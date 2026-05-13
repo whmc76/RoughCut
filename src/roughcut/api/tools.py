@@ -10,8 +10,9 @@ import shutil
 import subprocess
 import uuid
 import wave
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
+from urllib.parse import quote
 
 import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -30,6 +31,7 @@ _TTS_ROOT = _TOOLS_ROOT / "tts"
 _ASR_UPLOAD_ROOT = _TOOLS_ROOT / "asr-uploads"
 _AVATAR_ROOT = _TOOLS_ROOT / "avatar"
 _UPLOAD_ROOT = _TOOLS_ROOT / "uploads"
+_REFERENCE_UPLOAD_ROOT = _TOOLS_ROOT / "reference-uploads"
 _REFERENCE_ROOT = _TOOLS_ROOT / "reference-cache"
 _RUNS: dict[str, dict[str, Any]] = {}
 _RUN_TASKS: dict[str, asyncio.Task[None]] = {}
@@ -54,17 +56,29 @@ _RUN_PROGRESS_FLOORS: dict[str, float] = {
     "failed": 1.0,
 }
 _COSYVOICE3_END_OF_PROMPT = "<|endofprompt|>"
+_TTS_TEXT_SEGMENT_MAX_CHARS = 120
+_TTS_TEXT_HARD_BOUNDARY_CHARS = frozenset("。！？!?；;….")
+_TTS_TEXT_SOFT_BOUNDARY_CHARS = frozenset("，,、：:")
 _MAX_REFERENCE_AUDIO_SEC = 30.0
 _REFERENCE_AUDIO_HISTORY_LIMIT = 5
+_TTS_OUTPUT_HISTORY_LIMIT = 10
 _REFERENCE_AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
 _REFERENCE_VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v"}
+_WINDOWS_RESERVED_FILENAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
 _TTS_TEXT_UI_HINTS: tuple[str, ...] = (
     "需要 prompt_wav/reference_audio；只填写想要的口播指令，官方分隔符由后台自动补齐。",
     "需要 prompt_wav/reference_audio；只填写参考音频里实际说过的文本，官方分隔符由后台自动补齐。",
     "需要 prompt_wav/reference_audio；prompt_text 和 instruct_text 不参与该模式。",
     "需要填写 /query_tts_model 返回的 spk_id；如果模型没有内置音色列表，此模式不可用。",
 )
-_TTS_TEXT_KEYS: tuple[str, ...] = (
+_TTS_PRIMARY_TEXT_KEYS: tuple[str, ...] = (
     "tts_text",
     "ttsText",
     "spoken_text",
@@ -73,9 +87,11 @@ _TTS_TEXT_KEYS: tuple[str, ...] = (
     "voiceoverText",
     "narration_text",
     "narrationText",
-    "script",
+)
+_TTS_SEGMENT_TEXT_KEYS: tuple[str, ...] = (
     "rewritten_text",
     "rewrittenText",
+    "script",
     "text",
 )
 _TTS_SEGMENT_KEYS: tuple[str, ...] = (
@@ -84,16 +100,34 @@ _TTS_SEGMENT_KEYS: tuple[str, ...] = (
     "segments",
     "items",
 )
+_TTS_NESTED_PAYLOAD_KEYS: tuple[str, ...] = (
+    "dubbing_request",
+    "result",
+    "payload",
+    "data",
+)
 _TTS_TEXT_LABEL_RE = re.compile(
     r"(?im)^\s*(?:[\"']?(?:tts_text|ttsText|spoken_text|voiceover_text|narration_text)[\"']?|朗读正文|配音正文|口播正文)\s*[:：=]\s*(?P<value>.+?)\s*$"
 )
+_TTS_TEXT_BLOCK_LABEL_RE = re.compile(
+    r"(?is)(?:^|\n)\s*(?:[\"']?(?:tts_text|ttsText|spoken_text|voiceover_text|narration_text)[\"']?|朗读正文|配音正文|口播正文)\s*[:：=]\s*(?P<value>.+)$"
+)
+_TTS_STRUCTURED_FIELD_LABEL_RE = re.compile(
+    r"(?i)^\s*[\"']?(?:prompt|prompt_text|instruct_text|purpose|source_text|reason|rewrite_strategy|opening_hook|voiceover_segments|target_duration_sec|suggested_start_time)[\"']?\s*[:：=]"
+)
 _STRUCTURED_TTS_PROMPT_MARKERS: tuple[str, ...] = (
     "voiceover_segments",
+    "source_text",
     "opening_hook",
     "rewrite_strategy",
     "target_duration_sec",
     "suggested_start_time",
     "输出 JSON",
+    "JSON 结构",
+    "你是短视频 AI 导演",
+    "你是严谨的中文短视频导演",
+    "请根据字幕",
+    "要求：",
     "结构化",
 )
 
@@ -143,7 +177,7 @@ async def run_tts(
 
     reference_path = await _save_upload(
         prompt_wav or reference_audio,
-        root=_UPLOAD_ROOT,
+        root=_REFERENCE_UPLOAD_ROOT,
         fallback_suffix=".wav",
     )
     if reference_path is None and str(reference_history_path or "").strip():
@@ -175,6 +209,14 @@ async def list_tts_reference_audio() -> dict[str, Any]:
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "items": _list_reference_audio_history(),
+    }
+
+
+@router.get("/tts/outputs")
+async def list_tts_outputs() -> dict[str, Any]:
+    return {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "items": _list_tts_output_history(),
     }
 
 
@@ -286,11 +328,12 @@ async def _execute_tts_run(
         raise RuntimeError("CosyVoice3 streaming mode requires speed=1; use stream=false for speed changes")
     if reference_path is not None:
         reference_path = _prepare_reference_audio_for_cosyvoice(reference_path, run_id=run_id)
+    text_segments = _split_tts_text_for_synthesis(text)
+    if not text_segments:
+        raise RuntimeError("text is required")
     endpoint = "/inference"
-    data: dict[str, str] = {
+    base_data: dict[str, str] = {
         "mode": resolved_mode,
-        "tts_text": text,
-        "text": text,
         "prompt_text": resolved_prompt_text,
         "instruct_text": resolved_instruct_text,
         "spk_id": str(spk_id or "").strip(),
@@ -300,12 +343,9 @@ async def _execute_tts_run(
         "seed": str(int(seed or 0)),
         "text_frontend": "true" if text_frontend else "false",
     }
-    files = None
-    if reference_path is not None:
-        reference_handle = reference_path.open("rb")
-        files = {
-            "prompt_wav": (reference_path.name, reference_handle, "application/octet-stream"),
-        }
+    segment_output_paths: list[Path] = []
+    response: httpx.Response | None = None
+    sample_rate = int(settings.cosyvoice3_tts_sample_rate or 24000)
 
     try:
         _update_run_stage(run_id, "service_start", detail="Starting CosyVoice3 TTS service")
@@ -316,35 +356,72 @@ async def _execute_tts_run(
             _update_run_stage(
                 run_id,
                 "request",
-                detail=f"Submitting CosyVoice3 {resolved_mode} request",
+                detail=(
+                    f"Submitting CosyVoice3 {resolved_mode} request"
+                    if len(text_segments) == 1
+                    else f"Submitting CosyVoice3 {resolved_mode} request 1/{len(text_segments)}"
+                ),
                 endpoint=endpoint,
-                request_fields=sorted(data.keys()),
+                request_fields=sorted([*base_data.keys(), "tts_text", "text"]),
                 mode=resolved_mode,
+                segment_count=len(text_segments),
             )
             async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=20.0), follow_redirects=True) as client:
-                response = await client.post(
-                    f"{settings.cosyvoice3_tts_api_base_url.rstrip('/')}{endpoint}",
-                    data=data,
-                    files=files,
-                )
+                for index, segment_text in enumerate(text_segments, start=1):
+                    segment_data = _build_tts_segment_form_data(base_data, segment_text)
+                    if len(text_segments) > 1:
+                        _update_run_stage(
+                            run_id,
+                            "request",
+                            detail=f"Submitting CosyVoice3 {resolved_mode} request {index}/{len(text_segments)}",
+                            progress=0.34 + ((index - 1) / max(len(text_segments), 1)) * 0.36,
+                            endpoint=endpoint,
+                            mode=resolved_mode,
+                            segment_index=index,
+                            segment_count=len(text_segments),
+                        )
+                    response = await _post_tts_segment_request(
+                        client,
+                        f"{settings.cosyvoice3_tts_api_base_url.rstrip('/')}{endpoint}",
+                        data=segment_data,
+                        reference_path=reference_path,
+                    )
+                    response.raise_for_status()
+                    if len(text_segments) > 1:
+                        _update_run_stage(
+                            run_id,
+                            "process",
+                            detail=f"CosyVoice3 response received {index}/{len(text_segments)}",
+                            progress=0.55 + (index / max(len(text_segments), 1)) * 0.24,
+                            segment_index=index,
+                            segment_count=len(text_segments),
+                        )
+                        segment_path = _TTS_ROOT / f"tts_{run_id}_{index:03d}.segment.wav"
+                        _write_tts_response_audio(response, output_path=segment_path, sample_rate=sample_rate)
+                        segment_output_paths.append(segment_path)
         _update_run_stage(run_id, "process", detail="CosyVoice3 response received")
-        response.raise_for_status()
     except httpx.HTTPStatusError as exc:
+        _cleanup_paths(segment_output_paths)
         detail = _read_response_error(exc.response)
         raise RuntimeError(f"CosyVoice3 TTS failed: {detail}") from exc
     except Exception as exc:
+        _cleanup_paths(segment_output_paths)
         raise RuntimeError(f"CosyVoice3 TTS unavailable: {exc}") from exc
-    finally:
-        if files is not None:
-            files["prompt_wav"][1].close()
 
     output_path = _TTS_ROOT / f"tts_{uuid.uuid4().hex[:12]}.wav"
     _update_run_stage(run_id, "write_artifact", detail="Writing synthesized audio", output_path=str(output_path))
-    meta = _write_tts_response_audio(
-        response,
-        output_path=output_path,
-        sample_rate=int(settings.cosyvoice3_tts_sample_rate or 24000),
-    )
+    try:
+        if len(text_segments) == 1:
+            if response is None:
+                raise RuntimeError("CosyVoice3 did not return a response")
+            meta = _write_tts_response_audio(response, output_path=output_path, sample_rate=sample_rate)
+        else:
+            meta = _concatenate_tts_wav_segments(segment_output_paths, output_path=output_path)
+    except Exception:
+        output_path.unlink(missing_ok=True)
+        raise
+    finally:
+        _cleanup_paths(segment_output_paths)
     _complete_run(run_id, {
         "status": "success",
         "provider": "official-cosyvoice3",
@@ -362,8 +439,183 @@ async def _execute_tts_run(
         "text_frontend": text_frontend,
         "output_path": str(output_path),
         "audio_url": f"/api/v1/tools/artifacts/tts/{output_path.name}",
+        "segment_count": len(text_segments),
+        "text_segments": [
+            {"index": index, "text": segment_text, "char_count": len(segment_text)}
+            for index, segment_text in enumerate(text_segments, start=1)
+        ],
         **meta,
     })
+
+
+def _build_tts_segment_form_data(base_data: dict[str, str], text: str) -> dict[str, str]:
+    data = dict(base_data)
+    data["tts_text"] = text
+    data["text"] = text
+    return data
+
+
+def _cleanup_paths(paths: list[Path]) -> None:
+    for path in paths:
+        path.unlink(missing_ok=True)
+
+
+async def _post_tts_segment_request(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    data: dict[str, str],
+    reference_path: Path | None,
+) -> httpx.Response:
+    files = None
+    if reference_path is not None:
+        reference_handle = reference_path.open("rb")
+        files = {
+            "prompt_wav": (reference_path.name, reference_handle, "application/octet-stream"),
+        }
+    try:
+        return await client.post(url, data=data, files=files)
+    finally:
+        if files is not None:
+            files["prompt_wav"][1].close()
+
+
+def _split_tts_text_for_synthesis(text: str, *, max_chars: int = _TTS_TEXT_SEGMENT_MAX_CHARS) -> list[str]:
+    normalized = " ".join(str(text or "").split()).strip()
+    if not normalized:
+        return []
+    max_chars = max(1, int(max_chars or _TTS_TEXT_SEGMENT_MAX_CHARS))
+    if len(normalized) <= max_chars:
+        return [normalized]
+
+    sentence_units = _split_tts_text_units(normalized, boundary_chars=_TTS_TEXT_HARD_BOUNDARY_CHARS)
+    segments: list[str] = []
+    current = ""
+    for sentence in sentence_units:
+        for part in _split_tts_long_unit(sentence, max_chars=max_chars):
+            if not current:
+                current = part
+                continue
+            candidate = _join_tts_text_parts(current, part)
+            if len(candidate) <= max_chars:
+                current = candidate
+                continue
+            segments.append(current)
+            current = part
+    if current:
+        segments.append(current)
+    return [segment for segment in segments if segment.strip()]
+
+
+def _split_tts_text_units(text: str, *, boundary_chars: frozenset[str]) -> list[str]:
+    units: list[str] = []
+    start = 0
+    for index, char in enumerate(text):
+        if _is_tts_text_boundary(text, index, boundary_chars=boundary_chars):
+            unit = text[start:index + 1].strip()
+            if unit:
+                units.append(unit)
+            start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        units.append(tail)
+    return units or [text]
+
+
+def _is_tts_text_boundary(text: str, index: int, *, boundary_chars: frozenset[str]) -> bool:
+    char = text[index]
+    if char not in boundary_chars:
+        return False
+    if char == ".":
+        previous_char = text[index - 1] if index > 0 else ""
+        next_char = text[index + 1] if index + 1 < len(text) else ""
+        if previous_char.isdigit() and next_char.isdigit():
+            return False
+    return True
+
+
+def _split_tts_long_unit(text: str, *, max_chars: int) -> list[str]:
+    if len(text) <= max_chars:
+        return [text]
+    soft_units = _split_tts_text_units(text, boundary_chars=_TTS_TEXT_SOFT_BOUNDARY_CHARS)
+    parts: list[str] = []
+    current = ""
+    for unit in soft_units:
+        if len(unit) > max_chars:
+            if current:
+                parts.append(current)
+                current = ""
+            parts.extend(_hard_split_tts_text(unit, max_chars=max_chars))
+            continue
+        candidate = _join_tts_text_parts(current, unit) if current else unit
+        if len(candidate) <= max_chars:
+            current = candidate
+            continue
+        parts.append(current)
+        current = unit
+    if current:
+        parts.append(current)
+    return parts
+
+
+def _hard_split_tts_text(text: str, *, max_chars: int) -> list[str]:
+    parts: list[str] = []
+    remaining = text.strip()
+    while len(remaining) > max_chars:
+        split_at = _find_tts_hard_split_index(remaining, max_chars=max_chars)
+        parts.append(remaining[:split_at].strip())
+        remaining = remaining[split_at:].strip()
+    if remaining:
+        parts.append(remaining)
+    return parts
+
+
+def _find_tts_hard_split_index(text: str, *, max_chars: int) -> int:
+    lower_bound = max(1, int(max_chars * 0.6))
+    for index in range(max_chars, lower_bound, -1):
+        if text[index - 1].isspace():
+            return index
+    return max_chars
+
+
+def _join_tts_text_parts(left: str, right: str) -> str:
+    if not left:
+        return right
+    if not right:
+        return left
+    separator = " " if left[-1].isascii() and right[0].isascii() and not left[-1].isspace() else ""
+    return f"{left}{separator}{right}"
+
+
+def _concatenate_tts_wav_segments(segment_paths: list[Path], *, output_path: Path) -> dict[str, Any]:
+    if not segment_paths:
+        raise RuntimeError("CosyVoice3 returned no segment audio")
+    params: Any | None = None
+    with wave.open(str(output_path), "wb") as output:
+        for segment_path in segment_paths:
+            with wave.open(str(segment_path), "rb") as segment:
+                segment_params = segment.getparams()
+                if params is None:
+                    params = segment_params
+                    output.setnchannels(segment_params.nchannels)
+                    output.setsampwidth(segment_params.sampwidth)
+                    output.setframerate(segment_params.framerate)
+                    output.setcomptype(segment_params.comptype, segment_params.compname)
+                elif (
+                    segment_params.nchannels != params.nchannels
+                    or segment_params.sampwidth != params.sampwidth
+                    or segment_params.framerate != params.framerate
+                    or segment_params.comptype != params.comptype
+                ):
+                    raise RuntimeError("CosyVoice3 segment audio formats do not match")
+                output.writeframes(segment.readframes(segment.getnframes()))
+    sample_rate = int(params.framerate) if params is not None else 0
+    return {
+        "format": "wav",
+        "sample_rate": sample_rate,
+        "source_format": "segmented_wav",
+        "duration": _probe_audio_duration(output_path),
+    }
 
 
 def _strip_cosyvoice_prompt_boundary(value: str | None) -> str:
@@ -392,7 +644,10 @@ def _resolve_tts_spoken_text(value: str | None) -> str:
     cleaned = _remove_tts_text_ui_hints(value)
     structured_text = _extract_structured_tts_text(cleaned)
     if structured_text:
-        return _collapse_tts_text(structured_text)
+        resolved = _collapse_tts_text(structured_text)
+        if _looks_like_structured_tts_prompt(resolved):
+            raise ValueError("可朗读的 tts_text 里仍包含结构化提示词；请只保留实际要说出口的正文")
+        return resolved
     if _looks_like_structured_tts_prompt(cleaned):
         raise ValueError("结构化提示词里没有找到可朗读的 tts_text；请把实际要说出口的正文放到 tts_text")
     return _collapse_tts_text(cleaned)
@@ -405,10 +660,10 @@ def _extract_structured_tts_text(value: str | None) -> str:
     payload = _parse_structured_tts_payload(raw)
     candidate = _extract_tts_text_candidate(payload)
     if candidate:
-        return candidate
-    label_match = _TTS_TEXT_LABEL_RE.search(raw)
-    if label_match:
-        return _strip_wrapping_quotes(label_match.group("value"))
+        return _sanitize_extracted_tts_text(candidate)
+    labeled_text = _extract_labeled_tts_text(raw)
+    if labeled_text:
+        return _sanitize_extracted_tts_text(labeled_text)
     return ""
 
 
@@ -438,13 +693,13 @@ def _parse_structured_tts_payload(value: str) -> Any:
 
 def _extract_tts_text_candidate(payload: Any) -> str:
     if isinstance(payload, str):
-        return payload.strip()
+        return _sanitize_extracted_tts_text(payload)
     if isinstance(payload, list):
         parts = [_extract_tts_text_candidate(item) for item in payload]
         return "\n".join(part for part in parts if part)
     if not isinstance(payload, dict):
         return ""
-    for key in _TTS_TEXT_KEYS:
+    for key in _TTS_PRIMARY_TEXT_KEYS:
         candidate = _string_tts_candidate(payload.get(key))
         if candidate:
             return candidate
@@ -452,8 +707,12 @@ def _extract_tts_text_candidate(payload: Any) -> str:
         candidate = _extract_tts_text_candidate(payload.get(key))
         if candidate:
             return candidate
-    for key in ("dubbing_request", "result", "payload", "data"):
+    for key in _TTS_NESTED_PAYLOAD_KEYS:
         candidate = _extract_tts_text_candidate(payload.get(key))
+        if candidate:
+            return candidate
+    for key in _TTS_SEGMENT_TEXT_KEYS:
+        candidate = _string_tts_candidate(payload.get(key))
         if candidate:
             return candidate
     return ""
@@ -474,6 +733,43 @@ def _strip_wrapping_quotes(value: str) -> str:
     cleaned = str(value or "").strip().rstrip(",")
     if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
         return cleaned[1:-1].strip()
+    return cleaned
+
+
+def _extract_labeled_tts_text(value: str) -> str:
+    raw = str(value or "").strip()
+    block_match = _TTS_TEXT_BLOCK_LABEL_RE.search(raw)
+    if block_match:
+        return _trim_structured_field_tail(block_match.group("value"))
+    line_match = _TTS_TEXT_LABEL_RE.search(raw)
+    if line_match:
+        return line_match.group("value")
+    return ""
+
+
+def _trim_structured_field_tail(value: str) -> str:
+    lines: list[str] = []
+    for line in str(value or "").splitlines():
+        if lines and _TTS_STRUCTURED_FIELD_LABEL_RE.match(line):
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
+def _sanitize_extracted_tts_text(value: str) -> str:
+    cleaned = _strip_wrapping_quotes(value)
+    if not cleaned:
+        return ""
+    nested_payload = _parse_structured_tts_payload(cleaned)
+    if nested_payload is not None:
+        nested_candidate = _extract_tts_text_candidate(nested_payload)
+        if nested_candidate and nested_candidate != cleaned:
+            return nested_candidate
+    labeled_text = _extract_labeled_tts_text(cleaned)
+    if labeled_text and labeled_text != cleaned:
+        return _sanitize_extracted_tts_text(labeled_text)
+    if _looks_like_structured_tts_prompt(cleaned):
+        raise ValueError("可朗读的 tts_text 里仍包含结构化提示词；请只保留实际要说出口的正文")
     return cleaned
 
 
@@ -792,32 +1088,38 @@ def _reference_audio_dedupe_key(path: Path, *, size: int, duration: float | None
         return f"meta:{path.name.casefold()}:{size}:{duration_key}"
 
 
-def _list_reference_audio_history(limit: int = _REFERENCE_AUDIO_HISTORY_LIMIT) -> list[dict[str, Any]]:
+def _list_audio_artifact_history(
+    *,
+    root: Path,
+    source: str,
+    artifact_kind: str,
+    limit: int,
+    suffixes: set[str],
+    dedupe: bool,
+) -> list[dict[str, Any]]:
     if limit <= 0:
         return []
-    audio_suffixes = _REFERENCE_AUDIO_SUFFIXES | _REFERENCE_VIDEO_SUFFIXES
     candidates: list[tuple[float, Path, str, int, float | None]] = []
-    roots = ((_UPLOAD_ROOT, "上传历史"), (_TTS_ROOT, "生成音频"))
-    for root, source in roots:
-        if not root.exists():
+    if not root.exists():
+        return []
+    for path in root.iterdir():
+        if not path.is_file() or path.suffix.lower() not in suffixes or ".segment." in path.name:
             continue
-        for path in root.iterdir():
-            if not path.is_file() or path.suffix.lower() not in audio_suffixes:
-                continue
-            try:
-                stat = path.stat()
-            except OSError:
-                continue
-            duration = _audio_duration_seconds(path)
-            candidates.append((stat.st_mtime, path, source, stat.st_size, duration))
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        duration = _audio_duration_seconds(path)
+        candidates.append((stat.st_mtime, path, source, stat.st_size, duration))
     candidates.sort(key=lambda item: item[0], reverse=True)
     unique_candidates: list[tuple[float, Path, str, int, float | None]] = []
     seen_keys: set[str] = set()
     for updated_at, path, source, size, duration in candidates:
-        dedupe_key = _reference_audio_dedupe_key(path, size=size, duration=duration)
-        if dedupe_key in seen_keys:
-            continue
-        seen_keys.add(dedupe_key)
+        if dedupe:
+            dedupe_key = _reference_audio_dedupe_key(path, size=size, duration=duration)
+            if dedupe_key in seen_keys:
+                continue
+            seen_keys.add(dedupe_key)
         unique_candidates.append((updated_at, path, source, size, duration))
         if len(unique_candidates) >= limit:
             break
@@ -830,10 +1132,32 @@ def _list_reference_audio_history(limit: int = _REFERENCE_AUDIO_HISTORY_LIMIT) -
             "duration": duration,
             "will_trim": (duration or 0.0) > _MAX_REFERENCE_AUDIO_SEC,
             "updated_at": datetime.fromtimestamp(updated_at, timezone.utc).isoformat(),
-            "audio_url": f"/api/v1/tools/artifacts/{'tts' if source == '生成音频' else 'uploads'}/{path.name}",
+            "audio_url": f"/api/v1/tools/artifacts/{artifact_kind}/{quote(path.name)}",
         }
         for updated_at, path, source, size, duration in unique_candidates
     ]
+
+
+def _list_reference_audio_history(limit: int = _REFERENCE_AUDIO_HISTORY_LIMIT) -> list[dict[str, Any]]:
+    return _list_audio_artifact_history(
+        root=_REFERENCE_UPLOAD_ROOT,
+        source="参考上传",
+        artifact_kind="reference-uploads",
+        limit=limit,
+        suffixes=_REFERENCE_AUDIO_SUFFIXES | _REFERENCE_VIDEO_SUFFIXES,
+        dedupe=True,
+    )
+
+
+def _list_tts_output_history(limit: int = _TTS_OUTPUT_HISTORY_LIMIT) -> list[dict[str, Any]]:
+    return _list_audio_artifact_history(
+        root=_TTS_ROOT,
+        source="生成音频",
+        artifact_kind="tts",
+        limit=limit,
+        suffixes=_REFERENCE_AUDIO_SUFFIXES,
+        dedupe=False,
+    )
 
 
 def _resolve_reference_audio_history_path(value: str) -> Path:
@@ -841,10 +1165,10 @@ def _resolve_reference_audio_history_path(value: str) -> Path:
     if not requested:
         raise HTTPException(status_code=400, detail="reference_history_path is empty")
     raw_path = Path(requested)
-    allowed_roots = (_UPLOAD_ROOT.resolve(), _TTS_ROOT.resolve())
+    allowed_roots = (_REFERENCE_UPLOAD_ROOT.resolve(),)
     candidates = [raw_path]
     if raw_path.name == requested:
-        candidates.extend([_UPLOAD_ROOT / raw_path.name, _TTS_ROOT / raw_path.name])
+        candidates.append(_REFERENCE_UPLOAD_ROOT / raw_path.name)
     for candidate in candidates:
         try:
             resolved = candidate.resolve()
@@ -965,7 +1289,12 @@ def _audio_duration_seconds(path: Path) -> float | None:
 
 @router.get("/artifacts/{kind}/{file_name}")
 async def get_tool_artifact(kind: str, file_name: str):
-    root = {"tts": _TTS_ROOT, "avatar": _AVATAR_ROOT, "uploads": _UPLOAD_ROOT}.get(kind)
+    root = {
+        "tts": _TTS_ROOT,
+        "avatar": _AVATAR_ROOT,
+        "uploads": _UPLOAD_ROOT,
+        "reference-uploads": _REFERENCE_UPLOAD_ROOT,
+    }.get(kind)
     if root is None:
         raise HTTPException(status_code=404, detail="unknown artifact kind")
     path = (root / Path(file_name).name).resolve()
@@ -1057,8 +1386,7 @@ async def _save_upload(upload: UploadFile | None, *, root: Path, fallback_suffix
     if upload is None:
         return None
     root.mkdir(parents=True, exist_ok=True)
-    suffix = Path(upload.filename or "").suffix or fallback_suffix
-    path = root / f"{uuid.uuid4().hex[:12]}{suffix}"
+    path = _unique_upload_path(root, _safe_upload_filename(upload.filename, fallback_suffix=fallback_suffix))
     with path.open("wb") as handle:
         while True:
             chunk = await upload.read(1024 * 1024)
@@ -1069,6 +1397,43 @@ async def _save_upload(upload: UploadFile | None, *, root: Path, fallback_suffix
         path.unlink(missing_ok=True)
         return None
     return path
+
+
+def _safe_upload_filename(filename: str | None, *, fallback_suffix: str) -> str:
+    raw_name = str(filename or "").strip()
+    basename = PureWindowsPath(raw_name).name if raw_name else ""
+    basename = Path(basename).name
+    suffix = Path(basename).suffix or fallback_suffix
+    suffix = _sanitize_upload_suffix(suffix, fallback_suffix=fallback_suffix)
+    stem = Path(basename).stem if basename else "upload"
+    stem = re.sub(r'[<>:"/\\|?*#\x00-\x1f]+', "_", stem).strip(" ._") or "upload"
+    if stem.upper() in _WINDOWS_RESERVED_FILENAMES:
+        stem = f"{stem}_file"
+    max_stem_length = max(24, 180 - len(suffix))
+    return f"{stem[:max_stem_length]}{suffix}"
+
+
+def _sanitize_upload_suffix(suffix: str, *, fallback_suffix: str) -> str:
+    normalized = str(suffix or fallback_suffix or "").strip().lower()
+    normalized = re.sub(r"[^a-z0-9.]", "", normalized)
+    if not normalized.startswith("."):
+        normalized = f".{normalized}" if normalized else str(fallback_suffix or ".bin")
+    if normalized in {".", ""}:
+        normalized = str(fallback_suffix or ".bin")
+    return normalized[:20]
+
+
+def _unique_upload_path(root: Path, filename: str) -> Path:
+    candidate = root / filename
+    if not candidate.exists():
+        return candidate
+    suffix = candidate.suffix
+    stem = candidate.stem
+    for index in range(2, 100):
+        candidate = root / f"{stem}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    return root / f"{stem}-{uuid.uuid4().hex[:8]}{suffix}"
 
 
 def _read_response_error(response: httpx.Response) -> str:
