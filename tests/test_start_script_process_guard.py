@@ -60,6 +60,8 @@ def test_startup_service_probes_are_derived_from_configured_services() -> None:
     assert '"LOCAL_ASR_API_BASE_URL"' in body
     assert '"CosyVoice3 TTS"' in body
     assert "Get-CosyVoice3TtsBaseUrl" in body
+    assert '"MOSS-TTSD"' in body
+    assert "Get-MossTtsBaseUrl" in body
     assert "Get-ConfiguredVoiceProvider" in body
     assert '"VOICE_CLONE_API_BASE_URL"' in body
     assert '"runninghub"' in body
@@ -72,6 +74,16 @@ def test_cosyvoice3_probe_uses_config_or_roughcut_compose_port() -> None:
     assert '"COSYVOICE3_TTS_API_BASE_URL"' in body
     assert '"http://127.0.0.1:30180"' in body
     assert 'Resolve-ContainerMappedPort -ContainerName "cosyvoice3-tts" -ContainerPort 8080' in body
+    assert "Get-BaseUrlWithPort" in body
+
+
+def test_moss_tts_probe_uses_config_or_roughcut_compose_port() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    body = _function_body(source, "Get-MossTtsBaseUrl")
+
+    assert '"MOSS_TTS_API_BASE_URL"' in body
+    assert '"http://127.0.0.1:30190"' in body
+    assert 'Resolve-ContainerMappedPort -ContainerName "moss-ttsd" -ContainerPort 30000' in body
     assert "Get-BaseUrlWithPort" in body
 
 

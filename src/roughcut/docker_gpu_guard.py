@@ -130,6 +130,14 @@ def _build_target_configs(settings) -> list[_ManagedDockerTarget]:
             base_urls=(_normalize_base_url(getattr(settings, "cosyvoice3_tts_api_base_url", "")),),
             probe_kind="health_json",
         ),
+        _ManagedDockerTarget(
+            key="moss_tts",
+            compose_file=str(getattr(settings, "moss_tts_docker_compose_file", "") or ""),
+            env_file=str(getattr(settings, "moss_tts_docker_env_file", "") or ""),
+            services=_parse_services(getattr(settings, "moss_tts_docker_services", "moss-ttsd")),
+            base_urls=(_normalize_base_url(getattr(settings, "moss_tts_api_base_url", "")),),
+            probe_kind="health_json",
+        ),
     ]
 
 
@@ -191,7 +199,7 @@ def _ensure_target_started(*, target: _ManagedDockerTarget, reason: str) -> None
 
 def _schedule_idle_stop_locked(*, target: _ManagedDockerTarget, reason: str) -> None:
     _cancel_idle_timer_locked(target.key)
-    delay = max(15, _idle_timeout_seconds(target.key))
+    delay = max(1, _idle_timeout_seconds(target.key))
     timer = threading.Timer(delay, _stop_target_if_idle, kwargs={"target": target, "reason": reason})
     timer.daemon = True
     timer.name = f"roughcut-gpu-guard-{target.key}"
@@ -343,7 +351,7 @@ def _normalize_base_url(raw_url: object) -> str:
 def _idle_timeout_seconds(target_key: str) -> int:
     settings = get_settings()
     default_value = int(getattr(settings, "docker_gpu_guard_idle_timeout_sec", 900) or 900)
-    return max(15, int(getattr(settings, f"{target_key}_docker_idle_timeout_sec", default_value) or default_value))
+    return max(1, int(getattr(settings, f"{target_key}_docker_idle_timeout_sec", default_value) or default_value))
 
 
 def _get_redis_client() -> Redis | None:

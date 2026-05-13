@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -112,6 +113,121 @@ def test_tts_output_history_reads_sidecar_metadata(monkeypatch: pytest.MonkeyPat
     assert item["created_at"] == "2026-05-13T07:19:30+00:00"
     assert item["config_summary"] == "mode=instruct2 · speed=1"
     assert item["text_preview"] == "测试文本"
+
+
+def test_moss_tts_prompt_text_adds_duration_token() -> None:
+    prompt = tools._build_moss_tts_prompt_text("测试 MOSS TTS。", mode="moss_duration_control", duration_tokens=180)
+
+    assert prompt == "${token:180}测试 MOSS TTS。"
+
+
+def test_moss_tts_prompt_text_applies_duration_token_to_normal_tts() -> None:
+    prompt = tools._build_moss_tts_prompt_text("测试 MOSS TTS。", mode="moss_direct_tts", duration_tokens=180)
+
+    assert prompt == "${token:180}测试 MOSS TTS。"
+
+
+def test_moss_tts_podcast_text_gets_default_speaker_tag() -> None:
+    prompt = tools._build_moss_tts_prompt_text("欢迎来到今天的节目。", mode="moss_podcast", duration_tokens=0)
+
+    assert prompt == "[S1] 欢迎来到今天的节目。"
+
+
+def test_moss_tts_podcast_keeps_existing_speaker_tags() -> None:
+    prompt = tools._build_moss_tts_prompt_text("[S1] 你好。[S2] 你好。", mode="moss_podcast", duration_tokens=0)
+
+    assert prompt == "[S1] 你好。[S2] 你好。"
+
+
+def test_moss_tts_sound_effect_prompt_uses_ambient_sound_control() -> None:
+    prompt = tools._build_moss_tts_prompt_text("海边浪声和远处人群。", mode="moss_sound_effect", duration_tokens=90)
+
+    assert prompt == "${token:90}${ambient_sound:海边浪声和远处人群。}"
+
+
+def test_moss_tts_voice_clone_prompt_text_prefixes_reference_transcript() -> None:
+    prompt = tools._build_moss_tts_prompt_text(
+        "这是一段新文本。",
+        mode="moss_voice_clone",
+        duration_tokens=0,
+        prompt_text="参考音频里说过的话。",
+        has_reference_audio=True,
+    )
+
+    assert prompt == "[S1] 参考音频里说过的话。\n[S1] 这是一段新文本。"
+
+
+def test_moss_tts_voice_clone_duration_token_applies_to_target_text_only() -> None:
+    prompt = tools._build_moss_tts_prompt_text(
+        "这是一段新文本。",
+        mode="moss_voice_clone",
+        duration_tokens=180,
+        prompt_text="参考音频里说过的话。",
+        has_reference_audio=True,
+    )
+
+    assert prompt == "[S1] 参考音频里说过的话。\n${token:180}[S1] 这是一段新文本。"
+
+
+@pytest.mark.asyncio
+async def test_reference_prompt_text_auto_asr_uses_local_provider(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    reference = tmp_path / "voice.wav"
+    reference.write_bytes(b"wav-data")
+
+    class FakeLocalHTTPASRProvider:
+        async def transcribe(self, audio_path: Path, *, language: str, prompt: str | None = None, progress_callback=None):
+            assert audio_path == reference
+            assert language == "zh-CN"
+            assert prompt is None
+            if progress_callback is not None:
+                progress_callback({"phase": "transcribe", "progress": 0.5})
+            return SimpleNamespace(text="参考音频自动识别文本。")
+
+    @asynccontextmanager
+    async def fake_hold(*args, **kwargs):
+        yield
+
+    monkeypatch.setattr(tools, "LocalHTTPASRProvider", FakeLocalHTTPASRProvider)
+    monkeypatch.setattr(tools, "hold_managed_gpu_services_async", fake_hold)
+
+    text, source = await tools._resolve_reference_prompt_text_from_asr(
+        "test-run",
+        reference_path=reference,
+        enabled=True,
+        provider_label="MOSS-TTSD",
+    )
+
+    assert text == "参考音频自动识别文本。"
+    assert source == "auto_asr"
+
+
+@pytest.mark.asyncio
+async def test_post_moss_tts_request_sends_reference_audio_list(tmp_path: Path) -> None:
+    reference = tmp_path / "voice.wav"
+    reference.write_bytes(b"wav-data")
+    captured: dict[str, object] = {}
+
+    class FakeClient:
+        async def post(self, url: str, *, json: dict[str, object]):
+            captured["url"] = url
+            captured["json"] = json
+            return SimpleNamespace()
+
+    await tools._post_moss_tts_segment_request(
+        FakeClient(),
+        "http://example.test/generate",
+        text="测试 MOSS TTS。",
+        mode="moss_voice_clone",
+        duration_tokens=125,
+        sampling_params={"max_new_tokens": 2048},
+        reference_path=reference,
+        prompt_text="参考音频文本。",
+    )
+
+    payload = captured["json"]
+    assert isinstance(payload, dict)
+    assert payload["text"] == "[S1] 参考音频文本。\n${token:125}[S1] 测试 MOSS TTS。"
+    assert payload["audio_data"] == ["data:audio/wav;base64,d2F2LWRhdGE="]
 
 
 def test_safe_upload_filename_preserves_original_name_when_possible() -> None:

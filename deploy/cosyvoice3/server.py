@@ -26,7 +26,7 @@ cosyvoice: Any | None = None
 model_id = ""
 END_OF_PROMPT = "<|endofprompt|>"
 SYSTEM_PROMPT = "You are a helpful assistant."
-INSTRUCT_MAX_CHARS = 48
+INSTRUCT_MAX_CHARS = 160
 
 
 def _bool(value: Any) -> bool:
@@ -93,11 +93,21 @@ def _compact_instruct_text(value: str) -> str:
     for separator in ("；", ";"):
         body = body.replace(separator, "\n")
     lines = [line.strip() for line in body.splitlines() if line.strip()]
-    line = lines[0] if lines else body.strip()
-    line = _normalize_instruct_line(line)
-    if len(line) > INSTRUCT_MAX_CHARS:
-        line = _truncate_instruct_line(line, max_chars=INSTRUCT_MAX_CHARS)
-    return _ensure_sentence_punctuation(line)
+    compact_lines: list[str] = []
+    seen: set[str] = set()
+    for line in lines or [body.strip()]:
+        compact_line = _normalize_instruct_line(line)
+        if not compact_line or compact_line in seen:
+            continue
+        candidate = "；".join([*compact_lines, compact_line])
+        if len(candidate) > INSTRUCT_MAX_CHARS:
+            break
+        compact_lines.append(compact_line)
+        seen.add(compact_line)
+    compact = "；".join(compact_lines)
+    if len(compact) > INSTRUCT_MAX_CHARS:
+        compact = _truncate_instruct_line(compact, max_chars=INSTRUCT_MAX_CHARS)
+    return _ensure_sentence_punctuation(compact)
 
 
 def _normalize_instruct_line(value: str) -> str:
@@ -109,7 +119,35 @@ def _normalize_instruct_line(value: str) -> str:
     line = re.sub(r"^请", "", line)
     line = re.sub(r"^像(.+?)一样[，,]?", r"\1风格，", line)
     line = re.sub(r"^用(.+?)(?:的方式)?(?:说|表达)[，,]?", r"\1，", line)
+    line = line.replace("适合短视频旁白的方式", "短视频旁白风格")
     line = line.replace("更温柔", "温柔").replace("更清楚", "清楚")
+    replacements = (
+        ("声音亲切、有耐心，语气温柔活泼", "亲切耐心、温柔活泼"),
+        ("有声故事演播风格表达", "故事演播"),
+        ("有声故事演播风格", "故事演播"),
+        ("语气有画面感", "画面感"),
+        ("人物和情节转折要更清楚", "转折清楚"),
+        ("人物和情节转折要清楚", "转折清楚"),
+        ("课堂教学风格表达", "课堂教学"),
+        ("课堂教学风格", "课堂教学"),
+        ("重点词需要自然强调", "重点自然强调"),
+        ("紧凑、有节奏、适合短视频旁白", "短视频旁白、紧凑有节奏"),
+        ("紧凑、有节奏、短视频旁白风格", "短视频旁白、紧凑有节奏"),
+        ("较慢语速表达", "较慢语速"),
+        ("重点词上做清晰强调", "重点清晰强调"),
+        ("语义分段处加入自然停顿", "语义分段自然停顿"),
+        ("信息更容易理解", "信息易理解"),
+    )
+    for source, target in replacements:
+        line = line.replace(source, target)
+    line = line.replace("声音", "").replace("语气", "")
+    line = line.replace("需要", "")
+    line = line.replace("人物和情节转折要", "转折")
+    line = line.replace("并在", "，").replace("上做", "")
+    line = line.replace("加入", "").replace("让信息更容易理解", "信息易理解")
+    line = line.replace("地说", "")
+    line = line.replace("表达", "")
+    line = re.sub(r"[，,、]{2,}", "，", line)
     return line.strip(" ，,。.")
 
 

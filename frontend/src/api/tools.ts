@@ -1,4 +1,14 @@
-import type { ToolAsrResult, ToolAvatarResult, ToolRunStatus, ToolStatus, ToolTtsOutputHistory, ToolTtsReferenceAudioHistory, ToolTtsResult } from "../types";
+import type {
+  ToolAsrResult,
+  ToolAvatarResult,
+  ToolRunStatus,
+  ToolStatus,
+  ToolTtsOralizeRequest,
+  ToolTtsOralizeResult,
+  ToolTtsOutputHistory,
+  ToolTtsReferenceAudioHistory,
+  ToolTtsResult,
+} from "../types";
 import { request, requestForm } from "./core";
 
 export const toolsApi = {
@@ -6,6 +16,11 @@ export const toolsApi = {
   getToolTtsReferenceAudio: () => request<ToolTtsReferenceAudioHistory>("/tools/tts/reference-audio"),
   getToolTtsOutputs: () => request<ToolTtsOutputHistory>("/tools/tts/outputs"),
   getToolRun: <Result>(runId: string) => request<ToolRunStatus<Result>>(`/tools/runs/${encodeURIComponent(runId)}`),
+  oralizeToolTtsText: (body: ToolTtsOralizeRequest) =>
+    request<ToolTtsOralizeResult>("/tools/tts/oralize", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   runToolTts: (formData: FormData) => requestForm<ToolRunStatus<ToolTtsResult>>("/tools/tts", formData),
   runToolAsr: (formData: FormData) => requestForm<ToolRunStatus<ToolAsrResult>>("/tools/asr", formData),
   runToolAvatar: (formData: FormData) => requestForm<ToolRunStatus<ToolAvatarResult>>("/tools/avatar", formData),

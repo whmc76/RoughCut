@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from roughcut.api import tools
@@ -109,6 +112,53 @@ def test_normalize_cosyvoice3_instruct_text_compacts_preset_stack() -> None:
 
     normalized = tools._normalize_cosyvoice3_instruct_text(raw)
 
-    assert normalized == "You are a helpful assistant.\n幼教老师风格，声音亲切、有耐心，语气温柔活泼。<|endofprompt|>"
-    assert "有声故事" not in normalized
+    assert normalized == (
+        "You are a helpful assistant.\n"
+        "幼教老师风格，亲切耐心、温柔活泼；故事演播，画面感，转折清楚；课堂教学，逻辑清楚，重点自然强调；短视频旁白、紧凑有节奏。<|endofprompt|>"
+    )
+    assert "幼教老师" in normalized
+    assert "故事演播" in normalized
+    assert "课堂教学" in normalized
+    assert "短视频旁白" in normalized
+    assert "请像" not in normalized
     assert "请用" not in normalized
+
+
+def test_build_tts_oralization_messages_uses_structured_json_contract() -> None:
+    messages = tools._build_tts_oralization_messages(
+        source_text="这个产品的续航是二十小时，适合通勤。",
+        style="warm_explainer",
+        provider="moss_tts",
+        speaker_count=1,
+        target_chars=40,
+    )
+
+    assert messages[0].role == "system"
+    assert "只输出 JSON" in messages[0].content
+    payload = json.loads(messages[1].content)
+    assert payload["task"] == "rewrite_for_natural_tts"
+    assert payload["output_schema"]["tts_text"] == "最终送入 TTS 的可朗读正文。"
+    assert any("单人口播不要加 [S1] 标签" in rule for rule in payload["rules"])
+    assert payload["source_text"] == "这个产品的续航是二十小时，适合通勤。"
+
+
+def test_build_tts_oralization_messages_podcast_requires_speaker_tags() -> None:
+    messages = tools._build_tts_oralization_messages(
+        source_text="今天讨论续航。",
+        style="podcast_dialogue",
+        provider="moss_tts",
+        speaker_count=2,
+        target_chars=0,
+    )
+
+    payload = json.loads(messages[1].content)
+    assert payload["speaker_count"] == 2
+    assert any("tts_text 必须使用 [S1]-[S5] 标签" in rule for rule in payload["rules"])
+
+
+def test_validate_tts_audio_output_rejects_zero_duration_wav(tmp_path: Path) -> None:
+    path = tmp_path / "empty.wav"
+    tools._write_pcm16_wav(path, b"", sample_rate=24000)
+
+    with pytest.raises(RuntimeError, match="returned empty audio"):
+        tools._validate_tts_audio_output(path, service_label="MOSS-TTSD")

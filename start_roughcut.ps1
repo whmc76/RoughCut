@@ -1135,6 +1135,15 @@ function Get-CosyVoice3TtsBaseUrl {
     return $baseUrl
 }
 
+function Get-MossTtsBaseUrl {
+    $baseUrl = Get-ConfiguredValueOrDefault -Key "MOSS_TTS_API_BASE_URL" -DefaultValue "http://127.0.0.1:30190"
+    $mappedPort = Resolve-ContainerMappedPort -ContainerName "moss-ttsd" -ContainerPort 30000
+    if ($null -ne $mappedPort) {
+        return Get-BaseUrlWithPort -BaseUrl $baseUrl -Port $mappedPort
+    }
+    return $baseUrl
+}
+
 function Wait-RoughCutHttpServiceReady {
     param(
         [string]$ServiceName,
@@ -1199,6 +1208,13 @@ function Get-RoughCutStartupServiceProbes {
         Name = "CosyVoice3 TTS"
         BaseUrl = Get-CosyVoice3TtsBaseUrl
         HealthPaths = @((Get-ConfiguredValueOrDefault -Key "COSYVOICE3_TTS_HEALTH_PATH" -DefaultValue "/health"))
+        TimeoutSec = 5
+    }
+
+    $probes += [pscustomobject]@{
+        Name = "MOSS-TTSD"
+        BaseUrl = Get-MossTtsBaseUrl
+        HealthPaths = @((Get-ConfiguredValueOrDefault -Key "MOSS_TTS_HEALTH_PATH" -DefaultValue "/health"))
         TimeoutSec = 5
     }
 

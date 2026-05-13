@@ -1,0 +1,46 @@
+services:
+  moss-ttsd:
+    build:
+      context: .
+      dockerfile: deploy/moss-tts/Dockerfile
+      args:
+        BASE_IMAGE: ${MOSS_TTSD_BASE_IMAGE:-docker.m.daocloud.io/pytorch/pytorch:2.9.1-cuda12.8-cudnn9-devel}
+        MOSS_TTSD_REPO_URL: ${MOSS_TTSD_REPO_URL:-https://github.com/OpenMOSS/MOSS-TTSD.git}
+        MOSS_TTSD_SGLANG_REPO_URL: ${MOSS_TTSD_SGLANG_REPO_URL:-https://github.com/OpenMOSS/sglang.git}
+        MOSS_TTSD_SGLANG_BRANCH: ${MOSS_TTSD_SGLANG_BRANCH:-moss-ttsd-v1.0-with-cat}
+    image: roughcut-moss-ttsd:local
+    container_name: moss-ttsd
+    profiles: ["moss-ttsd"]
+    gpus: all
+    ipc: host
+    shm_size: 16gb
+    ports:
+      - "${MOSS_TTSD_PORT:-30190}:30000"
+    environment:
+      HF_HOME: /models/huggingface
+      HUGGINGFACE_HUB_CACHE: /models/huggingface/hub
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+      HF_HUB_DISABLE_XET: ${HF_HUB_DISABLE_XET:-1}
+      HF_HUB_DOWNLOAD_TIMEOUT: ${HF_HUB_DOWNLOAD_TIMEOUT:-600}
+      CUDA_HOME: /usr/local/cuda
+      CUDA_PATH: /usr/local/cuda
+      SGLANG_ATTENTION_BACKEND: ${SGLANG_ATTENTION_BACKEND:-flashinfer}
+      MOSS_TTSD_MODEL_ID: ${MOSS_TTSD_MODEL_ID:-OpenMOSS-Team/MOSS-TTSD-v1.0}
+      MOSS_TTSD_QUANT_MODEL_ID: ${MOSS_TTSD_QUANT_MODEL_ID:-groxaxo/MOSS-TTSD-NF4}
+      MOSS_TTSD_USE_QUANT: ${MOSS_TTSD_USE_QUANT:-false}
+      MOSS_TTSD_CODEC_MODEL_ID: ${MOSS_TTSD_CODEC_MODEL_ID:-OpenMOSS-Team/MOSS-Audio-Tokenizer}
+      MOSS_TTSD_MODELSCOPE_MODEL_ID: ${MOSS_TTSD_MODELSCOPE_MODEL_ID:-OpenMOSS/MOSS-TTSD-v1.0}
+      MOSS_TTSD_MODELSCOPE_CODEC_MODEL_ID: ${MOSS_TTSD_MODELSCOPE_CODEC_MODEL_ID:-OpenMOSS/MOSS-Audio-Tokenizer}
+      MOSS_TTSD_DOWNLOAD_BACKEND: ${MOSS_TTSD_DOWNLOAD_BACKEND:-modelscope}
+      MOSS_TTSD_EXTRA_ARGS: ${MOSS_TTSD_EXTRA_ARGS:---cpu-offload-gb 4 --mem-fraction-static 0.90 --max-running-requests 1 --max-total-tokens 4096 --max-prefill-tokens 2048 --cuda-graph-max-bs 1}
+      SGLANG_ENABLE_JIT_DEEPGEMM: ${SGLANG_ENABLE_JIT_DEEPGEMM:-0}
+      MOSS_TTSD_MODEL_DIR: /models/moss-ttsd
+      MOSS_TTSD_QUANT_MODEL_DIR: /models/moss-ttsd-nf4
+      MOSS_TTSD_CODEC_DIR: /models/moss-audio-tokenizer
+      MOSS_TTSD_FUSED_MODEL_DIR: /models/moss-ttsd-fused
+      MOSS_TTSD_QUANT_FUSED_MODEL_DIR: /models/moss-ttsd-nf4-fused
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+    volumes:
+      - ${MOSS_TTSD_MODEL_CACHE:-F:/roughcut_outputs/model-cache/moss-ttsd}:/models
+    restart: unless-stopped

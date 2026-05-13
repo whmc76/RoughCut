@@ -13,6 +13,14 @@ def test_split_tts_text_for_synthesis_uses_sentence_boundaries() -> None:
     assert all(len(segment) <= 12 for segment in segments)
 
 
+def test_split_tts_text_for_synthesis_keeps_normal_long_text_in_one_request() -> None:
+    text = "这是一段用于验证普通长文本仍交给 CosyVoice3 内部分句处理的内容。" * 20
+
+    segments = tools._split_tts_text_for_synthesis(text)
+
+    assert segments == [text]
+
+
 def test_split_tts_text_for_synthesis_splits_long_text_without_punctuation() -> None:
     text = "abcdefghijklmnopqrstuvwxyz"
 

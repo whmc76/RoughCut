@@ -6,7 +6,7 @@ import { api } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageSection } from "../components/ui/PageSection";
 import { PanelHeader } from "../components/ui/PanelHeader";
-import type { ToolAsrResult, ToolAvatarResult, ToolRunStage, ToolRunStatus, ToolServiceStatus, ToolTtsMode, ToolTtsReferenceAudioItem, ToolTtsResult } from "../types";
+import type { ToolAsrResult, ToolAvatarResult, ToolRunStage, ToolRunStatus, ToolServiceStatus, ToolTtsMode, ToolTtsOralizeStyle, ToolTtsProvider, ToolTtsReferenceAudioItem, ToolTtsResult } from "../types";
 import { formatDate } from "../utils";
 import "./ToolsPage.css";
 
@@ -44,8 +44,8 @@ const toolOptionStorageKeys = {
 };
 
 const TTS_REFERENCE_HISTORY_LIMIT = 5;
-const TTS_INSTRUCT_HINT_MAX_CHARS = 48;
-const TTS_LONG_TEXT_SEGMENT_HINT_CHARS = 120;
+const TTS_INSTRUCT_HINT_MAX_CHARS = 160;
+const TTS_LONG_TEXT_SEGMENT_HINT_CHARS = 2000;
 
 const cosyVoiceTtsModes = [
   {
@@ -83,9 +83,89 @@ const cosyVoiceTtsModes = [
   },
 ] satisfies CosyVoiceTtsMode[];
 
-type CosyVoiceTtsModeKey = ToolTtsMode;
+const ttsProviders = [
+  {
+    key: "cosyvoice3",
+    label: "CosyVoice3",
+    summary: "参考音色、跨语言和 instruct2 指令口播。",
+    detail: "本地 Docker 服务 cosyvoice3-tts，适合精细控制口播风格和参考音色复刻。",
+    recommended: true,
+  },
+  {
+    key: "moss_tts",
+    label: "MOSS-TTSD",
+    summary: "MOSS-TTSD 官方语音克隆、长文本和播客对谈。",
+    detail: "本地 Docker 服务 moss-ttsd，走官方 TTSD SGLang /generate 协议。",
+  },
+] satisfies TtsProviderOption[];
+
+const mossTtsModes = [
+  {
+    key: "moss_voice_clone",
+    label: "Voice Clone",
+    name: "音色克隆",
+    summary: "用 reference_audio 和 prompt_text 固定说话人音色。",
+    useCase: "核心能力：适合需要跨多次生成保持同一声音的配音。",
+    detail: "推荐用于音色一致性：固定同一参考音频、参考文本和采样参数。",
+    recommended: true,
+  },
+] satisfies MossTtsMode[];
+
+const mossOralizePresets = [
+  {
+    key: "short_video",
+    label: "短视频口播",
+    detail: "短句、强节奏、开头直接进重点。",
+    speakerCount: 1,
+  },
+  {
+    key: "warm_explainer",
+    label: "亲切讲解",
+    detail: "像真人解释问题，保留自然连接词。",
+    speakerCount: 1,
+  },
+  {
+    key: "calm_narration",
+    label: "沉稳旁白",
+    detail: "克制可信，减少口水词和营销腔。",
+    speakerCount: 1,
+  },
+  {
+    key: "podcast_dialogue",
+    label: "播客对谈",
+    detail: "输出 [S1]-[S2] 对谈正文。",
+    speakerCount: 2,
+  },
+] satisfies Array<{ key: ToolTtsOralizeStyle; label: string; detail: string; speakerCount: number }>;
+
+const mossSamplingPresets = [
+  { label: "官方推荐", temperature: "1.1", topP: "0.9", topK: "50", repetitionPenalty: "1.1" },
+  { label: "更稳定", temperature: "0.8", topP: "0.85", topK: "40", repetitionPenalty: "1.12" },
+  { label: "更有变化", temperature: "1.25", topP: "0.92", topK: "80", repetitionPenalty: "1.05" },
+] satisfies Array<{ label: string; temperature: string; topP: string; topK: string; repetitionPenalty: string }>;
+
+type TtsProviderOption = {
+  key: ToolTtsProvider;
+  label: string;
+  summary: string;
+  detail: string;
+  recommended?: boolean;
+};
+
+type CosyVoiceTtsModeKey = Extract<ToolTtsMode, "sft" | "zero_shot" | "cross_lingual" | "instruct2">;
 type CosyVoiceTtsMode = {
   key: CosyVoiceTtsModeKey;
+  label: string;
+  name: string;
+  summary: string;
+  useCase: string;
+  detail: string;
+  recommended?: boolean;
+};
+
+type MossTtsModeKey = Extract<ToolTtsMode, "moss_voice_clone">;
+type MossTtsMode = {
+  key: MossTtsModeKey;
   label: string;
   name: string;
   summary: string;
@@ -201,7 +281,8 @@ const instructTextPresetGroups = [
 ];
 
 type TtsToolOptions = {
-  mode: CosyVoiceTtsModeKey;
+  provider: ToolTtsProvider;
+  mode: ToolTtsMode;
   ttsText: string;
   promptText: string;
   instructText: string;
@@ -211,6 +292,14 @@ type TtsToolOptions = {
   speed: string;
   seed: string;
   textFrontend: "true" | "false";
+  mossUseDuration: "true" | "false";
+  mossDurationTokens: string;
+  mossMaxNewTokens: string;
+  mossTemperature: string;
+  mossTopP: string;
+  mossTopK: string;
+  mossRepetitionPenalty: string;
+  autoPromptTextAsr: "true" | "false";
 };
 
 type AsrToolOptions = {
@@ -226,6 +315,7 @@ const defaultTtsText = "这是一段 RoughCut 小工具页面的 CosyVoice3 试�
 const defaultInstructTextPreset = instructTextPresetGroups[0]?.presets[0]?.text ?? "";
 
 const defaultTtsOptions: TtsToolOptions = {
+  provider: "cosyvoice3",
   mode: "instruct2",
   ttsText: defaultTtsText,
   promptText: "希望你以后能够做的比我还好呦。",
@@ -236,6 +326,14 @@ const defaultTtsOptions: TtsToolOptions = {
   speed: "1",
   seed: "0",
   textFrontend: "true",
+  mossUseDuration: "false",
+  mossDurationTokens: "125",
+  mossMaxNewTokens: "2000",
+  mossTemperature: "1.1",
+  mossTopP: "0.9",
+  mossTopK: "50",
+  mossRepetitionPenalty: "1.1",
+  autoPromptTextAsr: "true",
 };
 
 const defaultAsrOptions: AsrToolOptions = {
@@ -251,9 +349,25 @@ function resolveCosyVoiceTtsMode(key: string): CosyVoiceTtsMode {
   return cosyVoiceTtsModes.find((mode) => mode.key === key) ?? cosyVoiceTtsModes[0];
 }
 
-function coerceTtsMode(value: unknown): CosyVoiceTtsModeKey {
+function resolveMossTtsMode(key: string): MossTtsMode {
+  return mossTtsModes.find((mode) => mode.key === key) ?? mossTtsModes[0];
+}
+
+function resolveTtsProvider(key: string): TtsProviderOption {
+  return ttsProviders.find((provider) => provider.key === key) ?? ttsProviders[0];
+}
+
+function coerceTtsProvider(value: unknown): ToolTtsProvider {
   const raw = String(value || "");
-  return cosyVoiceTtsModes.some((mode) => mode.key === raw) ? (raw as CosyVoiceTtsModeKey) : defaultTtsOptions.mode;
+  return ttsProviders.some((provider) => provider.key === raw) ? (raw as ToolTtsProvider) : defaultTtsOptions.provider;
+}
+
+function coerceTtsMode(value: unknown, provider: ToolTtsProvider = defaultTtsOptions.provider): ToolTtsMode {
+  const raw = String(value || "");
+  if (provider === "moss_tts") {
+    return mossTtsModes.some((mode) => mode.key === raw) ? (raw as MossTtsModeKey) : "moss_voice_clone";
+  }
+  return cosyVoiceTtsModes.some((mode) => mode.key === raw) ? (raw as CosyVoiceTtsModeKey) : "instruct2";
 }
 
 function coerceBooleanString(value: unknown, fallback: "true" | "false"): "true" | "false" {
@@ -282,8 +396,11 @@ function useStoredOptions<T extends Record<string, unknown>>(key: string, defaul
 }
 
 function coerceTtsOptions(value: Partial<TtsToolOptions>): TtsToolOptions {
+  const provider = coerceTtsProvider(value.provider);
+  const storedMossMaxNewTokens = String(value.mossMaxNewTokens ?? defaultTtsOptions.mossMaxNewTokens);
   return {
-    mode: coerceTtsMode(value.mode),
+    provider,
+    mode: coerceTtsMode(value.mode, provider),
     ttsText: String(value.ttsText ?? defaultTtsOptions.ttsText),
     promptText: String(value.promptText ?? defaultTtsOptions.promptText),
     instructText: String(value.instructText ?? defaultTtsOptions.instructText),
@@ -293,12 +410,24 @@ function coerceTtsOptions(value: Partial<TtsToolOptions>): TtsToolOptions {
     speed: String(value.speed ?? defaultTtsOptions.speed),
     seed: String(value.seed ?? defaultTtsOptions.seed),
     textFrontend: coerceBooleanString(value.textFrontend, defaultTtsOptions.textFrontend),
+    mossUseDuration: coerceBooleanString(value.mossUseDuration, defaultTtsOptions.mossUseDuration),
+    mossDurationTokens: String(value.mossDurationTokens ?? defaultTtsOptions.mossDurationTokens),
+    mossMaxNewTokens: storedMossMaxNewTokens === "512" ? defaultTtsOptions.mossMaxNewTokens : storedMossMaxNewTokens,
+    mossTemperature: String(value.mossTemperature ?? defaultTtsOptions.mossTemperature),
+    mossTopP: String(value.mossTopP ?? defaultTtsOptions.mossTopP),
+    mossTopK: String(value.mossTopK ?? defaultTtsOptions.mossTopK),
+    mossRepetitionPenalty: String(value.mossRepetitionPenalty ?? defaultTtsOptions.mossRepetitionPenalty),
+    autoPromptTextAsr: coerceBooleanString(value.autoPromptTextAsr, defaultTtsOptions.autoPromptTextAsr),
   };
 }
 
 function appendInstructionPreset(currentValue: string, presetValue: string): string {
+  const current = String(currentValue || "").trim();
   const preset = String(presetValue || "").trim();
-  return preset || String(currentValue || "").trim();
+  if (!preset) return current;
+  if (!current) return preset;
+  if (current.includes(preset)) return current;
+  return `${current}\n${preset}`;
 }
 
 const ttsTextUiHintFragments = cosyVoiceTtsModes.map((mode) => mode.detail);
@@ -312,25 +441,68 @@ function cleanTtsTextInput(value: string): string {
 }
 
 function cleanTtsInstructInput(value: string): string {
-  const firstLine = String(value || "")
+  const lines = String(value || "")
     .split(/[\n；;]/)
     .map((line) => line.trim())
-    .find(Boolean) ?? "";
-  const normalized = firstLine
+    .filter(Boolean)
+    .map(normalizeTtsInstructLine)
+    .filter(Boolean);
+  const uniqueLines = Array.from(new Set(lines));
+  const parts: string[] = [];
+  for (const line of uniqueLines) {
+    const candidate = parts.length ? `${parts.join("；")}；${line}` : line;
+    if (candidate.length > TTS_INSTRUCT_HINT_MAX_CHARS) break;
+    parts.push(line);
+  }
+  const compact = parts.join("；").replace(/[；;，,、\s]+$/g, "");
+  return compact ? `${compact}。` : "";
+}
+
+function normalizeTtsInstructLine(value: string): string {
+  let line = String(value || "")
     .replace(/\s+/g, "")
     .replace(/^请/, "")
     .replace(/^像(.+?)一样[，,]?/, "$1风格，")
     .replace(/^用(.+?)(?:的方式)?(?:说|表达)[，,]?/, "$1，")
+    .replaceAll("适合短视频旁白的方式", "短视频旁白风格")
+    .replaceAll("更温柔", "温柔")
+    .replaceAll("更清楚", "清楚");
+  const replacements: Array<[string, string]> = [
+    ["声音亲切、有耐心，语气温柔活泼", "亲切耐心、温柔活泼"],
+    ["有声故事演播风格表达", "故事演播"],
+    ["有声故事演播风格", "故事演播"],
+    ["语气有画面感", "画面感"],
+    ["人物和情节转折要更清楚", "转折清楚"],
+    ["人物和情节转折要清楚", "转折清楚"],
+    ["课堂教学风格表达", "课堂教学"],
+    ["课堂教学风格", "课堂教学"],
+    ["重点词需要自然强调", "重点自然强调"],
+    ["紧凑、有节奏、适合短视频旁白", "短视频旁白、紧凑有节奏"],
+    ["紧凑、有节奏、短视频旁白风格", "短视频旁白、紧凑有节奏"],
+    ["较慢语速表达", "较慢语速"],
+    ["重点词上做清晰强调", "重点清晰强调"],
+    ["语义分段处加入自然停顿", "语义分段自然停顿"],
+    ["信息更容易理解", "信息易理解"],
+  ];
+  for (const [source, target] of replacements) {
+    line = line.replaceAll(source, target);
+  }
+  return line
     .replaceAll("这句话", "")
     .replaceAll("一句话", "")
-    .replaceAll("更温柔", "温柔")
-    .replaceAll("更清楚", "清楚")
+    .replaceAll("进行表达", "表达")
+    .replaceAll("声音", "")
+    .replaceAll("语气", "")
+    .replaceAll("需要", "")
+    .replaceAll("人物和情节转折要", "转折")
+    .replaceAll("并在", "，")
+    .replaceAll("上做", "")
+    .replaceAll("加入", "")
+    .replaceAll("让信息更容易理解", "信息易理解")
+    .replaceAll("地说", "")
+    .replaceAll("表达", "")
+    .replace(/[，,、]{2,}/g, "，")
     .replace(/[，,。.\s]+$/g, "");
-  if (normalized.length <= TTS_INSTRUCT_HINT_MAX_CHARS) {
-    return normalized ? `${normalized}。` : "";
-  }
-  const truncated = normalized.slice(0, TTS_INSTRUCT_HINT_MAX_CHARS).replace(/[，,、\s]+$/g, "");
-  return truncated ? `${truncated}。` : "";
 }
 
 function findTtsTextPollution(ttsText: string, ...controlValues: string[]): string {
@@ -575,7 +747,21 @@ export function TtsToolPage() {
   const [ttsOptions, setTtsOptions] = useStoredOptions(toolOptionStorageKeys.tts, defaultTtsOptions, coerceTtsOptions);
   const [selectedReferencePath, setSelectedReferencePath] = useState("");
   const [localSubmitError, setLocalSubmitError] = useState("");
-  const selectedMode = resolveCosyVoiceTtsMode(ttsOptions.mode);
+  const [mossOralizeStyle, setMossOralizeStyle] = useState<ToolTtsOralizeStyle>("short_video");
+  const [mossSpeakerCount, setMossSpeakerCount] = useState(1);
+  const oralizeMutation = useMutation({
+    mutationFn: api.oralizeToolTtsText,
+    onSuccess: (result) => {
+      setTtsOptions((current) => ({ ...current, ttsText: result.tts_text }));
+      if (typeof result.speaker_count === "number") {
+        setMossSpeakerCount(result.speaker_count);
+      }
+    },
+  });
+  const selectedProvider = resolveTtsProvider(ttsOptions.provider);
+  const selectedCosyMode = resolveCosyVoiceTtsMode(ttsOptions.mode);
+  const selectedMossMode = resolveMossTtsMode(ttsOptions.mode);
+  const selectedMode = ttsOptions.provider === "moss_tts" ? selectedMossMode : selectedCosyMode;
   const ttsService = status.data?.tools.tts as (ToolServiceStatus & { models?: string[] }) | undefined;
   const serviceVoiceIds = useMemo(() => (ttsService?.models ?? []).filter(Boolean), [ttsService]);
   const mergedSftVoiceIds = useMemo(() => {
@@ -589,14 +775,20 @@ export function TtsToolPage() {
       return true;
     });
   }, [serviceVoiceIds]);
-  const usesReferenceAudio = selectedMode.key !== "sft";
-  const usesPromptText = selectedMode.key === "zero_shot";
-  const usesInstructText = selectedMode.key === "instruct2";
-  const usesSpeakerId = selectedMode.key === "sft";
-  const usesZeroShotSpeakerId = selectedMode.key === "zero_shot";
-  const usesCrossLingualText = selectedMode.key === "cross_lingual";
+  const isMossProvider = ttsOptions.provider === "moss_tts";
+  const usesReferenceAudio = isMossProvider ? selectedMossMode.key === "moss_voice_clone" : selectedCosyMode.key !== "sft";
+  const usesPromptText = !isMossProvider && selectedCosyMode.key === "zero_shot";
+  const usesInstructText = !isMossProvider && selectedCosyMode.key === "instruct2";
+  const usesSpeakerId = !isMossProvider && selectedCosyMode.key === "sft";
+  const usesZeroShotSpeakerId = !isMossProvider && selectedCosyMode.key === "zero_shot";
+  const usesCrossLingualText = !isMossProvider && selectedCosyMode.key === "cross_lingual";
+  const usesMossPromptText = isMossProvider && selectedMossMode.key === "moss_voice_clone";
+  const usesMossDuration = isMossProvider && ttsOptions.mossUseDuration === "true";
+  const usesReferencePromptText = usesPromptText || usesMossPromptText;
+  const usesAutoPromptTextAsr = usesReferencePromptText && ttsOptions.autoPromptTextAsr === "true";
   const cleanedTtsTextLength = cleanTtsTextInput(ttsOptions.ttsText).length;
   const estimatedTtsSegmentCount = Math.max(1, Math.ceil(cleanedTtsTextLength / TTS_LONG_TEXT_SEGMENT_HINT_CHARS));
+  const oralizeDeliveryNotes = oralizeMutation.data?.structured_payload?.delivery_notes;
   const referenceHistoryItems = useMemo(() => {
     const seen = new Set<string>();
     const items: ToolTtsReferenceAudioItem[] = [];
@@ -621,20 +813,47 @@ export function TtsToolPage() {
     return items;
   }, [outputHistory.data?.items]);
 
+  const handleOralize = () => {
+    const cleanedTtsText = cleanTtsTextInput(ttsOptions.ttsText);
+    if (!cleanedTtsText) {
+      setLocalSubmitError("先填入需要改写的原始正文，再执行口语化改写。");
+      return;
+    }
+    setLocalSubmitError("");
+    oralizeMutation.mutate({
+      provider: ttsOptions.provider,
+      text: cleanedTtsText,
+      style: mossOralizeStyle,
+      speaker_count: mossOralizeStyle === "podcast_dialogue" ? Math.max(2, mossSpeakerCount) : 1,
+      target_chars: cleanedTtsTextLength,
+    });
+  };
+
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
     const cleanedTtsText = cleanTtsTextInput(ttsOptions.ttsText);
     const cleanedInstructText = cleanTtsInstructInput(ttsOptions.instructText);
-    const pollutedControlText = findTtsTextPollution(cleanedTtsText, ttsOptions.promptText, cleanedInstructText);
+    const effectivePromptText = usesAutoPromptTextAsr ? "" : ttsOptions.promptText.trim();
+    const pollutedControlText = findTtsTextPollution(cleanedTtsText, effectivePromptText, cleanedInstructText);
     if (pollutedControlText) {
       setLocalSubmitError("朗读正文里包含参考文本或口播指令。请把 tts_text 保持为只需要说出口的正文，指令只放在 instruct_text。");
       return;
     }
     setLocalSubmitError("");
+    formData.set("provider", ttsOptions.provider);
+    formData.set("mode", selectedMode.key);
     formData.set("tts_text", cleanedTtsText);
     formData.set("text", cleanedTtsText);
+    formData.set("prompt_text", effectivePromptText);
     formData.set("instruct_text", cleanedInstructText);
+    formData.set("auto_prompt_text_asr", usesAutoPromptTextAsr ? "true" : "false");
+    formData.set("moss_duration_tokens", usesMossDuration ? ttsOptions.mossDurationTokens : "0");
+    formData.set("moss_max_new_tokens", ttsOptions.mossMaxNewTokens);
+    formData.set("moss_temperature", ttsOptions.mossTemperature);
+    formData.set("moss_top_p", ttsOptions.mossTopP);
+    formData.set("moss_top_k", ttsOptions.mossTopK);
+    formData.set("moss_repetition_penalty", ttsOptions.mossRepetitionPenalty);
     if (cleanedTtsText !== ttsOptions.ttsText.trim() || cleanedInstructText !== ttsOptions.instructText.trim()) {
       setTtsOptions((current) => ({ ...current, ttsText: cleanedTtsText, instructText: cleanedInstructText }));
     }
@@ -646,50 +865,89 @@ export function TtsToolPage() {
       <PageHeader
         eyebrow="TTS"
         title="文本转语音"
-        description="CosyVoice3 通过 Docker 服务提供推理，提交后返回可试听的 WAV。"
+        description="CosyVoice3 与 MOSS-TTSD 都通过本地 Docker 服务提供推理，提交后返回可试听的 WAV。"
         actions={<Link className="button ghost" to="/tools">返回小工具</Link>}
       />
       <ToolNav />
-      <PageSection eyebrow="调用" title="生成语音" description="覆盖 CosyVoice3 官方模式与参数。stream 与 speed 不等于 1 不能同时使用。">
+      <PageSection eyebrow="调用" title="生成语音" description="覆盖 CosyVoice3 和 MOSS-TTSD 官方模式；按 provider 展开对应参数。">
         <div className="panel-grid tool-workbench tts-workbench-vertical">
           <section className="panel">
             <PanelHeader title="输入" description={selectedMode.detail} />
             <form className="form-stack" onSubmit={handleSubmit}>
+              <input type="hidden" name="provider" value={selectedProvider.key} />
               <input type="hidden" name="mode" value={selectedMode.key} />
               <input type="hidden" name="reference_history_path" value={selectedReferencePath} />
               <div className="tts-style-field">
                 <div>
-                  <span className="field-label">mode</span>
+                  <span className="field-label">provider</span>
                 </div>
-                <div className="tts-mode-grid" role="radiogroup" aria-label="CosyVoice3 mode">
-                  {cosyVoiceTtsModes.map((mode) => (
+                <div className="tts-provider-grid" role="radiogroup" aria-label="TTS provider">
+                  {ttsProviders.map((provider) => (
                     <button
-                      key={mode.key}
+                      key={provider.key}
                       type="button"
-                      className={mode.key === selectedMode.key ? "tts-style-option active" : "tts-style-option"}
-                      aria-checked={mode.key === selectedMode.key}
-                      aria-label={`${mode.label} ${mode.name}${mode.recommended ? " 推荐" : ""}`}
+                      className={provider.key === selectedProvider.key ? "tts-style-option active" : "tts-style-option"}
+                      aria-checked={provider.key === selectedProvider.key}
+                      aria-label={`${provider.label}${provider.recommended ? " 推荐" : ""}`}
                       role="radio"
                       onClick={() =>
                         setTtsOptions((current) => ({
                           ...current,
-                          mode: mode.key,
-                          promptText: mode.key === "zero_shot" && !current.promptText.trim() ? defaultTtsOptions.promptText : current.promptText,
-                          instructText: mode.key === "instruct2" && !current.instructText.trim() ? defaultInstructTextPreset : current.instructText,
+                          provider: provider.key,
+                          mode: provider.key === "moss_tts" ? "moss_voice_clone" : "instruct2",
                         }))
                       }
                     >
                       <span className="tts-mode-title-row">
-                        <strong>{mode.label}</strong>
-                        {mode.recommended ? <span className="tts-mode-recommended">推荐</span> : null}
+                        <strong>{provider.label}</strong>
+                        {provider.recommended ? <span className="tts-mode-recommended">推荐</span> : null}
                       </span>
-                      <span className="tts-mode-name">{mode.name}</span>
-                      <span className="tts-mode-summary">{mode.summary}</span>
-                      <span className="tts-mode-use-case">{mode.useCase}</span>
+                      <span className="tts-mode-summary">{provider.summary}</span>
+                      <span className="tts-mode-use-case">{provider.detail}</span>
                     </button>
                   ))}
                 </div>
               </div>
+              {!isMossProvider ? (
+                <div className="tts-style-field">
+                  <div>
+                    <span className="field-label">mode</span>
+                  </div>
+                  <div className="tts-mode-grid" role="radiogroup" aria-label={`${selectedProvider.label} mode`}>
+                    {cosyVoiceTtsModes.map((mode) => (
+                      <button
+                        key={mode.key}
+                        type="button"
+                        className={mode.key === selectedMode.key ? "tts-style-option active" : "tts-style-option"}
+                        aria-checked={mode.key === selectedMode.key}
+                        aria-label={`${mode.label} ${mode.name}${mode.recommended ? " 推荐" : ""}`}
+                        role="radio"
+                        onClick={() =>
+                          setTtsOptions((current) => ({
+                            ...current,
+                            mode: mode.key,
+                            promptText: mode.key === "zero_shot" && !current.promptText.trim() ? defaultTtsOptions.promptText : current.promptText,
+                            instructText: mode.key === "instruct2" && !current.instructText.trim() ? defaultInstructTextPreset : current.instructText,
+                          }))
+                        }
+                      >
+                        <span className="tts-mode-title-row">
+                          <strong>{mode.label}</strong>
+                          {mode.recommended ? <span className="tts-mode-recommended">推荐</span> : null}
+                        </span>
+                        <span className="tts-mode-name">{mode.name}</span>
+                        <span className="tts-mode-summary">{mode.summary}</span>
+                        <span className="tts-mode-use-case">{mode.useCase}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <div className="tts-helper-panel">
+                  <strong>Voice Clone / 音色克隆</strong>
+                  <span>MOSS-TTSD 当前 Docker 使用官方 fused SGLang 服务，必须提供 reference_audio 和对应 prompt_text；多人播客只是正文里的 [S1]-[S5] 写法。</span>
+                </div>
+              )}
               <label>
                 <span>tts_text / text</span>
                 <textarea
@@ -701,30 +959,20 @@ export function TtsToolPage() {
                   onChange={(event) => setTtsOptions((current) => ({ ...current, ttsText: event.target.value }))}
                 />
                 <span className="muted compact">
-                  当前约 {cleanedTtsTextLength} 字；超过约 {TTS_LONG_TEXT_SEGMENT_HINT_CHARS} 字会自动按语义分段合成并拼接
+                  当前约 {cleanedTtsTextLength} 字；长文本会按当前 TTS 服务能力处理，超过约 {TTS_LONG_TEXT_SEGMENT_HINT_CHARS} 字才由 RoughCut 分批提交并拼接
                   {estimatedTtsSegmentCount > 1 ? `，预计 ${estimatedTtsSegmentCount} 段。` : "。"}
                 </span>
               </label>
-              <div className="tts-mode-fields">
-                <div className="tts-mode-fields-head">
-                  <strong>{selectedMode.label} 可用字段</strong>
-                  <span>{selectedMode.detail}</span>
-                </div>
-                <div className="tts-mode-fields-grid">
+              <div className="tts-mode-fields-grid">
               {usesPromptText ? (
                 <div className="tts-prompt-text-field">
-                  <label>
-                    <span>参考音频文本 prompt_text</span>
-                    <textarea
-                      className="input"
-                      name="prompt_text"
-                      rows={3}
-                      required
-                      value={ttsOptions.promptText}
-                      onChange={(event) => setTtsOptions((current) => ({ ...current, promptText: event.target.value }))}
-                      placeholder="参考音频里实际说出的话。"
-                    />
-                  </label>
+                  <ReferencePromptTextField
+                    autoAsr={usesAutoPromptTextAsr}
+                    value={ttsOptions.promptText}
+                    placeholder="参考音频里实际说出的话。"
+                    onAutoAsrChange={(enabled) => setTtsOptions((current) => ({ ...current, autoPromptTextAsr: enabled ? "true" : "false" }))}
+                    onTextChange={(value) => setTtsOptions((current) => ({ ...current, promptText: value }))}
+                  />
                 </div>
               ) : null}
               {usesInstructText ? (
@@ -773,7 +1021,7 @@ export function TtsToolPage() {
                       </section>
                     ))}
                   </div>
-                  <div className="muted compact">点击预设会替换口播指令；CosyVoice3 instruct2 只适合单条短指令，后台会压缩为一条安全风格提示。</div>
+                  <div className="muted compact">点击预设会继续拼接；提交时会自动压缩成一条短组合风格提示，避免模型把指令读出来。</div>
                 </div>
               ) : null}
               {usesCrossLingualText ? (
@@ -794,6 +1042,87 @@ export function TtsToolPage() {
                       </button>
                     ))}
                   </div>
+                </div>
+              ) : null}
+              {isMossProvider && (usesMossDuration || usesReferenceAudio || usesMossPromptText) ? (
+                <div className="tts-prompt-text-field">
+                  <div className="tts-helper-panel">
+                    <strong>口语化改写</strong>
+                    <span>MOSS-TTSD 没有独立 style prompt；这里先用结构化提示词把正文改成自然可说的 tts_text，再只把可朗读正文送去合成。</span>
+                  </div>
+                  <div className="tts-preset-category-list">
+                    <section className="tts-preset-category preset-tone-0">
+                      <div className="tts-preset-category-head">
+                        <strong>改写方案</strong>
+                        <span>点击只选择方案，不会往正文里塞模板台词。</span>
+                      </div>
+                      <div className="tts-preset-chip-grid">
+                        {mossOralizePresets.map((preset) => (
+                          <button
+                            key={preset.key}
+                            type="button"
+                            className={mossOralizeStyle === preset.key ? "tts-preset-chip active" : "tts-preset-chip"}
+                            title={preset.detail}
+                            onClick={() => {
+                              setMossOralizeStyle(preset.key);
+                              setMossSpeakerCount(preset.speakerCount);
+                            }}
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                    </section>
+                  </div>
+                  <div className="tts-oralize-actions">
+                    {mossOralizeStyle === "podcast_dialogue" ? (
+                      <label className="tts-inline-field">
+                        <span>说话人数</span>
+                        <input
+                          className="input"
+                          min={2}
+                          max={5}
+                          type="number"
+                          value={mossSpeakerCount}
+                          onChange={(event) => setMossSpeakerCount(Math.max(2, Math.min(5, Number(event.target.value) || 2)))}
+                        />
+                      </label>
+                    ) : null}
+                    <button className="button secondary" disabled={oralizeMutation.isPending || !cleanedTtsTextLength} onClick={handleOralize} type="button">
+                      {oralizeMutation.isPending ? "改写中..." : "改写为自然口播"}
+                    </button>
+                    {oralizeMutation.data?.model ? <span className="muted compact">rewriter: {oralizeMutation.data.model}</span> : null}
+                  </div>
+                  {oralizeMutation.isError ? <div className="notice notice-error">{(oralizeMutation.error as Error).message}</div> : null}
+                  {oralizeDeliveryNotes ? (
+                    <div className="tts-helper-panel subtle">
+                      <strong>生成建议</strong>
+                      <span>
+                        {[oralizeDeliveryNotes.pace, oralizeDeliveryNotes.pause, oralizeDeliveryNotes.emphasis?.length ? `强调：${oralizeDeliveryNotes.emphasis.join("、")}` : ""]
+                          .filter(Boolean)
+                          .join("；")}
+                      </span>
+                    </div>
+                  ) : null}
+                  {usesMossPromptText ? (
+                    <ReferencePromptTextField
+                      autoAsr={usesAutoPromptTextAsr}
+                      value={ttsOptions.promptText}
+                      placeholder="参考音频里实际说出的话，用来和 reference_audio 对齐音色。"
+                      onAutoAsrChange={(enabled) => setTtsOptions((current) => ({ ...current, autoPromptTextAsr: enabled ? "true" : "false" }))}
+                      onTextChange={(value) => setTtsOptions((current) => ({ ...current, promptText: value }))}
+                    />
+                  ) : null}
+                  {usesReferenceAudio ? (
+                    <ReferenceAudioPicker
+                      items={referenceHistoryItems}
+                      loading={referenceHistory.isLoading}
+                      selectedPath={selectedReferencePath}
+                      required={usesReferenceAudio}
+                      onSelect={setSelectedReferencePath}
+                      onFileChange={() => setSelectedReferencePath("")}
+                    />
+                  ) : null}
                 </div>
               ) : null}
               {usesSpeakerId ? (
@@ -827,7 +1156,7 @@ export function TtsToolPage() {
                   </label>
                 </div>
               ) : null}
-              {usesReferenceAudio && !usesInstructText ? (
+              {usesReferenceAudio && !usesInstructText && !isMossProvider ? (
                 <>
                   <ReferenceAudioPicker
                     items={referenceHistoryItems}
@@ -851,63 +1180,133 @@ export function TtsToolPage() {
                   ) : null}
                 </>
               ) : null}
-                </div>
               </div>
               <details className="tts-advanced-fields">
                 <summary>高级参数</summary>
                 <div className="tts-common-fields">
-                  <label>
-                    <span>stream</span>
-                    <select
-                      className="input"
-                      name="stream"
-                      value={ttsOptions.stream}
-                      onChange={(event) => setTtsOptions((current) => ({ ...current, stream: event.target.value as "true" | "false" }))}
-                    >
-                      <option value="true">true</option>
-                      <option value="false">false</option>
-                    </select>
-                  </label>
-                  <label>
-                    <span>speed</span>
-                    <input
-                      className="input"
-                      name="speed"
-                      type="number"
-                      min="0.5"
-                      max="2"
-                      step="0.05"
-                      value={ttsOptions.speed}
-                      onChange={(event) => setTtsOptions((current) => ({ ...current, speed: event.target.value }))}
-                    />
-                  </label>
-                  <label>
-                    <span>seed</span>
-                    <input
-                      className="input"
-                      name="seed"
-                      type="number"
-                      min="0"
-                      step="1"
-                      value={ttsOptions.seed}
-                      onChange={(event) => setTtsOptions((current) => ({ ...current, seed: event.target.value }))}
-                    />
-                  </label>
-                  <label>
-                    <span>text_frontend</span>
-                    <select
-                      className="input"
-                      name="text_frontend"
-                      value={ttsOptions.textFrontend}
-                      onChange={(event) => setTtsOptions((current) => ({ ...current, textFrontend: event.target.value as "true" | "false" }))}
-                    >
-                      <option value="true">true</option>
-                      <option value="false">false</option>
-                    </select>
-                  </label>
+                  {isMossProvider ? (
+                    <>
+                      <label className="tts-duration-toggle">
+                        <span>duration token</span>
+                        <span className="tts-inline-control">
+                          <input
+                            type="checkbox"
+                            checked={ttsOptions.mossUseDuration === "true"}
+                            onChange={(event) => setTtsOptions((current) => ({ ...current, mossUseDuration: event.target.checked ? "true" : "false" }))}
+                          />
+                          <span>启用</span>
+                        </span>
+                      </label>
+                      {usesMossDuration ? (
+                        <label>
+                          <span>duration tokens</span>
+                          <input
+                            className="input"
+                            name="moss_duration_tokens"
+                            type="number"
+                            min="1"
+                            step="1"
+                            value={ttsOptions.mossDurationTokens}
+                            onChange={(event) => setTtsOptions((current) => ({ ...current, mossDurationTokens: event.target.value }))}
+                          />
+                        </label>
+                      ) : null}
+                      <label>
+                        <span>max_new_tokens</span>
+                        <input className="input" name="moss_max_new_tokens" type="number" min="1" step="1" value={ttsOptions.mossMaxNewTokens} onChange={(event) => setTtsOptions((current) => ({ ...current, mossMaxNewTokens: event.target.value }))} />
+                      </label>
+                      <label>
+                        <span>temperature</span>
+                        <input className="input" name="moss_temperature" type="number" min="0" max="2" step="0.05" value={ttsOptions.mossTemperature} onChange={(event) => setTtsOptions((current) => ({ ...current, mossTemperature: event.target.value }))} />
+                      </label>
+                      <label>
+                        <span>top_p</span>
+                        <input className="input" name="moss_top_p" type="number" min="0.01" max="1" step="0.01" value={ttsOptions.mossTopP} onChange={(event) => setTtsOptions((current) => ({ ...current, mossTopP: event.target.value }))} />
+                      </label>
+                      <label>
+                        <span>top_k</span>
+                        <input className="input" name="moss_top_k" type="number" min="1" step="1" value={ttsOptions.mossTopK} onChange={(event) => setTtsOptions((current) => ({ ...current, mossTopK: event.target.value }))} />
+                      </label>
+                      <label>
+                        <span>repetition_penalty</span>
+                        <input className="input" name="moss_repetition_penalty" type="number" min="0.01" max="2" step="0.01" value={ttsOptions.mossRepetitionPenalty} onChange={(event) => setTtsOptions((current) => ({ ...current, mossRepetitionPenalty: event.target.value }))} />
+                      </label>
+                      <div className="tts-sampling-presets">
+                        {mossSamplingPresets.map((preset) => (
+                          <button
+                            key={preset.label}
+                            type="button"
+                            className="tts-preset-chip"
+                            onClick={() =>
+                              setTtsOptions((current) => ({
+                                ...current,
+                                mossTemperature: preset.temperature,
+                                mossTopP: preset.topP,
+                                mossTopK: preset.topK,
+                                mossRepetitionPenalty: preset.repetitionPenalty,
+                              }))
+                            }
+                          >
+                            {preset.label}
+                          </button>
+                        ))}
+                      </div>
+                    </>
+                  ) : (
+                    <>
+                      <label>
+                        <span>stream</span>
+                        <select
+                          className="input"
+                          name="stream"
+                          value={ttsOptions.stream}
+                          onChange={(event) => setTtsOptions((current) => ({ ...current, stream: event.target.value as "true" | "false" }))}
+                        >
+                          <option value="true">true</option>
+                          <option value="false">false</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>speed</span>
+                        <input
+                          className="input"
+                          name="speed"
+                          type="number"
+                          min="0.5"
+                          max="2"
+                          step="0.05"
+                          value={ttsOptions.speed}
+                          onChange={(event) => setTtsOptions((current) => ({ ...current, speed: event.target.value }))}
+                        />
+                      </label>
+                      <label>
+                        <span>seed</span>
+                        <input
+                          className="input"
+                          name="seed"
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={ttsOptions.seed}
+                          onChange={(event) => setTtsOptions((current) => ({ ...current, seed: event.target.value }))}
+                        />
+                      </label>
+                      <label>
+                        <span>text_frontend</span>
+                        <select
+                          className="input"
+                          name="text_frontend"
+                          value={ttsOptions.textFrontend}
+                          onChange={(event) => setTtsOptions((current) => ({ ...current, textFrontend: event.target.value as "true" | "false" }))}
+                        >
+                          <option value="true">true</option>
+                          <option value="false">false</option>
+                        </select>
+                      </label>
+                    </>
+                  )}
                 </div>
               </details>
-              <div className="notice compact">限制：stream=true 时 speed 必须为 1；CosyVoice3 官方分隔符由后台自动校验并补齐。</div>
               <button className="button primary" type="submit" disabled={pending}>
                 {pending ? "生成中..." : "生成语音"}
               </button>
@@ -923,6 +1322,45 @@ export function TtsToolPage() {
         </div>
       </PageSection>
     </section>
+  );
+}
+
+function ReferencePromptTextField({
+  autoAsr,
+  value,
+  placeholder,
+  onAutoAsrChange,
+  onTextChange,
+}: {
+  autoAsr: boolean;
+  value: string;
+  placeholder: string;
+  onAutoAsrChange: (enabled: boolean) => void;
+  onTextChange: (value: string) => void;
+}) {
+  return (
+    <div className="tts-reference-prompt-card">
+      <div className="tts-reference-prompt-head">
+        <div>
+          <strong>参考音频文本 prompt_text</strong>
+          <span>{autoAsr ? "提交时使用本地 ASR 自动识别参考音频文本。" : "手动填写参考音频里实际说出的话。"}</span>
+        </div>
+        <label className="tts-auto-asr-toggle">
+          <input type="checkbox" checked={autoAsr} onChange={(event) => onAutoAsrChange(event.target.checked)} />
+          <span>自动 ASR 识别</span>
+        </label>
+      </div>
+      <textarea
+        className="input"
+        name="prompt_text"
+        rows={3}
+        required={!autoAsr}
+        disabled={autoAsr}
+        value={autoAsr ? "" : value}
+        onChange={(event) => onTextChange(event.target.value)}
+        placeholder={autoAsr ? "已默认开启自动识别；如需修正识别文本，取消勾选后手动填写。" : placeholder}
+      />
+    </div>
   );
 }
 

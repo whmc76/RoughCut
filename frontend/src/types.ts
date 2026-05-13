@@ -1355,9 +1355,21 @@ export type ToolRunStatus<Result = unknown> = {
   updated_at?: string | null;
 };
 
-export type ToolTtsMode = "sft" | "zero_shot" | "cross_lingual" | "instruct2";
+export type ToolTtsProvider = "cosyvoice3" | "moss_tts";
+
+export type ToolTtsMode =
+  | "sft"
+  | "zero_shot"
+  | "cross_lingual"
+  | "instruct2"
+  | "moss_direct_tts"
+  | "moss_voice_clone"
+  | "moss_podcast"
+  | "moss_duration_control"
+  | "moss_sound_effect";
 
 export type ToolTtsParams = {
+  provider?: ToolTtsProvider;
   mode: ToolTtsMode;
   tts_text: string;
   text?: string;
@@ -1369,8 +1381,44 @@ export type ToolTtsParams = {
   speed?: number;
   seed?: number;
   text_frontend?: boolean;
+  moss_duration_tokens?: number;
+  moss_max_new_tokens?: number;
+  moss_temperature?: number;
+  moss_top_p?: number;
+  moss_top_k?: number;
+  auto_prompt_text_asr?: boolean;
   prompt_wav?: File;
   reference_audio?: File;
+};
+
+export type ToolTtsOralizeStyle = "short_video" | "warm_explainer" | "calm_narration" | "podcast_dialogue";
+
+export type ToolTtsOralizeRequest = {
+  provider?: ToolTtsProvider;
+  text: string;
+  style: ToolTtsOralizeStyle;
+  speaker_count?: number;
+  target_chars?: number;
+};
+
+export type ToolTtsOralizeResult = {
+  status: string;
+  provider: string;
+  style: ToolTtsOralizeStyle | string;
+  style_label?: string;
+  speaker_count?: number;
+  tts_text: string;
+  structured_payload?: {
+    delivery_notes?: {
+      pace?: string;
+      pause?: string;
+      emphasis?: string[];
+    };
+    voiceover_segments?: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  } | null;
+  model?: string;
+  usage?: Record<string, number>;
 };
 
 export type ToolTtsReferenceAudioItem = {
@@ -1410,6 +1458,7 @@ export type ToolTtsResult = {
   tts_text?: string;
   original_text?: string | null;
   prompt_text?: string | null;
+  prompt_text_source?: string | null;
   instruct_text?: string | null;
   spk_id?: string | null;
   zero_shot_spk_id?: string | null;
@@ -1417,6 +1466,8 @@ export type ToolTtsResult = {
   speed?: number | null;
   seed?: number | null;
   text_frontend?: boolean | null;
+  moss_duration_tokens?: number | null;
+  sampling_params?: Record<string, unknown> | null;
   prompt_wav?: string | null;
   reference_audio?: string | null;
   output_path: string;

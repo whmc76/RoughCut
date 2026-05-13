@@ -17,6 +17,10 @@ def test_docker_autostart_defaults_to_disabled() -> None:
     assert settings.local_asr_docker_services == "qwen3-asr"
     assert settings.cosyvoice3_tts_docker_guard_enabled is True
     assert settings.cosyvoice3_tts_docker_services == "cosyvoice3-tts"
+    assert settings.moss_tts_docker_guard_enabled is True
+    assert settings.moss_tts_docker_compose_file.endswith("docker-compose.moss-tts.yml")
+    assert settings.moss_tts_docker_services == "moss-ttsd"
+    assert settings.moss_tts_docker_idle_timeout_sec == 10
 
 
 def test_runtime_preflight_skips_compose_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -46,6 +50,12 @@ def test_managed_service_targets_include_lifecycle_metadata(monkeypatch: pytest.
         cosyvoice3_tts_docker_services="cosyvoice3-tts",
         cosyvoice3_tts_docker_guard_enabled=True,
         cosyvoice3_tts_docker_idle_timeout_sec=180,
+        moss_tts_api_base_url="http://127.0.0.1:30190",
+        moss_tts_docker_compose_file="E:/WorkSpace/RoughCut/docker-compose.moss-tts.yml",
+        moss_tts_docker_env_file="",
+        moss_tts_docker_services="moss-ttsd",
+        moss_tts_docker_guard_enabled=True,
+        moss_tts_docker_idle_timeout_sec=240,
         avatar_provider="",
         voice_provider="runninghub",
         docker_gpu_guard_enabled=True,
@@ -64,3 +74,7 @@ def test_managed_service_targets_include_lifecycle_metadata(monkeypatch: pytest.
     assert targets["cosyvoice3_tts"]["services"] == "cosyvoice3-tts"
     assert targets["cosyvoice3_tts"]["guard_enabled"] is True
     assert targets["cosyvoice3_tts"]["idle_timeout_sec"] == 180
+    assert targets["moss_tts"]["kind"] == "tts"
+    assert targets["moss_tts"]["services"] == "moss-ttsd"
+    assert targets["moss_tts"]["guard_enabled"] is True
+    assert targets["moss_tts"]["idle_timeout_sec"] == 240

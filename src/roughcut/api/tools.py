@@ -15,12 +15,14 @@ from typing import Any, Callable
 from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from roughcut.config import DEFAULT_OUTPUT_ROOT, get_settings
 from roughcut.docker_gpu_guard import hold_managed_gpu_services_async
 from roughcut.providers.avatar.heygem import HeyGemAvatarProvider
+from roughcut.providers.factory import get_reasoning_provider
+from roughcut.providers.reasoning.base import Message
 from roughcut.providers.transcription.base import TranscriptResult
 from roughcut.providers.transcription.local_http_asr import LocalHTTPASRProvider
 
@@ -56,11 +58,19 @@ _RUN_PROGRESS_FLOORS: dict[str, float] = {
     "failed": 1.0,
 }
 _COSYVOICE3_END_OF_PROMPT = "<|endofprompt|>"
-_COSYVOICE3_INSTRUCT_MAX_CHARS = 48
-_TTS_TEXT_SEGMENT_MAX_CHARS = 120
+_COSYVOICE3_INSTRUCT_MAX_CHARS = 160
+_MIN_TTS_AUDIO_DURATION_SEC = 0.05
+_TTS_TEXT_SEGMENT_MAX_CHARS = 2000
+_MOSS_TTS_TEXT_SEGMENT_MAX_CHARS = 800
 _TTS_TEXT_HARD_BOUNDARY_CHARS = frozenset("。！？!?；;….")
 _TTS_TEXT_SOFT_BOUNDARY_CHARS = frozenset("，,、：:")
+_MOSS_DURATION_CONTROL_MODES = frozenset({"moss_duration_control", "duration_control", "moss_sound_effect", "sound_effect"})
+_MOSS_PODCAST_MODES = frozenset({"moss_podcast", "podcast"})
+_MOSS_SPEAKER_TAG_RE = re.compile(r"\[S[1-5]\]", re.IGNORECASE)
 _MAX_REFERENCE_AUDIO_SEC = 30.0
+_MOSS_REFERENCE_AUDIO_MAX_SEC = 16.0
+_MOSS_REFERENCE_LONG_SILENCE_SEC = 0.85
+_MOSS_REFERENCE_KEEP_SILENCE_SEC = 0.35
 _REFERENCE_AUDIO_HISTORY_LIMIT = 5
 _TTS_OUTPUT_HISTORY_LIMIT = 10
 _REFERENCE_AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
@@ -131,17 +141,50 @@ _STRUCTURED_TTS_PROMPT_MARKERS: tuple[str, ...] = (
     "要求：",
     "结构化",
 )
+_TTS_ORALIZE_STYLE_PRESETS: dict[str, dict[str, Any]] = {
+    "short_video": {
+        "label": "短视频口播",
+        "goal": "把书面内容改成单人短视频旁白，开头直接进入重点，语句短，节奏清楚。",
+        "tone": "自然、利落、有一点交流感，但不要营销腔。",
+    },
+    "warm_explainer": {
+        "label": "亲切讲解",
+        "goal": "把内容改成像真人解释问题一样的口播，先说结论，再用一两句补充原因。",
+        "tone": "亲切、耐心、清楚，允许少量自然连接词。",
+    },
+    "calm_narration": {
+        "label": "沉稳旁白",
+        "goal": "把内容改成克制的旁白，保留信息密度，减少口水词。",
+        "tone": "稳定、可信、不过度表演。",
+    },
+    "podcast_dialogue": {
+        "label": "播客对谈",
+        "goal": "把内容拆成自然对谈，不硬塞寒暄，不新增事实，用主持人推进问题、嘉宾补充观点。",
+        "tone": "像真实播客片段，轮次短，接话自然。",
+    },
+}
+
 
 @router.get("/status")
 async def tools_status() -> dict[str, Any]:
     settings = get_settings()
+    tts_status = await _probe_tts_service(
+        base_url=settings.cosyvoice3_tts_api_base_url,
+        name="CosyVoice3 TTS",
+    )
+    cosyvoice3_status = dict(tts_status)
+    tts_status["providers"] = {
+        "cosyvoice3": cosyvoice3_status,
+        "moss_tts": await _probe_json_service(
+            base_url=settings.moss_tts_api_base_url,
+            path=settings.moss_tts_health_path,
+            name="MOSS-TTSD",
+        ),
+    }
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "tools": {
-            "tts": await _probe_tts_service(
-                base_url=settings.cosyvoice3_tts_api_base_url,
-                name="CosyVoice3 TTS",
-            ),
+            "tts": tts_status,
             "asr": await _probe_json_service(
                 base_url=settings.local_asr_api_base_url,
                 path=settings.local_asr_health_path,
@@ -152,8 +195,63 @@ async def tools_status() -> dict[str, Any]:
     }
 
 
+@router.post("/tts/oralize")
+async def oralize_tts_text(payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    source_text = _strip_tts_text_ui_hints(str(payload.get("text") or payload.get("tts_text") or ""))
+    if not source_text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    style = _normalize_tts_oralize_style(payload.get("style"))
+    provider = str(payload.get("provider") or "moss_tts").strip() or "moss_tts"
+    speaker_count = _clamp_int(payload.get("speaker_count"), default=1, minimum=1, maximum=5)
+    target_chars = _clamp_int(payload.get("target_chars"), default=0, minimum=0, maximum=3000)
+    prompt_messages = _build_tts_oralization_messages(
+        source_text=source_text,
+        style=style,
+        provider=provider,
+        speaker_count=speaker_count,
+        target_chars=target_chars,
+    )
+
+    try:
+        response = await get_reasoning_provider().complete(
+            prompt_messages,
+            temperature=0.35,
+            max_tokens=1800,
+            json_mode=True,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"TTS 口语化改写失败: {exc}") from exc
+
+    try:
+        structured_payload = response.as_json()
+    except Exception:
+        structured_payload = _parse_structured_tts_payload(response.content)
+    try:
+        tts_text = _resolve_tts_spoken_text(
+            json.dumps(structured_payload, ensure_ascii=False) if structured_payload is not None else response.content
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=f"TTS 口语化结果不可朗读: {exc}") from exc
+    if not tts_text:
+        raise HTTPException(status_code=502, detail="TTS 口语化改写没有返回 tts_text")
+
+    return {
+        "status": "success",
+        "provider": provider,
+        "style": style,
+        "style_label": _TTS_ORALIZE_STYLE_PRESETS[style]["label"],
+        "speaker_count": speaker_count,
+        "tts_text": tts_text,
+        "structured_payload": structured_payload,
+        "model": response.model,
+        "usage": response.usage,
+    }
+
+
 @router.post("/tts")
 async def run_tts(
+    provider: str = Form(default="cosyvoice3"),
     mode: str = Form(default="zero_shot"),
     text: str = Form(default=""),
     tts_text: str = Form(default=""),
@@ -165,6 +263,13 @@ async def run_tts(
     speed: float = Form(default=1.0),
     seed: int = Form(default=0),
     text_frontend: bool = Form(default=True),
+    moss_duration_tokens: int = Form(default=0),
+    moss_max_new_tokens: int = Form(default=2000),
+    moss_temperature: float = Form(default=1.1),
+    moss_top_p: float = Form(default=0.9),
+    moss_top_k: int = Form(default=50),
+    moss_repetition_penalty: float = Form(default=1.1),
+    auto_prompt_text_asr: bool = Form(default=True),
     reference_history_path: str = Form(default=""),
     reference_audio: UploadFile | None = File(default=None),
     prompt_wav: UploadFile | None = File(default=None),
@@ -191,6 +296,7 @@ async def run_tts(
         run["run_id"],
         text=normalized_text,
         original_text=normalized_text,
+        provider=provider,
         mode=mode,
         prompt_text=prompt_text,
         instruct_text=instruct_text,
@@ -200,6 +306,13 @@ async def run_tts(
         speed=speed,
         seed=seed,
         text_frontend=text_frontend,
+        moss_duration_tokens=moss_duration_tokens,
+        moss_max_new_tokens=moss_max_new_tokens,
+        moss_temperature=moss_temperature,
+        moss_top_p=moss_top_p,
+        moss_top_k=moss_top_k,
+        moss_repetition_penalty=moss_repetition_penalty,
+        auto_prompt_text_asr=auto_prompt_text_asr,
         reference_path=reference_path,
     )
     return _run_public_payload(run)
@@ -288,6 +401,7 @@ async def _execute_tts_run(
     *,
     text: str,
     original_text: str,
+    provider: str,
     mode: str,
     prompt_text: str,
     instruct_text: str,
@@ -297,10 +411,40 @@ async def _execute_tts_run(
     speed: float,
     seed: int,
     text_frontend: bool,
+    moss_duration_tokens: int,
+    moss_max_new_tokens: int,
+    moss_temperature: float,
+    moss_top_p: float,
+    moss_top_k: int,
+    moss_repetition_penalty: float,
+    auto_prompt_text_asr: bool,
     reference_path: Path | None,
 ) -> None:
     settings = get_settings()
     _TTS_ROOT.mkdir(parents=True, exist_ok=True)
+    resolved_provider = str(provider or "cosyvoice3").strip().lower().replace("-", "_")
+    requested_mode = str(mode or "").strip().lower()
+    if requested_mode.startswith("moss_") and resolved_provider in {"", "cosyvoice3", "cosyvoice"}:
+        resolved_provider = "moss_tts"
+    if resolved_provider in {"moss", "moss_tts", "moss_tts_family"}:
+        await _execute_moss_tts_run(
+            run_id,
+            text=text,
+            original_text=original_text,
+            prompt_text=prompt_text,
+            mode=mode,
+            duration_tokens=moss_duration_tokens,
+            max_new_tokens=moss_max_new_tokens,
+            temperature=moss_temperature,
+            top_p=moss_top_p,
+            top_k=moss_top_k,
+            repetition_penalty=moss_repetition_penalty,
+            auto_prompt_text_asr=auto_prompt_text_asr,
+            reference_path=reference_path,
+        )
+        return
+    if resolved_provider not in {"", "cosyvoice3", "cosyvoice"}:
+        raise RuntimeError(f"Unsupported TTS provider: {provider}")
     _update_run_stage(
         run_id,
         "validate",
@@ -312,7 +456,18 @@ async def _execute_tts_run(
     resolved_mode = str(mode or "zero_shot").strip().lower()
     if resolved_mode in {"zero_shot", "cross_lingual", "instruct", "instruct2"} and reference_path is None:
         raise RuntimeError(f"CosyVoice3 {resolved_mode} TTS requires prompt_wav/reference_audio")
+    source_reference_path = reference_path
+    if reference_path is not None:
+        reference_path = _prepare_reference_audio_for_cosyvoice(reference_path, run_id=run_id)
+    prompt_text_source = "manual" if str(prompt_text or "").strip() else ""
     user_prompt_text = _strip_cosyvoice_prompt_boundary(prompt_text)
+    if resolved_mode == "zero_shot" and not user_prompt_text:
+        user_prompt_text, prompt_text_source = await _resolve_reference_prompt_text_from_asr(
+            run_id,
+            reference_path=reference_path,
+            enabled=auto_prompt_text_asr,
+            provider_label="CosyVoice3",
+        )
     resolved_prompt_text = _normalize_cosyvoice3_prompt_text(user_prompt_text) if resolved_mode == "zero_shot" else user_prompt_text
     user_instruct_text = _strip_cosyvoice_prompt_boundary(instruct_text)
     effective_instruct_text = _compact_cosyvoice3_instruct_text(user_instruct_text) if resolved_mode in {"instruct", "instruct2"} else user_instruct_text
@@ -328,9 +483,6 @@ async def _execute_tts_run(
         raise RuntimeError("CosyVoice3 sft TTS requires spk_id from /query_tts_model")
     if stream and abs(float(speed or 1.0) - 1.0) > 0.0001:
         raise RuntimeError("CosyVoice3 streaming mode requires speed=1; use stream=false for speed changes")
-    source_reference_path = reference_path
-    if reference_path is not None:
-        reference_path = _prepare_reference_audio_for_cosyvoice(reference_path, run_id=run_id)
     text_segments = _split_tts_text_for_synthesis(text)
     if not text_segments:
         raise RuntimeError("text is required")
@@ -465,6 +617,7 @@ async def _execute_tts_run(
         "tts_text": text,
         "original_text": original_text,
         "prompt_text": user_prompt_text,
+        "prompt_text_source": prompt_text_source,
         "instruct_text": effective_instruct_text,
         "raw_instruct_text": user_instruct_text if user_instruct_text != effective_instruct_text else "",
         "reference_audio": str(source_reference_path) if source_reference_path is not None else None,
@@ -487,6 +640,221 @@ async def _execute_tts_run(
     _complete_run(run_id, result)
 
 
+async def _execute_moss_tts_run(
+    run_id: str,
+    *,
+    text: str,
+    original_text: str,
+    prompt_text: str,
+    mode: str,
+    duration_tokens: int,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    repetition_penalty: float,
+    auto_prompt_text_asr: bool,
+    reference_path: Path | None,
+) -> None:
+    settings = get_settings()
+    resolved_mode = str(mode or "direct_tts").strip().lower()
+    effective_duration_tokens = int(duration_tokens or 0)
+    if reference_path is None:
+        raise RuntimeError("MOSS-TTSD SGLang service requires prompt_wav/reference_audio")
+    source_reference_path = reference_path
+    reference_path = _prepare_reference_audio_for_moss(reference_path, run_id=run_id)
+    prompt_text_source = "manual" if str(prompt_text or "").strip() else ""
+    user_prompt_text = str(prompt_text or "").strip()
+    if not user_prompt_text:
+        user_prompt_text, prompt_text_source = await _resolve_reference_prompt_text_from_asr(
+            run_id,
+            reference_path=reference_path,
+            enabled=auto_prompt_text_asr,
+            provider_label="MOSS-TTSD",
+        )
+    if not user_prompt_text:
+        raise RuntimeError("MOSS-TTSD SGLang service requires prompt_text for the reference audio transcript")
+    if resolved_mode in {"moss_duration_control", "duration_control"} and effective_duration_tokens <= 0:
+        raise RuntimeError("MOSS-TTSD duration_control requires moss_duration_tokens")
+    _update_run_stage(
+        run_id,
+        "validate",
+        detail="Validated MOSS-TTSD form fields",
+        provider="moss_tts",
+        mode=resolved_mode,
+        duration_tokens=effective_duration_tokens,
+        prompt_text=bool(user_prompt_text),
+        prompt_text_source=prompt_text_source,
+    )
+    text_segments = _split_tts_text_for_synthesis(
+        text,
+        max_chars=_TTS_TEXT_SEGMENT_MAX_CHARS if effective_duration_tokens > 0 else _MOSS_TTS_TEXT_SEGMENT_MAX_CHARS,
+    )
+    if not text_segments:
+        raise RuntimeError("text is required")
+
+    endpoint = "/generate"
+    segment_output_paths: list[Path] = []
+    response: httpx.Response | None = None
+    sample_rate = int(settings.moss_tts_sample_rate or 24000)
+    segment_sampling_params = [
+        _build_moss_sampling_params(
+            max_new_tokens=_resolve_moss_segment_max_new_tokens(
+                segment_text,
+                requested_max_new_tokens=max_new_tokens,
+                duration_tokens=effective_duration_tokens if len(text_segments) == 1 else 0,
+            ),
+            temperature=temperature,
+            top_p=top_p,
+            top_k=top_k,
+            repetition_penalty=repetition_penalty,
+        )
+        for segment_text in text_segments
+    ]
+    sampling_params = _build_moss_sampling_params(
+        max_new_tokens=max(params["max_new_tokens"] for params in segment_sampling_params),
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        repetition_penalty=repetition_penalty,
+    )
+
+    try:
+        _update_run_stage(run_id, "service_start", detail="Connecting to MOSS-TTSD service")
+        async with hold_managed_gpu_services_async(
+            required_urls=[settings.moss_tts_api_base_url],
+            reason="tools_tts_moss",
+        ):
+            _update_run_stage(
+                run_id,
+                "request",
+                detail=(
+                    f"Submitting MOSS-TTSD {resolved_mode} request"
+                    if len(text_segments) == 1
+                    else f"Submitting MOSS-TTSD {resolved_mode} request 1/{len(text_segments)}"
+                ),
+                endpoint=endpoint,
+                mode=resolved_mode,
+                segment_count=len(text_segments),
+            )
+            async with httpx.AsyncClient(timeout=httpx.Timeout(600.0, connect=20.0), follow_redirects=True) as client:
+                for index, segment_text in enumerate(text_segments, start=1):
+                    if len(text_segments) > 1:
+                        _update_run_stage(
+                            run_id,
+                            "request",
+                            detail=f"Submitting MOSS-TTSD {resolved_mode} request {index}/{len(text_segments)}",
+                            progress=0.34 + ((index - 1) / max(len(text_segments), 1)) * 0.36,
+                            endpoint=endpoint,
+                            mode=resolved_mode,
+                            segment_index=index,
+                            segment_count=len(text_segments),
+                        )
+                    response = await _post_moss_tts_segment_request(
+                        client,
+                        f"{settings.moss_tts_api_base_url.rstrip('/')}{endpoint}",
+                        text=segment_text,
+                        prompt_text=user_prompt_text,
+                        mode=resolved_mode,
+                        duration_tokens=effective_duration_tokens if len(text_segments) == 1 else 0,
+                        sampling_params=segment_sampling_params[index - 1],
+                        reference_path=reference_path,
+                    )
+                    response.raise_for_status()
+                    if len(text_segments) > 1:
+                        _update_run_stage(
+                            run_id,
+                            "process",
+                            detail=f"MOSS-TTSD response received {index}/{len(text_segments)}",
+                            progress=0.55 + (index / max(len(text_segments), 1)) * 0.24,
+                            segment_index=index,
+                            segment_count=len(text_segments),
+                        )
+                        segment_path = _TTS_ROOT / f"tts_{run_id}_{index:03d}.segment.wav"
+                        _write_moss_tts_response_audio(response, output_path=segment_path, sample_rate=sample_rate)
+                        _trim_trailing_tts_silence(segment_path)
+                        _validate_tts_audio_output(segment_path, service_label="MOSS-TTSD", segment_index=index)
+                        segment_output_paths.append(segment_path)
+        _update_run_stage(run_id, "process", detail="MOSS-TTSD response received")
+    except httpx.HTTPStatusError as exc:
+        _cleanup_paths(segment_output_paths)
+        detail = _read_response_error(exc.response)
+        raise RuntimeError(f"MOSS-TTSD failed: {detail}") from exc
+    except Exception as exc:
+        _cleanup_paths(segment_output_paths)
+        raise RuntimeError(f"MOSS-TTSD unavailable: {exc}") from exc
+
+    created_at = datetime.now(timezone.utc)
+    output_path = _unique_upload_path(
+        _TTS_ROOT,
+        _build_tts_output_filename(
+            created_at=created_at,
+            mode=f"moss-{resolved_mode}",
+            prompt_text=user_prompt_text,
+            instruct_text=f"duration-{effective_duration_tokens}" if effective_duration_tokens > 0 else "",
+            spk_id="",
+            zero_shot_spk_id="",
+            stream=False,
+            speed=1.0,
+            seed=0,
+            text_frontend=True,
+            reference_path=source_reference_path,
+            segment_count=len(text_segments),
+        ),
+    )
+    _update_run_stage(run_id, "write_artifact", detail="Writing synthesized audio", output_path=str(output_path))
+    try:
+        if len(text_segments) == 1:
+            if response is None:
+                raise RuntimeError("MOSS-TTSD did not return a response")
+            meta = _write_moss_tts_response_audio(response, output_path=output_path, sample_rate=sample_rate)
+            _trim_trailing_tts_silence(output_path)
+            meta["duration"] = _validate_tts_audio_output(output_path, service_label="MOSS-TTSD")
+        else:
+            meta = _concatenate_tts_wav_segments(segment_output_paths, output_path=output_path)
+            meta["duration"] = _validate_tts_audio_output(output_path, service_label="MOSS-TTSD")
+    except Exception:
+        output_path.unlink(missing_ok=True)
+        raise
+    finally:
+        _cleanup_paths(segment_output_paths)
+
+    result = {
+        "status": "success",
+        "provider": "official-moss-ttsd",
+        "mode": resolved_mode,
+        "created_at": created_at.isoformat(),
+        "display_name": output_path.name,
+        "config_summary": _moss_tts_output_config_summary(
+            mode=resolved_mode,
+            prompt_text=user_prompt_text,
+            reference_path=source_reference_path,
+            duration_tokens=effective_duration_tokens,
+            sampling_params=sampling_params,
+            segment_count=len(text_segments),
+        ),
+        "text": text,
+        "tts_text": text,
+        "original_text": original_text,
+        "prompt_text": user_prompt_text,
+        "prompt_text_source": prompt_text_source,
+        "reference_audio": str(source_reference_path) if source_reference_path is not None else None,
+        "output_path": str(output_path),
+        "audio_url": f"/api/v1/tools/artifacts/tts/{output_path.name}",
+        "segment_count": len(text_segments),
+        "text_segments": [
+            {"index": index, "text": segment_text, "char_count": len(segment_text)}
+            for index, segment_text in enumerate(text_segments, start=1)
+        ],
+        "moss_duration_tokens": effective_duration_tokens,
+        "sampling_params": sampling_params,
+        "segment_sampling_params": segment_sampling_params if len(segment_sampling_params) > 1 else None,
+        **meta,
+    }
+    _write_tts_output_metadata(output_path, result)
+    _complete_run(run_id, result)
+
+
 def _build_tts_segment_form_data(base_data: dict[str, str], text: str) -> dict[str, str]:
     data = dict(base_data)
     data["tts_text"] = text
@@ -497,6 +865,117 @@ def _build_tts_segment_form_data(base_data: dict[str, str], text: str) -> dict[s
 def _cleanup_paths(paths: list[Path]) -> None:
     for path in paths:
         path.unlink(missing_ok=True)
+
+
+def _build_moss_sampling_params(
+    *,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    repetition_penalty: float,
+) -> dict[str, Any]:
+    return {
+        "max_new_tokens": max(1, int(max_new_tokens or 2048)),
+        "temperature": max(0.0, float(temperature if temperature is not None else 1.1)),
+        "top_p": min(1.0, max(0.01, float(top_p if top_p is not None else 0.9))),
+        "top_k": max(1, int(top_k or 50)),
+        "repetition_penalty": max(0.01, float(repetition_penalty if repetition_penalty is not None else 1.1)),
+    }
+
+
+def _resolve_moss_segment_max_new_tokens(
+    text: str,
+    *,
+    requested_max_new_tokens: int,
+    duration_tokens: int,
+) -> int:
+    if int(duration_tokens or 0) > 0:
+        return max(int(duration_tokens), int(requested_max_new_tokens or 0), 128)
+    cleaned = re.sub(r"\[S[1-5]\]|\$\{[^}]+\}", "", str(text or ""))
+    compact_len = len(re.sub(r"\s+", "", cleaned))
+    estimated_seconds = max(4.0, compact_len / 4.0 + 3.0)
+    estimated_tokens = int(estimated_seconds * 12.5 * 1.35)
+    return max(256, min(4096, max(int(requested_max_new_tokens or 0), estimated_tokens)))
+
+
+async def _post_moss_tts_segment_request(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    text: str,
+    mode: str,
+    duration_tokens: int,
+    sampling_params: dict[str, Any],
+    reference_path: Path | None,
+    prompt_text: str = "",
+) -> httpx.Response:
+    request_text = _build_moss_tts_prompt_text(
+        text,
+        mode=mode,
+        duration_tokens=duration_tokens,
+        prompt_text=prompt_text,
+        has_reference_audio=reference_path is not None,
+    )
+    payload: dict[str, Any] = {
+        "text": request_text,
+        "sampling_params": sampling_params,
+    }
+    if reference_path is not None:
+        audio_b64 = base64.b64encode(reference_path.read_bytes()).decode("ascii")
+        payload["audio_data"] = [f"data:audio/wav;base64,{audio_b64}"]
+    return await client.post(url, json=payload)
+
+
+def _build_moss_tts_prompt_text(
+    text: str,
+    *,
+    mode: str,
+    duration_tokens: int,
+    prompt_text: str = "",
+    has_reference_audio: bool = False,
+) -> str:
+    cleaned = _prepare_moss_tts_generation_text(text, mode=mode)
+    if str(mode or "").strip().lower() in {"moss_sound_effect", "sound_effect"}:
+        token_count = int(duration_tokens or 125)
+        return f"${{token:{token_count}}}${{ambient_sound:{cleaned}}}"
+    if has_reference_audio and str(prompt_text or "").strip():
+        prompt_part = _ensure_moss_speaker_tag(prompt_text, speaker="S1")
+        target_part = _ensure_moss_speaker_tag(cleaned, speaker="S1")
+        if int(duration_tokens or 0) > 0:
+            target_part = f"${{token:{int(duration_tokens)}}}{target_part}"
+        return f"{prompt_part}\n{target_part}"
+    if int(duration_tokens or 0) > 0:
+        return f"${{token:{int(duration_tokens)}}}{cleaned}"
+    return cleaned
+
+
+def _prepare_moss_tts_generation_text(text: str, *, mode: str) -> str:
+    cleaned = str(text or "").strip()
+    if str(mode or "").strip().lower() in _MOSS_PODCAST_MODES and cleaned and _MOSS_SPEAKER_TAG_RE.search(cleaned) is None:
+        return f"[S1] {cleaned}"
+    return cleaned
+
+
+def _ensure_moss_speaker_tag(text: str, *, speaker: str) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned or _MOSS_SPEAKER_TAG_RE.search(cleaned):
+        return cleaned
+    return f"[{speaker}] {cleaned}"
+
+
+def _write_moss_tts_response_audio(response: httpx.Response, *, output_path: Path, sample_rate: int) -> dict[str, Any]:
+    content_type = response.headers.get("content-type", "").lower()
+    if "application/json" in content_type:
+        payload = response.json()
+        audio_b64 = str(payload.get("text") or payload.get("audio_base64") or payload.get("audio") or "").strip()
+        if not audio_b64:
+            raise HTTPException(status_code=502, detail="MOSS-TTSD response did not include wav base64 in text")
+        if audio_b64.startswith("data:"):
+            audio_b64 = audio_b64.split(",", 1)[-1]
+        output_path.write_bytes(base64.b64decode(audio_b64))
+        return {"format": output_path.suffix.lstrip(".") or "wav", "sample_rate": sample_rate, "raw": _compact_json(payload)}
+    return _write_tts_response_audio(response, output_path=output_path, sample_rate=sample_rate)
 
 
 async def _post_tts_segment_request(
@@ -657,6 +1136,41 @@ def _concatenate_tts_wav_segments(segment_paths: list[Path], *, output_path: Pat
     }
 
 
+def _trim_trailing_tts_silence(path: Path, *, threshold: str = "-45dB", min_silence: float = 0.8) -> bool:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or not path.exists() or path.stat().st_size <= 0:
+        return False
+    temp_path = path.with_name(f"{path.stem}.trimmed{path.suffix}")
+    command = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(path),
+        "-af",
+        f"silenceremove=stop_periods=-1:stop_duration={float(min_silence):.2f}:stop_threshold={threshold}",
+        "-c:a",
+        "pcm_s16le",
+        str(temp_path),
+    ]
+    try:
+        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=90)
+    except (OSError, subprocess.SubprocessError):
+        temp_path.unlink(missing_ok=True)
+        return False
+    if result.returncode != 0 or not temp_path.exists() or temp_path.stat().st_size <= 44:
+        temp_path.unlink(missing_ok=True)
+        return False
+    try:
+        if (_audio_duration_seconds(temp_path) or 0) <= 0:
+            temp_path.unlink(missing_ok=True)
+            return False
+        temp_path.replace(path)
+    except OSError:
+        temp_path.unlink(missing_ok=True)
+        return False
+    return True
+
+
 def _strip_cosyvoice_prompt_boundary(value: str | None) -> str:
     cleaned = str(value or "").replace(_COSYVOICE3_END_OF_PROMPT, "").strip()
     if cleaned.startswith(_COSYVOICE3_SYSTEM_PROMPT):
@@ -666,6 +1180,81 @@ def _strip_cosyvoice_prompt_boundary(value: str | None) -> str:
 
 def _strip_tts_text_ui_hints(value: str | None) -> str:
     return _collapse_tts_text(_remove_tts_text_ui_hints(value))
+
+
+def _normalize_tts_oralize_style(value: Any) -> str:
+    style = str(value or "").strip()
+    return style if style in _TTS_ORALIZE_STYLE_PRESETS else "short_video"
+
+
+def _clamp_int(value: Any, *, default: int, minimum: int, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(minimum, min(maximum, parsed))
+
+
+def _build_tts_oralization_messages(
+    *,
+    source_text: str,
+    style: str,
+    provider: str,
+    speaker_count: int,
+    target_chars: int,
+) -> list[Message]:
+    style_config = _TTS_ORALIZE_STYLE_PRESETS[_normalize_tts_oralize_style(style)]
+    speaker_rule = (
+        "如果 speaker_count 大于 1，tts_text 必须使用 [S1]-[S5] 标签；每轮只写一句自然接话。"
+        if speaker_count > 1
+        else "单人口播不要加 [S1] 标签，除非输入原文已经显式包含说话人标签。"
+    )
+    length_rule = f"目标长度约 {target_chars} 个中文字；如果原文更短，不要硬扩写。" if target_chars > 0 else "长度以信息完整为准，不要为了口语化灌水。"
+    system_prompt = (
+        "你是中文 TTS 口播改写器。你的任务是把书面文本改成真实人会说出口的配音稿，"
+        "不是写创作提示词，也不是增加背景设定。只输出 JSON。"
+    )
+    user_prompt = {
+        "task": "rewrite_for_natural_tts",
+        "provider": provider,
+        "style": {
+            "key": style,
+            "label": style_config["label"],
+            "goal": style_config["goal"],
+            "tone": style_config["tone"],
+        },
+        "speaker_count": speaker_count,
+        "rules": [
+            "只改写表达方式，不能新增事实、数据、品牌、人物或结论。",
+            "保留专有名词、数字、时间、金额、型号和关键判断。",
+            "把长句拆短，优先使用自然停顿和中文标点帮助 TTS 呼吸。",
+            "去掉书面化连接词、列表腔、AI 总结腔和过度宣传腔。",
+            "可以少量加入“其实、你会发现、先说结论、说白了”这类口语连接，但不要每句都加。",
+            "不要输出舞台指令、括号情绪、音效提示、Markdown 或解释文字。",
+            speaker_rule,
+            length_rule,
+        ],
+        "output_schema": {
+            "tts_text": "最终送入 TTS 的可朗读正文。",
+            "voiceover_segments": [
+                {
+                    "purpose": "hook | point | transition | close",
+                    "source_text": "对应原文片段",
+                    "rewritten_text": "该片段的可朗读改写",
+                }
+            ],
+            "delivery_notes": {
+                "pace": "语速建议",
+                "pause": "停顿建议",
+                "emphasis": ["需要自然强调的词"],
+            },
+        },
+        "source_text": source_text,
+    }
+    return [
+        Message(role="system", content=system_prompt),
+        Message(role="user", content=json.dumps(user_prompt, ensure_ascii=False)),
+    ]
 
 
 def _remove_tts_text_ui_hints(value: str | None) -> str:
@@ -856,11 +1445,21 @@ def _compact_cosyvoice3_instruct_text(value: str) -> str:
     for separator in ("；", ";"):
         body = body.replace(separator, "\n")
     lines = [line.strip() for line in body.splitlines() if line.strip()]
-    line = lines[0] if lines else body.strip()
-    line = _normalize_cosyvoice3_instruct_line(line)
-    if len(line) > _COSYVOICE3_INSTRUCT_MAX_CHARS:
-        line = _truncate_cosyvoice3_instruct_line(line, max_chars=_COSYVOICE3_INSTRUCT_MAX_CHARS)
-    return _ensure_sentence_punctuation(line)
+    compact_lines: list[str] = []
+    seen: set[str] = set()
+    for line in lines or [body.strip()]:
+        compact_line = _normalize_cosyvoice3_instruct_line(line)
+        if not compact_line or compact_line in seen:
+            continue
+        candidate = "；".join([*compact_lines, compact_line])
+        if len(candidate) > _COSYVOICE3_INSTRUCT_MAX_CHARS:
+            break
+        compact_lines.append(compact_line)
+        seen.add(compact_line)
+    compact = "；".join(compact_lines)
+    if len(compact) > _COSYVOICE3_INSTRUCT_MAX_CHARS:
+        compact = _truncate_cosyvoice3_instruct_line(compact, max_chars=_COSYVOICE3_INSTRUCT_MAX_CHARS)
+    return _ensure_sentence_punctuation(compact)
 
 
 def _normalize_cosyvoice3_instruct_line(value: str) -> str:
@@ -870,7 +1469,35 @@ def _normalize_cosyvoice3_instruct_line(value: str) -> str:
     line = re.sub(r"^请", "", line)
     line = re.sub(r"^像(.+?)一样[，,]?", r"\1风格，", line)
     line = re.sub(r"^用(.+?)(?:的方式)?(?:说|表达)[，,]?", r"\1，", line)
+    line = line.replace("适合短视频旁白的方式", "短视频旁白风格")
     line = line.replace("更温柔", "温柔").replace("更清楚", "清楚")
+    replacements = (
+        ("声音亲切、有耐心，语气温柔活泼", "亲切耐心、温柔活泼"),
+        ("有声故事演播风格表达", "故事演播"),
+        ("有声故事演播风格", "故事演播"),
+        ("语气有画面感", "画面感"),
+        ("人物和情节转折要更清楚", "转折清楚"),
+        ("人物和情节转折要清楚", "转折清楚"),
+        ("课堂教学风格表达", "课堂教学"),
+        ("课堂教学风格", "课堂教学"),
+        ("重点词需要自然强调", "重点自然强调"),
+        ("紧凑、有节奏、适合短视频旁白", "短视频旁白、紧凑有节奏"),
+        ("紧凑、有节奏、短视频旁白风格", "短视频旁白、紧凑有节奏"),
+        ("较慢语速表达", "较慢语速"),
+        ("重点词上做清晰强调", "重点清晰强调"),
+        ("语义分段处加入自然停顿", "语义分段自然停顿"),
+        ("信息更容易理解", "信息易理解"),
+    )
+    for source, target in replacements:
+        line = line.replace(source, target)
+    line = line.replace("声音", "").replace("语气", "")
+    line = line.replace("需要", "")
+    line = line.replace("人物和情节转折要", "转折")
+    line = line.replace("并在", "，").replace("上做", "")
+    line = line.replace("加入", "").replace("让信息更容易理解", "信息易理解")
+    line = line.replace("地说", "")
+    line = line.replace("表达", "")
+    line = re.sub(r"[，,、]{2,}", "，", line)
     line = line.strip(" ，,。.")
     return line
 
@@ -891,6 +1518,55 @@ def _ensure_sentence_punctuation(value: str) -> str:
     if not line:
         return ""
     return line if line[-1] in "。.!！？" else f"{line}。"
+
+
+async def _resolve_reference_prompt_text_from_asr(
+    run_id: str,
+    *,
+    reference_path: Path | None,
+    enabled: bool,
+    provider_label: str,
+) -> tuple[str, str]:
+    if reference_path is None:
+        return "", ""
+    if not enabled:
+        return "", ""
+    provider = LocalHTTPASRProvider()
+
+    def on_progress(payload: dict[str, Any]) -> None:
+        provider_progress = _coerce_progress(payload.get("progress"))
+        mapped_progress = None if provider_progress is None else 0.10 + (provider_progress * 0.16)
+        phase = str(payload.get("phase") or "process").strip()
+        _update_run_stage(
+            run_id,
+            "process",
+            detail=str(payload.get("detail") or f"Reference ASR {phase}"),
+            progress=mapped_progress,
+            provider_progress=provider_progress,
+            provider_phase=phase,
+            provider_payload=_compact_progress_payload(payload),
+        )
+
+    try:
+        settings = get_settings()
+        _update_run_stage(run_id, "service_start", detail=f"Starting ASR for {provider_label} reference text")
+        async with hold_managed_gpu_services_async(
+            required_urls=[settings.local_asr_api_base_url],
+            reason="tools_tts_reference_prompt_asr",
+        ):
+            _update_run_stage(run_id, "request", detail="Recognizing reference audio prompt_text with ASR")
+            result = await provider.transcribe(
+                reference_path,
+                language="zh-CN",
+                prompt=None,
+                progress_callback=on_progress,
+            )
+    except Exception as exc:
+        raise RuntimeError(f"{provider_label} reference prompt_text ASR failed: {exc}") from exc
+    text = str(result.text or "").strip()
+    if not text:
+        raise RuntimeError(f"{provider_label} reference prompt_text ASR returned empty text")
+    return text, "auto_asr"
 
 
 async def _execute_asr_run(run_id: str, *, audio_path: Path, language: str, prompt: str) -> None:
@@ -1244,6 +1920,30 @@ def _tts_output_config_summary(
     return " · ".join(parts)
 
 
+def _moss_tts_output_config_summary(
+    *,
+    mode: str,
+    prompt_text: str,
+    reference_path: Path | None,
+    duration_tokens: int,
+    sampling_params: dict[str, Any],
+    segment_count: int,
+) -> str:
+    parts = [f"provider=moss_tts", f"mode={mode}"]
+    if reference_path is not None:
+        parts.append(f"reference={reference_path.name}")
+    if prompt_text:
+        parts.append(f"prompt={_short_text(prompt_text, 32)}")
+    if duration_tokens > 0:
+        parts.append(f"duration_tokens={duration_tokens}")
+    for key in ("max_new_tokens", "temperature", "top_p", "top_k"):
+        if key in sampling_params:
+            parts.append(f"{key}={sampling_params[key]}")
+    if segment_count > 1:
+        parts.append(f"segments={segment_count}")
+    return " · ".join(parts)
+
+
 def _short_text(value: str, max_length: int) -> str:
     cleaned = _collapse_tts_text(value)
     if len(cleaned) <= max_length:
@@ -1274,6 +1974,8 @@ def _write_tts_output_metadata(output_path: Path, result: dict[str, Any]) -> Non
                 "speed",
                 "seed",
                 "text_frontend",
+                "moss_duration_tokens",
+                "sampling_params",
                 "segment_count",
             )
         },
@@ -1422,25 +2124,44 @@ def _resolve_reference_audio_history_path(value: str) -> Path:
 
 
 def _prepare_reference_audio_for_cosyvoice(path: Path, *, run_id: str) -> Path:
+    return _prepare_reference_audio(
+        path,
+        run_id=run_id,
+        max_seconds=_MAX_REFERENCE_AUDIO_SEC,
+        service_label="CosyVoice3",
+    )
+
+
+def _prepare_reference_audio_for_moss(path: Path, *, run_id: str) -> Path:
+    return _prepare_reference_audio(
+        path,
+        run_id=run_id,
+        max_seconds=_MOSS_REFERENCE_AUDIO_MAX_SEC,
+        service_label="MOSS-TTSD",
+    )
+
+
+def _prepare_reference_audio(path: Path, *, run_id: str, max_seconds: float, service_label: str) -> Path:
     suffix = path.suffix.lower()
     duration = _audio_duration_seconds(path)
     needs_conversion = suffix != ".wav"
-    needs_trimming = duration is not None and duration > _MAX_REFERENCE_AUDIO_SEC
+    needs_trimming = duration is not None and duration > max_seconds
     if not needs_conversion and not needs_trimming:
         return path
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         if suffix in _REFERENCE_VIDEO_SUFFIXES:
-            raise RuntimeError("参考视频需要 ffmpeg 自动提取音频并转换为 CosyVoice3 可用的 WAV")
+            raise RuntimeError(f"参考视频需要 ffmpeg 自动提取音频并转换为 {service_label} 可用的 WAV")
         if needs_trimming and duration is not None:
-            raise RuntimeError(f"参考音频 {duration:.1f}s 超过 30s；需要 ffmpeg 自动去除开头静音并截取 30s")
-        raise RuntimeError("参考音频需要 ffmpeg 转换为 CosyVoice3 可用的 WAV")
+            raise RuntimeError(f"参考音频 {duration:.1f}s 超过 {max_seconds:.0f}s；需要 ffmpeg 自动去除开头静音并截取")
+        raise RuntimeError(f"参考音频需要 ffmpeg 转换为 {service_label} 可用的 WAV")
     _REFERENCE_ROOT.mkdir(parents=True, exist_ok=True)
     output_path = _REFERENCE_ROOT / f"reference_{uuid.uuid4().hex[:12]}.wav"
+    compress_long_silence = service_label == "MOSS-TTSD"
     if suffix in _REFERENCE_VIDEO_SUFFIXES:
         detail = "正在从参考视频提取音频，转换为 16k 单声道 WAV"
     elif needs_trimming and duration is not None:
-        detail = f"参考音频 {duration:.1f}s 超过 30s，正在去除开头静音并截取 30s"
+        detail = f"{service_label} 参考音频 {duration:.1f}s 超过 {max_seconds:.0f}s，正在提取有效语音并保留短停顿"
     else:
         detail = "正在转换参考音频为 16k 单声道 WAV"
     _update_run_stage(
@@ -1459,10 +2180,10 @@ def _prepare_reference_audio_for_cosyvoice(path: Path, *, run_id: str) -> Path:
         str(path),
         "-vn",
         "-af",
-        "silenceremove=start_periods=1:start_duration=0.2:start_threshold=-45dB",
+        _reference_audio_filter(compress_long_silence=compress_long_silence),
     ]
     if duration is None or needs_trimming:
-        command.extend(["-t", str(_MAX_REFERENCE_AUDIO_SEC)])
+        command.extend(["-t", str(float(max_seconds))])
     command.extend([
         "-ac",
         "1",
@@ -1482,7 +2203,7 @@ def _prepare_reference_audio_for_cosyvoice(path: Path, *, run_id: str) -> Path:
             "-vn",
         ]
         if duration is None or needs_trimming:
-            fallback_command.extend(["-t", str(_MAX_REFERENCE_AUDIO_SEC)])
+            fallback_command.extend(["-t", str(float(max_seconds))])
         fallback_command.extend([
             "-ac",
             "1",
@@ -1498,6 +2219,22 @@ def _prepare_reference_audio_for_cosyvoice(path: Path, *, run_id: str) -> Path:
             detail = (fallback.stderr or result.stderr or "ffmpeg trim failed").strip().splitlines()[-1:]
             raise RuntimeError(f"Failed to prepare reference audio: {' '.join(detail)[:500]}")
     return output_path
+
+
+def _reference_audio_filter(*, compress_long_silence: bool) -> str:
+    if not compress_long_silence:
+        return "silenceremove=start_periods=1:start_duration=0.2:start_threshold=-45dB"
+    return (
+        "silenceremove="
+        "start_periods=1:"
+        "start_duration=0.2:"
+        "start_threshold=-45dB:"
+        "start_silence=0.08:"
+        "stop_periods=-1:"
+        f"stop_duration={_MOSS_REFERENCE_LONG_SILENCE_SEC}:"
+        "stop_threshold=-45dB:"
+        f"stop_silence={_MOSS_REFERENCE_KEEP_SILENCE_SEC}"
+    )
 
 
 def _audio_duration_seconds(path: Path) -> float | None:
@@ -1753,6 +2490,18 @@ def _probe_audio_duration(path: Path) -> float:
             return round(frames / float(rate), 3) if rate > 0 else 0.0
     except Exception:
         return 0.0
+
+
+def _validate_tts_audio_output(path: Path, *, service_label: str, segment_index: int | None = None) -> float:
+    duration = _probe_audio_duration(path)
+    if duration >= _MIN_TTS_AUDIO_DURATION_SEC:
+        return duration
+    segment_label = f" segment {segment_index}" if segment_index is not None else ""
+    size = path.stat().st_size if path.exists() else 0
+    raise RuntimeError(
+        f"{service_label} returned empty audio{segment_label} ({duration:.3f}s, {size} bytes). "
+        "Check that reference_audio matches prompt_text and retry with a shorter target text or more stable sampling."
+    )
 
 
 def _copy_avatar_result(result: dict[str, Any]) -> Path | None:

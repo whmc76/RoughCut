@@ -135,6 +135,15 @@ def _managed_service_targets() -> list[dict[str, object]]:
             **_service_management_config(settings, target_key="cosyvoice3_tts"),
         }
     )
+    targets.append(
+        {
+            "name": "moss_tts",
+            "kind": "tts",
+            "url": str(getattr(settings, "moss_tts_api_base_url", "") or "").strip(),
+            "probe_kind": "health_json",
+            **_service_management_config(settings, target_key="moss_tts"),
+        }
+    )
     if str(getattr(settings, "avatar_provider", "") or "").strip().lower() == "heygem":
         targets.append(
             {
@@ -173,7 +182,7 @@ def _service_management_config(settings: object, *, target_key: str) -> dict[str
     )
     default_idle_timeout = int(getattr(settings, "docker_gpu_guard_idle_timeout_sec", 900) or 900)
     idle_timeout = max(
-        15,
+        1,
         int(getattr(settings, f"{target_key}_docker_idle_timeout_sec", default_idle_timeout) or default_idle_timeout),
     )
     return {

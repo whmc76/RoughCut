@@ -85,8 +85,6 @@
 }
 
 .tts-style-field,
-.tts-mode-fields,
-.tts-mode-fields-head,
 .tts-prompt-text-field,
 .tts-helper-panel,
 .tts-style-preview,
@@ -98,7 +96,6 @@
 }
 
 .tts-style-field,
-.tts-mode-fields,
 .tts-output-history,
 .tool-result {
   gap: 12px;
@@ -106,7 +103,13 @@
 
 .tts-mode-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.tts-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -158,6 +161,21 @@
   display: flex;
 }
 
+.tools-page .tts-mode-grid .tts-style-option {
+  min-height: 72px;
+  padding: 8px 10px;
+  gap: 3px;
+}
+
+.tools-page .tts-mode-grid .tts-style-option .tts-mode-title-row,
+.tools-page .tts-mode-grid .tts-style-option .tts-mode-name,
+.tools-page .tts-mode-grid .tts-style-option .tts-mode-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .tts-mode-name {
   color: #0f3f3a;
   font-size: 13px;
@@ -170,9 +188,12 @@
 }
 
 .tools-page .tts-mode-grid .tts-style-option .tts-mode-name,
-.tools-page .tts-mode-grid .tts-style-option .tts-mode-summary,
-.tools-page .tts-mode-grid .tts-style-option .tts-mode-use-case {
+.tools-page .tts-mode-grid .tts-style-option .tts-mode-summary {
   display: block;
+}
+
+.tools-page .tts-mode-grid .tts-style-option .tts-mode-use-case {
+  display: none;
 }
 
 .tts-mode-use-case {
@@ -196,27 +217,11 @@
   display: inline-flex;
 }
 
-.tts-mode-fields {
-  padding: 12px;
-  border: 1px solid rgba(15, 118, 110, 0.22);
-  border-radius: 8px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fbfa 100%);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
-}
-
-.tts-mode-fields-head {
-  padding: 0 0 10px;
-  border-bottom: 1px solid rgba(15, 118, 110, 0.1);
-  gap: 4px;
-}
-
-.tts-mode-fields-head strong,
 .tts-helper-panel strong {
   color: #0f3f3a;
   font-size: 14px;
 }
 
-.tts-mode-fields-head span,
 .tts-helper-panel span {
   color: var(--text-muted);
   font-size: 12px;
@@ -241,6 +246,35 @@
   border: 1px solid rgba(15, 118, 110, 0.14);
   border-radius: 8px;
   background: #f8faf7;
+}
+
+.tts-helper-panel.subtle {
+  border-color: rgba(37, 99, 235, 0.14);
+  background: #f8fbff;
+}
+
+.tts-oralize-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+}
+
+.tts-inline-field {
+  display: grid;
+  gap: 4px;
+  min-width: 96px;
+}
+
+.tts-inline-field span {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.tts-inline-field .input {
+  min-height: 36px;
+  max-width: 96px;
 }
 
 .tts-preset-category-list {
@@ -306,6 +340,7 @@
 }
 
 .tts-instruct-card,
+.tts-reference-prompt-card,
 .tts-reference-upload {
   display: grid;
   align-content: start;
@@ -320,16 +355,61 @@
   border-left: 4px solid #0f766e;
 }
 
+.tts-reference-prompt-card {
+  gap: 10px;
+  border-left: 4px solid #0f766e;
+}
+
 .tts-reference-upload {
   border-left: 4px solid #2563eb;
   background: #f7fbff;
 }
 
 .tts-instruct-card > span,
+.tts-reference-prompt-head strong,
 .tts-reference-upload-head strong {
   color: #0b3632;
   font-size: 13px;
   font-weight: 900;
+}
+
+.tts-reference-prompt-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.tts-reference-prompt-head > div {
+  display: grid;
+  gap: 3px;
+}
+
+.tts-reference-prompt-head span {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.tts-auto-asr-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 1px solid rgba(15, 118, 110, 0.16);
+  border-radius: 8px;
+  background: #f8faf7;
+  color: #0f3f3a;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.tts-reference-prompt-card textarea:disabled {
+  background: #f8faf7;
+  color: var(--text-muted);
+  cursor: not-allowed;
 }
 
 .tts-reference-upload-head,
@@ -585,6 +665,31 @@
   padding-block: 8px;
 }
 
+.tts-duration-toggle {
+  justify-content: space-between;
+  min-height: 38px;
+}
+
+.tts-inline-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.tts-inline-control input {
+  width: 14px;
+  height: 14px;
+}
+
+.tts-sampling-presets {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
 .tts-style-preview {
   gap: 10px;
   padding: 12px;
@@ -804,6 +909,7 @@ audio.tool-media {
 
 @media (max-width: 960px) {
   .tool-entry-grid,
+  .tts-provider-grid,
   .tts-preset-category-list,
   .tts-common-fields,
   .tts-instruct-input-row,

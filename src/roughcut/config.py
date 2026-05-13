@@ -398,6 +398,14 @@ class Settings(BaseSettings):
     cosyvoice3_tts_docker_env_file: str = ""
     cosyvoice3_tts_docker_services: str = "cosyvoice3-tts"
     cosyvoice3_tts_docker_idle_timeout_sec: int = 900
+    moss_tts_api_base_url: str = "http://127.0.0.1:30190"
+    moss_tts_health_path: str = "/health"
+    moss_tts_sample_rate: int = 24000
+    moss_tts_docker_guard_enabled: bool = True
+    moss_tts_docker_compose_file: str = "E:/WorkSpace/RoughCut/docker-compose.moss-tts.yml"
+    moss_tts_docker_env_file: str = ""
+    moss_tts_docker_services: str = "moss-ttsd"
+    moss_tts_docker_idle_timeout_sec: int = 10
     funasr_auto_unload_enabled: bool = True
     funasr_idle_unload_sec: int = 600
 
