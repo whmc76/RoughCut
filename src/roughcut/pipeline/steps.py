@@ -3401,6 +3401,51 @@ def _build_transcript_first_canonical_layer(
             )
         )
 
+    subtitle_by_id = {
+        str(getattr(item, "id", "") or ""): item
+        for item in list(subtitle_items or [])
+        if getattr(item, "id", None) is not None
+    }
+    seen_synthetic_correction_keys: set[tuple[str, str, str]] = set()
+    for correction in list(corrections or []):
+        original = str(_subtitle_correction_attr(correction, "original_span") or "").strip()
+        accepted = str(
+            _subtitle_correction_attr(correction, "human_override")
+            or _subtitle_correction_attr(correction, "suggested_span")
+            or ""
+        ).strip()
+        if not original or not accepted or original == accepted:
+            continue
+        subtitle_item_id = str(_subtitle_correction_attr(correction, "subtitle_item_id") or "").strip()
+        subtitle_item = subtitle_by_id.get(subtitle_item_id)
+        target_rows = _select_transcript_segments_for_correction(
+            correction_payload={"original": original, "accepted": accepted},
+            subtitle_item=subtitle_item,
+            transcript_rows=transcript_rows_ordered,
+        )
+        for target_row in target_rows[:1]:
+            segment_index = int(getattr(target_row, "segment_index", 0) or 0)
+            synthetic_id = synthetic_ids.get(segment_index)
+            if not synthetic_id:
+                continue
+            correction_key = (synthetic_id, original, accepted)
+            if correction_key in seen_synthetic_correction_keys:
+                continue
+            seen_synthetic_correction_keys.add(correction_key)
+            synthetic_corrections.append(
+                {
+                    "subtitle_item_id": synthetic_id,
+                    "original_span": original,
+                    "suggested_span": str(_subtitle_correction_attr(correction, "suggested_span") or accepted),
+                    "human_override": str(_subtitle_correction_attr(correction, "human_override") or "").strip() or None,
+                    "human_decision": _subtitle_correction_attr(correction, "human_decision"),
+                    "auto_applied": bool(_subtitle_correction_attr(correction, "auto_applied")),
+                    "change_type": _subtitle_correction_attr(correction, "change_type"),
+                    "confidence": _subtitle_correction_attr(correction, "confidence"),
+                    "source": _subtitle_correction_attr(correction, "source"),
+                }
+            )
+
     return build_canonical_transcript_layer(
         synthetic_items,
         corrections=synthetic_corrections,
@@ -3802,7 +3847,7 @@ def _subtitle_item_payload(item: SubtitleItem) -> dict[str, Any]:
 
 
 def _subtitle_projection_entry_payload(entry: dict[str, Any]) -> dict[str, Any]:
-    return {
+    payload = {
         "index": int(entry.get("index", 0) or 0),
         "start_time": entry.get("start_time", entry.get("start")),
         "end_time": entry.get("end_time", entry.get("end")),
@@ -3810,6 +3855,10 @@ def _subtitle_projection_entry_payload(entry: dict[str, Any]) -> dict[str, Any]:
         "text_norm": entry.get("text_norm"),
         "text_final": entry.get("text_final"),
     }
+    words = list(entry.get("words") or entry.get("words_json") or [])
+    if words:
+        payload["words"] = words
+    return payload
 
 
 async def _load_latest_subtitle_projection_entries(

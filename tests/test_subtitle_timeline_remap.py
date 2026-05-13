@@ -37,3 +37,52 @@ def test_remap_subtitle_spanning_cut_splits_display_text_across_fragments() -> N
 
     assert [item["text_final"] for item in remapped] == ["这个产品", "真的不错"]
     assert all(item["source_text_full"] == "这个产品真的不错" for item in remapped)
+
+
+def test_remap_subtitle_spanning_cut_uses_word_timestamps_for_fragment_text() -> None:
+    remapped = remap_subtitles_to_timeline(
+        [
+            {
+                "index": 0,
+                "start_time": 1.0,
+                "end_time": 5.0,
+                "text_final": "这个产品真的不错",
+                "words": [
+                    {"word": "这个", "start": 1.0, "end": 1.6},
+                    {"word": "产品", "start": 1.6, "end": 2.0},
+                    {"word": "真的", "start": 4.0, "end": 4.5},
+                    {"word": "不错", "start": 4.5, "end": 5.0},
+                ],
+            }
+        ],
+        [
+            {"start": 1.0, "end": 1.75},
+            {"start": 4.0, "end": 5.0},
+        ],
+    )
+
+    assert [item["text_final"] for item in remapped] == ["这个产品", "真的不错"]
+
+
+def test_remap_clipped_single_fragment_uses_word_timestamps_for_text() -> None:
+    remapped = remap_subtitles_to_timeline(
+        [
+            {
+                "index": 0,
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text_final": "嗯今天看这个",
+                "words": [
+                    {"word": "嗯", "start": 1.0, "end": 1.08},
+                    {"word": "今天", "start": 1.08, "end": 1.35},
+                    {"word": "看", "start": 1.35, "end": 1.55},
+                    {"word": "这个", "start": 1.55, "end": 2.0},
+                ],
+            }
+        ],
+        [{"start": 1.08, "end": 2.0}],
+    )
+
+    assert len(remapped) == 1
+    assert remapped[0]["start_time"] == 0.0
+    assert remapped[0]["text_final"] == "今天看这个"

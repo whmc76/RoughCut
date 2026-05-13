@@ -561,8 +561,18 @@ def _split_remapped_subtitle_text(
     mapped_ranges: list[tuple[float, float, float, float]],
 ) -> list[str]:
     text = _subtitle_item_display_text(item)
-    if len(mapped_ranges) <= 1 or not text:
+    if not text:
         return [text for _ in mapped_ranges]
+
+    word_fragment_texts = _split_remapped_subtitle_text_by_words(item, mapped_ranges)
+    if word_fragment_texts is not None:
+        return word_fragment_texts
+
+    if len(mapped_ranges) <= 1:
+        if not mapped_ranges:
+            return []
+        _new_start, _new_end, overlap_start, overlap_end = mapped_ranges[0]
+        return [_slice_subtitle_text_by_source_overlap(item, text, overlap_start, overlap_end)]
 
     weights = [max(0.0, float(end) - float(start)) for _new_start, _new_end, start, end in mapped_ranges]
     if sum(weights) <= 0:
@@ -572,6 +582,72 @@ def _split_remapped_subtitle_text(
         pieces = _split_tokens_by_weights(tokens, weights)
         return [" ".join(piece).strip() for piece in pieces]
     return ["".join(piece).strip() for piece in _split_tokens_by_weights(list(text.strip()), weights)]
+
+
+def _slice_subtitle_text_by_source_overlap(
+    item: dict[str, Any],
+    text: str,
+    overlap_start: float,
+    overlap_end: float,
+) -> str:
+    try:
+        sub_start = float(item.get("start_time", 0.0) or 0.0)
+        sub_end = float(item.get("end_time", sub_start) or sub_start)
+    except (TypeError, ValueError):
+        return text
+    duration = max(0.001, sub_end - sub_start)
+    if overlap_start <= sub_start + 0.01 and overlap_end >= sub_end - 0.01:
+        return text
+    chars = list(text.strip())
+    if not chars:
+        return text
+    start_index = max(0, min(len(chars), round(len(chars) * max(0.0, overlap_start - sub_start) / duration)))
+    end_index = max(start_index, min(len(chars), round(len(chars) * max(0.0, overlap_end - sub_start) / duration)))
+    sliced = "".join(chars[start_index:end_index]).strip()
+    return sliced or text
+
+
+def _split_remapped_subtitle_text_by_words(
+    item: dict[str, Any],
+    mapped_ranges: list[tuple[float, float, float, float]],
+) -> list[str] | None:
+    words = _normalized_subtitle_words(item)
+    if not words:
+        return None
+    text = _subtitle_item_display_text(item)
+    joiner = " " if " " in text.strip() else ""
+    fragments: list[str] = []
+    for _new_start, _new_end, overlap_start, overlap_end in mapped_ranges:
+        fragment_words = [
+            word["word"]
+            for word in words
+            if min(float(overlap_end), word["end"]) - max(float(overlap_start), word["start"]) > 0.001
+        ]
+        fragment_text = joiner.join(fragment_words).strip()
+        if not fragment_text:
+            return None
+        fragments.append(fragment_text)
+    return fragments
+
+
+def _normalized_subtitle_words(item: dict[str, Any]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for raw_word in list((item or {}).get("words") or (item or {}).get("words_json") or []):
+        if not isinstance(raw_word, dict):
+            continue
+        text = str(raw_word.get("word") or raw_word.get("raw_text") or raw_word.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            start = float(raw_word.get("start", 0.0) or 0.0)
+            end = float(raw_word.get("end", start) or start)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        normalized.append({"word": text, "start": start, "end": end})
+    normalized.sort(key=lambda word: (word["start"], word["end"]))
+    return normalized
 
 
 def _split_tokens_by_weights(tokens: list[str], weights: list[float]) -> list[list[str]]:

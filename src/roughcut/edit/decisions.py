@@ -19,6 +19,7 @@ FILLER_PATTERN = re.compile(
     r"(?:" + "|".join(re.escape(w) for w in sorted(FILLER_WORDS, key=len, reverse=True)) + r")",
     re.UNICODE,
 )
+HESITATION_FILLER_WORDS = ("呃呃", "嗯嗯", "嗯", "呃", "额")
 HEDGE_PATTERN = re.compile(
     r"(其实|也算|算是|上是|当然|吧|一下|一点|更加|感觉|可能|好像|还是|就|都|也|会|这个|那个|的话)",
     re.UNICODE,
@@ -69,6 +70,7 @@ _BRIDGE_OPENERS = (
 )
 _NUMERIC_SIGNAL_PATTERN = re.compile(r"\d", re.UNICODE)
 _NON_WORD_PATTERN = re.compile(r"[，。！？!?、；;：:,.~\-—_\s\[\]【】()（）]+", re.UNICODE)
+_SMART_RULE_BOUNDARY_PATTERN = re.compile(r"[\s,，、。.!！?？;；:：()[\]（）【】\"'“”‘’]", re.UNICODE)
 _SILENCE_WORD_BOUNDARY_GUARD_SEC = 0.08
 _NOISE_MARKER_TERMS = (
     "噪音",
@@ -1049,7 +1051,115 @@ def _build_subtitle_cut_candidates(
                         signals=["pure_filler"],
                     )
                 )
+        for start, end, phrase in _subtitle_hesitation_filler_ranges(item, text):
+            candidates.append(
+                CutCandidate(
+                    start=start,
+                    end=end,
+                    reason="filler_word",
+                    hard=True,
+                    signals=["partial_filler", f"token:{phrase}"],
+                )
+            )
+        for start, end, unit in _subtitle_repeated_speech_ranges(item, text, content_profile=content_profile):
+            candidates.append(
+                CutCandidate(
+                    start=start,
+                    end=end,
+                    reason="repeated_speech",
+                    hard=True,
+                    signals=["partial_repeated_speech", f"unit:{unit}"],
+                )
+            )
     return candidates
+
+
+def _subtitle_hesitation_filler_ranges(item: dict[str, Any], text: str) -> list[tuple[float, float, str]]:
+    ranges: list[tuple[float, float, str]] = []
+    for filler in HESITATION_FILLER_WORDS:
+        for start_char, end_char in _subtitle_text_match_char_ranges(text, filler):
+            if not (
+                _is_smart_rule_boundary(_char_at(text, start_char - 1))
+                and _is_smart_rule_boundary(_char_at(text, end_char))
+            ) and not start_char == 0:
+                continue
+            start, end = _subtitle_char_range_to_time(item, start_char, end_char)
+            if end > start + 0.02:
+                ranges.append((start, end, filler))
+    return _dedupe_subtitle_rule_ranges(ranges)
+
+
+def _subtitle_repeated_speech_ranges(
+    item: dict[str, Any],
+    text: str,
+    *,
+    content_profile: dict | None,
+) -> list[tuple[float, float, str]]:
+    ranges: list[tuple[float, float, str]] = []
+    for match in re.finditer(r"([\u4e00-\u9fff]{1,3})([\s，,、]*)\1", text):
+        separator = match.group(2) or ""
+        keep_first = match.group(1) or ""
+        if len(keep_first) <= 1 and not separator.strip() and not re.search(r"[，,、]", separator):
+            continue
+        match_index = match.start()
+        remove_start_char = len(text[:match_index]) + len(keep_first + separator)
+        remove_end_char = remove_start_char + len(keep_first)
+        start, end = _subtitle_char_range_to_time(item, remove_start_char, remove_end_char)
+        if end > start + 0.02:
+            ranges.append((start, end, keep_first))
+    return _dedupe_subtitle_rule_ranges(ranges)
+
+
+def _subtitle_text_match_char_ranges(text: str, needle: str) -> list[tuple[int, int]]:
+    if not text or not needle:
+        return []
+    ranges: list[tuple[int, int]] = []
+    search_from = 0
+    while search_from < len(text):
+        match_index = text.find(needle, search_from)
+        if match_index < 0:
+            break
+        ranges.append((len(text[:match_index]), len(text[:match_index]) + len(needle)))
+        search_from = match_index + len(needle)
+    return ranges
+
+
+def _subtitle_char_range_to_time(item: dict[str, Any], start_char: int, end_char: int) -> tuple[float, float]:
+    text = _semantic_subtitle_text(item)
+    char_count = max(1, len(text))
+    start_time = float(item.get("start_time", 0.0) or 0.0)
+    end_time = float(item.get("end_time", start_time) or start_time)
+    duration = max(0.001, end_time - start_time)
+    clamped_start = min(max(0, start_char), char_count)
+    clamped_end = min(max(clamped_start, end_char), char_count)
+    return (
+        round(start_time + duration * clamped_start / char_count, 3),
+        round(start_time + duration * clamped_end / char_count, 3),
+    )
+
+
+def _char_at(text: str, index: int) -> str:
+    if index < 0 or index >= len(text):
+        return ""
+    return text[index]
+
+
+def _is_smart_rule_boundary(char: str) -> bool:
+    return not char or bool(_SMART_RULE_BOUNDARY_PATTERN.fullmatch(char))
+
+
+def _dedupe_subtitle_rule_ranges(ranges: list[tuple[float, float, str]]) -> list[tuple[float, float, str]]:
+    deduped: list[tuple[float, float, str]] = []
+    seen: set[tuple[float, float, str]] = set()
+    for start, end, label in sorted(ranges, key=lambda item: (round(item[0], 3), -round(item[1] - item[0], 3))):
+        key = (round(start, 3), round(end, 3), label)
+        if key in seen:
+            continue
+        if any(min(end, kept_end) - max(start, kept_start) > 0.001 for kept_start, kept_end, _kept_label in deduped):
+            continue
+        seen.add(key)
+        deduped.append((round(start, 3), round(end, 3), label))
+    return deduped
 
 
 def _build_hard_cut_candidates(cuts: list[tuple[float, float, str]]) -> list[CutCandidate]:
@@ -2682,6 +2792,7 @@ def _cut_reason_priority(reason: str) -> int:
         "noise_subtitle": 4,
         "low_signal_subtitle": 4,
         "filler_word": 4,
+        "repeated_speech": 4,
         "long_non_dialogue": 3,
         "timing_trim": 3,
         "silence": 2,

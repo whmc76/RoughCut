@@ -41,6 +41,31 @@ def test_filler_cut_only_removes_pure_filler_subtitle() -> None:
     assert candidates[0].reason == "filler_word"
 
 
+def test_auto_subtitle_rule_cuts_leading_hesitation_filler_only() -> None:
+    candidates = _build_subtitle_cut_candidates(
+        [_subtitle("嗯今天先看这个手电")],
+        content_profile=None,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].reason == "filler_word"
+    assert candidates[0].signals[0] == "partial_filler"
+    assert candidates[0].start == 1.0
+    assert candidates[0].end < 1.2
+
+
+def test_auto_subtitle_rule_cuts_repeated_phrase_second_copy_only() -> None:
+    candidates = _build_subtitle_cut_candidates(
+        [_subtitle("这个产品产品真的不错")],
+        content_profile=None,
+    )
+
+    repeated = [candidate for candidate in candidates if candidate.reason == "repeated_speech"]
+    assert len(repeated) == 1
+    assert repeated[0].signals[0] == "partial_repeated_speech"
+    assert 1.2 < repeated[0].start < repeated[0].end < 1.7
+
+
 def test_short_normal_speech_is_not_low_signal() -> None:
     assert not _is_low_signal_subtitle_text("我懒得看了")
 
