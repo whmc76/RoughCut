@@ -8,10 +8,13 @@ from roughcut.speech.subtitle_segmentation import normalize_display_text
 def test_subtitle_numeral_transcription_uses_arabic_for_codes_and_specs() -> None:
     assert normalize_display_numbers("这个EDC幺七和MT三四都在桌上") == "这个EDC17和MT34都在桌上"
     assert normalize_display_numbers("这个幺七 幺7 零幺六都在桌上") == "这个17 17 016都在桌上"
+    assert normalize_display_numbers("这个SK05和EDC17都在，后面05 17 二三 三七啊") == "这个SK05和EDC17都在，后面05 17 23 37啊"
+    assert normalize_display_numbers("为什么三七啊从来没有考虑过换掉") == "为什么37啊从来没有考虑过换掉"
     assert normalize_display_numbers("编号零六 零零号 二零二六年") == "编号06 00号 2026年"
     assert normalize_display_numbers("百分之三十 第十七代 三百流明") == "30% 第17代 300流明"
     assert normalize_display_numbers("八千流明 一万流明") == "8000流明 10000流明"
     assert normalize_display_numbers("一百二十八GB 三百毫安 五伏两安") == "128GB 300毫安 5伏2安"
+    assert normalize_display_numbers("八千两百给你的安全感") == "8200给你的安全感"
     assert normalize_display_numbers("下午三点半 晚上八点零五分") == "下午3点半 晚上8点05"
 
 
@@ -32,6 +35,7 @@ def test_subtitle_numeral_transcription_keeps_natural_chinese_quantities() -> No
     assert normalize_display_numbers("这些东西零零散散放着") == "这些东西零零散散放着"
     assert normalize_display_numbers("一两个都行 三四个也可以") == "一两个都行 三四个也可以"
     assert normalize_display_numbers("一两天 十来个 几十块") == "一两天 十来个 几十块"
+    assert normalize_display_numbers("三七粉和三三两两不是型号数字") == "三七粉和三三两两不是型号数字"
 
 
 def test_display_text_applies_only_numeral_transcription_not_term_rewrites() -> None:

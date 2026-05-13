@@ -417,6 +417,9 @@ _CHINESE_DIGIT_SEQUENCE_RE = re.compile(
     r"(?<![A-Za-z0-9])(?P<number>[零〇幺一二两三四五六七八九]{2,})"
     r"(?=(?:号|款|版|年|月|日|集|期|代|[\s，,。.!！？；;：:]|$))"
 )
+_DEFAULT_CHINESE_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?P<number>[零〇幺一二两三四五六七八九十百千万]{2,})(?![A-Za-z0-9])"
+)
 _SPOKEN_DIGIT_RUN_RE = re.compile(
     r"(?<![A-Za-z0-9])(?P<number>[零〇幺一二两三四五六七八九\d]*幺[零〇幺一二两三四五六七八九\d]{1,5})"
 )
@@ -541,6 +544,26 @@ _VAGUE_NUMBER_TOKENS = {
     "六七",
     "七八",
     "八九",
+}
+_VAGUE_NUMBER_CONTEXT_UNITS = _NATURAL_SINGLE_QUANTITY_UNITS | _NATURAL_SINGLE_UNITS | {
+    "期",
+    "集",
+    "页",
+    "张",
+    "层",
+    "排",
+    "项",
+    "种",
+    "步",
+    "轮",
+    "名",
+}
+_DEFAULT_CHINESE_NUMBER_IDIOMS = {
+    "零零散散",
+    "三三两两",
+    "七七八八",
+    "一五一十",
+    "十全十美",
 }
 _INFO_COUNT_NOUN_PREFIXES = (
     "档位",
@@ -1350,6 +1373,7 @@ def transcribe_subtitle_numerals(text: str) -> str:
     result = _normalize_decimal_quantity_tokens(result)
     result = _normalize_spoken_digit_runs(result)
     result = _normalize_chinese_digit_sequences(result)
+    result = _normalize_default_chinese_number_tokens(result)
 
     def replace_percent(match: re.Match[str]) -> str:
         number = _normalize_numeric_token(match.group("number"))
@@ -1642,12 +1666,143 @@ def _normalize_chinese_digit_sequences(text: str) -> str:
     return _CHINESE_DIGIT_SEQUENCE_RE.sub(replace_sequence, text)
 
 
+def _normalize_default_chinese_number_tokens(text: str) -> str:
+    def replace_number(match: re.Match[str]) -> str:
+        raw_number = str(match.group("number") or "")
+        tail_text = match.string[match.end():match.end() + 8]
+        local_text = match.string[match.start():match.end() + 8]
+        if any(local_text.startswith(idiom) for idiom in _DEFAULT_CHINESE_NUMBER_IDIOMS):
+            return raw_number
+        if _is_vague_number_phrase(raw_number) and _starts_with_any_unit(tail_text, _VAGUE_NUMBER_CONTEXT_UNITS):
+            return raw_number
+        if not _default_chinese_number_tail_allows_arabic(tail_text):
+            return raw_number
+        return _normalize_numeric_token(raw_number) or raw_number
+
+    return _DEFAULT_CHINESE_NUMBER_RE.sub(replace_number, text)
+
+
 def _normalize_spoken_digit_runs(text: str) -> str:
     def replace_sequence(match: re.Match[str]) -> str:
         raw_number = str(match.group("number") or "")
         return _normalize_digit_sequence_token(raw_number) or raw_number
 
     return _SPOKEN_DIGIT_RUN_RE.sub(replace_sequence, text)
+
+
+def _is_vague_number_phrase(text: str) -> bool:
+    value = str(text or "").strip()
+    if value in _VAGUE_NUMBER_TOKENS:
+        return True
+    return bool(re.fullmatch(r"[一二两三四五六七八九]{2}[十百千万]", value))
+
+
+def _starts_with_any_unit(text: str, units: set[str]) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    return any(value.startswith(unit) for unit in sorted(units, key=len, reverse=True))
+
+
+def _default_chinese_number_tail_allows_arabic(text: str) -> bool:
+    value = str(text or "")
+    if value and value[0].isspace():
+        return True
+    stripped = value.lstrip()
+    if not stripped:
+        return True
+    if stripped[0] in "，,。.!！？；;：:、)]）】}」』":
+        return True
+    if _starts_with_any_unit(stripped, set(_DISPLAY_QUANTITY_UNITS) | set(_DISPLAY_ORDINAL_UNITS)):
+        return True
+    allowed_prefixes = (
+        "了",
+        "的",
+        "啊",
+        "呀",
+        "嘛",
+        "呢",
+        "吧",
+        "呗",
+        "哦",
+        "欸",
+        "哎",
+        "时候",
+        "这种",
+        "这个",
+        "那个",
+        "这些",
+        "那些",
+        "我",
+        "你",
+        "他",
+        "她",
+        "它",
+        "咱",
+        "和",
+        "跟",
+        "与",
+        "对比",
+        "上",
+        "下",
+        "里",
+        "外",
+        "都",
+        "也",
+        "就",
+        "是",
+        "有",
+        "用",
+        "带",
+        "换",
+        "买",
+        "卖",
+        "要",
+        "给",
+        "到",
+        "比",
+        "更",
+        "还",
+        "从",
+        "没",
+        "不",
+        "能",
+        "会",
+        "可以",
+        "应该",
+        "可能",
+        "很",
+        "挺",
+        "蛮",
+        "真",
+        "确实",
+        "已经",
+        "基本",
+        "比较",
+        "非常",
+        "特别",
+        "直接",
+        "反正",
+        "其实",
+        "然后",
+        "但是",
+        "不过",
+        "所以",
+        "如果",
+        "因为",
+        "就是",
+        "感觉",
+        "看",
+        "拿",
+        "放",
+        "装",
+        "做",
+        "说",
+        "讲",
+        "来",
+        "去",
+    )
+    return stripped.startswith(allowed_prefixes)
 
 
 def _format_natural_single_quantity(number_token: str, normalized_number: str, unit: str, tail_text: str) -> str:
