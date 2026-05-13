@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, typ
 import type WaveSurfer from "wavesurfer.js";
 import type { RegionsPlugin as RegionsPluginInstance } from "wavesurfer.js/dist/plugins/regions.esm.js";
 
-import type { Job, JobManualEditApplyPayload, JobManualEditPreviewAssets, JobManualEditSession, JobManualEditSilence, JobManualEditSubtitle, JobManualEditSubtitleOverride, JobManualEditWord, JobManualSubtitleReplacement, JobManualVideoTransform } from "../../types";
+import type { Job, JobManualEditApplyPayload, JobManualEditPreviewAssets, JobManualEditSession, JobManualEditSilence, JobManualEditSmartDelete, JobManualEditSubtitle, JobManualEditSubtitleOverride, JobManualEditWord, JobManualSubtitleReplacement, JobManualVideoTransform } from "../../types";
 import { classNames } from "../../utils";
 
 type JobManualEditSectionProps = {
@@ -167,11 +167,12 @@ type SmartCutRules = {
   fillerEnabled: boolean;
   repeatedEnabled: boolean;
   pauseEnabled: boolean;
+  smartDeleteEnabled: boolean;
   pauseThresholdSec: number;
   fillers: string;
 };
 
-type SmartCutRuleKind = "filler" | "repeated" | "pause";
+type SmartCutRuleKind = "filler" | "repeated" | "pause" | "smart_delete";
 
 type SmartCutRuleMatch = KeepSegment & {
   kind: SmartCutRuleKind;
@@ -181,6 +182,8 @@ type SmartCutRuleAnalysis = {
   filler: SmartCutRuleMatch[];
   repeated: SmartCutRuleMatch[];
   pause: SmartCutRuleMatch[];
+  pauseCandidates: SmartCutRuleMatch[];
+  smartDelete: SmartCutRuleMatch[];
 };
 
 const REGION_COLOR = "rgba(34, 197, 94, 0.22)";
@@ -370,9 +373,10 @@ const PREVIEW_AUTO_VOLUME_MAX_GAIN = 12;
 const DEFAULT_SMART_CUT_FILLERS = "嗯,呃,额,呃呃,嗯嗯";
 const SMART_CUT_RULE_STORAGE_KEY = "roughcut.manualEditor.smartCutRules.v3";
 const DEFAULT_SMART_CUT_RULES: SmartCutRules = {
-  fillerEnabled: false,
-  repeatedEnabled: false,
+  fillerEnabled: true,
+  repeatedEnabled: true,
   pauseEnabled: true,
+  smartDeleteEnabled: true,
   pauseThresholdSec: 0.8,
   fillers: DEFAULT_SMART_CUT_FILLERS,
 };
@@ -383,6 +387,7 @@ function normalizeSmartCutRules(value: Partial<SmartCutRules> | null | undefined
     fillerEnabled: typeof value?.fillerEnabled === "boolean" ? value.fillerEnabled : DEFAULT_SMART_CUT_RULES.fillerEnabled,
     repeatedEnabled: typeof value?.repeatedEnabled === "boolean" ? value.repeatedEnabled : DEFAULT_SMART_CUT_RULES.repeatedEnabled,
     pauseEnabled: typeof value?.pauseEnabled === "boolean" ? value.pauseEnabled : DEFAULT_SMART_CUT_RULES.pauseEnabled,
+    smartDeleteEnabled: typeof value?.smartDeleteEnabled === "boolean" ? value.smartDeleteEnabled : DEFAULT_SMART_CUT_RULES.smartDeleteEnabled,
     pauseThresholdSec: Number.isFinite(pauseThresholdSec) ? clamp(pauseThresholdSec, 0.1, 5) : DEFAULT_SMART_CUT_RULES.pauseThresholdSec,
     fillers: typeof value?.fillers === "string" && value.fillers.trim() ? value.fillers : DEFAULT_SMART_CUT_RULES.fillers,
   };
@@ -1957,6 +1962,7 @@ function parseSmartCutFillers(value: string) {
 
 const SMART_CUT_BOUNDARY_PATTERN = /[\s,，、。.!！?？;；:：()[\]（）【】"'“”‘’]/;
 const SMART_CUT_HESITATION_FILLERS = new Set(["嗯", "呃", "额", "呃呃", "嗯嗯"]);
+const SMART_CUT_WORD_BOUNDARY_GUARD_SEC = 0.08;
 
 function isSmartCutBoundary(char: string | undefined) {
   return !char || SMART_CUT_BOUNDARY_PATTERN.test(char);
@@ -2031,19 +2037,139 @@ function smartCutMeaningfulText(text: string, fillers: string[]) {
   return cleaned;
 }
 
-function pauseRangeOverlapsMeaningfulSubtitle(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
+function subtitleHasUsableWordTimings(subtitle: JobManualEditSubtitle) {
+  return Boolean(subtitle.words?.some((word) => {
+    const start = Number(word.start);
+    const end = Number(word.end);
+    return Number.isFinite(start) && Number.isFinite(end) && end > start;
+  }));
+}
+
+function pauseRangeOverlapsMeaningfulSpeech(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
+  const overlappingSubtitles = subtitles.filter((subtitle) => {
+    const overlap = Math.min(range.end, subtitle.end_time) - Math.max(range.start, subtitle.start_time);
+    return overlap > 0.08 && smartCutMeaningfulText(subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle), fillers).length >= 2;
+  });
+  if (!overlappingSubtitles.length) return false;
+
+  const subtitlesWithWordTimings = overlappingSubtitles.filter(subtitleHasUsableWordTimings);
+  if (subtitlesWithWordTimings.length) {
+    return subtitlesWithWordTimings.some((subtitle) => (
+      subtitle.words || []
+    ).some((word) => {
+      const start = Number(word.start);
+      const end = Number(word.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return false;
+      const overlap = Math.min(range.end, end) - Math.max(range.start, start);
+      return overlap > 0.06;
+    }));
+  }
+
+  return true;
+}
+
+function meaningfulWordRangesForPause(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
+  const wordRanges: KeepSegment[] = [];
+  for (const subtitle of subtitles) {
+    if (!subtitleHasUsableWordTimings(subtitle)) continue;
+    const subtitleOverlap = Math.min(range.end, subtitle.end_time) - Math.max(range.start, subtitle.start_time);
+    if (subtitleOverlap <= 0.08) continue;
+    for (const word of subtitle.words || []) {
+      if (!smartCutMeaningfulText(String(word.word || ""), fillers)) continue;
+      const start = Number(word.start);
+      const end = Number(word.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) continue;
+      wordRanges.push({
+        start: Number(start.toFixed(3)),
+        end: Number(end.toFixed(3)),
+      });
+    }
+  }
+  return wordRanges.sort((left, right) => left.start - right.start || left.end - right.end);
+}
+
+function wordBoundedPauseRanges(range: SilenceRange, wordRanges: KeepSegment[]) {
+  const ranges: KeepSegment[] = [];
+  for (let index = 1; index < wordRanges.length; index += 1) {
+    const previous = wordRanges[index - 1];
+    const next = wordRanges[index];
+    const start = Math.max(range.start, previous.end + SMART_CUT_WORD_BOUNDARY_GUARD_SEC);
+    const end = Math.min(range.end, next.start - SMART_CUT_WORD_BOUNDARY_GUARD_SEC);
+    if (end > start + 0.02) {
+      ranges.push({
+        start: Number(start.toFixed(3)),
+        end: Number(end.toFixed(3)),
+      });
+    }
+  }
+  return ranges;
+}
+
+function subtitleBoundedPauseRanges(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
+  const ranges: KeepSegment[] = [];
+  const sorted = sortedSubtitles(subtitles).filter((subtitle) => (
+    smartCutMeaningfulText(subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle), fillers).length >= 2
+  ));
+  for (let index = 1; index < sorted.length; index += 1) {
+    const previous = sorted[index - 1];
+    const next = sorted[index];
+    const start = Math.max(range.start, previous.end_time);
+    const end = Math.min(range.end, next.start_time);
+    if (end > start + 0.02) {
+      ranges.push({
+        start: Number(start.toFixed(3)),
+        end: Number(end.toFixed(3)),
+      });
+    }
+  }
+  return ranges;
+}
+
+function rangeOverlapsSubtitleSpeech(range: KeepSegment, subtitles: JobManualEditSubtitle[], fillers: string[]) {
   return subtitles.some((subtitle) => {
     const overlap = Math.min(range.end, subtitle.end_time) - Math.max(range.start, subtitle.start_time);
-    if (overlap <= 0.08) return false;
-    return smartCutMeaningfulText(subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle), fillers).length >= 2;
+    return overlap > 0.08 && smartCutMeaningfulText(subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle), fillers).length >= 2;
   });
 }
 
-export function buildSmartCutRuleAnalysis(subtitles: JobManualEditSubtitle[], rules: SmartCutRules, silenceRanges: SilenceRange[] = []): SmartCutRuleAnalysis {
+function fallbackCuttablePauseRanges(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
+  const boundedRanges = subtitleBoundedPauseRanges(range, subtitles, fillers);
+  if (boundedRanges.length) {
+    return boundedRanges.filter((candidate) => !rangeOverlapsSubtitleSpeech(candidate, subtitles, fillers));
+  }
+  return pauseRangeOverlapsMeaningfulSpeech(range, subtitles, fillers) ? [] : [{ start: range.start, end: range.end }];
+}
+
+function cuttablePauseRanges(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
+  const wordRanges = meaningfulWordRangesForPause(range, subtitles, fillers);
+  if (wordRanges.length) {
+    return wordBoundedPauseRanges(range, wordRanges);
+  }
+  return fallbackCuttablePauseRanges(range, subtitles, fillers);
+}
+
+function smartDeleteRuleRanges(smartDeleteSegments: JobManualEditSmartDelete[] = []): SmartCutRuleMatch[] {
+  return smartDeleteSegments
+    .map((segment) => ({
+      start: Number(segment.start.toFixed(3)),
+      end: Number(segment.end.toFixed(3)),
+      kind: "smart_delete" as const,
+    }))
+    .filter((range) => range.end > range.start + 0.02);
+}
+
+export function buildSmartCutRuleAnalysis(
+  subtitles: JobManualEditSubtitle[],
+  rules: SmartCutRules,
+  silenceRanges: SilenceRange[] = [],
+  smartDeleteSegments: JobManualEditSmartDelete[] = [],
+): SmartCutRuleAnalysis {
   const analysis: SmartCutRuleAnalysis = {
     filler: [],
     repeated: [],
     pause: [],
+    pauseCandidates: [],
+    smartDelete: smartDeleteRuleRanges(smartDeleteSegments),
   };
   const fillers = parseSmartCutFillers(rules.fillers);
   for (const subtitle of subtitles) {
@@ -2053,20 +2179,25 @@ export function buildSmartCutRuleAnalysis(subtitles: JobManualEditSubtitle[], ru
     analysis.repeated.push(...findRepeatedSpeechRangesInSubtitle(subtitle).map((range) => ({ ...range, kind: "repeated" as const })));
   }
   for (const range of silenceRanges) {
-    const pause = range.end - range.start;
-    if (pauseRangeOverlapsMeaningfulSubtitle(range, subtitles, fillers)) continue;
-    if (pause >= rules.pauseThresholdSec) {
-      analysis.pause.push({
-        start: Number(range.start.toFixed(3)),
-        end: Number(range.end.toFixed(3)),
-        kind: "pause",
-      });
+    for (const cuttableRange of cuttablePauseRanges(range, subtitles, fillers)) {
+      const pause = cuttableRange.end - cuttableRange.start;
+      const pauseMatch = {
+        start: Number(cuttableRange.start.toFixed(3)),
+        end: Number(cuttableRange.end.toFixed(3)),
+        kind: "pause" as const,
+      };
+      analysis.pauseCandidates.push(pauseMatch);
+      if (pause >= rules.pauseThresholdSec) {
+        analysis.pause.push(pauseMatch);
+      }
     }
   }
   return {
     filler: analysis.filler.filter((range) => range.end > range.start + 0.02),
     repeated: analysis.repeated.filter((range) => range.end > range.start + 0.02),
     pause: analysis.pause.filter((range) => range.end > range.start + 0.02),
+    pauseCandidates: analysis.pauseCandidates.filter((range) => range.end > range.start + 0.02),
+    smartDelete: analysis.smartDelete,
   };
 }
 
@@ -2075,7 +2206,33 @@ export function autoSmartCutRuleRanges(analysis: SmartCutRuleAnalysis, rules: Sm
     ...(rules.fillerEnabled ? analysis.filler : []),
     ...(rules.repeatedEnabled ? analysis.repeated : []),
     ...(rules.pauseEnabled ? analysis.pause : []),
+    ...(rules.smartDeleteEnabled ? analysis.smartDelete : []),
   ];
+}
+
+export function smartCutRuleManagedRanges(analysis: SmartCutRuleAnalysis) {
+  return [
+    ...analysis.filler,
+    ...analysis.repeated,
+    ...analysis.pauseCandidates,
+    ...analysis.smartDelete,
+  ];
+}
+
+export function applySmartCutRuleRangesToSegments(
+  baseSegments: KeepSegment[],
+  ranges: KeepSegment[],
+  managedRanges: KeepSegment[],
+  sourceDuration: number,
+) {
+  if (!baseSegments.length) return [];
+  const controlledBaseline = managedRanges.length
+    ? addSourceRangesToSegments(baseSegments, managedRanges, sourceDuration)
+    : baseSegments;
+  const keptRanges = ranges.filter((range) => isSourceRangeKept(range.start, range.end, controlledBaseline));
+  return keptRanges.length
+    ? removeSourceRangesFromSegments(controlledBaseline, keptRanges)
+    : controlledBaseline;
 }
 
 function smartCutRulesSignature(rules: SmartCutRules) {
@@ -2084,6 +2241,7 @@ function smartCutRulesSignature(rules: SmartCutRules) {
     fillerEnabled: normalized.fillerEnabled,
     repeatedEnabled: normalized.repeatedEnabled,
     pauseEnabled: normalized.pauseEnabled,
+    smartDeleteEnabled: normalized.smartDeleteEnabled,
     pauseThresholdSec: normalized.pauseThresholdSec,
     fillers: parseSmartCutFillers(normalized.fillers),
   });
@@ -2380,18 +2538,23 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   );
 
   const smartCutRuleAnalysis = useMemo(
-    () => buildSmartCutRuleAnalysis(sourceTranscriptSubtitles, smartCutRules, sourceSilenceRanges),
-    [smartCutRules, sourceSilenceRanges, sourceTranscriptSubtitles],
+    () => buildSmartCutRuleAnalysis(sourceTranscriptSubtitles, smartCutRules, sourceSilenceRanges, session.smart_delete_segments || []),
+    [smartCutRules, sourceSilenceRanges, sourceTranscriptSubtitles, session.smart_delete_segments],
   );
   const smartCutRuleRanges = useMemo(
     () => autoSmartCutRuleRanges(smartCutRuleAnalysis, smartCutRules),
     [smartCutRuleAnalysis, smartCutRules],
+  );
+  const smartCutManagedRanges = useMemo(
+    () => smartCutRuleManagedRanges(smartCutRuleAnalysis),
+    [smartCutRuleAnalysis],
   );
   const smartCutRuleCounts = useMemo(
     () => ({
       filler: smartCutRuleAnalysis.filler.length,
       repeated: smartCutRuleAnalysis.repeated.length,
       pause: smartCutRuleAnalysis.pause.length,
+      smartDelete: smartCutRuleAnalysis.smartDelete.length,
     }),
     [smartCutRuleAnalysis],
   );
@@ -3430,13 +3593,14 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     clearTranscriptSelection();
   };
 
-  const applySmartCutRuleRanges = (ranges: KeepSegment[]) => {
+  const applySmartCutRuleRanges = (ranges: KeepSegment[], managedRanges: KeepSegment[]) => {
     const baseSegments = baseKeepSegments.map((segment) => ({ start: segment.start, end: segment.end }));
-    if (!baseSegments.length) return;
-    const keptRanges = ranges.filter((range) => isSourceRangeKept(range.start, range.end, baseSegments));
-    const nextSegments = keptRanges.length
-      ? removeSourceRangesFromSegments(baseSegments, keptRanges)
-      : baseSegments;
+    const nextSegments = applySmartCutRuleRangesToSegments(
+      baseSegments,
+      ranges,
+      managedRanges,
+      session.source_duration_sec,
+    );
     if (!nextSegments.length) return;
     if (keepSegmentsEquivalent(effectiveSegments, nextSegments)) return;
     recordUndoSnapshot();
@@ -3814,12 +3978,13 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       session.timeline_version,
       JSON.stringify(baseKeepSegments.map((segment) => [segment.start, segment.end])),
       smartCutRulesSignature(smartCutRules),
+      JSON.stringify(smartCutManagedRanges.map((range) => [range.kind, range.start, range.end])),
       JSON.stringify(smartCutRuleRanges.map((range) => [range.kind, range.start, range.end])),
     ].join(":");
     if (signature === lastAutoSmartCutSignatureRef.current) return;
     lastAutoSmartCutSignatureRef.current = signature;
-    applySmartCutRuleRanges(smartCutRuleRanges);
-  }, [baseKeepSegments, session.editable, session.job_id, session.timeline_id, session.timeline_version, smartCutRuleRanges, smartCutRules]);
+    applySmartCutRuleRanges(smartCutRuleRanges, smartCutManagedRanges);
+  }, [baseKeepSegments, session.editable, session.job_id, session.source_duration_sec, session.timeline_id, session.timeline_version, smartCutManagedRanges, smartCutRuleRanges, smartCutRules]);
 
   useEffect(() => {
     if (!onAutoSave || autosaving || !session.editable || !effectiveSegments.length) return undefined;
@@ -4715,6 +4880,15 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                         <strong>{smartCutRuleCounts.pause}</strong>
                       </label>
                       <label>
+                        <input
+                          type="checkbox"
+                          checked={smartCutRules.smartDeleteEnabled}
+                          onChange={(event) => updateSmartCutRule({ smartDeleteEnabled: event.target.checked })}
+                        />
+                        <span>智能删除</span>
+                        <strong>{smartCutRuleCounts.smartDelete}</strong>
+                      </label>
+                      <label>
                         停顿
                         <input
                           className="input"
@@ -4734,7 +4908,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                       onChange={(event) => updateSmartCutRule({ fillers: event.target.value })}
                       placeholder="自定义语气词，用逗号分隔"
                     />
-                    <div className="manual-editor-rule-memory">规则设置已全局记忆；勾选后的语气词、重复口误和长停顿会进入待剪区间。</div>
+                    <div className="manual-editor-rule-memory">规则设置已全局记忆；勾选后的语气词、重复口误、长停顿和智能删除会进入待剪区间。</div>
                   </>
                 ) : null}
               </div>

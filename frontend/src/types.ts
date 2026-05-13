@@ -121,6 +121,17 @@ export type JobManualEditSilence = {
   source?: string;
 };
 
+export type JobManualEditSmartDelete = {
+  start: number;
+  end: number;
+  duration_sec: number;
+  reason: string;
+  source?: string;
+  confidence?: number | null;
+  detail?: string | null;
+  evidence?: string[];
+};
+
 export type JobManualEditWord = {
   word: string;
   start: number;
@@ -154,6 +165,7 @@ export type JobManualEditSession = {
   keep_segments: JobManualEditSegment[];
   base_keep_segments?: JobManualEditSegment[];
   silence_segments?: JobManualEditSilence[];
+  smart_delete_segments?: JobManualEditSmartDelete[];
   source_subtitles: JobManualEditSubtitle[];
   projected_subtitles: JobManualEditSubtitle[];
   subtitle_overrides: JobManualEditSubtitleOverride[];

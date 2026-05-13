@@ -69,6 +69,7 @@ _BRIDGE_OPENERS = (
 )
 _NUMERIC_SIGNAL_PATTERN = re.compile(r"\d", re.UNICODE)
 _NON_WORD_PATTERN = re.compile(r"[，。！？!?、；;：:,.~\-—_\s\[\]【】()（）]+", re.UNICODE)
+_SILENCE_WORD_BOUNDARY_GUARD_SEC = 0.08
 _NOISE_MARKER_TERMS = (
     "噪音",
     "杂音",
@@ -649,21 +650,112 @@ def _build_silence_cut_candidates(
 ) -> list[CutCandidate]:
     candidates: list[CutCandidate] = []
     for silence in silence_segments:
-        if silence.duration < min_silence_to_cut:
-            continue
-        candidate = _score_silence_cut(
+        for cuttable_silence in _cuttable_silence_ranges(
             silence,
             subtitle_items=subtitle_items,
             transcript_segments=transcript_segments,
             content_profile=content_profile,
-            scene_points=scene_points,
-            min_silence_to_cut=min_silence_to_cut,
-            editing_skill=editing_skill,
-            timeline_analysis=timeline_analysis,
-        )
-        if candidate.score >= _SILENCE_CUT_SCORE_THRESHOLD and candidate.end - candidate.start >= _MIN_CUT_DURATION_SEC:
-            candidates.append(candidate)
+        ):
+            if cuttable_silence.duration < min_silence_to_cut:
+                continue
+            candidate = _score_silence_cut(
+                cuttable_silence,
+                subtitle_items=subtitle_items,
+                transcript_segments=transcript_segments,
+                content_profile=content_profile,
+                scene_points=scene_points,
+                min_silence_to_cut=min_silence_to_cut,
+                editing_skill=editing_skill,
+                timeline_analysis=timeline_analysis,
+            )
+            if candidate.score >= _SILENCE_CUT_SCORE_THRESHOLD and candidate.end - candidate.start >= _MIN_CUT_DURATION_SEC:
+                candidates.append(candidate)
     return candidates
+
+
+def _cuttable_silence_ranges(
+    silence: SilenceSegment,
+    *,
+    subtitle_items: list[dict[str, Any]],
+    transcript_segments: list[dict[str, Any]],
+    content_profile: dict | None,
+) -> list[SilenceSegment]:
+    word_ranges = _meaningful_trusted_word_ranges_for_silence(
+        silence,
+        subtitle_items=subtitle_items,
+        transcript_segments=transcript_segments,
+        content_profile=content_profile,
+    )
+    if not word_ranges:
+        return [silence]
+    bounded_ranges: list[SilenceSegment] = []
+    for index in range(1, len(word_ranges)):
+        previous = word_ranges[index - 1]
+        next_item = word_ranges[index]
+        start = max(silence.start, previous["end"] + _SILENCE_WORD_BOUNDARY_GUARD_SEC)
+        end = min(silence.end, next_item["start"] - _SILENCE_WORD_BOUNDARY_GUARD_SEC)
+        if end > start + _MIN_CUT_DURATION_SEC:
+            bounded_ranges.append(SilenceSegment(start=round(start, 3), end=round(end, 3)))
+    return bounded_ranges
+
+
+def _meaningful_trusted_word_ranges_for_silence(
+    silence: SilenceSegment,
+    *,
+    subtitle_items: list[dict[str, Any]],
+    transcript_segments: list[dict[str, Any]],
+    content_profile: dict | None,
+) -> list[dict[str, float]]:
+    ranges: list[dict[str, float]] = []
+    for item in _overlapping_subtitle_items(silence.start, silence.end, subtitle_items):
+        ranges.extend(_trusted_word_ranges_from_payload(item, content_profile=content_profile, transcript_word=False))
+    for item in _overlapping_transcript_segments(silence.start, silence.end, transcript_segments):
+        ranges.extend(_trusted_word_ranges_from_payload(item, content_profile=content_profile, transcript_word=True))
+    ranges.sort(key=lambda item: (item["start"], item["end"]))
+    merged: list[dict[str, float]] = []
+    for item in ranges:
+        previous = merged[-1] if merged else None
+        if previous and item["start"] <= previous["end"] + 0.02:
+            previous["end"] = max(previous["end"], item["end"])
+            continue
+        merged.append(dict(item))
+    return merged
+
+
+def _trusted_word_ranges_from_payload(
+    item: dict[str, Any],
+    *,
+    content_profile: dict | None,
+    transcript_word: bool,
+) -> list[dict[str, float]]:
+    ranges: list[dict[str, float]] = []
+    for word in list(item.get("words") or item.get("words_json") or []):
+        if not isinstance(word, dict):
+            continue
+        word_text = str(word.get("word") or word.get("raw_text") or "").strip()
+        if not _word_text_has_timing_boundary(word_text, content_profile=content_profile):
+            continue
+        start = _optional_float(word.get("start"))
+        end = _optional_float(word.get("end"))
+        if start is None or end is None or end <= start:
+            continue
+        if transcript_word and not _transcript_word_timing_is_trusted(word):
+            continue
+        ranges.append({"start": round(start, 3), "end": round(end, 3)})
+    return ranges
+
+
+def _word_text_has_timing_boundary(text: str, *, content_profile: dict | None) -> bool:
+    compact = _compact_subtitle_text(text)
+    if not compact:
+        return False
+    if _looks_like_noise_subtitle(compact):
+        return False
+    if _is_restart_cue_text(compact):
+        return False
+    if _is_nonsemantic_repetition_text(compact, content_profile=content_profile):
+        return False
+    return True
 
 
 def _score_silence_cut(
@@ -1914,14 +2006,19 @@ def _transcript_segment_has_protected_speech(
     end_time: float,
     content_profile: dict | None,
 ) -> bool:
+    has_trusted_word_timing = False
     for word in list(segment.get("words") or []):
         word_text = str(word.get("word") or word.get("raw_text") or "").strip()
         if not word_text:
             continue
+        if _transcript_word_timing_is_trusted(word):
+            has_trusted_word_timing = True
         if _range_overlap_seconds(start_time, end_time, word.get("start"), word.get("end")) <= 0.0:
             continue
         if _subtitle_has_protected_speech_text(word_text, content_profile=content_profile):
             return True
+    if has_trusted_word_timing:
+        return False
     text = str(segment.get("text") or "").strip()
     return _subtitle_has_protected_speech_text(text, content_profile=content_profile)
 

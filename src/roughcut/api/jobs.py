@@ -322,6 +322,17 @@ class ManualEditorSilenceOut(BaseModel):
     source: str = "audio_vad"
 
 
+class ManualEditorSmartDeleteOut(BaseModel):
+    start: float
+    end: float
+    duration_sec: float
+    reason: str
+    source: str = "auto_edit_decision"
+    confidence: float | None = None
+    detail: str | None = None
+    evidence: list[str] = Field(default_factory=list)
+
+
 class ManualEditorWordOut(BaseModel):
     word: str
     start: float
@@ -355,6 +366,7 @@ class ManualEditorSessionOut(BaseModel):
     keep_segments: list[ManualEditorSegmentOut] = Field(default_factory=list)
     base_keep_segments: list[ManualEditorSegmentOut] = Field(default_factory=list)
     silence_segments: list[ManualEditorSilenceOut] = Field(default_factory=list)
+    smart_delete_segments: list[ManualEditorSmartDeleteOut] = Field(default_factory=list)
     source_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
     projected_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
     subtitle_overrides: list[ManualEditorSubtitleOverrideIn] = Field(default_factory=list)
@@ -1550,6 +1562,101 @@ def _manual_editor_silence_payload(segment: dict[str, Any], *, source: str = "au
     )
 
 
+_MANUAL_EDITOR_SMART_DELETE_REASONS = {
+    "restart_retake",
+    "restart_cue",
+    "low_signal_subtitle",
+    "long_non_dialogue",
+}
+
+_MANUAL_EDITOR_SMART_DELETE_REASON_LABELS = {
+    "restart_retake": "疑似重录废片",
+    "restart_cue": "明确重来/口误提示",
+    "low_signal_subtitle": "低信息字幕废片",
+    "long_non_dialogue": "长段非口播废片",
+}
+
+
+def _manual_editor_smart_delete_source(item: dict[str, Any]) -> tuple[str, float | None]:
+    llm_review = item.get("llm_review") if isinstance(item.get("llm_review"), dict) else {}
+    if str(llm_review.get("verdict") or "").strip().lower() == "cut":
+        try:
+            return "llm_cut_review", round(float(llm_review.get("confidence", 0.0) or 0.0), 3)
+        except (TypeError, ValueError):
+            return "llm_cut_review", None
+    return "auto_edit_decision", None
+
+
+def _manual_editor_is_smart_delete_cut(item: dict[str, Any]) -> bool:
+    reason = str(item.get("reason") or "").strip()
+    llm_review = item.get("llm_review") if isinstance(item.get("llm_review"), dict) else {}
+    verdict = str(llm_review.get("verdict") or "").strip().lower()
+    if verdict == "keep":
+        return False
+    if reason in _MANUAL_EDITOR_SMART_DELETE_REASONS:
+        return True
+    evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+    tags = {str(tag).strip() for tag in (evidence.get("tags") or []) if str(tag).strip()}
+    try:
+        retake_score = float(evidence.get("retake_score", 0.0) or 0.0)
+        removal_score = float(evidence.get("removal_score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        retake_score = 0.0
+        removal_score = 0.0
+    return retake_score >= 0.5 and removal_score >= 0.25 and "restart_cue_context" in tags
+
+
+def _manual_editor_smart_delete_payload(item: dict[str, Any]) -> ManualEditorSmartDeleteOut | None:
+    if not _manual_editor_is_smart_delete_cut(item):
+        return None
+    try:
+        start = max(0.0, float(item.get("start", 0.0) or 0.0))
+        end = max(start, float(item.get("end", start) or start))
+    except (TypeError, ValueError):
+        return None
+    if end <= start + 0.02:
+        return None
+    reason = str(item.get("reason") or "").strip() or "smart_delete"
+    source, confidence = _manual_editor_smart_delete_source(item)
+    llm_review = item.get("llm_review") if isinstance(item.get("llm_review"), dict) else {}
+    evidence_payload = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+    evidence: list[str] = []
+    for text in list(llm_review.get("evidence") or []):
+        cleaned = str(text).strip()
+        if cleaned:
+            evidence.append(cleaned)
+    for key in ("previous_text", "next_text"):
+        cleaned = str(evidence_payload.get(key) or "").strip()
+        if cleaned:
+            evidence.append(cleaned)
+    detail = str(llm_review.get("reason") or "").strip() or _MANUAL_EDITOR_SMART_DELETE_REASON_LABELS.get(reason)
+    return ManualEditorSmartDeleteOut(
+        start=round(start, 3),
+        end=round(end, 3),
+        duration_sec=round(end - start, 3),
+        reason=reason,
+        source=source,
+        confidence=confidence,
+        detail=detail or None,
+        evidence=list(dict.fromkeys(evidence))[:4],
+    )
+
+
+def _manual_editor_smart_delete_segments(editorial_analysis: dict[str, Any] | None) -> list[ManualEditorSmartDeleteOut]:
+    accepted_cuts = [
+        item
+        for item in list((editorial_analysis or {}).get("accepted_cuts") or [])
+        if isinstance(item, dict)
+    ]
+    segments = [
+        normalized
+        for item in accepted_cuts
+        if (normalized := _manual_editor_smart_delete_payload(item)) is not None
+    ]
+    segments.sort(key=lambda item: (item.start, item.end))
+    return segments
+
+
 def _manual_editor_final_subtitle_text(item: dict[str, Any]) -> str:
     return clean_final_subtitle_text(
         item.get("text_final")
@@ -1636,9 +1743,12 @@ def _attach_manual_editor_words_to_subtitles(
     subtitles: list[dict[str, Any]],
     words: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    if not subtitles or not words:
+    if not words:
         return subtitles
+    if not subtitles:
+        return _manual_editor_orphan_word_subtitles(subtitles, words)
     annotated: list[dict[str, Any]] = []
+    covered_word_ids: set[int] = set()
     for item in subtitles:
         payload = dict(item)
         try:
@@ -1647,13 +1757,117 @@ def _attach_manual_editor_words_to_subtitles(
         except (TypeError, ValueError):
             annotated.append(payload)
             continue
-        payload["words"] = [
-            word
-            for word in words
-            if min(float(word.get("end", 0.0) or 0.0), end_time) - max(float(word.get("start", 0.0) or 0.0), start_time) > 0.001
-        ]
+        attached_words: list[dict[str, Any]] = []
+        for word in words:
+            if min(float(word.get("end", 0.0) or 0.0), end_time) - max(float(word.get("start", 0.0) or 0.0), start_time) <= 0.001:
+                continue
+            attached_words.append(word)
+            covered_word_ids.add(id(word))
+        payload["words"] = attached_words
         annotated.append(payload)
+    annotated.extend(_manual_editor_orphan_word_subtitles(annotated, [word for word in words if id(word) not in covered_word_ids]))
+    annotated.sort(key=lambda item: (float(item.get("start_time", item.get("start", 0.0)) or 0.0), float(item.get("end_time", item.get("end", 0.0)) or 0.0)))
     return annotated
+
+
+def _manual_editor_orphan_word_subtitles(
+    subtitles: list[dict[str, Any]],
+    words: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Expose transcript words that landed in subtitle gaps so manual cuts are visible."""
+    if not words:
+        return []
+    covered_ranges: list[tuple[float, float]] = []
+    for item in subtitles:
+        try:
+            start_time = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
+            end_time = float(item.get("end_time", item.get("end", start_time)) or start_time)
+        except (TypeError, ValueError):
+            continue
+        if end_time > start_time:
+            covered_ranges.append((start_time, end_time))
+
+    orphan_words: list[dict[str, Any]] = []
+    for word in words:
+        try:
+            start = float(word.get("start", 0.0) or 0.0)
+            end = float(word.get("end", start) or start)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        if any(min(end, range_end) - max(start, range_start) > 0.001 for range_start, range_end in covered_ranges):
+            continue
+        text = str(word.get("word") or word.get("raw_text") or word.get("text") or "").strip()
+        if not text:
+            continue
+        orphan_words.append({**word, "start": start, "end": end, "word": text})
+    if not orphan_words:
+        return []
+
+    groups: list[list[dict[str, Any]]] = []
+    for word in sorted(orphan_words, key=lambda item: (float(item.get("start", 0.0) or 0.0), float(item.get("end", 0.0) or 0.0))):
+        previous_group = groups[-1] if groups else []
+        previous_word = previous_group[-1] if previous_group else None
+        current_text = "".join(str(item.get("word") or "") for item in previous_group)
+        gap = float(word.get("start", 0.0) or 0.0) - float((previous_word or {}).get("end", 0.0) or 0.0)
+        if (
+            not previous_group
+            or gap > 0.55
+            or len(current_text) >= 18
+            or float(word.get("end", 0.0) or 0.0) - float(previous_group[0].get("start", 0.0) or 0.0) > 5.0
+        ):
+            groups.append([word])
+            continue
+        previous_group.append(word)
+
+    next_index = max((int(item.get("index", -1) or -1) for item in subtitles), default=-1) + 1
+    virtual_rows: list[dict[str, Any]] = []
+    for group in groups:
+        text = "".join(str(item.get("word") or "") for item in group).strip()
+        if not text:
+            continue
+        start = float(group[0].get("start", 0.0) or 0.0)
+        end = float(group[-1].get("end", start) or start)
+        if end <= start:
+            continue
+        virtual_rows.append(
+            {
+                "index": next_index,
+                "source_index": next_index,
+                "source_indexes": [next_index],
+                "start_time": round(start, 3),
+                "end_time": round(end, 3),
+                "text_raw": text,
+                "text_norm": text,
+                "text_final": text,
+                "words": group,
+                "virtual": True,
+            }
+        )
+        next_index += 1
+    return virtual_rows
+
+
+async def _load_manual_editor_source_subtitle_dicts(session: AsyncSession, *, job_id: uuid.UUID) -> list[dict[str, Any]]:
+    result = await session.execute(
+        select(SubtitleItem)
+        .where(SubtitleItem.job_id == job_id, SubtitleItem.version == 1)
+        .order_by(SubtitleItem.item_index)
+    )
+    return [
+        {
+            "index": int(item.item_index),
+            "source_index": int(item.item_index),
+            "source_indexes": [int(item.item_index)],
+            "start_time": float(item.start_time),
+            "end_time": float(item.end_time),
+            "text_raw": item.text_raw,
+            "text_norm": item.text_norm,
+            "text_final": item.text_final,
+        }
+        for item in result.scalars().all()
+    ]
 
 
 def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> ManualEditorSubtitleOut:
@@ -2640,6 +2854,9 @@ async def _build_manual_editor_session(
         if isinstance(item, dict)
         if (normalized := _manual_editor_silence_payload(item)) is not None
     ]
+    smart_delete_segments = _manual_editor_smart_delete_segments(
+        editorial_analysis if isinstance(editorial_analysis, dict) else None
+    )
 
     draft_saved_at: str | None = None
     draft_note: str | None = None
@@ -2677,8 +2894,9 @@ async def _build_manual_editor_session(
         draft_saved_at = str(draft_payload.get("saved_at") or "") or None
         draft_note = str(draft_payload.get("note") or "") or None
 
+    raw_source_subtitle_dicts = await _load_manual_editor_source_subtitle_dicts(session, job_id=job.id)
     raw_subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id, drop_empty=False)
-    source_subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts, drop_empty=False, collapse_repeats=False)
+    source_subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_source_subtitle_dicts, drop_empty=False, collapse_repeats=False)
     word_payloads = await _load_manual_editor_word_payloads(session, job_id=job.id)
     source_subtitle_dicts = _attach_manual_editor_words_to_subtitles(source_subtitle_dicts, word_payloads)
     subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts)
@@ -2732,6 +2950,7 @@ async def _build_manual_editor_session(
         keep_segments=keep_segments,
         base_keep_segments=base_keep_segments,
         silence_segments=silence_segments,
+        smart_delete_segments=smart_delete_segments,
         source_subtitles=[
             _manual_editor_subtitle_payload(item, index=index)
             for index, item in enumerate(source_subtitle_dicts)

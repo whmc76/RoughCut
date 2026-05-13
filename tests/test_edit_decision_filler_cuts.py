@@ -128,6 +128,34 @@ def test_trusted_transcript_word_timing_still_protects_speech_from_silence_cut()
     assert not any(cut["reason"] == "silence" for cut in decision.analysis["accepted_cuts"])
 
 
+def test_vad_silence_cut_is_bounded_between_trusted_words() -> None:
+    decision = build_edit_decision(
+        "demo.mp4",
+        duration=12.0,
+        silence_segments=[SilenceSegment(start=8.37, end=9.45)],
+        subtitle_items=[],
+        transcript_segments=[
+            {
+                "index": 0,
+                "start": 4.88,
+                "end": 11.52,
+                "text": "大家看到现在这个镜头里有两把手电",
+                "words": [
+                    {"word": "这个", "start": 7.68, "end": 8.16, "alignment": {"source": "provider"}},
+                    {"word": "镜头", "start": 9.46, "end": 9.76, "alignment": {"source": "provider"}},
+                ],
+            }
+        ],
+        content_profile=None,
+        editing_skill={"silence_floor_sec": 0.8, "silence_score_bias": 0.3},
+    )
+
+    silence_cuts = [cut for cut in decision.analysis["accepted_cuts"] if cut["reason"] == "silence"]
+    assert len(silence_cuts) == 1
+    assert silence_cuts[0]["start"] == 8.37
+    assert silence_cuts[0]["end"] == 9.38
+
+
 def test_micro_keep_bridge_preserves_transcribed_speech() -> None:
     refined = _refine_segments_for_pacing(
         [

@@ -8,6 +8,7 @@ from roughcut.api.jobs import ManualEditorApplyIn
 from roughcut.api.jobs import (
     _apply_manual_subtitle_overrides,
     _annotate_manual_projected_subtitle_sources,
+    _attach_manual_editor_words_to_subtitles,
     _build_editorial_segments_from_keep_segments,
     _build_otio_style_manual_tracks,
     _clean_manual_editor_subtitle_projection,
@@ -20,6 +21,7 @@ from roughcut.api.jobs import (
     _manual_editor_apply_conflict_detail,
     _manual_editor_change_plan,
     _manual_editor_prerequisite_detail,
+    _manual_editor_smart_delete_segments,
     _source_file_cache_get,
     _source_file_cache_set,
     _validate_manual_editor_base_revision,
@@ -191,6 +193,46 @@ def test_manual_editor_subtitle_payload_uses_final_output_cleanup() -> None:
     assert payload.text_final == "好 今天给大家介绍 狐蝠工业"
 
 
+def test_manual_editor_smart_delete_segments_expose_auto_waste_cuts() -> None:
+    segments = _manual_editor_smart_delete_segments(
+        {
+            "accepted_cuts": [
+                {
+                    "start": 1.2345,
+                    "end": 3.5,
+                    "reason": "restart_retake",
+                    "llm_review": {
+                        "verdict": "cut",
+                        "confidence": 0.91,
+                        "reason": "前一句明确说重来，后一句是重录版本。",
+                        "evidence": ["重来提示", "后一句重复表达"],
+                    },
+                    "evidence": {"previous_text": "说错了重来", "next_text": "正式开始"},
+                },
+                {
+                    "start": 4.0,
+                    "end": 5.0,
+                    "reason": "silence",
+                    "llm_review": {"verdict": "keep", "confidence": 0.88},
+                },
+                {
+                    "start": 6.0,
+                    "end": 6.4,
+                    "reason": "silence",
+                    "llm_review": {"verdict": "cut", "confidence": 0.8},
+                },
+            ]
+        }
+    )
+
+    assert len(segments) == 1
+    assert segments[0].start == 1.234
+    assert segments[0].end == 3.5
+    assert segments[0].source == "llm_cut_review"
+    assert segments[0].confidence == 0.91
+    assert segments[0].detail == "前一句明确说重来，后一句是重录版本。"
+
+
 def test_manual_editor_subtitle_payload_accepts_projection_start_end_keys() -> None:
     payload = _manual_editor_subtitle_payload(
         {
@@ -331,6 +373,25 @@ def test_manual_editor_source_projection_can_preserve_repeat_runs_for_review() -
     )
 
     assert [item["index"] for item in cleaned] == [0, 1, 2, 3]
+
+
+def test_manual_editor_source_transcript_adds_orphan_word_rows() -> None:
+    rows = _attach_manual_editor_words_to_subtitles(
+        [
+            {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_final": "前一句"},
+            {"index": 1, "start_time": 3.2, "end_time": 4.0, "text_final": "后一句"},
+        ],
+        [
+            {"word": "然", "start": 1.6, "end": 1.72, "source": "provider"},
+            {"word": "后", "start": 1.72, "end": 1.9, "source": "provider"},
+            {"word": "呢", "start": 1.9, "end": 2.04, "source": "provider"},
+        ],
+    )
+
+    assert [item["text_final"] for item in rows] == ["前一句", "然后呢", "后一句"]
+    assert rows[1]["start_time"] == 1.6
+    assert rows[1]["end_time"] == 2.04
+    assert rows[1]["words"][0]["word"] == "然"
 
 
 def test_manual_editor_subtitle_projection_collapses_asr_repeat_runs() -> None:
