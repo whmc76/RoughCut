@@ -14,7 +14,7 @@ from roughcut.config import get_settings
 from roughcut.media.silence import detect_silence
 
 MANUAL_EDITOR_PREVIEW_ARTIFACT_TYPE = "manual_editor_preview_assets"
-MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 9
+MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 10
 MANUAL_EDITOR_PREVIEW_STATUS_FILENAME = "status.json"
 PREVIEW_AUDIO_TARGET_LUFS = -16.0
 PREVIEW_AUDIO_MIN_GAIN = 0.35
@@ -61,6 +61,7 @@ def ensure_manual_editor_preview_assets(
     asset_dir.mkdir(parents=True, exist_ok=True)
     audio_path = asset_dir / "proxy.wav"
     video_path = asset_dir / "proxy.mp4"
+    webm_path = asset_dir / "proxy.webm"
     peaks_path = asset_dir / "peaks.json"
     manifest_path = manual_editor_asset_manifest_path(job_id, asset_dir=asset_dir)
     source_fingerprint = _source_fingerprint(source_path)
@@ -94,6 +95,7 @@ def ensure_manual_editor_preview_assets(
                 source_fingerprint=source_fingerprint,
             )
             _generate_proxy_video(source_path, video_path)
+            webm_ready = _generate_proxy_webm_best_effort(source_path, webm_path)
             status_payload = _write_asset_status(
                 asset_dir,
                 status="warming",
@@ -130,6 +132,7 @@ def ensure_manual_editor_preview_assets(
                 "version": MANUAL_EDITOR_PREVIEW_ASSET_VERSION,
                 "source_fingerprint": source_fingerprint,
                 "video_filename": video_path.name,
+                "webm_filename": webm_path.name if webm_ready else "",
                 "audio_filename": audio_path.name,
                 "peaks_filename": peaks_path.name,
                 "thumbnail_items": [{"filename": path.name, "time_sec": time_sec} for path, time_sec in thumbnails],
@@ -161,8 +164,10 @@ def ensure_manual_editor_preview_assets(
     return {
         "ready": True,
         "video_ready": True,
+        "video_fallback_ready": webm_path.exists(),
         "audio_ready": True,
         "video_path": str(video_path),
+        "video_fallback_path": str(webm_path),
         "audio_path": str(audio_path),
         "duration_sec": round(float(peaks_payload.get("duration_sec") or duration_sec or 0.0), 3),
         "sample_rate": int(peaks_payload.get("sample_rate") or 16000),
@@ -195,6 +200,7 @@ def load_manual_editor_preview_assets(
     asset_dir = _resolve_manual_editor_asset_dir(job_id, asset_dir=asset_dir)
     audio_path = asset_dir / "proxy.wav"
     video_path = asset_dir / "proxy.mp4"
+    webm_path = asset_dir / "proxy.webm"
     peaks_path = asset_dir / "peaks.json"
     manifest_path = manual_editor_asset_manifest_path(job_id, asset_dir=asset_dir)
     manifest = _read_json(manifest_path)
@@ -221,13 +227,16 @@ def load_manual_editor_preview_assets(
         and status_payload.get("source_fingerprint") == source_fingerprint
     )
     video_ready = bool(video_path.exists() and (manifest_matches_source or status_matches_source))
+    video_fallback_ready = bool(webm_path.exists() and (manifest_matches_source or status_matches_source))
     audio_ready = bool(audio_path.exists() and peaks_path.exists() and (manifest_matches_source or status_matches_source))
     if not ready:
         return {
             "ready": False,
             "video_ready": video_ready,
+            "video_fallback_ready": video_fallback_ready,
             "audio_ready": audio_ready,
             "video_path": str(video_path),
+            "video_fallback_path": str(webm_path),
             "audio_path": str(audio_path),
             "duration_sec": round(float(duration_sec or 0.0), 3),
             "sample_rate": 16000,
@@ -251,8 +260,10 @@ def load_manual_editor_preview_assets(
     return {
         "ready": True,
         "video_ready": True,
+        "video_fallback_ready": webm_path.exists(),
         "audio_ready": True,
         "video_path": str(video_path),
+        "video_fallback_path": str(webm_path),
         "audio_path": str(audio_path),
         "duration_sec": round(float(peaks_payload.get("duration_sec") or duration_sec or 0.0), 3),
         "sample_rate": int(peaks_payload.get("sample_rate") or 16000),
@@ -363,6 +374,62 @@ def _generate_proxy_video(source_path: Path, video_path: Path) -> None:
     )
     if result.returncode != 0:
         raise RuntimeError(f"manual editor proxy video failed: {result.stderr[-1000:]}")
+
+
+def _generate_proxy_webm_best_effort(source_path: Path, webm_path: Path) -> bool:
+    try:
+        _generate_proxy_webm(source_path, webm_path)
+        return webm_path.exists()
+    except Exception:
+        return False
+
+
+def _generate_proxy_webm(source_path: Path, webm_path: Path) -> None:
+    settings = get_settings()
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a?",
+        "-vf",
+        "scale=960:960:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+        "-c:v",
+        "libvpx",
+        "-deadline",
+        "realtime",
+        "-cpu-used",
+        "5",
+        "-quality",
+        "realtime",
+        "-b:v",
+        "900k",
+        "-maxrate",
+        "1200k",
+        "-bufsize",
+        "2400k",
+        "-c:a",
+        "libopus",
+        "-b:a",
+        "96k",
+        "-max_muxing_queue_size",
+        "1024",
+        str(webm_path),
+    ]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=max(60, min(int(getattr(settings, "ffmpeg_timeout_sec", 600) or 600), 1800)),
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"manual editor proxy webm failed: {result.stderr[-1000:]}")
 
 
 def _generate_waveform_peaks(audio_path: Path, *, duration_sec: float, target_points: int | None = None) -> dict[str, Any]:

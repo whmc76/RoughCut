@@ -414,6 +414,11 @@ class ManualEditorThumbnailOut(BaseModel):
     time_sec: float
 
 
+class ManualEditorPreviewVideoSourceOut(BaseModel):
+    url: str
+    type: str | None = None
+
+
 class ManualEditorPreviewAssetsOut(BaseModel):
     job_id: str
     ready: bool = True
@@ -425,6 +430,7 @@ class ManualEditorPreviewAssetsOut(BaseModel):
     stage: str | None = None
     progress: float | None = None
     video_url: str | None = None
+    video_sources: list[ManualEditorPreviewVideoSourceOut] = Field(default_factory=list)
     audio_url: str | None = None
     duration_sec: float = 0.0
     sample_rate: int = 16000
@@ -2536,6 +2542,8 @@ def _media_type_for_path(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix == ".mp4":
         return "video/mp4"
+    if suffix == ".webm":
+        return "video/webm"
     if suffix == ".wav":
         return "audio/wav"
     if suffix in {".jpg", ".jpeg"}:
@@ -2626,7 +2634,24 @@ def _manual_editor_preview_assets_response(
         if (normalized := _manual_editor_silence_payload(item)) is not None
     ]
     video_path = Path(str(payload.get("video_path") or ""))
+    video_fallback_path = Path(str(payload.get("video_fallback_path") or ""))
     audio_path = Path(str(payload.get("audio_path") or ""))
+    video_url = f"/api/v1/jobs/{job_id}/manual-editor/assets/{video_path.name}" if video_ready and video_path.name else None
+    video_sources = []
+    if video_url:
+        video_sources.append(
+            ManualEditorPreviewVideoSourceOut(
+                url=video_url,
+                type='video/mp4; codecs="avc1.42E01F, mp4a.40.2"',
+            )
+        )
+    if payload.get("video_fallback_ready") and video_fallback_path.name:
+        video_sources.append(
+            ManualEditorPreviewVideoSourceOut(
+                url=f"/api/v1/jobs/{job_id}/manual-editor/assets/{video_fallback_path.name}",
+                type='video/webm; codecs="vp8, opus"',
+            )
+        )
     return ManualEditorPreviewAssetsOut(
         job_id=str(job_id),
         ready=is_ready,
@@ -2637,7 +2662,8 @@ def _manual_editor_preview_assets_response(
         status=str(payload.get("status") or ("ready" if is_ready else "missing")),
         stage=str(payload.get("stage") or ("ready" if is_ready else "not_started")),
         progress=float(payload.get("progress")) if payload.get("progress") is not None else (1.0 if is_ready else 0.0),
-        video_url=f"/api/v1/jobs/{job_id}/manual-editor/assets/{video_path.name}" if video_ready and video_path.name else None,
+        video_url=video_url,
+        video_sources=video_sources,
         audio_url=f"/api/v1/jobs/{job_id}/manual-editor/assets/{audio_path.name}" if audio_ready and audio_path.name else None,
         duration_sec=float(payload.get("duration_sec") or 0.0),
         sample_rate=int(payload.get("sample_rate") or 16000),

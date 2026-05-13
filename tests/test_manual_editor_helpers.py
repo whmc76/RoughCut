@@ -33,7 +33,7 @@ from roughcut.api.jobs import (
 )
 from roughcut.edit.otio_export import export_to_otio
 from roughcut.media import manual_editor_assets as manual_editor_assets_module
-from roughcut.media.manual_editor_assets import _fallback_asset_status, _generate_proxy_video, _peak_from_pcm, _recommended_preview_gain, _silence_intervals_from_peaks, _thumbnail_timestamps, manual_editor_asset_dir
+from roughcut.media.manual_editor_assets import _fallback_asset_status, _generate_proxy_video, _generate_proxy_webm, _peak_from_pcm, _recommended_preview_gain, _silence_intervals_from_peaks, _thumbnail_timestamps, manual_editor_asset_dir
 from roughcut.pipeline.orchestrator import _artifact_types_for_quality_rerun
 from roughcut.pipeline.steps import (
     _manual_editor_subtitle_items_from_editorial,
@@ -757,8 +757,10 @@ def test_manual_editor_preview_asset_response_exposes_partial_video_proxy() -> N
         {
             "ready": False,
             "video_ready": True,
+            "video_fallback_ready": True,
             "audio_ready": False,
             "video_path": r"C:\roughcut\jobs\job\manual-editor\proxy.mp4",
+            "video_fallback_path": r"C:\roughcut\jobs\job\manual-editor\proxy.webm",
             "audio_path": r"C:\roughcut\jobs\job\manual-editor\proxy.wav",
             "status": "warming",
             "stage": "proxy_audio",
@@ -773,6 +775,12 @@ def test_manual_editor_preview_asset_response_exposes_partial_video_proxy() -> N
     assert response.audio_ready is False
     assert response.warming is True
     assert response.video_url == f"/api/v1/jobs/{job_id}/manual-editor/assets/proxy.mp4"
+    assert [source.url for source in response.video_sources] == [
+        f"/api/v1/jobs/{job_id}/manual-editor/assets/proxy.mp4",
+        f"/api/v1/jobs/{job_id}/manual-editor/assets/proxy.webm",
+    ]
+    assert response.video_sources[0].type == 'video/mp4; codecs="avc1.42E01F, mp4a.40.2"'
+    assert response.video_sources[1].type == 'video/webm; codecs="vp8, opus"'
     assert response.audio_url is None
 
 
@@ -808,6 +816,14 @@ def test_manual_editor_preview_files_are_served_inline(tmp_path) -> None:
     assert response.media_type == "video/mp4"
     assert response.headers["content-disposition"].startswith("inline;")
 
+    webm_path = tmp_path / "proxy.webm"
+    webm_path.write_bytes(b"not-a-real-webm")
+
+    webm_response = _inline_file_response(webm_path)
+
+    assert webm_response.media_type == "video/webm"
+    assert webm_response.headers["content-disposition"].startswith("inline;")
+
 
 def test_manual_editor_proxy_video_uses_browser_compatible_h264(monkeypatch, tmp_path) -> None:
     captured: dict[str, list[str]] = {}
@@ -824,6 +840,23 @@ def test_manual_editor_proxy_video_uses_browser_compatible_h264(monkeypatch, tmp
     assert cmd[cmd.index("-c:v") + 1] == "libx264"
     assert cmd[cmd.index("-profile:v") + 1] == "baseline"
     assert cmd[cmd.index("-level:v") + 1] == "3.1"
+    assert "format=yuv420p" in cmd[cmd.index("-vf") + 1]
+
+
+def test_manual_editor_proxy_webm_uses_open_browser_codec_fallback(monkeypatch, tmp_path) -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(manual_editor_assets_module.subprocess, "run", fake_run)
+
+    _generate_proxy_webm(tmp_path / "source.mp4", tmp_path / "proxy.webm")
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("-c:v") + 1] == "libvpx"
+    assert cmd[cmd.index("-c:a") + 1] == "libopus"
     assert "format=yuv420p" in cmd[cmd.index("-vf") + 1]
 
 

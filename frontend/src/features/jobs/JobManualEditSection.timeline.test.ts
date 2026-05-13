@@ -4,6 +4,7 @@ import {
   applySmartCutRuleRangesToSegments,
   autoSmartCutRuleRanges,
   buildManualEditChangeList,
+  buildSourceTranscriptProjectedBaseline,
   buildSmartCutRuleAnalysis,
   buildTranscriptTokens,
   buildVisibleSubtitleRows,
@@ -272,6 +273,30 @@ describe("manual editor timeline mapping", () => {
     );
 
     expect(transcript.map((item) => item.text_final)).toEqual(["嗯", "我们开始"]);
+  });
+
+  it("builds the full-text transcript from a stable projected baseline", () => {
+    const session = {
+      source_subtitles: [
+        { index: 10, start_time: 10, end_time: 12, text_raw: "源字幕原文", text_final: "源字幕原文" },
+      ],
+      projected_subtitles: [
+        { index: 88, source_index: 10, start_time: 0, end_time: 2, text_final: "稳定投影全文" },
+      ],
+    };
+    const currentOutputProjection = [
+      { index: 88, source_index: 10, start_time: 0, end_time: 2, text_final: "稳定投影" },
+    ];
+
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      session,
+      buildSourceTranscriptProjectedBaseline(session, {}),
+      {},
+    );
+    const unstableTranscript = buildSourceTranscriptSubtitlesForTimeline(session, currentOutputProjection, {});
+
+    expect(transcript[0].text_final).toBe("稳定投影全文");
+    expect(unstableTranscript[0].text_final).toBe("稳定投影");
   });
 
   it("uses raw source text for filler rule analysis and auto ranges", () => {

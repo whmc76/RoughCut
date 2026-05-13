@@ -259,6 +259,11 @@ export type JobManualEditApplyPayload = {
   note?: string;
 };
 
+export type JobManualEditVideoSource = {
+  url: string;
+  type?: string | null;
+};
+
 export type JobManualEditPreviewAssets = {
   job_id: string;
   ready: boolean;
@@ -270,6 +275,7 @@ export type JobManualEditPreviewAssets = {
   stage?: string | null;
   progress?: number | null;
   video_url?: string | null;
+  video_sources?: JobManualEditVideoSource[];
   audio_url?: string | null;
   duration_sec: number;
   sample_rate: number;

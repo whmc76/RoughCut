@@ -547,6 +547,31 @@ function previewAssetStatusLabel(previewAssets: JobManualEditPreviewAssets) {
   return "预览资产待生成";
 }
 
+function normalizePreviewVideoSources(previewAssets: JobManualEditPreviewAssets | undefined, sourceUrl: string | null | undefined) {
+  const proxySources = (previewAssets?.video_sources || [])
+    .map((source) => ({ url: String(source.url || "").trim(), type: source.type || undefined }))
+    .filter((source) => source.url);
+  if (proxySources.length) {
+    return [...proxySources].sort((left, right) => {
+      const leftWebm = left.type?.includes("webm") || left.url.endsWith(".webm");
+      const rightWebm = right.type?.includes("webm") || right.url.endsWith(".webm");
+      return Number(rightWebm) - Number(leftWebm);
+    });
+  }
+  if (previewAssets?.video_url) {
+    const sources = [];
+    if (previewAssets.video_url.endsWith("/proxy.mp4")) {
+      sources.push({
+        url: previewAssets.video_url.replace(/\/proxy\.mp4$/, "/proxy.webm"),
+        type: 'video/webm; codecs="vp8, opus"',
+      });
+    }
+    sources.push({ url: previewAssets.video_url, type: 'video/mp4; codecs="avc1.42E01F, mp4a.40.2"' });
+    return sources;
+  }
+  return sourceUrl ? [{ url: sourceUrl, type: undefined }] : [];
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
@@ -1782,6 +1807,13 @@ export function buildSourceTranscriptSubtitlesForTimeline(
   });
 }
 
+export function buildSourceTranscriptProjectedBaseline(
+  session: Pick<JobManualEditSession, "projected_subtitles">,
+  subtitleDrafts: Record<number, SubtitleDraft>,
+) {
+  return applySubtitleDrafts(sortedSubtitles(session.projected_subtitles), subtitleDrafts);
+}
+
 function projectedSubtitlesForTranscript(subtitles: JobManualEditSubtitle[], ranges: OutputRange[]) {
   if (!subtitles.length || !ranges.length) return [];
   return sortedSubtitles(subtitles).flatMap((subtitle) => {
@@ -2486,6 +2518,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const syncingRegionsRef = useRef(false);
   const timelinePlaybackRef = useRef(false);
   const previewClockFrameRef = useRef<number | null>(null);
+  const pendingPreviewSeekRef = useRef<number | null>(null);
   const lastSyncedPreviewSourceTimeRef = useRef(-1);
   const floatingPreviewDragRef = useRef<{
     pointerId: number;
@@ -2509,6 +2542,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [currentSourceTime, setCurrentSourceTime] = useState(0);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
   const [previewPlaybackMode, setPreviewPlaybackMode] = useState<PreviewPlaybackMode>(null);
+  const [preferredPreviewPlaybackMode, setPreferredPreviewPlaybackMode] = useState<Exclude<PreviewPlaybackMode, null>>("source");
   const [previewVideoLoadError, setPreviewVideoLoadError] = useState<string | null>(null);
   const [previewVideoLoading, setPreviewVideoLoading] = useState(false);
   const [previewVideoLoadingLabel, setPreviewVideoLoadingLabel] = useState("正在载入视频");
@@ -2637,6 +2671,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setVideoSummary(session.video_summary || "");
     setCurrentSourceTime(0);
     setPreviewPlaybackMode(null);
+    setPreferredPreviewPlaybackMode("source");
+    pendingPreviewSeekRef.current = null;
     setWaveformReady(false);
     setWaveformError(null);
     setTermReviewFilter("");
@@ -2698,8 +2734,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     [baseProjection, subtitleDrafts],
   );
   const sourceTranscriptSubtitles = useMemo(() => {
-    return buildSourceTranscriptSubtitlesForTimeline(session, projection.remapped, subtitleDrafts);
-  }, [projection.remapped, session.source_subtitles, session.projected_subtitles, subtitleDrafts]);
+    const projectedBaseline = buildSourceTranscriptProjectedBaseline(session, subtitleDrafts);
+    return buildSourceTranscriptSubtitlesForTimeline(session, projectedBaseline, subtitleDrafts);
+  }, [session.source_subtitles, session.projected_subtitles, subtitleDrafts]);
   const sourceSilenceRanges = useMemo(() => {
     const audioSilences = previewAssets?.silence_intervals?.length
       ? previewAssets.silence_intervals
@@ -2802,8 +2839,13 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const currentVideoRotation = currentVideoTransform.rotation_cw;
   const hasVideoTransformEdits = JSON.stringify(currentVideoTransform) !== JSON.stringify(baseVideoTransform);
   const hasVideoSummaryEdits = currentVideoSummary !== baseVideoSummary;
-  const previewVideoUrl = previewAssets?.video_url ? previewAssets.video_url : session.source_url;
-  const previewVideoUsingProxy = Boolean(previewAssets?.video_url);
+  const previewVideoSources = useMemo(
+    () => normalizePreviewVideoSources(previewAssets, session.source_url),
+    [previewAssets, session.source_url],
+  );
+  const previewVideoUrl = previewVideoSources[0]?.url ?? null;
+  const previewVideoSourceKey = previewVideoSources.map((source) => `${source.url}:${source.type || ""}`).join("|") || "manual-preview";
+  const previewVideoUsingProxy = Boolean(previewAssets?.video_url || previewAssets?.video_sources?.length);
   const waveformUrl = previewAssets?.ready && previewAssets.audio_url ? previewAssets.audio_url : "";
   const waveformPeaks = useMemo(
     () => (previewAssets?.peaks?.length ? [previewAssets.peaks] : undefined),
@@ -3304,10 +3346,20 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
   const seekPreviewToSourceTime = (video: HTMLVideoElement, sourceTime: number) => {
     const nextSourceTime = clamp(sourceTime, 0, session.source_duration_sec || sourceTime);
+    pendingPreviewSeekRef.current = nextSourceTime;
     const alreadyThere = Math.abs(Number(video.currentTime || 0) - nextSourceTime) <= 0.015;
     waveSurferRef.current?.setTime(nextSourceTime);
     setPreviewSourceTime(nextSourceTime, true);
+    if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
+      try {
+        video.load();
+      } catch {
+        // Some browsers reject load() while source selection is already in progress.
+      }
+      return Promise.resolve();
+    }
     if (alreadyThere && !video.seeking) {
+      pendingPreviewSeekRef.current = null;
       return Promise.resolve();
     }
     return new Promise<void>((resolve) => {
@@ -3318,6 +3370,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         window.clearTimeout(timeoutId);
         video.removeEventListener("seeked", finish);
         setPreviewSourceTime(nextSourceTime, true);
+        if (Math.abs((pendingPreviewSeekRef.current ?? nextSourceTime) - nextSourceTime) <= 0.015) {
+          pendingPreviewSeekRef.current = null;
+        }
         resolve();
       };
       const timeoutId = window.setTimeout(finish, 750);
@@ -3333,19 +3388,28 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   };
 
   const jumpToOutputTime = (outputTime: number) => {
+    setPreferredPreviewPlaybackMode("output");
     const video = videoRef.current;
-    if (!video || !projection.ranges.length) return;
+    if (!projection.ranges.length) return;
     const sourceTime = outputTimeToSourceTime(outputTime, projection.ranges);
-    void seekPreviewToSourceTime(video, sourceTime);
+    if (video) {
+      void seekPreviewToSourceTime(video, sourceTime);
+      return;
+    }
+    pendingPreviewSeekRef.current = sourceTime;
+    waveSurferRef.current?.setTime(sourceTime);
+    setPreviewSourceTime(sourceTime, true);
   };
 
   const jumpToSourceTime = (sourceTime: number) => {
+    setPreferredPreviewPlaybackMode("source");
     const nextSourceTime = clamp(sourceTime, 0, session.source_duration_sec || sourceTime);
     const video = videoRef.current;
     if (video) {
       void seekPreviewToSourceTime(video, nextSourceTime);
       return;
     }
+    pendingPreviewSeekRef.current = nextSourceTime;
     waveSurferRef.current?.setTime(nextSourceTime);
     setPreviewSourceTime(nextSourceTime, true);
   };
@@ -3402,6 +3466,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     const video = videoRef.current;
     if (!video) return;
     timelinePlaybackRef.current = false;
+    setPreferredPreviewPlaybackMode("source");
     setPreviewPlaybackMode("source");
     applyPreviewAudioSettings(previewVolume, previewMuted, previewAutoVolumeEnabled, true);
     await video.play();
@@ -3412,6 +3477,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     const video = videoRef.current;
     if (!video || !projection.ranges.length) return;
     timelinePlaybackRef.current = true;
+    setPreferredPreviewPlaybackMode("output");
     setPreviewPlaybackMode("output");
     const currentRange = projection.ranges.find((range) => currentSourceTime >= range.sourceStart && currentSourceTime <= range.sourceEnd);
     const shouldRestart = !currentRange || currentOutputTime >= Math.max(0, totalOutputDuration - 0.08);
@@ -3445,6 +3511,18 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       return;
     }
     void playEditedTimeline();
+  };
+
+  const togglePreferredPreviewPlayback = () => {
+    if (isPreviewPlaying) {
+      pauseEditedTimeline();
+      return;
+    }
+    if (preferredPreviewPlaybackMode === "output") {
+      void playEditedTimeline();
+      return;
+    }
+    void playSourceTimeline();
   };
 
   const fallbackPreviewElementVolume = (video: HTMLVideoElement, volume: number, muted: boolean, autoVolumeEnabled: boolean) => {
@@ -3525,6 +3603,23 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   useEffect(() => {
     applyPreviewAudioSettings(previewVolume, previewMuted, previewAutoVolumeEnabled, false);
   }, [previewAutoVolumeEnabled, previewAutoVolumeGain, previewMuted, previewVolume]);
+
+  useEffect(() => {
+    try {
+      previewGainRef.current?.disconnect();
+      previewCompressorRef.current?.disconnect();
+      previewAudioSourceRef.current?.disconnect();
+    } catch {
+      // Ignore browser-specific Web Audio teardown errors.
+    }
+    if (previewAudioContextRef.current?.state !== "closed") {
+      void previewAudioContextRef.current?.close();
+    }
+    previewAudioContextRef.current = null;
+    previewAudioSourceRef.current = null;
+    previewGainRef.current = null;
+    previewCompressorRef.current = null;
+  }, [previewVideoSourceKey]);
 
   useEffect(() => () => {
     stopPreviewClock();
@@ -3667,13 +3762,23 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     if (video.videoWidth > 0 && video.videoHeight > 0) {
       setSourceVideoSize({ width: video.videoWidth, height: video.videoHeight });
     }
+    const pendingSeek = pendingPreviewSeekRef.current;
+    if (pendingSeek != null) {
+      void seekPreviewToSourceTime(video, pendingSeek);
+    }
   };
 
   const handlePreviewVideoError = (event: SyntheticEvent<HTMLVideoElement>) => {
-    const code = event.currentTarget.error?.code;
+    const video = event.currentTarget;
+    if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && video.currentSrc) {
+      setPreviewVideoLoadError(null);
+      setPreviewVideoLoading(false);
+      return;
+    }
+    const code = video.error?.code;
     const message = code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
       ? previewVideoUsingProxy
-        ? "浏览器无法解码当前视频代理，请重新生成预览资产或检查 ffmpeg。"
+        ? "浏览器无法解码当前视频代理，请重新生成预览资产或检查 ffmpeg 编码支持。"
         : "浏览器无法解码当前原片，等待视频代理生成后会自动切换。"
       : code === MediaError.MEDIA_ERR_NETWORK
         ? "预览视频加载中断，请刷新后重试。"
@@ -4323,7 +4428,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
       if (event.code === "Space") {
         event.preventDefault();
-        toggleSourceTimelinePlayback();
+        togglePreferredPreviewPlayback();
         return;
       }
 
@@ -4400,7 +4505,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       resizeObserver?.disconnect();
       window.removeEventListener("resize", updatePreviewFrameHeight);
     };
-  }, [currentVideoRotation, currentVideoTransform.aspect_ratio, previewDisabled, previewVideoUrl, sourceVideoSize]);
+  }, [currentVideoRotation, currentVideoTransform.aspect_ratio, previewDisabled, previewVideoSourceKey, sourceVideoSize]);
 
   useEffect(() => {
     const updateFloatingState = () => {
@@ -4434,19 +4539,19 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       window.removeEventListener("scroll", updateFloatingState);
       window.removeEventListener("resize", updateFloatingState);
     };
-  }, [previewDisabled, previewVideoUrl, session.job_id]);
+  }, [previewDisabled, previewVideoSourceKey, session.job_id]);
 
   useEffect(() => {
     setFloatingPreviewPosition(null);
     floatingPreviewDragRef.current = null;
-  }, [session.job_id, previewVideoUrl]);
+  }, [session.job_id, previewVideoSourceKey]);
 
   useEffect(() => {
     setPreviewVideoLoadError(null);
     setPreviewVideoLoadProgress(null);
     setPreviewVideoLoading(Boolean(previewVideoUrl));
     setPreviewVideoLoadingLabel("正在载入视频");
-  }, [previewVideoUrl]);
+  }, [previewVideoSourceKey, previewVideoUrl]);
 
   const buildRotatedPreviewStyle = (rotationValue: number) => {
     const rotation = normalizeRotationValue(rotationValue);
@@ -4648,7 +4753,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
             <div className="manual-editor-rotation-preview" style={rotationDialogPreviewStyle}>
               <div className="manual-editor-video-stage">
-                <video src={previewVideoUrl ?? undefined} muted playsInline preload="metadata" onLoadedMetadata={rememberVideoMetadata} />
+                <video key={previewVideoSourceKey} muted playsInline preload="metadata" onLoadedMetadata={rememberVideoMetadata}>
+                  {previewVideoSources.map((source) => (
+                    <source key={`${source.url}:${source.type || ""}`} src={source.url} type={source.type} />
+                  ))}
+                </video>
               </div>
             </div>
 
@@ -4857,13 +4966,13 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                   >
                     <div className="manual-editor-video-stage">
                       <video
-                        key={previewVideoUrl ?? "manual-preview"}
+                        key={previewVideoSourceKey}
                         ref={videoRef}
                         className="manual-editor-video"
-                        src={previewVideoUrl ?? undefined}
                         preload="metadata"
                         playsInline
                         onLoadStart={() => {
+                          setPreviewVideoLoadError(null);
                           setPreviewVideoLoading(true);
                           setPreviewVideoLoadingLabel("正在载入视频");
                           setPreviewVideoLoadProgress(null);
@@ -4871,15 +4980,22 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                         onLoadedMetadata={(event) => {
                           rememberVideoMetadata(event);
                           fallbackPreviewElementVolume(event.currentTarget, previewVolume, previewMuted, previewAutoVolumeEnabled);
+                          applyPreviewAudioSettings(previewVolume, previewMuted, previewAutoVolumeEnabled, false);
                         }}
                         onLoadedData={(event) => {
+                          setPreviewVideoLoadError(null);
                           updatePreviewVideoLoadProgress(event.currentTarget);
                           setPreviewVideoLoading(false);
                         }}
                         onProgress={(event) => updatePreviewVideoLoadProgress(event.currentTarget)}
                         onCanPlay={(event) => {
+                          setPreviewVideoLoadError(null);
                           updatePreviewVideoLoadProgress(event.currentTarget);
                           setPreviewVideoLoading(false);
+                          const pendingSeek = pendingPreviewSeekRef.current;
+                          if (pendingSeek != null) {
+                            void seekPreviewToSourceTime(event.currentTarget, pendingSeek);
+                          }
                         }}
                         onWaiting={(event) => {
                           updatePreviewVideoLoadProgress(event.currentTarget);
@@ -4887,6 +5003,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                           setPreviewVideoLoadingLabel("正在缓冲视频");
                         }}
                         onPlaying={(event) => {
+                          setPreviewVideoLoadError(null);
                           updatePreviewVideoLoadProgress(event.currentTarget);
                           setPreviewVideoLoading(false);
                           setIsPreviewPlaying(true);
@@ -4915,7 +5032,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                           setPreviewPlaybackMode(null);
                           stopPreviewClock();
                         }}
-                      />
+                      >
+                        {previewVideoSources.map((source) => (
+                          <source key={`${source.url}:${source.type || ""}`} src={source.url} type={source.type} />
+                        ))}
+                      </video>
                       {previewSubtitleText ? (
                         <div className="manual-editor-video-subtitle" aria-live="polite">
                           {previewSubtitleText}
@@ -4967,10 +5088,10 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                         type="button"
                         className="manual-editor-preview-play"
                         disabled={previewDisabled}
-                        onClick={toggleSourceTimelinePlayback}
-                        aria-label={isPreviewPlaying ? "暂停源片预览" : "播放源片预览"}
+                        onClick={togglePreferredPreviewPlayback}
+                        aria-label={isPreviewPlaying ? "暂停预览" : preferredPreviewPlaybackMode === "output" ? "播放输出预览" : "播放源片预览"}
                       >
-                        {isPreviewPlaying ? "暂停" : "源片"}
+                        {isPreviewPlaying ? "暂停" : "播放"}
                       </button>
                       <div className="manual-editor-preview-volume" onPointerDown={(event) => event.stopPropagation()}>
                         <button
@@ -5408,7 +5529,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                 <span>{previewAssetStageLabel(previewAssets.stage)}</span>
                 <span>{previewAssetProgressPercent != null ? `${previewAssetProgressPercent}%` : previewAssets.ready ? "100%" : "0%"}</span>
                 <span>{previewAssets.ready ? `${previewAssets.peak_count} peaks` : previewAssets.video_url ? "使用视频代理预览" : "等待视频代理"}</span>
-                {previewAssets.video_url ? <span>浏览器兼容视频代理</span> : null}
+                {previewAssets.video_url ? <span>{(previewAssets.video_sources?.length || 0) > 1 ? "多编码视频代理" : "浏览器兼容视频代理"}</span> : null}
                 {previewAssets.ready ? <span>{previewMeasuredLufs.toFixed(1)} LUFS 至 {previewTargetLufs.toFixed(0)} LUFS</span> : null}
                 {previewAssets.ready ? <span>增益 {previewAutoVolumeGain.toFixed(2)}x</span> : null}
                 {previewAssets.asset_version ? <span>v{previewAssets.asset_version}</span> : null}
