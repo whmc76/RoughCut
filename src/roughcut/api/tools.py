@@ -4,6 +4,8 @@ import asyncio
 import base64
 from datetime import datetime, timezone
 import hashlib
+import json
+import re
 import shutil
 import subprocess
 import uuid
@@ -62,6 +64,38 @@ _TTS_TEXT_UI_HINTS: tuple[str, ...] = (
     "需要 prompt_wav/reference_audio；prompt_text 和 instruct_text 不参与该模式。",
     "需要填写 /query_tts_model 返回的 spk_id；如果模型没有内置音色列表，此模式不可用。",
 )
+_TTS_TEXT_KEYS: tuple[str, ...] = (
+    "tts_text",
+    "ttsText",
+    "spoken_text",
+    "spokenText",
+    "voiceover_text",
+    "voiceoverText",
+    "narration_text",
+    "narrationText",
+    "script",
+    "rewritten_text",
+    "rewrittenText",
+    "text",
+)
+_TTS_SEGMENT_KEYS: tuple[str, ...] = (
+    "voiceover_segments",
+    "voiceoverSegments",
+    "segments",
+    "items",
+)
+_TTS_TEXT_LABEL_RE = re.compile(
+    r"(?im)^\s*(?:[\"']?(?:tts_text|ttsText|spoken_text|voiceover_text|narration_text)[\"']?|朗读正文|配音正文|口播正文)\s*[:：=]\s*(?P<value>.+?)\s*$"
+)
+_STRUCTURED_TTS_PROMPT_MARKERS: tuple[str, ...] = (
+    "voiceover_segments",
+    "opening_hook",
+    "rewrite_strategy",
+    "target_duration_sec",
+    "suggested_start_time",
+    "输出 JSON",
+    "结构化",
+)
 
 @router.get("/status")
 async def tools_status() -> dict[str, Any]:
@@ -100,7 +134,10 @@ async def run_tts(
     reference_audio: UploadFile | None = File(default=None),
     prompt_wav: UploadFile | None = File(default=None),
 ) -> dict[str, Any]:
-    normalized_text = _strip_tts_text_ui_hints(tts_text or text)
+    try:
+        normalized_text = _resolve_tts_spoken_text(tts_text or text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not normalized_text:
         raise HTTPException(status_code=400, detail="text is required")
 
@@ -337,10 +374,116 @@ def _strip_cosyvoice_prompt_boundary(value: str | None) -> str:
 
 
 def _strip_tts_text_ui_hints(value: str | None) -> str:
+    return _collapse_tts_text(_remove_tts_text_ui_hints(value))
+
+
+def _remove_tts_text_ui_hints(value: str | None) -> str:
     cleaned = str(value or "").strip()
     for hint in _TTS_TEXT_UI_HINTS:
         cleaned = cleaned.replace(hint, "").strip()
-    return " ".join(cleaned.split())
+    return cleaned
+
+
+def _collapse_tts_text(value: str | None) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def _resolve_tts_spoken_text(value: str | None) -> str:
+    cleaned = _remove_tts_text_ui_hints(value)
+    structured_text = _extract_structured_tts_text(cleaned)
+    if structured_text:
+        return _collapse_tts_text(structured_text)
+    if _looks_like_structured_tts_prompt(cleaned):
+        raise ValueError("结构化提示词里没有找到可朗读的 tts_text；请把实际要说出口的正文放到 tts_text")
+    return _collapse_tts_text(cleaned)
+
+
+def _extract_structured_tts_text(value: str | None) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    payload = _parse_structured_tts_payload(raw)
+    candidate = _extract_tts_text_candidate(payload)
+    if candidate:
+        return candidate
+    label_match = _TTS_TEXT_LABEL_RE.search(raw)
+    if label_match:
+        return _strip_wrapping_quotes(label_match.group("value"))
+    return ""
+
+
+def _parse_structured_tts_payload(value: str) -> Any:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    fence_match = re.fullmatch(r"```(?:json|JSON)?\s*(.*?)\s*```", raw, flags=re.DOTALL)
+    if fence_match:
+        raw = fence_match.group(1).strip()
+    candidates = [raw]
+    object_start = raw.find("{")
+    object_end = raw.rfind("}")
+    if 0 <= object_start < object_end:
+        candidates.append(raw[object_start:object_end + 1])
+    list_start = raw.find("[")
+    list_end = raw.rfind("]")
+    if 0 <= list_start < list_end:
+        candidates.append(raw[list_start:list_end + 1])
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except (TypeError, json.JSONDecodeError):
+            continue
+    return None
+
+
+def _extract_tts_text_candidate(payload: Any) -> str:
+    if isinstance(payload, str):
+        return payload.strip()
+    if isinstance(payload, list):
+        parts = [_extract_tts_text_candidate(item) for item in payload]
+        return "\n".join(part for part in parts if part)
+    if not isinstance(payload, dict):
+        return ""
+    for key in _TTS_TEXT_KEYS:
+        candidate = _string_tts_candidate(payload.get(key))
+        if candidate:
+            return candidate
+    for key in _TTS_SEGMENT_KEYS:
+        candidate = _extract_tts_text_candidate(payload.get(key))
+        if candidate:
+            return candidate
+    for key in ("dubbing_request", "result", "payload", "data"):
+        candidate = _extract_tts_text_candidate(payload.get(key))
+        if candidate:
+            return candidate
+    return ""
+
+
+def _string_tts_candidate(value: Any) -> str:
+    if isinstance(value, str):
+        return _strip_wrapping_quotes(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, list):
+        parts = [_string_tts_candidate(item) for item in value]
+        return "\n".join(part for part in parts if part)
+    return ""
+
+
+def _strip_wrapping_quotes(value: str) -> str:
+    cleaned = str(value or "").strip().rstrip(",")
+    if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in {"'", '"'}:
+        return cleaned[1:-1].strip()
+    return cleaned
+
+
+def _looks_like_structured_tts_prompt(value: str | None) -> bool:
+    raw = str(value or "").strip()
+    if not raw:
+        return False
+    if raw.startswith(("```", "{", "[")):
+        return True
+    return any(marker in raw for marker in _STRUCTURED_TTS_PROMPT_MARKERS)
 
 
 def _ensure_cosyvoice_prompt_boundary(value: str) -> str:
