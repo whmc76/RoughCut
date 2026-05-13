@@ -78,6 +78,7 @@ from roughcut.media.manual_editor_assets import (
     mark_manual_editor_preview_assets_queued,
     manual_editor_asset_dir,
 )
+from roughcut.media.output import get_output_project_dir
 from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.subtitle_text import clean_final_subtitle_text, clean_subtitle_payloads
 from roughcut.publication import (
@@ -88,6 +89,7 @@ from roughcut.publication import (
 )
 from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE
 from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
+from roughcut.packaging.library import resolve_packaging_plan_for_job
 from roughcut.recovery.stuck_step_recovery import STUCK_STEP_DIAGNOSTIC_ARTIFACT_TYPE
 from roughcut.review.content_understanding_schema import normalize_video_type
 from roughcut.review.content_profile import _probe_duration, build_reviewed_transcript_excerpt
@@ -415,6 +417,8 @@ class ManualEditorThumbnailOut(BaseModel):
 class ManualEditorPreviewAssetsOut(BaseModel):
     job_id: str
     ready: bool = True
+    video_ready: bool = False
+    audio_ready: bool = False
     warming: bool = False
     asset_version: int = 0
     status: str | None = None
@@ -2543,19 +2547,54 @@ def _media_type_for_path(path: Path) -> str:
     return "application/octet-stream"
 
 
-def _manual_editor_asset_path(job_id: uuid.UUID, filename: str) -> Path | None:
+def _inline_file_response(path: Path) -> FileResponse:
+    return FileResponse(
+        path=path,
+        filename=path.name,
+        media_type=_media_type_for_path(path),
+        content_disposition_type="inline",
+    )
+
+
+async def _manual_editor_asset_dirs(session: AsyncSession, job: Job) -> list[Path]:
+    artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job.id,
+        artifact_types=_DOWNSTREAM_PROFILE_ARTIFACT_TYPES,
+    )
+    profile = resolve_downstream_profile(artifact.data_json if artifact and isinstance(artifact.data_json, dict) else {})
+    output_project_dir = get_output_project_dir(
+        str(job.source_name or ""),
+        job.created_at,
+        content_profile=profile,
+        output_dir=job.output_dir,
+    )
+    dirs = [manual_editor_asset_dir(job.id, output_project_dir=output_project_dir)]
+    legacy_dir = manual_editor_asset_dir(job.id)
+    if legacy_dir.resolve() != dirs[0].resolve():
+        dirs.append(legacy_dir)
+    return dirs
+
+
+async def _manual_editor_primary_asset_dir(session: AsyncSession, job: Job) -> Path:
+    return (await _manual_editor_asset_dirs(session, job))[0]
+
+
+def _manual_editor_asset_path(job_id: uuid.UUID, filename: str, *, asset_dirs: list[Path] | None = None) -> Path | None:
     safe_name = Path(str(filename or "")).name
     if not safe_name:
         return None
-    asset_dir = manual_editor_asset_dir(job_id).resolve()
-    candidate = (asset_dir / safe_name).resolve()
-    try:
-        candidate.relative_to(asset_dir)
-    except ValueError:
-        return None
-    if not candidate.exists() or not candidate.is_file():
-        return None
-    return candidate
+    search_dirs = asset_dirs or [manual_editor_asset_dir(job_id)]
+    for raw_asset_dir in search_dirs:
+        asset_dir = raw_asset_dir.resolve()
+        candidate = (asset_dir / safe_name).resolve()
+        try:
+            candidate.relative_to(asset_dir)
+        except ValueError:
+            continue
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
 
 
 def _manual_editor_preview_assets_response(
@@ -2566,6 +2605,8 @@ def _manual_editor_preview_assets_response(
     warming: bool = False,
 ) -> ManualEditorPreviewAssetsOut:
     is_ready = bool(payload.get("ready", ready if ready is not None else True))
+    video_ready = bool(payload.get("video_ready", is_ready))
+    audio_ready = bool(payload.get("audio_ready", is_ready))
     thumbnail_urls = [
         f"/api/v1/jobs/{job_id}/manual-editor/assets/{Path(path).name}"
         for path in list(payload.get("thumbnail_paths") or [])
@@ -2589,13 +2630,15 @@ def _manual_editor_preview_assets_response(
     return ManualEditorPreviewAssetsOut(
         job_id=str(job_id),
         ready=is_ready,
+        video_ready=video_ready,
+        audio_ready=audio_ready,
         warming=bool(warming) and not is_ready,
         asset_version=int(payload.get("asset_version") or 0),
         status=str(payload.get("status") or ("ready" if is_ready else "missing")),
         stage=str(payload.get("stage") or ("ready" if is_ready else "not_started")),
         progress=float(payload.get("progress")) if payload.get("progress") is not None else (1.0 if is_ready else 0.0),
-        video_url=f"/api/v1/jobs/{job_id}/manual-editor/assets/{video_path.name}" if is_ready and video_path.name else None,
-        audio_url=f"/api/v1/jobs/{job_id}/manual-editor/assets/{audio_path.name}" if is_ready and audio_path.name else None,
+        video_url=f"/api/v1/jobs/{job_id}/manual-editor/assets/{video_path.name}" if video_ready and video_path.name else None,
+        audio_url=f"/api/v1/jobs/{job_id}/manual-editor/assets/{audio_path.name}" if audio_ready and audio_path.name else None,
         duration_sec=float(payload.get("duration_sec") or 0.0),
         sample_rate=int(payload.get("sample_rate") or 16000),
         peaks=[float(value) for value in list(payload.get("peaks") or [])],
@@ -2616,7 +2659,7 @@ def _manual_editor_preview_assets_response(
     )
 
 
-def _warm_manual_editor_preview_assets(job_id: uuid.UUID, source_path: Path, duration_sec: float) -> None:
+def _warm_manual_editor_preview_assets(job_id: uuid.UUID, source_path: Path, duration_sec: float, asset_dir: Path) -> None:
     key = str(job_id)
     try:
         with _MANUAL_EDITOR_ASSET_WARMUP_SEMAPHORE:
@@ -2624,6 +2667,7 @@ def _warm_manual_editor_preview_assets(job_id: uuid.UUID, source_path: Path, dur
                 job_id=job_id,
                 source_path=source_path,
                 duration_sec=duration_sec,
+                asset_dir=asset_dir,
             )
     except Exception:
         logger.exception("manual editor preview asset warmup failed job_id=%s", job_id)
@@ -2973,7 +3017,7 @@ async def _build_manual_editor_session(
 async def get_source_file(job_id: uuid.UUID):
     cached_path = _source_file_cache_get(job_id)
     if cached_path is not None:
-        return FileResponse(path=cached_path, filename=cached_path.name, media_type=_media_type_for_path(cached_path))
+        return _inline_file_response(cached_path)
 
     async with get_session_factory()() as session:
         job = await session.get(Job, job_id)
@@ -2983,7 +3027,7 @@ async def get_source_file(job_id: uuid.UUID):
         if source_path is None:
             raise HTTPException(status_code=404, detail="Source media is not available locally for preview")
     _source_file_cache_set(job_id, source_path)
-    return FileResponse(path=source_path, filename=source_path.name, media_type=_media_type_for_path(source_path))
+    return _inline_file_response(source_path)
 
 
 @router.get("/{job_id}/manual-editor/assets", response_model=ManualEditorPreviewAssetsOut)
@@ -2997,11 +3041,13 @@ async def get_manual_editor_preview_assets(job_id: uuid.UUID, session: AsyncSess
     media_meta_artifact = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
     media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
     duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
+    asset_dir = await _manual_editor_primary_asset_dir(session, job)
     payload = await asyncio.to_thread(
         ensure_manual_editor_preview_assets,
         job_id=job.id,
         source_path=source_path,
         duration_sec=duration_sec,
+        asset_dir=asset_dir,
     )
     return _manual_editor_preview_assets_response(job.id, payload, ready=True)
 
@@ -3017,10 +3063,12 @@ async def get_manual_editor_preview_assets_status(job_id: uuid.UUID, session: As
     media_meta_artifact = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
     media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
     duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
+    asset_dir = await _manual_editor_primary_asset_dir(session, job)
     payload = load_manual_editor_preview_assets(
         job_id=job.id,
         source_path=source_path,
         duration_sec=duration_sec,
+        asset_dir=asset_dir,
     )
     return _manual_editor_preview_assets_response(
         job.id,
@@ -3045,15 +3093,16 @@ async def warm_manual_editor_preview_assets(
     media_meta_artifact = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
     media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
     duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
-    payload = load_manual_editor_preview_assets(job_id=job.id, source_path=source_path, duration_sec=duration_sec)
+    asset_dir = await _manual_editor_primary_asset_dir(session, job)
+    payload = load_manual_editor_preview_assets(job_id=job.id, source_path=source_path, duration_sec=duration_sec, asset_dir=asset_dir)
     if (
         not payload.get("ready")
         and str(payload.get("status") or "") != "failed"
         and str(job.id) not in _MANUAL_EDITOR_ASSET_WARMUPS
     ):
         _MANUAL_EDITOR_ASSET_WARMUPS.add(str(job.id))
-        payload = {**payload, **mark_manual_editor_preview_assets_queued(job.id)}
-        background_tasks.add_task(_warm_manual_editor_preview_assets, job.id, source_path, duration_sec)
+        payload = {**payload, **mark_manual_editor_preview_assets_queued(job.id, asset_dir=asset_dir)}
+        background_tasks.add_task(_warm_manual_editor_preview_assets, job.id, source_path, duration_sec, asset_dir)
     return _manual_editor_preview_assets_response(
         job.id,
         payload,
@@ -3063,11 +3112,14 @@ async def warm_manual_editor_preview_assets(
 
 
 @router.get("/{job_id}/manual-editor/assets/{filename}")
-async def get_manual_editor_asset_file(job_id: uuid.UUID, filename: str):
-    path = _manual_editor_asset_path(job_id, filename)
+async def get_manual_editor_asset_file(job_id: uuid.UUID, filename: str, session: AsyncSession = Depends(get_session)):
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    path = _manual_editor_asset_path(job_id, filename, asset_dirs=await _manual_editor_asset_dirs(session, job))
     if path is None:
         raise HTTPException(status_code=404, detail="Manual editor asset not found")
-    return FileResponse(path=path, filename=path.name, media_type=_media_type_for_path(path))
+    return _inline_file_response(path)
 
 
 @router.get("/{job_id}/manual-editor/readiness", response_model=ManualEditorReadinessOut)
@@ -3218,6 +3270,8 @@ async def apply_manual_editor_timeline(
         _job_creative_profile,
         _load_latest_subtitle_payloads,
         _load_preferred_downstream_profile,
+        _plan_insert_asset_slot,
+        _plan_music_entry,
     )
 
     job_result = await session.execute(
@@ -3338,6 +3392,22 @@ async def apply_manual_editor_timeline(
                 style="smart_effect_commercial",
             )
         )
+
+    packaging_plan = resolve_packaging_plan_for_job(str(job.id), content_profile=content_profile)
+    packaging_plan["insert"] = await _plan_insert_asset_slot(
+        job_id=str(job.id),
+        insert_plan=packaging_plan.get("insert"),
+        subtitle_items=remapped_subtitles,
+        content_profile=content_profile,
+        timeline_analysis=timeline_analysis,
+        allow_llm=False,
+    )
+    packaging_plan["music"] = await _plan_music_entry(
+        music_plan=packaging_plan.get("music"),
+        subtitle_items=remapped_subtitles,
+        content_profile=content_profile,
+        timeline_analysis=timeline_analysis,
+    )
     editorial_segments = _build_editorial_segments_from_keep_segments(
         keep_segments,
         source_duration_sec=source_duration_sec,
@@ -3395,39 +3465,63 @@ async def apply_manual_editor_timeline(
     session.add(manual_editorial_timeline)
     await session.flush()
 
+    previous_video_transform = _manual_video_transform_from_render_plan(previous_render_plan)
+    resolution_transform_changed = (
+        previous_video_transform.get("resolution_mode") != video_transform.get("resolution_mode")
+        or previous_video_transform.get("resolution_preset") != video_transform.get("resolution_preset")
+    )
+    export_resolution_mode = str(
+        video_transform.get("resolution_mode")
+        if resolution_transform_changed
+        else packaging_plan.get("export_resolution_mode") or video_transform.get("resolution_mode") or "source"
+    )
+    export_resolution_preset = str(
+        video_transform.get("resolution_preset")
+        if resolution_transform_changed
+        else packaging_plan.get("export_resolution_preset") or video_transform.get("resolution_preset") or "1080p"
+    )
+    effective_video_transform = {
+        **video_transform,
+        "resolution_mode": export_resolution_mode,
+        "resolution_preset": export_resolution_preset,
+    }
+
     rebuilt_render_plan = build_render_plan(
         editorial_timeline_id=manual_editorial_timeline.id,
         workflow_preset=str(previous_render_plan.get("workflow_preset") or job.workflow_template or "unboxing_standard"),
         subtitle_version=int((previous_render_plan.get("subtitles") or {}).get("version") or 1),
-        subtitle_style=str((previous_render_plan.get("subtitles") or {}).get("style") or "bold_yellow_outline"),
-        subtitle_motion_style=str((previous_render_plan.get("subtitles") or {}).get("motion_style") or "motion_static"),
-        smart_effect_style=str((previous_render_plan.get("editing_accents") or {}).get("style") or "smart_effect_commercial"),
-        cover_style=str((previous_render_plan.get("cover") or {}).get("style") or "") or None,
-        title_style=str((previous_render_plan.get("cover") or {}).get("title_style") or "preset_default"),
+        subtitle_style=str(packaging_plan.get("subtitle_style") or "bold_yellow_outline"),
+        subtitle_motion_style=str(packaging_plan.get("subtitle_motion_style") or "motion_static"),
+        smart_effect_style=str(packaging_plan.get("smart_effect_style") or "smart_effect_commercial"),
+        cover_style=(
+            None
+            if str(packaging_plan.get("cover_style") or "preset_default") == "preset_default"
+            else str(packaging_plan.get("cover_style") or "")
+        ),
+        title_style=str(packaging_plan.get("title_style") or "preset_default"),
         target_lufs=float((previous_render_plan.get("loudness") or {}).get("target_lufs") or -16.0),
         peak_limit=float((previous_render_plan.get("loudness") or {}).get("peak_limit") or -2.0),
         noise_reduction=bool((previous_render_plan.get("voice_processing") or {}).get("noise_reduction", True)),
-        intro=previous_render_plan.get("intro"),
-        outro=previous_render_plan.get("outro"),
-        insert=previous_render_plan.get("insert"),
-        watermark=previous_render_plan.get("watermark"),
-        music=previous_render_plan.get("music"),
+        intro=packaging_plan.get("intro"),
+        outro=packaging_plan.get("outro"),
+        insert=packaging_plan.get("insert"),
+        watermark=packaging_plan.get("watermark"),
+        music=packaging_plan.get("music"),
         timeline_analysis=timeline_analysis,
         editing_skill=editing_skill,
         editing_accents=editing_accents,
         creative_profile=_job_creative_profile(job),
         ai_director_plan=previous_render_plan.get("ai_director"),
         avatar_commentary_plan=previous_render_plan.get("avatar_commentary"),
-        export_resolution_mode=str(video_transform.get("resolution_mode") or "source"),
-        export_resolution_preset=str(video_transform.get("resolution_preset") or "1080p"),
+        export_resolution_mode=export_resolution_mode,
+        export_resolution_preset=export_resolution_preset,
     )
     rebuilt_render_plan["delivery"] = {
         **dict(rebuilt_render_plan.get("delivery") or {}),
-        "aspect_ratio": str(video_transform.get("aspect_ratio") or "source"),
+        "aspect_ratio": str(effective_video_transform.get("aspect_ratio") or "source"),
     }
-    previous_video_transform = _manual_video_transform_from_render_plan(previous_render_plan)
     render_video_transform = {
-        **video_transform,
+        **effective_video_transform,
         "rotation_manual": bool(change_plan["rotation_changed"] or previous_video_transform.get("rotation_manual")),
     }
     rebuilt_render_plan["manual_editor"] = {

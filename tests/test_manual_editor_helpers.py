@@ -15,12 +15,15 @@ from roughcut.api.jobs import (
     _download_file_cache_get,
     _download_file_cache_set,
     _invalidate_job_file_response_cache,
+    _inline_file_response,
     _manual_editor_has_collapsed_repeat_runs,
     _manual_editor_silence_payload,
     _manual_editor_subtitle_payload,
     _manual_editor_apply_conflict_detail,
+    _manual_editor_asset_path,
     _manual_editor_change_plan,
     _manual_editor_prerequisite_detail,
+    _manual_editor_preview_assets_response,
     _manual_editor_smart_delete_segments,
     _source_file_cache_get,
     _source_file_cache_set,
@@ -29,7 +32,8 @@ from roughcut.api.jobs import (
     _normalize_manual_keep_segments,
 )
 from roughcut.edit.otio_export import export_to_otio
-from roughcut.media.manual_editor_assets import _fallback_asset_status, _peak_from_pcm, _recommended_preview_gain, _silence_intervals_from_peaks, _thumbnail_timestamps
+from roughcut.media import manual_editor_assets as manual_editor_assets_module
+from roughcut.media.manual_editor_assets import _fallback_asset_status, _generate_proxy_video, _peak_from_pcm, _recommended_preview_gain, _silence_intervals_from_peaks, _thumbnail_timestamps, manual_editor_asset_dir
 from roughcut.pipeline.orchestrator import _artifact_types_for_quality_rerun
 from roughcut.pipeline.steps import (
     _manual_editor_subtitle_items_from_editorial,
@@ -743,6 +747,84 @@ def test_manual_editor_preview_asset_status_is_normalized() -> None:
     assert status["progress"] == 1.0
     assert status["detail"] == "working"
     assert status["error"] is None
+
+
+def test_manual_editor_preview_asset_response_exposes_partial_video_proxy() -> None:
+    job_id = uuid4()
+
+    response = _manual_editor_preview_assets_response(
+        job_id,
+        {
+            "ready": False,
+            "video_ready": True,
+            "audio_ready": False,
+            "video_path": r"C:\roughcut\jobs\job\manual-editor\proxy.mp4",
+            "audio_path": r"C:\roughcut\jobs\job\manual-editor\proxy.wav",
+            "status": "warming",
+            "stage": "proxy_audio",
+            "progress": 0.28,
+        },
+        ready=False,
+        warming=True,
+    )
+
+    assert response.ready is False
+    assert response.video_ready is True
+    assert response.audio_ready is False
+    assert response.warming is True
+    assert response.video_url == f"/api/v1/jobs/{job_id}/manual-editor/assets/proxy.mp4"
+    assert response.audio_url is None
+
+
+def test_manual_editor_asset_dir_can_live_under_output_project(tmp_path) -> None:
+    job_id = uuid4()
+    output_project_dir = tmp_path / "20260513_video"
+
+    asset_dir = manual_editor_asset_dir(job_id, output_project_dir=output_project_dir)
+
+    assert asset_dir == output_project_dir / "manual-editor"
+
+
+def test_manual_editor_asset_path_prefers_output_dir_and_falls_back(tmp_path) -> None:
+    job_id = uuid4()
+    output_asset_dir = tmp_path / "output" / "manual-editor"
+    legacy_asset_dir = tmp_path / "jobs" / str(job_id) / "manual-editor"
+    output_asset_dir.mkdir(parents=True)
+    legacy_asset_dir.mkdir(parents=True)
+    (legacy_asset_dir / "proxy.mp4").write_bytes(b"legacy")
+    (output_asset_dir / "thumb_000.jpg").write_bytes(b"thumb")
+
+    assert _manual_editor_asset_path(job_id, "thumb_000.jpg", asset_dirs=[output_asset_dir, legacy_asset_dir]) == output_asset_dir / "thumb_000.jpg"
+    assert _manual_editor_asset_path(job_id, "proxy.mp4", asset_dirs=[output_asset_dir, legacy_asset_dir]) == legacy_asset_dir / "proxy.mp4"
+    assert _manual_editor_asset_path(job_id, "../proxy.mp4", asset_dirs=[output_asset_dir, legacy_asset_dir]) == legacy_asset_dir / "proxy.mp4"
+
+
+def test_manual_editor_preview_files_are_served_inline(tmp_path) -> None:
+    path = tmp_path / "proxy.mp4"
+    path.write_bytes(b"not-a-real-mp4")
+
+    response = _inline_file_response(path)
+
+    assert response.media_type == "video/mp4"
+    assert response.headers["content-disposition"].startswith("inline;")
+
+
+def test_manual_editor_proxy_video_uses_browser_compatible_h264(monkeypatch, tmp_path) -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd, **_kwargs):
+        captured["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(manual_editor_assets_module.subprocess, "run", fake_run)
+
+    _generate_proxy_video(tmp_path / "source.mp4", tmp_path / "proxy.mp4")
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("-c:v") + 1] == "libx264"
+    assert cmd[cmd.index("-profile:v") + 1] == "baseline"
+    assert cmd[cmd.index("-level:v") + 1] == "3.1"
+    assert "format=yuv420p" in cmd[cmd.index("-vf") + 1]
 
 
 def test_file_response_cache_validates_and_invalidates_local_files(tmp_path) -> None:

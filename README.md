@@ -197,6 +197,7 @@ ROUGHCUT_OUTPUT_ROOT=F:/roughcut_outputs
 JOB_STORAGE_DIR=F:/roughcut_outputs/jobs
 OUTPUT_DIR=F:/roughcut_outputs/output
 RENDER_DEBUG_DIR=F:/roughcut_outputs/render-debug
+PACKAGING_ASSET_DIR=assets/packaging
 RENDER_VIDEO_ENCODER=auto
 AUTO_CONFIRM_CONTENT_PROFILE=true
 CONTENT_PROFILE_REVIEW_THRESHOLD=0.72
@@ -680,6 +681,8 @@ ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.4-mini
 | `GLOSSARY_CORRECTION_REVIEW_THRESHOLD` | `0.9` | 术语纠错自动接受阈值，范围 `0.0` 到 `1.0` |
 | `AUTO_SELECT_COVER_VARIANT` | `true` | 自动选择首选封面，默认只在候选分差接近时提醒确认 |
 | `COVER_SELECTION_REVIEW_GAP` | `0.08` | 首选封面与次优封面的最小安全分差，范围 `0.0` 到 `1.0` |
+| `PACKAGING_ASSET_DIR` | `assets/packaging` | 包装素材持久目录；不要放在输出目录，避免清理成片时误删 BGM/水印/片头片尾 |
+| `PACKAGING_ASSET_STORAGE_BACKEND` | `local` | 包装素材后端，当前为本地目录；预留给后续 OSS 热切换 |
 | `PACKAGING_SELECTION_REVIEW_GAP` | `0.08` | BGM/插入素材首选与次优的最小安全分差，过近时建议确认 |
 | `PACKAGING_SELECTION_MIN_SCORE` | `0.6` | BGM/插入素材最低自动通过分，低于该值建议确认 |
 

@@ -14,29 +14,35 @@ from roughcut.config import get_settings
 from roughcut.media.silence import detect_silence
 
 MANUAL_EDITOR_PREVIEW_ARTIFACT_TYPE = "manual_editor_preview_assets"
-MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 7
+MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 9
 MANUAL_EDITOR_PREVIEW_STATUS_FILENAME = "status.json"
 PREVIEW_AUDIO_TARGET_LUFS = -16.0
 PREVIEW_AUDIO_MIN_GAIN = 0.35
 PREVIEW_AUDIO_MAX_GAIN = 12.0
 
 
-def manual_editor_asset_dir(job_id: uuid.UUID | str) -> Path:
+def manual_editor_asset_dir(job_id: uuid.UUID | str, *, output_project_dir: Path | str | None = None) -> Path:
+    if output_project_dir is not None:
+        return Path(output_project_dir).expanduser() / "manual-editor"
     root = Path(get_settings().job_storage_dir).expanduser()
     return root / str(job_id) / "manual-editor"
 
 
-def manual_editor_asset_manifest_path(job_id: uuid.UUID | str) -> Path:
-    return manual_editor_asset_dir(job_id) / "manifest.json"
+def manual_editor_asset_manifest_path(job_id: uuid.UUID | str, *, asset_dir: Path | str | None = None) -> Path:
+    return _resolve_manual_editor_asset_dir(job_id, asset_dir=asset_dir) / "manifest.json"
 
 
-def manual_editor_asset_status_path(job_id: uuid.UUID | str) -> Path:
-    return manual_editor_asset_dir(job_id) / MANUAL_EDITOR_PREVIEW_STATUS_FILENAME
+def manual_editor_asset_status_path(job_id: uuid.UUID | str, *, asset_dir: Path | str | None = None) -> Path:
+    return _resolve_manual_editor_asset_dir(job_id, asset_dir=asset_dir) / MANUAL_EDITOR_PREVIEW_STATUS_FILENAME
 
 
-def mark_manual_editor_preview_assets_queued(job_id: uuid.UUID | str) -> dict[str, Any]:
+def _resolve_manual_editor_asset_dir(job_id: uuid.UUID | str, *, asset_dir: Path | str | None = None) -> Path:
+    return Path(asset_dir).expanduser() if asset_dir is not None else manual_editor_asset_dir(job_id)
+
+
+def mark_manual_editor_preview_assets_queued(job_id: uuid.UUID | str, *, asset_dir: Path | str | None = None) -> dict[str, Any]:
     return _write_asset_status(
-        manual_editor_asset_dir(job_id),
+        _resolve_manual_editor_asset_dir(job_id, asset_dir=asset_dir),
         status="warming",
         stage="queued",
         progress=0.02,
@@ -49,13 +55,14 @@ def ensure_manual_editor_preview_assets(
     job_id: uuid.UUID | str,
     source_path: Path,
     duration_sec: float,
+    asset_dir: Path | str | None = None,
 ) -> dict[str, Any]:
-    asset_dir = manual_editor_asset_dir(job_id)
+    asset_dir = _resolve_manual_editor_asset_dir(job_id, asset_dir=asset_dir)
     asset_dir.mkdir(parents=True, exist_ok=True)
     audio_path = asset_dir / "proxy.wav"
     video_path = asset_dir / "proxy.mp4"
     peaks_path = asset_dir / "peaks.json"
-    manifest_path = manual_editor_asset_manifest_path(job_id)
+    manifest_path = manual_editor_asset_manifest_path(job_id, asset_dir=asset_dir)
     source_fingerprint = _source_fingerprint(source_path)
 
     manifest = _read_json(manifest_path)
@@ -75,6 +82,7 @@ def ensure_manual_editor_preview_assets(
                 stage="cached",
                 progress=1.0,
                 detail="Preview assets are ready from cache",
+                source_fingerprint=source_fingerprint,
             )
         else:
             status_payload = _write_asset_status(
@@ -83,6 +91,7 @@ def ensure_manual_editor_preview_assets(
                 stage="proxy_video",
                 progress=0.08,
                 detail="Generating browser preview video",
+                source_fingerprint=source_fingerprint,
             )
             _generate_proxy_video(source_path, video_path)
             status_payload = _write_asset_status(
@@ -91,6 +100,7 @@ def ensure_manual_editor_preview_assets(
                 stage="proxy_audio",
                 progress=0.28,
                 detail="Generating waveform proxy audio",
+                source_fingerprint=source_fingerprint,
             )
             _generate_proxy_audio(source_path, audio_path)
             status_payload = _write_asset_status(
@@ -99,6 +109,7 @@ def ensure_manual_editor_preview_assets(
                 stage="loudness_analysis",
                 progress=0.55,
                 detail="Measuring preview loudness and waveform peaks",
+                source_fingerprint=source_fingerprint,
             )
             peaks_payload = _generate_waveform_peaks(audio_path, duration_sec=duration_sec)
             peaks_path.write_text(json.dumps(peaks_payload, ensure_ascii=False), encoding="utf-8")
@@ -108,6 +119,7 @@ def ensure_manual_editor_preview_assets(
                 stage="thumbnails",
                 progress=0.78,
                 detail="Extracting timeline thumbnails",
+                source_fingerprint=source_fingerprint,
             )
             thumbnails = _generate_preview_thumbnails(
                 source_path,
@@ -130,6 +142,7 @@ def ensure_manual_editor_preview_assets(
                 stage="ready",
                 progress=1.0,
                 detail="Preview assets are ready",
+                source_fingerprint=source_fingerprint,
             )
     except Exception as exc:
         status_payload = _write_asset_status(
@@ -139,6 +152,7 @@ def ensure_manual_editor_preview_assets(
             progress=float(status_payload.get("progress") or 0.0),
             detail="Preview asset generation failed",
             error=_short_error(exc),
+            source_fingerprint=source_fingerprint,
         )
         raise
 
@@ -146,6 +160,8 @@ def ensure_manual_editor_preview_assets(
     thumbnail_items = _manifest_thumbnail_items(manifest, asset_dir)
     return {
         "ready": True,
+        "video_ready": True,
+        "audio_ready": True,
         "video_path": str(video_path),
         "audio_path": str(audio_path),
         "duration_sec": round(float(peaks_payload.get("duration_sec") or duration_sec or 0.0), 3),
@@ -174,12 +190,13 @@ def load_manual_editor_preview_assets(
     job_id: uuid.UUID | str,
     source_path: Path,
     duration_sec: float,
+    asset_dir: Path | str | None = None,
 ) -> dict[str, Any]:
-    asset_dir = manual_editor_asset_dir(job_id)
+    asset_dir = _resolve_manual_editor_asset_dir(job_id, asset_dir=asset_dir)
     audio_path = asset_dir / "proxy.wav"
     video_path = asset_dir / "proxy.mp4"
     peaks_path = asset_dir / "peaks.json"
-    manifest_path = manual_editor_asset_manifest_path(job_id)
+    manifest_path = manual_editor_asset_manifest_path(job_id, asset_dir=asset_dir)
     manifest = _read_json(manifest_path)
     status_payload = _read_asset_status(asset_dir)
     try:
@@ -194,9 +211,22 @@ def load_manual_editor_preview_assets(
         and audio_path.exists()
         and peaks_path.exists()
     )
+    manifest_matches_source = (
+        bool(source_fingerprint)
+        and manifest.get("version") == MANUAL_EDITOR_PREVIEW_ASSET_VERSION
+        and manifest.get("source_fingerprint") == source_fingerprint
+    )
+    status_matches_source = (
+        bool(source_fingerprint)
+        and status_payload.get("source_fingerprint") == source_fingerprint
+    )
+    video_ready = bool(video_path.exists() and (manifest_matches_source or status_matches_source))
+    audio_ready = bool(audio_path.exists() and peaks_path.exists() and (manifest_matches_source or status_matches_source))
     if not ready:
         return {
             "ready": False,
+            "video_ready": video_ready,
+            "audio_ready": audio_ready,
             "video_path": str(video_path),
             "audio_path": str(audio_path),
             "duration_sec": round(float(duration_sec or 0.0), 3),
@@ -220,6 +250,8 @@ def load_manual_editor_preview_assets(
     thumbnail_items = _manifest_thumbnail_items(manifest, asset_dir)
     return {
         "ready": True,
+        "video_ready": True,
+        "audio_ready": True,
         "video_path": str(video_path),
         "audio_path": str(audio_path),
         "duration_sec": round(float(peaks_payload.get("duration_sec") or duration_sec or 0.0), 3),
@@ -295,17 +327,25 @@ def _generate_proxy_video(source_path: Path, video_path: Path) -> None:
         "-map",
         "0:a?",
         "-vf",
-        "scale=1280:1280:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+        "scale=960:960:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
         "-c:v",
         "libx264",
+        "-profile:v",
+        "baseline",
+        "-level:v",
+        "3.1",
         "-preset",
         "veryfast",
         "-crf",
-        "26",
+        "30",
+        "-tune",
+        "fastdecode",
+        "-g",
+        "60",
         "-c:a",
         "aac",
         "-b:a",
-        "128k",
+        "96k",
         "-movflags",
         "+faststart",
         "-max_muxing_queue_size",
@@ -563,6 +603,7 @@ def _write_asset_status(
     progress: float,
     detail: str | None = None,
     error: str | None = None,
+    source_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     asset_dir.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -574,6 +615,8 @@ def _write_asset_status(
         "error": error,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
+    if source_fingerprint:
+        payload["source_fingerprint"] = source_fingerprint
     status_path = asset_dir / MANUAL_EDITOR_PREVIEW_STATUS_FILENAME
     status_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
@@ -604,6 +647,7 @@ def _fallback_asset_status(
         "detail": str(payload.get("detail") or "") or None,
         "error": str(payload.get("error") or "") or None,
         "updated_at": str(payload.get("updated_at") or "") or None,
+        "source_fingerprint": str(payload.get("source_fingerprint") or "") or None,
     }
 
 

@@ -76,14 +76,14 @@ type SubtitleTextDraft = {
   text_final?: string | null;
 };
 
-type TimelineThumbnailItem = {
+type SourceTimelineThumbnailItem = {
   url: string;
-  time_sec: number;
-  output_time: number | null;
-  kept: boolean;
+  timeSec: number;
+  leftPercent: number;
+  widthPercent: number;
 };
 
-type UnifiedTimelineThumbnailItem = TimelineThumbnailItem & {
+type SourceTimelineRangeItem = KeepSegment & {
   leftPercent: number;
   widthPercent: number;
 };
@@ -115,6 +115,7 @@ type ManualEditUndoSnapshot = {
   currentSubtitleDraftText: string;
   subtitleDrafts: Record<number, SubtitleDraft>;
   subtitleReplacementHistory: JobManualSubtitleReplacement[];
+  manualSmartCutRestoreRanges: KeepSegment[];
   editorNote: string;
   videoSummary: string;
   videoTransform: JobManualVideoTransform;
@@ -130,6 +131,8 @@ type SubtitleReplaceDialogState = {
   replacement: string;
   matchCount: number;
 };
+
+type PreviewPlaybackMode = "source" | "output" | null;
 
 type TranscriptTokenKind = "char" | "pause";
 type TranscriptBreakKind = "soft" | "paragraph";
@@ -184,6 +187,16 @@ type SmartCutRuleAnalysis = {
   pause: SmartCutRuleMatch[];
   pauseCandidates: SmartCutRuleMatch[];
   smartDelete: SmartCutRuleMatch[];
+};
+
+type ManualEditChangeListTone = "timeline" | "video" | "subtitle" | "summary" | "empty";
+
+type ManualEditChangeListItem = {
+  key: string;
+  title: string;
+  detail: string;
+  meta?: string;
+  tone: ManualEditChangeListTone;
 };
 
 const REGION_COLOR = "rgba(34, 197, 94, 0.22)";
@@ -528,6 +541,7 @@ function previewAssetStageLabel(stage?: string | null) {
 
 function previewAssetStatusLabel(previewAssets: JobManualEditPreviewAssets) {
   if (previewAssets.ready) return previewAssets.cached ? "已复用预览资产" : "已生成预览资产";
+  if (previewAssets.video_url || previewAssets.video_ready) return "已启用视频代理";
   if (previewAssets.status === "failed" || previewAssets.error) return "预览资产生成失败";
   if (previewAssets.warming || previewAssets.status === "warming") return "预览资产生成中";
   return "预览资产待生成";
@@ -917,6 +931,156 @@ function subtitleOverrideChanged(base: JobManualEditSubtitle | undefined, draft:
     Math.abs(draftEnd - base.end_time) > 0.001 ||
     draftText.trim() !== baseText.trim()
   );
+}
+
+function videoAspectRatioLabel(value?: string | null) {
+  return ASPECT_RATIO_OPTIONS.find((option) => option.value === value)?.label ?? "跟随原片";
+}
+
+function videoResolutionLabel(transform: JobManualVideoTransform) {
+  if (transform.resolution_mode === "specified") {
+    return RESOLUTION_PRESET_OPTIONS.find((option) => option.value === transform.resolution_preset)?.label ?? "1080p";
+  }
+  return "原片";
+}
+
+function summarizeSubtitleOverrides(overrides: JobManualEditSubtitleOverride[], baseSubtitles: JobManualEditSubtitle[]) {
+  const baseByIndex = new Map(baseSubtitles.map((subtitle) => [subtitle.index, subtitle]));
+  return overrides.reduce(
+    (summary, override) => {
+      const base = baseByIndex.get(override.index);
+      if (!base && !override.delete) {
+        summary.created += 1;
+        return summary;
+      }
+      if (override.delete) {
+        summary.deleted += 1;
+        return summary;
+      }
+      if ((override.text_final ?? base?.text_final ?? null) !== (base?.text_final ?? null)) summary.text += 1;
+      if (
+        base
+        && (
+          Math.abs((override.start_time ?? base.start_time) - base.start_time) > 0.001
+          || Math.abs((override.end_time ?? base.end_time) - base.end_time) > 0.001
+        )
+      ) {
+        summary.timing += 1;
+      }
+      return summary;
+    },
+    { created: 0, deleted: 0, text: 0, timing: 0 },
+  );
+}
+
+export function buildManualEditChangeList(options: {
+  baseSegments: KeepSegment[];
+  effectiveSegments: KeepSegment[];
+  outputDurationDeltaSec: number;
+  subtitleOverrides: JobManualEditSubtitleOverride[];
+  baseSubtitles: JobManualEditSubtitle[];
+  subtitleReplacements: JobManualSubtitleReplacement[];
+  baseVideoTransform: JobManualVideoTransform;
+  currentVideoTransform: JobManualVideoTransform;
+  hasVideoSummaryEdits: boolean;
+}): ManualEditChangeListItem[] {
+  const items: ManualEditChangeListItem[] = [];
+  const hasTimelineEdits = !keepSegmentsEquivalent(options.baseSegments, options.effectiveSegments);
+  if (hasTimelineEdits) {
+    const segmentDetail = options.baseSegments.length === options.effectiveSegments.length
+      ? `${options.effectiveSegments.length} 个保留段边界已调整`
+      : `保留段 ${options.baseSegments.length} -> ${options.effectiveSegments.length}`;
+    items.push({
+      key: "timeline",
+      title: "剪辑时间线",
+      detail: `${segmentDetail}，输出时长变化 ${options.outputDurationDeltaSec >= 0 ? "+" : "-"}${formatSeconds(Math.abs(options.outputDurationDeltaSec))}`,
+      meta: "保存后重建时间线",
+      tone: "timeline",
+    });
+  }
+
+  if (options.baseVideoTransform.rotation_cw !== options.currentVideoTransform.rotation_cw) {
+    items.push({
+      key: "rotation",
+      title: "画面旋转",
+      detail: `${options.baseVideoTransform.rotation_cw}° -> ${options.currentVideoTransform.rotation_cw}°`,
+      meta: "重新渲染",
+      tone: "video",
+    });
+  }
+
+  if (options.baseVideoTransform.aspect_ratio !== options.currentVideoTransform.aspect_ratio) {
+    items.push({
+      key: "aspect-ratio",
+      title: "画面比例",
+      detail: `${videoAspectRatioLabel(options.baseVideoTransform.aspect_ratio)} -> ${videoAspectRatioLabel(options.currentVideoTransform.aspect_ratio)}`,
+      meta: "重新渲染",
+      tone: "video",
+    });
+  }
+
+  if (
+    options.baseVideoTransform.resolution_mode !== options.currentVideoTransform.resolution_mode
+    || options.baseVideoTransform.resolution_preset !== options.currentVideoTransform.resolution_preset
+  ) {
+    items.push({
+      key: "resolution",
+      title: "输出分辨率",
+      detail: `${videoResolutionLabel(options.baseVideoTransform)} -> ${videoResolutionLabel(options.currentVideoTransform)}`,
+      meta: "重新渲染",
+      tone: "video",
+    });
+  }
+
+  if (options.subtitleOverrides.length) {
+    const summary = summarizeSubtitleOverrides(options.subtitleOverrides, options.baseSubtitles);
+    const details = [
+      summary.text ? `文本 ${summary.text}` : "",
+      summary.timing ? `时间 ${summary.timing}` : "",
+      summary.deleted ? `删除 ${summary.deleted}` : "",
+      summary.created ? `新增 ${summary.created}` : "",
+    ].filter(Boolean);
+    items.push({
+      key: "subtitles",
+      title: "字幕修改",
+      detail: `${options.subtitleOverrides.length} 条${details.length ? `（${details.join(" / ")}）` : ""}`,
+      meta: "复用剪辑计划",
+      tone: "subtitle",
+    });
+  }
+
+  if (options.subtitleReplacements.length) {
+    const replacementCount = options.subtitleReplacements.reduce((total, item) => total + Math.max(1, Number(item.occurrence_count || 1)), 0);
+    items.push({
+      key: "subtitle-replacements",
+      title: "术语替换",
+      detail: `${options.subtitleReplacements.length} 组替换，影响 ${replacementCount} 处`,
+      meta: "写入校对习惯",
+      tone: "subtitle",
+    });
+  }
+
+  if (options.hasVideoSummaryEdits) {
+    items.push({
+      key: "video-summary",
+      title: "视频摘要",
+      detail: "人工摘要已修改，将作为审核、字幕校对和文案链路的强证据",
+      meta: "更新上下文",
+      tone: "summary",
+    });
+  }
+
+  if (!items.length) {
+    items.push({
+      key: "empty",
+      title: "暂无改动",
+      detail: "删段、字幕、画面或摘要调整后会在这里实时汇总。",
+      meta: "草稿监听中",
+      tone: "empty",
+    });
+  }
+
+  return items;
 }
 
 function subtitleDiagnostics(subtitles: JobManualEditSubtitle[], totalDuration: number) {
@@ -1458,16 +1622,6 @@ export function findSubtitleIndexNearOutputTime(
   return previousIndex >= 0 ? previousIndex : 0;
 }
 
-function sourceTimeToOutputThumbnailItem(item: { url: string; time_sec: number }, ranges: OutputRange[]): TimelineThumbnailItem {
-  const sourceTime = Math.max(0, Number(item.time_sec || 0));
-  const activeRange = ranges.find((range) => sourceTime >= range.sourceStart && sourceTime <= range.sourceEnd);
-  return {
-    ...item,
-    output_time: activeRange ? sourceTimeToOutputTime(sourceTime, ranges) : null,
-    kept: Boolean(activeRange),
-  };
-}
-
 export function buildOutputWaveformBars(
   peaks: number[] | undefined,
   ranges: OutputRange[],
@@ -1485,6 +1639,16 @@ export function buildOutputWaveformBars(
     const peakIndex = clamp(Math.round((sourceTime / sourceDuration) * (peaks.length - 1)), 0, peaks.length - 1);
     const peak = Math.abs(Number(peaks[peakIndex] || 0));
     return clamp(Math.max(peak, 0.08), 0.08, 1);
+  });
+}
+
+function buildSourceWaveformBars(peaks: number[] | undefined, count = 220) {
+  if (!peaks?.length) {
+    return Array.from({ length: count }, () => 0.08);
+  }
+  return Array.from({ length: count }, (_, index) => {
+    const peakIndex = clamp(Math.round(((index + 0.5) / count) * (peaks.length - 1)), 0, peaks.length - 1);
+    return clamp(Math.abs(Number(peaks[peakIndex] || 0)), 0.08, 1);
   });
 }
 
@@ -1547,6 +1711,40 @@ function addSourceRangesToSegments(segments: KeepSegment[], rangesToAdd: KeepSeg
 
 function isSourceRangeKept(start: number, end: number, segments: KeepSegment[]) {
   return segments.some((segment) => start >= segment.start - 0.02 && end <= segment.end + 0.02);
+}
+
+function sourceCutRangesFromKeepSegments(segments: KeepSegment[], sourceDuration: number) {
+  const cuts: KeepSegment[] = [];
+  const duration = Math.max(0, sourceDuration || 0);
+  let cursor = 0;
+  for (const segment of [...segments].sort((left, right) => left.start - right.start)) {
+    const start = clamp(segment.start, 0, duration);
+    const end = clamp(segment.end, start, duration);
+    if (start > cursor + 0.05) {
+      cuts.push({ start: Number(cursor.toFixed(3)), end: Number(start.toFixed(3)) });
+    }
+    cursor = Math.max(cursor, end);
+  }
+  if (duration > cursor + 0.05) {
+    cuts.push({ start: Number(cursor.toFixed(3)), end: Number(duration.toFixed(3)) });
+  }
+  return cuts;
+}
+
+function sourceRangesToTimelineItems(ranges: KeepSegment[], sourceDuration: number): SourceTimelineRangeItem[] {
+  if (sourceDuration <= 0) return [];
+  return ranges
+    .map((range) => {
+      const start = clamp(range.start, 0, sourceDuration);
+      const end = clamp(range.end, start, sourceDuration);
+      return {
+        start: Number(start.toFixed(3)),
+        end: Number(end.toFixed(3)),
+        leftPercent: clamp((start / sourceDuration) * 100, 0, 100),
+        widthPercent: clamp(((end - start) / sourceDuration) * 100, 0, 100),
+      };
+    })
+    .filter((range) => range.end > range.start + 0.05 && range.widthPercent > 0);
 }
 
 function sourceSubtitlesForTranscript(session: Pick<JobManualEditSession, "source_subtitles" | "projected_subtitles">) {
@@ -2224,12 +2422,16 @@ export function applySmartCutRuleRangesToSegments(
   ranges: KeepSegment[],
   managedRanges: KeepSegment[],
   sourceDuration: number,
+  restoredRanges: KeepSegment[] = [],
 ) {
   if (!baseSegments.length) return [];
   const controlledBaseline = managedRanges.length
     ? addSourceRangesToSegments(baseSegments, managedRanges, sourceDuration)
     : baseSegments;
-  const keptRanges = ranges.filter((range) => isSourceRangeKept(range.start, range.end, controlledBaseline));
+  const activeRanges = restoredRanges.length
+    ? removeSourceRangesFromSegments(ranges, restoredRanges)
+    : ranges;
+  const keptRanges = activeRanges.filter((range) => isSourceRangeKept(range.start, range.end, controlledBaseline));
   return keptRanges.length
     ? removeSourceRangesFromSegments(controlledBaseline, keptRanges)
     : controlledBaseline;
@@ -2259,6 +2461,7 @@ function cloneUndoSnapshot(snapshot: ManualEditUndoSnapshot): ManualEditUndoSnap
     segments: snapshot.segments.map((segment) => ({ ...segment })),
     subtitleDrafts: cloneSubtitleDrafts(snapshot.subtitleDrafts),
     subtitleReplacementHistory: snapshot.subtitleReplacementHistory.map((item) => ({ ...item })),
+    manualSmartCutRestoreRanges: snapshot.manualSmartCutRestoreRanges.map((range) => ({ ...range })),
     videoTransform: { ...snapshot.videoTransform },
   };
 }
@@ -2305,6 +2508,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [videoSummary, setVideoSummary] = useState("");
   const [currentSourceTime, setCurrentSourceTime] = useState(0);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+  const [previewPlaybackMode, setPreviewPlaybackMode] = useState<PreviewPlaybackMode>(null);
   const [previewVideoLoadError, setPreviewVideoLoadError] = useState<string | null>(null);
   const [previewVideoLoading, setPreviewVideoLoading] = useState(false);
   const [previewVideoLoadingLabel, setPreviewVideoLoadingLabel] = useState("正在载入视频");
@@ -2320,7 +2524,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [waveformZoom, setWaveformZoom] = useState(INITIAL_WAVEFORM_ZOOM);
   const [waveformReady, setWaveformReady] = useState(false);
   const [waveformError, setWaveformError] = useState<string | null>(null);
-  const [timelineHoverOutputTime, setTimelineHoverOutputTime] = useState<number | null>(null);
+  const [timelineHoverSourceTime, setTimelineHoverSourceTime] = useState<number | null>(null);
   const [termReviewFilter, setTermReviewFilter] = useState("");
   const [minTermCount, setMinTermCount] = useState(2);
   const [manualTermDraft, setManualTermDraft] = useState("");
@@ -2335,6 +2539,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [transcriptReplacementDraft, setTranscriptReplacementDraft] = useState("");
   const [smartCutRulesExpanded, setSmartCutRulesExpanded] = useState(false);
   const [smartCutRules, setSmartCutRules] = useState<SmartCutRules>(() => loadSmartCutRules());
+  const [manualSmartCutRestoreRanges, setManualSmartCutRestoreRanges] = useState<KeepSegment[]>([]);
   const [videoTransform, setVideoTransform] = useState<JobManualVideoTransform>(() => normalizeVideoTransform(null));
   const [rotationDialogOpen, setRotationDialogOpen] = useState(false);
   const [rotationDraft, setRotationDraft] = useState(0);
@@ -2356,6 +2561,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     currentSubtitleDraftText,
     subtitleDrafts: cloneSubtitleDrafts(subtitleDrafts),
     subtitleReplacementHistory: subtitleReplacementHistory.map((item) => ({ ...item })),
+    manualSmartCutRestoreRanges: manualSmartCutRestoreRanges.map((range) => ({ ...range })),
     editorNote,
     videoSummary,
     videoTransform: { ...normalizeVideoTransform(videoTransform) },
@@ -2382,6 +2588,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setCurrentSubtitleDraftText("");
     setSubtitleDrafts(restored.subtitleDrafts);
     setSubtitleReplacementHistory(restored.subtitleReplacementHistory.map((item) => ({ ...item })));
+    setManualSmartCutRestoreRanges(restored.manualSmartCutRestoreRanges.map((range) => ({ ...range })));
     setEditorNote(restored.editorNote);
     setVideoSummary(restored.videoSummary);
     setVideoTransform(restored.videoTransform);
@@ -2421,6 +2628,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setTranscriptSelectionPopover(null);
     setTranscriptReplacementDraft("");
     setSmartCutRules(loadSmartCutRules());
+    setManualSmartCutRestoreRanges([]);
     lastAutoSmartCutSignatureRef.current = "";
     setManualTermDraft("");
     setManualReplacementDraft("");
@@ -2428,6 +2636,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setEditorNote("");
     setVideoSummary(session.video_summary || "");
     setCurrentSourceTime(0);
+    setPreviewPlaybackMode(null);
     setWaveformReady(false);
     setWaveformError(null);
     setTermReviewFilter("");
@@ -2447,7 +2656,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
   useEffect(() => {
     currentEditSnapshotRef.current = buildUndoSnapshot();
-  }, [currentSubtitleDraftText, editorNote, editingSubtitleIndex, segments, selectedSegmentIndex, selectedSubtitleIndex, subtitleDrafts, subtitleReplacementHistory, videoSummary, videoTransform]);
+  }, [currentSubtitleDraftText, editorNote, editingSubtitleIndex, manualSmartCutRestoreRanges, segments, selectedSegmentIndex, selectedSubtitleIndex, subtitleDrafts, subtitleReplacementHistory, videoSummary, videoTransform]);
 
   const effectiveSegments = useMemo(
     () => segments.filter((segment) => segment.end > segment.start + 0.05),
@@ -2559,8 +2768,13 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     [smartCutRuleAnalysis],
   );
   const smartCutRuleKeptRangeCount = useMemo(
-    () => smartCutRuleRanges.filter((range) => isSourceRangeKept(range.start, range.end, effectiveSegments)).length,
-    [effectiveSegments, smartCutRuleRanges],
+    () => {
+      const activeRanges = manualSmartCutRestoreRanges.length
+        ? removeSourceRangesFromSegments(smartCutRuleRanges, manualSmartCutRestoreRanges)
+        : smartCutRuleRanges;
+      return activeRanges.filter((range) => isSourceRangeKept(range.start, range.end, effectiveSegments)).length;
+    },
+    [effectiveSegments, manualSmartCutRestoreRanges, smartCutRuleRanges],
   );
 
   const totalOutputDuration = projection.totalDuration;
@@ -2588,7 +2802,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const currentVideoRotation = currentVideoTransform.rotation_cw;
   const hasVideoTransformEdits = JSON.stringify(currentVideoTransform) !== JSON.stringify(baseVideoTransform);
   const hasVideoSummaryEdits = currentVideoSummary !== baseVideoSummary;
-  const previewVideoUrl = previewAssets?.ready && previewAssets.video_url ? previewAssets.video_url : session.source_url;
+  const previewVideoUrl = previewAssets?.video_url ? previewAssets.video_url : session.source_url;
+  const previewVideoUsingProxy = Boolean(previewAssets?.video_url);
   const waveformUrl = previewAssets?.ready && previewAssets.audio_url ? previewAssets.audio_url : "";
   const waveformPeaks = useMemo(
     () => (previewAssets?.peaks?.length ? [previewAssets.peaks] : undefined),
@@ -2604,25 +2819,36 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         : 0,
     }));
   }, [previewAssets?.duration_sec, previewAssets?.thumbnail_items, previewAssets?.thumbnail_urls]);
-  const timelineThumbnailItems = useMemo(
-    () => thumbnailItems.map((item) => sourceTimeToOutputThumbnailItem(item, projection.ranges)),
-    [projection.ranges, thumbnailItems],
-  );
-  const unifiedThumbnailItems = useMemo<UnifiedTimelineThumbnailItem[]>(() => {
-    const keptItems = timelineThumbnailItems.filter((item) => item.kept && item.output_time != null);
-    if (!keptItems.length || totalOutputDuration <= 0) return [];
-    const estimatedWidth = clamp(100 / Math.max(8, keptItems.length), 3.5, 8);
-    return keptItems.map((item, index) => ({
-      ...item,
-      leftPercent: clamp(((item.output_time ?? 0) / totalOutputDuration) * 100, 0, 100),
-      widthPercent: index === keptItems.length - 1
+  const sourceTimelineDuration = Math.max(0, session.source_duration_sec || previewAssets?.duration_sec || 0);
+  const unifiedThumbnailItems = useMemo<SourceTimelineThumbnailItem[]>(() => {
+    if (!thumbnailItems.length || sourceTimelineDuration <= 0) return [];
+    const ordered = [...thumbnailItems].sort((left, right) => left.time_sec - right.time_sec);
+    const estimatedWidth = clamp(100 / Math.max(8, ordered.length), 3.5, 8);
+    return ordered.map((item, index) => {
+      const timeSec = clamp(Number(item.time_sec || 0), 0, sourceTimelineDuration);
+      const nextTime = ordered[index + 1]?.time_sec;
+      const widthPercent = nextTime == null
         ? estimatedWidth
-        : clamp((((keptItems[index + 1].output_time ?? 0) - (item.output_time ?? 0)) / totalOutputDuration) * 100, estimatedWidth, 10),
-    }));
-  }, [timelineThumbnailItems, totalOutputDuration]);
+        : clamp(((Math.max(timeSec, nextTime) - timeSec) / sourceTimelineDuration) * 100, estimatedWidth, 10);
+      return {
+        url: item.url,
+        timeSec,
+        leftPercent: clamp((timeSec / sourceTimelineDuration) * 100, 0, 100),
+        widthPercent,
+      };
+    });
+  }, [sourceTimelineDuration, thumbnailItems]);
   const unifiedWaveformBars = useMemo(
-    () => buildOutputWaveformBars(previewAssets?.peaks, projection.ranges, totalOutputDuration, session.source_duration_sec, 220),
-    [previewAssets?.peaks, projection.ranges, session.source_duration_sec, totalOutputDuration],
+    () => buildSourceWaveformBars(previewAssets?.peaks, 220),
+    [previewAssets?.peaks],
+  );
+  const sourceKeepTimelineItems = useMemo(
+    () => sourceRangesToTimelineItems(effectiveSegments, sourceTimelineDuration),
+    [effectiveSegments, sourceTimelineDuration],
+  );
+  const sourceCutTimelineItems = useMemo(
+    () => sourceRangesToTimelineItems(sourceCutRangesFromKeepSegments(effectiveSegments, sourceTimelineDuration), sourceTimelineDuration),
+    [effectiveSegments, sourceTimelineDuration],
   );
   const timelineRulerTicks = useMemo(
     () => Array.from({ length: 7 }, (_, index) => {
@@ -2630,17 +2856,17 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       return {
         key: index,
         leftPercent: ratio * 100,
-        label: formatSeconds(totalOutputDuration * ratio),
+        label: formatSeconds(sourceTimelineDuration * ratio),
       };
     }),
-    [totalOutputDuration],
+    [sourceTimelineDuration],
   );
-  const timelinePlayheadOutputTime = clamp(currentOutputTime, 0, Math.max(0, totalOutputDuration));
+  const timelinePlayheadSourceTime = clamp(currentSourceTime, 0, Math.max(0, sourceTimelineDuration));
   const unifiedTimelineStyle = {
-    "--playhead-left": `${totalOutputDuration > 0 ? (timelinePlayheadOutputTime / totalOutputDuration) * 100 : 0}%`,
-    "--hover-left": timelineHoverOutputTime == null || totalOutputDuration <= 0
+    "--playhead-left": `${sourceTimelineDuration > 0 ? (timelinePlayheadSourceTime / sourceTimelineDuration) * 100 : 0}%`,
+    "--hover-left": timelineHoverSourceTime == null || sourceTimelineDuration <= 0
       ? "-100%"
-      : `${clamp((timelineHoverOutputTime / totalOutputDuration) * 100, 0, 100)}%`,
+      : `${clamp((timelineHoverSourceTime / sourceTimelineDuration) * 100, 0, 100)}%`,
   } as CSSProperties;
   const previewAssetProgress = previewAssets?.progress == null ? null : clamp(previewAssets.progress, 0, 1);
   const previewAssetProgressPercent = previewAssetProgress == null ? null : Math.round(previewAssetProgress * 100);
@@ -2765,6 +2991,21 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
           ? "会把人工视频摘要写入内容画像和下游上下文，作为自动审核与字幕校对的强证据。"
       : "当前没有检测到剪辑、画面方向或字幕修改。";
   const outputDurationDeltaLabel = `${outputDurationDelta >= 0 ? "+" : "-"}${formatSeconds(Math.abs(outputDurationDelta))}`;
+  const manualEditChangeList = useMemo(
+    () => buildManualEditChangeList({
+      baseSegments: baseKeepSegments,
+      effectiveSegments,
+      outputDurationDeltaSec: outputDurationDelta,
+      subtitleOverrides,
+      baseSubtitles: baseProjection.remapped,
+      subtitleReplacements,
+      baseVideoTransform,
+      currentVideoTransform,
+      hasVideoSummaryEdits,
+    }),
+    [baseKeepSegments, baseProjection.remapped, baseVideoTransform, currentVideoTransform, effectiveSegments, hasVideoSummaryEdits, outputDurationDelta, subtitleOverrides, subtitleReplacements],
+  );
+  const hasManualEditChangeListItems = manualEditChangeList.some((item) => item.tone !== "empty");
   useEffect(() => {
     onStateChange?.({
       payload: manualEditorPayload,
@@ -3110,6 +3351,10 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   };
 
   const reanchorPreviewToSegments = (nextSegments: KeepSegment[], outputTime = currentOutputTime) => {
+    if (!timelinePlaybackRef.current) {
+      jumpToSourceTime(currentSourceTime);
+      return;
+    }
     const nextSourceTime = outputTimeToSourceTimeForSegments(outputTime, nextSegments);
     jumpToSourceTime(nextSourceTime);
   };
@@ -3121,33 +3366,53 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     if (subtitle) setSelectedSubtitleIndex(subtitle.index);
   };
 
-  const outputTimeFromUnifiedTimelinePointer = (event: { clientX: number }) => {
+  const selectSubtitleNearSourceTime = (sourceTime: number) => {
+    const outputTime = sourceTimeToActiveOutputTime(sourceTime, projection.ranges);
+    if (outputTime == null) {
+      if (editingSubtitleIndex == null) setSelectedSubtitleIndex(null);
+      return;
+    }
+    selectSubtitleNearOutputTime(outputTime);
+  };
+
+  const sourceTimeFromUnifiedTimelinePointer = (event: { clientX: number }) => {
     const timeline = unifiedTimelineRef.current;
-    if (!timeline || totalOutputDuration <= 0) return null;
+    if (!timeline || sourceTimelineDuration <= 0) return null;
     const rect = timeline.getBoundingClientRect();
     if (rect.width <= 0) return null;
     const ratio = clamp((event.clientX - rect.left) / rect.width, 0, 1);
-    return totalOutputDuration * ratio;
+    return sourceTimelineDuration * ratio;
   };
 
   const previewUnifiedTimelineAtPointer = (event: ReactPointerEvent<HTMLElement>) => {
-    const outputTime = outputTimeFromUnifiedTimelinePointer(event);
-    if (outputTime == null) return;
-    setTimelineHoverOutputTime(outputTime);
+    const sourceTime = sourceTimeFromUnifiedTimelinePointer(event);
+    if (sourceTime == null) return;
+    setTimelineHoverSourceTime(sourceTime);
   };
 
   const commitUnifiedTimelinePointer = (event: { clientX: number }) => {
-    const outputTime = outputTimeFromUnifiedTimelinePointer(event);
-    if (outputTime == null || !projection.ranges.length) return;
-    setTimelineHoverOutputTime(outputTime);
-    selectSubtitleNearOutputTime(outputTime);
-    jumpToOutputTime(outputTime);
+    const sourceTime = sourceTimeFromUnifiedTimelinePointer(event);
+    if (sourceTime == null) return;
+    setTimelineHoverSourceTime(sourceTime);
+    selectSubtitleNearSourceTime(sourceTime);
+    jumpToSourceTime(sourceTime);
+  };
+
+  const playSourceTimeline = async () => {
+    const video = videoRef.current;
+    if (!video) return;
+    timelinePlaybackRef.current = false;
+    setPreviewPlaybackMode("source");
+    applyPreviewAudioSettings(previewVolume, previewMuted, previewAutoVolumeEnabled, true);
+    await video.play();
+    startPreviewClock();
   };
 
   const playEditedTimeline = async () => {
     const video = videoRef.current;
     if (!video || !projection.ranges.length) return;
     timelinePlaybackRef.current = true;
+    setPreviewPlaybackMode("output");
     const currentRange = projection.ranges.find((range) => currentSourceTime >= range.sourceStart && currentSourceTime <= range.sourceEnd);
     const shouldRestart = !currentRange || currentOutputTime >= Math.max(0, totalOutputDuration - 0.08);
     if (shouldRestart) {
@@ -3161,8 +3426,17 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const pauseEditedTimeline = () => {
     timelinePlaybackRef.current = false;
     setIsPreviewPlaying(false);
+    setPreviewPlaybackMode(null);
     stopPreviewClock();
     void videoRef.current?.pause();
+  };
+
+  const toggleSourceTimelinePlayback = () => {
+    if (isPreviewPlaying) {
+      pauseEditedTimeline();
+      return;
+    }
+    void playSourceTimeline();
   };
 
   const toggleEditedTimelinePlayback = () => {
@@ -3398,7 +3672,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const handlePreviewVideoError = (event: SyntheticEvent<HTMLVideoElement>) => {
     const code = event.currentTarget.error?.code;
     const message = code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
-      ? "浏览器无法解码当前预览视频，正在使用兼容代理仍失败。请重新生成预览资产或检查 ffmpeg。"
+      ? previewVideoUsingProxy
+        ? "浏览器无法解码当前视频代理，请重新生成预览资产或检查 ffmpeg。"
+        : "浏览器无法解码当前原片，等待视频代理生成后会自动切换。"
       : code === MediaError.MEDIA_ERR_NETWORK
         ? "预览视频加载中断，请刷新后重试。"
         : "预览视频加载失败，请刷新或重新生成预览资产。";
@@ -3472,6 +3748,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setSelectedSegmentIndex((current) => clamp(current, 0, nextSegments.length - 1));
     updateSubtitleDraft(selectedSubtitle, { delete: true });
     setEditingSubtitleIndex(null);
+    forgetManualSmartCutRestores(sourceRanges);
   };
 
   const clearTranscriptSelection = () => {
@@ -3550,6 +3827,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       current,
     ));
     setSelectedSegmentIndex((current) => clamp(current, 0, nextSegments.length - 1));
+    forgetManualSmartCutRestores([range]);
     clearTranscriptSelection();
   };
 
@@ -3557,6 +3835,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     if (!transcriptSelection) return;
     const range = { start: transcriptSelection.sourceStart, end: transcriptSelection.sourceEnd };
     recordUndoSnapshot();
+    pauseEditedTimeline();
+    rememberManualSmartCutRestores([range]);
     setSegments((current) => addSourceRangesToSegments(current, [range], session.source_duration_sec));
     jumpToSourceTime(range.start);
     clearTranscriptSelection();
@@ -3593,6 +3873,16 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     clearTranscriptSelection();
   };
 
+  const rememberManualSmartCutRestores = (ranges: KeepSegment[]) => {
+    if (!ranges.length) return;
+    setManualSmartCutRestoreRanges((current) => addSourceRangesToSegments(current, ranges, session.source_duration_sec));
+  };
+
+  const forgetManualSmartCutRestores = (ranges: KeepSegment[]) => {
+    if (!ranges.length) return;
+    setManualSmartCutRestoreRanges((current) => removeSourceRangesFromSegments(current, ranges));
+  };
+
   const applySmartCutRuleRanges = (ranges: KeepSegment[], managedRanges: KeepSegment[]) => {
     const baseSegments = baseKeepSegments.map((segment) => ({ start: segment.start, end: segment.end }));
     const nextSegments = applySmartCutRuleRangesToSegments(
@@ -3600,6 +3890,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       ranges,
       managedRanges,
       session.source_duration_sec,
+      manualSmartCutRestoreRanges,
     );
     if (!nextSegments.length) return;
     if (keepSegmentsEquivalent(effectiveSegments, nextSegments)) return;
@@ -3903,6 +4194,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const restoreDeletedSubtitle = (subtitle: VisibleSubtitleRow) => {
     recordUndoSnapshot();
     if (subtitle.restoreRanges?.length) {
+      pauseEditedTimeline();
+      rememberManualSmartCutRestores(subtitle.restoreRanges);
       setSegments((current) => addSourceRangesToSegments(current, subtitle.restoreRanges ?? [], session.source_duration_sec));
       jumpToSourceTime(subtitle.restoreRanges[0].start);
     }
@@ -3980,11 +4273,12 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       smartCutRulesSignature(smartCutRules),
       JSON.stringify(smartCutManagedRanges.map((range) => [range.kind, range.start, range.end])),
       JSON.stringify(smartCutRuleRanges.map((range) => [range.kind, range.start, range.end])),
+      JSON.stringify(manualSmartCutRestoreRanges.map((range) => [range.start, range.end])),
     ].join(":");
     if (signature === lastAutoSmartCutSignatureRef.current) return;
     lastAutoSmartCutSignatureRef.current = signature;
     applySmartCutRuleRanges(smartCutRuleRanges, smartCutManagedRanges);
-  }, [baseKeepSegments, session.editable, session.job_id, session.source_duration_sec, session.timeline_id, session.timeline_version, smartCutManagedRanges, smartCutRuleRanges, smartCutRules]);
+  }, [baseKeepSegments, manualSmartCutRestoreRanges, session.editable, session.job_id, session.source_duration_sec, session.timeline_id, session.timeline_version, smartCutManagedRanges, smartCutRuleRanges, smartCutRules]);
 
   useEffect(() => {
     if (!onAutoSave || autosaving || !session.editable || !effectiveSegments.length) return undefined;
@@ -4029,7 +4323,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
       if (event.code === "Space") {
         event.preventDefault();
-        toggleEditedTimelinePlayback();
+        toggleSourceTimelinePlayback();
         return;
       }
 
@@ -4072,7 +4366,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     nudgeSelectedSubtitle,
     onApply,
     outputDurationDeltaLabel,
-    playEditedTimeline,
+    playSourceTimeline,
     selectAdjacentSubtitle,
     setSelectedSubtitleBoundaryFromPlayhead,
     saveImpactSummary,
@@ -4251,7 +4545,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         <div>
           <div className="detail-key">手动调整模式</div>
           <div className="muted compact-top">
-            基于当前时间线做人工删段和边界微调，字幕会按同一套保留段实时前移预览。保存后会从渲染开始重跑，继续生成特效和数字人版本。
+            基于完整源片做人工删段和边界微调；剪辑痕迹覆盖在源片时间轴上，输出成片预览只作为派生检查。保存后会从渲染开始重跑，继续生成特效和数字人版本。
           </div>
         </div>
         <div className="toolbar">
@@ -4265,6 +4559,30 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
           <span className="status-pill pending">时间线 v{session.timeline_version}</span>
         </div>
       </div>
+
+      <section className={classNames("manual-editor-change-list", !hasManualEditChangeListItems && "empty")} aria-label="改动清单">
+        <div className="manual-editor-change-list-head">
+          <div>
+            <strong>改动清单</strong>
+            <div className="muted compact-top">当前草稿会保存的剪辑、画面、字幕和摘要变化。</div>
+          </div>
+          <span className={classNames("status-pill", hasManualEditChangeListItems ? "pending" : "done")}>
+            {hasManualEditChangeListItems ? `${manualEditChangeList.length} 项改动` : "暂无改动"}
+          </span>
+        </div>
+        <ul className="manual-editor-change-list-items">
+          {manualEditChangeList.map((item) => (
+            <li key={item.key} className={classNames("manual-editor-change-list-item", item.tone)}>
+              <span className="manual-editor-change-list-marker" aria-hidden="true" />
+              <div className="manual-editor-change-list-main">
+                <strong>{item.title}</strong>
+                <span>{item.detail}</span>
+              </div>
+              {item.meta ? <span className="manual-editor-change-list-meta">{item.meta}</span> : null}
+            </li>
+          ))}
+        </ul>
+      </section>
 
       {session.detail ? <div className="notice compact-top">{session.detail}</div> : null}
       {subtitleReplaceDialog ? (
@@ -4330,7 +4648,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
             <div className="manual-editor-rotation-preview" style={rotationDialogPreviewStyle}>
               <div className="manual-editor-video-stage">
-                <video src={session.source_url ?? undefined} muted playsInline preload="metadata" onLoadedMetadata={rememberVideoMetadata} />
+                <video src={previewVideoUrl ?? undefined} muted playsInline preload="metadata" onLoadedMetadata={rememberVideoMetadata} />
               </div>
             </div>
 
@@ -4453,7 +4771,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         </div>
       ) : null}
       <div className="manual-editor-shortcuts" aria-label="手动编辑快捷键">
-        <span><kbd>Space</kbd> 播放/暂停</span>
+        <span><kbd>Space</kbd> 播放/暂停源片</span>
         <span><kbd>←/→</kbd> 跳 1s</span>
         <span><kbd>Alt</kbd> + <kbd>←/→</kbd> 逐帧</span>
         <span><kbd>[</kbd>/<kbd>]</kbd> 字幕 ±100ms</span>
@@ -4529,13 +4847,13 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                     style={floatingPreviewFrameStyle}
                     role="button"
                     tabIndex={0}
-                    onClick={toggleEditedTimelinePlayback}
+                    onClick={toggleSourceTimelinePlayback}
                     onKeyDown={(event) => {
                       if (event.key !== "Enter") return;
                       event.preventDefault();
-                      toggleEditedTimelinePlayback();
+                      toggleSourceTimelinePlayback();
                     }}
-                    aria-label={isPreviewPlaying ? "暂停输出时间轴预览" : "播放输出时间轴预览"}
+                    aria-label={isPreviewPlaying ? "暂停源片预览" : "播放源片预览"}
                   >
                     <div className="manual-editor-video-stage">
                       <video
@@ -4572,10 +4890,12 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                           updatePreviewVideoLoadProgress(event.currentTarget);
                           setPreviewVideoLoading(false);
                           setIsPreviewPlaying(true);
+                          setPreviewPlaybackMode(timelinePlaybackRef.current ? "output" : "source");
                           startPreviewClock();
                         }}
                         onPlay={() => {
                           setIsPreviewPlaying(true);
+                          setPreviewPlaybackMode(timelinePlaybackRef.current ? "output" : "source");
                           startPreviewClock();
                         }}
                         onError={handlePreviewVideoError}
@@ -4585,12 +4905,14 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                           if (videoRef.current?.paused) {
                             timelinePlaybackRef.current = false;
                             setIsPreviewPlaying(false);
+                            setPreviewPlaybackMode(null);
                             stopPreviewClock();
                           }
                         }}
                         onEnded={() => {
                           timelinePlaybackRef.current = false;
                           setIsPreviewPlaying(false);
+                          setPreviewPlaybackMode(null);
                           stopPreviewClock();
                         }}
                       />
@@ -4644,11 +4966,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                       <button
                         type="button"
                         className="manual-editor-preview-play"
-                        disabled={previewDisabled || !effectiveSegments.length}
-                        onClick={toggleEditedTimelinePlayback}
-                        aria-label={isPreviewPlaying ? "暂停输出时间轴预览" : "播放输出时间轴预览"}
+                        disabled={previewDisabled}
+                        onClick={toggleSourceTimelinePlayback}
+                        aria-label={isPreviewPlaying ? "暂停源片预览" : "播放源片预览"}
                       >
-                        {isPreviewPlaying ? "暂停" : "播放"}
+                        {isPreviewPlaying ? "暂停" : "源片"}
                       </button>
                       <div className="manual-editor-preview-volume" onPointerDown={(event) => event.stopPropagation()}>
                         <button
@@ -4680,7 +5002,10 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                       >
                         {previewAutoVolumeLabel}
                       </button>
-                      <span>{formatSeconds(currentOutputTime)} / {formatSeconds(totalOutputDuration)}</span>
+                      <span>
+                        源 {formatSeconds(currentSourceTime)} / {formatSeconds(sourceTimelineDuration)}
+                        {activePreviewOutputTime == null ? "" : ` · 输出 ${formatSeconds(activePreviewOutputTime)}`}
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -4688,8 +5013,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
               {currentVideoRotation ? <div className="manual-editor-rotation-status">当前预览已顺时针旋转 {currentVideoRotation}°，该参数会自动保存并用于重渲染。</div> : null}
 
               <div className="manual-editor-controls">
-                <button type="button" className="button primary" disabled={previewDisabled || !effectiveSegments.length} onClick={toggleEditedTimelinePlayback}>
-                  {isPreviewPlaying ? "暂停输出预览" : "播放输出预览"}
+                <button type="button" className="button primary" disabled={previewDisabled} onClick={toggleSourceTimelinePlayback}>
+                  {isPreviewPlaying && previewPlaybackMode === "source" ? "暂停源片" : "播放源片"}
+                </button>
+                <button type="button" className="button ghost" disabled={previewDisabled || !effectiveSegments.length} onClick={toggleEditedTimelinePlayback}>
+                  {isPreviewPlaying && previewPlaybackMode === "output" ? "暂停输出预览" : "播放输出预览"}
                 </button>
                 <button type="button" className="button ghost" onClick={openRotationDialog}>
                   旋转画面
@@ -4929,8 +5257,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
             style={unifiedTimelineStyle}
             onPointerMove={previewUnifiedTimelineAtPointer}
             onClick={commitUnifiedTimelinePointer}
-            onPointerLeave={() => setTimelineHoverOutputTime(null)}
-            aria-label="统一时间轴"
+            onPointerLeave={() => setTimelineHoverSourceTime(null)}
+            aria-label="源片统一时间轴"
           >
             {previewDisabled ? (
               <div className="notice">缺少可预览原片，时间轴定位暂不可用。</div>
@@ -4943,16 +5271,44 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
               ))}
             </div>
             <div className="manual-editor-unified-hover" aria-hidden="true">
-              <span>{timelineHoverOutputTime == null ? "" : formatSeconds(timelineHoverOutputTime)}</span>
+              <span>{timelineHoverSourceTime == null ? "" : formatSeconds(timelineHoverSourceTime)}</span>
             </div>
             <div className="manual-editor-unified-playhead" aria-hidden="true">
-              <span>{formatSeconds(timelinePlayheadOutputTime)}</span>
+              <span>{formatSeconds(timelinePlayheadSourceTime)}</span>
             </div>
 
             <div className="manual-editor-unified-clip">
               <div className="manual-editor-unified-clip-head">
                 <strong>{job?.source_name ?? session.source_name}</strong>
-                <span>{formatSeconds(totalOutputDuration)}</span>
+                <span>源 {formatSeconds(sourceTimelineDuration)} / 输出 {formatSeconds(totalOutputDuration)}</span>
+              </div>
+              <div className="manual-editor-unified-traces" aria-label="剪辑痕迹">
+                {sourceKeepTimelineItems.map((range, index) => (
+                  <button
+                    key={`keep-${range.start}-${range.end}-${index}`}
+                    type="button"
+                    className="manual-editor-unified-trace keep"
+                    style={{ left: `${range.leftPercent}%`, width: `${Math.max(range.widthPercent, 0.4)}%` }}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      jumpToSourceTime(range.start);
+                    }}
+                    title={`保留 ${formatSeconds(range.start)} - ${formatSeconds(range.end)}`}
+                  />
+                ))}
+                {sourceCutTimelineItems.map((range, index) => (
+                  <button
+                    key={`cut-${range.start}-${range.end}-${index}`}
+                    type="button"
+                    className="manual-editor-unified-trace cut"
+                    style={{ left: `${range.leftPercent}%`, width: `${Math.max(range.widthPercent, 0.4)}%` }}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      jumpToSourceTime(range.start);
+                    }}
+                    title={`待剪 ${formatSeconds(range.start)} - ${formatSeconds(range.end)}`}
+                  />
+                ))}
               </div>
               <div className="manual-editor-unified-thumbnails">
                 {unifiedThumbnailItems.length ? (
@@ -4967,10 +5323,10 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                       }}
                       onClick={(event) => {
                         event.stopPropagation();
-                        selectSubtitleNearOutputTime(item.output_time ?? 0);
-                        jumpToSourceTime(item.time_sec);
+                        selectSubtitleNearSourceTime(item.timeSec);
+                        jumpToSourceTime(item.timeSec);
                       }}
-                      title={`输出 ${formatSeconds(item.output_time ?? 0)} / 源 ${formatSeconds(item.time_sec)}`}
+                      title={`源 ${formatSeconds(item.timeSec)}`}
                     >
                       <img src={item.url} alt="" loading="lazy" />
                     </button>
@@ -4986,22 +5342,24 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
               </div>
             </div>
 
-            {projection.remapped.length ? (
-              <div className="manual-editor-unified-subtitles" aria-label="字幕定位轨">
-                {projection.remapped.map((subtitle) => {
-                  const left = totalOutputDuration > 0 ? (subtitle.start_time / totalOutputDuration) * 100 : 0;
-                  const width = totalOutputDuration > 0 ? ((subtitle.end_time - subtitle.start_time) / totalOutputDuration) * 100 : 0;
-                  const selected = selectedSubtitle?.index === subtitle.index;
-                  const warning = Boolean(diagnostics.warnings[subtitle.index]?.length);
+            {sourceTranscriptSubtitles.length ? (
+              <div className="manual-editor-unified-subtitles" aria-label="源片字幕定位轨">
+                {sourceTranscriptSubtitles.map((subtitle) => {
+                  const left = sourceTimelineDuration > 0 ? (subtitle.start_time / sourceTimelineDuration) * 100 : 0;
+                  const width = sourceTimelineDuration > 0 ? ((subtitle.end_time - subtitle.start_time) / sourceTimelineDuration) * 100 : 0;
+                  const sourceOutputTime = sourceTimeToActiveOutputTime(subtitle.start_time, projection.ranges);
+                  const selected = sourceOutputTime != null && selectedSubtitle?.index === projection.remapped[findSubtitleIndexNearOutputTime(projection.remapped, sourceOutputTime)]?.index;
+                  const cut = !isSourceRangeKept(subtitle.start_time, subtitle.end_time, effectiveSegments);
                   return (
                     <button
                       key={`${subtitle.index}-${subtitle.start_time}-timeline`}
                       type="button"
-                      className={classNames("manual-editor-unified-subtitle", selected && "active", warning && "warning")}
+                      className={classNames("manual-editor-unified-subtitle", selected && "active", cut && "cut")}
                       style={{ left: `${clamp(left, 0, 100)}%`, width: `${Math.max(width, 0.8)}%` }}
                       onClick={(event) => {
                         event.stopPropagation();
-                        selectSubtitle(subtitle);
+                        selectSubtitleNearSourceTime(subtitle.start_time);
+                        jumpToSourceTime(subtitle.start_time);
                       }}
                       title={`${formatSeconds(subtitle.start_time)} - ${formatSeconds(subtitle.end_time)} ${subtitleText(subtitle)}`}
                     >
@@ -5013,14 +5371,44 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
             ) : null}
           </div>
 
+          <div className="manual-editor-wave-shell top-gap">
+            <div
+              ref={waveformRef}
+              className={classNames("manual-editor-waveform", !waveformUrl && "disabled")}
+              aria-label="可调保留段波形"
+            />
+            <div ref={waveformTimelineRef} className="manual-editor-wave-timeline" />
+            {waveformUrl && (!waveformReady || waveformError) ? (
+              <div className="manual-editor-wave-loading">
+                {waveformError || "正在加载完整源片波形"}
+              </div>
+            ) : null}
+          </div>
+          <div className="manual-editor-wave-tools">
+            <span className="status-pill done">绿色保留</span>
+            <span className="status-pill failed">暗段待剪</span>
+            <span className="muted">拖动绿色区块即可微调边界；点击源片时间轴只定位，不会跳过被剪片段。</span>
+            <label className="manual-editor-wave-zoom">
+              <span>缩放</span>
+              <input
+                type="range"
+                min={4}
+                max={80}
+                step={1}
+                value={waveformZoom}
+                onChange={(event) => setWaveformZoom(Number(event.target.value))}
+              />
+            </label>
+          </div>
+
           {previewAssets ? (
             <div className="manual-editor-preview-assets">
               <div className="manual-editor-preview-asset-status">
                 <span>{previewAssetStatusLabel(previewAssets)}</span>
                 <span>{previewAssetStageLabel(previewAssets.stage)}</span>
                 <span>{previewAssetProgressPercent != null ? `${previewAssetProgressPercent}%` : previewAssets.ready ? "100%" : "0%"}</span>
-                <span>{previewAssets.ready ? `${previewAssets.peak_count} peaks` : "使用原片预览"}</span>
-                {previewAssets.ready && previewAssets.video_url ? <span>浏览器兼容视频代理</span> : null}
+                <span>{previewAssets.ready ? `${previewAssets.peak_count} peaks` : previewAssets.video_url ? "使用视频代理预览" : "等待视频代理"}</span>
+                {previewAssets.video_url ? <span>浏览器兼容视频代理</span> : null}
                 {previewAssets.ready ? <span>{previewMeasuredLufs.toFixed(1)} LUFS 至 {previewTargetLufs.toFixed(0)} LUFS</span> : null}
                 {previewAssets.ready ? <span>增益 {previewAutoVolumeGain.toFixed(2)}x</span> : null}
                 {previewAssets.asset_version ? <span>v{previewAssets.asset_version}</span> : null}

@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -64,6 +65,53 @@ def test_tts_output_history_is_separate_from_reference_history(monkeypatch: pyte
 
     assert [item["name"] for item in tools._list_reference_audio_history()] == ["voice-reference.wav"]
     assert [item["name"] for item in tools._list_tts_output_history()] == ["tts-output.wav"]
+
+
+def test_tts_output_filename_includes_timestamp_and_config() -> None:
+    filename = tools._build_tts_output_filename(
+        created_at=datetime(2026, 5, 13, 7, 19, 30, tzinfo=timezone.utc),
+        mode="instruct2",
+        prompt_text="",
+        instruct_text="请用开心、明亮、有感染力的语气说这句话。",
+        spk_id="",
+        zero_shot_spk_id="",
+        stream=True,
+        speed=1.0,
+        seed=0,
+        text_frontend=True,
+        reference_path=Path("原始参考 voice 01.wav"),
+        segment_count=3,
+    )
+
+    assert filename.startswith("tts_20260513_")
+    assert "instruct2" in filename
+    assert "inst-" in filename
+    assert "ref-原始参考-voice-01" in filename
+    assert "speed1" in filename
+    assert "seed0" in filename
+    assert "seg3" in filename
+    assert filename.endswith(".wav")
+
+
+def test_tts_output_history_reads_sidecar_metadata(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    tts_root = tmp_path / "tts"
+    monkeypatch.setattr(tools, "_TTS_ROOT", tts_root)
+    monkeypatch.setattr(tools, "_audio_duration_seconds", lambda path: None)
+
+    output_path = tts_root / "tts_20260513_151930_instruct2_speed1_seed0.wav"
+    _write_audio(output_path, b"output", mtime=200)
+    output_path.with_suffix(".wav.json").write_text(
+        '{"created_at":"2026-05-13T07:19:30+00:00","display_name":"readable.wav","config_summary":"mode=instruct2 · speed=1","text_preview":"测试文本"}',
+        encoding="utf-8",
+    )
+
+    item = tools._list_tts_output_history()[0]
+
+    assert item["name"] == output_path.name
+    assert item["display_name"] == "readable.wav"
+    assert item["created_at"] == "2026-05-13T07:19:30+00:00"
+    assert item["config_summary"] == "mode=instruct2 · speed=1"
+    assert item["text_preview"] == "测试文本"
 
 
 def test_safe_upload_filename_preserves_original_name_when_possible() -> None:

@@ -7,6 +7,7 @@ import { PageHeader } from "../components/ui/PageHeader";
 import { PageSection } from "../components/ui/PageSection";
 import { PanelHeader } from "../components/ui/PanelHeader";
 import type { ToolAsrResult, ToolAvatarResult, ToolRunStage, ToolRunStatus, ToolServiceStatus, ToolTtsMode, ToolTtsReferenceAudioItem, ToolTtsResult } from "../types";
+import { formatDate } from "../utils";
 import "./ToolsPage.css";
 
 const toolCards = [
@@ -43,6 +44,8 @@ const toolOptionStorageKeys = {
 };
 
 const TTS_REFERENCE_HISTORY_LIMIT = 5;
+const TTS_INSTRUCT_HINT_MAX_CHARS = 48;
+const TTS_LONG_TEXT_SEGMENT_HINT_CHARS = 120;
 
 const cosyVoiceTtsModes = [
   {
@@ -294,12 +297,8 @@ function coerceTtsOptions(value: Partial<TtsToolOptions>): TtsToolOptions {
 }
 
 function appendInstructionPreset(currentValue: string, presetValue: string): string {
-  const current = String(currentValue || "").trim();
   const preset = String(presetValue || "").trim();
-  if (!preset) return current;
-  if (!current) return preset;
-  if (current.includes(preset)) return current;
-  return `${current}\n${preset}`;
+  return preset || String(currentValue || "").trim();
 }
 
 const ttsTextUiHintFragments = cosyVoiceTtsModes.map((mode) => mode.detail);
@@ -310,6 +309,28 @@ function cleanTtsTextInput(value: string): string {
     cleaned = cleaned.replaceAll(fragment, "").trim();
   }
   return cleaned.replace(/\s{2,}/g, " ").trim();
+}
+
+function cleanTtsInstructInput(value: string): string {
+  const firstLine = String(value || "")
+    .split(/[\n；;]/)
+    .map((line) => line.trim())
+    .find(Boolean) ?? "";
+  const normalized = firstLine
+    .replace(/\s+/g, "")
+    .replace(/^请/, "")
+    .replace(/^像(.+?)一样[，,]?/, "$1风格，")
+    .replace(/^用(.+?)(?:的方式)?(?:说|表达)[，,]?/, "$1，")
+    .replaceAll("这句话", "")
+    .replaceAll("一句话", "")
+    .replaceAll("更温柔", "温柔")
+    .replaceAll("更清楚", "清楚")
+    .replace(/[，,。.\s]+$/g, "");
+  if (normalized.length <= TTS_INSTRUCT_HINT_MAX_CHARS) {
+    return normalized ? `${normalized}。` : "";
+  }
+  const truncated = normalized.slice(0, TTS_INSTRUCT_HINT_MAX_CHARS).replace(/[，,、\s]+$/g, "");
+  return truncated ? `${truncated}。` : "";
 }
 
 function findTtsTextPollution(ttsText: string, ...controlValues: string[]): string {
@@ -375,6 +396,10 @@ function formatDuration(value?: number | null): string {
   return `${minutes}:${seconds}`;
 }
 
+function formatHistoryTimestamp(item: ToolTtsReferenceAudioItem): string {
+  return formatDate(item.created_at || item.updated_at);
+}
+
 function stageLabel(stage: ToolRunStage): string {
   return stage.label || stage.name || stage.key || "stage";
 }
@@ -384,6 +409,13 @@ function currentStageLabel<Result>(run?: ToolRunStatus<Result>): string {
   if (run.current_stage) return run.current_stage;
   const activeStage = run.stages.find((stage) => !isTerminalStatus(stage.status) && stage.status !== "pending");
   return activeStage ? stageLabel(activeStage) : run.status;
+}
+
+function stageStatusClass(status?: string | null): string {
+  const safeStatus = String(status || "unknown")
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-");
+  return `tool-stage-status-${safeStatus}`;
 }
 
 function useToolRun<Result>(runTool: (formData: FormData) => Promise<ToolRunStatus<Result>>) {
@@ -412,6 +444,8 @@ function ToolRunProgress<Result>({ run }: { run?: ToolRunStatus<Result> }) {
   if (!run) return null;
   const progress = normalizeProgress(run.progress);
   const visibleStages = (run.stages ?? []).filter((stage) => !(run.status === "completed" && stageLabel(stage) === "failed" && stage.status === "pending"));
+  const currentStage = currentStageLabel(run);
+  const isRunning = !isTerminalStatus(run.status);
   return (
     <div className="tool-run-progress">
       <div className="tool-run-summary">
@@ -419,30 +453,44 @@ function ToolRunProgress<Result>({ run }: { run?: ToolRunStatus<Result> }) {
         <span className="muted">Run {run.run_id}</span>
         <span className="mode-chip subtle">{progress}%</span>
       </div>
-      <div className="progress-bar tool-run-progress-bar">
-        <span style={{ width: `${progress}%` }} />
+      <div
+        className={`progress-bar tool-run-progress-bar${isRunning ? " is-animated" : ""}`}
+        role="progressbar"
+        aria-label="工具运行进度"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={progress}
+      >
+        <span className="tool-run-progress-fill" style={{ width: `${progress}%` }} />
+        {visibleStages.map((stage, index) => {
+          const markerLeft = visibleStages.length <= 1 ? 100 : (index / (visibleStages.length - 1)) * 100;
+          return (
+            <div
+              className={`tool-run-progress-marker ${stageStatusClass(stage.status)}`}
+              key={`${stage.key || stage.name || stage.label || "stage"}-marker-${index}`}
+              style={{ left: `${markerLeft}%` }}
+              title={`${stageLabel(stage)} · ${stage.status}`}
+            />
+          );
+        })}
       </div>
       <div className="tool-run-meta">
-        <span>当前阶段：{currentStageLabel(run)}</span>
+        <span>当前阶段：{currentStage}</span>
         {run.detail ? <span>{run.detail}</span> : null}
       </div>
-      <div className="tool-stage-list">
+      <div className="tool-stage-strip" aria-label="阶段状态">
         {visibleStages.map((stage, index) => {
           const stageProgress = normalizeProgress(stage.progress);
           return (
-            <article className="tool-stage-row" key={`${stage.key || stage.name || stage.label || "stage"}-${index}`}>
-              <div className="tool-stage-head">
-                <strong>{stageLabel(stage)}</strong>
-                <span className={toneForStatus(stage.status)}>{stage.status}</span>
-              </div>
-              <div className="progress-bar tool-stage-progress">
-                <span style={{ width: `${stageProgress}%` }} />
-              </div>
-              <div className="tool-stage-detail">
-                <span>{stageProgress}%</span>
-                {stage.detail || stage.error ? <span>{stage.detail || stage.error}</span> : null}
-              </div>
-            </article>
+            <span
+              className={`tool-stage-chip ${stageStatusClass(stage.status)}`}
+              key={`${stage.key || stage.name || stage.label || "stage"}-${index}`}
+              title={`${stageLabel(stage)} · ${stage.status} · ${stageProgress}%${stage.detail || stage.error ? ` · ${stage.detail || stage.error}` : ""}`}
+            >
+              <span className="tool-stage-chip-dot" />
+              <strong>{stageLabel(stage)}</strong>
+              <span>{stage.status}</span>
+            </span>
           );
         })}
       </div>
@@ -523,6 +571,7 @@ export function TtsToolPage() {
   const { mutation, run, pending, error } = useToolRun<ToolTtsResult>(api.runToolTts);
   const status = useQuery({ queryKey: ["tools", "status"], queryFn: api.getToolStatus, refetchInterval: 30_000 });
   const referenceHistory = useQuery({ queryKey: ["tools", "tts", "reference-audio"], queryFn: api.getToolTtsReferenceAudio, refetchInterval: 20_000 });
+  const outputHistory = useQuery({ queryKey: ["tools", "tts", "outputs"], queryFn: api.getToolTtsOutputs, refetchInterval: 20_000 });
   const [ttsOptions, setTtsOptions] = useStoredOptions(toolOptionStorageKeys.tts, defaultTtsOptions, coerceTtsOptions);
   const [selectedReferencePath, setSelectedReferencePath] = useState("");
   const [localSubmitError, setLocalSubmitError] = useState("");
@@ -546,6 +595,8 @@ export function TtsToolPage() {
   const usesSpeakerId = selectedMode.key === "sft";
   const usesZeroShotSpeakerId = selectedMode.key === "zero_shot";
   const usesCrossLingualText = selectedMode.key === "cross_lingual";
+  const cleanedTtsTextLength = cleanTtsTextInput(ttsOptions.ttsText).length;
+  const estimatedTtsSegmentCount = Math.max(1, Math.ceil(cleanedTtsTextLength / TTS_LONG_TEXT_SEGMENT_HINT_CHARS));
   const referenceHistoryItems = useMemo(() => {
     const seen = new Set<string>();
     const items: ToolTtsReferenceAudioItem[] = [];
@@ -558,12 +609,24 @@ export function TtsToolPage() {
     }
     return items;
   }, [referenceHistory.data?.items]);
+  const outputHistoryItems = useMemo(() => {
+    const seen = new Set<string>();
+    const items: ToolTtsReferenceAudioItem[] = [];
+    for (const item of outputHistory.data?.items ?? []) {
+      const key = item.path || item.audio_url || item.name;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      items.push(item);
+    }
+    return items;
+  }, [outputHistory.data?.items]);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const formData = new FormData(event.currentTarget);
     const cleanedTtsText = cleanTtsTextInput(ttsOptions.ttsText);
-    const pollutedControlText = findTtsTextPollution(cleanedTtsText, ttsOptions.promptText, ttsOptions.instructText);
+    const cleanedInstructText = cleanTtsInstructInput(ttsOptions.instructText);
+    const pollutedControlText = findTtsTextPollution(cleanedTtsText, ttsOptions.promptText, cleanedInstructText);
     if (pollutedControlText) {
       setLocalSubmitError("朗读正文里包含参考文本或口播指令。请把 tts_text 保持为只需要说出口的正文，指令只放在 instruct_text。");
       return;
@@ -571,8 +634,9 @@ export function TtsToolPage() {
     setLocalSubmitError("");
     formData.set("tts_text", cleanedTtsText);
     formData.set("text", cleanedTtsText);
-    if (cleanedTtsText !== ttsOptions.ttsText.trim()) {
-      setTtsOptions((current) => ({ ...current, ttsText: cleanedTtsText }));
+    formData.set("instruct_text", cleanedInstructText);
+    if (cleanedTtsText !== ttsOptions.ttsText.trim() || cleanedInstructText !== ttsOptions.instructText.trim()) {
+      setTtsOptions((current) => ({ ...current, ttsText: cleanedTtsText, instructText: cleanedInstructText }));
     }
     mutation.mutate(formData);
   };
@@ -636,6 +700,10 @@ export function TtsToolPage() {
                   value={ttsOptions.ttsText}
                   onChange={(event) => setTtsOptions((current) => ({ ...current, ttsText: event.target.value }))}
                 />
+                <span className="muted compact">
+                  当前约 {cleanedTtsTextLength} 字；超过约 {TTS_LONG_TEXT_SEGMENT_HINT_CHARS} 字会自动按语义分段合成并拼接
+                  {estimatedTtsSegmentCount > 1 ? `，预计 ${estimatedTtsSegmentCount} 段。` : "。"}
+                </span>
               </label>
               <div className="tts-mode-fields">
                 <div className="tts-mode-fields-head">
@@ -705,7 +773,7 @@ export function TtsToolPage() {
                       </section>
                     ))}
                   </div>
-                  <div className="muted compact">点击预设会追加到口播指令，不会覆盖已有内容；重复点击同一预设不会重复添加。</div>
+                  <div className="muted compact">点击预设会替换口播指令；CosyVoice3 instruct2 只适合单条短指令，后台会压缩为一条安全风格提示。</div>
                 </div>
               ) : null}
               {usesCrossLingualText ? (
@@ -850,6 +918,7 @@ export function TtsToolPage() {
             <PanelHeader title="结果" description="显示 run 进度、阶段详情；完成后会显示输出路径和播放器。" />
             {localSubmitError ? <div className="notice notice-error">{localSubmitError}</div> : null}
             <TtsResult run={run} error={error} pending={pending} />
+            <TtsOutputHistoryPanel items={outputHistoryItems} loading={outputHistory.isLoading} />
           </section>
         </div>
       </PageSection>
@@ -941,7 +1010,7 @@ function ReferenceAudioPicker({
       ) : null}
       <div className="tts-reference-history">
         <div className="tts-reference-history-head">
-          <span>历史文件</span>
+          <span>参考历史</span>
           <span>{loading ? "加载中" : `${items.length} 个`}</span>
         </div>
         {items.length > 0 ? (
@@ -965,10 +1034,51 @@ function ReferenceAudioPicker({
             ))}
           </div>
         ) : (
-          <div className="muted compact">暂无历史音频；上传一次后会出现在这里。</div>
+          <div className="muted compact">暂无参考历史；提交一次参考音频或视频后会出现在这里。</div>
         )}
       </div>
     </div>
+  );
+}
+
+function TtsOutputHistoryPanel({ items, loading }: { items: ToolTtsReferenceAudioItem[]; loading: boolean }) {
+  return (
+    <section className="tts-output-history" aria-label="历史输出文件">
+      <div className="tts-output-history-head">
+        <div>
+          <strong>历史输出文件</strong>
+          <span>最近生成的 TTS 音频，独立于参考历史。</span>
+        </div>
+        <span className="mode-chip subtle">{loading ? "加载中" : `${items.length} 个`}</span>
+      </div>
+      {items.length > 0 ? (
+        <div className="tts-output-history-list">
+          {items.map((item) => {
+            const primaryName = item.display_name || item.name;
+            const secondaryMeta = [
+              formatHistoryTimestamp(item),
+              item.config_summary,
+              formatDuration(item.duration),
+              formatFileSize(item.size),
+            ].filter(Boolean);
+            return (
+              <article className="tts-output-history-item" key={item.path || item.audio_url || item.name}>
+                <div className="tts-output-history-item-head">
+                  <strong title={item.path}>{primaryName}</strong>
+                  <span>{formatDuration(item.duration) || formatHistoryTimestamp(item)}</span>
+                </div>
+                <div className="tts-output-history-meta">{secondaryMeta.join(" · ")}</div>
+                {item.text_preview ? <div className="tts-output-history-text">{item.text_preview}</div> : null}
+                {item.audio_url ? <audio className="tts-output-history-player" controls src={assetUrl(item.audio_url)} /> : null}
+                <div className="muted compact">{item.name === primaryName ? item.source : `${item.source} · ${item.name}`}</div>
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="empty-state compact">还没有历史输出。</div>
+      )}
+    </section>
   );
 }
 
@@ -989,6 +1099,7 @@ function TtsResult({ run, error, pending }: { run?: ToolRunStatus<ToolTtsResult>
             <span className="mode-chip subtle">{result.mode}</span>
             <span className="mode-chip subtle">{result.format}</span>
             {result.sample_rate ? <span className="mode-chip subtle">{result.sample_rate} Hz</span> : null}
+            {result.segment_count && result.segment_count > 1 ? <span className="mode-chip subtle">{result.segment_count} 段拼接</span> : null}
             {result.source_format ? <span className="mode-chip subtle">{result.source_format}</span> : null}
           </div>
           {result.text || result.tts_text || result.original_text ? (
@@ -998,6 +1109,15 @@ function TtsResult({ run, error, pending }: { run?: ToolRunStatus<ToolTtsResult>
                 <span className="mode-chip subtle">{result.mode}</span>
               </div>
               <pre>{result.tts_text || result.original_text || result.text}</pre>
+            </div>
+          ) : null}
+          {result.text_segments && result.text_segments.length > 1 ? (
+            <div className="tts-style-preview result-preview">
+              <div className="tts-style-preview-head">
+                <strong>自动分段</strong>
+                <span className="mode-chip subtle">{result.text_segments.length} 段</span>
+              </div>
+              <pre>{result.text_segments.map((segment) => `${segment.index}. ${segment.text}`).join("\n")}</pre>
             </div>
           ) : null}
           {result.prompt_text || result.instruct_text ? (

@@ -545,6 +545,8 @@ class PackagingAssetOut(BaseModel):
     original_name: str
     stored_name: str
     path: str
+    storage_backend: str = "local"
+    storage_key: str = ""
     size_bytes: int
     content_type: str
     watermark_preprocessed: bool | None = None

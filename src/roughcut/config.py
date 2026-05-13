@@ -8,7 +8,7 @@ import shutil
 import sys
 from typing import Any
 
-from pydantic import Field, ValidationInfo, field_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from roughcut.naming import (
@@ -28,7 +28,14 @@ from roughcut.naming import (
 from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_transcription_dialect
 
 DEFAULT_JOB_WORKFLOW_MODE = "standard_edit"
+DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_OUTPUT_ROOT = Path(os.getenv("ROUGHCUT_OUTPUT_ROOT", "F:/roughcut_outputs")).expanduser()
+DEFAULT_PACKAGING_ASSET_ROOT = Path(
+    os.getenv(
+        "ROUGHCUT_PACKAGING_ASSET_DIR",
+        os.getenv("PACKAGING_ASSET_DIR", str((DEFAULT_PROJECT_ROOT / "assets" / "packaging").as_posix())),
+    )
+).expanduser()
 DEFAULT_TEST_OUTPUT_ROOT = Path(
     os.getenv("ROUGHCUT_TEST_OUTPUT_ROOT", str((DEFAULT_OUTPUT_ROOT / "tests").as_posix()))
 ).expanduser()
@@ -302,6 +309,14 @@ class Settings(BaseSettings):
     s3_bucket_name: str = "roughcut"
     s3_region: str = "us-east-1"
     job_storage_dir: str = str((DEFAULT_OUTPUT_ROOT / "jobs").as_posix())
+    packaging_asset_dir: str = Field(
+        default=str(DEFAULT_PACKAGING_ASSET_ROOT.as_posix()),
+        validation_alias=AliasChoices("PACKAGING_ASSET_DIR", "ROUGHCUT_PACKAGING_ASSET_DIR"),
+    )
+    packaging_asset_storage_backend: str = Field(
+        default="local",
+        validation_alias=AliasChoices("PACKAGING_ASSET_STORAGE_BACKEND", "ROUGHCUT_PACKAGING_ASSET_STORAGE_BACKEND"),
+    )
     cleanup_job_storage_on_terminal: bool = True
     cleanup_render_debug_on_terminal: bool = True
     cleanup_heygem_temp_on_terminal: bool = True

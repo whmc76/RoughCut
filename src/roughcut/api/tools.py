@@ -56,6 +56,7 @@ _RUN_PROGRESS_FLOORS: dict[str, float] = {
     "failed": 1.0,
 }
 _COSYVOICE3_END_OF_PROMPT = "<|endofprompt|>"
+_COSYVOICE3_INSTRUCT_MAX_CHARS = 48
 _TTS_TEXT_SEGMENT_MAX_CHARS = 120
 _TTS_TEXT_HARD_BOUNDARY_CHARS = frozenset("。！？!?；;….")
 _TTS_TEXT_SOFT_BOUNDARY_CHARS = frozenset("，,、：:")
@@ -314,18 +315,20 @@ async def _execute_tts_run(
     user_prompt_text = _strip_cosyvoice_prompt_boundary(prompt_text)
     resolved_prompt_text = _normalize_cosyvoice3_prompt_text(user_prompt_text) if resolved_mode == "zero_shot" else user_prompt_text
     user_instruct_text = _strip_cosyvoice_prompt_boundary(instruct_text)
-    resolved_instruct_text = _normalize_cosyvoice3_instruct_text(user_instruct_text) if resolved_mode in {"instruct", "instruct2"} else user_instruct_text
+    effective_instruct_text = _compact_cosyvoice3_instruct_text(user_instruct_text) if resolved_mode in {"instruct", "instruct2"} else user_instruct_text
+    resolved_instruct_text = _normalize_cosyvoice3_instruct_text(effective_instruct_text) if resolved_mode in {"instruct", "instruct2"} else effective_instruct_text
     if resolved_mode == "zero_shot" and not user_prompt_text:
         raise RuntimeError("CosyVoice3 zero_shot TTS requires prompt_text")
-    if resolved_mode in {"instruct", "instruct2"} and not user_instruct_text:
+    if resolved_mode in {"instruct", "instruct2"} and not effective_instruct_text:
         raise RuntimeError("CosyVoice3 instruct2 TTS requires instruct_text")
-    polluted_fragments = [fragment for fragment in (user_prompt_text, user_instruct_text) if fragment and fragment in text]
+    polluted_fragments = [fragment for fragment in (user_prompt_text, effective_instruct_text) if fragment and fragment in text]
     if polluted_fragments:
         raise RuntimeError("朗读正文包含参考文本或口播指令；请保持 tts_text 只包含实际需要说出口的正文")
     if resolved_mode == "sft" and not str(spk_id or "").strip():
         raise RuntimeError("CosyVoice3 sft TTS requires spk_id from /query_tts_model")
     if stream and abs(float(speed or 1.0) - 1.0) > 0.0001:
         raise RuntimeError("CosyVoice3 streaming mode requires speed=1; use stream=false for speed changes")
+    source_reference_path = reference_path
     if reference_path is not None:
         reference_path = _prepare_reference_audio_for_cosyvoice(reference_path, run_id=run_id)
     text_segments = _split_tts_text_for_synthesis(text)
@@ -408,7 +411,24 @@ async def _execute_tts_run(
         _cleanup_paths(segment_output_paths)
         raise RuntimeError(f"CosyVoice3 TTS unavailable: {exc}") from exc
 
-    output_path = _TTS_ROOT / f"tts_{uuid.uuid4().hex[:12]}.wav"
+    created_at = datetime.now(timezone.utc)
+    output_path = _unique_upload_path(
+        _TTS_ROOT,
+        _build_tts_output_filename(
+            created_at=created_at,
+            mode=resolved_mode,
+            prompt_text=user_prompt_text,
+            instruct_text=effective_instruct_text,
+            spk_id=spk_id,
+            zero_shot_spk_id=zero_shot_spk_id,
+            stream=stream,
+            speed=float(speed or 1.0),
+            seed=int(seed or 0),
+            text_frontend=text_frontend,
+            reference_path=source_reference_path,
+            segment_count=len(text_segments),
+        ),
+    )
     _update_run_stage(run_id, "write_artifact", detail="Writing synthesized audio", output_path=str(output_path))
     try:
         if len(text_segments) == 1:
@@ -422,15 +442,32 @@ async def _execute_tts_run(
         raise
     finally:
         _cleanup_paths(segment_output_paths)
-    _complete_run(run_id, {
+    result = {
         "status": "success",
         "provider": "official-cosyvoice3",
         "mode": resolved_mode,
+        "created_at": created_at.isoformat(),
+        "display_name": output_path.name,
+        "config_summary": _tts_output_config_summary(
+            mode=resolved_mode,
+            prompt_text=user_prompt_text,
+            instruct_text=effective_instruct_text,
+            spk_id=spk_id,
+            zero_shot_spk_id=zero_shot_spk_id,
+            stream=stream,
+            speed=float(speed or 1.0),
+            seed=int(seed or 0),
+            text_frontend=text_frontend,
+            reference_path=source_reference_path,
+            segment_count=len(text_segments),
+        ),
         "text": text,
         "tts_text": text,
         "original_text": original_text,
         "prompt_text": user_prompt_text,
-        "instruct_text": user_instruct_text,
+        "instruct_text": effective_instruct_text,
+        "raw_instruct_text": user_instruct_text if user_instruct_text != effective_instruct_text else "",
+        "reference_audio": str(source_reference_path) if source_reference_path is not None else None,
         "spk_id": spk_id,
         "zero_shot_spk_id": zero_shot_spk_id,
         "stream": stream,
@@ -445,7 +482,9 @@ async def _execute_tts_run(
             for index, segment_text in enumerate(text_segments, start=1)
         ],
         **meta,
-    })
+    }
+    _write_tts_output_metadata(output_path, result)
+    _complete_run(run_id, result)
 
 
 def _build_tts_segment_form_data(base_data: dict[str, str], text: str) -> dict[str, str]:
@@ -802,12 +841,56 @@ def _normalize_cosyvoice3_prompt_text(value: str) -> str:
 
 
 def _normalize_cosyvoice3_instruct_text(value: str) -> str:
-    body = str(value or "").strip()
+    body = _compact_cosyvoice3_instruct_text(value)
     if not body:
         return ""
     if body.startswith(_COSYVOICE3_SYSTEM_PROMPT):
         body = body[len(_COSYVOICE3_SYSTEM_PROMPT):].strip()
-    return f"{_COSYVOICE3_SYSTEM_PROMPT} {body}{_COSYVOICE3_END_OF_PROMPT}"
+    return f"{_COSYVOICE3_SYSTEM_PROMPT}\n{body}{_COSYVOICE3_END_OF_PROMPT}"
+
+
+def _compact_cosyvoice3_instruct_text(value: str) -> str:
+    body = _strip_cosyvoice_prompt_boundary(value)
+    if not body:
+        return ""
+    for separator in ("；", ";"):
+        body = body.replace(separator, "\n")
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    line = lines[0] if lines else body.strip()
+    line = _normalize_cosyvoice3_instruct_line(line)
+    if len(line) > _COSYVOICE3_INSTRUCT_MAX_CHARS:
+        line = _truncate_cosyvoice3_instruct_line(line, max_chars=_COSYVOICE3_INSTRUCT_MAX_CHARS)
+    return _ensure_sentence_punctuation(line)
+
+
+def _normalize_cosyvoice3_instruct_line(value: str) -> str:
+    line = _strip_wrapping_quotes(value)
+    line = re.sub(r"\s+", "", line)
+    line = line.replace("这句话", "").replace("一句话", "").replace("进行表达", "表达")
+    line = re.sub(r"^请", "", line)
+    line = re.sub(r"^像(.+?)一样[，,]?", r"\1风格，", line)
+    line = re.sub(r"^用(.+?)(?:的方式)?(?:说|表达)[，,]?", r"\1，", line)
+    line = line.replace("更温柔", "温柔").replace("更清楚", "清楚")
+    line = line.strip(" ，,。.")
+    return line
+
+
+def _truncate_cosyvoice3_instruct_line(value: str, *, max_chars: int) -> str:
+    line = str(value or "").strip()
+    if len(line) <= max_chars:
+        return line
+    for separator in ("，", ",", "、"):
+        index = line.rfind(separator, 0, max_chars + 1)
+        if index >= max(8, int(max_chars * 0.45)):
+            return line[:index].strip(" ，,、")
+    return line[:max_chars].strip(" ，,、")
+
+
+def _ensure_sentence_punctuation(value: str) -> str:
+    line = str(value or "").strip()
+    if not line:
+        return ""
+    return line if line[-1] in "。.!！？" else f"{line}。"
 
 
 async def _execute_asr_run(run_id: str, *, audio_path: Path, language: str, prompt: str) -> None:
@@ -1072,6 +1155,153 @@ def _json_safe(value: Any) -> Any:
     return value
 
 
+def _build_tts_output_filename(
+    *,
+    created_at: datetime,
+    mode: str,
+    prompt_text: str,
+    instruct_text: str,
+    spk_id: str,
+    zero_shot_spk_id: str,
+    stream: bool,
+    speed: float,
+    seed: int,
+    text_frontend: bool,
+    reference_path: Path | None,
+    segment_count: int,
+) -> str:
+    timestamp = created_at.astimezone().strftime("%Y%m%d_%H%M%S")
+    parts = ["tts", timestamp, _safe_filename_part(mode, fallback="mode", max_length=28)]
+    if spk_id:
+        parts.append(f"spk-{_safe_filename_part(spk_id, fallback='speaker', max_length=36)}")
+    if zero_shot_spk_id:
+        parts.append(f"voice-{_safe_filename_part(zero_shot_spk_id, fallback='voice', max_length=36)}")
+    if instruct_text:
+        parts.append(f"inst-{_safe_filename_part(instruct_text, fallback='instruction', max_length=34)}")
+    elif prompt_text:
+        parts.append(f"prompt-{_safe_filename_part(prompt_text, fallback='prompt', max_length=34)}")
+    if reference_path is not None:
+        parts.append(f"ref-{_safe_filename_part(reference_path.stem, fallback='reference', max_length=34)}")
+    parts.extend([
+        f"speed{_format_filename_number(speed)}",
+        f"seed{int(seed or 0)}",
+        "stream" if stream else "batch",
+        "frontend" if text_frontend else "rawtext",
+    ])
+    if segment_count > 1:
+        parts.append(f"seg{segment_count}")
+    filename = "_".join(part for part in parts if part)
+    return _safe_upload_filename(f"{filename}.wav", fallback_suffix=".wav")
+
+
+def _safe_filename_part(value: Any, *, fallback: str, max_length: int) -> str:
+    cleaned = re.sub(r'[<>:"/\\|?*#\x00-\x1f]+', "_", str(value or "")).strip(" ._")
+    cleaned = re.sub(r"\s+", "-", cleaned)
+    if not cleaned:
+        cleaned = fallback
+    if cleaned.upper() in _WINDOWS_RESERVED_FILENAMES:
+        cleaned = f"{cleaned}_file"
+    return cleaned[:max(1, max_length)].strip(" ._") or fallback
+
+
+def _format_filename_number(value: float) -> str:
+    return f"{float(value or 0):.2f}".rstrip("0").rstrip(".").replace(".", "p")
+
+
+def _tts_output_config_summary(
+    *,
+    mode: str,
+    prompt_text: str,
+    instruct_text: str,
+    spk_id: str,
+    zero_shot_spk_id: str,
+    stream: bool,
+    speed: float,
+    seed: int,
+    text_frontend: bool,
+    reference_path: Path | None,
+    segment_count: int,
+) -> str:
+    parts = [f"mode={mode}"]
+    if spk_id:
+        parts.append(f"spk_id={spk_id}")
+    if zero_shot_spk_id:
+        parts.append(f"zero_shot_spk_id={zero_shot_spk_id}")
+    if reference_path is not None:
+        parts.append(f"reference={reference_path.name}")
+    if prompt_text:
+        parts.append(f"prompt={_short_text(prompt_text, 32)}")
+    if instruct_text:
+        parts.append(f"instruct={_short_text(instruct_text, 32)}")
+    parts.extend([
+        f"speed={_format_config_number(speed)}",
+        f"seed={int(seed or 0)}",
+        f"stream={str(bool(stream)).lower()}",
+        f"text_frontend={str(bool(text_frontend)).lower()}",
+    ])
+    if segment_count > 1:
+        parts.append(f"segments={segment_count}")
+    return " · ".join(parts)
+
+
+def _short_text(value: str, max_length: int) -> str:
+    cleaned = _collapse_tts_text(value)
+    if len(cleaned) <= max_length:
+        return cleaned
+    return f"{cleaned[:max(1, max_length - 1)]}…"
+
+
+def _format_config_number(value: float) -> str:
+    return f"{float(value or 0):.3f}".rstrip("0").rstrip(".")
+
+
+def _write_tts_output_metadata(output_path: Path, result: dict[str, Any]) -> None:
+    metadata = {
+        "created_at": result.get("created_at"),
+        "display_name": result.get("display_name") or output_path.name,
+        "config_summary": result.get("config_summary"),
+        "config": {
+            key: result.get(key)
+            for key in (
+                "provider",
+                "mode",
+                "prompt_text",
+                "instruct_text",
+                "reference_audio",
+                "spk_id",
+                "zero_shot_spk_id",
+                "stream",
+                "speed",
+                "seed",
+                "text_frontend",
+                "segment_count",
+            )
+        },
+        "text": result.get("tts_text") or result.get("text") or "",
+        "text_preview": _short_text(str(result.get("tts_text") or result.get("text") or ""), 120),
+        "audio": {
+            key: result.get(key)
+            for key in ("format", "sample_rate", "duration", "source_format")
+            if result.get(key) is not None
+        },
+    }
+    output_path.with_suffix(f"{output_path.suffix}.json").write_text(
+        json.dumps(_json_safe(metadata), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _read_tts_output_metadata(path: Path) -> dict[str, Any]:
+    metadata_path = path.with_suffix(f"{path.suffix}.json")
+    if not metadata_path.exists() or not metadata_path.is_file():
+        return {}
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _reference_audio_dedupe_key(path: Path, *, size: int, duration: float | None) -> str:
     try:
         digest = hashlib.sha1()
@@ -1150,7 +1380,7 @@ def _list_reference_audio_history(limit: int = _REFERENCE_AUDIO_HISTORY_LIMIT) -
 
 
 def _list_tts_output_history(limit: int = _TTS_OUTPUT_HISTORY_LIMIT) -> list[dict[str, Any]]:
-    return _list_audio_artifact_history(
+    items = _list_audio_artifact_history(
         root=_TTS_ROOT,
         source="生成音频",
         artifact_kind="tts",
@@ -1158,6 +1388,18 @@ def _list_tts_output_history(limit: int = _TTS_OUTPUT_HISTORY_LIMIT) -> list[dic
         suffixes=_REFERENCE_AUDIO_SUFFIXES,
         dedupe=False,
     )
+    for item in items:
+        metadata = _read_tts_output_metadata(Path(str(item.get("path") or "")))
+        if not metadata:
+            continue
+        item["created_at"] = metadata.get("created_at") or item.get("updated_at")
+        item["display_name"] = metadata.get("display_name") or item.get("name")
+        item["config_summary"] = metadata.get("config_summary") or ""
+        item["text_preview"] = metadata.get("text_preview") or ""
+        config = metadata.get("config")
+        if isinstance(config, dict):
+            item["config"] = config
+    return items
 
 
 def _resolve_reference_audio_history_path(value: str) -> Path:

@@ -5019,9 +5019,7 @@ select.input option:focus {
   background: rgba(255, 255, 255, 0.32);
 }
 
-.tool-run-summary,
-.tool-stage-head,
-.tool-stage-detail {
+.tool-run-summary {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -5032,38 +5030,158 @@ select.input option:focus {
   flex-wrap: wrap;
 }
 
-.tool-run-meta,
-.tool-stage-detail {
+.tool-run-meta {
   color: var(--text-muted);
   font-size: 12px;
   line-height: 1.45;
 }
 
 .tool-run-meta {
-  display: grid;
-  gap: 4px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  align-items: center;
+  justify-content: space-between;
 }
 
-.tool-run-progress-bar,
-.tool-stage-progress {
-  margin-top: 0;
-}
-
-.tool-stage-list {
-  display: grid;
-  gap: 10px;
-}
-
-.tool-stage-row {
-  display: grid;
-  gap: 8px;
-  padding: 10px 0;
-  border-top: 1px solid var(--line);
-}
-
-.tool-stage-head strong {
+.tool-run-meta span:last-child {
   min-width: 0;
-  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-run-progress-bar {
+  position: relative;
+  height: 12px;
+  margin-top: 0;
+  overflow: visible;
+  border: 1px solid rgba(15, 118, 110, 0.1);
+  background: #edf3ef;
+}
+
+.tool-run-progress-fill {
+  position: relative;
+  overflow: hidden;
+  transition: width 240ms ease;
+}
+
+.tool-run-progress-bar.is-animated .tool-run-progress-fill::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 255, 255, 0.58) 48%, transparent 100%);
+  transform: translateX(-100%);
+  animation: tool-progress-sheen 1.35s linear infinite;
+}
+
+.tool-run-progress-marker {
+  position: absolute;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  background: #a6b0aa;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.08);
+  transform: translate(-50%, -50%);
+}
+
+.tool-run-progress-marker.tool-stage-status-completed,
+.tool-run-progress-marker.tool-stage-status-success {
+  background: #0f766e;
+}
+
+.tool-run-progress-marker.tool-stage-status-running,
+.tool-run-progress-marker.tool-stage-status-processing,
+.tool-run-progress-marker.tool-stage-status-queued {
+  background: #b45309;
+}
+
+.tool-run-progress-marker.tool-stage-status-failed {
+  background: #be123c;
+}
+
+.tool-stage-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tool-stage-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 230px;
+  min-height: 24px;
+  gap: 5px;
+  padding: 4px 7px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.62);
+  color: #4f5d57;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.tool-stage-chip-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #a6b0aa;
+}
+
+.tool-stage-chip strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #1e2a27;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-stage-chip > span:last-child {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+}
+
+.tool-stage-chip.tool-stage-status-completed,
+.tool-stage-chip.tool-stage-status-success {
+  border-color: rgba(15, 118, 110, 0.18);
+  background: #edf7f4;
+}
+
+.tool-stage-chip.tool-stage-status-completed .tool-stage-chip-dot,
+.tool-stage-chip.tool-stage-status-success .tool-stage-chip-dot {
+  background: #0f766e;
+}
+
+.tool-stage-chip.tool-stage-status-running,
+.tool-stage-chip.tool-stage-status-processing,
+.tool-stage-chip.tool-stage-status-queued {
+  border-color: rgba(180, 83, 9, 0.22);
+  background: #fff7ed;
+}
+
+.tool-stage-chip.tool-stage-status-running .tool-stage-chip-dot,
+.tool-stage-chip.tool-stage-status-processing .tool-stage-chip-dot,
+.tool-stage-chip.tool-stage-status-queued .tool-stage-chip-dot {
+  background: #b45309;
+}
+
+.tool-stage-chip.tool-stage-status-failed {
+  border-color: rgba(190, 18, 60, 0.2);
+  background: #fff1f2;
+}
+
+.tool-stage-chip.tool-stage-status-failed .tool-stage-chip-dot {
+  background: #be123c;
+}
+
+@keyframes tool-progress-sheen {
+  to {
+    transform: translateX(100%);
+  }
 }
 
 .tool-media {
@@ -8273,6 +8391,90 @@ textarea.input {
   gap: 12px;
 }
 
+.manual-editor-change-list {
+  display: grid;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid rgba(15, 118, 110, 0.2);
+  border-radius: 12px;
+  background: #f8fbfa;
+}
+
+.manual-editor-change-list.empty {
+  border-color: var(--line);
+  background: #ffffff;
+}
+
+.manual-editor-change-list-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.manual-editor-change-list-items {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.manual-editor-change-list-item {
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.manual-editor-change-list-marker {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #94a3b8;
+}
+
+.manual-editor-change-list-item.timeline .manual-editor-change-list-marker,
+.manual-editor-change-list-item.video .manual-editor-change-list-marker {
+  background: #c96b4b;
+}
+
+.manual-editor-change-list-item.subtitle .manual-editor-change-list-marker,
+.manual-editor-change-list-item.summary .manual-editor-change-list-marker {
+  background: #0f766e;
+}
+
+.manual-editor-change-list-main {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.manual-editor-change-list-main strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.manual-editor-change-list-main span,
+.manual-editor-change-list-meta {
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.manual-editor-change-list-meta {
+  justify-self: end;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #f8faf7;
+  white-space: nowrap;
+}
+
 .manual-editor-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -8915,8 +9117,8 @@ textarea.input {
 .manual-editor-unified-clip {
   position: relative;
   display: grid;
-  grid-template-rows: 24px 58px 34px;
-  min-height: 124px;
+  grid-template-rows: 24px 14px 58px 34px;
+  min-height: 138px;
   overflow: hidden;
   border-radius: 7px;
   background: #00868b;
@@ -8946,6 +9148,35 @@ textarea.input {
 .manual-editor-unified-clip-head span {
   flex: 0 0 auto;
   font-variant-numeric: tabular-nums;
+}
+
+.manual-editor-unified-traces {
+  position: relative;
+  min-height: 14px;
+  background: rgba(7, 28, 32, 0.72);
+}
+
+.manual-editor-unified-trace {
+  position: absolute;
+  inset-block: 3px;
+  min-width: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.manual-editor-unified-trace.keep {
+  background: rgba(45, 212, 191, 0.76);
+}
+
+.manual-editor-unified-trace.cut {
+  background: rgba(248, 113, 113, 0.84);
+}
+
+.manual-editor-unified-trace:focus-visible {
+  outline: 2px solid #f2c94c;
+  outline-offset: 1px;
 }
 
 .manual-editor-unified-thumbnails {
@@ -9041,6 +9272,23 @@ textarea.input {
 .manual-editor-unified-subtitle.warning {
   border-color: rgba(248, 113, 113, 0.74);
   background: rgba(248, 113, 113, 0.28);
+}
+
+.manual-editor-unified-subtitle.cut {
+  border-color: rgba(148, 163, 184, 0.48);
+  background: rgba(15, 23, 42, 0.42);
+  color: rgba(226, 232, 240, 0.72);
+}
+
+.manual-editor-wave-zoom {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.manual-editor-wave-zoom input {
+  width: 140px;
+  accent-color: #0f766e;
 }
 
 .manual-editor-preview-assets {
@@ -10048,6 +10296,22 @@ textarea.input {
     right: 16px;
     bottom: 16px;
     width: min(360px, calc(100vw - 32px)) !important;
+  }
+
+  .manual-editor-change-list-head {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .manual-editor-change-list-item {
+    grid-template-columns: 10px minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .manual-editor-change-list-meta {
+    grid-column: 2;
+    justify-self: start;
+    white-space: normal;
   }
 
   .rail-notes {

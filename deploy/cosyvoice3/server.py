@@ -26,6 +26,7 @@ cosyvoice: Any | None = None
 model_id = ""
 END_OF_PROMPT = "<|endofprompt|>"
 SYSTEM_PROMPT = "You are a helpful assistant."
+INSTRUCT_MAX_CHARS = 48
 
 
 def _bool(value: Any) -> bool:
@@ -79,10 +80,55 @@ def _normalize_zero_shot_prompt_text(value: str) -> str:
 
 
 def _normalize_instruct_text(value: str) -> str:
+    body = _compact_instruct_text(value)
+    if not body:
+        return ""
+    return f"{SYSTEM_PROMPT}\n{body}{END_OF_PROMPT}"
+
+
+def _compact_instruct_text(value: str) -> str:
     body = _strip_prompt_format(value)
     if not body:
         return ""
-    return f"{SYSTEM_PROMPT} {body}{END_OF_PROMPT}"
+    for separator in ("；", ";"):
+        body = body.replace(separator, "\n")
+    lines = [line.strip() for line in body.splitlines() if line.strip()]
+    line = lines[0] if lines else body.strip()
+    line = _normalize_instruct_line(line)
+    if len(line) > INSTRUCT_MAX_CHARS:
+        line = _truncate_instruct_line(line, max_chars=INSTRUCT_MAX_CHARS)
+    return _ensure_sentence_punctuation(line)
+
+
+def _normalize_instruct_line(value: str) -> str:
+    import re
+
+    line = str(value or "").strip().strip("'\"").rstrip(",")
+    line = re.sub(r"\s+", "", line)
+    line = line.replace("这句话", "").replace("一句话", "").replace("进行表达", "表达")
+    line = re.sub(r"^请", "", line)
+    line = re.sub(r"^像(.+?)一样[，,]?", r"\1风格，", line)
+    line = re.sub(r"^用(.+?)(?:的方式)?(?:说|表达)[，,]?", r"\1，", line)
+    line = line.replace("更温柔", "温柔").replace("更清楚", "清楚")
+    return line.strip(" ，,。.")
+
+
+def _truncate_instruct_line(value: str, *, max_chars: int) -> str:
+    line = str(value or "").strip()
+    if len(line) <= max_chars:
+        return line
+    for separator in ("，", ",", "、"):
+        index = line.rfind(separator, 0, max_chars + 1)
+        if index >= max(8, int(max_chars * 0.45)):
+            return line[:index].strip(" ，,、")
+    return line[:max_chars].strip(" ，,、")
+
+
+def _ensure_sentence_punctuation(value: str) -> str:
+    line = str(value or "").strip()
+    if not line:
+        return ""
+    return line if line[-1] in "。.!！？" else f"{line}。"
 
 
 def _audio_to_wav_response(chunks: Iterable[dict[str, Any]], sample_rate: int) -> Response:

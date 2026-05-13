@@ -262,6 +262,8 @@ export type JobManualEditApplyPayload = {
 export type JobManualEditPreviewAssets = {
   job_id: string;
   ready: boolean;
+  video_ready: boolean;
+  audio_ready: boolean;
   warming: boolean;
   asset_version: number;
   status?: string | null;
@@ -1372,7 +1374,12 @@ export type ToolTtsReferenceAudioItem = {
   size?: number | null;
   duration?: number | null;
   will_trim?: boolean | null;
+  created_at?: string | null;
   updated_at?: string | null;
+  display_name?: string | null;
+  config_summary?: string | null;
+  text_preview?: string | null;
+  config?: Record<string, unknown> | null;
   audio_url?: string | null;
 };
 
@@ -1381,10 +1388,18 @@ export type ToolTtsReferenceAudioHistory = {
   items: ToolTtsReferenceAudioItem[];
 };
 
+export type ToolTtsOutputHistory = {
+  checked_at: string;
+  items: ToolTtsReferenceAudioItem[];
+};
+
 export type ToolTtsResult = {
   status: string;
   provider: string;
   mode: ToolTtsMode | string;
+  created_at?: string | null;
+  display_name?: string | null;
+  config_summary?: string | null;
   text?: string;
   tts_text?: string;
   original_text?: string | null;
@@ -1402,6 +1417,13 @@ export type ToolTtsResult = {
   audio_url: string;
   format: string;
   sample_rate?: number;
+  duration?: number;
+  segment_count?: number | null;
+  text_segments?: Array<{
+    index: number;
+    text: string;
+    char_count?: number | null;
+  }>;
   source_format?: string;
   raw?: Record<string, unknown>;
 };

@@ -95,3 +95,20 @@ def test_strip_tts_text_ui_hints_still_keeps_plain_text() -> None:
     text = "需要 prompt_wav/reference_audio；prompt_text 和 instruct_text 不参与该模式。 这是一段试音。"
 
     assert tools._resolve_tts_spoken_text(text) == "这是一段试音。"
+
+
+def test_normalize_cosyvoice3_instruct_text_compacts_preset_stack() -> None:
+    raw = "\n".join(
+        [
+            "请像幼教老师一样，声音亲切、有耐心，语气更温柔活泼。",
+            "请用有声故事演播风格表达，语气有画面感，人物和情节转折要更清楚。",
+            "请用课堂教学风格表达，逻辑清楚，重点词需要自然强调。",
+            "请用紧凑、有节奏、适合短视频旁白的方式说这句话。",
+        ]
+    )
+
+    normalized = tools._normalize_cosyvoice3_instruct_text(raw)
+
+    assert normalized == "You are a helpful assistant.\n幼教老师风格，声音亲切、有耐心，语气温柔活泼。<|endofprompt|>"
+    assert "有声故事" not in normalized
+    assert "请用" not in normalized

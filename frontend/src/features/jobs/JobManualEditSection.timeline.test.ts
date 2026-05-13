@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   applySmartCutRuleRangesToSegments,
   autoSmartCutRuleRanges,
+  buildManualEditChangeList,
   buildSmartCutRuleAnalysis,
   buildTranscriptTokens,
   buildVisibleSubtitleRows,
@@ -36,6 +37,65 @@ const ranges = [
 ];
 
 describe("manual editor timeline mapping", () => {
+  it("summarizes pending manual editor changes for the top change list", () => {
+    const changes = buildManualEditChangeList({
+      baseSegments: [
+        { start: 0, end: 10 },
+        { start: 20, end: 30 },
+      ],
+      effectiveSegments: [
+        { start: 0, end: 9 },
+        { start: 20, end: 30 },
+      ],
+      outputDurationDeltaSec: -1,
+      subtitleOverrides: [
+        { index: 1, start_time: 1.2, text_final: "新字幕" },
+        { index: 2, delete: true },
+      ],
+      baseSubtitles: [
+        { index: 1, start_time: 1, end_time: 2, text_final: "旧字幕" },
+        { index: 2, start_time: 3, end_time: 4, text_final: "删除字幕" },
+      ],
+      subtitleReplacements: [{ original: "旧", replacement: "新", occurrence_count: 3 }],
+      baseVideoTransform: { rotation_cw: 0, aspect_ratio: "source", resolution_mode: "source", resolution_preset: "1080p" },
+      currentVideoTransform: { rotation_cw: 90, aspect_ratio: "9:16", resolution_mode: "specified", resolution_preset: "2160p" },
+      hasVideoSummaryEdits: true,
+    });
+
+    expect(changes.map((item) => item.title)).toEqual([
+      "剪辑时间线",
+      "画面旋转",
+      "画面比例",
+      "输出分辨率",
+      "字幕修改",
+      "术语替换",
+      "视频摘要",
+    ]);
+    expect(changes[0].detail).toContain("输出时长变化 -0:01.00");
+    expect(changes[4].detail).toBe("2 条（文本 1 / 时间 1 / 删除 1）");
+  });
+
+  it("shows an empty manual editor change list item when the draft is unchanged", () => {
+    const changes = buildManualEditChangeList({
+      baseSegments: [{ start: 0, end: 10 }],
+      effectiveSegments: [{ start: 0, end: 10 }],
+      outputDurationDeltaSec: 0,
+      subtitleOverrides: [],
+      baseSubtitles: [],
+      subtitleReplacements: [],
+      baseVideoTransform: { rotation_cw: 0, aspect_ratio: "source", resolution_mode: "source", resolution_preset: "1080p" },
+      currentVideoTransform: { rotation_cw: 0, aspect_ratio: "source", resolution_mode: "source", resolution_preset: "1080p" },
+      hasVideoSummaryEdits: false,
+    });
+
+    expect(changes).toEqual([
+      expect.objectContaining({
+        title: "暂无改动",
+        tone: "empty",
+      }),
+    ]);
+  });
+
   it("maps the reported output preview time back to the kept source time", () => {
     expect(outputTimeToSourceTime(11.46, ranges)).toBeCloseTo(13.02, 3);
     expect(sourceTimeToOutputTime(13.02, ranges)).toBeCloseTo(11.46, 3);
@@ -371,6 +431,30 @@ describe("manual editor timeline mapping", () => {
 
     expect(analysis.pause).toEqual([{ start: 1.3, end: 2.5, kind: "pause" }]);
     expect(nextSegments).toEqual([{ start: 0, end: 1.3 }, { start: 2.5, end: 3 }]);
+  });
+
+  it("does not auto-cut a pause range after the user manually restores it", () => {
+    const nextSegments = applySmartCutRuleRangesToSegments(
+      [{ start: 0, end: 1 }, { start: 2, end: 3 }],
+      [{ start: 1, end: 2 }],
+      [{ start: 1, end: 2 }],
+      3,
+      [{ start: 1, end: 2 }],
+    );
+
+    expect(nextSegments).toEqual([{ start: 0, end: 3 }]);
+  });
+
+  it("still cuts the unrestored sides of a partially restored pause range", () => {
+    const nextSegments = applySmartCutRuleRangesToSegments(
+      [{ start: 0, end: 1 }, { start: 2, end: 3 }],
+      [{ start: 1, end: 2 }],
+      [{ start: 1, end: 2 }],
+      3,
+      [{ start: 1.4, end: 1.6 }],
+    );
+
+    expect(nextSegments).toEqual([{ start: 0, end: 1 }, { start: 1.4, end: 1.6 }, { start: 2, end: 3 }]);
   });
 
   it("adds backend smart-delete waste segments to enabled rule ranges", () => {

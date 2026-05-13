@@ -15,7 +15,7 @@ from io import BytesIO
 import numpy as np
 from sqlalchemy import select
 
-from roughcut.config import DEFAULT_OUTPUT_ROOT, get_settings
+from roughcut.config import DEFAULT_OUTPUT_ROOT, DEFAULT_PACKAGING_ASSET_ROOT, DEFAULT_PROJECT_ROOT, get_settings
 from roughcut.edit.presets import normalize_workflow_template_name
 from roughcut.review.domain_glossaries import detect_glossary_domains, normalize_subject_domain, select_primary_subject_domain
 from roughcut.state_store import PACKAGING_CONFIG_KEY, run_db_operation
@@ -23,15 +23,18 @@ from roughcut.state_store import PACKAGING_CONFIG_KEY, run_db_operation
 
 def _default_packaging_root() -> Path:
     try:
-        output_dir = Path(str(get_settings().output_dir or "")).expanduser()
+        configured_root = Path(str(get_settings().packaging_asset_dir or "")).expanduser()
     except Exception:
-        output_dir = DEFAULT_OUTPUT_ROOT / "output"
-    if not str(output_dir or "").strip():
-        output_dir = DEFAULT_OUTPUT_ROOT / "output"
-    return output_dir / "_packaging"
+        configured_root = DEFAULT_PACKAGING_ASSET_ROOT
+    if not str(configured_root or "").strip():
+        configured_root = DEFAULT_PACKAGING_ASSET_ROOT
+    if not configured_root.is_absolute():
+        configured_root = DEFAULT_PROJECT_ROOT / configured_root
+    return configured_root
 
 
 PACKAGING_ROOT = _default_packaging_root()
+PACKAGING_STORAGE_BACKEND_LOCAL = "local"
 
 ASSET_EXTENSIONS: dict[str, set[str]] = {
     "intro": {".mp4", ".mov", ".mkv", ".webm"},
@@ -382,6 +385,8 @@ def save_packaging_asset(*, asset_type: str, filename: str, payload: bytes) -> d
         "original_name": Path(filename or stored_name).name,
         "stored_name": stored_name,
         "path": str(target.resolve()),
+        "storage_backend": PACKAGING_STORAGE_BACKEND_LOCAL,
+        "storage_key": _packaging_storage_key(asset_type, stored_name),
         "size_bytes": len(payload),
         "content_type": content_type,
         "watermark_preprocessed": watermark_preprocessed if asset_type == "watermark" else None,
@@ -1146,7 +1151,21 @@ def _repair_packaging_asset_record(asset: dict[str, Any]) -> tuple[dict[str, Any
     if asset_type in ASSET_EXTENSIONS and stored_name:
         canonical_path = PACKAGING_ROOT / asset_type / stored_name
 
-    existing_candidate = _first_existing_packaging_asset_path(raw_path, canonical_path=canonical_path)
+    asset["storage_backend"] = str(asset.get("storage_backend") or PACKAGING_STORAGE_BACKEND_LOCAL)
+    if asset.get("storage_backend") != PACKAGING_STORAGE_BACKEND_LOCAL:
+        asset["storage_backend"] = PACKAGING_STORAGE_BACKEND_LOCAL
+        changed = True
+    expected_storage_key = _packaging_storage_key(asset_type, stored_name) if asset_type and stored_name else ""
+    if expected_storage_key and asset.get("storage_key") != expected_storage_key:
+        asset["storage_key"] = expected_storage_key
+        changed = True
+
+    existing_candidate = _first_existing_packaging_asset_path(
+        raw_path,
+        canonical_path=canonical_path,
+        asset_type=asset_type,
+        stored_name=stored_name,
+    )
     if canonical_path is not None:
         if canonical_path.exists():
             existing_candidate = canonical_path
@@ -1164,7 +1183,13 @@ def _repair_packaging_asset_record(asset: dict[str, Any]) -> tuple[dict[str, Any
     return asset, changed
 
 
-def _first_existing_packaging_asset_path(raw_path: str, *, canonical_path: Path | None) -> Path | None:
+def _first_existing_packaging_asset_path(
+    raw_path: str,
+    *,
+    canonical_path: Path | None,
+    asset_type: str = "",
+    stored_name: str = "",
+) -> Path | None:
     candidates: list[Path] = []
     if canonical_path is not None:
         candidates.append(canonical_path)
@@ -1174,6 +1199,8 @@ def _first_existing_packaging_asset_path(raw_path: str, *, canonical_path: Path 
         candidates.append(Path(normalized_raw))
         if normalized_raw.startswith("/app/"):
             candidates.append(Path(normalized_raw.removeprefix("/app/")))
+    if asset_type and stored_name:
+        candidates.extend(_legacy_packaging_asset_paths(asset_type=asset_type, stored_name=stored_name))
 
     seen: set[str] = set()
     for candidate in candidates:
@@ -1184,6 +1211,38 @@ def _first_existing_packaging_asset_path(raw_path: str, *, canonical_path: Path 
         if candidate.exists():
             return candidate
     return None
+
+
+def _legacy_packaging_asset_paths(*, asset_type: str, stored_name: str) -> list[Path]:
+    legacy_roots: list[Path] = []
+    try:
+        output_dir = Path(str(get_settings().output_dir or "")).expanduser()
+        if output_dir:
+            legacy_roots.append(output_dir / "_packaging")
+    except Exception:
+        pass
+    legacy_roots.append(DEFAULT_OUTPUT_ROOT / "output" / "_packaging")
+    return [root / asset_type / stored_name for root in _unique_paths(legacy_roots)]
+
+
+def _unique_paths(paths: list[Path]) -> list[Path]:
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in paths:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def _packaging_storage_key(asset_type: str, stored_name: str) -> str:
+    asset_type = str(asset_type or "").strip().lower()
+    stored_name = Path(str(stored_name or "").strip()).name
+    if not asset_type or not stored_name:
+        return ""
+    return f"packaging/{asset_type}/{stored_name}"
 
 
 def _existing_packaging_assets_by_id(assets: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -1392,12 +1451,16 @@ def _save_state_to_db(state: dict[str, Any]) -> None:
 
 
 def _serialize_asset_row(row: Any) -> dict[str, Any]:
+    asset_type = str(row.asset_type or "").strip().lower()
+    stored_name = str(row.stored_name or "").strip()
     return {
         "id": row.id,
-        "asset_type": row.asset_type,
+        "asset_type": asset_type,
         "original_name": row.original_name,
-        "stored_name": row.stored_name,
+        "stored_name": stored_name,
         "path": row.path,
+        "storage_backend": PACKAGING_STORAGE_BACKEND_LOCAL,
+        "storage_key": _packaging_storage_key(asset_type, stored_name),
         "size_bytes": row.size_bytes,
         "content_type": row.content_type,
         "watermark_preprocessed": row.watermark_preprocessed,
