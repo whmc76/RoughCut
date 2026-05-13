@@ -54,6 +54,32 @@ def test_reference_audio_history_includes_uploaded_video_files(monkeypatch: pyte
     assert items[0]["source"] == "参考上传"
 
 
+def test_reference_audio_history_reads_bound_prompt_text(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    upload_root = tmp_path / "reference-uploads"
+    monkeypatch.setattr(tools, "_REFERENCE_UPLOAD_ROOT", upload_root)
+    monkeypatch.setattr(tools, "_TTS_ROOT", tmp_path / "tts")
+    monkeypatch.setattr(tools, "_audio_duration_seconds", lambda path: 12.0)
+
+    reference = upload_root / "voice.wav"
+    _write_audio(reference, b"voice", mtime=100)
+    tools._write_reference_audio_metadata(
+        reference,
+        prompt_text="  参考音频里实际说过的话。\n第二句。  ",
+        prompt_text_source="manual",
+        provider="moss_tts",
+        mode="moss_voice_clone",
+    )
+
+    item = tools._list_reference_audio_history()[0]
+
+    assert item["name"] == "voice.wav"
+    assert item["prompt_text"] == "参考音频里实际说过的话。 第二句。"
+    assert item["prompt_text_source"] == "manual"
+    assert item["text_preview"] == "参考音频里实际说过的话。 第二句。"
+    assert item["config"] == {"provider": "moss_tts", "mode": "moss_voice_clone", "prompt_text_source": "manual"}
+    assert tools._read_reference_audio_prompt_text(reference) == "参考音频里实际说过的话。 第二句。"
+
+
 def test_tts_output_history_is_separate_from_reference_history(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     reference_root = tmp_path / "reference-uploads"
     tts_root = tmp_path / "tts"
@@ -199,6 +225,130 @@ async def test_reference_prompt_text_auto_asr_uses_local_provider(monkeypatch: p
 
     assert text == "参考音频自动识别文本。"
     assert source == "auto_asr"
+
+
+@pytest.mark.asyncio
+async def test_reference_prompt_text_auto_asr_reads_transcript_segments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    reference = tmp_path / "voice.wav"
+    reference.write_bytes(b"wav-data")
+
+    class FakeLocalHTTPASRProvider:
+        async def transcribe(self, audio_path: Path, *, language: str, prompt: str | None = None, progress_callback=None):
+            del audio_path, language, prompt, progress_callback
+            return SimpleNamespace(
+                segments=[
+                    SimpleNamespace(text="第一段参考文本。"),
+                    SimpleNamespace(text="第二段参考文本。"),
+                ]
+            )
+
+    @asynccontextmanager
+    async def fake_hold(*args, **kwargs):
+        yield
+
+    monkeypatch.setattr(tools, "LocalHTTPASRProvider", FakeLocalHTTPASRProvider)
+    monkeypatch.setattr(tools, "hold_managed_gpu_services_async", fake_hold)
+
+    text, source = await tools._resolve_reference_prompt_text_from_asr(
+        "test-run",
+        reference_path=reference,
+        enabled=True,
+        provider_label="MOSS-TTSD",
+    )
+
+    assert text == "第一段参考文本。 第二段参考文本。"
+    assert source == "auto_asr"
+
+
+@pytest.mark.asyncio
+async def test_prepared_reference_prompt_text_reasrs_shortened_audio(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_audio = tmp_path / "source.m4a"
+    prepared_audio = tmp_path / "prepared.wav"
+    source_audio.write_bytes(b"source")
+    prepared_audio.write_bytes(b"prepared")
+
+    durations = {
+        source_audio: 36.4,
+        prepared_audio: 16.0,
+    }
+
+    class FakeLocalHTTPASRProvider:
+        async def transcribe(self, audio_path: Path, *, language: str, prompt: str | None = None, progress_callback=None):
+            del language, prompt, progress_callback
+            assert audio_path == prepared_audio
+            return SimpleNamespace(text="实际短参考音频文本。")
+
+    @asynccontextmanager
+    async def fake_hold(*args, **kwargs):
+        yield
+
+    monkeypatch.setattr(tools, "_audio_duration_seconds", lambda path: durations.get(path))
+    monkeypatch.setattr(tools, "LocalHTTPASRProvider", FakeLocalHTTPASRProvider)
+    monkeypatch.setattr(tools, "hold_managed_gpu_services_async", fake_hold)
+
+    text, source = await tools._resolve_prompt_text_for_prepared_reference(
+        "test-run",
+        source_reference_path=source_audio,
+        reference_path=prepared_audio,
+        prompt_text="完整原始参考音频文本，包含裁剪后不存在的尾巴。",
+        enabled=False,
+        provider_label="MOSS-TTSD",
+    )
+
+    assert text == "实际短参考音频文本。"
+    assert source == "auto_asr_prepared_reference"
+
+
+@pytest.mark.asyncio
+async def test_prepared_reference_prompt_text_reasrs_converted_audio_even_when_duration_matches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source_audio = tmp_path / "source.m4a"
+    prepared_audio = tmp_path / "prepared.wav"
+    source_audio.write_bytes(b"source")
+    prepared_audio.write_bytes(b"prepared")
+
+    durations = {
+        source_audio: 12.0,
+        prepared_audio: 11.8,
+    }
+
+    class FakeLocalHTTPASRProvider:
+        async def transcribe(self, audio_path: Path, *, language: str, prompt: str | None = None, progress_callback=None):
+            del language, prompt, progress_callback
+            assert audio_path == prepared_audio
+            return SimpleNamespace(text="转换后实际参考文本。")
+
+    @asynccontextmanager
+    async def fake_hold(*args, **kwargs):
+        yield
+
+    monkeypatch.setattr(tools, "_audio_duration_seconds", lambda path: durations.get(path))
+    monkeypatch.setattr(tools, "LocalHTTPASRProvider", FakeLocalHTTPASRProvider)
+    monkeypatch.setattr(tools, "hold_managed_gpu_services_async", fake_hold)
+
+    text, source = await tools._resolve_prompt_text_for_prepared_reference(
+        "test-run",
+        source_reference_path=source_audio,
+        reference_path=prepared_audio,
+        prompt_text="用户手填但需要校准的参考文本。",
+        enabled=False,
+        provider_label="MOSS-TTSD",
+    )
+
+    assert text == "转换后实际参考文本。"
+    assert source == "auto_asr_prepared_reference"
+
+
+def test_reference_prompt_text_keeps_manual_text_when_original_audio_is_used(tmp_path: Path) -> None:
+    source_audio = tmp_path / "source.wav"
+    source_audio.write_bytes(b"source")
+
+    assert not tools._reference_audio_needs_prompt_text_calibration(source_audio, source_audio)
 
 
 @pytest.mark.asyncio

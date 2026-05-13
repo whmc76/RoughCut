@@ -71,6 +71,8 @@ _MAX_REFERENCE_AUDIO_SEC = 30.0
 _MOSS_REFERENCE_AUDIO_MAX_SEC = 16.0
 _MOSS_REFERENCE_LONG_SILENCE_SEC = 0.85
 _MOSS_REFERENCE_KEEP_SILENCE_SEC = 0.35
+_MIN_DURATION_TEXT_CHARS = 120
+_MIN_DURATION_PER_TEXT_CHAR_SEC = 0.045
 _REFERENCE_AUDIO_HISTORY_LIMIT = 5
 _TTS_OUTPUT_HISTORY_LIMIT = 10
 _REFERENCE_AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
@@ -288,6 +290,8 @@ async def run_tts(
     )
     if reference_path is None and str(reference_history_path or "").strip():
         reference_path = _resolve_reference_audio_history_path(reference_history_path)
+    if reference_path is not None and not str(prompt_text or "").strip():
+        prompt_text = _read_reference_audio_prompt_text(reference_path)
     run = _create_run("tts")
     _update_run_stage(run["run_id"], "upload", detail="TTS request accepted")
     _schedule_run(
@@ -461,12 +465,22 @@ async def _execute_tts_run(
         reference_path = _prepare_reference_audio_for_cosyvoice(reference_path, run_id=run_id)
     prompt_text_source = "manual" if str(prompt_text or "").strip() else ""
     user_prompt_text = _strip_cosyvoice_prompt_boundary(prompt_text)
-    if resolved_mode == "zero_shot" and not user_prompt_text:
-        user_prompt_text, prompt_text_source = await _resolve_reference_prompt_text_from_asr(
+    if resolved_mode == "zero_shot":
+        user_prompt_text, prompt_text_source = await _resolve_prompt_text_for_prepared_reference(
             run_id,
+            source_reference_path=source_reference_path,
             reference_path=reference_path,
+            prompt_text=user_prompt_text,
             enabled=auto_prompt_text_asr,
             provider_label="CosyVoice3",
+        )
+    if source_reference_path is not None and user_prompt_text:
+        _write_reference_audio_metadata(
+            source_reference_path,
+            prompt_text=user_prompt_text,
+            prompt_text_source=prompt_text_source,
+            provider="cosyvoice3",
+            mode=resolved_mode,
         )
     resolved_prompt_text = _normalize_cosyvoice3_prompt_text(user_prompt_text) if resolved_mode == "zero_shot" else user_prompt_text
     user_instruct_text = _strip_cosyvoice_prompt_boundary(instruct_text)
@@ -663,14 +677,21 @@ async def _execute_moss_tts_run(
         raise RuntimeError("MOSS-TTSD SGLang service requires prompt_wav/reference_audio")
     source_reference_path = reference_path
     reference_path = _prepare_reference_audio_for_moss(reference_path, run_id=run_id)
-    prompt_text_source = "manual" if str(prompt_text or "").strip() else ""
-    user_prompt_text = str(prompt_text or "").strip()
-    if not user_prompt_text:
-        user_prompt_text, prompt_text_source = await _resolve_reference_prompt_text_from_asr(
-            run_id,
-            reference_path=reference_path,
-            enabled=auto_prompt_text_asr,
-            provider_label="MOSS-TTSD",
+    user_prompt_text, prompt_text_source = await _resolve_prompt_text_for_prepared_reference(
+        run_id,
+        source_reference_path=source_reference_path,
+        reference_path=reference_path,
+        prompt_text=prompt_text,
+        enabled=auto_prompt_text_asr,
+        provider_label="MOSS-TTSD",
+    )
+    if source_reference_path is not None and user_prompt_text:
+        _write_reference_audio_metadata(
+            source_reference_path,
+            prompt_text=user_prompt_text,
+            prompt_text_source=prompt_text_source,
+            provider="moss_tts",
+            mode=resolved_mode,
         )
     if not user_prompt_text:
         raise RuntimeError("MOSS-TTSD SGLang service requires prompt_text for the reference audio transcript")
@@ -813,6 +834,11 @@ async def _execute_moss_tts_run(
         else:
             meta = _concatenate_tts_wav_segments(segment_output_paths, output_path=output_path)
             meta["duration"] = _validate_tts_audio_output(output_path, service_label="MOSS-TTSD")
+        _validate_tts_audio_duration_for_text(
+            float(meta.get("duration") or 0.0),
+            text,
+            service_label="MOSS-TTSD",
+        )
     except Exception:
         output_path.unlink(missing_ok=True)
         raise
@@ -1153,7 +1179,7 @@ def _trim_trailing_tts_silence(path: Path, *, threshold: str = "-45dB", min_sile
         str(temp_path),
     ]
     try:
-        result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=90)
+        result = subprocess.run(command, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
     except (OSError, subprocess.SubprocessError):
         temp_path.unlink(missing_ok=True)
         return False
@@ -1563,10 +1589,73 @@ async def _resolve_reference_prompt_text_from_asr(
             )
     except Exception as exc:
         raise RuntimeError(f"{provider_label} reference prompt_text ASR failed: {exc}") from exc
-    text = str(result.text or "").strip()
+    text = _transcript_result_text(result)
     if not text:
         raise RuntimeError(f"{provider_label} reference prompt_text ASR returned empty text")
     return text, "auto_asr"
+
+
+async def _resolve_prompt_text_for_prepared_reference(
+    run_id: str,
+    *,
+    source_reference_path: Path | None,
+    reference_path: Path | None,
+    prompt_text: str,
+    enabled: bool,
+    provider_label: str,
+) -> tuple[str, str]:
+    user_prompt_text = str(prompt_text or "").strip()
+    prompt_text_source = "manual" if user_prompt_text else ""
+    if _reference_audio_needs_prompt_text_calibration(source_reference_path, reference_path):
+        _update_run_stage(
+            run_id,
+            "validate",
+            detail=f"{provider_label} 参考音频已被裁剪或压缩，正在重新识别实际送入服务的 prompt_text",
+            reference_source=str(source_reference_path or ""),
+            reference_output=str(reference_path or ""),
+        )
+        try:
+            user_prompt_text, _ = await _resolve_reference_prompt_text_from_asr(
+                run_id,
+                reference_path=reference_path,
+                enabled=True,
+                provider_label=provider_label,
+            )
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"{provider_label} 参考音频被裁剪或压缩后，prompt_text 必须匹配实际送入服务的音频；"
+                f"自动校准参考文本失败：{exc}"
+            ) from exc
+        return user_prompt_text, "auto_asr_prepared_reference"
+    if not user_prompt_text:
+        return await _resolve_reference_prompt_text_from_asr(
+            run_id,
+            reference_path=reference_path,
+            enabled=enabled,
+            provider_label=provider_label,
+        )
+    return user_prompt_text, prompt_text_source
+
+
+def _reference_audio_needs_prompt_text_calibration(source_reference_path: Path | None, reference_path: Path | None) -> bool:
+    if source_reference_path is None or reference_path is None:
+        return False
+    try:
+        if source_reference_path.resolve() == reference_path.resolve():
+            return False
+    except OSError:
+        return False
+    return True
+
+
+def _transcript_result_text(result: Any) -> str:
+    direct_text = str(getattr(result, "text", "") or "").strip()
+    if direct_text:
+        return direct_text
+    segments = getattr(result, "segments", None)
+    if isinstance(segments, list):
+        return _collapse_tts_text("\n".join(str(getattr(segment, "text", "") or "") for segment in segments))
+    return ""
 
 
 async def _execute_asr_run(run_id: str, *, audio_path: Path, language: str, prompt: str) -> None:
@@ -1966,6 +2055,7 @@ def _write_tts_output_metadata(output_path: Path, result: dict[str, Any]) -> Non
                 "provider",
                 "mode",
                 "prompt_text",
+                "prompt_text_source",
                 "instruct_text",
                 "reference_audio",
                 "spk_id",
@@ -2002,6 +2092,71 @@ def _read_tts_output_metadata(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError):
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _reference_audio_metadata_path(path: Path) -> Path:
+    return path.with_suffix(f"{path.suffix}.json")
+
+
+def _is_reference_upload_path(path: Path) -> bool:
+    try:
+        resolved = path.resolve()
+        root = _REFERENCE_UPLOAD_ROOT.resolve()
+    except OSError:
+        return False
+    return resolved == root or root in resolved.parents
+
+
+def _read_reference_audio_metadata(path: Path) -> dict[str, Any]:
+    if not _is_reference_upload_path(path):
+        return {}
+    metadata_path = _reference_audio_metadata_path(path)
+    if not metadata_path.exists() or not metadata_path.is_file():
+        return {}
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _read_reference_audio_prompt_text(path: Path) -> str:
+    metadata = _read_reference_audio_metadata(path)
+    prompt_text = metadata.get("prompt_text")
+    return _collapse_tts_text(str(prompt_text or ""))
+
+
+def _write_reference_audio_metadata(
+    path: Path,
+    *,
+    prompt_text: str,
+    prompt_text_source: str,
+    provider: str,
+    mode: str,
+) -> None:
+    if not _is_reference_upload_path(path):
+        return
+    cleaned_prompt_text = _collapse_tts_text(prompt_text)
+    if not cleaned_prompt_text:
+        return
+    metadata_path = _reference_audio_metadata_path(path)
+    existing = _read_reference_audio_metadata(path)
+    now = datetime.now(timezone.utc).isoformat()
+    metadata = {
+        **existing,
+        "created_at": existing.get("created_at") or now,
+        "updated_at": now,
+        "prompt_text": cleaned_prompt_text,
+        "prompt_text_source": str(prompt_text_source or "manual"),
+        "provider": str(provider or ""),
+        "mode": str(mode or ""),
+        "reference_audio": str(path),
+    }
+    try:
+        metadata_path.write_text(json.dumps(_json_safe(metadata), ensure_ascii=False, indent=2), encoding="utf-8")
+        path.touch(exist_ok=True)
+    except OSError:
+        return
 
 
 def _reference_audio_dedupe_key(path: Path, *, size: int, duration: float | None) -> str:
@@ -2071,7 +2226,7 @@ def _list_audio_artifact_history(
 
 
 def _list_reference_audio_history(limit: int = _REFERENCE_AUDIO_HISTORY_LIMIT) -> list[dict[str, Any]]:
-    return _list_audio_artifact_history(
+    items = _list_audio_artifact_history(
         root=_REFERENCE_UPLOAD_ROOT,
         source="参考上传",
         artifact_kind="reference-uploads",
@@ -2079,6 +2234,23 @@ def _list_reference_audio_history(limit: int = _REFERENCE_AUDIO_HISTORY_LIMIT) -
         suffixes=_REFERENCE_AUDIO_SUFFIXES | _REFERENCE_VIDEO_SUFFIXES,
         dedupe=True,
     )
+    for item in items:
+        metadata = _read_reference_audio_metadata(Path(str(item.get("path") or "")))
+        if not metadata:
+            continue
+        prompt_text = _collapse_tts_text(str(metadata.get("prompt_text") or ""))
+        if prompt_text:
+            item["prompt_text"] = prompt_text
+            item["text_preview"] = _short_text(prompt_text, 120)
+        item["prompt_text_source"] = metadata.get("prompt_text_source") or ""
+        item["config"] = {
+            key: metadata.get(key)
+            for key in ("provider", "mode", "prompt_text_source")
+            if metadata.get(key) is not None
+        }
+        item["created_at"] = metadata.get("created_at") or item.get("created_at")
+        item["updated_at"] = metadata.get("updated_at") or item.get("updated_at")
+    return items
 
 
 def _list_tts_output_history(limit: int = _TTS_OUTPUT_HISTORY_LIMIT) -> list[dict[str, Any]]:
@@ -2193,7 +2365,7 @@ def _prepare_reference_audio(path: Path, *, run_id: str, max_seconds: float, ser
         "pcm_s16le",
         str(output_path),
     ])
-    result = subprocess.run(command, check=False, capture_output=True, text=True, timeout=90)
+    result = subprocess.run(command, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
     if result.returncode != 0 or not output_path.exists() or output_path.stat().st_size <= 0:
         fallback_command = [
             ffmpeg,
@@ -2213,7 +2385,7 @@ def _prepare_reference_audio(path: Path, *, run_id: str, max_seconds: float, ser
             "pcm_s16le",
             str(output_path),
         ])
-        fallback = subprocess.run(fallback_command, check=False, capture_output=True, text=True, timeout=90)
+        fallback = subprocess.run(fallback_command, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=90)
         if fallback.returncode != 0 or not output_path.exists() or output_path.stat().st_size <= 0:
             output_path.unlink(missing_ok=True)
             detail = (fallback.stderr or result.stderr or "ffmpeg trim failed").strip().splitlines()[-1:]
@@ -2256,6 +2428,8 @@ def _audio_duration_seconds(path: Path) -> float | None:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=8,
         )
     except (OSError, subprocess.SubprocessError):
@@ -2502,6 +2676,20 @@ def _validate_tts_audio_output(path: Path, *, service_label: str, segment_index:
         f"{service_label} returned empty audio{segment_label} ({duration:.3f}s, {size} bytes). "
         "Check that reference_audio matches prompt_text and retry with a shorter target text or more stable sampling."
     )
+
+
+def _validate_tts_audio_duration_for_text(duration: float, text: str, *, service_label: str) -> None:
+    cleaned = re.sub(r"\[S[1-5]\]|\$\{[^}]+\}", "", str(text or ""))
+    text_chars = len(re.sub(r"\s+", "", cleaned))
+    if text_chars < _MIN_DURATION_TEXT_CHARS:
+        return
+    min_duration = min(18.0, text_chars * _MIN_DURATION_PER_TEXT_CHAR_SEC)
+    if float(duration or 0.0) < min_duration:
+        raise RuntimeError(
+            f"{service_label} returned audio that is too short for the target text "
+            f"({duration:.1f}s for {text_chars} chars; expected at least {min_duration:.1f}s). "
+            "Check that reference_audio matches prompt_text and retry with a shorter target text or more stable sampling."
+        )
 
 
 def _copy_avatar_result(result: dict[str, Any]) -> Path | None:

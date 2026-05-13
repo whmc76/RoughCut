@@ -162,3 +162,14 @@ def test_validate_tts_audio_output_rejects_zero_duration_wav(tmp_path: Path) -> 
 
     with pytest.raises(RuntimeError, match="returned empty audio"):
         tools._validate_tts_audio_output(path, service_label="MOSS-TTSD")
+
+
+def test_validate_tts_audio_duration_rejects_obviously_truncated_long_text() -> None:
+    text = "很多父母都会遇到这种情况。孩子明明自己说了可以，可事情结束以后，他又不高兴了。" * 4
+
+    with pytest.raises(RuntimeError, match="too short for the target text"):
+        tools._validate_tts_audio_duration_for_text(4.9, text, service_label="MOSS-TTSD")
+
+
+def test_validate_tts_audio_duration_allows_short_text() -> None:
+    tools._validate_tts_audio_duration_for_text(1.0, "小手，数一数：一、二、三。", service_label="MOSS-TTSD")
