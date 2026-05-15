@@ -4,6 +4,7 @@ from roughcut.speech.transcript_projection import build_transcript_projection_la
 from roughcut.speech.subtitle_segmentation import (
     SubtitleEntry,
     analyze_subtitle_segmentation,
+    normalize_display_text,
     segment_subtitles,
 )
 
@@ -47,7 +48,7 @@ def test_analyzes_common_product_review_word_splits_without_jieba_dependency() -
 
 
 def test_alignment_tokenizer_keeps_common_chinese_words_atomic() -> None:
-    tokens = tokenize_alignment_text("我们他妈这个迷你老大哥天敌特色手感和狐蝠工业版本")
+    tokens = tokenize_alignment_text("我们他妈这个迷你老大哥天敌特色手感和狐蝠工业版本今天终于收到了年前的最后一个一款小玩具毫不费力油光水润玉质感锆合金")
 
     assert "我们" in tokens
     assert "他妈" in tokens
@@ -57,6 +58,18 @@ def test_alignment_tokenizer_keeps_common_chinese_words_atomic() -> None:
     assert "特色" in tokens
     assert "手感" in tokens
     assert "狐蝠工业" in tokens
+    assert "今天" in tokens
+    assert "终于" in tokens
+    assert "收到" in tokens
+    assert "年前" in tokens
+    assert "最后" in tokens
+    assert "一个" in tokens
+    assert "一款" in tokens
+    assert "小玩具" in tokens
+    assert "毫不费力" in tokens
+    assert "油光水润" in tokens
+    assert "玉质感" in tokens
+    assert "锆合金" in tokens
 
 
 def test_alignment_tokenizer_keeps_numeric_units_atomic() -> None:
@@ -127,6 +140,65 @@ def test_segmenter_keeps_number_and_lumen_unit_together() -> None:
         left.endswith("1500") and right.startswith("流明")
         for left, right in zip(texts, texts[1:])
     )
+
+
+def test_segmenter_retokenizes_char_level_provider_words_before_splitting() -> None:
+    text = "哦今天终于收到了年前的最后的一个一款小玩具啊"
+    chars = [char for char in text if char not in "，。！？!?；;：:,、"]
+    words = []
+    cursor = 1.6
+    for char in chars:
+        words.append({"word": char, "start": cursor, "end": cursor + 0.16})
+        cursor += 0.16
+    segment = type(
+        "TranscriptRow",
+        (),
+        {
+            "text": text,
+            "start_time": 1.6,
+            "end_time": cursor,
+            "words_json": words,
+        },
+    )()
+
+    result = segment_subtitles([segment], max_chars=9, max_duration=5.0)
+    texts = [entry.text_raw for entry in result.entries]
+
+    assert not any(
+        left.endswith("年") and right.startswith("前")
+        for left, right in zip(texts, texts[1:])
+    )
+    assert any("年前" in item for item in texts)
+
+
+def test_segmenter_keeps_material_phrases_atomic_after_char_level_retokenize() -> None:
+    text = "摸起来油光水润的高抛光就有一种玉质感"
+    words = []
+    cursor = 10.0
+    for char in text:
+        words.append({"word": char, "start": cursor, "end": cursor + 0.12})
+        cursor += 0.12
+    segment = type(
+        "TranscriptRow",
+        (),
+        {
+            "text": text,
+            "start_time": 10.0,
+            "end_time": cursor,
+            "words_json": words,
+        },
+    )()
+
+    result = segment_subtitles([segment], max_chars=6, max_duration=5.0)
+    texts = [entry.text_raw for entry in result.entries]
+
+    assert not any(left.endswith("油") and right.startswith("光水润") for left, right in zip(texts, texts[1:]))
+    assert any("油光水润" in item for item in texts)
+    assert any("玉质感" in item for item in texts)
+
+
+def test_display_text_corrects_material_context_precast_mishearing() -> None:
+    assert normalize_display_text("高抛光就有一种预制感吧") == "高抛光就有一种玉质感吧"
 
 
 def test_segmenter_uses_covering_word_times_for_number_unit_entry() -> None:

@@ -9,6 +9,10 @@ import re
 from pathlib import Path
 from typing import Any
 
+from roughcut.media.subtitle_spans import (
+    normalize_subtitle_items_for_timeline_projection,
+    split_text_by_timed_span_units,
+)
 from roughcut.media.subtitle_text import clean_final_subtitle_text
 
 _SUBTITLE_FONT_SCALE = 1.0
@@ -495,8 +499,12 @@ def remap_subtitles_to_timeline(
         })
         out_time += seg["end"] - seg["start"]
 
+    projection_items = normalize_subtitle_items_for_timeline_projection(
+        [item for item in subtitle_items if isinstance(item, dict)]
+    )
+
     remapped: list[dict] = []
-    for item in subtitle_items:
+    for item in projection_items:
         sub_start = float(item["start_time"])
         sub_end   = float(item["end_time"])
 
@@ -515,14 +523,24 @@ def remap_subtitles_to_timeline(
 
         if not mapped_ranges:
             continue
+        mapped_ranges = _merge_short_atomic_mapped_ranges(item, mapped_ranges)
         fragment_texts = _split_remapped_subtitle_text(item, mapped_ranges)
         emitted_ranges = [
             (mapped_range, fragment_text)
             for mapped_range, fragment_text in zip(mapped_ranges, fragment_texts)
             if str(fragment_text or "").strip()
         ]
+        item_index = _subtitle_index_as_int(item.get("index"), len(remapped))
+        source_index, source_indexes = _subtitle_source_index_metadata(item, item_index)
         for fragment_index, ((new_start, new_end, overlap_start, overlap_end), fragment_text) in enumerate(emitted_ranges):
-            remapped_item = {**item, "start_time": new_start, "end_time": new_end}
+            remapped_item = {
+                **item,
+                "index": item_index,
+                "source_index": source_index,
+                "source_indexes": source_indexes,
+                "start_time": new_start,
+                "end_time": new_end,
+            }
             if len(emitted_ranges) > 1:
                 remapped_item["source_fragment_index"] = fragment_index
                 remapped_item["source_fragment_count"] = len(emitted_ranges)
@@ -532,11 +550,63 @@ def remap_subtitles_to_timeline(
             remapped_item = _with_remapped_fragment_text(remapped_item, fragment_text)
             remapped.append(remapped_item)
 
-    return remapped
+    return _with_unique_remapped_subtitle_indexes(remapped)
+
+
+def _subtitle_index_as_int(value: Any, fallback: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _subtitle_source_index_metadata(item: dict[str, Any], fallback: int) -> tuple[int, list[int]]:
+    source_index = _subtitle_index_as_int(item.get("source_index", item.get("index")), fallback)
+    raw_source_indexes = item.get("source_indexes")
+    source_indexes: list[int] = []
+    if isinstance(raw_source_indexes, list):
+        for raw_index in raw_source_indexes:
+            normalized_index = _subtitle_index_as_int(raw_index, source_index)
+            if normalized_index not in source_indexes:
+                source_indexes.append(normalized_index)
+    if source_index not in source_indexes:
+        source_indexes.insert(0, source_index)
+    return source_index, source_indexes
+
+
+def _with_unique_remapped_subtitle_indexes(items: list[dict]) -> list[dict]:
+    index_counts: dict[int, int] = {}
+    normalized_indexes: list[int] = []
+    for position, item in enumerate(items):
+        index = _subtitle_index_as_int(item.get("index"), position)
+        normalized_indexes.append(index)
+        index_counts[index] = index_counts.get(index, 0) + 1
+    used_indexes: set[int] = set()
+    occupied_indexes = set(normalized_indexes)
+    next_index = max(occupied_indexes, default=-1) + 1
+    unique_items: list[dict] = []
+    for position, item in enumerate(items):
+        original_index = normalized_indexes[position]
+        source_index, source_indexes = _subtitle_source_index_metadata(item, original_index)
+        unique_item = dict(item)
+        if index_counts.get(original_index, 0) > 1:
+            unique_item["source_index"] = source_index
+            unique_item["source_indexes"] = source_indexes
+        if original_index in used_indexes:
+            while next_index in occupied_indexes or next_index in used_indexes:
+                next_index += 1
+            unique_item["index"] = next_index
+            used_indexes.add(next_index)
+            next_index += 1
+        else:
+            unique_item["index"] = original_index
+            used_indexes.add(original_index)
+        unique_items.append(unique_item)
+    return unique_items
 
 
 def _subtitle_item_display_text(item: dict[str, Any]) -> str:
-    for key in ("text_final", "text_norm", "text_raw", "text"):
+    for key in ("projection_text", "text_final", "text_norm", "text_raw", "text"):
         value = str((item or {}).get(key) or "").strip()
         if value:
             return value
@@ -545,6 +615,8 @@ def _subtitle_item_display_text(item: dict[str, Any]) -> str:
 
 def _with_remapped_fragment_text(item: dict[str, Any], text: str) -> dict[str, Any]:
     resolved = dict(item)
+    resolved.pop("projection_text", None)
+    resolved.pop("projection_text_source", None)
     updated = False
     for key in ("text_final", "text_norm", "text_raw", "text"):
         if key not in resolved:
@@ -564,6 +636,20 @@ def _split_remapped_subtitle_text(
     if not text:
         return [text for _ in mapped_ranges]
 
+    if len(mapped_ranges) == 1 and _mapped_range_covers_full_subtitle(item, mapped_ranges[0]):
+        return [text.strip()]
+
+    if (dominant_fragment_texts := _dominant_fragment_texts_for_lopsided_ranges(text, mapped_ranges)) is not None:
+        return dominant_fragment_texts
+
+    span_fragment_texts = split_text_by_timed_span_units(item, mapped_ranges)
+    if span_fragment_texts is not None:
+        return span_fragment_texts
+
+    display_word_fragment_texts = _split_remapped_subtitle_text_by_display_words(item, mapped_ranges)
+    if display_word_fragment_texts is not None:
+        return display_word_fragment_texts
+
     word_fragment_texts = _split_remapped_subtitle_text_by_words(item, mapped_ranges)
     if word_fragment_texts is not None:
         return word_fragment_texts
@@ -582,6 +668,64 @@ def _split_remapped_subtitle_text(
         pieces = _split_tokens_by_weights(tokens, weights)
         return [" ".join(piece).strip() for piece in pieces]
     return ["".join(piece).strip() for piece in _split_tokens_by_weights(list(text.strip()), weights)]
+
+
+def _mapped_range_covers_full_subtitle(
+    item: dict[str, Any],
+    mapped_range: tuple[float, float, float, float],
+) -> bool:
+    try:
+        sub_start = float(item.get("start_time", 0.0) or 0.0)
+        sub_end = float(item.get("end_time", sub_start) or sub_start)
+    except (TypeError, ValueError):
+        return False
+    _new_start, _new_end, overlap_start, overlap_end = mapped_range
+    return overlap_start <= sub_start + 0.01 and overlap_end >= sub_end - 0.01
+
+
+def _merge_short_atomic_mapped_ranges(
+    item: dict[str, Any],
+    mapped_ranges: list[tuple[float, float, float, float]],
+) -> list[tuple[float, float, float, float]]:
+    if len(mapped_ranges) <= 1:
+        return mapped_ranges
+    text = _subtitle_item_display_text(item)
+    compact = "".join(_subtitle_display_units(text))
+    if not (2 <= len(compact) <= 5):
+        return mapped_ranges
+
+    fragment_texts = _split_remapped_subtitle_text_by_display_words(item, mapped_ranges)
+    if fragment_texts is None:
+        fragment_texts = _split_remapped_subtitle_text_by_words(item, mapped_ranges)
+    if fragment_texts is None:
+        return mapped_ranges
+    if "".join(str(fragment or "").strip() for fragment in fragment_texts) != compact:
+        return mapped_ranges
+
+    first = mapped_ranges[0]
+    last = mapped_ranges[-1]
+    return [(first[0], last[1], first[2], last[3])]
+
+
+def _dominant_fragment_texts_for_lopsided_ranges(
+    text: str,
+    mapped_ranges: list[tuple[float, float, float, float]],
+) -> list[str] | None:
+    if len(mapped_ranges) <= 1:
+        return None
+    durations = [max(0.0, float(new_end) - float(new_start)) for new_start, new_end, _start, _end in mapped_ranges]
+    total_duration = sum(durations)
+    if total_duration <= 0:
+        return None
+    dominant_index = max(range(len(durations)), key=lambda index: durations[index])
+    short_durations = [duration for index, duration in enumerate(durations) if index != dominant_index]
+    if not short_durations:
+        return None
+    if max(short_durations) > 0.45 and max(short_durations) / total_duration > 0.22:
+        return None
+    fragments = ["" for _ in mapped_ranges]
+    fragments[dominant_index] = text.strip()
+    return fragments
 
 
 def _slice_subtitle_text_by_source_overlap(
@@ -628,6 +772,93 @@ def _split_remapped_subtitle_text_by_words(
             return None
         fragments.append(fragment_text)
     return fragments
+
+
+def _split_remapped_subtitle_text_by_display_words(
+    item: dict[str, Any],
+    mapped_ranges: list[tuple[float, float, float, float]],
+) -> list[str] | None:
+    words = _normalized_subtitle_words(item)
+    if not words:
+        return None
+    text = _subtitle_item_display_text(item).strip()
+    if not text or " " in text:
+        return None
+    display_units = _subtitle_display_units(text)
+    if len(display_units) < 2:
+        return None
+    word_units: list[dict[str, Any]] = []
+    for word in words:
+        for char in _subtitle_display_units(str(word.get("word") or "")):
+            word_units.append(
+                {
+                    "key": _subtitle_display_unit_key(char),
+                    "text": char,
+                    "start": float(word["start"]),
+                    "end": float(word["end"]),
+                }
+            )
+    if not word_units:
+        return None
+    display_keys = [_subtitle_display_unit_key(char) for char in display_units]
+    word_keys = [str(unit["key"]) for unit in word_units]
+    match_start = _find_subsequence(word_keys, display_keys)
+    if match_start < 0:
+        return None
+    matched_units = [
+        {**word_units[match_start + offset], "text": display_units[offset]}
+        for offset in range(len(display_units))
+    ]
+    fragments: list[str] = []
+    for _new_start, _new_end, overlap_start, overlap_end in mapped_ranges:
+        chars = [
+            str(unit["text"])
+            for unit in matched_units
+            if min(float(overlap_end), float(unit["end"])) - max(float(overlap_start), float(unit["start"])) > 0.001
+        ]
+        fragment_text = "".join(chars).strip()
+        if not fragment_text:
+            return None
+        fragments.append(fragment_text)
+    return fragments
+
+
+def _subtitle_display_units(text: str) -> list[str]:
+    return [
+        char
+        for char in str(text or "")
+        if char.strip() and (char.isalnum() or "\u4e00" <= char <= "\u9fff")
+    ]
+
+
+_CHINESE_DIGIT_KEYS = {
+    "零": "0",
+    "〇": "0",
+    "一": "1",
+    "二": "2",
+    "两": "2",
+    "三": "3",
+    "四": "4",
+    "五": "5",
+    "六": "6",
+    "七": "7",
+    "八": "8",
+    "九": "9",
+}
+
+
+def _subtitle_display_unit_key(char: str) -> str:
+    value = str(char or "").strip().lower()
+    return _CHINESE_DIGIT_KEYS.get(value, value)
+
+
+def _find_subsequence(values: list[str], target: list[str]) -> int:
+    if not target or len(target) > len(values):
+        return -1
+    for index in range(0, len(values) - len(target) + 1):
+        if values[index:index + len(target)] == target:
+            return index
+    return -1
 
 
 def _normalized_subtitle_words(item: dict[str, Any]) -> list[dict[str, Any]]:

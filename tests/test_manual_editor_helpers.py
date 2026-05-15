@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -17,14 +18,24 @@ from roughcut.api.jobs import (
     _invalidate_job_file_response_cache,
     _inline_file_response,
     _manual_editor_has_collapsed_repeat_runs,
+    _manual_editor_draft_subtitles_are_stale,
+    _manual_editor_draft_subtitles_match_fingerprint,
+    _manual_editor_request_subtitles_match_fingerprint,
     _manual_editor_silence_payload,
+    _manual_editor_subtitle_fingerprint,
     _manual_editor_subtitle_payload,
+    _manual_editor_should_use_clean_fallback_projection,
+    _manual_editor_stored_projection_matches_subtitles,
+    _manual_editor_projection_data_uses_canonical,
+    _manual_editor_projection_entries_use_canonical,
     _manual_editor_apply_conflict_detail,
     _manual_editor_asset_path,
     _manual_editor_change_plan,
     _manual_editor_prerequisite_detail,
     _manual_editor_preview_assets_response,
+    _manual_projection_has_source_text_mismatch,
     _manual_editor_smart_delete_segments,
+    _manual_keep_segments_from_editorial_payload,
     _source_file_cache_get,
     _source_file_cache_set,
     _validate_manual_editor_base_revision,
@@ -34,9 +45,11 @@ from roughcut.api.jobs import (
 from roughcut.edit.otio_export import export_to_otio
 from roughcut.media import manual_editor_assets as manual_editor_assets_module
 from roughcut.media.manual_editor_assets import _fallback_asset_status, _generate_proxy_video, _generate_proxy_webm, _peak_from_pcm, _recommended_preview_gain, _silence_intervals_from_peaks, _thumbnail_timestamps, manual_editor_asset_dir
+from roughcut.media.subtitle_projection_validation import validate_projected_subtitles_against_source
 from roughcut.pipeline.orchestrator import _artifact_types_for_quality_rerun
 from roughcut.pipeline.steps import (
     _manual_editor_subtitle_items_from_editorial,
+    _normalize_subtitle_event,
     _projection_has_suspicious_subtitle_timing,
     _subtitle_projection_entry_payload,
 )
@@ -58,6 +71,125 @@ def test_manual_keep_segments_are_sorted_merged_and_clamped() -> None:
         {"start": 0.0, "end": 4.0},
         {"start": 8.0, "end": 12.0},
         {"start": 18.0, "end": 20.0},
+    ]
+
+
+def test_manual_keep_segments_heal_micro_cut_gaps() -> None:
+    segments = _normalize_manual_keep_segments(
+        [
+            {"start": 0.0, "end": 10.0},
+            {"start": 10.05, "end": 20.0},
+            {"start": 20.2, "end": 30.0},
+        ],
+        source_duration_sec=40.0,
+    )
+
+    assert segments == [
+        {"start": 0.0, "end": 20.0},
+        {"start": 20.2, "end": 30.0},
+    ]
+
+
+def test_manual_editor_draft_subtitles_are_stale_after_subtitle_regeneration() -> None:
+    draft_created_at = datetime(2026, 5, 15, 8, 0, 0, tzinfo=timezone.utc)
+    latest_subtitle_created_at = draft_created_at + timedelta(seconds=1)
+
+    assert _manual_editor_draft_subtitles_are_stale(
+        draft_created_at=draft_created_at,
+        latest_subtitle_created_at=latest_subtitle_created_at,
+    )
+    assert not _manual_editor_draft_subtitles_are_stale(
+        draft_created_at=latest_subtitle_created_at,
+        latest_subtitle_created_at=draft_created_at,
+    )
+    assert not _manual_editor_draft_subtitles_are_stale(
+        draft_created_at=None,
+        latest_subtitle_created_at=latest_subtitle_created_at,
+    )
+
+
+def test_manual_editor_subtitle_fingerprint_tracks_current_subtitle_baseline() -> None:
+    baseline = [
+        {"index": 0, "start_time": 1.6, "end_time": 8.0, "text_final": "今天终于收到了年前的最后的一个一款"},
+        {"index": 1, "start_time": 8.0, "end_time": 13.813, "text_final": "小玩具也是耗尽了我这次的欧气啊"},
+    ]
+    changed = [
+        {"index": 0, "start_time": 1.6, "end_time": 8.0, "text_final": "今天终于收到了年"},
+        {"index": 1, "start_time": 8.0, "end_time": 13.813, "text_final": "前的最后的一个一款小玩具"},
+    ]
+
+    baseline_fingerprint = _manual_editor_subtitle_fingerprint(baseline)
+
+    assert baseline_fingerprint
+    assert baseline_fingerprint == _manual_editor_subtitle_fingerprint([dict(item) for item in baseline])
+    assert baseline_fingerprint != _manual_editor_subtitle_fingerprint(changed)
+
+
+def test_manual_editor_subtitle_overrides_require_matching_fingerprint() -> None:
+    current_fingerprint = _manual_editor_subtitle_fingerprint(
+        [{"index": 0, "start_time": 1.6, "end_time": 8.0, "text_final": "今天终于收到了年前的最后的一个一款"}]
+    )
+    assert current_fingerprint
+
+    assert _manual_editor_draft_subtitles_match_fingerprint(
+        {"base_subtitle_fingerprint": current_fingerprint},
+        current_fingerprint,
+    )
+    assert not _manual_editor_draft_subtitles_match_fingerprint(
+        {"base_subtitle_fingerprint": "old"},
+        current_fingerprint,
+    )
+    assert _manual_editor_request_subtitles_match_fingerprint(
+        ManualEditorApplyIn(base_subtitle_fingerprint=current_fingerprint),
+        current_fingerprint,
+    )
+    assert not _manual_editor_request_subtitles_match_fingerprint(
+        ManualEditorApplyIn(base_subtitle_fingerprint="old"),
+        current_fingerprint,
+    )
+
+
+def test_manual_editor_stored_projection_is_stale_after_subtitle_regeneration() -> None:
+    current_fingerprint = "current"
+    older_projection = datetime(2026, 5, 15, 8, 0, 0, tzinfo=timezone.utc)
+    latest_subtitles = older_projection + timedelta(seconds=1)
+
+    assert not _manual_editor_stored_projection_matches_subtitles(
+        {"overrides": [{"index": 0, "text_final": "old"}]},
+        current_subtitle_fingerprint=current_fingerprint,
+        projection_created_at=older_projection,
+        latest_subtitle_created_at=latest_subtitles,
+    )
+    assert _manual_editor_stored_projection_matches_subtitles(
+        {"base_subtitle_fingerprint": current_fingerprint, "overrides": [{"index": 0, "text_final": "current"}]},
+        current_subtitle_fingerprint=current_fingerprint,
+        projection_created_at=older_projection,
+        latest_subtitle_created_at=latest_subtitles,
+    )
+    assert not _manual_editor_stored_projection_matches_subtitles(
+        {"base_subtitle_fingerprint": "old", "overrides": [{"index": 0, "text_final": "old"}]},
+        current_subtitle_fingerprint=current_fingerprint,
+        projection_created_at=latest_subtitles,
+        latest_subtitle_created_at=older_projection,
+    )
+
+
+def test_manual_keep_segments_from_editorial_payload_heals_legacy_micro_cuts() -> None:
+    segments = _manual_keep_segments_from_editorial_payload(
+        {
+            "segments": [
+                {"type": "keep", "start": 0.0, "end": 10.0},
+                {"type": "cut", "start": 10.0, "end": 10.05, "reason": "filler_word"},
+                {"type": "keep", "start": 10.05, "end": 20.0},
+                {"type": "cut", "start": 20.0, "end": 20.2, "reason": "manual_editor_removed"},
+                {"type": "keep", "start": 20.2, "end": 30.0},
+            ]
+        }
+    )
+
+    assert segments == [
+        {"start": 0.0, "end": 20.0},
+        {"start": 20.2, "end": 30.0},
     ]
 
 
@@ -301,6 +433,270 @@ def test_manual_editor_projection_source_annotation_uses_output_mapping() -> Non
     assert annotated[0]["source_indexes"][0] == 54
 
 
+def test_manual_editor_rejects_projection_text_mapped_to_wrong_source_phrase() -> None:
+    assert _manual_projection_has_source_text_mismatch(
+        [
+            {
+                "index": 72,
+                "source_index": 41,
+                "source_indexes": [41],
+                "start_time": 102.2,
+                "end_time": 104.0,
+                "text_final": "那个NOC要出保卡了不对",
+            }
+        ],
+        [
+            {
+                "index": 41,
+                "start_time": 137.0,
+                "end_time": 138.4,
+                "text_final": "那身份卡啊",
+            }
+        ],
+    )
+
+
+def test_projection_validation_falls_back_to_source_remap_when_text_mapping_is_wrong() -> None:
+    result = validate_projected_subtitles_against_source(
+        [
+            {
+                "index": 72,
+                "source_index": 41,
+                "source_indexes": [41],
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text_final": "那个NOC要出保卡了不对",
+            }
+        ],
+        source_subtitles=[
+            {
+                "index": 41,
+                "start_time": 101.0,
+                "end_time": 102.0,
+                "text_final": "那身份卡啊",
+            }
+        ],
+        keep_segments=[{"start": 100.0, "end": 103.0}],
+        fallback_source_subtitles=[
+            {
+                "index": 41,
+                "start_time": 101.0,
+                "end_time": 102.0,
+                "text_final": "那身份卡啊",
+            }
+        ],
+    )
+
+    assert result.mismatch_detected is True
+    assert result.fallback_used is True
+    assert result.subtitles[0]["text_final"] == "那身份卡啊"
+    assert result.subtitles[0]["start_time"] == 1.0
+    assert result.subtitles[0]["source_index"] == 41
+
+
+def test_projection_validation_repairs_protected_phrase_lost_inside_merged_projection() -> None:
+    result = validate_projected_subtitles_against_source(
+        [
+            {
+                "index": 22,
+                "source_index": 26,
+                "source_indexes": [26, 24, 25],
+                "start_time": 0.0,
+                "end_time": 2.62,
+                "text_final": "任何快递的快递都给你轻松干穿费力",
+            }
+        ],
+        source_subtitles=[
+            {"index": 24, "start_time": 77.46, "end_time": 78.5, "text_final": "任何快递的"},
+            {"index": 25, "start_time": 78.5, "end_time": 79.28, "text_final": "快递都给你轻松干穿"},
+            {
+                "index": 26,
+                "start_time": 79.28,
+                "end_time": 81.92,
+                "text_final": "毫不费力",
+                "words": [
+                    {"word": "毫", "start": 79.28, "end": 79.44},
+                    {"word": "不", "start": 81.44, "end": 81.52},
+                    {"word": "费", "start": 81.52, "end": 81.76},
+                    {"word": "力", "start": 81.76, "end": 81.92},
+                ],
+            },
+        ],
+        keep_segments=[
+            {"start": 77.46, "end": 79.52},
+            {"start": 81.36, "end": 87.64},
+        ],
+    )
+
+    assert [item["text_final"] for item in result.subtitles] == [
+        "任何快递的",
+        "快递都给你轻松干穿",
+        "毫不费力",
+    ]
+
+
+def test_projection_validation_repairs_repeated_boundary_text_from_span_fallback() -> None:
+    result = validate_projected_subtitles_against_source(
+        [
+            {
+                "index": 5,
+                "source_index": 4,
+                "source_indexes": [4, 3],
+                "start_time": 0.0,
+                "end_time": 1.18,
+                "text_final": "太难太难了难上加难",
+            }
+        ],
+        source_subtitles=[
+            {
+                "index": 3,
+                "start_time": 17.12,
+                "end_time": 20.0,
+                "text_final": "NOC的这个发售太难了",
+                "words": [
+                    {"word": "NOC", "start": 17.12, "end": 17.52},
+                    {"word": "的", "start": 17.52, "end": 17.6},
+                    {"word": "这", "start": 17.6, "end": 17.76},
+                    {"word": "个", "start": 17.76, "end": 18.32},
+                    {"word": "发", "start": 18.4, "end": 18.56},
+                    {"word": "售", "start": 18.56, "end": 18.72},
+                    {"word": "啊", "start": 18.72, "end": 18.88},
+                    {"word": "太", "start": 19.6, "end": 19.84},
+                    {"word": "难", "start": 19.84, "end": 20.0},
+                ],
+            },
+            {
+                "index": 4,
+                "start_time": 20.0,
+                "end_time": 20.78,
+                "text_final": "太难了难上加难",
+                "words": [
+                    {"word": "了", "start": 20.0, "end": 20.14},
+                    {"word": "难", "start": 20.14, "end": 20.22},
+                    {"word": "上", "start": 20.3, "end": 20.38},
+                    {"word": "加", "start": 20.38, "end": 20.54},
+                    {"word": "难", "start": 20.54, "end": 20.78},
+                ],
+            },
+        ],
+        keep_segments=[{"start": 19.6, "end": 20.78}],
+    )
+
+    assert [item["text_final"] for item in result.subtitles] == ["太难", "了难上加难"]
+    assert "".join(item["text_final"] for item in result.subtitles) == "太难了难上加难"
+
+
+def test_projection_validation_repairs_missing_text_from_span_fallback_without_phrase_list() -> None:
+    result = validate_projected_subtitles_against_source(
+        [
+            {
+                "index": 22,
+                "source_index": 26,
+                "source_indexes": [26, 24, 25],
+                "start_time": 0.0,
+                "end_time": 2.62,
+                "text_final": "任何快递的快递都给你轻松干穿费力",
+            }
+        ],
+        source_subtitles=[
+            {"index": 24, "start_time": 77.46, "end_time": 78.5, "text_final": "任何快递的"},
+            {"index": 25, "start_time": 78.5, "end_time": 79.28, "text_final": "快递都给你轻松干穿"},
+            {
+                "index": 26,
+                "start_time": 79.28,
+                "end_time": 81.92,
+                "text_final": "完全省力",
+                "words": [
+                    {"word": "完", "start": 79.28, "end": 79.44},
+                    {"word": "全", "start": 81.44, "end": 81.52},
+                    {"word": "省", "start": 81.52, "end": 81.76},
+                    {"word": "力", "start": 81.76, "end": 81.92},
+                ],
+            },
+        ],
+        keep_segments=[
+            {"start": 77.46, "end": 79.52},
+            {"start": 81.36, "end": 87.64},
+        ],
+    )
+
+    assert [item["text_final"] for item in result.subtitles] == [
+        "任何快递的",
+        "快递都给你轻松干穿",
+        "完全省力",
+    ]
+
+
+def test_manual_editor_subtitle_payload_exposes_alignment_diagnostics_and_tokens() -> None:
+    payload = _manual_editor_subtitle_payload(
+        {
+            "index": 3,
+            "start_time": 17.12,
+            "end_time": 20.0,
+            "text_final": "NOC的这个发售太难了",
+            "words": [
+                {"word": "NOC", "start": 17.12, "end": 17.52},
+                {"word": "的", "start": 17.52, "end": 17.6},
+                {"word": "这", "start": 17.6, "end": 17.76},
+                {"word": "个", "start": 17.76, "end": 18.32},
+                {"word": "发", "start": 18.4, "end": 18.56},
+                {"word": "售", "start": 18.56, "end": 18.72},
+                {"word": "太", "start": 19.6, "end": 19.84},
+                {"word": "难", "start": 19.84, "end": 20.0},
+            ],
+        },
+        index=3,
+    )
+
+    assert "".join(token.text for token in payload.alignment_tokens).endswith("太难")
+    assert payload.alignment_diagnostics is not None
+    assert "unmatched_text_suffix" in payload.alignment_diagnostics["issues"]
+
+
+def test_manual_editor_keeps_projection_text_when_it_matches_source_phrase() -> None:
+    assert not _manual_projection_has_source_text_mismatch(
+        [
+            {
+                "index": 72,
+                "source_index": 41,
+                "source_indexes": [41],
+                "start_time": 102.2,
+                "end_time": 104.0,
+                "text_final": "那个身份卡啊",
+            }
+        ],
+        [
+            {
+                "index": 41,
+                "start_time": 137.0,
+                "end_time": 138.4,
+                "text_final": "那身份卡啊",
+            }
+        ],
+    )
+
+
+def test_variant_subtitle_event_preserves_source_mapping_metadata() -> None:
+    event = _normalize_subtitle_event(
+        {
+            "index": 72,
+            "source_index": 41,
+            "source_indexes": [41, 42],
+            "source_overlap_start_time": 101.0,
+            "source_overlap_end_time": 102.0,
+            "start_time": 1.0,
+            "end_time": 2.0,
+            "text_final": "那身份卡啊",
+        }
+    )
+
+    assert event is not None
+    assert event["text"] == "那身份卡啊"
+    assert event["source_index"] == 41
+    assert event["source_indexes"] == [41, 42]
+    assert event["source_overlap_start_time"] == 101.0
+
+
 def test_manual_editor_subtitle_payload_strips_local_asr_tags() -> None:
     payload = _manual_editor_subtitle_payload(
         {
@@ -425,6 +821,35 @@ def test_manual_editor_subtitle_projection_detects_three_item_repeat_run() -> No
 
     assert [item["index"] for item in cleaned] == [0]
     assert _manual_editor_has_collapsed_repeat_runs(raw, cleaned)
+
+
+def test_manual_editor_uses_canonical_projection_even_when_cleaning_drops_repeats() -> None:
+    repeated = "刚才我发现那个盒子放底下有点黑看不清它的这个全貌"
+    raw = [
+        {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_final": repeated},
+        {"index": 1, "start_time": 1.0, "end_time": 2.0, "text_final": repeated},
+        {"index": 2, "start_time": 2.0, "end_time": 3.0, "text_final": repeated},
+    ]
+    cleaned = _clean_manual_editor_subtitle_projection(raw)
+
+    assert not _manual_editor_should_use_clean_fallback_projection(
+        raw,
+        cleaned,
+        {"projection_kind": "display_baseline", "transcript_layer": "canonical_transcript"},
+    )
+    assert _manual_editor_projection_data_uses_canonical(
+        {"projection_kind": "display_baseline", "transcript_layer": "canonical_transcript"}
+    )
+    assert _manual_editor_projection_entries_use_canonical(
+        [{"index": 0, "projection_source": "canonical_transcript"}]
+    )
+    assert _manual_editor_should_use_clean_fallback_projection(
+        raw,
+        cleaned,
+        {"projection_kind": "legacy"},
+    )
+    assert not _manual_editor_projection_data_uses_canonical({"projection_kind": "legacy"})
+    assert not _manual_editor_projection_entries_use_canonical([{"index": 0}])
 
 
 def test_manual_editor_subtitle_projection_keeps_short_repeated_pairs() -> None:

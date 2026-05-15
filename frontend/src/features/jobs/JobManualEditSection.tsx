@@ -132,9 +132,9 @@ type SubtitleReplaceDialogState = {
   matchCount: number;
 };
 
-type PreviewPlaybackMode = "source" | "output" | null;
+type PreviewPlaybackMode = "output" | null;
 
-type TranscriptTokenKind = "char" | "pause";
+type TranscriptTokenKind = "char" | "pause" | "punctuation";
 type TranscriptBreakKind = "soft" | "paragraph";
 
 type TranscriptToken = {
@@ -145,6 +145,7 @@ type TranscriptToken = {
   start: number;
   end: number;
   kept: boolean;
+  timingSource?: "word" | "estimated";
   pauseDuration?: number;
   inferredPunctuation?: string;
   breakAfter?: TranscriptBreakKind;
@@ -495,16 +496,121 @@ function compactTranscriptText(value: string) {
   return value.replace(/[\s，,。.!！?？、；;：:“”"'‘’（）()[\]【】]+/g, "");
 }
 
+function transcriptTextIsSubsequence(needle: string, haystack: string) {
+  if (!needle) return true;
+  if (!haystack) return false;
+  const needleChars = Array.from(needle);
+  const haystackChars = Array.from(haystack);
+  let cursor = 0;
+  for (const char of haystackChars) {
+    if (char === needleChars[cursor]) cursor += 1;
+    if (cursor >= needleChars.length) return true;
+  }
+  return false;
+}
+
+function transcriptTextCommonSubsequenceRatio(left: string, right: string) {
+  const leftChars = Array.from(left);
+  const rightChars = Array.from(right);
+  if (!leftChars.length || !rightChars.length) return 0;
+  const previous = Array(rightChars.length + 1).fill(0);
+  for (let leftIndex = 0; leftIndex < leftChars.length; leftIndex += 1) {
+    let diagonal = 0;
+    for (let rightIndex = 0; rightIndex < rightChars.length; rightIndex += 1) {
+      const saved = previous[rightIndex + 1];
+      previous[rightIndex + 1] = leftChars[leftIndex] === rightChars[rightIndex]
+        ? diagonal + 1
+        : Math.max(previous[rightIndex + 1], previous[rightIndex]);
+      diagonal = saved;
+    }
+  }
+  const commonLength = previous[rightChars.length];
+  return commonLength / Math.max(leftChars.length, rightChars.length);
+}
+
+function shouldPreferSupersetTranscriptText(candidateText: string, baseText: string) {
+  const candidateKey = compactTranscriptText(candidateText);
+  const baseKey = compactTranscriptText(baseText);
+  if (!candidateKey) return false;
+  if (!baseKey) return true;
+  if (candidateKey.length <= baseKey.length) return false;
+  if (!transcriptTextIsSubsequence(baseKey, candidateKey)) return false;
+  const extraChars = candidateKey.length - baseKey.length;
+  const maxExtraChars = Math.max(12, Math.floor(baseKey.length * 0.35));
+  return extraChars <= maxExtraChars;
+}
+
 function shouldPreferSourceTranscriptText(sourceText: string, projectedText: string | undefined) {
   const sourceKey = compactTranscriptText(sourceText);
   const projectedKey = compactTranscriptText(projectedText || "");
   if (!sourceKey) return false;
   if (!projectedKey) return true;
-  return sourceKey.length > projectedKey.length && sourceKey.includes(projectedKey);
+  if (sourceKey.length > projectedKey.length && sourceKey.includes(projectedKey)) return true;
+  if (shouldPreferSupersetTranscriptText(sourceText, projectedText || "")) return true;
+  const lengthRatio = Math.max(sourceKey.length, projectedKey.length) / Math.max(1, Math.min(sourceKey.length, projectedKey.length));
+  return transcriptTextCommonSubsequenceRatio(sourceKey, projectedKey) < 0.32 && lengthRatio >= 1.8;
+}
+
+function subtitleTranscriptWordText(subtitle: JobManualEditSubtitle) {
+  return (subtitle.words || [])
+    .map((word) => String(word.word || "").trim())
+    .filter(Boolean)
+    .join("");
+}
+
+function subtitleTranscriptSourceTextWithWords(subtitle: JobManualEditSubtitle) {
+  const sourceText = subtitleTranscriptSourceText(subtitle);
+  const wordText = subtitleTranscriptWordText(subtitle);
+  return shouldPreferSupersetTranscriptText(wordText, sourceText) ? wordText : sourceText;
 }
 
 function subtitleSourceIndex(subtitle: Pick<JobManualEditSubtitle, "index" | "source_index">) {
   return Number.isFinite(Number(subtitle.source_index)) ? Number(subtitle.source_index) : Number(subtitle.index);
+}
+
+function subtitleSourceIndexes(subtitle: JobManualEditSubtitle, sourceIndex = subtitleSourceIndex(subtitle)) {
+  const indexes = Array.isArray(subtitle.source_indexes)
+    ? subtitle.source_indexes
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value))
+    : [];
+  if (!indexes.includes(sourceIndex)) indexes.unshift(sourceIndex);
+  return indexes.length ? indexes : [sourceIndex];
+}
+
+function withUniqueRemappedSubtitleIndexes(subtitles: JobManualEditSubtitle[]) {
+  const normalizedIndexes = subtitles.map((subtitle, position) => {
+    const index = Number(subtitle.index);
+    return Number.isFinite(index) ? index : position;
+  });
+  const counts = normalizedIndexes.reduce((result, index) => {
+    result.set(index, (result.get(index) ?? 0) + 1);
+    return result;
+  }, new Map<number, number>());
+  const occupiedIndexes = new Set(normalizedIndexes);
+  const usedIndexes = new Set<number>();
+  let nextIndex = normalizedIndexes.length ? Math.max(...normalizedIndexes) + 1 : 0;
+  return subtitles.map((subtitle, position) => {
+    const originalIndex = normalizedIndexes[position] ?? position;
+    const duplicate = (counts.get(originalIndex) ?? 0) > 1;
+    const sourceIndex = subtitleSourceIndex({ index: originalIndex, source_index: subtitle.source_index });
+    const subtitleWithSource = duplicate
+      ? {
+          ...subtitle,
+          source_index: sourceIndex,
+          source_indexes: subtitleSourceIndexes(subtitle, sourceIndex),
+        }
+      : subtitle;
+    if (!usedIndexes.has(originalIndex)) {
+      usedIndexes.add(originalIndex);
+      return { ...subtitleWithSource, index: originalIndex };
+    }
+    while (occupiedIndexes.has(nextIndex) || usedIndexes.has(nextIndex)) nextIndex += 1;
+    const uniqueIndex = nextIndex;
+    usedIndexes.add(uniqueIndex);
+    nextIndex += 1;
+    return { ...subtitleWithSource, index: uniqueIndex };
+  });
 }
 
 function formatSeconds(value: number) {
@@ -630,7 +736,7 @@ function sourceRangeToOutputRanges(sourceStart: number, sourceEnd: number, range
   return mappedRanges;
 }
 
-function remapSubtitles(subtitles: JobManualEditSubtitle[], keepSegments: KeepSegment[]) {
+export function remapSubtitles(subtitles: JobManualEditSubtitle[], keepSegments: KeepSegment[]) {
   const { ranges, totalDuration } = buildOutputRanges(keepSegments);
   const remapped = subtitles
     .flatMap((subtitle, index) => {
@@ -639,12 +745,25 @@ function remapSubtitles(subtitles: JobManualEditSubtitle[], keepSegments: KeepSe
       const mappedRanges = sourceRangeToOutputRanges(subtitleStart, subtitleEnd, ranges);
       if (!mappedRanges.length || subtitleEnd <= subtitleStart + 0.001) return [];
       const fragmentTexts = splitRemappedSubtitleText(subtitle, mappedRanges, subtitleStart, subtitleEnd);
+      const sourceIndex = subtitleSourceIndex({ index: subtitle.index ?? index, source_index: subtitle.source_index });
+      const sourceIndexes = subtitleSourceIndexes(subtitle, sourceIndex);
       return mappedRanges.flatMap((mappedRange, fragmentIndex) => {
         const fragmentText = fragmentTexts[fragmentIndex]?.trim() || "";
         if (!fragmentText) return [];
         const remappedSubtitle = withRemappedSubtitleText({
           ...subtitle,
           index: subtitle.index ?? index,
+          source_index: sourceIndex,
+          source_indexes: sourceIndexes,
+          ...(mappedRanges.length > 1
+            ? {
+                source_fragment_index: fragmentIndex,
+                source_fragment_count: mappedRanges.length,
+                source_text_full: subtitleText(subtitle),
+                source_overlap_start_time: mappedRange.sourceStart,
+                source_overlap_end_time: mappedRange.sourceEnd,
+              }
+            : {}),
           start_time: Number(mappedRange.outputStart.toFixed(3)),
           end_time: Number(mappedRange.outputEnd.toFixed(3)),
         }, fragmentText);
@@ -653,7 +772,7 @@ function remapSubtitles(subtitles: JobManualEditSubtitle[], keepSegments: KeepSe
     })
     .sort((left, right) => left.start_time - right.start_time || left.index - right.index);
 
-  return { remapped, ranges, totalDuration };
+  return { remapped: withUniqueRemappedSubtitleIndexes(remapped), ranges, totalDuration };
 }
 
 export function remapProjectedSubtitlesFromBaseTimeline(
@@ -670,21 +789,30 @@ export function remapProjectedSubtitlesFromBaseTimeline(
       if (outputEnd <= outputStart + 0.001) return [];
       const sourceRanges = outputRangeToSourceRanges(outputStart, outputEnd, baseRanges);
       if (!sourceRanges.length) return [];
-      const mappedRanges = sourceRanges.flatMap((range) => sourceRangeToOutputRanges(range.start, range.end, ranges));
+      const mappedRanges = sourceRanges
+        .flatMap((range) => sourceRangeToOutputRanges(range.start, range.end, ranges))
+        .sort((left, right) => left.outputStart - right.outputStart || left.outputEnd - right.outputEnd);
       if (!mappedRanges.length) return [];
-      const startTime = Math.min(...mappedRanges.map((range) => range.outputStart));
-      const endTime = Math.max(...mappedRanges.map((range) => range.outputEnd));
-      if (endTime <= startTime + 0.05) return [];
-      return [withRemappedSubtitleText({
-        ...subtitle,
-        index: subtitle.index ?? index,
-        start_time: Number(startTime.toFixed(3)),
-        end_time: Number(endTime.toFixed(3)),
-      }, subtitleText(subtitle))];
+      const textRanges = mappedRanges.map((range) => ({
+        ...range,
+        sourceStart: sourceTimeToOutputTime(range.sourceStart, baseRanges),
+        sourceEnd: sourceTimeToOutputTime(range.sourceEnd, baseRanges),
+      }));
+      const fragmentTexts = splitRemappedSubtitleText(subtitle, textRanges, outputStart, outputEnd);
+      return mappedRanges.flatMap((mappedRange, fragmentIndex) => {
+        const fragmentText = fragmentTexts[fragmentIndex]?.trim() || "";
+        if (!fragmentText) return [];
+        return [withRemappedSubtitleText({
+          ...subtitle,
+          index: subtitle.index ?? index,
+          start_time: Number(mappedRange.outputStart.toFixed(3)),
+          end_time: Number(mappedRange.outputEnd.toFixed(3)),
+        }, fragmentText)];
+      });
     })
     .sort((left, right) => left.start_time - right.start_time || left.index - right.index);
 
-  return { remapped, ranges, totalDuration };
+  return { remapped: withUniqueRemappedSubtitleIndexes(remapped), ranges, totalDuration };
 }
 
 function withRemappedSubtitleText(subtitle: JobManualEditSubtitle, text: string) {
@@ -1631,6 +1759,18 @@ export function sourceTimeToActiveOutputTime(sourceTime: number, ranges: OutputR
   return null;
 }
 
+export function sourceTimeToEditedPlaybackStartTime(sourceTime: number, ranges: OutputRange[]) {
+  if (!ranges.length) return null;
+  const normalized = Math.max(0, sourceTime || 0);
+  for (const range of ranges) {
+    if (normalized < range.sourceStart - 0.001) return range.sourceStart;
+    if (normalized < range.sourceEnd - 0.02) {
+      return clamp(normalized, range.sourceStart, range.sourceEnd);
+    }
+  }
+  return null;
+}
+
 export function findSubtitleIndexNearOutputTime(
   subtitles: Pick<JobManualEditSubtitle, "start_time" | "end_time">[],
   outputTime: number | null | undefined,
@@ -1794,7 +1934,7 @@ export function buildSourceTranscriptSubtitlesForTimeline(
   return sourceSubtitlesForTranscript(session).map((subtitle) => {
     const draft = subtitleDrafts[subtitle.index];
     const projectedText = projectedTextsBySourceIndex.get(subtitleSourceIndex(subtitle))?.join("");
-    const sourceText = subtitleTranscriptSourceText(subtitle);
+    const sourceText = subtitleTranscriptSourceTextWithWords(subtitle);
     const nextText = draft?.text_final
       ?? (shouldPreferSourceTranscriptText(sourceText, projectedText) ? sourceText : undefined)
       ?? projectedText
@@ -1832,6 +1972,14 @@ function projectedSubtitlesForTranscript(subtitles: JobManualEditSubtitle[], ran
 
 function sourceRangeOverlapsKeptSegments(start: number, end: number, segments: KeepSegment[]) {
   return segments.some((segment) => Math.min(end, segment.end) > Math.max(start, segment.start) + 0.02);
+}
+
+export function sourceRangeOverlapsCutRanges(start: number, end: number, cutRanges: KeepSegment[]) {
+  const rangeStart = Math.min(start, end);
+  const rangeEnd = Math.max(start, end);
+  const duration = Math.max(0, rangeEnd - rangeStart);
+  const minimumOverlap = duration > 0 ? Math.min(0.015, Math.max(0.004, duration * 0.2)) : 0.001;
+  return cutRanges.some((range) => Math.min(rangeEnd, range.end) - Math.max(rangeStart, range.start) >= minimumOverlap);
 }
 
 function normalizeSilenceRanges(
@@ -1889,6 +2037,38 @@ function subtitlePauseIntervals(subtitles: JobManualEditSubtitle[]) {
   return intervals;
 }
 
+export function wordTimingPauseIntervals(subtitles: JobManualEditSubtitle[], minDuration = 0.18) {
+  const intervals: SilenceRange[] = [];
+  for (const subtitle of sortedSubtitles(subtitles)) {
+    const words = (subtitle.words || [])
+      .map((word) => {
+        const start = Number(word.start);
+        const end = Number(word.end);
+        if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+        return {
+          start: Number(clamp(start, subtitle.start_time, subtitle.end_time).toFixed(3)),
+          end: Number(clamp(end, subtitle.start_time, subtitle.end_time).toFixed(3)),
+        };
+      })
+      .filter((word): word is KeepSegment => Boolean(word))
+      .sort((left, right) => left.start - right.start || left.end - right.end);
+    for (let index = 1; index < words.length; index += 1) {
+      const previous = words[index - 1];
+      const current = words[index];
+      const start = previous.end;
+      const end = current.start;
+      if (end <= start + minDuration - 0.001) continue;
+      intervals.push({
+        start: Number(start.toFixed(3)),
+        end: Number(end.toFixed(3)),
+        duration_sec: Number((end - start).toFixed(3)),
+        source: "word_gap",
+      });
+    }
+  }
+  return intervals;
+}
+
 export function projectedTranscriptMissesKeptSpeech(
   projectedTranscript: JobManualEditSubtitle[],
   sourceSubtitles: JobManualEditSubtitle[],
@@ -1932,6 +2112,8 @@ function inferTranscriptBreakAfter(text: string, gapAfter: number, paragraphChar
 }
 
 const TRANSCRIPT_TIMED_CHAR_RE = /[\u4e00-\u9fffA-Za-z0-9]/;
+const TRANSCRIPT_PAUSE_WORD_GUARD_SEC = 0.02;
+const TRANSCRIPT_MIN_VISIBLE_PAUSE_SEC = 0.12;
 
 type TimedTranscriptChar = {
   text: string;
@@ -1944,7 +2126,22 @@ function isTranscriptTimedChar(char: string) {
 }
 
 function normalizeTranscriptTimingChar(char: string) {
-  return char.toLocaleLowerCase();
+  const normalized = char.toLocaleLowerCase();
+  const digitMap: Record<string, string> = {
+    零: "0",
+    "〇": "0",
+    一: "1",
+    二: "2",
+    两: "2",
+    三: "3",
+    四: "4",
+    五: "5",
+    六: "6",
+    七: "7",
+    八: "8",
+    九: "9",
+  };
+  return digitMap[normalized] ?? normalized;
 }
 
 function timedCharsFromWords(words: JobManualEditWord[] | undefined) {
@@ -1967,6 +2164,35 @@ function timedCharsFromWords(words: JobManualEditWord[] | undefined) {
   return timedChars.sort((left, right) => left.start - right.start || left.end - right.end);
 }
 
+function transcriptTimingIndexPairs(left: string[], right: string[]) {
+  if (!left.length || !right.length) return [];
+  const rows = left.length + 1;
+  const cols = right.length + 1;
+  const dp = Array.from({ length: rows }, () => Array.from({ length: cols }, () => 0));
+  for (let row = 1; row < rows; row += 1) {
+    for (let col = 1; col < cols; col += 1) {
+      dp[row][col] = left[row - 1] === right[col - 1]
+        ? dp[row - 1][col - 1] + 1
+        : Math.max(dp[row - 1][col], dp[row][col - 1]);
+    }
+  }
+  const pairs: Array<[number, number]> = [];
+  let row = left.length;
+  let col = right.length;
+  while (row > 0 && col > 0) {
+    if (left[row - 1] === right[col - 1]) {
+      pairs.push([row - 1, col - 1]);
+      row -= 1;
+      col -= 1;
+    } else if (dp[row - 1][col] >= dp[row][col - 1]) {
+      row -= 1;
+    } else {
+      col -= 1;
+    }
+  }
+  return pairs.reverse();
+}
+
 function buildTimedTranscriptCharTokens(
   subtitle: JobManualEditSubtitle,
   text: string,
@@ -1979,30 +2205,32 @@ function buildTimedTranscriptCharTokens(
   const chars = Array.from(text);
   const timingCharCount = chars.filter(isTranscriptTimedChar).length;
   if (!timingCharCount) return null;
+  const timingChars = chars
+    .map((char, charIndex) => ({ char, charIndex, key: normalizeTranscriptTimingChar(char) }))
+    .filter((item) => isTranscriptTimedChar(item.char));
+  const pairs = transcriptTimingIndexPairs(
+    timingChars.map((item) => item.key),
+    timedChars.map((item) => normalizeTranscriptTimingChar(item.text)),
+  );
+  const matchedTimedCharByTextIndex = new Map<number, TimedTranscriptChar>();
+  pairs.forEach(([timingCharIndex, timedCharIndex]) => {
+    matchedTimedCharByTextIndex.set(timingChars[timingCharIndex].charIndex, timedChars[timedCharIndex]);
+  });
 
   const tokens: TranscriptToken[] = [];
-  let timedCursor = 0;
-  let matchedTimingChars = 0;
+  const matchedTimingChars = pairs.length;
   let previousEnd = subtitle.start_time;
 
   chars.forEach((char, charIndex) => {
     let start = previousEnd;
     let end = previousEnd;
+    let timingSource: TranscriptToken["timingSource"] = "estimated";
     if (isTranscriptTimedChar(char)) {
-      const normalizedChar = normalizeTranscriptTimingChar(char);
-      let matchIndex = -1;
-      for (let index = timedCursor; index < Math.min(timedCursor + 8, timedChars.length); index += 1) {
-        if (normalizeTranscriptTimingChar(timedChars[index].text) === normalizedChar) {
-          matchIndex = index;
-          break;
-        }
-      }
-      if (matchIndex >= 0) {
-        const match = timedChars[matchIndex];
+      const match = matchedTimedCharByTextIndex.get(charIndex);
+      if (match) {
         start = match.start;
         end = match.end;
-        timedCursor = matchIndex + 1;
-        matchedTimingChars += 1;
+        timingSource = "word";
       } else {
         const duration = Math.max(0.001, subtitle.end_time - subtitle.start_time);
         start = subtitle.start_time + duration * (charIndex / Math.max(1, chars.length));
@@ -2018,11 +2246,42 @@ function buildTimedTranscriptCharTokens(
       start: Number(start.toFixed(3)),
       end: Number(end.toFixed(3)),
       kept: isSourceRangeKept(start, end, segments),
+      timingSource,
     });
   });
 
   if (matchedTimingChars / timingCharCount < 0.6) return null;
   return tokens;
+}
+
+function buildBackendAlignedTranscriptTokens(
+  subtitle: JobManualEditSubtitle,
+  segments: KeepSegment[],
+  options: { sourceIndex: number },
+): TranscriptToken[] | null {
+  const { sourceIndex } = options;
+  const backendTokens: TranscriptToken[] = [];
+  (subtitle.alignment_tokens || []).forEach((token, tokenIndex) => {
+    const start = Number(token.start);
+    const end = Number(token.end);
+    const text = String(token.text || "");
+    if (!text || !Number.isFinite(start) || !Number.isFinite(end) || end <= start) return;
+    backendTokens.push({
+      key: `span-${sourceIndex}-${tokenIndex}`,
+      kind: "char",
+      text,
+      subtitleIndex: sourceIndex,
+      start: Number(start.toFixed(3)),
+      end: Number(end.toFixed(3)),
+      kept: isSourceRangeKept(start, end, segments),
+      timingSource: "word",
+    });
+  });
+  if (!backendTokens.length) return null;
+  const diagnostics = subtitle.alignment_diagnostics;
+  const matchedRatio = Number(diagnostics?.matched_ratio ?? 0);
+  if (diagnostics?.status === "warning" && matchedRatio < 0.35) return null;
+  return backendTokens;
 }
 
 export function buildTranscriptTokens(subtitles: JobManualEditSubtitle[], segments: KeepSegment[], silenceRanges: SilenceRange[] = []) {
@@ -2038,7 +2297,8 @@ export function buildTranscriptTokens(subtitles: JobManualEditSubtitle[], segmen
     const inferredPunctuation = inferTranscriptBoundaryPunctuation(text, gapAfter);
     const nextParagraphCharCount = paragraphCharCount + chars.filter((char) => char.trim()).length;
     const breakAfter = inferTranscriptBreakAfter(inferredPunctuation ? `${text}${inferredPunctuation}` : text, gapAfter, nextParagraphCharCount);
-    const timedTokens = buildTimedTranscriptCharTokens(subtitle, text, segments, { sourceIndex });
+    const timedTokens = buildBackendAlignedTranscriptTokens(subtitle, segments, { sourceIndex })
+      ?? buildTimedTranscriptCharTokens(subtitle, text, segments, { sourceIndex });
     const tokens: TranscriptToken[] = timedTokens ?? chars.map((char, charIndex): TranscriptToken => {
       const start = subtitle.start_time + duration * (charIndex / Math.max(1, chars.length));
       const end = subtitle.start_time + duration * ((charIndex + 1) / Math.max(1, chars.length));
@@ -2050,30 +2310,50 @@ export function buildTranscriptTokens(subtitles: JobManualEditSubtitle[], segmen
         start: Number(start.toFixed(3)),
         end: Number(end.toFixed(3)),
         kept: isSourceRangeKept(start, end, segments),
+        timingSource: "estimated",
       };
     });
     const lastToken = tokens[tokens.length - 1];
     if (lastToken) {
-      lastToken.inferredPunctuation = inferredPunctuation;
-      lastToken.breakAfter = breakAfter;
+      if (inferredPunctuation && nextSubtitle) {
+        const punctuationStart = lastToken.end;
+        const punctuationEnd = nextSubtitle
+          ? Math.max(punctuationStart + 0.001, nextSubtitle.start_time)
+          : Math.max(punctuationStart + 0.001, subtitle.end_time);
+        tokens.push({
+          key: `punctuation-${sourceIndex}`,
+          kind: "punctuation",
+          text: inferredPunctuation,
+          subtitleIndex: sourceIndex,
+          start: Number(punctuationStart.toFixed(3)),
+          end: Number(punctuationEnd.toFixed(3)),
+          kept: isSourceRangeKept(punctuationStart, punctuationEnd, segments),
+          breakAfter,
+        });
+      } else {
+        lastToken.breakAfter = breakAfter;
+      }
     }
     charTokens.push(...tokens);
     paragraphCharCount = breakAfter === "paragraph" ? 0 : nextParagraphCharCount;
   });
 
-  const pauseTokens = silenceRanges.map((range, index) => {
-    const pauseDuration = Math.max(0, range.end - range.start);
-    return {
-      key: `pause-${range.source || "audio"}-${index}-${range.start}`,
-      kind: "pause" as const,
-      text: `[...,${pauseDuration.toFixed(1)}s]`,
-      subtitleIndex: null,
-      start: range.start,
-      end: range.end,
-      kept: isSourceRangeKept(range.start, range.end, segments),
-      pauseDuration,
-      breakAfter: pauseDuration >= 1.1 ? "paragraph" as const : undefined,
-    };
+  const pauseTokens = silenceRanges.flatMap((range, index) => {
+    const visibleRanges = transcriptVisiblePauseRanges(range, charTokens);
+    return visibleRanges.map((visibleRange, visibleIndex) => {
+      const pauseDuration = Math.max(0, visibleRange.end - visibleRange.start);
+      return {
+        key: `pause-${range.source || "audio"}-${index}-${visibleIndex}-${visibleRange.start}`,
+        kind: "pause" as const,
+        text: `[...,${pauseDuration.toFixed(1)}s]`,
+        subtitleIndex: null,
+        start: visibleRange.start,
+        end: visibleRange.end,
+        kept: isSourceRangeKept(visibleRange.start, visibleRange.end, segments),
+        pauseDuration,
+        breakAfter: pauseDuration >= 1.1 ? "paragraph" as const : undefined,
+      };
+    });
   });
 
   return [...charTokens, ...pauseTokens].sort((left, right) => (
@@ -2081,6 +2361,29 @@ export function buildTranscriptTokens(subtitles: JobManualEditSubtitle[], segmen
     || (left.kind === "pause" ? -1 : 1)
     || left.end - right.end
   ));
+}
+
+function transcriptVisiblePauseRanges(range: SilenceRange, tokens: TranscriptToken[]) {
+  const wordTimedBlockers = tokens
+    .filter((token) => token.kind === "char"
+      && token.timingSource === "word"
+      && token.text.trim()
+      && token.end > range.start + 0.001
+      && token.start < range.end - 0.001)
+    .map((token) => ({
+      start: Number(Math.max(range.start, token.start - TRANSCRIPT_PAUSE_WORD_GUARD_SEC).toFixed(3)),
+      end: Number(Math.min(range.end, token.end + TRANSCRIPT_PAUSE_WORD_GUARD_SEC).toFixed(3)),
+    }))
+    .filter((blocker) => blocker.end > blocker.start + 0.001);
+  const visibleRanges = wordTimedBlockers.length
+    ? removeSourceRangesFromSegments([{ start: range.start, end: range.end }], wordTimedBlockers)
+    : [{ start: range.start, end: range.end }];
+  return visibleRanges
+    .map((visibleRange) => ({
+      start: Number(visibleRange.start.toFixed(3)),
+      end: Number(visibleRange.end.toFixed(3)),
+    }))
+    .filter((visibleRange) => visibleRange.end > visibleRange.start + TRANSCRIPT_MIN_VISIBLE_PAUSE_SEC - 0.001);
 }
 
 function closestTranscriptTokenIndex(node: Node | null) {
@@ -2122,7 +2425,7 @@ function transcriptSelectionFromTokenRange(tokens: TranscriptToken[], anchorInde
   const sourceStart = Math.min(...selectedTokens.map((token) => token.start));
   const sourceEnd = Math.max(...selectedTokens.map((token) => token.end));
   const text = selectedTokens
-    .filter((token) => token.kind === "char")
+    .filter((token) => token.kind === "char" || token.kind === "punctuation")
     .map((token) => token.text)
     .join("")
     .trim();
@@ -2180,6 +2483,74 @@ export function removeTranscriptSelectionTextFromSubtitleDrafts(
     changed = true;
   }
   return changed ? nextDrafts : drafts;
+}
+
+export function transcriptCutRangesForSelection(
+  subtitles: JobManualEditSubtitle[],
+  tokens: TranscriptToken[],
+  selection: Pick<TranscriptSelection, "startTokenIndex" | "endTokenIndex">,
+  sourceDuration: number,
+) {
+  const selectedTokens = tokens.slice(selection.startTokenIndex, selection.endTokenIndex + 1);
+  if (!selectedTokens.length) return [];
+
+  const subtitlesBySource = new Map<number, JobManualEditSubtitle>();
+  for (const subtitle of subtitles) {
+    subtitlesBySource.set(subtitleSourceIndex(subtitle), subtitle);
+  }
+
+  const charTokensBySource = new Map<number, TranscriptToken[]>();
+  const selectedCharTokensBySource = new Map<number, TranscriptToken[]>();
+  const selectedBoundaryTokens: TranscriptToken[] = [];
+  tokens.forEach((token, tokenIndex) => {
+    if (token.kind === "punctuation" && tokenIndex >= selection.startTokenIndex && tokenIndex <= selection.endTokenIndex) {
+      selectedBoundaryTokens.push(token);
+      return;
+    }
+    if (token.kind !== "char" || token.subtitleIndex == null || !token.text.trim()) return;
+    const sourceIndex = token.subtitleIndex;
+    const allTokens = charTokensBySource.get(sourceIndex) ?? [];
+    allTokens.push(token);
+    charTokensBySource.set(sourceIndex, allTokens);
+    if (tokenIndex < selection.startTokenIndex || tokenIndex > selection.endTokenIndex) return;
+    const selected = selectedCharTokensBySource.get(sourceIndex) ?? [];
+    selected.push(token);
+    selectedCharTokensBySource.set(sourceIndex, selected);
+  });
+
+  const ranges: KeepSegment[] = [];
+  for (const token of selectedBoundaryTokens) {
+    ranges.push({
+      start: Number(Math.max(0, token.start).toFixed(3)),
+      end: Number(Math.min(sourceDuration, Math.max(token.start, token.end)).toFixed(3)),
+    });
+  }
+  for (const [sourceIndex, selectedCharTokens] of selectedCharTokensBySource.entries()) {
+    const allCharTokens = charTokensBySource.get(sourceIndex) || [];
+    const subtitle = subtitlesBySource.get(sourceIndex);
+    if (subtitle && allCharTokens.length > 0 && selectedCharTokens.length >= allCharTokens.length) {
+      ranges.push({
+        start: Number(subtitle.start_time.toFixed(3)),
+        end: Number(subtitle.end_time.toFixed(3)),
+      });
+      continue;
+    }
+    ranges.push({
+      start: Number(Math.min(...selectedCharTokens.map((token) => token.start)).toFixed(3)),
+      end: Number(Math.max(...selectedCharTokens.map((token) => token.end)).toFixed(3)),
+    });
+  }
+
+  ranges.push(
+    ...selectedTokens
+      .filter((token) => token.kind === "pause")
+      .map((token) => ({
+        start: Number(token.start.toFixed(3)),
+        end: Number(token.end.toFixed(3)),
+      })),
+  );
+
+  return addSourceRangesToSegments([], ranges, sourceDuration);
 }
 
 function parseSmartCutFillers(value: string) {
@@ -2335,6 +2706,13 @@ function wordBoundedPauseRanges(range: SilenceRange, wordRanges: KeepSegment[]) 
   return ranges;
 }
 
+function pauseRangeOverlapsTimedSpeech(range: SilenceRange, wordRanges: KeepSegment[]) {
+  return wordRanges.some((wordRange) => {
+    const overlap = Math.min(range.end, wordRange.end) - Math.max(range.start, wordRange.start);
+    return overlap > 0.03;
+  });
+}
+
 function subtitleBoundedPauseRanges(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
   const ranges: KeepSegment[] = [];
   const sorted = sortedSubtitles(subtitles).filter((subtitle) => (
@@ -2373,6 +2751,7 @@ function fallbackCuttablePauseRanges(range: SilenceRange, subtitles: JobManualEd
 function cuttablePauseRanges(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
   const wordRanges = meaningfulWordRangesForPause(range, subtitles, fillers);
   if (wordRanges.length) {
+    if (pauseRangeOverlapsTimedSpeech(range, wordRanges)) return [];
     return wordBoundedPauseRanges(range, wordRanges);
   }
   return fallbackCuttablePauseRanges(range, subtitles, fillers);
@@ -2532,7 +2911,6 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const lastAutoSmartCutSignatureRef = useRef("");
   const lastSelectedSubtitleTextRef = useRef("");
   const resumeAfterSubtitleEditRef = useRef(false);
-  const resumeTimelineAfterSubtitleEditRef = useRef(false);
   const currentEditSnapshotRef = useRef<ManualEditUndoSnapshot | null>(null);
   const undoStackRef = useRef<ManualEditUndoSnapshot[]>([]);
   const [segments, setSegments] = useState<KeepSegment[]>([]);
@@ -2542,7 +2920,6 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [currentSourceTime, setCurrentSourceTime] = useState(0);
   const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
   const [previewPlaybackMode, setPreviewPlaybackMode] = useState<PreviewPlaybackMode>(null);
-  const [preferredPreviewPlaybackMode, setPreferredPreviewPlaybackMode] = useState<Exclude<PreviewPlaybackMode, null>>("source");
   const [previewVideoLoadError, setPreviewVideoLoadError] = useState<string | null>(null);
   const [previewVideoLoading, setPreviewVideoLoading] = useState(false);
   const [previewVideoLoadingLabel, setPreviewVideoLoadingLabel] = useState("正在载入视频");
@@ -2631,7 +3008,6 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setRotationDialogOpen(false);
     setResolutionDialogOpen(false);
     resumeAfterSubtitleEditRef.current = false;
-    resumeTimelineAfterSubtitleEditRef.current = false;
     return true;
   };
 
@@ -2671,7 +3047,6 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setVideoSummary(session.video_summary || "");
     setCurrentSourceTime(0);
     setPreviewPlaybackMode(null);
-    setPreferredPreviewPlaybackMode("source");
     pendingPreviewSeekRef.current = null;
     setWaveformReady(false);
     setWaveformError(null);
@@ -2687,7 +3062,6 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setRotationDetectMessage(null);
     timelinePlaybackRef.current = false;
     resumeAfterSubtitleEditRef.current = false;
-    resumeTimelineAfterSubtitleEditRef.current = false;
   }, [session.job_id, session.timeline_id, session.timeline_version, session.keep_segments, session.subtitle_overrides, session.video_transform, session.video_summary]);
 
   useEffect(() => {
@@ -2744,6 +3118,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     return normalizeSilenceRanges(
       [
         ...subtitlePauseIntervals(sourceTranscriptSubtitles),
+        ...wordTimingPauseIntervals(sourceTranscriptSubtitles),
         ...audioSilences,
       ],
       session.source_duration_sec,
@@ -2752,6 +3127,10 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const transcriptTokens = useMemo(
     () => buildTranscriptTokens(sourceTranscriptSubtitles, effectiveSegments, sourceSilenceRanges),
     [effectiveSegments, sourceSilenceRanges, sourceTranscriptSubtitles],
+  );
+  const transcriptCutRanges = useMemo(
+    () => sourceCutRangesFromKeepSegments(effectiveSegments, session.source_duration_sec),
+    [effectiveSegments, session.source_duration_sec],
   );
   const transcriptCharCount = useMemo(
     () => transcriptTokens.filter((token) => token.kind === "char").length,
@@ -3010,9 +3389,10 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       base_timeline_id: session.timeline_id,
       base_timeline_version: session.timeline_version,
       base_render_plan_version: session.render_plan_version,
+      base_subtitle_fingerprint: session.subtitle_fingerprint || null,
       note: editorNote.trim() || undefined,
     }),
-    [currentVideoSummary, currentVideoTransform, effectiveSegments, editorNote, session.render_plan_version, session.timeline_id, session.timeline_version, subtitleOverrides, subtitleReplacements],
+    [currentVideoSummary, currentVideoTransform, effectiveSegments, editorNote, session.render_plan_version, session.subtitle_fingerprint, session.timeline_id, session.timeline_version, subtitleOverrides, subtitleReplacements],
   );
   const savePlanLabel = hasTimelineEdits
     ? "剪辑变更：重建时间线/特效"
@@ -3388,7 +3768,6 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   };
 
   const jumpToOutputTime = (outputTime: number) => {
-    setPreferredPreviewPlaybackMode("output");
     const video = videoRef.current;
     if (!projection.ranges.length) return;
     const sourceTime = outputTimeToSourceTime(outputTime, projection.ranges);
@@ -3402,7 +3781,6 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   };
 
   const jumpToSourceTime = (sourceTime: number) => {
-    setPreferredPreviewPlaybackMode("source");
     const nextSourceTime = clamp(sourceTime, 0, session.source_duration_sec || sourceTime);
     const video = videoRef.current;
     if (video) {
@@ -3462,27 +3840,18 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     jumpToSourceTime(sourceTime);
   };
 
-  const playSourceTimeline = async () => {
-    const video = videoRef.current;
-    if (!video) return;
-    timelinePlaybackRef.current = false;
-    setPreferredPreviewPlaybackMode("source");
-    setPreviewPlaybackMode("source");
-    applyPreviewAudioSettings(previewVolume, previewMuted, previewAutoVolumeEnabled, true);
-    await video.play();
-    startPreviewClock();
-  };
-
   const playEditedTimeline = async () => {
     const video = videoRef.current;
     if (!video || !projection.ranges.length) return;
     timelinePlaybackRef.current = true;
-    setPreferredPreviewPlaybackMode("output");
     setPreviewPlaybackMode("output");
-    const currentRange = projection.ranges.find((range) => currentSourceTime >= range.sourceStart && currentSourceTime <= range.sourceEnd);
-    const shouldRestart = !currentRange || currentOutputTime >= Math.max(0, totalOutputDuration - 0.08);
+    const currentRange = projection.ranges.find((range) => currentSourceTime >= range.sourceStart && currentSourceTime < range.sourceEnd - 0.02);
+    const playbackStartSourceTime = sourceTimeToEditedPlaybackStartTime(currentSourceTime, projection.ranges);
+    const shouldRestart = currentOutputTime >= Math.max(0, totalOutputDuration - 0.08);
     if (shouldRestart) {
       await seekPreviewToSourceTime(video, projection.ranges[0].sourceStart);
+    } else if (!currentRange && playbackStartSourceTime != null) {
+      await seekPreviewToSourceTime(video, playbackStartSourceTime);
     }
     applyPreviewAudioSettings(previewVolume, previewMuted, previewAutoVolumeEnabled, true);
     await video.play();
@@ -3497,32 +3866,12 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     void videoRef.current?.pause();
   };
 
-  const toggleSourceTimelinePlayback = () => {
-    if (isPreviewPlaying) {
-      pauseEditedTimeline();
-      return;
-    }
-    void playSourceTimeline();
-  };
-
   const toggleEditedTimelinePlayback = () => {
     if (isPreviewPlaying) {
       pauseEditedTimeline();
       return;
     }
     void playEditedTimeline();
-  };
-
-  const togglePreferredPreviewPlayback = () => {
-    if (isPreviewPlaying) {
-      pauseEditedTimeline();
-      return;
-    }
-    if (preferredPreviewPlaybackMode === "output") {
-      void playEditedTimeline();
-      return;
-    }
-    void playSourceTimeline();
   };
 
   const fallbackPreviewElementVolume = (video: HTMLVideoElement, volume: number, muted: boolean, autoVolumeEnabled: boolean) => {
@@ -3638,22 +3987,15 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const pauseForSubtitleEdit = () => {
     const video = videoRef.current;
     resumeAfterSubtitleEditRef.current = Boolean(video && !video.paused);
-    resumeTimelineAfterSubtitleEditRef.current = timelinePlaybackRef.current;
     if (video && !video.paused) void video.pause();
     timelinePlaybackRef.current = false;
   };
 
   const resumeAfterSubtitleEdit = (options?: { force?: boolean }) => {
     const shouldResume = resumeAfterSubtitleEditRef.current;
-    const shouldResumeTimeline = resumeTimelineAfterSubtitleEditRef.current;
     resumeAfterSubtitleEditRef.current = false;
-    resumeTimelineAfterSubtitleEditRef.current = false;
     if (!shouldResume && !options?.force) return;
-    if (shouldResumeTimeline || options?.force) {
-      void playEditedTimeline();
-      return;
-    }
-    void videoRef.current?.play();
+    void playEditedTimeline();
   };
 
   const restoreInitialSegments = () => {
@@ -3689,7 +4031,6 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setResolutionDialogOpen(false);
     setRotationDetectMessage(null);
     resumeAfterSubtitleEditRef.current = false;
-    resumeTimelineAfterSubtitleEditRef.current = false;
   };
 
   useEffect(() => {
@@ -3919,8 +4260,14 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
   const cutTranscriptSelection = () => {
     if (!transcriptSelection) return;
-    const range = { start: transcriptSelection.sourceStart, end: transcriptSelection.sourceEnd };
-    const nextSegments = removeSourceRangesFromSegments(effectiveSegments, [range]);
+    const ranges = transcriptCutRangesForSelection(
+      sourceTranscriptSubtitles,
+      transcriptTokens,
+      transcriptSelection,
+      session.source_duration_sec,
+    );
+    if (!ranges.length) return;
+    const nextSegments = removeSourceRangesFromSegments(effectiveSegments, ranges);
     if (!nextSegments.length) return;
     recordUndoSnapshot();
     pauseEditedTimeline();
@@ -3932,7 +4279,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       current,
     ));
     setSelectedSegmentIndex((current) => clamp(current, 0, nextSegments.length - 1));
-    forgetManualSmartCutRestores([range]);
+    forgetManualSmartCutRestores(ranges);
     clearTranscriptSelection();
   };
 
@@ -4428,7 +4775,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
       if (event.code === "Space") {
         event.preventDefault();
-        togglePreferredPreviewPlayback();
+        toggleEditedTimelinePlayback();
         return;
       }
 
@@ -4471,7 +4818,6 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     nudgeSelectedSubtitle,
     onApply,
     outputDurationDeltaLabel,
-    playSourceTimeline,
     selectAdjacentSubtitle,
     setSelectedSubtitleBoundaryFromPlayhead,
     saveImpactSummary,
@@ -4880,7 +5226,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         </div>
       ) : null}
       <div className="manual-editor-shortcuts" aria-label="手动编辑快捷键">
-        <span><kbd>Space</kbd> 播放/暂停源片</span>
+        <span><kbd>Space</kbd> 播放/暂停输出预览</span>
         <span><kbd>←/→</kbd> 跳 1s</span>
         <span><kbd>Alt</kbd> + <kbd>←/→</kbd> 逐帧</span>
         <span><kbd>[</kbd>/<kbd>]</kbd> 字幕 ±100ms</span>
@@ -4956,13 +5302,13 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                     style={floatingPreviewFrameStyle}
                     role="button"
                     tabIndex={0}
-                    onClick={toggleSourceTimelinePlayback}
+                    onClick={toggleEditedTimelinePlayback}
                     onKeyDown={(event) => {
                       if (event.key !== "Enter") return;
                       event.preventDefault();
-                      toggleSourceTimelinePlayback();
+                      toggleEditedTimelinePlayback();
                     }}
-                    aria-label={isPreviewPlaying ? "暂停源片预览" : "播放源片预览"}
+                    aria-label={isPreviewPlaying ? "暂停预览" : "播放输出预览"}
                   >
                     <div className="manual-editor-video-stage">
                       <video
@@ -5007,12 +5353,14 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                           updatePreviewVideoLoadProgress(event.currentTarget);
                           setPreviewVideoLoading(false);
                           setIsPreviewPlaying(true);
-                          setPreviewPlaybackMode(timelinePlaybackRef.current ? "output" : "source");
+                          timelinePlaybackRef.current = true;
+                          setPreviewPlaybackMode("output");
                           startPreviewClock();
                         }}
                         onPlay={() => {
                           setIsPreviewPlaying(true);
-                          setPreviewPlaybackMode(timelinePlaybackRef.current ? "output" : "source");
+                          timelinePlaybackRef.current = true;
+                          setPreviewPlaybackMode("output");
                           startPreviewClock();
                         }}
                         onError={handlePreviewVideoError}
@@ -5088,10 +5436,10 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                         type="button"
                         className="manual-editor-preview-play"
                         disabled={previewDisabled}
-                        onClick={togglePreferredPreviewPlayback}
-                        aria-label={isPreviewPlaying ? "暂停预览" : preferredPreviewPlaybackMode === "output" ? "播放输出预览" : "播放源片预览"}
+                        onClick={toggleEditedTimelinePlayback}
+                        aria-label={isPreviewPlaying ? "暂停预览" : "播放输出预览"}
                       >
-                        {isPreviewPlaying ? "暂停" : "播放"}
+                        {isPreviewPlaying ? "暂停" : "播放输出"}
                       </button>
                       <div className="manual-editor-preview-volume" onPointerDown={(event) => event.stopPropagation()}>
                         <button
@@ -5134,10 +5482,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
               {currentVideoRotation ? <div className="manual-editor-rotation-status">当前预览已顺时针旋转 {currentVideoRotation}°，该参数会自动保存并用于重渲染。</div> : null}
 
               <div className="manual-editor-controls">
-                <button type="button" className="button primary" disabled={previewDisabled} onClick={toggleSourceTimelinePlayback}>
-                  {isPreviewPlaying && previewPlaybackMode === "source" ? "暂停源片" : "播放源片"}
-                </button>
-                <button type="button" className="button ghost" disabled={previewDisabled || !effectiveSegments.length} onClick={toggleEditedTimelinePlayback}>
+                <button type="button" className="button primary" disabled={previewDisabled || !effectiveSegments.length} onClick={toggleEditedTimelinePlayback}>
                   {isPreviewPlaying && previewPlaybackMode === "output" ? "暂停输出预览" : "播放输出预览"}
                 </button>
                 <button type="button" className="button ghost" onClick={openRotationDialog}>
@@ -5171,6 +5516,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                       ? index >= transcriptSelection.startTokenIndex && index <= transcriptSelection.endTokenIndex
                       : false;
                     const active = index === activeTranscriptTokenIndex;
+                    const cut = !token.kept || sourceRangeOverlapsCutRanges(token.start, token.end, transcriptCutRanges);
                     const breakNode = token.breakAfter ? (
                       <span className={classNames("manual-editor-transcript-break", token.breakAfter === "paragraph" && "paragraph")} aria-hidden="true">
                         <br />
@@ -5185,16 +5531,38 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                               if (element) {
                                 transcriptTokenRefs.current.set(index, element);
                               } else {
-                                transcriptTokenRefs.current.delete(index);
-                              }
-                            }}
-                            className={classNames("manual-editor-transcript-pause", !token.kept && "cut", active && "active", selected && "selected")}
+                              transcriptTokenRefs.current.delete(index);
+                            }
+                          }}
+                            className={classNames("manual-editor-transcript-pause", cut && "cut", active && "active", selected && "selected")}
                             data-transcript-token-index={index}
                             onClick={() => selectTranscriptToken(index)}
                             title={`停顿 ${formatSeconds(token.start)} - ${formatSeconds(token.end)}`}
                           >
                             {token.text}
                           </button>
+                          {breakNode}
+                        </Fragment>
+                      );
+                    }
+                    if (token.kind === "punctuation") {
+                      return (
+                        <Fragment key={token.key}>
+                          <span
+                            ref={(element) => {
+                              if (element) {
+                                transcriptTokenRefs.current.set(index, element);
+                              } else {
+                                transcriptTokenRefs.current.delete(index);
+                              }
+                            }}
+                            className={classNames("manual-editor-transcript-punctuation", cut && "cut", active && "active", selected && "selected")}
+                            data-transcript-token-index={index}
+                            onClick={() => selectTranscriptToken(index)}
+                            title={`${formatSeconds(token.start)} - ${formatSeconds(token.end)}`}
+                          >
+                            {token.text}
+                          </span>
                           {breakNode}
                         </Fragment>
                       );
@@ -5209,14 +5577,13 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                               transcriptTokenRefs.current.delete(index);
                             }
                           }}
-                          className={classNames("manual-editor-transcript-token", !token.kept && "cut", active && "active", selected && "selected")}
+                          className={classNames("manual-editor-transcript-token", cut && "cut", active && "active", selected && "selected")}
                           data-transcript-token-index={index}
                           onClick={() => selectTranscriptToken(index)}
                           title={`${formatSeconds(token.start)} - ${formatSeconds(token.end)}`}
                         >
                           {token.text}
                         </span>
-                        {token.inferredPunctuation ? <span className={classNames("manual-editor-transcript-punctuation", !token.kept && "cut")} aria-hidden="true">{token.inferredPunctuation}</span> : null}
                         {breakNode}
                       </Fragment>
                     );

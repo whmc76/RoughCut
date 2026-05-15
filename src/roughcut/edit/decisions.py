@@ -70,7 +70,6 @@ _BRIDGE_OPENERS = (
 )
 _NUMERIC_SIGNAL_PATTERN = re.compile(r"\d", re.UNICODE)
 _NON_WORD_PATTERN = re.compile(r"[，。！？!?、；;：:,.~\-—_\s\[\]【】()（）]+", re.UNICODE)
-_SMART_RULE_BOUNDARY_PATTERN = re.compile(r"[\s,，、。.!！?？;；:：()[\]（）【】\"'“”‘’]", re.UNICODE)
 _SILENCE_WORD_BOUNDARY_GUARD_SEC = 0.08
 _NOISE_MARKER_TERMS = (
     "噪音",
@@ -305,6 +304,7 @@ _SYNTHETIC_WORD_ALIGNMENT_SOURCES = {
 }
 _SCENE_SNAP_TOLERANCE_SEC = 0.24
 _MIN_CUT_DURATION_SEC = 0.08
+_MIN_PARTIAL_SUBTITLE_CUT_DURATION_SEC = 0.18
 _TRANSCRIPT_EVIDENCE_WINDOW_SEC = 0.45
 _TRIM_INTENSITY_PROFILES = {
     "tight": {
@@ -1078,13 +1078,10 @@ def _subtitle_hesitation_filler_ranges(item: dict[str, Any], text: str) -> list[
     ranges: list[tuple[float, float, str]] = []
     for filler in HESITATION_FILLER_WORDS:
         for start_char, end_char in _subtitle_text_match_char_ranges(text, filler):
-            if not (
-                _is_smart_rule_boundary(_char_at(text, start_char - 1))
-                and _is_smart_rule_boundary(_char_at(text, end_char))
-            ) and not start_char == 0:
+            if start_char != 0:
                 continue
             start, end = _subtitle_char_range_to_time(item, start_char, end_char)
-            if end > start + 0.02:
+            if end >= start + _MIN_PARTIAL_SUBTITLE_CUT_DURATION_SEC:
                 ranges.append((start, end, filler))
     return _dedupe_subtitle_rule_ranges(ranges)
 
@@ -1105,7 +1102,7 @@ def _subtitle_repeated_speech_ranges(
         remove_start_char = len(text[:match_index]) + len(keep_first + separator)
         remove_end_char = remove_start_char + len(keep_first)
         start, end = _subtitle_char_range_to_time(item, remove_start_char, remove_end_char)
-        if end > start + 0.02:
+        if end >= start + _MIN_PARTIAL_SUBTITLE_CUT_DURATION_SEC:
             ranges.append((start, end, keep_first))
     return _dedupe_subtitle_rule_ranges(ranges)
 
@@ -1136,16 +1133,6 @@ def _subtitle_char_range_to_time(item: dict[str, Any], start_char: int, end_char
         round(start_time + duration * clamped_start / char_count, 3),
         round(start_time + duration * clamped_end / char_count, 3),
     )
-
-
-def _char_at(text: str, index: int) -> str:
-    if index < 0 or index >= len(text):
-        return ""
-    return text[index]
-
-
-def _is_smart_rule_boundary(char: str) -> bool:
-    return not char or bool(_SMART_RULE_BOUNDARY_PATTERN.fullmatch(char))
 
 
 def _dedupe_subtitle_rule_ranges(ranges: list[tuple[float, float, str]]) -> list[tuple[float, float, str]]:

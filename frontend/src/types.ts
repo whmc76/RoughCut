@@ -140,16 +140,42 @@ export type JobManualEditWord = {
   source?: string | null;
 };
 
+export type JobManualEditAlignmentToken = {
+  text: string;
+  start: number;
+  end: number;
+  source?: string | null;
+};
+
+export type JobManualEditAlignmentDiagnostics = {
+  status?: string;
+  issues?: string[];
+  matched_ratio?: number;
+  text_unit_count?: number;
+  word_unit_count?: number;
+  timed_unit_count?: number;
+  unmatched_prefix?: string;
+  unmatched_suffix?: string;
+  word_text?: string;
+};
+
 export type JobManualEditSubtitle = {
   index: number;
   source_index?: number | null;
   source_indexes?: number[];
+  source_fragment_index?: number;
+  source_fragment_count?: number;
+  source_overlap_start_time?: number;
+  source_overlap_end_time?: number;
+  source_text_full?: string | null;
   start_time: number;
   end_time: number;
   text_raw?: string | null;
   text_norm?: string | null;
   text_final?: string | null;
   words?: JobManualEditWord[];
+  alignment_tokens?: JobManualEditAlignmentToken[];
+  alignment_diagnostics?: JobManualEditAlignmentDiagnostics | null;
 };
 
 export type JobManualEditSession = {
@@ -157,6 +183,7 @@ export type JobManualEditSession = {
   timeline_id: string;
   timeline_version: number;
   render_plan_version?: number | null;
+  subtitle_fingerprint?: string | null;
   source_name: string;
   source_duration_sec: number;
   source_url?: string | null;
@@ -256,6 +283,7 @@ export type JobManualEditApplyPayload = {
   base_timeline_id?: string;
   base_timeline_version?: number;
   base_render_plan_version?: number | null;
+  base_subtitle_fingerprint?: string | null;
   note?: string;
 };
 
@@ -1355,7 +1383,7 @@ export type ToolRunStatus<Result = unknown> = {
   updated_at?: string | null;
 };
 
-export type ToolTtsProvider = "cosyvoice3" | "moss_tts";
+export type ToolTtsProvider = "cosyvoice3" | "moss_tts_local";
 
 export type ToolTtsMode =
   | "sft"
@@ -1364,9 +1392,7 @@ export type ToolTtsMode =
   | "instruct2"
   | "moss_direct_tts"
   | "moss_voice_clone"
-  | "moss_podcast"
-  | "moss_duration_control"
-  | "moss_sound_effect";
+  | "moss_continuation_clone";
 
 export type ToolTtsParams = {
   provider?: ToolTtsProvider;
@@ -1432,6 +1458,8 @@ export type ToolTtsReferenceAudioItem = {
   updated_at?: string | null;
   display_name?: string | null;
   config_summary?: string | null;
+  prompt_text?: string | null;
+  prompt_text_source?: string | null;
   text_preview?: string | null;
   config?: Record<string, unknown> | null;
   audio_url?: string | null;

@@ -94,6 +94,19 @@ def test_clean_subtitle_payloads_normalizes_projection_timing_keys() -> None:
     ]
 
 
+def test_clean_subtitle_payloads_can_preserve_projection_text_for_validation() -> None:
+    cleaned = clean_subtitle_payloads(
+        [
+            {"index": 0, "start": 1.0, "end": 2.0, "text_final": "型号：EDC17（黑色），不错！"},
+            {"index": 1, "start": 2.0, "end": 3.0, "text_final": "呃，嗯。"},
+        ],
+        clean_text=False,
+    )
+
+    assert cleaned[0]["text_final"] == "型号：EDC17（黑色），不错！"
+    assert cleaned[1]["text_final"] == "呃，嗯。"
+
+
 def test_normalize_display_text_hides_asr_noise_markers_before_review() -> None:
     assert normalize_display_text("[silence]") == ""
     assert normalize_display_text("silence music") == ""

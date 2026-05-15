@@ -14,6 +14,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.db.models import FactClaim, SubtitleCorrection, SubtitleItem, TranscriptSegment
+from roughcut.speech.alignment import tokenize_alignment_text
 
 
 @dataclass
@@ -123,15 +124,7 @@ def _tokenize_entry_text_for_resegmentation(text: str) -> list[str]:
     compact = re.sub(r"\s+", "", str(text or "").strip())
     if not compact:
         return []
-    return [
-        token
-        for token in re.findall(
-            rf"{_NUMERIC_MEASURE_TOKEN_RE.pattern}|[A-Za-z0-9]+|[\u4e00-\u9fff]|.",
-            compact,
-            flags=re.IGNORECASE,
-        )
-        if token.strip()
-    ]
+    return tokenize_alignment_text(compact)
 
 
 def _window_words_for_resegmentation(
@@ -480,6 +473,7 @@ _SPLIT_SPOKEN_DIGIT_RIGHT_RE = re.compile(
 _SAFE_DISPLAY_TERM_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"威虎版(?=(?:的|这个|本|外观|手感|处理|工艺|版本|区别|对比|,|，|。|$))"), "微弧版"),
     (re.compile(r"(?<![A-Za-z0-9])CAC(?=(?:的|外壳|壳体|机身|工艺|切削|精雕|加工|结构|边角|铝合金|中框|骨架))", re.IGNORECASE), "CNC"),
+    (re.compile(r"预制感(?=(?:吧|，|。|的|它应该叫陶瓷|就是|有一种|$))"), "玉质感"),
 )
 _NATURAL_SINGLE_UNITS = {"个", "次", "年", "月", "天", "小时", "分钟", "秒"}
 _NATURAL_SINGLE_QUANTITY_UNITS = {
@@ -923,6 +917,39 @@ _FALLBACK_GENERIC_CJK_BOUNDARY_TERMS = tuple(
             "使用",
             "介绍",
             "一下",
+            "今天",
+            "终于",
+            "收到",
+            "年前",
+            "最后",
+            "一个",
+            "一款",
+            "小玩具",
+            "玩具",
+            "发售",
+            "抢购",
+            "难度",
+            "直线",
+            "上升",
+            "没想到",
+            "现在",
+            "这么",
+            "这次",
+            "两次",
+            "都是",
+            "极限",
+            "转账",
+            "毫不费力",
+            "油光水润",
+            "玉质感",
+            "预制感",
+            "高抛光",
+            "锆合金",
+            "喜欢",
+            "可以",
+            "理解",
+            "为什么",
+            "大家",
             "设计",
             "工业",
             "狐蝠",
@@ -1032,6 +1059,7 @@ _MAX_SEMANTIC_BRIDGE_DURATION_SEC = 8.6
 _LOW_CONFIDENCE_WINDOW_MAX_ENTRIES = 6
 _LOW_CONFIDENCE_WINDOW_MAX_CHARS = 84
 _SYNTHETIC_WORD_SOURCES = {"synthetic", "segment_only", "provider_missing", "roughcut_synthesized"}
+_SEGMENTATION_COMPACT_PUNCT_RE = re.compile(r"[\s，。！？!?；;：:,、（）()\[\]【】{}\"'《》<>]+")
 _SINGLE_CHAR_CONTINUATION_START_RE = re.compile(
     r"^(?P<head>[\u4e00-\u9fff])(?P<rest>也|都|就|是|有|会|要|在|来|去|从|跟|把|被|里|上|下)"
 )
@@ -1202,12 +1230,109 @@ def _words_for_segmentation(seg: TranscriptSegment) -> list[dict]:
     if not raw_words:
         return []
     if _words_are_usable_for_segmentation(getattr(seg, "text", ""), raw_words):
-        return _normalize_segmentation_words(raw_words)
+        normalized_words = _normalize_segmentation_words(raw_words)
+        if _segmentation_words_are_overly_granular(getattr(seg, "text", ""), normalized_words):
+            retokenized_words = _retokenize_granular_segmentation_words(
+                getattr(seg, "text", ""),
+                normalized_words,
+            )
+            if retokenized_words:
+                return retokenized_words
+        return normalized_words
     return _build_text_fallback_words(
         getattr(seg, "text", ""),
         start=float(getattr(seg, "start_time", 0.0) or 0.0),
         end=float(getattr(seg, "end_time", 0.0) or 0.0),
     )
+
+
+def _segmentation_words_are_overly_granular(text: str, words: list[dict]) -> bool:
+    if len(words) < 8:
+        return False
+    word_texts = [
+        _SEGMENTATION_COMPACT_PUNCT_RE.sub("", str(word.get("word") or ""))
+        for word in words
+    ]
+    word_texts = [word for word in word_texts if word]
+    if len(word_texts) < 8:
+        return False
+    cjk_or_alnum_words = [word for word in word_texts if re.search(r"[\u4e00-\u9fffA-Za-z0-9]", word)]
+    if not cjk_or_alnum_words:
+        return False
+    single_unit_ratio = sum(1 for word in cjk_or_alnum_words if len(word) <= 1) / len(cjk_or_alnum_words)
+    if single_unit_ratio < 0.72:
+        return False
+    tokenized = [
+        token
+        for token in tokenize_alignment_text(text)
+        if _SEGMENTATION_COMPACT_PUNCT_RE.sub("", token)
+    ]
+    return len(tokenized) < len(cjk_or_alnum_words) * 0.82
+
+
+def _retokenize_granular_segmentation_words(text: str, words: list[dict]) -> list[dict]:
+    tokens = tokenize_alignment_text(text)
+    if not tokens:
+        return []
+    units: list[dict[str, float | str | dict]] = []
+    for word in words:
+        word_text = str(word.get("word") or "").strip()
+        chars = [
+            char
+            for char in _SEGMENTATION_COMPACT_PUNCT_RE.sub("", word_text)
+            if char.strip()
+        ]
+        if not chars:
+            continue
+        start = float(word.get("start") or 0.0)
+        end = max(start, float(word.get("end") or start))
+        duration = max(0.0, end - start)
+        for char_index, char in enumerate(chars):
+            char_start = start + duration * (char_index / max(1, len(chars)))
+            char_end = end if char_index == len(chars) - 1 else start + duration * ((char_index + 1) / max(1, len(chars)))
+            units.append(
+                {
+                    "char": char.lower(),
+                    "start": char_start,
+                    "end": max(char_start, char_end),
+                    "source_word": word_text,
+                    "alignment": dict(word.get("alignment") or {}),
+                }
+            )
+    if not units:
+        return []
+
+    unit_text = "".join(str(unit["char"]) for unit in units)
+    cursor = 0
+    retokenized: list[dict] = []
+    for token in tokens:
+        token_key = _SEGMENTATION_COMPACT_PUNCT_RE.sub("", str(token or "")).lower()
+        if not token_key:
+            continue
+        match_at = unit_text.find(token_key, cursor)
+        if match_at < 0:
+            continue
+        token_units = units[match_at:match_at + len(token_key)]
+        if not token_units:
+            continue
+        retokenized.append(
+            {
+                "word": str(token),
+                "start": float(token_units[0]["start"]),
+                "end": float(token_units[-1]["end"]),
+                "alignment": {
+                    **dict(token_units[0].get("alignment") or {}),
+                    "source": "provider_retokenized",
+                    "strategy": "alignment_tokenizer",
+                },
+            }
+        )
+        cursor = match_at + len(token_key)
+    compact_source = _SEGMENTATION_COMPACT_PUNCT_RE.sub("", str(text or "")).lower()
+    compact_retokenized = _SEGMENTATION_COMPACT_PUNCT_RE.sub("", "".join(str(word.get("word") or "") for word in retokenized)).lower()
+    if len(compact_retokenized) < len(compact_source) * 0.82:
+        return []
+    return retokenized
 
 
 def _collect_segmentation_input_stats(segments: list[TranscriptSegment]) -> dict[str, int]:
@@ -1254,6 +1379,7 @@ def normalize_display_text(text: str, *, cleanup_fillers: bool = True) -> str:
     if cleanup_fillers:
         result = cleanup_subtitle_fillers(result)
     result = transcribe_subtitle_numerals(result)
+    result = _normalize_safe_display_terms(result)
     result = _collapse_clause_level_homophone_duplicates(result)
     result = _collapse_inline_homophone_duplicates(result)
     result = apply_subtitle_clause_spacing(result)

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
+import json
 import logging
 import os
 import re
@@ -19,7 +21,7 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import delete, distinct, inspect, select
+from sqlalchemy import delete, distinct, func, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
@@ -81,6 +83,16 @@ from roughcut.media.manual_editor_assets import (
 from roughcut.media.output import get_output_project_dir
 from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.subtitle_text import clean_final_subtitle_text, clean_subtitle_payloads
+from roughcut.media.subtitle_projection_validation import (
+    annotate_projected_subtitle_sources,
+    projection_has_source_text_mismatch,
+    source_ranges_for_output_range,
+    validate_projected_subtitles_against_source,
+)
+from roughcut.media.subtitle_spans import (
+    subtitle_span_alignment_diagnostics,
+    subtitle_span_token_payloads,
+)
 from roughcut.publication import (
     active_publication_credentials,
     build_publication_plan,
@@ -298,10 +310,12 @@ class ManualEditorApplyIn(BaseModel):
     base_timeline_id: str | None = None
     base_timeline_version: int | None = None
     base_render_plan_version: int | None = None
+    base_subtitle_fingerprint: str | None = None
     note: str | None = None
 
 
 MANUAL_EDITOR_DRAFT_ARTIFACT_TYPE = "manual_editor_draft"
+MANUAL_EDITOR_MICRO_CUT_HEAL_SEC = 0.18
 
 
 class PublicationSubmitIn(BaseModel):
@@ -343,6 +357,13 @@ class ManualEditorWordOut(BaseModel):
     source: str | None = None
 
 
+class ManualEditorSubtitleSpanTokenOut(BaseModel):
+    text: str
+    start: float
+    end: float
+    source: str | None = None
+
+
 class ManualEditorSubtitleOut(BaseModel):
     index: int
     source_index: int | None = None
@@ -353,6 +374,8 @@ class ManualEditorSubtitleOut(BaseModel):
     text_norm: str | None = None
     text_final: str | None = None
     words: list[ManualEditorWordOut] = Field(default_factory=list)
+    alignment_tokens: list[ManualEditorSubtitleSpanTokenOut] = Field(default_factory=list)
+    alignment_diagnostics: dict[str, Any] | None = None
 
 
 class ManualEditorSessionOut(BaseModel):
@@ -360,6 +383,7 @@ class ManualEditorSessionOut(BaseModel):
     timeline_id: str
     timeline_version: int
     render_plan_version: int | None = None
+    subtitle_fingerprint: str | None = None
     source_name: str
     source_duration_sec: float
     source_url: str | None = None
@@ -1680,8 +1704,14 @@ def _clean_manual_editor_subtitle_projection(
     *,
     drop_empty: bool = True,
     collapse_repeats: bool = True,
+    clean_text: bool = True,
 ) -> list[dict[str, Any]]:
-    return clean_subtitle_payloads(subtitles, drop_empty=drop_empty, collapse_repeats=collapse_repeats)
+    return clean_subtitle_payloads(
+        subtitles,
+        drop_empty=drop_empty,
+        collapse_repeats=collapse_repeats,
+        clean_text=clean_text,
+    )
 
 
 def _manual_editor_has_collapsed_repeat_runs(
@@ -1689,6 +1719,30 @@ def _manual_editor_has_collapsed_repeat_runs(
     cleaned_subtitles: list[dict[str, Any]],
 ) -> bool:
     return len(raw_subtitles) > len(cleaned_subtitles)
+
+
+def _manual_editor_should_use_clean_fallback_projection(
+    raw_subtitles: list[dict[str, Any]],
+    cleaned_subtitles: list[dict[str, Any]],
+    projection_data: dict[str, Any] | None,
+) -> bool:
+    if not _manual_editor_has_collapsed_repeat_runs(raw_subtitles, cleaned_subtitles):
+        return False
+    projection_kind = str((projection_data or {}).get("projection_kind") or "").strip()
+    transcript_layer = str((projection_data or {}).get("transcript_layer") or "").strip()
+    if projection_kind == "display_baseline" and transcript_layer == "canonical_transcript":
+        return False
+    return True
+
+
+def _manual_editor_projection_data_uses_canonical(projection_data: dict[str, Any] | None) -> bool:
+    projection_kind = str((projection_data or {}).get("projection_kind") or "").strip()
+    transcript_layer = str((projection_data or {}).get("transcript_layer") or "").strip()
+    return projection_kind == "display_baseline" and transcript_layer == "canonical_transcript"
+
+
+def _manual_editor_projection_entries_use_canonical(entries: list[dict[str, Any]]) -> bool:
+    return any(str(item.get("projection_source") or "") == "canonical_transcript" for item in entries)
 
 
 def _manual_editor_word_payload(item: dict[str, Any]) -> ManualEditorWordOut | None:
@@ -1897,6 +1951,11 @@ def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> Manu
             continue
     if source_index not in source_indexes:
         source_indexes.insert(0, source_index)
+    alignment_tokens = [
+        ManualEditorSubtitleSpanTokenOut(**token)
+        for token in subtitle_span_token_payloads(item)
+    ]
+    alignment_diagnostics = subtitle_span_alignment_diagnostics(item)
     return ManualEditorSubtitleOut(
         index=int(item.get("index", index) or index),
         source_index=source_index,
@@ -1912,6 +1971,8 @@ def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> Manu
             if isinstance(raw_word, dict)
             if (word := _manual_editor_word_payload(raw_word)) is not None
         ],
+        alignment_tokens=alignment_tokens,
+        alignment_diagnostics=alignment_diagnostics,
     )
 
 
@@ -1920,27 +1981,7 @@ def _source_ranges_for_output_range(
     output_end: float,
     keep_segments: list[dict[str, Any]],
 ) -> list[tuple[float, float]]:
-    start = min(float(output_start or 0.0), float(output_end or 0.0))
-    end = max(float(output_start or 0.0), float(output_end or 0.0))
-    ranges: list[tuple[float, float]] = []
-    output_cursor = 0.0
-    for segment in sorted(keep_segments, key=lambda item: float(item.get("start", 0.0) or 0.0)):
-        source_start = float(segment.get("start", 0.0) or 0.0)
-        source_end = float(segment.get("end", source_start) or source_start)
-        if source_end <= source_start:
-            continue
-        segment_output_start = output_cursor
-        segment_output_end = output_cursor + (source_end - source_start)
-        output_cursor = segment_output_end
-        overlap_start = max(start, segment_output_start)
-        overlap_end = min(end, segment_output_end)
-        if overlap_end <= overlap_start + 0.001:
-            continue
-        ranges.append((
-            source_start + (overlap_start - segment_output_start),
-            source_start + (overlap_end - segment_output_start),
-        ))
-    return ranges
+    return source_ranges_for_output_range(output_start, output_end, keep_segments)
 
 
 def _annotate_manual_projected_subtitle_sources(
@@ -1948,48 +1989,14 @@ def _annotate_manual_projected_subtitle_sources(
     source_subtitles: list[dict[str, Any]],
     keep_segments: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    if not projected_subtitles or not source_subtitles or not keep_segments:
-        return projected_subtitles
-    source_rows: list[dict[str, Any]] = []
-    for fallback_index, item in enumerate(source_subtitles):
-        try:
-            source_index = int(item.get("source_index", item.get("index", fallback_index)) or fallback_index)
-            start_time = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
-            end_time = float(item.get("end_time", item.get("end", start_time)) or start_time)
-        except (TypeError, ValueError):
-            continue
-        if end_time <= start_time:
-            continue
-        source_rows.append({"index": source_index, "start": start_time, "end": end_time})
-    if not source_rows:
-        return projected_subtitles
+    return annotate_projected_subtitle_sources(projected_subtitles, source_subtitles, keep_segments)
 
-    annotated: list[dict[str, Any]] = []
-    for item in projected_subtitles:
-        payload = dict(item)
-        output_start = float(payload.get("start_time", payload.get("start", 0.0)) or 0.0)
-        output_end = float(payload.get("end_time", payload.get("end", output_start)) or output_start)
-        source_ranges = _source_ranges_for_output_range(output_start, output_end, keep_segments)
-        overlap_by_source: dict[int, float] = {}
-        for range_start, range_end in source_ranges:
-            for source in source_rows:
-                overlap = min(range_end, source["end"]) - max(range_start, source["start"])
-                if overlap <= 0.001:
-                    continue
-                source_index = int(source["index"])
-                overlap_by_source[source_index] = overlap_by_source.get(source_index, 0.0) + overlap
-        if overlap_by_source:
-            source_indexes = [
-                source_index
-                for source_index, _overlap in sorted(
-                    overlap_by_source.items(),
-                    key=lambda pair: (-pair[1], pair[0]),
-                )
-            ]
-            payload["source_index"] = source_indexes[0]
-            payload["source_indexes"] = source_indexes
-        annotated.append(payload)
-    return annotated
+
+def _manual_projection_has_source_text_mismatch(
+    projected_subtitles: list[dict[str, Any]],
+    source_subtitles: list[dict[str, Any]],
+) -> bool:
+    return projection_has_source_text_mismatch(projected_subtitles, source_subtitles)
 
 
 def _normalize_manual_keep_segments(
@@ -2017,7 +2024,7 @@ def _normalize_manual_keep_segments(
             merged.append(item)
             continue
         previous = merged[-1]
-        if item["start"] <= previous["end"] + 0.02:
+        if item["start"] <= previous["end"] + MANUAL_EDITOR_MICRO_CUT_HEAL_SEC:
             previous["end"] = round(max(previous["end"], item["end"]), 3)
             continue
         merged.append(item)
@@ -2077,7 +2084,13 @@ def _manual_keep_segments_from_editorial_payload(payload: dict[str, Any] | None)
         if end <= start + 0.05:
             continue
         keep_segments.append({"start": round(start, 3), "end": round(end, 3)})
-    return keep_segments
+    healed: list[dict[str, float]] = []
+    for item in sorted(keep_segments, key=lambda segment: (segment["start"], segment["end"])):
+        if healed and item["start"] <= healed[-1]["end"] + MANUAL_EDITOR_MICRO_CUT_HEAL_SEC:
+            healed[-1]["end"] = round(max(healed[-1]["end"], item["end"]), 3)
+            continue
+        healed.append(dict(item))
+    return healed
 
 
 def _manual_editor_draft_matches_base(
@@ -2096,6 +2109,105 @@ def _manual_editor_draft_matches_base(
     if expected_render_version is not None and int(payload.get("base_render_plan_version") or 0) != expected_render_version:
         return False
     return True
+
+
+def _manual_editor_draft_subtitles_are_stale(
+    *,
+    draft_created_at: datetime | None,
+    latest_subtitle_created_at: datetime | None,
+) -> bool:
+    if draft_created_at is None or latest_subtitle_created_at is None:
+        return False
+    return _coerce_utc_datetime(draft_created_at) < _coerce_utc_datetime(latest_subtitle_created_at)
+
+
+def _coerce_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+async def _manual_editor_latest_subtitle_created_at(session: AsyncSession, *, job_id: uuid.UUID) -> datetime | None:
+    result = await session.execute(
+        select(func.max(SubtitleItem.created_at)).where(
+            SubtitleItem.job_id == job_id,
+            SubtitleItem.version == 1,
+        )
+    )
+    value = result.scalar_one_or_none()
+    return value if isinstance(value, datetime) else None
+
+
+def _manual_editor_subtitle_fingerprint(subtitles: list[dict[str, Any]]) -> str | None:
+    rows: list[dict[str, Any]] = []
+    for fallback_index, item in enumerate(subtitles):
+        if not isinstance(item, dict):
+            continue
+        text = str(
+            item.get("text_final")
+            or item.get("text_norm")
+            or item.get("text_raw")
+            or item.get("text")
+            or ""
+        ).strip()
+        if not text:
+            continue
+        try:
+            index = int(item.get("source_index", item.get("index", fallback_index)) or fallback_index)
+            start_time = round(float(item.get("start_time", item.get("start", 0.0)) or 0.0), 3)
+            end_time = round(float(item.get("end_time", item.get("end", start_time)) or start_time), 3)
+        except (TypeError, ValueError):
+            continue
+        rows.append(
+            {
+                "index": index,
+                "start": start_time,
+                "end": end_time,
+                "text": text,
+            }
+        )
+    if not rows:
+        return None
+    encoded = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _manual_editor_draft_subtitles_match_fingerprint(
+    draft_payload: dict[str, Any] | None,
+    current_subtitle_fingerprint: str | None,
+) -> bool:
+    if not draft_payload or not current_subtitle_fingerprint:
+        return False
+    draft_fingerprint = str(draft_payload.get("base_subtitle_fingerprint") or "").strip()
+    return bool(draft_fingerprint and draft_fingerprint == current_subtitle_fingerprint)
+
+
+def _manual_editor_request_subtitles_match_fingerprint(
+    request: ManualEditorApplyIn,
+    current_subtitle_fingerprint: str | None,
+) -> bool:
+    if not current_subtitle_fingerprint:
+        return False
+    request_fingerprint = str(request.base_subtitle_fingerprint or "").strip()
+    return bool(request_fingerprint and request_fingerprint == current_subtitle_fingerprint)
+
+
+def _manual_editor_stored_projection_matches_subtitles(
+    subtitle_projection: dict[str, Any] | None,
+    *,
+    current_subtitle_fingerprint: str | None,
+    projection_created_at: datetime | None,
+    latest_subtitle_created_at: datetime | None,
+) -> bool:
+    if not subtitle_projection:
+        return False
+    projection_fingerprint = str(subtitle_projection.get("base_subtitle_fingerprint") or "").strip()
+    if projection_fingerprint:
+        return bool(current_subtitle_fingerprint and projection_fingerprint == current_subtitle_fingerprint)
+    return not _manual_editor_draft_subtitles_are_stale(
+        draft_created_at=projection_created_at,
+        latest_subtitle_created_at=latest_subtitle_created_at,
+    )
 
 
 def _manual_video_transform_from_render_plan(render_plan: dict[str, Any] | None) -> dict[str, Any]:
@@ -2928,6 +3040,23 @@ async def _build_manual_editor_session(
         editorial_analysis if isinstance(editorial_analysis, dict) else None
     )
 
+    raw_source_subtitle_dicts = await _load_manual_editor_source_subtitle_dicts(session, job_id=job.id)
+    raw_subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id, drop_empty=False)
+    source_subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_source_subtitle_dicts, drop_empty=False, collapse_repeats=False)
+    subtitle_fingerprint = _manual_editor_subtitle_fingerprint(source_subtitle_dicts)
+    latest_subtitle_created_at = await _manual_editor_latest_subtitle_created_at(session, job_id=job.id)
+    if not _manual_editor_stored_projection_matches_subtitles(
+        subtitle_projection if isinstance(subtitle_projection, dict) else None,
+        current_subtitle_fingerprint=subtitle_fingerprint,
+        projection_created_at=editorial_timeline.created_at,
+        latest_subtitle_created_at=latest_subtitle_created_at,
+    ):
+        subtitle_overrides = []
+        manual_projection_items = []
+    word_payloads = await _load_manual_editor_word_payloads(session, job_id=job.id)
+    source_subtitle_dicts = _attach_manual_editor_words_to_subtitles(source_subtitle_dicts, word_payloads)
+    subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts)
+
     draft_saved_at: str | None = None
     draft_note: str | None = None
     base_video_summary = await _load_manual_editor_base_video_summary(session, job_id=job.id)
@@ -2939,38 +3068,59 @@ async def _build_manual_editor_session(
     )
     draft_payload = draft_artifact.data_json if draft_artifact and isinstance(draft_artifact.data_json, dict) else None
     keep_segments = base_keep_segments
+    draft_subtitles_stale = _manual_editor_draft_subtitles_are_stale(
+        draft_created_at=draft_artifact.created_at if draft_artifact is not None else None,
+        latest_subtitle_created_at=latest_subtitle_created_at,
+    )
     draft_active = _manual_editor_draft_matches_base(
         draft_payload,
         editorial_timeline=editorial_timeline,
         render_plan_timeline=render_plan_timeline,
     )
     if draft_active and draft_payload is not None:
+        raw_draft_keep_segments = [
+            segment
+            for segment in list(draft_payload.get("keep_segments") or [])
+            if isinstance(segment, dict)
+        ]
+        try:
+            normalized_draft_keep_segments = _normalize_manual_keep_segments(
+                raw_draft_keep_segments,
+                source_duration_sec=source_duration_sec,
+            ) if raw_draft_keep_segments else []
+        except (HTTPException, TypeError, ValueError):
+            normalized_draft_keep_segments = []
         draft_keep_segments = [
             _manual_editor_segment_payload(segment, index=index)
-            for index, segment in enumerate(list(draft_payload.get("keep_segments") or []))
-            if isinstance(segment, dict)
+            for index, segment in enumerate(normalized_draft_keep_segments)
         ]
         if draft_keep_segments:
             keep_segments = draft_keep_segments
-        subtitle_overrides = _manual_subtitle_override_payloads(
-            [
-                item
-                for item in list(draft_payload.get("subtitle_overrides") or [])
-                if isinstance(item, dict)
-            ]
+        draft_subtitles_match = _manual_editor_draft_subtitles_match_fingerprint(
+            draft_payload,
+            subtitle_fingerprint,
         )
+        if draft_subtitles_match or (
+            not draft_subtitles_stale
+            and not str(draft_payload.get("base_subtitle_fingerprint") or "").strip()
+        ):
+            subtitle_overrides = _manual_subtitle_override_payloads(
+                [
+                    item
+                    for item in list(draft_payload.get("subtitle_overrides") or [])
+                    if isinstance(item, dict)
+                ]
+            )
         video_transform = _manual_video_transform_payload(draft_payload.get("video_transform"))
         video_summary = _normalize_manual_video_summary(draft_payload.get("video_summary")) or base_video_summary
         draft_saved_at = str(draft_payload.get("saved_at") or "") or None
         draft_note = str(draft_payload.get("note") or "") or None
 
-    raw_source_subtitle_dicts = await _load_manual_editor_source_subtitle_dicts(session, job_id=job.id)
-    raw_subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id, drop_empty=False)
-    source_subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_source_subtitle_dicts, drop_empty=False, collapse_repeats=False)
-    word_payloads = await _load_manual_editor_word_payloads(session, job_id=job.id)
-    source_subtitle_dicts = _attach_manual_editor_words_to_subtitles(source_subtitle_dicts, word_payloads)
-    subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts)
-    use_clean_fallback_projection = _manual_editor_has_collapsed_repeat_runs(raw_subtitle_dicts, subtitle_dicts)
+    use_clean_fallback_projection = _manual_editor_should_use_clean_fallback_projection(
+        raw_subtitle_dicts,
+        subtitle_dicts,
+        projection_data,
+    )
     manual_projection_suspicious = _projection_has_suspicious_subtitle_timing(
         manual_projection_items,
         split_profile={},
@@ -2997,12 +3147,24 @@ async def _build_manual_editor_session(
                 subtitle_overrides,
                 output_duration_sec=base_output_duration_sec,
             )
-    projected_subtitles = _clean_manual_editor_subtitle_projection(projected_subtitles)
-    projected_subtitles = _annotate_manual_projected_subtitle_sources(
+    projected_subtitles = _clean_manual_editor_subtitle_projection(
         projected_subtitles,
-        source_subtitle_dicts,
-        [segment.model_dump(include={"start", "end"}) for segment in keep_segments],
+        clean_text=False,
+        collapse_repeats=False,
     )
+    projection_validation = validate_projected_subtitles_against_source(
+        projected_subtitles,
+        source_subtitles=source_subtitle_dicts,
+        keep_segments=[segment.model_dump(include={"start", "end"}) for segment in keep_segments],
+        fallback_source_subtitles=(
+            None
+            if _manual_editor_projection_data_uses_canonical(projection_data)
+            or _manual_editor_projection_entries_use_canonical(projected_subtitles)
+            else _clean_manual_editor_subtitle_projection(source_subtitle_dicts)
+        ),
+    )
+    projected_subtitles = projection_validation.subtitles
+    projected_subtitles = _clean_manual_editor_subtitle_projection(projected_subtitles)
     source_path = _resolve_manual_editor_source_path(job)
     status_detail = _manual_editor_detail_for_job_status(str(job.status or ""))
     prerequisite_detail = _manual_editor_prerequisite_detail(list(job.steps or []))
@@ -3012,6 +3174,7 @@ async def _build_manual_editor_session(
         timeline_id=str(editorial_timeline.id),
         timeline_version=int(editorial_timeline.version or 1),
         render_plan_version=int(render_plan_timeline.version) if render_plan_timeline is not None else None,
+        subtitle_fingerprint=subtitle_fingerprint,
         source_name=str(job.source_name or ""),
         source_duration_sec=round(max(0.0, source_duration_sec), 3),
         source_url=f"/api/v1/jobs/{job.id}/source/file" if source_path is not None else None,
@@ -3215,8 +3378,23 @@ async def save_manual_editor_draft(
             default=0.0,
         )
     keep_segments = _normalize_manual_keep_segments(request.keep_segments, source_duration_sec=source_duration_sec)
-    subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
-    subtitle_replacement_payloads = _manual_subtitle_replacement_payloads(request.subtitle_replacements)
+    current_source_subtitles = _clean_manual_editor_subtitle_projection(
+        await _load_manual_editor_source_subtitle_dicts(session, job_id=job.id),
+        drop_empty=False,
+        collapse_repeats=False,
+    )
+    subtitle_fingerprint = _manual_editor_subtitle_fingerprint(current_source_subtitles)
+    request_subtitles_match = _manual_editor_request_subtitles_match_fingerprint(request, subtitle_fingerprint)
+    subtitle_override_payloads = (
+        _manual_subtitle_override_payloads(request.subtitle_overrides)
+        if request_subtitles_match
+        else []
+    )
+    subtitle_replacement_payloads = (
+        _manual_subtitle_replacement_payloads(request.subtitle_replacements)
+        if request_subtitles_match
+        else []
+    )
     video_transform = _manual_video_transform_payload(request.video_transform)
     video_summary = _normalize_manual_video_summary(request.video_summary)
     saved_at = datetime.now(timezone.utc).isoformat()
@@ -3248,6 +3426,7 @@ async def save_manual_editor_draft(
                 "base_timeline_id": str(editorial_timeline.id),
                 "base_timeline_version": int(editorial_timeline.version or 1),
                 "base_render_plan_version": int(render_plan_timeline.version or 1),
+                "base_subtitle_fingerprint": subtitle_fingerprint,
                 "keep_segments": keep_segments,
                 "subtitle_overrides": subtitle_override_payloads,
                 "subtitle_replacements": subtitle_replacement_payloads,
@@ -3263,7 +3442,11 @@ async def save_manual_editor_draft(
         saved_at=saved_at,
         keep_segment_count=len(keep_segments),
         subtitle_override_count=len(subtitle_override_payloads),
-        detail="手动调整草稿已自动保存。",
+        detail=(
+            "手动调整草稿已自动保存；字幕已重建，旧页面里的字幕修改已忽略，请刷新后再改字幕。"
+            if not request_subtitles_match and (request.subtitle_overrides or request.subtitle_replacements)
+            else "手动调整草稿已自动保存。"
+        ),
     )
 
 
@@ -3338,8 +3521,24 @@ async def apply_manual_editor_timeline(
 
     keep_segments = _normalize_manual_keep_segments(request.keep_segments, source_duration_sec=source_duration_sec)
     raw_subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id)
+    raw_source_subtitle_dicts = await _load_manual_editor_source_subtitle_dicts(session, job_id=job.id)
+    source_subtitle_dicts = _clean_manual_editor_subtitle_projection(
+        raw_source_subtitle_dicts,
+        drop_empty=False,
+        collapse_repeats=False,
+    )
+    source_subtitle_dicts = _attach_manual_editor_words_to_subtitles(
+        source_subtitle_dicts,
+        await _load_manual_editor_word_payloads(session, job_id=job.id),
+    )
+    subtitle_fingerprint = _manual_editor_subtitle_fingerprint(source_subtitle_dicts)
+    if (request.subtitle_overrides or request.subtitle_replacements) and not _manual_editor_request_subtitles_match_fingerprint(
+        request,
+        subtitle_fingerprint,
+    ):
+        raise HTTPException(status_code=409, detail="字幕数据已更新，请刷新手动编辑器后再保存字幕修改。")
     subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts)
-    if _manual_editor_has_collapsed_repeat_runs(raw_subtitle_dicts, subtitle_dicts):
+    if _manual_editor_should_use_clean_fallback_projection(raw_subtitle_dicts, subtitle_dicts, projection_data):
         remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
     else:
         remapped_subtitles = await _build_edited_subtitle_projection(
@@ -3349,6 +3548,18 @@ async def apply_manual_editor_timeline(
             projection_data=projection_data,
             fallback_subtitles=subtitle_dicts,
         )
+    projection_validation = validate_projected_subtitles_against_source(
+        remapped_subtitles,
+        source_subtitles=source_subtitle_dicts,
+        keep_segments=keep_segments,
+        fallback_source_subtitles=(
+            None
+            if _manual_editor_projection_data_uses_canonical(projection_data)
+            or _manual_editor_projection_entries_use_canonical(remapped_subtitles)
+            else _clean_manual_editor_subtitle_projection(source_subtitle_dicts)
+        ),
+    )
+    remapped_subtitles = projection_validation.subtitles
     base_output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in remapped_subtitles), default=0.0)
     subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
     subtitle_replacement_payloads = _manual_subtitle_replacement_payloads(request.subtitle_replacements)
@@ -3454,6 +3665,7 @@ async def apply_manual_editor_timeline(
         "subtitle_projection": {
             "mode": "ripple_keep_segments",
             "source": "latest_reviewed_subtitles",
+            "base_subtitle_fingerprint": subtitle_fingerprint,
             "overrides": subtitle_override_payloads,
             "items": remapped_subtitles,
             "projected_count": len(remapped_subtitles),
@@ -3465,6 +3677,7 @@ async def apply_manual_editor_timeline(
                 "applied": True,
                 "base_timeline_id": str(editorial_timeline.id),
                 "base_timeline_version": int(editorial_timeline.version or 1),
+                "base_subtitle_fingerprint": subtitle_fingerprint,
                 "change_scope": str(change_plan["change_scope"]),
                 "render_strategy": str(change_plan["render_strategy"]),
                 "timeline_changed": bool(change_plan["timeline_changed"]),
