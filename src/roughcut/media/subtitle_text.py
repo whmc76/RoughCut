@@ -45,17 +45,34 @@ _DISRUPTION_CLAUSE_PATTERN = re.compile(
 
 def clean_final_subtitle_text(text: object) -> str:
     """Remove final-output noise and serialize captions without punctuation."""
+    return _clean_final_subtitle_text_and_reason(text)[0]
+
+
+def subtitle_display_suppression_reason(text: object) -> str:
+    return _clean_final_subtitle_text_and_reason(text)[1]
+
+
+def _clean_final_subtitle_text_and_reason(text: object) -> tuple[str, str]:
     normalized = str(text or "").strip()
     if not normalized:
-        return ""
+        return "", "empty_source_text"
+    original = normalized
     normalized = _strip_asr_noise_markers(normalized)
     normalized = re.sub(r"([\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", r"\1", normalized)
     if _is_asr_noise_only(normalized):
-        return ""
+        return "", "asr_noise_marker"
     normalized = _drop_final_noise_clauses(normalized)
-    if not normalized or _is_standalone_subtitle_filler(normalized) or _is_disruption_clause(normalized):
-        return ""
-    return _format_final_subtitle_text(normalized)
+    if not normalized:
+        if _is_disruption_clause(original):
+            return "", "disruption_clause"
+        if _is_standalone_subtitle_filler(original):
+            return "", "standalone_filler"
+        return "", "all_clauses_suppressed"
+    if _is_standalone_subtitle_filler(normalized):
+        return "", "standalone_filler"
+    if _is_disruption_clause(normalized):
+        return "", "disruption_clause"
+    return _format_final_subtitle_text(normalized), ""
 
 
 def clean_subtitle_payloads(
@@ -69,7 +86,13 @@ def clean_subtitle_payloads(
     for item in subtitles:
         payload = _normalize_subtitle_timing_payload(item)
         source_text = str(payload.get("text_final") or payload.get("text_norm") or payload.get("text_raw", "") or "").strip()
-        text_final = clean_final_subtitle_text(source_text) if clean_text else source_text
+        text_final, suppressed_reason = (
+            _clean_final_subtitle_text_and_reason(source_text)
+            if clean_text
+            else (source_text, "")
+        )
+        if clean_text and suppressed_reason and source_text:
+            payload["display_suppressed_reason"] = suppressed_reason
         if drop_empty and not (text_final if clean_text else source_text):
             continue
         if clean_text:

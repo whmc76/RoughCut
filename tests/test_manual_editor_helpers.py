@@ -45,7 +45,10 @@ from roughcut.api.jobs import (
 from roughcut.edit.otio_export import export_to_otio
 from roughcut.media import manual_editor_assets as manual_editor_assets_module
 from roughcut.media.manual_editor_assets import _fallback_asset_status, _generate_proxy_video, _generate_proxy_webm, _peak_from_pcm, _recommended_preview_gain, _silence_intervals_from_peaks, _thumbnail_timestamps, manual_editor_asset_dir
-from roughcut.media.subtitle_projection_validation import validate_projected_subtitles_against_source
+from roughcut.media.subtitle_projection_validation import (
+    validate_projected_subtitles_against_source,
+    validate_projected_subtitles_against_transcript,
+)
 from roughcut.pipeline.orchestrator import _artifact_types_for_quality_rerun
 from roughcut.pipeline.steps import (
     _manual_editor_subtitle_items_from_editorial,
@@ -627,6 +630,77 @@ def test_projection_validation_repairs_missing_text_from_span_fallback_without_p
     ]
 
 
+def test_transcript_projection_validation_blocks_kept_asr_speech_without_subtitle() -> None:
+    result = validate_projected_subtitles_against_transcript(
+        [
+            {"start_time": 0.0, "end_time": 0.4, "text_final": "今天"},
+        ],
+        transcript_segments=[
+            {
+                "index": 0,
+                "text": "今天看手电",
+                "words": [
+                    {"word": "今天", "start": 0.0, "end": 0.35, "alignment": {"source": "provider"}},
+                    {"word": "手电", "start": 1.0, "end": 1.35, "alignment": {"source": "provider"}},
+                ],
+            }
+        ],
+        keep_segments=[{"start": 0.0, "end": 2.0}],
+    )
+
+    assert result["blocking"] is True
+    assert result["issue_counts"]["kept_transcript_speech_missing_projected_subtitle"] == 1
+    assert result["blocking_examples"][0]["text"] == "手电"
+
+
+def test_transcript_projection_validation_ignores_speech_removed_by_cut() -> None:
+    result = validate_projected_subtitles_against_transcript(
+        [
+            {"start_time": 0.0, "end_time": 0.35, "text_final": "今天"},
+        ],
+        transcript_segments=[
+            {
+                "index": 0,
+                "text": "今天看手电",
+                "words": [
+                    {"word": "今天", "start": 0.0, "end": 0.35, "alignment": {"source": "provider"}},
+                    {"word": "手电", "start": 1.0, "end": 1.35, "alignment": {"source": "provider"}},
+                ],
+            }
+        ],
+        keep_segments=[{"start": 0.0, "end": 0.5}],
+    )
+
+    assert result["blocking"] is False
+    assert result["kept_speech_unit_count"] == 1
+    assert result["covered_speech_unit_count"] == 1
+
+
+def test_transcript_projection_validation_warns_for_synthetic_timing_gap() -> None:
+    result = validate_projected_subtitles_against_transcript(
+        [],
+        transcript_segments=[
+            {
+                "index": 0,
+                "text": "今天看手电",
+                "words": [
+                    {
+                        "word": "手电",
+                        "start": 1.0,
+                        "end": 1.35,
+                        "alignment": {"source": "roughcut_synthesized"},
+                    },
+                ],
+            }
+        ],
+        keep_segments=[{"start": 0.0, "end": 2.0}],
+    )
+
+    assert result["blocking"] is False
+    assert result["warning_issue_count"] == 1
+    assert result["issue_counts"]["synthetic_timing_speech_missing_projected_subtitle"] == 1
+
+
 def test_manual_editor_subtitle_payload_exposes_alignment_diagnostics_and_tokens() -> None:
     payload = _manual_editor_subtitle_payload(
         {
@@ -749,7 +823,14 @@ def test_manual_editor_subtitle_projection_can_keep_empty_fillers_for_source_tra
     )
 
     assert cleaned == [
-        {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_raw": "呃，嗯。", "text_final": ""},
+        {
+            "index": 0,
+            "start_time": 0.0,
+            "end_time": 1.0,
+            "text_raw": "呃，嗯。",
+            "text_final": "",
+            "display_suppressed_reason": "standalone_filler",
+        },
         {
             "index": 1,
             "start_time": 1.0,

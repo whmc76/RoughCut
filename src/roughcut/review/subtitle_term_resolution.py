@@ -4,6 +4,7 @@ import re
 from typing import Any, Iterable, Mapping
 
 from roughcut.review.model_identity import model_numbers_conflict
+from roughcut.review.topic_fact_confirmation import topic_fact_allows_automatic_term_rewrites
 
 ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH = "subtitle_term_resolution_patch"
 
@@ -117,6 +118,10 @@ def build_subtitle_term_resolution_patch(
     auto_applied_count = 0
     accepted_count = 0
     pending_count = 0
+    automatic_rewrites_allowed = topic_fact_allows_automatic_term_rewrites(content_profile)
+    review_reasons: list[str] = []
+    if not automatic_rewrites_allowed:
+        review_reasons.append("主题事实未确认，词级热词改写降级为待审候选")
 
     for correction in corrections:
         original_span = str(_correction_attr(correction, "original_span") or "").strip()
@@ -132,7 +137,8 @@ def build_subtitle_term_resolution_patch(
             confidence = float(confidence_raw) if confidence_raw is not None else None
         except (TypeError, ValueError):
             confidence = None
-        auto_applied = bool(_correction_attr(correction, "auto_applied"))
+        original_auto_applied = bool(_correction_attr(correction, "auto_applied"))
+        auto_applied = original_auto_applied and automatic_rewrites_allowed
         human_decision = str(_correction_attr(correction, "human_decision") or "").strip().lower()
         if auto_applied:
             auto_applied_count += 1
@@ -152,26 +158,35 @@ def build_subtitle_term_resolution_patch(
                 "confidence": confidence,
                 "source": str(_correction_attr(correction, "source") or "").strip(),
                 "auto_applied": auto_applied,
+                "auto_apply_downgraded": bool(original_auto_applied and not auto_applied),
                 "human_decision": human_decision or None,
             }
         )
 
     average_confidence = round(confidence_total / confidence_count, 3) if confidence_count else None
     candidate_terms = _profile_candidate_terms(content_profile)
+    topic_fact_confirmation = (
+        dict((content_profile or {}).get("topic_fact_confirmation") or {})
+        if isinstance((content_profile or {}).get("topic_fact_confirmation"), Mapping)
+        else {}
+    )
     return {
         "source_name": source_name,
         "autocorrect_policy": "lexical_only",
         "automation_scope": "lexical_corrections_only",
+        "automatic_rewrites_allowed": automatic_rewrites_allowed,
         "candidate_terms": candidate_terms,
         "patches": patches,
         "evidence": {
             "candidate_terms": candidate_terms,
             "source_name": source_name,
             "autocorrect_policy": "lexical_only",
+            "topic_fact_confirmation": topic_fact_confirmation,
         },
         "confidence": average_confidence,
         "scope": "subtitle_terms",
         "blocking": pending_count > 0,
+        "review_reasons": review_reasons,
         "metrics": {
             "patch_count": len(patches),
             "auto_applied_count": auto_applied_count,

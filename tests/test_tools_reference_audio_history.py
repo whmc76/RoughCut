@@ -66,7 +66,7 @@ def test_reference_audio_history_reads_bound_prompt_text(monkeypatch: pytest.Mon
         reference,
         prompt_text="  参考音频里实际说过的话。\n第二句。  ",
         prompt_text_source="manual",
-        provider="moss_tts",
+        provider="moss_tts_local",
         mode="moss_voice_clone",
     )
 
@@ -76,7 +76,7 @@ def test_reference_audio_history_reads_bound_prompt_text(monkeypatch: pytest.Mon
     assert item["prompt_text"] == "参考音频里实际说过的话。 第二句。"
     assert item["prompt_text_source"] == "manual"
     assert item["text_preview"] == "参考音频里实际说过的话。 第二句。"
-    assert item["config"] == {"provider": "moss_tts", "mode": "moss_voice_clone", "prompt_text_source": "manual"}
+    assert item["config"] == {"provider": "moss_tts_local", "mode": "moss_voice_clone", "prompt_text_source": "manual"}
     assert tools._read_reference_audio_prompt_text(reference) == "参考音频里实际说过的话。 第二句。"
 
 
@@ -141,58 +141,84 @@ def test_tts_output_history_reads_sidecar_metadata(monkeypatch: pytest.MonkeyPat
     assert item["text_preview"] == "测试文本"
 
 
-def test_moss_tts_prompt_text_adds_duration_token() -> None:
-    prompt = tools._build_moss_tts_prompt_text("测试 MOSS TTS。", mode="moss_duration_control", duration_tokens=180)
+def test_moss_tts_local_form_data_sends_duration_and_sampling_fields() -> None:
+    data = tools._build_moss_tts_local_form_data(
+        text="测试 MOSS TTS。",
+        mode="moss_duration_control",
+        prompt_text="",
+        duration_tokens=180,
+        max_new_tokens=0,
+        temperature=1.0,
+        top_p=0.95,
+        top_k=50,
+        repetition_penalty=1.1,
+    )
 
-    assert prompt == "${token:180}测试 MOSS TTS。"
-
-
-def test_moss_tts_prompt_text_applies_duration_token_to_normal_tts() -> None:
-    prompt = tools._build_moss_tts_prompt_text("测试 MOSS TTS。", mode="moss_direct_tts", duration_tokens=180)
-
-    assert prompt == "${token:180}测试 MOSS TTS。"
-
-
-def test_moss_tts_podcast_text_gets_default_speaker_tag() -> None:
-    prompt = tools._build_moss_tts_prompt_text("欢迎来到今天的节目。", mode="moss_podcast", duration_tokens=0)
-
-    assert prompt == "[S1] 欢迎来到今天的节目。"
-
-
-def test_moss_tts_podcast_keeps_existing_speaker_tags() -> None:
-    prompt = tools._build_moss_tts_prompt_text("[S1] 你好。[S2] 你好。", mode="moss_podcast", duration_tokens=0)
-
-    assert prompt == "[S1] 你好。[S2] 你好。"
+    assert data["mode"] == "moss_direct_tts"
+    assert data["tts_text"] == "测试 MOSS TTS。"
+    assert data["duration_tokens"] == "180"
+    assert int(data["max_new_tokens"]) >= 1
+    assert data["audio_temperature"] == "1.0"
 
 
-def test_moss_tts_sound_effect_prompt_uses_ambient_sound_control() -> None:
-    prompt = tools._build_moss_tts_prompt_text("海边浪声和远处人群。", mode="moss_sound_effect", duration_tokens=90)
-
-    assert prompt == "${token:90}${ambient_sound:海边浪声和远处人群。}"
-
-
-def test_moss_tts_voice_clone_prompt_text_prefixes_reference_transcript() -> None:
-    prompt = tools._build_moss_tts_prompt_text(
-        "这是一段新文本。",
-        mode="moss_voice_clone",
+def test_moss_tts_local_continuation_keeps_prompt_text() -> None:
+    data = tools._build_moss_tts_local_form_data(
+        text="这是一段新文本。",
+        mode="moss_continuation_clone",
         duration_tokens=0,
         prompt_text="参考音频里说过的话。",
-        has_reference_audio=True,
+        max_new_tokens=512,
+        temperature=1.0,
+        top_p=0.95,
+        top_k=50,
+        repetition_penalty=1.1,
     )
 
-    assert prompt == "[S1] 参考音频里说过的话。\n[S1] 这是一段新文本。"
+    assert data["mode"] == "moss_continuation_clone"
+    assert data["continuation"] == "true"
+    assert data["prompt_text"] == "参考音频里说过的话。"
 
 
-def test_moss_tts_voice_clone_duration_token_applies_to_target_text_only() -> None:
-    prompt = tools._build_moss_tts_prompt_text(
+def test_moss_tts_auto_duration_tokens_estimate_target_budget() -> None:
+    tokens = tools._resolve_moss_segment_duration_tokens(
+        "这是一段大约二十字左右的测试文本。",
+        requested_duration_tokens=0,
+        total_text="这是一段大约二十字左右的测试文本。",
+        segment_count=1,
+    )
+
+    assert tokens >= tools._MOSS_MIN_AUTO_DURATION_TOKENS
+
+
+def test_moss_tts_requested_duration_tokens_are_distributed_across_segments() -> None:
+    first = "第一段比较短。"
+    second = "第二段内容明显更长一些，需要分到更多 duration token。"
+
+    first_tokens = tools._resolve_moss_segment_duration_tokens(
+        first,
+        requested_duration_tokens=300,
+        total_text=f"{first}{second}",
+        segment_count=2,
+    )
+    second_tokens = tools._resolve_moss_segment_duration_tokens(
+        second,
+        requested_duration_tokens=300,
+        total_text=f"{first}{second}",
+        segment_count=2,
+    )
+
+    assert first_tokens < second_tokens
+    assert abs((first_tokens + second_tokens) - 300) <= 1
+
+
+def test_moss_tts_duration_token_caps_max_new_tokens() -> None:
+    tokens = tools._resolve_moss_segment_max_new_tokens(
         "这是一段新文本。",
-        mode="moss_voice_clone",
+        requested_max_new_tokens=2000,
         duration_tokens=180,
-        prompt_text="参考音频里说过的话。",
-        has_reference_audio=True,
     )
 
-    assert prompt == "[S1] 参考音频里说过的话。\n${token:180}[S1] 这是一段新文本。"
+    assert tokens == 300
 
 
 @pytest.mark.asyncio
@@ -220,7 +246,7 @@ async def test_reference_prompt_text_auto_asr_uses_local_provider(monkeypatch: p
         "test-run",
         reference_path=reference,
         enabled=True,
-        provider_label="MOSS-TTSD",
+        provider_label="MOSS-TTS Local",
     )
 
     assert text == "参考音频自动识别文本。"
@@ -253,7 +279,7 @@ async def test_reference_prompt_text_auto_asr_reads_transcript_segments(monkeypa
         "test-run",
         reference_path=reference,
         enabled=True,
-        provider_label="MOSS-TTSD",
+        provider_label="MOSS-TTS Local",
     )
 
     assert text == "第一段参考文本。 第二段参考文本。"
@@ -295,7 +321,7 @@ async def test_prepared_reference_prompt_text_reasrs_shortened_audio(
         reference_path=prepared_audio,
         prompt_text="完整原始参考音频文本，包含裁剪后不存在的尾巴。",
         enabled=False,
-        provider_label="MOSS-TTSD",
+        provider_label="MOSS-TTS Local",
     )
 
     assert text == "实际短参考音频文本。"
@@ -337,7 +363,7 @@ async def test_prepared_reference_prompt_text_reasrs_converted_audio_even_when_d
         reference_path=prepared_audio,
         prompt_text="用户手填但需要校准的参考文本。",
         enabled=False,
-        provider_label="MOSS-TTSD",
+        provider_label="MOSS-TTS Local",
     )
 
     assert text == "转换后实际参考文本。"
@@ -349,35 +375,6 @@ def test_reference_prompt_text_keeps_manual_text_when_original_audio_is_used(tmp
     source_audio.write_bytes(b"source")
 
     assert not tools._reference_audio_needs_prompt_text_calibration(source_audio, source_audio)
-
-
-@pytest.mark.asyncio
-async def test_post_moss_tts_request_sends_reference_audio_list(tmp_path: Path) -> None:
-    reference = tmp_path / "voice.wav"
-    reference.write_bytes(b"wav-data")
-    captured: dict[str, object] = {}
-
-    class FakeClient:
-        async def post(self, url: str, *, json: dict[str, object]):
-            captured["url"] = url
-            captured["json"] = json
-            return SimpleNamespace()
-
-    await tools._post_moss_tts_segment_request(
-        FakeClient(),
-        "http://example.test/generate",
-        text="测试 MOSS TTS。",
-        mode="moss_voice_clone",
-        duration_tokens=125,
-        sampling_params={"max_new_tokens": 2048},
-        reference_path=reference,
-        prompt_text="参考音频文本。",
-    )
-
-    payload = captured["json"]
-    assert isinstance(payload, dict)
-    assert payload["text"] == "[S1] 参考音频文本。\n${token:125}[S1] 测试 MOSS TTS。"
-    assert payload["audio_data"] == ["data:audio/wav;base64,d2F2LWRhdGE="]
 
 
 def test_safe_upload_filename_preserves_original_name_when_possible() -> None:
@@ -434,3 +431,26 @@ def test_prepare_long_reference_audio_trims_to_limit(monkeypatch: pytest.MonkeyP
     assert prepared != source
     assert "-t" in commands[0]
     assert str(tools._MAX_REFERENCE_AUDIO_SEC) in commands[0]
+
+
+def test_prepare_long_moss_reference_audio_trims_to_moss_limit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    source = tmp_path / "reference.wav"
+    source.write_bytes(b"wav")
+    commands: list[list[str]] = []
+
+    monkeypatch.setattr(tools, "_REFERENCE_ROOT", tmp_path / "reference-cache")
+    monkeypatch.setattr(tools, "_audio_duration_seconds", lambda path: 36.0)
+    monkeypatch.setattr(tools.shutil, "which", lambda name: "ffmpeg")
+
+    def fake_run(command, **kwargs):
+        commands.append(list(command))
+        Path(command[-1]).write_bytes(b"wav")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(tools.subprocess, "run", fake_run)
+
+    prepared = tools._prepare_reference_audio_for_moss(source, run_id="run-test")
+
+    assert prepared != source
+    assert "-t" in commands[0]
+    assert str(tools._MOSS_REFERENCE_AUDIO_MAX_SEC) in commands[0]

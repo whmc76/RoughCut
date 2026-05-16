@@ -471,7 +471,6 @@ _SPLIT_SPOKEN_DIGIT_RIGHT_RE = re.compile(
     rf"^[，,。.!！？；;：:\s]*(?P<digits>[{_SPOKEN_DIGIT_CHAR_CLASS}]{{1,5}})(?P<suffix>.*)$"
 )
 _SAFE_DISPLAY_TERM_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
-    (re.compile(r"威虎版(?=(?:的|这个|本|外观|手感|处理|工艺|版本|区别|对比|,|，|。|$))"), "微弧版"),
     (re.compile(r"(?<![A-Za-z0-9])CAC(?=(?:的|外壳|壳体|机身|工艺|切削|精雕|加工|结构|边角|铝合金|中框|骨架))", re.IGNORECASE), "CNC"),
     (re.compile(r"预制感(?=(?:吧|，|。|的|它应该叫陶瓷|就是|有一种|$))"), "玉质感"),
 )

@@ -45,6 +45,8 @@ scripts/__pycache__/
 __pycache__/
 .artifacts/
 .codex-artifacts/
+.model-cache/
+.external-services/
 .superpowers/**/state/
 .superpowers/**/content/waiting-*.html
 .playwright-cli/

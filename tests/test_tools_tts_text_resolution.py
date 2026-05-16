@@ -128,7 +128,7 @@ def test_build_tts_oralization_messages_uses_structured_json_contract() -> None:
     messages = tools._build_tts_oralization_messages(
         source_text="这个产品的续航是二十小时，适合通勤。",
         style="warm_explainer",
-        provider="moss_tts",
+        provider="moss_tts_local",
         speaker_count=1,
         target_chars=40,
     )
@@ -146,7 +146,7 @@ def test_build_tts_oralization_messages_podcast_requires_speaker_tags() -> None:
     messages = tools._build_tts_oralization_messages(
         source_text="今天讨论续航。",
         style="podcast_dialogue",
-        provider="moss_tts",
+        provider="moss_tts_local",
         speaker_count=2,
         target_chars=0,
     )
@@ -161,15 +161,27 @@ def test_validate_tts_audio_output_rejects_zero_duration_wav(tmp_path: Path) -> 
     tools._write_pcm16_wav(path, b"", sample_rate=24000)
 
     with pytest.raises(RuntimeError, match="returned empty audio"):
-        tools._validate_tts_audio_output(path, service_label="MOSS-TTSD")
+        tools._validate_tts_audio_output(path, service_label="MOSS-TTS Local")
 
 
 def test_validate_tts_audio_duration_rejects_obviously_truncated_long_text() -> None:
     text = "很多父母都会遇到这种情况。孩子明明自己说了可以，可事情结束以后，他又不高兴了。" * 4
 
     with pytest.raises(RuntimeError, match="too short for the target text"):
-        tools._validate_tts_audio_duration_for_text(4.9, text, service_label="MOSS-TTSD")
+        tools._validate_tts_audio_duration_for_text(4.9, text, service_label="MOSS-TTS Local")
+
+
+def test_validate_tts_audio_duration_rejects_medium_text_cut_short() -> None:
+    text = (
+        "很多父母都会遇到这种情况。孩子明明自己说了“可以”，可事情结束以后，他又不高兴了。"
+        "大人就会很疑惑：“不是你自己答应的吗？”“不是你说可以的吗？”“那你现在为什么又委屈？” "
+        "可《布鲁伊》这集《跳舞模式》真正想讲的，不是孩子反复无常，而是一个特别容易被大人忽略的问题："
+        "孩子嘴上说可以，不代表他心里真的愿意。先说结论，再解释原因。这个问题可以分成三个层面来看。"
+    )
+
+    with pytest.raises(RuntimeError, match="too short for the target text"):
+        tools._validate_tts_audio_duration_for_text(12.9, text, service_label="MOSS-TTS Local")
 
 
 def test_validate_tts_audio_duration_allows_short_text() -> None:
-    tools._validate_tts_audio_duration_for_text(1.0, "小手，数一数：一、二、三。", service_label="MOSS-TTSD")
+    tools._validate_tts_audio_duration_for_text(1.0, "小手，数一数：一、二、三。", service_label="MOSS-TTS Local")

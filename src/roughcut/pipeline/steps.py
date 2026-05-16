@@ -48,6 +48,7 @@ from roughcut.edit.decisions import (
     _summarize_keep_energy_segments,
     build_edit_decision,
     infer_timeline_analysis,
+    refresh_source_timeline_contract_analysis,
 )
 from roughcut.edit.otio_export import export_to_otio
 from roughcut.edit.presets import normalize_workflow_template_name
@@ -70,7 +71,10 @@ from roughcut.media.output import (
 )
 from roughcut.media.scene import detect_scenes
 from roughcut.media.subtitle_text import clean_final_subtitle_text, clean_subtitle_payloads
-from roughcut.media.subtitle_projection_validation import validate_projected_subtitles_against_source
+from roughcut.media.subtitle_projection_validation import (
+    validate_projected_subtitles_against_source,
+    validate_projected_subtitles_against_transcript,
+)
 from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.probe import probe, validate_media
 from roughcut.media.render import render_video
@@ -159,6 +163,10 @@ from roughcut.review.subtitle_quality import (
 from roughcut.review.subtitle_term_resolution import (
     ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH,
     build_subtitle_term_resolution_patch,
+)
+from roughcut.review.topic_fact_confirmation import (
+    topic_fact_confirmation_present,
+    topic_fact_is_confirmed,
 )
 from roughcut.review.subtitle_translation import (
     detect_subtitle_language,
@@ -3948,6 +3956,45 @@ async def _validated_subtitle_projection_for_timeline(
     return validation.subtitles
 
 
+def _build_source_transcript_projection_validation(
+    *,
+    remapped_subtitles: list[dict[str, Any]],
+    transcript_segments: list[dict[str, Any]],
+    keep_segments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return validate_projected_subtitles_against_transcript(
+        remapped_subtitles,
+        transcript_segments=transcript_segments,
+        keep_segments=keep_segments,
+    )
+
+
+def _merge_automatic_gate_with_subtitle_projection(
+    automatic_gate: dict[str, Any],
+    subtitle_source_projection_validation: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(automatic_gate or {})
+    reasons = [
+        str(item)
+        for item in list(merged.get("blocking_reasons") or [])
+        if str(item).strip()
+    ]
+    if bool(subtitle_source_projection_validation.get("blocking")):
+        if "subtitle_source_projection_validation_blocking" not in reasons:
+            reasons.append("subtitle_source_projection_validation_blocking")
+        merged["blocking"] = True
+        merged["subtitle_source_projection_validation"] = {
+            "blocking_issue_count": int(
+                subtitle_source_projection_validation.get("blocking_issue_count") or 0
+            ),
+            "issue_counts": dict(subtitle_source_projection_validation.get("issue_counts") or {}),
+        }
+    else:
+        merged["blocking"] = bool(merged.get("blocking"))
+    merged["blocking_reasons"] = reasons
+    return merged
+
+
 async def _load_subtitle_corrections(session, *, job_id: uuid.UUID) -> list[SubtitleCorrection]:
     result = await session.execute(
         select(SubtitleCorrection)
@@ -5109,14 +5156,18 @@ def _build_effective_glossary_terms(
         source_name=source_name,
     )
     merged_terms = merge_glossary_terms(serialized, builtin)
-    merged_terms = merge_glossary_terms(
-        merged_terms,
-        _build_source_identity_glossary_terms(
-            effective_content_profile,
-            raw_profile=raw_content_profile,
-            source_name=source_name or "",
-        ),
-    )
+    if (
+        not topic_fact_confirmation_present(effective_content_profile)
+        or topic_fact_is_confirmed(effective_content_profile)
+    ):
+        merged_terms = merge_glossary_terms(
+            merged_terms,
+            _build_source_identity_glossary_terms(
+                effective_content_profile,
+                raw_profile=raw_content_profile,
+                source_name=source_name or "",
+            ),
+        )
     merged_terms = _suppress_conflicting_model_glossary_terms(merged_terms)
     if not subject_domain:
         return merged_terms
@@ -7587,6 +7638,13 @@ async def run_edit_plan(job_id: str) -> dict:
             transcript_segments=transcript_segment_dicts,
             content_profile=content_profile,
         )
+        source_timeline_contract = refresh_source_timeline_contract_analysis(
+            decision,
+            duration=duration,
+            transcript_segments=transcript_segment_dicts,
+            subtitle_items=subtitle_dicts,
+            silence_segments=silences,
+        )
         await _set_step_progress(session, step, detail="生成剪辑时间线与渲染计划", progress=0.85)
 
         editorial_timeline = await save_editorial_timeline(job.id, decision, session)
@@ -7611,6 +7669,11 @@ async def run_edit_plan(job_id: str) -> dict:
             session,
             job_id=job.id,
             projected_subtitles=remapped_subtitles,
+            keep_segments=keep_segments,
+        )
+        subtitle_source_projection_validation = _build_source_transcript_projection_validation(
+            remapped_subtitles=remapped_subtitles,
+            transcript_segments=transcript_segment_dicts,
             keep_segments=keep_segments,
         )
         packaged_timeline_analysis = infer_timeline_analysis(
@@ -7684,11 +7747,61 @@ async def run_edit_plan(job_id: str) -> dict:
             ai_director_plan=ai_director_artifact.data_json if ai_director_artifact else None,
             avatar_commentary_plan=avatar_artifact.data_json if avatar_artifact else None,
         )
+        render_plan_dict["source_timeline_contract"] = source_timeline_contract
+        render_plan_dict["subtitle_source_projection_validation"] = subtitle_source_projection_validation
+        automatic_gate = _merge_automatic_gate_with_subtitle_projection(
+            dict(decision.analysis.get("automatic_gate") or {}),
+            subtitle_source_projection_validation,
+        )
+        render_plan_dict["automatic_gate"] = automatic_gate
         await save_render_plan(job.id, render_plan_dict, session)
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=step.id,
+                artifact_type="edit_review_bundle",
+                data_json={
+                    "schema_version": "edit_review_bundle_v1",
+                    "job_flow_mode": str(getattr(job, "job_flow_mode", "") or "auto"),
+                    "source_name": str(job.source_name or ""),
+                    "topic_fact_confirmation": (
+                        dict(content_profile.get("topic_fact_confirmation") or {})
+                        if isinstance(content_profile, dict)
+                        and isinstance(content_profile.get("topic_fact_confirmation"), dict)
+                        else {}
+                    ),
+                    "source_timeline_contract": source_timeline_contract,
+                    "subtitle_source_projection_validation": subtitle_source_projection_validation,
+                    "automatic_gate": automatic_gate,
+                    "edit_decision": decision.to_dict(),
+                    "full_subtitles": [dict(item) for item in subtitle_dicts],
+                    "edited_subtitles": [dict(item) for item in remapped_subtitles],
+                },
+            )
+        )
 
         await _set_step_progress(session, step, detail="剪辑决策已生成", progress=1.0)
         await session.commit()
-        return {"timeline_id": str(editorial_timeline.id)}
+        return {
+            "timeline_id": str(editorial_timeline.id),
+            "automatic_gate": automatic_gate,
+            "source_timeline_contract": {
+                "blocking": bool(source_timeline_contract.get("blocking")),
+                "blocking_issue_count": int(source_timeline_contract.get("blocking_issue_count") or 0),
+                "warning_issue_count": int(source_timeline_contract.get("warning_issue_count") or 0),
+                "issue_counts": dict(source_timeline_contract.get("issue_counts") or {}),
+            },
+            "subtitle_source_projection_validation": {
+                "blocking": bool(subtitle_source_projection_validation.get("blocking")),
+                "blocking_issue_count": int(
+                    subtitle_source_projection_validation.get("blocking_issue_count") or 0
+                ),
+                "warning_issue_count": int(
+                    subtitle_source_projection_validation.get("warning_issue_count") or 0
+                ),
+                "issue_counts": dict(subtitle_source_projection_validation.get("issue_counts") or {}),
+            },
+        }
 
 
 async def run_render(job_id: str) -> dict:
@@ -7711,6 +7824,14 @@ async def run_render(job_id: str) -> dict:
         # Get timelines
         editorial_timeline = await _load_latest_timeline(session, job.id, "editorial")
         render_plan_timeline = await _load_latest_timeline(session, job.id, "render_plan")
+        automatic_gate = dict(render_plan_timeline.data_json.get("automatic_gate") or {})
+        if bool(automatic_gate.get("blocking")):
+            blocking_reasons = ", ".join(
+                str(item) for item in list(automatic_gate.get("blocking_reasons") or [])
+            )
+            raise RuntimeError(
+                f"render blocked by automatic gate: {blocking_reasons or 'source_timeline_contract_blocking'}"
+            )
         has_packaging = any(
             render_plan_timeline.data_json.get(key)
             for key in ("intro", "outro", "insert", "watermark", "music")

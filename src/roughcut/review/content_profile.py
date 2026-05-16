@@ -69,6 +69,7 @@ from roughcut.review.intelligent_copy_topics import build_intelligent_copy_topic
 from roughcut.review.model_identity import model_numbers_conflict
 from roughcut.review.platform_copy import build_transcript_for_packaging
 from roughcut.review.text_rewrite_policy import disabled_text_rewrite
+from roughcut.review.topic_fact_confirmation import build_topic_fact_confirmation_snapshot
 from roughcut.review.subtitle_memory import (
     _DEFAULT_TERM_ALIASES,
     _extract_compound_components,
@@ -1827,6 +1828,20 @@ def assess_content_profile_automation(
             review_reasons.append("LLM 内容理解结果要求人工复核")
     else:
         review_reasons.extend(llm_review_reasons)
+
+    topic_fact_confirmation = (
+        profile.get("topic_fact_confirmation")
+        if isinstance(profile.get("topic_fact_confirmation"), dict)
+        else build_topic_fact_confirmation_snapshot(profile)
+    )
+    if topic_fact_confirmation.get("status") != "confirmed":
+        for reason in list(topic_fact_confirmation.get("review_reasons") or []):
+            normalized_reason = str(reason or "").strip()
+            if normalized_reason and normalized_reason not in review_reasons:
+                review_reasons.append(normalized_reason)
+    else:
+        score += 0.08
+        reasons.append("主题事实已通过调研证据确认")
 
     score = round(min(score, 1.0), 3)
     review_reasons = list(dict.fromkeys(review_reasons))
@@ -4019,6 +4034,7 @@ async def infer_content_profile(
             "main": "内容待确认",
             "bottom": "",
         }
+    profile["topic_fact_confirmation"] = build_topic_fact_confirmation_snapshot(profile)
     return profile
 
 
@@ -5087,6 +5103,7 @@ async def enrich_content_profile(
     ):
         enriched["cover_title"] = build_cover_title(enriched, preset)
     _ensure_review_fields_not_empty(enriched, source_name=source_name, transcript_excerpt=transcript_excerpt)
+    enriched["topic_fact_confirmation"] = build_topic_fact_confirmation_snapshot(enriched)
     return enriched
 
 
@@ -5648,6 +5665,7 @@ async def polish_subtitle_items(
     chunk_size: int = 28,
     allow_llm: bool = True,
 ) -> int:
+    text_only_contract = _capture_subtitle_text_only_contract(subtitle_items)
     provider = None
     if allow_llm:
         try:
@@ -5831,7 +5849,56 @@ async def polish_subtitle_items(
             )
             polished_count += 1
 
+    _enforce_subtitle_text_only_contract(subtitle_items, text_only_contract)
     return polished_count
+
+
+def _capture_subtitle_text_only_contract(subtitle_items: Any) -> dict[Any, Any]:
+    contract: dict[Any, Any] = {"__positions__": []}
+    for fallback_index, item in enumerate(list(subtitle_items or [])):
+        item_index = int(getattr(item, "item_index", fallback_index) or fallback_index)
+        payload = {
+            "item_index": item_index,
+            "start_time": float(getattr(item, "start_time", 0.0) or 0.0),
+            "end_time": float(getattr(item, "end_time", 0.0) or 0.0),
+        }
+        contract[item_index] = payload
+        contract["__positions__"].append(payload)
+    return contract
+
+
+def _enforce_subtitle_text_only_contract(
+    subtitle_items: Any,
+    contract: dict[Any, Any],
+) -> list[dict[str, Any]]:
+    repairs: list[dict[str, Any]] = []
+    position_contracts = list(contract.get("__positions__") or [])
+    for fallback_index, item in enumerate(list(subtitle_items or [])):
+        item_index = int(getattr(item, "item_index", fallback_index) or fallback_index)
+        expected = contract.get(item_index)
+        if not expected and fallback_index < len(position_contracts):
+            expected = position_contracts[fallback_index]
+        if not expected:
+            continue
+        for field_name in ("item_index", "start_time", "end_time"):
+            current = getattr(item, field_name, None)
+            expected_value = expected[field_name]
+            if current == expected_value:
+                continue
+            try:
+                if field_name in {"start_time", "end_time"} and abs(float(current or 0.0) - float(expected_value)) <= 1e-9:
+                    continue
+            except (TypeError, ValueError):
+                pass
+            setattr(item, field_name, expected_value)
+            repairs.append(
+                {
+                    "item_index": item_index,
+                    "field": field_name,
+                    "restored_to": expected_value,
+                }
+            )
+    return repairs
 
 
 async def _search_evidence(

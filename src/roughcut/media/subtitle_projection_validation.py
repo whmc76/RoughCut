@@ -13,6 +13,46 @@ class SubtitleProjectionValidationResult:
     fallback_used: bool
 
 
+@dataclass(frozen=True)
+class TranscriptProjectionSpeechUnit:
+    unit_type: str
+    start: float
+    end: float
+    text: str
+    source_index: int
+    source_kind: str
+    trusted: bool
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = {
+            "type": self.unit_type,
+            "start": round(self.start, 3),
+            "end": round(self.end, 3),
+            "duration_sec": round(self.duration, 3),
+            "source_index": self.source_index,
+            "source_kind": self.source_kind,
+            "trusted": self.trusted,
+        }
+        if self.text:
+            payload["text"] = self.text
+        return payload
+
+
+SYNTHETIC_TRANSCRIPT_ALIGNMENT_SOURCES = {
+    "canonical_realign",
+    "canonical_segment_fallback",
+    "postprocess_text_fallback",
+    "provider_missing",
+    "roughcut_synthesized",
+    "segment_only",
+    "synthetic",
+}
+
+
 def subtitle_projection_display_text(item: dict[str, Any]) -> str:
     return str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or item.get("text") or "")
 
@@ -66,6 +106,79 @@ def source_ranges_for_output_range(
             source_start + (overlap_end - segment_output_start),
         ))
     return ranges
+
+
+def validate_projected_subtitles_against_transcript(
+    projected_subtitles: list[dict[str, Any]],
+    *,
+    transcript_segments: list[dict[str, Any]],
+    keep_segments: list[dict[str, Any]],
+    min_coverage_ratio: float = 0.35,
+    min_overlap_sec: float = 0.06,
+) -> dict[str, Any]:
+    speech_units = _build_transcript_projection_speech_units(transcript_segments)
+    keep_ranges = _normalize_time_ranges(keep_segments)
+    projected_source_ranges = _projected_subtitle_source_ranges(projected_subtitles, keep_segments)
+
+    blocking: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    kept_unit_count = 0
+    covered_unit_count = 0
+
+    for unit in speech_units:
+        kept_overlap = _range_overlap(unit.start, unit.end, keep_ranges)
+        if not _has_sufficient_overlap(
+            overlap=kept_overlap,
+            duration=unit.duration,
+            min_coverage_ratio=min_coverage_ratio,
+            min_overlap_sec=min_overlap_sec,
+        ):
+            continue
+        kept_unit_count += 1
+        subtitle_overlap = _range_overlap(unit.start, unit.end, projected_source_ranges)
+        if _has_sufficient_overlap(
+            overlap=subtitle_overlap,
+            duration=unit.duration,
+            min_coverage_ratio=min_coverage_ratio,
+            min_overlap_sec=min_overlap_sec,
+        ):
+            covered_unit_count += 1
+            continue
+
+        payload = {
+            **unit.as_dict(),
+            "issue": (
+                "kept_transcript_speech_missing_projected_subtitle"
+                if unit.trusted
+                else "synthetic_timing_speech_missing_projected_subtitle"
+            ),
+            "kept_overlap_sec": round(kept_overlap, 3),
+            "subtitle_overlap_sec": round(subtitle_overlap, 3),
+        }
+        if unit.trusted:
+            blocking.append(payload)
+        else:
+            warnings.append(payload)
+
+    issue_counts: dict[str, int] = {}
+    for item in [*blocking, *warnings]:
+        issue = str(item.get("issue") or "")
+        if issue:
+            issue_counts[issue] = issue_counts.get(issue, 0) + 1
+
+    return {
+        "validation_version": "source_transcript_projection_v1",
+        "blocking": bool(blocking),
+        "blocking_issue_count": len(blocking),
+        "warning_issue_count": len(warnings),
+        "issue_counts": issue_counts,
+        "speech_unit_count": len(speech_units),
+        "kept_speech_unit_count": kept_unit_count,
+        "covered_speech_unit_count": covered_unit_count,
+        "missing_speech_unit_count": len(blocking) + len(warnings),
+        "blocking_examples": blocking[:12],
+        "warning_examples": warnings[:12],
+    }
 
 
 def annotate_projected_subtitle_sources(
@@ -327,3 +440,130 @@ def validate_projected_subtitles_against_source(
         mismatch_detected=True,
         fallback_used=True,
     )
+
+
+def _build_transcript_projection_speech_units(
+    transcript_segments: list[dict[str, Any]],
+) -> list[TranscriptProjectionSpeechUnit]:
+    units: list[TranscriptProjectionSpeechUnit] = []
+    for segment_index, segment in enumerate(transcript_segments or []):
+        if not isinstance(segment, dict):
+            continue
+        words = [word for word in list(segment.get("words") or []) if isinstance(word, dict)]
+        for word_index, word in enumerate(words):
+            text = str(word.get("word") or word.get("raw_text") or word.get("text") or "").strip()
+            start = _optional_float(word.get("start"))
+            end = _optional_float(word.get("end"))
+            if not text or start is None or end is None or end <= start:
+                continue
+            units.append(
+                TranscriptProjectionSpeechUnit(
+                    unit_type="speech_token",
+                    start=start,
+                    end=end,
+                    text=text,
+                    source_index=word_index,
+                    source_kind=f"transcript_segment:{segment_index}",
+                    trusted=_transcript_projection_timing_is_trusted(word),
+                )
+            )
+        if words:
+            continue
+        text = str(segment.get("text") or segment.get("text_raw") or "").strip()
+        start = _optional_float(segment.get("start_time", segment.get("start")))
+        end = _optional_float(segment.get("end_time", segment.get("end")))
+        if not text or start is None or end is None or end <= start:
+            continue
+        units.append(
+            TranscriptProjectionSpeechUnit(
+                unit_type="speech_segment",
+                start=start,
+                end=end,
+                text=text,
+                source_index=int(segment.get("index", segment_index) or segment_index),
+                source_kind="transcript_segment",
+                trusted=_transcript_projection_timing_is_trusted(segment),
+            )
+        )
+    return sorted(units, key=lambda item: (item.start, item.end, item.source_kind, item.source_index))
+
+
+def _projected_subtitle_source_ranges(
+    projected_subtitles: list[dict[str, Any]],
+    keep_segments: list[dict[str, Any]],
+) -> list[tuple[float, float]]:
+    ranges: list[tuple[float, float]] = []
+    for item in projected_subtitles or []:
+        if not isinstance(item, dict):
+            continue
+        if not compact_projection_text(subtitle_projection_display_text(item)):
+            continue
+        start = _optional_float(item.get("start_time", item.get("start")))
+        end = _optional_float(item.get("end_time", item.get("end")))
+        if start is None or end is None or end <= start:
+            continue
+        ranges.extend(source_ranges_for_output_range(start, end, keep_segments))
+    return sorted((start, end) for start, end in ranges if end > start)
+
+
+def _normalize_time_ranges(items: list[dict[str, Any]]) -> list[tuple[float, float]]:
+    ranges: list[tuple[float, float]] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        start = _optional_float(item.get("start_time", item.get("start")))
+        end = _optional_float(item.get("end_time", item.get("end")))
+        if start is None or end is None or end <= start:
+            continue
+        ranges.append((start, end))
+    return sorted(ranges)
+
+
+def _range_overlap(start: float, end: float, ranges: list[tuple[float, float]]) -> float:
+    return sum(max(0.0, min(end, range_end) - max(start, range_start)) for range_start, range_end in ranges)
+
+
+def _has_sufficient_overlap(
+    *,
+    overlap: float,
+    duration: float,
+    min_coverage_ratio: float,
+    min_overlap_sec: float,
+) -> bool:
+    if overlap <= 0.001:
+        return False
+    return overlap / max(0.001, duration) >= min_coverage_ratio or overlap >= min_overlap_sec
+
+
+def _transcript_projection_timing_is_trusted(payload: dict[str, Any]) -> bool:
+    return _transcript_projection_alignment_source(payload) not in SYNTHETIC_TRANSCRIPT_ALIGNMENT_SOURCES
+
+
+def _transcript_projection_alignment_source(payload: dict[str, Any]) -> str:
+    alignment = payload.get("alignment")
+    if isinstance(alignment, dict):
+        source = str(alignment.get("source") or "").strip().lower()
+        if source:
+            return source
+        roughcut = alignment.get("_roughcut")
+        if isinstance(roughcut, dict):
+            source = str(roughcut.get("source") or "").strip().lower()
+            if source:
+                return source
+    raw_payload = payload.get("raw_payload")
+    if isinstance(raw_payload, dict):
+        for key in ("source", "_roughcut_source"):
+            source = str(raw_payload.get(key) or "").strip().lower()
+            if source:
+                return source
+    return "provider"
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or number in {float("inf"), float("-inf")}:
+        return None
+    return number

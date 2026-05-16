@@ -39,6 +39,7 @@ const toolCards = [
 
 const toolOptionStorageKeys = {
   tts: "roughcut.tools.tts.options",
+  ttsReferencePath: "roughcut.tools.tts.referencePath",
   asr: "roughcut.tools.asr.options",
   avatar: "roughcut.tools.avatar.options",
 };
@@ -92,22 +93,39 @@ const ttsProviders = [
     recommended: true,
   },
   {
-    key: "moss_tts",
-    label: "MOSS-TTSD",
-    summary: "MOSS-TTSD 官方语音克隆、长文本和播客对谈。",
-    detail: "本地 Docker 服务 moss-ttsd，走官方 TTSD SGLang /generate 协议。",
+    key: "moss_tts_local",
+    label: "MOSS-TTS Local",
+    summary: "新 1.7B Local Transformer，普通配音更轻。",
+    detail: "本地 Docker 服务 moss-tts-local，走官方 Transformers 推理。",
+    recommended: true,
   },
 ] satisfies TtsProviderOption[];
 
-const mossTtsModes = [
+const mossTtsLocalModes = [
+  {
+    key: "moss_direct_tts",
+    label: "Direct TTS",
+    name: "直接生成",
+    summary: "只用 text 生成语音，不绑定参考音色。",
+    useCase: "适合快速试音、拼音/IPA 发音控制和不需要固定说话人的旁白。",
+    detail: "MOSS-TTS Local 官方 generation 路径；reference_audio 可留空，文本里可直接混用中文、拼音或 IPA。",
+  },
   {
     key: "moss_voice_clone",
     label: "Voice Clone",
     name: "音色克隆",
-    summary: "用 reference_audio 和 prompt_text 固定说话人音色。",
-    useCase: "核心能力：适合需要跨多次生成保持同一声音的配音。",
-    detail: "推荐用于音色一致性：固定同一参考音频、参考文本和采样参数。",
+    summary: "用 reference_audio 克隆说话人音色。",
+    useCase: "推荐：适合普通配音优先测试，同一参考音频可保持较一致的声音。",
+    detail: "MOSS-TTS Local 官方 generation + reference 路径；需要 reference_audio，不要求单独 prompt_text。",
     recommended: true,
+  },
+  {
+    key: "moss_continuation_clone",
+    label: "Continuation",
+    name: "续写克隆",
+    summary: "把参考文本和目标文本拼成上下文，从参考音频后继续说。",
+    useCase: "适合更看重参考音频的语气、节奏和连续风格时使用。",
+    detail: "MOSS-TTS Local 官方 continuation 路径；需要 reference_audio 和参考音频对应文本。",
   },
 ] satisfies MossTtsMode[];
 
@@ -163,7 +181,7 @@ type CosyVoiceTtsMode = {
   recommended?: boolean;
 };
 
-type MossTtsModeKey = Extract<ToolTtsMode, "moss_voice_clone">;
+type MossTtsModeKey = Extract<ToolTtsMode, "moss_direct_tts" | "moss_voice_clone" | "moss_continuation_clone">;
 type MossTtsMode = {
   key: MossTtsModeKey;
   label: string;
@@ -328,7 +346,7 @@ const defaultTtsOptions: TtsToolOptions = {
   textFrontend: "true",
   mossUseDuration: "false",
   mossDurationTokens: "125",
-  mossMaxNewTokens: "2000",
+  mossMaxNewTokens: "0",
   mossTemperature: "1.1",
   mossTopP: "0.9",
   mossTopK: "50",
@@ -349,8 +367,13 @@ function resolveCosyVoiceTtsMode(key: string): CosyVoiceTtsMode {
   return cosyVoiceTtsModes.find((mode) => mode.key === key) ?? cosyVoiceTtsModes[0];
 }
 
-function resolveMossTtsMode(key: string): MossTtsMode {
-  return mossTtsModes.find((mode) => mode.key === key) ?? mossTtsModes[0];
+function getMossTtsModes(_provider: ToolTtsProvider): MossTtsMode[] {
+  return mossTtsLocalModes;
+}
+
+function resolveMossTtsMode(key: string, provider: ToolTtsProvider): MossTtsMode {
+  const modes = getMossTtsModes(provider);
+  return modes.find((mode) => mode.key === key) ?? modes[0];
 }
 
 function resolveTtsProvider(key: string): TtsProviderOption {
@@ -359,13 +382,15 @@ function resolveTtsProvider(key: string): TtsProviderOption {
 
 function coerceTtsProvider(value: unknown): ToolTtsProvider {
   const raw = String(value || "");
+  if (raw === "moss_tts" || raw === "moss") return "moss_tts_local";
   return ttsProviders.some((provider) => provider.key === raw) ? (raw as ToolTtsProvider) : defaultTtsOptions.provider;
 }
 
 function coerceTtsMode(value: unknown, provider: ToolTtsProvider = defaultTtsOptions.provider): ToolTtsMode {
   const raw = String(value || "");
-  if (provider === "moss_tts") {
-    return mossTtsModes.some((mode) => mode.key === raw) ? (raw as MossTtsModeKey) : "moss_voice_clone";
+  if (provider === "moss_tts_local") {
+    const modes = getMossTtsModes(provider);
+    return modes.some((mode) => mode.key === raw) ? (raw as MossTtsModeKey) : "moss_voice_clone";
   }
   return cosyVoiceTtsModes.some((mode) => mode.key === raw) ? (raw as CosyVoiceTtsModeKey) : "instruct2";
 }
@@ -412,7 +437,7 @@ function coerceTtsOptions(value: Partial<TtsToolOptions>): TtsToolOptions {
     textFrontend: coerceBooleanString(value.textFrontend, defaultTtsOptions.textFrontend),
     mossUseDuration: coerceBooleanString(value.mossUseDuration, defaultTtsOptions.mossUseDuration),
     mossDurationTokens: String(value.mossDurationTokens ?? defaultTtsOptions.mossDurationTokens),
-    mossMaxNewTokens: storedMossMaxNewTokens === "512" ? defaultTtsOptions.mossMaxNewTokens : storedMossMaxNewTokens,
+    mossMaxNewTokens: storedMossMaxNewTokens === "512" || storedMossMaxNewTokens === "2000" ? defaultTtsOptions.mossMaxNewTokens : storedMossMaxNewTokens,
     mossTemperature: String(value.mossTemperature ?? defaultTtsOptions.mossTemperature),
     mossTopP: String(value.mossTopP ?? defaultTtsOptions.mossTopP),
     mossTopK: String(value.mossTopK ?? defaultTtsOptions.mossTopK),
@@ -745,7 +770,8 @@ export function TtsToolPage() {
   const referenceHistory = useQuery({ queryKey: ["tools", "tts", "reference-audio"], queryFn: api.getToolTtsReferenceAudio, refetchInterval: 20_000 });
   const outputHistory = useQuery({ queryKey: ["tools", "tts", "outputs"], queryFn: api.getToolTtsOutputs, refetchInterval: 20_000 });
   const [ttsOptions, setTtsOptions] = useStoredOptions(toolOptionStorageKeys.tts, defaultTtsOptions, coerceTtsOptions);
-  const [selectedReferencePath, setSelectedReferencePath] = useState("");
+  const [selectedReferencePath, setSelectedReferencePath] = useState(() => window.localStorage.getItem(toolOptionStorageKeys.ttsReferencePath) ?? "");
+  const appliedReferencePromptKeyRef = useRef("");
   const [localSubmitError, setLocalSubmitError] = useState("");
   const [mossOralizeStyle, setMossOralizeStyle] = useState<ToolTtsOralizeStyle>("short_video");
   const [mossSpeakerCount, setMossSpeakerCount] = useState(1);
@@ -760,8 +786,11 @@ export function TtsToolPage() {
   });
   const selectedProvider = resolveTtsProvider(ttsOptions.provider);
   const selectedCosyMode = resolveCosyVoiceTtsMode(ttsOptions.mode);
-  const selectedMossMode = resolveMossTtsMode(ttsOptions.mode);
-  const selectedMode = ttsOptions.provider === "moss_tts" ? selectedMossMode : selectedCosyMode;
+  const selectedMossModes = getMossTtsModes(ttsOptions.provider);
+  const selectedMossMode = resolveMossTtsMode(ttsOptions.mode, ttsOptions.provider);
+  const isMossLocalProvider = ttsOptions.provider === "moss_tts_local";
+  const isMossProvider = isMossLocalProvider;
+  const selectedMode = isMossProvider ? selectedMossMode : selectedCosyMode;
   const ttsService = status.data?.tools.tts as (ToolServiceStatus & { models?: string[] }) | undefined;
   const serviceVoiceIds = useMemo(() => (ttsService?.models ?? []).filter(Boolean), [ttsService]);
   const mergedSftVoiceIds = useMemo(() => {
@@ -775,14 +804,13 @@ export function TtsToolPage() {
       return true;
     });
   }, [serviceVoiceIds]);
-  const isMossProvider = ttsOptions.provider === "moss_tts";
-  const usesReferenceAudio = isMossProvider ? selectedMossMode.key === "moss_voice_clone" : selectedCosyMode.key !== "sft";
+  const usesReferenceAudio = isMossProvider ? selectedMossMode.key === "moss_voice_clone" || selectedMossMode.key === "moss_continuation_clone" : selectedCosyMode.key !== "sft";
   const usesPromptText = !isMossProvider && selectedCosyMode.key === "zero_shot";
   const usesInstructText = !isMossProvider && selectedCosyMode.key === "instruct2";
   const usesSpeakerId = !isMossProvider && selectedCosyMode.key === "sft";
   const usesZeroShotSpeakerId = !isMossProvider && selectedCosyMode.key === "zero_shot";
   const usesCrossLingualText = !isMossProvider && selectedCosyMode.key === "cross_lingual";
-  const usesMossPromptText = isMossProvider && selectedMossMode.key === "moss_voice_clone";
+  const usesMossPromptText = isMossLocalProvider && selectedMossMode.key === "moss_continuation_clone";
   const usesMossDuration = isMossProvider && ttsOptions.mossUseDuration === "true";
   const usesReferencePromptText = usesPromptText || usesMossPromptText;
   const usesAutoPromptTextAsr = usesReferencePromptText && ttsOptions.autoPromptTextAsr === "true";
@@ -801,6 +829,10 @@ export function TtsToolPage() {
     }
     return items;
   }, [referenceHistory.data?.items]);
+  const selectedReferenceItem = useMemo(
+    () => referenceHistoryItems.find((item) => item.path === selectedReferencePath),
+    [referenceHistoryItems, selectedReferencePath],
+  );
   const outputHistoryItems = useMemo(() => {
     const seen = new Set<string>();
     const items: ToolTtsReferenceAudioItem[] = [];
@@ -812,6 +844,54 @@ export function TtsToolPage() {
     }
     return items;
   }, [outputHistory.data?.items]);
+
+  useEffect(() => {
+    if (selectedReferencePath) {
+      window.localStorage.setItem(toolOptionStorageKeys.ttsReferencePath, selectedReferencePath);
+    } else {
+      window.localStorage.removeItem(toolOptionStorageKeys.ttsReferencePath);
+      appliedReferencePromptKeyRef.current = "";
+    }
+  }, [selectedReferencePath]);
+
+  useEffect(() => {
+    if (!selectedReferenceItem?.path) return;
+    const promptText = selectedReferenceItem.prompt_text?.trim();
+    if (!promptText) {
+      appliedReferencePromptKeyRef.current = "";
+      setTtsOptions((current) => (current.autoPromptTextAsr === "true" ? current : { ...current, autoPromptTextAsr: "true" }));
+      return;
+    }
+    const promptKey = `${selectedReferenceItem.path}\n${promptText}`;
+    if (appliedReferencePromptKeyRef.current === promptKey) return;
+    appliedReferencePromptKeyRef.current = promptKey;
+    setTtsOptions((current) => ({
+      ...current,
+      promptText,
+      autoPromptTextAsr: "false",
+    }));
+  }, [selectedReferenceItem?.path, selectedReferenceItem?.prompt_text, setTtsOptions]);
+
+  const handleReferenceSelect = (item: ToolTtsReferenceAudioItem) => {
+    setSelectedReferencePath(item.path);
+    const promptText = item.prompt_text?.trim();
+    if (promptText) {
+      appliedReferencePromptKeyRef.current = `${item.path}\n${promptText}`;
+      setTtsOptions((current) => ({
+        ...current,
+        promptText,
+        autoPromptTextAsr: "false",
+      }));
+    } else {
+      appliedReferencePromptKeyRef.current = "";
+      setTtsOptions((current) => ({ ...current, autoPromptTextAsr: "true" }));
+    }
+  };
+
+  const clearReferenceSelection = () => {
+    setSelectedReferencePath("");
+    setTtsOptions((current) => (current.autoPromptTextAsr === "true" ? current : { ...current, autoPromptTextAsr: "true" }));
+  };
 
   const handleOralize = () => {
     const cleanedTtsText = cleanTtsTextInput(ttsOptions.ttsText);
@@ -865,11 +945,11 @@ export function TtsToolPage() {
       <PageHeader
         eyebrow="TTS"
         title="文本转语音"
-        description="CosyVoice3 与 MOSS-TTSD 都通过本地 Docker 服务提供推理，提交后返回可试听的 WAV。"
+        description="CosyVoice3 与 MOSS-TTS Local 都通过本地 Docker 服务提供推理，提交后返回可试听的 WAV。"
         actions={<Link className="button ghost" to="/tools">返回小工具</Link>}
       />
       <ToolNav />
-      <PageSection eyebrow="调用" title="生成语音" description="覆盖 CosyVoice3 和 MOSS-TTSD 官方模式；按 provider 展开对应参数。">
+      <PageSection eyebrow="调用" title="生成语音" description="覆盖 CosyVoice3 和 MOSS-TTS Local 官方模式；按 provider 展开对应参数。">
         <div className="panel-grid tool-workbench tts-workbench-vertical">
           <section className="panel">
             <PanelHeader title="输入" description={selectedMode.detail} />
@@ -894,7 +974,11 @@ export function TtsToolPage() {
                         setTtsOptions((current) => ({
                           ...current,
                           provider: provider.key,
-                          mode: provider.key === "moss_tts" ? "moss_voice_clone" : "instruct2",
+                          mode: provider.key === "moss_tts_local" ? "moss_voice_clone" : "instruct2",
+                          mossTemperature: provider.key === "moss_tts_local" ? "1.0" : current.mossTemperature,
+                          mossTopP: provider.key === "moss_tts_local" ? "0.95" : current.mossTopP,
+                          mossTopK: provider.key === "moss_tts_local" ? "50" : current.mossTopK,
+                          mossRepetitionPenalty: provider.key === "moss_tts_local" ? "1.1" : current.mossRepetitionPenalty,
                         }))
                       }
                     >
@@ -943,9 +1027,36 @@ export function TtsToolPage() {
                   </div>
                 </div>
               ) : (
-                <div className="tts-helper-panel">
-                  <strong>Voice Clone / 音色克隆</strong>
-                  <span>MOSS-TTSD 当前 Docker 使用官方 fused SGLang 服务，必须提供 reference_audio 和对应 prompt_text；多人播客只是正文里的 [S1]-[S5] 写法。</span>
+                <div className="tts-style-field">
+                  <div>
+                    <span className="field-label">mode</span>
+                  </div>
+                  <div className="tts-mode-grid" role="radiogroup" aria-label={`${selectedProvider.label} mode`}>
+                    {selectedMossModes.map((mode) => (
+                      <button
+                        key={mode.key}
+                        type="button"
+                        className={mode.key === selectedMode.key ? "tts-style-option active" : "tts-style-option"}
+                        aria-checked={mode.key === selectedMode.key}
+                        aria-label={`${mode.label} ${mode.name}${mode.recommended ? " 推荐" : ""}`}
+                        role="radio"
+                        onClick={() =>
+                          setTtsOptions((current) => ({
+                            ...current,
+                            mode: mode.key,
+                          }))
+                        }
+                      >
+                        <span className="tts-mode-title-row">
+                          <strong>{mode.label}</strong>
+                          {mode.recommended ? <span className="tts-mode-recommended">推荐</span> : null}
+                        </span>
+                        <span className="tts-mode-name">{mode.name}</span>
+                        <span className="tts-mode-summary">{mode.summary}</span>
+                        <span className="tts-mode-use-case">{mode.useCase}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
               <label>
@@ -995,8 +1106,9 @@ export function TtsToolPage() {
                       loading={referenceHistory.isLoading}
                       selectedPath={selectedReferencePath}
                       required={usesReferenceAudio}
-                      onSelect={setSelectedReferencePath}
-                      onFileChange={() => setSelectedReferencePath("")}
+                      onSelect={handleReferenceSelect}
+                      onClear={clearReferenceSelection}
+                      onFileChange={clearReferenceSelection}
                     />
                   </div>
                   <div className="tts-preset-category-list">
@@ -1046,35 +1158,27 @@ export function TtsToolPage() {
               ) : null}
               {isMossProvider && (usesMossDuration || usesReferenceAudio || usesMossPromptText) ? (
                 <div className="tts-prompt-text-field">
-                  <div className="tts-helper-panel">
-                    <strong>口语化改写</strong>
-                    <span>MOSS-TTSD 没有独立 style prompt；这里先用结构化提示词把正文改成自然可说的 tts_text，再只把可朗读正文送去合成。</span>
-                  </div>
-                  <div className="tts-preset-category-list">
-                    <section className="tts-preset-category preset-tone-0">
-                      <div className="tts-preset-category-head">
-                        <strong>改写方案</strong>
-                        <span>点击只选择方案，不会往正文里塞模板台词。</span>
-                      </div>
-                      <div className="tts-preset-chip-grid">
-                        {mossOralizePresets.map((preset) => (
-                          <button
-                            key={preset.key}
-                            type="button"
-                            className={mossOralizeStyle === preset.key ? "tts-preset-chip active" : "tts-preset-chip"}
-                            title={preset.detail}
-                            onClick={() => {
-                              setMossOralizeStyle(preset.key);
-                              setMossSpeakerCount(preset.speakerCount);
-                            }}
-                          >
-                            {preset.label}
-                          </button>
-                        ))}
-                      </div>
-                    </section>
-                  </div>
-                  <div className="tts-oralize-actions">
+                  <div className="tts-oralize-bar">
+                    <div className="tts-oralize-copy">
+                      <strong>口语化改写</strong>
+                      <span>选择方案后把正文改成自然可说的 tts_text。</span>
+                    </div>
+                    <div className="tts-oralize-presets" aria-label="改写方案">
+                      {mossOralizePresets.map((preset) => (
+                        <button
+                          key={preset.key}
+                          type="button"
+                          className={mossOralizeStyle === preset.key ? "tts-preset-chip active" : "tts-preset-chip"}
+                          title={preset.detail}
+                          onClick={() => {
+                            setMossOralizeStyle(preset.key);
+                            setMossSpeakerCount(preset.speakerCount);
+                          }}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
                     {mossOralizeStyle === "podcast_dialogue" ? (
                       <label className="tts-inline-field">
                         <span>说话人数</span>
@@ -1108,7 +1212,7 @@ export function TtsToolPage() {
                     <ReferencePromptTextField
                       autoAsr={usesAutoPromptTextAsr}
                       value={ttsOptions.promptText}
-                      placeholder="参考音频里实际说出的话，用来和 reference_audio 对齐音色。"
+                      placeholder={isMossLocalProvider ? "参考音频里实际说出的话；续写克隆会把它拼到目标正文前面。" : "参考音频里实际说出的话，用来和 reference_audio 对齐音色。"}
                       onAutoAsrChange={(enabled) => setTtsOptions((current) => ({ ...current, autoPromptTextAsr: enabled ? "true" : "false" }))}
                       onTextChange={(value) => setTtsOptions((current) => ({ ...current, promptText: value }))}
                     />
@@ -1119,8 +1223,9 @@ export function TtsToolPage() {
                       loading={referenceHistory.isLoading}
                       selectedPath={selectedReferencePath}
                       required={usesReferenceAudio}
-                      onSelect={setSelectedReferencePath}
-                      onFileChange={() => setSelectedReferencePath("")}
+                      onSelect={handleReferenceSelect}
+                      onClear={clearReferenceSelection}
+                      onFileChange={clearReferenceSelection}
                     />
                   ) : null}
                 </div>
@@ -1163,8 +1268,9 @@ export function TtsToolPage() {
                     loading={referenceHistory.isLoading}
                     selectedPath={selectedReferencePath}
                     required={usesReferenceAudio}
-                    onSelect={setSelectedReferencePath}
-                    onFileChange={() => setSelectedReferencePath("")}
+                    onSelect={handleReferenceSelect}
+                    onClear={clearReferenceSelection}
+                    onFileChange={clearReferenceSelection}
                   />
                   {usesZeroShotSpeakerId ? (
                   <label>
@@ -1194,7 +1300,7 @@ export function TtsToolPage() {
                             checked={ttsOptions.mossUseDuration === "true"}
                             onChange={(event) => setTtsOptions((current) => ({ ...current, mossUseDuration: event.target.checked ? "true" : "false" }))}
                           />
-                          <span>启用</span>
+                          <span>手动覆盖</span>
                         </span>
                       </label>
                       {usesMossDuration ? (
@@ -1213,7 +1319,8 @@ export function TtsToolPage() {
                       ) : null}
                       <label>
                         <span>max_new_tokens</span>
-                        <input className="input" name="moss_max_new_tokens" type="number" min="1" step="1" value={ttsOptions.mossMaxNewTokens} onChange={(event) => setTtsOptions((current) => ({ ...current, mossMaxNewTokens: event.target.value }))} />
+                        <input className="input" name="moss_max_new_tokens" type="number" min="0" step="1" value={ttsOptions.mossMaxNewTokens} onChange={(event) => setTtsOptions((current) => ({ ...current, mossMaxNewTokens: event.target.value }))} />
+                        <span className="muted compact">0 表示由后端按 duration token 自动设置上限，避免生成跑到口癖或静音循环。</span>
                       </label>
                       <label>
                         <span>temperature</span>
@@ -1343,23 +1450,26 @@ function ReferencePromptTextField({
       <div className="tts-reference-prompt-head">
         <div>
           <strong>参考音频文本 prompt_text</strong>
-          <span>{autoAsr ? "提交时使用本地 ASR 自动识别参考音频文本。" : "手动填写参考音频里实际说出的话。"}</span>
+          <span>{autoAsr ? "提交时使用本地 ASR 自动识别。" : "手动填写参考音频里实际说出的话。"}</span>
         </div>
         <label className="tts-auto-asr-toggle">
           <input type="checkbox" checked={autoAsr} onChange={(event) => onAutoAsrChange(event.target.checked)} />
           <span>自动 ASR 识别</span>
         </label>
       </div>
-      <textarea
-        className="input"
-        name="prompt_text"
-        rows={3}
-        required={!autoAsr}
-        disabled={autoAsr}
-        value={autoAsr ? "" : value}
-        onChange={(event) => onTextChange(event.target.value)}
-        placeholder={autoAsr ? "已默认开启自动识别；如需修正识别文本，取消勾选后手动填写。" : placeholder}
-      />
+      {autoAsr ? (
+        <input type="hidden" name="prompt_text" value="" />
+      ) : (
+        <textarea
+          className="input"
+          name="prompt_text"
+          rows={3}
+          required
+          value={value}
+          onChange={(event) => onTextChange(event.target.value)}
+          placeholder={placeholder}
+        />
+      )}
     </div>
   );
 }
@@ -1370,13 +1480,15 @@ function ReferenceAudioPicker({
   selectedPath,
   required,
   onSelect,
+  onClear,
   onFileChange,
 }: {
   items: ToolTtsReferenceAudioItem[];
   loading: boolean;
   selectedPath: string;
   required: boolean;
-  onSelect: (path: string) => void;
+  onSelect: (item: ToolTtsReferenceAudioItem) => void;
+  onClear: () => void;
   onFileChange: () => void;
 }) {
   const selectedItem = items.find((item) => item.path === selectedPath);
@@ -1402,9 +1514,9 @@ function ReferenceAudioPicker({
     if (inputRef.current) inputRef.current.value = "";
   };
 
-  const handleHistorySelect = (path: string) => {
+  const handleHistorySelect = (item: ToolTtsReferenceAudioItem) => {
     clearUploadPreview();
-    onSelect(path);
+    onSelect(item);
   };
 
   const handleFileChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -1425,55 +1537,62 @@ function ReferenceAudioPicker({
       <div className="tts-reference-upload-head">
         <strong>prompt_wav / reference_audio</strong>
         {selectedPath ? (
-          <button className="text-button" type="button" onClick={() => onSelect("")}>
+          <button className="text-button" type="button" onClick={onClear}>
             清除历史选择
           </button>
         ) : null}
       </div>
-      <input ref={inputRef} className="input" name="prompt_wav" type="file" accept="audio/*,video/*" required={required && !selectedPath} onChange={handleFileChange} />
-      <div className="muted compact">可上传音频或视频；视频会自动抽取音频并转换为参考音频。</div>
-      {selectedItem ? <div className="mode-chip subtle">已选择历史：{selectedItem.name}</div> : null}
-      {selectedPreviewUrl ? (
-        <div className="tts-reference-preview">
-          <div className="tts-reference-preview-head">
-            <span>预览确认</span>
-            <span>{selectedPreviewName}</span>
-          </div>
-          {selectedPreviewIsVideo ? (
-            <video className="tts-reference-preview-media" controls src={selectedPreviewUrl} />
+      <div className="tts-reference-layout">
+        <div className="tts-reference-upload-main">
+          <input ref={inputRef} className="input" name="prompt_wav" type="file" accept="audio/*,video/*" required={required && !selectedPath} onChange={handleFileChange} />
+          <div className="muted compact">可上传音频或视频；视频会自动抽取音频。</div>
+          {selectedItem ? <div className="mode-chip subtle">已选择历史：{selectedItem.name}</div> : null}
+          {selectedPreviewUrl ? (
+            <div className="tts-reference-preview">
+              <div className="tts-reference-preview-head">
+                <span>预览确认</span>
+                <span>{selectedPreviewName}</span>
+              </div>
+              {selectedPreviewIsVideo ? (
+                <video className="tts-reference-preview-media" controls src={selectedPreviewUrl} />
+              ) : (
+                <audio className="tts-reference-preview-media" controls src={selectedPreviewUrl} />
+              )}
+            </div>
           ) : (
-            <audio className="tts-reference-preview-media" controls src={selectedPreviewUrl} />
+            <div className="tts-reference-empty-preview">选择文件或右侧历史后预览。</div>
           )}
         </div>
-      ) : null}
-      <div className="tts-reference-history">
-        <div className="tts-reference-history-head">
-          <span>参考历史</span>
-          <span>{loading ? "加载中" : `${items.length} 个`}</span>
-        </div>
-        {items.length > 0 ? (
-          <div className="tts-reference-history-list">
-            {items.map((item) => (
-              <button
-                key={item.path}
-                type="button"
-                className={item.path === selectedPath ? "tts-reference-history-item active" : "tts-reference-history-item"}
-                onClick={() => handleHistorySelect(item.path)}
-                title={item.path}
-              >
-                <strong>{item.name}</strong>
-                <span>
-                  {item.source}
-                  {formatDuration(item.duration) ? ` · ${formatDuration(item.duration)}` : ""}
-                  {item.will_trim ? " · 自动去静音并截取30s" : ""}
-                  {formatFileSize(item.size) ? ` · ${formatFileSize(item.size)}` : ""}
-                </span>
-              </button>
-            ))}
+        <div className="tts-reference-history">
+          <div className="tts-reference-history-head">
+            <span>参考历史</span>
+            <span>{loading ? "加载中" : `${items.length} 个`}</span>
           </div>
-        ) : (
-          <div className="muted compact">暂无参考历史；提交一次参考音频或视频后会出现在这里。</div>
-        )}
+          {items.length > 0 ? (
+            <div className="tts-reference-history-list">
+              {items.map((item) => (
+                <button
+                  key={item.path}
+                  type="button"
+                  className={item.path === selectedPath ? "tts-reference-history-item active" : "tts-reference-history-item"}
+                  onClick={() => handleHistorySelect(item)}
+                  title={item.path}
+                >
+                  <strong>{item.name}</strong>
+                  <span>
+                    {item.source}
+                    {formatDuration(item.duration) ? ` · ${formatDuration(item.duration)}` : ""}
+                    {item.will_trim ? " · 自动截取30s" : ""}
+                    {formatFileSize(item.size) ? ` · ${formatFileSize(item.size)}` : ""}
+                  </span>
+                  {item.text_preview ? <span className="tts-reference-history-text">prompt_text：{item.text_preview}</span> : null}
+                </button>
+              ))}
+            </div>
+          ) : (
+            <div className="muted compact">暂无参考历史；提交一次参考音频或视频后会出现在这里。</div>
+          )}
+        </div>
       </div>
     </div>
   );

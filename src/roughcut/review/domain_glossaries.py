@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import re
 from collections import OrderedDict
 from typing import Any
-import re
+
+from roughcut.review.topic_fact_confirmation import topic_fact_confirmation_present, topic_fact_is_confirmed
 
 from roughcut.edit.presets import normalize_workflow_template_name
 
@@ -541,17 +543,21 @@ def _detect_glossary_signal_domains(
             if domain not in domains:
                 domains.append(domain)
 
-    declared_domain = normalize_subject_domain((content_profile or {}).get("subject_domain"))
+    effective_profile = _topic_fact_scoped_profile(content_profile)
+    topic_fact_scoped = topic_fact_confirmation_present(content_profile)
+
+    declared_domain = normalize_subject_domain(effective_profile.get("subject_domain"))
     if declared_domain and declared_domain not in domains:
         domains.append(declared_domain)
 
     haystacks: list[str] = []
-    if source_name:
+    if source_name and not topic_fact_scoped:
         haystacks.append(str(source_name))
     for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "summary", "hook_line"):
-        haystacks.append(str((content_profile or {}).get(key) or ""))
-    for item in subtitle_items or []:
-        haystacks.append(str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or ""))
+        haystacks.append(str(effective_profile.get(key) or ""))
+    if not topic_fact_scoped:
+        for item in subtitle_items or []:
+            haystacks.append(str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or ""))
     joined = " ".join(haystacks).upper()
     scores: dict[str, int] = {}
     for domain, keywords in _DOMAIN_KEYWORDS.items():
@@ -567,6 +573,34 @@ def _detect_glossary_signal_domains(
         if score >= threshold and domain not in domains:
             domains.append(domain)
     return domains
+
+
+def _topic_fact_scoped_profile(content_profile: dict[str, Any] | None) -> dict[str, Any]:
+    profile = dict(content_profile or {})
+    if not topic_fact_confirmation_present(profile):
+        return profile
+    confirmation = profile.get("topic_fact_confirmation")
+    confirmation_payload = dict(confirmation or {}) if isinstance(confirmation, dict) else {}
+    subject = confirmation_payload.get("subject")
+    subject_payload = dict(subject or {}) if isinstance(subject, dict) else {}
+    if not subject_payload:
+        return {}
+    scoped: dict[str, Any] = {}
+    mapping = {
+        "domain": "subject_domain",
+        "brand": "subject_brand",
+        "model": "subject_model",
+        "type": "subject_type",
+        "theme": "video_theme",
+        "summary": "summary",
+    }
+    for source_key, target_key in mapping.items():
+        value = str(subject_payload.get(source_key) or "").strip()
+        if value:
+            scoped[target_key] = value
+    if topic_fact_is_confirmed(profile):
+        scoped["topic_fact_confirmation"] = confirmation_payload
+    return scoped
 
 
 def normalize_subject_domain(value: str | None) -> str | None:

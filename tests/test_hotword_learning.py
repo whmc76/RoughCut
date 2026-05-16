@@ -10,6 +10,7 @@ from roughcut.review.hotword_learning import (
     record_learned_hotwords_from_content_profile_feedback,
 )
 from roughcut.pipeline.steps import _build_effective_glossary_terms, _infer_subject_domain_for_memory
+from roughcut.review.domain_glossaries import detect_glossary_domains
 from roughcut.review.subtitle_memory import (
     apply_domain_term_corrections,
     build_subtitle_review_memory,
@@ -531,3 +532,48 @@ def test_nitecore_edc17_source_name_scopes_to_flashlight_not_knife() -> None:
     assert "奈特科尔=NITECORE" not in prompt
     assert "NOC" not in prompt
     assert "折刀" not in prompt
+
+
+def test_unconfirmed_topic_fact_does_not_inject_source_identity_terms() -> None:
+    effective_terms = _build_effective_glossary_terms(
+        glossary_terms=[],
+        workflow_template="edc_tactical",
+        content_profile={
+            "subject_domain": "flashlight",
+            "subject_brand": "NITECORE",
+            "subject_model": "EDC17",
+            "subject_type": "NITECORE EDC17 手电",
+            "topic_fact_confirmation": {
+                "status": "needs_review",
+                "review_reasons": ["品牌/型号缺少深度调研或内部实体库交叉印证"],
+            },
+        },
+        source_name="NITECORE EDC17.mp4",
+        subject_domain="flashlight",
+    )
+
+    assert not any(term.get("category") == "source_identity" for term in effective_terms)
+
+
+def test_topic_fact_scope_ignores_subtitle_and_source_domain_noise() -> None:
+    domains = detect_glossary_domains(
+        workflow_template="edc_tactical",
+        content_profile={
+            "subject_domain": "food",
+            "topic_fact_confirmation": {
+                "status": "needs_review",
+                "subject": {
+                    "domain": "food",
+                    "type": "益生菌含片",
+                    "theme": "LuckyKiss 弹射舱益生菌含片开箱",
+                },
+            },
+        },
+        subtitle_items=[
+            {"text_final": "这个EDC折刀和工具钳都很像"},
+            {"text_final": "这里还有手电和刀刃细节"},
+        ],
+        source_name="NOC MT34 折刀 EDC.mp4",
+    )
+
+    assert domains == ["food"]

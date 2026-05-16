@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from roughcut.edit.skills import apply_review_focus_overrides, resolve_editing_skill
+from roughcut.edit.timeline_contract import audit_edit_decision_contract
 from roughcut.media.scene import SceneBoundary
 from roughcut.media.silence import SilenceSegment
 
@@ -492,6 +493,7 @@ def build_edit_decision(
             _build_subtitle_cut_candidates(
                 enriched_subtitles,
                 content_profile=content_profile,
+                transcript_segments=normalized_transcript,
             )
         )
         candidates.extend(_build_hard_cut_candidates(
@@ -525,6 +527,13 @@ def build_edit_decision(
     accepted_cuts = _annotate_cut_candidates_with_keep_energy(
         candidates,
         keep_energy_segments=keep_energy_segments,
+    )
+    source_timeline_contract = build_source_timeline_contract_analysis(
+        duration=duration,
+        edit_segments=segments,
+        transcript_segments=normalized_transcript,
+        subtitle_items=enriched_subtitles,
+        silence_segments=silence_segments,
     )
     return EditDecision(
         source=source_path,
@@ -561,9 +570,58 @@ def build_edit_decision(
             "cut_evidence_summary": _summarize_cut_evidence(accepted_cuts),
             "keep_energy_segments": keep_energy_segments,
             "keep_energy_summary": _summarize_keep_energy_segments(keep_energy_segments),
+            "source_timeline_contract": source_timeline_contract,
+            "automatic_gate": build_automatic_gate_analysis(source_timeline_contract),
             **timeline_analysis,
         },
     )
+
+
+def build_source_timeline_contract_analysis(
+    *,
+    duration: float,
+    edit_segments: list[EditSegment],
+    transcript_segments: list[dict[str, Any]],
+    subtitle_items: list[dict[str, Any]],
+    silence_segments: list[SilenceSegment],
+) -> dict[str, Any]:
+    return audit_edit_decision_contract(
+        duration=duration,
+        edit_segments=edit_segments,
+        transcript_segments=transcript_segments,
+        subtitle_items=subtitle_items,
+        silence_segments=silence_segments,
+    )
+
+
+def build_automatic_gate_analysis(source_timeline_contract: dict[str, Any]) -> dict[str, Any]:
+    blocking = bool(source_timeline_contract.get("blocking"))
+    return {
+        "blocking": blocking,
+        "blocking_reasons": ["source_timeline_contract_blocking"] if blocking else [],
+    }
+
+
+def refresh_source_timeline_contract_analysis(
+    decision: EditDecision,
+    *,
+    duration: float,
+    transcript_segments: list[dict[str, Any]],
+    subtitle_items: list[dict[str, Any]],
+    silence_segments: list[SilenceSegment],
+) -> dict[str, Any]:
+    if not hasattr(decision, "analysis") or not isinstance(getattr(decision, "analysis", None), dict):
+        decision.analysis = {}
+    source_timeline_contract = build_source_timeline_contract_analysis(
+        duration=duration,
+        edit_segments=decision.segments,
+        transcript_segments=transcript_segments,
+        subtitle_items=subtitle_items,
+        silence_segments=silence_segments,
+    )
+    decision.analysis["source_timeline_contract"] = source_timeline_contract
+    decision.analysis["automatic_gate"] = build_automatic_gate_analysis(source_timeline_contract)
+    return source_timeline_contract
 
 
 def infer_timeline_analysis(
@@ -1035,6 +1093,7 @@ def _build_subtitle_cut_candidates(
     subtitle_items: list[dict[str, Any]],
     *,
     content_profile: dict | None,
+    transcript_segments: list[dict[str, Any]] | None = None,
 ) -> list[CutCandidate]:
     candidates: list[CutCandidate] = []
     for item in subtitle_items:
@@ -1042,36 +1101,140 @@ def _build_subtitle_cut_candidates(
         if FILLER_PATTERN.search(text):
             clean = PUNCTUATION_PATTERN.sub("", FILLER_PATTERN.sub("", text).strip())
             if not clean:
-                candidates.append(
-                    CutCandidate(
-                        start=float(item["start_time"]),
-                        end=float(item["end_time"]),
-                        reason="filler_word",
-                        hard=True,
-                        signals=["pure_filler"],
-                    )
+                _append_subtitle_rule_candidate(
+                    candidates,
+                    start=float(item["start_time"]),
+                    end=float(item["end_time"]),
+                    reason="filler_word",
+                    signals=["pure_filler"],
+                    transcript_segments=transcript_segments,
+                    content_profile=content_profile,
                 )
         for start, end, phrase in _subtitle_hesitation_filler_ranges(item, text):
-            candidates.append(
-                CutCandidate(
-                    start=start,
-                    end=end,
-                    reason="filler_word",
-                    hard=True,
-                    signals=["partial_filler", f"token:{phrase}"],
-                )
+            _append_subtitle_rule_candidate(
+                candidates,
+                start=start,
+                end=end,
+                reason="filler_word",
+                signals=["partial_filler", f"token:{phrase}"],
+                transcript_segments=transcript_segments,
+                content_profile=content_profile,
             )
         for start, end, unit in _subtitle_repeated_speech_ranges(item, text, content_profile=content_profile):
-            candidates.append(
-                CutCandidate(
-                    start=start,
-                    end=end,
-                    reason="repeated_speech",
-                    hard=True,
-                    signals=["partial_repeated_speech", f"unit:{unit}"],
-                )
+            _append_subtitle_rule_candidate(
+                candidates,
+                start=start,
+                end=end,
+                reason="repeated_speech",
+                signals=["partial_repeated_speech", f"unit:{unit}"],
+                transcript_segments=transcript_segments,
+                content_profile=content_profile,
             )
     return candidates
+
+
+def _append_subtitle_rule_candidate(
+    candidates: list[CutCandidate],
+    *,
+    start: float,
+    end: float,
+    reason: str,
+    signals: list[str],
+    transcript_segments: list[dict[str, Any]] | None,
+    content_profile: dict | None,
+) -> None:
+    if end <= start:
+        return
+    allowed, audit_signal = _subtitle_rule_cut_allowed_by_transcript(
+        start,
+        end,
+        reason=reason,
+        signals=signals,
+        transcript_segments=transcript_segments or [],
+        content_profile=content_profile,
+    )
+    if not allowed:
+        return
+    candidate_signals = list(signals)
+    if audit_signal:
+        candidate_signals.append(audit_signal)
+    candidates.append(
+        CutCandidate(
+            start=start,
+            end=end,
+            reason=reason,
+            hard=True,
+            signals=candidate_signals,
+        )
+    )
+
+
+def _subtitle_rule_cut_allowed_by_transcript(
+    start: float,
+    end: float,
+    *,
+    reason: str,
+    signals: list[str],
+    transcript_segments: list[dict[str, Any]],
+    content_profile: dict | None,
+) -> tuple[bool, str]:
+    if not transcript_segments:
+        return True, "subtitle_rule_no_transcript_guard"
+    overlapping_words: list[str] = []
+    for segment in _overlapping_transcript_segments(start, end, transcript_segments):
+        words = [word for word in list(segment.get("words") or []) if isinstance(word, dict)]
+        if not words:
+            if _range_overlap_seconds(start, end, segment.get("start"), segment.get("end")) > 0.0:
+                return False, "blocked_by_segment_transcript"
+            continue
+        for word in words:
+            if not _transcript_word_timing_is_trusted(word):
+                continue
+            word_overlap = _range_overlap_seconds(start, end, word.get("start"), word.get("end"))
+            word_start = _optional_float(word.get("start"))
+            word_end = _optional_float(word.get("end"))
+            word_duration = max(0.0, (word_end or 0.0) - (word_start or 0.0))
+            if word_overlap < min(0.04, max(0.012, word_duration * 0.2)):
+                continue
+            word_text = _compact_subtitle_text(str(word.get("word") or word.get("raw_text") or ""))
+            if not word_text:
+                continue
+            overlapping_words.append(word_text)
+
+    if not overlapping_words:
+        return True, "subtitle_rule_no_trusted_word_overlap"
+    if reason == "filler_word":
+        return (
+            all(_transcript_word_is_explicit_filler(word) for word in overlapping_words),
+            "subtitle_rule_confirmed_by_transcript_filler",
+        )
+    if reason == "repeated_speech":
+        repeated_units = {
+            _compact_subtitle_text(signal.split(":", 1)[1])
+            for signal in signals
+            if str(signal).startswith("unit:")
+        }
+        return (
+            bool(repeated_units)
+            and all(any(word == unit or word in unit or unit in word for unit in repeated_units) for word in overlapping_words)
+            and not any(
+                _subtitle_has_protected_speech_text(word, content_profile=content_profile)
+                and not any(word == unit or word in unit or unit in word for unit in repeated_units)
+                for word in overlapping_words
+            ),
+            "subtitle_rule_confirmed_by_transcript_repetition",
+        )
+    return False, "blocked_by_unverified_subtitle_rule"
+
+
+def _transcript_word_is_explicit_filler(word_text: str) -> bool:
+    compact = _compact_subtitle_text(word_text)
+    if not compact:
+        return True
+    if compact in {_compact_subtitle_text(item) for item in HESITATION_FILLER_WORDS}:
+        return True
+    stripped = _compact_subtitle_text(FILLER_PATTERN.sub("", compact))
+    return not stripped
 
 
 def _subtitle_hesitation_filler_ranges(item: dict[str, Any], text: str) -> list[tuple[float, float, str]]:

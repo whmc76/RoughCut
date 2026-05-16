@@ -11,11 +11,11 @@ _MINIMAX_REASONING_MAX_RETRIES = 1
 
 
 class MiniMaxReasoningProvider(ReasoningProvider):
-    def __init__(self) -> None:
+    def __init__(self, *, model: str | None = None) -> None:
         settings = get_settings()
         self._api_key = settings.minimax_api_key
         self._base_url = settings.minimax_base_url.rstrip("/")
-        self._model = settings.active_reasoning_model
+        self._model = model or settings.active_reasoning_model
 
     async def complete(
         self,

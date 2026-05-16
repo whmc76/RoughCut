@@ -137,11 +137,11 @@ def _managed_service_targets() -> list[dict[str, object]]:
     )
     targets.append(
         {
-            "name": "moss_tts",
+            "name": "moss_tts_local",
             "kind": "tts",
-            "url": str(getattr(settings, "moss_tts_api_base_url", "") or "").strip(),
+            "url": str(getattr(settings, "moss_tts_local_api_base_url", "") or "").strip(),
             "probe_kind": "health_json",
-            **_service_management_config(settings, target_key="moss_tts"),
+            **_service_management_config(settings, target_key="moss_tts_local"),
         }
     )
     if str(getattr(settings, "avatar_provider", "") or "").strip().lower() == "heygem":

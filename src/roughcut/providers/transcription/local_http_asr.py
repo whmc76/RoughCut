@@ -190,10 +190,19 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                         )
                     )
 
-        segments = self._sanitize_decode_loop_segments(segments)
+        segments = self._sanitize_decode_loop_segments(
+            segments,
+            repeated_segment_strategy="drop",
+            repeated_segment_min_repeats=2,
+        )
         raw_segments = list(segments)
-        repaired_segments = self._repair_segments(segments, duration=total_duration)
-        repaired_segments = self._sanitize_decode_loop_segments(repaired_segments)
+        repair_duration = max((float(segment.end) for segment in segments), default=total_duration)
+        repaired_segments = self._repair_segments(segments, duration=repair_duration)
+        repaired_segments = self._sanitize_decode_loop_segments(
+            repaired_segments,
+            repeated_segment_strategy="drop",
+            repeated_segment_min_repeats=2,
+        )
         return TranscriptResult(
             segments=repaired_segments,
             language=language,
@@ -598,11 +607,23 @@ class LocalHTTPASRProvider(TranscriptionProvider):
             )
         return words
 
-    def _sanitize_decode_loop_segments(self, segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
+    def _sanitize_decode_loop_segments(
+        self,
+        segments: list[TranscriptSegment],
+        *,
+        repeated_segment_strategy: str = "collapse",
+        repeated_segment_min_repeats: int | None = None,
+    ) -> list[TranscriptSegment]:
         cleaned_segments = [
             self._copy_segment_with_text(segment, text=self._collapse_decode_loop_text(segment.text))
             for segment in list(segments or [])
         ]
+        min_repeats = max(2, int(repeated_segment_min_repeats or self._DECODE_LOOP_MIN_REPEATS))
+        if repeated_segment_strategy == "drop":
+            cleaned_segments = self._drop_repeated_decode_loop_segment_sequences(
+                cleaned_segments,
+                min_repeats=min_repeats,
+            )
         collapsed: list[TranscriptSegment] = []
         index = 0
         while index < len(cleaned_segments):
@@ -616,21 +637,36 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                 run_end += 1
 
             run_length = run_end - index
-            if self._is_decode_loop_key(current_key) and run_length >= self._DECODE_LOOP_MIN_REPEATS:
+            if self._is_decode_loop_key(current_key) and run_length >= min_repeats:
                 run = cleaned_segments[index:run_end]
                 first = run[0]
                 merged = self._copy_segment_with_text(first, text=first.text)
-                merged.end = round(max(float(item.end) for item in run), 3)
                 merged.raw_payload = dict(merged.raw_payload)
-                merged.raw_payload["_roughcut_filtering"] = {
-                    **self._filtering_payload(merged.raw_payload),
-                    "collapsed_decode_loop_segments": {
-                        "repeat_count": run_length,
-                        "start": round(float(run[0].start), 3),
-                        "end": round(float(merged.end), 3),
-                        "text": first.text,
-                    },
-                }
+                filtering = self._filtering_payload(merged.raw_payload)
+                if repeated_segment_strategy == "drop":
+                    merged.raw_payload["_roughcut_filtering"] = {
+                        **filtering,
+                        "dropped_decode_loop_segments": {
+                            "repeat_count": run_length,
+                            "dropped_count": run_length - 1,
+                            "kept_start": round(float(first.start), 3),
+                            "kept_end": round(float(first.end), 3),
+                            "dropped_start": round(float(run[1].start), 3),
+                            "dropped_end": round(max(float(item.end) for item in run[1:]), 3),
+                            "text": first.text,
+                        },
+                    }
+                else:
+                    merged.end = round(max(float(item.end) for item in run), 3)
+                    merged.raw_payload["_roughcut_filtering"] = {
+                        **filtering,
+                        "collapsed_decode_loop_segments": {
+                            "repeat_count": run_length,
+                            "start": round(float(run[0].start), 3),
+                            "end": round(float(merged.end), 3),
+                            "text": first.text,
+                        },
+                    }
                 collapsed.append(merged)
             else:
                 collapsed.extend(cleaned_segments[index:run_end])
@@ -657,6 +693,67 @@ class LocalHTTPASRProvider(TranscriptionProvider):
             for new_index, segment in enumerate(collapsed)
             if str(segment.text or "").strip()
         ]
+
+    def _drop_repeated_decode_loop_segment_sequences(
+        self,
+        segments: list[TranscriptSegment],
+        *,
+        min_repeats: int,
+    ) -> list[TranscriptSegment]:
+        source_segments = list(segments or [])
+        if len(source_segments) < min_repeats:
+            return source_segments
+
+        keys = [self._decode_loop_key(segment.text) for segment in source_segments]
+        filtered: list[TranscriptSegment] = []
+        index = 0
+        while index < len(source_segments):
+            remaining = len(source_segments) - index
+            best_pattern_len = 0
+            best_repeat_count = 0
+            max_pattern_len = min(6, remaining // min_repeats)
+            for pattern_len in range(1, max_pattern_len + 1):
+                pattern_keys = keys[index : index + pattern_len]
+                pattern_key = "".join(pattern_keys)
+                if not self._is_decode_loop_key(pattern_key):
+                    continue
+                repeat_count = 1
+                cursor = index + pattern_len
+                while cursor + pattern_len <= len(source_segments) and keys[cursor : cursor + pattern_len] == pattern_keys:
+                    repeat_count += 1
+                    cursor += pattern_len
+                if repeat_count >= min_repeats and pattern_len * repeat_count > best_pattern_len * best_repeat_count:
+                    best_pattern_len = pattern_len
+                    best_repeat_count = repeat_count
+
+            if best_pattern_len > 0:
+                kept = [
+                    self._copy_segment_with_text(segment, text=segment.text)
+                    for segment in source_segments[index : index + best_pattern_len]
+                ]
+                dropped = source_segments[index + best_pattern_len : index + best_pattern_len * best_repeat_count]
+                first = kept[0]
+                first.raw_payload = dict(first.raw_payload)
+                first.raw_payload["_roughcut_filtering"] = {
+                    **self._filtering_payload(first.raw_payload),
+                    "dropped_decode_loop_segment_sequences": {
+                        "repeat_count": best_repeat_count,
+                        "pattern_segment_count": best_pattern_len,
+                        "dropped_count": len(dropped),
+                        "kept_start": round(float(kept[0].start), 3),
+                        "kept_end": round(float(kept[-1].end), 3),
+                        "dropped_start": round(float(dropped[0].start), 3) if dropped else None,
+                        "dropped_end": round(max((float(item.end) for item in dropped), default=float(kept[-1].end)), 3),
+                        "text": "".join(segment.text for segment in kept),
+                    },
+                }
+                filtered.extend(kept)
+                index += best_pattern_len * best_repeat_count
+                continue
+
+            filtered.append(source_segments[index])
+            index += 1
+        return filtered
 
     def _copy_segment_with_text(self, segment: TranscriptSegment, *, text: str) -> TranscriptSegment:
         cleaned = str(text or "").strip()
@@ -812,12 +909,15 @@ class LocalHTTPASRProvider(TranscriptionProvider):
             segment.end = round(max(duration, segment.end), 3)
             return [segment]
         total_units = sum(max(1, self._text_units(chunk)) for chunk in chunks)
-        cursor = 0.0
+        target_start = max(0.0, float(segment.start))
+        target_end = max(target_start, float(duration), float(segment.end))
+        target_duration = max(0.0, target_end - target_start)
+        cursor = target_start
         split_segments: list[TranscriptSegment] = []
         for index, chunk in enumerate(chunks):
             weight = max(1, self._text_units(chunk))
-            chunk_duration = duration * weight / total_units if total_units > 0 else 0.0
-            end = duration if index == len(chunks) - 1 else min(duration, cursor + chunk_duration)
+            chunk_duration = target_duration * weight / total_units if total_units > 0 else 0.0
+            end = target_end if index == len(chunks) - 1 else min(target_end, cursor + chunk_duration)
             split_segments.append(
                 TranscriptSegment(
                     index=index,

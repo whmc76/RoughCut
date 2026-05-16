@@ -131,11 +131,11 @@ def _build_target_configs(settings) -> list[_ManagedDockerTarget]:
             probe_kind="health_json",
         ),
         _ManagedDockerTarget(
-            key="moss_tts",
-            compose_file=str(getattr(settings, "moss_tts_docker_compose_file", "") or ""),
-            env_file=str(getattr(settings, "moss_tts_docker_env_file", "") or ""),
-            services=_parse_services(getattr(settings, "moss_tts_docker_services", "moss-ttsd")),
-            base_urls=(_normalize_base_url(getattr(settings, "moss_tts_api_base_url", "")),),
+            key="moss_tts_local",
+            compose_file=str(getattr(settings, "moss_tts_local_docker_compose_file", "") or ""),
+            env_file=str(getattr(settings, "moss_tts_local_docker_env_file", "") or ""),
+            services=_parse_services(getattr(settings, "moss_tts_local_docker_services", "moss-tts-local")),
+            base_urls=(_normalize_base_url(getattr(settings, "moss_tts_local_api_base_url", "")),),
             probe_kind="health_json",
         ),
     ]

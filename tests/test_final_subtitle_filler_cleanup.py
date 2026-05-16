@@ -5,7 +5,7 @@ import pytest
 
 from roughcut.media.output import write_srt_file
 from roughcut.media.subtitles import write_ass_file
-from roughcut.media.subtitle_text import clean_final_subtitle_text, clean_subtitle_payloads
+from roughcut.media.subtitle_text import clean_final_subtitle_text, clean_subtitle_payloads, subtitle_display_suppression_reason
 from roughcut.review.content_profile import polish_subtitle_items
 from roughcut.speech.subtitle_segmentation import normalize_display_text
 
@@ -43,6 +43,21 @@ def test_clean_final_subtitle_text_hides_asr_noise_markers() -> None:
     assert clean_final_subtitle_text("这个细节 [music] 继续看") == "这个细节继续看"
     assert clean_final_subtitle_text("这个细节 silence music 继续看。") == "这个细节 silence music 继续看"
     assert clean_final_subtitle_text("给它塞进去啊EnvironmentalSounds哎") == "给它塞进去啊"
+
+
+def test_clean_subtitle_payloads_marks_explicit_display_suppression_reason() -> None:
+    cleaned = clean_subtitle_payloads(
+        [
+            {"index": 0, "start_time": 0.0, "end_time": 1.0, "text_final": "[silence]"},
+            {"index": 1, "start_time": 1.0, "end_time": 2.0, "text_final": "呃"},
+        ],
+        drop_empty=False,
+    )
+
+    assert cleaned[0]["text_final"] == ""
+    assert cleaned[0]["display_suppressed_reason"] == "asr_noise_marker"
+    assert cleaned[1]["display_suppressed_reason"] == "standalone_filler"
+    assert subtitle_display_suppression_reason("滚") == "disruption_clause"
 
 
 def test_clean_final_subtitle_text_replaces_all_punctuation_with_spaces() -> None:

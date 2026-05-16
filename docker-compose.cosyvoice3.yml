@@ -28,5 +28,5 @@ services:
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     volumes:
-      - ${COSYVOICE3_MODEL_CACHE:-F:/roughcut_outputs/model-cache/cosyvoice3}:/models
+      - ${COSYVOICE3_MODEL_CACHE:-E:/WorkSpace/RoughCut/.model-cache/cosyvoice3}:/models
     restart: unless-stopped

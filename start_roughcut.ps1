@@ -54,6 +54,7 @@ $CodexHostBridgeOutLog = Join-Path $RepoRoot "logs\codex-host-bridge.out.log"
 $CodexHostBridgeErrLog = Join-Path $RepoRoot "logs\codex-host-bridge.err.log"
 $CodexHostBridgePort = 38695
 $CodexHostBridgeBindHost = "0.0.0.0"
+$ApiBindHost = "0.0.0.0"
 $script:ManagedProcesses = @()
 
 function Invoke-NativeCommandChecked {
@@ -1135,9 +1136,9 @@ function Get-CosyVoice3TtsBaseUrl {
     return $baseUrl
 }
 
-function Get-MossTtsBaseUrl {
-    $baseUrl = Get-ConfiguredValueOrDefault -Key "MOSS_TTS_API_BASE_URL" -DefaultValue "http://127.0.0.1:30190"
-    $mappedPort = Resolve-ContainerMappedPort -ContainerName "moss-ttsd" -ContainerPort 30000
+function Get-MossTtsLocalBaseUrl {
+    $baseUrl = Get-ConfiguredValueOrDefault -Key "MOSS_TTS_LOCAL_API_BASE_URL" -DefaultValue "http://127.0.0.1:30191"
+    $mappedPort = Resolve-ContainerMappedPort -ContainerName "moss-tts-local" -ContainerPort 8080
     if ($null -ne $mappedPort) {
         return Get-BaseUrlWithPort -BaseUrl $baseUrl -Port $mappedPort
     }
@@ -1212,9 +1213,9 @@ function Get-RoughCutStartupServiceProbes {
     }
 
     $probes += [pscustomobject]@{
-        Name = "MOSS-TTSD"
-        BaseUrl = Get-MossTtsBaseUrl
-        HealthPaths = @((Get-ConfiguredValueOrDefault -Key "MOSS_TTS_HEALTH_PATH" -DefaultValue "/health"))
+        Name = "MOSS-TTS Local"
+        BaseUrl = Get-MossTtsLocalBaseUrl
+        HealthPaths = @((Get-ConfiguredValueOrDefault -Key "MOSS_TTS_LOCAL_HEALTH_PATH" -DefaultValue "/health"))
         TimeoutSec = 5
     }
 
@@ -1583,6 +1584,75 @@ function Get-RoughCutCommandMatchPattern {
     return "roughcut(?:\.cli|\.exe`"?)\s+$escapedArguments"
 }
 
+function Get-RoughCutApiCommandMatchPattern {
+    return "roughcut(?:\.cli|\.exe`"?)\s+api\s+--host\s+(?:127\.0\.0\.1|0\.0\.0\.0)\s+--port"
+}
+
+function Test-RoughCutLanIpv4Address {
+    param([string]$Address)
+
+    $parsed = $null
+    if (-not [System.Net.IPAddress]::TryParse($Address, [ref]$parsed)) {
+        return $false
+    }
+    if ($parsed.AddressFamily -ne [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        return $false
+    }
+
+    $bytes = $parsed.GetAddressBytes()
+    return $bytes[0] -eq 192 -and $bytes[1] -eq 168
+}
+
+function Get-RoughCutLanIpv4Addresses {
+    $addresses = @()
+    $getNetIPAddress = Get-Command Get-NetIPAddress -ErrorAction SilentlyContinue
+
+    if ($null -ne $getNetIPAddress) {
+        try {
+            $addresses += @(Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop | Where-Object {
+                $alias = [string]$_.InterfaceAlias
+                $_.IPAddress `
+                    -and (Test-RoughCutLanIpv4Address -Address $_.IPAddress) `
+                    -and $_.IPAddress -ne "127.0.0.1" `
+                    -and $_.IPAddress -notlike "169.254.*" `
+                    -and $alias -notmatch "(?i)(Loopback|vEthernet|Docker|WSL|VMware|VirtualBox|Hyper-V)"
+            } | ForEach-Object {
+                $_.IPAddress
+            })
+        } catch {
+            $addresses = @()
+        }
+    }
+
+    if ($addresses.Count -eq 0) {
+        try {
+            $addresses += @([System.Net.Dns]::GetHostAddresses([System.Net.Dns]::GetHostName()) | Where-Object {
+                $_.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork `
+                    -and (Test-RoughCutLanIpv4Address -Address $_.ToString()) `
+                    -and $_.ToString() -ne "127.0.0.1" `
+                    -and $_.ToString() -notlike "169.254.*"
+            } | ForEach-Object {
+                $_.ToString()
+            })
+        } catch {
+            $addresses = @()
+        }
+    }
+
+    return @($addresses | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_)
+    } | Sort-Object -Unique)
+}
+
+function Get-RoughCutApiLanUrls {
+    param([int]$ApiPort)
+
+    return @(Get-RoughCutLanIpv4Addresses | ForEach-Object {
+        $address = $_
+        "http://${address}:$ApiPort"
+    })
+}
+
 function Stop-RoughCutProcess {
     param(
         [string]$Name,
@@ -1621,7 +1691,7 @@ function Stop-RoughCutServices {
     param([switch]$StopDockerServices)
 
     Write-Host "Stopping existing RoughCut services..." -ForegroundColor Cyan
-    Stop-RoughCutProcess -Name "API" -Pattern (Get-RoughCutCommandMatchPattern "api --host 127.0.0.1 --port")
+    Stop-RoughCutProcess -Name "API" -Pattern (Get-RoughCutApiCommandMatchPattern)
     Stop-RoughCutProcess -Name "Orchestrator" -Pattern (Get-RoughCutCommandMatchPattern "orchestrator --poll-interval")
     Stop-RoughCutProcess -Name "Media worker" -Pattern (Get-RoughCutCommandMatchPattern "worker --queue media_queue")
     Stop-RoughCutProcess -Name "Media worker" -Pattern "celery -A roughcut\.pipeline\.celery_app:celery_app worker --queues=media_queue"
@@ -2162,8 +2232,8 @@ if (-not $NoWatcher) {
 }
 Start-RoughCutProcess `
     -Name "API" `
-    -Arguments @("-m", "roughcut.cli", "api", "--host", "127.0.0.1", "--port", "$Port") `
-    -MatchPattern (Get-RoughCutCommandMatchPattern "api --host 127.0.0.1 --port $Port") `
+    -Arguments @("-m", "roughcut.cli", "api", "--host", $ApiBindHost, "--port", "$Port") `
+    -MatchPattern (Get-RoughCutCommandMatchPattern "api --host $ApiBindHost --port $Port") `
     -StdoutPath (Join-Path $RepoRoot "logs\api.out.log") `
     -StderrPath (Join-Path $RepoRoot "logs\api.err.log") `
     -HiddenWindow
@@ -2206,17 +2276,30 @@ if ($NoWorkers) {
         -StderrPath (Join-Path $RepoRoot "logs\agent-worker.err.log")
 }
 
+$apiLocalUrl = "http://127.0.0.1:$Port"
+$apiLanUrls = @(Get-RoughCutApiLanUrls -ApiPort $Port)
+
 Write-Host ""
 Write-Host "RoughCut started." -ForegroundColor Green
-Write-Host "API URL: http://127.0.0.1:$Port" -ForegroundColor Green
+Write-Host "API URL: $apiLocalUrl" -ForegroundColor Green
+if ($apiLanUrls.Count -eq 1) {
+    Write-Host "LAN URL (192.168): $($apiLanUrls[0])" -ForegroundColor Green
+} elseif ($apiLanUrls.Count -gt 1) {
+    Write-Host "LAN URLs (192.168):" -ForegroundColor Green
+    foreach ($apiLanUrl in $apiLanUrls) {
+        Write-Host "  $apiLanUrl" -ForegroundColor Green
+    }
+} else {
+    Write-Host "LAN URL (192.168): unavailable (no active 192.168 IPv4 address found)." -ForegroundColor DarkGray
+}
 Write-Host "Logs: .\logs\*.out.log / .\logs\*.err.log" -ForegroundColor DarkGray
 
 if (Wait-ApiReady -TestPort $Port) {
     if ($OpenBrowser) {
-        Start-Process "http://127.0.0.1:$Port/" | Out-Null
+        Start-Process "$apiLocalUrl/" | Out-Null
         Write-Host "GUI opened in your default browser." -ForegroundColor Green
     } else {
-        Write-Host "API is ready. Open http://127.0.0.1:$Port/ manually when needed." -ForegroundColor Green
+        Write-Host "API is ready. Open $apiLocalUrl/ manually when needed." -ForegroundColor Green
     }
 } else {
     Write-Host "API did not become ready in time. Check logs if the GUI does not open." -ForegroundColor Yellow

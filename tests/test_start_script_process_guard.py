@@ -35,6 +35,19 @@ def test_process_match_guard_only_targets_roughcut_runtime_processes() -> None:
         assert f'"{process_name}"' in body
 
 
+def test_local_api_startup_prints_192_168_lan_url() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    lan_body = _function_body(source, "Test-RoughCutLanIpv4Address")
+    api_match_body = _function_body(source, "Get-RoughCutApiCommandMatchPattern")
+
+    assert '$ApiBindHost = "0.0.0.0"' in source
+    assert '"--host", $ApiBindHost' in source
+    assert "LAN URL (192.168)" in source
+    assert "Get-RoughCutApiLanUrls -ApiPort $Port" in source
+    assert "$bytes[0] -eq 192 -and $bytes[1] -eq 168" in lan_body
+    assert "127\\.0\\.0\\.1|0\\.0\\.0\\.0" in api_match_body
+
+
 def test_worker_celery_fallback_pattern_is_not_split_into_wildcard_entry() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
     body = _function_body(source, "Start-RoughCutWorkerProcess")
@@ -60,8 +73,8 @@ def test_startup_service_probes_are_derived_from_configured_services() -> None:
     assert '"LOCAL_ASR_API_BASE_URL"' in body
     assert '"CosyVoice3 TTS"' in body
     assert "Get-CosyVoice3TtsBaseUrl" in body
-    assert '"MOSS-TTSD"' in body
-    assert "Get-MossTtsBaseUrl" in body
+    assert '"MOSS-TTS Local"' in body
+    assert "Get-MossTtsLocalBaseUrl" in body
     assert "Get-ConfiguredVoiceProvider" in body
     assert '"VOICE_CLONE_API_BASE_URL"' in body
     assert '"runninghub"' in body
@@ -77,13 +90,13 @@ def test_cosyvoice3_probe_uses_config_or_roughcut_compose_port() -> None:
     assert "Get-BaseUrlWithPort" in body
 
 
-def test_moss_tts_probe_uses_config_or_roughcut_compose_port() -> None:
+def test_moss_tts_local_probe_uses_config_or_roughcut_compose_port() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
-    body = _function_body(source, "Get-MossTtsBaseUrl")
+    body = _function_body(source, "Get-MossTtsLocalBaseUrl")
 
-    assert '"MOSS_TTS_API_BASE_URL"' in body
-    assert '"http://127.0.0.1:30190"' in body
-    assert 'Resolve-ContainerMappedPort -ContainerName "moss-ttsd" -ContainerPort 30000' in body
+    assert '"MOSS_TTS_LOCAL_API_BASE_URL"' in body
+    assert '"http://127.0.0.1:30191"' in body
+    assert 'Resolve-ContainerMappedPort -ContainerName "moss-tts-local" -ContainerPort 8080' in body
     assert "Get-BaseUrlWithPort" in body
 
 

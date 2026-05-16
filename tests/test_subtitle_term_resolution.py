@@ -1,4 +1,4 @@
-from roughcut.review.subtitle_term_resolution import _should_ignore_patch_candidate
+from roughcut.review.subtitle_term_resolution import _should_ignore_patch_candidate, build_subtitle_term_resolution_patch
 
 
 def test_ignore_flashlight_reflection_patch_in_knife_context() -> None:
@@ -35,3 +35,33 @@ def test_ignore_model_patch_when_numbers_conflict() -> None:
         suggested_span="EDC37",
         content_profile={"subject_domain": "flashlight", "subject_model": "EDC17"},
     )
+
+
+def test_unconfirmed_topic_fact_downgrades_auto_applied_term_patch() -> None:
+    patch = build_subtitle_term_resolution_patch(
+        corrections=[
+            {
+                "subtitle_item_id": "s1",
+                "original_span": "EDC幺七",
+                "suggested_span": "EDC17",
+                "change_type": "term",
+                "confidence": 0.97,
+                "source": "glossary",
+                "auto_applied": True,
+            }
+        ],
+        source_name="demo.mp4",
+        content_profile={
+            "subject_model": "EDC17",
+            "topic_fact_confirmation": {
+                "status": "needs_review",
+                "review_reasons": ["品牌/型号缺少深度调研或内部实体库交叉印证"],
+            },
+        },
+    )
+
+    assert patch["automatic_rewrites_allowed"] is False
+    assert patch["metrics"]["auto_applied_count"] == 0
+    assert patch["metrics"]["pending_count"] == 1
+    assert patch["patches"][0]["auto_applied"] is False
+    assert patch["patches"][0]["auto_apply_downgraded"] is True

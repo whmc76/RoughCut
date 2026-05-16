@@ -16,7 +16,7 @@ x-moss-audio-common: &moss-audio-common
     NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
     NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
   volumes:
-    - ${MOSS_AUDIO_HF_CACHE:-F:/roughcut_outputs/model-cache/huggingface}:/models/huggingface
+    - ${MOSS_AUDIO_HF_CACHE:-E:/WorkSpace/RoughCut/.model-cache/huggingface}:/models/huggingface
     - ./output/test/asr-bench/samples:/bench/audio:ro
   restart: unless-stopped
 

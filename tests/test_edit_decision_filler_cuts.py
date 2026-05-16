@@ -54,6 +54,49 @@ def test_auto_subtitle_rule_cuts_leading_hesitation_filler_only() -> None:
     assert candidates[0].end <= 1.2
 
 
+def test_auto_subtitle_rule_requires_transcript_filler_confirmation_when_asr_present() -> None:
+    candidates = _build_subtitle_cut_candidates(
+        [_subtitle("嗯先看手电")],
+        content_profile=None,
+        transcript_segments=[
+            {
+                "index": 0,
+                "start": 1.0,
+                "end": 2.0,
+                "text": "先看手电",
+                "words": [
+                    {"word": "先看", "start": 1.0, "end": 1.18, "alignment": {"source": "provider"}},
+                ],
+            }
+        ],
+    )
+
+    assert candidates == []
+
+
+def test_auto_subtitle_rule_allows_transcript_confirmed_filler_cut() -> None:
+    candidates = _build_subtitle_cut_candidates(
+        [_subtitle("嗯先看手电")],
+        content_profile=None,
+        transcript_segments=[
+            {
+                "index": 0,
+                "start": 1.0,
+                "end": 2.0,
+                "text": "嗯先看手电",
+                "words": [
+                    {"word": "嗯", "start": 1.0, "end": 1.2, "alignment": {"source": "provider"}},
+                    {"word": "先看", "start": 1.22, "end": 1.42, "alignment": {"source": "provider"}},
+                ],
+            }
+        ],
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].reason == "filler_word"
+    assert "subtitle_rule_confirmed_by_transcript_filler" in candidates[0].signals
+
+
 def test_auto_subtitle_rule_does_not_cut_mid_sentence_hesitation_particle() -> None:
     candidates = _build_subtitle_cut_candidates(
         [_subtitle("大家看到现在这个嗯后面继续讲")],

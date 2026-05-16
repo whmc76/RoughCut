@@ -109,6 +109,71 @@ async def test_transcribe_long_audio_in_chunks_offsets_segments_and_reports_prog
     assert {event["phase"] for event in progress_events} >= {"export", "request", "complete"}
 
 
+@pytest.mark.asyncio
+async def test_transcribe_long_audio_in_chunks_drops_repeated_chunk_decode_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    provider = LocalHTTPASRProvider()
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"stub")
+    chunk_config = AudioChunkConfig(
+        enabled=True,
+        threshold_sec=10.0,
+        chunk_size_sec=20.0,
+        min_chunk_sec=8.0,
+        overlap_sec=0.0,
+        request_timeout_sec=180.0,
+        request_max_retries=2,
+        request_retry_backoff_sec=5.0,
+        export_timeout_sec=180.0,
+    )
+    repeated_sentence = "之前都是那个人先开的，它的这个结合金版本确实还挺帅的完全不差。"
+
+    monkeypatch.setattr(
+        "roughcut.providers.transcription.local_http_asr.build_audio_chunk_specs",
+        lambda duration, config: [
+            AudioChunkSpec(index=0, count=2, start=0.0, end=20.0),
+            AudioChunkSpec(index=1, count=2, start=20.0, end=40.0),
+        ],
+    )
+
+    def _export_audio_chunk(_: Path, chunk_path: Path, *, start: float, end: float, timeout_sec: float | None = None) -> None:
+        chunk_path.write_bytes(f"{start}-{end}".encode("utf-8"))
+
+    async def _post_transcribe_request(chunk_path: Path, *, context: str | None, max_new_tokens: int, timeout):
+        return {
+            "duration": 20.0,
+            "segments": [
+                {
+                    "start_time": 0.0,
+                    "end_time": 12.0,
+                    "text": repeated_sentence,
+                }
+            ],
+        }
+
+    monkeypatch.setattr("roughcut.providers.transcription.local_http_asr.export_audio_chunk", _export_audio_chunk)
+    monkeypatch.setattr(provider, "_post_transcribe_request", _post_transcribe_request)
+
+    result = await provider._transcribe_long_audio_in_chunks(
+        audio_path,
+        language="zh-CN",
+        context="",
+        total_duration=40.0,
+        max_new_tokens=4096,
+        chunk_config=chunk_config,
+        progress_callback=None,
+    )
+
+    assert "".join(segment.text for segment in result.segments) == repeated_sentence
+    assert result.segments[0].start == 0.0
+    assert result.segments[-1].end == 20.0
+    filtering = result.segments[0].raw_payload["_roughcut_filtering"]
+    assert filtering["dropped_decode_loop_segment_sequences"]["dropped_count"] == 2
+    assert filtering["dropped_decode_loop_segment_sequences"]["dropped_start"] == 20.0
+
+
 def test_extract_chunking_summary() -> None:
     summary = extract_chunking_summary(
         {
