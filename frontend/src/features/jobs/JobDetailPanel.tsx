@@ -248,6 +248,7 @@ export function JobDetailPanel({
   const { t } = useI18n();
   const isReviewMode = selectedJob?.status === "needs_review";
   const isAwaitingInitialization = Boolean(selectedJob?.awaiting_initialization || selectedJob?.status === "awaiting_init");
+  const isAwaitingManualEdit = Boolean(selectedJob?.awaiting_manual_edit || selectedJob?.status === "awaiting_manual_edit");
   const showReviewConfig = isReviewMode && !flowOnly;
   const showFlowSections = !isReviewMode || flowOnly;
   const currentStep = activity?.current_step;
@@ -398,6 +399,11 @@ export function JobDetailPanel({
             </button>
           </div>
           {showDownload ? <div className="muted compact-top">{downloadHint}</div> : null}
+          {isAwaitingManualEdit ? (
+            <div className="notice compact-top">
+              {selectedJob.review_detail || "智能辅助模式已完成剪辑预处理，等待用户打开手动调整并保存后再进入渲染。"}
+            </div>
+          ) : null}
 
           {isMergedTask ? (
             <section className="detail-block">

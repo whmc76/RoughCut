@@ -33,6 +33,8 @@ from roughcut.api.jobs import (
     _manual_editor_change_plan,
     _manual_editor_prerequisite_detail,
     _manual_editor_preview_assets_response,
+    _manual_editor_projected_subtitles_have_duplicate_source_overlap,
+    _manual_editor_projection_should_use_source_fallback,
     _manual_projection_has_source_text_mismatch,
     _manual_editor_smart_delete_segments,
     _manual_keep_segments_from_editorial_payload,
@@ -651,6 +653,43 @@ def test_transcript_projection_validation_blocks_kept_asr_speech_without_subtitl
     assert result["blocking"] is True
     assert result["issue_counts"]["kept_transcript_speech_missing_projected_subtitle"] == 1
     assert result["blocking_examples"][0]["text"] == "手电"
+
+
+def test_manual_editor_projection_falls_back_when_kept_asr_is_missing() -> None:
+    assert _manual_editor_projection_should_use_source_fallback(
+        [
+            {"start_time": 0.0, "end_time": 0.4, "text_final": "今天"},
+        ],
+        source_subtitles=[
+            {
+                "index": 0,
+                "start_time": 0.0,
+                "end_time": 2.0,
+                "text_final": "今天看手电",
+                "words": [
+                    {"word": "今天", "start": 0.0, "end": 0.35, "alignment": {"source": "provider"}},
+                    {"word": "手电", "start": 1.0, "end": 1.35, "alignment": {"source": "provider"}},
+                ],
+            }
+        ],
+        keep_segments=[{"start": 0.0, "end": 2.0}],
+    ) is True
+
+
+def test_manual_editor_projection_falls_back_on_duplicate_source_alternatives() -> None:
+    projected = [
+        {"index": 70, "source_index": 41, "source_indexes": [41], "start_time": 100.0, "end_time": 101.2, "text_final": "那身份牌啊"},
+        {"index": 71, "source_index": 41, "source_indexes": [41], "start_time": 100.02, "end_time": 101.18, "text_final": "那身份卡啊"},
+    ]
+
+    assert _manual_editor_projected_subtitles_have_duplicate_source_overlap(projected) is True
+    assert _manual_editor_projection_should_use_source_fallback(
+        projected,
+        source_subtitles=[
+            {"index": 41, "start_time": 137.0, "end_time": 138.4, "text_final": "那身份卡啊"},
+        ],
+        keep_segments=[{"start": 137.0, "end": 138.4}],
+    ) is True
 
 
 def test_transcript_projection_validation_ignores_speech_removed_by_cut() -> None:

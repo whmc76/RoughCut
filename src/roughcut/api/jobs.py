@@ -88,6 +88,7 @@ from roughcut.media.subtitle_projection_validation import (
     projection_has_source_text_mismatch,
     source_ranges_for_output_range,
     validate_projected_subtitles_against_source,
+    validate_projected_subtitles_against_transcript,
 )
 from roughcut.media.subtitle_spans import (
     subtitle_span_alignment_diagnostics,
@@ -1999,6 +2000,70 @@ def _manual_projection_has_source_text_mismatch(
     return projection_has_source_text_mismatch(projected_subtitles, source_subtitles)
 
 
+def _manual_editor_subtitle_source_indexes(item: dict[str, Any]) -> set[int]:
+    indexes: set[int] = set()
+    for raw_index in list(item.get("source_indexes") or []):
+        try:
+            indexes.add(int(raw_index))
+        except (TypeError, ValueError):
+            continue
+    raw_source_index = item.get("source_index", item.get("index"))
+    try:
+        indexes.add(int(raw_source_index))
+    except (TypeError, ValueError):
+        pass
+    return indexes
+
+
+def _manual_editor_projected_subtitles_have_duplicate_source_overlap(
+    projected_subtitles: list[dict[str, Any]],
+) -> bool:
+    rows = sorted(
+        [item for item in projected_subtitles if isinstance(item, dict)],
+        key=lambda item: (
+            float(item.get("start_time", item.get("start", 0.0)) or 0.0),
+            float(item.get("end_time", item.get("end", 0.0)) or 0.0),
+        ),
+    )
+    for index in range(1, len(rows)):
+        previous = rows[index - 1]
+        current = rows[index]
+        previous_indexes = _manual_editor_subtitle_source_indexes(previous)
+        current_indexes = _manual_editor_subtitle_source_indexes(current)
+        if not previous_indexes or previous_indexes.isdisjoint(current_indexes):
+            continue
+        try:
+            previous_start = float(previous.get("start_time", previous.get("start", 0.0)) or 0.0)
+            previous_end = float(previous.get("end_time", previous.get("end", previous_start)) or previous_start)
+            current_start = float(current.get("start_time", current.get("start", 0.0)) or 0.0)
+            current_end = float(current.get("end_time", current.get("end", current_start)) or current_start)
+        except (TypeError, ValueError):
+            continue
+        overlap = min(previous_end, current_end) - max(previous_start, current_start)
+        min_duration = min(max(0.001, previous_end - previous_start), max(0.001, current_end - current_start))
+        if overlap / min_duration >= 0.72:
+            return True
+    return False
+
+
+def _manual_editor_projection_should_use_source_fallback(
+    projected_subtitles: list[dict[str, Any]],
+    *,
+    source_subtitles: list[dict[str, Any]],
+    keep_segments: list[dict[str, Any]],
+) -> bool:
+    if not projected_subtitles or not source_subtitles or not keep_segments:
+        return False
+    if _manual_editor_projected_subtitles_have_duplicate_source_overlap(projected_subtitles):
+        return True
+    validation = validate_projected_subtitles_against_transcript(
+        projected_subtitles,
+        transcript_segments=source_subtitles,
+        keep_segments=keep_segments,
+    )
+    return bool(validation.get("blocking"))
+
+
 def _normalize_manual_keep_segments(
     segments: list[dict[str, Any]] | list[ManualEditorSegmentIn],
     *,
@@ -3164,6 +3229,16 @@ async def _build_manual_editor_session(
         ),
     )
     projected_subtitles = projection_validation.subtitles
+    keep_segment_payloads = [segment.model_dump(include={"start", "end"}) for segment in keep_segments]
+    if _manual_editor_projection_should_use_source_fallback(
+        projected_subtitles,
+        source_subtitles=source_subtitle_dicts,
+        keep_segments=keep_segment_payloads,
+    ):
+        projected_subtitles = remap_subtitles_to_timeline(
+            _clean_manual_editor_subtitle_projection(source_subtitle_dicts, drop_empty=False, collapse_repeats=False),
+            keep_segment_payloads,
+        )
     projected_subtitles = _clean_manual_editor_subtitle_projection(projected_subtitles)
     source_path = _resolve_manual_editor_source_path(job)
     status_detail = _manual_editor_detail_for_job_status(str(job.status or ""))
@@ -3560,6 +3635,15 @@ async def apply_manual_editor_timeline(
         ),
     )
     remapped_subtitles = projection_validation.subtitles
+    if _manual_editor_projection_should_use_source_fallback(
+        remapped_subtitles,
+        source_subtitles=source_subtitle_dicts,
+        keep_segments=keep_segments,
+    ):
+        remapped_subtitles = remap_subtitles_to_timeline(
+            _clean_manual_editor_subtitle_projection(source_subtitle_dicts, drop_empty=False, collapse_repeats=False),
+            keep_segments,
+        )
     base_output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in remapped_subtitles), default=0.0)
     subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
     subtitle_replacement_payloads = _manual_subtitle_replacement_payloads(request.subtitle_replacements)
@@ -5358,6 +5442,17 @@ def _build_current_step(job: Job) -> dict | None:
             "updated_at": _iso_or_none(job.updated_at),
         }
 
+    if job.status == "awaiting_manual_edit":
+        waiting_context = _resolve_manual_editor_waiting_context(job)
+        return {
+            "step_name": waiting_context["step_name"],
+            "label": waiting_context["label"],
+            "status": "pending",
+            "detail": waiting_context["detail"],
+            "progress": None,
+            "updated_at": _iso_or_none(job.updated_at),
+        }
+
     next_pending = next((step for step in steps if step.status == "pending"), None)
     if next_pending:
         meta = next_pending.metadata_ or {}
@@ -6211,6 +6306,10 @@ def _attach_job_preview(job: Job, *, lightweight: bool = False) -> None:
     job.review_detail = review_preview["detail"]
     job.awaiting_initialization = str(job.status or "").strip() == "awaiting_init"
     job.awaiting_manual_edit = str(job.status or "").strip() == "awaiting_manual_edit"
+    if job.awaiting_manual_edit:
+        manual_preview = _resolve_manual_editor_waiting_context(job)
+        job.review_label = manual_preview["label"]
+        job.review_detail = manual_preview["detail"]
     publication_preview = _resolve_job_publication_preview(job)
     job.publication_status = publication_preview["status"]
     job.publication_summary = publication_preview["summary"]
@@ -6792,6 +6891,24 @@ def _pending_step_standard_detail(step_name: str) -> str | None:
     if normalized == "platform_package":
         return "等待调度器派发生成平台文案。"
     return None
+
+
+def _manual_editor_waiting_detail() -> str:
+    return "智能辅助模式已完成剪辑预处理，等待用户打开手动调整并保存后再进入渲染。"
+
+
+def _resolve_manual_editor_waiting_context(job: Job) -> dict[str, str | None]:
+    steps = _ordered_steps(job.steps or [])
+    render_step = _find_step(steps, "render")
+    step_name = "render" if render_step is not None else "edit_plan"
+    detail = ""
+    if render_step is not None:
+        detail = str((render_step.metadata_ or {}).get("detail") or "").strip()
+    return {
+        "step_name": step_name,
+        "label": STEP_LABELS.get(step_name, step_name),
+        "detail": detail or _manual_editor_waiting_detail(),
+    }
 
 
 def _job_has_final_review_signals(job: Job | None) -> bool:

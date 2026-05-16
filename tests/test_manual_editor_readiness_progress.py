@@ -10,6 +10,51 @@ from roughcut.db.models import Artifact, Job, JobStep, Timeline
 from roughcut.db.session import Base
 
 
+def test_awaiting_manual_edit_preview_exposes_waiting_detail():
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="source.mp4",
+        source_name="source.mp4",
+        status="awaiting_manual_edit",
+    )
+    job.steps = [
+        JobStep(job_id=job.id, step_name="edit_plan", status="done"),
+        JobStep(
+            job_id=job.id,
+            step_name="render",
+            status="pending",
+            metadata_={"detail": "智能辅助模式已完成预处理，等待用户手动调整后再进入渲染。"},
+        ),
+    ]
+
+    jobs_api._attach_job_preview(job)
+
+    assert job.awaiting_manual_edit is True
+    assert job.review_step is None
+    assert job.review_label == "渲染输出"
+    assert job.review_detail == "智能辅助模式已完成预处理，等待用户手动调整后再进入渲染。"
+
+
+def test_awaiting_manual_edit_current_step_uses_manual_waiting_context():
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="source.mp4",
+        source_name="source.mp4",
+        status="awaiting_manual_edit",
+    )
+    job.steps = [
+        JobStep(job_id=job.id, step_name="edit_plan", status="done"),
+        JobStep(job_id=job.id, step_name="render", status="pending"),
+    ]
+
+    current_step = jobs_api._build_current_step(job)
+
+    assert current_step is not None
+    assert current_step["step_name"] == "render"
+    assert current_step["status"] == "pending"
+    assert "等待用户打开手动调整" in str(current_step["detail"])
+
+
 def test_manual_editor_readiness_progress_includes_running_step_progress():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 

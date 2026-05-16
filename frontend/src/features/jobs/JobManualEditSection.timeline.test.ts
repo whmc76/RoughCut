@@ -15,6 +15,7 @@ import {
   outputTimeToSourceTimeForSegments,
   outputTimeToSourceTime,
   projectedTranscriptMissesKeptSpeech,
+  projectedSubtitlesHaveDuplicateSourceOverlap,
   removeTranscriptSelectionTextFromSubtitleDrafts,
   remapSubtitles,
   remapProjectedSubtitlesFromBaseTimeline,
@@ -302,7 +303,7 @@ describe("manual editor timeline mapping", () => {
     );
 
     expect(transcript).toEqual([
-      { index: 26, start_time: 99.26, end_time: 101.18, text_final: "投影字幕" },
+      { index: 26, start_time: 99.26, end_time: 101.18, text_final: "源字幕" },
     ]);
   });
 
@@ -321,7 +322,7 @@ describe("manual editor timeline mapping", () => {
     );
 
     expect(transcript).toEqual([
-      { index: 52, start_time: 188.807, end_time: 192.22, text_final: "投影字幕" },
+      { index: 52, start_time: 188.807, end_time: 192.22, text_final: "源字幕" },
     ]);
   });
 
@@ -340,6 +341,32 @@ describe("manual editor timeline mapping", () => {
     );
 
     expect(transcript[0].text_final).toBe("那身份卡啊");
+  });
+
+  it("does not let incomplete projected subtitles hide raw ASR in full-text editing", () => {
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          { index: 41, start_time: 137.0, end_time: 138.4, text_raw: "那身份卡啊，所以还很期待", text_final: "那身份卡啊，所以还很期待" },
+        ],
+        projected_subtitles: [
+          { index: 70, source_index: 41, start_time: 100, end_time: 101, text_final: "那身份牌" },
+        ],
+      },
+      [
+        { index: 70, source_index: 41, start_time: 100, end_time: 101, text_final: "那身份牌" },
+      ],
+      {},
+    );
+
+    expect(transcript[0].text_final).toBe("那身份卡啊，所以还很期待");
+  });
+
+  it("detects duplicate projected subtitle alternatives on the same source span", () => {
+    expect(projectedSubtitlesHaveDuplicateSourceOverlap([
+      { index: 70, source_index: 41, source_indexes: [41], start_time: 100, end_time: 101.2, text_final: "那身份牌啊" },
+      { index: 71, source_index: 41, source_indexes: [41], start_time: 100.02, end_time: 101.18, text_final: "那身份卡啊" },
+    ])).toBe(true);
   });
 
   it("keeps the full source text when a deleted prefix is missing from projected subtitles", () => {
@@ -409,7 +436,7 @@ describe("manual editor timeline mapping", () => {
     expect(transcript.map((item) => item.text_final)).toEqual(["嗯", "我们开始"]);
   });
 
-  it("builds the full-text transcript from a stable projected baseline", () => {
+  it("keeps full-text transcript on raw source even when a projected baseline exists", () => {
     const session = {
       source_subtitles: [
         { index: 10, start_time: 10, end_time: 12, text_raw: "源字幕原文", text_final: "源字幕原文" },
@@ -429,8 +456,8 @@ describe("manual editor timeline mapping", () => {
     );
     const unstableTranscript = buildSourceTranscriptSubtitlesForTimeline(session, currentOutputProjection, {});
 
-    expect(transcript[0].text_final).toBe("稳定投影全文");
-    expect(unstableTranscript[0].text_final).toBe("稳定投影");
+    expect(transcript[0].text_final).toBe("源字幕原文");
+    expect(unstableTranscript[0].text_final).toBe("源字幕原文");
   });
 
   it("uses raw source text for filler rule analysis and auto ranges", () => {
@@ -532,8 +559,8 @@ describe("manual editor timeline mapping", () => {
       [{ start: 8.37, end: 9.45, duration_sec: 1.08, source: "audio_vad" }],
     );
 
-    expect(analysis.pause).toEqual([{ start: 8.37, end: 9.38, kind: "pause" }]);
-    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([{ start: 8.37, end: 9.38, kind: "pause" }]);
+    expect(analysis.pause).toEqual([{ start: 8.37, end: 9.3, kind: "pause" }]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([{ start: 8.37, end: 9.3, kind: "pause" }]);
   });
 
   it("uses real word timings for full-text transcript tokens", () => {
@@ -653,8 +680,31 @@ describe("manual editor timeline mapping", () => {
     const pauses = wordTimingPauseIntervals(subtitles);
     const tokens = buildTranscriptTokens(subtitles, [{ start: 10, end: 15 }], pauses);
 
-    expect(pauses).toEqual([{ start: 10.9, end: 12.1, duration_sec: 1.2, source: "word_gap" }]);
-    expect(tokens.some((token) => token.kind === "pause" && token.text === "[...,1.2s]")).toBe(true);
+    expect(pauses).toEqual([{ start: 10.98, end: 12.02, duration_sec: 1.04, source: "word_gap" }]);
+    expect(tokens.some((token) => token.kind === "pause" && token.text === "[...,1.0s]")).toBe(true);
+  });
+
+  it("keeps pause auto-cuts away from neighboring word edges", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 1,
+          start_time: 4.88,
+          end_time: 11.52,
+          text_final: "那身份卡啊所以还很期待",
+          words: [
+            { word: "那身份卡啊", start: 4.88, end: 5.42 },
+            { word: "所以", start: 5.62, end: 5.9 },
+            { word: "还很期待", start: 7.1, end: 7.7 },
+          ],
+        },
+      ],
+      rules,
+      [{ start: 5.88, end: 7.12, duration_sec: 1.24, source: "audio_vad" }],
+    );
+
+    expect(analysis.pause).toEqual([{ start: 6.06, end: 6.94, kind: "pause" }]);
   });
 
   it("expands a fully selected subtitle cut to the hidden subtitle timing edges", () => {

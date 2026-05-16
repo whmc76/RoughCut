@@ -1935,10 +1935,10 @@ export function buildSourceTranscriptSubtitlesForTimeline(
     const draft = subtitleDrafts[subtitle.index];
     const projectedText = projectedTextsBySourceIndex.get(subtitleSourceIndex(subtitle))?.join("");
     const sourceText = subtitleTranscriptSourceTextWithWords(subtitle);
+    const authoritativeSourceText = sourceText.trim() ? sourceText : undefined;
     const nextText = draft?.text_final
-      ?? (shouldPreferSourceTranscriptText(sourceText, projectedText) ? sourceText : undefined)
+      ?? authoritativeSourceText
       ?? projectedText
-      ?? sourceText
       ?? subtitleText(subtitle);
     return {
       ...subtitle,
@@ -2055,12 +2055,15 @@ export function wordTimingPauseIntervals(subtitles: JobManualEditSubtitle[], min
     for (let index = 1; index < words.length; index += 1) {
       const previous = words[index - 1];
       const current = words[index];
-      const start = previous.end;
-      const end = current.start;
+      const rawStart = previous.end;
+      const rawEnd = current.start;
+      if (rawEnd <= rawStart + minDuration - 0.001) continue;
+      const start = Number(Math.min(rawEnd, rawStart + WORD_TIMING_PAUSE_EDGE_GUARD_SEC).toFixed(3));
+      const end = Number(Math.max(start, rawEnd - WORD_TIMING_PAUSE_EDGE_GUARD_SEC).toFixed(3));
       if (end <= start + minDuration - 0.001) continue;
       intervals.push({
-        start: Number(start.toFixed(3)),
-        end: Number(end.toFixed(3)),
+        start,
+        end,
         duration_sec: Number((end - start).toFixed(3)),
         source: "word_gap",
       });
@@ -2094,6 +2097,26 @@ export function projectedTranscriptMissesKeptSpeech(
   return false;
 }
 
+function subtitleIndexesOverlap(left: JobManualEditSubtitle, right: JobManualEditSubtitle) {
+  const leftIndexes = new Set(subtitleSourceIndexes(left));
+  return subtitleSourceIndexes(right).some((index) => leftIndexes.has(index));
+}
+
+export function projectedSubtitlesHaveDuplicateSourceOverlap(subtitles: JobManualEditSubtitle[]) {
+  const sorted = sortedSubtitles(subtitles);
+  for (let index = 1; index < sorted.length; index += 1) {
+    const previous = sorted[index - 1];
+    const current = sorted[index];
+    if (!subtitleIndexesOverlap(previous, current)) continue;
+    const overlap = subtitleTimeOverlapSeconds(previous, current);
+    const previousDuration = Math.max(0.001, previous.end_time - previous.start_time);
+    const currentDuration = Math.max(0.001, current.end_time - current.start_time);
+    const overlapRatio = overlap / Math.min(previousDuration, currentDuration);
+    if (overlapRatio >= 0.72) return true;
+  }
+  return false;
+}
+
 const TRANSCRIPT_BOUNDARY_PUNCTUATION_PATTERN = /[。！？!?…，,、；;：:]$/;
 const TRANSCRIPT_SENTENCE_PUNCTUATION_PATTERN = /[。！？!?…]$/;
 
@@ -2112,8 +2135,9 @@ function inferTranscriptBreakAfter(text: string, gapAfter: number, paragraphChar
 }
 
 const TRANSCRIPT_TIMED_CHAR_RE = /[\u4e00-\u9fffA-Za-z0-9]/;
-const TRANSCRIPT_PAUSE_WORD_GUARD_SEC = 0.02;
+const TRANSCRIPT_PAUSE_WORD_GUARD_SEC = 0.08;
 const TRANSCRIPT_MIN_VISIBLE_PAUSE_SEC = 0.12;
+const WORD_TIMING_PAUSE_EDGE_GUARD_SEC = 0.08;
 
 type TimedTranscriptChar = {
   text: string;
@@ -2563,7 +2587,7 @@ function parseSmartCutFillers(value: string) {
 
 const SMART_CUT_BOUNDARY_PATTERN = /[\s,，、。.!！?？;；:：()[\]（）【】"'“”‘’]/;
 const SMART_CUT_HESITATION_FILLERS = new Set(["嗯", "呃", "额", "呃呃", "嗯嗯"]);
-const SMART_CUT_WORD_BOUNDARY_GUARD_SEC = 0.08;
+const SMART_CUT_WORD_BOUNDARY_GUARD_SEC = 0.16;
 
 function isSmartCutBoundary(char: string | undefined) {
   return !char || SMART_CUT_BOUNDARY_PATTERN.test(char);
@@ -3076,26 +3100,36 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const baseProjection = useMemo(
     () => {
       const sessionKeepSegments = session.keep_segments.map((segment) => ({ start: segment.start, end: segment.end }));
+      const sourceFallbackProjection = session.source_subtitles.length
+        ? remapSubtitles(session.source_subtitles, effectiveSegments)
+        : null;
+      const useSourceFallbackWhenProjectionMissesSpeech = (candidate: { remapped: JobManualEditSubtitle[]; ranges: OutputRange[] }) => {
+        if (!sourceFallbackProjection) return false;
+        if (projectedSubtitlesHaveDuplicateSourceOverlap(candidate.remapped)) return true;
+        const candidateOnSourceTimeline = projectedSubtitlesForTranscript(candidate.remapped, candidate.ranges);
+        return projectedTranscriptMissesKeptSpeech(candidateOnSourceTimeline, session.source_subtitles, effectiveSegments);
+      };
       if (
         session.projected_subtitles.length
         && keepSegmentsEquivalent(effectiveSegments, sessionKeepSegments)
       ) {
         const { ranges, totalDuration } = buildOutputRanges(effectiveSegments);
-        return {
+        const candidate = {
           ranges,
           totalDuration,
           remapped: sortedSubtitles(session.projected_subtitles),
         };
+        return useSourceFallbackWhenProjectionMissesSpeech(candidate) ? sourceFallbackProjection! : candidate;
       }
       if (session.projected_subtitles.length) {
-        return remapProjectedSubtitlesFromBaseTimeline(
+        const candidate = remapProjectedSubtitlesFromBaseTimeline(
           session.projected_subtitles,
           sessionKeepSegments,
           effectiveSegments,
         );
+        return useSourceFallbackWhenProjectionMissesSpeech(candidate) ? sourceFallbackProjection! : candidate;
       }
-      const fallbackProjection = remapSubtitles(session.source_subtitles, effectiveSegments);
-      return fallbackProjection;
+      return sourceFallbackProjection ?? remapSubtitles(session.projected_subtitles, effectiveSegments);
     },
     [session.keep_segments, session.projected_subtitles, session.source_subtitles, effectiveSegments],
   );

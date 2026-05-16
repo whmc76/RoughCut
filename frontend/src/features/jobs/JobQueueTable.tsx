@@ -108,6 +108,9 @@ function isTerminalJob(job: Job) {
 function reviewPreviewText(job: Job, t: (key: string) => string) {
   const { manualDescription, filenameDescription } = splitVideoDescription(job.video_description);
   const cutEvidenceSummary = formatCutEvidenceSummary(job.timeline_diagnostics);
+  if (job.awaiting_manual_edit) {
+    return job.review_detail || "智能辅助模式已完成剪辑预处理，等待打开手动调整并保存后再进入渲染。";
+  }
   if (job.status !== "needs_review") {
     return job.content_summary || job.content_subject || manualDescription || filenameDescription || t("jobs.queue.noSummary");
   }
