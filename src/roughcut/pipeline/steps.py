@@ -70,7 +70,12 @@ from roughcut.media.output import (
     write_srt_file,
 )
 from roughcut.media.scene import detect_scenes
-from roughcut.media.subtitle_text import clean_final_subtitle_text, clean_subtitle_payloads
+from roughcut.media.subtitle_text import (
+    clean_final_subtitle_text,
+    clean_subtitle_payloads,
+    normalize_contextual_noc_alias_text,
+    normalize_flashlight_model_alias_text,
+)
 from roughcut.media.subtitle_projection_validation import (
     validate_projected_subtitles_against_source,
     validate_projected_subtitles_against_transcript,
@@ -305,7 +310,35 @@ def _apply_subtitle_semantic_cleanup(
     content_profile: dict[str, Any] | None,
     review_memory: dict[str, Any] | None,
 ) -> int:
-    return 0
+    context_text = " ".join(
+        str(value or "")
+        for value in (
+            getattr(job, "source_name", ""),
+            (content_profile or {}).get("subject_brand"),
+            (content_profile or {}).get("subject_model"),
+            (content_profile or {}).get("subject_type"),
+            (content_profile or {}).get("video_theme"),
+            (content_profile or {}).get("summary"),
+            (content_profile or {}).get("hook_line"),
+        )
+    )
+    changed = 0
+    for item in subtitle_items:
+        current = str(
+            getattr(item, "text_final", None)
+            or getattr(item, "text_norm", None)
+            or getattr(item, "text_raw", "")
+            or ""
+        ).strip()
+        normalized = normalize_contextual_noc_alias_text(current, context_text=context_text)
+        if normalized == current:
+            continue
+        if hasattr(item, "text_norm"):
+            item.text_norm = normalized
+        if hasattr(item, "text_final"):
+            item.text_final = normalized
+        changed += 1
+    return changed
 
 
 _TRANSCRIPTION_PROVIDER_LABELS: dict[str, str] = {
@@ -3399,6 +3432,8 @@ def _build_transcript_first_canonical_layer(
         segment_index = int(getattr(transcript_row, "segment_index", index) or index)
         synthetic_id = synthetic_ids[segment_index]
         transcript_text = str(getattr(transcript_row, "text", "") or "")
+        if str(category_scope or "").strip().lower() == "flashlight":
+            transcript_text = normalize_flashlight_model_alias_text(transcript_text)
         synthetic_items.append(
             SimpleNamespace(
                 id=synthetic_id,
@@ -3993,6 +4028,18 @@ def _merge_automatic_gate_with_subtitle_projection(
         merged["blocking"] = bool(merged.get("blocking"))
     merged["blocking_reasons"] = reasons
     return merged
+
+
+def _attach_edit_decision_projection_gate_analysis(
+    decision: Any,
+    *,
+    subtitle_source_projection_validation: dict[str, Any],
+    automatic_gate: dict[str, Any],
+) -> None:
+    if not hasattr(decision, "analysis") or not isinstance(getattr(decision, "analysis", None), dict):
+        decision.analysis = {}
+    decision.analysis["subtitle_source_projection_validation"] = subtitle_source_projection_validation
+    decision.analysis["automatic_gate"] = automatic_gate
 
 
 async def _load_subtitle_corrections(session, *, job_id: uuid.UUID) -> list[SubtitleCorrection]:
@@ -6056,7 +6103,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
                 content_profile=content_profile or {"workflow_template": job.workflow_template or "unboxing_standard"},
                 glossary_terms=effective_glossary_terms,
                 review_memory=review_memory,
-                allow_llm=False,
+                allow_llm=True,
             )
             semantic_cleanup_count = _apply_subtitle_semantic_cleanup(
                 items,
@@ -7753,6 +7800,16 @@ async def run_edit_plan(job_id: str) -> dict:
             dict(decision.analysis.get("automatic_gate") or {}),
             subtitle_source_projection_validation,
         )
+        _attach_edit_decision_projection_gate_analysis(
+            decision,
+            subtitle_source_projection_validation=subtitle_source_projection_validation,
+            automatic_gate=automatic_gate,
+        )
+        editorial_timeline.data_json = decision.to_dict()
+        try:
+            editorial_timeline.otio_data = export_to_otio(decision.to_dict())
+        except Exception:
+            pass  # OTIO optional
         render_plan_dict["automatic_gate"] = automatic_gate
         await save_render_plan(job.id, render_plan_dict, session)
         session.add(

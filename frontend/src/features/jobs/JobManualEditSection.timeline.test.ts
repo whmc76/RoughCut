@@ -11,6 +11,7 @@ import {
   buildSourceTranscriptSubtitlesForTimeline,
   buildOutputWaveformBars,
   findSubtitleIndexNearOutputTime,
+  buildSmartCutRulePreviews,
   normalizeAdjacentSubtitleTextOverlaps,
   outputTimeToSourceTimeForSegments,
   outputTimeToSourceTime,
@@ -19,11 +20,13 @@ import {
   removeTranscriptSelectionTextFromSubtitleDrafts,
   remapSubtitles,
   remapProjectedSubtitlesFromBaseTimeline,
+  resolveEditedPlaybackSyncDecision,
   sourceTimeToEditedPlaybackStartTime,
   sourceTimeToActiveOutputTime,
   sourceTimeToOutputTime,
   sourceRangeOverlapsCutRanges,
   smartCutRuleManagedRanges,
+  subtitleAutoCorrectionSummary,
   transcriptCutRangesForSelection,
   wordTimingPauseIntervals,
 } from "./JobManualEditSection";
@@ -44,6 +47,38 @@ const ranges = [
 ];
 
 describe("manual editor timeline mapping", () => {
+  it("summarizes automatic subtitle text corrections", () => {
+    expect(subtitleAutoCorrectionSummary({
+      index: 0,
+      start_time: 0,
+      end_time: 1,
+      text_raw: "最近这三次NFC的发烧太难了",
+      text_norm: "最近这三次NOC的发烧太难了",
+    })).toEqual({
+      label: "规则清理",
+      source: "最近这三次NFC的发烧太难了",
+      current: "最近这三次NOC的发烧太难了",
+    });
+
+    expect(subtitleAutoCorrectionSummary({
+      index: 1,
+      start_time: 1,
+      end_time: 2,
+      text_raw: "这个也算是我这次的欧气",
+      text_norm: "这个也算是我这次的欧气",
+      text_final: "这个也算是我这次的运气",
+    })?.label).toBe("LLM精修");
+
+    expect(subtitleAutoCorrectionSummary({
+      index: 2,
+      start_time: 2,
+      end_time: 3,
+      text_raw: "没有变化",
+      text_norm: "没有变化",
+      text_final: "没有变化",
+    })).toBeNull();
+  });
+
   it("summarizes pending manual editor changes for the top change list", () => {
     const changes = buildManualEditChangeList({
       baseSegments: [
@@ -102,6 +137,19 @@ describe("manual editor timeline mapping", () => {
     expect(sourceTimeToEditedPlaybackStartTime(41.5, ranges)).toBe(42.21);
     expect(sourceTimeToEditedPlaybackStartTime(10, ranges)).toBe(10);
     expect(sourceTimeToEditedPlaybackStartTime(90, ranges)).toBeNull();
+  });
+
+  it("keeps output preview moving across cut gaps and range boundaries", () => {
+    const introRanges = [
+      { sourceStart: 0.96, sourceEnd: 1.32, outputStart: 0, outputEnd: 0.36 },
+      { sourceStart: 1.62, sourceEnd: 4.06, outputStart: 0.36, outputEnd: 2.8 },
+      { sourceStart: 5.91, sourceEnd: 8.37, outputStart: 2.8, outputEnd: 5.26 },
+    ];
+
+    expect(resolveEditedPlaybackSyncDecision(2.4, introRanges)).toEqual({ action: "none" });
+    expect(resolveEditedPlaybackSyncDecision(4.061, introRanges)).toEqual({ action: "seek", sourceTime: 5.91 });
+    expect(resolveEditedPlaybackSyncDecision(4.8, introRanges)).toEqual({ action: "seek", sourceTime: 5.91 });
+    expect(resolveEditedPlaybackSyncDecision(8.38, introRanges)).toEqual({ action: "stop" });
   });
 
   it("shows an empty manual editor change list item when the draft is unchanged", () => {
@@ -225,7 +273,7 @@ describe("manual editor timeline mapping", () => {
     expect(sourceRangeOverlapsCutRanges(tokens[1].start, tokens[1].end, cutRanges)).toBe(false);
   });
 
-  it("makes inferred transcript punctuation selectable as a source boundary range", () => {
+  it("keeps inferred transcript punctuation selectable as a source boundary range", () => {
     const subtitles = [
       { index: 0, start_time: 10, end_time: 11, text_final: "前一句内容" },
       { index: 1, start_time: 11.8, end_time: 13, text_final: "后一句内容" },
@@ -235,6 +283,7 @@ describe("manual editor timeline mapping", () => {
 
     expect(punctuationIndex).toBeGreaterThan(-1);
     expect(["，", "。"]).toContain(tokens[punctuationIndex].text);
+    expect(tokens[punctuationIndex].inferredPunctuation).toBe(tokens[punctuationIndex].text);
     expect(transcriptCutRangesForSelection(
       subtitles,
       tokens,
@@ -386,7 +435,7 @@ describe("manual editor timeline mapping", () => {
     expect(transcript[0].text_final).toBe("挺明显的还是");
   });
 
-  it("uses ASR word text when the subtitle text drops audible words in the middle", () => {
+  it("does not let ASR word timing text override canonical subtitle body", () => {
     const transcript = buildSourceTranscriptSubtitlesForTimeline(
       {
         source_subtitles: [
@@ -412,8 +461,35 @@ describe("manual editor timeline mapping", () => {
       {},
     );
 
-    expect(transcript[0].text_final).toBe("小玩具然后呢也是耗尽了");
-    expect(buildTranscriptTokens(transcript, [{ start: 0, end: 10 }]).map((token) => token.text).join("")).toContain("然后呢");
+    expect(transcript[0].text_final).toBe("小玩具也是耗尽了");
+    expect(buildTranscriptTokens(transcript, [{ start: 0, end: 10 }]).map((token) => token.text).join("")).not.toContain("然后呢");
+  });
+
+  it("does not render ASR word timing text for empty source subtitle rows", () => {
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          {
+            index: 66,
+            start_time: 58.77,
+            end_time: 59,
+            text_raw: "",
+            text_final: "",
+            words: [
+              { word: "你看啊啊好不过好在呢", start: 39.42, end: 42.18 },
+              { word: "还算抢到了啊", start: 42.18, end: 44.94 },
+            ],
+            alignment_diagnostics: { status: "warning", issues: ["missing_display_text"], matched_ratio: 0 },
+          },
+        ],
+        projected_subtitles: [],
+      },
+      [],
+      {},
+    );
+
+    expect(transcript[0].text_final).toBe("");
+    expect(buildTranscriptTokens(transcript, [{ start: 0, end: 60 }]).map((token) => token.text).join("")).toBe("");
   });
 
   it("keeps raw filler-only source rows visible in the full transcript", () => {
@@ -434,6 +510,27 @@ describe("manual editor timeline mapping", () => {
     );
 
     expect(transcript.map((item) => item.text_final)).toEqual(["嗯", "我们开始"]);
+  });
+
+  it("uses corrected canonical subtitle text before raw ASR text in the full transcript", () => {
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          {
+            index: 0,
+            start_time: 0,
+            end_time: 1,
+            text_raw: "NNOCOC的的这个个发发售售太太难难了了",
+            text_final: "NOC的这个发售太难了",
+          },
+        ],
+        projected_subtitles: [],
+      },
+      [],
+      {},
+    );
+
+    expect(transcript[0].text_final).toBe("NOC的这个发售太难了");
   });
 
   it("keeps full-text transcript on raw source even when a projected baseline exists", () => {
@@ -458,6 +555,182 @@ describe("manual editor timeline mapping", () => {
 
     expect(transcript[0].text_final).toBe("源字幕原文");
     expect(unstableTranscript[0].text_final).toBe("源字幕原文");
+  });
+
+  it("does not repeat full-row timing text for split source transcript rows", () => {
+    const text = "而且这个是有 DLC 涂层的嘛，本身它就有一定的润滑的作用，呃，摸起来真是啊，确实不错啊，呃，钢合金这个版本比我预想的还是要嗯更好一点，然后尾部呢还有一个这个，啊，这个。";
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          {
+            index: 100,
+            start_time: 100,
+            end_time: 113,
+            text_raw: text,
+            text_final: text,
+            words: Array.from(text).map((word, index) => ({
+              word,
+              start: 100 + index * 0.04,
+              end: 100 + (index + 1) * 0.04,
+            })),
+            alignment_tokens: Array.from(text).map((token, index) => ({
+              text: token,
+              start: 100 + index * 0.04,
+              end: 100 + (index + 1) * 0.04,
+            })),
+          },
+        ],
+        projected_subtitles: [],
+      },
+      [],
+      {},
+    );
+    const rendered = buildTranscriptTokens(transcript, [{ start: 100, end: 113 }], [])
+      .filter((token) => token.kind === "char")
+      .map((token) => token.text)
+      .join("");
+
+    expect(transcript.length).toBeGreaterThan(1);
+    expect(transcript.every((subtitle) => !subtitle.words?.length && !subtitle.alignment_tokens?.length)).toBe(true);
+    expect(rendered).toBe(transcript.map((subtitle) => subtitle.text_final).join(""));
+    expect(rendered.match(/涂层/g)?.length).toBe(1);
+    expect(rendered).not.toContain("涂层涂层");
+    expect(rendered).not.toContain("的的的");
+  });
+
+  it("renders canonical punctuation even when backend alignment tokens only contain timed characters", () => {
+    const tokens = buildTranscriptTokens(
+      [
+        {
+          index: 10,
+          start_time: 10,
+          end_time: 12,
+          text_final: "NOC的这个发售，太难了。",
+          alignment_tokens: Array.from("NOC的这个发售太难了").map((text, index) => ({
+            text,
+            start: 10 + index * 0.04,
+            end: 10 + (index + 1) * 0.04,
+          })),
+        },
+      ],
+      [{ start: 10, end: 12 }],
+      [],
+    );
+
+    expect(tokens.filter((token) => token.kind === "char").map((token) => token.text).join("")).toBe("NOC的这个发售，太难了。");
+  });
+
+  it("keeps canonical text order when timing metadata is not monotonic", () => {
+    const tokens = buildTranscriptTokens(
+      [
+        {
+          index: 10,
+          start_time: 10,
+          end_time: 12,
+          text_final: "NOC的，这个发售啊，嗯，太难了。",
+          alignment_tokens: [
+            { text: "N", start: 10.0, end: 10.1 },
+            { text: "O", start: 10.1, end: 10.2 },
+            { text: "C", start: 10.2, end: 10.3 },
+            { text: "的", start: 10.3, end: 10.5 },
+            { text: "这", start: 10.42, end: 10.52 },
+            { text: "个", start: 10.52, end: 10.62 },
+            { text: "发", start: 10.62, end: 10.72 },
+            { text: "售", start: 10.72, end: 10.82 },
+            { text: "啊", start: 10.82, end: 10.92 },
+            { text: "嗯", start: 10.9, end: 11.0 },
+            { text: "太", start: 11.0, end: 11.1 },
+            { text: "难", start: 11.1, end: 11.2 },
+            { text: "了", start: 11.2, end: 11.3 },
+          ],
+        },
+      ],
+      [{ start: 10, end: 12 }],
+      [],
+    );
+
+    expect(tokens.filter((token) => token.kind === "char").map((token) => token.text).join("")).toBe("NOC的，这个发售啊，嗯，太难了。");
+  });
+
+  it("keeps full-text editing on source subtitles even when projected subtitles look cleaner", () => {
+    const session = {
+      keep_segments: [{ start: 0, end: 30 }],
+      source_subtitles: [
+        {
+          index: 9,
+          start_time: 17.12,
+          end_time: 20.78,
+          text_raw: "NC的这个发售太难了难上加难",
+          text_final: "NC的这个发售太难了难上加难",
+        },
+      ],
+      projected_subtitles: [
+        { index: 90, source_index: 9, source_indexes: [9], start_time: 17.12, end_time: 18.9, text_final: "NOC的这个发售" },
+        { index: 91, source_index: 9, source_indexes: [9], start_time: 19.6, end_time: 20.78, text_final: "太难了难上加难" },
+      ],
+    };
+
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      session,
+      buildSourceTranscriptProjectedBaseline(session, {}),
+      {},
+    );
+
+    expect(transcript.map((item) => item.text_final).join("")).toBe("NC的这个发售太难了难上加难");
+    expect(transcript.map((item) => [item.start_time, item.end_time])).toEqual([[17.12, 20.78]]);
+  });
+
+  it("does not splice output subtitle projection text back into the full source transcript", () => {
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        keep_segments: [{ start: 1.6, end: 39.42 }],
+        source_subtitles: [
+          { index: 49, source_index: 0, start_time: 1.6, end_time: 5.05, text_final: "哦，今天终于收到了年前的" },
+          { index: 50, source_index: 0, start_time: 5.05, end_time: 8.5, text_final: "最后的一款小玩具啊，嗯，" },
+        ],
+        projected_subtitles: [
+          { index: 1, source_index: 0, start_time: 0.1, end_time: 0.5, text_final: "今天终于收到了年前最后的一款小玩具我这这次的气欧啊" },
+          { index: 2, source_index: 0, start_time: 0.5, end_time: 0.8, text_final: "NOCNO的C的这个发售" },
+        ],
+      },
+      [
+        { index: 1, source_index: 0, start_time: 0.1, end_time: 0.5, text_final: "今天终于收到了年前最后的一款小玩具我这这次的气欧啊" },
+        { index: 2, source_index: 0, start_time: 0.5, end_time: 0.8, text_final: "NOCNO的C的这个发售" },
+      ],
+      {},
+    );
+
+    const text = transcript.map((item) => item.text_final).join("");
+    expect(text).toBe("哦，今天终于收到了年前的最后的一款小玩具啊，嗯，");
+    expect(text).not.toContain("NOCNO");
+    expect(text).not.toContain("我这这次");
+  });
+
+  it("splits source fallback subtitles so preview rows do not regress into long lines", () => {
+    const projection = remapSubtitles(
+      [
+        {
+          index: 9,
+          start_time: 0,
+          end_time: 8,
+          text_final: "没有这个像很多兄弟一样隐恨总算这个年还能过不然这个真的是难受能难受好久",
+        },
+      ],
+      [{ start: 0, end: 8 }],
+    );
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        keep_segments: [{ start: 0, end: 8 }],
+        source_subtitles: projection.remapped,
+        projected_subtitles: [],
+      },
+      [],
+      {},
+    );
+
+    expect(transcript.length).toBeGreaterThan(1);
+    expect(transcript.every((item) => Array.from(String(item.text_final || "")).length <= 32)).toBe(true);
+    expect(transcript.map((item) => item.text_final).join("")).toBe("没有这个像很多兄弟一样隐恨总算这个年还能过不然这个真的是难受能难受好久");
   });
 
   it("uses raw source text for filler rule analysis and auto ranges", () => {
@@ -825,8 +1098,29 @@ describe("manual editor timeline mapping", () => {
       [{ start: 12.3456, end: 14.9, duration_sec: 2.554, reason: "restart_retake", source: "llm_cut_review" }],
     );
 
-    expect(analysis.smartDelete).toEqual([{ start: 12.346, end: 14.9, kind: "smart_delete" }]);
-    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([{ start: 12.346, end: 14.9, kind: "smart_delete" }]);
+    expect(analysis.smartDelete).toEqual([expect.objectContaining({ start: 12.346, end: 14.9, kind: "smart_delete" })]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([expect.objectContaining({ start: 12.346, end: 14.9, kind: "smart_delete" })]);
+  });
+
+  it("builds rule previews from real matched source text", () => {
+    const rules = { fillerEnabled: true, repeatedEnabled: true, pauseEnabled: true, smartDeleteEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const subtitles = [
+      { index: 0, start_time: 0, end_time: 1, text_final: "嗯我们开始" },
+      { index: 1, start_time: 2, end_time: 3, text_final: "这个这个型号不错" },
+    ];
+    const analysis = buildSmartCutRuleAnalysis(
+      subtitles,
+      rules,
+      [{ start: 1.1, end: 1.95, duration_sec: 0.85 }],
+      [{ start: 4, end: 5, duration_sec: 1, reason: "restart_retake", detail: "开头重说" }],
+    );
+
+    const previews = buildSmartCutRulePreviews(analysis, rules, subtitles);
+
+    expect(previews.map((preview) => preview.label)).toEqual(["语气词", "重复口误", "长停顿", "智能删除"]);
+    expect(previews.find((preview) => preview.kind === "filler")?.sampleText).toBe("嗯");
+    expect(previews.find((preview) => preview.kind === "pause")?.sampleText).toBe("[0.8s]");
+    expect(previews.find((preview) => preview.kind === "smart_delete")?.reason).toContain("开头重说");
   });
 
   it("removes selected transcript text from subtitle drafts when cutting text from preview", () => {

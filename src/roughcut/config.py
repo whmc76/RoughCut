@@ -107,7 +107,7 @@ TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
         "gpt-4o-mini-transcribe",
     ],
     "local_http_asr": [
-        "qwen3-asr-1.7b-forced-aligner",
+        "faster-whisper-large-v3-beam5-nohot",
     ],
 }
 MULTIMODAL_FALLBACK_PROVIDER_VALUES: tuple[str, ...] = MULTIMODAL_PROVIDER_VALUES
@@ -189,16 +189,19 @@ DEFAULT_TRANSCRIPTION_MODELS: dict[str, str] = {
     "funasr": "sensevoice-small",
     "faster_whisper": "large-v3",
     "openai": "gpt-4o-transcribe",
-    "local_http_asr": "qwen3-asr-1.7b-forced-aligner",
+    "local_http_asr": "faster-whisper-large-v3-beam5-nohot",
 }
 LEGACY_LOCAL_HTTP_ASR_MODELS: tuple[str, ...] = (
     "local-asr-current",
     "vibevoice-asr-int8",
     "moss-audio-8b-instruct",
+    "qwen3-asr-1.7b-forced-aligner",
 )
 LEGACY_LOCAL_HTTP_ASR_URLS: tuple[str, ...] = (
     "http://127.0.0.1:6001",
     "http://localhost:6001",
+    "http://127.0.0.1:30080",
+    "http://localhost:30080",
 )
 AVATAR_PROVIDER_OPTIONS: tuple[str, ...] = AVATAR_PROVIDER_VALUES
 VOICE_PROVIDER_OPTIONS: tuple[str, ...] = VOICE_PROVIDER_VALUES
@@ -276,6 +279,7 @@ PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
     "cover_selection_review_gap",
     "packaging_selection_review_gap",
     "packaging_selection_min_score",
+    "streamlined_asr_pipeline_enabled",
     "subtitle_filler_cleanup_enabled",
     "quality_auto_rerun_enabled",
     "quality_auto_rerun_below_score",
@@ -327,19 +331,24 @@ class Settings(BaseSettings):
     transcription_dialect: str = DEFAULT_TRANSCRIPTION_DIALECT
     transcription_alignment_mode: str = "auto"  # auto | provider_only | synthetic
     transcription_alignment_min_word_coverage: float = 0.72
-    local_asr_api_base_url: str = "http://127.0.0.1:30080"
-    local_asr_model_name: str = "qwen3-asr-1.7b-forced-aligner"
-    local_asr_display_name: str = "Qwen3-ASR 1.7B + ForcedAligner"
+    local_asr_api_base_url: str = "http://127.0.0.1:30200"
+    local_asr_model_name: str = "faster-whisper-large-v3-beam5-nohot"
+    local_asr_display_name: str = "faster-whisper large-v3 beam5 nohot"
     local_asr_health_path: str = "/health"
     local_asr_transcribe_path: str = "/transcribe"
     local_asr_hotwords_field: str = "hotwords"
-    local_asr_max_new_tokens: int = 2048
+    local_asr_hotwords_enabled: bool = True
+    local_asr_beam_size: int = 5
+    local_asr_best_of: int = 5
+    local_asr_condition_on_previous_text: bool = False
+    local_asr_vad_filter: bool = True
+    local_asr_max_new_tokens: int = 256
     transcription_chunking_enabled: bool = True
-    transcription_chunk_threshold_sec: int = 30
-    transcription_chunk_size_sec: int = 20
-    transcription_chunk_min_sec: int = 8
-    transcription_chunk_overlap_sec: float = 0.5
-    transcription_chunk_request_timeout_sec: int = 180
+    transcription_chunk_threshold_sec: int = 300
+    transcription_chunk_size_sec: int = 300
+    transcription_chunk_min_sec: int = 60
+    transcription_chunk_overlap_sec: float = 0.0
+    transcription_chunk_request_timeout_sec: int = 900
     transcription_chunk_request_max_retries: int = 2
     transcription_chunk_request_retry_backoff_sec: float = 5.0
     watch_auto_scan_interval_sec: int = 45
@@ -386,9 +395,9 @@ class Settings(BaseSettings):
     indextts2_docker_services: str = "indextts2"
     indextts2_docker_idle_timeout_sec: int = 900
     local_asr_docker_guard_enabled: bool = True
-    local_asr_docker_compose_file: str = "E:/WorkSpace/RoughCut/docker-compose.qwen3-asr.yml"
+    local_asr_docker_compose_file: str = "E:/WorkSpace/RoughCut/docker-compose.asr-matrix.yml"
     local_asr_docker_env_file: str = ""
-    local_asr_docker_services: str = "qwen3-asr"
+    local_asr_docker_services: str = "faster-whisper-large-v3"
     local_asr_docker_idle_timeout_sec: int = 900
     cosyvoice3_tts_api_base_url: str = "http://127.0.0.1:30180"
     cosyvoice3_tts_health_path: str = "/health"
@@ -547,6 +556,7 @@ class Settings(BaseSettings):
     edit_decision_llm_review_max_candidates: int = 6
     edit_decision_llm_review_timeout_sec: int = 30
     edit_decision_llm_review_min_confidence: float = 0.72
+    streamlined_asr_pipeline_enabled: bool = True
     subtitle_filler_cleanup_enabled: bool = True
     quality_auto_rerun_enabled: bool = True
     quality_auto_rerun_below_score: float = 75.0
@@ -689,7 +699,7 @@ def canonicalize_transcription_provider_name(provider: object) -> str:
 
 def normalize_transcription_provider_name(provider: object) -> str:
     provider_value = canonicalize_transcription_provider_name(provider)
-    if provider_value != DEFAULT_TRANSCRIPTION_PROVIDER:
+    if provider_value not in TRANSCRIPTION_MODEL_OPTIONS:
         return DEFAULT_TRANSCRIPTION_PROVIDER
     return provider_value
 

@@ -81,8 +81,13 @@ from roughcut.media.manual_editor_assets import (
     manual_editor_asset_dir,
 )
 from roughcut.media.output import get_output_project_dir
-from roughcut.media.subtitles import remap_subtitles_to_timeline
-from roughcut.media.subtitle_text import clean_final_subtitle_text, clean_subtitle_payloads
+from roughcut.media.subtitles import remap_subtitles_to_timeline, split_subtitle_display_item
+from roughcut.media.subtitle_text import (
+    clean_subtitle_payloads,
+    normalize_contextual_noc_alias_text,
+    normalize_editable_subtitle_text,
+    normalize_flashlight_model_alias_text,
+)
 from roughcut.media.subtitle_projection_validation import (
     annotate_projected_subtitle_sources,
     projection_has_source_text_mismatch,
@@ -91,9 +96,12 @@ from roughcut.media.subtitle_projection_validation import (
     validate_projected_subtitles_against_transcript,
 )
 from roughcut.media.subtitle_spans import (
+    subtitle_display_unit_key,
+    subtitle_display_units,
     subtitle_span_alignment_diagnostics,
     subtitle_span_token_payloads,
 )
+from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER
 from roughcut.publication import (
     active_publication_credentials,
     build_publication_plan,
@@ -369,6 +377,11 @@ class ManualEditorSubtitleOut(BaseModel):
     index: int
     source_index: int | None = None
     source_indexes: list[int] = Field(default_factory=list)
+    source_fragment_index: int | None = None
+    source_fragment_count: int | None = None
+    source_overlap_start_time: float | None = None
+    source_overlap_end_time: float | None = None
+    source_text_full: str | None = None
     start_time: float
     end_time: float
     text_raw: str | None = None
@@ -1693,11 +1706,111 @@ def _manual_editor_smart_delete_segments(editorial_analysis: dict[str, Any] | No
 
 
 def _manual_editor_final_subtitle_text(item: dict[str, Any]) -> str:
-    return clean_final_subtitle_text(
+    return normalize_editable_subtitle_text(
         item.get("text_final")
         or item.get("text_norm")
         or item.get("text_raw", "")
     )
+
+
+def _manual_editor_editable_text(value: Any) -> str:
+    return normalize_editable_subtitle_text(value)
+
+
+def _manual_editor_display_source_text(item: dict[str, Any], *, final_text: str = "") -> str:
+    for key in ("text_final", "text_norm", "projection_text", "text", "text_raw"):
+        text = _manual_editor_editable_text(item.get(key))
+        if text:
+            return text
+    return _manual_editor_editable_text(final_text)
+
+
+def _manual_editor_lcs_index_pairs(left: list[str], right: list[str]) -> list[tuple[int, int]]:
+    if not left or not right:
+        return []
+    rows = len(left) + 1
+    cols = len(right) + 1
+    table = [[0] * cols for _ in range(rows)]
+    for row in range(1, rows):
+        for col in range(1, cols):
+            table[row][col] = (
+                table[row - 1][col - 1] + 1
+                if left[row - 1] == right[col - 1]
+                else max(table[row - 1][col], table[row][col - 1])
+            )
+    pairs: list[tuple[int, int]] = []
+    row = len(left)
+    col = len(right)
+    while row > 0 and col > 0:
+        if left[row - 1] == right[col - 1]:
+            pairs.append((row - 1, col - 1))
+            row -= 1
+            col -= 1
+        elif table[row - 1][col] >= table[row][col - 1]:
+            row -= 1
+        else:
+            col -= 1
+    pairs.reverse()
+    return pairs
+
+
+def _manual_editor_normalize_alignment_token_payloads(
+    tokens: list[dict[str, Any]],
+    *,
+    canonical_text: str,
+) -> list[dict[str, Any]]:
+    canonical_units = subtitle_display_units(canonical_text)
+    if not canonical_units or not tokens:
+        return tokens
+
+    raw_units: list[dict[str, Any]] = []
+    for token in tokens:
+        text = str((token or {}).get("text") or "")
+        units = subtitle_display_units(text)
+        if not units:
+            continue
+        try:
+            start = float((token or {}).get("start", 0.0) or 0.0)
+            end = float((token or {}).get("end", start) or start)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        duration = end - start
+        for offset, unit in enumerate(units):
+            raw_units.append(
+                {
+                    "text": unit,
+                    "key": subtitle_display_unit_key(unit),
+                    "start": round(start + duration * (offset / len(units)), 3),
+                    "end": round(start + duration * ((offset + 1) / len(units)), 3),
+                }
+            )
+    if not raw_units:
+        return tokens
+
+    pairs = _manual_editor_lcs_index_pairs(
+        [subtitle_display_unit_key(unit) for unit in canonical_units],
+        [str(unit["key"]) for unit in raw_units],
+    )
+    matched_by_canonical = {canonical_index: raw_index for canonical_index, raw_index in pairs}
+    normalized: list[dict[str, Any]] = []
+    previous_end = raw_units[0]["start"]
+    for canonical_index, unit in enumerate(canonical_units):
+        raw_index = matched_by_canonical.get(canonical_index)
+        raw_unit = raw_units[raw_index] if raw_index is not None else None
+        start = float(raw_unit["start"]) if raw_unit else float(previous_end)
+        end = float(raw_unit["end"]) if raw_unit else max(start + 0.001, float(previous_end))
+        previous_end = max(float(previous_end), end)
+        normalized.append(
+            {
+                "text": unit,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "source": "span_alignment",
+            }
+        )
+    return normalized
 
 
 def _clean_manual_editor_subtitle_projection(
@@ -1793,15 +1906,77 @@ async def _load_manual_editor_word_payloads(session: AsyncSession, *, job_id: uu
     for row in rows:
         if int(row.version or 1) != latest_version:
             continue
+        row_words: list[dict[str, Any]] = []
         for word in list(row.words_json or []):
             if not isinstance(word, dict):
                 continue
             payload = _manual_editor_word_payload(word)
             if payload is None:
                 continue
-            words.append(payload.model_dump())
+            row_words.append(payload.model_dump())
+        words.extend(_manual_editor_normalize_word_payloads_for_text(row_words, row.text))
     words.sort(key=lambda item: (float(item.get("start", 0.0) or 0.0), float(item.get("end", 0.0) or 0.0)))
     return words
+
+
+def _manual_editor_normalize_word_payloads_for_text(words: list[dict[str, Any]], text: Any) -> list[dict[str, Any]]:
+    canonical_text = normalize_editable_subtitle_text(text) or normalize_editable_subtitle_text(
+        "".join(str(word.get("word") or "") for word in words)
+    )
+    canonical_units = subtitle_display_units(canonical_text)
+    if not canonical_units or not words:
+        return words
+
+    raw_units: list[dict[str, Any]] = []
+    for word in words:
+        units = subtitle_display_units(str(word.get("word") or ""))
+        if not units:
+            continue
+        try:
+            start = float(word.get("start", 0.0) or 0.0)
+            end = float(word.get("end", start) or start)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        duration = end - start
+        for offset, unit in enumerate(units):
+            raw_units.append(
+                {
+                    "text": unit,
+                    "key": subtitle_display_unit_key(unit),
+                    "start": round(start + duration * (offset / len(units)), 3),
+                    "end": round(start + duration * ((offset + 1) / len(units)), 3),
+                    "word": word,
+                }
+            )
+    if not raw_units:
+        return words
+
+    pairs = _manual_editor_lcs_index_pairs(
+        [subtitle_display_unit_key(unit) for unit in canonical_units],
+        [str(unit["key"]) for unit in raw_units],
+    )
+    matched_by_canonical = {canonical_index: raw_index for canonical_index, raw_index in pairs}
+    normalized: list[dict[str, Any]] = []
+    previous_end = float(raw_units[0]["start"])
+    for canonical_index, unit in enumerate(canonical_units):
+        raw_index = matched_by_canonical.get(canonical_index)
+        raw_unit = raw_units[raw_index] if raw_index is not None else None
+        raw_word = dict(raw_unit.get("word") or {}) if raw_unit else {}
+        start = float(raw_unit["start"]) if raw_unit else previous_end
+        end = float(raw_unit["end"]) if raw_unit else max(start + 0.001, previous_end)
+        previous_end = max(previous_end, end)
+        normalized.append(
+            {
+                **raw_word,
+                "word": unit,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "source": raw_word.get("source") or "transcript_words",
+            }
+        )
+    return normalized
 
 
 def _attach_manual_editor_words_to_subtitles(
@@ -1810,29 +1985,155 @@ def _attach_manual_editor_words_to_subtitles(
 ) -> list[dict[str, Any]]:
     if not words:
         return subtitles
+    if any(
+        str(item.get("projection_source") or "") in {"canonical_transcript", "transcript_segment"}
+        for item in subtitles
+        if isinstance(item, dict)
+    ):
+        return subtitles
     if not subtitles:
         return _manual_editor_orphan_word_subtitles(subtitles, words)
     annotated: list[dict[str, Any]] = []
     covered_word_ids: set[int] = set()
-    for item in subtitles:
+    subtitle_ranges = _manual_editor_subtitle_ranges(subtitles)
+    word_owner_indexes = {
+        id(word): owner_index
+        for word in words
+        if (owner_index := _manual_editor_best_subtitle_range_index(word, subtitle_ranges)) is not None
+    }
+    for subtitle_order_index, item in enumerate(subtitles):
         payload = dict(item)
         try:
             start_time = float(payload.get("start_time", payload.get("start", 0.0)) or 0.0)
-            end_time = float(payload.get("end_time", payload.get("end", start_time)) or start_time)
+            float(payload.get("end_time", payload.get("end", start_time)) or start_time)
         except (TypeError, ValueError):
             annotated.append(payload)
             continue
-        attached_words: list[dict[str, Any]] = []
+        overlapping_words: list[dict[str, Any]] = []
         for word in words:
-            if min(float(word.get("end", 0.0) or 0.0), end_time) - max(float(word.get("start", 0.0) or 0.0), start_time) <= 0.001:
+            if id(word) in covered_word_ids:
                 continue
-            attached_words.append(word)
-            covered_word_ids.add(id(word))
-        payload["words"] = attached_words
+            if word_owner_indexes.get(id(word)) != subtitle_order_index:
+                continue
+            overlapping_words.append(word)
+        attached_words, represented_word_ids = _manual_editor_represented_words_for_subtitle(payload, overlapping_words)
+        if overlapping_words:
+            payload["words"] = overlapping_words
+            covered_word_ids.update(id(word) for word in overlapping_words)
+        else:
+            payload["words"] = attached_words
+            covered_word_ids.update(represented_word_ids)
         annotated.append(payload)
     annotated.extend(_manual_editor_orphan_word_subtitles(annotated, [word for word in words if id(word) not in covered_word_ids]))
     annotated.sort(key=lambda item: (float(item.get("start_time", item.get("start", 0.0)) or 0.0), float(item.get("end_time", item.get("end", 0.0)) or 0.0)))
     return annotated
+
+
+def _manual_editor_subtitle_ranges(subtitles: list[dict[str, Any]]) -> list[tuple[float, float]]:
+    ranges: list[tuple[float, float]] = []
+    for item in subtitles:
+        try:
+            start = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
+            end = float(item.get("end_time", item.get("end", start)) or start)
+        except (TypeError, ValueError):
+            start = end = 0.0
+        ranges.append((start, end))
+    return ranges
+
+
+def _manual_editor_best_subtitle_range_index(
+    word: dict[str, Any],
+    ranges: list[tuple[float, float]],
+) -> int | None:
+    try:
+        word_start = float(word.get("start", 0.0) or 0.0)
+        word_end = float(word.get("end", word_start) or word_start)
+    except (TypeError, ValueError):
+        return None
+    if word_end <= word_start:
+        return None
+    center = (word_start + word_end) / 2.0
+    best_index: int | None = None
+    best_score: tuple[float, int, float] = (0.0, 0, float("-inf"))
+    duration = max(word_end - word_start, 0.001)
+    for index, (start, end) in enumerate(ranges):
+        if end <= start:
+            continue
+        overlap = min(word_end, end) - max(word_start, start)
+        if overlap <= 0.001:
+            continue
+        center_inside = 1 if start <= center < end else 0
+        score = (overlap / duration, center_inside, start)
+        if score > best_score:
+            best_index = index
+            best_score = score
+    return best_index
+
+
+def _manual_editor_word_belongs_to_range(word: dict[str, Any], *, start: float, end: float) -> bool:
+    try:
+        word_start = float(word.get("start", 0.0) or 0.0)
+        word_end = float(word.get("end", word_start) or word_start)
+    except (TypeError, ValueError):
+        return False
+    if word_end <= word_start or end <= start:
+        return False
+    overlap = min(word_end, end) - max(word_start, start)
+    if overlap <= 0.001:
+        return False
+    duration = max(word_end - word_start, 0.001)
+    center = (word_start + word_end) / 2.0
+    return overlap / duration >= 0.5 or start <= center < end
+
+
+def _manual_editor_represented_words_for_subtitle(
+    subtitle: dict[str, Any],
+    words: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], set[int]]:
+    canonical_text = _manual_editor_display_source_text(
+        subtitle,
+        final_text=_manual_editor_final_subtitle_text(subtitle),
+    )
+    canonical_units = subtitle_display_units(canonical_text)
+    if not canonical_units or not words:
+        return [], set()
+
+    raw_units: list[dict[str, Any]] = []
+    for word in words:
+        units = subtitle_display_units(str(word.get("word") or word.get("raw_text") or word.get("text") or ""))
+        if not units:
+            continue
+        try:
+            start = float(word.get("start", 0.0) or 0.0)
+            end = float(word.get("end", start) or start)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        duration = end - start
+        for offset, unit in enumerate(units):
+            raw_units.append(
+                {
+                    "key": subtitle_display_unit_key(unit),
+                    "start": start + duration * (offset / len(units)),
+                    "end": start + duration * ((offset + 1) / len(units)),
+                    "word": word,
+                }
+            )
+    if not raw_units:
+        return [], set()
+
+    pairs = _manual_editor_lcs_index_pairs(
+        [subtitle_display_unit_key(unit) for unit in canonical_units],
+        [str(unit["key"]) for unit in raw_units],
+    )
+    represented_word_ids = {
+        id(raw_units[raw_index]["word"])
+        for _, raw_index in pairs
+        if 0 <= raw_index < len(raw_units)
+    }
+    represented_words = [word for word in words if id(word) in represented_word_ids]
+    return represented_words, represented_word_ids
 
 
 def _manual_editor_orphan_word_subtitles(
@@ -1842,15 +2143,6 @@ def _manual_editor_orphan_word_subtitles(
     """Expose transcript words that landed in subtitle gaps so manual cuts are visible."""
     if not words:
         return []
-    covered_ranges: list[tuple[float, float]] = []
-    for item in subtitles:
-        try:
-            start_time = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
-            end_time = float(item.get("end_time", item.get("end", start_time)) or start_time)
-        except (TypeError, ValueError):
-            continue
-        if end_time > start_time:
-            covered_ranges.append((start_time, end_time))
 
     orphan_words: list[dict[str, Any]] = []
     for word in words:
@@ -1860,8 +2152,6 @@ def _manual_editor_orphan_word_subtitles(
         except (TypeError, ValueError):
             continue
         if end <= start:
-            continue
-        if any(min(end, range_end) - max(start, range_start) > 0.001 for range_start, range_end in covered_ranges):
             continue
         text = str(word.get("word") or word.get("raw_text") or word.get("text") or "").strip()
         if not text:
@@ -1896,6 +2186,8 @@ def _manual_editor_orphan_word_subtitles(
         end = float(group[-1].get("end", start) or start)
         if end <= start:
             continue
+        if _manual_editor_orphan_word_group_is_neighbor_duplicate(text, start=start, end=end, subtitles=subtitles):
+            continue
         virtual_rows.append(
             {
                 "index": next_index,
@@ -1914,12 +2206,251 @@ def _manual_editor_orphan_word_subtitles(
     return virtual_rows
 
 
+def _manual_editor_absorb_short_boundary_orphan_groups(
+    subtitles: list[dict[str, Any]],
+    groups: list[list[dict[str, Any]]],
+) -> list[list[dict[str, Any]]]:
+    if not subtitles or not groups:
+        return groups
+    remaining: list[list[dict[str, Any]]] = []
+    for group in groups:
+        text = normalize_editable_subtitle_text("".join(str(item.get("word") or "") for item in group))
+        key = _manual_editor_compact_text_key(text)
+        if not key or len(key) > 2:
+            remaining.append(group)
+            continue
+        start = float(group[0].get("start", 0.0) or 0.0)
+        end = float(group[-1].get("end", start) or start)
+        if _manual_editor_orphan_word_group_is_neighbor_duplicate(text, start=start, end=end, subtitles=subtitles):
+            continue
+        target: dict[str, Any] | None = None
+        mode = "suffix"
+        best_score: tuple[float, int] = (float("inf"), 9)
+        for item in subtitles:
+            try:
+                item_start = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
+                item_end = float(item.get("end_time", item.get("end", item_start)) or item_start)
+            except (TypeError, ValueError):
+                continue
+            if item_start - 0.001 <= start and end <= item_end + 0.001 and (0.0, -1) < best_score:
+                target = item
+                mode = "merge"
+                best_score = (0.0, -1)
+            before_gap = max(0.0, item_start - end)
+            after_gap = max(0.0, start - item_end)
+            prefix_score = (before_gap, 0)
+            suffix_score = (after_gap, 1)
+            if end <= item_start + 0.001 and before_gap <= 0.18 and prefix_score < best_score:
+                target = item
+                mode = "prefix"
+                best_score = prefix_score
+            if start >= item_end - 0.001 and after_gap <= 0.18 and suffix_score < best_score:
+                target = item
+                mode = "suffix"
+                best_score = suffix_score
+        if target is None:
+            remaining.append(group)
+            continue
+        current_text = _manual_editor_display_source_text(target, final_text=_manual_editor_final_subtitle_text(target))
+        existing_words = list(target.get("words") or [])
+        if mode == "merge" and existing_words:
+            merged_words = sorted(
+                [*existing_words, *group],
+                key=lambda item: (float(item.get("start", 0.0) or 0.0), float(item.get("end", 0.0) or 0.0)),
+            )
+            merged_text = normalize_editable_subtitle_text("".join(str(item.get("word") or "") for item in merged_words))
+        else:
+            merged_text = normalize_editable_subtitle_text(f"{text}{current_text}" if mode == "prefix" else f"{current_text}{text}")
+        if not merged_text:
+            remaining.append(group)
+            continue
+        target["text_raw"] = merged_text
+        target["text_norm"] = merged_text
+        target["text_final"] = merged_text
+        if mode == "merge" and existing_words:
+            target["words"] = sorted(
+                [*existing_words, *group],
+                key=lambda item: (float(item.get("start", 0.0) or 0.0), float(item.get("end", 0.0) or 0.0)),
+            )
+        else:
+            target["words"] = [*group, *existing_words] if mode == "prefix" else [*existing_words, *group]
+    return remaining
+
+
+def _manual_editor_orphan_word_group_is_neighbor_duplicate(
+    text: str,
+    *,
+    start: float,
+    end: float,
+    subtitles: list[dict[str, Any]],
+) -> bool:
+    key = _manual_editor_compact_text_key(text)
+    if not key:
+        return True
+    if len(key) > 4:
+        return False
+    nearby_text = ""
+    for item in subtitles:
+        try:
+            item_start = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
+            item_end = float(item.get("end_time", item.get("end", item_start)) or item_start)
+        except (TypeError, ValueError):
+            continue
+        if item_end < start - 0.8 or item_start > end + 0.8:
+            continue
+        nearby_text += _manual_editor_final_subtitle_text(item)
+    return key in _manual_editor_compact_text_key(nearby_text)
+
+
+def _manual_editor_compact_text_key(text: Any) -> str:
+    return re.sub(r"[\s，。！？!?；;：:,、（）()\[\]【】{}\"'《》<>]+", "", normalize_editable_subtitle_text(text))
+
+
+_MANUAL_EDITOR_FLASHLIGHT_CONTEXT_RE = re.compile(
+    r"EDC(?:17|23|37)|NITECORE|奈特科尔|手电|电筒|流明|尾按|泛光|聚光",
+    re.IGNORECASE,
+)
+
+
+def _manual_editor_apply_source_text_corrections(text: Any, *, context_text: str = "") -> str:
+    normalized = normalize_editable_subtitle_text(text)
+    if not normalized:
+        return ""
+    normalized = normalize_contextual_noc_alias_text(normalized, context_text=context_text)
+    if _MANUAL_EDITOR_FLASHLIGHT_CONTEXT_RE.search(f"{context_text}\n{normalized}"):
+        normalized = normalize_flashlight_model_alias_text(normalized)
+    return normalized
+
+
+def _manual_editor_canonical_segment_source_rows(
+    canonical_layer: dict[str, Any],
+    *,
+    context_text: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for fallback_index, segment in enumerate(list(canonical_layer.get("segments") or [])):
+        if not isinstance(segment, dict):
+            continue
+        raw_text = str(segment.get("text_raw") or segment.get("text") or "").strip()
+        final_text = _manual_editor_apply_source_text_corrections(
+            segment.get("text_canonical") or segment.get("text") or raw_text,
+            context_text=context_text,
+        )
+        if not final_text:
+            continue
+        try:
+            index = int(segment.get("index", fallback_index) or fallback_index)
+            start_time = max(0.0, float(segment.get("start", segment.get("start_time", 0.0)) or 0.0))
+            end_time = max(start_time, float(segment.get("end", segment.get("end_time", start_time)) or start_time))
+        except (TypeError, ValueError):
+            continue
+        rows.append(
+            {
+                "index": index,
+                "source_index": index,
+                "source_indexes": [index],
+                "start_time": start_time,
+                "end_time": end_time,
+                "text_raw": raw_text or final_text,
+                "text_norm": final_text,
+                "text_final": final_text,
+                "words": [
+                    dict(word)
+                    for word in list(segment.get("words") or [])
+                    if isinstance(word, dict)
+                ],
+                "projection_source": "canonical_transcript",
+            }
+        )
+    return rows
+
+
+def _manual_editor_transcript_source_rows(
+    transcript_rows: list[TranscriptSegment],
+    *,
+    context_text: str,
+) -> list[dict[str, Any]]:
+    latest_version = max((int(row.version or 1) for row in transcript_rows), default=1)
+    rows: list[dict[str, Any]] = []
+    for fallback_index, row in enumerate(
+        sorted(
+            [item for item in transcript_rows if int(item.version or 1) == latest_version],
+            key=lambda item: (
+                int(item.segment_index or 0),
+                float(item.start_time or 0.0),
+                float(item.end_time or 0.0),
+            ),
+        )
+    ):
+        final_text = _manual_editor_apply_source_text_corrections(row.text, context_text=context_text)
+        if not final_text:
+            continue
+        index = int(row.segment_index if row.segment_index is not None else fallback_index)
+        rows.append(
+            {
+                "index": index,
+                "source_index": index,
+                "source_indexes": [index],
+                "start_time": float(row.start_time),
+                "end_time": float(row.end_time),
+                "text_raw": str(row.text or ""),
+                "text_norm": final_text,
+                "text_final": final_text,
+                "words": [
+                    dict(word)
+                    for word in list(row.words_json or [])
+                    if isinstance(word, dict)
+                ],
+                "projection_source": "transcript_segment",
+            }
+        )
+    return rows
+
+
 async def _load_manual_editor_source_subtitle_dicts(session: AsyncSession, *, job_id: uuid.UUID) -> list[dict[str, Any]]:
+    job = await session.get(Job, job_id)
+    context_parts = [str(getattr(job, "source_name", "") or "")]
+    canonical_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=(ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,),
+    )
+    canonical_layer = canonical_artifact.data_json if canonical_artifact is not None and isinstance(canonical_artifact.data_json, dict) else {}
+    canonical_segments = [
+        segment
+        for segment in list(canonical_layer.get("segments") or [])
+        if isinstance(segment, dict)
+    ]
+    context_parts.extend(
+        str(segment.get("text_canonical") or segment.get("text") or segment.get("text_raw") or "")
+        for segment in canonical_segments
+    )
+    context_text = "\n".join(part for part in context_parts if part)
+    canonical_rows = _manual_editor_canonical_segment_source_rows(canonical_layer, context_text=context_text)
+    if canonical_rows:
+        return _manual_editor_split_long_subtitle_rows(canonical_rows)
+
+    transcript_result = await session.execute(
+        select(TranscriptSegment)
+        .where(TranscriptSegment.job_id == job_id)
+        .order_by(TranscriptSegment.version.desc(), TranscriptSegment.segment_index.asc())
+    )
+    transcript_rows = list(transcript_result.scalars().all())
+    if transcript_rows:
+        if not context_text:
+            context_text = "\n".join([str(getattr(job, "source_name", "") or ""), *(row.text for row in transcript_rows)])
+        transcript_source_rows = _manual_editor_transcript_source_rows(transcript_rows, context_text=context_text)
+        if transcript_source_rows:
+            return _manual_editor_split_long_subtitle_rows(transcript_source_rows)
+
     result = await session.execute(
         select(SubtitleItem)
         .where(SubtitleItem.job_id == job_id, SubtitleItem.version == 1)
         .order_by(SubtitleItem.item_index)
     )
+    subtitle_rows = list(result.scalars().all())
+    if not context_text:
+        context_text = "\n".join([str(getattr(job, "source_name", "") or ""), *(str(item.text_final or item.text_norm or item.text_raw or "") for item in subtitle_rows)])
     return [
         {
             "index": int(item.item_index),
@@ -1928,20 +2459,26 @@ async def _load_manual_editor_source_subtitle_dicts(session: AsyncSession, *, jo
             "start_time": float(item.start_time),
             "end_time": float(item.end_time),
             "text_raw": item.text_raw,
-            "text_norm": item.text_norm,
-            "text_final": item.text_final,
+            "text_norm": _manual_editor_apply_source_text_corrections(item.text_norm or item.text_raw, context_text=context_text),
+            "text_final": _manual_editor_apply_source_text_corrections(item.text_final or item.text_norm or item.text_raw, context_text=context_text),
         }
-        for item in result.scalars().all()
+        for item in subtitle_rows
     ]
 
 
 def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> ManualEditorSubtitleOut:
     text_final = _manual_editor_final_subtitle_text(item)
+    canonical_source_text = _manual_editor_display_source_text(item, final_text=text_final)
     start_time = max(0.0, float(item.get("start_time", item.get("start", 0.0)) or 0.0))
     end_time = max(start_time, float(item.get("end_time", item.get("end", start_time)) or start_time))
+    raw_item_index = item.get("index")
+    try:
+        item_index = int(raw_item_index) if raw_item_index is not None else int(index)
+    except (TypeError, ValueError):
+        item_index = int(index)
     raw_source_index = item.get("source_index", item.get("item_index"))
     try:
-        source_index = int(raw_source_index) if raw_source_index is not None else int(item.get("index", index) or index)
+        source_index = int(raw_source_index) if raw_source_index is not None else item_index
     except (TypeError, ValueError):
         source_index = int(index)
     source_indexes: list[int] = []
@@ -1952,26 +2489,56 @@ def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> Manu
             continue
     if source_index not in source_indexes:
         source_indexes.insert(0, source_index)
+    raw_alignment_token_payloads = subtitle_span_token_payloads(item)
     alignment_tokens = [
         ManualEditorSubtitleSpanTokenOut(**token)
-        for token in subtitle_span_token_payloads(item)
+        for token in _manual_editor_normalize_alignment_token_payloads(
+            raw_alignment_token_payloads,
+            canonical_text=canonical_source_text or text_final,
+        )
     ]
     alignment_diagnostics = subtitle_span_alignment_diagnostics(item)
+    word_payloads = [
+        word.model_dump()
+        for raw_word in list(item.get("words") or [])
+        if isinstance(raw_word, dict)
+        if (word := _manual_editor_word_payload(raw_word)) is not None
+    ]
+    normalized_word_payloads = _manual_editor_normalize_word_payloads_for_text(
+        word_payloads,
+        canonical_source_text or text_final,
+    )
     return ManualEditorSubtitleOut(
-        index=int(item.get("index", index) or index),
+        index=item_index,
         source_index=source_index,
         source_indexes=source_indexes,
+        source_fragment_index=(
+            int(item["source_fragment_index"])
+            if item.get("source_fragment_index") is not None
+            else None
+        ),
+        source_fragment_count=(
+            int(item["source_fragment_count"])
+            if item.get("source_fragment_count") is not None
+            else None
+        ),
+        source_overlap_start_time=(
+            round(float(item["source_overlap_start_time"]), 3)
+            if item.get("source_overlap_start_time") is not None
+            else None
+        ),
+        source_overlap_end_time=(
+            round(float(item["source_overlap_end_time"]), 3)
+            if item.get("source_overlap_end_time") is not None
+            else None
+        ),
+        source_text_full=_manual_editor_editable_text(item.get("source_text_full")) or None,
         start_time=round(start_time, 3),
         end_time=round(end_time, 3),
-        text_raw=str(item.get("text_raw") or "") or None,
-        text_norm=str(item.get("text_norm") or "") or None,
+        text_raw=_manual_editor_editable_text(item.get("text_raw")) or None,
+        text_norm=_manual_editor_editable_text(item.get("text_norm")) or None,
         text_final=text_final,
-        words=[
-            word
-            for raw_word in list(item.get("words") or [])
-            if isinstance(raw_word, dict)
-            if (word := _manual_editor_word_payload(raw_word)) is not None
-        ],
+        words=[ManualEditorWordOut(**word) for word in normalized_word_payloads],
         alignment_tokens=alignment_tokens,
         alignment_diagnostics=alignment_diagnostics,
     )
@@ -2062,6 +2629,58 @@ def _manual_editor_projection_should_use_source_fallback(
         keep_segments=keep_segments,
     )
     return bool(validation.get("blocking"))
+
+
+def _manual_editor_split_long_subtitle_rows(subtitles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    next_index = max(
+        (
+            int(item.get("index", -1) or -1)
+            for item in subtitles
+            if isinstance(item, dict)
+        ),
+        default=-1,
+    ) + 1
+    for item in subtitles:
+        if not isinstance(item, dict):
+            continue
+        text = _manual_editor_final_subtitle_text(item)
+        try:
+            start_time = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
+            end_time = float(item.get("end_time", item.get("end", start_time)) or start_time)
+        except (TypeError, ValueError):
+            rows.append(dict(item))
+            continue
+        pieces = split_subtitle_display_item(
+            start_time=start_time,
+            end_time=end_time,
+            text=text,
+            max_duration_sec=6.0,
+            max_chars=32,
+        )
+        if len(pieces) <= 1:
+            rows.append(dict(item))
+            continue
+        original_index = int(item.get("index", next_index) or next_index)
+        for fragment_index, piece in enumerate(pieces):
+            row = dict(item)
+            row["index"] = original_index if fragment_index == 0 else next_index
+            if fragment_index > 0:
+                next_index += 1
+            row["source_fragment_index"] = fragment_index
+            row["source_fragment_count"] = len(pieces)
+            row["source_text_full"] = text
+            row["source_overlap_start_time"] = piece["start_time"]
+            row["source_overlap_end_time"] = piece["end_time"]
+            row["start_time"] = piece["start_time"]
+            row["end_time"] = piece["end_time"]
+            for key in ("text_raw", "text_norm", "text_final", "text"):
+                if key in row:
+                    row[key] = piece["text"]
+            if not any(key in row for key in ("text_raw", "text_norm", "text_final", "text")):
+                row["text_final"] = piece["text"]
+            rows.append(row)
+    return rows
 
 
 def _normalize_manual_keep_segments(
@@ -3107,7 +3726,12 @@ async def _build_manual_editor_session(
 
     raw_source_subtitle_dicts = await _load_manual_editor_source_subtitle_dicts(session, job_id=job.id)
     raw_subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id, drop_empty=False)
-    source_subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_source_subtitle_dicts, drop_empty=False, collapse_repeats=False)
+    source_subtitle_dicts = _clean_manual_editor_subtitle_projection(
+        raw_source_subtitle_dicts,
+        drop_empty=False,
+        collapse_repeats=False,
+        clean_text=False,
+    )
     subtitle_fingerprint = _manual_editor_subtitle_fingerprint(source_subtitle_dicts)
     latest_subtitle_created_at = await _manual_editor_latest_subtitle_created_at(session, job_id=job.id)
     if not _manual_editor_stored_projection_matches_subtitles(
@@ -3235,9 +3859,11 @@ async def _build_manual_editor_session(
         source_subtitles=source_subtitle_dicts,
         keep_segments=keep_segment_payloads,
     ):
-        projected_subtitles = remap_subtitles_to_timeline(
-            _clean_manual_editor_subtitle_projection(source_subtitle_dicts, drop_empty=False, collapse_repeats=False),
-            keep_segment_payloads,
+        projected_subtitles = _manual_editor_split_long_subtitle_rows(
+            remap_subtitles_to_timeline(
+                _clean_manual_editor_subtitle_projection(source_subtitle_dicts, drop_empty=False, collapse_repeats=False),
+                keep_segment_payloads,
+            )
         )
     projected_subtitles = _clean_manual_editor_subtitle_projection(projected_subtitles)
     source_path = _resolve_manual_editor_source_path(job)
@@ -3457,6 +4083,7 @@ async def save_manual_editor_draft(
         await _load_manual_editor_source_subtitle_dicts(session, job_id=job.id),
         drop_empty=False,
         collapse_repeats=False,
+        clean_text=False,
     )
     subtitle_fingerprint = _manual_editor_subtitle_fingerprint(current_source_subtitles)
     request_subtitles_match = _manual_editor_request_subtitles_match_fingerprint(request, subtitle_fingerprint)
@@ -3601,6 +4228,7 @@ async def apply_manual_editor_timeline(
         raw_source_subtitle_dicts,
         drop_empty=False,
         collapse_repeats=False,
+        clean_text=False,
     )
     source_subtitle_dicts = _attach_manual_editor_words_to_subtitles(
         source_subtitle_dicts,
@@ -3640,9 +4268,11 @@ async def apply_manual_editor_timeline(
         source_subtitles=source_subtitle_dicts,
         keep_segments=keep_segments,
     ):
-        remapped_subtitles = remap_subtitles_to_timeline(
-            _clean_manual_editor_subtitle_projection(source_subtitle_dicts, drop_empty=False, collapse_repeats=False),
-            keep_segments,
+        remapped_subtitles = _manual_editor_split_long_subtitle_rows(
+            remap_subtitles_to_timeline(
+                _clean_manual_editor_subtitle_projection(source_subtitle_dicts, drop_empty=False, collapse_repeats=False),
+                keep_segments,
+            )
         )
     base_output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in remapped_subtitles), default=0.0)
     subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
