@@ -9863,27 +9863,15 @@ textarea.input {
 
 .manual-editor-transcript-token.cut-filler,
 .manual-editor-transcript-punctuation.cut-filler,
-.manual-editor-transcript-pause.cut-filler {
-  background: rgba(245, 158, 11, 0.16);
-  color: #8a5a10;
-}
-
 .manual-editor-transcript-token.cut-repeated,
 .manual-editor-transcript-punctuation.cut-repeated,
-.manual-editor-transcript-pause.cut-repeated {
-  background: rgba(124, 58, 237, 0.13);
-  color: #6d28d9;
-}
-
 .manual-editor-transcript-token.cut-pause,
 .manual-editor-transcript-punctuation.cut-pause,
-.manual-editor-transcript-pause.cut-pause {
-  background: rgba(2, 132, 199, 0.13);
-  color: #0369a1;
-}
-
 .manual-editor-transcript-token.cut-smart_delete,
 .manual-editor-transcript-punctuation.cut-smart_delete,
+.manual-editor-transcript-pause.cut-filler,
+.manual-editor-transcript-pause.cut-repeated,
+.manual-editor-transcript-pause.cut-pause,
 .manual-editor-transcript-pause.cut-smart_delete {
   background: rgba(180, 35, 24, 0.12);
   color: #b42318;

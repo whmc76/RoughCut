@@ -2629,19 +2629,18 @@ export function buildTranscriptTokens(subtitles: JobManualEditSubtitle[], segmen
 }
 
 function transcriptVisiblePauseRanges(range: SilenceRange, tokens: TranscriptToken[]) {
-  const wordTimedBlockers = tokens
+  const speechBlockers = tokens
     .filter((token) => token.kind === "char"
-      && token.timingSource === "word"
       && token.text.trim()
       && token.end > range.start + 0.001
       && token.start < range.end - 0.001)
     .map((token) => ({
-      start: Number(Math.max(range.start, token.start - TRANSCRIPT_PAUSE_WORD_GUARD_SEC).toFixed(3)),
-      end: Number(Math.min(range.end, token.end + TRANSCRIPT_PAUSE_WORD_GUARD_SEC).toFixed(3)),
+      start: Number(Math.max(range.start, token.start - (token.timingSource === "word" ? TRANSCRIPT_PAUSE_WORD_GUARD_SEC : 0.018)).toFixed(3)),
+      end: Number(Math.min(range.end, token.end + (token.timingSource === "word" ? TRANSCRIPT_PAUSE_WORD_GUARD_SEC : 0.018)).toFixed(3)),
     }))
     .filter((blocker) => blocker.end > blocker.start + 0.001);
-  const visibleRanges = wordTimedBlockers.length
-    ? removeSourceRangesFromSegments([{ start: range.start, end: range.end }], wordTimedBlockers)
+  const visibleRanges = speechBlockers.length
+    ? removeSourceRangesFromSegments([{ start: range.start, end: range.end }], addSourceRangesToSegments([], speechBlockers, range.end))
     : [{ start: range.start, end: range.end }];
   return visibleRanges
     .map((visibleRange) => ({
@@ -3526,28 +3525,26 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     () => smartCutRuleManagedRanges(smartCutRuleAnalysis),
     [smartCutRuleAnalysis],
   );
+  const activeSmartCutRuleRanges = useMemo(
+    () => (manualSmartCutRestoreRanges.length
+      ? smartCutRuleRanges.filter((range) => !sourceRangeOverlapsCutRanges(range.start, range.end, manualSmartCutRestoreRanges))
+      : smartCutRuleRanges),
+    [manualSmartCutRestoreRanges, smartCutRuleRanges],
+  );
   const smartCutRuleCounts = useMemo(
     () => ({
-      filler: smartCutRuleAnalysis.filler.length,
-      repeated: smartCutRuleAnalysis.repeated.length,
-      pause: smartCutRuleAnalysis.pause.length,
-      smartDelete: smartCutRuleAnalysis.smartDelete.length,
+      filler: activeSmartCutRuleRanges.filter((range) => range.kind === "filler").length,
+      repeated: activeSmartCutRuleRanges.filter((range) => range.kind === "repeated").length,
+      pause: activeSmartCutRuleRanges.filter((range) => range.kind === "pause").length,
+      smartDelete: activeSmartCutRuleRanges.filter((range) => range.kind === "smart_delete").length,
     }),
-    [smartCutRuleAnalysis],
+    [activeSmartCutRuleRanges],
   );
   const smartCutRulePreviews = useMemo(
     () => buildSmartCutRulePreviews(smartCutRuleAnalysis, smartCutRules, sourceTranscriptSubtitles),
     [smartCutRuleAnalysis, smartCutRules, sourceTranscriptSubtitles],
   );
-  const smartCutRuleKeptRangeCount = useMemo(
-    () => {
-      const activeRanges = manualSmartCutRestoreRanges.length
-        ? removeSourceRangesFromSegments(smartCutRuleRanges, manualSmartCutRestoreRanges)
-        : smartCutRuleRanges;
-      return activeRanges.filter((range) => isSourceRangeKept(range.start, range.end, effectiveSegments)).length;
-    },
-    [effectiveSegments, manualSmartCutRestoreRanges, smartCutRuleRanges],
-  );
+  const activeSmartCutRuleRangeCount = activeSmartCutRuleRanges.length;
 
   const totalOutputDuration = projection.totalDuration;
   const activeSubtitle = activeSubtitleIndex >= 0 ? projection.remapped[activeSubtitleIndex] : null;
@@ -4659,13 +4656,19 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     }
   };
 
+  const transcriptTokenIsCut = (token: TranscriptToken) => (
+    !token.kept || sourceRangeOverlapsCutRanges(token.start, token.end, transcriptCutRanges)
+  );
+
   const selectTranscriptToken = (tokenIndex: number) => {
     const token = transcriptTokens[tokenIndex];
     if (!token) return;
     const nextSelection = transcriptSelectionFromTokenRange(transcriptTokens, tokenIndex, tokenIndex);
     setTranscriptSelection(nextSelection);
     setTranscriptSelectionPopover(transcriptSelectionPopoverPositionFromRect(transcriptTokenRefs.current.get(tokenIndex)?.getBoundingClientRect() ?? null));
-    jumpToSourceTime(token.start);
+    if (!transcriptTokenIsCut(token)) {
+      jumpToSourceTime(token.start);
+    }
     if (token.subtitleIndex != null) {
       const subtitle = projection.remapped.find((item) => subtitleSourceIndex(item) === token.subtitleIndex)
         ?? projection.remapped.find((item) => item.index === token.subtitleIndex);
@@ -5951,7 +5954,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                       ? index >= transcriptSelection.startTokenIndex && index <= transcriptSelection.endTokenIndex
                       : false;
                     const active = index === activeTranscriptTokenIndex;
-                    const cut = !token.kept || sourceRangeOverlapsCutRanges(token.start, token.end, transcriptCutRanges);
+                    const cut = transcriptTokenIsCut(token);
                     const smartCutMatch = smartCutRuleMatchForSourceRange(token.start, token.end, smartCutRuleRanges, manualSmartCutRestoreRanges);
                     const smartCutKind = smartCutMatch?.kind ?? null;
                     const cutKind = cut ? smartCutKind ?? "manual" : null;
@@ -6122,7 +6125,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                     <strong>剪辑规则</strong>
                     <span>{smartCutRulesExpanded ? "收起" : "展开"}</span>
                   </button>
-                  <span className="status-pill pending">规则命中 待剪 {smartCutRuleKeptRangeCount}</span>
+                  <span className="status-pill pending">规则命中 待剪 {activeSmartCutRuleRangeCount}</span>
                 </div>
                 {smartCutRulesExpanded ? (
                   <>

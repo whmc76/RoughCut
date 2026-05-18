@@ -273,6 +273,17 @@ describe("manual editor timeline mapping", () => {
     expect(sourceRangeOverlapsCutRanges(tokens[1].start, tokens[1].end, cutRanges)).toBe(false);
   });
 
+  it("does not collapse ASR text into a pause chip when silence metadata overlaps speech", () => {
+    const tokens = buildTranscriptTokens(
+      [{ index: 0, start_time: 10, end_time: 15, text_final: "这一段其实还有完整语音内容" }],
+      [{ start: 0, end: 20 }],
+      [{ start: 10, end: 15, duration_sec: 5, source: "audio_vad" }],
+    );
+
+    expect(tokens.some((token) => token.kind === "pause")).toBe(false);
+    expect(tokens.filter((token) => token.kind === "char").map((token) => token.text).join("")).toBe("这一段其实还有完整语音内容");
+  });
+
   it("keeps inferred transcript punctuation selectable as a source boundary range", () => {
     const subtitles = [
       { index: 0, start_time: 10, end_time: 11, text_final: "前一句内容" },
