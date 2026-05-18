@@ -2302,8 +2302,8 @@ function inferTranscriptBoundaryPunctuation(text: string, gapAfter: number) {
 function inferTranscriptBreakAfter(text: string, gapAfter: number, paragraphCharCount: number): TranscriptBreakKind | undefined {
   const trimmed = text.trim();
   const sentenceEnd = TRANSCRIPT_SENTENCE_PUNCTUATION_PATTERN.test(trimmed);
-  if (gapAfter >= 1.1 || (sentenceEnd && paragraphCharCount >= 42) || paragraphCharCount >= 86) return "paragraph";
-  if (gapAfter >= 0.45 || sentenceEnd || Array.from(trimmed).length >= 22) return "soft";
+  if (gapAfter >= 3.2 || (sentenceEnd && paragraphCharCount >= 96) || paragraphCharCount >= 150) return "paragraph";
+  if (gapAfter >= 1.2 || (sentenceEnd && paragraphCharCount >= 52) || Array.from(trimmed).length >= 36) return "soft";
   return undefined;
 }
 
@@ -2621,7 +2621,6 @@ export function buildTranscriptTokens(subtitles: JobManualEditSubtitle[], segmen
         end: visibleRange.end,
         kept: isSourceRangeKept(visibleRange.start, visibleRange.end, segments),
         pauseDuration,
-        breakAfter: pauseDuration >= 1.1 ? "paragraph" as const : undefined,
       };
     });
   });
@@ -5962,11 +5961,15 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                     const tokenTitle = cutReason
                       ? `${cutReason} ${formatSeconds(token.start)} - ${formatSeconds(token.end)}`
                       : `${formatSeconds(token.start)} - ${formatSeconds(token.end)}`;
-                    const breakNode = token.breakAfter ? (
-                      <span className={classNames("manual-editor-transcript-break", token.breakAfter === "paragraph" && "paragraph")} aria-hidden="true">
-                        <br />
-                      </span>
-                    ) : null;
+                    const breakNode = token.breakAfter === "paragraph"
+                      ? (
+                        <span className="manual-editor-transcript-break paragraph" aria-hidden="true">
+                          <br />
+                        </span>
+                      )
+                      : token.breakAfter
+                        ? <span className="manual-editor-transcript-break" aria-hidden="true"> </span>
+                        : null;
                     if (token.kind === "pause") {
                       return (
                         <Fragment key={token.key}>

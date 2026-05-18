@@ -9611,14 +9611,14 @@ textarea.input {
 
 .manual-editor-transcript-body {
   min-height: 0;
-  padding: 10px 12px;
+  padding: 8px 10px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #ffffff;
   color: #1f2a2a;
-  font-size: 15px;
-  font-weight: 620;
-  line-height: 1.68;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.48;
   overflow: auto;
   user-select: text;
 }
@@ -9812,16 +9812,16 @@ textarea.input {
   align-items: center;
   justify-content: center;
   min-width: 0;
-  height: 1.45em;
-  margin: 0 2px;
-  padding: 0 4px;
+  height: 1.3em;
+  margin: 0 1px;
+  padding: 0 3px;
   border: 0;
   border-radius: 5px;
   background: rgba(245, 158, 11, 0.14);
   color: #8a5a10;
   font: inherit;
-  font-size: 11px;
-  font-weight: 850;
+  font-size: 10px;
+  font-weight: 800;
   line-height: 1;
   vertical-align: 1px;
   cursor: pointer;
@@ -9895,7 +9895,7 @@ textarea.input {
 
 .manual-editor-transcript-break.paragraph {
   display: block;
-  height: 8px;
+  height: 4px;
 }
 
 .manual-editor-rule-panel {
