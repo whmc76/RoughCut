@@ -425,6 +425,7 @@ const SMART_CUT_AUDIO_SAFETY_SEC: Record<SmartCutRuleKind, number> = {
   pause: 0.08,
   smart_delete: 0.08,
 };
+const SMART_CUT_PAUSE_CLUSTER_GAP_SEC = 0.22;
 const SMART_DELETE_PROTECTED_TERM_PATTERN = /(?:^|[^A-Za-z0-9])(?:EDC\s*\d{1,4}|NITE\s*CORE|NITECORE|NOC|MT\s*\d{1,4}|S\d{2}\s*mini|OLIGHT|FENIX|ACEBEAM|NEXTORCH|NEXTOOL)(?=$|[^A-Za-z0-9])/i;
 
 function normalizeSmartCutRules(value: Partial<SmartCutRules> | null | undefined): SmartCutRules {
@@ -3348,6 +3349,40 @@ function cuttablePauseRanges(range: SilenceRange, subtitles: JobManualEditSubtit
   return fallbackCuttablePauseRanges(range, subtitles, fillers);
 }
 
+function pauseRangesCanCluster(
+  left: KeepSegment,
+  right: KeepSegment,
+  subtitles: JobManualEditSubtitle[],
+  fillers: string[],
+) {
+  const gapStart = Math.min(left.end, right.start);
+  const gapEnd = Math.max(left.end, right.start);
+  if (gapEnd <= gapStart + 0.001) return true;
+  if (gapEnd - gapStart > SMART_CUT_PAUSE_CLUSTER_GAP_SEC) return false;
+  return !smartCutMeaningfulText(subtitleTextForSourceRange({ start: gapStart, end: gapEnd }, subtitles), fillers);
+}
+
+function pauseGroupsForThreshold(
+  candidates: SmartCutRuleMatch[],
+  subtitles: JobManualEditSubtitle[],
+  fillers: string[],
+) {
+  const sorted = candidates
+    .filter((range) => range.end > range.start + 0.02)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  const groups: SmartCutRuleMatch[][] = [];
+  for (const candidate of sorted) {
+    const previousGroup = groups[groups.length - 1];
+    const previousRange = previousGroup?.[previousGroup.length - 1];
+    if (previousGroup && previousRange && pauseRangesCanCluster(previousRange, candidate, subtitles, fillers)) {
+      previousGroup.push(candidate);
+    } else {
+      groups.push([candidate]);
+    }
+  }
+  return groups;
+}
+
 function subtitleTextForSourceRange(range: KeepSegment, subtitles: JobManualEditSubtitle[]) {
   const fragments: string[] = [];
   for (const subtitle of subtitles) {
@@ -3416,18 +3451,22 @@ export function buildSmartCutRuleAnalysis(
     analysis.repeated.push(...findRepeatedSpeechRangesInSubtitle(subtitle).map((range) => ({ ...range, kind: "repeated" as const })));
   }
   analysis.repeated.push(...findRepeatedSpeechRangesAcrossSubtitles(subtitles));
+  const pauseCandidates: SmartCutRuleMatch[] = [];
   for (const range of silenceRanges) {
     for (const cuttableRange of cuttablePauseRanges(range, subtitles, fillers)) {
-      const pause = cuttableRange.end - cuttableRange.start;
       const pauseMatch = {
         start: Number(cuttableRange.start.toFixed(3)),
         end: Number(cuttableRange.end.toFixed(3)),
         kind: "pause" as const,
       };
-      analysis.pauseCandidates.push(pauseMatch);
-      if (pause >= rules.pauseThresholdSec) {
-        analysis.pause.push(pauseMatch);
-      }
+      pauseCandidates.push(pauseMatch);
+    }
+  }
+  analysis.pauseCandidates = pauseCandidates;
+  for (const group of pauseGroupsForThreshold(pauseCandidates, subtitles, fillers)) {
+    const pauseDuration = group.reduce((total, range) => total + Math.max(0, range.end - range.start), 0);
+    if (pauseDuration >= rules.pauseThresholdSec) {
+      analysis.pause.push(...group);
     }
   }
   return {

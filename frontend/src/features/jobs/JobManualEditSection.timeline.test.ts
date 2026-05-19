@@ -1195,6 +1195,49 @@ describe("manual editor timeline mapping", () => {
     expect(analysis.pause).toEqual([{ start: 1.2, end: 2.6, kind: "pause" }]);
   });
 
+  it("auto-cuts nearby short pause fragments once the pause group reaches the threshold", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 0, end_time: 1, text_final: "前一句内容" },
+        { index: 1, start_time: 2.2, end_time: 3, text_final: "后一句内容" },
+      ],
+      rules,
+      [
+        { start: 1, end: 1.35, duration_sec: 0.35, source: "audio_vad" },
+        { start: 1.45, end: 1.9, duration_sec: 0.45, source: "audio_vad" },
+      ],
+    );
+
+    expect(analysis.pauseCandidates).toEqual([
+      { start: 1, end: 1.35, kind: "pause" },
+      { start: 1.45, end: 1.9, kind: "pause" },
+    ]);
+    expect(analysis.pause).toEqual(analysis.pauseCandidates);
+  });
+
+  it("does not group short pauses across meaningful speech", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 0, end_time: 1, text_final: "前一句内容" },
+        { index: 1, start_time: 1.38, end_time: 1.48, text_final: "中间" },
+        { index: 2, start_time: 2.2, end_time: 3, text_final: "后一句内容" },
+      ],
+      rules,
+      [
+        { start: 1, end: 1.35, duration_sec: 0.35, source: "audio_vad" },
+        { start: 1.5, end: 1.95, duration_sec: 0.45, source: "audio_vad" },
+      ],
+    );
+
+    expect(analysis.pauseCandidates).toEqual([
+      { start: 1, end: 1.35, kind: "pause" },
+      { start: 1.5, end: 1.95, kind: "pause" },
+    ]);
+    expect(analysis.pause).toEqual([]);
+  });
+
   it("recomputes rule-managed pauses from the restored baseline instead of preserving stale short cuts", () => {
     const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
     const analysis = buildSmartCutRuleAnalysis(

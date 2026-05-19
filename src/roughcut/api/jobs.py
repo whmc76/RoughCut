@@ -325,6 +325,8 @@ class ManualEditorApplyIn(BaseModel):
 
 
 MANUAL_EDITOR_DRAFT_ARTIFACT_TYPE = "manual_editor_draft"
+MANUAL_EDITOR_DRAFT_SCHEMA = "manual_editor_draft.v2"
+MANUAL_EDITOR_TIMELINE_RULES_VERSION = 2
 MANUAL_EDITOR_MICRO_CUT_HEAL_SEC = 0.18
 
 
@@ -1619,6 +1621,7 @@ _MANUAL_EDITOR_SMART_DELETE_REASONS = {
 }
 
 _MANUAL_EDITOR_FRONTEND_MANAGED_AUTO_CUT_REASONS = {
+    "silence",
     "filler_word",
     "repeated_speech",
     "restart_retake",
@@ -2822,6 +2825,39 @@ def _manual_editor_frontend_managed_auto_cut_ranges(
     return ranges
 
 
+def _manual_editor_deleted_ranges_from_keep_segments(
+    keep_segments: list[dict[str, float]],
+    *,
+    source_duration_sec: float,
+) -> list[dict[str, float]]:
+    deleted_ranges: list[dict[str, float]] = []
+    cursor = 0.0
+    for segment in keep_segments:
+        start = max(0.0, min(source_duration_sec, float(segment.get("start", 0.0) or 0.0)))
+        end = max(start, min(source_duration_sec, float(segment.get("end", start) or start)))
+        if start > cursor + 0.02:
+            deleted_ranges.append({"start": round(cursor, 3), "end": round(start, 3)})
+        cursor = max(cursor, end)
+    if source_duration_sec > cursor + 0.02:
+        deleted_ranges.append({"start": round(cursor, 3), "end": round(source_duration_sec, 3)})
+    return deleted_ranges
+
+
+def _manual_editor_range_overlaps_any(
+    range_item: dict[str, float],
+    ranges: list[dict[str, float]],
+    *,
+    min_overlap_sec: float = 0.02,
+) -> bool:
+    start = float(range_item.get("start", 0.0) or 0.0)
+    end = float(range_item.get("end", start) or start)
+    for candidate in ranges:
+        overlap = min(end, float(candidate.get("end", 0.0) or 0.0)) - max(start, float(candidate.get("start", 0.0) or 0.0))
+        if overlap > min_overlap_sec:
+            return True
+    return False
+
+
 def _manual_editor_restore_frontend_managed_auto_cuts(
     keep_segments: list[Any],
     *,
@@ -2830,11 +2866,20 @@ def _manual_editor_restore_frontend_managed_auto_cuts(
 ) -> list[dict[str, float]]:
     if source_duration_sec <= 0.05:
         return _normalize_manual_keep_segments(keep_segments, source_duration_sec=source_duration_sec)
+    normalized_keep_segments = _normalize_manual_keep_segments(keep_segments, source_duration_sec=source_duration_sec)
     managed_ranges = _manual_editor_frontend_managed_auto_cut_ranges(editorial_analysis)
     if not managed_ranges:
-        return _normalize_manual_keep_segments(keep_segments, source_duration_sec=source_duration_sec)
+        return normalized_keep_segments
+    managed_deleted_ranges = [
+        deleted_range
+        for deleted_range in _manual_editor_deleted_ranges_from_keep_segments(
+            normalized_keep_segments,
+            source_duration_sec=source_duration_sec,
+        )
+        if _manual_editor_range_overlaps_any(deleted_range, managed_ranges)
+    ]
     return _normalize_manual_keep_segments(
-        [*keep_segments, *managed_ranges],
+        [*normalized_keep_segments, *managed_ranges, *managed_deleted_ranges],
         source_duration_sec=source_duration_sec,
     )
 
@@ -2855,6 +2900,15 @@ def _manual_editor_draft_matches_base(
     if expected_render_version is not None and int(payload.get("base_render_plan_version") or 0) != expected_render_version:
         return False
     return True
+
+
+def _manual_editor_draft_timeline_rules_current(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    try:
+        return int(payload.get("timeline_rules_version") or 0) == MANUAL_EDITOR_TIMELINE_RULES_VERSION
+    except (TypeError, ValueError):
+        return False
 
 
 def _manual_editor_draft_subtitles_are_stale(
@@ -3914,24 +3968,26 @@ async def _build_manual_editor_session(
             for segment in list(draft_payload.get("keep_segments") or [])
             if isinstance(segment, dict)
         ]
-        try:
-            normalized_draft_keep_segments = _normalize_manual_keep_segments(
-                raw_draft_keep_segments,
-                source_duration_sec=source_duration_sec,
-            ) if raw_draft_keep_segments else []
-            normalized_draft_keep_segments = _manual_editor_restore_frontend_managed_auto_cuts(
-                normalized_draft_keep_segments,
-                editorial_analysis=editorial_analysis if isinstance(editorial_analysis, dict) else None,
-                source_duration_sec=source_duration_sec,
-            ) if normalized_draft_keep_segments else []
-        except (HTTPException, TypeError, ValueError):
-            normalized_draft_keep_segments = []
-        draft_keep_segments = [
-            _manual_editor_segment_payload(segment, index=index)
-            for index, segment in enumerate(normalized_draft_keep_segments)
-        ]
-        if draft_keep_segments:
-            keep_segments = draft_keep_segments
+        draft_keep_segments: list[ManualEditorSegmentOut] = []
+        if _manual_editor_draft_timeline_rules_current(draft_payload):
+            try:
+                normalized_draft_keep_segments = _normalize_manual_keep_segments(
+                    raw_draft_keep_segments,
+                    source_duration_sec=source_duration_sec,
+                ) if raw_draft_keep_segments else []
+                normalized_draft_keep_segments = _manual_editor_restore_frontend_managed_auto_cuts(
+                    normalized_draft_keep_segments,
+                    editorial_analysis=editorial_analysis if isinstance(editorial_analysis, dict) else None,
+                    source_duration_sec=source_duration_sec,
+                ) if normalized_draft_keep_segments else []
+            except (HTTPException, TypeError, ValueError):
+                normalized_draft_keep_segments = []
+            draft_keep_segments = [
+                _manual_editor_segment_payload(segment, index=index)
+                for index, segment in enumerate(normalized_draft_keep_segments)
+            ]
+            if draft_keep_segments:
+                keep_segments = draft_keep_segments
         draft_subtitles_match = _manual_editor_draft_subtitles_match_fingerprint(
             draft_payload,
             subtitle_fingerprint,
@@ -4271,7 +4327,8 @@ async def save_manual_editor_draft(
             job_id=job.id,
             artifact_type=MANUAL_EDITOR_DRAFT_ARTIFACT_TYPE,
             data_json={
-                "schema": "manual_editor_draft.v1",
+                "schema": MANUAL_EDITOR_DRAFT_SCHEMA,
+                "timeline_rules_version": MANUAL_EDITOR_TIMELINE_RULES_VERSION,
                 "saved_at": saved_at,
                 "base_timeline_id": str(editorial_timeline.id),
                 "base_timeline_version": int(editorial_timeline.version or 1),
