@@ -9,6 +9,7 @@ from roughcut.edit.skills import apply_review_focus_overrides, resolve_editing_s
 from roughcut.edit.timeline_contract import audit_edit_decision_contract
 from roughcut.media.scene import SceneBoundary
 from roughcut.media.silence import SilenceSegment
+from roughcut.media.subtitle_spans import build_subtitle_span_alignment, subtitle_display_units
 
 
 FILLER_WORDS = [
@@ -286,6 +287,7 @@ _RETAKE_MAX_GAP_SEC = 4.5
 _RETAKE_MAX_WINDOW_ITEMS = 4
 _RETAKE_MIN_PREFIX_LEN = 4
 _RETAKE_MAX_FRAGMENT_CHARS = 24
+_MAX_REPEATED_SPEECH_COPY_GAP_SEC = 0.45
 _SHOWCASE_CONTEXT_MAX_GAP_SEC = 0.55
 _SHOWCASE_CONTEXT_APPRECIATION_MAX_GAP_SEC = 1.2
 _VISUAL_SHOWCASE_GAP_MIN_SEC = 0.45
@@ -1243,7 +1245,10 @@ def _subtitle_hesitation_filler_ranges(item: dict[str, Any], text: str) -> list[
         for start_char, end_char in _subtitle_text_match_char_ranges(text, filler):
             if start_char != 0:
                 continue
-            start, end = _subtitle_char_range_to_time(item, start_char, end_char)
+            timed_range = _subtitle_char_range_to_time(item, start_char, end_char)
+            if timed_range is None:
+                continue
+            start, end = timed_range
             if end >= start + _MIN_PARTIAL_SUBTITLE_CUT_DURATION_SEC:
                 ranges.append((start, end, filler))
     return _dedupe_subtitle_rule_ranges(ranges)
@@ -1262,9 +1267,17 @@ def _subtitle_repeated_speech_ranges(
         if len(keep_first) <= 1 and not separator.strip() and not re.search(r"[，,、]", separator):
             continue
         match_index = match.start()
-        remove_start_char = len(text[:match_index]) + len(keep_first + separator)
+        first_start_char = len(text[:match_index])
+        first_end_char = first_start_char + len(keep_first)
+        remove_start_char = first_end_char + len(separator)
         remove_end_char = remove_start_char + len(keep_first)
-        start, end = _subtitle_char_range_to_time(item, remove_start_char, remove_end_char)
+        first_timed_range = _subtitle_char_range_to_time(item, first_start_char, first_end_char)
+        remove_timed_range = _subtitle_char_range_to_time(item, remove_start_char, remove_end_char)
+        if first_timed_range is None or remove_timed_range is None:
+            continue
+        if remove_timed_range[0] - first_timed_range[1] > _MAX_REPEATED_SPEECH_COPY_GAP_SEC:
+            continue
+        start, end = remove_timed_range
         if end >= start + _MIN_PARTIAL_SUBTITLE_CUT_DURATION_SEC:
             ranges.append((start, end, keep_first))
     return _dedupe_subtitle_rule_ranges(ranges)
@@ -1284,18 +1297,34 @@ def _subtitle_text_match_char_ranges(text: str, needle: str) -> list[tuple[int, 
     return ranges
 
 
-def _subtitle_char_range_to_time(item: dict[str, Any], start_char: int, end_char: int) -> tuple[float, float]:
+def _subtitle_char_range_to_time(item: dict[str, Any], start_char: int, end_char: int) -> tuple[float, float] | None:
     text = _semantic_subtitle_text(item)
-    char_count = max(1, len(text))
-    start_time = float(item.get("start_time", 0.0) or 0.0)
-    end_time = float(item.get("end_time", start_time) or start_time)
-    duration = max(0.001, end_time - start_time)
-    clamped_start = min(max(0, start_char), char_count)
-    clamped_end = min(max(clamped_start, end_char), char_count)
-    return (
-        round(start_time + duration * clamped_start / char_count, 3),
-        round(start_time + duration * clamped_end / char_count, 3),
-    )
+    if not text:
+        return None
+    alignment = build_subtitle_span_alignment(item)
+    if alignment.matched_ratio < 0.98:
+        return None
+    unit_char_indexes = [
+        index
+        for index, char in enumerate(text)
+        if char in subtitle_display_units(char)
+    ]
+    if not unit_char_indexes or len(alignment.units) != len(unit_char_indexes):
+        return None
+    clamped_start = min(max(0, start_char), len(text))
+    clamped_end = min(max(clamped_start, end_char), len(text))
+    selected_units = [
+        alignment.units[unit_index]
+        for unit_index, char_index in enumerate(unit_char_indexes)
+        if clamped_start <= char_index < clamped_end
+    ]
+    if not selected_units:
+        return None
+    start = min(float(unit.start) for unit in selected_units)
+    end = max(float(unit.end) for unit in selected_units)
+    if end <= start:
+        return None
+    return round(start, 3), round(end, 3)
 
 
 def _dedupe_subtitle_rule_ranges(ranges: list[tuple[float, float, str]]) -> list[tuple[float, float, str]]:
@@ -2669,7 +2698,6 @@ def _collect_restart_retake_cuts(
             or _is_restart_cue_text(fragment_text)
         ):
             continue
-        fragment_incomplete = _looks_like_incomplete_tail(fragment_text)
         fragment_start = float(item.get("start_time", 0.0) or 0.0)
         fragment_end = float(item.get("end_time", 0.0) or 0.0)
         lookahead_stop = min(len(ordered), start_index + _RETAKE_MAX_WINDOW_ITEMS + 1)
@@ -2682,7 +2710,7 @@ def _collect_restart_retake_cuts(
             next_compact = _strip_restart_prefix(_compact_subtitle_text(next_text))
             if not _looks_like_retake_match(fragment_compact, next_compact):
                 continue
-            if not (fragment_incomplete or _window_has_restart_cue(ordered, start_index=start_index, next_index=next_index)):
+            if not _window_has_restart_cue(ordered, start_index=start_index, next_index=next_index):
                 continue
             if not _retake_window_is_disposable(
                 ordered,

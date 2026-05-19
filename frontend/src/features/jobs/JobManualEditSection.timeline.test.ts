@@ -235,7 +235,17 @@ describe("manual editor timeline mapping", () => {
     const rules = { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "呃" };
     const analysis = buildSmartCutRuleAnalysis(
       [
-        { index: 0, start_time: 10, end_time: 15, text_raw: "呃没想到啊", text_final: "呃没想到啊" },
+        {
+          index: 0,
+          start_time: 10,
+          end_time: 15,
+          text_raw: "呃没想到啊",
+          text_final: "呃没想到啊",
+          words: [
+            { word: "呃", start: 10, end: 11 },
+            { word: "没想到啊", start: 11, end: 15 },
+          ],
+        },
       ],
       rules,
       [],
@@ -282,6 +292,17 @@ describe("manual editor timeline mapping", () => {
 
     expect(tokens.some((token) => token.kind === "pause")).toBe(false);
     expect(tokens.filter((token) => token.kind === "char").map((token) => token.text).join("")).toBe("这一段其实还有完整语音内容");
+  });
+
+  it("lets long audio VAD pauses become smart-cut candidates without word timings", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [{ index: 0, start_time: 0, end_time: 4, text_final: "收到了第三次" }],
+      rules,
+      [{ start: 0.8, end: 1.8, duration_sec: 1.0, source: "audio_vad" }],
+    );
+
+    expect(analysis.pause).toEqual([{ start: 0.8, end: 1.8, kind: "pause" }]);
   });
 
   it("keeps inferred transcript punctuation selectable as a source boundary range", () => {
@@ -602,8 +623,9 @@ describe("manual editor timeline mapping", () => {
       .join("");
 
     expect(transcript.length).toBeGreaterThan(1);
-    expect(transcript.every((subtitle) => !subtitle.words?.length && !subtitle.alignment_tokens?.length)).toBe(true);
-    expect(rendered).toBe(transcript.map((subtitle) => subtitle.text_final).join(""));
+    expect(transcript.some((subtitle) => subtitle.alignment_tokens?.length)).toBe(true);
+    expect(transcript.flatMap((subtitle) => subtitle.alignment_tokens || []).map((token) => token.text).join("")).toBe(text);
+    expect(rendered.replace(/\s/g, "")).toBe(transcript.map((subtitle) => subtitle.text_final).join("").replace(/\s/g, ""));
     expect(rendered.match(/涂层/g)?.length).toBe(1);
     expect(rendered).not.toContain("涂层涂层");
     expect(rendered).not.toContain("的的的");
@@ -787,7 +809,19 @@ describe("manual editor timeline mapping", () => {
       autoSmartCutRuleRanges(analysis, rules),
       smartCutRuleManagedRanges(analysis),
       1.4,
-    )).toEqual([{ start: 0, end: 0.76 }, { start: 1.34, end: 1.4 }]);
+    )).toEqual([{ start: 0, end: 0.7 }]);
+  });
+
+  it("does not auto-cut repeated text from estimated character timing", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: true, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [{ index: 0, start_time: 0, end_time: 6, text_final: "落在中间会落在中间会有点滑手" }],
+      rules,
+      [],
+    );
+
+    expect(analysis.repeated).toEqual([]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([]);
   });
 
   it("does not auto-cut long VAD pauses inside meaningful subtitle text", () => {
@@ -998,6 +1032,61 @@ describe("manual editor timeline mapping", () => {
     expect(tokens.some((token) => token.kind === "pause" && token.text === "[...,1.0s]")).toBe(true);
   });
 
+  it("uses real ASR alignment gaps for long split transcript rows", () => {
+    const beforePause = Array.from("哦今天终于收到了年前的").map((text, index) => ({
+      text,
+      start: Number((1.7 + index * 0.12).toFixed(3)),
+      end: Number((1.78 + index * 0.12).toFixed(3)),
+    }));
+    const afterPause = Array.from("最后的一款小玩具啊嗯这个也是耗尽了我这次的欧气啊").map((text, index) => ({
+      text,
+      start: Number((6.3 + index * 0.12).toFixed(3)),
+      end: Number((6.38 + index * 0.12).toFixed(3)),
+    }));
+    const sourceSubtitle = {
+      index: 49,
+      start_time: 1.6,
+      end_time: 13.8,
+      text_final: "哦，今天终于收到了年前的最后的一款小玩具啊，嗯，这个也是耗尽了我这次的欧气啊",
+      alignment_tokens: [...beforePause, ...afterPause],
+    };
+    const displayRows = buildSourceTranscriptSubtitlesForTimeline(
+      { keep_segments: [{ start: 1.6, end: 13.8 }], source_subtitles: [sourceSubtitle], projected_subtitles: [] },
+      [],
+      {},
+    );
+    const pauses = wordTimingPauseIntervals([sourceSubtitle]);
+    const tokens = buildTranscriptTokens(displayRows, [{ start: 1.6, end: 13.8 }], pauses);
+    const pauseIndex = tokens.findIndex((token) => token.kind === "pause");
+    const nextVisibleToken = tokens.slice(pauseIndex + 1).find((token) => token.kind === "char");
+
+    expect(displayRows.length).toBeGreaterThan(1);
+    expect(displayRows.some((subtitle) => subtitle.alignment_tokens?.length)).toBe(true);
+    expect(pauses).toEqual([{ start: 3.06, end: 6.22, duration_sec: 3.16, source: "alignment_gap" }]);
+    expect(pauseIndex).toBeGreaterThan(-1);
+    expect(tokens[pauseIndex - 1]?.text).toBe("的");
+    expect(nextVisibleToken?.text).toBe("最");
+  });
+
+  it("splits long pause chips by actual kept and cut timeline ranges", () => {
+    const tokens = buildTranscriptTokens(
+      [],
+      [{ start: 0, end: 1 }, { start: 2, end: 3 }],
+      [{ start: 0, end: 3, duration_sec: 3, source: "audio_vad" }],
+    );
+
+    expect(tokens.map((token) => ({
+      kind: token.kind,
+      start: token.start,
+      end: token.end,
+      kept: token.kept,
+    }))).toEqual([
+      { kind: "pause", start: 0, end: 1, kept: true },
+      { kind: "pause", start: 1, end: 2, kept: false },
+      { kind: "pause", start: 2, end: 3, kept: true },
+    ]);
+  });
+
   it("keeps pause auto-cuts away from neighboring word edges", () => {
     const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
     const analysis = buildSmartCutRuleAnalysis(
@@ -1195,7 +1284,7 @@ describe("manual editor timeline mapping", () => {
 
     const previews = buildSmartCutRulePreviews(analysis, rules, subtitles);
 
-    expect(previews.map((preview) => preview.label)).toEqual(["语气词", "重复口误", "长停顿", "智能删除"]);
+    expect(previews.map((preview) => preview.label)).toEqual(["语气词", "重复口误", "长停顿", "智能废片"]);
     expect(previews.find((preview) => preview.kind === "filler")?.sampleText).toBe("嗯");
     expect(previews.find((preview) => preview.kind === "pause")?.sampleText).toBe("[0.8s]");
     expect(previews.find((preview) => preview.kind === "smart_delete")?.reason).toContain("开头重说");

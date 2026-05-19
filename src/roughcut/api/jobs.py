@@ -1618,6 +1618,15 @@ _MANUAL_EDITOR_SMART_DELETE_REASONS = {
     "long_non_dialogue",
 }
 
+_MANUAL_EDITOR_FRONTEND_MANAGED_AUTO_CUT_REASONS = {
+    "filler_word",
+    "repeated_speech",
+    "restart_retake",
+    "restart_cue",
+    "low_signal_subtitle",
+    "long_non_dialogue",
+}
+
 _MANUAL_EDITOR_SMART_DELETE_REASON_LABELS = {
     "restart_retake": "疑似重录废片",
     "restart_cue": "明确重来/口误提示",
@@ -1644,8 +1653,6 @@ def _manual_editor_is_smart_delete_cut(item: dict[str, Any]) -> bool:
         return False
     if verdict == "cut":
         return True
-    if reason in _MANUAL_EDITOR_SMART_DELETE_REASONS:
-        return True
     evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
     tags = {str(tag).strip() for tag in (evidence.get("tags") or []) if str(tag).strip()}
     try:
@@ -1654,6 +1661,11 @@ def _manual_editor_is_smart_delete_cut(item: dict[str, Any]) -> bool:
     except (TypeError, ValueError):
         retake_score = 0.0
         removal_score = 0.0
+    if reason == "restart_retake":
+        signals = {str(signal).strip() for signal in list(item.get("signals") or []) if str(signal).strip()}
+        return "restart_cue_context" in tags or any("restart_cue" in signal for signal in signals)
+    if reason in _MANUAL_EDITOR_SMART_DELETE_REASONS:
+        return True
     return retake_score >= 0.5 and removal_score >= 0.25 and "restart_cue_context" in tags
 
 
@@ -2667,16 +2679,24 @@ def _manual_editor_split_long_subtitle_rows(subtitles: list[dict[str, Any]]) -> 
         original_index = int(item.get("index", next_index) or next_index)
         for fragment_index, piece in enumerate(pieces):
             row = dict(item)
+            piece_start = float(piece["start_time"])
+            piece_end = float(piece["end_time"])
             row["index"] = original_index if fragment_index == 0 else next_index
             if fragment_index > 0:
                 next_index += 1
             row["source_fragment_index"] = fragment_index
             row["source_fragment_count"] = len(pieces)
             row["source_text_full"] = text
-            row["source_overlap_start_time"] = piece["start_time"]
-            row["source_overlap_end_time"] = piece["end_time"]
-            row["start_time"] = piece["start_time"]
-            row["end_time"] = piece["end_time"]
+            row["source_overlap_start_time"] = piece_start
+            row["source_overlap_end_time"] = piece_end
+            row["start_time"] = piece_start
+            row["end_time"] = piece_end
+            row["words"] = [
+                dict(word)
+                for word in list(item.get("words") or [])
+                if isinstance(word, dict)
+                and _manual_editor_word_belongs_to_range(word, start=piece_start, end=piece_end)
+            ]
             for key in ("text_raw", "text_norm", "text_final", "text"):
                 if key in row:
                     row[key] = piece["text"]
@@ -2778,6 +2798,45 @@ def _manual_keep_segments_from_editorial_payload(payload: dict[str, Any] | None)
             continue
         healed.append(dict(item))
     return healed
+
+
+def _manual_editor_frontend_managed_auto_cut_ranges(
+    editorial_analysis: dict[str, Any] | None,
+) -> list[dict[str, float]]:
+    ranges: list[dict[str, float]] = []
+    accepted_cuts = list((editorial_analysis or {}).get("accepted_cuts") or [])
+    for item in accepted_cuts:
+        if not isinstance(item, dict):
+            continue
+        reason = str(item.get("reason") or "").strip()
+        if reason not in _MANUAL_EDITOR_FRONTEND_MANAGED_AUTO_CUT_REASONS:
+            continue
+        try:
+            start = max(0.0, float(item.get("start", 0.0) or 0.0))
+            end = max(start, float(item.get("end", start) or start))
+        except (TypeError, ValueError):
+            continue
+        if end <= start + 0.02:
+            continue
+        ranges.append({"start": round(start, 3), "end": round(end, 3)})
+    return ranges
+
+
+def _manual_editor_restore_frontend_managed_auto_cuts(
+    keep_segments: list[Any],
+    *,
+    editorial_analysis: dict[str, Any] | None,
+    source_duration_sec: float,
+) -> list[dict[str, float]]:
+    if source_duration_sec <= 0.05:
+        return _normalize_manual_keep_segments(keep_segments, source_duration_sec=source_duration_sec)
+    managed_ranges = _manual_editor_frontend_managed_auto_cut_ranges(editorial_analysis)
+    if not managed_ranges:
+        return _normalize_manual_keep_segments(keep_segments, source_duration_sec=source_duration_sec)
+    return _normalize_manual_keep_segments(
+        [*keep_segments, *managed_ranges],
+        source_duration_sec=source_duration_sec,
+    )
 
 
 def _manual_editor_draft_matches_base(
@@ -3771,6 +3830,15 @@ async def _build_manual_editor_session(
     smart_delete_segments = _manual_editor_smart_delete_segments(
         editorial_analysis if isinstance(editorial_analysis, dict) else None
     )
+    restored_base_keep_segment_dicts = _manual_editor_restore_frontend_managed_auto_cuts(
+        raw_base_keep_segments,
+        editorial_analysis=editorial_analysis if isinstance(editorial_analysis, dict) else None,
+        source_duration_sec=source_duration_sec,
+    )
+    restored_base_keep_segments = [
+        _manual_editor_segment_payload(segment, index=index)
+        for index, segment in enumerate(restored_base_keep_segment_dicts)
+    ]
 
     raw_source_subtitle_dicts = await _load_manual_editor_source_subtitle_dicts(session, job_id=job.id)
     raw_subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(session, job_id=job.id, drop_empty=False)
@@ -3800,7 +3868,7 @@ async def _build_manual_editor_session(
         latest_subtitle_revision_created_at=latest_subtitle_created_at,
     )
     if timeline_subtitles_current:
-        base_keep_segments = raw_base_keep_segments
+        base_keep_segments = restored_base_keep_segments
     elif source_duration_sec > 0.05:
         base_keep_segments = [
             _manual_editor_segment_payload({"start": 0.0, "end": source_duration_sec}, index=0)
@@ -3851,6 +3919,11 @@ async def _build_manual_editor_session(
                 raw_draft_keep_segments,
                 source_duration_sec=source_duration_sec,
             ) if raw_draft_keep_segments else []
+            normalized_draft_keep_segments = _manual_editor_restore_frontend_managed_auto_cuts(
+                normalized_draft_keep_segments,
+                editorial_analysis=editorial_analysis if isinstance(editorial_analysis, dict) else None,
+                source_duration_sec=source_duration_sec,
+            ) if normalized_draft_keep_segments else []
         except (HTTPException, TypeError, ValueError):
             normalized_draft_keep_segments = []
         draft_keep_segments = [

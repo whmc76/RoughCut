@@ -8,13 +8,14 @@ from roughcut.edit.decisions import (
 from roughcut.media.silence import SilenceSegment
 
 
-def _subtitle(text: str) -> dict:
+def _subtitle(text: str, *, words: list[dict] | None = None, start: float = 1.0, end: float = 2.0) -> dict:
     return {
-        "start_time": 1.0,
-        "end_time": 2.0,
+        "start_time": start,
+        "end_time": end,
         "text_raw": text,
         "text_norm": text,
         "text_final": text,
+        "words": words or [],
     }
 
 
@@ -43,7 +44,18 @@ def test_filler_cut_only_removes_pure_filler_subtitle() -> None:
 
 def test_auto_subtitle_rule_cuts_leading_hesitation_filler_only() -> None:
     candidates = _build_subtitle_cut_candidates(
-        [_subtitle("嗯先看手电")],
+        [
+            _subtitle(
+                "嗯先看手电",
+                words=[
+                    {"word": "嗯", "start": 1.0, "end": 1.2},
+                    {"word": "先", "start": 1.2, "end": 1.32},
+                    {"word": "看", "start": 1.28, "end": 1.4},
+                    {"word": "手", "start": 1.4, "end": 1.7},
+                    {"word": "电", "start": 1.7, "end": 2.0},
+                ],
+            )
+        ],
         content_profile=None,
     )
 
@@ -56,7 +68,18 @@ def test_auto_subtitle_rule_cuts_leading_hesitation_filler_only() -> None:
 
 def test_auto_subtitle_rule_requires_transcript_filler_confirmation_when_asr_present() -> None:
     candidates = _build_subtitle_cut_candidates(
-        [_subtitle("嗯先看手电")],
+        [
+            _subtitle(
+                "嗯先看手电",
+                words=[
+                    {"word": "嗯", "start": 1.0, "end": 1.2},
+                    {"word": "先", "start": 1.22, "end": 1.3},
+                    {"word": "看", "start": 1.3, "end": 1.42},
+                    {"word": "手", "start": 1.42, "end": 1.7},
+                    {"word": "电", "start": 1.7, "end": 2.0},
+                ],
+            )
+        ],
         content_profile=None,
         transcript_segments=[
             {
@@ -76,7 +99,18 @@ def test_auto_subtitle_rule_requires_transcript_filler_confirmation_when_asr_pre
 
 def test_auto_subtitle_rule_allows_transcript_confirmed_filler_cut() -> None:
     candidates = _build_subtitle_cut_candidates(
-        [_subtitle("嗯先看手电")],
+        [
+            _subtitle(
+                "嗯先看手电",
+                words=[
+                    {"word": "嗯", "start": 1.0, "end": 1.2},
+                    {"word": "先", "start": 1.22, "end": 1.3},
+                    {"word": "看", "start": 1.3, "end": 1.42},
+                    {"word": "手", "start": 1.42, "end": 1.7},
+                    {"word": "电", "start": 1.7, "end": 2.0},
+                ],
+            )
+        ],
         content_profile=None,
         transcript_segments=[
             {
@@ -117,14 +151,68 @@ def test_auto_subtitle_rule_drops_sub_frame_leading_hesitation_cut() -> None:
 
 def test_auto_subtitle_rule_cuts_repeated_phrase_second_copy_only() -> None:
     candidates = _build_subtitle_cut_candidates(
-        [_subtitle("这个产品产品真的不错")],
+        [
+            _subtitle(
+                "这个产品产品真的不错",
+                words=[
+                    {"word": "这", "start": 1.0, "end": 1.1},
+                    {"word": "个", "start": 1.1, "end": 1.2},
+                    {"word": "产", "start": 1.2, "end": 1.35},
+                    {"word": "品", "start": 1.35, "end": 1.5},
+                    {"word": "产", "start": 1.5, "end": 1.65},
+                    {"word": "品", "start": 1.65, "end": 1.8},
+                    {"word": "真", "start": 1.8, "end": 1.86},
+                    {"word": "的", "start": 1.86, "end": 1.9},
+                    {"word": "不", "start": 1.9, "end": 1.95},
+                    {"word": "错", "start": 1.95, "end": 2.0},
+                ],
+            )
+        ],
         content_profile=None,
     )
 
     repeated = [candidate for candidate in candidates if candidate.reason == "repeated_speech"]
     assert len(repeated) == 1
     assert repeated[0].signals[0] == "partial_repeated_speech"
-    assert 1.2 < repeated[0].start < repeated[0].end < 1.7
+    assert 1.49 < repeated[0].start < 1.51
+    assert 1.79 < repeated[0].end < 1.81
+
+
+def test_auto_subtitle_rule_does_not_estimate_partial_cut_without_alignment() -> None:
+    candidates = _build_subtitle_cut_candidates(
+        [_subtitle("这个产品产品真的不错")],
+        content_profile=None,
+    )
+
+    assert [candidate for candidate in candidates if candidate.reason == "repeated_speech"] == []
+
+
+def test_auto_subtitle_rule_does_not_cut_repeated_word_across_long_pause() -> None:
+    candidates = _build_subtitle_cut_candidates(
+        [
+            _subtitle(
+                "就是这个 这个能不能看到",
+                start=552.83,
+                end=555.23,
+                words=[
+                    {"word": "就", "start": 552.83, "end": 552.94},
+                    {"word": "是", "start": 552.94, "end": 553.05},
+                    {"word": "这", "start": 553.05, "end": 553.2},
+                    {"word": "个", "start": 553.2, "end": 553.35},
+                    {"word": "这", "start": 554.35, "end": 554.57},
+                    {"word": "个", "start": 554.57, "end": 554.79},
+                    {"word": "能", "start": 554.79, "end": 554.93},
+                    {"word": "不", "start": 554.93, "end": 554.98},
+                    {"word": "能", "start": 554.98, "end": 555.03},
+                    {"word": "看", "start": 555.03, "end": 555.13},
+                    {"word": "到", "start": 555.13, "end": 555.23},
+                ],
+            )
+        ],
+        content_profile=None,
+    )
+
+    assert [candidate for candidate in candidates if candidate.reason == "repeated_speech"] == []
 
 
 def test_auto_subtitle_rule_drops_sub_frame_repeated_phrase_cut() -> None:
