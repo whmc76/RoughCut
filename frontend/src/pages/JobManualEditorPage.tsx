@@ -70,6 +70,8 @@ function readinessEmptyStateMessage(readiness: JobManualEditorReadiness) {
 function manualEditorRetryStartStep(readiness?: JobManualEditorReadiness) {
   const failedStep = readiness?.required_steps.find((step) => step.status === "failed" || step.status === "cancelled");
   if (failedStep?.step_name) return failedStep.step_name;
+  const currentStep = readiness?.current_step || "";
+  if (currentStep && !["source_media", "media_meta", "editorial_timeline", "render_plan"].includes(currentStep)) return currentStep;
   if (readiness?.missing?.some((item) => item === "editorial_timeline" || item === "render_plan")) return "edit_plan";
   if (readiness?.missing?.includes("media_meta")) return "probe";
   return null;

@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 import roughcut.db.session as db_session
 from roughcut.db.models import Job, JobStep
 from roughcut.db.session import Base
+from roughcut.pipeline import orchestrator
 from roughcut.pipeline import steps
 from roughcut.pipeline import tasks
 
@@ -54,6 +55,106 @@ def test_finalize_ignored_dispatched_step_ignores_missing_job(task_status_sessio
     missing_job_id = str(uuid.uuid4())
 
     assert not tasks._finalize_ignored_dispatched_step(missing_job_id, "transcribe", task_id="stale-task")
+
+
+def test_streamlined_asr_pipeline_skips_legacy_review_steps(monkeypatch):
+    job = Job(id=uuid.uuid4(), source_name="source.mp4", status="processing", enhancement_modes=[])
+    skipped_step_names = [
+        "subtitle_term_resolution",
+        "subtitle_consistency_review",
+        "glossary_review",
+        "transcript_review",
+        "subtitle_translation",
+        "ai_director",
+        "avatar_commentary",
+    ]
+    job_steps = [
+        JobStep(job_id=job.id, step_name=step_name, status="pending")
+        for step_name in skipped_step_names
+    ]
+    monkeypatch.setattr(
+        orchestrator,
+        "get_settings",
+        lambda: SimpleNamespace(streamlined_asr_pipeline_enabled=True),
+    )
+
+    orchestrator._reconcile_terminal_steps(job, job_steps)
+
+    assert {step.step_name for step in job_steps if step.status == "skipped"} == set(skipped_step_names)
+    assert {
+        step.metadata_["skip_reason"]
+        for step in job_steps
+        if step.step_name
+        in {"subtitle_term_resolution", "subtitle_consistency_review", "glossary_review", "transcript_review"}
+    } == {"streamlined_asr_pipeline"}
+    assert next(step for step in job_steps if step.step_name == "subtitle_translation").metadata_["skip_reason"] == (
+        "multilingual_translation_disabled"
+    )
+
+
+def test_streamlined_asr_pipeline_keeps_review_steps_by_default(monkeypatch):
+    job = Job(id=uuid.uuid4(), source_name="source.mp4", status="processing", enhancement_modes=[])
+    review_step_names = [
+        "subtitle_term_resolution",
+        "subtitle_consistency_review",
+        "glossary_review",
+        "transcript_review",
+    ]
+    job_steps = [
+        JobStep(job_id=job.id, step_name=step_name, status="pending")
+        for step_name in review_step_names
+    ]
+    monkeypatch.setattr(orchestrator, "get_settings", lambda: SimpleNamespace())
+
+    orchestrator._reconcile_terminal_steps(job, job_steps)
+
+    assert {step.step_name: step.status for step in job_steps} == {
+        step_name: "pending" for step_name in review_step_names
+    }
+
+
+def test_streamlined_asr_pipeline_can_be_disabled(monkeypatch):
+    job = Job(id=uuid.uuid4(), source_name="source.mp4", status="processing", enhancement_modes=[])
+    legacy_step = JobStep(job_id=job.id, step_name="transcript_review", status="pending")
+    translation_step = JobStep(job_id=job.id, step_name="subtitle_translation", status="pending")
+    monkeypatch.setattr(
+        orchestrator,
+        "get_settings",
+        lambda: SimpleNamespace(streamlined_asr_pipeline_enabled=False),
+    )
+
+    orchestrator._reconcile_terminal_steps(job, [legacy_step, translation_step])
+
+    assert legacy_step.status == "pending"
+    assert translation_step.status == "skipped"
+
+
+def test_reconcile_restores_previously_streamlined_review_step(monkeypatch):
+    job = Job(id=uuid.uuid4(), source_name="source.mp4", status="processing", enhancement_modes=[])
+    review_step = JobStep(
+        job_id=job.id,
+        step_name="transcript_review",
+        status="skipped",
+        attempt=2,
+        metadata_={
+            "skip_reason": "streamlined_asr_pipeline",
+            "detail": "新 ASR 精简链路已跳过旧版转写/字幕兜底审校。",
+            "progress": 1.0,
+            "last_task_id": "old-task",
+        },
+    )
+    monkeypatch.setattr(orchestrator, "get_settings", lambda: SimpleNamespace())
+
+    orchestrator._reconcile_terminal_steps(job, [review_step])
+
+    assert review_step.status == "pending"
+    assert review_step.attempt == 0
+    assert review_step.finished_at is None
+    assert review_step.error_message is None
+    assert review_step.metadata_["progress"] == 0.0
+    assert review_step.metadata_["detail"] == "ASR 审阅链路已恢复，等待重新执行。"
+    assert "skip_reason" not in review_step.metadata_
+    assert "last_task_id" not in review_step.metadata_
 
 
 def test_task_status_helpers_ignore_invalid_job_ids(task_status_session_factory):

@@ -4,8 +4,14 @@ State in DB, Celery only executes individual steps.
 
  Pipeline: probe → extract_audio → transcribe → subtitle_postprocess
         → subtitle_term_resolution → subtitle_consistency_review
-        → glossary_review → transcript_review → subtitle_translation → content_profile → summary_review(auto gate) → ai_director
+        → glossary_review → transcript_review → subtitle_translation
+        → content_profile → summary_review(auto gate) → ai_director
         → avatar_commentary → edit_plan → render → final_review(auto gate) → platform_package
+
+ The ASR cleanup and review gates remain in the main path because they provide
+ term resolution, consistency checks, and canonical transcript projection for
+ downstream editing. They can still be explicitly skipped through the legacy
+ streamlined-ASR compatibility flag, but that is no longer the default.
 """
 from __future__ import annotations
 
@@ -25,6 +31,7 @@ from sqlalchemy.pool import NullPool
 from sqlalchemy.sql import text
 
 from roughcut.config import get_settings
+from roughcut.creative.modes import multilingual_translation_mode_enabled
 from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline
 from roughcut.db.session import get_session_factory
 from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE, assess_job_quality
@@ -104,6 +111,14 @@ MAX_ATTEMPTS = 3
 _GPU_SENSITIVE_STEPS = {"transcribe", "avatar_commentary", "render"}
 _REVIEW_ROUND_STEPS = {"summary_review", "glossary_review", "final_review"}
 _EDIT_PLAN_OPTIONAL_PREREQUISITES = {"ai_director", "avatar_commentary"}
+_STREAMLINED_ASR_REVIEW_STEPS = frozenset(
+    {
+        "subtitle_term_resolution",
+        "subtitle_consistency_review",
+        "glossary_review",
+        "transcript_review",
+    }
+)
 _ORCHESTRATOR_ADVISORY_LOCK_KEY = 22032026
 _ORCHESTRATOR_HEARTBEAT_PATH = Path("logs/orchestrator-heartbeat.json")
 _ORCHESTRATOR_HEARTBEAT_MIN_FRESH_SEC = 30.0
@@ -373,6 +388,9 @@ async def tick() -> None:
         pending_steps = result.scalars().all()
 
         for step in pending_steps:
+            if await _maybe_auto_skip_step(step, session):
+                continue
+
             if await _step_paused_for_smart_assist(step, session):
                 continue
 
@@ -424,6 +442,69 @@ async def _step_paused_for_smart_assist(step: JobStep, session) -> bool:
 
     _mark_job_waiting_for_manual_edit(job, step)
     return True
+
+
+async def _maybe_auto_skip_step(step: JobStep, session) -> bool:
+    job = await session.get(Job, step.job_id)
+    if job is None:
+        return False
+    reason = _auto_skip_reason_for_step(job, step.step_name)
+    if not reason:
+        return False
+    _mark_step_skipped(step, reason=reason)
+    if job.status == "pending":
+        job.status = "processing"
+        job.updated_at = datetime.now(timezone.utc)
+    return True
+
+
+def _auto_skip_reason_for_step(job: Job, step_name: str, *, settings: object | None = None) -> str | None:
+    normalized = str(step_name or "").strip()
+    resolved_settings = settings or get_settings()
+    if (
+        normalized in _STREAMLINED_ASR_REVIEW_STEPS
+        and bool(getattr(resolved_settings, "streamlined_asr_pipeline_enabled", False))
+    ):
+        return "streamlined_asr_pipeline"
+    if normalized == "subtitle_translation" and not multilingual_translation_mode_enabled(
+        getattr(job, "enhancement_modes", [])
+    ):
+        return "multilingual_translation_disabled"
+    if normalized == "ai_director" and "ai_director" not in set(getattr(job, "enhancement_modes", []) or []):
+        return "ai_director_disabled"
+    if normalized == "avatar_commentary" and "avatar_commentary" not in set(getattr(job, "enhancement_modes", []) or []):
+        return "avatar_commentary_disabled"
+    return None
+
+
+def _mark_step_skipped(step: JobStep, *, reason: str) -> None:
+    now = datetime.now(timezone.utc)
+    metadata = dict(step.metadata_ or {})
+    current_task_id = metadata.pop("task_id", None)
+    metadata.pop("retry_wait_until", None)
+    metadata.pop("retry_after_sec", None)
+    metadata["skip_reason"] = reason
+    metadata["detail"] = _skip_detail_for_reason(reason)
+    metadata["progress"] = 1.0
+    metadata["updated_at"] = now.isoformat()
+    if current_task_id:
+        metadata["last_task_id"] = current_task_id
+    step.status = "skipped"
+    step.finished_at = step.finished_at or now
+    step.error_message = None
+    step.metadata_ = metadata
+
+
+def _skip_detail_for_reason(reason: str) -> str:
+    if reason == "streamlined_asr_pipeline":
+        return "新 ASR 精简链路已跳过旧版转写/字幕兜底审校。"
+    if reason == "multilingual_translation_disabled":
+        return "未启用多语言翻译模式，跳过字幕翻译。"
+    if reason == "ai_director_disabled":
+        return "未启用 AI 导演模式，跳过。"
+    if reason == "avatar_commentary_disabled":
+        return "未启用数字人解说模式，跳过。"
+    return "当前配置不需要执行此步骤，已跳过。"
 
 
 def _step_retry_wait_remaining(step: JobStep) -> int:
@@ -1554,20 +1635,46 @@ def _find_previous_existing_step_name(step_name: str, existing_step_names: set[s
 
 
 def _reconcile_terminal_steps(job: Job, steps: list[JobStep]) -> None:
-    now = datetime.now(timezone.utc)
-    enabled_modes = set(getattr(job, "enhancement_modes", []) or [])
     for step in steps:
         if step.status == "done":
             step.error_message = None
             continue
-        if step.step_name == "ai_director" and "ai_director" not in enabled_modes:
-            step.status = "skipped"
-        elif step.step_name == "avatar_commentary" and "avatar_commentary" not in enabled_modes:
-            step.status = "skipped"
-        else:
+        if _maybe_restore_previously_streamlined_step(job, step):
             continue
-        step.finished_at = step.finished_at or now
-        step.error_message = None
+        skip_reason = _auto_skip_reason_for_step(job, step.step_name)
+        if not skip_reason:
+            continue
+        _mark_step_skipped(step, reason=skip_reason)
+
+
+def _maybe_restore_previously_streamlined_step(job: Job, step: JobStep) -> bool:
+    if step.status != "skipped":
+        return False
+    normalized = str(step.step_name or "").strip()
+    if normalized not in _STREAMLINED_ASR_REVIEW_STEPS:
+        return False
+    metadata = dict(step.metadata_ or {})
+    if metadata.get("skip_reason") != "streamlined_asr_pipeline":
+        return False
+    if _auto_skip_reason_for_step(job, normalized):
+        return False
+    now = datetime.now(timezone.utc)
+    metadata.pop("skip_reason", None)
+    metadata.pop("last_task_id", None)
+    metadata["detail"] = "ASR 审阅链路已恢复，等待重新执行。"
+    metadata["progress"] = 0.0
+    metadata["updated_at"] = now.isoformat()
+    step.status = "pending"
+    step.attempt = 0
+    step.started_at = None
+    step.finished_at = None
+    step.error_message = None
+    step.metadata_ = metadata
+    if job.status in {"done", "failed"}:
+        job.status = "processing"
+        job.error_message = None
+        job.updated_at = now
+    return True
 
 
 async def _assess_and_maybe_rerun_job(session, job: Job, steps: list[JobStep]) -> str:
