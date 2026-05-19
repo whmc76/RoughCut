@@ -5072,7 +5072,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   };
 
   const transcriptTokenIsCut = (token: TranscriptToken) => (
-    !token.kept || sourceRangeOverlapsCutRanges(token.start, token.end, transcriptCutRanges)
+    !token.kept
+    || sourceRangeOverlapsCutRanges(token.start, token.end, transcriptCutRanges)
+    || smartCutRuleMatchForSourceRange(token.start, token.end, activeSmartCutRuleRanges, []) != null
   );
 
   const smartCutClassificationForToken = (token: TranscriptToken, cut: boolean) => {

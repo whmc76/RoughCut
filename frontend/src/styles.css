@@ -9817,8 +9817,8 @@ textarea.input {
   padding: 0 3px;
   border: 0;
   border-radius: 5px;
-  background: rgba(245, 158, 11, 0.14);
-  color: #8a5a10;
+  background: rgba(14, 116, 144, 0.1);
+  color: #0e7490;
   font: inherit;
   font-size: 10px;
   font-weight: 800;
@@ -9828,9 +9828,10 @@ textarea.input {
 }
 
 .manual-editor-transcript-pause.cut {
-  background: rgba(180, 35, 24, 0.08);
-  color: rgba(180, 35, 24, 0.68);
+  background: rgba(14, 116, 144, 0.16);
+  color: #0e7490;
   text-decoration: line-through;
+  text-decoration-color: currentColor;
 }
 
 .manual-editor-transcript-pause.active {
