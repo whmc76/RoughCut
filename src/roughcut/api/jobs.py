@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
 import json
 import logging
 import os
@@ -101,7 +100,9 @@ from roughcut.media.subtitle_spans import (
     subtitle_span_alignment_diagnostics,
     subtitle_span_token_payloads,
 )
+from roughcut.media.subtitle_fingerprint import subtitle_payload_fingerprint
 from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER
+from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER
 from roughcut.publication import (
     active_publication_credentials,
     build_publication_plan,
@@ -1641,6 +1642,8 @@ def _manual_editor_is_smart_delete_cut(item: dict[str, Any]) -> bool:
     verdict = str(llm_review.get("verdict") or "").strip().lower()
     if verdict == "keep":
         return False
+    if verdict == "cut":
+        return True
     if reason in _MANUAL_EDITOR_SMART_DELETE_REASONS:
         return True
     evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
@@ -2822,38 +2825,64 @@ async def _manual_editor_latest_subtitle_created_at(session: AsyncSession, *, jo
     return value if isinstance(value, datetime) else None
 
 
-def _manual_editor_subtitle_fingerprint(subtitles: list[dict[str, Any]]) -> str | None:
-    rows: list[dict[str, Any]] = []
-    for fallback_index, item in enumerate(subtitles):
-        if not isinstance(item, dict):
-            continue
-        text = str(
-            item.get("text_final")
-            or item.get("text_norm")
-            or item.get("text_raw")
-            or item.get("text")
-            or ""
-        ).strip()
-        if not text:
-            continue
-        try:
-            index = int(item.get("source_index", item.get("index", fallback_index)) or fallback_index)
-            start_time = round(float(item.get("start_time", item.get("start", 0.0)) or 0.0), 3)
-            end_time = round(float(item.get("end_time", item.get("end", start_time)) or start_time), 3)
-        except (TypeError, ValueError):
-            continue
-        rows.append(
-            {
-                "index": index,
-                "start": start_time,
-                "end": end_time,
-                "text": text,
-            }
+async def _manual_editor_latest_subtitle_revision_created_at(session: AsyncSession, *, job_id: uuid.UUID) -> datetime | None:
+    artifact_result = await session.execute(
+        select(func.max(Artifact.created_at)).where(
+            Artifact.job_id == job_id,
+            Artifact.artifact_type.in_(
+                [
+                    ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,
+                    ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER,
+                ]
+            ),
         )
-    if not rows:
-        return None
-    encoded = json.dumps(rows, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    )
+    values = [
+        value
+        for value in (
+            await _manual_editor_latest_subtitle_created_at(session, job_id=job_id),
+            artifact_result.scalar_one_or_none(),
+        )
+        if isinstance(value, datetime)
+    ]
+    return max(values, key=_coerce_utc_datetime) if values else None
+
+
+def _manual_editor_subtitle_fingerprint(subtitles: list[dict[str, Any]]) -> str | None:
+    return subtitle_payload_fingerprint(subtitles)
+
+
+def _manual_editor_timeline_subtitle_fingerprint(payload: dict[str, Any] | None) -> str | None:
+    data = payload if isinstance(payload, dict) else {}
+    analysis = data.get("analysis") if isinstance(data.get("analysis"), dict) else {}
+    manual_editor_meta = analysis.get("manual_editor") if isinstance(analysis.get("manual_editor"), dict) else {}
+    for value in (
+        manual_editor_meta.get("source_subtitle_fingerprint"),
+        manual_editor_meta.get("base_subtitle_fingerprint"),
+        analysis.get("source_subtitle_fingerprint"),
+        data.get("source_subtitle_fingerprint"),
+        data.get("base_subtitle_fingerprint"),
+    ):
+        fingerprint = str(value or "").strip()
+        if fingerprint:
+            return fingerprint
+    return None
+
+
+def _manual_editor_timeline_matches_current_subtitles(
+    payload: dict[str, Any] | None,
+    *,
+    current_subtitle_fingerprint: str | None,
+    timeline_created_at: datetime | None,
+    latest_subtitle_revision_created_at: datetime | None,
+) -> bool:
+    timeline_fingerprint = _manual_editor_timeline_subtitle_fingerprint(payload)
+    if timeline_fingerprint:
+        return bool(current_subtitle_fingerprint and timeline_fingerprint == current_subtitle_fingerprint)
+    return not _manual_editor_draft_subtitles_are_stale(
+        draft_created_at=timeline_created_at,
+        latest_subtitle_created_at=latest_subtitle_revision_created_at,
+    )
 
 
 def _manual_editor_draft_subtitles_match_fingerprint(
@@ -3685,12 +3714,12 @@ async def _build_manual_editor_session(
     media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
     source_duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
 
-    base_keep_segments = [
+    raw_base_keep_segments = [
         _manual_editor_segment_payload(segment, index=index)
         for index, segment in enumerate(_manual_keep_segments_from_editorial_payload(editorial_timeline.data_json or {}))
     ]
     if source_duration_sec <= 0.0:
-        source_duration_sec = max((segment.end for segment in base_keep_segments), default=0.0)
+        source_duration_sec = max((segment.end for segment in raw_base_keep_segments), default=0.0)
 
     subtitle_projection = (editorial_timeline.data_json or {}).get("subtitle_projection")
     subtitle_overrides: list[dict[str, Any]] = []
@@ -3733,7 +3762,32 @@ async def _build_manual_editor_session(
         clean_text=False,
     )
     subtitle_fingerprint = _manual_editor_subtitle_fingerprint(source_subtitle_dicts)
-    latest_subtitle_created_at = await _manual_editor_latest_subtitle_created_at(session, job_id=job.id)
+    timeline_subtitle_fingerprint = _manual_editor_subtitle_fingerprint(raw_subtitle_dicts or source_subtitle_dicts)
+    latest_subtitle_created_at = await _manual_editor_latest_subtitle_revision_created_at(session, job_id=job.id)
+    if source_duration_sec <= 0.0:
+        source_duration_sec = max(
+            (
+                float(item.get("end_time", item.get("end", 0.0)) or 0.0)
+                for item in source_subtitle_dicts
+                if isinstance(item, dict)
+            ),
+            default=0.0,
+        )
+    timeline_subtitles_current = _manual_editor_timeline_matches_current_subtitles(
+        editorial_timeline.data_json if isinstance(editorial_timeline.data_json, dict) else None,
+        current_subtitle_fingerprint=timeline_subtitle_fingerprint,
+        timeline_created_at=editorial_timeline.created_at,
+        latest_subtitle_revision_created_at=latest_subtitle_created_at,
+    )
+    if timeline_subtitles_current:
+        base_keep_segments = raw_base_keep_segments
+    elif source_duration_sec > 0.05:
+        base_keep_segments = [
+            _manual_editor_segment_payload({"start": 0.0, "end": source_duration_sec}, index=0)
+        ]
+        smart_delete_segments = []
+    else:
+        base_keep_segments = raw_base_keep_segments
     if not _manual_editor_stored_projection_matches_subtitles(
         subtitle_projection if isinstance(subtitle_projection, dict) else None,
         current_subtitle_fingerprint=subtitle_fingerprint,
@@ -3761,7 +3815,7 @@ async def _build_manual_editor_session(
         draft_created_at=draft_artifact.created_at if draft_artifact is not None else None,
         latest_subtitle_created_at=latest_subtitle_created_at,
     )
-    draft_active = _manual_editor_draft_matches_base(
+    draft_active = timeline_subtitles_current and _manual_editor_draft_matches_base(
         draft_payload,
         editorial_timeline=editorial_timeline,
         render_plan_timeline=render_plan_timeline,

@@ -76,6 +76,7 @@ from roughcut.media.subtitle_text import (
     normalize_contextual_noc_alias_text,
     normalize_flashlight_model_alias_text,
 )
+from roughcut.media.subtitle_fingerprint import subtitle_payload_fingerprint
 from roughcut.media.subtitle_projection_validation import (
     validate_projected_subtitles_against_source,
     validate_projected_subtitles_against_transcript,
@@ -7692,6 +7693,15 @@ async def run_edit_plan(job_id: str) -> dict:
             subtitle_items=subtitle_dicts,
             silence_segments=silences,
         )
+        manual_editor_analysis = decision.analysis.setdefault("manual_editor", {})
+        if isinstance(manual_editor_analysis, dict):
+            manual_editor_analysis["source_subtitle_fingerprint"] = subtitle_payload_fingerprint(subtitle_dicts)
+            manual_editor_analysis["source_subtitle_basis"] = str(
+                projection_data.get("projection_kind")
+                or projection_data.get("basis")
+                or projection_data.get("source_basis")
+                or "subtitle_items"
+            )
         await _set_step_progress(session, step, detail="生成剪辑时间线与渲染计划", progress=0.85)
 
         editorial_timeline = await save_editorial_timeline(job.id, decision, session)

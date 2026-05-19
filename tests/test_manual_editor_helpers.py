@@ -26,15 +26,21 @@ from roughcut.api.jobs import (
     _manual_editor_subtitle_payload,
     _manual_editor_should_use_clean_fallback_projection,
     _manual_editor_stored_projection_matches_subtitles,
+    _manual_editor_timeline_matches_current_subtitles,
+    _manual_editor_timeline_subtitle_fingerprint,
     _manual_editor_projection_data_uses_canonical,
     _manual_editor_projection_entries_use_canonical,
     _manual_editor_apply_conflict_detail,
+    _manual_editor_apply_source_text_corrections,
     _manual_editor_asset_path,
+    _manual_editor_canonical_segment_source_rows,
     _manual_editor_change_plan,
     _manual_editor_prerequisite_detail,
     _manual_editor_preview_assets_response,
+    _manual_editor_normalize_word_payloads_for_text,
     _manual_editor_projected_subtitles_have_duplicate_source_overlap,
     _manual_editor_projection_should_use_source_fallback,
+    _manual_editor_split_long_subtitle_rows,
     _manual_projection_has_source_text_mismatch,
     _manual_editor_smart_delete_segments,
     _manual_keep_segments_from_editorial_payload,
@@ -179,6 +185,48 @@ def test_manual_editor_stored_projection_is_stale_after_subtitle_regeneration() 
     )
 
 
+def test_manual_editor_timeline_records_and_matches_subtitle_fingerprint() -> None:
+    payload = {
+        "analysis": {
+            "manual_editor": {
+                "source_subtitle_fingerprint": "fingerprint-a",
+                "source_subtitle_basis": "canonical_transcript",
+            }
+        }
+    }
+
+    assert _manual_editor_timeline_subtitle_fingerprint(payload) == "fingerprint-a"
+    assert _manual_editor_timeline_matches_current_subtitles(
+        payload,
+        current_subtitle_fingerprint="fingerprint-a",
+        timeline_created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        latest_subtitle_revision_created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    assert not _manual_editor_timeline_matches_current_subtitles(
+        payload,
+        current_subtitle_fingerprint="fingerprint-b",
+        timeline_created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        latest_subtitle_revision_created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+def test_manual_editor_legacy_timeline_is_stale_when_subtitle_revision_is_newer() -> None:
+    timeline_created_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+    assert not _manual_editor_timeline_matches_current_subtitles(
+        {"analysis": {}},
+        current_subtitle_fingerprint="fingerprint-a",
+        timeline_created_at=timeline_created_at,
+        latest_subtitle_revision_created_at=timeline_created_at + timedelta(seconds=1),
+    )
+    assert _manual_editor_timeline_matches_current_subtitles(
+        {"analysis": {}},
+        current_subtitle_fingerprint="fingerprint-a",
+        timeline_created_at=timeline_created_at,
+        latest_subtitle_revision_created_at=timeline_created_at - timedelta(seconds=1),
+    )
+
+
 def test_manual_keep_segments_from_editorial_payload_heals_legacy_micro_cuts() -> None:
     segments = _manual_keep_segments_from_editorial_payload(
         {
@@ -318,7 +366,7 @@ def test_manual_subtitle_overrides_can_insert_and_delete_items() -> None:
     assert adjusted[1]["end_time"] == 1.8
 
 
-def test_manual_editor_subtitle_payload_uses_final_output_cleanup() -> None:
+def test_manual_editor_subtitle_payload_preserves_editable_canonical_body() -> None:
     payload = _manual_editor_subtitle_payload(
         {
             "index": 0,
@@ -331,7 +379,7 @@ def test_manual_editor_subtitle_payload_uses_final_output_cleanup() -> None:
         index=0,
     )
 
-    assert payload.text_final == "好 今天给大家介绍 狐蝠工业"
+    assert payload.text_final == "好，今天给大家介绍，嗯，狐蝠工业。"
 
 
 def test_manual_editor_smart_delete_segments_expose_auto_waste_cuts() -> None:
@@ -366,12 +414,15 @@ def test_manual_editor_smart_delete_segments_expose_auto_waste_cuts() -> None:
         }
     )
 
-    assert len(segments) == 1
+    assert len(segments) == 2
     assert segments[0].start == 1.234
     assert segments[0].end == 3.5
     assert segments[0].source == "llm_cut_review"
     assert segments[0].confidence == 0.91
     assert segments[0].detail == "前一句明确说重来，后一句是重录版本。"
+    assert segments[1].start == 6.0
+    assert segments[1].end == 6.4
+    assert segments[1].source == "llm_cut_review"
 
 
 def test_manual_editor_subtitle_payload_accepts_projection_start_end_keys() -> None:
@@ -406,6 +457,21 @@ def test_manual_editor_subtitle_payload_preserves_source_index() -> None:
     assert payload.index == 65
     assert payload.source_index == 52
     assert payload.source_indexes == [52, 53]
+
+
+def test_manual_editor_subtitle_payload_preserves_zero_index() -> None:
+    payload = _manual_editor_subtitle_payload(
+        {
+            "index": 0,
+            "start_time": 0.0,
+            "end_time": 1.0,
+            "text_final": "第一句",
+        },
+        index=7,
+    )
+
+    assert payload.index == 0
+    assert payload.source_index == 0
 
 
 def test_manual_editor_projection_source_annotation_uses_output_mapping() -> None:
@@ -692,6 +758,26 @@ def test_manual_editor_projection_falls_back_on_duplicate_source_alternatives() 
     ) is True
 
 
+def test_manual_editor_source_fallback_splits_long_subtitle_rows() -> None:
+    rows = _manual_editor_split_long_subtitle_rows(
+        [
+            {
+                "index": 9,
+                "source_index": 9,
+                "source_indexes": [9],
+                "start_time": 0.0,
+                "end_time": 8.0,
+                "text_final": "没有这个像很多兄弟一样隐恨总算这个年还能过不然这个真的是难受能难受好久",
+            }
+        ]
+    )
+
+    assert len(rows) > 1
+    assert all(len(row["text_final"]) <= 32 for row in rows)
+    assert "".join(row["text_final"] for row in rows) == "没有这个像很多兄弟一样隐恨总算这个年还能过不然这个真的是难受能难受好久"
+    assert rows[0]["source_fragment_count"] == len(rows)
+
+
 def test_transcript_projection_validation_ignores_speech_removed_by_cut() -> None:
     result = validate_projected_subtitles_against_transcript(
         [
@@ -761,7 +847,7 @@ def test_manual_editor_subtitle_payload_exposes_alignment_diagnostics_and_tokens
         index=3,
     )
 
-    assert "".join(token.text for token in payload.alignment_tokens).endswith("太难")
+    assert "".join(token.text for token in payload.alignment_tokens) == "NOC的这个发售太难了"
     assert payload.alignment_diagnostics is not None
     assert "unmatched_text_suffix" in payload.alignment_diagnostics["issues"]
 
@@ -830,8 +916,85 @@ def test_manual_editor_subtitle_payload_strips_local_asr_tags() -> None:
         index=1,
     )
 
-    assert payload.text_final == "给它塞进去啊"
+    assert payload.text_final == "给它塞进去啊，哎"
     assert noise_payload.text_final == "好"
+
+
+def test_manual_editor_subtitle_payload_normalizes_editable_text_contract() -> None:
+    payload = _manual_editor_subtitle_payload(
+        {
+            "index": 0,
+            "start_time": 0.0,
+            "end_time": 2.0,
+            "text_raw": "今今天天终终于于收收到到了了年年前前的的一个个款款",
+            "text_final": "今今天天终终于于收收到到了了年年前前的的一个个款款",
+            "words": [
+                {"word": char, "start": index * 0.05, "end": (index + 1) * 0.05}
+                for index, char in enumerate("今今天天终终于于收收到到了了年年前前的的一个个款款")
+            ],
+        },
+        index=0,
+    )
+
+    assert payload.text_raw == "今天终于收到了年前的一个款"
+    assert payload.text_final == "今天终于收到了年前的一个款"
+    assert "".join(token.text for token in payload.alignment_tokens) == "今天终于收到了年前的一个款"
+
+
+def test_manual_editor_subtitle_payload_normalizes_mixed_anchor_alignment_tokens() -> None:
+    raw = "没想到这NOC现NOC现在这么火"
+    payload = _manual_editor_subtitle_payload(
+        {
+            "index": 0,
+            "start_time": 0.0,
+            "end_time": 2.0,
+            "text_raw": raw,
+            "text_final": raw,
+            "words": [
+                {"word": char, "start": index * 0.05, "end": (index + 1) * 0.05}
+                for index, char in enumerate(raw)
+            ],
+        },
+        index=0,
+    )
+
+    assert payload.text_raw == "没想到这NOC现在这么火"
+    assert "".join(token.text for token in payload.alignment_tokens) == "没想到这NOC现在这么火"
+
+
+def test_manual_editor_normalizes_legacy_word_timing_noise_before_attach() -> None:
+    raw = "今今天天终终于于收收到到了了年年前前的的一个个款款"
+    words = [
+        {"word": char, "start": index * 0.05, "end": (index + 1) * 0.05, "source": "provider"}
+        for index, char in enumerate(raw)
+    ]
+
+    normalized = _manual_editor_normalize_word_payloads_for_text(
+        words,
+        "今天终于收到了年前的一个款",
+    )
+
+    assert "".join(word["word"] for word in normalized) == "今天终于收到了年前的一个款"
+    assert all(word["source"] == "provider" for word in normalized)
+
+
+def test_manual_editor_subtitle_payload_reprojects_attached_words_to_canonical_text() -> None:
+    payload = _manual_editor_subtitle_payload(
+        {
+            "index": 0,
+            "start_time": 0.0,
+            "end_time": 2.0,
+            "text_raw": "小玩具也是耗尽了我这次的欧气啊",
+            "text_final": "小玩具也是耗尽了我这次的欧气啊",
+            "words": [
+                {"word": word, "start": index * 0.1, "end": (index + 1) * 0.1, "source": "provider"}
+                for index, word in enumerate(["小玩具", "啊", "嗯", "这个", "也是", "耗尽了", "我", "这次", "的", "欧气", "啊", "我靠", "我"])
+            ],
+        },
+        index=0,
+    )
+
+    assert "".join(word.word for word in payload.words) == "小玩具也是耗尽了我这次的欧气啊"
 
 
 def test_manual_editor_subtitle_projection_drops_final_empty_fillers() -> None:
@@ -879,6 +1042,44 @@ def test_manual_editor_subtitle_projection_can_keep_empty_fillers_for_source_tra
     ]
 
 
+def test_manual_editor_subtitle_payload_preserves_standalone_fillers_for_full_editing() -> None:
+    payload = _manual_editor_subtitle_payload(
+        {
+            "index": 0,
+            "start_time": 0.0,
+            "end_time": 0.4,
+            "text_raw": "嗯",
+            "text_final": "",
+            "display_suppressed_reason": "standalone_filler",
+        },
+        index=0,
+    )
+
+    assert payload.text_final == "嗯"
+    assert payload.text_raw == "嗯"
+
+
+def test_manual_editor_subtitle_payload_uses_corrected_text_as_alignment_canonical() -> None:
+    payload = _manual_editor_subtitle_payload(
+        {
+            "index": 0,
+            "start_time": 0.0,
+            "end_time": 1.0,
+            "text_raw": "NNOCOC的的这个个发发售售太太难难了了",
+            "text_final": "NOC的这个发售太难了",
+            "words": [
+                {"word": char, "start": index * 0.05, "end": (index + 1) * 0.05}
+                for index, char in enumerate("NNOCOC的的这个个发发售售太太难难了了")
+            ],
+        },
+        index=0,
+    )
+
+    assert payload.text_final == "NOC的这个发售太难了"
+    assert "".join(word.word for word in payload.words) == "NOC的这个发售太难了"
+    assert "".join(token.text for token in payload.alignment_tokens) == "NOC的这个发售太难了"
+
+
 def test_manual_editor_source_projection_can_preserve_repeat_runs_for_review() -> None:
     repeated = "刚才我发现那个盒子放底下有点黑看不清它的这个全貌"
     cleaned = _clean_manual_editor_subtitle_projection(
@@ -912,6 +1113,129 @@ def test_manual_editor_source_transcript_adds_orphan_word_rows() -> None:
     assert rows[1]["start_time"] == 1.6
     assert rows[1]["end_time"] == 2.04
     assert rows[1]["words"][0]["word"] == "然"
+
+
+def test_manual_editor_words_inside_subtitle_ranges_do_not_override_source_text() -> None:
+    rows = _attach_manual_editor_words_to_subtitles(
+        [
+            {"index": 0, "start_time": 1.2, "end_time": 3.0, "text_final": "今天主题"},
+            {"index": 1, "start_time": 3.0, "end_time": 4.0, "text_final": "一把是EDC37"},
+        ],
+        [
+            {"word": "啊", "start": 1.2, "end": 1.3, "source": "provider"},
+            {"word": "呃", "start": 1.3, "end": 1.4, "source": "provider"},
+            {"word": "今", "start": 1.4, "end": 1.5, "source": "provider"},
+            {"word": "天", "start": 1.5, "end": 1.6, "source": "provider"},
+            {"word": "主", "start": 1.6, "end": 1.7, "source": "provider"},
+            {"word": "题", "start": 1.7, "end": 1.8, "source": "provider"},
+            {"word": "这", "start": 2.7, "end": 2.8, "source": "provider"},
+            {"word": "个", "start": 2.8, "end": 2.9, "source": "provider"},
+            {"word": "一", "start": 3.0, "end": 3.1, "source": "provider"},
+            {"word": "把", "start": 3.1, "end": 3.2, "source": "provider"},
+            {"word": "是", "start": 3.2, "end": 3.3, "source": "provider"},
+            {"word": "EDC37", "start": 3.3, "end": 3.7, "source": "provider"},
+        ],
+    )
+
+    assert [item["text_final"] for item in rows] == ["今天主题", "一把是EDC37"]
+    assert all(not item.get("virtual") for item in rows)
+
+
+def test_manual_editor_word_order_noise_cannot_fragment_canonical_subtitle_text() -> None:
+    rows = _attach_manual_editor_words_to_subtitles(
+        [
+            {"index": 0, "start_time": 17.0, "end_time": 18.9, "text_final": "NOC的这个发售啊太难了"},
+            {"index": 1, "start_time": 18.9, "end_time": 20.8, "text_final": "太难了，难上加难"},
+        ],
+        [
+            {"word": "NOC", "start": 17.0, "end": 17.25, "source": "provider"},
+            {"word": "的", "start": 17.25, "end": 17.3, "source": "provider"},
+            {"word": "这", "start": 17.3, "end": 17.4, "source": "provider"},
+            {"word": "个", "start": 17.4, "end": 17.5, "source": "provider"},
+            {"word": "发", "start": 17.5, "end": 17.62, "source": "provider"},
+            {"word": "售", "start": 17.62, "end": 17.74, "source": "provider"},
+            {"word": "啊", "start": 17.74, "end": 17.86, "source": "provider"},
+            {"word": "太", "start": 17.86, "end": 18.0, "source": "provider"},
+            {"word": "难", "start": 18.0, "end": 18.12, "source": "provider"},
+            {"word": "太", "start": 18.9, "end": 19.0, "source": "provider"},
+            {"word": "了", "start": 19.0, "end": 19.08, "source": "provider"},
+            {"word": "难", "start": 19.08, "end": 19.18, "source": "provider"},
+            {"word": "难", "start": 19.18, "end": 19.28, "source": "provider"},
+            {"word": "上", "start": 19.28, "end": 19.38, "source": "provider"},
+            {"word": "加", "start": 19.38, "end": 19.48, "source": "provider"},
+            {"word": "难", "start": 19.48, "end": 19.58, "source": "provider"},
+        ],
+    )
+
+    assert [item["text_final"] for item in rows] == [
+        "NOC的这个发售啊太难了",
+        "太难了，难上加难",
+    ]
+    assert "了太了" not in "".join(item["text_final"] for item in rows)
+
+
+def test_manual_editor_source_text_correction_normalizes_flashlight_model_aliases() -> None:
+    context = "20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4"
+
+    assert _manual_editor_apply_source_text_corrections("所以呢我的选择就是这个幺七", context_text=context) == "所以呢我的选择就是这个EDC17"
+    assert _manual_editor_apply_source_text_corrections("为什么三七一直没换", context_text=context) == "为什么EDC37一直没换"
+
+
+def test_manual_editor_canonical_source_rows_keep_text_authority_over_words() -> None:
+    rows = _manual_editor_canonical_segment_source_rows(
+        {
+            "segments": [
+                {
+                    "index": 7,
+                    "start": 17.0,
+                    "end": 20.8,
+                    "text_raw": "太难了，难上加难",
+                    "text_canonical": "太难了，难上加难",
+                    "words": [
+                        {"word": "太", "start": 17.0, "end": 17.1},
+                        {"word": "了", "start": 17.1, "end": 17.2},
+                        {"word": "难", "start": 17.2, "end": 17.3},
+                    ],
+                }
+            ]
+        },
+        context_text="NOC MT34",
+    )
+
+    assert rows[0]["text_final"] == "太难了，难上加难"
+    assert "".join(word["word"] for word in rows[0]["words"]) == "太了难"
+
+
+def test_manual_editor_canonical_source_does_not_add_global_orphan_word_rows() -> None:
+    rows = _attach_manual_editor_words_to_subtitles(
+        [
+            {
+                "index": 0,
+                "start_time": 0.0,
+                "end_time": 3.0,
+                "text_final": "完整正文已经来自canonical",
+                "projection_source": "canonical_transcript",
+            }
+        ],
+        [{"word": "碎", "start": 1.2, "end": 1.201, "source": "provider"}],
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["text_final"] == "完整正文已经来自canonical"
+
+
+def test_manual_editor_source_transcript_drops_orphan_boundary_duplicates() -> None:
+    rows = _attach_manual_editor_words_to_subtitles(
+        [
+            {"index": 0, "start_time": 17.0, "end_time": 18.9, "text_final": "NOC的这个发售太难了"},
+            {"index": 1, "start_time": 19.2, "end_time": 20.8, "text_final": "太难了难上加难"},
+        ],
+        [
+            {"word": "难", "start": 19.02, "end": 19.1, "source": "provider"},
+        ],
+    )
+
+    assert [item["text_final"] for item in rows] == ["NOC的这个发售太难了", "太难了难上加难"]
 
 
 def test_manual_editor_subtitle_projection_collapses_asr_repeat_runs() -> None:

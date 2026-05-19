@@ -94,6 +94,34 @@ def test_learned_hotwords_are_prioritized_in_transcription_prompt() -> None:
     assert len(prompt) <= 320
 
 
+def test_source_name_edc_identity_terms_are_frontloaded_in_transcription_prompt() -> None:
+    source_name = "260212-134637 开箱NOC MT34 也叫S06mini 锆合金折刀玩法展示.mp4"
+    review_memory = build_subtitle_review_memory(
+        workflow_template="edc_tactical",
+        subject_domain="edc",
+        source_name=source_name,
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[],
+        content_profile={"subject_domain": "edc"},
+        include_recent_terms=False,
+        include_recent_examples=False,
+    )
+    prompt = build_transcription_prompt(
+        source_name=source_name,
+        workflow_template="edc_tactical",
+        review_memory=review_memory,
+        dialect_profile="mandarin",
+        content_profile={"subject_domain": "edc"},
+    )
+
+    hotwords = extract_prompt_hotwords(prompt)
+    assert hotwords[:6] == ["NOC", "MT34", "MT", "S06mini", "锆合金", "折刀"]
+    assert "NOC MT34" in hotwords
+    assert len(hotwords) <= 12
+    assert len(prompt) <= 320
+
+
 def test_learned_hotwords_without_current_evidence_are_not_prompted() -> None:
     review_memory = build_subtitle_review_memory(
         workflow_template="unboxing_standard",

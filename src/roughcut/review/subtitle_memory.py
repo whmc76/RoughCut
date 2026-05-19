@@ -46,6 +46,9 @@ _DOMAIN_ANCHORS = (
     "锁定",
     "锁",
     "钢材",
+    "锆合金",
+    "钛合金",
+    "铝合金",
     "柄材",
     "背夹",
     "贴片",
@@ -93,6 +96,38 @@ _DOMAIN_ANCHORS = (
     "露营",
     "战术",
 )
+
+_SOURCE_CONTEXT_HOTWORD_TERMS = (
+    "锆合金",
+    "钛合金",
+    "铝合金",
+    "大马士革",
+    "折刀",
+    "快开",
+    "轴锁",
+    "线锁",
+    "背夹",
+    "指槽",
+    "柄材",
+    "钢材",
+    "DLC",
+)
+
+_SOURCE_CONTEXT_ACRONYMS = {
+    "EDC",
+    "FAS",
+    "NOC",
+    "MT",
+    "DLC",
+    "TC4",
+    "M390",
+    "S30V",
+    "S35VN",
+    "S90V",
+    "MCP",
+    "RAG",
+    "UV",
+}
 
 _DEFAULT_TERM_ALIASES: dict[str, tuple[str, ...]] = {
     "LEATHERMAN": (
@@ -1394,10 +1429,19 @@ def build_transcription_prompt(
         existing_terms=[],
         limit=12,
     )
+    source_hotword_terms = _collect_source_context_hotword_terms(
+        source_name=source_name,
+        content_profile=content_profile,
+    )
     dialect_hotwords = [str(item).strip() for item in dialect_spec.get("hotwords") or [] if str(item).strip()]
     reserved_dialect_slots = min(4, len(dialect_hotwords))
     term_limit = max(0, 12 - reserved_dialect_slots)
     terms: list[str] = []
+    for item in source_hotword_terms:
+        if item and item not in terms and not _term_blocked_by_prior(item, blocked_terms):
+            terms.append(item)
+        if len(terms) >= term_limit:
+            break
     for item in learned_terms:
         if item and item not in terms:
             terms.append(item)
@@ -1444,6 +1488,77 @@ def _filter_transcription_hotword_terms(terms: list[str]) -> list[str]:
         seen.add(key)
         filtered.append(normalized)
     return filtered[:12]
+
+
+def _collect_source_context_hotword_terms(
+    *,
+    source_name: str,
+    content_profile: dict[str, Any] | None = None,
+) -> list[str]:
+    profile = content_profile or {}
+    prior = _normalize_transcription_context_prior(profile.get("transcription_context_prior"))
+    source_stem = re.sub(r"\.[A-Za-z0-9]+$", "", str(source_name or "").strip())
+    context = " ".join(
+        str(item or "")
+        for item in [
+            source_stem,
+            *(profile.get(key) or "" for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "summary", "hook_line")),
+            prior.get("subject_summary") or "",
+            *list(prior.get("allowed_hotwords") or []),
+            *_collect_manual_guidance_texts(profile),
+        ]
+    )
+    if not context.strip():
+        return []
+
+    terms: list[str] = []
+    seen: set[str] = set()
+
+    def append(value: Any) -> None:
+        token = " ".join(str(value or "").strip().split())
+        if not token:
+            return
+        key = token.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        terms.append(token)
+
+    for match in re.finditer(r"(?<![A-Za-z0-9])([A-Za-z]{2,8}|TC4|M390|S(?:30|35|90)VN)(?![A-Za-z0-9])", context, re.IGNORECASE):
+        token = match.group(1).upper()
+        if token in _SOURCE_CONTEXT_ACRONYMS:
+            append(token)
+
+    for match in re.finditer(
+        r"(?<![A-Za-z0-9])([A-Za-z]{1,8})[\s_-]*(\d{1,4})(?:[\s_-]*(mini|pro|ultra|max|plus))?(?![A-Za-z0-9])",
+        context,
+        re.IGNORECASE,
+    ):
+        prefix = match.group(1).upper()
+        digits = match.group(2)
+        suffix_raw = str(match.group(3) or "").lower()
+        suffix = {
+            "mini": "mini",
+            "pro": "Pro",
+            "ultra": "Ultra",
+            "max": "Max",
+            "plus": "Plus",
+        }.get(suffix_raw, "")
+        append(f"{prefix}{digits}{suffix}")
+        if len(prefix) >= 2:
+            append(prefix)
+
+    for term in _SOURCE_CONTEXT_HOTWORD_TERMS:
+        if re.search(re.escape(term), context, re.IGNORECASE):
+            append(term)
+
+    if any(item.upper() == "NOC" for item in terms):
+        for model in list(terms):
+            if re.fullmatch(r"MT\d{1,4}", model, re.IGNORECASE):
+                append(f"NOC {model.upper()}")
+                break
+
+    return terms[:10]
 
 
 def _contains_brand_alias_chain(term: str) -> bool:

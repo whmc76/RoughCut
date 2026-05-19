@@ -760,6 +760,36 @@ describe("manual editor timeline mapping", () => {
     ]);
   });
 
+  it("detects repeated phrase retakes beyond short duplicated words", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: true, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const text = "找了一个小兄弟找了一个小兄弟";
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 0,
+          start_time: 0,
+          end_time: 1.4,
+          text_final: text,
+          words: Array.from(text).map((word, index) => ({
+            word,
+            start: index * 0.1,
+            end: (index + 1) * 0.1,
+          })),
+        },
+      ],
+      rules,
+      [],
+    );
+
+    expect(analysis.repeated).toEqual([{ start: 0.7, end: 1.4, kind: "repeated" }]);
+    expect(applySmartCutRuleRangesToSegments(
+      [{ start: 0, end: 1.4 }],
+      autoSmartCutRuleRanges(analysis, rules),
+      smartCutRuleManagedRanges(analysis),
+      1.4,
+    )).toEqual([{ start: 0, end: 0.76 }, { start: 1.34, end: 1.4 }]);
+  });
+
   it("does not auto-cut long VAD pauses inside meaningful subtitle text", () => {
     const analysis = buildSmartCutRuleAnalysis(
       [
@@ -1073,7 +1103,7 @@ describe("manual editor timeline mapping", () => {
     );
 
     expect(analysis.pause).toEqual([{ start: 1.3, end: 2.5, kind: "pause" }]);
-    expect(nextSegments).toEqual([{ start: 0, end: 1.3 }, { start: 2.5, end: 3 }]);
+    expect(nextSegments).toEqual([{ start: 0, end: 1.38 }, { start: 2.42, end: 3 }]);
   });
 
   it("does not auto-cut a pause range after the user manually restores it", () => {
@@ -1111,6 +1141,43 @@ describe("manual editor timeline mapping", () => {
 
     expect(analysis.smartDelete).toEqual([expect.objectContaining({ start: 12.346, end: 14.9, kind: "smart_delete" })]);
     expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([expect.objectContaining({ start: 12.346, end: 14.9, kind: "smart_delete" })]);
+  });
+
+  it("protects model identity text from backend smart-delete ranges", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 10, end_time: 12, text_final: "新兄弟EDC17光荣取代了" },
+      ],
+      rules,
+      [],
+      [{ start: 10, end: 12, duration_sec: 2, reason: "low_signal_subtitle", source: "llm_cut_review" }],
+    );
+
+    expect(analysis.smartDelete).toEqual([expect.objectContaining({ start: 10, end: 12, kind: "smart_delete", protected: true })]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([]);
+    expect(smartCutRuleManagedRanges(analysis)).toEqual([expect.objectContaining({ start: 10, end: 12, kind: "smart_delete", protected: true })]);
+  });
+
+  it("restores previously cut protected smart-delete model text through managed ranges", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 10, end_time: 12, text_final: "新兄弟EDC17光荣取代了" },
+      ],
+      rules,
+      [],
+      [{ start: 10, end: 12, duration_sec: 2, reason: "low_signal_subtitle", source: "llm_cut_review" }],
+    );
+
+    const nextSegments = applySmartCutRuleRangesToSegments(
+      [{ start: 0, end: 10 }, { start: 12, end: 20 }],
+      autoSmartCutRuleRanges(analysis, rules),
+      smartCutRuleManagedRanges(analysis),
+      20,
+    );
+
+    expect(nextSegments).toEqual([{ start: 0, end: 20 }]);
   });
 
   it("builds rule previews from real matched source text", () => {
