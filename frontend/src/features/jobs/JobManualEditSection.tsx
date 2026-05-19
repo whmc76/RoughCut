@@ -3270,6 +3270,29 @@ function wordBoundedPauseRanges(range: SilenceRange, wordRanges: KeepSegment[]) 
   return ranges;
 }
 
+function speechSeparatedPauseRanges(range: SilenceRange, wordRanges: KeepSegment[]) {
+  const ranges: KeepSegment[] = [];
+  let cursor = range.start;
+  for (const wordRange of wordRanges) {
+    if (wordRange.end <= range.start + 0.001 || wordRange.start >= range.end - 0.001) continue;
+    const end = Math.min(range.end, wordRange.start - SMART_CUT_WORD_BOUNDARY_GUARD_SEC);
+    if (end > cursor + 0.02) {
+      ranges.push({
+        start: Number(cursor.toFixed(3)),
+        end: Number(end.toFixed(3)),
+      });
+    }
+    cursor = Math.max(cursor, wordRange.end + SMART_CUT_WORD_BOUNDARY_GUARD_SEC);
+  }
+  if (range.end > cursor + 0.02) {
+    ranges.push({
+      start: Number(cursor.toFixed(3)),
+      end: Number(range.end.toFixed(3)),
+    });
+  }
+  return ranges;
+}
+
 function pauseRangeOverlapsTimedSpeech(range: SilenceRange, wordRanges: KeepSegment[]) {
   return wordRanges.some((wordRange) => {
     const overlap = Math.min(range.end, wordRange.end) - Math.max(range.start, wordRange.start);
@@ -3343,6 +3366,7 @@ function audioRangeOverlapsProtectedVisualSubtitle(range: SilenceRange, subtitle
 function cuttablePauseRanges(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
   const wordRanges = meaningfulWordRangesForPause(range, subtitles, fillers);
   if (wordRanges.length) {
+    if (silenceRangeHasAsrEvidence(range)) return speechSeparatedPauseRanges(range, wordRanges);
     if (pauseRangeOverlapsTimedSpeech(range, wordRanges)) return [];
     return wordBoundedPauseRanges(range, wordRanges);
   }

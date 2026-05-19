@@ -911,6 +911,39 @@ describe("manual editor timeline mapping", () => {
     expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([{ start: 8.37, end: 9.3, kind: "pause" }]);
   });
 
+  it("cuts the silent part of a long mixed timing gap instead of dropping the whole gap because of an edge word", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 348,
+          start_time: 903.49,
+          end_time: 904.25,
+          text_final: "食指开",
+          words: [
+            { word: "食", start: 903.49, end: 903.8 },
+            { word: "指", start: 903.8, end: 904.11 },
+            { word: "开", start: 904.11, end: 904.25 },
+          ],
+        },
+        {
+          index: 349,
+          start_time: 921.89,
+          end_time: 922.43,
+          text_final: "累了",
+          words: [
+            { word: "累", start: 921.89, end: 922.16 },
+            { word: "了", start: 922.16, end: 922.43 },
+          ],
+        },
+      ],
+      rules,
+      [{ start: 904.25, end: 922.11, duration_sec: 17.86, source: "mixed" }],
+    );
+
+    expect(analysis.pause).toEqual([{ start: 904.25, end: 921.73, kind: "pause" }]);
+  });
+
   it("uses real word timings for full-text transcript tokens", () => {
     const tokens = buildTranscriptTokens(
       [
