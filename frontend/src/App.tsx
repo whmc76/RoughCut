@@ -60,7 +60,7 @@ export function App() {
         { to: "/jobs", label: t("app.nav.jobs") },
         { to: "/watch-roots", label: t("app.nav.watchRoots") },
         { to: "/intelligent-copy", label: t("app.nav.intelligentCopy") },
-        { to: "/tools", label: "小工具" },
+        { to: "/tools", label: t("app.nav.tools") },
       ],
     },
     {

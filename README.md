@@ -366,7 +366,7 @@ pnpm lint:backend
 Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roughcut.bat) 作为用户入口：
 
 - `start_roughcut.bat`
-  默认开发入口。后台拉起本地 API / orchestrator / workers，并服务本地构建的 `frontend/dist`；不会再隐式启动 Docker 基础设施；这个终端窗口本身就是托管器，直接关窗即可停掉整套服务
+  默认开发入口。后台拉起本地 API / orchestrator / workers，同时启动 Vite 前端开发服务器；浏览器使用终端里打印的 `Frontend URL` 或 `Frontend LAN URL`，前端代码改动会走 HMR 热更新。`API URL` 仍是接口和静态后备入口，不负责 Vite HMR；如需只用静态产物，可传 `-NoFrontendDev`。不会再隐式启动 Docker 基础设施；这个终端窗口本身就是托管器，直接关窗即可停掉整套服务
 - `start_roughcut.bat infra`
   只启动 PostgreSQL / Redis / MinIO 这套轻量基础设施，供本地服务使用
 - `start_roughcut.bat runtime`

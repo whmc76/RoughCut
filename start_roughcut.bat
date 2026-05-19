@@ -220,7 +220,7 @@ goto finish
 echo.
 echo RoughCut Windows entrypoint
 echo.
-echo   start_roughcut.bat             One-click local development launcher
+echo   start_roughcut.bat             One-click local development launcher with Vite HMR
 echo   start_roughcut.bat infra       Start only PostgreSQL / Redis / MinIO containers
 echo   start_roughcut.bat runtime     Start explicit containerized runtime mode
 echo   start_roughcut.bat runtime-local-asr  Start runtime with local-asr extras enabled inside Docker

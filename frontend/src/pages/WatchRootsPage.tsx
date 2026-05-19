@@ -24,10 +24,10 @@ export function WatchRootsPage() {
     ...configProfiles.map((profile) => ({ value: profile.id, label: profile.name })),
   ];
   const modalTitle = workspace.isCreatingRoot
-    ? "新建监看目录"
+    ? "新建自动任务"
     : workspace.selectedRoot
       ? workspace.selectedRoot.path
-      : "编辑监看目录";
+      : "编辑自动任务";
   const modalSubtitle = workspace.isCreatingRoot
     ? "设置目录路径、默认方案和扫描规则。"
     : "点击目录卡片进入编辑，保存会自动同步到当前监看配置。";
@@ -131,7 +131,7 @@ export function WatchRootsPage() {
               }}
               onToggleEnabled={(root) => workspace.toggleRootEnabled.mutate(root)}
               onDelete={(root) => {
-                if (!window.confirm(`确认删除监看目录“${root.path}”？`)) return;
+                if (!window.confirm(`确认删除自动任务“${root.path}”？`)) return;
                 workspace.deleteRootById.mutate(root.id);
               }}
             />
@@ -166,7 +166,7 @@ export function WatchRootsPage() {
           }}
           onDelete={() => {
             if (!workspace.selectedRoot) return;
-            if (!window.confirm(`确认删除监看目录“${workspace.selectedRoot.path}”？`)) return;
+            if (!window.confirm(`确认删除自动任务“${workspace.selectedRoot.path}”？`)) return;
             workspace.deleteRoot.mutate(undefined, {
               onSuccess: () => setEditorOpen(false),
             });

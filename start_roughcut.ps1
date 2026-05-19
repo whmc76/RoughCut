@@ -15,6 +15,7 @@ param(
     [switch]$NoPause,
     [switch]$SafeStart,
     [switch]$OpenBrowser,
+    [switch]$NoFrontendDev,
     [switch]$NoOrchestrator,
     [switch]$NoWorkers,
     [switch]$NoAutoResume,
@@ -40,6 +41,7 @@ $Pnpm = Get-Command pnpm -ErrorAction SilentlyContinue
 $FrontendDir = Join-Path $RepoRoot "frontend"
 $FrontendSrcDir = Join-Path $FrontendDir "src"
 $FrontendDist = Join-Path $FrontendDir "dist\index.html"
+$FrontendDevDefaultPort = 5173
 $WatchDir = Join-Path $RepoRoot "watch"
 $InfraComposeFile = Join-Path $RepoRoot "docker-compose.infra.yml"
 $RuntimeComposeFile = Join-Path $RepoRoot "docker-compose.runtime.yml"
@@ -1573,7 +1575,7 @@ function Get-ProcessMatches {
     return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
         $_.CommandLine `
             -and $_.CommandLine -match $Pattern `
-            -and $_.Name -in @("python.exe", "pythonw.exe", "roughcut.exe", "celery.exe")
+            -and $_.Name -in @("python.exe", "pythonw.exe", "roughcut.exe", "celery.exe", "pwsh.exe", "powershell.exe", "node.exe", "cmd.exe")
     } | Sort-Object ProcessId)
 }
 
@@ -1586,6 +1588,10 @@ function Get-RoughCutCommandMatchPattern {
 
 function Get-RoughCutApiCommandMatchPattern {
     return "roughcut(?:\.cli|\.exe`"?)\s+api\s+--host\s+(?:127\.0\.0\.1|0\.0\.0\.0)\s+--port"
+}
+
+function Get-RoughCutFrontendDevCommandMatchPattern {
+    return 'pnpm(?:\.cmd|\.ps1)?[\s\S]*frontend[\s\S]*dev'
 }
 
 function Test-RoughCutLanIpv4Address {
@@ -1653,6 +1659,15 @@ function Get-RoughCutApiLanUrls {
     })
 }
 
+function Get-RoughCutFrontendLanUrls {
+    param([int]$FrontendPort)
+
+    return @(Get-RoughCutLanIpv4Addresses | ForEach-Object {
+        $address = $_
+        "http://${address}:$FrontendPort"
+    })
+}
+
 function Stop-RoughCutProcess {
     param(
         [string]$Name,
@@ -1691,6 +1706,7 @@ function Stop-RoughCutServices {
     param([switch]$StopDockerServices)
 
     Write-Host "Stopping existing RoughCut services..." -ForegroundColor Cyan
+    Stop-RoughCutProcess -Name "Frontend dev server" -Pattern (Get-RoughCutFrontendDevCommandMatchPattern)
     Stop-RoughCutProcess -Name "API" -Pattern (Get-RoughCutApiCommandMatchPattern)
     Stop-RoughCutProcess -Name "Orchestrator" -Pattern (Get-RoughCutCommandMatchPattern "orchestrator --poll-interval")
     Stop-RoughCutProcess -Name "Media worker" -Pattern (Get-RoughCutCommandMatchPattern "worker --queue media_queue")
@@ -1766,6 +1782,101 @@ function Start-RoughCutProcess {
     }
 
     Write-Host "$Name started (PID $($process.Id))." -ForegroundColor Green
+}
+
+function ConvertTo-CmdArgument {
+    param([string]$Value)
+    if ([string]::IsNullOrEmpty($Value)) {
+        return '""'
+    }
+    if ($Value -notmatch '[\s"&<>|^]') {
+        return $Value
+    }
+    return '"' + ($Value.Replace('"', '\"')) + '"'
+}
+
+function Start-RoughCutPnpmProcess {
+    param(
+        [string]$Name,
+        [string[]]$Arguments,
+        [string]$MatchPattern,
+        [string]$StdoutPath,
+        [string]$StderrPath,
+        [hashtable]$Environment = @{}
+    )
+
+    if ($null -eq $Pnpm) {
+        throw "pnpm is required to start $Name. Enable Corepack or install pnpm, then rerun."
+    }
+
+    $matches = @(Get-ProcessMatches -Pattern $MatchPattern)
+    if ($matches.Count -gt 1) {
+        $matches | Select-Object -SkipLast 1 | ForEach-Object {
+            try {
+                Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop
+                Write-Host "Stopped duplicate $Name (PID $($_.ProcessId))." -ForegroundColor Yellow
+            } catch {
+            }
+        }
+        $matches = @(Get-ProcessMatches -Pattern $MatchPattern)
+    }
+
+    if ($matches.Count -eq 1) {
+        Write-Host "$Name is already running. Skipping." -ForegroundColor Yellow
+        return
+    }
+
+    $argumentText = ($Arguments | ForEach-Object { ConvertTo-CmdArgument -Value $_ }) -join " "
+    $command = "pnpm $argumentText"
+    $previousEnvironment = @{}
+
+    foreach ($entry in $Environment.GetEnumerator()) {
+        $name = [string]$entry.Key
+        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+        [Environment]::SetEnvironmentVariable($name, [string]$entry.Value, "Process")
+    }
+
+    try {
+        $process = Start-Process `
+            -FilePath "cmd.exe" `
+            -ArgumentList @("/d", "/s", "/c", $command) `
+            -WorkingDirectory $RepoRoot `
+            -PassThru `
+            -RedirectStandardOutput $StdoutPath `
+            -RedirectStandardError $StderrPath `
+            -WindowStyle Hidden
+    } finally {
+        foreach ($entry in $previousEnvironment.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, "Process")
+        }
+    }
+
+    [RoughCutJobObject]::Assign($script:ProcessJob, $process.Handle)
+    $script:ManagedProcesses += [pscustomobject]@{
+        Name = $Name
+        Process = $process
+    }
+
+    Write-Host "$Name started (PID $($process.Id))." -ForegroundColor Green
+}
+
+function Start-RoughCutFrontendDevServer {
+    param(
+        [int]$FrontendPort,
+        [int]$ApiPort
+    )
+
+    Start-RoughCutPnpmProcess `
+        -Name "Frontend dev server" `
+        -Arguments @("--dir", "frontend", "dev") `
+        -MatchPattern (Get-RoughCutFrontendDevCommandMatchPattern) `
+        -StdoutPath (Join-Path $RepoRoot "logs\frontend-dev.out.log") `
+        -StderrPath (Join-Path $RepoRoot "logs\frontend-dev.err.log") `
+        -Environment @{
+            VITE_API_PROXY_TARGET = "http://127.0.0.1:$ApiPort"
+            VITE_DEV_HOST = "0.0.0.0"
+            VITE_DEV_PORT = "$FrontendPort"
+        }
 }
 
 function Start-RoughCutHostTelegramAgent {
@@ -2205,6 +2316,11 @@ if ($null -ne $dockerCommand) {
     $indexTtsStartupProbeEnabled = Test-IndexTTS2StartupProbeEnabled
     $requestedApiPort = if ($PSBoundParameters.ContainsKey("Port")) { $Port } else { 0 }
     $resolvedApiPort = Resolve-ApiPort -UsedPorts $usedPorts -RequestedPort $requestedApiPort
+    $resolvedFrontendDevPort = if ($NoFrontendDev) {
+        0
+    } else {
+        Resolve-StandalonePort -EnvVarName "ROUGHCUT_FRONTEND_DEV_PORT" -PreferredPorts @($FrontendDevDefaultPort, 5174, 5175, 5176, 5177) -UsedPorts $usedPorts
+    }
 
     Update-LocalServiceEnv -PostgresPort $servicePorts.Postgres -RedisPort $servicePorts.Redis -MinioApiPort $servicePorts.MinioApi -MinioConsolePort $servicePorts.MinioConsole -HeygemApiPort $servicePorts.HeygemApi -HeygemTrainingPort $servicePorts.HeygemTraining -ApiPort $resolvedApiPort -IndexTtsEnabled $indexTtsStartupProbeEnabled
     $Port = $resolvedApiPort
@@ -2237,6 +2353,11 @@ Start-RoughCutProcess `
     -StdoutPath (Join-Path $RepoRoot "logs\api.out.log") `
     -StderrPath (Join-Path $RepoRoot "logs\api.err.log") `
     -HiddenWindow
+if ($NoFrontendDev) {
+    Write-Host "Frontend dev server disabled; API will serve frontend/dist." -ForegroundColor Yellow
+} else {
+    Start-RoughCutFrontendDevServer -FrontendPort $resolvedFrontendDevPort -ApiPort $Port
+}
 if ($NoOrchestrator) {
     Write-Host "Orchestrator disabled for this startup." -ForegroundColor Yellow
 } else {
@@ -2277,10 +2398,25 @@ if ($NoWorkers) {
 }
 
 $apiLocalUrl = "http://127.0.0.1:$Port"
+$frontendLocalUrl = if ($NoFrontendDev) { $apiLocalUrl } else { "http://127.0.0.1:$resolvedFrontendDevPort" }
 $apiLanUrls = @(Get-RoughCutApiLanUrls -ApiPort $Port)
+$frontendLanUrls = if ($NoFrontendDev) { @() } else { @(Get-RoughCutFrontendLanUrls -FrontendPort $resolvedFrontendDevPort) }
 
 Write-Host ""
 Write-Host "RoughCut started." -ForegroundColor Green
+if (-not $NoFrontendDev) {
+    Write-Host "Frontend URL: $frontendLocalUrl (Vite HMR enabled)" -ForegroundColor Green
+    if ($frontendLanUrls.Count -eq 1) {
+        Write-Host "Frontend LAN URL (192.168, Vite HMR): $($frontendLanUrls[0])" -ForegroundColor Green
+    } elseif ($frontendLanUrls.Count -gt 1) {
+        Write-Host "Frontend LAN URLs (192.168, Vite HMR):" -ForegroundColor Green
+        foreach ($frontendLanUrl in $frontendLanUrls) {
+            Write-Host "  $frontendLanUrl" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "Frontend LAN URL (192.168, Vite HMR): unavailable (no active 192.168 IPv4 address found)." -ForegroundColor DarkGray
+    }
+}
 Write-Host "API URL: $apiLocalUrl" -ForegroundColor Green
 if ($apiLanUrls.Count -eq 1) {
     Write-Host "LAN URL (192.168): $($apiLanUrls[0])" -ForegroundColor Green
@@ -2296,10 +2432,14 @@ Write-Host "Logs: .\logs\*.out.log / .\logs\*.err.log" -ForegroundColor DarkGray
 
 if (Wait-ApiReady -TestPort $Port) {
     if ($OpenBrowser) {
-        Start-Process "$apiLocalUrl/" | Out-Null
+        Start-Process "$frontendLocalUrl/" | Out-Null
         Write-Host "GUI opened in your default browser." -ForegroundColor Green
     } else {
-        Write-Host "API is ready. Open $apiLocalUrl/ manually when needed." -ForegroundColor Green
+        if ($NoFrontendDev) {
+            Write-Host "API is ready. Open $apiLocalUrl/ manually when needed." -ForegroundColor Green
+        } else {
+            Write-Host "API is ready. Open $frontendLocalUrl/ for hot-updating frontend development." -ForegroundColor Green
+        }
     }
 } else {
     Write-Host "API did not become ready in time. Check logs if the GUI does not open." -ForegroundColor Yellow

@@ -78,7 +78,7 @@ const cosyVoiceTtsModes = [
     label: "instruct2",
     name: "指令口播",
     summary: "用 instruct_text 控制语言、方言、情绪、语速或音量。",
-    useCase: "推荐：最适合小工具试音、口播风格和数字人配音。",
+    useCase: "推荐：最适合百宝箱试音、口播风格和数字人配音。",
     detail: "需要 prompt_wav/reference_audio；只填写想要的口播指令，官方分隔符由后台自动补齐。",
     recommended: true,
   },
@@ -329,7 +329,7 @@ type AvatarToolOptions = {
   script: string;
 };
 
-const defaultTtsText = "这是一段 RoughCut 小工具页面的 CosyVoice3 试音。";
+const defaultTtsText = "这是一段 RoughCut 百宝箱页面的 CosyVoice3 试音。";
 const defaultInstructTextPreset = instructTextPresetGroups[0]?.presets[0]?.text ?? "";
 
 const defaultTtsOptions: TtsToolOptions = {
@@ -703,7 +703,7 @@ export function ToolsPage() {
     <section className="page-stack tools-page">
       <PageHeader
         eyebrow="Tools"
-        title="小工具"
+        title="百宝箱"
         description="把 TTS、ASR、数字人口播这些能力拆成可直接调用的页面，方便单独试音、转写和预览。"
         summary={[
           { label: "TTS", value: "CosyVoice3 Docker", detail: "用于文本到语音和音色参考测试" },
@@ -946,7 +946,7 @@ export function TtsToolPage() {
         eyebrow="TTS"
         title="文本转语音"
         description="CosyVoice3 与 MOSS-TTS Local 都通过本地 Docker 服务提供推理，提交后返回可试听的 WAV。"
-        actions={<Link className="button ghost" to="/tools">返回小工具</Link>}
+        actions={<Link className="button ghost" to="/tools">返回百宝箱</Link>}
       />
       <ToolNav />
       <PageSection eyebrow="调用" title="生成语音" description="覆盖 CosyVoice3 和 MOSS-TTS Local 官方模式；按 provider 展开对应参数。">
@@ -1704,7 +1704,7 @@ export function AsrToolPage() {
         eyebrow="ASR"
         title="音频转文字"
         description="上传音频后直接调用当前本地 HTTP ASR 服务，返回文本和片段。"
-        actions={<Link className="button ghost" to="/tools">返回小工具</Link>}
+        actions={<Link className="button ghost" to="/tools">返回百宝箱</Link>}
       />
       <ToolNav />
       <PageSection eyebrow="调用" title="转写音频" description="热词会作为上下文传给本地 ASR，用于产品名、型号和专有名词。">
@@ -1803,7 +1803,7 @@ export function AvatarToolPage() {
         eyebrow="Avatar"
         title="数字人口播"
         description="上传一段主播视频和配音音频，直接调用 HeyGem 生成单段预览。"
-        actions={<Link className="button ghost" to="/tools">返回小工具</Link>}
+        actions={<Link className="button ghost" to="/tools">返回百宝箱</Link>}
       />
       <ToolNav />
       <PageSection eyebrow="调用" title="生成口播预览" description="这页适合验证视频素材、音频素材和 HeyGem 服务是否能协同跑通。">
