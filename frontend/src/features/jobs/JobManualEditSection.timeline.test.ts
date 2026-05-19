@@ -1007,7 +1007,7 @@ describe("manual editor timeline mapping", () => {
 
     const charTokens = tokens.filter((token): token is typeof token & { kind: "char" } => token.kind === "char");
     expect(charTokens.map((token) => token.text).join("")).toBe("太难了难上加难");
-    expect(charTokens.every((token) => token.timingSource === "word")).toBe(true);
+    expect(charTokens.every((token) => token.timingSource === "alignment")).toBe(true);
   });
 
   it("shows pauses that are only visible in ASR word timing gaps", () => {
@@ -1154,6 +1154,32 @@ describe("manual editor timeline mapping", () => {
 
     expect(tokens.map((token) => token.text).join("")).toBe("因为之前");
     expect(tokens.some((token) => token.kind === "pause")).toBe(false);
+  });
+
+  it("renders audio VAD pauses inside coarse backend alignment spans", () => {
+    const tokens = buildTranscriptTokens(
+      [
+        {
+          index: 1,
+          start_time: 2.12,
+          end_time: 8.36,
+          text_final: "今天终于收到了年前的最后的一个小玩具",
+          alignment_tokens: [
+            { text: "收", start: 3.22, end: 3.7, source: "span_alignment" },
+            { text: "到", start: 3.22, end: 3.7, source: "span_alignment" },
+            { text: "了", start: 3.7, end: 3.84, source: "span_alignment" },
+            { text: "年", start: 3.84, end: 4.7, source: "span_alignment" },
+            { text: "前", start: 3.84, end: 4.7, source: "span_alignment" },
+            { text: "最", start: 5.0, end: 6.56, source: "span_alignment" },
+            { text: "后", start: 5.0, end: 6.56, source: "span_alignment" },
+          ],
+        },
+      ],
+      [{ start: 2.12, end: 8.36 }],
+      [{ start: 5.85, end: 6.21, duration_sec: 0.36, source: "audio_vad" }],
+    );
+
+    expect(tokens.some((token) => token.kind === "pause" && token.start === 5.85 && token.end === 6.21)).toBe(true);
   });
 
   it("still auto-cuts long VAD pauses between subtitle rows", () => {

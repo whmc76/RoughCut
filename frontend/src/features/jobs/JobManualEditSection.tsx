@@ -149,7 +149,7 @@ type TranscriptToken = {
   start: number;
   end: number;
   kept: boolean;
-  timingSource?: "word" | "estimated";
+  timingSource?: "word" | "alignment" | "estimated";
   pauseDuration?: number;
   inferredPunctuation?: string;
   breakAfter?: TranscriptBreakKind;
@@ -191,7 +191,7 @@ type SmartCutRuleMatch = KeepSegment & {
 };
 
 type TimedSourceRange = KeepSegment & {
-  timingSource: "word" | "estimated";
+  timingSource: "word" | "alignment" | "estimated";
 };
 
 type SmartCutRuleAnalysis = {
@@ -2615,7 +2615,7 @@ function buildBackendAlignedTranscriptTokens(
       start: Number(start.toFixed(3)),
       end: Number(end.toFixed(3)),
       kept: isSourceRangeKept(start, end, segments),
-      timingSource: "word",
+      timingSource: "alignment",
     });
   });
   if (!backendTokens.length) return null;
@@ -2669,7 +2669,7 @@ function normalizeAlignedTranscriptTokens(tokens: TranscriptToken[], sourceIndex
       start: Number(start.toFixed(3)),
       end: Number(end.toFixed(3)),
       kept: isSourceRangeKept(start, end, segments),
-      timingSource: match ? "word" : "estimated",
+      timingSource: match ? "alignment" : "estimated",
     };
   });
 }
@@ -2811,8 +2811,8 @@ function transcriptVisiblePauseRanges(range: SilenceRange, tokens: TranscriptTok
   const speechBlockers = tokens
     .filter((token) => token.kind === "char"
       && token.text.trim()
-      && (!audioEvidence || token.timingSource === "word")
-      && (!asrEvidence || token.timingSource === "word")
+      && (!audioEvidence || transcriptTokenBlocksAudioPause(token))
+      && (!asrEvidence || token.timingSource === "word" || token.timingSource === "alignment")
       && token.end > range.start + 0.001
       && token.start < range.end - 0.001)
     .map((token) => ({
@@ -2831,10 +2831,16 @@ function transcriptVisiblePauseRanges(range: SilenceRange, tokens: TranscriptTok
     .filter((visibleRange) => visibleRange.end > visibleRange.start + TRANSCRIPT_MIN_VISIBLE_PAUSE_SEC - 0.001);
 }
 
+function transcriptTokenBlocksAudioPause(token: TranscriptToken) {
+  if (token.timingSource === "word") return true;
+  if (token.timingSource !== "alignment") return false;
+  return token.end - token.start <= 0.5;
+}
+
 function audioRangeBroadlyOverlapsEstimatedSpeech(range: SilenceRange, tokens: TranscriptToken[]) {
   const groups = new Map<number, TranscriptToken[]>();
   for (const token of tokens) {
-    if (token.kind !== "char" || token.timingSource === "word" || token.subtitleIndex == null || !token.text.trim()) continue;
+    if (token.kind !== "char" || token.timingSource === "word" || token.timingSource === "alignment" || token.subtitleIndex == null || !token.text.trim()) continue;
     if (token.end <= range.start + 0.001 || token.start >= range.end - 0.001) continue;
     groups.set(token.subtitleIndex, [...(groups.get(token.subtitleIndex) || []), token]);
   }
@@ -2847,7 +2853,7 @@ function audioRangeBroadlyOverlapsEstimatedSpeech(range: SilenceRange, tokens: T
     const subtitleIndex = group[0]?.subtitleIndex;
     const subtitleTokens = tokens.filter((token) => (
       token.kind === "char"
-      && token.timingSource !== "word"
+      && token.timingSource === "estimated"
       && token.subtitleIndex === subtitleIndex
       && token.text.trim()
     ));
@@ -3112,7 +3118,7 @@ function rangeCoversWholeSubtitle(range: KeepSegment, subtitle: JobManualEditSub
 }
 
 function rangeHasReliableTextCutTiming(range: TimedSourceRange, subtitle: JobManualEditSubtitle) {
-  return range.timingSource === "word" || rangeCoversWholeSubtitle(range, subtitle);
+  return range.timingSource === "word" || range.timingSource === "alignment" || rangeCoversWholeSubtitle(range, subtitle);
 }
 
 function findRepeatedSpeechRangesInSubtitle(subtitle: JobManualEditSubtitle) {
