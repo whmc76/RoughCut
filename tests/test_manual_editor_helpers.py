@@ -21,6 +21,7 @@ from roughcut.api.jobs import (
     _manual_editor_draft_subtitles_are_stale,
     _manual_editor_draft_subtitles_match_fingerprint,
     _manual_editor_request_subtitles_match_fingerprint,
+    _validate_manual_editor_subtitle_revision,
     _manual_editor_silence_payload,
     _manual_editor_subtitle_fingerprint,
     _manual_editor_subtitle_payload,
@@ -160,6 +161,23 @@ def test_manual_editor_subtitle_overrides_require_matching_fingerprint() -> None
     )
 
 
+def test_manual_editor_rejects_stale_subtitle_revision_for_any_save() -> None:
+    _validate_manual_editor_subtitle_revision(
+        ManualEditorApplyIn(base_subtitle_fingerprint="current"),
+        "current",
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        _validate_manual_editor_subtitle_revision(
+            ManualEditorApplyIn(
+                base_subtitle_fingerprint="old",
+                keep_segments=[{"start": 0.0, "end": 10.0}],
+            ),
+            "current",
+        )
+    assert exc_info.value.status_code == 409
+    assert "字幕数据已更新" in str(exc_info.value.detail)
+
+
 def test_manual_editor_stored_projection_is_stale_after_subtitle_regeneration() -> None:
     current_fingerprint = "current"
     older_projection = datetime(2026, 5, 15, 8, 0, 0, tzinfo=timezone.utc)
@@ -189,7 +207,7 @@ def test_manual_editor_timeline_records_and_matches_subtitle_fingerprint() -> No
     payload = {
         "analysis": {
             "manual_editor": {
-                "source_subtitle_fingerprint": "fingerprint-a",
+                "timeline_subtitle_fingerprint": "fingerprint-a",
                 "source_subtitle_basis": "canonical_transcript",
             }
         }
@@ -199,14 +217,35 @@ def test_manual_editor_timeline_records_and_matches_subtitle_fingerprint() -> No
     assert _manual_editor_timeline_matches_current_subtitles(
         payload,
         current_subtitle_fingerprint="fingerprint-a",
+        current_timeline_subtitle_fingerprint="fingerprint-b",
         timeline_created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         latest_subtitle_revision_created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
     )
     assert not _manual_editor_timeline_matches_current_subtitles(
         payload,
         current_subtitle_fingerprint="fingerprint-b",
+        current_timeline_subtitle_fingerprint="fingerprint-c",
         timeline_created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         latest_subtitle_revision_created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+
+def test_manual_editor_timeline_matches_either_source_or_projection_fingerprint() -> None:
+    payload = {"analysis": {"manual_editor": {"base_subtitle_fingerprint": "source-current"}}}
+
+    assert _manual_editor_timeline_matches_current_subtitles(
+        payload,
+        current_subtitle_fingerprint="source-current",
+        current_timeline_subtitle_fingerprint="projection-current",
+        timeline_created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        latest_subtitle_revision_created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    )
+    assert _manual_editor_timeline_matches_current_subtitles(
+        {"analysis": {"manual_editor": {"timeline_subtitle_fingerprint": "projection-current"}}},
+        current_subtitle_fingerprint="source-current",
+        current_timeline_subtitle_fingerprint="projection-current",
+        timeline_created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        latest_subtitle_revision_created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
     )
 
 

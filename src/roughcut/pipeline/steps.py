@@ -3980,14 +3980,15 @@ async def _validated_subtitle_projection_for_timeline(
     job_id: uuid.UUID,
     projected_subtitles: list[dict[str, Any]],
     keep_segments: list[dict[str, Any]],
+    source_subtitles: list[dict[str, Any]] | None = None,
     fallback_source_subtitles: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    source_subtitles = await _load_source_subtitle_payloads_for_projection_validation(session, job_id=job_id)
+    effective_source_subtitles = source_subtitles or await _load_source_subtitle_payloads_for_projection_validation(session, job_id=job_id)
     validation = validate_projected_subtitles_against_source(
         projected_subtitles,
-        source_subtitles=source_subtitles,
+        source_subtitles=effective_source_subtitles,
         keep_segments=keep_segments,
-        fallback_source_subtitles=fallback_source_subtitles or clean_subtitle_payloads(source_subtitles),
+        fallback_source_subtitles=fallback_source_subtitles or clean_subtitle_payloads(effective_source_subtitles),
     )
     return validation.subtitles
 
@@ -7695,7 +7696,7 @@ async def run_edit_plan(job_id: str) -> dict:
         )
         manual_editor_analysis = decision.analysis.setdefault("manual_editor", {})
         if isinstance(manual_editor_analysis, dict):
-            manual_editor_analysis["source_subtitle_fingerprint"] = subtitle_payload_fingerprint(subtitle_dicts)
+            manual_editor_analysis["timeline_subtitle_fingerprint"] = subtitle_payload_fingerprint(subtitle_dicts)
             manual_editor_analysis["source_subtitle_basis"] = str(
                 projection_data.get("projection_kind")
                 or projection_data.get("basis")
@@ -7727,6 +7728,8 @@ async def run_edit_plan(job_id: str) -> dict:
             job_id=job.id,
             projected_subtitles=remapped_subtitles,
             keep_segments=keep_segments,
+            source_subtitles=subtitle_dicts,
+            fallback_source_subtitles=subtitle_dicts,
         )
         subtitle_source_projection_validation = _build_source_transcript_projection_validation(
             remapped_subtitles=remapped_subtitles,
@@ -8056,6 +8059,8 @@ async def run_render(job_id: str) -> dict:
                     job_id=uuid.UUID(job_id),
                     projected_subtitles=remapped_subtitles,
                     keep_segments=keep_segments,
+                    source_subtitles=subtitle_dicts,
+                    fallback_source_subtitles=subtitle_dicts,
                 )
             ai_effect_render_plan = build_ai_effect_render_plan(
                 render_plan_timeline.data_json,
@@ -8651,6 +8656,8 @@ async def run_platform_package(job_id: str) -> dict:
                 job_id=job.id,
                 projected_subtitles=manual_editor_subtitles,
                 keep_segments=keep_segments,
+                source_subtitles=subtitle_dicts,
+                fallback_source_subtitles=subtitle_dicts,
             )
 
         render_output_result = await session.execute(

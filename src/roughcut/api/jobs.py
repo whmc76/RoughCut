@@ -2857,8 +2857,10 @@ def _manual_editor_timeline_subtitle_fingerprint(payload: dict[str, Any] | None)
     analysis = data.get("analysis") if isinstance(data.get("analysis"), dict) else {}
     manual_editor_meta = analysis.get("manual_editor") if isinstance(analysis.get("manual_editor"), dict) else {}
     for value in (
+        manual_editor_meta.get("timeline_subtitle_fingerprint"),
         manual_editor_meta.get("source_subtitle_fingerprint"),
         manual_editor_meta.get("base_subtitle_fingerprint"),
+        analysis.get("timeline_subtitle_fingerprint"),
         analysis.get("source_subtitle_fingerprint"),
         data.get("source_subtitle_fingerprint"),
         data.get("base_subtitle_fingerprint"),
@@ -2873,12 +2875,18 @@ def _manual_editor_timeline_matches_current_subtitles(
     payload: dict[str, Any] | None,
     *,
     current_subtitle_fingerprint: str | None,
+    current_timeline_subtitle_fingerprint: str | None = None,
     timeline_created_at: datetime | None,
     latest_subtitle_revision_created_at: datetime | None,
 ) -> bool:
     timeline_fingerprint = _manual_editor_timeline_subtitle_fingerprint(payload)
     if timeline_fingerprint:
-        return bool(current_subtitle_fingerprint and timeline_fingerprint == current_subtitle_fingerprint)
+        current_fingerprints = {
+            str(value or "").strip()
+            for value in (current_subtitle_fingerprint, current_timeline_subtitle_fingerprint)
+            if str(value or "").strip()
+        }
+        return timeline_fingerprint in current_fingerprints
     return not _manual_editor_draft_subtitles_are_stale(
         draft_created_at=timeline_created_at,
         latest_subtitle_created_at=latest_subtitle_revision_created_at,
@@ -2903,6 +2911,17 @@ def _manual_editor_request_subtitles_match_fingerprint(
         return False
     request_fingerprint = str(request.base_subtitle_fingerprint or "").strip()
     return bool(request_fingerprint and request_fingerprint == current_subtitle_fingerprint)
+
+
+def _validate_manual_editor_subtitle_revision(
+    request: ManualEditorApplyIn,
+    current_subtitle_fingerprint: str | None,
+) -> None:
+    request_fingerprint = str(request.base_subtitle_fingerprint or "").strip()
+    if not request_fingerprint or not current_subtitle_fingerprint:
+        return
+    if request_fingerprint != current_subtitle_fingerprint:
+        raise HTTPException(status_code=409, detail="字幕数据已更新，请刷新手动编辑器后再保存。")
 
 
 def _manual_editor_stored_projection_matches_subtitles(
@@ -3775,7 +3794,8 @@ async def _build_manual_editor_session(
         )
     timeline_subtitles_current = _manual_editor_timeline_matches_current_subtitles(
         editorial_timeline.data_json if isinstance(editorial_timeline.data_json, dict) else None,
-        current_subtitle_fingerprint=timeline_subtitle_fingerprint,
+        current_subtitle_fingerprint=subtitle_fingerprint,
+        current_timeline_subtitle_fingerprint=timeline_subtitle_fingerprint,
         timeline_created_at=editorial_timeline.created_at,
         latest_subtitle_revision_created_at=latest_subtitle_created_at,
     )
@@ -4140,6 +4160,7 @@ async def save_manual_editor_draft(
         clean_text=False,
     )
     subtitle_fingerprint = _manual_editor_subtitle_fingerprint(current_source_subtitles)
+    _validate_manual_editor_subtitle_revision(request, subtitle_fingerprint)
     request_subtitles_match = _manual_editor_request_subtitles_match_fingerprint(request, subtitle_fingerprint)
     subtitle_override_payloads = (
         _manual_subtitle_override_payloads(request.subtitle_overrides)
@@ -4289,11 +4310,7 @@ async def apply_manual_editor_timeline(
         await _load_manual_editor_word_payloads(session, job_id=job.id),
     )
     subtitle_fingerprint = _manual_editor_subtitle_fingerprint(source_subtitle_dicts)
-    if (request.subtitle_overrides or request.subtitle_replacements) and not _manual_editor_request_subtitles_match_fingerprint(
-        request,
-        subtitle_fingerprint,
-    ):
-        raise HTTPException(status_code=409, detail="字幕数据已更新，请刷新手动编辑器后再保存字幕修改。")
+    _validate_manual_editor_subtitle_revision(request, subtitle_fingerprint)
     subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts)
     if _manual_editor_should_use_clean_fallback_projection(raw_subtitle_dicts, subtitle_dicts, projection_data):
         remapped_subtitles = remap_subtitles_to_timeline(subtitle_dicts, keep_segments)
