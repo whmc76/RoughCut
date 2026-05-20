@@ -1331,6 +1331,19 @@ describe("manual editor timeline mapping", () => {
     expect(nextSegments).toEqual([{ start: 0, end: 3 }]);
   });
 
+  it("uses the configured pause breath when shrinking deleted pause ranges", () => {
+    const nextSegments = applySmartCutRuleRangesToSegments(
+      [{ start: 0, end: 1 }, { start: 2, end: 3 }],
+      [{ start: 1, end: 2, kind: "pause" }],
+      [{ start: 1, end: 2, kind: "pause" }],
+      3,
+      [],
+      { pauseBreathSec: 0.2 },
+    );
+
+    expect(nextSegments).toEqual([{ start: 0, end: 1.2 }, { start: 1.8, end: 3 }]);
+  });
+
   it("still cuts the unrestored sides of a partially restored pause range", () => {
     const nextSegments = applySmartCutRuleRangesToSegments(
       [{ start: 0, end: 1 }, { start: 2, end: 3 }],

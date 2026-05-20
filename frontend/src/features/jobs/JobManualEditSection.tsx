@@ -179,6 +179,7 @@ type SmartCutRules = {
   pauseEnabled: boolean;
   smartDeleteEnabled: boolean;
   pauseThresholdSec: number;
+  pauseBreathSec?: number;
   fillers: string;
 };
 
@@ -418,6 +419,7 @@ const DEFAULT_SMART_CUT_RULES: SmartCutRules = {
   pauseEnabled: true,
   smartDeleteEnabled: true,
   pauseThresholdSec: 0.8,
+  pauseBreathSec: 0.08,
   fillers: DEFAULT_SMART_CUT_FILLERS,
 };
 
@@ -432,12 +434,14 @@ const SMART_DELETE_PROTECTED_TERM_PATTERN = /(?:^|[^A-Za-z0-9])(?:EDC\s*\d{1,4}|
 
 function normalizeSmartCutRules(value: Partial<SmartCutRules> | null | undefined): SmartCutRules {
   const pauseThresholdSec = Number(value?.pauseThresholdSec);
+  const pauseBreathSec = Number(value?.pauseBreathSec);
   return {
     fillerEnabled: typeof value?.fillerEnabled === "boolean" ? value.fillerEnabled : DEFAULT_SMART_CUT_RULES.fillerEnabled,
     repeatedEnabled: typeof value?.repeatedEnabled === "boolean" ? value.repeatedEnabled : DEFAULT_SMART_CUT_RULES.repeatedEnabled,
     pauseEnabled: typeof value?.pauseEnabled === "boolean" ? value.pauseEnabled : DEFAULT_SMART_CUT_RULES.pauseEnabled,
     smartDeleteEnabled: typeof value?.smartDeleteEnabled === "boolean" ? value.smartDeleteEnabled : DEFAULT_SMART_CUT_RULES.smartDeleteEnabled,
     pauseThresholdSec: Number.isFinite(pauseThresholdSec) ? clamp(pauseThresholdSec, 0.1, 5) : DEFAULT_SMART_CUT_RULES.pauseThresholdSec,
+    pauseBreathSec: Number.isFinite(pauseBreathSec) ? clamp(pauseBreathSec, 0, 1) : DEFAULT_SMART_CUT_RULES.pauseBreathSec,
     fillers: typeof value?.fillers === "string" && value.fillers.trim() ? value.fillers : DEFAULT_SMART_CUT_RULES.fillers,
   };
 }
@@ -3634,11 +3638,18 @@ export function smartCutRuleManagedRanges(analysis: SmartCutRuleAnalysis) {
   ];
 }
 
-function applyAutomaticCutSafetyPadding(ranges: KeepSegment[], sourceDuration: number) {
+function smartCutSafetyPadding(kind: SmartCutRuleKind | undefined, rules?: Partial<SmartCutRules>) {
+  if (kind === "pause") {
+    return normalizeSmartCutRules(rules).pauseBreathSec ?? DEFAULT_SMART_CUT_RULES.pauseBreathSec ?? 0;
+  }
+  return kind ? SMART_CUT_AUDIO_SAFETY_SEC[kind] ?? 0 : 0;
+}
+
+function applyAutomaticCutSafetyPadding(ranges: KeepSegment[], sourceDuration: number, rules?: Partial<SmartCutRules>) {
   return ranges
     .map((range) => {
       const kind = (range as SmartCutRuleMatch).kind;
-      const padding = kind ? SMART_CUT_AUDIO_SAFETY_SEC[kind] ?? 0 : 0;
+      const padding = smartCutSafetyPadding(kind, rules);
       const start = Number(clamp(range.start + padding, 0, sourceDuration).toFixed(3));
       const end = Number(clamp(range.end - padding, start, sourceDuration).toFixed(3));
       return { ...range, start, end };
@@ -3648,10 +3659,11 @@ function applyAutomaticCutSafetyPadding(ranges: KeepSegment[], sourceDuration: n
 
 export function applySmartCutRuleRangesToSegments(
   baseSegments: KeepSegment[],
-  ranges: KeepSegment[],
-  managedRanges: KeepSegment[],
+  ranges: Array<KeepSegment | SmartCutRuleMatch>,
+  managedRanges: Array<KeepSegment | SmartCutRuleMatch>,
   sourceDuration: number,
   restoredRanges: KeepSegment[] = [],
+  rules?: Partial<SmartCutRules>,
 ) {
   if (!baseSegments.length) return [];
   const controlledBaseline = managedRanges.length
@@ -3660,7 +3672,7 @@ export function applySmartCutRuleRangesToSegments(
   const activeRanges = restoredRanges.length
     ? removeSourceRangesFromSegments(ranges, restoredRanges)
     : ranges;
-  const paddedRanges = applyAutomaticCutSafetyPadding(activeRanges, sourceDuration);
+  const paddedRanges = applyAutomaticCutSafetyPadding(activeRanges, sourceDuration, rules);
   const keptRanges = paddedRanges.filter((range) => isSourceRangeKept(range.start, range.end, controlledBaseline));
   return keptRanges.length
     ? removeSourceRangesFromSegments(controlledBaseline, keptRanges)
@@ -3675,6 +3687,7 @@ function smartCutRulesSignature(rules: SmartCutRules) {
     pauseEnabled: normalized.pauseEnabled,
     smartDeleteEnabled: normalized.smartDeleteEnabled,
     pauseThresholdSec: normalized.pauseThresholdSec,
+    pauseBreathSec: normalized.pauseBreathSec,
     fillers: parseSmartCutFillers(normalized.fillers),
   });
 }
@@ -5325,6 +5338,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       managedRanges,
       session.source_duration_sec,
       manualSmartCutRestoreRanges,
+      smartCutRules,
     );
     if (!nextSegments.length) return;
     if (keepSegmentsEquivalent(effectiveSegments, nextSegments)) return;
@@ -6749,6 +6763,19 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                           onChange={(event) => updateSmartCutRule({ pauseThresholdSec: Number(event.target.value || 0.8) })}
                         />
                         秒
+                      </label>
+                      <label>
+                        保留气口
+                        <input
+                          className="input"
+                          type="number"
+                          min={0}
+                          max={1}
+                          step={0.01}
+                          value={smartCutRules.pauseBreathSec ?? DEFAULT_SMART_CUT_RULES.pauseBreathSec}
+                          onChange={(event) => updateSmartCutRule({ pauseBreathSec: Number(event.target.value || 0) })}
+                        />
+                        秒/侧
                       </label>
                     </div>
                     <input
