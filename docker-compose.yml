@@ -25,8 +25,8 @@ x-app-env: &app-env
   COVER_TITLE_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
   HEYGEM_SHARED_ROOT: /code/data
   HEYGEM_VOICE_ROOT: /code/data/voice/data
-  AVATAR_API_BASE_URL: ${AVATAR_API_BASE_URL:-http://host.docker.internal:49202}
-  AVATAR_TRAINING_API_BASE_URL: ${AVATAR_TRAINING_API_BASE_URL:-http://host.docker.internal:49204}
+  AVATAR_API_BASE_URL: ${ROUGHCUT_DOCKER_AVATAR_API_BASE_URL:-http://host.docker.internal:49202}
+  AVATAR_TRAINING_API_BASE_URL: ${ROUGHCUT_DOCKER_AVATAR_TRAINING_API_BASE_URL:-http://host.docker.internal:49204}
   OLLAMA_BASE_URL: ${ROUGHCUT_DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
 
 x-app-common: &app-common
@@ -129,11 +129,11 @@ services:
 
   api:
     <<: *app-common
-    command: ["roughcut", "api", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["roughcut", "api", "--host", "0.0.0.0", "--port", "${ROUGHCUT_API_INTERNAL_PORT:-8000}"]
     ports:
-      - "${ROUGHCUT_API_PORT:-38471}:8000"
+      - "${ROUGHCUT_API_PORT:-38471}:${ROUGHCUT_API_INTERNAL_PORT:-8000}"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/readyz"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${ROUGHCUT_API_INTERNAL_PORT:-8000}/readyz"]
       interval: 10s
       timeout: 5s
       retries: 12

@@ -2,7 +2,7 @@ param(
     [ValidateSet("local", "infra", "runtime", "full", "runtime-watch", "full-watch", "runtime-down", "full-down")]
     [string]$Mode = "local",
     [string]$DockerPythonExtras = "",
-    [int]$Port = 38471,
+    [int]$Port = 0,
     [ValidateRange(1, 8)]
     [int]$MediaWorkerCount = 1,
     [ValidateRange(1, 16)]
@@ -47,6 +47,7 @@ $InfraComposeFile = Join-Path $RepoRoot "docker-compose.infra.yml"
 $RuntimeComposeFile = Join-Path $RepoRoot "docker-compose.runtime.yml"
 $DevComposeFile = Join-Path $RepoRoot "docker-compose.dev.yml"
 $AutomationComposeFile = Join-Path $RepoRoot "docker-compose.automation.yml"
+$PortsEnvFile = Join-Path $RepoRoot "roughcut.ports.env"
 $DockerWatchScript = Join-Path $RepoRoot "scripts\watch-roughcut-docker-runtime.ps1"
 $EnsureTelegramAgentScript = Join-Path $RepoRoot "scripts\ensure-roughcut-telegram-agent.ps1"
 $StopTelegramAgentScript = Join-Path $RepoRoot "scripts\stop-roughcut-telegram-agent.ps1"
@@ -131,6 +132,10 @@ function Invoke-RoughCutCompose {
 
     $composeFiles = Get-RoughCutComposeFiles -ComposeMode $ComposeMode
     $args = @("compose")
+    if (Test-Path $PortsEnvFile) {
+        $args += "--env-file"
+        $args += $PortsEnvFile
+    }
     foreach ($composeFile in $composeFiles) {
         if (-not (Test-Path $composeFile)) {
             throw "Compose file not found: $composeFile"
@@ -224,6 +229,10 @@ function Get-RoughCutComposeStatusEntries {
 
     $composeFiles = Get-RoughCutComposeFiles -ComposeMode $ComposeMode
     $args = @("compose")
+    if (Test-Path $PortsEnvFile) {
+        $args += "--env-file"
+        $args += $PortsEnvFile
+    }
     foreach ($composeFile in $composeFiles) {
         $args += "-f"
         $args += $composeFile
@@ -1000,19 +1009,24 @@ function Is-TcpPortAvailable {
 function Get-LocalDotEnvValue {
     param([string]$Key)
 
-    $dotEnvPath = Join-Path $RepoRoot ".env"
-    if (-not (Test-Path $dotEnvPath)) {
-        return $null
-    }
-
     $escapedKey = [regex]::Escape($Key)
-    foreach ($line in Get-Content $dotEnvPath) {
-        if ($line -match "^\s*$escapedKey\s*=\s*([^#]*?)(\s+#.*)?$") {
-            $raw = $Matches[1].Trim()
-            if (($raw.StartsWith('"') -and $raw.EndsWith('"')) -or ($raw.StartsWith("'") -and $raw.EndsWith("'"))) {
-                return $raw.Substring(1, $raw.Length - 2)
+    $envFiles = @(
+        (Join-Path $RepoRoot "roughcut.ports.env"),
+        (Join-Path $RepoRoot ".env")
+    )
+
+    foreach ($dotEnvPath in $envFiles) {
+        if (-not (Test-Path $dotEnvPath)) {
+            continue
+        }
+        foreach ($line in Get-Content $dotEnvPath) {
+            if ($line -match "^\s*$escapedKey\s*=\s*([^#]*?)(\s+#.*)?$") {
+                $raw = $Matches[1].Trim()
+                if (($raw.StartsWith('"') -and $raw.EndsWith('"')) -or ($raw.StartsWith("'") -and $raw.EndsWith("'"))) {
+                    return $raw.Substring(1, $raw.Length - 2)
+                }
+                return $raw
             }
-            return $raw
         }
     }
     return $null
@@ -1074,7 +1088,7 @@ function Get-ConfiguredTranscriptionProvider {
         "local-asr" { return "local_http_asr" }
         "local_asr" { return "local_http_asr" }
         "local-http-asr" { return "local_http_asr" }
-        "" { return "local_http_asr" }
+        "" { return "faster_whisper" }
         default { return $provider }
     }
 }
@@ -1448,40 +1462,35 @@ function Resolve-ApiPort {
         [int]$RequestedPort = 0
     )
 
+    $candidateSource = $null
     if ($RequestedPort -gt 0) {
-        $candidate = Parse-PortValue -Value "$RequestedPort"
-        $candidateIsFree = $false
-        if ($null -ne $candidate) {
-            $candidateIsFree = Is-TcpPortAvailable -TestPort $candidate
-        }
-        if ($null -ne $candidate -and -not $UsedPorts.ContainsKey($candidate) -and $candidateIsFree) {
-            $UsedPorts[$candidate] = $true
-            return $candidate
-        }
+        $candidateSource = "$RequestedPort"
+    } elseif ($env:ROUGHCUT_API_PORT) {
+        $candidateSource = $env:ROUGHCUT_API_PORT
+    } else {
+        $dotEnvValue = Get-LocalDotEnvValue -Key "ROUGHCUT_API_PORT"
+        $candidateSource = if ($dotEnvValue) { $dotEnvValue } else { "38471" }
     }
 
-    $envCandidates = @()
-    if ($env:ROUGHCUT_API_PORT) {
-        $envCandidates += $env:ROUGHCUT_API_PORT
+    $candidate = Parse-PortValue -Value $candidateSource
+    if ($null -eq $candidate) {
+        throw "Invalid ROUGHCUT_API_PORT value '$candidateSource'. Configure one canonical API port, normally 38471."
     }
-    $dotEnvValue = Get-LocalDotEnvValue -Key "ROUGHCUT_API_PORT"
-    if ($dotEnvValue) {
-        $envCandidates += $dotEnvValue
+    if ($UsedPorts.ContainsKey($candidate)) {
+        throw "Canonical API port $candidate is already reserved by another RoughCut service. Stop that service or set ROUGHCUT_API_PORT explicitly; startup will not auto-switch API ports."
     }
-
-    foreach ($candidateSource in $envCandidates) {
-        $candidate = Parse-PortValue -Value $candidateSource
-        if ($null -eq $candidate) {
-            continue
-        }
-        $candidateIsFree = Is-TcpPortAvailable -TestPort $candidate
-        if (-not $UsedPorts.ContainsKey($candidate) -and $candidateIsFree) {
-            $UsedPorts[$candidate] = $true
-            return $candidate
-        }
+    if (Is-TcpPortAvailable -TestPort $candidate) {
+        $UsedPorts[$candidate] = $true
+        return $candidate
     }
 
-    return Resolve-StandalonePort -EnvVarName "ROUGHCUT_API_PORT" -PreferredPorts @(38471, 38472, 38473, 38474, 38475, 38476, 38477) -UsedPorts $UsedPorts
+    $apiPattern = "roughcut(?:\.cli|\.exe`"?)\s+api\s+--host\s+(?:127\.0\.0\.1|0\.0\.0\.0)\s+--port\s+$candidate"
+    if (@(Get-ProcessMatches -Pattern $apiPattern).Count -gt 0) {
+        $UsedPorts[$candidate] = $true
+        return $candidate
+    }
+
+    throw "Canonical API port $candidate is already in use by another process. Stop that process; RoughCut will not auto-switch API ports."
 }
 
 function Update-LocalServiceEnv {
@@ -1719,7 +1728,13 @@ function Stop-RoughCutServices {
 
     if ($StopDockerServices) {
         Write-Host "Stopping docker compose services..." -ForegroundColor Cyan
-        docker compose stop | Out-Host
+        $stopArgs = @("compose")
+        if (Test-Path $PortsEnvFile) {
+            $stopArgs += "--env-file"
+            $stopArgs += $PortsEnvFile
+        }
+        $stopArgs += "stop"
+        docker @stopArgs | Out-Host
     }
 }
 
@@ -1729,6 +1744,97 @@ function Remove-LegacyHeygemMockContainer {
     if (-not [string]::IsNullOrWhiteSpace($exists)) {
         Write-Host "Removing legacy mock container $legacyContainer..." -ForegroundColor Yellow
         docker rm -f $legacyContainer | Out-Host
+    }
+}
+
+function Start-RoughCutManagedProcessFromSpec {
+    param([pscustomobject]$Spec)
+
+    $startProcessSplat = @{
+        FilePath = $Spec.FilePath
+        ArgumentList = @($Spec.Arguments)
+        WorkingDirectory = $Spec.WorkingDirectory
+        PassThru = $true
+        RedirectStandardOutput = $Spec.StdoutPath
+        RedirectStandardError = $Spec.StderrPath
+    }
+    if ($Spec.HiddenWindow) {
+        $startProcessSplat["WindowStyle"] = "Hidden"
+    } else {
+        $startProcessSplat["NoNewWindow"] = $true
+    }
+
+    $previousEnvironment = @{}
+    foreach ($environmentEntry in $Spec.Environment.GetEnumerator()) {
+        $environmentName = [string]$environmentEntry.Key
+        $previousEnvironment[$environmentName] = [Environment]::GetEnvironmentVariable($environmentName, "Process")
+        [Environment]::SetEnvironmentVariable($environmentName, [string]$environmentEntry.Value, "Process")
+    }
+
+    try {
+        $process = Start-Process @startProcessSplat
+    } finally {
+        foreach ($environmentEntry in $previousEnvironment.GetEnumerator()) {
+            [Environment]::SetEnvironmentVariable([string]$environmentEntry.Key, $environmentEntry.Value, "Process")
+        }
+    }
+
+    [RoughCutJobObject]::Assign($script:ProcessJob, $process.Handle)
+    return $process
+}
+
+function Add-RoughCutManagedProcess {
+    param(
+        [string]$Name,
+        [System.Diagnostics.Process]$Process,
+        [pscustomobject]$Spec
+    )
+
+    $script:ManagedProcesses += [pscustomobject]@{
+        Name = $Name
+        Process = $Process
+        Spec = $Spec
+        RestartCount = 0
+        LastExitCode = $null
+        RestartPending = $false
+        NextRestartAt = $null
+    }
+}
+
+function Schedule-RoughCutManagedProcessRestart {
+    param([pscustomobject]$Entry)
+
+    $Entry.RestartCount = [int]$Entry.RestartCount + 1
+    $delaySeconds = [Math]::Min(30, [Math]::Max(1, [int][Math]::Pow(2, [Math]::Min($Entry.RestartCount - 1, 5))))
+    $Entry.RestartPending = $true
+    $Entry.NextRestartAt = (Get-Date).AddSeconds($delaySeconds)
+    Write-Host "$($Entry.Name) will restart in $delaySeconds second(s) (restart #$($Entry.RestartCount))." -ForegroundColor Yellow
+}
+
+function Restart-RoughCutManagedProcess {
+    param([pscustomobject]$Entry)
+
+    $matches = @(Get-ProcessMatches -Pattern $Entry.Spec.MatchPattern)
+    if ($matches.Count -gt 0) {
+        $activeProcess = Get-Process -Id $matches[-1].ProcessId -ErrorAction SilentlyContinue
+        if ($null -ne $activeProcess) {
+            $Entry.Process = $activeProcess
+            $Entry.RestartPending = $false
+            $Entry.NextRestartAt = $null
+            Write-Host "$($Entry.Name) is already running again (PID $($activeProcess.Id)); supervisor reattached." -ForegroundColor Green
+            return
+        }
+    }
+
+    try {
+        $process = Start-RoughCutManagedProcessFromSpec -Spec $Entry.Spec
+        $Entry.Process = $process
+        $Entry.RestartPending = $false
+        $Entry.NextRestartAt = $null
+        Write-Host "$($Entry.Name) restarted (PID $($process.Id))." -ForegroundColor Green
+    } catch {
+        Write-Host "Failed to restart $($Entry.Name): $($_.Exception.Message)" -ForegroundColor Red
+        Schedule-RoughCutManagedProcessRestart -Entry $Entry
     }
 }
 
@@ -1755,31 +1861,37 @@ function Start-RoughCutProcess {
     }
 
     if ($matches.Count -eq 1) {
-        Write-Host "$Name is already running. Skipping." -ForegroundColor Yellow
+        $existingProcess = Get-Process -Id $matches[0].ProcessId -ErrorAction SilentlyContinue
+        if ($null -ne $existingProcess) {
+            $spec = [pscustomobject]@{
+                FilePath = $Python
+                Arguments = @($Arguments)
+                WorkingDirectory = $RepoRoot
+                MatchPattern = $MatchPattern
+                StdoutPath = $StdoutPath
+                StderrPath = $StderrPath
+                HiddenWindow = [bool]$HiddenWindow
+                Environment = @{}
+            }
+            Add-RoughCutManagedProcess -Name $Name -Process $existingProcess -Spec $spec
+        }
+        Write-Host "$Name is already running. Supervisor attached." -ForegroundColor Yellow
         return
     }
 
-    $startProcessSplat = @{
+    $spec = [pscustomobject]@{
         FilePath = $Python
-        ArgumentList = $Arguments
+        Arguments = @($Arguments)
         WorkingDirectory = $RepoRoot
-        PassThru = $true
-        RedirectStandardOutput = $StdoutPath
-        RedirectStandardError = $StderrPath
-    }
-    if ($HiddenWindow) {
-        $startProcessSplat["WindowStyle"] = "Hidden"
-    } else {
-        $startProcessSplat["NoNewWindow"] = $true
+        MatchPattern = $MatchPattern
+        StdoutPath = $StdoutPath
+        StderrPath = $StderrPath
+        HiddenWindow = [bool]$HiddenWindow
+        Environment = @{}
     }
 
-    $process = Start-Process @startProcessSplat
-
-    [RoughCutJobObject]::Assign($script:ProcessJob, $process.Handle)
-    $script:ManagedProcesses += [pscustomobject]@{
-        Name = $Name
-        Process = $process
-    }
+    $process = Start-RoughCutManagedProcessFromSpec -Spec $spec
+    Add-RoughCutManagedProcess -Name $Name -Process $process -Spec $spec
 
     Write-Host "$Name started (PID $($process.Id))." -ForegroundColor Green
 }
@@ -1809,6 +1921,13 @@ function Start-RoughCutPnpmProcess {
         throw "pnpm is required to start $Name. Enable Corepack or install pnpm, then rerun."
     }
 
+    $argumentText = ($Arguments | ForEach-Object { ConvertTo-CmdArgument -Value $_ }) -join " "
+    $command = "pnpm $argumentText"
+    $environmentCopy = @{}
+    foreach ($entry in $Environment.GetEnumerator()) {
+        $environmentCopy[[string]$entry.Key] = [string]$entry.Value
+    }
+
     $matches = @(Get-ProcessMatches -Pattern $MatchPattern)
     if ($matches.Count -gt 1) {
         $matches | Select-Object -SkipLast 1 | ForEach-Object {
@@ -1822,40 +1941,37 @@ function Start-RoughCutPnpmProcess {
     }
 
     if ($matches.Count -eq 1) {
-        Write-Host "$Name is already running. Skipping." -ForegroundColor Yellow
+        $existingProcess = Get-Process -Id $matches[0].ProcessId -ErrorAction SilentlyContinue
+        if ($null -ne $existingProcess) {
+            $spec = [pscustomobject]@{
+                FilePath = "cmd.exe"
+                Arguments = @("/d", "/s", "/c", $command)
+                WorkingDirectory = $RepoRoot
+                MatchPattern = $MatchPattern
+                StdoutPath = $StdoutPath
+                StderrPath = $StderrPath
+                HiddenWindow = $true
+                Environment = $environmentCopy
+            }
+            Add-RoughCutManagedProcess -Name $Name -Process $existingProcess -Spec $spec
+        }
+        Write-Host "$Name is already running. Supervisor attached." -ForegroundColor Yellow
         return
     }
 
-    $argumentText = ($Arguments | ForEach-Object { ConvertTo-CmdArgument -Value $_ }) -join " "
-    $command = "pnpm $argumentText"
-    $previousEnvironment = @{}
-
-    foreach ($entry in $Environment.GetEnumerator()) {
-        $name = [string]$entry.Key
-        $previousEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
-        [Environment]::SetEnvironmentVariable($name, [string]$entry.Value, "Process")
+    $spec = [pscustomobject]@{
+        FilePath = "cmd.exe"
+        Arguments = @("/d", "/s", "/c", $command)
+        WorkingDirectory = $RepoRoot
+        MatchPattern = $MatchPattern
+        StdoutPath = $StdoutPath
+        StderrPath = $StderrPath
+        HiddenWindow = $true
+        Environment = $environmentCopy
     }
 
-    try {
-        $process = Start-Process `
-            -FilePath "cmd.exe" `
-            -ArgumentList @("/d", "/s", "/c", $command) `
-            -WorkingDirectory $RepoRoot `
-            -PassThru `
-            -RedirectStandardOutput $StdoutPath `
-            -RedirectStandardError $StderrPath `
-            -WindowStyle Hidden
-    } finally {
-        foreach ($entry in $previousEnvironment.GetEnumerator()) {
-            [Environment]::SetEnvironmentVariable([string]$entry.Key, $entry.Value, "Process")
-        }
-    }
-
-    [RoughCutJobObject]::Assign($script:ProcessJob, $process.Handle)
-    $script:ManagedProcesses += [pscustomobject]@{
-        Name = $Name
-        Process = $process
-    }
+    $process = Start-RoughCutManagedProcessFromSpec -Spec $spec
+    Add-RoughCutManagedProcess -Name $Name -Process $process -Spec $spec
 
     Write-Host "$Name started (PID $($process.Id))." -ForegroundColor Green
 }
@@ -1865,6 +1981,14 @@ function Start-RoughCutFrontendDevServer {
         [int]$FrontendPort,
         [int]$ApiPort
     )
+
+    @(Get-ProcessMatches -Pattern (Get-RoughCutFrontendDevCommandMatchPattern)) | ForEach-Object {
+        try {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop
+            Write-Host "Stopped existing frontend dev server (PID $($_.ProcessId)) so API proxy target is refreshed." -ForegroundColor Yellow
+        } catch {
+        }
+    }
 
     Start-RoughCutPnpmProcess `
         -Name "Frontend dev server" `
@@ -2202,14 +2326,23 @@ function Wait-LauncherClose {
     }
     Write-Host "This launcher window owns the running RoughCut services." -ForegroundColor DarkGray
     Write-Host "Close this terminal window to stop API / orchestrator / workers together." -ForegroundColor DarkGray
+    Write-Host "If a managed service exits, this launcher will automatically restart it." -ForegroundColor DarkGray
     Write-Host "Logs stay in .\logs\*.out.log / .\logs\*.err.log" -ForegroundColor DarkGray
 
-    $notified = @{}
     while ($true) {
         foreach ($entry in $script:ManagedProcesses) {
-            if ($entry.Process.HasExited -and -not $notified.ContainsKey($entry.Process.Id)) {
-                $notified[$entry.Process.Id] = $true
-                Write-Host "$($entry.Name) exited with code $($entry.Process.ExitCode)." -ForegroundColor Yellow
+            try {
+                if ($entry.Process.HasExited) {
+                    if (-not $entry.RestartPending) {
+                        $entry.LastExitCode = $entry.Process.ExitCode
+                        Write-Host "$($entry.Name) exited with code $($entry.LastExitCode)." -ForegroundColor Yellow
+                        Schedule-RoughCutManagedProcessRestart -Entry $entry
+                    } elseif ((Get-Date) -ge $entry.NextRestartAt) {
+                        Restart-RoughCutManagedProcess -Entry $entry
+                    }
+                }
+            } catch {
+                Write-Host "Supervisor check failed for $($entry.Name): $($_.Exception.Message)" -ForegroundColor Red
             }
         }
         Start-Sleep -Seconds 2
@@ -2400,7 +2533,7 @@ if ($NoWorkers) {
 $apiLocalUrl = "http://127.0.0.1:$Port"
 $frontendLocalUrl = if ($NoFrontendDev) { $apiLocalUrl } else { "http://127.0.0.1:$resolvedFrontendDevPort" }
 $apiLanUrls = @(Get-RoughCutApiLanUrls -ApiPort $Port)
-$frontendLanUrls = if ($NoFrontendDev) { @() } else { @(Get-RoughCutFrontendLanUrls -FrontendPort $resolvedFrontendDevPort) }
+$frontendLanUrls = @(if ($NoFrontendDev) { @() } else { Get-RoughCutFrontendLanUrls -FrontendPort $resolvedFrontendDevPort })
 
 Write-Host ""
 Write-Host "RoughCut started." -ForegroundColor Green

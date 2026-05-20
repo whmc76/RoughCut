@@ -401,9 +401,26 @@ class IntelligentCopyInspectIn(BaseModel):
     folder_path: str
 
 
+class IntelligentCopyPathSuggestIn(BaseModel):
+    query: str = ""
+    limit: int = Field(default=12, ge=1, le=30)
+
+
+class IntelligentCopyPathSuggestionOut(BaseModel):
+    path: str
+    label: str
+    parent: str
+    kind: str = "folder"
+
+
+class IntelligentCopyPathSuggestOut(BaseModel):
+    suggestions: list[IntelligentCopyPathSuggestionOut] = []
+
+
 class IntelligentCopyGenerateIn(BaseModel):
     folder_path: str
     copy_style: str | None = None
+    platforms: list[str] = Field(default_factory=list)
 
 
 class IntelligentPublishIn(BaseModel):
@@ -411,6 +428,18 @@ class IntelligentPublishIn(BaseModel):
     creator_profile_id: str | None = None
     platforms: list[str] = Field(default_factory=list)
     platform_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class AvatarPublicationProfileOut(BaseModel):
+    id: str
+    display_name: str
+    presenter_alias: str | None = None
+    creator_profile: dict[str, Any] = Field(default_factory=dict)
+    created_at: str
+
+
+class AvatarPublicationProfileListOut(BaseModel):
+    profiles: list[AvatarPublicationProfileOut] = Field(default_factory=list)
 
 
 class IntelligentCopyCoverSizeOut(BaseModel):
@@ -443,6 +472,9 @@ class IntelligentCopyPlatformMaterialOut(BaseModel):
     tags_copy: str = ""
     full_copy: str = ""
     cover_path: str | None = None
+    cover_generation: dict[str, Any] | None = None
+    publish_ready: bool = True
+    blocking_reasons: list[str] = Field(default_factory=list)
 
 
 class IntelligentCopyInspectOut(BaseModel):
@@ -462,12 +494,62 @@ class IntelligentCopyResultOut(BaseModel):
     material_dir: str
     markdown_path: str
     json_path: str
+    cover_source_path: str | None = None
     copy_style: str
     inspection: IntelligentCopyInspectOut
     highlights: dict[str, Any] = {}
     content_profile_summary: dict[str, Any] = {}
     platforms: list[IntelligentCopyPlatformMaterialOut] = []
+    publish_ready: bool = False
+    blocking_reasons: list[str] = Field(default_factory=list)
     warnings: list[str] = []
+
+
+class IntelligentCopyImagegenRequestOut(BaseModel):
+    request_path: str
+    status: str
+    backend: str = ""
+    source_image_path: str = ""
+    output_path: str = ""
+    target_size: dict[str, Any] = Field(default_factory=dict)
+    created_at: str = ""
+    completed_at: str | None = None
+    error: str | None = None
+
+
+class IntelligentCopyImagegenRequestListOut(BaseModel):
+    folder_path: str
+    material_dir: str
+    requests: list[IntelligentCopyImagegenRequestOut] = Field(default_factory=list)
+
+
+class IntelligentCopyImagegenCompleteIn(BaseModel):
+    folder_path: str
+    request_path: str
+    result_path: str
+
+
+class IntelligentCopyGenerateTaskOut(BaseModel):
+    id: str
+    folder_path: str
+    copy_style: str | None = None
+    status: str
+    progress: int = 0
+    stage: str = "queued"
+    message: str = ""
+    created_at: str
+    updated_at: str
+    started_at: str | None = None
+    completed_at: str | None = None
+    material_dir: str | None = None
+    error: str | None = None
+    inspection: IntelligentCopyInspectOut | None = None
+    result: IntelligentCopyResultOut | None = None
+    partial_result: IntelligentCopyResultOut | None = None
+
+
+class IntelligentCopyGenerateTaskListOut(BaseModel):
+    tasks: list[IntelligentCopyGenerateTaskOut] = []
 
 
 class ContentProfileMemoryStatsOut(BaseModel):

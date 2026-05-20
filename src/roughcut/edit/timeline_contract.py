@@ -12,6 +12,7 @@ SPEECH_EXPLICIT_CUT_REASONS = {
     "repeated_speech",
     "restart_retake",
     "restart_cue",
+    "rollback_instruction",
     "noise_subtitle",
     "manual_cut",
 }
@@ -33,6 +34,7 @@ PAUSE_CUT_REASONS = {
     "micro_keep_bridge",
     "long_non_dialogue",
     "manual_cut",
+    "rollback_instruction",
 }
 
 SYNTHETIC_ALIGNMENT_SOURCES = {

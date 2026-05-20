@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from roughcut.config import get_settings
 from roughcut.edit.presets import WorkflowPreset, get_workflow_preset, normalize_workflow_template_name, select_workflow_template
 from roughcut.llm_cache import digest_payload
-from roughcut.media.subtitle_text import clean_final_subtitle_text
+from roughcut.media.subtitle_text import clean_final_subtitle_text, normalize_editable_subtitle_text
 from roughcut.providers.factory import get_ocr_provider, get_reasoning_provider, get_search_provider
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import Message, extract_json_text
@@ -63,7 +63,6 @@ from roughcut.review.content_profile_feedback import (
 from roughcut.review.content_profile_resolve import resolve_identity_candidates
 from roughcut.review.content_profile_review_stats import build_content_profile_auto_review_gate
 from roughcut.review.content_profile_scoring import score_identity_candidates
-from roughcut.review.content_profile_field_rules import CONTENT_PROFILE_FIELD_GUIDELINES
 from roughcut.review.domain_glossaries import detect_glossary_domains, select_primary_subject_domain
 from roughcut.review.intelligent_copy_topics import build_intelligent_copy_topic_hints
 from roughcut.review.model_identity import model_numbers_conflict
@@ -1189,6 +1188,12 @@ def _is_exception_review_reason(reason: str) -> bool:
     text = str(reason or "").strip().lower()
     if not text:
         return False
+    hard_failures = (
+        "内容理解调用超时",
+        "content understanding timeout",
+    )
+    if any(token in text for token in hard_failures):
+        return True
     soft_failures = (
         "内容理解推断失败",
         "内容理解暂不可用",
@@ -2933,7 +2938,6 @@ def _sanitize_profile_identity(
     allow_video_theme_inference: bool = False,
 ) -> dict[str, Any]:
     sanitized = dict(profile or {})
-    transcript_source_labels = _profile_transcript_source_labels(sanitized)
     confirmed_fields = _extract_confirmed_profile_fields(sanitized)
     subject_domain = str(sanitized.get("subject_domain") or "").strip()
     transcript_hints = _seed_profile_from_transcript_excerpt(
@@ -3731,7 +3735,6 @@ def _text_conflicts_with_verified_identity(
     if not text or not (brand or model):
         return False
     normalized_text = _normalize_profile_value(text)
-    normalized_brand = _normalize_profile_value(brand)
     for known_brand in set(_MODEL_TO_BRAND.values()):
         normalized_known_brand = _normalize_profile_value(known_brand)
         if (
@@ -5685,6 +5688,7 @@ async def polish_subtitle_items(
     )
     review_memory_text = summarize_subtitle_review_memory_for_polish(review_memory)
     indexed_items = list(subtitle_items)
+    indexed_source_texts = [_subtitle_polish_source_text(item) for item in indexed_items]
 
     for start in range(0, len(subtitle_items), chunk_size):
         chunk = subtitle_items[start:start + chunk_size]
@@ -5700,17 +5704,9 @@ async def polish_subtitle_items(
                         "index": item.item_index,
                         "start_time": item.start_time,
                         "end_time": item.end_time,
-                        "prev_text": (
-                            indexed_items[position - 1].text_final
-                            or indexed_items[position - 1].text_norm
-                            or indexed_items[position - 1].text_raw
-                        ) if position > 0 else "",
-                        "text": item.text_final or item.text_norm or item.text_raw,
-                        "next_text": (
-                            indexed_items[position + 1].text_final
-                            or indexed_items[position + 1].text_norm
-                            or indexed_items[position + 1].text_raw
-                        ) if position + 1 < len(indexed_items) else "",
+                        "prev_text": indexed_source_texts[position - 1] if position > 0 else "",
+                        "text": indexed_source_texts[position],
+                        "next_text": indexed_source_texts[position + 1] if position + 1 < len(indexed_items) else "",
                     }
                     for position, item in enumerate(chunk, start=start)
                 ]
@@ -5751,24 +5747,16 @@ async def polish_subtitle_items(
                     if item.get("text_final")
                 }
                 for item in chunk:
+                    current_position = chunk_positions.get(item.item_index, start)
                     polished = updates.get(item.item_index)
                     if polished:
                         polished = _cleanup_polished_text(polished, preserve_display_numbers=True)
-                        original = item.text_final or item.text_norm or item.text_raw or ""
-                        current_position = chunk_positions.get(item.item_index, start)
+                        original = indexed_source_texts[current_position]
                         if _is_safe_subtitle_polish(
                             original_text=original,
                             polished_text=polished,
-                            prev_text=(
-                                indexed_items[current_position - 1].text_final
-                                or indexed_items[current_position - 1].text_norm
-                                or indexed_items[current_position - 1].text_raw
-                            ) if current_position > 0 else "",
-                            next_text=(
-                                indexed_items[current_position + 1].text_final
-                                or indexed_items[current_position + 1].text_norm
-                                or indexed_items[current_position + 1].text_raw
-                            ) if current_position + 1 < len(indexed_items) else "",
+                            prev_text=indexed_source_texts[current_position - 1] if current_position > 0 else "",
+                            next_text=indexed_source_texts[current_position + 1] if current_position + 1 < len(indexed_items) else "",
                             glossary_terms=glossary_terms,
                             review_memory=review_memory,
                             content_profile=content_profile,
@@ -5777,16 +5765,8 @@ async def polish_subtitle_items(
                                 polished,
                                 glossary_terms=glossary_terms,
                                 review_memory=review_memory,
-                                prev_text=(
-                                    indexed_items[current_position - 1].text_final
-                                    or indexed_items[current_position - 1].text_norm
-                                    or indexed_items[current_position - 1].text_raw
-                                ) if current_position > 0 else "",
-                                next_text=(
-                                    indexed_items[current_position + 1].text_final
-                                    or indexed_items[current_position + 1].text_norm
-                                    or indexed_items[current_position + 1].text_raw
-                                ) if current_position + 1 < len(indexed_items) else "",
+                                prev_text=indexed_source_texts[current_position - 1] if current_position > 0 else "",
+                                next_text=indexed_source_texts[current_position + 1] if current_position + 1 < len(indexed_items) else "",
                                 preserve_display_numbers=True,
                             )
                             item.text_final = polished
@@ -5795,34 +5775,18 @@ async def polish_subtitle_items(
                                 original,
                                 glossary_terms=glossary_terms,
                                 review_memory=review_memory,
-                                prev_text=(
-                                    indexed_items[current_position - 1].text_final
-                                    or indexed_items[current_position - 1].text_norm
-                                    or indexed_items[current_position - 1].text_raw
-                                ) if current_position > 0 else "",
-                                next_text=(
-                                    indexed_items[current_position + 1].text_final
-                                    or indexed_items[current_position + 1].text_norm
-                                    or indexed_items[current_position + 1].text_raw
-                                ) if current_position + 1 < len(indexed_items) else "",
+                                prev_text=indexed_source_texts[current_position - 1] if current_position > 0 else "",
+                                next_text=indexed_source_texts[current_position + 1] if current_position + 1 < len(indexed_items) else "",
                                 preserve_display_numbers=True,
                             )
                         polished_count += 1
                         continue
                     item.text_final = _fallback_polish_text(
-                        item.text_norm or item.text_raw,
+                        indexed_source_texts[chunk_positions.get(item.item_index, start)],
                         glossary_terms=glossary_terms,
                         review_memory=review_memory,
-                        prev_text=(
-                            indexed_items[chunk_positions.get(item.item_index, start) - 1].text_final
-                            or indexed_items[chunk_positions.get(item.item_index, start) - 1].text_norm
-                            or indexed_items[chunk_positions.get(item.item_index, start) - 1].text_raw
-                        ) if chunk_positions.get(item.item_index, start) > 0 else "",
-                        next_text=(
-                            indexed_items[chunk_positions.get(item.item_index, start) + 1].text_final
-                            or indexed_items[chunk_positions.get(item.item_index, start) + 1].text_norm
-                            or indexed_items[chunk_positions.get(item.item_index, start) + 1].text_raw
-                        ) if chunk_positions.get(item.item_index, start) + 1 < len(indexed_items) else "",
+                        prev_text=indexed_source_texts[chunk_positions.get(item.item_index, start) - 1] if chunk_positions.get(item.item_index, start) > 0 else "",
+                        next_text=indexed_source_texts[chunk_positions.get(item.item_index, start) + 1] if chunk_positions.get(item.item_index, start) + 1 < len(indexed_items) else "",
                         preserve_display_numbers=True,
                     )
                     polished_count += 1
@@ -5832,25 +5796,26 @@ async def polish_subtitle_items(
 
         for position, item in enumerate(chunk, start=start):
             item.text_final = _fallback_polish_text(
-                item.text_norm or item.text_raw,
+                indexed_source_texts[position],
                 glossary_terms=glossary_terms,
                 review_memory=review_memory,
-                prev_text=(
-                    indexed_items[position - 1].text_final
-                    or indexed_items[position - 1].text_norm
-                    or indexed_items[position - 1].text_raw
-                ) if position > 0 else "",
-                next_text=(
-                    indexed_items[position + 1].text_final
-                    or indexed_items[position + 1].text_norm
-                    or indexed_items[position + 1].text_raw
-                ) if position + 1 < len(indexed_items) else "",
+                prev_text=indexed_source_texts[position - 1] if position > 0 else "",
+                next_text=indexed_source_texts[position + 1] if position + 1 < len(indexed_items) else "",
                 preserve_display_numbers=True,
             )
             polished_count += 1
 
     _enforce_subtitle_text_only_contract(subtitle_items, text_only_contract)
     return polished_count
+
+
+def _subtitle_polish_source_text(item: Any) -> str:
+    return normalize_editable_subtitle_text(
+        getattr(item, "text_final", None)
+        or getattr(item, "text_norm", None)
+        or getattr(item, "text_raw", None)
+        or ""
+    )
 
 
 def _capture_subtitle_text_only_contract(subtitle_items: Any) -> dict[Any, Any]:

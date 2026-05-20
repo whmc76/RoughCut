@@ -445,6 +445,7 @@ def _build_project_rules_block(*, scope_path: str, workspace_mode: str, workspac
         "- 当前仓库是 RoughCut，核心链路包括 FastAPI API、React/Vite 控制台、Celery worker、Telegram agent 与 ACP bridge。",
         "- 新需求默认优先结构收敛和可维护性，不为旧页面/旧配置保留兼容层，除非需求明确要求兼容。",
         "- 工程改动应保持最小可行实现，优先复用现有模块，并尽量补上直接相关测试。",
+        "- 失败用例只在主逻辑合理、数据来源正确、职责边界清晰后用于验证异常拦截；不要用失败测试固化错误生产路径。",
         "- 日常命令优先从仓库根目录使用 pnpm；Python 依赖和 CLI 仍由 uv 管理。",
         "- 若本次提供了 scope_path，只在该范围及其直接依赖内收敛改动；确有必要再扩大范围。",
     ]

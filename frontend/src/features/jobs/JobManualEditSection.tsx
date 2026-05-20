@@ -116,6 +116,8 @@ type ManualEditUndoSnapshot = {
   subtitleDrafts: Record<number, SubtitleDraft>;
   subtitleReplacementHistory: JobManualSubtitleReplacement[];
   manualSmartCutRestoreRanges: KeepSegment[];
+  manualSmartCutConfirmRanges: KeepSegment[];
+  manualSmartCutDismissRanges: KeepSegment[];
   editorNote: string;
   videoSummary: string;
   videoTransform: JobManualVideoTransform;
@@ -539,7 +541,7 @@ export function subtitleAutoCorrectionSummary(subtitle: JobManualEditSubtitle) {
 }
 
 function subtitleTranscriptSourceText(subtitle: JobManualEditSubtitle) {
-  return String(subtitle.text_final || subtitle.text_norm || subtitle.text_raw || "").trim();
+  return String(subtitle.transcript_text || subtitle.text_final || subtitle.text_norm || subtitle.text_raw || "").trim();
 }
 
 function compactTranscriptText(value: string) {
@@ -2182,6 +2184,8 @@ export function sourceRangeOverlapsCutRanges(start: number, end: number, cutRang
 
 function smartDeleteReasonLabel(reason?: string | null) {
   switch (reason) {
+    case "rollback_instruction":
+      return "口播指令回删";
     case "restart_retake":
       return "重说/返工片段";
     case "duplicate":
@@ -2221,7 +2225,7 @@ function smartCutRuleReason(kind: SmartCutRuleKind, match?: SmartCutRuleMatch | 
     case "pause":
       return "删除超过阈值且不压到有效语音的空白。";
     case "smart_delete":
-      return `删除${smartDeleteReasonLabel(match?.detail || match?.reason)}。`;
+      return `建议剪掉${smartDeleteReasonLabel(match?.detail || match?.reason)}，需逐条确认。`;
     default:
       return "按当前规则进入待剪区间。";
   }
@@ -2705,7 +2709,7 @@ export function buildTranscriptTokens(subtitles: JobManualEditSubtitle[], segmen
   subtitles.forEach((subtitle, subtitlePosition) => {
     const sourceIndex = subtitleSourceIndex(subtitle);
     const tokenKeyScope = transcriptTokenKeyScope(subtitle, subtitlePosition, sourceIndex);
-    const text = subtitleText(subtitle);
+    const text = subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle);
     const chars = Array.from(text);
     const duration = Math.max(0.001, subtitle.end_time - subtitle.start_time);
     const nextSubtitle = subtitles[subtitlePosition + 1];
@@ -3051,7 +3055,7 @@ function isSmartCutBoundary(char: string | undefined) {
 }
 
 function findTextRangesInSubtitle(subtitle: JobManualEditSubtitle, needle: string) {
-  const text = subtitleText(subtitle);
+  const text = subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle);
   if (!text || !needle) return [];
   const ranges: KeepSegment[] = [];
   const chars = Array.from(text);
@@ -3079,7 +3083,7 @@ function findTextRangesInSubtitle(subtitle: JobManualEditSubtitle, needle: strin
 }
 
 function sourceRangeForSubtitleChars(subtitle: JobManualEditSubtitle, startChar: number, endChar: number): TimedSourceRange {
-  const text = subtitleText(subtitle);
+  const text = subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle);
   const chars = Array.from(text);
   const timedTokens = buildBackendAlignedTranscriptTokens(
     subtitle,
@@ -3123,7 +3127,7 @@ function rangeHasReliableTextCutTiming(range: TimedSourceRange, subtitle: JobMan
 }
 
 function findRepeatedSpeechRangesInSubtitle(subtitle: JobManualEditSubtitle) {
-  const text = subtitleText(subtitle);
+  const text = subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle);
   if (!text) return [];
   const ranges: KeepSegment[] = [];
   const repeatedMatches = text.matchAll(/([\u4e00-\u9fff]{1,3})([\s，,、]*)\1/g);
@@ -3173,8 +3177,8 @@ function findRepeatedSpeechRangesAcrossSubtitles(subtitles: JobManualEditSubtitl
   for (let index = 1; index < sorted.length; index += 1) {
     const previous = sorted[index - 1];
     const current = sorted[index];
-    const previousChars = Array.from(subtitleText(previous));
-    const currentChars = Array.from(subtitleText(current));
+    const previousChars = Array.from(subtitleTranscriptSourceText(previous) || subtitleText(previous));
+    const currentChars = Array.from(subtitleTranscriptSourceText(current) || subtitleText(current));
     const maxLength = Math.min(12, previousChars.length, currentChars.length);
     for (let phraseLength = maxLength; phraseLength >= 4; phraseLength -= 1) {
       const phrase = previousChars.slice(previousChars.length - phraseLength).join("");
@@ -3413,7 +3417,7 @@ function subtitleTextForSourceRange(range: KeepSegment, subtitles: JobManualEdit
     const overlapStart = Math.max(range.start, subtitle.start_time);
     const overlapEnd = Math.min(range.end, subtitle.end_time);
     if (overlapEnd <= overlapStart + 0.015) continue;
-    const text = subtitleText(subtitle);
+    const text = subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle);
     const chars = Array.from(text);
     if (!chars.length) continue;
     const duration = Math.max(0.001, subtitle.end_time - subtitle.start_time);
@@ -3572,8 +3576,19 @@ export function autoSmartCutRuleRanges(analysis: SmartCutRuleAnalysis, rules: Sm
     ...(rules.fillerEnabled ? analysis.filler : []),
     ...(rules.repeatedEnabled ? analysis.repeated : []),
     ...(rules.pauseEnabled ? analysis.pause : []),
-    ...(rules.smartDeleteEnabled ? analysis.smartDelete.filter((range) => !range.protected) : []),
   ];
+}
+
+export function smartDeleteSuggestionRanges(
+  analysis: SmartCutRuleAnalysis,
+  rules: SmartCutRules,
+  dismissedRanges: KeepSegment[] = [],
+) {
+  if (!rules.smartDeleteEnabled) return [];
+  return analysis.smartDelete.filter((range) => (
+    !range.protected
+    && !sourceRangeOverlapsCutRanges(range.start, range.end, dismissedRanges)
+  ));
 }
 
 export function smartCutRuleManagedRanges(analysis: SmartCutRuleAnalysis) {
@@ -3643,6 +3658,8 @@ function cloneUndoSnapshot(snapshot: ManualEditUndoSnapshot): ManualEditUndoSnap
     subtitleDrafts: cloneSubtitleDrafts(snapshot.subtitleDrafts),
     subtitleReplacementHistory: snapshot.subtitleReplacementHistory.map((item) => ({ ...item })),
     manualSmartCutRestoreRanges: snapshot.manualSmartCutRestoreRanges.map((range) => ({ ...range })),
+    manualSmartCutConfirmRanges: snapshot.manualSmartCutConfirmRanges.map((range) => ({ ...range })),
+    manualSmartCutDismissRanges: snapshot.manualSmartCutDismissRanges.map((range) => ({ ...range })),
     videoTransform: { ...snapshot.videoTransform },
   };
 }
@@ -3724,6 +3741,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const [smartCutRulesExpanded, setSmartCutRulesExpanded] = useState(false);
   const [smartCutRules, setSmartCutRules] = useState<SmartCutRules>(() => loadSmartCutRules());
   const [manualSmartCutRestoreRanges, setManualSmartCutRestoreRanges] = useState<KeepSegment[]>([]);
+  const [manualSmartCutConfirmRanges, setManualSmartCutConfirmRanges] = useState<KeepSegment[]>([]);
+  const [manualSmartCutDismissRanges, setManualSmartCutDismissRanges] = useState<KeepSegment[]>([]);
   const [videoTransform, setVideoTransform] = useState<JobManualVideoTransform>(() => normalizeVideoTransform(null));
   const [rotationDialogOpen, setRotationDialogOpen] = useState(false);
   const [rotationDraft, setRotationDraft] = useState(0);
@@ -3746,6 +3765,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     subtitleDrafts: cloneSubtitleDrafts(subtitleDrafts),
     subtitleReplacementHistory: subtitleReplacementHistory.map((item) => ({ ...item })),
     manualSmartCutRestoreRanges: manualSmartCutRestoreRanges.map((range) => ({ ...range })),
+    manualSmartCutConfirmRanges: manualSmartCutConfirmRanges.map((range) => ({ ...range })),
+    manualSmartCutDismissRanges: manualSmartCutDismissRanges.map((range) => ({ ...range })),
     editorNote,
     videoSummary,
     videoTransform: { ...normalizeVideoTransform(videoTransform) },
@@ -3773,6 +3794,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setSubtitleDrafts(restored.subtitleDrafts);
     setSubtitleReplacementHistory(restored.subtitleReplacementHistory.map((item) => ({ ...item })));
     setManualSmartCutRestoreRanges(restored.manualSmartCutRestoreRanges.map((range) => ({ ...range })));
+    setManualSmartCutConfirmRanges(restored.manualSmartCutConfirmRanges.map((range) => ({ ...range })));
+    setManualSmartCutDismissRanges(restored.manualSmartCutDismissRanges.map((range) => ({ ...range })));
     setEditorNote(restored.editorNote);
     setVideoSummary(restored.videoSummary);
     setVideoTransform(restored.videoTransform);
@@ -3812,6 +3835,8 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setTranscriptReplacementDraft("");
     setSmartCutRules(loadSmartCutRules());
     setManualSmartCutRestoreRanges([]);
+    setManualSmartCutConfirmRanges([]);
+    setManualSmartCutDismissRanges([]);
     lastAutoSmartCutSignatureRef.current = "";
     setManualTermDraft("");
     setManualReplacementDraft("");
@@ -3839,7 +3864,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
 
   useEffect(() => {
     currentEditSnapshotRef.current = buildUndoSnapshot();
-  }, [currentSubtitleDraftText, editorNote, editingSubtitleIndex, manualSmartCutRestoreRanges, segments, selectedSegmentIndex, selectedSubtitleIndex, subtitleDrafts, subtitleReplacementHistory, videoSummary, videoTransform]);
+  }, [currentSubtitleDraftText, editorNote, editingSubtitleIndex, manualSmartCutConfirmRanges, manualSmartCutDismissRanges, manualSmartCutRestoreRanges, segments, selectedSegmentIndex, selectedSubtitleIndex, subtitleDrafts, subtitleReplacementHistory, videoSummary, videoTransform]);
 
   const effectiveSegments = useMemo(
     () => segments.filter((segment) => segment.end > segment.start + 0.05),
@@ -3958,12 +3983,23 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     [smartCutRules, sourceSilenceRanges, sourceTranscriptSubtitles, session.smart_delete_segments],
   );
   const smartCutRuleRanges = useMemo(
-    () => autoSmartCutRuleRanges(smartCutRuleAnalysis, smartCutRules),
-    [smartCutRuleAnalysis, smartCutRules],
+    () => [
+      ...autoSmartCutRuleRanges(smartCutRuleAnalysis, smartCutRules),
+      ...(smartCutRules.smartDeleteEnabled ? manualSmartCutConfirmRanges.map((range) => ({ ...range, kind: "smart_delete" as const })) : []),
+    ],
+    [manualSmartCutConfirmRanges, smartCutRuleAnalysis, smartCutRules],
   );
   const smartCutManagedRanges = useMemo(
     () => smartCutRuleManagedRanges(smartCutRuleAnalysis),
     [smartCutRuleAnalysis],
+  );
+  const pendingSmartDeleteRanges = useMemo(
+    () => smartDeleteSuggestionRanges(
+      smartCutRuleAnalysis,
+      smartCutRules,
+      [...manualSmartCutDismissRanges, ...manualSmartCutConfirmRanges],
+    ),
+    [manualSmartCutConfirmRanges, manualSmartCutDismissRanges, smartCutRuleAnalysis, smartCutRules],
   );
   const activeSmartCutRuleRanges = useMemo(
     () => (manualSmartCutRestoreRanges.length
@@ -3976,15 +4012,16 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       filler: activeSmartCutRuleRanges.filter((range) => range.kind === "filler").length,
       repeated: activeSmartCutRuleRanges.filter((range) => range.kind === "repeated").length,
       pause: activeSmartCutRuleRanges.filter((range) => range.kind === "pause").length,
-      smartDelete: activeSmartCutRuleRanges.filter((range) => range.kind === "smart_delete").length,
+      smartDelete: pendingSmartDeleteRanges.length,
     }),
-    [activeSmartCutRuleRanges],
+    [activeSmartCutRuleRanges, pendingSmartDeleteRanges.length],
   );
   const smartCutRulePreviews = useMemo(
     () => buildSmartCutRulePreviews(smartCutRuleAnalysis, smartCutRules, sourceTranscriptSubtitles),
     [smartCutRuleAnalysis, smartCutRules, sourceTranscriptSubtitles],
   );
   const activeSmartCutRuleRangeCount = activeSmartCutRuleRanges.length;
+  const pendingSmartDeleteRangeCount = pendingSmartDeleteRanges.length;
 
   const totalOutputDuration = projection.totalDuration;
   const activeSubtitle = activeSubtitleIndex >= 0 ? projection.remapped[activeSubtitleIndex] : null;
@@ -4223,7 +4260,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   useEffect(() => {
     onStateChange?.({
       payload: manualEditorPayload,
-      canApply: session.editable && Boolean(onApply) && hasMaterialEdits && effectiveSegments.length > 0,
+      canApply: session.editable && Boolean(onApply) && hasMaterialEdits && effectiveSegments.length > 0 && pendingSmartDeleteRangeCount === 0,
       hasMaterialEdits,
       hasLocalEdits: hasMaterialEdits || hasVideoSummaryEdits,
       hasVideoSummaryEdits,
@@ -4243,6 +4280,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     onApply,
     onStateChange,
     outputDurationDeltaLabel,
+    pendingSmartDeleteRangeCount,
     saveImpactSummary,
     savePlanLabel,
     session.editable,
@@ -4872,6 +4910,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     lastSelectedSubtitleTextRef.current = "";
     setSubtitleReplaceDialog(null);
     setSubtitleReplacementHistory([]);
+    setManualSmartCutRestoreRanges([]);
+    setManualSmartCutConfirmRanges([]);
+    setManualSmartCutDismissRanges([]);
     setEditorNote("");
     setVideoSummary(session.video_summary || "");
     const nextTransform = normalizeVideoTransform(session.video_transform);
@@ -5046,6 +5087,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     updateSubtitleDraft(selectedSubtitle, { delete: true });
     setEditingSubtitleIndex(null);
     forgetManualSmartCutRestores(sourceRanges);
+    confirmSmartDeleteSuggestionsForRanges(sourceRanges);
   };
 
   const clearTranscriptSelection = () => {
@@ -5108,6 +5150,10 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     return { match: null, kind: null };
   };
 
+  const smartDeleteSuggestionForToken = (token: TranscriptToken) => (
+    smartCutRuleMatchForSourceRange(token.start, token.end, pendingSmartDeleteRanges, [])
+  );
+
   const selectTranscriptToken = (tokenIndex: number) => {
     const token = transcriptTokens[tokenIndex];
     if (!token) return;
@@ -5146,6 +5192,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     ));
     setSelectedSegmentIndex((current) => clamp(current, 0, nextSegments.length - 1));
     forgetManualSmartCutRestores(ranges);
+    confirmSmartDeleteSuggestionsForRanges(ranges);
     clearTranscriptSelection();
   };
 
@@ -5155,6 +5202,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     recordUndoSnapshot();
     pauseEditedTimeline();
     rememberManualSmartCutRestores([range]);
+    unconfirmSmartDeleteSuggestionsForRanges([range]);
     setSegments((current) => addSourceRangesToSegments(current, [range], session.source_duration_sec));
     jumpToSourceTime(range.start);
     clearTranscriptSelection();
@@ -5199,6 +5247,40 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const forgetManualSmartCutRestores = (ranges: KeepSegment[]) => {
     if (!ranges.length) return;
     setManualSmartCutRestoreRanges((current) => removeSourceRangesFromSegments(current, ranges));
+  };
+
+  const confirmSmartDeleteSuggestionsForRanges = (ranges: KeepSegment[]) => {
+    const matched = pendingSmartDeleteRanges
+      .filter((suggestion) => sourceRangeOverlapsCutRanges(suggestion.start, suggestion.end, ranges))
+      .map((suggestion) => ({ start: suggestion.start, end: suggestion.end }));
+    if (!matched.length) return;
+    setManualSmartCutConfirmRanges((current) => addSourceRangesToSegments(current, matched, session.source_duration_sec));
+    setManualSmartCutDismissRanges((current) => removeSourceRangesFromSegments(current, matched));
+  };
+
+  const unconfirmSmartDeleteSuggestionsForRanges = (ranges: KeepSegment[]) => {
+    if (!ranges.length) return;
+    setManualSmartCutConfirmRanges((current) => removeSourceRangesFromSegments(current, ranges));
+  };
+
+  const confirmSmartDeleteSuggestion = (range: SmartCutRuleMatch) => {
+    const nextRange = { start: range.start, end: range.end };
+    const nextSegments = removeSourceRangesFromSegments(effectiveSegments, [nextRange]);
+    if (!nextSegments.length) return;
+    recordUndoSnapshot();
+    pauseEditedTimeline();
+    setSegments(nextSegments);
+    setManualSmartCutConfirmRanges((current) => addSourceRangesToSegments(current, [nextRange], session.source_duration_sec));
+    setManualSmartCutDismissRanges((current) => removeSourceRangesFromSegments(current, [nextRange]));
+    setSelectedSegmentIndex((current) => clamp(current, 0, nextSegments.length - 1));
+    reanchorPreviewToSegments(nextSegments);
+  };
+
+  const dismissSmartDeleteSuggestion = (range: SmartCutRuleMatch) => {
+    const nextRange = { start: range.start, end: range.end };
+    recordUndoSnapshot();
+    setManualSmartCutDismissRanges((current) => addSourceRangesToSegments(current, [nextRange], session.source_duration_sec));
+    setManualSmartCutConfirmRanges((current) => removeSourceRangesFromSegments(current, [nextRange]));
   };
 
   const applySmartCutRuleRanges = (ranges: KeepSegment[], managedRanges: KeepSegment[]) => {
@@ -6404,12 +6486,18 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                     const active = index === activeTranscriptTokenIndex;
                     const cut = transcriptTokenIsCut(token);
                     const { match: smartCutMatch, kind: smartCutKind } = smartCutClassificationForToken(token, cut);
+                    const smartDeleteSuggestion = smartDeleteSuggestionForToken(token);
                     const cutKind = cut ? smartCutKind ?? "manual" : null;
                     const cutReason = cutKind && cutKind !== "manual"
                       ? `${smartCutRuleLabel(cutKind)}：${smartCutRuleReason(cutKind, smartCutMatch)}`
                       : cut ? manualCutReason() : null;
+                    const suggestionReason = smartDeleteSuggestion
+                      ? `${smartCutRuleLabel("smart_delete")}建议：${smartCutRuleReason("smart_delete", smartDeleteSuggestion)}`
+                      : null;
                     const tokenTitle = cutReason
-                      ? `${cutReason} ${formatSeconds(token.start)} - ${formatSeconds(token.end)}`
+                      ? `${cutReason}${suggestionReason ? `；${suggestionReason}` : ""} ${formatSeconds(token.start)} - ${formatSeconds(token.end)}`
+                      : suggestionReason
+                        ? `${suggestionReason} ${formatSeconds(token.start)} - ${formatSeconds(token.end)}`
                       : `${formatSeconds(token.start)} - ${formatSeconds(token.end)}`;
                     const breakNode = token.breakAfter === "paragraph"
                       ? (
@@ -6432,11 +6520,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                               transcriptTokenRefs.current.delete(index);
                             }
                           }}
-                            className={classNames("manual-editor-transcript-pause", cut && "cut", cutKind && `cut-${cutKind}`, active && "active", selected && "selected")}
+                            className={classNames("manual-editor-transcript-pause", cut && "cut", cutKind && `cut-${cutKind}`, smartDeleteSuggestion && "suggested-smart_delete", active && "active", selected && "selected")}
                             data-transcript-token-index={index}
                             onClick={() => selectTranscriptToken(index)}
-                            title={cutReason ? `停顿 · ${tokenTitle}` : `停顿 ${tokenTitle}`}
-                            aria-label={cutReason ? `停顿，${cutReason}` : `停顿 ${tokenTitle}`}
+                            title={cutReason || suggestionReason ? `停顿 · ${tokenTitle}` : `停顿 ${tokenTitle}`}
+                            aria-label={cutReason ? `停顿，${cutReason}` : suggestionReason ? `停顿，${suggestionReason}` : `停顿 ${tokenTitle}`}
                           >
                             [{(token.pauseDuration ?? Math.max(0, token.end - token.start)).toFixed(1)}s]
                           </button>
@@ -6463,6 +6551,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                               token.inferredPunctuation && "inferred",
                               cut && "cut",
                               cutKind && `cut-${cutKind}`,
+                              smartDeleteSuggestion && "suggested-smart_delete",
                               active && "active",
                               selected && "selected",
                             )}
@@ -6486,7 +6575,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                               transcriptTokenRefs.current.delete(index);
                             }
                           }}
-                          className={classNames("manual-editor-transcript-token", cut && "cut", cutKind && `cut-${cutKind}`, active && "active", selected && "selected")}
+                          className={classNames("manual-editor-transcript-token", cut && "cut", cutKind && `cut-${cutKind}`, smartDeleteSuggestion && "suggested-smart_delete", active && "active", selected && "selected")}
                           data-transcript-token-index={index}
                           onClick={() => selectTranscriptToken(index)}
                           title={tokenTitle}
@@ -6573,6 +6662,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                     <span>{smartCutRulesExpanded ? "收起" : "展开"}</span>
                   </button>
                   <span className="status-pill pending">规则命中 待剪 {activeSmartCutRuleRangeCount}</span>
+                  {pendingSmartDeleteRangeCount ? <span className="status-pill running">智能待确认 {pendingSmartDeleteRangeCount}</span> : null}
                 </div>
                 {smartCutRulesExpanded ? (
                   <>
@@ -6656,7 +6746,32 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                         </article>
                       ))}
                     </div>
-                    <div className="manual-editor-rule-memory">全文剪辑中的划线内容会进入待剪区间；划线颜色对应规则类型。悬停可看具体原因和时间。规则设置已全局记忆。</div>
+                    {pendingSmartDeleteRanges.length ? (
+                      <div className="manual-editor-smart-suggestions" aria-label="智能剪辑建议">
+                        <div className="manual-editor-smart-suggestions-head">
+                          <strong>智能废片建议</strong>
+                          <span>{pendingSmartDeleteRanges.length} 条需确认</span>
+                        </div>
+                        {pendingSmartDeleteRanges.map((range) => (
+                          <article key={`${range.start}-${range.end}-${range.reason || ""}`} className="manual-editor-smart-suggestion">
+                            <button
+                              type="button"
+                              className="manual-editor-smart-suggestion-main"
+                              onClick={() => jumpToSourceTime(range.start)}
+                              title={`定位 ${formatSeconds(range.start)} - ${formatSeconds(range.end)}`}
+                            >
+                              <strong>{formatSeconds(range.start)} - {formatSeconds(range.end)}</strong>
+                              <span>{textSnippet(range.sourceText || range.detail || range.reason || smartDeleteReasonLabel(range.reason), 42)}</span>
+                            </button>
+                            <div className="manual-editor-smart-suggestion-actions">
+                              <button type="button" className="button small secondary" disabled={!session.editable} onClick={() => dismissSmartDeleteSuggestion(range)}>撤销</button>
+                              <button type="button" className="button small danger" disabled={!session.editable} onClick={() => confirmSmartDeleteSuggestion(range)}>确认剪掉</button>
+                            </div>
+                          </article>
+                        ))}
+                      </div>
+                    ) : null}
+                    <div className="manual-editor-rule-memory">划线内容会进入待剪区间；智能废片只作为点状建议标记，必须逐条确认或撤销后才允许进入最终剪辑决策。规则设置已全局记忆。</div>
                   </>
                 ) : null}
               </div>

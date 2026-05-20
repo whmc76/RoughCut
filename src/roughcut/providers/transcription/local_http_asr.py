@@ -35,13 +35,18 @@ class LocalHTTPASRProvider(TranscriptionProvider):
     _DECODE_LOOP_MIN_TEXT_UNITS = 12
     _DECODE_LOOP_MIN_REPEATS = 4
 
-    def __init__(self, *, model_name: str = "qwen3-asr-1.7b-forced-aligner") -> None:
+    def __init__(self, *, model_name: str = "faster-whisper-large-v3-beam5-nohot") -> None:
         settings = get_settings()
         self._base_url = settings.local_asr_api_base_url.rstrip("/")
         self._transcribe_path = self._normalize_path(settings.local_asr_transcribe_path or "/transcribe")
         configured_model = str(settings.local_asr_model_name or "").strip()
         self._model_name = configured_model or model_name
         self._hotwords_field = str(settings.local_asr_hotwords_field or "hotwords").strip() or "hotwords"
+        self._hotwords_enabled = bool(getattr(settings, "local_asr_hotwords_enabled", False))
+        self._beam_size = max(1, int(getattr(settings, "local_asr_beam_size", 5) or 5))
+        self._best_of = max(1, int(getattr(settings, "local_asr_best_of", 5) or 5))
+        self._condition_on_previous_text = bool(getattr(settings, "local_asr_condition_on_previous_text", False))
+        self._vad_filter = bool(getattr(settings, "local_asr_vad_filter", True))
 
     async def transcribe(
         self,
@@ -53,9 +58,9 @@ class LocalHTTPASRProvider(TranscriptionProvider):
     ) -> TranscriptResult:
         settings = get_settings()
         context = self._resolve_hotword_context(prompt)
-        max_new_tokens = int(getattr(settings, "local_asr_max_new_tokens", 4096) or 4096)
         chunk_config = resolve_audio_chunk_config(settings)
         probed_duration = probe_audio_duration(audio_path)
+        max_new_tokens = self._resolve_max_new_tokens(settings, audio_duration=probed_duration)
         if should_chunk_audio(duration=probed_duration, config=chunk_config):
             return await self._transcribe_long_audio_in_chunks(
                 audio_path,
@@ -190,19 +195,21 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                         )
                     )
 
-        segments = self._sanitize_decode_loop_segments(
-            segments,
-            repeated_segment_strategy="drop",
-            repeated_segment_min_repeats=2,
-        )
+        if self._decode_loop_sanitizer_enabled():
+            segments = self._sanitize_decode_loop_segments(
+                segments,
+                repeated_segment_strategy="drop",
+                repeated_segment_min_repeats=2,
+            )
         raw_segments = list(segments)
         repair_duration = max((float(segment.end) for segment in segments), default=total_duration)
         repaired_segments = self._repair_segments(segments, duration=repair_duration)
-        repaired_segments = self._sanitize_decode_loop_segments(
-            repaired_segments,
-            repeated_segment_strategy="drop",
-            repeated_segment_min_repeats=2,
-        )
+        if self._decode_loop_sanitizer_enabled():
+            repaired_segments = self._sanitize_decode_loop_segments(
+                repaired_segments,
+                repeated_segment_strategy="drop",
+                repeated_segment_min_repeats=2,
+            )
         return TranscriptResult(
             segments=repaired_segments,
             language=language,
@@ -223,6 +230,8 @@ class LocalHTTPASRProvider(TranscriptionProvider):
         )
 
     def _resolve_hotword_context(self, prompt: str | None) -> str | None:
+        if not self._hotwords_enabled:
+            return None
         text = str(prompt or "").strip()
         if not text:
             return None
@@ -230,6 +239,17 @@ class LocalHTTPASRProvider(TranscriptionProvider):
         if hotwords:
             return ", ".join(hotwords[:16])
         return text[:160]
+
+    def _resolve_max_new_tokens(self, settings: object, *, audio_duration: float) -> int:
+        configured = int(getattr(settings, "local_asr_max_new_tokens", 256) or 256)
+        configured = max(32, configured)
+        if "qwen3-asr" not in str(self._model_name or "").strip().lower():
+            return configured
+        del audio_duration
+        # qwen-asr's transformers + forced-aligner examples use 256. The larger
+        # vLLM-oriented 2048 budget lets short chunk requests drift into repeated
+        # CJK filler/function characters before EOS.
+        return min(configured, 256)
 
     async def _post_chunk_transcribe_request(
         self,
@@ -316,6 +336,10 @@ class LocalHTTPASRProvider(TranscriptionProvider):
             data = {
                 self._hotwords_field: context or "",
                 "max_new_tokens": str(max_new_tokens),
+                "beam_size": str(self._beam_size),
+                "best_of": str(self._best_of),
+                "condition_on_previous_text": str(self._condition_on_previous_text).lower(),
+                "vad_filter": str(self._vad_filter).lower(),
             }
             async with hold_managed_gpu_services_async(
                 required_urls=[self._base_url],
@@ -356,10 +380,12 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                     )
                 ]
 
-        segments = self._sanitize_decode_loop_segments(segments)
+        if self._decode_loop_sanitizer_enabled():
+            segments = self._sanitize_decode_loop_segments(segments)
         raw_segments_copy = list(segments)
         segments = self._repair_segments(segments, duration=duration)
-        segments = self._sanitize_decode_loop_segments(segments)
+        if self._decode_loop_sanitizer_enabled():
+            segments = self._sanitize_decode_loop_segments(segments)
 
         if progress_callback is not None:
             total = duration if duration > 0 else (segments[-1].end if segments else 0.0)
@@ -784,6 +810,9 @@ class LocalHTTPASRProvider(TranscriptionProvider):
             logprob=segment.logprob,
             alignment=segment.alignment,
         )
+
+    def _decode_loop_sanitizer_enabled(self) -> bool:
+        return "qwen3-asr" in str(self._model_name or "").strip().lower()
 
     @staticmethod
     def _filtering_payload(raw_payload: dict[str, Any]) -> dict[str, Any]:

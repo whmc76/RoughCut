@@ -223,6 +223,34 @@ _RESTART_PREFIX_TERMS = (
     "再讲一遍",
     "再说一遍",
 )
+_ROLLBACK_INSTRUCTION_TERMS = (
+    "把刚才这段剪掉",
+    "刚才这段剪掉",
+    "刚才那段剪掉",
+    "把前面这段剪掉",
+    "前面这段剪掉",
+    "刚才这段删掉",
+    "前面这段删掉",
+    "刚才这段不要",
+    "前面这段不要",
+    "刚才不要",
+    "前面不要",
+    "刚才不算",
+    "前面不算",
+    "这段不算",
+    "这段剪掉",
+    "这段删掉",
+    "这条不要",
+    "这一条不要",
+    "这遍不要",
+    "这一遍不要",
+)
+_ROLLBACK_REFERENCE_TERMS = ("刚才", "刚刚", "前面", "之前", "这段", "那段", "上一段", "这条", "这一条", "这遍", "这一遍")
+_ROLLBACK_DELETE_TERMS = ("剪掉", "删掉", "不要", "不算", "作废")
+_ROLLBACK_ASR_VARIANT_RE = re.compile(r"(?:本来)?就是(?:减|剪)(?:6|六)(?:啊|呀|吧|所以|$)", re.UNICODE)
+_ROLLBACK_LOOKBACK_MAX_SEC = 24.0
+_ROLLBACK_LOOKBACK_MAX_GAP_SEC = 3.2
+_ROLLBACK_MIN_CUT_SEC = 1.5
 _EMPHASIS_REPEAT_CUE_RE = re.compile(r"(?:说|讲|重复)(?:一|两|二|三|3|好多)遍")
 _COUNTING_REPEAT_UNIT_RE = re.compile(r"^(?:第[\u4e00-\u9fff\d]{1,3}|[\u4e00-\u9fff\d]{1,3}个)$")
 _TERMINAL_PUNCTUATION_CHARS = "。！？!?…~"
@@ -504,6 +532,7 @@ def build_edit_decision(
                 *_collect_restart_cue_cuts(enriched_subtitles, content_profile=content_profile),
             ]
         ))
+        candidates.extend(_collect_rollback_instruction_cuts(enriched_subtitles, content_profile=content_profile))
 
     merged_cuts = _merge_cut_intervals(
         [(candidate.start, candidate.end, candidate.reason) for candidate in candidates]
@@ -550,6 +579,7 @@ def build_edit_decision(
                     "scene_boundaries",
                     "section_role",
                     "retake_cues",
+                    "rollback_instructions",
                 ],
                 "principle": "cut only when removal evidence beats speech, visual showcase, and semantic continuity protection",
             },
@@ -2763,6 +2793,100 @@ def _collect_restart_cue_cuts(
     return cuts
 
 
+def _collect_rollback_instruction_cuts(
+    subtitle_items: list[dict],
+    *,
+    content_profile: dict | None,
+) -> list[CutCandidate]:
+    ordered = sorted(
+        subtitle_items,
+        key=lambda item: (
+            float(item.get("start_time", 0.0) or 0.0),
+            float(item.get("end_time", 0.0) or 0.0),
+        ),
+    )
+    candidates: list[CutCandidate] = []
+    for index, item in enumerate(ordered):
+        cue_text = _semantic_subtitle_text(item)
+        if not _is_rollback_instruction_text(cue_text):
+            continue
+        cue_start = float(item.get("start_time", 0.0) or 0.0)
+        if cue_start <= 0.0:
+            continue
+        window = _rollback_instruction_lookback_window(ordered, cue_index=index, cue_start=cue_start)
+        if not window:
+            continue
+        start = float(window[0].get("start_time", 0.0) or 0.0)
+        end = cue_start
+        if end - start < _ROLLBACK_MIN_CUT_SEC:
+            continue
+        previous_text = _semantic_subtitle_text(window[-1])
+        next_item = ordered[index + 1] if index + 1 < len(ordered) else None
+        signals = ["hard_rule", "spoken_editorial_rollback"]
+        if _is_rollback_asr_variant_text(cue_text):
+            signals.append("asr_variant:减6")
+        candidates.append(
+            CutCandidate(
+                start=max(0.0, start),
+                end=max(start, end),
+                reason="rollback_instruction",
+                score=1.0,
+                hard=True,
+                signals=signals,
+                evidence={
+                    "instruction_text": cue_text[:64],
+                    "previous_text": previous_text[:64],
+                    "next_text": _semantic_subtitle_text(next_item)[:64] if next_item is not None else "",
+                    "subtitle_count": len(window),
+                    "duration_sec": round(max(0.0, end - start), 3),
+                    "tags": ["rollback_instruction", "spoken_edit_note"],
+                },
+            )
+        )
+    return candidates
+
+
+def _rollback_instruction_lookback_window(
+    ordered: list[dict],
+    *,
+    cue_index: int,
+    cue_start: float,
+) -> list[dict]:
+    window: list[dict] = []
+    boundary = max(0.0, cue_start - _ROLLBACK_LOOKBACK_MAX_SEC)
+    next_start = cue_start
+    for item in reversed(ordered[:cue_index]):
+        item_start = float(item.get("start_time", 0.0) or 0.0)
+        item_end = float(item.get("end_time", item_start) or item_start)
+        if item_end < boundary:
+            break
+        if next_start - item_end > _ROLLBACK_LOOKBACK_MAX_GAP_SEC and window:
+            break
+        window.append(item)
+        next_start = item_start
+    window.reverse()
+    return window
+
+
+def _is_rollback_instruction_text(text: str) -> bool:
+    compact = _compact_subtitle_text(text)
+    if not compact:
+        return False
+    if any(term in compact for term in _ROLLBACK_INSTRUCTION_TERMS):
+        return True
+    if (
+        any(reference in compact for reference in _ROLLBACK_REFERENCE_TERMS)
+        and any(delete_term in compact for delete_term in _ROLLBACK_DELETE_TERMS)
+    ):
+        return True
+    return _is_rollback_asr_variant_text(compact)
+
+
+def _is_rollback_asr_variant_text(text: str) -> bool:
+    compact = _compact_subtitle_text(text)
+    return bool(_ROLLBACK_ASR_VARIANT_RE.search(compact))
+
+
 def _looks_like_retake_match(fragment_compact: str, next_compact: str) -> bool:
     if not fragment_compact or not next_compact:
         return False
@@ -2965,6 +3089,7 @@ def _subject_family(subject_type: str) -> str:
 
 def _cut_reason_priority(reason: str) -> int:
     priorities = {
+        "rollback_instruction": 5,
         "restart_retake": 5,
         "restart_cue": 4,
         "noise_subtitle": 4,

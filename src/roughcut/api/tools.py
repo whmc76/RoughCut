@@ -776,7 +776,7 @@ async def _execute_moss_tts_local_run(
                 run_id,
                 "request",
                 detail=(
-                    f"Submitting MOSS-TTS Local request"
+                    "Submitting MOSS-TTS Local request"
                     if len(text_segments) == 1
                     else f"Submitting MOSS-TTS Local request 1/{len(text_segments)}"
                 ),
@@ -2039,7 +2039,7 @@ def _moss_tts_output_config_summary(
     sampling_params: dict[str, Any],
     segment_count: int,
 ) -> str:
-    parts = [f"provider=moss_tts_local", f"mode={mode}"]
+    parts = ["provider=moss_tts_local", f"mode={mode}"]
     if reference_path is not None:
         parts.append(f"reference={reference_path.name}")
     if prompt_text:

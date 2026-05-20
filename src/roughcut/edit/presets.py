@@ -188,7 +188,6 @@ def select_workflow_template(
         return PRESETS[normalized_override]
 
     normalized_kind = str(content_kind or "").strip().lower()
-    normalized_domain = str(subject_domain or "").strip().lower()
     haystack = " ".join([subject_model, subject_type, transcript_hint]).lower()
 
     if normalized_kind in CONTENT_KIND_TO_TEMPLATE:

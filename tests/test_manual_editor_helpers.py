@@ -29,10 +29,12 @@ from roughcut.api.jobs import (
     _manual_editor_stored_projection_matches_subtitles,
     _manual_editor_timeline_matches_current_subtitles,
     _manual_editor_timeline_subtitle_fingerprint,
+    _manual_editor_word_payload,
     _manual_editor_projection_data_uses_canonical,
     _manual_editor_projection_entries_use_canonical,
     _manual_editor_apply_conflict_detail,
     _manual_editor_apply_source_text_corrections,
+    _manual_editor_apply_transcript_hotword_corrections,
     _manual_editor_asset_path,
     _manual_editor_canonical_segment_source_rows,
     _manual_editor_change_plan,
@@ -41,6 +43,8 @@ from roughcut.api.jobs import (
     _manual_editor_normalize_word_payloads_for_text,
     _manual_editor_projected_subtitles_have_duplicate_source_overlap,
     _manual_editor_projection_should_use_source_fallback,
+    _manual_editor_profile_has_vertical_glossary_evidence,
+    _manual_editor_reveal_source_asr_words,
     _manual_editor_split_long_subtitle_rows,
     _manual_projection_has_source_text_mismatch,
     _manual_editor_smart_delete_segments,
@@ -1243,6 +1247,162 @@ def test_manual_editor_canonical_source_rows_keep_text_authority_over_words() ->
 
     assert rows[0]["text_final"] == "太难了，难上加难"
     assert "".join(word["word"] for word in rows[0]["words"]) == "太了难"
+
+
+def test_manual_editor_canonical_source_rows_reveal_raw_asr_fillers() -> None:
+    rows = _manual_editor_canonical_segment_source_rows(
+        {
+            "segments": [
+                {
+                    "index": 7,
+                    "start": 17.0,
+                    "end": 20.8,
+                    "text_raw": "NOC的这个发售啊太难了",
+                    "text_canonical": "NOC的这个发售太难了",
+                    "words": [
+                        {"word": char, "start": 17.0 + index * 0.1, "end": 17.1 + index * 0.1}
+                        for index, char in enumerate("NOC的这个发售太难了")
+                    ],
+                }
+            ]
+        },
+        context_text="NOC MT34",
+    )
+
+    assert rows[0]["text_final"] == "NOC的这个发售啊太难了"
+    assert rows[0]["text_raw"] == "NOC的这个发售啊太难了"
+
+
+def test_manual_editor_source_asr_words_reveal_fillers_hidden_by_canonical_text() -> None:
+    rows = _manual_editor_reveal_source_asr_words(
+        [
+            {
+                "index": 0,
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text_raw": "今天主题",
+                "text_final": "今天主题",
+                "projection_source": "canonical_transcript",
+            }
+        ],
+        [
+            {"word": "啊", "start": 1.0, "end": 1.1, "source": "provider"},
+            {"word": "呃", "start": 1.1, "end": 1.2, "source": "provider"},
+            {"word": "今", "start": 1.2, "end": 1.3, "source": "provider"},
+            {"word": "天", "start": 1.3, "end": 1.4, "source": "provider"},
+            {"word": "主", "start": 1.4, "end": 1.5, "source": "provider"},
+            {"word": "题", "start": 1.5, "end": 1.6, "source": "provider"},
+            {"word": "吧", "start": 1.6, "end": 1.7, "source": "provider"},
+        ],
+    )
+
+    assert rows[0]["text_final"] == "今天主题"
+    assert rows[0]["transcript_text"] == "啊呃今天主题吧"
+    assert "".join(word["word"] for word in rows[0]["words"]) == "啊呃今天主题吧"
+
+
+def test_manual_editor_source_asr_words_apply_hotword_corrections_without_hiding_fillers() -> None:
+    rows = _manual_editor_reveal_source_asr_words(
+        [
+            {
+                "index": 0,
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text_final": "EDC小玩具这个也",
+                "projection_source": "canonical_transcript",
+            }
+        ],
+        [
+            {"word": "一", "start": 1.0, "end": 1.1},
+            {"word": "滴", "start": 1.1, "end": 1.2},
+            {"word": "西", "start": 1.2, "end": 1.3},
+            {"word": "啊", "start": 1.3, "end": 1.4},
+            {"word": "小", "start": 1.4, "end": 1.5},
+            {"word": "玩", "start": 1.5, "end": 1.6},
+            {"word": "具", "start": 1.6, "end": 1.7},
+        ],
+        hotword_replacements=[("一滴西", "EDC")],
+    )
+
+    assert rows[0]["text_final"] == "EDC小玩具这个也"
+    assert rows[0]["transcript_text"] == "EDC啊小玩具"
+    assert "".join(word["word"] for word in rows[0]["words"]) == "一滴西啊小玩具"
+
+
+def test_manual_editor_transcript_hotword_corrections_preserve_spoken_repeats() -> None:
+    corrected = _manual_editor_apply_transcript_hotword_corrections(
+        "太太难了一滴西啊",
+        hotword_replacements=[("一滴西", "EDC")],
+    )
+
+    assert corrected == "太太难了EDC啊"
+
+
+def test_manual_editor_vertical_glossary_requires_content_profile_evidence() -> None:
+    assert not _manual_editor_profile_has_vertical_glossary_evidence({})
+    assert not _manual_editor_profile_has_vertical_glossary_evidence({"subject_domain": "edc"})
+    assert _manual_editor_profile_has_vertical_glossary_evidence(
+        {"subject_domain": "edc", "subject_brand": "NOC", "subject_model": "MT34"}
+    )
+
+
+def test_manual_editor_raw_word_payload_can_use_raw_asr_text_for_source_display() -> None:
+    payload = _manual_editor_word_payload(
+        {
+            "word": "这",
+            "raw_text": "啊",
+            "start": 1.2,
+            "end": 1.3,
+            "provider": "local_http_asr",
+        },
+        prefer_raw_text=True,
+    )
+
+    assert payload is not None
+    assert payload.word == "啊"
+
+
+def test_manual_editor_subtitle_payload_exposes_transcript_text_without_replacing_final_text() -> None:
+    payload = _manual_editor_subtitle_payload(
+        {
+            "index": 0,
+            "start_time": 1.0,
+            "end_time": 2.0,
+            "text_final": "一个小玩具这个也",
+            "transcript_text": "一个小玩具啊这个也",
+            "words": [
+                {"word": char, "start": 1.0 + index * 0.1, "end": 1.1 + index * 0.1}
+                for index, char in enumerate("一个小玩具啊这个也")
+            ],
+        },
+        index=0,
+    )
+
+    assert payload.text_final == "一个小玩具这个也"
+    assert payload.transcript_text == "一个小玩具啊这个也"
+    assert "".join(word.word for word in payload.words) == "一个小玩具啊这个也"
+
+
+def test_manual_editor_source_asr_words_do_not_replace_mismatched_canonical_text() -> None:
+    rows = _manual_editor_reveal_source_asr_words(
+        [
+            {
+                "index": 0,
+                "start_time": 17.0,
+                "end_time": 20.8,
+                "text_final": "太难了，难上加难",
+                "projection_source": "canonical_transcript",
+            }
+        ],
+        [
+            {"word": "太", "start": 17.0, "end": 17.1},
+            {"word": "了", "start": 17.1, "end": 17.2},
+            {"word": "难", "start": 17.2, "end": 17.3},
+        ],
+    )
+
+    assert rows[0]["text_final"] == "太难了，难上加难"
+    assert rows[0]["transcript_text"] == "太了难"
 
 
 def test_manual_editor_canonical_source_does_not_add_global_orphan_word_rows() -> None:

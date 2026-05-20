@@ -173,6 +173,7 @@ export type JobManualEditSubtitle = {
   text_raw?: string | null;
   text_norm?: string | null;
   text_final?: string | null;
+  transcript_text?: string | null;
   words?: JobManualEditWord[];
   alignment_tokens?: JobManualEditAlignmentToken[];
   alignment_diagnostics?: JobManualEditAlignmentDiagnostics | null;
@@ -647,6 +648,17 @@ export type IntelligentCopyInspect = {
   warnings: string[];
 };
 
+export type IntelligentCopyPathSuggestion = {
+  path: string;
+  label: string;
+  parent: string;
+  kind: "folder";
+};
+
+export type IntelligentCopyPathSuggestResponse = {
+  suggestions: IntelligentCopyPathSuggestion[];
+};
+
 export type IntelligentCopyPlatformMaterial = {
   key: string;
   label: string;
@@ -673,6 +685,9 @@ export type IntelligentCopyPlatformMaterial = {
   tags_copy: string;
   full_copy: string;
   cover_path?: string | null;
+  cover_generation?: Record<string, unknown> | null;
+  publish_ready?: boolean;
+  blocking_reasons?: string[];
 };
 
 export type IntelligentCopyResult = {
@@ -680,12 +695,56 @@ export type IntelligentCopyResult = {
   material_dir: string;
   markdown_path: string;
   json_path: string;
+  cover_source_path?: string | null;
   copy_style: string;
   inspection: IntelligentCopyInspect;
   highlights: Record<string, string>;
   content_profile_summary: Record<string, unknown>;
   platforms: IntelligentCopyPlatformMaterial[];
+  publish_ready?: boolean;
+  blocking_reasons?: string[];
   warnings: string[];
+};
+
+export type IntelligentCopyGenerateTask = {
+  id: string;
+  folder_path: string;
+  copy_style?: string | null;
+  status: "queued" | "running" | "completed" | "failed" | string;
+  progress: number;
+  stage: string;
+  message: string;
+  created_at: string;
+  updated_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  material_dir?: string | null;
+  error?: string | null;
+  inspection?: IntelligentCopyInspect | null;
+  result?: IntelligentCopyResult | null;
+  partial_result?: IntelligentCopyResult | null;
+};
+
+export type IntelligentCopyGenerateTaskList = {
+  tasks: IntelligentCopyGenerateTask[];
+};
+
+export type IntelligentCopyImagegenRequest = {
+  request_path: string;
+  status: string;
+  backend: string;
+  source_image_path: string;
+  output_path: string;
+  target_size: Record<string, unknown>;
+  created_at: string;
+  completed_at?: string | null;
+  error?: string | null;
+};
+
+export type IntelligentCopyImagegenRequestList = {
+  folder_path: string;
+  material_dir: string;
+  requests: IntelligentCopyImagegenRequest[];
 };
 
 export type AvatarMaterialRule = {
@@ -828,6 +887,7 @@ export type PublicationPlatformPublishOptions = {
 
 export type PublicationAttempt = {
   id: string;
+  content_id?: string | null;
   job_id: string;
   creator_profile_id: string;
   creator_profile_name: string;
@@ -838,12 +898,40 @@ export type PublicationAttempt = {
   adapter: string;
   status: string;
   run_status?: string | null;
+  attempt_number?: number | null;
+  retry_count?: number | null;
   operator_summary?: string | null;
   payload_path?: string | null;
+  external_receipt_id?: string | null;
+  external_post_id?: string | null;
+  external_url?: string | null;
   public_url?: string | null;
   scheduled_at?: string | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  request_payload?: Record<string, unknown>;
+  response_payload?: Record<string, unknown> | null;
+  runs?: PublicationAttemptRun[];
   created_at: string;
   updated_at: string;
+};
+
+export type PublicationAttemptRun = {
+  id: string;
+  attempt_id: string;
+  status: string;
+  phase?: string | null;
+  provider_task_id?: string | null;
+  provider_execution_id?: string | null;
+  provider_status?: string | null;
+  result?: Record<string, unknown> | null;
+  error_message?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+};
+
+export type PublicationAttemptList = {
+  attempts: PublicationAttempt[];
 };
 
 export type PublicationPlan = {
@@ -903,6 +991,18 @@ export type AvatarMaterialLibrary = {
   summary: string;
   sections: AvatarMaterialSection[];
   profiles: AvatarMaterialProfile[];
+};
+
+export type AvatarPublicationProfile = {
+  id: string;
+  display_name: string;
+  presenter_alias?: string | null;
+  creator_profile?: AvatarCreatorProfile;
+  created_at: string;
+};
+
+export type AvatarPublicationProfileList = {
+  profiles: AvatarPublicationProfile[];
 };
 
 export type IdentitySupportSourceKey =

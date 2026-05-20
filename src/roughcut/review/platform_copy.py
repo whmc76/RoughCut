@@ -15,6 +15,9 @@ from roughcut.llm_cache import digest_payload
 from roughcut.providers.factory import get_reasoning_provider, get_search_provider
 from roughcut.providers.reasoning.base import Message
 from roughcut.review.content_profile_memory import merge_content_profile_creative_preferences
+from roughcut.review.platform_body_quality import assess_platform_body
+from roughcut.review.platform_tag_quality import assess_platform_tags
+from roughcut.review.platform_title_quality import assess_platform_titles
 from roughcut.usage import track_usage_operation
 
 _PLATFORM_FACT_SHEET_CACHE_VERSION = "2026-04-03.fact-sheet.v2"
@@ -345,7 +348,7 @@ async def build_packaging_fact_sheet(
         model=str(profile.get("subject_model") or ""),
     )
     try:
-        with llm_task_route("copy", search_enabled=False):
+        with llm_task_route("copy_verify", search_enabled=False):
             provider = get_reasoning_provider()
             subject_identity = _packaging_subject_identity(profile)
             resolved_feedback = _resolved_review_feedback_payload(profile)
@@ -470,40 +473,241 @@ async def generate_platform_packaging(
         "}\n\n"
         f"视频摘要上下文：{json.dumps(prompt_brief, ensure_ascii=False)}"
     )
-    try:
-        with llm_task_route("copy", search_enabled=False):
-            provider = get_reasoning_provider()
-            with track_usage_operation("platform_package.generate_packaging"):
-                response = await asyncio.wait_for(
-                    provider.complete(
-                        [
-                            Message(
-                                role="system",
-                                content=(
-                                    "你是严谨的中文多平台视频包装策划。"
-                                    "优先输出真实玩家口吻、平台化表达、自然互动问题和合规标签。"
-                                ),
-                            ),
-                            Message(role="user", content=prompt),
-                        ],
-                        temperature=0.35,
-                        max_tokens=3200,
-                        json_mode=True,
-                    ),
-                    timeout=90,
-                )
-        raw_response = response.as_json()
-    except Exception:
-        raw_response = {}
-    packaging = normalize_platform_packaging(
+    raw_response, repair_trace = await _generate_platform_packaging_with_repair(
+        prompt,
+        content_profile=content_profile,
+        fact_sheet=fact_sheet,
+    )
+    packaging = _normalize_generated_platform_packaging_strict(
         raw_response,
         content_profile=content_profile,
-        copy_style=copy_style,
-        fact_sheet=fact_sheet,
-        author_profile=author_profile,
     )
+    _assert_platform_packaging_publishable(packaging, content_profile=content_profile, fact_sheet=fact_sheet)
     packaging["fact_sheet"] = fact_sheet
+    packaging["generation_repair_trace"] = repair_trace
     return packaging
+
+
+async def _generate_platform_packaging_with_repair(
+    prompt: str,
+    *,
+    content_profile: dict[str, Any] | None,
+    fact_sheet: dict[str, Any] | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    trace: list[dict[str, Any]] = []
+    last_payload: dict[str, Any] = {}
+    last_issues: list[str] = []
+    last_error = ""
+    last_repair_hints: list[str] = []
+    for attempt in range(1, 4):
+        attempt_prompt = prompt
+        if attempt > 1:
+            attempt_prompt = (
+                prompt
+                + "\n\n上一次输出没有通过发布物料校验，禁止改用模板兜底，必须基于原始视频摘要重新修复。"
+                + "\n需要修复的问题："
+                + json.dumps(last_issues or [last_error], ensure_ascii=False)
+                + "\n修复建议："
+                + json.dumps(last_repair_hints, ensure_ascii=False)
+                + "\n上一次输出："
+                + json.dumps(last_payload, ensure_ascii=False)
+                + "\n只返回完整 JSON。"
+            )
+        try:
+            with llm_task_route("copy", search_enabled=False):
+                provider = get_reasoning_provider()
+                with track_usage_operation("platform_package.generate_packaging"):
+                    response = await asyncio.wait_for(
+                        provider.complete(
+                            [
+                                Message(
+                                    role="system",
+                                    content=(
+                                        "你是严谨的中文多平台视频包装策划。"
+                                        "最终文案必须像真人创作者发布，不能有模板腔、总结腔、AI味。"
+                                        "如果信息不足，写真实观感和视频画面，不要编参数。只输出 JSON。"
+                                    ),
+                                ),
+                                Message(role="user", content=attempt_prompt),
+                            ],
+                            temperature=0.45 if attempt == 1 else 0.25,
+                            max_tokens=3800,
+                            json_mode=True,
+                        ),
+                        timeout=90,
+                    )
+            candidate = response.as_json()
+            last_payload = candidate if isinstance(candidate, dict) else {}
+            assessment = _assess_platform_packaging_candidate(
+                last_payload,
+                content_profile=content_profile,
+                fact_sheet=fact_sheet,
+            )
+            last_issues = list(assessment.get("blocking_reasons") or [])
+            last_repair_hints = list(assessment.get("repair_hints") or [])
+            trace.append(
+                {
+                    "attempt": attempt,
+                    "status": "ok" if not last_issues else "needs_repair",
+                    "issues": last_issues,
+                    "warnings": list(assessment.get("warnings") or []),
+                    "repair_hints": last_repair_hints,
+                }
+            )
+            if not last_issues:
+                return last_payload, trace
+        except Exception as exc:
+            last_error = str(exc)
+            trace.append({"attempt": attempt, "status": "error", "error": last_error})
+            last_issues = [last_error]
+    detail = "；".join(last_issues or [last_error] or ["未知错误"])
+    raise RuntimeError(f"MiniMax 文案生成经过修复重试后仍不合格，禁止发布：{detail}")
+
+
+def _validate_raw_platform_packaging(raw: dict[str, Any]) -> list[str]:
+    problems: list[str] = []
+    if not isinstance(raw.get("highlights"), dict):
+        problems.append("缺少 highlights")
+    raw_platforms = raw.get("platforms") if isinstance(raw.get("platforms"), dict) else {}
+    if not raw_platforms:
+        problems.append("缺少 platforms")
+        return problems
+    for key, label, _body_label, _tag_label in PLATFORM_ORDER:
+        payload = raw_platforms.get(key) if isinstance(raw_platforms.get(key), dict) else {}
+        titles = [str(item).strip() for item in (payload.get("titles") or []) if str(item).strip()]
+        description = str(payload.get("description") or "").strip()
+        tags = [str(item).strip() for item in (payload.get("tags") or []) if str(item).strip()]
+        if key != "x" and len(titles) < 3:
+            problems.append(f"{label}标题少于 3 个")
+        if len(description) < 12:
+            problems.append(f"{label}正文过短或缺失")
+        if len(tags) < 2:
+            problems.append(f"{label}标签少于 2 个")
+    return problems
+
+
+def _assess_platform_packaging_candidate(
+    raw: dict[str, Any],
+    *,
+    content_profile: dict[str, Any] | None,
+    fact_sheet: dict[str, Any] | None,
+) -> dict[str, Any]:
+    blocking_reasons = _validate_raw_platform_packaging(raw)
+    warnings: list[str] = []
+    repair_hints: list[str] = []
+    if blocking_reasons:
+        repair_hints.append("返回完整 JSON，所有平台都必须包含 titles、description、tags。")
+        return {
+            "publish_ready": False,
+            "blocking_reasons": blocking_reasons,
+            "warnings": warnings,
+            "repair_hints": repair_hints,
+        }
+    normalized = _normalize_generated_platform_packaging_strict(raw, content_profile=content_profile)
+    return _assess_platform_packaging_quality(
+        normalized,
+        content_profile=content_profile,
+        fact_sheet=fact_sheet,
+    )
+
+
+def _normalize_generated_platform_packaging_strict(
+    raw: dict[str, Any],
+    *,
+    content_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    highlights = raw.get("highlights") if isinstance(raw.get("highlights"), dict) else {}
+    raw_platforms = raw.get("platforms") if isinstance(raw.get("platforms"), dict) else {}
+    normalized: dict[str, Any] = {
+        "highlights": {
+            "product": str(highlights.get("product") or "").strip(),
+            "video_type": str(highlights.get("video_type") or "").strip(),
+            "strongest_selling_point": str(highlights.get("strongest_selling_point") or "").strip(),
+            "strongest_emotion": str(highlights.get("strongest_emotion") or "").strip(),
+            "title_hook": str(highlights.get("title_hook") or "").strip(),
+            "engagement_question": str(highlights.get("engagement_question") or "").strip(),
+        },
+        "platforms": {},
+    }
+    for key, _label, _, _ in PLATFORM_ORDER:
+        platform_raw = raw_platforms.get(key) if isinstance(raw_platforms.get(key), dict) else {}
+        titles = [_sanitize_title_text(item) for item in (platform_raw.get("titles") or [])]
+        description = _clean_generated_copy_text(platform_raw.get("description"))
+        tags = [str(item).strip().lstrip("#") for item in (platform_raw.get("tags") or []) if str(item).strip()]
+        normalized["platforms"][key] = {
+            "titles": _dedupe_non_empty([item for item in titles if item])[:5],
+            "description": description,
+            "tags": _dedupe_non_empty(tags)[:8],
+        }
+    audit = audit_platform_packaging_titles(normalized, content_profile=content_profile)
+    normalized["title_audit"] = audit
+    return normalized
+
+
+def _clean_generated_copy_text(value: Any) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"[\x00-\x1f\x7f]", "", text)
+    text = re.sub(r"[\u200b-\u200f\u2060\ufeff]", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _assert_platform_packaging_publishable(
+    packaging: dict[str, Any],
+    *,
+    content_profile: dict[str, Any] | None = None,
+    fact_sheet: dict[str, Any] | None = None,
+) -> None:
+    assessment = _assess_platform_packaging_quality(
+        packaging,
+        content_profile=content_profile,
+        fact_sheet=fact_sheet,
+    )
+    if not assessment["publish_ready"]:
+        raise RuntimeError("文案模型输出质量不达标，禁止发布：" + "；".join(assessment["blocking_reasons"][:12]))
+
+
+def _assess_platform_packaging_quality(
+    packaging: dict[str, Any],
+    *,
+    content_profile: dict[str, Any] | None = None,
+    fact_sheet: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    platforms = packaging.get("platforms") if isinstance(packaging.get("platforms"), dict) else {}
+    problems: list[str] = []
+    warnings: list[str] = []
+    repair_hints: list[str] = []
+    platform_reports: dict[str, Any] = {}
+    for key, label, _body_label, _tag_label in PLATFORM_ORDER:
+        payload = platforms.get(key) if isinstance(platforms.get(key), dict) else {}
+        titles = [str(item).strip() for item in (payload.get("titles") or []) if str(item).strip()]
+        description = str(payload.get("description") or "").strip()
+        tags = [str(item).strip() for item in (payload.get("tags") or []) if str(item).strip()]
+        if key != "x" and not titles:
+            problems.append(f"{label}缺少标题")
+        if not description:
+            problems.append(f"{label}缺少正文")
+        if not tags:
+            problems.append(f"{label}缺少标签")
+        title_assessment = assess_platform_titles(key, titles, content_profile=content_profile)
+        body_assessment = assess_platform_body(key, description, content_profile=content_profile, fact_sheet=fact_sheet)
+        tag_assessment = assess_platform_tags(key, tags, content_profile=content_profile)
+        platform_reports[key] = {
+            "title": title_assessment,
+            "body": body_assessment,
+            "tags": tag_assessment,
+        }
+        for dimension, assessment in (("标题", title_assessment), ("正文", body_assessment), ("标签", tag_assessment)):
+            problems.extend(f"{label}{dimension}：{reason}" for reason in assessment.get("blocking_reasons") or [])
+            warnings.extend(f"{label}{dimension}：{reason}" for reason in assessment.get("warnings") or [])
+            repair_hints.extend(f"{label}{dimension}：{hint}" for hint in assessment.get("repair_hints") or [])
+    return {
+        "publish_ready": not problems,
+        "blocking_reasons": _dedupe_non_empty(problems),
+        "warnings": _dedupe_non_empty(warnings),
+        "repair_hints": _dedupe_non_empty(repair_hints),
+        "platforms": platform_reports,
+    }
 
 
 def normalize_platform_packaging(

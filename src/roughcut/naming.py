@@ -49,7 +49,7 @@ CODING_BACKEND_PROVIDER_MAP: dict[str, tuple[str, ...]] = {
     "claude": ("anthropic",),
 }
 DEFAULT_CODING_BACKEND_MODELS: dict[str, str] = {
-    "codex": "gpt-5.4-mini",
+    "codex": "gpt-5.5",
     "claude": "opus",
 }
 

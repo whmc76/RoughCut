@@ -48,12 +48,17 @@ _BUILTIN_GLOSSARY_BRAND_TERMS: list[dict[str, Any]] = [
     for term in _BUILTIN_GLOSSARY_BRAND_MODEL_TERMS
     if str(term.get("category") or "").strip().lower().endswith("_brand")
 ]
+_HEURISTIC_FACT_SIGNAL_SHORT_CIRCUIT_THRESHOLD = 8
 
 
 async def infer_content_semantic_facts(
     provider: Any,
     evidence_bundle: dict[str, Any],
 ) -> ContentSemanticFacts:
+    heuristic_facts = _enrich_semantic_facts_from_evidence(ContentSemanticFacts(), evidence_bundle)
+    if _semantic_facts_signal_score(heuristic_facts) >= _HEURISTIC_FACT_SIGNAL_SHORT_CIRCUIT_THRESHOLD:
+        return heuristic_facts
+
     prompt = (
         "你是视频证据语义抽取器。请根据多模态证据提取可供后续检索和消歧使用的通用语义事实，"
         "只输出一个 JSON 对象，不要 Markdown，不要代码块，不要解释。"

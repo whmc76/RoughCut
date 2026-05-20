@@ -1,8 +1,9 @@
-import type { AvatarCreatorProfile, AvatarMaterialLibrary } from "../types";
+import type { AvatarCreatorProfile, AvatarMaterialLibrary, AvatarPublicationProfileList } from "../types";
 import { apiPath, request, requestForm } from "./core";
 
 export const avatarMaterialsApi = {
   getAvatarMaterials: () => request<AvatarMaterialLibrary>("/avatar-materials"),
+  getAvatarPublicationProfiles: () => request<AvatarPublicationProfileList>("/avatar-materials/publication-profiles"),
   uploadAvatarMaterialProfile: (
     displayName: string,
     presenterAlias: string,

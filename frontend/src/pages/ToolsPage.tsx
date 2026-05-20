@@ -15,6 +15,7 @@ const toolCards = [
     key: "tts",
     title: "TTS",
     label: "文本转语音",
+    verb: "生成语音",
     route: "/tools/tts",
     provider: "CosyVoice3",
     detail: "上传参考音色，输入脚本后直接生成 WAV。",
@@ -23,6 +24,7 @@ const toolCards = [
     key: "asr",
     title: "ASR",
     label: "音频转文字",
+    verb: "开始转写",
     route: "/tools/asr",
     provider: "MOSS-Audio / Local HTTP ASR",
     detail: "上传音频，复用当前本地 ASR 配置输出文本和片段。",
@@ -31,6 +33,7 @@ const toolCards = [
     key: "avatar",
     title: "数字人",
     label: "口播预览",
+    verb: "生成预览",
     route: "/tools/avatar",
     provider: "HeyGem",
     detail: "上传主播视频和配音音频，生成一段数字人口播预览。",
@@ -712,21 +715,26 @@ export function ToolsPage() {
         ]}
       />
 
-      <PageSection eyebrow="入口" title="选择要直接调用的能力" description="每个入口都进入独立页面，提交后直接调用后端服务。">
+      <PageSection className="tools-entry-section" eyebrow="入口" title="选择要直接调用的能力" description="每个入口都进入独立页面，提交后直接调用后端服务。">
         <div className="tool-entry-grid">
           {toolCards.map((tool) => (
-            <Link className="tool-entry" key={tool.key} to={tool.route}>
-              <span className="tool-entry-code">{tool.title}</span>
-              <strong>{tool.label}</strong>
-              <span className="muted">{tool.provider}</span>
-              <span className="tool-entry-detail">{tool.detail}</span>
+            <Link className={`tool-entry tool-entry-${tool.key}`} key={tool.key} to={tool.route}>
+              <span className="tool-entry-mark" aria-hidden="true">
+                {tool.title}
+              </span>
+              <span className="tool-entry-copy">
+                <strong>{tool.label}</strong>
+                <span className="tool-entry-provider">{tool.provider}</span>
+                <span className="tool-entry-detail">{tool.detail}</span>
+              </span>
+              <span className="tool-entry-cta">{tool.verb}</span>
             </Link>
           ))}
         </div>
       </PageSection>
 
       <PageSection eyebrow="状态" title="工具服务在线状态" description="这里检查的是直连入口依赖，不代表完整任务流水线状态。">
-        <section className="panel">
+        <section className="panel tools-status-panel">
           <PanelHeader title="Service endpoints" description={status.data?.checked_at ?? "正在检查服务状态"} />
           <div className="service-grid">
             {toolCards.map((tool) => (
@@ -949,9 +957,9 @@ export function TtsToolPage() {
         actions={<Link className="button ghost" to="/tools">返回百宝箱</Link>}
       />
       <ToolNav />
-      <PageSection eyebrow="调用" title="生成语音" description="覆盖 CosyVoice3 和 MOSS-TTS Local 官方模式；按 provider 展开对应参数。">
+      <PageSection className="tool-run-section" eyebrow="调用" title="生成语音" description="覆盖 CosyVoice3 和 MOSS-TTS Local 官方模式；按 provider 展开对应参数。">
         <div className="panel-grid tool-workbench tts-workbench-vertical">
-          <section className="panel">
+          <section className="panel tool-panel tool-input-panel tts-input-panel">
             <PanelHeader title="输入" description={selectedMode.detail} />
             <form className="form-stack" onSubmit={handleSubmit}>
               <input type="hidden" name="provider" value={selectedProvider.key} />
@@ -1059,7 +1067,7 @@ export function TtsToolPage() {
                   </div>
                 </div>
               )}
-              <label>
+              <label className="tool-control-block tool-control-block-main">
                 <span>tts_text / text</span>
                 <textarea
                   className="input"
@@ -1420,7 +1428,7 @@ export function TtsToolPage() {
             </form>
           </section>
 
-          <section className="panel">
+          <section className="panel tool-panel tool-result-panel">
             <PanelHeader title="结果" description="显示 run 进度、阶段详情；完成后会显示输出路径和播放器。" />
             {localSubmitError ? <div className="notice notice-error">{localSubmitError}</div> : null}
             <TtsResult run={run} error={error} pending={pending} />
@@ -1707,9 +1715,9 @@ export function AsrToolPage() {
         actions={<Link className="button ghost" to="/tools">返回百宝箱</Link>}
       />
       <ToolNav />
-      <PageSection eyebrow="调用" title="转写音频" description="热词会作为上下文传给本地 ASR，用于产品名、型号和专有名词。">
+      <PageSection className="tool-run-section" eyebrow="调用" title="转写音频" description="热词会作为上下文传给本地 ASR，用于产品名、型号和专有名词。">
         <div className="panel-grid two-up tool-workbench">
-          <section className="panel">
+          <section className="panel tool-panel tool-input-panel">
             <PanelHeader title="输入" description="支持本地 ASR 服务能处理的音频格式。" />
             <form className="form-stack" onSubmit={handleSubmit}>
               <label>
@@ -1745,7 +1753,7 @@ export function AsrToolPage() {
             </form>
           </section>
 
-          <section className="panel">
+          <section className="panel tool-panel tool-result-panel">
             <PanelHeader title="结果" description="主文本适合快速复制，片段用于检查时间信息；阶段区显示实际进度。" />
             <AsrResult run={run} error={error} pending={pending} />
           </section>
@@ -1806,9 +1814,9 @@ export function AvatarToolPage() {
         actions={<Link className="button ghost" to="/tools">返回百宝箱</Link>}
       />
       <ToolNav />
-      <PageSection eyebrow="调用" title="生成口播预览" description="这页适合验证视频素材、音频素材和 HeyGem 服务是否能协同跑通。">
+      <PageSection className="tool-run-section" eyebrow="调用" title="生成口播预览" description="这页适合验证视频素材、音频素材和 HeyGem 服务是否能协同跑通。">
         <div className="panel-grid two-up tool-workbench">
-          <section className="panel">
+          <section className="panel tool-panel tool-input-panel">
             <PanelHeader title="输入" description="主播视频会被准备成 HeyGem 可访问素材，音频会被提交为本段口播。" />
             <form className="form-stack" onSubmit={handleSubmit}>
               <label>
@@ -1836,7 +1844,7 @@ export function AvatarToolPage() {
             </form>
           </section>
 
-          <section className="panel">
+          <section className="panel tool-panel tool-result-panel">
             <PanelHeader title="结果" description="成功时会显示可播放的预览视频，并保留每阶段进度详情。" />
             <AvatarResult run={run} error={error} pending={pending} />
           </section>

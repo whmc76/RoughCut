@@ -7,9 +7,11 @@ from typing import Any
 
 from roughcut.review.domain_glossaries import list_builtin_glossary_packs
 from roughcut.review.content_profile_field_rules import (
-    CONTENT_UNDERSTANDING_FIELD_GUIDELINES,
+    CONTENT_UNDERSTANDING_FIELD_GUIDELINES as _CONTENT_UNDERSTANDING_FIELD_GUIDELINES,
     SUPPORTED_VIDEO_TYPES,
 )
+
+CONTENT_UNDERSTANDING_FIELD_GUIDELINES = _CONTENT_UNDERSTANDING_FIELD_GUIDELINES
 
 
 def _normalize_domain_alias(value: str) -> str:
@@ -532,7 +534,6 @@ def _compose_subject_type_label(*, subject_type: str, subject_brand: str, subjec
 
     normalized_candidate = _normalize_compact(candidate)
     normalized_brand = _normalize_compact(brand)
-    normalized_model = _normalize_compact(model)
     if normalized_brand and normalized_brand in normalized_candidate:
         return candidate
     if _subject_type_contains_model(candidate, model):

@@ -145,7 +145,7 @@ def main() -> None:
 def parse_providers(raw_items: list[str]) -> list[ProviderSpec]:
     if not raw_items:
         return [
-            ProviderSpec(provider="openai", model="gpt-5.4", label="OpenAI GPT-5.4"),
+            ProviderSpec(provider="openai", model="gpt-5.5", label="OpenAI GPT-5.5 low"),
             ProviderSpec(provider="minimax", model="MiniMax-M2.7", label="MiniMax M2.7"),
         ]
     providers: list[ProviderSpec] = []

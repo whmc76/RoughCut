@@ -13,8 +13,8 @@ def test_docker_autostart_defaults_to_disabled() -> None:
     assert settings.docker_gpu_guard_enabled is False
     assert settings.avatar_render_no_progress_timeout_sec == 0
     assert settings.local_asr_docker_guard_enabled is True
-    assert settings.local_asr_docker_compose_file.endswith("docker-compose.qwen3-asr.yml")
-    assert settings.local_asr_docker_services == "qwen3-asr"
+    assert settings.local_asr_docker_compose_file.endswith("docker-compose.asr-matrix.yml")
+    assert settings.local_asr_docker_services == "faster-whisper-large-v3"
     assert settings.cosyvoice3_tts_docker_guard_enabled is True
     assert settings.cosyvoice3_tts_docker_services == "cosyvoice3-tts"
     assert settings.moss_tts_local_docker_guard_enabled is True
@@ -38,10 +38,10 @@ def test_runtime_preflight_skips_compose_when_disabled(monkeypatch: pytest.Monke
 def test_managed_service_targets_include_lifecycle_metadata(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = SimpleNamespace(
         transcription_provider="local_http_asr",
-        local_asr_api_base_url="http://127.0.0.1:30080",
-        local_asr_docker_compose_file="E:/WorkSpace/RoughCut/docker-compose.qwen3-asr.yml",
+        local_asr_api_base_url="http://127.0.0.1:30200",
+        local_asr_docker_compose_file="E:/WorkSpace/RoughCut/docker-compose.asr-matrix.yml",
         local_asr_docker_env_file="",
-        local_asr_docker_services="qwen3-asr",
+        local_asr_docker_services="faster-whisper-large-v3",
         local_asr_docker_guard_enabled=True,
         local_asr_docker_idle_timeout_sec=120,
         cosyvoice3_tts_api_base_url="http://127.0.0.1:30180",
@@ -66,7 +66,7 @@ def test_managed_service_targets_include_lifecycle_metadata(monkeypatch: pytest.
     targets = {str(target["name"]): target for target in runtime_preflight._managed_service_targets()}
 
     assert targets["local_http_asr"]["kind"] == "asr"
-    assert targets["local_http_asr"]["services"] == "qwen3-asr"
+    assert targets["local_http_asr"]["services"] == "faster-whisper-large-v3"
     assert targets["local_http_asr"]["guard_enabled"] is True
     assert targets["local_http_asr"]["auto_release_enabled"] is True
     assert targets["local_http_asr"]["idle_timeout_sec"] == 120

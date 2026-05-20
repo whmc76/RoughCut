@@ -32,8 +32,6 @@ from roughcut.packaging.library import list_packaging_assets, resolve_packaging_
 from roughcut.providers.factory import get_reasoning_provider, get_transcription_provider
 from roughcut.review.downstream_context import select_resolved_downstream_profile
 from roughcut.review.final_review_rerun import (
-    FinalReviewRerunPlan,
-    build_final_review_rerun_plan as _build_final_review_rerun_plan,
     build_final_review_rerun_plans as _build_final_review_rerun_plans,
     combine_final_review_rerun_plans as _combine_final_review_rerun_plans,
     extract_final_review_content_profile_feedback as _extract_final_review_content_profile_feedback,

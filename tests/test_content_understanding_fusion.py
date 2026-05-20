@@ -1,4 +1,7 @@
+import pytest
+
 from roughcut.review.content_understanding_evidence import build_evidence_bundle
+from roughcut.review.content_understanding_facts import infer_content_semantic_facts
 from roughcut.review.content_understanding_schema import (
     ContentSemanticFacts,
     ContentUnderstanding,
@@ -6,6 +9,11 @@ from roughcut.review.content_understanding_schema import (
     map_content_understanding_to_profile,
     parse_content_understanding_payload,
 )
+
+
+class _UnexpectedLLMProvider:
+    async def complete(self, *args, **kwargs):
+        raise AssertionError("heuristic fact extraction should skip LLM")
 
 
 def test_source_context_and_asr_are_both_exposed_to_understanding() -> None:
@@ -29,6 +37,26 @@ def test_source_context_and_asr_are_both_exposed_to_understanding() -> None:
     assert "益生菌含片" in semantic_inputs["transcript_text"]
     assert "LUCKY" in semantic_inputs["entity_like_tokens"]
     assert "益生菌含片" in "".join(semantic_inputs["entity_like_tokens"])
+
+
+@pytest.mark.asyncio
+async def test_semantic_fact_extraction_uses_heuristic_fast_path_when_signal_is_strong() -> None:
+    bundle = build_evidence_bundle(
+        source_name="20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4",
+        subtitle_items=[
+            {"start_time": 0.0, "end_time": 2.0, "text_final": "今天看一下NITECORE EDC17这支EDC手电。"},
+            {"start_time": 2.0, "end_time": 5.0, "text_final": "顺便和我之前常用的EDC37做个对比。"},
+            {"start_time": 5.0, "end_time": 7.0, "text_final": "这支手电有UV光和1500mAh电池。"},
+        ],
+        transcript_excerpt="今天看一下NITECORE EDC17这支EDC手电，顺便和EDC37做个对比。",
+    )
+
+    facts = await infer_content_semantic_facts(_UnexpectedLLMProvider(), bundle)
+
+    assert "NITECORE" in facts.brand_candidates
+    assert "EDC17" in facts.model_candidates
+    assert "手电筒" in facts.product_type_candidates
+    assert any("NITECORE EDC17" in query for query in facts.search_expansions)
 
 
 def test_food_understanding_wins_over_edc_style_hint_in_profile_mapping() -> None:

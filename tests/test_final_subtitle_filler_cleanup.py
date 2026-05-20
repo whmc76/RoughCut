@@ -5,7 +5,14 @@ import pytest
 
 from roughcut.media.output import write_srt_file
 from roughcut.media.subtitles import write_ass_file
-from roughcut.media.subtitle_text import clean_final_subtitle_text, clean_subtitle_payloads, subtitle_display_suppression_reason
+from roughcut.media.subtitle_text import (
+    clean_final_subtitle_text,
+    clean_subtitle_payloads,
+    normalize_contextual_noc_alias_text,
+    normalize_editable_subtitle_text,
+    subtitle_display_suppression_reason,
+)
+from roughcut.review import content_profile as content_profile_module
 from roughcut.review.content_profile import polish_subtitle_items
 from roughcut.speech.subtitle_segmentation import normalize_display_text
 
@@ -28,6 +35,49 @@ def test_clean_final_subtitle_text_preserves_normal_cjk_phrases() -> None:
     assert clean_final_subtitle_text("我 跟 你 说") == "我跟你说"
     assert clean_final_subtitle_text("即 使") == "即使"
     assert clean_final_subtitle_text("我") == "我"
+    assert clean_final_subtitle_text("好好好") == "好好好"
+
+
+def test_clean_final_subtitle_text_collapses_asr_character_stutter() -> None:
+    assert clean_final_subtitle_text("今今天天终终于于收收到到了了年年前前的的一个个款款") == "今天终于收到了年前的一个款"
+    assert clean_final_subtitle_text("小小玩玩具具也也是是耗耗尽尽了了") == "小玩具也是耗尽了"
+    assert clean_final_subtitle_text("大家大家看到看到现在这个镜头") == "大家看到现在这个镜头"
+    assert clean_final_subtitle_text("没想到这NOC现NOC现在这么火") == "没想到这NOC现在这么火"
+
+
+def test_normalize_editable_subtitle_text_collapses_asr_overlap_noise_from_full_editor() -> None:
+    assert normalize_editable_subtitle_text("NNOCOC的的这个个发发售售，太太难难了") == "NOC的这个发售，太难了"
+    assert normalize_editable_subtitle_text("你看，好好不不过过好好好在在，还还还还算算抢抢抢到了了") == "你看，好不过好在，还算抢到了"
+    assert normalize_editable_subtitle_text("没没有没有这个像很多兄弟一样隐恨") == "没有这个像很多兄弟一样隐恨"
+    assert normalize_editable_subtitle_text("还还是确实还是蛮") == "还是确实还是蛮"
+    assert normalize_editable_subtitle_text("我一一般都是把它挂包上") == "我一般都是把它挂包上"
+
+
+def test_normalize_editable_subtitle_text_collapses_asr_spellouts_and_measure_alternatives() -> None:
+    assert normalize_editable_subtitle_text("最近这三次 N O C 的发售") == "最近这三次 NOC 的发售"
+    assert normalize_editable_subtitle_text("非常适合 E D C 啊") == "非常适合 EDC 啊"
+    assert normalize_editable_subtitle_text("S 06 mini 的迷你款") == "S06mini 的迷你款"
+    assert normalize_editable_subtitle_text("最后的一个一款小玩具") == "最后的一款小玩具"
+    assert normalize_editable_subtitle_text("\ufeff型号，，不错！！") == "型号，不错！"
+
+
+def test_contextual_noc_alias_correction_requires_noc_context() -> None:
+    assert normalize_contextual_noc_alias_text(
+        "最近这三次NFC的发售太难了",
+        context_text="开箱NOC MT34",
+    ) == "最近这三次NOC的发售太难了"
+    assert normalize_contextual_noc_alias_text(
+        "这个手机NFC功能",
+        context_text="手机功能演示",
+    ) == "这个手机NFC功能"
+
+
+def test_normalize_editable_subtitle_text_collapses_function_word_asr_prefix_stutter() -> None:
+    assert normalize_editable_subtitle_text("纸纸箱了之类") == "纸箱了之类"
+    assert normalize_editable_subtitle_text("既既能这个切菜，又又很帅") == "既能这个切菜，又很帅"
+    assert normalize_editable_subtitle_text("尾部呢，还有有一个挂孔") == "尾部呢，还有一个挂孔"
+    assert normalize_editable_subtitle_text("因为我我应该是指甲有点短") == "因为我应该是指甲有点短"
+    assert normalize_editable_subtitle_text("开开箱，轻轻这么一指，试试它") == "开开箱，轻轻这么一指，试试它"
 
 
 def test_clean_final_subtitle_text_hides_asr_noise_markers() -> None:
@@ -153,6 +203,41 @@ async def test_polish_subtitle_items_persists_final_text_without_asr_labels_or_p
 
     assert polished_count == 1
     assert item.text_final == "细节 silence music 继续看"
+
+
+@pytest.mark.asyncio
+async def test_polish_subtitle_items_sends_normalized_text_to_llm(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, str] = {}
+
+    class _Response:
+        def as_json(self) -> dict:
+            return {"items": []}
+
+    class _Provider:
+        async def complete(self, messages, **_kwargs):
+            captured["prompt"] = messages[-1].content
+            return _Response()
+
+    monkeypatch.setattr(content_profile_module, "get_reasoning_provider", lambda: _Provider())
+    item = SimpleNamespace(
+        item_index=0,
+        start_time=0.0,
+        end_time=1.0,
+        text_raw="今今天天终终于于收收到到了了年年前前的的一个个款款",
+        text_norm="今今天天终终于于收收到到了了年年前前的的一个个款款",
+        text_final=None,
+    )
+
+    await polish_subtitle_items(
+        [item],
+        content_profile={"workflow_template": "unboxing_standard"},
+        glossary_terms=[],
+        allow_llm=True,
+    )
+
+    assert "今天终于收到了年前的一个款" in captured["prompt"]
+    assert "今今天天" not in captured["prompt"]
+    assert item.text_final == "今天终于收到了年前的一个款"
 
 
 def test_write_srt_file_skips_filler_only_cues_with_consecutive_numbers(tmp_path: Path) -> None:

@@ -145,6 +145,9 @@ def build_publication_plan(
     packages = _normalize_platform_packages(platform_packaging)
     if not packages:
         blocked_reasons.append("缺少多平台发布文案包，请先完成 platform_package。")
+    if isinstance(platform_packaging, dict) and platform_packaging.get("publish_ready") is False:
+        for reason in [str(item).strip() for item in (platform_packaging.get("blocking_reasons") or []) if str(item).strip()]:
+            blocked_reasons.append(reason)
 
     credentials = active_publication_credentials(creator_profile)
     if not credentials:
@@ -168,6 +171,10 @@ def build_publication_plan(
             continue
         if not _package_has_publish_copy(package):
             warnings.append(f"{platform_label(platform)} 文案包为空，已跳过。")
+            continue
+        if package.get("publish_ready") is False:
+            for reason in [str(item).strip() for item in (package.get("blocking_reasons") or []) if str(item).strip()]:
+                warnings.append(f"{platform_label(platform)} 未就绪：{reason}")
             continue
         targets.append(
             {
@@ -537,12 +544,15 @@ async def list_publication_attempts(
     *,
     job_id: str | None = None,
     creator_profile_id: str | None = None,
+    limit: int | None = None,
 ) -> list[dict[str, Any]]:
     stmt = select(PublicationAttempt).order_by(PublicationAttempt.created_at.desc(), PublicationAttempt.id.desc())
     if job_id:
         stmt = stmt.where(PublicationAttempt.content_id == str(job_id))
     if creator_profile_id:
         stmt = stmt.where(PublicationAttempt.creator_profile_id == str(creator_profile_id))
+    if limit is not None:
+        stmt = stmt.limit(max(1, int(limit)))
     result = await session.execute(stmt)
     attempts = result.scalars().all()
     if not attempts:

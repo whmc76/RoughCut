@@ -1,0 +1,136 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from roughcut.providers.transcription.base import TranscriptResult, TranscriptSegment
+from roughcut.speech.transcribe import analyze_transcript_asr_quality, execute_transcription_plan
+
+
+class _FakeProvider:
+    def __init__(self, result: TranscriptResult | Exception) -> None:
+        self._result = result
+
+    async def transcribe(self, audio_path: Path, **kwargs) -> TranscriptResult:
+        del audio_path, kwargs
+        if isinstance(self._result, Exception):
+            raise self._result
+        return self._result
+
+
+def _result(provider: str, model: str, text: str) -> TranscriptResult:
+    segment = TranscriptSegment(
+        index=0,
+        start=0.0,
+        end=3.0,
+        text=text,
+        provider=provider,
+        model=model,
+        raw_text=text,
+    )
+    return TranscriptResult(
+        segments=[segment],
+        raw_segments=[segment],
+        language="zh-CN",
+        duration=3.0,
+        provider=provider,
+        model=model,
+        raw_payload={"chunks": [{"text": text}]},
+    )
+
+
+@pytest.mark.asyncio
+async def test_qwen3_local_asr_duplicate_noise_is_rejected_without_fallback(monkeypatch, tmp_path: Path) -> None:
+    bad = _result(
+        "local_http_asr",
+        "qwen3-asr-1.7b-forced-aligner",
+        "你看啊啊好，不过好在呢，还还算抢到了啊，没没有没有这个像很多兄弟一样隐恨啊。",
+    )
+    providers = {
+        ("local_http_asr", "qwen3-asr-1.7b-forced-aligner"): _FakeProvider(bad),
+    }
+
+    def fake_get_transcription_provider(*, provider: str, model: str, **kwargs) -> _FakeProvider:
+        del kwargs
+        return providers[(provider, model)]
+
+    monkeypatch.setattr("roughcut.speech.transcribe.get_transcription_provider", fake_get_transcription_provider)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await execute_transcription_plan(
+            audio_path=tmp_path / "audio.wav",
+            language="zh-CN",
+            prompt=None,
+            provider_plan=[("local_http_asr", "qwen3-asr-1.7b-forced-aligner")],
+        )
+
+    assert "asr_quality_gate" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_faster_whisper_local_asr_duplicate_text_is_not_rejected(monkeypatch, tmp_path: Path) -> None:
+    result = _result(
+        "local_http_asr",
+        "faster-whisper-large-v3-beam5-nohot",
+        "你看啊啊好，不过好在呢，还还算抢到了啊，没没有没有这个像很多兄弟一样隐恨啊。",
+    )
+
+    def fake_get_transcription_provider(*, provider: str, model: str, **kwargs) -> _FakeProvider:
+        del provider, model, kwargs
+        return _FakeProvider(result)
+
+    monkeypatch.setattr("roughcut.speech.transcribe.get_transcription_provider", fake_get_transcription_provider)
+
+    selected_result, selected_provider, selected_model, attempt_errors = await execute_transcription_plan(
+        audio_path=tmp_path / "audio.wav",
+        language="zh-CN",
+        prompt=None,
+        provider_plan=[("local_http_asr", "faster-whisper-large-v3-beam5-nohot")],
+    )
+
+    assert selected_result is result
+    assert selected_provider == "local_http_asr"
+    assert selected_model == "faster-whisper-large-v3-beam5-nohot"
+    assert attempt_errors == []
+
+
+def test_normal_reduplication_does_not_trip_asr_quality_gate() -> None:
+    result = _result(
+        "local_http_asr",
+        "qwen3-asr-1.7b-forced-aligner",
+        "我们开开箱吧，试试这个，轻轻一推，一点点手法。",
+    )
+
+    analysis = analyze_transcript_asr_quality(result)
+
+    assert analysis["rejected"] is False
+    assert analysis["suspicious_duplicate_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_rejected_qwen3_local_asr_result_is_not_returned(monkeypatch, tmp_path: Path) -> None:
+    bad = _result(
+        "local_http_asr",
+        "qwen3-asr-1.7b-forced-aligner",
+        "去去防御，你不要把东西掏出来。也就就加一个更字儿，啊啊好。",
+    )
+
+    def fake_get_transcription_provider(*, provider: str, model: str, **kwargs) -> _FakeProvider:
+        del kwargs
+        if provider == "local_http_asr":
+            return _FakeProvider(bad)
+        return _FakeProvider(RuntimeError(f"{provider}/{model} unavailable"))
+
+    monkeypatch.setattr("roughcut.speech.transcribe.get_transcription_provider", fake_get_transcription_provider)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await execute_transcription_plan(
+            audio_path=tmp_path / "audio.wav",
+            language="zh-CN",
+            prompt=None,
+            provider_plan=[("local_http_asr", "qwen3-asr-1.7b-forced-aligner")],
+        )
+
+    message = str(exc_info.value)
+    assert "asr_quality_gate" in message

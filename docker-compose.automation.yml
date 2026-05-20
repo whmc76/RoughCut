@@ -14,8 +14,8 @@ x-automation-app-env: &automation-app-env
   COVER_TITLE_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
   HEYGEM_SHARED_ROOT: /code/data
   HEYGEM_VOICE_ROOT: /code/data/voice/data
-  AVATAR_API_BASE_URL: ${AVATAR_API_BASE_URL:-http://host.docker.internal:49202}
-  AVATAR_TRAINING_API_BASE_URL: ${AVATAR_TRAINING_API_BASE_URL:-http://host.docker.internal:49204}
+  AVATAR_API_BASE_URL: ${ROUGHCUT_DOCKER_AVATAR_API_BASE_URL:-http://host.docker.internal:49202}
+  AVATAR_TRAINING_API_BASE_URL: ${ROUGHCUT_DOCKER_AVATAR_TRAINING_API_BASE_URL:-http://host.docker.internal:49204}
 
 x-automation-app-common: &automation-app-common
   build:

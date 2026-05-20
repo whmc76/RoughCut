@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import gc
+import json
 import os
+import re
 import tempfile
 import threading
 import time
@@ -131,6 +133,7 @@ async def transcribe(
     file: UploadFile = File(...),
     hotwords: str = Form(default=""),
     max_new_tokens: int = Form(default=2048),
+    timestamp_mode: bool = Form(default=False),
 ) -> dict[str, Any]:
     suffix = Path(file.filename or "audio.wav").suffix or ".wav"
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
@@ -143,7 +146,7 @@ async def transcribe(
     try:
         payload = generate(
             GenerateRequest(
-                text=build_transcription_prompt(hotwords),
+                text=build_transcription_prompt(hotwords, timestamp_mode=timestamp_mode),
                 audio_data=str(tmp_path),
                 sampling_params={
                     "max_new_tokens": int(max_new_tokens or 2048),
@@ -151,13 +154,20 @@ async def transcribe(
                 },
             )
         )
+        raw_text = str(payload.get("text") or "")
+        timestamps = parse_timestamped_transcript(raw_text) if timestamp_mode else []
+        if timestamp_mode and timestamps:
+            payload["raw_text"] = raw_text
+            payload["text"] = "".join(item["text"] for item in timestamps).strip()
         payload["segments"] = [
             {
                 "start_time": 0.0,
                 "end_time": payload.get("duration", 0.0),
                 "text": payload.get("text", ""),
+                "words": timestamps,
             }
         ]
+        payload["word_or_char_timestamps"] = timestamps
         return payload
     finally:
         try:
@@ -170,6 +180,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--quantization", choices=["none", "bnb-8bit", "bnb-4bit"], default="none")
+    parser.add_argument("--lazy-load", action="store_true")
     parser.add_argument(
         "--idle-unload-seconds",
         type=float,
@@ -199,8 +210,15 @@ def audio_duration(audio: Any, *, sample_rate: int) -> float:
         return 0.0
 
 
-def build_transcription_prompt(hotwords: str | None) -> str:
-    prompt = "Please transcribe this audio exactly. Output only the transcript text, with no explanation."
+def build_transcription_prompt(hotwords: str | None, *, timestamp_mode: bool) -> str:
+    if timestamp_mode:
+        prompt = (
+            "Please transcribe this audio exactly with word-level timestamps. "
+            "Return only a JSON array. Each item must have text, start, and end fields in seconds. "
+            "Do not include explanations."
+        )
+    else:
+        prompt = "Please transcribe this audio exactly. Output only the transcript text, with no explanation."
     terms = str(hotwords or "").strip()
     if not terms:
         return prompt
@@ -209,6 +227,96 @@ def build_transcription_prompt(hotwords: str | None) -> str:
         "Pay special attention to these possible domain terms and preserve alphanumeric model names exactly: "
         f"{terms}."
     )
+
+
+def parse_timestamped_transcript(value: str) -> list[dict[str, Any]]:
+    text = strip_reasoning(value)
+    parsed = parse_timestamp_json(text)
+    if parsed:
+        return parsed
+    parsed = parse_bracket_timestamp_text(text)
+    if parsed:
+        return parsed
+    parsed = parse_square_marker_timestamp_text(text)
+    if parsed:
+        return parsed
+    return parse_marker_timestamp_text(text)
+
+
+def parse_timestamp_json(value: str) -> list[dict[str, Any]]:
+    candidates = [value]
+    match = re.search(r"```(?:json)?\s*(.*?)```", value, flags=re.DOTALL | re.IGNORECASE)
+    if match:
+        candidates.insert(0, match.group(1))
+    array_match = re.search(r"\[[\s\S]*\]", value)
+    if array_match:
+        candidates.insert(0, array_match.group(0))
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except Exception:
+            continue
+        rows = data if isinstance(data, list) else data.get("timestamps") if isinstance(data, dict) else []
+        parsed = [normalize_timestamp_row(item) for item in rows if isinstance(item, dict)]
+        return [item for item in parsed if item]
+    return []
+
+
+def parse_bracket_timestamp_text(value: str) -> list[dict[str, Any]]:
+    pattern = re.compile(
+        r"(?:\[|\()?\s*(?P<start>\d+(?:\.\d+)?)\s*(?:-|,|~|至|到)\s*(?P<end>\d+(?:\.\d+)?)\s*(?:\]|\))?\s*[:：]?\s*(?P<text>[^,\n，。；;]+)"
+    )
+    parsed = [normalize_timestamp_row(match.groupdict()) for match in pattern.finditer(value)]
+    return [item for item in parsed if item]
+
+
+def parse_square_marker_timestamp_text(value: str) -> list[dict[str, Any]]:
+    pattern = re.compile(
+        r"\[(?P<start>\d+(?:\.\d+)?)\](?P<text>[^\[\]]+?)\[(?P<end>\d+(?:\.\d+)?)\]"
+    )
+    parsed = [normalize_timestamp_row(match.groupdict()) for match in pattern.finditer(value)]
+    return [item for item in parsed if item]
+
+
+def parse_marker_timestamp_text(value: str) -> list[dict[str, Any]]:
+    marker_re = re.compile(r"<\|?(?P<time>\d+(?:\.\d+)?)\|?>")
+    markers = list(marker_re.finditer(value))
+    rows: list[dict[str, Any]] = []
+    for index, marker in enumerate(markers[:-1]):
+        next_marker = markers[index + 1]
+        text = value[marker.end():next_marker.start()].strip()
+        row = normalize_timestamp_row({"text": text, "start": marker.group("time"), "end": next_marker.group("time")})
+        if row:
+            rows.append(row)
+    return rows
+
+
+def normalize_timestamp_row(value: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not value:
+        return None
+    text = strip_reasoning(str(value.get("text") or value.get("word") or value.get("char") or "")).strip()
+    if not text:
+        return None
+    start = coerce_float(value.get("start", value.get("start_time")))
+    end = coerce_float(value.get("end", value.get("end_time")))
+    if end <= start:
+        return None
+    return {"word": text, "text": text, "start": round(start, 3), "end": round(end, 3)}
+
+
+def strip_reasoning(value: str) -> str:
+    text = re.sub(r"<think>.*?</think>", "", str(value or ""), flags=re.DOTALL | re.IGNORECASE)
+    return text.strip()
+
+
+def coerce_float(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if number > 1000:
+        number = number / 1000.0
+    return max(0.0, number)
 
 
 def build_quantization_config(value: str) -> BitsAndBytesConfig | None:
@@ -318,8 +426,9 @@ def main() -> None:
     model_path = args.model_path
     quantization = args.quantization
     idle_unload_seconds = max(0.0, float(args.idle_unload_seconds or 0.0))
-    with model_lock:
-        ensure_model_loaded()
+    if not args.lazy_load:
+        with model_lock:
+            ensure_model_loaded()
     start_idle_unload_monitor()
     uvicorn.run(app, host=args.host, port=args.port)
 

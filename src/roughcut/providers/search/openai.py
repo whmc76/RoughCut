@@ -57,7 +57,7 @@ class OpenAISearchProvider(SearchProvider):
             kwargs["text"] = text_options
         reasoning_options = build_reasoning_options(
             self._model,
-            effort=str(getattr(get_settings(), "active_reasoning_effort", "medium") or "medium"),
+            effort=str(getattr(get_settings(), "active_reasoning_effort", "low") or "low"),
         )
         if reasoning_options:
             kwargs["reasoning"] = reasoning_options

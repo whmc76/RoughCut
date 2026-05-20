@@ -48,6 +48,39 @@ def test_local_api_startup_prints_192_168_lan_url() -> None:
     assert "127\\.0\\.0\\.1|0\\.0\\.0\\.0" in api_match_body
 
 
+def test_frontend_lan_urls_are_preserved_as_an_array() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert "$frontendLanUrls = @(if ($NoFrontendDev)" in source
+    assert "Get-RoughCutFrontendLanUrls -FrontendPort $resolvedFrontendDevPort" in source
+
+
+def test_launcher_supervisor_restarts_exited_processes() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    body = _function_body(source, "Wait-LauncherClose")
+
+    assert "If a managed service exits, this launcher will automatically restart it." in body
+    assert "$($entry.Name) exited with code $($entry.LastExitCode)." in body
+    assert "Schedule-RoughCutManagedProcessRestart -Entry $entry" in body
+    assert "Restart-RoughCutManagedProcess -Entry $entry" in body
+    assert "$notified" not in body
+
+
+def test_managed_process_specs_keep_restart_arguments() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    process_body = _function_body(source, "Start-RoughCutProcess")
+    pnpm_body = _function_body(source, "Start-RoughCutPnpmProcess")
+    restart_body = _function_body(source, "Restart-RoughCutManagedProcess")
+
+    assert "Start-RoughCutManagedProcessFromSpec -Spec $spec" in process_body
+    assert "Add-RoughCutManagedProcess -Name $Name -Process $process -Spec $spec" in process_body
+    assert 'Arguments = @("/d", "/s", "/c", $command)' in pnpm_body
+    assert "Environment = $environmentCopy" in pnpm_body
+    assert "Schedule-RoughCutManagedProcessRestart" in source
+    assert "Start-RoughCutManagedProcessFromSpec -Spec $Entry.Spec" in restart_body
+    assert "supervisor reattached" in restart_body
+
+
 def test_worker_celery_fallback_pattern_is_not_split_into_wildcard_entry() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
     body = _function_body(source, "Start-RoughCutWorkerProcess")

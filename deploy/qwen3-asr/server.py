@@ -21,6 +21,7 @@ model_id: str = ""
 aligner_id: str = ""
 device_map: str = "cuda:0"
 loaded_seconds: float | None = None
+loaded_max_new_tokens: int | None = None
 load_count: int = 0
 last_loaded_at: float | None = None
 last_unloaded_at: float | None = None
@@ -37,6 +38,7 @@ def health() -> dict[str, Any]:
         "aligner": aligner_id,
         "loaded": model is not None,
         "loaded_seconds": loaded_seconds,
+        "loaded_max_new_tokens": loaded_max_new_tokens,
         "load_count": load_count,
         "idle_unload_seconds": idle_unload_seconds,
         "idle_for_seconds": round(max(0.0, time.monotonic() - last_activity_monotonic), 3),
@@ -57,7 +59,7 @@ def unload() -> dict[str, Any]:
 async def transcribe(
     file: UploadFile = File(...),
     hotwords: str = Form(default=""),
-    max_new_tokens: int = Form(default=512),
+    max_new_tokens: int = Form(default=256),
     language: str = Form(default="Chinese"),
 ) -> dict[str, Any]:
     suffix = Path(file.filename or "audio.wav").suffix or ".wav"
@@ -127,7 +129,7 @@ def run_transcription(path: Path, *, hotwords: str, max_new_tokens: int, languag
         "word_or_char_timestamps": timestamps,
         "meta_info": {
             "infer_seconds": round(elapsed, 3),
-            "max_new_tokens": int(max_new_tokens or 0),
+            "max_new_tokens": resolve_max_new_tokens(max_new_tokens),
             "cuda_memory": cuda_memory_stats(),
         },
     }
@@ -216,10 +218,23 @@ def normalize_language(value: str) -> str:
     return str(value or "").strip() or "Chinese"
 
 
+def resolve_max_new_tokens(value: int | None) -> int:
+    try:
+        configured = int(value or 256)
+    except (TypeError, ValueError):
+        configured = 256
+    # This service uses qwen-asr's transformers path; official transformers and
+    # forced-aligner examples use 256, while 2048 is for the separate vLLM path.
+    return max(32, min(256, configured))
+
+
 def ensure_model_loaded(*, max_new_tokens: int) -> None:
-    global last_loaded_at, load_count, loaded_seconds, model
-    if model is not None:
+    global last_loaded_at, load_count, loaded_max_new_tokens, loaded_seconds, model
+    resolved_max_new_tokens = resolve_max_new_tokens(max_new_tokens)
+    if model is not None and loaded_max_new_tokens == resolved_max_new_tokens:
         return
+    if model is not None:
+        unload_model()
     from qwen_asr import Qwen3ASRModel
 
     started = time.perf_counter()
@@ -228,21 +243,23 @@ def ensure_model_loaded(*, max_new_tokens: int) -> None:
         dtype=torch.bfloat16,
         device_map=device_map,
         max_inference_batch_size=1,
-        max_new_tokens=int(max_new_tokens or 512),
+        max_new_tokens=resolved_max_new_tokens,
         forced_aligner=aligner_id,
         forced_aligner_kwargs={"dtype": torch.bfloat16, "device_map": device_map},
     )
     loaded_seconds = round(time.perf_counter() - started, 3)
+    loaded_max_new_tokens = resolved_max_new_tokens
     last_loaded_at = time.time()
     load_count += 1
     mark_activity()
 
 
 def unload_model() -> None:
-    global last_unloaded_at, model
+    global last_unloaded_at, loaded_max_new_tokens, model
     if model is None:
         return
     model = None
+    loaded_max_new_tokens = None
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -315,7 +332,7 @@ def main() -> None:
     idle_unload_seconds = max(0.0, float(args.idle_unload_seconds or 0.0))
     if not args.lazy_load:
         with model_lock:
-            ensure_model_loaded(max_new_tokens=512)
+            ensure_model_loaded(max_new_tokens=256)
     start_idle_unload_monitor()
     uvicorn.run(app, host=args.host, port=args.port)
 

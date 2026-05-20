@@ -118,17 +118,17 @@ REASONING_EFFORT_VALUES: tuple[str, ...] = ("minimal", "low", "medium", "high")
 DEFAULT_REASONING_PROVIDER = "openai"
 DEFAULT_REASONING_MODEL = "gpt-5.5"
 DEFAULT_BACKUP_REASONING_PROVIDER = "openai"
-DEFAULT_BACKUP_REASONING_MODEL = "gpt-5.4-mini"
-DEFAULT_BACKUP_VISION_MODEL = "gpt-5.4-mini"
+DEFAULT_BACKUP_REASONING_MODEL = "gpt-5.5"
+DEFAULT_BACKUP_VISION_MODEL = "gpt-5.5"
 DEFAULT_HYBRID_ANALYSIS_PROVIDER = "openai"
 DEFAULT_HYBRID_ANALYSIS_MODEL = "gpt-5.5"
-DEFAULT_HYBRID_COPY_PROVIDER = "openai"
-DEFAULT_HYBRID_COPY_MODEL = "gpt-5.4-mini"
 DEFAULT_MINIMAX_REASONING_MODEL = "MiniMax-M2.7"
+DEFAULT_HYBRID_COPY_PROVIDER = "minimax"
+DEFAULT_HYBRID_COPY_MODEL = DEFAULT_MINIMAX_REASONING_MODEL
 DEFAULT_SEARCH_FALLBACK_PROVIDER = "openai"
 DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER = "openai"
 DEFAULT_MULTIMODAL_FALLBACK_PROVIDER = "openai"
-DEFAULT_MULTIMODAL_FALLBACK_MODEL = "gpt-5.4-mini"
+DEFAULT_MULTIMODAL_FALLBACK_MODEL = "gpt-5.5"
 DEFAULT_MODEL_SEARCH_HELPER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "codex_model_search_helper.py"
 MINIMAX_REASONING_MODEL_ALIASES: dict[str, str] = {
     "minimax-m2.7-highspeed": "MiniMax-M2.7",
@@ -292,7 +292,11 @@ PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=(".env", "roughcut.ports.env"),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     # Database
     database_url: str = "postgresql+asyncpg://roughcut:roughcut@localhost:5432/roughcut"
@@ -423,11 +427,11 @@ class Settings(BaseSettings):
     llm_routing_mode: str = "bundled"  # bundled | hybrid_performance
     reasoning_provider: str = DEFAULT_REASONING_PROVIDER  # openai | anthropic | minimax | ollama
     reasoning_model: str = DEFAULT_REASONING_MODEL
-    reasoning_effort: str = "medium"
+    reasoning_effort: str = "low"
     llm_backup_enabled: bool = True
     backup_reasoning_provider: str = DEFAULT_BACKUP_REASONING_PROVIDER
     backup_reasoning_model: str = DEFAULT_BACKUP_REASONING_MODEL
-    backup_reasoning_effort: str = "medium"
+    backup_reasoning_effort: str = "low"
     backup_vision_model: str = DEFAULT_BACKUP_VISION_MODEL
     backup_search_provider: str = "auto"
     backup_search_fallback_provider: str = DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER
@@ -436,7 +440,7 @@ class Settings(BaseSettings):
     local_vision_model: str = ""
     hybrid_analysis_provider: str = DEFAULT_HYBRID_ANALYSIS_PROVIDER
     hybrid_analysis_model: str = DEFAULT_HYBRID_ANALYSIS_MODEL
-    hybrid_analysis_effort: str = "medium"
+    hybrid_analysis_effort: str = "low"
     hybrid_analysis_search_mode: str = "entity_gated"  # off | entity_gated | follow_provider
     hybrid_copy_provider: str = DEFAULT_HYBRID_COPY_PROVIDER
     hybrid_copy_model: str = DEFAULT_HYBRID_COPY_MODEL
@@ -550,6 +554,11 @@ class Settings(BaseSettings):
     cover_title_font_path: str = "C:/Windows/Fonts/msyhbd.ttc"
     auto_select_cover_variant: bool = True
     cover_selection_review_gap: float = 0.08
+    intelligent_copy_cover_image_generation_enabled: bool = True
+    intelligent_copy_cover_image_backend: str = "codex_builtin"  # codex_builtin | openai_images_api
+    intelligent_copy_cover_image_model: str = "image2"
+    intelligent_copy_cover_image_quality: str = "medium"
+    intelligent_copy_cover_image_timeout_sec: int = 90
     packaging_selection_review_gap: float = 0.08
     packaging_selection_min_score: float = 0.6
     edit_decision_llm_review_enabled: bool = True
@@ -635,7 +644,7 @@ class Settings(BaseSettings):
             return route_effort
         if self.llm_mode == "local":
             return "medium"
-        return _normalize_reasoning_effort(self.reasoning_effort) or "medium"
+        return _normalize_reasoning_effort(self.reasoning_effort) or "low"
 
     @property
     def active_vision_model(self) -> str:
@@ -761,6 +770,11 @@ def _has_openai_codex_reasoning_bridge(settings: Any) -> bool:
 def _openai_responses_credentials_unavailable(settings: Any) -> bool:
     direct_key = str(getattr(settings, "openai_api_key", "") or "").strip()
     return uses_codex_auth_helper(settings) and not direct_key and not _has_openai_codex_reasoning_bridge(settings)
+
+
+def _openai_responses_route_uses_codex_bridge(settings: Any) -> bool:
+    direct_key = str(getattr(settings, "openai_api_key", "") or "").strip()
+    return uses_codex_auth_helper(settings) and not direct_key and _has_openai_codex_reasoning_bridge(settings)
 
 
 def _openai_responses_route_likely_unavailable(settings: Any) -> bool:
@@ -1087,7 +1101,7 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
     for key in ("reasoning_effort", "backup_reasoning_effort", "hybrid_analysis_effort", "hybrid_copy_effort"):
         if key in normalized:
             normalized[key] = _normalize_reasoning_effort(normalized.get(key)) or (
-                "high" if key == "hybrid_copy_effort" else "medium"
+                "high" if key == "hybrid_copy_effort" else "low"
             )
 
     for key in ("hybrid_analysis_provider", "hybrid_copy_provider"):
@@ -1200,7 +1214,7 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
     object.__setattr__(
         settings,
         "hybrid_analysis_effort",
-        _normalize_reasoning_effort(getattr(settings, "hybrid_analysis_effort", "medium")) or "medium",
+        _normalize_reasoning_effort(getattr(settings, "hybrid_analysis_effort", "low")) or "low",
     )
     object.__setattr__(
         settings,
@@ -1218,7 +1232,7 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
     object.__setattr__(
         settings,
         "reasoning_effort",
-        _normalize_reasoning_effort(getattr(settings, "reasoning_effort", "medium")) or "medium",
+        _normalize_reasoning_effort(getattr(settings, "reasoning_effort", "low")) or "low",
     )
     object.__setattr__(settings, "llm_backup_enabled", bool(getattr(settings, "llm_backup_enabled", True)))
     backup_provider = str(getattr(settings, "backup_reasoning_provider", "") or "").strip().lower()
@@ -1236,7 +1250,7 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
     object.__setattr__(
         settings,
         "backup_reasoning_effort",
-        _normalize_reasoning_effort(getattr(settings, "backup_reasoning_effort", "medium")) or "medium",
+        _normalize_reasoning_effort(getattr(settings, "backup_reasoning_effort", "low")) or "low",
     )
     object.__setattr__(
         settings,
@@ -1307,7 +1321,7 @@ def resolve_backup_llm_route(*, settings: Settings | None = None) -> dict[str, A
     route: dict[str, Any] = {
         "reasoning_provider": provider,
         "reasoning_model": model,
-        "reasoning_effort": _normalize_reasoning_effort(getattr(current, "backup_reasoning_effort", "medium")) or "medium",
+        "reasoning_effort": _normalize_reasoning_effort(getattr(current, "backup_reasoning_effort", "low")) or "low",
         "vision_model": str(getattr(current, "backup_vision_model", "") or "").strip() or model,
         "search_provider": str(getattr(current, "backup_search_provider", "auto") or "auto").strip().lower() or "auto",
         "search_fallback_provider": (
@@ -1373,13 +1387,6 @@ def resolve_llm_task_route(task_name: str, *, settings: Settings | None = None) 
             getattr(current, "hybrid_analysis_model", DEFAULT_HYBRID_ANALYSIS_MODEL)
             or DEFAULT_HYBRID_ANALYSIS_MODEL
         ).strip()
-        if (
-            selected_provider == "openai"
-            and _openai_responses_route_likely_unavailable(current)
-            and _has_minimax_reasoning_credentials(current)
-        ):
-            selected_provider = "minimax"
-            selected_model = DEFAULT_MINIMAX_REASONING_MODEL
         route = {
             "reasoning_provider": selected_provider,
             "reasoning_model": normalize_reasoning_model_for_provider(
@@ -1392,20 +1399,12 @@ def resolve_llm_task_route(task_name: str, *, settings: Settings | None = None) 
             route["reasoning_effort"] = effort
         return route
     if normalized_task == "copy":
-        selected_provider = str(
-            getattr(current, "hybrid_copy_provider", DEFAULT_HYBRID_COPY_PROVIDER)
-            or DEFAULT_HYBRID_COPY_PROVIDER
-        ).strip().lower()
+        selected_provider = "minimax"
         selected_model = str(
             getattr(current, "hybrid_copy_model", DEFAULT_HYBRID_COPY_MODEL)
             or DEFAULT_HYBRID_COPY_MODEL
         ).strip()
-        if (
-            selected_provider == "openai"
-            and _openai_responses_route_likely_unavailable(current)
-            and _has_minimax_reasoning_credentials(current)
-        ):
-            selected_provider = "minimax"
+        if selected_model.lower().startswith("gpt-") or selected_model.lower().startswith("o"):
             selected_model = DEFAULT_MINIMAX_REASONING_MODEL
         route = {
             "reasoning_provider": selected_provider,

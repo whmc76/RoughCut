@@ -3,8 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../../api";
 import type {
-  AvatarMaterialLibrary,
   Job,
+  PublicationAttempt,
   PublicationPlan,
   PublicationPlatformPublishOptions,
 } from "../../types";
@@ -16,18 +16,6 @@ type PublicationPlatformOptionDraft = {
   category: string;
   visibility_or_publish_mode: string;
 };
-
-const PUBLISHABLE_CREDENTIAL_STATUSES = new Set(["logged_in", "available", "verified"]);
-
-function hasActivePublicationCredential(profile: NonNullable<AvatarMaterialLibrary["profiles"]>[number]): boolean {
-  const credentials = profile.creator_profile?.publishing?.platform_credentials ?? [];
-  return credentials.some(
-    (item) =>
-      item.enabled !== false &&
-      (item.adapter ?? "browser_agent") === "browser_agent" &&
-      PUBLISHABLE_CREDENTIAL_STATUSES.has(item.status),
-  );
-}
 
 function publicationAttemptStatusLabel(status: string) {
   if (status === "queued") return "已排队";
@@ -70,6 +58,12 @@ function buildPublicationPlatformOptions(
   return Object.fromEntries(entries);
 }
 
+function hasActivePublicationAttempt(attempts: PublicationAttempt[] | undefined): boolean {
+  return (attempts ?? []).some((attempt) =>
+    ["queued", "submitted", "processing", "scheduled_pending"].includes(String(attempt.status ?? "")),
+  );
+}
+
 type JobPublicationPanelProps = {
   job: Job;
   onCancel?: () => void;
@@ -83,7 +77,7 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
     enabled: job.status === "done",
   });
   const publicationProfiles = useMemo(
-    () => (avatarMaterials.data?.profiles ?? []).filter((profile) => hasActivePublicationCredential(profile)),
+    () => avatarMaterials.data?.profiles ?? [],
     [avatarMaterials.data?.profiles],
   );
   const [selectedPublicationProfileId, setSelectedPublicationProfileId] = useState("");
@@ -104,6 +98,7 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
     queryKey: publicationQueryKey,
     queryFn: () => api.getJobPublicationPlan(job.id, selectedPublicationProfileId || null),
     enabled: Boolean(job.id && job.status === "done"),
+    refetchInterval: (query) => (hasActivePublicationAttempt(query.state.data?.existing_attempts) ? 1_500 : false),
   });
 
   useEffect(() => {
@@ -140,7 +135,7 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
     <section className="form-stack">
       <div className="toolbar">
         <div>
-          <strong>发布到已登录凭据平台</strong>
+          <strong>发布到创作者卡片绑定平台</strong>
           <div className="muted compact-top">{job.source_name}</div>
         </div>
         <span className={`status-pill ${publicationPlan.data?.publish_ready ? "done" : "pending"}`}>
@@ -150,14 +145,14 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
 
       <div className="form-grid two-up compact-top">
         <label>
-          <span>创作者凭据</span>
+          <span>创作者卡片</span>
           <select
             className="input"
             value={selectedPublicationProfileId}
             onChange={(event) => setSelectedPublicationProfileId(event.target.value)}
             disabled={!publicationProfiles.length}
           >
-            {!publicationProfiles.length ? <option value="">没有可用发布凭据</option> : null}
+            {!publicationProfiles.length ? <option value="">没有创作者卡片</option> : null}
             {publicationProfiles.map((profile) => (
               <option key={profile.id} value={profile.id}>
                 {profile.display_name}

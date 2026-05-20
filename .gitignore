@@ -45,6 +45,7 @@ scripts/__pycache__/
 __pycache__/
 .artifacts/
 .codex-artifacts/
+.codex-run/
 .model-cache/
 .external-services/
 .superpowers/**/state/
@@ -60,4 +61,8 @@ tmp_*.py
 .tmp_*.py
 roughcut.db
 logs/*.env
+logs/model-route-benchmarks/
 watch/
+roughcut.ports.env
+frame_*.jpg
+data/intelligent_copy/

@@ -47,6 +47,9 @@ api          — FastAPI API + 生产环境静态托管 frontend/dist
 - 新需求直接重构，不为旧页面/旧配置保留兼容层
 - 优先保证结构收敛、代码可维护，再考虑迁移成本
 - 只有确认进入正式版后，才开始补兼容策略
+- 主逻辑合理、数据来源正确、职责边界清晰之后，才补失败用例和异常拦截；禁止用失败用例固化错误的生产路径
+
+项目级构建原则见 [Project Build Principles](docs/design/project-build-principles.md)。
 
 后台仍由 5 个长期进程推进任务，通过数据库协调状态：
 
@@ -165,7 +168,7 @@ pnpm docker:runtime:auto-up
 
 对应的服务访问地址默认为：
 
-- `http://127.0.0.1:38471/`
+- `http://127.0.0.1:${ROUGHCUT_API_PORT}/`，默认值在 `roughcut.ports.env` 中是 `38471`
 
 数字人相关服务现在默认走独立共享服务，不再依赖 RoughCut 内部 Docker：
 
@@ -181,6 +184,8 @@ pnpm docker:runtime:auto-up
 ```bash
 cp .env.example .env
 ```
+
+所有本机端口统一放在 `roughcut.ports.env`，包括 API、Vite、PostgreSQL、Redis、MinIO、本地 ASR/TTS/数字人服务和浏览器发布代理。`.env` 只放密钥、模型选择、路径、功能开关等运行配置；需要换端口时改 `roughcut.ports.env`，不要在脚本或页面里散落硬编码端口。
 
 最小配置（本地 Ollama + 本地 ASR 服务）：
 
@@ -239,6 +244,10 @@ TRANSCRIPTION_PROVIDER=openai
 TRANSCRIPTION_MODEL=gpt-4o-transcribe
 ```
 
+智能发布封面默认使用 Codex 内置 `image_gen` 工作流：系统会先用候选帧合成接触表识别高光帧，再为每个平台写出一份 `*.codex-imagegen.json` 请求清单和参考帧；请求未完成或生成失败时，该平台物料保持 `publish_ready=false`，不会生成可发布兜底封面。只有显式设置 `INTELLIGENT_COPY_COVER_IMAGE_BACKEND=openai_images_api` 时，才会走直接 OpenAI Images API 后端。
+
+Codex 图片请求完成后，用 `uv run python scripts/run_codex_imagegen_queue.py <smart-copy目录> --complete <请求json> --result <Codex生成图片>` 回填并标记完成；只有请求 JSON 状态为 `completed` 且输出文件存在，封面才会进入可发布状态。
+
 如果你希望 RoughCut 走 Codex / GPT-5 系列的工程型模型链路，当前 OpenAI Provider 已统一切到 `Responses API`，
 因此这条链路会同时覆盖：
 
@@ -295,8 +304,8 @@ pnpm dev
 
 默认：
 
-- Vite 开发地址 `http://127.0.0.1:5173`
-- FastAPI 地址 `http://127.0.0.1:8000`
+- Vite 开发地址 `http://127.0.0.1:${ROUGHCUT_FRONTEND_DEV_PORT}`，默认由 `roughcut.ports.env` 定义为 `5173`
+- FastAPI 地址 `http://127.0.0.1:${ROUGHCUT_API_PORT}`，默认由 `roughcut.ports.env` 定义为 `38471`
 
 如果只想启动单个进程：
 
@@ -333,7 +342,7 @@ pnpm dev:telegram-agent
 当 Telegram 收到未知命令，或直接收到“修复错误 / 结构优化 / 链路优化 / 扩展命令”这类自然语言工程请求时，agent 会自动尝试分流：
 
 - 优先走 ACP bridge
-- ACP 默认优先调用 Codex，并建议使用 `gpt-5.4-mini` 承担工程级任务；Claude 作为后备桥接后端
+- ACP 默认优先调用 Codex，并建议使用 `gpt-5.5` low reasoning 承担工程级任务；Claude 作为后备桥接后端
 - ACP/Codex prompt 会自动附带 RoughCut 项目规则和同 Telegram 会话的近期任务记忆，避免每次冷启动
 - `build` preset 会在独立 git worktree 中执行构建/测试，不污染主工作树
 - 如果是需要改代码的扩展类请求，会自动创建待确认任务
@@ -424,24 +433,24 @@ cp .env.example .env
 最低成本常驻（只起基础设施）：
 
 ```bash
-docker compose -f docker-compose.infra.yml up -d
+docker compose --env-file roughcut.ports.env -f docker-compose.infra.yml up -d
 ```
 
 推荐常驻（基础设施 + Docker runtime，默认 live source sync）：
 
 ```bash
-docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml -f docker-compose.dev.yml up -d --build
+docker compose --env-file roughcut.ports.env -f docker-compose.infra.yml -f docker-compose.runtime.yml -f docker-compose.dev.yml up -d --build
 ```
 
 全自动无人值守（再加 watcher，默认 live source sync）：
 
 ```bash
-docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml -f docker-compose.automation.yml -f docker-compose.dev.yml up -d --build
+docker compose --env-file roughcut.ports.env -f docker-compose.infra.yml -f docker-compose.runtime.yml -f docker-compose.automation.yml -f docker-compose.dev.yml up -d --build
 ```
 
 推荐常驻默认包含：
 
-- `api`：FastAPI + 内置静态面板，访问 `http://localhost:8000`
+- `api`：FastAPI + 内置静态面板，访问 `http://localhost:${ROUGHCUT_API_PORT}`；容器内部监听端口为 `ROUGHCUT_API_INTERNAL_PORT`
 - `orchestrator`
 - `worker-media`
 - `worker-llm`
@@ -456,9 +465,9 @@ docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml -f dock
 ### 3. 查看日志
 
 ```bash
-docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f api
-docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f orchestrator
-docker compose -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f worker-media
+docker compose --env-file roughcut.ports.env -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f api
+docker compose --env-file roughcut.ports.env -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f orchestrator
+docker compose --env-file roughcut.ports.env -f docker-compose.infra.yml -f docker-compose.runtime.yml logs -f worker-media
 ```
 
 ### 3.5 Docker 开发态自动同步 workspace 改动
@@ -557,7 +566,7 @@ host-side rebuild watch 方案和 Hydra 的差别是：
 ### 上传视频
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/jobs \
+curl -X POST "${ROUGHCUT_API_BASE:-http://localhost:38471/api/v1}/jobs" \
   -F "file=@video.mov"
 ```
 
@@ -566,7 +575,7 @@ curl -X POST http://localhost:8000/api/v1/jobs \
 ### 查询进度
 
 ```bash
-curl http://localhost:8000/api/v1/jobs/{job_id}
+curl "${ROUGHCUT_API_BASE:-http://localhost:38471/api/v1}/jobs/{job_id}"
 ```
 
 返回各步骤状态（pending / running / done / failed）。
@@ -574,25 +583,25 @@ curl http://localhost:8000/api/v1/jobs/{job_id}
 ### 下载成片
 
 ```bash
-curl http://localhost:8000/api/v1/jobs/{job_id}/download -o output.mp4
+curl "${ROUGHCUT_API_BASE:-http://localhost:38471/api/v1}/jobs/{job_id}/download" -o output.mp4
 ```
 
 ### 术语词表管理
 
 ```bash
 # 添加术语
-curl -X POST http://localhost:8000/api/v1/glossary \
+curl -X POST "${ROUGHCUT_API_BASE:-http://localhost:38471/api/v1}/glossary" \
   -H "Content-Type: application/json" \
   -d '{"wrong_forms": ["苹果手机", "爱疯"], "correct_form": "iPhone", "category": "brand"}'
 
 # 查询所有术语
-curl http://localhost:8000/api/v1/glossary
+curl "${ROUGHCUT_API_BASE:-http://localhost:38471/api/v1}/glossary"
 ```
 
 ### 审校报告
 
 ```bash
-curl http://localhost:8000/api/v1/jobs/{job_id}/report
+curl "${ROUGHCUT_API_BASE:-http://localhost:38471/api/v1}/jobs/{job_id}/report"
 ```
 
 ---
@@ -609,8 +618,9 @@ curl http://localhost:8000/api/v1/jobs/{job_id}/report
 | `RENDER_DEBUG_DIR` | `F:/roughcut_outputs/render-debug` | render 调试产物目录 |
 | `REASONING_PROVIDER` | `openai` | 推理后端：`openai` / `anthropic` / `minimax` / `ollama` |
 | `REASONING_MODEL` | `gpt-5.5` | 推理模型名称 |
-| `MULTIMODAL_FALLBACK_PROVIDER` | `ollama` | 主模型视觉失败时的本地备份 provider |
-| `MULTIMODAL_FALLBACK_MODEL` | `""` | 主模型视觉失败时的本地备份视觉模型（空 = 自动探测） |
+| `REASONING_EFFORT` | `low` | GPT 推理强度默认值 |
+| `MULTIMODAL_FALLBACK_PROVIDER` | `openai` | 主模型视觉失败时的备份 provider |
+| `MULTIMODAL_FALLBACK_MODEL` | `gpt-5.5` | 主模型视觉失败时的备份视觉/多模态模型 |
 | `SEARCH_PROVIDER` | `auto` | 搜索后端：优先主模型搜索桥接，失败回退本地搜索 |
 | `SEARCH_FALLBACK_PROVIDER` | `searxng` | 主模型搜索失败时的兜底搜索后端 |
 | `MODEL_SEARCH_HELPER` | `""` | 主模型搜索/MCP 的本地桥接命令，读取 `ROUGHCUT_SEARCH_QUERY` 环境变量；Codex CLI 可用 `python scripts/codex_model_search_helper.py` |
@@ -661,7 +671,7 @@ ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND=codex
 TELEGRAM_AGENT_CLAUDE_MODEL=opus
 ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL=opus
 ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND=codex
-ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.4-mini
+ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.5
 ```
 
 如果要让内置 ACP bridge 改走 Codex，可以改成：
@@ -670,17 +680,22 @@ ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.4-mini
 TELEGRAM_AGENT_ACP_COMMAND=uv run python scripts/acp_bridge.py
 ROUGHCUT_ACP_BRIDGE_BACKEND=codex
 ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND=codex
-ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.4-mini
+ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.5
 ```
 
 如果不显式配置 `TELEGRAM_AGENT_ACP_COMMAND`，Telegram agent 也会默认回退到仓库内置的 `scripts/acp_bridge.py`。
-当前推荐链路是：ACP 主走 Claude Code `opus`，失败时自动 fallback 到 Codex `gpt-5.4-mini`。
+当前推荐链路是：ACP 主走 Claude Code `opus`，失败时自动 fallback 到 Codex `gpt-5.5` low reasoning。
 | `AUTO_CONFIRM_CONTENT_PROFILE` | `true` | 高置信度内容摘要自动确认，避免任务卡在人工核对 |
 | `CONTENT_PROFILE_REVIEW_THRESHOLD` | `0.72` | 内容摘要自动确认阈值，范围 `0.0` 到 `1.0` |
 | `AUTO_ACCEPT_GLOSSARY_CORRECTIONS` | `true` | 高置信度术语纠错自动接受，只保留风险项待确认 |
 | `GLOSSARY_CORRECTION_REVIEW_THRESHOLD` | `0.9` | 术语纠错自动接受阈值，范围 `0.0` 到 `1.0` |
 | `AUTO_SELECT_COVER_VARIANT` | `true` | 自动选择首选封面，默认只在候选分差接近时提醒确认 |
 | `COVER_SELECTION_REVIEW_GAP` | `0.08` | 首选封面与次优封面的最小安全分差，范围 `0.0` 到 `1.0` |
+| `INTELLIGENT_COPY_COVER_IMAGE_GENERATION_ENABLED` | `true` | 智能发布封面必须完成图像生成；未完成时物料不可发布，不生成兜底封面 |
+| `INTELLIGENT_COPY_COVER_IMAGE_BACKEND` | `codex_builtin` | 封面图像后端；默认是 Codex 内置 imagegen 请求清单，显式设为 `openai_images_api` 才走直接 Images API 后端 |
+| `INTELLIGENT_COPY_COVER_IMAGE_MODEL` | `image2` | 直接 Images API 后端使用的图像编辑模型；Codex 内置路径不依赖这个 API 参数 |
+| `INTELLIGENT_COPY_COVER_IMAGE_QUALITY` | `medium` | 直接 Images API 后端使用的图像编辑质量 |
+| `INTELLIGENT_COPY_COVER_IMAGE_TIMEOUT_SEC` | `90` | 智能发布单张封面图像编辑超时（秒） |
 | `PACKAGING_ASSET_DIR` | `assets/packaging` | 包装素材持久目录；不要放在输出目录，避免清理成片时误删 BGM/水印/片头片尾 |
 | `PACKAGING_ASSET_STORAGE_BACKEND` | `local` | 包装素材后端，当前为本地目录；预留给后续 OSS 热切换 |
 | `PACKAGING_SELECTION_REVIEW_GAP` | `0.08` | BGM/插入素材首选与次优的最小安全分差，过近时建议确认 |

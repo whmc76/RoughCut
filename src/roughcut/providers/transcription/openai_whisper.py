@@ -17,7 +17,7 @@ from roughcut.providers.transcription.base import (
 
 
 class OpenAIWhisperProvider(TranscriptionProvider):
-    def __init__(self) -> None:
+    def __init__(self, model_name: str | None = None) -> None:
         settings = get_settings()
         self._client = openai.AsyncOpenAI(
             api_key=resolve_credential(
@@ -28,7 +28,7 @@ class OpenAIWhisperProvider(TranscriptionProvider):
             ),
             base_url=settings.openai_base_url.rstrip("/"),
         )
-        self._model = settings.transcription_model
+        self._model = str(model_name or settings.transcription_model or "gpt-4o-transcribe").strip()
 
     async def transcribe(
         self,

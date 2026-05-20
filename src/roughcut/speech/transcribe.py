@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.db.models import Artifact, FactClaim, JobStep, SubtitleCorrection, SubtitleItem, TranscriptSegment
 from roughcut.config import get_settings
+from roughcut.media.subtitle_spans import subtitle_display_unit_key, subtitle_display_units
+from roughcut.media.subtitle_text import normalize_editable_subtitle_text, normalize_flashlight_model_alias_text
 from roughcut.providers.factory import get_transcription_provider, resolve_transcription_provider_plan
 from roughcut.providers.transcription.base import TranscriptResult, TranscriptSegment as ProviderTranscriptSegment, TranscriptionProgressCallback, WordTiming
 from roughcut.providers.transcription.chunking import extract_chunking_summary
@@ -70,6 +72,16 @@ _FLASHLIGHT_EDC_ALT_SEQUENCE_RE = re.compile(
     re.IGNORECASE,
 )
 _KNIFE_MATERIAL_SURFACE_MISHEARD_RE = re.compile(r"钢瓦|盖瓦|锆瓦|(?:钢马|锆马).{0,16}泛光")
+_LOCAL_ASR_PROVIDER = "local_http_asr"
+_ASR_FUNCTION_STUTTER_RE = re.compile(
+    r"(?P<char>[啊呃嗯哦哎诶呀呢嘛吧吗还就也都又再没不很太是的了个这那我你他她它给把])(?P=char)"
+    r"(?=[\u4e00-\u9fff，,。！？!?、])"
+)
+_ASR_PREFIX_STUTTER_RE = re.compile(r"(?P<char>[\u4e00-\u9fff])(?P=char)(?=[\u4e00-\u9fff])")
+_ASR_REPEAT_ALLOWED_CHARS = frozenset(
+    "试看想听说讲问找拿用摸擦敲聊闻尝轻慢快小大多少点微静悄渐晃摇拉推按翻搓揉洗刷切削划扫"
+)
+_ASR_REPEAT_ALLOWED_PREFIXES = frozenset(("开开箱", "一点点"))
 
 
 def _is_brand_like_term(term: dict) -> bool:
@@ -155,7 +167,10 @@ def _filter_tail_cta_noise_segments(result: TranscriptResult) -> list[dict[str, 
 
 
 def _normalize_semantic_contamination_text(text: str, *, category_scope: str) -> str:
-    return str(text or "").strip()
+    normalized = str(text or "").strip()
+    if str(category_scope or "").strip().lower() == "flashlight":
+        normalized = normalize_flashlight_model_alias_text(normalized)
+    return normalized
 
 
 def _collapse_flashlight_edc_alt_lists(text: str) -> str:
@@ -181,6 +196,131 @@ def _normalize_knife_material_surface_text(text: str) -> str:
     return cleaned
 
 
+def _append_quality_fallbacks(provider_plan: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    expanded: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for provider, model in provider_plan:
+        item = (provider, model)
+        if item not in seen:
+            expanded.append(item)
+            seen.add(item)
+    return expanded
+
+
+def _result_quality_text_units(result: TranscriptResult) -> list[tuple[str, str]]:
+    raw_payload = result.raw_payload if isinstance(result.raw_payload, dict) else {}
+    chunks = raw_payload.get("chunks")
+    units: list[tuple[str, str]] = []
+    if isinstance(chunks, list):
+        for index, chunk in enumerate(chunks):
+            if not isinstance(chunk, dict):
+                continue
+            text = str(chunk.get("text") or chunk.get("raw_text") or "").strip()
+            if text:
+                units.append((f"chunk:{index}", text))
+    if units:
+        return units
+
+    for index, seg in enumerate(result.raw_segments or result.segments or []):
+        text = str(getattr(seg, "raw_text", None) or getattr(seg, "text", "") or "").strip()
+        if text:
+            units.append((f"segment:{index}", text))
+    return units
+
+
+def _find_suspicious_asr_duplicate_samples(text: str, *, sample_limit: int = 4) -> list[str]:
+    compact = re.sub(r"\s+", "", str(text or ""))
+    if not compact:
+        return []
+
+    samples: list[str] = []
+    seen_spans: set[tuple[int, int]] = set()
+
+    def add_sample(start: int, end: int) -> None:
+        if len(samples) >= sample_limit:
+            return
+        span = (start, end)
+        if span in seen_spans:
+            return
+        seen_spans.add(span)
+        samples.append(compact[max(0, start - 6): min(len(compact), end + 10)])
+
+    for match in _ASR_FUNCTION_STUTTER_RE.finditer(compact):
+        add_sample(match.start(), match.end())
+
+    for match in _ASR_PREFIX_STUTTER_RE.finditer(compact):
+        char = match.group("char")
+        prefix = compact[match.start(): match.start() + 3]
+        if char in _ASR_REPEAT_ALLOWED_CHARS or prefix in _ASR_REPEAT_ALLOWED_PREFIXES:
+            continue
+        add_sample(match.start(), match.end())
+
+    return samples
+
+
+def analyze_transcript_asr_quality(result: TranscriptResult) -> dict[str, Any]:
+    units = _result_quality_text_units(result)
+    affected_units: list[dict[str, Any]] = []
+    suspicious_duplicate_count = 0
+    for unit_id, text in units:
+        samples = _find_suspicious_asr_duplicate_samples(text)
+        if not samples:
+            continue
+        suspicious_duplicate_count += len(samples)
+        affected_units.append({"unit": unit_id, "samples": samples})
+
+    unit_count = len(units)
+    affected_count = len(affected_units)
+    affected_ratio = affected_count / unit_count if unit_count else 0.0
+    rejected = (
+        suspicious_duplicate_count >= 3
+        or affected_count >= 3
+        or (affected_count >= 2 and affected_ratio >= 0.05)
+    )
+    return {
+        "rejected": rejected,
+        "reason": "suspicious_adjacent_cjk_duplicates",
+        "unit_count": unit_count,
+        "affected_unit_count": affected_count,
+        "affected_unit_ratio": round(affected_ratio, 4),
+        "suspicious_duplicate_count": suspicious_duplicate_count,
+        "affected_units": affected_units[:8],
+    }
+
+
+def _should_reject_transcription_result(provider_name: str, result: TranscriptResult) -> dict[str, Any] | None:
+    provider = str(provider_name or result.provider or "").strip().lower()
+    if provider != _LOCAL_ASR_PROVIDER:
+        return None
+    model = str(result.model or "").strip().lower()
+    if "qwen3-asr" not in model:
+        return None
+    analysis = analyze_transcript_asr_quality(result)
+    if not analysis["rejected"]:
+        return None
+    return analysis
+
+
+def _summarize_asr_quality_rejection(analysis: dict[str, Any]) -> str:
+    samples: list[str] = []
+    for unit in analysis.get("affected_units") or []:
+        if not isinstance(unit, dict):
+            continue
+        for sample in unit.get("samples") or []:
+            samples.append(str(sample))
+            if len(samples) >= 3:
+                break
+        if len(samples) >= 3:
+            break
+    sample_text = " | ".join(samples)
+    return (
+        "asr_quality_gate: rejected suspicious local_http_asr output "
+        f"({analysis.get('suspicious_duplicate_count', 0)} duplicate findings across "
+        f"{analysis.get('affected_unit_count', 0)}/{analysis.get('unit_count', 0)} units"
+        f"{'; samples=' + sample_text if sample_text else ''})"
+    )
+
+
 async def execute_transcription_plan(
     *,
     audio_path: Path,
@@ -190,15 +330,44 @@ async def execute_transcription_plan(
     progress_callback: TranscriptionProgressCallback | None = None,
 ) -> tuple[TranscriptResult, str, str, list[dict[str, str]]]:
     attempt_errors: list[dict[str, str]] = []
-    for provider_name, model_name in provider_plan:
+    expanded_provider_plan = _append_quality_fallbacks(provider_plan)
+    rejected_attempts: list[dict[str, Any]] = []
+    for provider_name, model_name in expanded_provider_plan:
         try:
-            provider = get_transcription_provider(provider=provider_name, model=model_name)
+            provider = get_transcription_provider(
+                provider=provider_name,
+                model=model_name,
+                allow_explicit_provider=provider_name != _LOCAL_ASR_PROVIDER,
+            )
             result = await provider.transcribe(
                 audio_path,
                 language=language,
                 prompt=prompt,
                 progress_callback=progress_callback,
             )
+            rejection = _should_reject_transcription_result(provider_name, result)
+            if rejection is not None:
+                rejected_attempts.append(
+                    {
+                        "provider": provider_name,
+                        "model": model_name,
+                        "analysis": rejection,
+                    }
+                )
+                attempt_errors.append(
+                    {
+                        "provider": provider_name,
+                        "model": model_name,
+                        "error": _summarize_asr_quality_rejection(rejection),
+                    }
+                )
+                continue
+            if rejected_attempts:
+                result.raw_payload = dict(result.raw_payload or {})
+                result.raw_payload["_roughcut_asr_quality_gate"] = {
+                    "fallback_selected": {"provider": provider_name, "model": model_name},
+                    "rejected_attempts": rejected_attempts,
+                }
             return result, provider_name, model_name, attempt_errors
         except Exception as exc:
             attempt_errors.append(
@@ -453,10 +622,131 @@ def _normalize_transcript_result(
         text = str(seg.text or "").strip()
         if not text:
             continue
-        seg.text = text
+        normalized_text = _normalize_semantic_contamination_text(
+            normalize_editable_subtitle_text(text),
+            category_scope=category_scope,
+        )
+        if normalized_text != text:
+            normalization_payload = dict(seg.raw_payload or {})
+            roughcut_normalization = dict(normalization_payload.get("_roughcut_asr_normalization") or {})
+            roughcut_normalization.update(
+                {
+                    "original_text": text,
+                    "normalized_text": normalized_text,
+                    "stage": "transcribe.normalize",
+                }
+            )
+            normalization_payload["_roughcut_asr_normalization"] = roughcut_normalization
+            seg.raw_payload = normalization_payload
+        seg.text = normalized_text
+        seg.words = _normalize_segment_word_timings_for_text(seg, normalized_text=normalized_text)
     normalized.segments = [seg for seg in normalized.segments if str(seg.text or "").strip()]
     _filter_tail_cta_noise_segments(normalized)
     return enhance_transcript_alignment(normalized, settings=alignment_settings)
+
+
+def _normalize_segment_word_timings_for_text(
+    seg: ProviderTranscriptSegment,
+    *,
+    normalized_text: str,
+) -> list[WordTiming]:
+    canonical_units = subtitle_display_units(normalized_text)
+    if not canonical_units or not seg.words:
+        return list(seg.words or [])
+
+    raw_units: list[dict[str, Any]] = []
+    for word in seg.words:
+        units = subtitle_display_units(word.word)
+        if not units:
+            continue
+        try:
+            start = float(word.start)
+            end = float(word.end)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        duration = end - start
+        for offset, unit in enumerate(units):
+            raw_units.append(
+                {
+                    "text": unit,
+                    "key": subtitle_display_unit_key(unit),
+                    "start": start + duration * (offset / len(units)),
+                    "end": start + duration * ((offset + 1) / len(units)),
+                    "word": word,
+                }
+            )
+    if not raw_units:
+        return list(seg.words or [])
+
+    pairs = _lcs_index_pairs(
+        [subtitle_display_unit_key(unit) for unit in canonical_units],
+        [str(unit["key"]) for unit in raw_units],
+    )
+    matched_by_canonical = {canonical_index: raw_index for canonical_index, raw_index in pairs}
+    previous_end = float(raw_units[0]["start"])
+    normalized_words: list[WordTiming] = []
+    for canonical_index, unit in enumerate(canonical_units):
+        raw_index = matched_by_canonical.get(canonical_index)
+        raw_unit = raw_units[raw_index] if raw_index is not None else None
+        raw_word = raw_unit.get("word") if raw_unit else None
+        start = float(raw_unit["start"]) if raw_unit else previous_end
+        end = float(raw_unit["end"]) if raw_unit else max(start + 0.001, previous_end)
+        previous_end = max(previous_end, end)
+        raw_payload = dict(getattr(raw_word, "raw_payload", None) or {})
+        raw_payload["_roughcut_asr_normalization"] = {
+            "original_word": getattr(raw_word, "word", None),
+            "normalized_word": unit,
+            "stage": "transcribe.words.normalize",
+            "matched": raw_unit is not None,
+        }
+        normalized_words.append(
+            WordTiming(
+                word=unit,
+                start=round(start, 3),
+                end=round(end, 3),
+                provider=getattr(raw_word, "provider", None),
+                model=getattr(raw_word, "model", None),
+                raw_payload=raw_payload,
+                raw_text=getattr(raw_word, "raw_text", None) or getattr(raw_word, "word", None),
+                context=getattr(raw_word, "context", None),
+                hotword=getattr(raw_word, "hotword", None),
+                confidence=getattr(raw_word, "confidence", None),
+                logprob=getattr(raw_word, "logprob", None),
+                alignment=getattr(raw_word, "alignment", None),
+            )
+        )
+    return normalized_words
+
+
+def _lcs_index_pairs(left: list[str], right: list[str]) -> list[tuple[int, int]]:
+    if not left or not right:
+        return []
+    rows = len(left) + 1
+    cols = len(right) + 1
+    table = [[0] * cols for _ in range(rows)]
+    for row in range(1, rows):
+        for col in range(1, cols):
+            table[row][col] = (
+                table[row - 1][col - 1] + 1
+                if left[row - 1] == right[col - 1]
+                else max(table[row - 1][col], table[row][col - 1])
+            )
+    pairs: list[tuple[int, int]] = []
+    row = len(left)
+    col = len(right)
+    while row > 0 and col > 0:
+        if left[row - 1] == right[col - 1]:
+            pairs.append((row - 1, col - 1))
+            row -= 1
+            col -= 1
+        elif table[row - 1][col] >= table[row][col - 1]:
+            row -= 1
+        else:
+            col -= 1
+    pairs.reverse()
+    return pairs
 
 
 def _serialize_word_timing(word: WordTiming) -> dict[str, object]:

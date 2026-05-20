@@ -3,6 +3,9 @@ from __future__ import annotations
 import os
 
 from roughcut.config import (
+    DEFAULT_TRANSCRIPTION_MODELS,
+    TRANSCRIPTION_MODEL_OPTIONS,
+    canonicalize_transcription_provider_name,
     get_settings,
     has_distinct_backup_llm_route,
     llm_backup_route,
@@ -98,12 +101,25 @@ def resolve_transcription_provider_plan(*, provider: str, model: str) -> list[tu
     return _resolve_plan(provider, model)
 
 
-def get_transcription_provider(*, provider: str | None = None, model: str | None = None) -> TranscriptionProvider:
+def get_transcription_provider(
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+    allow_explicit_provider: bool = False,
+) -> TranscriptionProvider:
     settings = get_settings()
-    provider, model = normalize_transcription_settings(
-        provider or settings.transcription_provider,
-        model or settings.transcription_model,
-    )
+    if allow_explicit_provider:
+        provider = canonicalize_transcription_provider_name(provider or settings.transcription_provider)
+        if provider not in TRANSCRIPTION_MODEL_OPTIONS:
+            raise ValueError(f"Unknown transcription provider: {provider}")
+        model = str(model or "").strip()
+        if model not in TRANSCRIPTION_MODEL_OPTIONS[provider]:
+            model = DEFAULT_TRANSCRIPTION_MODELS[provider]
+    else:
+        provider, model = normalize_transcription_settings(
+            provider or settings.transcription_provider,
+            model or settings.transcription_model,
+        )
     cache_key = (provider, model)
     cached = _TRANSCRIPTION_PROVIDER_CACHE.get(cache_key)
     if cached is not None:
@@ -112,7 +128,7 @@ def get_transcription_provider(*, provider: str | None = None, model: str | None
     if provider == "openai":
         from roughcut.providers.transcription.openai_whisper import OpenAIWhisperProvider
 
-        instance = OpenAIWhisperProvider()
+        instance = OpenAIWhisperProvider(model_name=model)
     elif provider == "funasr":
         from roughcut.providers.transcription.funasr_provider import FunASRProvider
 

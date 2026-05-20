@@ -201,18 +201,6 @@ def normalize_subtitle_items_for_timeline_projection(items: list[dict[str, Any]]
         alignment = alignments[index]
         projection_units = subtitle_display_units(alignment.text)
         if alignment.units and alignment.matched_ratio >= 0.35:
-            first_key = alignment.units[0].key
-            last_key = alignment.units[-1].key
-            display_keys = [subtitle_display_unit_key(char) for char in projection_units]
-            try:
-                first_matched = display_keys.index(first_key)
-            except ValueError:
-                first_matched = 0
-            try:
-                last_matched = len(display_keys) - 1 - list(reversed(display_keys)).index(last_key)
-            except ValueError:
-                last_matched = len(display_keys) - 1
-
             trim_start = _boundary_trim_prefix_units(
                 alignment.unmatched_prefix,
                 alignments[index - 1] if index > 0 else None,

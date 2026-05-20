@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import logging
 import os
 import re
@@ -125,7 +124,7 @@ from roughcut.review.content_profile_memory import (
     load_content_profile_user_memory,
     record_content_profile_feedback_memory,
 )
-from roughcut.review.hotword_learning import upsert_learned_hotword
+from roughcut.review.hotword_learning import load_learned_hotwords, upsert_learned_hotword
 from roughcut.review.downstream_context import build_downstream_context, resolve_downstream_profile
 from roughcut.review.final_review_rerun import (
     build_final_review_rerun_plans,
@@ -144,7 +143,7 @@ from roughcut.review.content_profile_review_stats import (
     summarize_content_profile_review_stats,
     record_content_profile_manual_review,
 )
-from roughcut.review.domain_glossaries import detect_glossary_domains
+from roughcut.review.domain_glossaries import detect_glossary_domains, resolve_builtin_glossary_terms
 from roughcut.review.subtitle_memory import build_subtitle_review_memory
 from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
 from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
@@ -390,6 +389,7 @@ class ManualEditorSubtitleOut(BaseModel):
     text_raw: str | None = None
     text_norm: str | None = None
     text_final: str | None = None
+    transcript_text: str | None = None
     words: list[ManualEditorWordOut] = Field(default_factory=list)
     alignment_tokens: list[ManualEditorSubtitleSpanTokenOut] = Field(default_factory=list)
     alignment_diagnostics: dict[str, Any] | None = None
@@ -1614,6 +1614,7 @@ def _manual_editor_silence_payload(segment: dict[str, Any], *, source: str = "au
 
 
 _MANUAL_EDITOR_SMART_DELETE_REASONS = {
+    "rollback_instruction",
     "restart_retake",
     "restart_cue",
     "low_signal_subtitle",
@@ -1624,6 +1625,7 @@ _MANUAL_EDITOR_FRONTEND_MANAGED_AUTO_CUT_REASONS = {
     "silence",
     "filler_word",
     "repeated_speech",
+    "rollback_instruction",
     "restart_retake",
     "restart_cue",
     "low_signal_subtitle",
@@ -1631,6 +1633,7 @@ _MANUAL_EDITOR_FRONTEND_MANAGED_AUTO_CUT_REASONS = {
 }
 
 _MANUAL_EDITOR_SMART_DELETE_REASON_LABELS = {
+    "rollback_instruction": "口播指令回删前段",
     "restart_retake": "疑似重录废片",
     "restart_cue": "明确重来/口误提示",
     "low_signal_subtitle": "低信息字幕废片",
@@ -1877,7 +1880,7 @@ def _manual_editor_projection_entries_use_canonical(entries: list[dict[str, Any]
     return any(str(item.get("projection_source") or "") == "canonical_transcript" for item in entries)
 
 
-def _manual_editor_word_payload(item: dict[str, Any]) -> ManualEditorWordOut | None:
+def _manual_editor_word_payload(item: dict[str, Any], *, prefer_raw_text: bool = False) -> ManualEditorWordOut | None:
     try:
         start = max(0.0, float(item.get("start", 0.0) or 0.0))
         end = max(start, float(item.get("end", start) or start))
@@ -1885,7 +1888,11 @@ def _manual_editor_word_payload(item: dict[str, Any]) -> ManualEditorWordOut | N
         return None
     if end <= start:
         return None
-    word = str(item.get("word") or item.get("raw_text") or item.get("text") or "").strip()
+    word = (
+        str(item.get("raw_text") or item.get("word") or item.get("text") or "").strip()
+        if prefer_raw_text
+        else str(item.get("word") or item.get("raw_text") or item.get("text") or "").strip()
+    )
     if not word:
         return None
     confidence = item.get("confidence")
@@ -1910,7 +1917,13 @@ def _manual_editor_word_payload(item: dict[str, Any]) -> ManualEditorWordOut | N
     )
 
 
-async def _load_manual_editor_word_payloads(session: AsyncSession, *, job_id: uuid.UUID) -> list[dict[str, Any]]:
+async def _load_manual_editor_word_payloads(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+    prefer_raw_text: bool = False,
+    normalize_to_text: bool = True,
+) -> list[dict[str, Any]]:
     result = await session.execute(
         select(TranscriptSegment)
         .where(TranscriptSegment.job_id == job_id)
@@ -1928,11 +1941,15 @@ async def _load_manual_editor_word_payloads(session: AsyncSession, *, job_id: uu
         for word in list(row.words_json or []):
             if not isinstance(word, dict):
                 continue
-            payload = _manual_editor_word_payload(word)
+            payload = _manual_editor_word_payload(word, prefer_raw_text=prefer_raw_text)
             if payload is None:
                 continue
             row_words.append(payload.model_dump())
-        words.extend(_manual_editor_normalize_word_payloads_for_text(row_words, row.text))
+        words.extend(
+            _manual_editor_normalize_word_payloads_for_text(row_words, row.text)
+            if normalize_to_text
+            else row_words
+        )
     words.sort(key=lambda item: (float(item.get("start", 0.0) or 0.0), float(item.get("end", 0.0) or 0.0)))
     return words
 
@@ -2324,10 +2341,92 @@ def _manual_editor_compact_text_key(text: Any) -> str:
     return re.sub(r"[\s，。！？!?；;：:,、（）()\[\]【】{}\"'《》<>]+", "", normalize_editable_subtitle_text(text))
 
 
+def _manual_editor_text_is_subsequence(needle: str, haystack: str) -> bool:
+    if not needle:
+        return True
+    if not haystack:
+        return False
+    cursor = 0
+    for char in haystack:
+        if char == needle[cursor]:
+            cursor += 1
+            if cursor >= len(needle):
+                return True
+    return False
+
+
+_MANUAL_EDITOR_REVEALABLE_ASR_FILLER_CHARS = frozenset("啊呃额嗯哎唉诶欸吧呀嘛呢哦喔哈")
+
+
+def _manual_editor_subsequence_extra_text(needle: str, haystack: str) -> str:
+    if not needle:
+        return haystack
+    cursor = 0
+    extras: list[str] = []
+    for char in haystack:
+        if cursor < len(needle) and char == needle[cursor]:
+            cursor += 1
+        else:
+            extras.append(char)
+    return "".join(extras) if cursor >= len(needle) else ""
+
+
+def _manual_editor_should_reveal_asr_source_text(current_text: Any, asr_text: Any) -> bool:
+    current_key = _manual_editor_compact_text_key(current_text)
+    asr_key = _manual_editor_compact_text_key(asr_text)
+    if not asr_key or asr_key == current_key:
+        return False
+    if not current_key:
+        return True
+    if not _manual_editor_text_is_subsequence(current_key, asr_key):
+        return False
+    extra_chars = len(asr_key) - len(current_key)
+    if extra_chars <= 0:
+        return False
+    extra_text = _manual_editor_subsequence_extra_text(current_key, asr_key)
+    if not extra_text:
+        return False
+    filler_extra_count = sum(1 for char in extra_text if char in _MANUAL_EDITOR_REVEALABLE_ASR_FILLER_CHARS)
+    if filler_extra_count <= 0:
+        return False
+    return filler_extra_count / max(1, len(extra_text)) >= 0.6 and (
+        extra_chars <= 12 or len(current_key) / max(1, len(asr_key)) >= 0.72
+    )
+
+
 _MANUAL_EDITOR_FLASHLIGHT_CONTEXT_RE = re.compile(
     r"EDC(?:17|23|37)|NITECORE|奈特科尔|手电|电筒|流明|尾按|泛光|聚光",
     re.IGNORECASE,
 )
+_MANUAL_EDITOR_HOTWORD_CONTEXT_PROFILE_FIELDS = (
+    "subject_domain",
+    "subject_brand",
+    "subject_model",
+    "subject_type",
+    "content_subject",
+    "video_theme",
+    "summary",
+    "hook_line",
+    "visible_text",
+)
+_MANUAL_EDITOR_GENERIC_HOTWORD_WRONG_FORMS = frozenset(
+    {
+        "这个",
+        "那个",
+        "今天",
+        "我们",
+        "大家",
+        "然后",
+        "就是",
+        "可以",
+        "还是",
+        "感觉",
+    }
+)
+_MANUAL_EDITOR_ASR_TRANSCRIPT_NOISE_MARKER_RE = re.compile(
+    r"(?i)(?:<\|?\s*(?:nospeech|no[_\s-]?speech|silence|music|noise|sounds?|background[_\s-]?noise|environmental[_\s-]?sounds?)\s*\|?>|[♪♫]+)"
+)
+_MANUAL_EDITOR_LATIN_TOKEN_RE = re.compile(r"[A-Za-z0-9]")
 
 
 def _manual_editor_apply_source_text_corrections(text: Any, *, context_text: str = "") -> str:
@@ -2337,6 +2436,233 @@ def _manual_editor_apply_source_text_corrections(text: Any, *, context_text: str
     normalized = normalize_contextual_noc_alias_text(normalized, context_text=context_text)
     if _MANUAL_EDITOR_FLASHLIGHT_CONTEXT_RE.search(f"{context_text}\n{normalized}"):
         normalized = normalize_flashlight_model_alias_text(normalized)
+    return normalized
+
+
+def _manual_editor_normalize_asr_transcript_text(text: Any) -> str:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return ""
+    normalized = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", normalized)
+    normalized = _MANUAL_EDITOR_ASR_TRANSCRIPT_NOISE_MARKER_RE.sub("", normalized)
+    normalized = re.sub(r"([\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", r"\1", normalized)
+    normalized = re.sub(r"([，。！？、：；,.!?])\1+", r"\1", normalized)
+    return re.sub(r"\s{2,}", " ", normalized).strip()
+
+
+def _manual_editor_hotword_context_text(job: Job | None, content_profile: dict[str, Any] | None) -> str:
+    parts: list[str] = [str(getattr(job, "source_name", "") or "")]
+    profile = content_profile if isinstance(content_profile, dict) else {}
+    for field in _MANUAL_EDITOR_HOTWORD_CONTEXT_PROFILE_FIELDS:
+        value = profile.get(field)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    for field in ("search_queries", "keywords"):
+        values = profile.get(field)
+        if isinstance(values, list):
+            parts.extend(str(item).strip() for item in values if str(item or "").strip())
+    prior = profile.get("transcription_context_prior")
+    if isinstance(prior, dict):
+        for value in prior.values():
+            if isinstance(value, str) and value.strip():
+                parts.append(value.strip())
+            elif isinstance(value, list):
+                parts.extend(str(item).strip() for item in value if str(item or "").strip())
+    return "\n".join(part for part in parts if part)
+
+
+def _manual_editor_profile_has_vertical_glossary_evidence(content_profile: dict[str, Any] | None) -> bool:
+    if not isinstance(content_profile, dict) or not content_profile:
+        return False
+    if not str(content_profile.get("subject_domain") or "").strip():
+        return False
+    for field in ("subject_brand", "subject_model", "subject_type", "content_subject", "video_theme", "summary", "hook_line"):
+        value = str(content_profile.get(field) or "").strip()
+        if len(value) >= 2:
+            return True
+    for field in ("search_queries", "keywords"):
+        values = content_profile.get(field)
+        if isinstance(values, list) and any(len(str(item or "").strip()) >= 2 for item in values):
+            return True
+    confirmation = content_profile.get("topic_fact_confirmation")
+    if isinstance(confirmation, dict) and confirmation.get("subject"):
+        return True
+    return False
+
+
+def _manual_editor_normalize_hotword_form(value: Any, *, max_length: int = 80) -> str:
+    text = _manual_editor_normalize_asr_transcript_text(value)
+    return " ".join(text.split())[:max_length]
+
+
+def _manual_editor_hotword_replacement_allowed(wrong: str, correct: str) -> bool:
+    wrong = _manual_editor_normalize_hotword_form(wrong, max_length=80)
+    correct = _manual_editor_normalize_hotword_form(correct, max_length=80)
+    if not wrong or not correct or wrong == correct:
+        return False
+    if wrong.casefold() == correct.casefold():
+        return bool(_MANUAL_EDITOR_LATIN_TOKEN_RE.search(correct)) and wrong != correct
+    if wrong in _MANUAL_EDITOR_GENERIC_HOTWORD_WRONG_FORMS:
+        return False
+    if len(wrong) < 2:
+        return False
+    if model_numbers_conflict(wrong, correct):
+        return False
+    return bool(re.search(r"[A-Za-z0-9\u4e00-\u9fff]", wrong + correct))
+
+
+def _manual_editor_add_hotword_replacement(
+    pairs: list[tuple[str, str]],
+    seen: set[tuple[str, str]],
+    *,
+    wrong: Any,
+    correct: Any,
+) -> None:
+    wrong_text = _manual_editor_normalize_hotword_form(wrong, max_length=80)
+    correct_text = _manual_editor_normalize_hotword_form(correct, max_length=80)
+    if not _manual_editor_hotword_replacement_allowed(wrong_text, correct_text):
+        return
+    key = (wrong_text.casefold(), correct_text.casefold())
+    if key in seen:
+        return
+    seen.add(key)
+    pairs.append((wrong_text, correct_text))
+
+
+def _manual_editor_hotword_replacements_from_terms(terms: list[dict[str, Any]] | None) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for term in terms or []:
+        if not isinstance(term, dict):
+            continue
+        correct = term.get("correct_form") or term.get("canonical_form") or term.get("term")
+        for wrong in list(term.get("wrong_forms") or []) + list(term.get("aliases") or []):
+            _manual_editor_add_hotword_replacement(pairs, seen, wrong=wrong, correct=correct)
+        raw_term = term.get("term")
+        if raw_term and raw_term != correct:
+            _manual_editor_add_hotword_replacement(pairs, seen, wrong=raw_term, correct=correct)
+    pairs.sort(key=lambda item: (-len(_manual_editor_compact_text_key(item[0])), -len(item[0]), item[0]))
+    return pairs
+
+
+def _manual_editor_content_profile_hotword_terms(content_profile: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(content_profile, dict):
+        return []
+    identity_review = content_profile.get("identity_review")
+    evidence_bundle = identity_review.get("evidence_bundle") if isinstance(identity_review, dict) else None
+    matched_aliases = evidence_bundle.get("matched_glossary_aliases") if isinstance(evidence_bundle, dict) else None
+    matched_aliases = matched_aliases if isinstance(matched_aliases, dict) else {}
+    field_specs = (
+        ("subject_brand", "brand"),
+        ("subject_model", "model"),
+    )
+    terms: list[dict[str, Any]] = []
+    for field_name, alias_key in field_specs:
+        canonical = _manual_editor_normalize_hotword_form(content_profile.get(field_name), max_length=64)
+        if not canonical:
+            continue
+        aliases: list[str] = []
+        for value in matched_aliases.get(alias_key) or []:
+            alias = _manual_editor_normalize_hotword_form(value, max_length=64)
+            if alias:
+                aliases.append(alias)
+        for key in (f"{field_name}_aliases", f"{alias_key}_aliases"):
+            values = content_profile.get(key)
+            if isinstance(values, list):
+                aliases.extend(_manual_editor_normalize_hotword_form(value, max_length=64) for value in values)
+        aliases = [alias for alias in aliases if alias and alias != canonical]
+        if aliases:
+            terms.append({"correct_form": canonical, "wrong_forms": aliases, "category": field_name, "source": "content_profile"})
+    return terms
+
+
+async def _load_manual_editor_persisted_glossary_terms(
+    session: AsyncSession,
+    *,
+    domains: list[str],
+) -> list[dict[str, Any]]:
+    domain_set = {str(domain or "").strip() for domain in domains if str(domain or "").strip()}
+    if not domain_set:
+        return []
+    result = await session.execute(select(GlossaryTerm).where(GlossaryTerm.scope_type.in_(["domain", "global"])))
+    terms: list[dict[str, Any]] = []
+    for row in result.scalars().all():
+        scope_type = str(row.scope_type or "").strip()
+        scope_value = str(row.scope_value or "").strip()
+        if scope_type == "domain" and scope_value not in domain_set:
+            continue
+        if scope_type not in {"domain", "global"}:
+            continue
+        terms.append(
+            {
+                "correct_form": row.correct_form,
+                "wrong_forms": list(row.wrong_forms or []),
+                "category": row.category,
+                "context_hint": row.context_hint,
+                "domain": scope_value if scope_type == "domain" else "",
+            }
+        )
+    return terms
+
+
+async def _load_manual_editor_transcript_hotword_replacements(
+    session: AsyncSession,
+    *,
+    job: Job,
+    content_profile: dict[str, Any] | None,
+) -> list[tuple[str, str]]:
+    subject_domain = str((content_profile or {}).get("subject_domain") or "").strip()
+    learned_hotwords = await load_learned_hotwords(session, subject_domain=subject_domain, limit=80)
+    term_payloads: list[dict[str, Any]] = _manual_editor_content_profile_hotword_terms(content_profile)
+    term_payloads.extend(
+        {
+            "term": item.get("term"),
+            "canonical_form": item.get("canonical_form") or item.get("term"),
+            "aliases": list(item.get("aliases") or []),
+        }
+        for item in learned_hotwords
+        if isinstance(item, dict)
+    )
+    if _manual_editor_profile_has_vertical_glossary_evidence(content_profile):
+        domains = detect_glossary_domains(
+            workflow_template=None,
+            content_profile=content_profile or {},
+            subtitle_items=None,
+            source_name=None,
+        )
+        term_payloads.extend(
+            resolve_builtin_glossary_terms(
+                workflow_template=None,
+                content_profile=content_profile or {},
+                subtitle_items=None,
+                source_name=None,
+            )
+        )
+        term_payloads.extend(await _load_manual_editor_persisted_glossary_terms(session, domains=domains))
+    return _manual_editor_hotword_replacements_from_terms(term_payloads)
+
+
+def _manual_editor_apply_transcript_hotword_corrections(
+    text: Any,
+    *,
+    context_text: str = "",
+    hotword_replacements: list[tuple[str, str]] | None = None,
+) -> str:
+    normalized = _manual_editor_normalize_asr_transcript_text(text)
+    if not normalized:
+        return ""
+    normalized = normalize_contextual_noc_alias_text(normalized, context_text=context_text)
+    if _MANUAL_EDITOR_FLASHLIGHT_CONTEXT_RE.search(f"{context_text}\n{normalized}"):
+        normalized = normalize_flashlight_model_alias_text(normalized)
+    for wrong, correct in hotword_replacements or []:
+        if not _manual_editor_hotword_replacement_allowed(wrong, correct):
+            continue
+        if _MANUAL_EDITOR_LATIN_TOKEN_RE.search(wrong):
+            escaped = re.escape(wrong).replace(r"\ ", r"\s*")
+            pattern = re.compile(rf"(?<![A-Za-z0-9]){escaped}(?![A-Za-z0-9])", re.IGNORECASE)
+            normalized = pattern.sub(correct, normalized)
+        else:
+            normalized = normalized.replace(wrong, correct)
     return normalized
 
 
@@ -2354,7 +2680,9 @@ def _manual_editor_canonical_segment_source_rows(
             segment.get("text_canonical") or segment.get("text") or raw_text,
             context_text=context_text,
         )
-        if not final_text:
+        raw_display_text = _manual_editor_apply_source_text_corrections(raw_text, context_text=context_text)
+        display_text = raw_display_text if _manual_editor_should_reveal_asr_source_text(final_text, raw_display_text) else final_text
+        if not display_text:
             continue
         try:
             index = int(segment.get("index", fallback_index) or fallback_index)
@@ -2369,9 +2697,9 @@ def _manual_editor_canonical_segment_source_rows(
                 "source_indexes": [index],
                 "start_time": start_time,
                 "end_time": end_time,
-                "text_raw": raw_text or final_text,
-                "text_norm": final_text,
-                "text_final": final_text,
+                "text_raw": raw_display_text or raw_text or display_text,
+                "text_norm": display_text,
+                "text_final": display_text,
                 "words": [
                     dict(word)
                     for word in list(segment.get("words") or [])
@@ -2380,6 +2708,47 @@ def _manual_editor_canonical_segment_source_rows(
                 "projection_source": "canonical_transcript",
             }
         )
+    return rows
+
+
+def _manual_editor_reveal_source_asr_words(
+    subtitles: list[dict[str, Any]],
+    words: list[dict[str, Any]],
+    *,
+    context_text: str = "",
+    hotword_replacements: list[tuple[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    if not subtitles or not words:
+        return subtitles
+    rows: list[dict[str, Any]] = []
+    for item in subtitles:
+        payload = dict(item)
+        try:
+            start_time = float(payload.get("start_time", payload.get("start", 0.0)) or 0.0)
+            end_time = float(payload.get("end_time", payload.get("end", start_time)) or start_time)
+        except (TypeError, ValueError):
+            rows.append(payload)
+            continue
+        if end_time <= start_time:
+            rows.append(payload)
+            continue
+        range_words = [
+            word
+            for word in words
+            if _manual_editor_word_belongs_to_range(word, start=start_time, end=end_time)
+        ]
+        if not range_words:
+            rows.append(payload)
+            continue
+        asr_text = _manual_editor_apply_transcript_hotword_corrections(
+            "".join(str(word.get("word") or "") for word in range_words),
+            context_text=context_text,
+            hotword_replacements=hotword_replacements,
+        )
+        if asr_text:
+            payload["transcript_text"] = asr_text
+            payload["words"] = range_words
+        rows.append(payload)
     return rows
 
 
@@ -2486,6 +2855,7 @@ async def _load_manual_editor_source_subtitle_dicts(session: AsyncSession, *, jo
 
 def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> ManualEditorSubtitleOut:
     text_final = _manual_editor_final_subtitle_text(item)
+    transcript_text = _manual_editor_editable_text(item.get("transcript_text"))
     canonical_source_text = _manual_editor_display_source_text(item, final_text=text_final)
     start_time = max(0.0, float(item.get("start_time", item.get("start", 0.0)) or 0.0))
     end_time = max(start_time, float(item.get("end_time", item.get("end", start_time)) or start_time))
@@ -2524,7 +2894,7 @@ def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> Manu
     ]
     normalized_word_payloads = _manual_editor_normalize_word_payloads_for_text(
         word_payloads,
-        canonical_source_text or text_final,
+        transcript_text or canonical_source_text or text_final,
     )
     return ManualEditorSubtitleOut(
         index=item_index,
@@ -2556,6 +2926,7 @@ def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> Manu
         text_raw=_manual_editor_editable_text(item.get("text_raw")) or None,
         text_norm=_manual_editor_editable_text(item.get("text_norm")) or None,
         text_final=text_final,
+        transcript_text=transcript_text or None,
         words=[ManualEditorWordOut(**word) for word in normalized_word_payloads],
         alignment_tokens=alignment_tokens,
         alignment_diagnostics=alignment_diagnostics,
@@ -3938,6 +4309,30 @@ async def _build_manual_editor_session(
     ):
         subtitle_overrides = []
         manual_projection_items = []
+    raw_word_payloads = await _load_manual_editor_word_payloads(
+        session,
+        job_id=job.id,
+        prefer_raw_text=True,
+        normalize_to_text=False,
+    )
+    content_profile_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job.id,
+        artifact_types=_CONTENT_PROFILE_ARTIFACT_TYPES,
+    )
+    content_profile = _coerce_artifact_payload(content_profile_artifact)
+    source_transcript_hotword_replacements = await _load_manual_editor_transcript_hotword_replacements(
+        session,
+        job=job,
+        content_profile=content_profile,
+    )
+    source_transcript_context_text = _manual_editor_hotword_context_text(job, content_profile)
+    source_subtitle_dicts = _manual_editor_reveal_source_asr_words(
+        source_subtitle_dicts,
+        raw_word_payloads,
+        context_text=source_transcript_context_text,
+        hotword_replacements=source_transcript_hotword_replacements,
+    )
     word_payloads = await _load_manual_editor_word_payloads(session, job_id=job.id)
     source_subtitle_dicts = _attach_manual_editor_words_to_subtitles(source_subtitle_dicts, word_payloads)
     subtitle_dicts = _clean_manual_editor_subtitle_projection(raw_subtitle_dicts)

@@ -34,7 +34,7 @@ from roughcut.speech.postprocess import normalize_display_text, split_into_subti
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 DEFAULT_VIDEO_ROOT = ROOT / "data" / "avatar_materials" / "profiles"
 REPORT_ROOT = ROOT / "output" / "test" / "model-text-compare"
-CODEX_MODEL = "gpt-5.4-mini"
+CODEX_MODEL = "gpt-5.5"
 MINIMAX_MODEL = "MiniMax-M2.7"
 
 

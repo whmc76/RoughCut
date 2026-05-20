@@ -28,7 +28,6 @@ from roughcut.providers.reasoning.base import extract_json_text
 from roughcut.review.content_profile import (
     _identity_values_match,
     _mapped_brand_for_model,
-    _normalize_profile_value,
     _seed_profile_from_text,
 )
 

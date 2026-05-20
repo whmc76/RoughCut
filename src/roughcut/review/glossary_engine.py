@@ -5,16 +5,13 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from roughcut.config import get_settings
 from roughcut.db.models import GlossaryTerm, SubtitleCorrection, SubtitleItem
 from roughcut.review.model_identity import (
     filter_conflicting_model_wrong_forms as _shared_filter_conflicting_model_wrong_forms,
     model_numbers_conflict,
 )
-from roughcut.review.subtitle_term_resolution import _should_ignore_patch_candidate
 from roughcut.review.text_rewrite_policy import disabled_correction_candidates, disabled_text_rewrite
 
 

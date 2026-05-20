@@ -6,6 +6,7 @@
 
 | 日期 | 标题 | 定位 | 文件 |
 |------|------|------|------|
+| 2026-05-18 | Project Build Principles | 当前项目构建原则 | [project-build-principles.md](./project-build-principles.md) |
 | 2026-05-16 | Source Timeline Contract Refactor | 当前源时间轴/剪辑门禁主重构 | [2026-05-16-source-timeline-contract-refactor.md](./2026-05-16-source-timeline-contract-refactor.md) |
 | 2026-04-23 | Naming System | 当前命名规范 | [naming-system.md](./naming-system.md) |
 | 2026-04-16 | Canonical Transcript Rollout | 最新 rollout | [2026-04-16-canonical-transcript-rollout.md](./2026-04-16-canonical-transcript-rollout.md) |

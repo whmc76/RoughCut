@@ -11,10 +11,39 @@ from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 
+def _read_env_file_value(path: Path, key: str) -> str:
+    if not path.exists():
+        return ""
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, raw_value = stripped.split("=", 1)
+        if name.strip() != key:
+            continue
+        value = raw_value.split("#", 1)[0].strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        return value
+    return ""
+
+
+def _configured_api_base() -> str:
+    explicit = os.environ.get("ROUGHCUT_API_BASE", "").strip()
+    if explicit:
+        return explicit
+    repo_root = Path(__file__).resolve().parents[1]
+    port = os.environ.get("ROUGHCUT_API_PORT", "").strip()
+    if not port:
+        for env_path in (repo_root / "roughcut.ports.env", repo_root / ".env"):
+            port = _read_env_file_value(env_path, "ROUGHCUT_API_PORT").strip()
+            if port:
+                break
+    return f"http://127.0.0.1:{port or '38471'}/api/v1"
+
+
 API_CANDIDATES = [
-    os.environ.get("ROUGHCUT_API_BASE", "").strip(),
-    "http://127.0.0.1:8001/api/v1",
-    "http://127.0.0.1:8000/api/v1",
+    _configured_api_base(),
 ]
 REPORT_PATH = Path(r"Y:\EDC系列\AI粗剪\roughcut_progress_report.md")
 SNAPSHOT_PATH = Path(r"Y:\EDC系列\AI粗剪\roughcut_progress_report.json")

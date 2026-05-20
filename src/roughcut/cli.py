@@ -74,6 +74,38 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _read_env_file_value(path: Path, key: str) -> str:
+    if not path.exists():
+        return ""
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        name, raw_value = stripped.split("=", 1)
+        if name.strip() != key:
+            continue
+        value = raw_value.split("#", 1)[0].strip()
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            value = value[1:-1]
+        return value
+    return ""
+
+
+def _configured_int(key: str, default: int) -> int:
+    value = os.getenv(key, "").strip()
+    if not value:
+        repo_root = _repo_root()
+        for env_path in (repo_root / "roughcut.ports.env", repo_root / ".env"):
+            value = _read_env_file_value(env_path, key).strip()
+            if value:
+                break
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
 def _resolve_repo_path(value: str, repo_root: Path) -> Path:
     path = Path(value)
     if path.is_absolute():
@@ -208,15 +240,16 @@ def doctor(json_output: bool):
 
 @cli.command()
 @click.option("--host", default="0.0.0.0", help="Bind host")
-@click.option("--port", default=8000, type=int, help="Bind port")
+@click.option("--port", default=None, type=int, help="Bind port. Defaults to ROUGHCUT_API_PORT in roughcut.ports.env.")
 @click.option("--reload", is_flag=True, default=False, help="Enable auto-reload (dev)")
 @click.option("--workers", default=1, type=int, help="Number of uvicorn workers")
-def api(host: str, port: int, reload: bool, workers: int):
+def api(host: str, port: int | None, reload: bool, workers: int):
     """Start the FastAPI server."""
+    bind_port = port if port is not None else _configured_int("ROUGHCUT_API_PORT", 38471)
     uvicorn.run(
         "roughcut.main:app",
         host=host,
-        port=port,
+        port=bind_port,
         reload=reload,
         workers=workers if not reload else 1,
         log_level="info",

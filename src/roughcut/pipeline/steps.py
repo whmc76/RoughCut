@@ -373,6 +373,7 @@ _SOURCE_NAME_SEQUENCE_RE = re.compile(r"(?P<prefix>[A-Za-z]+)[-_ ]?(?P<number>\d
 _EDIT_DECISION_REVIEW_CONTEXT_WINDOW_SEC = 1.2
 _EDIT_DECISION_REVIEW_MAX_CONTEXT_ITEMS = 2
 _EDIT_DECISION_REVIEW_REASON_PRIORITY = {
+    "rollback_instruction": 0,
     "restart_retake": 0,
     "low_signal_subtitle": 1,
     "long_non_dialogue": 2,
@@ -596,7 +597,7 @@ def _context_items_around_cut(
 
 def _should_review_cut_with_llm(item: dict[str, Any]) -> bool:
     reason = str(item.get("reason") or "").strip()
-    if reason in {"restart_retake", "low_signal_subtitle", "long_non_dialogue"}:
+    if reason in {"rollback_instruction", "restart_retake", "low_signal_subtitle", "long_non_dialogue"}:
         return True
     if reason != "silence":
         return False
@@ -4389,6 +4390,45 @@ def _profile_matches_topic_registry_hints(
     return True
 
 
+def _content_profile_confident_enough_to_skip_enrich(profile: dict[str, Any] | None) -> bool:
+    candidate = dict(profile or {})
+    understanding = candidate.get("content_understanding") if isinstance(candidate.get("content_understanding"), dict) else {}
+    confidence = (understanding.get("confidence") if isinstance(understanding, dict) else {}) or {}
+    try:
+        overall_confidence = float(confidence.get("overall") or 0.0)
+    except (TypeError, ValueError):
+        overall_confidence = 0.0
+    if overall_confidence < 0.86:
+        return False
+    if bool(understanding.get("needs_review")):
+        return False
+
+    subject_type = str(candidate.get("subject_type") or "").strip()
+    video_theme = str(candidate.get("video_theme") or "").strip()
+    summary = str(candidate.get("summary") or "").strip()
+    if not subject_type or not video_theme or not summary:
+        return False
+    if any(token in subject_type for token in ("内容", "视频", "产品", "待确认")):
+        return False
+
+    identity_terms = [
+        str(candidate.get("subject_brand") or "").strip(),
+        str(candidate.get("subject_model") or "").strip(),
+        str(understanding.get("primary_subject") or "").strip(),
+    ]
+    observed_entities = understanding.get("observed_entities") if isinstance(understanding, dict) else []
+    if isinstance(observed_entities, list):
+        identity_terms.extend(
+            str((item or {}).get("name") or "").strip()
+            for item in observed_entities
+            if isinstance(item, dict)
+        )
+    if not any(identity_terms):
+        return False
+
+    return bool([item for item in (candidate.get("search_queries") or []) if str(item).strip()])
+
+
 async def _apply_source_context_feedback_to_content_profile(
     session,
     *,
@@ -6642,6 +6682,14 @@ async def run_content_profile(job_id: str) -> dict:
                                 "enabled": True,
                                 "reason": "topic_registry_hint_aligned",
                                 "topic_hints": topic_registry_hints,
+                            },
+                        }
+                    elif _content_profile_confident_enough_to_skip_enrich(content_profile):
+                        content_profile = {
+                            **dict(content_profile or {}),
+                            "content_profile_enrich_short_circuit": {
+                                "enabled": True,
+                                "reason": "initial_understanding_confident",
                             },
                         }
                     else:

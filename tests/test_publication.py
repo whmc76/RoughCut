@@ -94,6 +94,48 @@ def test_normalize_publication_credentials_filters_to_browser_agent():
     ]
 
 
+def test_publication_plan_blocks_unready_smart_copy_platform(tmp_path):
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        platform_packaging={
+            "publish_ready": False,
+            "blocking_reasons": ["抖音：封面等待 Codex 内置 imagegen 执行完成"],
+            "platforms": {
+                "douyin": {
+                    "titles": ["标题"],
+                    "description": "简介",
+                    "tags": ["tag"],
+                    "publish_ready": False,
+                    "blocking_reasons": ["封面等待 Codex 内置 imagegen 执行完成"],
+                }
+            },
+        },
+        creator_profile={
+            "creator_profile": {
+                "publishing": {
+                    "platform_credentials": [
+                        {
+                            "platform": "douyin",
+                            "account_label": "主号",
+                            "credential_ref": "chrome-profile:main",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "browser_agent",
+                        }
+                    ]
+                }
+            }
+        },
+    )
+
+    assert plan["publish_ready"] is False
+    assert "抖音：封面等待 Codex 内置 imagegen 执行完成" in plan["blocked_reasons"]
+    assert plan["targets"] == []
+
+
 @pytest.mark.asyncio
 async def test_publication_plan_requires_done_job_local_media_and_bound_credentials(tmp_path):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")

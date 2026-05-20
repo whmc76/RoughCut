@@ -794,8 +794,6 @@ def _build_music_duck_windows(
             "reason": f"insert_{str(transition_mode or 'restrained').strip().lower()}",
         }
     ]
-    normalized = _normalize_smart_effect_style(style)
-    return mapping.get(normalized, mapping[_DEFAULT_SMART_EFFECT_STYLE])
 
 
 def _build_section_choreography(

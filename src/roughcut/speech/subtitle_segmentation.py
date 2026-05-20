@@ -14,6 +14,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.db.models import FactClaim, SubtitleCorrection, SubtitleItem, TranscriptSegment
+from roughcut.media.subtitle_text import normalize_editable_subtitle_text
 from roughcut.speech.alignment import tokenize_alignment_text
 
 
@@ -5259,8 +5260,8 @@ async def save_subtitle_items(
             item_index=entry.index,
             start_time=entry.start,
             end_time=entry.end,
-            text_raw=entry.text_raw,
-            text_norm=entry.text_norm,
+            text_raw=normalize_editable_subtitle_text(entry.text_raw),
+            text_norm=normalize_editable_subtitle_text(entry.text_norm),
         )
         session.add(item)
         items.append(item)

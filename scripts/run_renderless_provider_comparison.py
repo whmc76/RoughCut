@@ -135,7 +135,7 @@ def main() -> None:
     report_root.mkdir(parents=True, exist_ok=True)
 
     providers = [
-        ProviderSpec(provider="openai", model="gpt-5.4", label="OpenAI GPT-5.4"),
+        ProviderSpec(provider="openai", model="gpt-5.5", label="OpenAI GPT-5.5 low"),
         ProviderSpec(provider="minimax", model="MiniMax-M2.7", label="MiniMax M2.7"),
     ]
     samples: list[dict[str, Any]] = []

@@ -25,6 +25,7 @@ import {
   sourceTimeToActiveOutputTime,
   sourceTimeToOutputTime,
   sourceRangeOverlapsCutRanges,
+  smartDeleteSuggestionRanges,
   smartCutRuleManagedRanges,
   subtitleAutoCorrectionSummary,
   transcriptCutRangesForSelection,
@@ -1321,7 +1322,7 @@ describe("manual editor timeline mapping", () => {
     expect(nextSegments).toEqual([{ start: 0, end: 1 }, { start: 1.4, end: 1.6 }, { start: 2, end: 3 }]);
   });
 
-  it("adds backend smart-delete waste segments to enabled rule ranges", () => {
+  it("keeps backend smart-delete waste segments as confirm-required suggestions", () => {
     const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
     const analysis = buildSmartCutRuleAnalysis(
       [],
@@ -1331,7 +1332,27 @@ describe("manual editor timeline mapping", () => {
     );
 
     expect(analysis.smartDelete).toEqual([expect.objectContaining({ start: 12.346, end: 14.9, kind: "smart_delete" })]);
-    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([expect.objectContaining({ start: 12.346, end: 14.9, kind: "smart_delete" })]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([]);
+    expect(smartDeleteSuggestionRanges(analysis, rules)).toEqual([expect.objectContaining({ start: 12.346, end: 14.9, kind: "smart_delete" })]);
+  });
+
+  it("restores unconfirmed backend smart-delete cuts instead of applying them by default", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [],
+      rules,
+      [],
+      [{ start: 10, end: 12, duration_sec: 2, reason: "restart_retake", source: "llm_cut_review" }],
+    );
+
+    const nextSegments = applySmartCutRuleRangesToSegments(
+      [{ start: 0, end: 10 }, { start: 12, end: 20 }],
+      autoSmartCutRuleRanges(analysis, rules),
+      smartCutRuleManagedRanges(analysis),
+      20,
+    );
+
+    expect(nextSegments).toEqual([{ start: 0, end: 20 }]);
   });
 
   it("protects model identity text from backend smart-delete ranges", () => {

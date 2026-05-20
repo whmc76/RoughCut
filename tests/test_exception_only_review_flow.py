@@ -15,7 +15,11 @@ from roughcut.creative.modes import (
 import roughcut.pipeline.orchestrator as orchestrator
 from roughcut.db.models import Artifact, Job, JobStep, SubtitleItem
 from roughcut.db.session import Base
-from roughcut.pipeline.steps import _drop_soft_content_understanding_blockers, _finalize_content_profile_review_state
+from roughcut.pipeline.steps import (
+    _content_profile_confident_enough_to_skip_enrich,
+    _drop_soft_content_understanding_blockers,
+    _finalize_content_profile_review_state,
+)
 from roughcut.review.content_profile import assess_content_profile_automation
 from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
 
@@ -112,6 +116,68 @@ def test_content_understanding_inference_failure_is_warning_not_blocking() -> No
     assert "内容理解推断失败" in automation["review_reasons"]
     assert automation["blocking_reasons"] == []
     assert automation["auto_confirm"] is True
+
+
+def test_content_understanding_timeout_blocks_auto_confirm() -> None:
+    automation = assess_content_profile_automation(
+        {
+            "workflow_template": "edc_tactical",
+            "subject_type": "EDC手电",
+            "video_theme": "NITECORE EDC17UV开箱与亮度展示",
+            "summary": "这条视频围绕 NITECORE EDC17UV 手电展开，介绍开箱、规格和亮度体验。",
+            "cover_title": {"top": "NITECORE", "main": "EDC17UV", "bottom": "亮度表现直接看"},
+            "engagement_question": "你更关注这类手电的亮度还是便携性？",
+            "search_queries": ["NITECORE EDC17UV", "EDC17UV 手电"],
+            "subject_brand": "NITECORE",
+            "subject_model": "EDC17UV",
+            "source_context": {"video_description": "任务创建时已填写视频说明。"},
+            "content_understanding": {
+                "needs_review": True,
+                "review_reasons": ["内容理解调用超时"],
+            },
+        },
+        subtitle_items=[{"text_final": "这是一段关于EDC17UV手电开箱和亮度体验的字幕。"} for _ in range(8)],
+        source_name="20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4",
+        auto_confirm_enabled=True,
+        threshold=0.92,
+    )
+
+    assert "内容理解调用超时" in automation["blocking_reasons"]
+    assert automation["auto_confirm"] is False
+
+
+def test_confident_content_profile_can_skip_enrich_pass() -> None:
+    assert _content_profile_confident_enough_to_skip_enrich(
+        {
+            "subject_brand": "NITECORE",
+            "subject_model": "EDC17",
+            "subject_type": "EDC手电",
+            "video_theme": "NITECORE EDC17开箱与EDC37对比",
+            "summary": "这条视频围绕NITECORE EDC17手电展开，介绍开箱、功能和与EDC37的对比。",
+            "search_queries": ["NITECORE EDC17", "EDC17 EDC37 对比"],
+            "content_understanding": {
+                "primary_subject": "NITECORE EDC17",
+                "observed_entities": [{"name": "EDC17"}, {"name": "EDC37"}],
+                "needs_review": False,
+                "confidence": {"overall": 0.92},
+            },
+        }
+    ) is True
+
+
+def test_uncertain_content_profile_keeps_enrich_pass() -> None:
+    assert _content_profile_confident_enough_to_skip_enrich(
+        {
+            "subject_type": "内容待确认",
+            "video_theme": "开箱展示",
+            "summary": "这是一条开箱展示视频。",
+            "search_queries": [],
+            "content_understanding": {
+                "needs_review": True,
+                "confidence": {"overall": 0.84},
+            },
+        }
+    ) is False
 
 
 def test_llm_food_domain_wins_over_edc_keyword_conflict() -> None:

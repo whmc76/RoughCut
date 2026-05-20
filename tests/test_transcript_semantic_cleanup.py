@@ -1,5 +1,9 @@
-from roughcut.providers.transcription.base import TranscriptResult, TranscriptSegment
-from roughcut.pipeline.steps import _build_transcript_first_canonical_layer, _filter_redundant_corrections_for_current_subtitles
+from roughcut.providers.transcription.base import TranscriptResult, TranscriptSegment, WordTiming
+from roughcut.pipeline.steps import (
+    _apply_subtitle_semantic_cleanup,
+    _build_transcript_first_canonical_layer,
+    _filter_redundant_corrections_for_current_subtitles,
+)
 from roughcut.speech.transcribe import _normalize_transcript_result
 
 
@@ -25,6 +29,80 @@ def test_normalize_transcript_result_cleans_flashlight_cross_domain_drift() -> N
     )
 
     assert normalized.segments[0].text == "然后这种电折刀的方式也注定它的这个防尘防水等级不会低"
+
+
+def test_normalize_transcript_result_normalizes_asr_stutter_before_downstream() -> None:
+    first_raw = "今今天天终终于于收收到到了了年年前前的的一个个款款"
+    second_raw = "没想到这NOC现NOC现在这么火"
+    third_raw = "NNOCOC的的这个个发发售售，太太难难了，没没有没有这个像很多兄弟一样隐恨"
+    fourth_raw = "最近这三次 N O C 的发售啊，最后的一个一款小玩具，非常适合 E D C 啊"
+    result = TranscriptResult(
+        segments=[
+            TranscriptSegment(
+                index=0,
+                start=0.0,
+                end=3.0,
+                text=first_raw,
+                words=[
+                    WordTiming(word=char, start=index * 0.05, end=(index + 1) * 0.05)
+                    for index, char in enumerate(first_raw)
+                ],
+            ),
+            TranscriptSegment(
+                index=1,
+                start=3.0,
+                end=6.0,
+                text=second_raw,
+                words=[
+                    WordTiming(word=char, start=3.0 + index * 0.05, end=3.0 + (index + 1) * 0.05)
+                    for index, char in enumerate(second_raw)
+                ],
+            ),
+            TranscriptSegment(
+                index=2,
+                start=6.0,
+                end=9.0,
+                text=third_raw,
+                words=[
+                    WordTiming(word=char, start=6.0 + index * 0.05, end=6.0 + (index + 1) * 0.05)
+                    for index, char in enumerate(third_raw)
+                ],
+            ),
+            TranscriptSegment(
+                index=3,
+                start=9.0,
+                end=12.0,
+                text=fourth_raw,
+                words=[
+                    WordTiming(word=char, start=9.0 + index * 0.05, end=9.0 + (index + 1) * 0.05)
+                    for index, char in enumerate(fourth_raw)
+                ],
+            ),
+        ],
+        language="zh-CN",
+        duration=12.0,
+        raw_payload={},
+    )
+
+    normalized = _normalize_transcript_result(
+        result,
+        glossary_terms=[],
+        review_memory={},
+    )
+
+    assert [segment.text for segment in normalized.segments] == [
+        "今天终于收到了年前的一个款",
+        "没想到这NOC现在这么火",
+        "NOC的这个发售，太难了，没有这个像很多兄弟一样隐恨",
+        "最近这三次 NOC 的发售啊，最后的一款小玩具，非常适合 EDC 啊",
+    ]
+    assert ["".join(word.word for word in segment.words) for segment in normalized.segments] == [
+        "今天终于收到了年前的一个款",
+        "没想到这NOC现在这么火",
+        "NOC的这个发售太难了没有这个像很多兄弟一样隐恨",
+        "最近这三次NOC的发售啊最后的一款小玩具非常适合EDC啊",
+    ]
+    assert normalized.segments[0].raw_payload["_roughcut_asr_normalization"]["original_text"].startswith("今今天天")
 
 
 def test_normalize_transcript_result_removes_known_hallucination_phrase() -> None:
@@ -72,7 +150,7 @@ def test_normalize_transcript_result_normalizes_flashlight_edc17_shorthand() -> 
         review_memory={"terms": [{"term": "EDC17", "count": 10, "category_scope": "flashlight"}]},
     )
 
-    assert normalized.segments[0].text == "所以呢我的选择就是这个幺七"
+    assert normalized.segments[0].text == "所以呢我的选择就是这个EDC17"
 
 
 def test_transcript_first_canonical_layer_normalizes_flashlight_edc17_shorthand() -> None:
@@ -95,8 +173,27 @@ def test_transcript_first_canonical_layer_normalizes_flashlight_edc17_shorthand(
     )
 
     payload = layer.as_dict()
-    assert payload["segments"][0]["text_raw"] == "所以呢我的选择就是这个幺七"
-    assert payload["segments"][0]["text_canonical"] == "所以呢我的选择就是这个幺七"
+    assert payload["segments"][0]["text_raw"] == "所以呢我的选择就是这个EDC17"
+    assert payload["segments"][0]["text_canonical"] == "所以呢我的选择就是这个EDC17"
+
+
+def test_subtitle_semantic_cleanup_corrects_nfc_to_noc_when_source_confirms_noc() -> None:
+    item = type(
+        "Item",
+        (),
+        {
+            "text_raw": "最近这三次NFC的发售太难了",
+            "text_norm": "最近这三次NFC的发售太难了",
+            "text_final": None,
+        },
+    )()
+    job = type("Job", (), {"source_name": "4637 开箱NOC MT34 也叫S06mini.mp4"})()
+
+    changed = _apply_subtitle_semantic_cleanup([item], job=job, content_profile={}, review_memory={})
+
+    assert changed == 1
+    assert item.text_norm == "最近这三次NOC的发售太难了"
+    assert item.text_final == "最近这三次NOC的发售太难了"
 
 
 def test_transcript_first_canonical_layer_applies_deduped_subtitle_corrections_to_matching_transcript() -> None:

@@ -115,6 +115,7 @@ async def test_transcribe_long_audio_in_chunks_drops_repeated_chunk_decode_loop(
     tmp_path: Path,
 ) -> None:
     provider = LocalHTTPASRProvider()
+    provider._model_name = "qwen3-asr-1.7b-forced-aligner"
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"stub")
     chunk_config = AudioChunkConfig(
@@ -235,18 +236,27 @@ def test_resolve_audio_chunk_config_clamps_invalid_relationships() -> None:
 def test_default_chunk_threshold_covers_medium_local_asr_audio() -> None:
     config = resolve_audio_chunk_config(SimpleNamespace())
 
-    assert config.threshold_sec == 30.0
-    assert config.chunk_size_sec == 20.0
-    assert config.min_chunk_sec == 8.0
-    assert config.overlap_sec == 0.5
+    assert config.threshold_sec == 300.0
+    assert config.chunk_size_sec == 300.0
+    assert config.min_chunk_sec == 60.0
+    assert config.overlap_sec == 0.0
     assert should_chunk_audio(duration=453.6, config=config)
     assert should_chunk_audio(duration=511.2, config=config)
-    assert should_chunk_audio(duration=113.5, config=config)
-    assert not should_chunk_audio(duration=29.5, config=config)
+    assert not should_chunk_audio(duration=113.5, config=config)
+    assert not should_chunk_audio(duration=299.5, config=config)
+
+
+def test_qwen3_local_http_asr_caps_transformers_token_budget() -> None:
+    provider = LocalHTTPASRProvider()
+    provider._model_name = "qwen3-asr-1.7b-forced-aligner"
+
+    assert provider._resolve_max_new_tokens(SimpleNamespace(local_asr_max_new_tokens=2048), audio_duration=20.0) == 256
+    assert provider._resolve_max_new_tokens(SimpleNamespace(local_asr_max_new_tokens=128), audio_duration=20.0) == 128
 
 
 def test_local_http_asr_collapses_repeated_decoder_loop_text_before_splitting(tmp_path: Path) -> None:
     provider = LocalHTTPASRProvider()
+    provider._model_name = "qwen3-asr-1.7b-forced-aligner"
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"stub")
     sentence = "啊，刚才我发现那个盒子放底下有点黑啊，看不清它的这个全貌。"
@@ -279,6 +289,7 @@ def test_local_http_asr_collapses_repeated_decoder_loop_text_before_splitting(tm
 
 def test_local_http_asr_collapses_repeated_decoder_loop_text_without_terminal_punctuation(tmp_path: Path) -> None:
     provider = LocalHTTPASRProvider()
+    provider._model_name = "qwen3-asr-1.7b-forced-aligner"
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"stub")
     sentence = "啊，刚才我发现那个盒子放底下有点黑啊，看不清它的这个全貌"
@@ -464,6 +475,7 @@ async def test_transcribe_uses_extracted_hotwords_as_context(
     tmp_path: Path,
 ) -> None:
     provider = LocalHTTPASRProvider()
+    provider._hotwords_enabled = True
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"stub")
     captured: dict[str, str | None] = {}
@@ -503,6 +515,7 @@ async def test_transcribe_single_audio_reports_request_progress(
     tmp_path: Path,
 ) -> None:
     provider = LocalHTTPASRProvider()
+    provider._hotwords_enabled = True
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"stub")
 

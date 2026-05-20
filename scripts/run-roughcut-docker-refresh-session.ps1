@@ -324,6 +324,11 @@ try {
     }
 
     $composeArgs = @("compose")
+    $portsEnvPath = Join-Path $repoRoot "roughcut.ports.env"
+    if (Test-Path $portsEnvPath) {
+        $composeArgs += "--env-file"
+        $composeArgs += $portsEnvPath
+    }
     foreach ($composeFile in (Get-RoughCutComposeFiles -Mode $ComposeMode)) {
         $composePath = Join-Path $repoRoot $composeFile
         if (-not (Test-Path $composePath)) {

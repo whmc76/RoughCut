@@ -17,7 +17,7 @@ services:
   api:
     environment:
       <<: *dev-app-env
-    command: ["roughcut", "api", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command: ["roughcut", "api", "--host", "0.0.0.0", "--port", "${ROUGHCUT_API_INTERNAL_PORT:-8000}", "--reload"]
     volumes: *dev-source-sync-volumes
     depends_on:
       frontend-watch:

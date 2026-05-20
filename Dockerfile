@@ -69,6 +69,8 @@ RUN if echo " ${ROUGHCUT_PYTHON_EXTRAS} " | grep -q " local-asr "; then \
 
 RUN mkdir -p /app/data/output /app/logs
 
+ENV ROUGHCUT_API_INTERNAL_PORT=8000
+
 EXPOSE 8000
 
-CMD ["roughcut", "api", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "roughcut api --host 0.0.0.0 --port ${ROUGHCUT_API_INTERNAL_PORT:-8000}"]

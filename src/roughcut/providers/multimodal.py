@@ -312,7 +312,7 @@ async def _complete_once_unthrottled(
             payload["text"] = text_options
         reasoning_options = build_reasoning_options(
             model,
-            effort=str(getattr(settings, "active_reasoning_effort", "medium") or "medium"),
+            effort=str(getattr(settings, "active_reasoning_effort", "low") or "low"),
         )
         if reasoning_options:
             payload["reasoning"] = reasoning_options

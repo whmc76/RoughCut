@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import re
+import shutil
 import subprocess
 import uuid
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,7 +21,14 @@ from roughcut.api.schemas import (
     IntelligentCopyGenerateIn,
     IntelligentCopyInspectIn,
     IntelligentCopyInspectOut,
+    IntelligentCopyImagegenCompleteIn,
+    IntelligentCopyImagegenRequestListOut,
+    IntelligentCopyPathSuggestIn,
+    IntelligentCopyPathSuggestOut,
+    IntelligentCopyPathSuggestionOut,
     IntelligentPublishIn,
+    IntelligentCopyGenerateTaskListOut,
+    IntelligentCopyGenerateTaskOut,
     IntelligentCopyResultOut,
     OpenFolderOut,
 )
@@ -29,9 +42,14 @@ from roughcut.publication import (
     list_publication_attempts,
     submit_publication_attempts,
 )
+from roughcut.providers.image_generation import mark_codex_imagegen_request_completed
 from roughcut.review.intelligent_copy import generate_intelligent_copy, inspect_intelligent_copy_folder
 
 router = APIRouter(prefix="/intelligent-copy", tags=["intelligent-copy"])
+_GENERATION_TASKS: dict[str, asyncio.Task] = {}
+_GENERATION_TASK_STORE_LOCK = RLock()
+_GENERATION_TASK_STORE_PATH = Path("data/intelligent_copy/generation_tasks.json")
+_GENERATION_TASK_HISTORY_LIMIT = 30
 
 
 @router.post("/inspect", response_model=IntelligentCopyInspectOut)
@@ -42,12 +60,138 @@ def inspect_folder(body: IntelligentCopyInspectIn):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/path-suggestions", response_model=IntelligentCopyPathSuggestOut)
+def suggest_folder_paths(body: IntelligentCopyPathSuggestIn):
+    return IntelligentCopyPathSuggestOut(suggestions=suggest_directory_paths(body.query, limit=body.limit))
+
+
 @router.post("/generate", response_model=IntelligentCopyResultOut)
 async def generate_folder_materials(body: IntelligentCopyGenerateIn):
     try:
-        return await generate_intelligent_copy(body.folder_path, copy_style=body.copy_style)
+        return await generate_intelligent_copy(body.folder_path, copy_style=body.copy_style, platforms=body.platforms)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/generate-tasks", response_model=IntelligentCopyGenerateTaskOut)
+async def create_generate_task(body: IntelligentCopyGenerateIn):
+    try:
+        inspection = inspect_intelligent_copy_folder(body.folder_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    folder_path = str(inspection["folder_path"])
+    requested_platforms = _normalize_generation_platforms(body.platforms)
+    active_task = _find_active_generation_task(folder_path=folder_path, copy_style=body.copy_style, platforms=requested_platforms)
+    if active_task is not None:
+        return active_task
+
+    task_id = uuid.uuid4().hex
+    now = _now_iso()
+    task = {
+        "id": task_id,
+        "folder_path": folder_path,
+        "copy_style": str(body.copy_style or "").strip() or None,
+        "platforms": requested_platforms,
+        "status": "queued",
+        "progress": 0,
+        "stage": "queued",
+        "message": "任务已创建，等待开始生成物料。",
+        "created_at": now,
+        "updated_at": now,
+        "started_at": None,
+        "completed_at": None,
+        "material_dir": str(inspection.get("material_dir") or ""),
+        "error": None,
+        "inspection": inspection,
+        "partial_result": None,
+        "result": None,
+    }
+    _upsert_generation_task(task)
+    _schedule_generation_task(task_id, folder_path=folder_path, copy_style=body.copy_style, platforms=requested_platforms)
+    return _get_generation_task(task_id) or task
+
+
+@router.get("/generate-tasks/recent", response_model=IntelligentCopyGenerateTaskListOut)
+async def list_recent_generate_tasks(limit: int = 12):
+    _mark_stale_generation_tasks()
+    safe_limit = max(1, min(int(limit or 12), _GENERATION_TASK_HISTORY_LIMIT))
+    tasks = sorted(
+        _load_generation_tasks(),
+        key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+        reverse=True,
+    )
+    return {"tasks": tasks[:safe_limit]}
+
+
+@router.get("/generate-tasks/{task_id}", response_model=IntelligentCopyGenerateTaskOut)
+async def get_generate_task(task_id: str):
+    task = _get_generation_task(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="生成任务不存在。")
+    if task.get("status") in {"queued", "running"} and task_id not in _GENERATION_TASKS:
+        task = _mark_generation_task_failed(task_id, "生成任务已中断，请重新生成。") or task
+    return task
+
+
+@router.post("/imagegen-requests", response_model=IntelligentCopyImagegenRequestListOut)
+def list_imagegen_requests(body: IntelligentCopyInspectIn):
+    try:
+        inspection = inspect_intelligent_copy_folder(body.folder_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    material_dir = Path(str(inspection.get("material_dir") or ""))
+    return {
+        "folder_path": str(inspection.get("folder_path") or ""),
+        "material_dir": str(material_dir),
+        "requests": _list_codex_imagegen_requests(material_dir),
+    }
+
+
+@router.post("/imagegen-requests/complete", response_model=IntelligentCopyImagegenRequestListOut)
+def complete_imagegen_request(body: IntelligentCopyImagegenCompleteIn):
+    try:
+        inspection = inspect_intelligent_copy_folder(body.folder_path)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    material_dir = Path(str(inspection.get("material_dir") or ""))
+    request_path = _resolve_material_child_path(material_dir, body.request_path)
+    result_path = Path(str(body.result_path or "")).expanduser()
+    if not result_path.exists() or not result_path.is_file():
+        raise HTTPException(status_code=400, detail="Codex 生成图片不存在。")
+    try:
+        payload = json.loads(request_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="图像生成请求 JSON 无法读取。") from exc
+    output_path = Path(str(payload.get("output_path") or "")).expanduser()
+    if not output_path.is_absolute():
+        output_path = material_dir / output_path
+    try:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(result_path, output_path)
+        mark_codex_imagegen_request_completed(request_path=request_path, output_path=output_path, result_path=result_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"标记 Codex 图像生成完成失败：{exc}") from exc
+    return {
+        "folder_path": str(inspection.get("folder_path") or ""),
+        "material_dir": str(material_dir),
+        "requests": _list_codex_imagegen_requests(material_dir),
+    }
+
+
+@router.get("/publication/attempts/recent")
+async def list_recent_publication_attempts(
+    limit: int = 24,
+    creator_profile_id: str | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    safe_limit = max(1, min(int(limit or 24), 100))
+    attempts = await list_publication_attempts(
+        session,
+        creator_profile_id=str(creator_profile_id or "").strip() or None,
+        limit=safe_limit,
+    )
+    return {"attempts": attempts}
 
 
 @router.post("/publication/plan")
@@ -122,6 +266,297 @@ def _open_in_file_manager(target_path: Path) -> None:
     subprocess.Popen(["explorer", str(resolved)])
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _load_generation_tasks() -> list[dict[str, Any]]:
+    with _GENERATION_TASK_STORE_LOCK:
+        try:
+            payload = json.loads(_GENERATION_TASK_STORE_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        tasks = payload.get("tasks") if isinstance(payload, dict) else payload
+        if not isinstance(tasks, list):
+            return []
+        return [item for item in tasks if isinstance(item, dict) and str(item.get("id") or "").strip()]
+
+
+def _save_generation_tasks(tasks: list[dict[str, Any]]) -> None:
+    with _GENERATION_TASK_STORE_LOCK:
+        _GENERATION_TASK_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        pruned = sorted(
+            tasks,
+            key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+            reverse=True,
+        )[:_GENERATION_TASK_HISTORY_LIMIT]
+        _GENERATION_TASK_STORE_PATH.write_text(
+            json.dumps({"tasks": pruned}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+
+def _upsert_generation_task(task: dict[str, Any]) -> None:
+    tasks = _load_generation_tasks()
+    task_id = str(task.get("id") or "").strip()
+    next_tasks = [item for item in tasks if str(item.get("id") or "") != task_id]
+    next_tasks.insert(0, task)
+    _save_generation_tasks(next_tasks)
+
+
+def _patch_generation_task(task_id: str, patch: dict[str, Any]) -> dict[str, Any] | None:
+    tasks = _load_generation_tasks()
+    updated_task: dict[str, Any] | None = None
+    now = _now_iso()
+    for item in tasks:
+        if str(item.get("id") or "") == task_id:
+            item.update(patch)
+            item["updated_at"] = now
+            updated_task = item
+            break
+    if updated_task is not None:
+        _save_generation_tasks(tasks)
+    return updated_task
+
+
+def _get_generation_task(task_id: str) -> dict[str, Any] | None:
+    normalized = str(task_id or "").strip()
+    return next((item for item in _load_generation_tasks() if str(item.get("id") or "") == normalized), None)
+
+
+def _list_codex_imagegen_requests(material_dir: Path) -> list[dict[str, Any]]:
+    if not material_dir.exists() or not material_dir.is_dir():
+        return []
+    requests: list[dict[str, Any]] = []
+    for path in sorted(material_dir.glob("*.codex-imagegen.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            requests.append(
+                {
+                    "request_path": str(path),
+                    "status": "invalid",
+                    "error": str(exc),
+                }
+            )
+            continue
+        payload = payload if isinstance(payload, dict) else {}
+        requests.append(
+            {
+                "request_path": str(path),
+                "status": str(payload.get("status") or "pending_codex_imagegen"),
+                "backend": str(payload.get("backend") or ""),
+                "source_image_path": str(payload.get("source_image_path") or ""),
+                "output_path": str(payload.get("output_path") or ""),
+                "target_size": payload.get("target_size") if isinstance(payload.get("target_size"), dict) else {},
+                "created_at": str(payload.get("created_at") or ""),
+                "completed_at": str(payload.get("completed_at") or "") or None,
+                "error": str(payload.get("error") or "") or None,
+            }
+        )
+    return requests
+
+
+def _resolve_material_child_path(material_dir: Path, raw_path: str) -> Path:
+    raw = str(raw_path or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="缺少请求文件路径。")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = material_dir / path
+    try:
+        resolved = path.resolve()
+        material_root = material_dir.resolve()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="请求文件路径无效。") from exc
+    if material_root != resolved and material_root not in resolved.parents:
+        raise HTTPException(status_code=400, detail="请求文件必须位于 smart-copy 目录内。")
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(status_code=404, detail="图像生成请求不存在。")
+    if resolved.suffix.lower() != ".json" or not resolved.name.endswith(".codex-imagegen.json"):
+        raise HTTPException(status_code=400, detail="不是 Codex imagegen 请求文件。")
+    return resolved
+
+
+def _normalize_generation_platforms(platforms: list[str] | None) -> list[str]:
+    normalized: list[str] = []
+    for platform in platforms or []:
+        item = str(platform or "").strip()
+        if item and item not in normalized:
+            normalized.append(item)
+    return normalized
+
+
+def _find_active_generation_task(*, folder_path: str, copy_style: str | None, platforms: list[str] | None) -> dict[str, Any] | None:
+    normalized_style = str(copy_style or "").strip()
+    normalized_platforms = _normalize_generation_platforms(platforms)
+    for item in _load_generation_tasks():
+        task_id = str(item.get("id") or "")
+        if item.get("folder_path") != folder_path:
+            continue
+        if str(item.get("copy_style") or "").strip() != normalized_style:
+            continue
+        if _normalize_generation_platforms(item.get("platforms") or []) != normalized_platforms:
+            continue
+        if item.get("status") in {"queued", "running"} and task_id in _GENERATION_TASKS:
+            return item
+    return None
+
+
+def _mark_generation_task_failed(task_id: str, error: str) -> dict[str, Any] | None:
+    return _patch_generation_task(
+        task_id,
+        {
+            "status": "failed",
+            "progress": 100,
+            "stage": "failed",
+            "message": "生成任务失败。",
+            "completed_at": _now_iso(),
+            "error": error,
+        },
+    )
+
+
+def _mark_stale_generation_tasks() -> None:
+    for item in _load_generation_tasks():
+        task_id = str(item.get("id") or "")
+        if item.get("status") in {"queued", "running"} and task_id not in _GENERATION_TASKS:
+            _mark_generation_task_failed(task_id, "生成任务已中断，请重新生成。")
+
+
+def _schedule_generation_task(task_id: str, *, folder_path: str, copy_style: str | None, platforms: list[str] | None) -> None:
+    async def runner() -> None:
+        await asyncio.to_thread(_run_generation_task_thread, task_id, folder_path, copy_style, platforms)
+
+    _GENERATION_TASKS[task_id] = asyncio.create_task(runner())
+
+
+def _run_generation_task_thread(task_id: str, folder_path: str, copy_style: str | None, platforms: list[str] | None) -> None:
+    asyncio.run(_run_generation_task(task_id, folder_path=folder_path, copy_style=copy_style, platforms=platforms))
+
+
+async def _run_generation_task(task_id: str, *, folder_path: str, copy_style: str | None, platforms: list[str] | None) -> None:
+    try:
+        _patch_generation_task(
+            task_id,
+            {
+                "status": "running",
+                "progress": 2,
+                "stage": "starting",
+                "message": "开始生成物料。",
+                "started_at": _now_iso(),
+                "error": None,
+            },
+        )
+
+        async def progress_callback(update: dict[str, Any]) -> None:
+            patch: dict[str, Any] = {
+                "status": "running",
+                "progress": max(0, min(99, int(update.get("progress") or 0))),
+                "stage": str(update.get("stage") or "running"),
+                "message": str(update.get("message") or ""),
+            }
+            for key in ("folder_path", "material_dir", "inspection", "partial_result"):
+                if key in update:
+                    patch[key] = update[key]
+            _patch_generation_task(task_id, patch)
+
+        result = await generate_intelligent_copy(folder_path, copy_style=copy_style, platforms=platforms, progress_callback=progress_callback)
+        publish_ready = bool(result.get("publish_ready"))
+        blocking_reasons = [str(item).strip() for item in (result.get("blocking_reasons") or []) if str(item).strip()]
+        _patch_generation_task(
+            task_id,
+            {
+                "status": "completed" if publish_ready else "blocked",
+                "progress": 100,
+                "stage": "completed" if publish_ready else "blocked",
+                "message": "物料生成完成。" if publish_ready else "物料生成完成，但仍有阻断项，不能发布。",
+                "completed_at": _now_iso(),
+                "material_dir": str(result.get("material_dir") or ""),
+                "inspection": result.get("inspection"),
+                "partial_result": result,
+                "result": result,
+                "error": None if publish_ready else "；".join(blocking_reasons[:5]),
+            },
+        )
+    except Exception as exc:
+        _mark_generation_task_failed(task_id, str(exc))
+    finally:
+        _GENERATION_TASKS.pop(task_id, None)
+
+
+def suggest_directory_paths(query: str, *, limit: int = 12) -> list[IntelligentCopyPathSuggestionOut]:
+    raw_query = str(query or "").strip().strip('"')
+    safe_limit = max(1, min(int(limit or 12), 30))
+    if not raw_query:
+        return []
+
+    base_dir, prefix = _split_directory_suggestion_query(raw_query)
+    if base_dir is None:
+        return []
+
+    try:
+        if not base_dir.exists() or not base_dir.is_dir():
+            return []
+    except OSError:
+        return []
+
+    prefix_lower = prefix.casefold()
+    starts_with: list[Path] = []
+    contains: list[Path] = []
+    try:
+        with os.scandir(base_dir) as entries:
+            for entry in entries:
+                try:
+                    if not entry.is_dir():
+                        continue
+                except OSError:
+                    continue
+                name_lower = entry.name.casefold()
+                if not prefix_lower or name_lower.startswith(prefix_lower):
+                    starts_with.append(Path(entry.path))
+                elif prefix_lower in name_lower:
+                    contains.append(Path(entry.path))
+    except OSError:
+        return []
+
+    suggestions: list[IntelligentCopyPathSuggestionOut] = []
+    for item in sorted(starts_with, key=lambda path: path.name.casefold()) + sorted(contains, key=lambda path: path.name.casefold()):
+        try:
+            resolved = item.resolve()
+        except OSError:
+            resolved = item.absolute()
+        suggestions.append(
+            IntelligentCopyPathSuggestionOut(
+                path=str(resolved),
+                label=item.name,
+                parent=str(base_dir),
+            )
+        )
+        if len(suggestions) >= safe_limit:
+            break
+    return suggestions
+
+
+def _split_directory_suggestion_query(raw_query: str) -> tuple[Path | None, str]:
+    drive_match = re.fullmatch(r"([A-Za-z]):", raw_query)
+    if drive_match:
+        return Path(f"{drive_match.group(1)}:\\"), ""
+
+    query_path = Path(raw_query).expanduser()
+    has_trailing_separator = raw_query.endswith(("\\", "/"))
+    try:
+        if has_trailing_separator or (query_path.exists() and query_path.is_dir()):
+            return query_path, ""
+    except OSError:
+        pass
+
+    parent = query_path.parent
+    if str(parent) == "":
+        return None, ""
+    return parent, query_path.name
+
+
 async def _load_intelligent_publish_inputs(
     *,
     folder_path: str,
@@ -176,10 +611,19 @@ def _load_intelligent_copy_packaging(folder_path: Path) -> dict[str, Any] | None
             "description": str(item.get("body") or "").strip(),
             "body": str(item.get("body") or "").strip(),
             "tags": [str(tag).strip().lstrip("#") for tag in (item.get("tags") or []) if str(tag).strip()],
+            "cover_path": str(item.get("cover_path") or "").strip(),
+            "publish_ready": bool(item.get("publish_ready", True)),
+            "blocking_reasons": [str(reason).strip() for reason in (item.get("blocking_reasons") or []) if str(reason).strip()],
         }
     if not platforms:
         return None
-    return {"platforms": platforms, "source": "intelligent_publish", "material_dir": str(folder_path / "smart-copy")}
+    return {
+        "platforms": platforms,
+        "source": "intelligent_publish",
+        "material_dir": str(folder_path / "smart-copy"),
+        "publish_ready": bool(payload.get("publish_ready", False)),
+        "blocking_reasons": [str(reason).strip() for reason in (payload.get("blocking_reasons") or []) if str(reason).strip()],
+    }
 
 
 def _resolve_intelligent_publish_creator_profile(creator_profile_id: str | None) -> dict[str, Any] | None:

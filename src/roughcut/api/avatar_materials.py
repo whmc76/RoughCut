@@ -9,7 +9,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from roughcut.api.schemas import AvatarMaterialLibraryOut
+from roughcut.api.schemas import AvatarMaterialLibraryOut, AvatarPublicationProfileListOut
 from roughcut.avatar import (
     build_avatar_material_requirements,
     create_profile_dir,
@@ -77,6 +77,22 @@ async def get_avatar_materials():
     payload["warnings"] = detect_avatar_material_library_warnings(profiles)
     payload["profiles"] = profiles
     return payload
+
+
+@router.get("/publication-profiles", response_model=AvatarPublicationProfileListOut)
+def get_avatar_publication_profiles():
+    profiles = [
+        {
+            "id": str(profile.get("id") or ""),
+            "display_name": str(profile.get("display_name") or "未命名账号"),
+            "presenter_alias": profile.get("presenter_alias"),
+            "creator_profile": profile.get("creator_profile") if isinstance(profile.get("creator_profile"), dict) else {},
+            "created_at": str(profile.get("created_at") or ""),
+        }
+        for profile in _list_profiles()
+        if str(profile.get("id") or "").strip()
+    ]
+    return {"profiles": profiles}
 
 
 @router.post("/profiles", response_model=AvatarMaterialLibraryOut, status_code=201)

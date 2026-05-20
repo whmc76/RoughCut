@@ -1,0 +1,111 @@
+x-asr-common: &asr-common
+  gpus: all
+  ipc: host
+  shm_size: 16gb
+  environment:
+    HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+    HF_HOME: /models/huggingface
+    HUGGINGFACE_HUB_CACHE: /models/huggingface/hub
+    MODELSCOPE_CACHE: /models/modelscope
+    PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+    PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.aliyun.com}
+    NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+    NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+  volumes:
+    - ${ASR_MATRIX_HF_CACHE:-E:/WorkSpace/RoughCut/.model-cache/huggingface}:/models/huggingface
+    - ${ASR_MATRIX_MODELSCOPE_CACHE:-E:/WorkSpace/RoughCut/.model-cache/modelscope}:/models/modelscope
+    - ./output/test/asr-alignment-matrix/samples:/bench/asr-alignment-matrix/samples:ro
+    - ./output/test/asr-bench/samples:/bench/asr-bench/samples:ro
+  restart: unless-stopped
+
+services:
+  faster-whisper-large-v3:
+    <<: *asr-common
+    profiles: ["asr-matrix", "faster-whisper"]
+    build:
+      context: .
+      dockerfile: deploy/faster-whisper/Dockerfile
+      args:
+        BASE_IMAGE: ${ASR_MATRIX_BASE_IMAGE:-pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime}
+        APT_MIRROR: ${APT_MIRROR:-http://mirrors.aliyun.com/ubuntu}
+        HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.aliyun.com}
+    image: roughcut-faster-whisper-large-v3:local
+    container_name: asr-faster-whisper-large-v3
+    ports:
+      - "${FASTER_WHISPER_LARGE_V3_PORT:-30200}:30000"
+    command:
+      - --model
+      - ${FASTER_WHISPER_LARGE_V3_MODEL:-/models/huggingface/hub/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478}
+      - --device
+      - cuda
+      - --compute-type
+      - float16
+      - --lazy-load
+      - --idle-unload-seconds
+      - "${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-900}"
+
+  funasr-fa-zh:
+    <<: *asr-common
+    profiles: ["asr-matrix", "funasr-align"]
+    build:
+      context: .
+      dockerfile: deploy/funasr/Dockerfile
+      args:
+        BASE_IMAGE: ${ASR_MATRIX_BASE_IMAGE:-pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime}
+        APT_MIRROR: ${APT_MIRROR:-http://mirrors.aliyun.com/ubuntu}
+        HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.aliyun.com}
+    image: roughcut-funasr-fa-zh:local
+    container_name: asr-funasr-fa-zh
+    ports:
+      - "${FUNASR_FA_ZH_PORT:-30212}:30000"
+    command:
+      - --model
+      - fa-zh
+      - --mode
+      - align
+      - --device
+      - cuda:0
+      - --lazy-load
+      - --idle-unload-seconds
+      - "${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-900}"
+
+  moss-audio-8b-instruct-fp16:
+    <<: *asr-common
+    profiles: ["asr-matrix", "moss-audio"]
+    build:
+      context: .
+      dockerfile: deploy/moss-audio/Dockerfile
+      args:
+        BASE_IMAGE: ${MOSS_AUDIO_BASE_IMAGE:-pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime}
+        MOSS_AUDIO_INSTALL_OS_DEPS: ${MOSS_AUDIO_INSTALL_OS_DEPS:-false}
+        APT_MIRROR: ${APT_MIRROR:-http://mirrors.aliyun.com/ubuntu}
+        HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.aliyun.com}
+        MOSS_AUDIO_SOURCE_URLS: ${MOSS_AUDIO_SOURCE_URLS:-https://gh.llkk.cc/https://github.com/OpenMOSS/MOSS-Audio/archive/refs/heads/main.zip https://ghfast.top/https://github.com/OpenMOSS/MOSS-Audio/archive/refs/heads/main.zip https://github.com/OpenMOSS/MOSS-Audio/archive/refs/heads/main.zip}
+    image: roughcut-moss-audio-8b-instruct:local
+    container_name: asr-moss-audio-8b-instruct-fp16
+    environment:
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+      HF_HOME: /models/huggingface
+      HUGGINGFACE_HUB_CACHE: /models/huggingface/hub
+      MODELSCOPE_CACHE: /models/modelscope
+      PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+      PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.aliyun.com}
+      MOSS_AUDIO_IDLE_UNLOAD_SECONDS: ${MOSS_AUDIO_IDLE_UNLOAD_SECONDS:-900}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+    ports:
+      - "${MOSS_AUDIO_INSTRUCT_FP16_MATRIX_PORT:-30222}:30000"
+    command:
+      - --model-path
+      - ${MOSS_AUDIO_INSTRUCT_MODEL:-/models/huggingface/hub/models--OpenMOSS-Team--MOSS-Audio-8B-Instruct/snapshots/cb7369a8094b5f1c818e384a8d76596c0e2138bd}
+      - --quantization
+      - none
+      - --lazy-load
+      - --idle-unload-seconds
+      - "${MOSS_AUDIO_IDLE_UNLOAD_SECONDS:-900}"

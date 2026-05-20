@@ -7,13 +7,17 @@ import shutil
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from roughcut.config import get_settings
-from roughcut.media.output import _extract_frame, _overlay_title_layout
+from roughcut.media.output import _extract_frame, _overlay_title_layout, _probe_duration, _sample_cover_candidates
 from roughcut.packaging.library import list_packaging_assets
+from roughcut.providers.image_generation import CodexImageGenerationPending, generate_edited_cover_image
+from roughcut.providers.multimodal import complete_with_images
+from roughcut.providers.reasoning.base import extract_json_text
+from roughcut.review.intelligent_copy_cover_quality import assess_cover_publish_readiness
 from roughcut.review.content_profile import _seed_profile_from_text, _subject_domain_from_subject_type, infer_content_profile
-from roughcut.review.platform_copy import PLATFORM_ORDER, save_platform_packaging_markdown
+from roughcut.review.platform_copy import PLATFORM_ORDER, generate_platform_packaging, save_platform_packaging_markdown
 from roughcut.review.intelligent_copy_scoring import score_description, score_title_candidate
 from roughcut.review.intelligent_copy_templates import build_platform_description, build_title_candidates
 from roughcut.review.intelligent_copy_topics import IntelligentCopyTopicSpec, match_intelligent_copy_topic
@@ -22,6 +26,7 @@ VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
 SUBTITLE_SUFFIXES = {".srt", ".vtt", ".ass", ".ssa"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 MATERIAL_DIR_NAME = "smart-copy"
+IntelligentCopyProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 PLATFORM_PUBLISH_RULES: dict[str, dict[str, Any]] = {
     "bilibili": {
@@ -165,8 +170,36 @@ def inspect_intelligent_copy_folder(folder_path: str) -> dict[str, Any]:
     }
 
 
-async def generate_intelligent_copy(folder_path: str, *, copy_style: str | None = None) -> dict[str, Any]:
+async def _emit_intelligent_copy_progress(
+    progress_callback: IntelligentCopyProgressCallback | None,
+    payload: dict[str, Any],
+) -> None:
+    if progress_callback is None:
+        return
+    result = progress_callback(payload)
+    if result is not None:
+        await result
+
+
+async def generate_intelligent_copy(
+    folder_path: str,
+    *,
+    copy_style: str | None = None,
+    platforms: list[str] | None = None,
+    progress_callback: IntelligentCopyProgressCallback | None = None,
+) -> dict[str, Any]:
     inspection = inspect_intelligent_copy_folder(folder_path)
+    await _emit_intelligent_copy_progress(
+        progress_callback,
+        {
+            "progress": 5,
+            "stage": "inspect",
+            "message": "已读取目录，正在确认成片和字幕。",
+            "inspection": inspection,
+            "folder_path": inspection.get("folder_path"),
+            "material_dir": inspection.get("material_dir"),
+        },
+    )
     video_path = Path(str(inspection.get("video_file") or ""))
     subtitle_path = Path(str(inspection.get("subtitle_file") or ""))
     cover_path = Path(str(inspection.get("cover_file") or "")) if inspection.get("cover_file") else None
@@ -178,10 +211,33 @@ async def generate_intelligent_copy(folder_path: str, *, copy_style: str | None 
     subtitle_items = _load_subtitle_items(subtitle_path)
     if not subtitle_items:
         raise ValueError("字幕文件已找到，但无法解析出可用字幕内容。")
+    selected_platform_keys = _resolve_intelligent_copy_platform_keys(platforms)
+    await _emit_intelligent_copy_progress(
+        progress_callback,
+        {
+            "progress": 18,
+            "stage": "subtitles",
+            "message": f"已解析 {len(subtitle_items)} 条字幕，正在生成内容画像。",
+            "inspection": inspection,
+            "folder_path": inspection.get("folder_path"),
+            "material_dir": inspection.get("material_dir"),
+        },
+    )
 
     packaging_state = list_packaging_assets()
     packaging_config = packaging_state.get("config") if isinstance(packaging_state, dict) else {}
     resolved_copy_style = str(copy_style or (packaging_config or {}).get("copy_style") or "attention_grabbing").strip() or "attention_grabbing"
+    await _emit_intelligent_copy_progress(
+        progress_callback,
+        {
+            "progress": 26,
+            "stage": "profile",
+            "message": "正在提炼主题、卖点和发布语气。",
+            "inspection": inspection,
+            "folder_path": inspection.get("folder_path"),
+            "material_dir": inspection.get("material_dir"),
+        },
+    )
 
     content_profile = _build_intelligent_copy_fast_profile(
         video_path=video_path,
@@ -216,24 +272,81 @@ async def generate_intelligent_copy(folder_path: str, *, copy_style: str | None 
             subtitle_items=subtitle_items,
             copy_style=resolved_copy_style,
         )
+    await _emit_intelligent_copy_progress(
+        progress_callback,
+        {
+            "progress": 42,
+            "stage": "brief",
+            "message": "内容画像已完成，正在组织多平台文案策略。",
+            "inspection": inspection,
+            "folder_path": inspection.get("folder_path"),
+            "material_dir": inspection.get("material_dir"),
+        },
+    )
     copy_brief = _build_intelligent_copy_brief(
         video_path=video_path,
         subtitle_items=subtitle_items,
         content_profile=content_profile,
     )
-    packaging = _build_intelligent_copy_packaging(
+    packaging = await generate_platform_packaging(
+        source_name=video_path.name,
         content_profile=content_profile,
-        copy_brief=copy_brief,
+        subtitle_items=subtitle_items,
+        copy_style=resolved_copy_style,
+        prompt_brief={
+            "mode": "intelligent_copy",
+            "source_name": video_path.name,
+            "copy_brief": copy_brief,
+            "content_profile_summary": _content_profile_summary(content_profile),
+            "requirements": [
+                "最终发布文案必须自然、像真人发布，不要模板腔、总结腔、AI味。",
+                "不要用空话凑长度；没有事实证据就写体验、画面和观感，不写参数。",
+                "每个平台都要有明显平台语气差异。",
+            ],
+        },
     )
+    packaging = _filter_intelligent_copy_packaging(packaging, selected_platform_keys)
 
     material_dir = video_path.parent / MATERIAL_DIR_NAME
     material_dir.mkdir(parents=True, exist_ok=True)
     markdown_path = material_dir / "platform-packaging.md"
     json_path = material_dir / "smart-copy.json"
     save_platform_packaging_markdown(markdown_path, packaging)
+    cover_source = await _prepare_intelligent_copy_cover_source(
+        video_path=video_path,
+        material_dir=material_dir,
+        content_profile=content_profile,
+        packaging=packaging,
+    )
+    base_result = {
+        "folder_path": str(video_path.parent),
+        "material_dir": str(material_dir),
+        "markdown_path": str(markdown_path),
+        "json_path": str(json_path),
+        "cover_source_path": str(cover_source) if cover_source else None,
+        "copy_style": resolved_copy_style,
+        "inspection": inspection,
+        "highlights": dict(packaging.get("highlights") or {}),
+        "content_profile_summary": _content_profile_summary(content_profile),
+        "warnings": list(inspection.get("warnings") or []),
+    }
+    await _emit_intelligent_copy_progress(
+        progress_callback,
+        {
+            "progress": 56,
+            "stage": "packaging",
+            "message": "平台文案已生成，正在渲染各平台封面和物料文件。",
+            "inspection": inspection,
+            "folder_path": str(video_path.parent),
+            "material_dir": str(material_dir),
+            "partial_result": {**base_result, "platforms": []},
+        },
+    )
 
     platform_materials: list[dict[str, Any]] = []
-    for index, (platform_key, _label, _body_label, _tag_label) in enumerate(PLATFORM_ORDER, start=1):
+    blocking_reasons: list[str] = []
+    publish_platforms = [item for item in PLATFORM_ORDER if item[0] in selected_platform_keys and PLATFORM_PUBLISH_RULES.get(item[0])]
+    for index, (platform_key, _label, _body_label, _tag_label) in enumerate(publish_platforms, start=1):
         rules = PLATFORM_PUBLISH_RULES.get(platform_key)
         if not rules:
             continue
@@ -244,36 +357,103 @@ async def generate_intelligent_copy(folder_path: str, *, copy_style: str | None 
             rules=rules,
         )
         cover_output_path = material_dir / f"{index:02d}-{platform_key}-cover.jpg"
-        try:
-            await _render_platform_cover(
-                output_path=cover_output_path,
-                video_path=video_path,
-                existing_cover_path=cover_path,
-                title=material.get("primary_title") or material.get("title_hook") or material.get("body") or "",
-                rules=rules,
-            )
-        except Exception:
-            cover_output_path = None
-        if cover_output_path:
+        cover_generation = await _render_platform_cover(
+            output_path=cover_output_path,
+            video_path=video_path,
+            source_image_path=cover_source,
+            existing_cover_path=cover_path,
+            title=material.get("primary_title") or material.get("title_hook") or material.get("body") or "",
+            platform_key=platform_key,
+            rules=rules,
+        )
+        platform_blocks = _validate_platform_material_ready(material)
+        if cover_generation and not bool(cover_generation.get("publish_ready", True)):
+            platform_blocks.extend(str(item) for item in (cover_generation.get("blocking_reasons") or []) if str(item).strip())
+        if cover_output_path.exists() and not platform_blocks:
             material["cover_path"] = str(cover_output_path)
+        if cover_generation:
+            material["cover_generation"] = cover_generation
+        material["publish_ready"] = not platform_blocks
+        material["blocking_reasons"] = platform_blocks
+        blocking_reasons.extend(f"{rules['label']}：{reason}" for reason in platform_blocks)
         _write_platform_material_files(material_dir=material_dir, index=index, material=material)
         platform_materials.append(material)
+        platform_progress = 56 + round((index / max(1, len(publish_platforms))) * 38)
+        await _emit_intelligent_copy_progress(
+            progress_callback,
+            {
+                "progress": min(platform_progress, 96),
+                "stage": "platforms",
+                "message": f"已生成 {rules['label']} 物料（{index}/{len(publish_platforms)}）。",
+                "inspection": inspection,
+                "folder_path": str(video_path.parent),
+                "material_dir": str(material_dir),
+                "partial_result": {**base_result, "platforms": list(platform_materials)},
+            },
+        )
 
     result = {
-        "folder_path": str(video_path.parent),
-        "material_dir": str(material_dir),
-        "markdown_path": str(markdown_path),
-        "json_path": str(json_path),
-        "copy_style": resolved_copy_style,
-        "inspection": inspection,
-        "highlights": dict(packaging.get("highlights") or {}),
+        **base_result,
         "copy_brief": copy_brief,
-        "content_profile_summary": _content_profile_summary(content_profile),
         "platforms": platform_materials,
-        "warnings": list(inspection.get("warnings") or []),
+        "publish_ready": not blocking_reasons,
+        "blocking_reasons": blocking_reasons,
     }
     json_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    await _emit_intelligent_copy_progress(
+        progress_callback,
+        {
+            "progress": 100,
+            "stage": "completed",
+            "message": "物料生成完成。",
+            "inspection": inspection,
+            "folder_path": str(video_path.parent),
+            "material_dir": str(material_dir),
+            "partial_result": result,
+            "result": result,
+        },
+    )
     return result
+
+
+def _resolve_intelligent_copy_platform_keys(platforms: list[str] | None) -> list[str]:
+    available = [key for key, _label, _body_label, _tag_label in PLATFORM_ORDER if PLATFORM_PUBLISH_RULES.get(key)]
+    if not platforms:
+        return available
+    aliases = {
+        "wechat-channels": "wechat_channels",
+        "wechat": "wechat_channels",
+        "b站": "bilibili",
+        "bilibili": "bilibili",
+        "小红书": "xiaohongshu",
+        "抖音": "douyin",
+        "快手": "kuaishou",
+        "视频号": "wechat_channels",
+        "头条号": "toutiao",
+        "youtube": "youtube",
+        "x": "x",
+    }
+    selected: list[str] = []
+    for platform in platforms:
+        raw = str(platform or "").strip()
+        normalized = aliases.get(raw.casefold(), raw)
+        if normalized in available and normalized not in selected:
+            selected.append(normalized)
+    if not selected:
+        raise ValueError("请选择至少一个可生成物料的平台。")
+    return selected
+
+
+def _filter_intelligent_copy_packaging(packaging: dict[str, Any], platform_keys: list[str]) -> dict[str, Any]:
+    platforms = packaging.get("platforms") if isinstance(packaging.get("platforms"), dict) else {}
+    return {
+        **packaging,
+        "platforms": {
+            key: platforms.get(key, {})
+            for key in platform_keys
+            if PLATFORM_PUBLISH_RULES.get(key)
+        },
+    }
 
 
 def _build_intelligent_copy_fast_profile(
@@ -336,6 +516,19 @@ def _build_platform_material(*, platform_key: str, platform_payload: dict[str, A
         "tags_copy": tags_copy,
         "full_copy": "\n\n".join(part for part in full_copy_parts if part),
     }
+
+
+def _validate_platform_material_ready(material: dict[str, Any]) -> list[str]:
+    problems: list[str] = []
+    if bool(material.get("has_title", True)) and not list(material.get("titles") or []):
+        problems.append("缺少可发布标题")
+    if not str(material.get("body") or "").strip():
+        problems.append("缺少可发布正文")
+    if not list(material.get("tags") or []):
+        problems.append("缺少可发布标签")
+    if not str(material.get("full_copy") or "").strip():
+        problems.append("完整发布文案为空")
+    return problems
 
 
 def _write_platform_material_files(*, material_dir: Path, index: int, material: dict[str, Any]) -> None:
@@ -510,31 +703,325 @@ def _render_platform_material_markdown(material: dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+async def _prepare_intelligent_copy_cover_source(
+    *,
+    video_path: Path,
+    material_dir: Path,
+    content_profile: dict[str, Any],
+    packaging: dict[str, Any],
+) -> Path | None:
+    source_path = material_dir / "00-highlight-cover-source.jpg"
+    manifest_path = material_dir / "00-highlight-cover-source.json"
+    settings = get_settings()
+    try:
+        duration = _probe_duration(video_path)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            candidates = (
+                _sample_cover_candidates(
+                    video_path,
+                    duration=duration,
+                    anchor_seek=3.0,
+                    candidate_count=max(6, int(settings.cover_candidate_count or 10)),
+                    tmpdir=tmp,
+                )
+                if duration > 0
+                else []
+            )
+            if not candidates:
+                raise RuntimeError("没有可用于封面判断的候选帧")
+            selected = await _select_intelligent_copy_highlight_candidate(
+                candidates,
+                content_profile=content_profile,
+                packaging=packaging,
+                contact_sheet_output_path=material_dir / "00-highlight-candidates-sheet.jpg",
+            )
+            candidate_index = max(0, min(len(candidates) - 1, int(selected.get("index", 0) or 0)))
+            candidate = candidates[candidate_index]
+            await _extract_frame(video_path, source_path, float(candidate.get("seek") or 3.0))
+            _write_cover_source_manifest(
+                manifest_path,
+                {
+                    "seek_sec": round(float(candidate.get("seek") or 0.0), 2),
+                    "source": selected.get("source") or "highlight_rank",
+                    "score": selected.get("score"),
+                    "reason": selected.get("reason") or "",
+                    "candidate_index": candidate_index,
+                    "contact_sheet_path": selected.get("contact_sheet_path") or "",
+                },
+            )
+            return source_path
+    except Exception as exc:
+        _write_cover_source_manifest(manifest_path, {"source": "failed", "error": str(exc)})
+        return None
+
+
+async def _select_intelligent_copy_highlight_candidate(
+    candidates: list[dict[str, Any]],
+    *,
+    content_profile: dict[str, Any],
+    packaging: dict[str, Any],
+    contact_sheet_output_path: Path | None = None,
+) -> dict[str, Any]:
+    preview_paths = [candidate["preview"] for candidate in candidates if candidate.get("preview")]
+    if not preview_paths:
+        raise RuntimeError("没有候选帧预览图，无法选择封面高光")
+    contact_sheet_path = _build_numbered_highlight_contact_sheet(
+        preview_paths,
+        output_path=contact_sheet_output_path,
+    )
+    profile_text = json.dumps(
+        {
+            "content_profile": _content_profile_summary(content_profile),
+            "highlights": dict(packaging.get("highlights") or {}),
+        },
+        ensure_ascii=False,
+    )
+    last_error = ""
+    for attempt in range(1, 4):
+        try:
+            prompt = (
+                "你在为多平台视频发布选择封面底图。请从候选帧中选出最适合再做 AI 封面编辑的一张。"
+                "优先级：1) 视频主题一眼明确，主体/产品/关键动作足够大；"
+                "2) 是成片中的高光时刻，有开箱、展示、对比、细节或结果感；"
+                "3) 画面清晰稳定，少字幕、少 UI 杂讯、少遮挡；"
+                "4) 后续可裁成横版 16:9、竖版 9:16、3:4。"
+                "不要选只有手部、主体过小、过暗、失焦、字幕占比很大的帧。"
+                "候选图已经合成到一张接触表里，每个小图左上角有 1-based 序号。"
+                f"\n视频主题参考：{profile_text}"
+                f"\n这是第 {attempt} 次判断；如果上一轮格式失败，请修复为合法 JSON。"
+                "\n输出 JSON："
+                "{\"best_number\":1,\"score\":0.91,\"reason\":\"主体最大且主题最明确\"}"
+            )
+            content = await asyncio.wait_for(
+                complete_with_images(prompt, [contact_sheet_path], max_tokens=180, json_mode=True),
+                timeout=8,
+            )
+            data = json.loads(extract_json_text(content))
+            if "best_number" in data or "number" in data:
+                index = int(data.get("best_number", data.get("number", 1)) or 1) - 1
+            else:
+                index = int(data.get("best_index", data.get("index", 0)) or 0)
+            if 0 <= index < len(candidates):
+                return {
+                    "index": index,
+                    "score": _normalize_score(data.get("score"), fallback=0.0),
+                    "reason": str(data.get("reason") or "").strip(),
+                    "source": "llm_contact_sheet_rank",
+                    "contact_sheet_path": str(contact_sheet_path),
+                    "attempts": attempt,
+                }
+            last_error = f"模型返回序号越界：{index + 1}"
+        except Exception as exc:
+            last_error = str(exc)
+    raise RuntimeError(f"高光帧识别经过重试后仍失败：{last_error}")
+
+
+def _build_numbered_highlight_contact_sheet(preview_paths: list[Path], *, output_path: Path | None = None) -> Path:
+    valid_paths = [path for path in preview_paths if path and path.exists()]
+    if not valid_paths:
+        raise ValueError("No preview frames available for contact sheet")
+    sheet_path = output_path or (valid_paths[0].parent / "highlight_candidates_sheet.jpg")
+    sheet_path.parent.mkdir(parents=True, exist_ok=True)
+    columns = 3 if len(valid_paths) > 1 else 1
+    cell_width = 360
+    cell_height = 360
+    settings = get_settings()
+    fontfile = str(getattr(settings, "cover_title_font_path", "") or "").strip()
+    font_clause = ""
+    if fontfile and Path(fontfile).exists():
+        font_clause = f":fontfile='{_escape_ffmpeg_filter_value(fontfile)}'"
+
+    command = ["ffmpeg", "-y"]
+    for path in valid_paths:
+        command.extend(["-i", str(path)])
+
+    filter_parts: list[str] = []
+    labels: list[str] = []
+    for index, _path in enumerate(valid_paths):
+        label = f"v{index}"
+        labels.append(f"[{label}]")
+        filter_parts.append(
+            (
+                f"[{index}:v]"
+                f"scale={cell_width}:{cell_height}:force_original_aspect_ratio=decrease,"
+                f"pad={cell_width}:{cell_height}:(ow-iw)/2:(oh-ih)/2:color=0x111111,"
+                "drawbox=x=0:y=0:w=76:h=54:color=black@0.68:t=fill,"
+                f"drawtext=text='{index + 1}'{font_clause}:x=22:y=10:fontsize=34:fontcolor=white,"
+                "drawbox=x=0:y=0:w=iw:h=ih:color=white@0.24:t=2"
+                f"[{label}]"
+            )
+        )
+
+    layout_parts = [
+        f"{(index % columns) * cell_width}_{(index // columns) * cell_height}"
+        for index in range(len(valid_paths))
+    ]
+    filter_parts.append(
+        "".join(labels)
+        + f"xstack=inputs={len(valid_paths)}:layout={'|'.join(layout_parts)}:fill=0x111111"
+        + ",format=yuvj420p[out]"
+    )
+    command.extend(
+        [
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[out]",
+            "-frames:v",
+            "1",
+            str(sheet_path),
+        ]
+    )
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=settings.ffmpeg_timeout_sec,
+    )
+    if result.returncode != 0 or not sheet_path.exists():
+        raise RuntimeError(f"候选封面接触表生成失败：{result.stderr[-400:]}")
+    return sheet_path
+
+
+def _escape_ffmpeg_filter_value(value: str) -> str:
+    return str(value or "").replace("\\", "/").replace(":", "\\:").replace("'", "\\'")
+
+
+def _normalize_score(value: Any, *, fallback: float) -> float:
+    try:
+        return round(max(0.0, min(1.0, float(value))), 3)
+    except Exception:
+        return round(max(0.0, min(1.0, float(fallback))), 3)
+
+
+def _write_cover_source_manifest(path: Path, payload: dict[str, Any]) -> None:
+    try:
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
 async def _render_platform_cover(
     *,
     output_path: Path,
     video_path: Path,
+    source_image_path: Path | None,
     existing_cover_path: Path | None,
     title: str,
+    platform_key: str,
     rules: dict[str, Any],
-) -> None:
+) -> dict[str, Any]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     target_width, target_height = int(rules["cover_size"][0]), int(rules["cover_size"][1])
+    source_kind = "video_highlight"
+    image_generation: dict[str, Any] | None = None
+    blocking_reasons: list[str] = []
+    request_path = output_path.with_suffix(".codex-imagegen.json")
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         base_image = tmpdir_path / "base.jpg"
-        if existing_cover_path is not None and existing_cover_path.exists():
+        if source_image_path is not None and source_image_path.exists():
+            shutil.copy2(source_image_path, base_image)
+        elif existing_cover_path is not None and existing_cover_path.exists():
             shutil.copy2(existing_cover_path, base_image)
+            source_kind = "existing_cover_reference"
         else:
-            await _extract_frame(video_path, base_image, 3.0)
-        _fit_image_to_canvas(
-            source_path=base_image,
-            output_path=output_path,
-            width=target_width,
-            height=target_height,
-        )
-    if existing_cover_path is not None and existing_cover_path.exists():
-        return
+            return {
+                "source": "missing_source",
+                "platform": str(platform_key or "").strip(),
+                "target_size": {"width": target_width, "height": target_height},
+                "publish_ready": False,
+                "blocking_reasons": ["封面缺少可编辑参考帧，已停止生成"],
+                "image_generation": None,
+            }
+        generated_image = tmpdir_path / "generated.jpg"
+        if not _should_generate_intelligent_copy_cover_image(source_kind):
+            return {
+                "source": source_kind,
+                "platform": str(platform_key or "").strip(),
+                "target_size": {"width": target_width, "height": target_height},
+                "publish_ready": False,
+                "blocking_reasons": ["封面图像生成未启用，正式物料不可发布"],
+                "image_generation": None,
+            }
+        if _should_generate_intelligent_copy_cover_image(source_kind):
+            last_error = ""
+            for attempt in range(1, 4):
+                try:
+                    image_generation = await generate_edited_cover_image(
+                        source_image_path=base_image,
+                        output_path=generated_image,
+                        request_path=request_path,
+                        final_output_path=output_path,
+                        prompt=_build_platform_cover_image_prompt(
+                            title=title,
+                            platform_key=platform_key,
+                            rules=rules,
+                            width=target_width,
+                            height=target_height,
+                        ),
+                        width=target_width,
+                        height=target_height,
+                    )
+                    image_generation["attempts"] = attempt
+                    source_kind = "image_generation"
+                    break
+                except CodexImageGenerationPending as exc:
+                    image_generation = dict(exc.metadata)
+                    image_generation["attempts"] = attempt
+                    blocking_reasons.append("封面等待 Codex 内置 imagegen 执行完成")
+                    break
+                except Exception as exc:
+                    last_error = str(exc)
+            if source_kind != "image_generation":
+                if last_error:
+                    blocking_reasons.append(f"封面图像生成重试后仍失败：{last_error}")
+                return {
+                    "source": source_kind,
+                    "platform": str(platform_key or "").strip(),
+                    "target_size": {"width": target_width, "height": target_height},
+                    "publish_ready": False,
+                    "blocking_reasons": blocking_reasons or ["封面图像生成未完成"],
+                    "image_generation": image_generation,
+                }
+        if not generated_image.exists() and not output_path.exists():
+            return {
+                "source": source_kind,
+                "platform": str(platform_key or "").strip(),
+                "target_size": {"width": target_width, "height": target_height},
+                "publish_ready": False,
+                "blocking_reasons": ["封面图像生成没有返回图片文件"],
+                "image_generation": image_generation,
+            }
+        if generated_image.exists():
+            _fit_image_to_canvas(
+                source_path=generated_image,
+                output_path=output_path,
+                width=target_width,
+                height=target_height,
+                fit_mode="cover",
+            )
+        if isinstance(image_generation, dict) and str(image_generation.get("backend") or "") == "codex_builtin":
+            request_payload = _read_cover_request_payload(request_path)
+            cover_assessment = assess_cover_publish_readiness(
+                image_generation,
+                request_payload,
+                output_path,
+            )
+            if not bool(cover_assessment.get("publish_ready")):
+                return {
+                    "source": source_kind,
+                    "platform": str(platform_key or "").strip(),
+                    "target_size": {"width": target_width, "height": target_height},
+                    "publish_ready": False,
+                    "blocking_reasons": list(cover_assessment.get("blocking_reasons") or []),
+                    "warnings": list(cover_assessment.get("warnings") or []),
+                    "image_generation": image_generation,
+                    "cover_quality": cover_assessment,
+                }
     title_lines = _build_cover_title_lines(title)
     if title_lines:
         await _overlay_title_layout(
@@ -543,10 +1030,97 @@ async def _render_platform_cover(
             str(rules.get("cover_style") or "tech_showcase"),
             str(rules.get("title_style") or "preset_default"),
         )
+    return {
+        "source": source_kind,
+        "platform": str(platform_key or "").strip(),
+        "target_size": {"width": target_width, "height": target_height},
+        "publish_ready": output_path.exists() and not blocking_reasons,
+        "blocking_reasons": blocking_reasons,
+        "image_generation": image_generation,
+    }
 
 
-def _fit_image_to_canvas(*, source_path: Path, output_path: Path, width: int, height: int) -> None:
+def _read_cover_request_payload(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _should_generate_intelligent_copy_cover_image(source_kind: str) -> bool:
     settings = get_settings()
+    if not bool(getattr(settings, "intelligent_copy_cover_image_generation_enabled", True)):
+        return False
+    return str(source_kind or "").strip() in {"video_highlight", "existing_cover_reference"}
+
+
+def _build_platform_cover_image_prompt(
+    *,
+    title: str,
+    platform_key: str,
+    rules: dict[str, Any],
+    width: int,
+    height: int,
+) -> str:
+    title_text = re.sub(r"\s+", " ", str(title or "").strip())
+    platform_label = str(rules.get("label") or platform_key or "").strip()
+    ratio_label = _cover_ratio_label(width=width, height=height)
+    instruction = _platform_cover_visual_instruction(platform_key)
+    return (
+        "基于参考帧生成一张可发布的视频封面底图。"
+        "必须保留参考帧中的真实主体、产品形态、材质和场景关系，不要发明不存在的品牌 logo、型号、参数或功能。"
+        "可以做商业封面级的适度编辑：增强光线、清晰度、对比、景深、构图、背景整洁度和质感，但不要改变主体身份。"
+        "不要把标题文字直接画进图片里；请预留干净的标题安全区，后续系统会叠加中文标题。"
+        "避免水印、错别字、乱码、伪造界面、夸张危险动作、过度赛博化和廉价电商感。"
+        f"\n平台：{platform_label}"
+        f"\n目标比例：{ratio_label}，最终输出会裁切到 {width}x{height}。"
+        f"\n标题参考：{title_text or '内容主题明确、突出主体'}"
+        f"\n平台视觉要求：{instruction}"
+    )
+
+
+def _cover_ratio_label(*, width: int, height: int) -> str:
+    safe_width = max(1, int(width or 0))
+    safe_height = max(1, int(height or 0))
+    ratio = safe_width / safe_height
+    if abs(ratio - (16 / 9)) < 0.03:
+        return "16:9 横版"
+    if abs(ratio - (9 / 16)) < 0.03:
+        return "9:16 竖版"
+    if abs(ratio - (3 / 4)) < 0.03:
+        return "3:4 竖版"
+    return f"{safe_width}:{safe_height}"
+
+
+def _platform_cover_visual_instruction(platform_key: str) -> str:
+    instructions = {
+        "bilibili": "横版信息流封面，主体明确、细节可读、技术/开箱感强，左侧或下方保留标题空间。",
+        "xiaohongshu": "3:4 笔记封面，干净、质感、真实分享感，主体靠中上，留出醒目的标题空间。",
+        "douyin": "9:16 竖版短视频封面，第一眼冲击强，主体占比大，顶部和中部要适合大字标题。",
+        "kuaishou": "9:16 竖版封面，直给、真实、主体大，避免过度精修，适合手机端快速扫到重点。",
+        "wechat_channels": "9:16 竖版封面，稳妥可信，画面克制，主体清楚，适合朋友圈/视频号信息流。",
+        "toutiao": "横版资讯封面，结论感和主体信息清楚，背景少干扰，适合信息流点击。",
+        "youtube": "横版 YouTube thumbnail，高对比、主体大、层次清楚，预留大标题区域。",
+        "x": "横版社交流封面，干净、观点感强，缩略图里主体仍然清楚。",
+    }
+    return instructions.get(str(platform_key or "").strip(), "主体清楚、背景干净、预留标题安全区。")
+
+
+def _fit_image_to_canvas(*, source_path: Path, output_path: Path, width: int, height: int, fit_mode: str = "contain") -> None:
+    settings = get_settings()
+    if str(fit_mode or "").strip().lower() == "cover":
+        video_filter = (
+            "scale="
+            f"w={width}:h={height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height}"
+        )
+    else:
+        video_filter = (
+            "scale="
+            f"w={width}:h={height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x111111"
+        )
     result = subprocess.run(
         [
             "ffmpeg",
@@ -554,11 +1128,7 @@ def _fit_image_to_canvas(*, source_path: Path, output_path: Path, width: int, he
             "-i",
             str(source_path),
             "-vf",
-            (
-                "scale="
-                f"w={width}:h={height}:force_original_aspect_ratio=decrease,"
-                f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=0x111111"
-            ),
+            video_filter,
             "-frames:v",
             "1",
             str(output_path),

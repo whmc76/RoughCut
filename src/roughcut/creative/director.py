@@ -212,7 +212,7 @@ def _director_bridge_line(subject: str, *, summary: str, preference_tags: set[st
         return f"接下来别只记{subject}表面流程，更关键的是把节点顺序和判断逻辑拆清楚。"
     if "comparison_focus" in preference_tags:
         return f"接下来别只看热闹，更关键的是把这条{subject}的差异、取舍和判断依据说透。"
-    return f"接下来别只看表面流程，更关键的是它背后的逻辑为什么成立。"
+    return "接下来别只看表面流程，更关键的是它背后的逻辑为什么成立。"
 
 
 def _director_science_boost(subject: str, *, preference_tags: set[str]) -> str:
