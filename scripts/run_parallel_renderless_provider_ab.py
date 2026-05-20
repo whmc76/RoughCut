@@ -38,9 +38,9 @@ from run_fullchain_batch import (
 from run_renderless_provider_comparison import ProviderSpec, build_report, collect_run_summary, render_markdown
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
-DEFAULT_SOURCE_ROOT = Path("F:/roughcut_outputs/jobs")
-DEFAULT_WORK_ROOT = Path("F:/roughcut_outputs/provider_compare_inputs")
-DEFAULT_OUTPUT_DIR = "F:/roughcut_outputs/output/provider_compare_batch"
+DEFAULT_SOURCE_ROOT = ROOT / "data" / "runtime" / "jobs"
+DEFAULT_WORK_ROOT = ROOT / "data" / "runtime" / "provider_compare_inputs"
+DEFAULT_OUTPUT_DIR = str(ROOT / "data" / "runtime" / "output" / "provider_compare_batch")
 
 RUN_STEPS = [
     "probe",

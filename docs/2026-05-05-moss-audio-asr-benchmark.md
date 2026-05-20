@@ -52,9 +52,9 @@ Benchmark command pattern:
 
 ```powershell
 uv run python scripts\benchmark_http_asr_compare.py `
-  --inputs "F:\roughcut_outputs\jobs\af3f56f7-1dc3-4b83-ad2f-c32be55edd59\20260212-141536 补充说明noc mt34开箱的快开自定义方式.mp4" `
-           "F:\roughcut_outputs\jobs\7b4ca848-d4dc-41e0-bacf-800d1a5cbc8a\20260212-142025 以noc mt34为例 讲解展示了edc折刀的多种快开放式和简单的手法教学.mp4" `
-           "F:\roughcut_outputs\jobs\fb30a42c-1af1-4c78-b065-bc3cd4004b2e\20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4" `
+  --inputs "E:\WorkSpace\RoughCut\data\runtime\jobs\af3f56f7-1dc3-4b83-ad2f-c32be55edd59\20260212-141536 补充说明noc mt34开箱的快开自定义方式.mp4" `
+           "E:\WorkSpace\RoughCut\data\runtime\jobs\7b4ca848-d4dc-41e0-bacf-800d1a5cbc8a\20260212-142025 以noc mt34为例 讲解展示了edc折刀的多种快开放式和简单的手法教学.mp4" `
+           "E:\WorkSpace\RoughCut\data\runtime\jobs\fb30a42c-1af1-4c78-b065-bc3cd4004b2e\20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4" `
   --sample-seconds 30 `
   --candidates current `
   --timeout-sec 1800 `

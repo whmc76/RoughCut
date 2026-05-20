@@ -28,6 +28,7 @@ logs/*.json
 logs/*.jpg
 logs/*.lock
 data/cache/
+data/runtime/
 assets/packaging/*
 !assets/packaging/.gitkeep
 output/
@@ -47,7 +48,6 @@ __pycache__/
 .codex-artifacts/
 .codex-run/
 .model-cache/
-.external-services/
 .superpowers/**/state/
 .superpowers/**/content/waiting-*.html
 .playwright-cli/

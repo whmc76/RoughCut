@@ -129,8 +129,13 @@ pnpm setup
 
 这一步会创建：
 
-- `F:/roughcut_outputs/output`
-- `F:/roughcut_outputs/render-debug`
+- `./data/runtime/jobs`
+- `./data/runtime/output`
+- `./data/runtime/cache`
+- `./data/runtime/render-debug`
+- `./data/runtime/tools`
+- `./data/runtime/voice_refs`
+- `./data/runtime/voice`
 - `watch`
 - `.env`（若不存在且 `.env.example` 存在）
 
@@ -174,8 +179,10 @@ pnpm docker:runtime:auto-up
 
 - HeyGem: `http://127.0.0.1:49202`
 - 语音克隆默认走 RunningHub；本地 `49204` 仅在显式启用 IndexTTS2 时使用
-- HeyGem 数据根: `F:/roughcut_outputs/heygem`
-- 参考音频缓存目录: `F:/roughcut_outputs/voice_refs`
+- HeyGem 公共服务目录: `E:/WorkSpace/heygem`
+- HeyGem 公共服务数据根: `D:/duix_avatar_data/face2face`
+- HeyGem 公共服务语音目录: `D:/duix_avatar_data/face2face/voice/data`
+- RoughCut 不迁移 HeyGem 本体或公共数据根；只迁移自己的 `jobs` / `output` / `cache` / `render-debug` / `tools` / `voice_refs` / `voice` 等运行数据
 
 ### 5. 配置环境变量
 
@@ -198,10 +205,10 @@ LOCAL_ASR_API_BASE_URL=http://127.0.0.1:30080
 LOCAL_ASR_MODEL_NAME=qwen3-asr-1.7b-forced-aligner
 LOCAL_ASR_DISPLAY_NAME=Qwen3-ASR 1.7B + ForcedAligner
 
-ROUGHCUT_OUTPUT_ROOT=F:/roughcut_outputs
-JOB_STORAGE_DIR=F:/roughcut_outputs/jobs
-OUTPUT_DIR=F:/roughcut_outputs/output
-RENDER_DEBUG_DIR=F:/roughcut_outputs/render-debug
+ROUGHCUT_OUTPUT_ROOT=./data/runtime
+JOB_STORAGE_DIR=./data/runtime/jobs
+OUTPUT_DIR=./data/runtime/output
+RENDER_DEBUG_DIR=./data/runtime/render-debug
 PACKAGING_ASSET_DIR=assets/packaging
 RENDER_VIDEO_ENCODER=auto
 AUTO_CONFIRM_CONTENT_PROFILE=true
@@ -215,8 +222,9 @@ PACKAGING_SELECTION_MIN_SCORE=0.6
 AVATAR_PROVIDER=heygem
 AVATAR_API_BASE_URL=http://127.0.0.1:49202
 AVATAR_TRAINING_API_BASE_URL=http://127.0.0.1:49204
-HEYGEM_SHARED_ROOT=F:/roughcut_outputs/heygem
-HEYGEM_VOICE_ROOT=F:/roughcut_outputs/voice_refs
+HEYGEM_DOCKER_ENV_FILE=E:/WorkSpace/heygem/.env
+HEYGEM_SHARED_ROOT=D:/duix_avatar_data/face2face
+HEYGEM_VOICE_ROOT=D:/duix_avatar_data/face2face/voice/data
 VOICE_PROVIDER=runninghub
 VOICE_CLONE_API_BASE_URL=https://www.runninghub.cn
 VOICE_CLONE_VOICE_ID=2003864334474354690
@@ -375,7 +383,11 @@ pnpm lint:backend
 Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roughcut.bat) 作为用户入口：
 
 - `start_roughcut.bat`
-  默认开发入口。后台拉起本地 API / orchestrator / workers，同时启动 Vite 前端开发服务器；浏览器使用终端里打印的 `Frontend URL` 或 `Frontend LAN URL`，前端代码改动会走 HMR 热更新。`API URL` 仍是接口和静态后备入口，不负责 Vite HMR；如需只用静态产物，可传 `-NoFrontendDev`。不会再隐式启动 Docker 基础设施；这个终端窗口本身就是托管器，直接关窗即可停掉整套服务
+  默认 Docker full dev 入口。启动 `roughcut` compose 分组下的 infra + runtime + automation + dev overlay：后端源码 bind mount 并热重载，worker / orchestrator 由 `watchfiles` 自动重启，容器内 `frontend-watch` 持续更新 `frontend/dist`。端口仍统一来自 `roughcut.ports.env`
+- `start_roughcut.bat rebuild`
+  与默认入口相同，但显式加 `-BuildDocker` 强制重建 `roughcut:local`；改了 `Dockerfile`、`pyproject.toml`、`uv.lock`、`package.json`、`pnpm-lock.yaml` 或 Python extras 后使用
+- `start_roughcut.bat local`
+  旧本地开发入口。后台拉起本地 API / orchestrator / workers，同时启动 Vite 前端开发服务器；浏览器使用终端里打印的 `Frontend URL` 或 `Frontend LAN URL`
 - `start_roughcut.bat infra`
   只启动 PostgreSQL / Redis / MinIO 这套轻量基础设施，供本地服务使用
 - `start_roughcut.bat runtime`
@@ -394,6 +406,10 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
   显式启动 host-side rebuild watch，监听 workspace 改动并自动 refresh Docker runtime；适合需要整套镜像重建的开发/维护场景，不适合重任务常驻队列
 - `start_roughcut.bat full-watch`
   显式启动 host-side rebuild watch，监听 workspace 改动并自动 refresh runtime + automation
+- `start_roughcut.bat install-autostart`
+  注册 Windows 登录任务，开机登录后自动启动默认 Docker full dev 模式；任务不会每次强制 build
+- `start_roughcut.bat uninstall-autostart`
+  移除 Windows 登录任务
 - `pnpm docker:runtime:auto-up`
   从根目录启动显式容器化 runtime，并自动构建重建（host-side）
 - `pnpm docker:auto:auto-up`
@@ -405,7 +421,7 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
 
 `start_roughcut.ps1` 是当前主脚本，也是一键启动的实际实现。
 
-默认开发建议是把 `start_roughcut.bat` 作为默认开发入口；本地模式不再隐式拉起任何 Docker 容器，需要时请显式执行 `start_roughcut.bat infra`。运行时 Docker preflight 和外部 GPU/ASR 容器 guard 默认关闭，只有显式设置 `RUNTIME_PREFLIGHT_DOCKER_ENABLED=true` 或 `DOCKER_GPU_GUARD_ENABLED=true` 时才会由 RoughCut 自动管理容器。Docker 更适合基础依赖、部署验证和显式容器化运行。`pnpm docker:up/down` 现在只作为 `infra` 快捷别名保留。
+默认开发建议是把 `start_roughcut.bat` 作为 Docker full dev 入口；本地 Python 模式保留为 `start_roughcut.bat local`。运行时 Docker preflight 和外部 GPU/ASR 容器 guard 默认关闭，只有显式设置 `RUNTIME_PREFLIGHT_DOCKER_ENABLED=true` 或 `DOCKER_GPU_GUARD_ENABLED=true` 时才会由 RoughCut 自动管理容器。`pnpm docker:up/down` 现在只作为 `infra` 快捷别名保留。
 
 ---
 
@@ -436,16 +452,22 @@ cp .env.example .env
 docker compose --env-file roughcut.ports.env -f docker-compose.infra.yml up -d
 ```
 
-推荐常驻（基础设施 + Docker runtime，默认 live source sync）：
+推荐常驻开发（基础设施 + Docker runtime，默认 live source sync）：
 
 ```bash
-docker compose --env-file roughcut.ports.env -f docker-compose.infra.yml -f docker-compose.runtime.yml -f docker-compose.dev.yml up -d --build
+pnpm docker:dev:up
 ```
 
-全自动无人值守（再加 watcher，默认 live source sync）：
+强制重建镜像后启动：
 
 ```bash
-docker compose --env-file roughcut.ports.env -f docker-compose.infra.yml -f docker-compose.runtime.yml -f docker-compose.automation.yml -f docker-compose.dev.yml up -d --build
+pnpm docker:dev:rebuild
+```
+
+等价的完整 compose 命令：
+
+```bash
+docker compose --env-file roughcut.ports.env -f docker-compose.infra.yml -f docker-compose.runtime.yml -f docker-compose.automation.yml -f docker-compose.dev.yml up -d
 ```
 
 推荐常驻默认包含：
@@ -544,10 +566,15 @@ host-side rebuild watch 方案和 Hydra 的差别是：
 
 ### 4. 数据目录
 
-- `F:/roughcut_outputs/output`：成片输出
-- `F:/roughcut_outputs/render-debug`：render 诊断目录
-- `F:/roughcut_outputs/jobs`：任务运行期文件与中间产物
-- `F:/roughcut_outputs/heygem`：HeyGem 输入 / temp / result
+- `./data/runtime/jobs`：任务运行期文件与中间产物
+- `./data/runtime/output`：成片输出
+- `./data/runtime/cache`：RoughCut 本地缓存（如启用）
+- `./data/runtime/render-debug`：render 诊断目录
+- `./data/runtime/tools`：百宝箱工具历史、TTS/ASR 输出与参考上传历史
+- `./data/runtime/voice_refs`：旧版语音参考文件
+- `./data/runtime/voice`：RoughCut 自有语音任务数据
+- `./data/runtime/content_profile_review_stats.json`：创作配置自动审校统计
+- `D:/duix_avatar_data/face2face`：HeyGem 公共服务输入 / temp / result，由 `E:/WorkSpace/heygem/.env` 的 `HEYGEM_DATA_DIR` 管理，不属于 RoughCut 私有数据迁移范围
 - `./watch`：可选目录监听挂载点（启用 automation compose 时使用）
 
   ### 5. 说明
@@ -612,10 +639,10 @@ curl "${ROUGHCUT_API_BASE:-http://localhost:38471/api/v1}/jobs/{job_id}/report"
 
 | 配置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `JOB_STORAGE_DIR` | `F:/roughcut_outputs/jobs` | 任务运行期文件根目录 |
-| `OUTPUT_DIR` | `F:/roughcut_outputs/output` | 成片输出目录 |
+| `JOB_STORAGE_DIR` | `./data/runtime/jobs` | 任务运行期文件根目录 |
+| `OUTPUT_DIR` | `./data/runtime/output` | 成片输出目录 |
 | `OUTPUT_NAME_PATTERN` | `{date}_{stem}` | 输出文件名模板 |
-| `RENDER_DEBUG_DIR` | `F:/roughcut_outputs/render-debug` | render 调试产物目录 |
+| `RENDER_DEBUG_DIR` | `./data/runtime/render-debug` | render 调试产物目录 |
 | `REASONING_PROVIDER` | `openai` | 推理后端：`openai` / `anthropic` / `minimax` / `ollama` |
 | `REASONING_MODEL` | `gpt-5.5` | 推理模型名称 |
 | `REASONING_EFFORT` | `low` | GPT 推理强度默认值 |
@@ -659,7 +686,7 @@ curl "${ROUGHCUT_API_BASE:-http://localhost:38471/api/v1}/jobs/{job_id}/report"
 | `TELEGRAM_AGENT_ACP_COMMAND` | `""` | 外部 ACP bridge 命令；Telegram agent 会通过 stdin 发送 JSON 负载 |
 | `TELEGRAM_AGENT_TASK_TIMEOUT_SEC` | `900` | Telegram agent 异步任务超时 |
 | `TELEGRAM_AGENT_RESULT_MAX_CHARS` | `3500` | Telegram 回推结果摘要最大字符数 |
-| `TELEGRAM_AGENT_STATE_DIR` | `F:/roughcut_outputs/telegram-agent` | Telegram agent 本地任务状态文件目录 |
+| `TELEGRAM_AGENT_STATE_DIR` | `./data/runtime/telegram-agent` | Telegram agent 本地任务状态文件目录 |
 | `FACT_CHECK_ENABLED` | `false` | 事实核验开关（Phase 2） |
 
 如果要直接启用仓库内置的 ACP bridge，推荐配置：
@@ -809,11 +836,11 @@ find . -type d -name "__pycache__" -prune -exec rm -rf {} +
 
 当 render 遇到旋转、任务文件路径或 ffmpeg 参数问题时，可直接查看：
 
-- `F:/roughcut_outputs/render-debug/{job_id}_{output_name}/source.integrity.json`：下载源文件 SHA-256 校验
-- `F:/roughcut_outputs/render-debug/{job_id}_{output_name}/source.ffprobe.json`：下载源文件的 ffprobe 结果
-- `F:/roughcut_outputs/render-debug/{job_id}_{output_name}/render.ffmpeg.txt`：完整渲染命令
-- `F:/roughcut_outputs/render-debug/{job_id}_{output_name}/strip.ffmpeg.txt` / `normalize.ffmpeg.txt`：旋转归一化命令
-- `F:/roughcut_outputs/render-debug/{job_id}_{output_name}/*.stderr.log`：对应 ffmpeg stderr 输出
+- `./data/runtime/render-debug/{job_id}_{output_name}/source.integrity.json`：下载源文件 SHA-256 校验
+- `./data/runtime/render-debug/{job_id}_{output_name}/source.ffprobe.json`：下载源文件的 ffprobe 结果
+- `./data/runtime/render-debug/{job_id}_{output_name}/render.ffmpeg.txt`：完整渲染命令
+- `./data/runtime/render-debug/{job_id}_{output_name}/strip.ffmpeg.txt` / `normalize.ffmpeg.txt`：旋转归一化命令
+- `./data/runtime/render-debug/{job_id}_{output_name}/*.stderr.log`：对应 ffmpeg stderr 输出
 
 ---
 

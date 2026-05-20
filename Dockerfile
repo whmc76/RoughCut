@@ -23,19 +23,33 @@ ENV UV_CACHE_DIR=/root/.cache/uv
 ENV PATH="/app/.venv/bin:${PATH}"
 ENV LD_LIBRARY_PATH="/app/.venv/lib/python3.11/site-packages/nvidia/cublas/lib:/app/.venv/lib/python3.11/site-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH}"
 ARG ROUGHCUT_PYTHON_EXTRAS=""
+ARG ROUGHCUT_APT_MIRROR="http://mirrors.aliyun.com/debian"
+ARG ROUGHCUT_APT_SECURITY_MIRROR="http://mirrors.aliyun.com/debian-security"
 
 WORKDIR /app
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        curl \
-        ffmpeg \
-        fonts-noto-cjk \
-        libglib2.0-0 \
-        libsm6 \
-        libxext6 \
-        libxrender1 \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    rm -f /etc/apt/sources.list.d/debian.sources; \
+    printf 'deb %s bookworm main\n' "$ROUGHCUT_APT_MIRROR" > /etc/apt/sources.list; \
+    printf 'deb %s bookworm-updates main\n' "$ROUGHCUT_APT_MIRROR" >> /etc/apt/sources.list; \
+    printf 'deb %s bookworm-security main\n' "$ROUGHCUT_APT_SECURITY_MIRROR" >> /etc/apt/sources.list; \
+    for attempt in 1 2 3; do \
+        apt-get -o Acquire::Retries=5 update \
+        && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
+            curl \
+            ffmpeg \
+            fonts-noto-cjk \
+            libglib2.0-0 \
+            libsm6 \
+            libxext6 \
+            libxrender1 \
+        && break; \
+        if [ "$attempt" -eq 3 ]; then exit 1; fi; \
+        apt-get clean; \
+        rm -rf /var/lib/apt/lists/*; \
+        sleep 5; \
+    done; \
+    rm -rf /var/lib/apt/lists/*
 
 COPY pyproject.toml uv.lock README.md alembic.ini ./
 

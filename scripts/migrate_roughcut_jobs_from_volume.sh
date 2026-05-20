@@ -2,7 +2,7 @@
 set -eu
 
 SRC="/mnt/docker-desktop-disk/data/docker/volumes/roughcut_minio_data/_data/roughcut/jobs"
-DST="/mnt/host/f/roughcut_outputs/jobs"
+DST="${ROUGHCUT_JOBS_MIGRATION_DST:-/mnt/host/e/WorkSpace/RoughCut/data/runtime/jobs}"
 
 mkdir -p "$DST"
 echo "START $(date -Iseconds)"

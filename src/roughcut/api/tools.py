@@ -2121,6 +2121,27 @@ def _read_tts_output_metadata(path: Path) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _translate_legacy_runtime_path(value: str) -> Path | None:
+    requested = str(value or "").strip()
+    if not requested:
+        return None
+    normalized = requested.replace("\\", "/")
+    legacy_roots = (
+        "F:/roughcut_outputs",
+        "E:/WorkSpace/RoughCut/data/runtime",
+    )
+    for legacy_root in legacy_roots:
+        if normalized.casefold() == legacy_root.casefold():
+            return DEFAULT_OUTPUT_ROOT
+        prefix = f"{legacy_root}/"
+        if normalized.casefold().startswith(prefix.casefold()):
+            suffix = normalized[len(prefix) :].strip("/")
+            if suffix:
+                return DEFAULT_OUTPUT_ROOT.joinpath(*suffix.split("/"))
+            return DEFAULT_OUTPUT_ROOT
+    return None
+
+
 def _reference_audio_metadata_path(path: Path) -> Path:
     return path.with_suffix(f"{path.suffix}.json")
 
@@ -2299,8 +2320,18 @@ def _list_tts_output_history(limit: int = _TTS_OUTPUT_HISTORY_LIMIT) -> list[dic
         item["text_preview"] = metadata.get("text_preview") or ""
         config = metadata.get("config")
         if isinstance(config, dict):
-            item["config"] = config
+            item["config"] = _normalize_tts_output_config(config)
     return items
+
+
+def _normalize_tts_output_config(config: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(config)
+    reference_audio = normalized.get("reference_audio")
+    if isinstance(reference_audio, str):
+        translated = _translate_legacy_runtime_path(reference_audio)
+        if translated is not None and translated.exists():
+            normalized["reference_audio"] = str(translated)
+    return normalized
 
 
 def _resolve_reference_audio_history_path(value: str) -> Path:
@@ -2310,6 +2341,9 @@ def _resolve_reference_audio_history_path(value: str) -> Path:
     raw_path = Path(requested)
     allowed_roots = (_REFERENCE_UPLOAD_ROOT.resolve(),)
     candidates = [raw_path]
+    translated = _translate_legacy_runtime_path(requested)
+    if translated is not None:
+        candidates.append(translated)
     if raw_path.name == requested:
         candidates.append(_REFERENCE_UPLOAD_ROOT / raw_path.name)
     for candidate in candidates:

@@ -747,9 +747,15 @@ def _settle_shared_audio_mount(path: Path) -> None:
 
 
 def _detect_shared_root() -> Path | None:
+    # HeyGem is a shared service outside RoughCut. Resolve its public data root
+    # from the HeyGem service env first so RoughCut only stages files into the
+    # shared mount that the running HeyGem container actually sees.
     configured_root = _resolve_docker_configured_shared_root()
     if configured_root is not None:
         return configured_root
+    env_data_dir = os.getenv("HEYGEM_DATA_DIR")
+    if env_data_dir:
+        return Path(env_data_dir).expanduser()
     env_root = os.getenv("HEYGEM_SHARED_ROOT")
     env_host_root = os.getenv("HEYGEM_SHARED_HOST_DIR")
     if env_root or env_host_root:

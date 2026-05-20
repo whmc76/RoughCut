@@ -113,7 +113,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run renderless RoughCut provider comparison on local videos.")
     parser.add_argument("--source", action="append", dest="sources", default=[], help="Absolute or repo-relative video path.")
     parser.add_argument("--report-dir", type=Path, default=ROOT / "output" / "test" / "provider-compare")
-    parser.add_argument("--output-dir", default="F:/roughcut_outputs/output/provider_compare")
+    parser.add_argument("--output-dir", default=str(ROOT / "data" / "runtime" / "output" / "provider_compare"))
     parser.add_argument("--workflow-template", default="edc_tactical")
     parser.add_argument("--language", default="zh-CN")
     parser.add_argument(

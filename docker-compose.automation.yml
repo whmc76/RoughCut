@@ -8,8 +8,13 @@ x-automation-app-env: &automation-app-env
   S3_SECRET_ACCESS_KEY: minioadmin
   S3_BUCKET_NAME: roughcut
   S3_REGION: us-east-1
+  DB_USE_NULL_POOL: "true"
+  ROUGHCUT_OUTPUT_ROOT: /app/data
+  ROUGHCUT_TEST_OUTPUT_ROOT: /app/data/tests
+  JOB_STORAGE_DIR: /app/data/jobs
   OUTPUT_DIR: /app/data/output
   RENDER_DEBUG_DIR: /app/logs/render-debug
+  TELEGRAM_AGENT_STATE_DIR: /app/data/telegram-agent
   SUBTITLE_FONT: Noto Sans CJK SC
   COVER_TITLE_FONT_PATH: /usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc
   HEYGEM_SHARED_ROOT: /code/data
@@ -27,10 +32,11 @@ x-automation-app-common: &automation-app-common
   environment:
     <<: *automation-app-env
   volumes:
-    - ./data/output:/app/data/output
+    - ${ROUGHCUT_OUTPUT_HOST_ROOT:-./data/runtime}:/app/data
+    - ${ROUGHCUT_OUTPUT_HOST_ROOT:-./data/runtime}/render-debug:/app/logs/render-debug
     - ./logs:/app/logs
     - ./watch:/app/watch
-    - ${HEYGEM_SHARED_HOST_DIR:-E:/WorkSpace/heygem/data}:/code/data
+    - ${HEYGEM_SHARED_HOST_DIR:-D:/duix_avatar_data/face2face}:/code/data
   depends_on:
     postgres:
       condition: service_healthy

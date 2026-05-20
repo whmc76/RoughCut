@@ -1,6 +1,6 @@
 param(
-    [ValidateSet("local", "infra", "runtime", "full", "runtime-watch", "full-watch", "runtime-down", "full-down")]
-    [string]$Mode = "local",
+    [ValidateSet("local", "infra", "runtime", "full", "runtime-watch", "full-watch", "runtime-down", "full-down", "install-autostart", "uninstall-autostart")]
+    [string]$Mode = "full",
     [string]$DockerPythonExtras = "",
     [int]$Port = 0,
     [ValidateRange(1, 8)]
@@ -22,7 +22,8 @@ param(
     [switch]$NoWatchAutoDuty,
     [switch]$NoWatcher,
     [switch]$NoDockerWatch,
-    [switch]$AutoDockerWatch
+    [switch]$AutoDockerWatch,
+    [switch]$BuildDocker
 )
 
 Set-StrictMode -Version Latest
@@ -58,6 +59,8 @@ $CodexHostBridgeErrLog = Join-Path $RepoRoot "logs\codex-host-bridge.err.log"
 $CodexHostBridgePort = 38695
 $CodexHostBridgeBindHost = "0.0.0.0"
 $ApiBindHost = "0.0.0.0"
+$DockerAutostartTaskName = "RoughCut Docker Dev"
+$DockerAutostartShortcutName = "RoughCut Docker Dev.lnk"
 $script:ManagedProcesses = @()
 
 function Invoke-NativeCommandChecked {
@@ -100,6 +103,52 @@ function Invoke-NativeCommandUnchecked {
     }
 }
 
+function Wait-RoughCutDockerDaemon {
+    param([int]$TimeoutSec = 180)
+
+    $docker = Get-Command docker -ErrorAction SilentlyContinue
+    if ($null -eq $docker) {
+        throw "Docker Desktop is required for Docker modes."
+    }
+
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $lastError = ""
+    $startedDockerDesktop = $false
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $output = & $docker.Source info --format "{{.ServerVersion}}" 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                return $docker
+            }
+            $lastError = ($output | Out-String).Trim()
+        } catch {
+            $lastError = $_.Exception.Message
+        }
+
+        if (-not $startedDockerDesktop) {
+            $dockerDesktopPath = if ([string]::IsNullOrWhiteSpace($env:ProgramFiles)) {
+                ""
+            } else {
+                Join-Path $env:ProgramFiles "Docker\Docker\Docker Desktop.exe"
+            }
+            if (-not [string]::IsNullOrWhiteSpace($dockerDesktopPath) -and (Test-Path $dockerDesktopPath)) {
+                $runningDockerDesktop = Get-Process -Name "Docker Desktop" -ErrorAction SilentlyContinue
+                if ($null -eq $runningDockerDesktop) {
+                    Write-Host "Starting Docker Desktop..." -ForegroundColor DarkGray
+                    Start-Process -FilePath $dockerDesktopPath -WindowStyle Hidden | Out-Null
+                }
+            }
+            $startedDockerDesktop = $true
+        }
+
+        Write-Host "Waiting for Docker Desktop to become ready..." -ForegroundColor DarkGray
+        Start-Sleep -Seconds 3
+    }
+
+    $detail = if ([string]::IsNullOrWhiteSpace($lastError)) { "Docker daemon did not respond." } else { $lastError }
+    throw "Docker Desktop did not become ready within $TimeoutSec seconds. $detail"
+}
+
 function Get-RoughCutComposeFiles {
     param(
         [ValidateSet("infra", "runtime", "full")]
@@ -125,10 +174,7 @@ function Invoke-RoughCutCompose {
         [string]$DockerPythonExtrasOverride = ""
     )
 
-    $docker = Get-Command docker -ErrorAction SilentlyContinue
-    if ($null -eq $docker) {
-        throw "Docker Desktop is required for mode '$ComposeMode'."
-    }
+    $docker = Wait-RoughCutDockerDaemon
 
     $composeFiles = Get-RoughCutComposeFiles -ComposeMode $ComposeMode
     $args = @("compose")
@@ -182,7 +228,7 @@ function Remove-RoughCutStoppedComposeContainers {
     }
 
     $escapedServices = $ServiceNames | ForEach-Object { [regex]::Escape($_) }
-    $serviceRegex = "^(?:[^_]+_)?roughcut-(?:$($escapedServices -join "|"))-\\d+$"
+    $serviceRegex = "^(?:[^_]+_)?roughcut-(?:$($escapedServices -join "|"))-\d+$"
     $staleContainers = @()
 
     foreach ($entry in ($composeEntries -split "(`r`n|`n|`r)")) {
@@ -222,10 +268,7 @@ function Get-RoughCutComposeStatusEntries {
         [string]$ComposeMode
     )
 
-    $docker = Get-Command docker -ErrorAction SilentlyContinue
-    if ($null -eq $docker) {
-        throw "Docker Desktop is required for mode '$ComposeMode'."
-    }
+    $docker = Wait-RoughCutDockerDaemon
 
     $composeFiles = Get-RoughCutComposeFiles -ComposeMode $ComposeMode
     $args = @("compose")
@@ -332,21 +375,16 @@ function Start-RoughCutComposeMode {
     switch ($ComposeMode) {
         "infra" {
             Remove-RoughCutStoppedComposeContainers -ServiceNames @("postgres", "redis", "minio")
-            Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--remove-orphans")
+            Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d")
         }
         default {
-            try {
-                Remove-RoughCutStoppedComposeContainers
-                Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--build", "--remove-orphans") -DockerPythonExtrasOverride $DockerPythonExtras
-            } catch {
-                $existingImage = Invoke-NativeCommandUnchecked -FilePath "docker" -Arguments @("image", "inspect", "roughcut:local") 2>$null
-                if ($LASTEXITCODE -ne 0) {
-                    throw
-                }
-                Write-Host "Docker build failed, but local image roughcut:local exists. Retrying without --build." -ForegroundColor Yellow
-                Remove-RoughCutStoppedComposeContainers
-                Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("up", "-d", "--remove-orphans") -DockerPythonExtrasOverride $DockerPythonExtras
+            $upArgs = @("up", "-d")
+            $shouldBuild = $BuildDocker
+            if ($shouldBuild) {
+                $upArgs = @("up", "-d", "--build")
             }
+            Remove-RoughCutStoppedComposeContainers
+            Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments $upArgs -DockerPythonExtrasOverride $DockerPythonExtras
         }
     }
 
@@ -363,10 +401,16 @@ function Start-RoughCutComposeMode {
         "runtime" {
             Write-Host "Recommended always-on runtime is up." -ForegroundColor Green
             Write-Host "Docker live source sync is active for this runtime." -ForegroundColor Green
+            if (-not $BuildDocker) {
+                Write-Host "Image rebuild skipped; source changes are hot-mounted. Use -BuildDocker after dependency or Dockerfile changes." -ForegroundColor DarkGray
+            }
         }
         "full" {
             Write-Host "Runtime plus automation services are up." -ForegroundColor Green
             Write-Host "Docker live source sync is active for this runtime." -ForegroundColor Green
+            if (-not $BuildDocker) {
+                Write-Host "Image rebuild skipped; source changes are hot-mounted. Use -BuildDocker after dependency or Dockerfile changes." -ForegroundColor DarkGray
+            }
         }
     }
 }
@@ -380,7 +424,7 @@ function Stop-RoughCutComposeMode {
     Stop-RoughCutDockerWatch -ComposeMode $ComposeMode
     Stop-RoughCutCodexHostBridge -SilentlyContinue
     Write-Host "Stopping RoughCut Docker mode: $ComposeMode" -ForegroundColor Cyan
-    Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("down", "--remove-orphans")
+    Invoke-RoughCutCompose -ComposeMode $ComposeMode -ComposeArguments @("down")
 }
 
 function Get-RoughCutDockerWatchLockPath {
@@ -433,6 +477,75 @@ function Get-PowerShellCommand {
         throw "PowerShell executable not found."
     }
     return $powerShellCommand
+}
+
+function Install-RoughCutDockerAutostart {
+    $powerShellCommand = Get-PowerShellCommand
+    $scriptPath = if ([string]::IsNullOrWhiteSpace($PSCommandPath)) {
+        Join-Path $RepoRoot "start_roughcut.ps1"
+    } else {
+        $PSCommandPath
+    }
+    $taskAction = "`"$($powerShellCommand.Source)`" -NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Mode full"
+
+    Write-Host "Installing Windows logon task: $DockerAutostartTaskName" -ForegroundColor Cyan
+    $taskExitCode = 0
+    try {
+        $taskOutput = & schtasks.exe /Create /TN $DockerAutostartTaskName /SC ONLOGON /RL LIMITED /F /TR $taskAction 2>&1
+        $taskExitCode = $LASTEXITCODE
+    } catch {
+        $taskOutput = @($_.Exception.Message)
+        $taskExitCode = 1
+    }
+    $taskOutput | Out-Host
+    if ($taskExitCode -ne 0) {
+        Write-Warning "Windows Task Scheduler refused the logon task; installing a current-user Startup shortcut instead."
+        $startupDir = [Environment]::GetFolderPath([Environment+SpecialFolder]::Startup)
+        if ([string]::IsNullOrWhiteSpace($startupDir)) {
+            throw "Failed to resolve current-user Startup folder after task registration failed."
+        }
+        $shortcutPath = Join-Path $startupDir $DockerAutostartShortcutName
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcut = $shell.CreateShortcut($shortcutPath)
+        $shortcut.TargetPath = $powerShellCommand.Source
+        $shortcut.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scriptPath`" -Mode full"
+        $shortcut.WorkingDirectory = $RepoRoot
+        $shortcut.WindowStyle = 7
+        $shortcut.Save()
+        Write-Host "Installed current-user Startup shortcut: $shortcutPath" -ForegroundColor Green
+    } else {
+        Write-Host "Installed Windows logon task: $DockerAutostartTaskName" -ForegroundColor Green
+    }
+
+    Write-Host "RoughCut Docker full dev mode will start automatically at Windows logon." -ForegroundColor Green
+    Write-Host "The task runs without --build; use './start_roughcut.bat rebuild' after dependency or Dockerfile changes." -ForegroundColor DarkGray
+}
+
+function Uninstall-RoughCutDockerAutostart {
+    Write-Host "Removing Windows logon task: $DockerAutostartTaskName" -ForegroundColor Cyan
+    $taskExitCode = 0
+    try {
+        $taskOutput = & schtasks.exe /Delete /TN $DockerAutostartTaskName /F 2>&1
+        $taskExitCode = $LASTEXITCODE
+    } catch {
+        $taskOutput = @($_.Exception.Message)
+        $taskExitCode = 1
+    }
+    $taskOutput | Out-Host
+    if ($taskExitCode -ne 0) {
+        Write-Warning "Windows logon task was not removed or did not exist."
+    }
+
+    $startupDir = [Environment]::GetFolderPath([Environment+SpecialFolder]::Startup)
+    if (-not [string]::IsNullOrWhiteSpace($startupDir)) {
+        $shortcutPath = Join-Path $startupDir $DockerAutostartShortcutName
+        if (Test-Path -LiteralPath $shortcutPath) {
+            Remove-Item -LiteralPath $shortcutPath -Force
+            Write-Host "Removed current-user Startup shortcut: $shortcutPath" -ForegroundColor Green
+        }
+    }
+
+    Write-Host "RoughCut Docker autostart removed." -ForegroundColor Green
 }
 
 function Get-RoughCutCodexHostBridgeToken {
@@ -1505,7 +1618,7 @@ function Update-LocalServiceEnv {
         [bool]$IndexTtsEnabled = $false
     )
 
-    $defaultHeygemRoot = "E:/WorkSpace/heygem/data"
+    $defaultHeygemRoot = "D:/duix_avatar_data/face2face"
     $heygemSharedRoot = if ($env:HEYGEM_SHARED_ROOT -and -not [string]::IsNullOrWhiteSpace($env:HEYGEM_SHARED_ROOT)) {
         [System.IO.Path]::GetFullPath($env:HEYGEM_SHARED_ROOT).Replace('\\', '/')
     } else {
@@ -1530,7 +1643,7 @@ function Update-LocalServiceEnv {
     $voiceRoot = if ($env:HEYGEM_VOICE_ROOT -and -not [string]::IsNullOrWhiteSpace($env:HEYGEM_VOICE_ROOT)) {
         [System.IO.Path]::GetFullPath($env:HEYGEM_VOICE_ROOT).Replace('\\', '/')
     } else {
-        "E:/WorkSpace/RoughCut/data/voice_refs"
+        "D:/duix_avatar_data/face2face/voice/data"
     }
     if (-not (Test-Path $voiceRoot)) {
         New-Item -ItemType Directory -Force -Path $voiceRoot | Out-Null
@@ -2354,6 +2467,16 @@ Stop-RoughCutServices -StopDockerServices:$StopDocker
 Stop-RoughCutDockerWatch -ComposeMode all -SilentlyContinue
 Stop-RoughCutHostTelegramAgent
 Remove-LegacyHeygemMockContainer
+    exit 0
+}
+
+if ($Mode -eq "install-autostart") {
+    Install-RoughCutDockerAutostart
+    exit 0
+}
+
+if ($Mode -eq "uninstall-autostart") {
+    Uninstall-RoughCutDockerAutostart
     exit 0
 }
 

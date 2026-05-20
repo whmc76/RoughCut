@@ -29,7 +29,9 @@ from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_tr
 
 DEFAULT_JOB_WORKFLOW_MODE = "standard_edit"
 DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_OUTPUT_ROOT = Path(os.getenv("ROUGHCUT_OUTPUT_ROOT", "F:/roughcut_outputs")).expanduser()
+DEFAULT_OUTPUT_ROOT = Path(
+    os.getenv("ROUGHCUT_OUTPUT_ROOT", str((DEFAULT_PROJECT_ROOT / "data" / "runtime").as_posix()))
+).expanduser()
 DEFAULT_PACKAGING_ASSET_ROOT = Path(
     os.getenv(
         "ROUGHCUT_PACKAGING_ASSET_DIR",
@@ -40,10 +42,16 @@ DEFAULT_TEST_OUTPUT_ROOT = Path(
     os.getenv("ROUGHCUT_TEST_OUTPUT_ROOT", str((DEFAULT_OUTPUT_ROOT / "tests").as_posix()))
 ).expanduser()
 DEFAULT_HEYGEM_SHARED_ROOT = Path(
-    os.getenv("HEYGEM_SHARED_ROOT", str((DEFAULT_OUTPUT_ROOT / "heygem").as_posix()))
+    os.getenv(
+        "HEYGEM_SHARED_ROOT",
+        os.getenv("HEYGEM_DATA_DIR", "D:/duix_avatar_data/face2face"),
+    )
 ).expanduser()
 DEFAULT_HEYGEM_VOICE_ROOT = Path(
-    os.getenv("HEYGEM_VOICE_ROOT", str((DEFAULT_OUTPUT_ROOT / "voice_refs").as_posix()))
+    os.getenv(
+        "HEYGEM_VOICE_ROOT",
+        str((DEFAULT_HEYGEM_SHARED_ROOT / "voice" / "data").as_posix()),
+    )
 ).expanduser()
 SECRET_SETTINGS: tuple[str, ...] = (
     "openai_api_key",
@@ -304,6 +312,7 @@ class Settings(BaseSettings):
     db_max_overflow: int = Field(default=8, ge=0)
     db_pool_timeout_sec: float = Field(default=30.0, gt=0)
     db_pool_recycle_sec: int = Field(default=1800, ge=0)
+    db_use_null_pool: bool = False
 
     # Redis / Celery
     redis_url: str = "redis://localhost:6379/0"

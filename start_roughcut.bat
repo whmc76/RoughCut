@@ -3,12 +3,16 @@ setlocal
 set SCRIPT_DIR=%~dp0
 cd /d "%SCRIPT_DIR%"
 
+if /I "%~1"=="local" goto powershell_local
 if /I "%~1"=="dev" goto pnpm_dev
 if /I "%~1"=="infra" goto powershell_infra
+if /I "%~1"=="docker-dev" goto powershell_full
 if /I "%~1"=="runtime" goto powershell_runtime
 if /I "%~1"=="runtime-local-asr" goto powershell_runtime_local_asr
 if /I "%~1"=="runtime-auto-watch" goto powershell_runtime_auto_watch
 if /I "%~1"=="full" goto powershell_full
+if /I "%~1"=="rebuild" goto powershell_full_rebuild
+if /I "%~1"=="full-build" goto powershell_full_rebuild
 if /I "%~1"=="full-local-asr" goto powershell_full_local_asr
 if /I "%~1"=="full-auto-watch" goto powershell_full_auto_watch
 if /I "%~1"=="runtime-down" goto powershell_runtime_down
@@ -21,12 +25,16 @@ if /I "%~1"=="doctor" goto pnpm_doctor
 if /I "%~1"=="migrate" goto pnpm_migrate
 if /I "%~1"=="docker-up" goto pnpm_docker_up
 if /I "%~1"=="docker-down" goto pnpm_docker_down
+if /I "%~1"=="install-autostart" goto powershell_install_autostart
+if /I "%~1"=="autostart-install" goto powershell_install_autostart
+if /I "%~1"=="uninstall-autostart" goto powershell_uninstall_autostart
+if /I "%~1"=="autostart-remove" goto powershell_uninstall_autostart
 if /I "%~1"=="StopOnly" goto powershell_stoponly
 if /I "%~1"=="--StopOnly" goto powershell_stoponly
 if /I "%~1"=="/StopOnly" goto powershell_stoponly
 if /I "%~1"=="help" goto usage
 
-goto powershell_start
+goto powershell_default_full
 
 :require_pnpm
 where pnpm >nul 2>nul
@@ -82,6 +90,27 @@ goto finish
 call :require_pnpm
 if not %ERRORLEVEL%==0 goto finish
 call pnpm docker:down
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
+:powershell_default_full
+set "POWER_ARGS=%*"
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full %POWER_ARGS%
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full %POWER_ARGS%
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
+:powershell_local
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode local
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode local
+)
 set EXIT_CODE=%ERRORLEVEL%
 goto finish
 
@@ -146,6 +175,16 @@ if %ERRORLEVEL%==0 (
 set EXIT_CODE=%ERRORLEVEL%
 goto finish
 
+:powershell_full_rebuild
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full -BuildDocker
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full -BuildDocker
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
 :powershell_full_local_asr
 where pwsh >nul 2>nul
 if %ERRORLEVEL%==0 (
@@ -206,6 +245,26 @@ if %ERRORLEVEL%==0 (
 set EXIT_CODE=%ERRORLEVEL%
 goto finish
 
+:powershell_install_autostart
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode install-autostart
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode install-autostart
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
+:powershell_uninstall_autostart
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode uninstall-autostart
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode uninstall-autostart
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
 :powershell_stoponly
 where pwsh >nul 2>nul
 if %ERRORLEVEL%==0 (
@@ -220,7 +279,9 @@ goto finish
 echo.
 echo RoughCut Windows entrypoint
 echo.
-echo   start_roughcut.bat             One-click local development launcher with Vite HMR
+echo   start_roughcut.bat             One-click Docker full dev launcher with live source sync
+echo   start_roughcut.bat rebuild     Same as default, but force rebuild roughcut:local
+echo   start_roughcut.bat local       Start local Python + local Vite launcher
 echo   start_roughcut.bat infra       Start only PostgreSQL / Redis / MinIO containers
 echo   start_roughcut.bat runtime     Start explicit containerized runtime mode
 echo   start_roughcut.bat runtime-local-asr  Start runtime with local-asr extras enabled inside Docker
@@ -230,7 +291,6 @@ echo   start_roughcut.bat runtime-down Stop runtime services
 echo   start_roughcut.bat full-down    Stop runtime plus automation services
 echo   start_roughcut.bat runtime-watch  Start explicit host-side rebuild watch for Docker runtime
 echo   start_roughcut.bat full-watch     Start explicit host-side rebuild watch for runtime + automation
-echo   start_roughcut.bat             Start local API / orchestrator / workers against local code without auto-starting Docker
 echo   start_roughcut.bat dev         Run unified pnpm dev
 echo   start_roughcut.bat build       Run pnpm build
 echo   start_roughcut.bat setup       Run pnpm setup
@@ -238,6 +298,8 @@ echo   start_roughcut.bat doctor      Run pnpm doctor
 echo   start_roughcut.bat migrate     Run pnpm migrate
 echo   start_roughcut.bat docker-up   Run pnpm docker:up
 echo   start_roughcut.bat docker-down Run pnpm docker:down
+echo   start_roughcut.bat install-autostart    Start Docker full dev mode at Windows logon
+echo   start_roughcut.bat uninstall-autostart  Remove the Windows logon task
 set EXIT_CODE=0
 
 :finish

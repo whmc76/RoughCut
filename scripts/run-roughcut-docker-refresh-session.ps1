@@ -350,7 +350,6 @@ try {
         $upArgs += "--build"
     }
     $upArgs += "--force-recreate"
-    $upArgs += "--remove-orphans"
     $upArgs += Get-RoughCutRefreshServices -Mode $ComposeMode
 
     $previousDockerExtras = [Environment]::GetEnvironmentVariable("ROUGHCUT_DOCKER_PYTHON_EXTRAS", "Process")

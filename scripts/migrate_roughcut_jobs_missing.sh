@@ -2,10 +2,10 @@
 set -eu
 
 SRC="/mnt/docker-desktop-disk/data/docker/volumes/roughcut_minio_data/_data/roughcut/jobs"
-DST="/mnt/host/f/roughcut_outputs/jobs"
-LIST="/mnt/host/f/roughcut_outputs/jobs-missing.txt"
-LOG="/mnt/host/f/roughcut_outputs/jobs-volume-migration.log"
-ERR="/mnt/host/f/roughcut_outputs/jobs-volume-migration.err.log"
+DST="${ROUGHCUT_JOBS_MIGRATION_DST:-/mnt/host/e/WorkSpace/RoughCut/data/runtime/jobs}"
+LIST="${ROUGHCUT_JOBS_MISSING_LIST:-/mnt/host/e/WorkSpace/RoughCut/data/runtime/jobs-missing.txt}"
+LOG="${ROUGHCUT_JOBS_MIGRATION_LOG:-/mnt/host/e/WorkSpace/RoughCut/data/runtime/jobs-volume-migration.log}"
+ERR="${ROUGHCUT_JOBS_MIGRATION_ERR:-/mnt/host/e/WorkSpace/RoughCut/data/runtime/jobs-volume-migration.err.log}"
 
 mkdir -p "$DST"
 touch "$LOG" "$ERR"

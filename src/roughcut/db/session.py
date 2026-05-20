@@ -30,10 +30,10 @@ def get_engine():
     global _engine
     if _worker_mode or _engine is None:
         settings = get_settings()
-        # SQLAlchemy's asyncpg pool can reuse an in-flight connection under the
-        # Windows proactor loop in this app. Keep Windows/worker processes on
-        # short-lived connections; non-Windows API deployments use a bounded pool.
-        if _worker_mode or os.name == "nt":
+        # SQLAlchemy's asyncpg pool can retain a connection that is still busy
+        # after dev reloads or worker handoffs. Use short-lived connections for
+        # workers, Windows local runs, and Docker dev when DB_USE_NULL_POOL=true.
+        if _worker_mode or os.name == "nt" or settings.db_use_null_pool:
             _engine = create_async_engine(
                 settings.database_url,
                 echo=False,

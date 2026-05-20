@@ -3,6 +3,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 START_SCRIPT = REPO_ROOT / "start_roughcut.ps1"
+START_BAT = REPO_ROOT / "start_roughcut.bat"
 
 
 def _function_body(source: str, name: str) -> str:
@@ -46,6 +47,80 @@ def test_local_api_startup_prints_192_168_lan_url() -> None:
     assert "Get-RoughCutApiLanUrls -ApiPort $Port" in source
     assert "$bytes[0] -eq 192 -and $bytes[1] -eq 168" in lan_body
     assert "127\\.0\\.0\\.1|0\\.0\\.0\\.0" in api_match_body
+
+
+def test_batch_default_launches_docker_full_dev_mode() -> None:
+    source = START_BAT.read_text(encoding="utf-8")
+
+    assert "goto powershell_default_full" in source
+    assert "start_roughcut.ps1\" -Mode full %POWER_ARGS%" in source
+    assert "start_roughcut.ps1\" -Mode local" in source
+
+
+def test_powershell_default_launches_docker_full_dev_mode() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+
+    assert '[string]$Mode = "full"' in source
+
+
+def test_docker_full_dev_build_is_explicit_only() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    body = _function_body(source, "Start-RoughCutComposeMode")
+
+    assert '$upArgs = @("up", "-d")' in body
+    assert "$shouldBuild = $BuildDocker" in body
+    assert "$shouldBuild = $BuildDocker -or" not in body
+    assert '@("up", "-d", "--build")' in body
+    assert "Retrying once with --build" not in body
+
+
+def test_docker_start_does_not_remove_orphan_shared_services() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    body = _function_body(source, "Start-RoughCutComposeMode")
+
+    assert "--remove-orphans" not in body
+
+
+def test_package_default_docker_scripts_use_full_dev_with_ports_env() -> None:
+    source = (REPO_ROOT / "package.json").read_text(encoding="utf-8")
+
+    assert '"docker:up": "pnpm docker:dev:up"' in source
+    assert '"docker:down": "pnpm docker:dev:down"' in source
+    assert '"docker:logs": "pnpm docker:dev:logs"' in source
+    assert '"docker:dev:up": "pwsh -NoProfile -File start_roughcut.ps1 -Mode full"' in source
+    assert '"docker:dev:rebuild": "pwsh -NoProfile -File start_roughcut.ps1 -Mode full -BuildDocker"' in source
+    assert "docker compose --env-file roughcut.ports.env -f docker-compose.infra.yml -f docker-compose.runtime.yml -f docker-compose.dev.yml -f docker-compose.automation.yml logs -f" in source
+
+
+def test_docker_compose_mounts_whole_runtime_root_inside_container() -> None:
+    for compose_name in ("docker-compose.yml", "docker-compose.runtime.yml"):
+        source = (REPO_ROOT / compose_name).read_text(encoding="utf-8")
+
+        assert "ROUGHCUT_OUTPUT_ROOT: /app/data" in source
+        assert "ROUGHCUT_TEST_OUTPUT_ROOT: /app/data/tests" in source
+        assert "TELEGRAM_AGENT_STATE_DIR: /app/data/telegram-agent" in source
+        assert "${ROUGHCUT_OUTPUT_HOST_ROOT:-./data/runtime}:/app/data" in source
+
+
+def test_automation_compose_mounts_runtime_root_inside_container() -> None:
+    source = (REPO_ROOT / "docker-compose.automation.yml").read_text(encoding="utf-8")
+
+    assert "ROUGHCUT_OUTPUT_ROOT: /app/data" in source
+    assert "ROUGHCUT_TEST_OUTPUT_ROOT: /app/data/tests" in source
+    assert "JOB_STORAGE_DIR: /app/data/jobs" in source
+    assert "TELEGRAM_AGENT_STATE_DIR: /app/data/telegram-agent" in source
+    assert "${ROUGHCUT_OUTPUT_HOST_ROOT:-./data/runtime}:/app/data" in source
+
+
+def test_autostart_installs_windows_logon_full_dev_without_build() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    body = _function_body(source, "Install-RoughCutDockerAutostart")
+
+    assert "$DockerAutostartTaskName = \"RoughCut Docker Dev\"" in source
+    assert "-Mode full" in body
+    assert "-BuildDocker" not in body
+    assert "/SC ONLOGON" in body
+    assert "/RL LIMITED" in body
 
 
 def test_frontend_lan_urls_are_preserved_as_an_array() -> None:

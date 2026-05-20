@@ -1,6 +1,6 @@
 param(
-    [string]$MissingListPath = "F:/roughcut_outputs/jobs-missing.txt",
-    [string]$TargetRoot = "F:/roughcut_outputs/jobs",
+    [string]$MissingListPath = (Join-Path (Split-Path -Parent $PSScriptRoot) "data\runtime\jobs-missing.txt"),
+    [string]$TargetRoot = (Join-Path (Split-Path -Parent $PSScriptRoot) "data\runtime\jobs"),
     [string]$VolumeName = "roughcut_minio_data"
 )
 

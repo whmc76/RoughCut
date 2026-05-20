@@ -20,7 +20,7 @@ pnpm run docker:auto:auto-up
 
 - 启动 full 模式（runtime + automation）
 - 启动 host 端文件监听
-- 源码变更后自动触发 `docker compose up -d --build --force-recreate --remove-orphans`
+- 源码变更后自动触发 `docker compose up -d --build --force-recreate`，只刷新 RoughCut 自身服务，不清理共享服务容器
 
 ### 2) 仅 runtime 自动重建
 

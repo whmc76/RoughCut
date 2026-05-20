@@ -8,9 +8,13 @@ x-app-env: &app-env
   S3_SECRET_ACCESS_KEY: minioadmin
   S3_BUCKET_NAME: roughcut
   S3_REGION: us-east-1
+  DB_USE_NULL_POOL: "true"
+  ROUGHCUT_OUTPUT_ROOT: /app/data
+  ROUGHCUT_TEST_OUTPUT_ROOT: /app/data/tests
   JOB_STORAGE_DIR: /app/data/jobs
   OUTPUT_DIR: /app/data/output
   RENDER_DEBUG_DIR: /app/logs/render-debug
+  TELEGRAM_AGENT_STATE_DIR: /app/data/telegram-agent
   XDG_CACHE_HOME: /app/data/cache
   HF_HOME: /app/data/cache/huggingface
   TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-local_http_asr}
@@ -49,14 +53,12 @@ x-app-common: &app-common
   extra_hosts:
     - "host.docker.internal:host-gateway"
   volumes:
-    - ${ROUGHCUT_OUTPUT_HOST_ROOT:-F:/roughcut_outputs}/jobs:/app/data/jobs
-    - ${ROUGHCUT_OUTPUT_HOST_ROOT:-F:/roughcut_outputs}/output:/app/data/output
-    - ${ROUGHCUT_OUTPUT_HOST_ROOT:-F:/roughcut_outputs}/cache:/app/data/cache
-    - ${ROUGHCUT_OUTPUT_HOST_ROOT:-F:/roughcut_outputs}/render-debug:/app/logs/render-debug
+    - ${ROUGHCUT_OUTPUT_HOST_ROOT:-./data/runtime}:/app/data
+    - ${ROUGHCUT_OUTPUT_HOST_ROOT:-./data/runtime}/render-debug:/app/logs/render-debug
     - ./logs:/app/logs
     - ./data/avatar_materials:/app/data/avatar_materials
     - ./watch:/app/watch
-    - ${HEYGEM_SHARED_HOST_DIR:-E:/WorkSpace/heygem/data}:/code/data
+    - ${HEYGEM_SHARED_HOST_DIR:-D:/duix_avatar_data/face2face}:/code/data
     - ${ROUGHCUT_CODEX_AUTH_HOST_DIR:-C:/Users/28687/.codex}:/host-codex:ro
   depends_on:
     postgres:
@@ -97,7 +99,7 @@ services:
     ports:
       - "${ROUGHCUT_API_PORT:-38471}:${ROUGHCUT_API_INTERNAL_PORT:-8000}"
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:${ROUGHCUT_API_INTERNAL_PORT:-8000}/readyz"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:${ROUGHCUT_API_INTERNAL_PORT:-8000}/healthz"]
       interval: 10s
       timeout: 5s
       retries: 12
