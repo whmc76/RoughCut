@@ -2757,27 +2757,61 @@ export function buildTranscriptTokens(subtitles: JobManualEditSubtitle[], segmen
     paragraphCharCount = breakAfter === "paragraph" ? 0 : nextParagraphCharCount;
   });
 
-  const pauseTokens = silenceRanges.flatMap((range, index) => {
-    const visibleRanges = transcriptVisiblePauseRanges(range, charTokens);
-    return visibleRanges.flatMap((visibleRange, visibleIndex) => {
-      const fragments = splitPauseRangeByKeepSegments(visibleRange, segments);
-      return fragments.map((fragment, fragmentIndex) => {
-        const pauseDuration = Math.max(0, fragment.end - fragment.start);
-        return {
-          key: `pause-${range.source || "audio"}-${index}-${visibleIndex}-${fragmentIndex}-${fragment.start}`,
-          kind: "pause" as const,
-          text: `[...,${pauseDuration.toFixed(1)}s]`,
-          subtitleIndex: null,
-          start: fragment.start,
-          end: fragment.end,
-          kept: fragment.kept,
-          pauseDuration,
-        };
-      });
+  const visiblePauseRanges = mergeTranscriptVisiblePauseRanges(
+    silenceRanges.flatMap((range) => transcriptVisiblePauseRanges(range, charTokens)),
+    charTokens,
+  );
+  const pauseTokens = visiblePauseRanges.flatMap((visibleRange, visibleIndex) => {
+    const fragments = splitPauseRangeByKeepSegments(visibleRange, segments);
+    return fragments.map((fragment, fragmentIndex) => {
+      const pauseDuration = Math.max(0, fragment.end - fragment.start);
+      return {
+        key: `pause-${visibleIndex}-${fragmentIndex}-${fragment.start}`,
+        kind: "pause" as const,
+        text: `[...,${pauseDuration.toFixed(1)}s]`,
+        subtitleIndex: null,
+        start: fragment.start,
+        end: fragment.end,
+        kept: fragment.kept,
+        pauseDuration,
+      };
     });
   });
 
   return mergeTranscriptTokensInDisplayOrder(charTokens, pauseTokens);
+}
+
+function mergeTranscriptVisiblePauseRanges(ranges: KeepSegment[], tokens: TranscriptToken[]) {
+  const sorted = ranges
+    .map((range) => ({
+      start: Number(range.start.toFixed(3)),
+      end: Number(range.end.toFixed(3)),
+    }))
+    .filter((range) => range.end > range.start + TRANSCRIPT_MIN_VISIBLE_PAUSE_SEC - 0.001)
+    .sort((left, right) => left.start - right.start || left.end - right.end);
+  const merged: KeepSegment[] = [];
+  for (const range of sorted) {
+    const previous = merged[merged.length - 1];
+    if (!previous || !transcriptPauseRangesCanMerge(previous, range, tokens)) {
+      merged.push({ ...range });
+      continue;
+    }
+    previous.end = Number(Math.max(previous.end, range.end).toFixed(3));
+  }
+  return merged;
+}
+
+function transcriptPauseRangesCanMerge(left: KeepSegment, right: KeepSegment, tokens: TranscriptToken[]) {
+  if (right.start > left.end + SMART_CUT_PAUSE_CLUSTER_GAP_SEC) return false;
+  const gapStart = Math.min(left.end, right.start);
+  const gapEnd = Math.max(left.end, right.start);
+  if (gapEnd <= gapStart + 0.001) return true;
+  return !tokens.some((token) => (
+    token.kind === "char"
+    && token.text.trim()
+    && token.end > gapStart + 0.001
+    && token.start < gapEnd - 0.001
+  ));
 }
 
 function splitPauseRangeByKeepSegments(range: KeepSegment, segments: KeepSegment[]) {

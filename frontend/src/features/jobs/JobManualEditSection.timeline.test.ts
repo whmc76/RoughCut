@@ -1121,6 +1121,27 @@ describe("manual editor timeline mapping", () => {
     ]);
   });
 
+  it("renders adjacent visible pause fragments as one pause chip", () => {
+    const tokens = buildTranscriptTokens(
+      [],
+      [{ start: 2, end: 3 }],
+      [
+        { start: 0, end: 1.3, duration_sec: 1.3, source: "word_gap" },
+        { start: 1.3, end: 1.6, duration_sec: 0.3, source: "audio_vad" },
+      ],
+    );
+
+    expect(tokens.map((token) => ({
+      kind: token.kind,
+      start: token.start,
+      end: token.end,
+      kept: token.kept,
+      pauseDuration: token.pauseDuration,
+    }))).toEqual([
+      { kind: "pause", start: 0, end: 1.6, kept: false, pauseDuration: 1.6 },
+    ]);
+  });
+
   it("keeps pause auto-cuts away from neighboring word edges", () => {
     const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
     const analysis = buildSmartCutRuleAnalysis(
