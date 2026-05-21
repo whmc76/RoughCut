@@ -42,9 +42,12 @@ const toolCards = [
 
 const toolOptionStorageKeys = {
   tts: "roughcut.tools.tts.options",
+  ttsRun: "roughcut.tools.tts.runId",
   ttsReferencePath: "roughcut.tools.tts.referencePath",
   asr: "roughcut.tools.asr.options",
+  asrRun: "roughcut.tools.asr.runId",
   avatar: "roughcut.tools.avatar.options",
+  avatarRun: "roughcut.tools.avatar.runId",
 };
 
 const TTS_REFERENCE_HISTORY_LIMIT = 5;
@@ -618,11 +621,14 @@ function stageStatusClass(status?: string | null): string {
   return `tool-stage-status-${safeStatus}`;
 }
 
-function useToolRun<Result>(runTool: (formData: FormData) => Promise<ToolRunStatus<Result>>) {
-  const [runId, setRunId] = useState<string | null>(null);
+function useToolRun<Result>(runTool: (formData: FormData) => Promise<ToolRunStatus<Result>>, storageKey: string) {
+  const [runId, setRunId] = useState<string | null>(() => window.localStorage.getItem(storageKey));
   const mutation = useMutation<ToolRunStatus<Result>, Error, FormData>({
     mutationFn: runTool,
-    onSuccess: (run) => setRunId(run.run_id),
+    onSuccess: (run) => {
+      setRunId(run.run_id);
+      window.localStorage.setItem(storageKey, run.run_id);
+    },
   });
   const runQuery = useQuery({
     queryKey: ["tools", "run", runId],
@@ -636,6 +642,12 @@ function useToolRun<Result>(runTool: (formData: FormData) => Promise<ToolRunStat
   const run = runQuery.data ?? mutation.data;
   const pending = mutation.isPending || (Boolean(run) && !isTerminalStatus(run?.status) && !runQuery.isError);
   const error = mutation.error ?? (runQuery.error as Error | null);
+
+  useEffect(() => {
+    if (runQuery.isError) {
+      window.localStorage.removeItem(storageKey);
+    }
+  }, [runQuery.isError, storageKey]);
 
   return { mutation, run, pending, error };
 }
@@ -676,6 +688,7 @@ function ToolRunProgress<Result>({ run }: { run?: ToolRunStatus<Result> }) {
       </div>
       <div className="tool-run-meta">
         <span>当前阶段：{currentStage}</span>
+        {run.queue_position ? <span>队列位置：{run.queue_position}/{run.queue_size || run.queue_position}</span> : null}
         {run.detail ? <span>{run.detail}</span> : null}
       </div>
       <div className="tool-stage-strip" aria-label="阶段状态">
@@ -773,7 +786,7 @@ function ToolNav() {
 }
 
 export function TtsToolPage() {
-  const { mutation, run, pending, error } = useToolRun<ToolTtsResult>(api.runToolTts);
+  const { mutation, run, pending, error } = useToolRun<ToolTtsResult>(api.runToolTts, toolOptionStorageKeys.ttsRun);
   const status = useQuery({ queryKey: ["tools", "status"], queryFn: api.getToolStatus, refetchInterval: 30_000 });
   const referenceHistory = useQuery({ queryKey: ["tools", "tts", "reference-audio"], queryFn: api.getToolTtsReferenceAudio, refetchInterval: 20_000 });
   const outputHistory = useQuery({ queryKey: ["tools", "tts", "outputs"], queryFn: api.getToolTtsOutputs, refetchInterval: 20_000 });
@@ -1698,7 +1711,7 @@ function TtsResult({ run, error, pending }: { run?: ToolRunStatus<ToolTtsResult>
 }
 
 export function AsrToolPage() {
-  const { mutation, run, pending, error } = useToolRun<ToolAsrResult>(api.runToolAsr);
+  const { mutation, run, pending, error } = useToolRun<ToolAsrResult>(api.runToolAsr, toolOptionStorageKeys.asrRun);
   const [asrOptions, setAsrOptions] = useStoredOptions(toolOptionStorageKeys.asr, defaultAsrOptions, coerceAsrOptions);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -1797,7 +1810,7 @@ function AsrResult({ run, error, pending }: { run?: ToolRunStatus<ToolAsrResult>
 }
 
 export function AvatarToolPage() {
-  const { mutation, run, pending, error } = useToolRun<ToolAvatarResult>(api.runToolAvatar);
+  const { mutation, run, pending, error } = useToolRun<ToolAvatarResult>(api.runToolAvatar, toolOptionStorageKeys.avatarRun);
   const [avatarOptions, setAvatarOptions] = useStoredOptions(toolOptionStorageKeys.avatar, defaultAvatarOptions, coerceAvatarOptions);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {

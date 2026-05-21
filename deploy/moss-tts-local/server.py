@@ -5,13 +5,15 @@ import importlib.util
 import io
 import os
 import tempfile
+import threading
+import time
 import wave
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import Response
 from transformers import AutoModel, AutoProcessor, GenerationConfig
 
@@ -22,6 +24,8 @@ model_id = ""
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.bfloat16 if device == "cuda" else torch.float32
 sample_rate = 24000
+inference_lock = threading.Lock()
+active_inference: dict[str, Any] = {}
 
 
 def _bool(value: Any) -> bool:
@@ -107,6 +111,8 @@ def health() -> dict[str, Any]:
         "device": device,
         "dtype": str(dtype).replace("torch.", ""),
         "sample_rate": sample_rate,
+        "busy": inference_lock.locked(),
+        "active_inference": dict(active_inference),
     }
 
 
@@ -130,6 +136,7 @@ def query_tts_model() -> dict[str, Any]:
             "audio_repetition_penalty",
             "n_vq_for_inference",
             "continuation",
+            "seed",
         ],
     }
 
@@ -148,6 +155,8 @@ def inference(
     audio_repetition_penalty: float = Form(default=1.1),
     n_vq_for_inference: int = Form(default=32),
     continuation: bool = Form(default=False),
+    seed: int = Form(default=0),
+    max_generation_seconds: float = Form(default=240.0),
     prompt_wav: UploadFile | None = File(default=None),
     reference_audio: UploadFile | None = File(default=None),
 ) -> Response:
@@ -155,6 +164,12 @@ def inference(
     resolved_text = str(tts_text or text or "").strip()
     if not resolved_text:
         raise HTTPException(status_code=400, detail="tts_text is required")
+    acquired = inference_lock.acquire(blocking=False)
+    if not acquired:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="MOSS-TTS Local is already generating audio; retry after the active request finishes",
+        )
     prompt_path = _save_upload(prompt_wav or reference_audio)
     try:
         resolved_mode = str(mode or "").strip().lower()
@@ -180,6 +195,16 @@ def inference(
         batch = proc(conversations, mode=process_mode)
         input_ids = batch["input_ids"].to(device)
         attention_mask = batch["attention_mask"].to(device)
+        active_inference.clear()
+        active_inference.update(
+            {
+                "mode": resolved_mode,
+                "process_mode": process_mode,
+                "text_chars": len(resolved_text),
+                "token_budget": int(token_budget),
+                "started_at": time.time(),
+            }
+        )
         gen_config = _generation_config(
             model_id,
             audio_temperature=audio_temperature,
@@ -188,11 +213,18 @@ def inference(
             audio_repetition_penalty=audio_repetition_penalty,
             n_vq_for_inference=n_vq_for_inference,
         )
+        resolved_seed = int(seed or 0)
+        if resolved_seed > 0:
+            torch.manual_seed(resolved_seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(resolved_seed)
+        max_time = max(1.0, min(600.0, float(max_generation_seconds or 0.0)))
         with torch.inference_mode():
             outputs = loaded_model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 max_new_tokens=token_budget,
+                max_time=max_time,
                 generation_config=gen_config,
             )
         messages = list(proc.decode(outputs))
@@ -200,8 +232,10 @@ def inference(
             raise HTTPException(status_code=502, detail="MOSS-TTS Local returned no audio")
         return _audio_to_wav_response(messages[0].audio_codes_list[0])
     finally:
+        active_inference.clear()
         if prompt_path:
             Path(prompt_path).unlink(missing_ok=True)
+        inference_lock.release()
 
 
 def main() -> None:

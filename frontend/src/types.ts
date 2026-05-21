@@ -1474,6 +1474,8 @@ export type ToolRunStatus<Result = unknown> = {
   tool?: string;
   status: string;
   progress?: number | null;
+  queue_position?: number | null;
+  queue_size?: number | null;
   current_stage?: string | null;
   detail?: string | null;
   stages: ToolRunStage[];

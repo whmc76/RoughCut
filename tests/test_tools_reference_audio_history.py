@@ -141,6 +141,37 @@ def test_tts_output_history_reads_sidecar_metadata(monkeypatch: pytest.MonkeyPat
     assert item["text_preview"] == "测试文本"
 
 
+def test_tool_run_is_persisted_to_disk(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(tools, "_RUN_STORE_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(tools, "_RUNS", {})
+    monkeypatch.setattr(tools, "_RUNS_LOADED", False)
+
+    run = tools._create_run("asr", request={"audio_path": str(tmp_path / "voice.wav"), "language": "zh-CN"})
+
+    stored = tools._RUN_STORE_ROOT / f"{run['run_id']}.json"
+    assert stored.exists()
+    payload = stored.read_text(encoding="utf-8")
+    assert '"tool": "asr"' in payload
+    assert '"audio_path"' in payload
+
+
+def test_interrupted_tool_run_requeues_when_loaded(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(tools, "_RUN_STORE_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(tools, "_RUNS", {})
+    monkeypatch.setattr(tools, "_RUNS_LOADED", False)
+    run = tools._create_run("tts", request={"text": "测试", "mode": "moss_direct_tts"})
+    tools._update_run_stage(run["run_id"], "request", detail="Submitting request", progress=0.5)
+
+    monkeypatch.setattr(tools, "_RUNS", {})
+    monkeypatch.setattr(tools, "_RUNS_LOADED", False)
+    tools._ensure_runs_loaded()
+
+    restored = tools._RUNS[run["run_id"]]
+    assert restored["status"] == "queued"
+    assert restored["error"] is None
+    assert tools._get_run_stage(restored, "request")["status"] == "pending"
+
+
 def test_moss_tts_local_form_data_sends_duration_and_sampling_fields() -> None:
     data = tools._build_moss_tts_local_form_data(
         text="测试 MOSS TTS。",
@@ -152,6 +183,7 @@ def test_moss_tts_local_form_data_sends_duration_and_sampling_fields() -> None:
         top_p=0.95,
         top_k=50,
         repetition_penalty=1.1,
+        seed=1234,
     )
 
     assert data["mode"] == "moss_direct_tts"
@@ -159,6 +191,7 @@ def test_moss_tts_local_form_data_sends_duration_and_sampling_fields() -> None:
     assert data["duration_tokens"] == "180"
     assert int(data["max_new_tokens"]) >= 1
     assert data["audio_temperature"] == "1.0"
+    assert data["seed"] == "1234"
 
 
 def test_moss_tts_local_continuation_keeps_prompt_text() -> None:
@@ -172,6 +205,7 @@ def test_moss_tts_local_continuation_keeps_prompt_text() -> None:
         top_p=0.95,
         top_k=50,
         repetition_penalty=1.1,
+        seed=0,
     )
 
     assert data["mode"] == "moss_continuation_clone"

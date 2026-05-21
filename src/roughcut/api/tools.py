@@ -11,7 +11,7 @@ import subprocess
 import uuid
 import wave
 from pathlib import Path, PureWindowsPath
-from typing import Any, Callable
+from typing import Any
 from urllib.parse import quote
 
 import httpx
@@ -35,8 +35,12 @@ _AVATAR_ROOT = _TOOLS_ROOT / "avatar"
 _UPLOAD_ROOT = _TOOLS_ROOT / "uploads"
 _REFERENCE_UPLOAD_ROOT = _TOOLS_ROOT / "reference-uploads"
 _REFERENCE_ROOT = _TOOLS_ROOT / "reference-cache"
+_RUN_STORE_ROOT = _TOOLS_ROOT / "runs"
 _RUNS: dict[str, dict[str, Any]] = {}
 _RUN_TASKS: dict[str, asyncio.Task[None]] = {}
+_RUNS_LOADED = False
+_RUN_QUEUE_WORKER: asyncio.Task[None] | None = None
+_TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
 _RUN_STAGE_NAMES: tuple[str, ...] = (
     "upload",
     "validate",
@@ -61,7 +65,7 @@ _COSYVOICE3_END_OF_PROMPT = "<|endofprompt|>"
 _COSYVOICE3_INSTRUCT_MAX_CHARS = 160
 _MIN_TTS_AUDIO_DURATION_SEC = 0.05
 _TTS_TEXT_SEGMENT_MAX_CHARS = 2000
-_MOSS_TTS_TEXT_SEGMENT_MAX_CHARS = 800
+_MOSS_TTS_TEXT_SEGMENT_MAX_CHARS = 120
 _TTS_TEXT_HARD_BOUNDARY_CHARS = frozenset("。！？!?；;….")
 _TTS_TEXT_SOFT_BOUNDARY_CHARS = frozenset("，,、：:")
 _MAX_REFERENCE_AUDIO_SEC = 30.0
@@ -79,6 +83,11 @@ _MOSS_DURATION_TOKENS_PER_TEXT_CHAR = 3.2
 _MOSS_MIN_AUTO_DURATION_TOKENS = 120
 _MOSS_MAX_AUTO_DURATION_TOKENS = 1800
 _MOSS_DURATION_MAX_NEW_TOKEN_HEADROOM = 120
+_MOSS_REQUEST_HEARTBEAT_SECONDS = 15.0
+_MOSS_SEGMENT_REQUEST_TIMEOUT_SECONDS = 300.0
+_MOSS_SEGMENT_GENERATION_MAX_SECONDS = 240.0
+_MOSS_SERVICE_READY_TIMEOUT_SECONDS = 900.0
+_MOSS_SERVICE_READY_POLL_SECONDS = 5.0
 _REFERENCE_AUDIO_HISTORY_LIMIT = 5
 _TTS_OUTPUT_HISTORY_LIMIT = 10
 _REFERENCE_AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
@@ -175,6 +184,7 @@ _TTS_ORALIZE_STYLE_PRESETS: dict[str, dict[str, Any]] = {
 
 @router.get("/status")
 async def tools_status() -> dict[str, Any]:
+    _ensure_tool_queue_worker()
     settings = get_settings()
     tts_status = await _probe_tts_service(
         base_url=settings.cosyvoice3_tts_api_base_url,
@@ -291,7 +301,7 @@ async def run_tts(
     seed: int = Form(default=0),
     text_frontend: bool = Form(default=True),
     moss_duration_tokens: int = Form(default=0),
-    moss_max_new_tokens: int = Form(default=2000),
+    moss_max_new_tokens: int = Form(default=0),
     moss_temperature: float = Form(default=1.1),
     moss_top_p: float = Form(default=0.9),
     moss_top_k: int = Form(default=50),
@@ -301,6 +311,7 @@ async def run_tts(
     reference_audio: UploadFile | None = File(default=None),
     prompt_wav: UploadFile | None = File(default=None),
 ) -> dict[str, Any]:
+    _ensure_tool_queue_worker()
     try:
         normalized_text = _resolve_tts_spoken_text(tts_text or text)
     except ValueError as exc:
@@ -317,38 +328,37 @@ async def run_tts(
         reference_path = _resolve_reference_audio_history_path(reference_history_path)
     if reference_path is not None and not str(prompt_text or "").strip():
         prompt_text = _read_reference_audio_prompt_text(reference_path)
-    run = _create_run("tts")
+    request = {
+        "text": normalized_text,
+        "original_text": normalized_text,
+        "provider": provider,
+        "mode": mode,
+        "prompt_text": prompt_text,
+        "instruct_text": instruct_text,
+        "spk_id": spk_id,
+        "zero_shot_spk_id": zero_shot_spk_id,
+        "stream": stream,
+        "speed": speed,
+        "seed": seed,
+        "text_frontend": text_frontend,
+        "moss_duration_tokens": moss_duration_tokens,
+        "moss_max_new_tokens": moss_max_new_tokens,
+        "moss_temperature": moss_temperature,
+        "moss_top_p": moss_top_p,
+        "moss_top_k": moss_top_k,
+        "moss_repetition_penalty": moss_repetition_penalty,
+        "auto_prompt_text_asr": auto_prompt_text_asr,
+        "reference_path": str(reference_path) if reference_path is not None else None,
+    }
+    run = _create_run("tts", request=request)
     _update_run_stage(run["run_id"], "upload", detail="TTS request accepted")
-    _schedule_run(
-        run["run_id"],
-        _execute_tts_run,
-        run["run_id"],
-        text=normalized_text,
-        original_text=normalized_text,
-        provider=provider,
-        mode=mode,
-        prompt_text=prompt_text,
-        instruct_text=instruct_text,
-        spk_id=spk_id,
-        zero_shot_spk_id=zero_shot_spk_id,
-        stream=stream,
-        speed=speed,
-        seed=seed,
-        text_frontend=text_frontend,
-        moss_duration_tokens=moss_duration_tokens,
-        moss_max_new_tokens=moss_max_new_tokens,
-        moss_temperature=moss_temperature,
-        moss_top_p=moss_top_p,
-        moss_top_k=moss_top_k,
-        moss_repetition_penalty=moss_repetition_penalty,
-        auto_prompt_text_asr=auto_prompt_text_asr,
-        reference_path=reference_path,
-    )
+    _enqueue_run(run["run_id"])
     return _run_public_payload(run)
 
 
 @router.get("/tts/reference-audio")
 async def list_tts_reference_audio() -> dict[str, Any]:
+    _ensure_tool_queue_worker()
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "items": _list_reference_audio_history(),
@@ -357,6 +367,7 @@ async def list_tts_reference_audio() -> dict[str, Any]:
 
 @router.get("/tts/outputs")
 async def list_tts_outputs() -> dict[str, Any]:
+    _ensure_tool_queue_worker()
     return {
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "items": _list_tts_output_history(),
@@ -369,20 +380,18 @@ async def run_asr(
     language: str = Form(default="zh-CN"),
     prompt: str = Form(default=""),
 ) -> dict[str, Any]:
+    _ensure_tool_queue_worker()
     audio_path = await _save_upload(audio, root=_ASR_UPLOAD_ROOT, fallback_suffix=".wav")
     if audio_path is None:
         raise HTTPException(status_code=400, detail="audio is required")
 
-    run = _create_run("asr")
+    run = _create_run("asr", request={
+        "audio_path": str(audio_path),
+        "language": language or "zh-CN",
+        "prompt": prompt or "",
+    })
     _update_run_stage(run["run_id"], "upload", detail="ASR audio uploaded", progress=0.04, path=str(audio_path))
-    _schedule_run(
-        run["run_id"],
-        _execute_asr_run,
-        run["run_id"],
-        audio_path=audio_path,
-        language=language or "zh-CN",
-        prompt=prompt or "",
-    )
+    _enqueue_run(run["run_id"])
     return _run_public_payload(run)
 
 
@@ -392,12 +401,17 @@ async def run_avatar(
     presenter_video: UploadFile = File(...),
     audio: UploadFile = File(...),
 ) -> dict[str, Any]:
+    _ensure_tool_queue_worker()
     presenter_path = await _save_upload(presenter_video, root=_UPLOAD_ROOT, fallback_suffix=".mp4")
     audio_path = await _save_upload(audio, root=_UPLOAD_ROOT, fallback_suffix=".wav")
     if presenter_path is None or audio_path is None:
         raise HTTPException(status_code=400, detail="presenter_video and audio are required")
 
-    run = _create_run("avatar")
+    run = _create_run("avatar", request={
+        "script": script,
+        "presenter_path": str(presenter_path),
+        "audio_path": str(audio_path),
+    })
     _update_run_stage(
         run["run_id"],
         "upload",
@@ -406,19 +420,13 @@ async def run_avatar(
         presenter_path=str(presenter_path),
         audio_path=str(audio_path),
     )
-    _schedule_run(
-        run["run_id"],
-        _execute_avatar_run,
-        run["run_id"],
-        script=script,
-        presenter_path=presenter_path,
-        audio_path=audio_path,
-    )
+    _enqueue_run(run["run_id"])
     return _run_public_payload(run)
 
 
 @router.get("/runs/{run_id}")
 async def get_tool_run(run_id: str) -> dict[str, Any]:
+    _ensure_tool_queue_worker()
     run = _RUNS.get(str(run_id or "").strip())
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
@@ -468,6 +476,7 @@ async def _execute_tts_run(
             top_p=moss_top_p,
             top_k=moss_top_k,
             repetition_penalty=moss_repetition_penalty,
+            seed=seed,
             auto_prompt_text_asr=auto_prompt_text_asr,
             reference_path=reference_path,
         )
@@ -692,6 +701,7 @@ async def _execute_moss_tts_local_run(
     top_p: float,
     top_k: int,
     repetition_penalty: float,
+    seed: int,
     auto_prompt_text_asr: bool,
     reference_path: Path | None,
 ) -> None:
@@ -772,6 +782,7 @@ async def _execute_moss_tts_local_run(
             required_urls=[settings.moss_tts_local_api_base_url],
             reason="tools_tts_moss_local",
         ):
+            await _wait_moss_tts_local_ready(run_id, settings)
             _update_run_stage(
                 run_id,
                 "request",
@@ -807,12 +818,17 @@ async def _execute_moss_tts_local_run(
                         top_p=top_p,
                         top_k=top_k,
                         repetition_penalty=repetition_penalty,
+                        seed=seed,
                     )
-                    response = await _post_tts_segment_request(
+                    response = await _post_moss_tts_segment_request_with_progress(
+                        run_id,
                         client,
                         f"{settings.moss_tts_local_api_base_url.rstrip('/')}{endpoint}",
                         data=data,
                         reference_path=reference_path,
+                        segment_index=index,
+                        segment_count=len(text_segments),
+                        max_new_tokens=segment_max_new_tokens[index - 1],
                     )
                     response.raise_for_status()
                     if len(text_segments) > 1:
@@ -855,7 +871,7 @@ async def _execute_moss_tts_local_run(
             zero_shot_spk_id="",
             stream=False,
             speed=1.0,
-            seed=0,
+            seed=int(seed or 0),
             text_frontend=True,
             reference_path=source_reference_path,
             segment_count=len(text_segments),
@@ -888,6 +904,7 @@ async def _execute_moss_tts_local_run(
         "audio_top_p": min(1.0, max(0.01, float(top_p if top_p is not None else 0.95))),
         "audio_top_k": max(1, int(top_k or 50)),
         "audio_repetition_penalty": max(0.01, float(repetition_penalty if repetition_penalty is not None else 1.1)),
+        "seed": max(0, int(seed or 0)),
     }
     result = {
         "status": "success",
@@ -950,8 +967,10 @@ def _build_moss_tts_local_form_data(
     top_p: float,
     top_k: int,
     repetition_penalty: float,
+    seed: int,
 ) -> dict[str, str]:
     resolved_mode = _normalize_moss_tts_local_mode(mode)
+    resolved_seed = max(0, int(seed or 0))
     return {
         "mode": resolved_mode,
         "tts_text": str(text or ""),
@@ -964,12 +983,109 @@ def _build_moss_tts_local_form_data(
         "audio_top_p": str(min(1.0, max(0.01, float(top_p if top_p is not None else 0.95)))),
         "audio_top_k": str(max(1, int(top_k or 50))),
         "audio_repetition_penalty": str(max(0.01, float(repetition_penalty if repetition_penalty is not None else 1.1))),
+        "seed": str(resolved_seed),
+        "max_generation_seconds": _format_config_number(_MOSS_SEGMENT_GENERATION_MAX_SECONDS),
     }
+
+
+async def _post_moss_tts_segment_request_with_progress(
+    run_id: str,
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    data: dict[str, str],
+    reference_path: Path | None,
+    segment_index: int,
+    segment_count: int,
+    max_new_tokens: int,
+) -> httpx.Response:
+    started_at = datetime.now(timezone.utc)
+    task = asyncio.create_task(
+        _post_tts_segment_request(
+            client,
+            url,
+            data=data,
+            reference_path=reference_path,
+        )
+    )
+    segment_total = max(1, int(segment_count or 1))
+    segment_position = max(1, min(segment_total, int(segment_index or 1)))
+    request_span = 0.36 / segment_total
+    progress_floor = 0.34 + (segment_position - 1) * request_span
+    progress_ceiling = min(0.54, progress_floor + max(0.04, request_span * 0.92))
+    estimated_seconds = max(45.0, min(240.0, int(max_new_tokens or 0) / 8.0))
+    try:
+        while True:
+            elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+            if elapsed > _MOSS_SEGMENT_REQUEST_TIMEOUT_SECONDS:
+                if not task.done():
+                    task.cancel()
+                raise RuntimeError(
+                    "MOSS-TTS Local segment timed out after "
+                    f"{int(_MOSS_SEGMENT_REQUEST_TIMEOUT_SECONDS)}s; "
+                    "try shorter text, direct TTS, or restart the MOSS-TTS service if prior requests are still running"
+                )
+            done, _ = await asyncio.wait({task}, timeout=_MOSS_REQUEST_HEARTBEAT_SECONDS)
+            if done:
+                return task.result()
+            progress_ratio = min(0.95, elapsed / estimated_seconds)
+            progress = progress_floor + (progress_ceiling - progress_floor) * progress_ratio
+            detail = (
+                f"MOSS-TTS Local generating request {segment_position}/{segment_total} "
+                f"({int(elapsed)}s elapsed)"
+            )
+            _update_run_stage(
+                run_id,
+                "request",
+                detail=detail,
+                progress=progress,
+                segment_index=segment_position,
+                segment_count=segment_total,
+                max_new_tokens=int(max_new_tokens or 0),
+                elapsed_seconds=int(elapsed),
+            )
+    except Exception:
+        if not task.done():
+            task.cancel()
+        raise
 
 
 def _normalize_moss_tts_local_mode(mode: object) -> str:
     requested = str(mode or "moss_voice_clone").strip().lower()
     return _MOSS_TTS_LOCAL_MODE_ALIASES.get(requested, requested)
+
+
+async def _wait_moss_tts_local_ready(run_id: str, settings: Any) -> None:
+    base_url = str(settings.moss_tts_local_api_base_url or "").rstrip("/")
+    health_path = str(settings.moss_tts_local_health_path or "/health")
+    url = f"{base_url}{health_path if health_path.startswith('/') else f'/{health_path}'}"
+    started_at = datetime.now(timezone.utc)
+    last_error = ""
+    while True:
+        elapsed = (datetime.now(timezone.utc) - started_at).total_seconds()
+        if elapsed > _MOSS_SERVICE_READY_TIMEOUT_SECONDS:
+            raise RuntimeError(f"MOSS-TTS Local did not become ready after {int(elapsed)}s: {last_error or 'not ready'}")
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(8.0, connect=2.0), follow_redirects=True) as client:
+                response = await client.get(url)
+            payload = response.json() if response.headers.get("content-type", "").lower().startswith("application/json") else {}
+            if response.status_code < 400 and not bool(payload.get("busy")):
+                return
+            if response.status_code < 400 and bool(payload.get("busy")):
+                active = payload.get("active_inference") if isinstance(payload, dict) else None
+                last_error = f"service busy: {active or {}}"
+            else:
+                last_error = f"HTTP {response.status_code}: {_read_response_error(response)}"
+        except Exception as exc:
+            last_error = str(exc)
+        _update_run_stage(
+            run_id,
+            "service_start",
+            detail=f"Waiting for MOSS-TTS Local to become ready ({int(elapsed)}s)",
+            progress=0.18,
+            service_error=last_error,
+        )
+        await asyncio.sleep(_MOSS_SERVICE_READY_POLL_SECONDS)
 
 
 def _cleanup_paths(paths: list[Path]) -> None:
@@ -1755,20 +1871,118 @@ async def _execute_avatar_run(run_id: str, *, script: str, presenter_path: Path,
     })
 
 
-async def _run_background(run_id: str, func: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+def _enqueue_run(run_id: str) -> None:
+    run = _RUNS.get(run_id)
+    if run is None or run.get("status") in _TERMINAL_RUN_STATUSES:
+        return
+    run["status"] = "queued"
+    run["progress"] = max(0.0, min(float(run.get("progress") or 0.0), _RUN_PROGRESS_FLOORS["upload"]))
+    run["updated_at"] = datetime.now(timezone.utc).isoformat()
+    upload_stage = _get_run_stage(run, "upload")
+    if upload_stage is not None and upload_stage.get("status") == "running":
+        upload_stage["status"] = "completed"
+        upload_stage["progress"] = max(float(upload_stage.get("progress") or 0.0), _RUN_PROGRESS_FLOORS["upload"])
+        upload_stage["updated_at"] = run["updated_at"]
+    _persist_run(run)
+    _ensure_tool_queue_worker()
+
+
+def _ensure_tool_queue_worker() -> None:
+    global _RUN_QUEUE_WORKER
+    _ensure_runs_loaded()
     try:
-        await func(*args, **kwargs)
-    except Exception as exc:
-        _fail_run(run_id, str(exc))
-    finally:
-        _RUN_TASKS.pop(run_id, None)
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if _RUN_QUEUE_WORKER is None or _RUN_QUEUE_WORKER.done():
+        _RUN_QUEUE_WORKER = loop.create_task(_run_tool_queue_worker())
 
 
-def _schedule_run(run_id: str, func: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
-    _RUN_TASKS[run_id] = asyncio.create_task(_run_background(run_id, func, *args, **kwargs))
+async def _run_tool_queue_worker() -> None:
+    while True:
+        run = _next_queued_run()
+        if run is None:
+            return
+        run_id = str(run.get("run_id") or "")
+        if not run_id:
+            return
+        current_task = asyncio.current_task()
+        if current_task is not None:
+            _RUN_TASKS[run_id] = current_task
+        try:
+            await _execute_persisted_run(run)
+        except Exception as exc:
+            _fail_run(run_id, str(exc))
+        finally:
+            _RUN_TASKS.pop(run_id, None)
 
 
-def _create_run(tool: str) -> dict[str, Any]:
+def _next_queued_run() -> dict[str, Any] | None:
+    queued = [run for run in _RUNS.values() if run.get("status") == "queued"]
+    queued.sort(key=lambda item: str(item.get("created_at") or ""))
+    return queued[0] if queued else None
+
+
+async def _execute_persisted_run(run: dict[str, Any]) -> None:
+    run_id = str(run.get("run_id") or "")
+    tool = str(run.get("tool") or "").strip().lower()
+    request = run.get("request") if isinstance(run.get("request"), dict) else {}
+    if not run_id:
+        raise RuntimeError("run_id is missing")
+    if tool == "tts":
+        reference_value = request.get("reference_path")
+        await _execute_tts_run(
+            run_id,
+            text=str(request.get("text") or ""),
+            original_text=str(request.get("original_text") or request.get("text") or ""),
+            provider=str(request.get("provider") or "cosyvoice3"),
+            mode=str(request.get("mode") or "zero_shot"),
+            prompt_text=str(request.get("prompt_text") or ""),
+            instruct_text=str(request.get("instruct_text") or ""),
+            spk_id=str(request.get("spk_id") or ""),
+            zero_shot_spk_id=str(request.get("zero_shot_spk_id") or ""),
+            stream=bool(request.get("stream", True)),
+            speed=float(request.get("speed") or 1.0),
+            seed=int(request.get("seed") or 0),
+            text_frontend=bool(request.get("text_frontend", True)),
+            moss_duration_tokens=int(request.get("moss_duration_tokens") or 0),
+            moss_max_new_tokens=int(request.get("moss_max_new_tokens") or 0),
+            moss_temperature=float(request.get("moss_temperature") or 1.1),
+            moss_top_p=float(request.get("moss_top_p") or 0.9),
+            moss_top_k=int(request.get("moss_top_k") or 50),
+            moss_repetition_penalty=float(request.get("moss_repetition_penalty") or 1.1),
+            auto_prompt_text_asr=bool(request.get("auto_prompt_text_asr", True)),
+            reference_path=Path(str(reference_value)) if reference_value else None,
+        )
+        return
+    if tool == "asr":
+        audio_path = Path(str(request.get("audio_path") or ""))
+        if not audio_path.exists():
+            raise RuntimeError(f"ASR uploaded audio is missing: {audio_path}")
+        await _execute_asr_run(
+            run_id,
+            audio_path=audio_path,
+            language=str(request.get("language") or "zh-CN"),
+            prompt=str(request.get("prompt") or ""),
+        )
+        return
+    if tool == "avatar":
+        presenter_path = Path(str(request.get("presenter_path") or ""))
+        audio_path = Path(str(request.get("audio_path") or ""))
+        missing_paths = [str(path) for path in (presenter_path, audio_path) if not path.exists()]
+        if missing_paths:
+            raise RuntimeError(f"Avatar uploaded media is missing: {', '.join(missing_paths)}")
+        await _execute_avatar_run(
+            run_id,
+            script=str(request.get("script") or ""),
+            presenter_path=presenter_path,
+            audio_path=audio_path,
+        )
+        return
+    raise RuntimeError(f"Unsupported tool run type: {tool}")
+
+
+def _create_run(tool: str, *, request: dict[str, Any] | None = None) -> dict[str, Any]:
     run_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
     run = {
@@ -1776,6 +1990,7 @@ def _create_run(tool: str) -> dict[str, Any]:
         "tool": tool,
         "status": "queued",
         "progress": 0.0,
+        "request": _json_safe(request or {}),
         "created_at": now,
         "updated_at": now,
         "stages": [
@@ -1792,6 +2007,7 @@ def _create_run(tool: str) -> dict[str, Any]:
         "error": None,
     }
     _RUNS[run_id] = run
+    _persist_run(run)
     return run
 
 
@@ -1816,6 +2032,7 @@ def _update_run_stage(run_id: str, stage_name: str, *, detail: str = "", progres
     run["progress"] = max(float(run.get("progress") or 0.0), stage["progress"])
     run["updated_at"] = now
     _mark_prior_stages_done(run, stage_name, now)
+    _persist_run(run)
 
 
 def _complete_run(run_id: str, result: dict[str, Any]) -> None:
@@ -1831,6 +2048,7 @@ def _complete_run(run_id: str, result: dict[str, Any]) -> None:
     if failed is not None and failed["status"] == "pending":
         failed["progress"] = 0.0
     run.update({"status": "completed", "progress": 1.0, "result": result, "error": None, "updated_at": now})
+    _persist_run(run)
 
 
 def _fail_run(run_id: str, error: str) -> None:
@@ -1850,6 +2068,7 @@ def _fail_run(run_id: str, error: str) -> None:
     if stage is not None:
         stage.update({"status": "failed", "progress": 1.0, "detail": error, "updated_at": now})
     run.update({"status": "failed", "progress": 1.0, "error": error, "updated_at": now})
+    _persist_run(run)
 
 
 def _get_run_stage(run: dict[str, Any], stage_name: str) -> dict[str, Any] | None:
@@ -1879,11 +2098,14 @@ def _run_public_payload(run: dict[str, Any]) -> dict[str, Any]:
         for stage in run.get("stages", [])
         if not (run.get("status") == "completed" and stage.get("name") == "failed" and stage.get("status") == "pending")
     ]
+    queued_runs = [item for item in _RUNS.values() if item.get("status") == "queued"]
     return {
         "run_id": run["run_id"],
         "tool": run["tool"],
         "status": run["status"],
         "progress": run["progress"],
+        "queue_position": _queue_position(str(run["run_id"])),
+        "queue_size": len(queued_runs),
         "current_stage": current_stage,
         "detail": _current_stage_detail(run, current_stage),
         "stages": stages,
@@ -1897,6 +2119,8 @@ def _run_public_payload(run: dict[str, Any]) -> dict[str, Any]:
 def _current_stage_name(run: dict[str, Any]) -> str:
     if run.get("status") == "failed":
         return "failed"
+    if run.get("status") == "queued":
+        return "queued"
     for stage in run.get("stages", []):
         if stage.get("status") == "running":
             return str(stage.get("name") or "")
@@ -1906,10 +2130,104 @@ def _current_stage_name(run: dict[str, Any]) -> str:
 
 
 def _current_stage_detail(run: dict[str, Any], current_stage: str) -> str:
+    if current_stage == "queued":
+        position = _queue_position(str(run.get("run_id") or ""))
+        if position is not None:
+            return f"等待后台队列执行，当前排第 {position} 个"
+        return "等待后台队列执行"
     stage = _get_run_stage(run, current_stage)
     if stage is None:
         return ""
     return str(stage.get("detail") or "")
+
+
+def _ensure_runs_loaded() -> None:
+    global _RUNS_LOADED
+    if _RUNS_LOADED:
+        return
+    _RUNS_LOADED = True
+    if not _RUN_STORE_ROOT.exists():
+        return
+    for path in sorted(_RUN_STORE_ROOT.glob("*.json")):
+        try:
+            run = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(run, dict):
+            continue
+        run_id = str(run.get("run_id") or path.stem).strip()
+        if not run_id:
+            continue
+        run["run_id"] = run_id
+        _repair_run_shape(run)
+        if run.get("status") not in _TERMINAL_RUN_STATUSES:
+            _requeue_interrupted_run(run)
+        _RUNS.setdefault(run_id, run)
+
+
+def _repair_run_shape(run: dict[str, Any]) -> None:
+    stages = run.get("stages")
+    if not isinstance(stages, list):
+        stages = []
+    existing = {str(stage.get("name") or ""): stage for stage in stages if isinstance(stage, dict)}
+    repaired = []
+    for name in _RUN_STAGE_NAMES:
+        stage = existing.get(name) or {}
+        repaired.append({
+            "name": name,
+            "status": str(stage.get("status") or "pending"),
+            "progress": _coerce_progress(stage.get("progress")) or 0.0,
+            "detail": str(stage.get("detail") or ""),
+            "updated_at": stage.get("updated_at"),
+            **({"data": stage.get("data")} if isinstance(stage.get("data"), dict) else {}),
+        })
+    run["stages"] = repaired
+    run.setdefault("status", "queued")
+    run.setdefault("progress", 0.0)
+    run.setdefault("request", {})
+    run.setdefault("result", None)
+    run.setdefault("error", None)
+    run.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    run.setdefault("updated_at", run.get("created_at"))
+
+
+def _requeue_interrupted_run(run: dict[str, Any]) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    for stage in run.get("stages", []):
+        if stage.get("status") == "running":
+            stage["status"] = "pending"
+            stage["detail"] = "等待后台队列恢复执行"
+            stage["updated_at"] = now
+    run["status"] = "queued"
+    run["error"] = None
+    run["updated_at"] = now
+    _persist_run(run)
+
+
+def _persist_run(run: dict[str, Any]) -> None:
+    try:
+        _RUN_STORE_ROOT.mkdir(parents=True, exist_ok=True)
+        run_id = str(run.get("run_id") or "").strip()
+        if not run_id:
+            return
+        path = _RUN_STORE_ROOT / f"{_safe_filename_part(run_id, fallback='run', max_length=64)}.json"
+        tmp_path = path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(_json_safe(run), ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
+    except Exception:
+        return
+
+
+def _queue_position(run_id: str) -> int | None:
+    run = _RUNS.get(run_id)
+    if run is None or run.get("status") != "queued":
+        return None
+    queued = [item for item in _RUNS.values() if item.get("status") == "queued"]
+    queued.sort(key=lambda item: str(item.get("created_at") or ""))
+    for index, item in enumerate(queued, start=1):
+        if item.get("run_id") == run_id:
+            return index
+    return None
 
 
 def _coerce_progress(value: Any) -> float | None:

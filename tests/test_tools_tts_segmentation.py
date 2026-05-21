@@ -29,7 +29,7 @@ def test_split_tts_text_for_synthesis_splits_long_text_without_punctuation() -> 
     assert segments == ["abcdefghij", "klmnopqrst", "uvwxyz"]
 
 
-def test_split_moss_tts_text_does_not_force_arbitrary_small_chunks() -> None:
+def test_split_moss_tts_text_uses_short_chunks_for_local_generation() -> None:
     text = (
         "很多父母都会遇到这种情况。孩子明明自己说了可以，可事情结束以后，他又不高兴了。"
         "大人就会很疑惑，不是你自己答应的吗，不是你说可以的吗，那你现在为什么又委屈。"
@@ -39,7 +39,8 @@ def test_split_moss_tts_text_does_not_force_arbitrary_small_chunks() -> None:
 
     segments = tools._split_tts_text_for_synthesis(text, max_chars=tools._MOSS_TTS_TEXT_SEGMENT_MAX_CHARS)
 
-    assert segments == [text]
+    assert len(segments) > 1
+    assert "".join(segments) == text
     assert all(len(segment) <= tools._MOSS_TTS_TEXT_SEGMENT_MAX_CHARS for segment in segments)
 
 
