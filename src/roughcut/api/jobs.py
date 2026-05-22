@@ -85,6 +85,7 @@ from roughcut.media.subtitle_text import (
     normalize_contextual_noc_alias_text,
     normalize_editable_subtitle_text,
     normalize_flashlight_model_alias_text,
+    normalize_source_transcript_text,
 )
 from roughcut.media.subtitle_projection_validation import (
     annotate_projected_subtitle_sources,
@@ -325,7 +326,7 @@ class ManualEditorApplyIn(BaseModel):
 
 MANUAL_EDITOR_DRAFT_ARTIFACT_TYPE = "manual_editor_draft"
 MANUAL_EDITOR_DRAFT_SCHEMA = "manual_editor_draft.v2"
-MANUAL_EDITOR_TIMELINE_RULES_VERSION = 2
+MANUAL_EDITOR_TIMELINE_RULES_VERSION = 3
 MANUAL_EDITOR_MICRO_CUT_HEAL_SEC = 0.18
 
 
@@ -1614,11 +1615,17 @@ def _manual_editor_silence_payload(segment: dict[str, Any], *, source: str = "au
 
 
 _MANUAL_EDITOR_SMART_DELETE_REASONS = {
+    "filler_word",
+    "repeated_speech",
     "rollback_instruction",
     "restart_retake",
     "restart_cue",
     "low_signal_subtitle",
     "long_non_dialogue",
+    "timing_trim",
+    "micro_keep",
+    "micro_keep_bridge",
+    "gap_fill",
 }
 
 _MANUAL_EDITOR_FRONTEND_MANAGED_AUTO_CUT_REASONS = {
@@ -1630,18 +1637,33 @@ _MANUAL_EDITOR_FRONTEND_MANAGED_AUTO_CUT_REASONS = {
     "restart_cue",
     "low_signal_subtitle",
     "long_non_dialogue",
+    "timing_trim",
+    "micro_keep",
+    "micro_keep_bridge",
+    "gap_fill",
 }
 
 _MANUAL_EDITOR_SMART_DELETE_REASON_LABELS = {
+    "filler_word": "规则候选：口头填充音",
+    "repeated_speech": "规则候选：重复口误",
     "rollback_instruction": "口播指令回删前段",
     "restart_retake": "疑似重录废片",
     "restart_cue": "明确重来/口误提示",
     "low_signal_subtitle": "低信息字幕废片",
     "long_non_dialogue": "长段非口播废片",
+    "timing_trim": "规则候选：节奏边界修剪",
+    "micro_keep": "规则候选：短空段清理",
+    "micro_keep_bridge": "规则候选：碎片桥段清理",
+    "gap_fill": "规则候选：时间线空隙清理",
 }
 
 
 def _manual_editor_smart_delete_source(item: dict[str, Any]) -> tuple[str, float | None]:
+    if str(item.get("candidate_stage") or "").strip() == "manual_editor_full_transcript":
+        try:
+            return "manual_editor_rule_candidate", round(float(item.get("score", 0.0) or 0.0), 3)
+        except (TypeError, ValueError):
+            return "manual_editor_rule_candidate", None
     llm_review = item.get("llm_review") if isinstance(item.get("llm_review"), dict) else {}
     if str(llm_review.get("verdict") or "").strip().lower() == "cut":
         try:
@@ -1717,9 +1739,14 @@ def _manual_editor_smart_delete_segments(editorial_analysis: dict[str, Any] | No
         for item in list((editorial_analysis or {}).get("accepted_cuts") or [])
         if isinstance(item, dict)
     ]
+    rule_candidates = [
+        item
+        for item in list((editorial_analysis or {}).get("manual_editor_rule_candidates") or [])
+        if isinstance(item, dict)
+    ]
     segments = [
         normalized
-        for item in accepted_cuts
+        for item in [*accepted_cuts, *rule_candidates]
         if (normalized := _manual_editor_smart_delete_payload(item)) is not None
     ]
     segments.sort(key=lambda item: (item.start, item.end))
@@ -1727,7 +1754,7 @@ def _manual_editor_smart_delete_segments(editorial_analysis: dict[str, Any] | No
 
 
 def _manual_editor_final_subtitle_text(item: dict[str, Any]) -> str:
-    return normalize_editable_subtitle_text(
+    return normalize_source_transcript_text(
         item.get("text_final")
         or item.get("text_norm")
         or item.get("text_raw", "")
@@ -1735,7 +1762,7 @@ def _manual_editor_final_subtitle_text(item: dict[str, Any]) -> str:
 
 
 def _manual_editor_editable_text(value: Any) -> str:
-    return normalize_editable_subtitle_text(value)
+    return normalize_source_transcript_text(value)
 
 
 def _manual_editor_display_source_text(item: dict[str, Any], *, final_text: str = "") -> str:
@@ -2430,7 +2457,7 @@ _MANUAL_EDITOR_LATIN_TOKEN_RE = re.compile(r"[A-Za-z0-9]")
 
 
 def _manual_editor_apply_source_text_corrections(text: Any, *, context_text: str = "") -> str:
-    normalized = normalize_editable_subtitle_text(text)
+    normalized = normalize_source_transcript_text(text)
     if not normalized:
         return ""
     normalized = normalize_contextual_noc_alias_text(normalized, context_text=context_text)
@@ -2440,13 +2467,10 @@ def _manual_editor_apply_source_text_corrections(text: Any, *, context_text: str
 
 
 def _manual_editor_normalize_asr_transcript_text(text: Any) -> str:
-    normalized = str(text or "").strip()
+    normalized = normalize_source_transcript_text(text)
     if not normalized:
         return ""
-    normalized = re.sub(r"[\u200b\u200c\u200d\ufeff]", "", normalized)
     normalized = _MANUAL_EDITOR_ASR_TRANSCRIPT_NOISE_MARKER_RE.sub("", normalized)
-    normalized = re.sub(r"([\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", r"\1", normalized)
-    normalized = re.sub(r"([，。！？、：；,.!?])\1+", r"\1", normalized)
     return re.sub(r"\s{2,}", " ", normalized).strip()
 
 

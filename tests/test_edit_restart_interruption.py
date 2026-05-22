@@ -47,7 +47,7 @@ def test_rollback_instruction_accepts_asr_variant_from_real_failure_case() -> No
     assert _is_rollback_instruction_text("本来就是减6啊所以说也是很爽啊")
 
 
-def test_build_edit_decision_includes_rollback_instruction_cut() -> None:
+def test_build_edit_decision_marks_rollback_instruction_for_manual_full_transcript() -> None:
     decision = build_edit_decision(
         "demo.mp4",
         duration=22.0,
@@ -61,8 +61,16 @@ def test_build_edit_decision_includes_rollback_instruction_cut() -> None:
         content_profile={"content_kind": "unboxing"},
     )
 
-    assert any(cut["reason"] == "rollback_instruction" and cut["start"] == 10.0 and cut["end"] == 18.0 for cut in decision.analysis["accepted_cuts"])
-    assert any(segment.type == "remove" and segment.start == 10.0 and segment.end == 18.0 for segment in decision.segments)
+    assert not any(cut["reason"] == "rollback_instruction" for cut in decision.analysis["accepted_cuts"])
+    assert any(
+        cut["reason"] == "rollback_instruction"
+        and cut["start"] == 10.0
+        and cut["end"] == 18.0
+        and cut["candidate_stage"] == "manual_editor_full_transcript"
+        and cut["auto_applied"] is False
+        for cut in decision.analysis["manual_editor_rule_candidates"]
+    )
+    assert not any(segment.type == "remove" and segment.start == 10.0 and segment.end == 18.0 for segment in decision.segments)
 
 
 def test_interruption_between_retake_lines_becomes_cut_candidate() -> None:

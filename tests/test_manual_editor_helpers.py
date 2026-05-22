@@ -453,11 +453,21 @@ def test_manual_editor_smart_delete_segments_expose_auto_waste_cuts() -> None:
                     "reason": "silence",
                     "llm_review": {"verdict": "cut", "confidence": 0.8},
                 },
-            ]
+            ],
+            "manual_editor_rule_candidates": [
+                {
+                    "start": 7.0,
+                    "end": 7.2,
+                    "reason": "filler_word",
+                    "score": 0.86,
+                    "candidate_stage": "manual_editor_full_transcript",
+                    "auto_applied": False,
+                }
+            ],
         }
     )
 
-    assert len(segments) == 2
+    assert len(segments) == 3
     assert segments[0].start == 1.234
     assert segments[0].end == 3.5
     assert segments[0].source == "llm_cut_review"
@@ -466,6 +476,11 @@ def test_manual_editor_smart_delete_segments_expose_auto_waste_cuts() -> None:
     assert segments[1].start == 6.0
     assert segments[1].end == 6.4
     assert segments[1].source == "llm_cut_review"
+    assert segments[2].start == 7.0
+    assert segments[2].end == 7.2
+    assert segments[2].source == "manual_editor_rule_candidate"
+    assert segments[2].confidence == 0.86
+    assert segments[2].detail == "规则候选：口头填充音"
 
 
 def test_manual_editor_subtitle_payload_accepts_projection_start_end_keys() -> None:

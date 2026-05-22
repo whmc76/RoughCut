@@ -518,29 +518,34 @@ def build_edit_decision(
             timeline_analysis=timeline_analysis,
         )
     )
+    manual_editor_rule_candidates: list[CutCandidate] = []
     if cut_fillers and enriched_subtitles:
-        candidates.extend(
+        manual_editor_rule_candidates.extend(
             _build_subtitle_cut_candidates(
                 enriched_subtitles,
                 content_profile=content_profile,
                 transcript_segments=normalized_transcript,
             )
         )
-        candidates.extend(_build_hard_cut_candidates(
-            [
-                *_collect_restart_retake_cuts(enriched_subtitles, content_profile=content_profile),
-                *_collect_restart_cue_cuts(enriched_subtitles, content_profile=content_profile),
-            ]
-        ))
-        candidates.extend(_collect_rollback_instruction_cuts(enriched_subtitles, content_profile=content_profile))
+        manual_editor_rule_candidates.extend(
+            _build_hard_cut_candidates(
+                [
+                    *_collect_restart_retake_cuts(enriched_subtitles, content_profile=content_profile),
+                    *_collect_restart_cue_cuts(enriched_subtitles, content_profile=content_profile),
+                ]
+            )
+        )
+        manual_editor_rule_candidates.extend(
+            _collect_rollback_instruction_cuts(enriched_subtitles, content_profile=content_profile)
+        )
 
     merged_cuts = _merge_cut_intervals(
         [(candidate.start, candidate.end, candidate.reason) for candidate in candidates]
     )
-    segments = _build_segments_from_cuts(duration=duration, merged_cuts=merged_cuts)
+    base_segments = _build_segments_from_cuts(duration=duration, merged_cuts=merged_cuts)
     if subtitle_items is not None:
-        segments = _refine_segments_for_pacing(
-            segments,
+        pacing_rule_preview = _refine_segments_for_pacing(
+            base_segments,
             subtitle_items=enriched_subtitles,
             transcript_segments=normalized_transcript,
             content_profile=content_profile,
@@ -548,7 +553,13 @@ def build_edit_decision(
             timeline_analysis=timeline_analysis,
             scene_points=scene_points,
         )
-    segments = _merge_adjacent_segments(segments)
+        manual_editor_rule_candidates.extend(
+            _collect_pacing_rule_candidates(
+                base_segments,
+                pacing_rule_preview,
+            )
+        )
+    segments = _merge_adjacent_segments(base_segments)
     keep_energy_segments = _build_keep_energy_segments_analysis(
         segments,
         subtitle_items=enriched_subtitles,
@@ -578,10 +589,9 @@ def build_edit_decision(
                     "transcript_overlap",
                     "scene_boundaries",
                     "section_role",
-                    "retake_cues",
-                    "rollback_instructions",
+                    "manual_editor_rule_candidates",
                 ],
-                "principle": "cut only when removal evidence beats speech, visual showcase, and semantic continuity protection",
+                "principle": "auto-apply only VAD-backed source cuts; text and pacing rules are marked for the manual full-transcript stage",
             },
             "candidate_count": len(candidates),
             "scene_boundary_count": len(scene_points),
@@ -599,6 +609,15 @@ def build_edit_decision(
             ],
             "review_focus": str(resolved_skill.get("review_focus") or ""),
             "accepted_cuts": accepted_cuts,
+            "manual_editor_rule_candidates": [
+                {
+                    **candidate.to_dict(),
+                    "candidate_stage": "manual_editor_full_transcript",
+                    "auto_applied": False,
+                }
+                for candidate in manual_editor_rule_candidates
+            ],
+            "manual_editor_rule_candidate_count": len(manual_editor_rule_candidates),
             "cut_evidence_summary": _summarize_cut_evidence(accepted_cuts),
             "keep_energy_segments": keep_energy_segments,
             "keep_energy_summary": _summarize_keep_energy_segments(keep_energy_segments),
@@ -1776,6 +1795,50 @@ def _build_segments_from_cuts(*, duration: float, merged_cuts: list[tuple[float,
     if cursor < duration:
         segments.append(EditSegment(start=cursor, end=duration, type="keep"))
     return segments
+
+
+_PACING_RULE_CANDIDATE_REASONS = {
+    "timing_trim",
+    "micro_keep",
+    "micro_keep_bridge",
+    "long_non_dialogue",
+    "gap_fill",
+}
+
+
+def _collect_pacing_rule_candidates(
+    base_segments: list[EditSegment],
+    refined_segments: list[EditSegment],
+) -> list[CutCandidate]:
+    base_removes = [
+        segment
+        for segment in base_segments
+        if segment.type == "remove" and segment.end > segment.start
+    ]
+    candidates: list[CutCandidate] = []
+    for segment in refined_segments:
+        if segment.type != "remove" or segment.reason not in _PACING_RULE_CANDIDATE_REASONS:
+            continue
+        if segment.end <= segment.start + 0.08:
+            continue
+        if any(_same_cut_interval(segment, applied) for applied in base_removes):
+            continue
+        candidates.append(
+            CutCandidate(
+                start=segment.start,
+                end=segment.end,
+                reason=segment.reason,
+                score=0.65,
+                hard=False,
+                signals=["pacing_rule_candidate"],
+                evidence={"candidate_origin": "pacing_refinement_preview"},
+            )
+        )
+    return candidates
+
+
+def _same_cut_interval(left: EditSegment, right: EditSegment) -> bool:
+    return abs(left.start - right.start) <= 0.001 and abs(left.end - right.end) <= 0.001
 
 
 def _refine_segments_for_pacing(

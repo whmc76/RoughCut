@@ -163,6 +163,22 @@ def test_human_accepted_correction_updates_canonical_segment_text() -> None:
     assert layer.segments[0].accepted_corrections[0]["human_decision"] == "accepted"
 
 
+def test_canonical_transcript_layer_preserves_source_raw_filler_text() -> None:
+    class Subtitle:
+        id = "subtitle-1"
+        item_index = 0
+        start_time = 0.0
+        end_time = 2.0
+        text_raw = "啊我靠饮恨"
+        text_norm = "我靠饮恨"
+        text_final = None
+
+    layer = build_canonical_transcript_layer([Subtitle()], corrections=[])
+
+    assert layer.segments[0].text_raw == "啊我靠饮恨"
+    assert layer.segments[0].text_canonical == "我靠饮恨"
+
+
 def test_glossary_automation_blocks_neighbor_model_rewrite() -> None:
     automation = assess_glossary_correction_automation(
         full_text="这个EDC17手电",

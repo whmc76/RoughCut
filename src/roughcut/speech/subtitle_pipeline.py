@@ -482,7 +482,7 @@ def _build_canonical_transcript_layer_from_source_segments(
         item_corrections = corrections_by_source_id.get(source_id, [])
         accepted_corrections = tuple(payload for payload in item_corrections if payload["status"] == "accepted")
         pending_corrections = tuple(payload for payload in item_corrections if payload["status"] == "pending")
-        text_raw = str(source_segment.text_norm or source_segment.text_raw or "")
+        text_raw = str(source_segment.text_raw or "")
         canonical_text = str(source_segment.text_final or source_segment.text_norm or text_raw)
         canonical_text = _apply_accepted_corrections(canonical_text, accepted_corrections)
         canonical_words = _build_canonical_transcript_words(

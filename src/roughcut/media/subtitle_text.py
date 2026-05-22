@@ -45,7 +45,7 @@ _ASCII_MODEL_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9+#.-]{3,}")
 _ASCII_SPELLOUT_SEQUENCE_PATTERN = re.compile(
     r"(?<![A-Za-z0-9])(?:[A-Za-z]|\d+|mini|Mini|MINI)(?:\s+(?:[A-Za-z]|\d+|mini|Mini|MINI)){1,}(?![A-Za-z0-9])"
 )
-_ASR_PARTIAL_PREFIX_STUTTER_PATTERN = re.compile(r"(没没有没有|没没有|还还是|好好不过|太太难|太难难|一一般)")
+_ASR_PARTIAL_PREFIX_STUTTER_PATTERN = re.compile(r"(没没有没有|没没有|还还是|好好不过|太太难难|太难难|一一般)")
 _ASR_MEASURE_WORD_ALT_PATTERN = re.compile(r"一个(?=一[款把台支只件颗枚套])")
 _ASR_FUNCTION_PREFIX_STUTTER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"纸纸(?=[箱盒])"), "纸"),
@@ -55,7 +55,7 @@ _ASR_FUNCTION_PREFIX_STUTTER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] =
     (re.compile(r"我我(?=应该|建议|觉得|知道|看|这)"), "我"),
 )
 _CJK_SINGLE_PREFIX_STUTTER_CHARS = frozenset(
-    "还没太好难过在算抢到了的个发售这那也我就"
+    "还没好难过在算抢到了的个发售这那也我就"
 )
 _FLASHLIGHT_MODEL_ALIAS_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?<![A-Za-z0-9])(?:EDC)?(?:幺七|一七|么七)(?![A-Za-z0-9])", re.IGNORECASE), "EDC17"),
@@ -72,7 +72,17 @@ def clean_final_subtitle_text(text: object) -> str:
 
 
 def normalize_editable_subtitle_text(text: object) -> str:
-    """Normalize ASR noise for editable transcript surfaces without hiding fillers."""
+    """Normalize ASR noise for editable transcript surfaces without hiding spoken content."""
+    return normalize_source_transcript_text(text)
+
+
+def normalize_source_transcript_text(text: object) -> str:
+    """Denoise source transcript text without deleting real spoken words.
+
+    This is the only normalization allowed before the manual full-transcript
+    stage. It removes mechanical ASR jitter/noise markers, but it must not
+    suppress fillers, interjections, profanity,口误, or low-information speech.
+    """
     normalized = str(text or "").strip()
     if not normalized:
         return ""
@@ -310,6 +320,10 @@ def _collapse_ascii_overlap_token(token: str) -> str:
         for overlap in range(1, unit_len):
             if collapsed == unit + unit[overlap:]:
                 return unit
+    for unit_len in range(3, min(8, len(collapsed)) + 1):
+        unit = collapsed[-unit_len:]
+        if collapsed == unit[:-1] + unit:
+            return unit
     return collapsed
 
 
@@ -319,7 +333,7 @@ def _collapse_partial_prefix_stutter_noise(text: str) -> str:
         "没没有": "没有",
         "还还是": "还是",
         "好好不过": "好不过",
-        "太太难": "太难",
+        "太太难难": "太难",
         "太难难": "太难",
         "一一般": "一般",
     }

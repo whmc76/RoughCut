@@ -36,6 +36,7 @@ def test_normalize_transcript_result_normalizes_asr_stutter_before_downstream() 
     second_raw = "没想到这NOC现NOC现在这么火"
     third_raw = "NNOCOC的的这个个发发售售，太太难难了，没没有没有这个像很多兄弟一样隐恨"
     fourth_raw = "最近这三次 N O C 的发售啊，最后的一个一款小玩具，非常适合 E D C 啊"
+    fifth_raw = "最近这三次NONOC的发售，经常会EDEDC用的啊"
     result = TranscriptResult(
         segments=[
             TranscriptSegment(
@@ -78,9 +79,19 @@ def test_normalize_transcript_result_normalizes_asr_stutter_before_downstream() 
                     for index, char in enumerate(fourth_raw)
                 ],
             ),
+            TranscriptSegment(
+                index=4,
+                start=12.0,
+                end=15.0,
+                text=fifth_raw,
+                words=[
+                    WordTiming(word=char, start=12.0 + index * 0.05, end=12.0 + (index + 1) * 0.05)
+                    for index, char in enumerate(fifth_raw)
+                ],
+            ),
         ],
         language="zh-CN",
-        duration=12.0,
+        duration=15.0,
         raw_payload={},
     )
 
@@ -95,14 +106,17 @@ def test_normalize_transcript_result_normalizes_asr_stutter_before_downstream() 
         "没想到这NOC现在这么火",
         "NOC的这个发售，太难了，没有这个像很多兄弟一样隐恨",
         "最近这三次 NOC 的发售啊，最后的一款小玩具，非常适合 EDC 啊",
+        "最近这三次NOC的发售，经常会EDC用的啊",
     ]
     assert ["".join(word.word for word in segment.words) for segment in normalized.segments] == [
         "今天终于收到了年前的一个款",
         "没想到这NOC现在这么火",
         "NOC的这个发售太难了没有这个像很多兄弟一样隐恨",
         "最近这三次NOC的发售啊最后的一款小玩具非常适合EDC啊",
+        "最近这三次NOC的发售经常会EDC用的啊",
     ]
     assert normalized.segments[0].raw_payload["_roughcut_asr_normalization"]["original_text"].startswith("今今天天")
+    assert normalized.segments[4].raw_payload["_roughcut_asr_normalization"]["stage"] == "transcribe.normalize"
 
 
 def test_normalize_transcript_result_removes_known_hallucination_phrase() -> None:

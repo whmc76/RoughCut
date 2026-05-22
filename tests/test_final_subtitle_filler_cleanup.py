@@ -10,6 +10,7 @@ from roughcut.media.subtitle_text import (
     clean_subtitle_payloads,
     normalize_contextual_noc_alias_text,
     normalize_editable_subtitle_text,
+    normalize_source_transcript_text,
     subtitle_display_suppression_reason,
 )
 from roughcut.review import content_profile as content_profile_module
@@ -78,6 +79,16 @@ def test_normalize_editable_subtitle_text_collapses_function_word_asr_prefix_stu
     assert normalize_editable_subtitle_text("尾部呢，还有有一个挂孔") == "尾部呢，还有一个挂孔"
     assert normalize_editable_subtitle_text("因为我我应该是指甲有点短") == "因为我应该是指甲有点短"
     assert normalize_editable_subtitle_text("开开箱，轻轻这么一指，试试它") == "开开箱，轻轻这么一指，试试它"
+
+
+def test_normalize_source_transcript_text_preserves_real_spoken_fillers_and_interjections() -> None:
+    assert normalize_source_transcript_text("啊，呃，嗯，我靠，饮恨") == "啊，呃，嗯，我靠，饮恨"
+    assert normalize_source_transcript_text("这个、那个、就是、然后") == "这个、那个、就是、然后"
+    assert normalize_source_transcript_text("NNOCOC的的这个个发发售售，太太难难了") == "NOC的这个发售，太难了"
+    assert normalize_source_transcript_text("最近这三次NONOC的发售") == "最近这三次NOC的发售"
+    assert normalize_source_transcript_text("经常会EDEDC用的啊") == "经常会EDC用的啊"
+    assert normalize_source_transcript_text("太太难了") == "太太难了"
+    assert normalize_source_transcript_text("<|nospeech|> 啊我靠饮恨") == "啊我靠饮恨"
 
 
 def test_clean_final_subtitle_text_hides_asr_noise_markers() -> None:

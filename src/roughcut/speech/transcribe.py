@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from roughcut.db.models import Artifact, FactClaim, JobStep, SubtitleCorrection, SubtitleItem, TranscriptSegment
 from roughcut.config import get_settings
 from roughcut.media.subtitle_spans import subtitle_display_unit_key, subtitle_display_units
-from roughcut.media.subtitle_text import normalize_editable_subtitle_text, normalize_flashlight_model_alias_text
+from roughcut.media.subtitle_text import normalize_flashlight_model_alias_text, normalize_source_transcript_text
 from roughcut.providers.factory import get_transcription_provider, resolve_transcription_provider_plan
 from roughcut.providers.transcription.base import TranscriptResult, TranscriptSegment as ProviderTranscriptSegment, TranscriptionProgressCallback, WordTiming
 from roughcut.providers.transcription.chunking import extract_chunking_summary
@@ -623,7 +623,7 @@ def _normalize_transcript_result(
         if not text:
             continue
         normalized_text = _normalize_semantic_contamination_text(
-            normalize_editable_subtitle_text(text),
+            normalize_source_transcript_text(text),
             category_scope=category_scope,
         )
         if normalized_text != text:
