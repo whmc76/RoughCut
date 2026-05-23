@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import or_, select
@@ -36,9 +37,126 @@ SUPPORTED_PUBLICATION_PLATFORMS: dict[str, dict[str, str]] = {
     "douyin": {"label": "抖音", "kind": "video"},
     "xiaohongshu": {"label": "小红书", "kind": "video"},
     "bilibili": {"label": "B站", "kind": "video"},
+    "kuaishou": {"label": "快手", "kind": "video"},
     "wechat-channels": {"label": "视频号", "kind": "video"},
     "toutiao": {"label": "头条号", "kind": "video"},
+    "youtube": {"label": "YouTube", "kind": "video"},
+    "x": {"label": "X", "kind": "video"},
 }
+DEFAULT_PUBLICATION_TIMEZONE = ZoneInfo("Asia/Shanghai")
+REQUIRED_BROWSER_AGENT_COMPOSITE_FRAMEWORKS: dict[str, str] = {
+    "bilibili": "bilibili_creator_native_composite_v1",
+    "youtube": "youtube_studio_composite_v1",
+    "xiaohongshu": "xiaohongshu_creator_composite_v1",
+    "kuaishou": "kuaishou_creator_composite_v1",
+    "toutiao": "toutiao_xigua_composite_v1",
+    "wechat-channels": "wechat_channels_composite_v1",
+    "x": "x_composer_composite_v1",
+}
+
+
+async def check_publication_browser_agent_ready(
+    *,
+    browser_agent_base_url: str,
+    auth_token: str = "",
+    target_platforms: list[str] | None = None,
+    http_client: Any | None = None,
+    request_timeout_sec: int = 10,
+) -> dict[str, Any]:
+    """Validate that the configured browser-agent can execute real publish tasks."""
+    try:
+        payload = await _browser_agent_request_json(
+            "GET",
+            "/healthz",
+            base_url=browser_agent_base_url,
+            auth_token=auth_token,
+            http_client=http_client,
+            request_timeout_sec=request_timeout_sec,
+        )
+    except Exception as exc:
+        return {
+            "ready": False,
+            "code": "browser_agent_unavailable",
+            "message": f"browser-agent 不可用，不能开始正式发布：{exc}",
+            "health": {},
+        }
+
+    capabilities = payload.get("capabilities") if isinstance(payload.get("capabilities"), dict) else {}
+    if capabilities.get("publication_tasks") is not True:
+        return {
+            "ready": False,
+            "code": "browser_agent_publication_tasks_unsupported",
+            "message": "当前 browser-agent 只支持摸底，不支持 /tasks 正式发布执行；已阻止创建假发布任务。",
+            "health": payload,
+        }
+    if capabilities.get("live_publish") is not True:
+        return {
+            "ready": False,
+            "code": "browser_agent_live_publish_unsupported",
+            "message": "当前 browser-agent 可以接收发布任务，但未声明支持最终预约/发布点击；已阻止正式 live 发布。",
+            "health": payload,
+        }
+    requested_platforms = [
+        platform
+        for platform in (normalize_publication_platform(item) for item in (target_platforms or []))
+        if platform
+    ]
+    final_platforms = {
+        platform
+        for platform in (normalize_publication_platform(item) for item in (capabilities.get("final_publish_platforms") or []))
+        if platform
+    }
+    missing_platforms = sorted(set(requested_platforms) - final_platforms, key=_platform_sort_key)
+    if missing_platforms:
+        labels = "、".join(platform_label(platform) for platform in missing_platforms)
+        return {
+            "ready": False,
+            "code": "browser_agent_live_publish_platform_unsupported",
+            "message": f"browser-agent 当前未声明支持这些平台的最终发布点击器：{labels}；已阻止创建假发布任务。",
+            "health": payload,
+        }
+    requested_composite_platforms = [
+        platform for platform in requested_platforms if platform in REQUIRED_BROWSER_AGENT_COMPOSITE_FRAMEWORKS
+    ]
+    if requested_composite_platforms and capabilities.get("legacy_lightweight_scripts_blocked") is not True:
+        labels = "、".join(platform_label(platform) for platform in requested_composite_platforms)
+        return {
+            "ready": False,
+            "code": "browser_agent_legacy_lightweight_scripts_not_blocked",
+            "message": f"browser-agent 未声明阻断旧轻量脚本入口，不能对这些平台执行正式发布：{labels}。",
+            "health": payload,
+        }
+    framework_map = capabilities.get("platform_composite_frameworks")
+    framework_map = framework_map if isinstance(framework_map, dict) else {}
+    missing_frameworks = [
+        platform
+        for platform in requested_composite_platforms
+        if framework_map.get(platform) != REQUIRED_BROWSER_AGENT_COMPOSITE_FRAMEWORKS[platform]
+    ]
+    if missing_frameworks:
+        labels = "、".join(
+            f"{platform_label(platform)}({REQUIRED_BROWSER_AGENT_COMPOSITE_FRAMEWORKS[platform]})"
+            for platform in missing_frameworks
+        )
+        return {
+            "ready": False,
+            "code": "browser_agent_composite_framework_missing",
+            "message": f"browser-agent 未声明这些平台的专用复合框架：{labels}；已阻止退回旧轻量脚本。",
+            "health": payload,
+        }
+    if str(payload.get("cdp_status") or "").strip().lower() not in {"", "ok", "ready"}:
+        return {
+            "ready": False,
+            "code": "browser_agent_cdp_unavailable",
+            "message": f"browser-agent 已启动但浏览器 CDP 不可用：{payload.get('cdp_error') or payload.get('cdp_status')}",
+            "health": payload,
+        }
+    return {
+        "ready": True,
+        "code": "ready",
+        "message": "browser-agent 支持正式发布任务。",
+        "health": payload,
+    }
 
 _PLATFORM_ALIASES = {
     "抖音": "douyin",
@@ -49,6 +167,9 @@ _PLATFORM_ALIASES = {
     "b站": "bilibili",
     "哔哩哔哩": "bilibili",
     "bilibili": "bilibili",
+    "快手": "kuaishou",
+    "kuaishou": "kuaishou",
+    "kwai": "kuaishou",
     "wechat-channels": "wechat-channels",
     "wechat_channels": "wechat-channels",
     "视频号": "wechat-channels",
@@ -56,6 +177,10 @@ _PLATFORM_ALIASES = {
     "头条": "toutiao",
     "头条号": "toutiao",
     "toutiao": "toutiao",
+    "youtube": "youtube",
+    "yt": "youtube",
+    "x": "x",
+    "twitter": "x",
 }
 
 
@@ -162,6 +287,7 @@ def build_publication_plan(
     options_by_platform = _normalize_publication_platform_options(platform_options)
     target_platforms = sorted((requested or set(credential_by_platform)) & set(packages), key=_platform_sort_key)
     targets: list[dict[str, Any]] = []
+    preflight_blocked_count = 0
     for platform in target_platforms:
         credential = credential_by_platform.get(platform)
         package = packages.get(platform) or {}
@@ -176,6 +302,11 @@ def build_publication_plan(
             for reason in [str(item).strip() for item in (package.get("blocking_reasons") or []) if str(item).strip()]:
                 warnings.append(f"{platform_label(platform)} 未就绪：{reason}")
             continue
+        preflight_block_reason = _publication_preflight_block_reason(platform, publish_options)
+        if preflight_block_reason:
+            preflight_blocked_count += 1
+            warnings.append(preflight_block_reason)
+            continue
         targets.append(
             {
                 "platform": platform,
@@ -189,6 +320,19 @@ def build_publication_plan(
                 "title": _package_primary_title(package),
                 "body": str(package.get("description") or package.get("body") or "").strip(),
                 "tags": [str(item).strip() for item in (package.get("tags") or []) if str(item).strip()],
+                "titles": [str(item).strip() for item in (package.get("titles") or []) if str(item).strip()],
+                "description": str(package.get("description") or package.get("body") or "").strip(),
+                "cover_path": str(package.get("cover_path") or "").strip(),
+                "full_copy": str(package.get("full_copy") or "").strip(),
+                "copy_material": {
+                    "source": "platform_packaging",
+                    "primary_title": _package_primary_title(package),
+                    "titles": [str(item).strip() for item in (package.get("titles") or []) if str(item).strip()],
+                    "body": str(package.get("description") or package.get("body") or "").strip(),
+                    "tags": [str(item).strip() for item in (package.get("tags") or []) if str(item).strip()],
+                    "cover_path": str(package.get("cover_path") or "").strip(),
+                    "full_copy": str(package.get("full_copy") or "").strip(),
+                },
                 "category": publish_options.get("category"),
                 "collection": publish_options.get("collection"),
                 "visibility_or_publish_mode": publish_options.get("visibility_or_publish_mode"),
@@ -199,7 +343,10 @@ def build_publication_plan(
         )
 
     if credentials and packages and not targets:
-        blocked_reasons.append("当前创作者凭据与文案包平台没有交集。")
+        if preflight_blocked_count:
+            blocked_reasons.append("所有候选平台都未通过发布前页面验证。")
+        else:
+            blocked_reasons.append("当前创作者凭据与文案包平台没有交集。")
 
     return {
         "job_id": str(getattr(job, "id", "")),
@@ -757,8 +904,27 @@ def _normalize_publication_platform_options(value: dict[str, Any] | None) -> dic
         platform_specific_overrides = raw_value.get("platform_specific_overrides")
         if isinstance(platform_specific_overrides, dict):
             option["platform_specific_overrides"] = platform_specific_overrides
+        live_publish_preflight = raw_value.get("live_publish_preflight")
+        if not isinstance(live_publish_preflight, dict) and isinstance(platform_specific_overrides, dict):
+            live_publish_preflight = platform_specific_overrides.get("live_publish_preflight")
+        if isinstance(live_publish_preflight, dict):
+            option["live_publish_preflight"] = live_publish_preflight
         normalized[platform] = option
     return normalized
+
+
+def _publication_preflight_block_reason(platform: str, publish_options: dict[str, Any]) -> str:
+    preflight = publish_options.get("live_publish_preflight") if isinstance(publish_options.get("live_publish_preflight"), dict) else {}
+    if not preflight:
+        return ""
+    status = str(preflight.get("status") or "").strip().lower()
+    missing = [str(item).strip() for item in (preflight.get("missing_required_surfaces") or []) if str(item).strip()]
+    if status not in {"blocked", "missing_required_surfaces"} and not missing:
+        return ""
+    summary = str(preflight.get("summary") or "").strip()
+    if not summary and missing:
+        summary = "缺少发布页关键参数面：" + "、".join(missing[:8])
+    return f"{platform_label(platform)} 发布前验证未通过：{summary or '页面关键参数未验证完整。'}"
 
 
 def _normalize_scheduled_publish_at(value: Any) -> str | None:
@@ -818,6 +984,19 @@ def _apply_browser_agent_task_state(
     mapped_status = map_browser_agent_publication_status(raw_status)
     result = task.get("result") if isinstance(task.get("result"), dict) else {}
     error = task.get("error") if isinstance(task.get("error"), dict) else {}
+    audit = result.get("publication_audit") if isinstance(result.get("publication_audit"), dict) else {}
+    audit_failures = [
+        str(item).strip()
+        for item in (audit.get("required_unverified") or [])
+        if str(item).strip()
+    ] if audit else []
+    if mapped_status in PUBLICATION_SUCCESS_STATUSES and audit and (audit.get("verified") is False or audit_failures):
+        mapped_status = "needs_human"
+        error = {
+            "code": "publication_audit_unverified",
+            "message": "browser-agent 读到平台回执，但发布物料审计未通过："
+            + ("、".join(audit_failures) if audit_failures else "unknown"),
+        }
 
     attempt.provider_status = raw_status or attempt.provider_status
     attempt.provider_task_id = str(task.get("task_id") or task.get("id") or attempt.provider_task_id or "").strip() or None
@@ -991,7 +1170,7 @@ def _parse_datetime(value: Any) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=DEFAULT_PUBLICATION_TIMEZONE)
     return parsed.astimezone(timezone.utc)
 
 
@@ -1008,6 +1187,9 @@ def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> d
     tags = [str(item).strip().lstrip("#") for item in (target.get("tags") or []) if str(item).strip()]
     media_path = str(plan.get("media_path") or "").strip()
     collection = target.get("collection") if isinstance(target.get("collection"), dict) else None
+    collection_name = str(target.get("collection_name") or "").strip()
+    if collection is None and collection_name:
+        collection = {"name": collection_name}
     scheduled_publish_at = str(target.get("scheduled_publish_at") or "").strip() or None
     visibility_or_publish_mode = str(target.get("visibility_or_publish_mode") or "").strip() or None
     category = str(target.get("category") or "").strip() or None
@@ -1021,6 +1203,8 @@ def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> d
         "native_topics": [],
         "category": category,
         "collection": collection,
+        "cover_path": str(target.get("cover_path") or "").strip() or None,
+        "copy_material": target.get("copy_material") if isinstance(target.get("copy_material"), dict) else {},
         "visibility_or_publish_mode": visibility_or_publish_mode,
         "scheduled_publish_at": scheduled_publish_at,
         "ui_control_semantics": {
@@ -1081,13 +1265,31 @@ def _resolve_render_media_path(render_output: Any | None) -> Path | None:
     path = Path(raw).expanduser()
     if path.exists() and path.is_file():
         return path.resolve()
+    if _looks_like_external_media_path(raw):
+        return path
     return None
+
+
+def _looks_like_external_media_path(raw: str) -> bool:
+    text = str(raw or "").strip()
+    if not text:
+        return False
+    return text.startswith("\\\\") or text.startswith("//")
 
 
 def _normalize_platform_packages(packaging: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
     raw = packaging if isinstance(packaging, dict) else {}
     platform_root = raw.get("platforms") if isinstance(raw.get("platforms"), dict) else raw
     packages: dict[str, dict[str, Any]] = {}
+    if isinstance(raw.get("platforms"), list):
+        for item in raw.get("platforms") or []:
+            if not isinstance(item, dict):
+                continue
+            platform = normalize_publication_platform(item.get("key") or item.get("platform") or item.get("label"))
+            if not platform:
+                continue
+            packages[platform] = dict(item)
+        return packages
     if not isinstance(platform_root, dict):
         return packages
     for key, value in platform_root.items():

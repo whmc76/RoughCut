@@ -59,6 +59,37 @@ class _FakeBrowserAgentClient:
         )
 
 
+class _FakeBrowserAgentHealthClient:
+    def __init__(self, final_publish_platforms, *, composite_frameworks=None, legacy_blocked=True):
+        self.final_publish_platforms = final_publish_platforms
+        self.composite_frameworks = composite_frameworks or {
+            "bilibili": "bilibili_creator_native_composite_v1",
+            "youtube": "youtube_studio_composite_v1",
+            "xiaohongshu": "xiaohongshu_creator_composite_v1",
+            "kuaishou": "kuaishou_creator_composite_v1",
+            "toutiao": "toutiao_xigua_composite_v1",
+            "wechat-channels": "wechat_channels_composite_v1",
+            "x": "x_composer_composite_v1",
+        }
+        self.legacy_blocked = legacy_blocked
+
+    async def get(self, url, *, headers):
+        return _FakeBrowserAgentResponse(
+            {
+                "status": "ok",
+                "cdp_status": "ok",
+                "capabilities": {
+                    "publication_tasks": True,
+                    "live_publish": True,
+                    "final_publish_executor": True,
+                    "final_publish_platforms": self.final_publish_platforms,
+                    "platform_composite_frameworks": self.composite_frameworks,
+                    "legacy_lightweight_scripts_blocked": self.legacy_blocked,
+                },
+            }
+        )
+
+
 def test_normalize_publication_credentials_filters_to_browser_agent():
     credentials = publication.normalize_publication_credentials(
         [
@@ -92,6 +123,94 @@ def test_normalize_publication_credentials_filters_to_browser_agent():
             "last_error": None,
         }
     ]
+
+
+def test_apply_browser_agent_task_state_blocks_success_when_audit_failed():
+    attempt = SimpleNamespace(
+        provider_status=None,
+        provider_task_id=None,
+        provider_execution_id=None,
+        response_payload=None,
+        status="processing",
+        run_status="processing",
+        published_at=None,
+        scheduled_at=None,
+        external_post_id=None,
+        external_receipt_id=None,
+        external_url=None,
+        error_code=None,
+        error_message=None,
+        operator_summary=None,
+    )
+    run = SimpleNamespace(
+        status="processing",
+        phase="reconcile",
+        heartbeat_at=None,
+        provider_task_id=None,
+        provider_execution_id=None,
+        provider_status=None,
+        result_json=None,
+        error_message=None,
+        completed_at=None,
+    )
+    task = {
+        "task_id": "task-1",
+        "status": "published",
+        "result": {
+            "public_url": "https://youtu.be/example",
+            "publication_audit": {
+                "verified": False,
+                "required_unverified": ["cover", "collection"],
+            },
+        },
+    }
+
+    publication._apply_browser_agent_task_state(attempt, run, task, response_payload={"task": task})
+
+    assert attempt.status == "needs_human"
+    assert attempt.error_code == "publication_audit_unverified"
+    assert "cover" in attempt.error_message
+    assert "collection" in attempt.error_message
+    assert run.status == "needs_human"
+
+
+@pytest.mark.asyncio
+async def test_publication_browser_agent_ready_requires_requested_final_publish_platforms():
+    result = await publication.check_publication_browser_agent_ready(
+        browser_agent_base_url="http://browser-agent",
+        target_platforms=["bilibili", "youtube"],
+        http_client=_FakeBrowserAgentHealthClient(["bilibili"]),
+    )
+
+    assert result["ready"] is False
+    assert result["code"] == "browser_agent_live_publish_platform_unsupported"
+    assert "YouTube" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_publication_browser_agent_ready_requires_composite_frameworks():
+    result = await publication.check_publication_browser_agent_ready(
+        browser_agent_base_url="http://browser-agent",
+        target_platforms=["bilibili", "youtube"],
+        http_client=_FakeBrowserAgentHealthClient(["bilibili", "youtube"], composite_frameworks={"youtube": "youtube_studio_composite_v1"}),
+    )
+
+    assert result["ready"] is False
+    assert result["code"] == "browser_agent_composite_framework_missing"
+    assert "B站" in result["message"]
+
+
+@pytest.mark.asyncio
+async def test_publication_browser_agent_ready_requires_legacy_script_block():
+    result = await publication.check_publication_browser_agent_ready(
+        browser_agent_base_url="http://browser-agent",
+        target_platforms=["xiaohongshu"],
+        http_client=_FakeBrowserAgentHealthClient(["xiaohongshu"], legacy_blocked=False),
+    )
+
+    assert result["ready"] is False
+    assert result["code"] == "browser_agent_legacy_lightweight_scripts_not_blocked"
+    assert "小红书" in result["message"]
 
 
 def test_publication_plan_blocks_unready_smart_copy_platform(tmp_path):
@@ -134,6 +253,56 @@ def test_publication_plan_blocks_unready_smart_copy_platform(tmp_path):
     assert plan["publish_ready"] is False
     assert "抖音：封面等待 Codex 内置 imagegen 执行完成" in plan["blocked_reasons"]
     assert plan["targets"] == []
+
+
+def test_publication_plan_blocks_missing_live_publish_preflight_surfaces(tmp_path):
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        platform_packaging={
+            "platforms": {
+                "kuaishou": {
+                    "titles": ["标题"],
+                    "description": "简介",
+                    "tags": ["tag"],
+                }
+            }
+        },
+        creator_profile={
+            "creator_profile": {
+                "publishing": {
+                    "platform_credentials": [
+                        {
+                            "platform": "kuaishou",
+                            "account_label": "主号",
+                            "credential_ref": "chrome-profile:main",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "browser_agent",
+                        }
+                    ]
+                }
+            }
+        },
+        platform_options={
+            "kuaishou": {
+                "scheduled_publish_at": "2026-04-26T20:00",
+                "visibility_or_publish_mode": "scheduled",
+                "live_publish_preflight": {
+                    "status": "blocked",
+                    "missing_required_surfaces": ["cover", "visibility", "schedule"],
+                    "summary": "缺少发布页关键参数面：cover、visibility、schedule",
+                },
+            }
+        },
+    )
+
+    assert plan["publish_ready"] is False
+    assert plan["targets"] == []
+    assert "所有候选平台都未通过发布前页面验证。" in plan["blocked_reasons"]
+    assert any("快手 发布前验证未通过" in warning for warning in plan["warnings"])
 
 
 @pytest.mark.asyncio
@@ -319,3 +488,11 @@ async def test_publication_worker_submits_and_reconciles_browser_agent_attempt(t
     assert attempts[0]["provider_task_id"]
     assert attempts[0]["external_post_id"] == "post-1"
     assert attempts[0]["public_url"] == "https://www.douyin.com/video/post-1"
+
+
+def test_publication_parse_naive_schedule_as_china_local_time():
+    parsed = publication._parse_datetime("2026-05-23T19:30")
+
+    assert parsed is not None
+    assert parsed.isoformat() == "2026-05-23T11:30:00+00:00"
+    assert parsed.astimezone(publication.DEFAULT_PUBLICATION_TIMEZONE).isoformat() == "2026-05-23T19:30:00+08:00"

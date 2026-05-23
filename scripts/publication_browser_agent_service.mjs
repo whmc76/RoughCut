@@ -1462,9 +1462,20 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
         /全部发表成功|发布成功|审核中|已发布|定时发布中|定时发布时间/.test(textHaystack)
       ) && schedulePresent) ||
       (platform === "xiaohongshu" && /\/publish\/success/.test(location.href) && /发布成功/.test(textHaystack));
+    const receiptFieldBypass = receiptLike && platform !== "youtube";
     const coverBasename = expected.coverPath ? expected.coverPath.split(/[\\\\/]/).pop() : "";
     const youtubeAutoThumbnail = platform === "youtube" && imageSources.some((src) => /i\\.ytimg\\.com|mqdefault|hqdefault|vi_webp/.test(src));
     const youtubeCustomThumbnailPreview = platform === "youtube" && imageSources.some((src) => /^data:image\\//.test(src));
+    const youtubeThumbnailUploading = platform === "youtube" && /正在上传|上传缩略图|缩略图.{0,12}上传中|Uploading thumbnail|Thumbnail upload/.test(textHaystack);
+    const youtubeThumbnailState = platform !== "youtube"
+      ? ""
+      : youtubeThumbnailUploading
+        ? "custom_uploading"
+        : youtubeCustomThumbnailPreview
+          ? "custom_preview_ready"
+          : youtubeAutoThumbnail
+            ? "generated_remote_thumbnail"
+            : "unknown";
     const xiaohongshuCustomCoverPreview = platform === "xiaohongshu" && (
       imageSources.some((src) => /^blob:|^data:image\\//.test(src)) ||
       backgroundSources.some((src) => src.includes("blob:") || src.includes("data:image/")) ||
@@ -1479,7 +1490,7 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       : imageSources.length > 0;
     const coverPresent = !expected.coverPath
       ? true
-      : !coverRequiredWarning && (textHaystack.includes(coverBasename) || (platform !== "youtube" && platformCoverSuccess) || (platform === "youtube" && (youtubeCustomThumbnailPreview || (!youtubeAutoThumbnail && imageSources.length > 0))));
+      : !coverRequiredWarning && (textHaystack.includes(coverBasename) || (platform !== "youtube" && platformCoverSuccess) || (platform === "youtube" && youtubeCustomThumbnailPreview && !youtubeThumbnailUploading));
     const declarationPresent =
       platform === "bilibili" ? /内容无需标注/.test(textHaystack)
       : platform === "xiaohongshu" ? /原创声明|声明原创|原创/.test(textHaystack)
@@ -1490,7 +1501,10 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
     const platformExtras = {
       youtube_link: (textHaystack.match(/https:\\/\\/youtu\\.be\\/[A-Za-z0-9_-]+/) || textHaystack.match(/https:\\/\\/www\\.youtube\\.com\\/watch\\?v=[A-Za-z0-9_-]+/) || [])[0] || "",
       youtube_scheduled: youtubeScheduled,
-      youtube_thumbnail_uploading: /正在上传/.test(textHaystack),
+      youtube_thumbnail_uploading: youtubeThumbnailUploading,
+      youtube_custom_thumbnail_preview: youtubeCustomThumbnailPreview,
+      youtube_remote_auto_thumbnail: youtubeAutoThumbnail,
+      youtube_thumbnail_state: youtubeThumbnailState,
       xiaohongshu_custom_cover_preview: xiaohongshuCustomCoverPreview,
       route: { url: location.href, title: document.title },
       image_sources: imageSources.slice(0, 12),
@@ -1498,14 +1512,14 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       relevant_lines: lines.filter((line) => /发布|预约|定时|封面|缩略图|播放列表|合集|原创|声明|公开|已排定|链接|正在上传|标签|话题|分类/.test(line)).slice(0, 120),
     };
     const fields = {
-      title: { expected: expected.title, verified: receiptLike || !expected.title || textHaystack.includes(expected.title) },
-      body: { expected: expected.body, verified: receiptLike || !expected.body || textHaystack.includes(expected.body.slice(0, Math.min(28, expected.body.length))) },
-      tags: { expected: expected.tags, actual_checks: tagChecks, verified: receiptLike || tagChecks.every((item) => item.present) },
-      collection: { expected: expected.collection, verified: receiptLike || !expected.collection || platform === "x" || (platform === "kuaishou" && /加入合集|选择要加入到的合集/.test(textHaystack)) || textHaystack.includes(expected.collection) },
-      schedule: { expected: expected.scheduleDisplay, verified: receiptLike || schedulePresent },
-      upload_ready: { verified: receiptLike || !uploadBusy },
-      declaration: { verified: receiptLike || declarationPresent },
-      cover: { expected_path: expected.coverPath, verified: receiptLike || coverPresent || platform === "x", cover_required_warning: coverRequiredWarning, youtube_auto_thumbnail: youtubeAutoThumbnail, youtube_custom_thumbnail_preview: youtubeCustomThumbnailPreview },
+      title: { expected: expected.title, verified: receiptFieldBypass || !expected.title || textHaystack.includes(expected.title) },
+      body: { expected: expected.body, verified: receiptFieldBypass || !expected.body || textHaystack.includes(expected.body.slice(0, Math.min(28, expected.body.length))) },
+      tags: { expected: expected.tags, actual_checks: tagChecks, verified: receiptFieldBypass || tagChecks.every((item) => item.present) },
+      collection: { expected: expected.collection, verified: receiptFieldBypass || !expected.collection || platform === "x" || (platform === "kuaishou" && /加入合集|选择要加入到的合集/.test(textHaystack)) || textHaystack.includes(expected.collection) },
+      schedule: { expected: expected.scheduleDisplay, verified: receiptFieldBypass || schedulePresent },
+      upload_ready: { verified: receiptFieldBypass || !uploadBusy },
+      declaration: { verified: receiptFieldBypass || declarationPresent },
+      cover: { expected_path: expected.coverPath, verified: receiptFieldBypass || coverPresent || platform === "x", cover_required_warning: coverRequiredWarning, youtube_auto_thumbnail: youtubeAutoThumbnail, youtube_custom_thumbnail_preview: youtubeCustomThumbnailPreview, youtube_thumbnail_uploading: youtubeThumbnailUploading, youtube_thumbnail_state: youtubeThumbnailState },
     };
     const failures = Object.entries(fields).filter(([, value]) => value && value.verified === false).map(([key]) => key);
     platformExtras.receipt_like = receiptLike;
@@ -1757,6 +1771,91 @@ const PLATFORM_COMPOSITE_FRAMEWORKS = {
   "wechat-channels": { id: "wechat_channels_composite_v1", prepare: prepareWechatChannelsCompositeDraft },
   x: { id: "x_composer_composite_v1", prepare: prepareXCompositeDraft },
 };
+
+const DEDICATED_PLATFORM_FRAMEWORK_IDS = Object.freeze({
+  bilibili: "bilibili_creator_native_composite_v1",
+  ...Object.fromEntries(Object.entries(PLATFORM_COMPOSITE_FRAMEWORKS).map(([platform, framework]) => [platform, framework.id])),
+});
+
+function dedicatedCompositeFrameworkId(platform) {
+  return DEDICATED_PLATFORM_FRAMEWORK_IDS[platform] || "";
+}
+
+function buildPublicationAuditChecklist(fields = {}) {
+  const checklist = {};
+  for (const key of ["cover", "title", "body", "tags", "collection", "schedule", "upload_ready", "declaration", "receipt"]) {
+    if (!fields[key]) continue;
+    checklist[key] = {
+      verified: fields[key].verified !== false,
+      expected: fields[key].expected ?? fields[key].expected_path ?? "",
+    };
+    if (Array.isArray(fields[key].actual_checks)) checklist[key].actual_checks = fields[key].actual_checks;
+  }
+  return checklist;
+}
+
+function buildCompositePublicationAudit(platform, content, integrity, finalPublish = {}, route = {}) {
+  const fields = { ...(integrity?.fields || {}) };
+  fields.receipt = {
+    verified: Boolean(finalPublish.receipt_like || finalPublish.success_like || integrity?.platform_extras?.receipt_like || integrity?.platform_extras?.youtube_link || integrity?.platform_extras?.youtube_scheduled),
+    expected: String(content.scheduled_publish_at || "").trim() ? "scheduled publish receipt" : "publish receipt",
+  };
+  const checklist = buildPublicationAuditChecklist(fields);
+  const requiredUnverified = Object.entries(checklist)
+    .filter(([, value]) => value && value.verified === false)
+    .map(([key]) => key);
+  return {
+    platform,
+    framework_id: dedicatedCompositeFrameworkId(platform),
+    dedicated_platform_framework: Boolean(dedicatedCompositeFrameworkId(platform)),
+    legacy_lightweight_script_used: false,
+    verified: requiredUnverified.length === 0,
+    required_unverified: requiredUnverified,
+    checklist,
+    route: route || integrity?.platform_extras?.route || {},
+    platform_extras: integrity?.platform_extras || {},
+  };
+}
+
+function buildBilibiliPublicationAudit(content, platformVerifier, finalPublish = {}, route = {}, coverAction = {}) {
+  const actual = platformVerifier?.actual || {};
+  const tags = Array.from(new Set([...(content.hashtags || []), ...(content.structured_tags || [])].map((item) => String(item || "").trim()).filter(Boolean))).slice(0, 10);
+  const collection = expectedCollectionName(content);
+  const failures = new Set(platformVerifier?.failures || []);
+  const hasFailure = (key) => failures.has(key) || (key === "body" && failures.has("description")) || (key === "tags" && [...failures].some((item) => String(item).startsWith("tag:")));
+  const scheduled = Boolean(String(content.scheduled_publish_at || "").trim());
+  const fields = {
+    cover: { expected_path: expectedCoverPath(content), verified: !expectedCoverPath(content) || Boolean(coverAction?.uploaded) },
+    title: { expected: String(content.title || "").trim(), verified: !hasFailure("title") },
+    body: { expected: String(content.body || "").trim(), verified: !hasFailure("body") },
+    tags: { expected: tags, actual_checks: tags.map((tag) => ({ tag, present: !failures.has(`tag:${tag}`) })), verified: !hasFailure("tags") },
+    collection: { expected: collection, verified: !collection || !hasFailure("collection") },
+    schedule: { expected: String(content.scheduled_publish_at || "").trim(), verified: !scheduled || !hasFailure("schedule") },
+    upload_ready: { verified: true },
+    declaration: { verified: !hasFailure("declaration") },
+    receipt: { expected: scheduled ? "scheduled publish receipt" : "publish receipt", verified: Boolean(finalPublish.success_like) },
+  };
+  const checklist = buildPublicationAuditChecklist(fields);
+  const requiredUnverified = Object.entries(checklist)
+    .filter(([, value]) => value && value.verified === false)
+    .map(([key]) => key);
+  return {
+    platform: "bilibili",
+    framework_id: dedicatedCompositeFrameworkId("bilibili"),
+    dedicated_platform_framework: true,
+    legacy_lightweight_script_used: false,
+    verified: requiredUnverified.length === 0,
+    required_unverified: requiredUnverified,
+    checklist,
+    route,
+    platform_extras: {
+      actual,
+      cover_action: coverAction,
+      field_failures: platformVerifier?.failures || [],
+      final_publish: finalPublish,
+    },
+  };
+}
 
 async function setGenericScheduleControls(client, platform, scheduledPublishAt) {
   const schedule = parseChinaLocalSchedule(scheduledPublishAt);
@@ -2443,7 +2542,26 @@ async function waitForCompositePublishReceipt(client, platform, content, timeout
 
 async function runCompositePlatformAdapter(client, tab, platform, content, inheritedActions = []) {
   const actions = [...inheritedActions];
-  const framework = PLATFORM_COMPOSITE_FRAMEWORKS[platform] || { id: "generic_composite_fallback_v1", prepare: prepareGenericCompositeDraft };
+  const framework = PLATFORM_COMPOSITE_FRAMEWORKS[platform] || (COMPOSITE_PUBLISH_PLATFORMS.has(platform) ? null : { id: "generic_composite_fallback_v1", prepare: prepareGenericCompositeDraft });
+  if (!framework) {
+    return {
+      status: "needs_human",
+      result: {
+        platform,
+        composite_framework: {
+          enabled: true,
+          platform,
+          framework_id: "",
+          dedicated_platform_framework: false,
+          legacy_lightweight_script_used: false,
+        },
+      },
+      error: {
+        code: "dedicated_composite_framework_missing",
+        message: `${platform} 属于全平台发布链路，但没有注册专用复合框架，已停止以避免退回旧轻量脚本。`,
+      },
+    };
+  }
   const usedFallbackFramework = framework.id === "generic_composite_fallback_v1";
   actions.push(...(await runCompositePhase(platform, `prepare_${framework.id}`, () => framework.prepare(client, platform, content))));
   await sleep(1200);
@@ -2460,6 +2578,7 @@ async function runCompositePlatformAdapter(client, tab, platform, content, inher
       legacy_lightweight_script_used: false,
       material_integrity: integrity,
     },
+    publication_audit: buildCompositePublicationAudit(platform, content, integrity, {}, { url: snapshot.url || tab.url || "", title: snapshot.title || tab.title || "" }),
     actions: actions.slice(0, 120),
     visible_option_lines: (snapshot.lines || [])
       .filter((line) => /合集|栏目|播放列表|分区|分类|原创|声明|权益|群聊|定时|预约|可见|公开|私密|儿童|COPPA|playlist|visibility|schedule|category|封面|缩略图/i.test(line))
@@ -2477,6 +2596,7 @@ async function runCompositePlatformAdapter(client, tab, platform, content, inher
         external_url: youtubeReceipt,
         material_integrity_complete: integrity.verified,
       };
+      result.publication_audit = buildCompositePublicationAudit(platform, content, integrity, result.final_publish, result.route);
       return {
         status: "scheduled_pending",
         result,
@@ -2499,6 +2619,7 @@ async function runCompositePlatformAdapter(client, tab, platform, content, inher
       material_integrity_complete: true,
       receipt_route: integrity.platform_extras.route || {},
     };
+    result.publication_audit = buildCompositePublicationAudit(platform, content, integrity, result.final_publish, result.route);
     return {
       status: String(content.scheduled_publish_at || "").trim() ? "scheduled_pending" : "published",
       result,
@@ -2508,6 +2629,7 @@ async function runCompositePlatformAdapter(client, tab, platform, content, inher
 
   const finalOutcome = await runCompositePhase(platform, "finalize_generic_composite_publish", () => finalizeGenericCompositePublish(client, platform, content, integrity));
   result.final_publish = finalOutcome.result?.final_publish || {};
+  result.publication_audit = buildCompositePublicationAudit(platform, content, await readCompositeMaterialIntegrity(client, platform, content), result.final_publish, result.route);
   return { status: finalOutcome.status, result, error: finalOutcome.error };
 }
 
@@ -3053,8 +3175,10 @@ async function preparePublicationTask(task) {
     }
     interruptions.push(...(await dismissInterruptions(client, tab, platform, "after_upload")));
     let platformVerifier = null;
+    let bilibiliCoverAction = null;
     if (platform === "bilibili") {
       const coverAction = await setBilibiliCoverImage(client, content.cover_path || content.copy_material?.cover_path || "");
+      bilibiliCoverAction = coverAction;
       actions.push(coverAction);
       platformVerifier = await setBilibiliDraftFields(client, content);
       actions.push(platformVerifier);
@@ -3074,6 +3198,19 @@ async function preparePublicationTask(task) {
     const result = {
       draft_url: snapshot.url || tab.url || "",
       route: { url: snapshot.url || tab.url || "", title: snapshot.title || tab.title || "" },
+      composite_framework: platform === "bilibili"
+        ? {
+            enabled: true,
+            platform,
+            framework_id: dedicatedCompositeFrameworkId("bilibili"),
+            dedicated_platform_framework: true,
+            legacy_lightweight_script_used: false,
+            material_integrity: platformVerifier || {},
+          }
+        : undefined,
+      publication_audit: platform === "bilibili"
+        ? buildBilibiliPublicationAudit(content, platformVerifier, {}, { url: snapshot.url || tab.url || "", title: snapshot.title || tab.title || "" }, bilibiliCoverAction)
+        : undefined,
       actions: actions.slice(0, 80),
       interruptions: interruptions.slice(0, 80),
       visible_option_lines: (snapshot.lines || [])
@@ -3114,6 +3251,7 @@ async function preparePublicationTask(task) {
     if (platform === "bilibili") {
       const finalOutcome = await finalizeBilibiliPublish(client, content);
       result.final_publish = finalOutcome.result?.final_publish || {};
+      result.publication_audit = buildBilibiliPublicationAudit(content, platformVerifier, result.final_publish, result.route, bilibiliCoverAction);
       return {
         status: finalOutcome.status,
         result,
@@ -4286,7 +4424,8 @@ const server = http.createServer(async (req, res) => {
           final_publish_executor: FINAL_PUBLISH_EXECUTOR_IMPLEMENTED,
           final_publish_platforms: [...FINAL_PUBLISH_PLATFORMS],
           composite_publish_platforms: [...COMPOSITE_PUBLISH_PLATFORMS],
-          platform_composite_frameworks: Object.fromEntries(Object.entries(PLATFORM_COMPOSITE_FRAMEWORKS).map(([platform, framework]) => [platform, framework.id])),
+          platform_composite_frameworks: DEDICATED_PLATFORM_FRAMEWORK_IDS,
+          legacy_lightweight_scripts_blocked: true,
           supervised_draft_prepare: true,
         },
       });
