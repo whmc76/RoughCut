@@ -5,7 +5,7 @@
       "id": "0dd09f0cf37e44ebae9b5dfeb7c10435",
       "name": "FAS标准",
       "created_at": "2026-03-26T07:31:39.092673+00:00",
-      "updated_at": "2026-03-26T12:47:04.250204+00:00",
+      "updated_at": "2026-05-21T07:22:10.062261+00:00",
       "config": {
         "default_job_workflow_mode": "standard_edit",
         "default_job_enhancement_modes": [
@@ -34,7 +34,7 @@
         "music_selection_mode": "random",
         "music_loop_mode": "loop_single",
         "subtitle_style": "bold_yellow_outline",
-        "cover_style": "preset_default",
+        "cover_style": "edc_cinematic_hero",
         "title_style": "preset_default",
         "copy_style": "attention_grabbing",
         "subtitle_motion_style": "motion_static",

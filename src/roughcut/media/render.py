@@ -41,6 +41,13 @@ _DELIVERY_ASPECT_RATIOS: dict[str, tuple[int, int]] = {
     "1:1": (1, 1),
     "4:3": (4, 3),
 }
+_DELIVERY_FRAME_RATE_PRESETS: dict[str, float] = {
+    "24": 24.0,
+    "25": 25.0,
+    "30": 30.0,
+    "50": 50.0,
+    "60": 60.0,
+}
 
 _TRANSPOSE_MAP = {
     90: ",transpose=1",
@@ -474,6 +481,11 @@ async def render_video(
 
     source_info = _probe_video_stream(source_path)
     _write_debug_json(debug_dir, "source.ffprobe.json", source_info)
+    target_fps = _resolve_delivery_frame_rate(
+        source_fps=float(source_info.get("fps", 0.0) or 0.0),
+        delivery=render_plan.get("delivery") or {},
+    )
+    target_fps_expr = _ffmpeg_fps_expr(target_fps) if target_fps > 0 else None
     prefer_hardware_encoder = not _prefer_software_encoder_for_source(
         source_info,
         source_duration_sec=source_duration,
@@ -516,6 +528,8 @@ async def render_video(
             "rotation_decision": rotation_decision.to_dict(),
             "expected_width": expected_w,
             "expected_height": expected_h,
+            "target_fps": target_fps,
+            "target_fps_expr": target_fps_expr,
             "prefer_hardware_encoder": prefer_hardware_encoder,
             "delivery_color_management": _describe_delivery_color_management(source_info),
         },
@@ -536,6 +550,7 @@ async def render_video(
     segment_filters, video_label, audio_label = _build_segment_filter_chain(
         keep_segments,
         transpose_suffix=transpose_suffix,
+        target_fps_expr=target_fps_expr,
         editing_accents=editing_accents,
         section_choreography=section_choreography,
         subtitle_items=choreographed_subtitles,
@@ -568,6 +583,7 @@ async def render_video(
             video_transform_accents,
             expected_width=render_w,
             expected_height=render_h,
+            target_fps_expr=target_fps_expr,
         )
         filter_parts.extend(smart_effect_filters)
         video_map = f"[{video_label}]"
@@ -654,6 +670,7 @@ async def render_video(
             output_path=output_path,
             expected_width=render_w,
             expected_height=render_h,
+            target_fps=target_fps,
             debug_dir=debug_dir,
         )
         await _normalize_rendered_output(
@@ -691,6 +708,7 @@ def _build_segment_filter_chain(
     *,
     transpose_suffix: str,
     editing_accents: dict[str, Any],
+    target_fps_expr: str | None = None,
     section_choreography: dict[str, Any] | None = None,
     subtitle_items: list[dict[str, Any]] | None = None,
 ) -> tuple[list[str], str, str]:
@@ -701,8 +719,9 @@ def _build_segment_filter_chain(
         section_choreography=section_choreography,
         subtitle_items=subtitle_items,
     )
-    needs_constant_fps = bool(transition_map)
-    video_timing_suffix = f"{transpose_suffix},fps=30000/1001,settb=AVTB" if needs_constant_fps else transpose_suffix
+    video_timing_suffix = transpose_suffix
+    if target_fps_expr:
+        video_timing_suffix = f"{video_timing_suffix},fps={target_fps_expr},settb=AVTB"
     segment_durations: list[float] = []
     for index, segment in enumerate(keep_segments):
         start = float(segment["start"])
@@ -1170,6 +1189,7 @@ def _build_smart_effect_video_filters(
     *,
     expected_width: int,
     expected_height: int,
+    target_fps_expr: str | None = None,
 ) -> tuple[list[str], str]:
     overlays = list(editing_accents.get("emphasis_overlays") or [])
     if not overlays:
@@ -1181,6 +1201,7 @@ def _build_smart_effect_video_filters(
         preserve_color=bool(editing_accents.get("preserve_color")),
     )
     zoom_size = f"{expected_width}x{expected_height}"
+    zoom_fps_expr = target_fps_expr or "30000/1001"
     parts: list[str] = []
     current_video = video_label
     max_full_transforms = max(0, int(tokens.get("max_full_transforms") or 0))
@@ -1221,7 +1242,7 @@ def _build_smart_effect_video_filters(
                 f"crop=w=iw/{overlay_tokens['pre_scale']}:h=ih/{overlay_tokens['pre_scale']}:"
                 f"x='(iw-iw/{overlay_tokens['pre_scale']})/2':y='(ih-ih/{overlay_tokens['pre_scale']})/2',"
                 f"zoompan=z='{zoom_expr}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-                f"d=1:s={zoom_size}:fps=30000/1001,"
+                f"d=1:s={zoom_size}:fps={zoom_fps_expr},"
                 f"eq=contrast={overlay_tokens['contrast']}:saturation={overlay_tokens['saturation']}:brightness={overlay_tokens['brightness']},"
                 f"unsharp={overlay_tokens['unsharp']},"
                 f"drawbox=x=0:y=0:w=iw:h=ih:color={overlay_tokens['flash_color']}:t=fill:enable='{enable_expr}':replace=0"
@@ -1970,6 +1991,34 @@ def _resolve_delivery_resolution(
     return landscape_w, landscape_h
 
 
+def _resolve_delivery_frame_rate(*, source_fps: float, delivery: dict[str, Any]) -> float:
+    mode = str(delivery.get("frame_rate_mode") or "source").strip().lower()
+    if mode == "specified":
+        preset = str(delivery.get("frame_rate_preset") or "30").strip()
+        return _DELIVERY_FRAME_RATE_PRESETS.get(preset, 30.0)
+    return max(0.0, float(source_fps or 0.0))
+
+
+def _ffmpeg_fps_expr(fps: float) -> str:
+    canonical = (
+        (23.976, "24000/1001"),
+        (24.0, "24"),
+        (25.0, "25"),
+        (29.97, "30000/1001"),
+        (30.0, "30"),
+        (50.0, "50"),
+        (59.94, "60000/1001"),
+        (60.0, "60"),
+    )
+    for target, expr in canonical:
+        if abs(fps - target) < 0.05:
+            return expr
+    rounded = round(fps)
+    if abs(fps - rounded) < 0.01 and rounded > 0:
+        return str(int(rounded))
+    return f"{fps:.6f}"
+
+
 def _escape_drawtext_value(value: str) -> str:
     escaped = value.replace("\\", r"\\")
     escaped = escaped.replace(":", r"\:")
@@ -2028,6 +2077,7 @@ async def _apply_packaging_plan(
     expected_width: int,
     expected_height: int,
     debug_dir: Path | None,
+    target_fps: float = 0.0,
 ) -> Path:
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
@@ -2039,6 +2089,7 @@ async def _apply_packaging_plan(
                 insert_plan=insert_plan,
                 expected_width=expected_width,
                 expected_height=expected_height,
+                target_fps=target_fps,
                 output_path=tmp / "inserted.mp4",
                 debug_dir=debug_dir,
             )
@@ -2049,6 +2100,7 @@ async def _apply_packaging_plan(
                 outro_plan=render_plan.get("outro"),
                 expected_width=expected_width,
                 expected_height=expected_height,
+                target_fps=target_fps,
                 output_path=tmp / "with_bookends.mp4",
                 debug_dir=debug_dir,
             )
@@ -2085,6 +2137,7 @@ async def _apply_insert_clip(
     expected_height: int,
     output_path: Path,
     debug_dir: Path | None,
+    target_fps: float = 0.0,
 ) -> Path:
     source_duration = _probe_duration(source_path)
     if source_duration <= 0.0:
@@ -2112,19 +2165,23 @@ async def _apply_insert_clip(
         prepared_insert,
         expected_width=expected_width,
         expected_height=expected_height,
+        target_fps=target_fps,
         trim_duration_sec=prepare_insert_duration,
     )
     insert_video_filter, insert_audio_filter = _build_insert_packaging_filter_chain(
         insert_plan=insert_plan,
         runtime_duration_sec=effective_insert_duration,
+        target_fps=target_fps,
     )
+    target_fps_expr = _ffmpeg_fps_expr(target_fps) if target_fps > 0 else None
+    source_video_timing_filter = f",fps={target_fps_expr},settb=AVTB" if target_fps_expr else ""
 
     filter_parts = [
         "[0:v]split[vpre][vpost]",
         "[0:a]asplit[apre][apost]",
-        f"[vpre]trim=start=0:end={insert_after_sec},setpts=PTS-STARTPTS[v0]",
+        f"[vpre]trim=start=0:end={insert_after_sec},setpts=PTS-STARTPTS{source_video_timing_filter}[v0]",
         f"[apre]atrim=start=0:end={insert_after_sec},asetpts=PTS-STARTPTS[a0]",
-        f"[vpost]trim=start={insert_after_sec},setpts=PTS-STARTPTS[v2]",
+        f"[vpost]trim=start={insert_after_sec},setpts=PTS-STARTPTS{source_video_timing_filter}[v2]",
         f"[apost]atrim=start={insert_after_sec},asetpts=PTS-STARTPTS[a2]",
         f"[1:v]{insert_video_filter}[v1]",
         f"[1:a]{insert_audio_filter}[a1]",
@@ -2187,6 +2244,7 @@ def _build_insert_packaging_filter_chain(
     *,
     insert_plan: dict[str, Any] | None,
     runtime_duration_sec: float,
+    target_fps: float = 0.0,
 ) -> tuple[str, str]:
     transition_style = str((insert_plan or {}).get("insert_transition_style") or "straight_cut").strip().lower()
     transition_mode = str((insert_plan or {}).get("insert_transition_mode") or "restrained").strip().lower()
@@ -2203,6 +2261,9 @@ def _build_insert_packaging_filter_chain(
     if abs(playback_rate - 1.0) > 1e-3:
         video_filters.append(f"setpts=PTS/{playback_rate:.3f}")
         audio_filters.append(f"atempo={playback_rate:.3f}")
+    if target_fps > 0:
+        video_filters.append(f"fps={_ffmpeg_fps_expr(target_fps)}")
+        video_filters.append("settb=AVTB")
 
     if fade_tokens["video_fade_in"] > 0:
         video_filters.append(f"fade=t=in:st=0:d={fade_tokens['video_fade_in']:.3f}")
@@ -2278,6 +2339,7 @@ async def _apply_intro_outro(
     expected_height: int,
     output_path: Path,
     debug_dir: Path | None,
+    target_fps: float = 0.0,
 ) -> Path:
     prepared_paths: list[Path] = []
     if intro_plan:
@@ -2287,6 +2349,7 @@ async def _apply_intro_outro(
             intro_prepared,
             expected_width=expected_width,
             expected_height=expected_height,
+            target_fps=target_fps,
         )
         prepared_paths.append(intro_prepared)
 
@@ -2299,6 +2362,7 @@ async def _apply_intro_outro(
             outro_prepared,
             expected_width=expected_width,
             expected_height=expected_height,
+            target_fps=target_fps,
         )
         prepared_paths.append(outro_prepared)
 
@@ -2311,11 +2375,12 @@ async def _apply_intro_outro(
 
     filter_parts: list[str] = []
     concat_inputs = ""
+    target_fps_filter = f",fps={_ffmpeg_fps_expr(target_fps)},settb=AVTB" if target_fps > 0 else ""
     for index in range(len(prepared_paths)):
         filter_parts.append(
             f"[{index}:v]scale={expected_width}:{expected_height}:force_original_aspect_ratio=decrease,"
             f"pad={expected_width}:{expected_height}:(ow-iw)/2:(oh-ih)/2:black,"
-            f"setsar=1,format=yuv420p[v{index}]"
+            f"setsar=1,format=yuv420p{target_fps_filter}[v{index}]"
         )
         filter_parts.append(
             f"[{index}:a]aformat=sample_rates=48000:channel_layouts=stereo,asetpts=N/SR/TB[a{index}]"
@@ -2539,6 +2604,7 @@ async def _prepare_packaging_clip(
     *,
     expected_width: int,
     expected_height: int,
+    target_fps: float = 0.0,
     trim_duration_sec: float | None = None,
 ) -> Path:
     media_info = _ffprobe_json(source_path)
@@ -2552,6 +2618,8 @@ async def _prepare_packaging_clip(
         "setsar=1",
         "format=yuv420p",
     ]
+    if target_fps > 0:
+        video_filters.extend([f"fps={_ffmpeg_fps_expr(target_fps)}", "settb=AVTB"])
     scale_filter = ",".join(video_filters)
 
     cmd = ["ffmpeg", "-y", "-i", str(source_path)]
@@ -2829,6 +2897,7 @@ def _ffprobe_json_cached(path_str: str, _mtime_ns: int, _size: int) -> dict[str,
 def _describe_stream(stream: dict[str, Any]) -> dict[str, Any]:
     width = int(stream.get("width", 0) or 0)
     height = int(stream.get("height", 0) or 0)
+    fps = _parse_frame_rate(stream.get("avg_frame_rate") or stream.get("r_frame_rate"))
     rotation_raw = 0
     has_display_matrix = False
 
@@ -2859,6 +2928,7 @@ def _describe_stream(stream: dict[str, Any]) -> dict[str, Any]:
         "color_space": stream.get("color_space", ""),
         "color_transfer": stream.get("color_transfer", ""),
         "color_primaries": stream.get("color_primaries", ""),
+        "fps": fps,
         "display_width": display_width,
         "display_height": display_height,
         "rotation_raw": rotation_raw,
@@ -2866,6 +2936,18 @@ def _describe_stream(stream: dict[str, Any]) -> dict[str, Any]:
         "has_display_matrix": has_display_matrix,
         "tags": stream.get("tags", {}),
     }
+
+
+def _parse_frame_rate(value: Any) -> float:
+    text = str(value or "0/1").strip()
+    try:
+        if "/" in text:
+            numerator, denominator = text.split("/", 1)
+            denominator_value = float(denominator)
+            return float(numerator) / denominator_value if denominator_value else 0.0
+        return float(text)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return 0.0
 
 
 def _is_expected_output(info: dict[str, Any], expected_width: int, expected_height: int) -> bool:

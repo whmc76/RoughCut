@@ -57,7 +57,8 @@ from roughcut.api.jobs import (
 )
 from roughcut.edit.otio_export import export_to_otio
 from roughcut.media import manual_editor_assets as manual_editor_assets_module
-from roughcut.media.manual_editor_assets import _fallback_asset_status, _generate_proxy_video, _generate_proxy_webm, _peak_from_pcm, _recommended_preview_gain, _silence_intervals_from_peaks, _thumbnail_timestamps, manual_editor_asset_dir
+from roughcut.media import output as output_module
+from roughcut.media.manual_editor_assets import _fallback_asset_status, _generate_proxy_video, _generate_proxy_webm, _peak_from_pcm, _recommended_preview_gain, _silence_intervals_from_peaks, _thumbnail_timestamps, load_manual_editor_preview_assets, manual_editor_asset_dir
 from roughcut.media.subtitle_projection_validation import (
     validate_projected_subtitles_against_source,
     validate_projected_subtitles_against_transcript,
@@ -1867,6 +1868,74 @@ def test_manual_editor_preview_asset_response_exposes_partial_video_proxy() -> N
     assert response.audio_url is None
 
 
+def test_manual_editor_preview_asset_status_hides_proxy_while_ffmpeg_is_writing(tmp_path) -> None:
+    job_id = uuid4()
+    source_path = tmp_path / "source.mp4"
+    asset_dir = tmp_path / "manual-editor"
+    source_path.write_bytes(b"source")
+    asset_dir.mkdir()
+    source_fingerprint = manual_editor_assets_module._source_fingerprint(source_path)
+    (asset_dir / "proxy.mp4").write_bytes(b"partial mp4")
+    (asset_dir / "proxy.webm").write_bytes(b"partial webm")
+    (asset_dir / "status.json").write_text(
+        (
+            "{"
+            '"asset_version":10,'
+            '"status":"warming",'
+            '"stage":"proxy_video",'
+            '"progress":0.08,'
+            f'"source_fingerprint":"{source_fingerprint}"'
+            "}"
+        ),
+        encoding="utf-8",
+    )
+
+    payload = load_manual_editor_preview_assets(
+        job_id=job_id,
+        source_path=source_path,
+        duration_sec=10,
+        asset_dir=asset_dir,
+    )
+
+    assert payload["ready"] is False
+    assert payload["video_ready"] is False
+    assert payload["video_fallback_ready"] is False
+
+
+def test_manual_editor_preview_asset_status_exposes_mp4_after_proxy_video_completes(tmp_path) -> None:
+    job_id = uuid4()
+    source_path = tmp_path / "source.mp4"
+    asset_dir = tmp_path / "manual-editor"
+    source_path.write_bytes(b"source")
+    asset_dir.mkdir()
+    source_fingerprint = manual_editor_assets_module._source_fingerprint(source_path)
+    (asset_dir / "proxy.mp4").write_bytes(b"complete mp4")
+    (asset_dir / "proxy.webm").write_bytes(b"still writing webm")
+    (asset_dir / "status.json").write_text(
+        (
+            "{"
+            '"asset_version":10,'
+            '"status":"warming",'
+            '"stage":"proxy_webm",'
+            '"progress":0.18,'
+            f'"source_fingerprint":"{source_fingerprint}"'
+            "}"
+        ),
+        encoding="utf-8",
+    )
+
+    payload = load_manual_editor_preview_assets(
+        job_id=job_id,
+        source_path=source_path,
+        duration_sec=10,
+        asset_dir=asset_dir,
+    )
+
+    assert payload["ready"] is False
+    assert payload["video_ready"] is True
+    assert payload["video_fallback_ready"] is False
+
+
 def test_manual_editor_asset_dir_can_live_under_output_project(tmp_path) -> None:
     job_id = uuid4()
     output_project_dir = tmp_path / "20260513_video"
@@ -1874,6 +1943,16 @@ def test_manual_editor_asset_dir_can_live_under_output_project(tmp_path) -> None
     asset_dir = manual_editor_asset_dir(job_id, output_project_dir=output_project_dir)
 
     assert asset_dir == output_project_dir / "manual-editor"
+
+
+def test_output_dir_falls_back_from_windows_path_inside_container() -> None:
+    output_dir = output_module._resolve_configured_output_dir(
+        "Y:\\EDC系列\\AI粗剪",
+        "/app/data/output",
+        platform_name="posix",
+    )
+
+    assert output_dir == "/app/data/output"
 
 
 def test_manual_editor_asset_path_prefers_output_dir_and_falls_back(tmp_path) -> None:

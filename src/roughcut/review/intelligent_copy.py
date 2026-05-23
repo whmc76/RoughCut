@@ -9,12 +9,13 @@ import tempfile
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from roughcut.config import get_settings
+from roughcut.config import get_settings, llm_task_route
 from roughcut.media.output import _extract_frame, _overlay_title_layout, _probe_duration, _sample_cover_candidates
 from roughcut.packaging.library import list_packaging_assets
 from roughcut.providers.image_generation import CodexImageGenerationPending, generate_edited_cover_image
 from roughcut.providers.multimodal import complete_with_images
-from roughcut.providers.reasoning.base import extract_json_text
+from roughcut.providers.factory import get_reasoning_provider
+from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.review.intelligent_copy_cover_quality import assess_cover_publish_readiness
 from roughcut.review.content_profile import _seed_profile_from_text, _subject_domain_from_subject_type, infer_content_profile
 from roughcut.review.platform_copy import PLATFORM_ORDER, generate_platform_packaging, save_platform_packaging_markdown
@@ -26,7 +27,22 @@ VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
 SUBTITLE_SUFFIXES = {".srt", ".vtt", ".ass", ".ssa"}
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
 MATERIAL_DIR_NAME = "smart-copy"
+TITLE_OPTION_LIMIT = 3
 IntelligentCopyProgressCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
+
+OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO = "edc_cinematic_hero"
+COVER_IMAGE_STYLE_SCHEMES: dict[str, dict[str, str]] = {
+    OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO: {
+        "label": "EDC 电影英雄封面",
+        "prompt": (
+            "风格方案：EDC 电影英雄封面。借鉴高冲击 EDC 开箱封面，不做平铺商品图。"
+            "整体要有电影级暖色冒险背景、深浅层次、金属高光、暗部对比、轻微霓虹/电光描边、"
+            "速度线或能量线点缀；产品是英雄物件，质感锐利但真实；中文标题采用粗壮 3D 金属字/"
+            "电竞海报字效果，主次分明，有描边、阴影和发光边缘；画面要帅、强点击、专业，"
+            "不要廉价电商模板。"
+        ),
+    },
+}
 
 PLATFORM_PUBLISH_RULES: dict[str, dict[str, Any]] = {
     "bilibili": {
@@ -186,6 +202,7 @@ async def generate_intelligent_copy(
     *,
     copy_style: str | None = None,
     platforms: list[str] | None = None,
+    use_existing_cover: bool = False,
     progress_callback: IntelligentCopyProgressCallback | None = None,
 ) -> dict[str, Any]:
     inspection = inspect_intelligent_copy_folder(folder_path)
@@ -283,6 +300,7 @@ async def generate_intelligent_copy(
             "material_dir": inspection.get("material_dir"),
         },
     )
+    content_profile = _ensure_intelligent_copy_subject_identity(content_profile, video_path)
     copy_brief = _build_intelligent_copy_brief(
         video_path=video_path,
         subtitle_items=subtitle_items,
@@ -306,6 +324,13 @@ async def generate_intelligent_copy(
         },
     )
     packaging = _filter_intelligent_copy_packaging(packaging, selected_platform_keys)
+    cover_brief = await _build_intelligent_cover_brief(
+        video_path=video_path,
+        subtitle_items=subtitle_items,
+        content_profile=content_profile,
+        copy_brief=copy_brief,
+        packaging=packaging,
+    )
 
     material_dir = video_path.parent / MATERIAL_DIR_NAME
     material_dir.mkdir(parents=True, exist_ok=True)
@@ -324,9 +349,14 @@ async def generate_intelligent_copy(
         "markdown_path": str(markdown_path),
         "json_path": str(json_path),
         "cover_source_path": str(cover_source) if cover_source else None,
+        "use_existing_cover": bool(use_existing_cover),
+        "cover_brief": cover_brief,
         "copy_style": resolved_copy_style,
         "inspection": inspection,
         "highlights": dict(packaging.get("highlights") or {}),
+        "fact_sheet": dict(packaging.get("fact_sheet") or {}),
+        "title_audit": dict(packaging.get("title_audit") or {}),
+        "generation_repair_trace": list(packaging.get("generation_repair_trace") or []),
         "content_profile_summary": _content_profile_summary(content_profile),
         "warnings": list(inspection.get("warnings") or []),
     }
@@ -345,6 +375,7 @@ async def generate_intelligent_copy(
 
     platform_materials: list[dict[str, Any]] = []
     blocking_reasons: list[str] = []
+    cover_group_cache: dict[str, dict[str, Any]] = {}
     publish_platforms = [item for item in PLATFORM_ORDER if item[0] in selected_platform_keys and PLATFORM_PUBLISH_RULES.get(item[0])]
     for index, (platform_key, _label, _body_label, _tag_label) in enumerate(publish_platforms, start=1):
         rules = PLATFORM_PUBLISH_RULES.get(platform_key)
@@ -357,15 +388,32 @@ async def generate_intelligent_copy(
             rules=rules,
         )
         cover_output_path = material_dir / f"{index:02d}-{platform_key}-cover.jpg"
-        cover_generation = await _render_platform_cover(
-            output_path=cover_output_path,
-            video_path=video_path,
-            source_image_path=cover_source,
-            existing_cover_path=cover_path,
-            title=material.get("primary_title") or material.get("title_hook") or material.get("body") or "",
-            platform_key=platform_key,
-            rules=rules,
-        )
+        cover_group = _resolve_platform_cover_group(platform_key=platform_key, rules=rules)
+        if use_existing_cover:
+            cover_generation = _render_or_reuse_existing_cover_group(
+                cache=cover_group_cache,
+                material_dir=material_dir,
+                output_path=cover_output_path,
+                existing_cover_path=cover_path,
+                platform_key=platform_key,
+                platform_rules=rules,
+                cover_group=cover_group,
+            )
+        else:
+            cover_generation = await _render_or_reuse_platform_cover_group(
+                cache=cover_group_cache,
+                material_dir=material_dir,
+                output_path=cover_output_path,
+                video_path=video_path,
+                source_image_path=cover_source,
+                existing_cover_path=None,
+                title=str(cover_brief.get("cover_title") or "")
+                or _resolve_cover_group_title(packaging=packaging, content_profile=content_profile),
+                cover_brief=cover_brief,
+                platform_key=platform_key,
+                platform_rules=rules,
+                cover_group=cover_group,
+            )
         platform_blocks = _validate_platform_material_ready(material)
         if cover_generation and not bool(cover_generation.get("publish_ready", True)):
             platform_blocks.extend(str(item) for item in (cover_generation.get("blocking_reasons") or []) if str(item).strip())
@@ -482,6 +530,8 @@ def _build_platform_material(*, platform_key: str, platform_payload: dict[str, A
     titles = [item for item in titles if item]
     if not rules.get("has_title", True):
         titles = []
+    titles = titles[:TITLE_OPTION_LIMIT]
+    title_goals = _build_title_goals(titles, platform_key=platform_key)
     body = _trim_to_display_units(str(platform_payload.get("description") or "").strip(), int(rules["body_limit"]))
     tags = [str(item).strip().lstrip("#") for item in (platform_payload.get("tags") or []) if str(item).strip()]
     tags = _dedupe(tags)[: int(rules["tag_limit"])]
@@ -508,14 +558,561 @@ def _build_platform_material(*, platform_key: str, platform_payload: dict[str, A
             "cover_size": {"width": int(rules["cover_size"][0]), "height": int(rules["cover_size"][1])},
             "rule_note": str(rules["rule_note"]),
         },
-        "titles": titles[:5],
+        "titles": titles,
+        "title_goals": title_goals,
         "primary_title": titles[0] if titles else "",
-        "title_copy_all": "\n".join(f"{index}. {title}" for index, title in enumerate(titles[:5], start=1)),
+        "title_copy_all": "\n".join(f"{index}. {title}" for index, title in enumerate(titles, start=1)),
         "body": body,
         "tags": tags,
         "tags_copy": tags_copy,
         "full_copy": "\n\n".join(part for part in full_copy_parts if part),
     }
+
+
+def _resolve_platform_cover_title(
+    *,
+    material: dict[str, Any],
+    packaging: dict[str, Any],
+    content_profile: dict[str, Any],
+) -> str:
+    highlights = packaging.get("highlights") if isinstance(packaging.get("highlights"), dict) else {}
+    cover_title = content_profile.get("cover_title") if isinstance(content_profile.get("cover_title"), dict) else {}
+    cover_title_text = " ".join(
+        str(cover_title.get(key) or "").strip()
+        for key in ("top", "main", "bottom")
+        if str(cover_title.get(key) or "").strip()
+    ).strip()
+    for candidate in (material.get("primary_title"),):
+        normalized = _normalize_cover_title_candidate(candidate)
+        if normalized:
+            return normalized
+    structured_title = _compose_compact_cover_title(
+        highlights=highlights,
+        content_profile=content_profile,
+        cover_title_text=cover_title_text,
+    )
+    if structured_title:
+        return structured_title
+    candidates = (
+        cover_title_text,
+        highlights.get("strongest_selling_point"),
+        highlights.get("product"),
+    )
+    for candidate in candidates:
+        normalized = _normalize_cover_title_candidate(candidate)
+        if normalized:
+            return normalized
+    return ""
+
+
+def _resolve_cover_group_title(*, packaging: dict[str, Any], content_profile: dict[str, Any]) -> str:
+    return _resolve_platform_cover_title(
+        material={"primary_title": ""},
+        packaging=packaging,
+        content_profile=content_profile,
+    )
+
+
+async def _build_intelligent_cover_brief(
+    *,
+    video_path: Path,
+    subtitle_items: list[dict[str, Any]],
+    content_profile: dict[str, Any],
+    copy_brief: dict[str, Any],
+    packaging: dict[str, Any],
+) -> dict[str, Any]:
+    fallback = _build_fallback_cover_brief(
+        packaging=packaging,
+        content_profile=content_profile,
+        copy_brief=copy_brief,
+    )
+    context = {
+        "source_name": video_path.name,
+        "content_profile": _content_profile_summary(content_profile),
+        "copy_brief": copy_brief,
+        "highlights": dict(packaging.get("highlights") or {}),
+        "platform_titles": _collect_platform_title_samples(packaging),
+        "transcript_excerpt": build_transcript_excerpt_for_cover(subtitle_items),
+    }
+    prompt = (
+        "你是短视频封面策划。请根据视频内容自己总结、提炼封面需求，不要套固定模板。"
+        "你要判断视频类型，例如开箱、评测、对比、教程、种草、展示、实测等，"
+        "再为图片模型准备简洁明确的封面 brief。\n"
+        "封面标题要求：必须短、强识别、适合图片模型直接渲染；不要使用完整文案句子；不要超过 14 个汉字左右。"
+        "如果能识别明确品牌、型号或商品名，cover_title 必须保留核心品牌/商品身份，不能只写材质、品类或卖点。"
+        "不要走固定格式。你可以参考品牌/型号、商品类型、开箱/评测/对比/教程/超好玩/强烈推荐/夯爆了等信息，"
+        "但必须根据真实内容自行取舍、总结和改写，不能机械拼接。"
+        "EDC/工具内容要合规，不要危险导向，不要编参数。\n"
+        "只输出 JSON："
+        '{"cover_title":"","video_type":"","product_identity":"","selling_angle":"","visual_brief":"","avoid":""}'
+        f"\n视频上下文：{json.dumps(context, ensure_ascii=False)}"
+    )
+    try:
+        with llm_task_route("copy", search_enabled=False):
+            provider = get_reasoning_provider()
+            response = await asyncio.wait_for(
+                provider.complete(
+                    [
+                        Message(role="system", content="你只输出合法 JSON，负责为图片模型提炼封面 brief。"),
+                        Message(role="user", content=prompt),
+                    ],
+                    temperature=0.35,
+                    max_tokens=900,
+                    json_mode=True,
+                ),
+                timeout=45,
+            )
+        raw = response.as_json()
+        payload = raw if isinstance(raw, dict) else json.loads(extract_json_text(str(raw)))
+    except Exception:
+        payload = {}
+    return _normalize_cover_brief_payload(payload, fallback=fallback)
+
+
+def _build_fallback_cover_brief(
+    *,
+    packaging: dict[str, Any],
+    content_profile: dict[str, Any],
+    copy_brief: dict[str, Any],
+) -> dict[str, Any]:
+    title = _resolve_cover_group_title(packaging=packaging, content_profile=content_profile)
+    highlights = packaging.get("highlights") if isinstance(packaging.get("highlights"), dict) else {}
+    return {
+        "cover_title": title,
+        "video_type": str(highlights.get("video_type") or copy_brief.get("intent") or "").strip(),
+        "product_identity": str(highlights.get("product") or copy_brief.get("topic_subject") or "").strip(),
+        "selling_angle": str(highlights.get("strongest_selling_point") or highlights.get("title_hook") or "").strip(),
+        "visual_brief": "突出真实主体、产品质感和开箱/展示高光，封面标题保持大而清晰。",
+        "avoid": "不要长句、参数、危险导向、乱码、额外文字。",
+        "strategy_source": "fallback",
+    }
+
+
+def _normalize_cover_brief_payload(payload: dict[str, Any], *, fallback: dict[str, Any]) -> dict[str, Any]:
+    product_identity = _trim_to_display_units(
+        str(payload.get("product_identity") or fallback.get("product_identity") or "").strip(),
+        24,
+    )
+    title = _normalize_llm_cover_title(payload.get("cover_title"))
+    source = "llm" if title and payload else str(fallback.get("strategy_source") or "fallback")
+    if not title:
+        title = str(fallback.get("cover_title") or "").strip()
+    title = _ensure_cover_title_keeps_identity(title, product_identity=product_identity)
+    normalized = {
+        "cover_title": title,
+        "video_type": _trim_to_display_units(str(payload.get("video_type") or fallback.get("video_type") or "").strip(), 18),
+        "product_identity": product_identity,
+        "selling_angle": _trim_to_display_units(
+            str(payload.get("selling_angle") or fallback.get("selling_angle") or "").strip(),
+            24,
+        ),
+        "visual_brief": str(payload.get("visual_brief") or fallback.get("visual_brief") or "").strip()[:160],
+        "avoid": str(payload.get("avoid") or fallback.get("avoid") or "").strip()[:120],
+        "strategy_source": source,
+    }
+    return normalized
+
+
+def _normalize_llm_cover_title(value: Any) -> str:
+    normalized = re.sub(r"\s+", " ", str(value or "").strip()).strip(" -|，,。.!！?？")
+    if not normalized:
+        return ""
+    if _display_units(normalized) > 28:
+        fragments = [fragment.strip(" -|，,。.!！?？") for fragment in re.split(r"[，,。.!！?？；;]", normalized) if fragment.strip()]
+        for fragment in fragments:
+            if 4 <= _display_units(fragment) <= 28:
+                return fragment
+        return ""
+    return normalized
+
+
+def _ensure_cover_title_keeps_identity(title: str, *, product_identity: str) -> str:
+    normalized_title = re.sub(r"\s+", " ", str(title or "").strip()).strip(" -|，,。.!！?？")
+    anchor = _extract_cover_identity_anchor(product_identity)
+    if not normalized_title or not anchor:
+        return normalized_title
+    compact_title = re.sub(r"\s+", "", normalized_title).upper()
+    compact_anchor = re.sub(r"\s+", "", anchor).upper()
+    if compact_anchor and compact_anchor in compact_title:
+        return normalized_title
+    anchor_chinese = re.sub(r"[A-Za-z0-9]+", "", anchor)
+    if len(anchor_chinese) >= 2 and re.sub(r"\s+", "", anchor_chinese) in re.sub(r"\s+", "", normalized_title):
+        return normalized_title
+    if re.search(r"[A-Za-z0-9]{2,}", anchor) and re.search(r"[A-Za-z0-9]{2,}", normalized_title):
+        return normalized_title
+    repaired = f"{anchor} {normalized_title}".strip()
+    if _display_units(repaired) <= 32:
+        return repaired
+    fragments = [fragment.strip(" -|，,。.!！?？") for fragment in re.split(r"[，,。.!！?？；;]", normalized_title) if fragment.strip()]
+    for fragment in fragments:
+        candidate = f"{anchor} {fragment}".strip()
+        if _display_units(candidate) <= 32:
+            return candidate
+    return _trim_to_display_units(repaired, 32)
+
+
+def _extract_cover_identity_anchor(product_identity: str) -> str:
+    compact = re.sub(r"\s+", "", str(product_identity or "").strip())
+    if not compact:
+        return ""
+    latin_match = re.search(r"[A-Za-z0-9]{2,}[\u4e00-\u9fff]{0,2}", compact)
+    if latin_match:
+        return latin_match.group(0)
+    for suffix in ("锆合金", "音叉", "推牌", "版本", "开箱", "评测", "体验", "测评"):
+        index = compact.find(suffix)
+        if index > 1:
+            return _trim_to_display_units(compact[:index], 8)
+    return _trim_to_display_units(compact, 8)
+
+
+def _collect_platform_title_samples(packaging: dict[str, Any]) -> dict[str, list[str]]:
+    platforms = packaging.get("platforms") if isinstance(packaging.get("platforms"), dict) else {}
+    samples: dict[str, list[str]] = {}
+    for key, value in platforms.items():
+        if not isinstance(value, dict):
+            continue
+        titles = [str(item).strip() for item in (value.get("titles") or []) if str(item).strip()]
+        if titles:
+            samples[str(key)] = titles[:3]
+    return samples
+
+
+def build_transcript_excerpt_for_cover(subtitle_items: list[dict[str, Any]], *, max_chars: int = 900) -> str:
+    lines: list[str] = []
+    total = 0
+    for item in subtitle_items[:80]:
+        text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        if not text:
+            continue
+        projected = total + len(text) + (1 if lines else 0)
+        if projected > max_chars:
+            break
+        lines.append(text)
+        total = projected
+    return "\n".join(lines)
+
+
+def _compose_compact_cover_title(
+    *,
+    highlights: dict[str, Any],
+    content_profile: dict[str, Any],
+    cover_title_text: str,
+) -> str:
+    subject_model = str(content_profile.get("subject_model") or "").strip()
+    subject_brand = str(content_profile.get("subject_brand") or "").strip()
+    subject_type = str(content_profile.get("subject_type") or "").strip()
+    text_pool = " ".join(
+        str(value or "").strip()
+        for value in (
+            subject_brand,
+            subject_model,
+            subject_type,
+            highlights.get("product"),
+            highlights.get("video_type"),
+            highlights.get("strongest_selling_point"),
+            highlights.get("title_hook"),
+            cover_title_text,
+            content_profile.get("video_theme"),
+            content_profile.get("summary"),
+        )
+        if str(value or "").strip()
+    )
+    if not text_pool:
+        return ""
+    parts = _cover_product_title_parts(
+        subject_brand=subject_brand,
+        subject_model=subject_model,
+        subject_type=subject_type,
+        text_pool=text_pool,
+    )
+    keyword = _resolve_cover_action_keyword(text_pool)
+    if keyword:
+        parts.append(keyword)
+    title = " ".join(_dedupe(parts))
+    return _normalize_cover_title_candidate(title)
+
+
+def _cover_product_title_parts(
+    *,
+    subject_brand: str,
+    subject_model: str,
+    subject_type: str,
+    text_pool: str,
+) -> list[str]:
+    parts: list[str] = []
+    normalized_pool = text_pool.upper()
+    compact_model = re.sub(r"\s+", "", subject_model)
+    compact_brand = re.sub(r"\s+", "", subject_brand)
+    if compact_brand and not _is_generic_intelligent_copy_subject_identity(compact_brand):
+        parts.append(compact_brand)
+    elif "MOT" in normalized_pool:
+        parts.append("MOT风灵" if "风灵" in text_pool else "MOT")
+    elif "OLIGHT" in normalized_pool:
+        parts.append("OLIGHT")
+    elif "琢匠" in text_pool:
+        parts.append("琢匠")
+    elif "FAS" in normalized_pool:
+        parts.append("FAS")
+
+    model_tail = compact_model
+    for prefix in ("MOT", "风灵", "MOT风灵", "OLIGHT", "琢匠", "FAS"):
+        model_tail = model_tail.replace(prefix, "")
+    model_tail = re.sub(r"(版本|版)$", "", model_tail)
+    if model_tail:
+        if "锆合金" in model_tail and "推牌" in model_tail:
+            parts.append("锆合金推牌")
+        else:
+            parts.append(_trim_to_display_units(model_tail, 10))
+    elif "锆合金" in text_pool and "推牌" in text_pool:
+        parts.append("锆合金推牌")
+    elif "音叉推牌" in text_pool:
+        parts.append("音叉推牌")
+    elif "推牌" in text_pool:
+        parts.append("推牌")
+    elif subject_type:
+        parts.append(_trim_to_display_units(subject_type, 8))
+
+    return [part for part in parts if part]
+
+
+def _resolve_cover_action_keyword(text_pool: str) -> str:
+    text = str(text_pool or "")
+    normalized = text.lower()
+    if re.search(r"对比|差异|区别|怎么选|选哪|取舍|comparison", text, re.I):
+        return "对比"
+    if re.search(r"教程|怎么用|使用方法|教学|tutorial", text, re.I):
+        return "教程"
+    if re.search(r"开箱|到手|上手|unbox|unboxing", text, re.I):
+        return "开箱"
+    if re.search(r"评测|测评|实测|值不值|体验|review|test", text, re.I):
+        return "评测"
+    if re.search(r"好玩|解压|把玩|玩具|toy|fun", normalized, re.I):
+        return "超好玩"
+    return "开箱"
+
+
+def _normalize_cover_title_candidate(value: Any) -> str:
+    normalized = re.sub(r"\s+", " ", str(value or "").strip()).strip(" -|，,。.!！?？")
+    if not normalized:
+        return ""
+    fragments = [fragment.strip(" -|，,。.!！?？") for fragment in re.split(r"[，,。.!！?？；;]", normalized) if fragment.strip()]
+    product_pattern = re.compile(r"MOT|风灵|锆合金|音叉|推牌|EDC|OLIGHT|司令官|琢匠|貔貅|FAS|刀帕|开箱|评测|对比|教程|超好玩|强烈推荐|夯爆", re.I)
+    for fragment in fragments:
+        if product_pattern.search(fragment) and _display_units(fragment) <= 22:
+            return fragment
+    if _display_units(normalized) > 18 and not product_pattern.search(normalized):
+        return ""
+    return _trim_to_display_units(normalized, 22)
+
+
+def _resolve_platform_cover_group(*, platform_key: str, rules: dict[str, Any]) -> dict[str, Any]:
+    width, height = int(rules["cover_size"][0]), int(rules["cover_size"][1])
+    ratio = width / max(1, height)
+    if abs(ratio - (16 / 9)) < 0.06:
+        return {
+            "key": "landscape_16_9",
+            "label": "横版通用封面",
+            "representative_platform": "bilibili",
+            "cover_size": (1600, 900),
+            "members": ["bilibili", "toutiao", "youtube", "x"],
+        }
+    if abs(ratio - (3 / 4)) < 0.06:
+        return {
+            "key": "portrait_3_4",
+            "label": "3:4 竖版通用封面",
+            "representative_platform": "xiaohongshu",
+            "cover_size": (1080, 1440),
+            "members": ["xiaohongshu"],
+        }
+    return {
+        "key": "portrait_9_16",
+        "label": "9:16 竖版通用封面",
+        "representative_platform": "douyin",
+        "cover_size": (1080, 1920),
+        "members": ["douyin", "kuaishou", "wechat_channels"],
+    }
+
+
+async def _render_or_reuse_platform_cover_group(
+    *,
+    cache: dict[str, dict[str, Any]],
+    material_dir: Path,
+    output_path: Path,
+    video_path: Path,
+    source_image_path: Path | None,
+    existing_cover_path: Path | None,
+    title: str,
+    platform_key: str,
+    platform_rules: dict[str, Any],
+    cover_group: dict[str, Any],
+    cover_brief: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    group_key = str(cover_group.get("key") or platform_key).strip()
+    group_output_path = material_dir / f"00-cover-{group_key}.jpg"
+    group_metadata = cache.get(group_key)
+    if group_metadata is None:
+        group_rules = dict(platform_rules)
+        group_rules["label"] = str(cover_group.get("label") or platform_rules.get("label") or platform_key)
+        group_rules["cover_size"] = tuple(cover_group.get("cover_size") or platform_rules["cover_size"])
+        group_metadata = await _render_platform_cover(
+            output_path=group_output_path,
+            video_path=video_path,
+            source_image_path=source_image_path,
+            existing_cover_path=existing_cover_path,
+            title=title,
+            cover_brief=cover_brief,
+            platform_key=str(cover_group.get("representative_platform") or platform_key),
+            rules=group_rules,
+        )
+        group_metadata["cover_group"] = {
+            "key": group_key,
+            "label": str(cover_group.get("label") or ""),
+            "cover_path": str(group_output_path),
+            "members": list(cover_group.get("members") or []),
+        }
+        cache[group_key] = group_metadata
+
+    return _materialize_platform_cover_from_group(
+        group_metadata=group_metadata,
+        group_output_path=group_output_path,
+        output_path=output_path,
+        platform_key=platform_key,
+        platform_rules=platform_rules,
+        cover_group=cover_group,
+    )
+
+
+def _render_or_reuse_existing_cover_group(
+    *,
+    cache: dict[str, dict[str, Any]],
+    material_dir: Path,
+    output_path: Path,
+    existing_cover_path: Path | None,
+    platform_key: str,
+    platform_rules: dict[str, Any],
+    cover_group: dict[str, Any],
+) -> dict[str, Any]:
+    group_key = str(cover_group.get("key") or platform_key).strip()
+    group_output_path = material_dir / f"00-cover-{group_key}.jpg"
+    group_metadata = cache.get(group_key)
+    if group_metadata is None:
+        target_width, target_height = tuple(cover_group.get("cover_size") or platform_rules["cover_size"])
+        blocking_reasons: list[str] = []
+        if existing_cover_path is not None and existing_cover_path.exists():
+            _fit_image_to_canvas(
+                source_path=existing_cover_path,
+                output_path=group_output_path,
+                width=int(target_width),
+                height=int(target_height),
+                fit_mode="cover",
+            )
+        else:
+            blocking_reasons.append("已选择使用已有封面，但目录内未找到可用封面")
+        group_metadata = {
+            "source": "existing_cover",
+            "platform": str(cover_group.get("representative_platform") or platform_key),
+            "target_size": {"width": int(target_width), "height": int(target_height)},
+            "publish_ready": group_output_path.exists() and not blocking_reasons,
+            "blocking_reasons": blocking_reasons,
+            "warnings": [],
+            "image_generation": None,
+            "cover_group": {
+                "key": group_key,
+                "label": str(cover_group.get("label") or ""),
+                "cover_path": str(group_output_path),
+                "members": list(cover_group.get("members") or []),
+            },
+        }
+        cache[group_key] = group_metadata
+
+    return _materialize_platform_cover_from_group(
+        group_metadata=group_metadata,
+        group_output_path=group_output_path,
+        output_path=output_path,
+        platform_key=platform_key,
+        platform_rules=platform_rules,
+        cover_group=cover_group,
+    )
+
+
+def _materialize_platform_cover_from_group(
+    *,
+    group_metadata: dict[str, Any],
+    group_output_path: Path,
+    output_path: Path,
+    platform_key: str,
+    platform_rules: dict[str, Any],
+    cover_group: dict[str, Any],
+) -> dict[str, Any]:
+    target_width, target_height = int(platform_rules["cover_size"][0]), int(platform_rules["cover_size"][1])
+    blocking_reasons = list(group_metadata.get("blocking_reasons") or [])
+    warnings = list(group_metadata.get("warnings") or [])
+    if bool(group_metadata.get("publish_ready")) and group_output_path.exists():
+        _fit_image_to_canvas(
+            source_path=group_output_path,
+            output_path=output_path,
+            width=target_width,
+            height=target_height,
+            fit_mode="cover",
+        )
+    elif not blocking_reasons:
+        blocking_reasons.append("通用封面尚未生成完成")
+    return {
+        "source": "cover_group_reuse",
+        "platform": str(platform_key or "").strip(),
+        "target_size": {"width": target_width, "height": target_height},
+        "publish_ready": output_path.exists() and not blocking_reasons,
+        "blocking_reasons": blocking_reasons,
+        "warnings": warnings,
+        "cover_group": {
+            "key": str(cover_group.get("key") or "").strip(),
+            "label": str(cover_group.get("label") or "").strip(),
+            "cover_path": str(group_output_path),
+            "members": list(cover_group.get("members") or []),
+        },
+        "group_generation": group_metadata,
+        "image_generation": group_metadata.get("image_generation"),
+    }
+
+
+def _build_title_goals(titles: list[str], *, platform_key: str) -> list[dict[str, str]]:
+    return [
+        {
+            "title": title,
+            "goal": _title_goal_label(title, index=index, platform_key=platform_key),
+            "direction": _title_goal_direction(title, index=index, platform_key=platform_key),
+        }
+        for index, title in enumerate(titles, start=1)
+    ]
+
+
+def _title_goal_label(title: str, *, index: int, platform_key: str) -> str:
+    text = str(title or "")
+    if re.search(r"值不值|要不要|真香|劝退|能买吗|值吗|香不香", text):
+        return "决策转化"
+    if re.search(r"差异|对比|区别|怎么选|选哪|取舍", text):
+        return "差异对比"
+    if re.search(r"质感|细节|做工|手感|上手|实拍|近景", text):
+        return "质感种草"
+    if re.search(r"终于|直接|太狠|暴击|上头|居然|到手|开箱", text):
+        return "流量引爆"
+    if platform_key == "youtube" and re.search(r"review|hands-on|test|unboxing", text, re.I):
+        return "搜索评测"
+    fallback = ("流量引爆", "搜索识别", "差异对比", "质感种草", "决策转化")
+    return fallback[min(index - 1, len(fallback) - 1)]
+
+
+def _title_goal_direction(title: str, *, index: int, platform_key: str) -> str:
+    goal = _title_goal_label(title, index=index, platform_key=platform_key)
+    mapping = {
+        "流量引爆": "用到手、开箱或强情绪先抓点击。",
+        "搜索识别": "保留主体关键词，保证用户能搜到。",
+        "差异对比": "突出版本差异、选择取舍或对比信息。",
+        "质感种草": "放大细节、做工、手感和实拍感。",
+        "决策转化": "用值不值、真香或劝退帮助快速判断。",
+        "搜索评测": "兼顾主体关键词和评测检索表达。",
+    }
+    return mapping.get(goal, "明确这条标题承担的发布目标。")
 
 
 def _validate_platform_material_ready(material: dict[str, Any]) -> list[str]:
@@ -598,7 +1195,7 @@ def _merge_intelligent_copy_profile_hints(
     summary = str(profile.get("summary") or "").strip()
     if not summary or "主题待进一步确认" in summary or "主体信息暂未稳定识别" in summary:
         subject_label = subject_model or subject_brand or subject_type or stem or "这条视频"
-        summary = f"这条视频主要围绕{subject_label}展开，已按保守策略生成多平台发布素材，建议发布前人工核对具体型号与参数。"
+        summary = f"{subject_label}的成片素材，后续文案需要围绕画面、字幕和已核验事实重新创作。"
 
     resolved_hook_line = str(profile.get("hook_line") or "").strip()
     if not resolved_hook_line or resolved_hook_line == "内容待人工确认":
@@ -642,6 +1239,39 @@ def _merge_intelligent_copy_profile_hints(
         "copy_style": str(copy_style or "").strip() or "attention_grabbing",
         "search_queries": specialized["search_queries"],
         "cover_title": specialized["cover_title"],
+    }
+
+
+def _ensure_intelligent_copy_subject_identity(content_profile: dict[str, Any] | None, video_path: Path) -> dict[str, Any]:
+    profile = dict(content_profile or {})
+    brand = str(profile.get("subject_brand") or "").strip()
+    model = str(profile.get("subject_model") or "").strip()
+    if (brand and not _is_generic_intelligent_copy_subject_identity(brand)) or (
+        model and not _is_generic_intelligent_copy_subject_identity(model)
+    ):
+        return profile
+    stem = video_path.stem.strip()
+    if stem:
+        profile["subject_model"] = stem
+        profile.setdefault("search_queries", [stem])
+        if not str(profile.get("summary") or "").strip():
+            profile["summary"] = f"{stem}的成片素材，后续文案需要围绕画面、字幕和已核验事实重新创作。"
+    return profile
+
+
+def _is_generic_intelligent_copy_subject_identity(value: str) -> bool:
+    compact = re.sub(r"[\s\-_·:：/|，,。.!！?？#【】\[\]()（）]+", "", str(value or ""))
+    return compact in {
+        "",
+        "产品",
+        "这款产品",
+        "开箱产品",
+        "内容",
+        "内容待确认",
+        "主体待确认",
+        "视频",
+        "这条视频",
+        "物料",
     }
 
 
@@ -913,6 +1543,7 @@ async def _render_platform_cover(
     title: str,
     platform_key: str,
     rules: dict[str, Any],
+    cover_brief: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     target_width, target_height = int(rules["cover_size"][0]), int(rules["cover_size"][1])
@@ -920,6 +1551,43 @@ async def _render_platform_cover(
     image_generation: dict[str, Any] | None = None
     blocking_reasons: list[str] = []
     request_path = output_path.with_suffix(".codex-imagegen.json")
+    completed_request_payload = _read_cover_request_payload(request_path)
+    if (
+        str(completed_request_payload.get("status") or "").strip().lower() == "completed"
+        and output_path.exists()
+    ):
+        image_generation = dict(completed_request_payload.get("image_generation") or {})
+        image_generation.update(
+            {
+                "status": "completed",
+                "backend": str(image_generation.get("backend") or "codex_builtin"),
+                "output_path": str(output_path),
+                "request_path": str(request_path),
+            }
+        )
+        if isinstance(completed_request_payload.get("codex_runner"), dict):
+            image_generation["codex_runner"] = dict(completed_request_payload["codex_runner"])
+        _fit_existing_image_to_canvas(
+            output_path=output_path,
+            width=target_width,
+            height=target_height,
+            fit_mode="cover",
+        )
+        cover_assessment = assess_cover_publish_readiness(
+            image_generation,
+            completed_request_payload,
+            output_path,
+        )
+        return {
+            "source": "image_generation",
+            "platform": str(platform_key or "").strip(),
+            "target_size": {"width": target_width, "height": target_height},
+            "publish_ready": bool(cover_assessment.get("publish_ready")),
+            "blocking_reasons": list(cover_assessment.get("blocking_reasons") or []),
+            "warnings": list(cover_assessment.get("warnings") or []),
+            "image_generation": image_generation,
+            "cover_quality": cover_assessment,
+        }
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         base_image = tmpdir_path / "base.jpg"
@@ -962,6 +1630,7 @@ async def _render_platform_cover(
                             rules=rules,
                             width=target_width,
                             height=target_height,
+                            cover_brief=cover_brief,
                         ),
                         width=target_width,
                         height=target_height,
@@ -1004,6 +1673,13 @@ async def _render_platform_cover(
                 height=target_height,
                 fit_mode="cover",
             )
+        elif output_path.exists():
+            _fit_existing_image_to_canvas(
+                output_path=output_path,
+                width=target_width,
+                height=target_height,
+                fit_mode="cover",
+            )
         if isinstance(image_generation, dict) and str(image_generation.get("backend") or "") == "codex_builtin":
             request_payload = _read_cover_request_payload(request_path)
             cover_assessment = assess_cover_publish_readiness(
@@ -1023,7 +1699,7 @@ async def _render_platform_cover(
                     "cover_quality": cover_assessment,
                 }
     title_lines = _build_cover_title_lines(title)
-    if title_lines:
+    if title_lines and source_kind != "image_generation":
         await _overlay_title_layout(
             output_path,
             title_lines,
@@ -1062,22 +1738,63 @@ def _build_platform_cover_image_prompt(
     rules: dict[str, Any],
     width: int,
     height: int,
+    cover_brief: dict[str, Any] | None = None,
 ) -> str:
     title_text = re.sub(r"\s+", " ", str(title or "").strip())
     platform_label = str(rules.get("label") or platform_key or "").strip()
     ratio_label = _cover_ratio_label(width=width, height=height)
     instruction = _platform_cover_visual_instruction(platform_key)
+    brief = cover_brief if isinstance(cover_brief, dict) else {}
+    style_key = _resolve_cover_image_style_key(rules=rules, cover_brief=brief)
+    style_prompt = _cover_image_style_prompt(style_key)
+    brief_lines = []
+    if brief:
+        for label, key in (
+            ("视频类型", "video_type"),
+            ("主体识别", "product_identity"),
+            ("封面卖点", "selling_angle"),
+            ("画面 brief", "visual_brief"),
+        ):
+            value = str(brief.get(key) or "").strip()
+            if value:
+                brief_lines.append(f"{label}：{value}")
+    brief_text = ("\n" + "\n".join(brief_lines)) if brief_lines else ""
     return (
-        "基于参考帧生成一张可发布的视频封面底图。"
-        "必须保留参考帧中的真实主体、产品形态、材质和场景关系，不要发明不存在的品牌 logo、型号、参数或功能。"
-        "可以做商业封面级的适度编辑：增强光线、清晰度、对比、景深、构图、背景整洁度和质感，但不要改变主体身份。"
-        "不要把标题文字直接画进图片里；请预留干净的标题安全区，后续系统会叠加中文标题。"
-        "避免水印、错别字、乱码、伪造界面、夸张危险动作、过度赛博化和廉价电商感。"
-        f"\n平台：{platform_label}"
-        f"\n目标比例：{ratio_label}，最终输出会裁切到 {width}x{height}。"
-        f"\n标题参考：{title_text or '内容主题明确、突出主体'}"
-        f"\n平台视觉要求：{instruction}"
+        "基于参考图生成一张可直接发布的视频封面。\n"
+        f"平台：{platform_label}\n"
+        f"比例/尺寸：{ratio_label}，最终 {width}x{height}\n"
+        f"封面标题：{title_text or '内容主题明确、突出主体'}\n"
+        f"视觉方向：{instruction}\n"
+        f"{brief_text}\n"
+        f"{style_prompt}\n"
+        "要求：保留真实主体和产品形态；智能优化构图、主体占比、光影、清晰度、对比、质感和背景整洁度；"
+        "封面标题已经由上游 LLM 根据视频类型总结提炼，请严格使用给定标题，不要改写、扩写或机械套模板；"
+        "标题由图片模型直接渲染，必须准确完整、大而清晰、层级分明，不能散乱、太小、裁切或越界；"
+        "标题和关键主体必须放在画面中央安全区，适配平台从 16:9、4:3、3:4 到 9:16 的居中裁切，"
+        "不要把文字放在左右边缘，两侧只放可裁切的背景氛围。\n"
+        "禁止：额外文字、字幕、水印、伪 logo、乱码、错别字、伪造参数、改变主体身份。"
     )
+
+
+def _resolve_cover_image_style_key(*, rules: dict[str, Any], cover_brief: dict[str, Any]) -> str:
+    explicit = str(rules.get("cover_style") or "").strip()
+    if explicit in COVER_IMAGE_STYLE_SCHEMES:
+        return explicit
+    identity_text = " ".join(
+        str(cover_brief.get(key) or "").strip()
+        for key in ("product_identity", "selling_angle", "visual_brief", "video_type")
+        if str(cover_brief.get(key) or "").strip()
+    )
+    if re.search(r"\bEDC\b|MOT|风灵|FAS|锆合金|音叉|推牌|刀帕|伞绳|绳扣|战术|tactical", identity_text, re.I):
+        return OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO
+    return explicit
+
+
+def _cover_image_style_prompt(style_key: str) -> str:
+    scheme = COVER_IMAGE_STYLE_SCHEMES.get(str(style_key or "").strip())
+    if not scheme:
+        return "风格方案：跟随平台和内容主题，保持主体真实、标题清晰、画面专业。"
+    return str(scheme.get("prompt") or "").strip()
 
 
 def _cover_ratio_label(*, width: int, height: int) -> str:
@@ -1095,14 +1812,14 @@ def _cover_ratio_label(*, width: int, height: int) -> str:
 
 def _platform_cover_visual_instruction(platform_key: str) -> str:
     instructions = {
-        "bilibili": "横版信息流封面，主体明确、细节可读、技术/开箱感强，左侧或下方保留标题空间。",
+        "bilibili": "横版信息流封面，主体明确、细节可读、技术/开箱感强，标题和主体集中在中央安全区。",
         "xiaohongshu": "3:4 笔记封面，干净、质感、真实分享感，主体靠中上，留出醒目的标题空间。",
         "douyin": "9:16 竖版短视频封面，第一眼冲击强，主体占比大，顶部和中部要适合大字标题。",
         "kuaishou": "9:16 竖版封面，直给、真实、主体大，避免过度精修，适合手机端快速扫到重点。",
         "wechat_channels": "9:16 竖版封面，稳妥可信，画面克制，主体清楚，适合朋友圈/视频号信息流。",
-        "toutiao": "横版资讯封面，结论感和主体信息清楚，背景少干扰，适合信息流点击。",
-        "youtube": "横版 YouTube thumbnail，高对比、主体大、层次清楚，预留大标题区域。",
-        "x": "横版社交流封面，干净、观点感强，缩略图里主体仍然清楚。",
+        "toutiao": "横版资讯封面，结论感和主体信息清楚，背景少干扰，标题和主体集中在中央安全区。",
+        "youtube": "横版 YouTube thumbnail，高对比、主体大、层次清楚，标题和主体集中在中央安全区。",
+        "x": "横版社交流封面，干净、观点感强，缩略图里主体仍然清楚，标题和主体集中在中央安全区。",
     }
     return instructions.get(str(platform_key or "").strip(), "主体清楚、背景干净、预留标题安全区。")
 
@@ -1141,6 +1858,32 @@ def _fit_image_to_canvas(*, source_path: Path, output_path: Path, width: int, he
     )
     if result.returncode != 0:
         raise RuntimeError(f"封面尺寸适配失败：{result.stderr[-400:]}")
+
+
+def _fit_existing_image_to_canvas(*, output_path: Path, width: int, height: int, fit_mode: str = "contain") -> None:
+    if not output_path.exists():
+        return
+    with tempfile.NamedTemporaryFile(
+        suffix=output_path.suffix or ".jpg",
+        prefix=f"{output_path.stem}.fit-source.",
+        dir=output_path.parent,
+        delete=False,
+    ) as tmp_file:
+        tmp_source = Path(tmp_file.name)
+    try:
+        shutil.copy2(output_path, tmp_source)
+        _fit_image_to_canvas(
+            source_path=tmp_source,
+            output_path=output_path,
+            width=width,
+            height=height,
+            fit_mode=fit_mode,
+        )
+    finally:
+        try:
+            tmp_source.unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _build_cover_title_lines(title: str) -> dict[str, str] | None:

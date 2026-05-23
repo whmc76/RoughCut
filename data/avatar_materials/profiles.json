@@ -1,211 +1,5 @@
 [
   {
-    "id": "d2d15bc6d77a47b79cf20a79b56596c2",
-    "display_name": "FAS",
-    "presenter_alias": "FAS",
-    "notes": null,
-    "personal_info": {
-      "public_name": "FAS",
-      "real_name": null,
-      "title": null,
-      "organization": null,
-      "location": null,
-      "bio": null,
-      "expertise": [],
-      "experience": null,
-      "achievements": null,
-      "creator_focus": null,
-      "audience": null,
-      "style": null,
-      "contact": null,
-      "extra_notes": null
-    },
-    "creator_profile": {
-      "identity": {
-        "public_name": "FAS",
-        "real_name": null,
-        "title": null,
-        "organization": null,
-        "location": null,
-        "bio": null
-      },
-      "positioning": {
-        "creator_focus": null,
-        "expertise": [],
-        "audience": null,
-        "style": null,
-        "tone_keywords": []
-      },
-      "publishing": {
-        "primary_platform": null,
-        "active_platforms": [],
-        "signature": null,
-        "default_call_to_action": null,
-        "description_strategy": null
-      },
-      "business": {
-        "contact": null,
-        "collaboration_notes": null,
-        "availability": null
-      },
-      "archive_notes": null
-    },
-    "profile_dir": "data\\avatar_materials\\profiles\\FAS_d2d15bc6",
-    "training_status": "ready_for_manual_training",
-    "training_provider": "heygem",
-    "training_api_available": true,
-    "next_action": "素材已通过基础预检，声音采样也已完成预处理，可以直接生成脚本驱动的数字人预览样片。",
-    "capability_status": {
-      "heygem_avatar": "ready",
-      "voice_clone": "ready",
-      "portrait_reference": "ready",
-      "preview": "ready"
-    },
-    "blocking_issues": [],
-    "warnings": [],
-    "created_at": "2026-03-26T07:52:57.313770+00:00",
-    "files": [
-      {
-        "id": "de90c4d1149941be94bacc2877f81746",
-        "original_name": "_.mp4",
-        "stored_name": "_.mp4",
-        "kind": "video",
-        "role": "speaking_video",
-        "role_label": "讲话视频片段",
-        "pipeline_target": "heygem_avatar",
-        "content_type": "video/mp4",
-        "size_bytes": 87348509,
-        "path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\_.mp4",
-        "created_at": "2026-03-26T07:52:57.098978+00:00",
-        "probe": {
-          "duration": 69.752993,
-          "width": 1080,
-          "height": 1080,
-          "fps": 30.0,
-          "video_codec": "hevc",
-          "audio_codec": "aac",
-          "audio_sample_rate": 44100,
-          "audio_channels": 2,
-          "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
-          "bit_rate": 10018037
-        },
-        "artifacts": null,
-        "checks": [
-          {
-            "level": "ok",
-            "message": "讲话视频片段基础参数达标，可进入 HeyGem 人工复核。"
-          }
-        ]
-      },
-      {
-        "id": "6e5828056ed24f339ca8da4a5deeb6c9",
-        "original_name": "_.png",
-        "stored_name": "_.png",
-        "kind": "image",
-        "role": "portrait_photo",
-        "role_label": "肖像照",
-        "pipeline_target": "avatar_identity",
-        "content_type": "image/png",
-        "size_bytes": 12460769,
-        "path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\_.png",
-        "created_at": "2026-03-26T07:52:57.107548+00:00",
-        "probe": null,
-        "artifacts": null,
-        "checks": [
-          {
-            "level": "ok",
-            "message": "肖像照已入库，可用于形象核验和模板管理。"
-          }
-        ]
-      },
-      {
-        "id": "1f417f6c17a84b08bb7ce1d414a347ed",
-        "original_name": "_.m4a",
-        "stored_name": "_.m4a",
-        "kind": "audio",
-        "role": "voice_sample",
-        "role_label": "声音采样",
-        "pipeline_target": "voice_clone",
-        "content_type": "audio/x-m4a",
-        "size_bytes": 614416,
-        "path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\_.m4a",
-        "created_at": "2026-03-26T07:52:57.145728+00:00",
-        "probe": {
-          "duration": 24.063813,
-          "width": 0,
-          "height": 0,
-          "fps": 0.0,
-          "video_codec": "",
-          "audio_codec": "aac",
-          "audio_sample_rate": 48000,
-          "audio_channels": 2,
-          "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
-          "bit_rate": 204262
-        },
-        "artifacts": {
-          "normalized_wav_path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\derived\\voice_1f417f6c_16k_mono.wav",
-          "training_reference_name": "voice_1f417f6c.wav",
-          "training_preprocess": {
-            "provider": "indextts2",
-            "reference_audio": "voice_1f417f6c.wav",
-            "reference_audio_text": "",
-            "lang": "zh",
-            "mode": "direct_reference_upload",
-            "normalized_wav_path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\derived\\voice_1f417f6c_16k_mono.wav"
-          }
-        },
-        "checks": [
-          {
-            "level": "ok",
-            "message": "声音采样基础参数达标，可用于语音克隆。"
-          }
-        ]
-      }
-    ],
-    "preview_runs": [
-      {
-        "id": "8ab62636b25b4b6ba8398467ddfb371a",
-        "status": "completed",
-        "script": "大家好，我是FAS。现在这是一条 RoughCut 自动生成的创作者数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头稳定性。",
-        "task_code": "avatar-preview-8ab626-0",
-        "source_voice_file_id": "1f417f6c17a84b08bb7ce1d414a347ed",
-        "source_video_file_id": "de90c4d1149941be94bacc2877f81746",
-        "output_path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\previews\\8ab62636b25b4b6ba8398467ddfb371a.mp4",
-        "output_size_bytes": 13086852,
-        "duration_sec": 18.0,
-        "width": 1080,
-        "height": 1080,
-        "preview_mode": "source_audio_direct",
-        "fallback_reason": null,
-        "created_at": "2026-03-26T07:59:33Z"
-      }
-    ],
-    "profile_dashboard": {
-      "completeness_score": 20,
-      "section_status": {
-        "identity": false,
-        "positioning": false,
-        "publishing": false,
-        "business": false,
-        "materials": true
-      },
-      "material_counts": {
-        "speaking_videos": 1,
-        "portrait_photos": 1,
-        "voice_samples": 1
-      },
-      "strengths": [
-        "数字人口播素材链路已打通"
-      ],
-      "next_steps": [
-        "补充作者名、身份标题或简介，先把对外身份讲清楚。",
-        "补充内容定位、受众和表达风格，方便平台文案按策略生成。",
-        "补充主平台、活跃平台和个性签名，方便形成渠道化档案。",
-        "补充联系方式或合作备注，方便归档为完整创作者档案。"
-      ]
-    }
-  },
-  {
     "id": "422d4e7bc3ad47fb8e0d3d2ed558cafa",
     "display_name": "赛博迪克朗",
     "presenter_alias": "CyberDickLang",
@@ -465,7 +259,11 @@
         "active_platforms": [],
         "signature": null,
         "default_call_to_action": null,
-        "description_strategy": null
+        "description_strategy": null,
+        "cover_style": null,
+        "cover_style_label": null,
+        "cover_packaging_scheme": null,
+        "platform_credentials": []
       },
       "business": {
         "contact": null,
@@ -475,11 +273,12 @@
       "archive_notes": "赛博迪克朗 的个人数字人"
     },
     "profile_dashboard": {
-      "completeness_score": 20,
+      "completeness_score": 17,
       "section_status": {
         "identity": false,
         "positioning": false,
         "publishing": false,
+        "publication_credentials": false,
         "business": false,
         "materials": true
       },
@@ -495,6 +294,333 @@
         "补充作者名、身份标题或简介，先把对外身份讲清楚。",
         "补充内容定位、受众和表达风格，方便平台文案按策略生成。",
         "补充主平台、活跃平台和个性签名，方便形成渠道化档案。",
+        "绑定已登录的平台凭据，完成任务后才能一键创建发布队列。",
+        "补充联系方式或合作备注，方便归档为完整创作者档案。"
+      ]
+    }
+  },
+  {
+    "id": "d2d15bc6d77a47b79cf20a79b56596c2",
+    "display_name": "FAS",
+    "presenter_alias": "FAS",
+    "notes": null,
+    "personal_info": {
+      "public_name": "FAS",
+      "real_name": null,
+      "title": null,
+      "organization": null,
+      "location": null,
+      "bio": null,
+      "expertise": [],
+      "experience": null,
+      "achievements": null,
+      "creator_focus": null,
+      "audience": null,
+      "style": null,
+      "contact": null,
+      "extra_notes": null
+    },
+    "creator_profile": {
+      "identity": {
+        "public_name": "FAS",
+        "real_name": null,
+        "title": null,
+        "organization": null,
+        "location": null,
+        "bio": null
+      },
+      "positioning": {
+        "creator_focus": null,
+        "expertise": [],
+        "audience": null,
+        "style": null,
+        "tone_keywords": []
+      },
+      "publishing": {
+        "primary_platform": null,
+        "active_platforms": [
+          "B站",
+          "小红书",
+          "抖音",
+          "快手",
+          "视频号",
+          "头条号",
+          "YouTube",
+          "X"
+        ],
+        "signature": null,
+        "default_call_to_action": null,
+        "description_strategy": null,
+        "cover_style": "edc_cinematic_hero",
+        "cover_style_label": "EDC 电影英雄封面",
+        "cover_packaging_scheme": "edc_cinematic_hero",
+        "platform_credentials": [
+          {
+            "id": "2ec647a1954549fdbb4cc1d10fc655fb",
+            "platform": "bilibili",
+            "platform_label": "B站",
+            "account_label": "FAS · Chrome",
+            "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:bilibili",
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
+            "last_error": null
+          },
+          {
+            "id": "e5588d6ef8fc4726bf1e3b1eb06c5a8b",
+            "platform": "xiaohongshu",
+            "platform_label": "小红书",
+            "account_label": "FAS · Chrome",
+            "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:xiaohongshu",
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
+            "last_error": null
+          },
+          {
+            "id": "e4572d771c9748218502c7dd7f000653",
+            "platform": "douyin",
+            "platform_label": "抖音",
+            "account_label": "FAS · Chrome",
+            "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:douyin",
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
+            "last_error": null
+          },
+          {
+            "id": "2f2c9087bb3e4041b171a7ff0194acf1",
+            "platform": "kuaishou",
+            "platform_label": "快手",
+            "account_label": "FAS · Chrome",
+            "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:kuaishou",
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
+            "last_error": null
+          },
+          {
+            "id": "eb99653c03cc47888081422f53bfcd60",
+            "platform": "wechat-channels",
+            "platform_label": "视频号",
+            "account_label": "FAS · Chrome",
+            "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:wechat-channels",
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
+            "last_error": null
+          },
+          {
+            "id": "db437af2d30c467f84b9fafed826a4c8",
+            "platform": "toutiao",
+            "platform_label": "头条号",
+            "account_label": "FAS · Chrome",
+            "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:toutiao",
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
+            "last_error": null
+          },
+          {
+            "id": "8a4a60e148ac4059a4febf4a0edd5519",
+            "platform": "youtube",
+            "platform_label": "YouTube",
+            "account_label": "FAS · Chrome",
+            "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:youtube",
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
+            "last_error": null
+          },
+          {
+            "id": "6abd7e2ca16f49728b8656d4de3ada1c",
+            "platform": "x",
+            "platform_label": "X",
+            "account_label": "FAS · Chrome",
+            "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:x",
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
+            "last_error": null
+          }
+        ]
+      },
+      "business": {
+        "contact": null,
+        "collaboration_notes": null,
+        "availability": null
+      },
+      "archive_notes": null
+    },
+    "profile_dir": "data\\avatar_materials\\profiles\\FAS_d2d15bc6",
+    "training_status": "ready_for_manual_training",
+    "training_provider": "heygem",
+    "training_api_available": true,
+    "next_action": "素材已通过基础预检，声音采样也已完成预处理，可以直接生成脚本驱动的数字人预览样片。",
+    "capability_status": {
+      "heygem_avatar": "ready",
+      "voice_clone": "ready",
+      "portrait_reference": "ready",
+      "preview": "ready"
+    },
+    "blocking_issues": [],
+    "warnings": [],
+    "created_at": "2026-03-26T07:52:57.313770+00:00",
+    "files": [
+      {
+        "id": "de90c4d1149941be94bacc2877f81746",
+        "original_name": "_.mp4",
+        "stored_name": "_.mp4",
+        "kind": "video",
+        "role": "speaking_video",
+        "role_label": "讲话视频片段",
+        "pipeline_target": "heygem_avatar",
+        "content_type": "video/mp4",
+        "size_bytes": 87348509,
+        "path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\_.mp4",
+        "created_at": "2026-03-26T07:52:57.098978+00:00",
+        "probe": {
+          "duration": 69.752993,
+          "width": 1080,
+          "height": 1080,
+          "fps": 30.0,
+          "video_codec": "hevc",
+          "audio_codec": "aac",
+          "audio_sample_rate": 44100,
+          "audio_channels": 2,
+          "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+          "bit_rate": 10018037
+        },
+        "artifacts": null,
+        "checks": [
+          {
+            "level": "ok",
+            "message": "讲话视频片段基础参数达标，可进入 HeyGem 人工复核。"
+          }
+        ]
+      },
+      {
+        "id": "6e5828056ed24f339ca8da4a5deeb6c9",
+        "original_name": "_.png",
+        "stored_name": "_.png",
+        "kind": "image",
+        "role": "portrait_photo",
+        "role_label": "肖像照",
+        "pipeline_target": "avatar_identity",
+        "content_type": "image/png",
+        "size_bytes": 12460769,
+        "path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\_.png",
+        "created_at": "2026-03-26T07:52:57.107548+00:00",
+        "probe": null,
+        "artifacts": null,
+        "checks": [
+          {
+            "level": "ok",
+            "message": "肖像照已入库，可用于形象核验和模板管理。"
+          }
+        ]
+      },
+      {
+        "id": "1f417f6c17a84b08bb7ce1d414a347ed",
+        "original_name": "_.m4a",
+        "stored_name": "_.m4a",
+        "kind": "audio",
+        "role": "voice_sample",
+        "role_label": "声音采样",
+        "pipeline_target": "voice_clone",
+        "content_type": "audio/x-m4a",
+        "size_bytes": 614416,
+        "path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\_.m4a",
+        "created_at": "2026-03-26T07:52:57.145728+00:00",
+        "probe": {
+          "duration": 24.063813,
+          "width": 0,
+          "height": 0,
+          "fps": 0.0,
+          "video_codec": "",
+          "audio_codec": "aac",
+          "audio_sample_rate": 48000,
+          "audio_channels": 2,
+          "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
+          "bit_rate": 204262
+        },
+        "artifacts": {
+          "normalized_wav_path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\derived\\voice_1f417f6c_16k_mono.wav",
+          "training_reference_name": "voice_1f417f6c.wav",
+          "training_preprocess": {
+            "provider": "indextts2",
+            "reference_audio": "voice_1f417f6c.wav",
+            "reference_audio_text": "",
+            "lang": "zh",
+            "mode": "direct_reference_upload",
+            "normalized_wav_path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\derived\\voice_1f417f6c_16k_mono.wav"
+          }
+        },
+        "checks": [
+          {
+            "level": "ok",
+            "message": "声音采样基础参数达标，可用于语音克隆。"
+          }
+        ]
+      }
+    ],
+    "preview_runs": [
+      {
+        "id": "8ab62636b25b4b6ba8398467ddfb371a",
+        "status": "completed",
+        "script": "大家好，我是FAS。现在这是一条 RoughCut 自动生成的创作者数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头稳定性。",
+        "task_code": "avatar-preview-8ab626-0",
+        "source_voice_file_id": "1f417f6c17a84b08bb7ce1d414a347ed",
+        "source_video_file_id": "de90c4d1149941be94bacc2877f81746",
+        "output_path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\previews\\8ab62636b25b4b6ba8398467ddfb371a.mp4",
+        "output_size_bytes": 13086852,
+        "duration_sec": 18.0,
+        "width": 1080,
+        "height": 1080,
+        "preview_mode": "source_audio_direct",
+        "fallback_reason": null,
+        "created_at": "2026-03-26T07:59:33Z"
+      }
+    ],
+    "profile_dashboard": {
+      "completeness_score": 50,
+      "section_status": {
+        "identity": false,
+        "positioning": false,
+        "publishing": true,
+        "publication_credentials": true,
+        "business": false,
+        "materials": true
+      },
+      "material_counts": {
+        "speaking_videos": 1,
+        "portrait_photos": 1,
+        "voice_samples": 1
+      },
+      "strengths": [
+        "渠道侧信息已具备复用价值",
+        "已绑定可复用的平台发布凭据",
+        "数字人口播素材链路已打通"
+      ],
+      "next_steps": [
+        "补充作者名、身份标题或简介，先把对外身份讲清楚。",
+        "补充内容定位、受众和表达风格，方便平台文案按策略生成。",
         "补充联系方式或合作备注，方便归档为完整创作者档案。"
       ]
     }

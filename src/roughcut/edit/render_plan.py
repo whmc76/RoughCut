@@ -57,6 +57,8 @@ def build_render_plan(
     avatar_commentary_plan: dict[str, Any] | None = None,
     export_resolution_mode: str = "source",
     export_resolution_preset: str = "1080p",
+    export_frame_rate_mode: str = "source",
+    export_frame_rate_preset: str = "30",
 ) -> dict:
     preset = get_workflow_preset(workflow_preset)
     preserve_color = _should_preserve_smart_effect_color(workflow_preset=preset.name)
@@ -134,6 +136,8 @@ def build_render_plan(
         "delivery": {
             "resolution_mode": export_resolution_mode,
             "resolution_preset": export_resolution_preset,
+            "frame_rate_mode": export_frame_rate_mode,
+            "frame_rate_preset": export_frame_rate_preset,
         },
     }
 

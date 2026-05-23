@@ -1,0 +1,576 @@
+{
+  "generated_at": "2026-05-21T19:59:54.748Z",
+  "video_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\MOT 风灵音叉推牌 锆合金版本.mp4",
+  "results": {
+    "bilibili": {
+      "platform": "bilibili",
+      "status": "uploaded_for_probe",
+      "route": {
+        "url": "https://member.bilibili.com/platform/upload/video/frame",
+        "title": "创作中心 - 哔哩哔哩弹幕视频网 - ( ゜- ゜)つロ 乾杯~"
+      },
+      "clicks": [
+        {
+          "clicked": true,
+          "text": "更多设置",
+          "label": "主站 用花生创作视频 11 成为UP主的第297天 投稿 首页 内容管理 数据中心 粉丝管理 互动管理 收益管理 花生 视频创作 创作成长 任务中心 必火推广 创作学院 创作权益 社区公约 创作设置 发布视频 批量操作 将以下所有视频加入合集 MOT 风灵音叉推牌 锆合金版本 上传完成 添加视频 添加分P MOT 风灵音叉推牌 锆合金版本 上传完成 更换视频 基本设置一键填写 * 封面 封面设置 系统默认选中第一帧为视频封面，以下为更多智能推荐封面 * 标题 16/80 * 创作声明 * 分区 生活兴趣 * 标签 原创 桌游棋牌 教程攻略 还可以添加7个标签 推荐标签： 电子烟 蒸汽烟 魔术 悦刻 生活记录 戒烟 记录 高能 分享 原创 版本 风灵 合金 音叉 参与话题： 把兴趣玩出名堂 一起做手工吧！ 影视未来星企划 寻找100位非遗手艺人 大人也要玩玩具 兴趣不止三分钟 搜索更多话题 > 简介 0 /2000 定时发布 (可选择距离当前最早≥5分钟/最晚≤15天的时间，花火、预约、互动视频稿件不可修改/取消) 加入合集 请选择合集 商业推广 增加商业推广信息 更多设置 （含声明与权益、视频元素、互动管理等） 存草稿 立即投稿 信息填完后，就可投稿！不需等待上传完成哦~ 开启后视频上传完成第一时间通知 member.bilibili.com想要 显示通知 禁止 允许 知道了 遇到问题"
+        }
+      ],
+      "upload": {
+        "uploaded": true,
+        "input": {
+          "accept": ".mp4,.flv,.avi,.wmv,.mov,.webm,.mpeg4,.ts,.mpg,.rm,.rmvb,.mkv,.m4v,.vob,.swf,.3gp,.mts,.m2v,.m2ts,.f4v,.m2t,.3g2,.asf",
+          "multiple": "multiple",
+          "type": "file",
+          "style": "display: none;"
+        },
+        "fileInputCount": 3
+      },
+      "before": {
+        "url": "https://member.bilibili.com/platform/upload/video/frame",
+        "title": "创作中心 - 哔哩哔哩弹幕视频网 - ( ゜- ゜)つロ 乾杯~",
+        "file_inputs": [
+          {
+            "index": 0,
+            "accept": ".mp4,.flv,.avi,.wmv,.mov,.webm,.mpeg4,.ts,.mpg,.rm,.rmvb,.mkv,.m4v,.vob,.swf,.3gp,.mts,.m2v,.m2ts,.f4v,.m2t,.3g2,.asf",
+            "multiple": true,
+            "visible": false
+          },
+          {
+            "index": 1,
+            "accept": ".mp4,.flv,.avi,.wmv,.mov,.webm,.mpeg4,.ts,.mpg,.rm,.rmvb,.mkv,.m4v,.vob,.swf,.3gp,.mts,.m2v,.m2ts,.f4v,.m2t,.3g2,.asf",
+            "multiple": true,
+            "visible": true
+          },
+          {
+            "index": 2,
+            "accept": ".txt",
+            "multiple": false,
+            "visible": true
+          }
+        ],
+        "option_lines": [
+          "主站 用花生创作视频 11 成为UP主的第297天 投稿 首页 内容管理 数据中心 粉丝管理 互动管理 收益管理 花生 视频创作 创作成长 任务中心 必火推广 创作学院 创作权益 社区公约 创作设置 视频投稿短剧投稿专栏投稿互动视频投稿音频投稿贴纸投稿视频素材投稿 视频大小 视频大小16G以内，时长10小时以内 粉丝数 ≥ 1000，可自动解锁64G超大文件 视频格式 推荐上传 MP4/MOV/MKV 格式，转码更快、过审更顺利～ 视频分辨率 推荐分辨率：1080P 、4K ，高分辨率更清晰流畅～ 点击上传或将视频拖拽到此区域 上传视频 花生 文本驱动的视频制作智能体，上传文字或音频，就能做出专业视频 立即使用 上传视频，即表示您已同意 哔哩哔哩使用协议 与 哔哩哔哩社区公约 ，请勿上传色情，反动等违法视频， 查看社区规则 遇到问题"
+        ],
+        "controls": [
+          {
+            "tag": "div",
+            "type": "",
+            "role": "region",
+            "text": "投稿 首页 内容管理 数据中心 粉丝管理 互动管理 收益管理 花生 视频创作 创作成长 任务中心 必火推广 创作学院 创作权益 社区公约 创作设置",
+            "ariaLabel": "scrollable content",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          }
+        ]
+      },
+      "after": {
+        "url": "https://member.bilibili.com/platform/upload/video/frame",
+        "title": "视频上传完毕～",
+        "file_inputs": [
+          {
+            "index": 0,
+            "accept": ".mp4,.flv,.avi,.wmv,.mov,.webm,.mpeg4,.ts,.mpg,.rm,.rmvb,.mkv,.m4v,.vob,.swf,.3gp,.mts,.m2v,.m2ts,.f4v,.m2t,.3g2,.asf",
+            "multiple": true,
+            "visible": false
+          },
+          {
+            "index": 1,
+            "accept": ".mp4,.flv,.avi,.wmv,.mov,.webm,.mpeg4,.ts,.mpg,.rm,.rmvb,.mkv,.m4v,.vob,.swf,.3gp,.mts,.m2v,.m2ts,.f4v,.m2t,.3g2,.asf",
+            "multiple": true,
+            "visible": true
+          },
+          {
+            "index": 2,
+            "accept": ".txt",
+            "multiple": false,
+            "visible": true
+          },
+          {
+            "index": 3,
+            "accept": ".zip",
+            "multiple": true,
+            "visible": true
+          }
+        ],
+        "option_lines": [
+          "主站 用花生创作视频 11 成为UP主的第297天 投稿 首页 内容管理 数据中心 粉丝管理 互动管理 收益管理 花生 视频创作 创作成长 任务中心 必火推广 创作学院 创作权益 社区公约 创作设置 发布视频 批量操作 将以下所有视频加入合集 MOT 风灵音叉推牌 锆合金版本 上传完成 添加视频 添加分P MOT 风灵音叉推牌 锆合金版本 上传完成 更换视频 基本设置一键填写 * 封面 封面设置 系统默认选中第一帧为视频封面，以下为更多智能推荐封面 * 标题 16/80 * 创作声明 * 分区 生活兴趣 * 标签 原创 桌游棋牌 教程攻略 还可以添加7个标签 推荐标签： 电子烟 蒸汽烟 魔术 悦刻 生活记录 戒烟 记录 高能 分享 原创 版本 风灵 合金 音叉 参与话题： 把兴趣玩出名堂 一起做手工吧！ 影视未来星企划 寻找100位非遗手艺人 大人也要玩玩具 兴趣不止三分钟 搜索更多话题 > 简介 0 /2000 定时发布 (可选择距离当前最早≥5分钟/最晚≤15天的时间，花火、预约、互动视频稿件不可修改/取消) 加入合集 请选择合集 商业推广 增加商业推广信息 更多设置 （含声明与权益、视频元素、互动管理等） 存草稿 立即投稿 信息填完后，就可投稿！不需等待上传完成哦~ 开启后视频上传完成第一时间通知 member.bilibili.com想要 显示通知 禁止 允许 知道了 遇到问题"
+        ],
+        "controls": [
+          {
+            "tag": "div",
+            "type": "",
+            "role": "region",
+            "text": "投稿 首页 内容管理 数据中心 粉丝管理 互动管理 收益管理 花生 视频创作 创作成长 任务中心 必火推广 创作学院 创作权益 社区公约 创作设置",
+            "ariaLabel": "scrollable content",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          },
+          {
+            "tag": "button",
+            "type": "",
+            "role": "",
+            "text": "加入合集",
+            "ariaLabel": "",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "role": "",
+            "text": "请选择符合您视频内容的创作声明",
+            "ariaLabel": "",
+            "placeholder": "请选择符合您视频内容的创作声明",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          }
+        ]
+      },
+      "expanded": {
+        "url": "https://member.bilibili.com/platform/upload/video/frame",
+        "title": "创作中心 - 哔哩哔哩弹幕视频网 - ( ゜- ゜)つロ 乾杯~",
+        "file_inputs": [
+          {
+            "index": 0,
+            "accept": ".mp4,.flv,.avi,.wmv,.mov,.webm,.mpeg4,.ts,.mpg,.rm,.rmvb,.mkv,.m4v,.vob,.swf,.3gp,.mts,.m2v,.m2ts,.f4v,.m2t,.3g2,.asf",
+            "multiple": true,
+            "visible": false
+          },
+          {
+            "index": 1,
+            "accept": ".mp4,.flv,.avi,.wmv,.mov,.webm,.mpeg4,.ts,.mpg,.rm,.rmvb,.mkv,.m4v,.vob,.swf,.3gp,.mts,.m2v,.m2ts,.f4v,.m2t,.3g2,.asf",
+            "multiple": true,
+            "visible": true
+          },
+          {
+            "index": 2,
+            "accept": ".txt",
+            "multiple": false,
+            "visible": true
+          },
+          {
+            "index": 3,
+            "accept": ".zip",
+            "multiple": true,
+            "visible": true
+          }
+        ],
+        "option_lines": [
+          "主站 用花生创作视频 11 成为UP主的第297天 投稿 首页 内容管理 数据中心 粉丝管理 互动管理 收益管理 花生 视频创作 创作成长 任务中心 必火推广 创作学院 创作权益 社区公约 创作设置 发布视频 批量操作 将以下所有视频加入合集 MOT 风灵音叉推牌 锆合金版本 上传完成 添加视频 添加分P MOT 风灵音叉推牌 锆合金版本 上传完成 更换视频 基本设置一键填写 * 封面 封面设置 系统默认选中第一帧为视频封面，以下为更多智能推荐封面 * 标题 16/80 * 创作声明 * 分区 生活兴趣 * 标签 原创 桌游棋牌 教程攻略 还可以添加7个标签 推荐标签： 电子烟 蒸汽烟 魔术 悦刻 生活记录 戒烟 记录 高能 分享 原创 版本 风灵 合金 音叉 参与话题： 把兴趣玩出名堂 一起做手工吧！ 影视未来星企划 寻找100位非遗手艺人 大人也要玩玩具 兴趣不止三分钟 搜索更多话题 > 简介 0 /2000 定时发布 (可选择距离当前最早≥5分钟/最晚≤15天的时间，花火、预约、互动视频稿件不可修改/取消) 加入合集 请选择合集 商业推广 增加商业推广信息 更多设置 （含声明与权益、视频元素、互动管理等） 存草稿 立即投稿 信息填完后，就可投稿！不需等待上传完成哦~ 开启后视频上传完成第一时间通知 member.bilibili.com想要 显示通知 禁止 允许 知道了 遇到问题"
+        ],
+        "controls": [
+          {
+            "tag": "div",
+            "type": "",
+            "role": "region",
+            "text": "投稿 首页 内容管理 数据中心 粉丝管理 互动管理 收益管理 花生 视频创作 创作成长 任务中心 必火推广 创作学院 创作权益 社区公约 创作设置",
+            "ariaLabel": "scrollable content",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          },
+          {
+            "tag": "button",
+            "type": "",
+            "role": "",
+            "text": "加入合集",
+            "ariaLabel": "",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          },
+          {
+            "tag": "input",
+            "type": "text",
+            "role": "",
+            "text": "请选择符合您视频内容的创作声明",
+            "ariaLabel": "",
+            "placeholder": "请选择符合您视频内容的创作声明",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          }
+        ]
+      }
+    },
+    "xiaohongshu": {
+      "platform": "xiaohongshu",
+      "status": "uploaded_for_probe",
+      "route": {
+        "url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+        "title": "小红书创作服务平台"
+      },
+      "clicks": [
+        {
+          "clicked": true,
+          "text": "更多设置",
+          "label": "遇到问题 创作服务平台 FAS机神圣殿 × 潮玩EDC 发布笔记 首页 笔记管理 数据看板 活动中心 笔记灵感 创作学院 创作百科 收起侧边栏 视频文件 重新上传 MOT 风灵音叉推牌 锆合金版本.mp4 检测为高清视频。清晰的画面能极大提升观看体验，有利于提升观看时长 设置封面 默认截取第一帧作为封面，优质的封面会吸引更多人浏览笔记 优质封面示例 智能推荐封面 智能标题 #TEC无畏契约 #tec无畏契约 #EDC #固态硬盘 #数码EDC 更多 话题 用户 表情 0 /1000 活动话题 更多 原神千星奇域 添加话题 活动详情 少东家夏日奇遇 添加话题 活动详情 内容设置 收起 添加章节 清晰的视频结构能提升观看体验，有助于完播率 去添加 加入合集 汇集系列视频，有利于连续性观看 选择合集 原创声明 添加内容类型声明 添加组件 添加地点 选择群聊 关联直播预告 标记地点或标记朋友 添加路线 店内商品 选择我店铺内的商品 添加商品 更多设置 收起 公开可见 定时发布 笔记预览 封面预览 FAS机神圣殿 × 潮玩EDC 关注 编辑于 刚刚 · 公开可见"
+        }
+      ],
+      "upload": {
+        "uploaded": true,
+        "input": {
+          "data-v-0afdcc40": "",
+          "data-v-7cbccdb2-s": "",
+          "class": "upload-input",
+          "type": "file",
+          "accept": ".mp4,.mov,.flv,.f4v,.mkv,.rm,.rmvb,.m4v,.mpg,.mpeg,.ts"
+        },
+        "fileInputCount": 1
+      },
+      "before": {
+        "url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+        "title": "小红书创作服务平台",
+        "file_inputs": [
+          {
+            "index": 0,
+            "accept": ".mp4,.mov,.flv,.f4v,.mkv,.rm,.rmvb,.m4v,.mpg,.mpeg,.ts",
+            "multiple": false,
+            "visible": false
+          }
+        ],
+        "option_lines": [],
+        "controls": []
+      },
+      "after": {
+        "url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+        "title": "小红书创作服务平台",
+        "file_inputs": [
+          {
+            "index": 0,
+            "accept": ".mp4,.mov,.flv,.f4v,.mkv,.rm,.rmvb,.m4v,.mpg,.mpeg,.ts",
+            "multiple": false,
+            "visible": true
+          }
+        ],
+        "option_lines": [
+          "遇到问题 创作服务平台 FAS机神圣殿 × 潮玩EDC 发布笔记 首页 笔记管理 数据看板 活动中心 笔记灵感 创作学院 创作百科 收起侧边栏 视频文件 重新上传 MOT 风灵音叉推牌 锆合金版本.mp4 检测为高清视频。清晰的画面能极大提升观看体验，有利于提升观看时长 设置封面 默认截取第一帧作为封面，优质的封面会吸引更多人浏览笔记 优质封面示例 智能推荐封面 智能标题 #TEC无畏契约 #tec无畏契约 #EDC #固态硬盘 #数码EDC 更多 话题 用户 表情 0 /1000 活动话题 更多 原神千星奇域 添加话题 活动详情 少东家夏日奇遇 添加话题 活动详情 内容设置 收起 添加章节 清晰的视频结构能提升观看体验，有助于完播率 去添加 加入合集 汇集系列视频，有利于连续性观看 选择合集 原创声明 添加内容类型声明 添加组件 添加地点 选择群聊 关联直播预告 标记地点或标记朋友 添加路线 店内商品 选择我店铺内的商品 添加商品 更多设置 收起 公开可见 定时发布 笔记预览 封面预览 FAS机神圣殿 × 潮玩EDC 关注 编辑于 刚刚 · 公开可见"
+        ],
+        "controls": []
+      },
+      "expanded": {
+        "url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+        "title": "小红书创作服务平台",
+        "file_inputs": [
+          {
+            "index": 0,
+            "accept": ".mp4,.mov,.flv,.f4v,.mkv,.rm,.rmvb,.m4v,.mpg,.mpeg,.ts",
+            "multiple": false,
+            "visible": true
+          }
+        ],
+        "option_lines": [
+          "遇到问题 创作服务平台 FAS机神圣殿 × 潮玩EDC 发布笔记 首页 笔记管理 数据看板 活动中心 笔记灵感 创作学院 创作百科 收起侧边栏 视频文件 重新上传 MOT 风灵音叉推牌 锆合金版本.mp4 检测为高清视频。清晰的画面能极大提升观看体验，有利于提升观看时长 设置封面 默认截取第一帧作为封面，优质的封面会吸引更多人浏览笔记 优质封面示例 智能推荐封面 智能标题 #TEC无畏契约 #tec无畏契约 #EDC #固态硬盘 #数码EDC 更多 话题 用户 表情 0 /1000 活动话题 更多 原神千星奇域 添加话题 活动详情 少东家夏日奇遇 添加话题 活动详情 内容设置 收起 添加章节 清晰的视频结构能提升观看体验，有助于完播率 去添加 加入合集 汇集系列视频，有利于连续性观看 选择合集 原创声明 添加内容类型声明 添加组件 添加地点 选择群聊 关联直播预告 标记地点或标记朋友 添加路线 店内商品 选择我店铺内的商品 添加商品 更多设置 收起 公开可见 定时发布 笔记预览 封面预览 FAS机神圣殿 × 潮玩EDC 关注 编辑于 刚刚 · 公开可见"
+        ],
+        "controls": []
+      }
+    },
+    "kuaishou": {
+      "platform": "kuaishou",
+      "status": "uploaded_for_probe",
+      "route": {
+        "url": "https://cp.kuaishou.com/article/publish/video",
+        "title": "快手创作者服务平台"
+      },
+      "clicks": [
+        {
+          "clicked": false
+        }
+      ],
+      "upload": {
+        "uploaded": true,
+        "input": {
+          "type": "file",
+          "accept": "video/*,.mp4,.mov,.flv,.f4v,.webm,.mkv,.rm,.rmvb,.m4v,.3gp,.3g2,.wmv,.avi,.asf,.mpg,.mpeg,.ts",
+          "style": "display: none; opacity: 0; width: 0px; height: 0px;"
+        },
+        "fileInputCount": 1
+      },
+      "before": {
+        "url": "https://cp.kuaishou.com/article/publish/video",
+        "title": "快手创作者服务平台",
+        "file_inputs": [
+          {
+            "index": 0,
+            "accept": "video/*,.mp4,.mov,.flv,.f4v,.webm,.mkv,.rm,.rmvb,.m4v,.3gp,.3g2,.wmv,.avi,.asf,.mpg,.mpeg,.ts",
+            "multiple": false,
+            "visible": false
+          }
+        ],
+        "option_lines": [],
+        "controls": []
+      },
+      "after": {
+        "url": "https://cp.kuaishou.com/article/publish/video",
+        "title": "快手创作者服务平台",
+        "file_inputs": [
+          {
+            "index": 0,
+            "accept": "video/*,.mp4,.mov,.flv,.f4v,.webm,.mkv,.rm,.rmvb,.m4v,.3gp,.3g2,.wmv,.avi,.asf,.mpg,.mpeg,.ts",
+            "multiple": false,
+            "visible": false
+          }
+        ],
+        "option_lines": [],
+        "controls": []
+      },
+      "expanded": {
+        "url": "https://cp.kuaishou.com/article/publish/video",
+        "title": "快手创作者服务平台",
+        "file_inputs": [
+          {
+            "index": 0,
+            "accept": "video/*,.mp4,.mov,.flv,.f4v,.webm,.mkv,.rm,.rmvb,.m4v,.3gp,.3g2,.wmv,.avi,.asf,.mpg,.mpeg,.ts",
+            "multiple": false,
+            "visible": false
+          }
+        ],
+        "option_lines": [],
+        "controls": []
+      }
+    },
+    "wechat-channels": {
+      "platform": "wechat-channels",
+      "status": "upload_not_started",
+      "route": {
+        "url": "https://channels.weixin.qq.com/platform/post/create",
+        "title": "视频号助手"
+      },
+      "clicks": [
+        {
+          "clicked": false
+        }
+      ],
+      "upload": {
+        "uploaded": false,
+        "reason": "no_file_input",
+        "fileInputs": []
+      },
+      "before": {
+        "url": "https://channels.weixin.qq.com/platform/post/create",
+        "title": "视频号助手",
+        "file_inputs": [],
+        "option_lines": [],
+        "controls": []
+      },
+      "after": {
+        "url": "https://channels.weixin.qq.com/platform/post/create",
+        "title": "视频号助手",
+        "file_inputs": [],
+        "option_lines": [],
+        "controls": []
+      },
+      "expanded": {
+        "url": "https://channels.weixin.qq.com/platform/post/create",
+        "title": "视频号助手",
+        "file_inputs": [],
+        "option_lines": [],
+        "controls": []
+      }
+    },
+    "toutiao": {
+      "platform": "toutiao",
+      "status": "upload_not_started",
+      "route": {
+        "url": "https://mp.toutiao.com/profile_v4/xigua/publish-video",
+        "title": "头条号"
+      },
+      "clicks": [
+        {
+          "clicked": false
+        }
+      ],
+      "upload": {
+        "uploaded": false,
+        "reason": "no_file_input",
+        "fileInputs": []
+      },
+      "before": {
+        "url": "https://mp.toutiao.com/profile_v4/xigua/publish-video",
+        "title": "头条号",
+        "file_inputs": [],
+        "option_lines": [
+          "头条号 消息 12 在头条创作的第 33 天 FAS机神圣殿潮玩EDC 主页 创作 文章 视频 微头条 音频 管理 作品管理 评论管理 草稿箱 数据 收益数据 作品数据 粉丝数据 进阶创作 付费专栏 提现 成长指南 首发激励 创作权益 头条认证 创作灵感 创作训练营 工具 功能实验室 直播工具 创作保护 图片素材 设置 关于今日头条|用户协议|隐私政策|社区规范|自律公约|侵权投诉|联系我们© 2026 toutiao.com All Rights Reserved"
+        ],
+        "controls": []
+      },
+      "after": {
+        "url": "https://mp.toutiao.com/profile_v4/xigua/publish-video",
+        "title": "头条号",
+        "file_inputs": [],
+        "option_lines": [
+          "头条号 消息 12 在头条创作的第 33 天 FAS机神圣殿潮玩EDC 主页 创作 文章 视频 微头条 音频 管理 作品管理 评论管理 草稿箱 数据 收益数据 作品数据 粉丝数据 进阶创作 付费专栏 提现 成长指南 首发激励 创作权益 头条认证 创作灵感 创作训练营 工具 功能实验室 直播工具 创作保护 图片素材 设置 关于今日头条|用户协议|隐私政策|社区规范|自律公约|侵权投诉|联系我们© 2026 toutiao.com All Rights Reserved"
+        ],
+        "controls": []
+      },
+      "expanded": {
+        "url": "https://mp.toutiao.com/profile_v4/xigua/publish-video",
+        "title": "头条号",
+        "file_inputs": [],
+        "option_lines": [
+          "头条号 消息 12 在头条创作的第 33 天 FAS机神圣殿潮玩EDC 主页 创作 文章 视频 微头条 音频 管理 作品管理 评论管理 草稿箱 数据 收益数据 作品数据 粉丝数据 进阶创作 付费专栏 提现 成长指南 首发激励 创作权益 头条认证 创作灵感 创作训练营 工具 功能实验室 直播工具 创作保护 图片素材 设置 关于今日头条|用户协议|隐私政策|社区规范|自律公约|侵权投诉|联系我们© 2026 toutiao.com All Rights Reserved"
+        ],
+        "controls": []
+      }
+    },
+    "youtube": {
+      "platform": "youtube",
+      "status": "upload_not_started",
+      "route": {
+        "url": "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw",
+        "title": "频道信息中心 - YouTube Studio"
+      },
+      "clicks": [
+        {
+          "clicked": true,
+          "text": "创建",
+          "label": "跳过导航 创建 我的频道 FAS机神圣殿x潮玩EDC 信息中心 内容 数据分析 社区 字幕 内容检测 创收 自定义 音频库 设置 发送反馈 频道信息中心 想查看你近期视频的指标？ 上传并发布一个视频，即可开始体验。 上传视频 频道分析 当前订阅人数 0 摘要 过去 28 天 观看次数 0 — 观看时长（小时） 0.0 — 热门内容 过去 48 小时 · 观看次数 前往频道数据分析 使用条款 隐私权政策 政策和安全"
+        },
+        {
+          "clicked": false
+        }
+      ],
+      "upload": {
+        "uploaded": false,
+        "reason": "no_file_input",
+        "fileInputs": []
+      },
+      "before": {
+        "url": "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw",
+        "title": "频道信息中心 - YouTube Studio",
+        "file_inputs": [],
+        "option_lines": [],
+        "controls": []
+      },
+      "after": {
+        "url": "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw",
+        "title": "频道信息中心 - YouTube Studio",
+        "file_inputs": [],
+        "option_lines": [],
+        "controls": []
+      },
+      "expanded": {
+        "url": "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw",
+        "title": "频道信息中心 - YouTube Studio",
+        "file_inputs": [],
+        "option_lines": [],
+        "controls": []
+      }
+    },
+    "x": {
+      "platform": "x",
+      "status": "uploaded_for_probe",
+      "route": {
+        "url": "https://x.com/compose/post",
+        "title": ""
+      },
+      "clicks": [
+        {
+          "clicked": true,
+          "text": "Show more",
+          "label": "To view keyboard shortcuts, press question mark View keyboard shortcuts Home Explore Notifications Follow Chat Grok Bookmarks Creator Studio Premium Profile More Post FAS_EDC @FASEDC_Official For you Following See new posts What’s happening? Post Your Home Timeline Elon Musk @elonmusk · May 20 Release notes for Grok Build will be published daily Quote skcd @skcd42 · May 20 Bug fixes shipping for Grok Build (release notes will be available in the TUI itself) - Copy only path on ReadTool block - Redirect stderr to /dev/null to fix incorrect TUI text interleaving - Distinguish system/user initiated cancellations - Guard against crash conditions in 2K 2.8K 23K 28M Kangmin Lee | 이강민 @kangminlee · 17h The show writers turned Homelander into a Trump analogue, and this is how they choose to end The Boys. This entire show was just a deranged sexual humiliation fantasy projected onto Trump. They can't even produce a decent superhero parody without injecting their twisted fetishes Show more 799 765 766 14K 1.1M Elon Musk @elonmusk · 12h Pathetic 802 803 770 771 20K 2.5M 𝓘. @IANLOOKS · 17h ☆ #IAN #이안 24 472 7.7K VideoArtGame @VideoArtGame · 18h Illustration | Death Note - Misa Amane Artist: @gamppan9 5 1.7K 16K 148K 149K Erling Haaland @ErlingHaaland · May 21 Not the ending we hoped for, but we’ll use this feeling the right way next season. To every City fan who travelled with us this season, thank you Congrats to Arsenal for the title. 7.3K 13K 139K 4.6M @twaniimals · 13h 18 173 1.7K 33K breeze @wyabreeze · 3h just got my first car 539 546 357 359 4.1K 4.2K 981K 984K Kurrco @Kurrco · 59m Drake linked up with NYFlavaaa who always listens to Drake's music while driving with his kids 318 320 2K 2.1K 13K 14K 537K 544K Subscribe to Premium 50% off Get rid of ads, see your analytics, boost your replies and unlock 20+ features. Subscribe Today’s News Chinese Stocks Drop 2% Wiping Out $294 Billion in Value 9 hours ago · News · 8,969 posts Bill Seeks Permanent U.S. Strategic Bitcoin Reserve 4 hours ago · News · 6,063 posts LISA, Anitta, and Rema Drop 'Goals' for 2026 World Cup Soundtrack 2 days ago · Entertainment · 481.2K posts Trending now What’s happening Trending in Hong Kong SAR China readymonitor Business & finance · Trending Telegram Trending in Hong Kong SAR China #Revolution Politics · Trending #Putin Show more Who to follow Satya Nadella @satyanadella Follow Donald J. Trump @realDonaldTrump Follow Lauren Boebert @laurenboebert Follow Show more Terms of Service | Privacy Policy | Cookie Policy | Accessibility | Ads info | More © 2026 X Corp."
+        }
+      ],
+      "upload": {
+        "uploaded": true,
+        "input": {
+          "accept": "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime",
+          "multiple": "",
+          "type": "file",
+          "tabindex": "-1",
+          "class": "r-8akbif r-orgf3d r-1udh08x r-u8s1d r-xjis5s r-1wyyakw",
+          "data-testid": "fileInput"
+        },
+        "fileInputCount": 1
+      },
+      "before": {
+        "url": "https://x.com/compose/post",
+        "title": "",
+        "file_inputs": [
+          {
+            "index": 0,
+            "accept": "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime",
+            "multiple": true,
+            "visible": true
+          }
+        ],
+        "option_lines": [],
+        "controls": [
+          {
+            "tag": "button",
+            "type": "button",
+            "role": "button",
+            "text": "Schedule post",
+            "ariaLabel": "Schedule post",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          }
+        ]
+      },
+      "after": {
+        "url": "https://x.com/compose/post",
+        "title": "",
+        "file_inputs": [
+          {
+            "index": 0,
+            "accept": "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime",
+            "multiple": true,
+            "visible": true
+          }
+        ],
+        "option_lines": [],
+        "controls": [
+          {
+            "tag": "button",
+            "type": "button",
+            "role": "button",
+            "text": "Schedule post",
+            "ariaLabel": "Schedule post",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          }
+        ]
+      },
+      "expanded": {
+        "url": "https://x.com/compose/post",
+        "title": "",
+        "file_inputs": [
+          {
+            "index": 0,
+            "accept": "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime",
+            "multiple": true,
+            "visible": true
+          }
+        ],
+        "option_lines": [],
+        "controls": [
+          {
+            "tag": "button",
+            "type": "button",
+            "role": "button",
+            "text": "Schedule post",
+            "ariaLabel": "Schedule post",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          }
+        ]
+      }
+    }
+  }
+}

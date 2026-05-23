@@ -3,7 +3,16 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import { existsSync, readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { createReadStream } from "node:fs";
+import { extname, resolve } from "node:path";
+
+const LOCAL_IMAGE_PREVIEW_PATH = "/__roughcut_local_image";
+const LOCAL_IMAGE_MIME_TYPES: Record<string, string> = {
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+};
 
 function readEnvFile(path: string): Record<string, string> {
   if (!existsSync(path)) return {};
@@ -41,13 +50,38 @@ export default defineConfig(({ mode }) => {
     5173,
   );
   const apiProxyTarget = runtimeEnv.VITE_API_PROXY_TARGET || env.VITE_API_PROXY_TARGET || `http://127.0.0.1:${apiPort}`;
-  const devHost = runtimeEnv.VITE_DEV_HOST || env.VITE_DEV_HOST || "127.0.0.1";
+  const devHost = runtimeEnv.VITE_DEV_HOST || env.VITE_DEV_HOST || "0.0.0.0";
   const devPort = frontendPort;
   const hmrHost = runtimeEnv.VITE_HMR_HOST || env.VITE_HMR_HOST || undefined;
   const hmrClientPort = Number(runtimeEnv.VITE_HMR_CLIENT_PORT || env.VITE_HMR_CLIENT_PORT || 0);
 
   return {
-    plugins: [react()],
+    plugins: [
+      react(),
+      {
+        name: "roughcut-local-image-preview",
+        configureServer(server) {
+          server.middlewares.use(LOCAL_IMAGE_PREVIEW_PATH, (req, res) => {
+            const rawUrl = req.url ?? "";
+            const url = new URL(rawUrl, "http://127.0.0.1");
+            const imagePath = url.searchParams.get("path") ?? "";
+            const extension = extname(imagePath).toLowerCase();
+            const contentType = LOCAL_IMAGE_MIME_TYPES[extension];
+            if (!imagePath || !contentType || !existsSync(imagePath)) {
+              res.statusCode = 404;
+              res.end("Not found");
+              return;
+            }
+            res.setHeader("Content-Type", contentType);
+            res.setHeader("Cache-Control", "no-store");
+            createReadStream(imagePath).on("error", () => {
+              if (!res.headersSent) res.statusCode = 500;
+              res.end("Failed to read image");
+            }).pipe(res);
+          });
+        },
+      },
+    ],
     server: {
       host: devHost,
       port: devPort,

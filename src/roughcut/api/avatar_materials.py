@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from roughcut.api.schemas import AvatarMaterialLibraryOut, AvatarPublicationProfileListOut
 from roughcut.avatar import (
+    avatar_material_role_matches_kind,
     build_avatar_material_requirements,
     create_profile_dir,
     detect_avatar_material_library_warnings,
@@ -39,6 +40,7 @@ from roughcut.naming import (
     AVATAR_CAPABILITY_VOICE,
     normalize_avatar_capability_status,
 )
+from roughcut.publication import CANONICAL_PUBLICATION_ADAPTER, normalize_publication_platform, platform_label
 
 router = APIRouter(prefix="/avatar-materials", tags=["avatar-materials"])
 
@@ -57,6 +59,11 @@ class AvatarMaterialProfileUpdate(BaseModel):
     notes: str | None = None
     personal_info: dict[str, Any] | None = None
     creator_profile: dict[str, Any] | None = None
+
+
+class PublicationBrowserLoginMatchIn(BaseModel):
+    browser: str
+    platforms: list[str] = []
 
 
 @router.get("", response_model=AvatarMaterialLibraryOut)
@@ -93,6 +100,133 @@ def get_avatar_publication_profiles():
         if str(profile.get("id") or "").strip()
     ]
     return {"profiles": profiles}
+
+
+def _normalize_publication_browser(value: str) -> str:
+    normalized = str(value or "").strip().lower().replace(" ", "-").replace("_", "-")
+    aliases = {
+        "chrome": "chrome",
+        "google-chrome": "chrome",
+        "edge": "edge",
+        "msedge": "edge",
+        "microsoft-edge": "edge",
+        "firefox": "firefox",
+        "browser-agent": "browser-agent",
+        "default": "browser-agent",
+    }
+    browser = aliases.get(normalized)
+    if browser:
+        return browser
+    raise HTTPException(status_code=400, detail="不支持的浏览器选项。")
+
+
+def _publication_browser_label(browser: str) -> str:
+    return {
+        "chrome": "Chrome",
+        "edge": "Edge",
+        "firefox": "Firefox",
+        "browser-agent": "Browser Agent 默认浏览器",
+    }.get(browser, browser)
+
+
+def _normalize_publication_browser_platforms(platforms: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for item in platforms or []:
+        platform = normalize_publication_platform(item)
+        if platform and platform not in normalized:
+            normalized.append(platform)
+    return normalized
+
+
+@router.post("/publication-profiles/{profile_id}/match-browser-login", response_model=AvatarPublicationProfileListOut)
+def match_publication_browser_login(profile_id: str, body: PublicationBrowserLoginMatchIn):
+    try:
+        profile = get_avatar_material_profile(profile_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Avatar material profile not found") from exc
+
+    browser = _normalize_publication_browser(body.browser)
+    platforms = _normalize_publication_browser_platforms(body.platforms)
+    if not platforms:
+        raise HTTPException(status_code=400, detail="当前物料没有后端支持的一键发布平台。")
+
+    creator_profile = normalize_creator_profile(
+        profile.get("creator_profile") if isinstance(profile.get("creator_profile"), dict) else {},
+        personal_info=profile.get("personal_info") if isinstance(profile.get("personal_info"), dict) else None,
+        display_name=str(profile.get("display_name") or "").strip(),
+        presenter_alias=str(profile.get("presenter_alias") or "").strip(),
+        notes=str(profile.get("notes") or "").strip(),
+    )
+    publishing = creator_profile.setdefault("publishing", {})
+    if not isinstance(publishing, dict):
+        publishing = {}
+        creator_profile["publishing"] = publishing
+
+    browser_label = _publication_browser_label(browser)
+    profile_name = str(profile.get("display_name") or profile.get("presenter_alias") or "发布账号").strip()
+    credentials = [
+        dict(item)
+        for item in (publishing.get("platform_credentials") or [])
+        if isinstance(item, dict) and normalize_publication_platform(item.get("platform"))
+    ]
+    now = now_iso()
+    note = f"由智能发布页根据用户选择的{browser_label}本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。"
+    for platform in platforms:
+        existing = next(
+            (
+                item
+                for item in credentials
+                if normalize_publication_platform(item.get("platform")) == platform
+                and str(item.get("adapter") or CANONICAL_PUBLICATION_ADAPTER).strip().lower().replace("-", "_")
+                == CANONICAL_PUBLICATION_ADAPTER
+            ),
+            None,
+        )
+        credential_ref = f"browser-agent:{browser}:{profile_id}:{platform}"
+        patch = {
+            "id": str((existing or {}).get("id") or uuid.uuid4().hex),
+            "platform": platform,
+            "platform_label": platform_label(platform),
+            "account_label": str((existing or {}).get("account_label") or f"{profile_name} · {browser_label}").strip(),
+            "credential_ref": credential_ref,
+            "status": "logged_in",
+            "enabled": True,
+            "adapter": CANONICAL_PUBLICATION_ADAPTER,
+            "verified_at": now,
+            "notes": note,
+            "last_error": None,
+        }
+        if existing is not None:
+            existing.update(patch)
+        else:
+            credentials.append(patch)
+
+    active_platforms = [
+        str(item).strip()
+        for item in (publishing.get("active_platforms") or [])
+        if str(item).strip()
+    ]
+    for platform in platforms:
+        label = platform_label(platform)
+        if label not in active_platforms:
+            active_platforms.append(label)
+    publishing["active_platforms"] = active_platforms[:8]
+    publishing["platform_credentials"] = credentials
+
+    profile["creator_profile"] = normalize_creator_profile(
+        creator_profile,
+        personal_info=profile.get("personal_info") if isinstance(profile.get("personal_info"), dict) else None,
+        display_name=str(profile.get("display_name") or "").strip(),
+        presenter_alias=str(profile.get("presenter_alias") or "").strip(),
+        notes=str(profile.get("notes") or "").strip(),
+    )
+    profile["personal_info"] = personal_info_from_creator_profile(
+        profile["creator_profile"],
+        display_name=str(profile.get("display_name") or "").strip(),
+        presenter_alias=str(profile.get("presenter_alias") or "").strip(),
+    )
+    save_avatar_material_profile(profile)
+    return get_avatar_publication_profiles()
 
 
 @router.post("/profiles", response_model=AvatarMaterialLibraryOut, status_code=201)
@@ -517,9 +651,9 @@ def _build_profile_runtime_state(
     if voice_sample_count == 0:
         warnings.append("还没有声音采样，后续语音克隆和 AI 导演重配音将无法直接复用同音色。")
 
-    avatar_ready = speaking_video_count > 0 and not any("讲话视频片段" in item for item in blocking_issues)
-    voice_clone_ready = voice_sample_count > 0
-    portrait_ready = portrait_photo_count > 0
+    avatar_ready = speaking_video_count > 0 and not any("讲话视频" in item for item in blocking_issues)
+    voice_clone_ready = voice_sample_count > 0 and not any("声音采样" in item for item in blocking_issues)
+    portrait_ready = portrait_photo_count > 0 and not any("肖像照" in item for item in blocking_issues)
     preview_ready = avatar_ready and voice_clone_ready and preview_service_available
     training_ready = avatar_ready
 
@@ -551,14 +685,10 @@ def _derive_runtime_preview_capability(
     preview_service_available: bool,
 ) -> tuple[dict[str, str], str]:
     capability_status = normalize_avatar_capability_status(capability_status)
-    has_video = any(str(item.get("role") or "") == "speaking_video" for item in files)
-    has_voice = any(str(item.get("role") or "") == "voice_sample" for item in files)
-    has_portrait = any(str(item.get("role") or "") == "portrait_photo" for item in files)
-    has_blocking_issues = any(
-        str(check.get("level") or "").strip().lower() == "error"
-        for file in files
-        for check in (file.get("checks") or [])
-    )
+    has_video = _has_ready_material(files, "speaking_video")
+    has_voice = _has_ready_material(files, "voice_sample")
+    has_portrait = _has_ready_material(files, "portrait_photo")
+    has_blocking_issues = _has_blocking_material_issues(files)
 
     if not files:
         return (
@@ -571,7 +701,7 @@ def _derive_runtime_preview_capability(
             "先补齐讲话视频片段或修复阻塞项，再导入 HeyGem 训练。",
         )
 
-    avatar_ready = "ready" if has_video and not has_blocking_issues else "missing"
+    avatar_ready = "ready" if has_video else "missing"
     voice_ready = "ready" if has_voice else "missing"
     portrait_ready = "ready" if has_portrait else "missing"
     preview_ready = "ready" if has_video and has_voice and preview_service_available else "missing"
@@ -579,11 +709,9 @@ def _derive_runtime_preview_capability(
     if has_blocking_issues:
         return (
             {
-                AVATAR_CAPABILITY_GENERATION: "missing"
-                if capability_status.get(AVATAR_CAPABILITY_GENERATION) == "missing"
-                else avatar_ready,
-                AVATAR_CAPABILITY_VOICE: capability_status.get(AVATAR_CAPABILITY_VOICE, voice_ready),
-                AVATAR_CAPABILITY_PORTRAIT: capability_status.get(AVATAR_CAPABILITY_PORTRAIT, portrait_ready),
+                AVATAR_CAPABILITY_GENERATION: avatar_ready,
+                AVATAR_CAPABILITY_VOICE: voice_ready,
+                AVATAR_CAPABILITY_PORTRAIT: portrait_ready,
                 AVATAR_CAPABILITY_PREVIEW: "missing",
             },
             "素材存在阻塞项，先修复后再继续。",
@@ -667,9 +795,14 @@ async def _save_material_file(
             }
             checks = _build_material_checks(role=resolved_role, kind=kind, meta=probe_payload)
         except Exception as exc:
-            checks.append({"level": "warning", "message": f"媒体探测失败：{exc}"})
+            if avatar_material_role_matches_kind(resolved_role, kind):
+                checks.append({"level": "error", "message": f"媒体探测失败，无法确认素材是否达标：{exc}"})
+            else:
+                checks.extend(_build_material_checks(role=resolved_role, kind=kind, meta={}))
     elif resolved_role == "portrait_photo":
-        checks = [{"level": "ok", "message": "肖像照已入库，可用于形象核验和模板管理。"}]
+        checks = _build_material_checks(role=resolved_role, kind=kind, meta={})
+    else:
+        checks = _build_material_checks(role=resolved_role, kind=kind, meta={})
 
     return {
         "id": uuid.uuid4().hex,
@@ -733,6 +866,18 @@ def _pipeline_target(role: str) -> str:
 
 def _build_material_checks(*, role: str, kind: str, meta: dict[str, Any]) -> list[dict[str, str]]:
     checks: list[dict[str, str]] = []
+    if not avatar_material_role_matches_kind(role, kind):
+        checks.append(
+            {
+                "level": "error",
+                "message": (
+                    f"{_role_label(role)}字段只接受{_kind_label(_expected_kind_for_role(role))}文件，"
+                    f"当前文件识别为{_kind_label(kind)}。"
+                ),
+            }
+        )
+        return checks
+
     duration = float(meta.get("duration") or 0.0)
     if role == "speaking_video" and kind == "video":
         if duration < 8.0:
@@ -762,7 +907,45 @@ def _build_material_checks(*, role: str, kind: str, meta: dict[str, Any]) -> lis
             checks.append({"level": "ok", "message": "声音采样基础参数达标，可用于语音克隆。"})
         return checks
 
+    if role == "portrait_photo" and kind == "image":
+        checks.append({"level": "ok", "message": "肖像照已入库，可用于形象核验和模板管理。"})
+        return checks
+
     return checks
+
+
+def _expected_kind_for_role(role: str) -> str:
+    return {
+        "speaking_video": "video",
+        "portrait_photo": "image",
+        "voice_sample": "audio",
+    }.get(role, "other")
+
+
+def _kind_label(kind: str) -> str:
+    return {
+        "video": "视频",
+        "image": "图片",
+        "audio": "音频",
+        "other": "可人工复核",
+    }.get(kind, str(kind or "未知"))
+
+
+def _has_ready_material(files: list[dict[str, Any]], role: str) -> bool:
+    return any(
+        str(item.get("role") or "") == role
+        and avatar_material_role_matches_kind(item.get("role"), item.get("kind"))
+        and not _has_blocking_material_issues([item])
+        for item in files
+    )
+
+
+def _has_blocking_material_issues(files: list[dict[str, Any]]) -> bool:
+    return any(
+        str(check.get("level") or "").strip().lower() == "error"
+        for file in files
+        for check in (file.get("checks") or [])
+    )
 
 
 def _merge_checks(file_record: dict[str, Any], blocking_issues: list[str], warnings: list[str]) -> None:

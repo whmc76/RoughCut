@@ -64,3 +64,50 @@ def test_publish_ready_titles_pass() -> None:
 
     assert result["publish_ready"] is True
     assert result["blocking_reasons"] == []
+
+
+def test_short_low_information_title_blocks_publish() -> None:
+    result = assess_platform_titles(
+        "xiaohongshu",
+        [
+            "MOT风灵锆合金到手真香吗",
+            "版本差异先看",
+            "MOT风灵推牌开箱先看手感",
+        ],
+        content_profile=_profile(),
+    )
+
+    assert result["publish_ready"] is False
+    assert any("信息量过弱" in reason or "没有主体锚点" in reason for reason in result["blocking_reasons"])
+    assert any("创作方向" in hint or "具体主体" in hint for hint in result["repair_hints"])
+
+
+def test_short_anchored_hook_title_passes() -> None:
+    result = assess_platform_titles(
+        "xiaohongshu",
+        [
+            "MOT风灵锆合金到手真香吗",
+            "MOT风灵推牌开箱先看手感",
+            "风灵音叉推牌细节太毒",
+        ],
+        content_profile=_profile(),
+    )
+
+    assert result["publish_ready"] is True
+    assert result["blocking_reasons"] == []
+
+
+def test_chinese_source_youtube_titles_do_not_need_english_review_terms() -> None:
+    result = assess_platform_titles(
+        "youtube",
+        [
+            "MOT风灵音叉推牌锆合金版开箱评测",
+            "MOT风灵锆合金版上手体验和细节差异",
+            "MOT风灵推牌锆合金版值不值得选",
+        ],
+        content_profile=_profile(),
+    )
+
+    assert result["publish_ready"] is True
+    assert not any("平台常用表达" in warning for warning in result["warnings"])
+    assert not any("YouTube 自动改成英文" in hint for hint in result["repair_hints"])

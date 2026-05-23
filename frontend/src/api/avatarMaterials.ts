@@ -4,6 +4,11 @@ import { apiPath, request, requestForm } from "./core";
 export const avatarMaterialsApi = {
   getAvatarMaterials: () => request<AvatarMaterialLibrary>("/avatar-materials"),
   getAvatarPublicationProfiles: () => request<AvatarPublicationProfileList>("/avatar-materials/publication-profiles"),
+  matchPublicationBrowserLogin: (profileId: string, browser: string, platforms: string[]) =>
+    request<AvatarPublicationProfileList>(`/avatar-materials/publication-profiles/${encodeURIComponent(profileId)}/match-browser-login`, {
+      method: "POST",
+      body: JSON.stringify({ browser, platforms }),
+    }),
   uploadAvatarMaterialProfile: (
     displayName: string,
     presenterAlias: string,

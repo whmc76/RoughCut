@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncGenerator
 
@@ -16,6 +17,7 @@ class Base(DeclarativeBase):
 
 
 _engine = None
+_engine_loop_id = None
 _session_factory = None
 _worker_mode = False  # Set True in Celery workers to always create fresh engines
 
@@ -27,32 +29,12 @@ def set_worker_mode(enabled: bool = True) -> None:
 
 
 def get_engine():
-    global _engine
-    if _worker_mode or _engine is None:
-        settings = get_settings()
-        # SQLAlchemy's asyncpg pool can retain a connection that is still busy
-        # after dev reloads or worker handoffs. Use short-lived connections for
-        # workers, Windows local runs, and Docker dev when DB_USE_NULL_POOL=true.
-        if _worker_mode or os.name == "nt" or settings.db_use_null_pool:
-            _engine = create_async_engine(
-                settings.database_url,
-                echo=False,
-                poolclass=NullPool,
-            )
-        elif _uses_sqlite(settings.database_url):
-            _engine = create_async_engine(
-                settings.database_url,
-                echo=False,
-            )
-        else:
-            _engine = create_async_engine(
-                settings.database_url,
-                echo=False,
-                pool_size=settings.db_pool_size,
-                max_overflow=settings.db_max_overflow,
-                pool_timeout=settings.db_pool_timeout_sec,
-                pool_recycle=settings.db_pool_recycle_sec,
-            )
+    global _engine, _engine_loop_id, _session_factory
+    loop_id = _current_loop_id()
+    if _worker_mode or _engine is None or _engine_loop_id != loop_id:
+        _engine = _create_engine()
+        _engine_loop_id = loop_id
+        _session_factory = None
     return _engine
 
 
@@ -82,3 +64,36 @@ def _uses_sqlite(database_url: str) -> bool:
         return make_url(database_url).drivername.startswith("sqlite")
     except Exception:
         return str(database_url or "").lower().startswith("sqlite")
+
+
+def _current_loop_id() -> int | None:
+    try:
+        return id(asyncio.get_running_loop())
+    except RuntimeError:
+        return None
+
+
+def _create_engine():
+    settings = get_settings()
+    # SQLAlchemy's asyncpg pool can retain loop-bound connections after dev
+    # reloads or worker handoffs. Use short-lived connections for workers,
+    # Windows local runs, and Docker dev when DB_USE_NULL_POOL=true.
+    if _worker_mode or os.name == "nt" or settings.db_use_null_pool:
+        return create_async_engine(
+            settings.database_url,
+            echo=False,
+            poolclass=NullPool,
+        )
+    if _uses_sqlite(settings.database_url):
+        return create_async_engine(
+            settings.database_url,
+            echo=False,
+        )
+    return create_async_engine(
+        settings.database_url,
+        echo=False,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        pool_timeout=settings.db_pool_timeout_sec,
+        pool_recycle=settings.db_pool_recycle_sec,
+    )

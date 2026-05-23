@@ -85,6 +85,8 @@ export function formatDirtyKeyLabel(key: string): string {
     "packaging.avatar_overlay_border_color": "数字人描边颜色",
     "packaging.export_resolution_mode": "导出分辨率模式",
     "packaging.export_resolution_preset": "导出分辨率预设",
+    "packaging.export_frame_rate_mode": "导出帧率模式",
+    "packaging.export_frame_rate_preset": "导出帧率预设",
   };
   return knownLabels[key] ?? key;
 }

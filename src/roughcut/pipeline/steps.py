@@ -7851,6 +7851,8 @@ async def run_edit_plan(job_id: str) -> dict:
             ),
             export_resolution_mode=str(packaging_plan.get("export_resolution_mode") or "source"),
             export_resolution_preset=str(packaging_plan.get("export_resolution_preset") or "1080p"),
+            export_frame_rate_mode=str(packaging_plan.get("export_frame_rate_mode") or "source"),
+            export_frame_rate_preset=str(packaging_plan.get("export_frame_rate_preset") or "30"),
             creative_profile=_job_creative_profile(job),
             ai_director_plan=ai_director_artifact.data_json if ai_director_artifact else None,
             avatar_commentary_plan=avatar_artifact.data_json if avatar_artifact else None,
@@ -10381,6 +10383,9 @@ async def _overlay_avatar_segments_picture_in_picture(
     sample_probe = await probe(Path(str(available_segments[0]["video_local_path"])))
     avatar_width = max(1, int(getattr(sample_probe, "width", 0) or 1))
     avatar_height = max(1, int(getattr(sample_probe, "height", 0) or 1))
+    base_fps = float(getattr(base_probe, "fps", 0.0) or 0.0)
+    sample_avatar_fps = float(getattr(sample_probe, "fps", 0.0) or 0.0)
+    avatar_fps_cache = {str(Path(str(available_segments[0]["video_local_path"]))): sample_avatar_fps}
     overlay_width = max(180, int(round(base_width * max(0.12, min(scale, 0.45)))))
     overlay_height = max(180, int(round(overlay_width * (avatar_height / avatar_width))))
     resolved_margin = max(margin, int(round(min(base_width, base_height) * max(0.02, min(safe_margin_ratio, 0.2)))))
@@ -10425,6 +10430,15 @@ async def _overlay_avatar_segments_picture_in_picture(
         if end_time <= start_time:
             end_time = start_time + segment_duration
         enable_expr = f"between(t,{start_time:.6f},{end_time:.6f})"
+        segment_video_path = Path(str(segment["video_local_path"]))
+        segment_avatar_fps = avatar_fps_cache.get(str(segment_video_path))
+        if segment_avatar_fps is None:
+            try:
+                segment_probe = await probe(segment_video_path)
+                segment_avatar_fps = float(getattr(segment_probe, "fps", 0.0) or 0.0)
+            except Exception:
+                segment_avatar_fps = sample_avatar_fps
+            avatar_fps_cache[str(segment_video_path)] = segment_avatar_fps
         avatar_filter = _build_rounded_rgba_filter(
             input_label=f"{index}:v",
             output_label=f"pipfg{index}",
@@ -10434,7 +10448,7 @@ async def _overlay_avatar_segments_picture_in_picture(
             extra_filters=(
                 f"trim=duration={segment_duration:.6f},"
                 f"setpts=PTS-STARTPTS+{start_time:.6f}/TB,"
-                f"scale={overlay_width}:{overlay_height}"
+                f"{_build_avatar_picture_in_picture_filters(base_duration=segment_duration, base_fps=base_fps, avatar_duration=segment_duration, avatar_fps=segment_avatar_fps, overlay_width=overlay_width, overlay_height=overlay_height)}"
             ),
         )
         filter_parts.append(avatar_filter)

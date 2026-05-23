@@ -252,7 +252,7 @@ TRANSCRIPTION_PROVIDER=openai
 TRANSCRIPTION_MODEL=gpt-4o-transcribe
 ```
 
-智能发布封面默认使用 Codex 内置 `image_gen` 工作流：系统会先用候选帧合成接触表识别高光帧，再为每个平台写出一份 `*.codex-imagegen.json` 请求清单和参考帧；请求未完成或生成失败时，该平台物料保持 `publish_ready=false`，不会生成可发布兜底封面。只有显式设置 `INTELLIGENT_COPY_COVER_IMAGE_BACKEND=openai_images_api` 时，才会走直接 OpenAI Images API 后端。
+智能发布封面默认使用 Codex 内置 `image_gen` 工作流：系统会先用候选帧合成接触表识别高光帧，再为每个平台写出一份 `*.codex-imagegen.json` 请求清单和参考帧；请求未完成或生成失败时，该平台物料保持 `publish_ready=false`，不会生成可发布兜底封面。只有显式设置 `INTELLIGENT_COPY_COVER_IMAGE_BACKEND=openai_images_api` 时，才会走直接 OpenAI Images API 后端。Codex 路径里的 `INTELLIGENT_COPY_COVER_CODEX_RUNNER_MODEL` 只控制执行 `image_gen` 调用的 Codex 文本代理，默认 `gpt-5.4-mini` + `low`；真正影响画面质量的是请求里的 prompt、尺寸/比例、文字约束、QC 和重试策略，不是把执行代理改成 `gpt-5.5`。
 
 Codex 图片请求完成后，用 `uv run python scripts/run_codex_imagegen_queue.py <smart-copy目录> --complete <请求json> --result <Codex生成图片>` 回填并标记完成；只有请求 JSON 状态为 `completed` 且输出文件存在，封面才会进入可发布状态。
 
@@ -698,7 +698,7 @@ ROUGHCUT_ACP_BRIDGE_FALLBACK_BACKEND=codex
 TELEGRAM_AGENT_CLAUDE_MODEL=opus
 ROUGHCUT_ACP_BRIDGE_CLAUDE_MODEL=opus
 ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND=codex
-ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.5
+ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.4-mini
 ```
 
 如果要让内置 ACP bridge 改走 Codex，可以改成：
@@ -707,11 +707,11 @@ ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.5
 TELEGRAM_AGENT_ACP_COMMAND=uv run python scripts/acp_bridge.py
 ROUGHCUT_ACP_BRIDGE_BACKEND=codex
 ROUGHCUT_ACP_BRIDGE_CODEX_COMMAND=codex
-ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.5
+ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.4-mini
 ```
 
 如果不显式配置 `TELEGRAM_AGENT_ACP_COMMAND`，Telegram agent 也会默认回退到仓库内置的 `scripts/acp_bridge.py`。
-当前推荐链路是：ACP 主走 Claude Code `opus`，失败时自动 fallback 到 Codex `gpt-5.5` low reasoning。
+当前推荐链路是：ACP 主走 Claude Code `opus`，失败时自动 fallback 到 Codex `gpt-5.4-mini` low reasoning。
 | `AUTO_CONFIRM_CONTENT_PROFILE` | `true` | 高置信度内容摘要自动确认，避免任务卡在人工核对 |
 | `CONTENT_PROFILE_REVIEW_THRESHOLD` | `0.72` | 内容摘要自动确认阈值，范围 `0.0` 到 `1.0` |
 | `AUTO_ACCEPT_GLOSSARY_CORRECTIONS` | `true` | 高置信度术语纠错自动接受，只保留风险项待确认 |
@@ -723,6 +723,8 @@ ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.5
 | `INTELLIGENT_COPY_COVER_IMAGE_MODEL` | `image2` | 直接 Images API 后端使用的图像编辑模型；Codex 内置路径不依赖这个 API 参数 |
 | `INTELLIGENT_COPY_COVER_IMAGE_QUALITY` | `medium` | 直接 Images API 后端使用的图像编辑质量 |
 | `INTELLIGENT_COPY_COVER_IMAGE_TIMEOUT_SEC` | `90` | 智能发布单张封面图像编辑超时（秒） |
+| `INTELLIGENT_COPY_COVER_CODEX_RUNNER_MODEL` | `gpt-5.4-mini` | Codex 内置路径的执行代理模型；只负责理解请求、调用 `image_gen`、保存文件，不是底层图像模型 |
+| `INTELLIGENT_COPY_COVER_CODEX_RUNNER_EFFORT` | `low` | Codex 内置路径的执行代理推理强度；默认低推理即可，画质优先通过 prompt contract / QC / 重试策略提升 |
 | `PACKAGING_ASSET_DIR` | `assets/packaging` | 包装素材持久目录；不要放在输出目录，避免清理成片时误删 BGM/水印/片头片尾 |
 | `PACKAGING_ASSET_STORAGE_BACKEND` | `local` | 包装素材后端，当前为本地目录；预留给后续 OSS 热切换 |
 | `PACKAGING_SELECTION_REVIEW_GAP` | `0.08` | BGM/插入素材首选与次优的最小安全分差，过近时建议确认 |

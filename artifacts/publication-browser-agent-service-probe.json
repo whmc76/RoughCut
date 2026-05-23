@@ -1,0 +1,1124 @@
+{
+  "result": {
+    "contract": "browser_agent_publication_inventory_v1",
+    "status": "partial",
+    "source": "browser_agent_inventory",
+    "probe_id": "da9107cd-f3ba-4c09-922a-cb1e147f3a87",
+    "browser": "chrome",
+    "generated_at": "2026-05-21T20:10:18.713Z",
+    "platforms": {
+      "bilibili": {
+        "status": "partial",
+        "platform": "bilibili",
+        "message": "已在不点击发布按钮的前提下进行草稿上传摸底，并读取可见/已展开控件。",
+        "route": {
+          "url": "https://member.bilibili.com/platform/upload/video/frame",
+          "title": "创作中心 - 哔哩哔哩弹幕视频网 - ( ゜- ゜)つロ 乾杯~",
+          "domains": [
+            "member.bilibili.com",
+            "member.bilibili.com/platform/upload"
+          ]
+        },
+        "field_groups": [
+          {
+            "key": "title",
+            "label": "标题",
+            "controls": [
+              {
+                "tag": "input",
+                "role": "",
+                "type": "text",
+                "label": "MOT 风灵音叉推牌 锆合金版本",
+                "checked": false
+              }
+            ]
+          },
+          {
+            "key": "tags",
+            "label": "标签/话题",
+            "controls": [
+              {
+                "tag": "input",
+                "role": "",
+                "type": "text",
+                "label": "按回车键Enter创建标签",
+                "checked": false
+              }
+            ]
+          },
+          {
+            "key": "bilibili_settings",
+            "label": "B站投稿设置",
+            "controls": [
+              {
+                "label": "创作权益"
+              },
+              {
+                "label": "将以下所有视频加入合集"
+              },
+              {
+                "label": "创作声明"
+              },
+              {
+                "label": "分区"
+              },
+              {
+                "label": "标签"
+              },
+              {
+                "label": "还可以添加7个标签"
+              },
+              {
+                "label": "推荐标签："
+              },
+              {
+                "label": "定时发布"
+              },
+              {
+                "label": "加入合集"
+              },
+              {
+                "label": "请选择合集"
+              },
+              {
+                "label": "更多设置 （含声明与权益、视频元素、互动管理等）"
+              },
+              {
+                "label": "立即投稿"
+              }
+            ]
+          }
+        ],
+        "option_groups": [
+          {
+            "key": "collections",
+            "label": "合集/栏目/播放列表",
+            "options": [
+              "将以下所有视频加入合集",
+              "MOT 风灵音叉推牌 锆合金版本",
+              "添加视频",
+              "添加分P",
+              "更换视频",
+              "基本设置一键填写",
+              "*",
+              "加入合集",
+              "请选择合集",
+              "商业推广",
+              "增加商业推广信息",
+              "更多设置 （含声明与权益、视频元素、互动管理等）",
+              "存草稿",
+              "立即投稿",
+              "信息填完后，就可投稿！不需等待上传完成哦~",
+              "开启后视频上传完成第一时间通知",
+              "选择合集",
+              "内容无需标注",
+              "含AI生成内容",
+              "含虚构演绎内容",
+              "内容含营销信息",
+              "个人观点，仅供参考",
+              "内容为转载"
+            ]
+          },
+          {
+            "key": "categories",
+            "label": "分类/分区",
+            "options": [
+              "分区",
+              "生活兴趣",
+              "标签",
+              "原创",
+              "桌游棋牌",
+              "教程攻略",
+              "还可以添加7个标签",
+              "推荐标签："
+            ]
+          },
+          {
+            "key": "declarations",
+            "label": "声明/权益/内容类型",
+            "options": [
+              "创作权益",
+              "社区公约",
+              "创作设置",
+              "批量操作",
+              "将以下所有视频加入合集",
+              "MOT 风灵音叉推牌 锆合金版本",
+              "创作声明",
+              "分区",
+              "生活兴趣",
+              "标签",
+              "原创",
+              "桌游棋牌",
+              "教程攻略",
+              "还可以添加7个标签",
+              "推荐标签：",
+              "电子烟",
+              "蒸汽烟",
+              "魔术",
+              "更多设置 （含声明与权益、视频元素、互动管理等）",
+              "存草稿",
+              "立即投稿",
+              "信息填完后，就可投稿！不需等待上传完成哦~",
+              "开启后视频上传完成第一时间通知",
+              "member.bilibili.com想要",
+              "显示通知",
+              "禁止",
+              "含AI生成内容",
+              "含虚构演绎内容",
+              "内容含营销信息",
+              "个人观点，仅供参考",
+              "内容为转载",
+              "是否添加内容授权声明（非必选）",
+              "内容为自制：未经作者允许，禁止转载"
+            ]
+          },
+          {
+            "key": "bilibili_sections",
+            "label": "B站分区候选",
+            "options": [
+              "分区",
+              "生活兴趣",
+              "标签",
+              "原创",
+              "桌游棋牌",
+              "教程攻略",
+              "还可以添加7个标签",
+              "推荐标签：",
+              "电子烟",
+              "生活记录",
+              "戒烟",
+              "记录",
+              "高能",
+              "分享",
+              "版本",
+              "风灵",
+              "合金"
+            ]
+          }
+        ],
+        "operation_steps": [
+          {
+            "index": 1,
+            "label": "打开 B站创作中心投稿页"
+          },
+          {
+            "index": 2,
+            "label": "上传视频和封面"
+          },
+          {
+            "index": 3,
+            "label": "填写标题、简介和标签"
+          },
+          {
+            "index": 4,
+            "label": "选择分区，EDC/装备类优先从真实分区候选中评估户外潮流、数码、生活等选项"
+          },
+          {
+            "index": 5,
+            "label": "选择合集/系列、声明与权益等更多设置"
+          },
+          {
+            "index": 6,
+            "label": "设置定时或保存草稿，发布前再次验证控件"
+          }
+        ],
+        "warnings": [],
+        "probe_meta": {
+          "draft_upload_requested": true,
+          "upload": {
+            "uploaded": true,
+            "skipped": true,
+            "reason": "media_already_present"
+          },
+          "actions": [
+            {
+              "clicked": true,
+              "text": "生活兴趣",
+              "label": "生活兴趣"
+            },
+            {
+              "clicked": true,
+              "text": "加入合集",
+              "label": "加入合集"
+            },
+            {
+              "clicked": true,
+              "text": "请选择合集",
+              "label": "请选择合集"
+            },
+            {
+              "clicked": true,
+              "text": "创作声明",
+              "label": "请选择符合您视频内容的创作声明"
+            }
+          ]
+        }
+      },
+      "xiaohongshu": {
+        "status": "partial",
+        "platform": "xiaohongshu",
+        "message": "已在不点击发布按钮的前提下进行草稿上传摸底，并读取可见/已展开控件。",
+        "route": {
+          "url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+          "title": "小红书创作服务平台",
+          "domains": [
+            "creator.xiaohongshu.com"
+          ]
+        },
+        "field_groups": [
+          {
+            "key": "title",
+            "label": "标题",
+            "controls": [
+              {
+                "tag": "input",
+                "role": "",
+                "type": "text",
+                "label": "填写标题会有更多赞哦",
+                "checked": false
+              }
+            ]
+          },
+          {
+            "key": "tags",
+            "label": "标签/话题",
+            "controls": [
+              {
+                "tag": "button",
+                "role": "",
+                "type": "",
+                "label": "话题",
+                "checked": false
+              }
+            ]
+          },
+          {
+            "key": "xiaohongshu_content_settings",
+            "label": "小红书内容设置",
+            "controls": [
+              {
+                "label": "内容设置"
+              },
+              {
+                "label": "添加章节"
+              },
+              {
+                "label": "加入合集"
+              },
+              {
+                "label": "原创声明"
+              },
+              {
+                "label": "添加内容类型声明"
+              },
+              {
+                "label": "添加地点"
+              },
+              {
+                "label": "选择群聊"
+              },
+              {
+                "label": "标记地点或标记朋友"
+              },
+              {
+                "label": "添加路线"
+              }
+            ]
+          }
+        ],
+        "option_groups": [
+          {
+            "key": "collections",
+            "label": "合集/栏目/播放列表",
+            "options": [
+              "加入合集",
+              "汇集系列视频，有利于连续性观看",
+              "选择合集",
+              "原创声明",
+              "添加内容类型声明",
+              "添加组件",
+              "添加地点",
+              "选择群聊",
+              "关联直播预告",
+              "标记地点或标记朋友"
+            ]
+          },
+          {
+            "key": "declarations",
+            "label": "声明/权益/内容类型",
+            "options": [
+              "原创声明",
+              "添加内容类型声明",
+              "添加组件",
+              "添加地点",
+              "选择群聊",
+              "关联直播预告",
+              "标记地点或标记朋友",
+              "添加路线",
+              "店内商品"
+            ]
+          },
+          {
+            "key": "group_chats",
+            "label": "群聊/社群",
+            "options": [
+              "选择群聊",
+              "关联直播预告",
+              "标记地点或标记朋友",
+              "添加路线",
+              "店内商品",
+              "选择我店铺内的商品",
+              "添加商品",
+              "更多设置"
+            ]
+          },
+          {
+            "key": "xiaohongshu_declarations",
+            "label": "小红书声明",
+            "options": [
+              "原创声明",
+              "添加内容类型声明",
+              "添加组件",
+              "添加地点",
+              "选择群聊",
+              "关联直播预告",
+              "标记地点或标记朋友",
+              "添加路线",
+              "店内商品"
+            ]
+          },
+          {
+            "key": "xiaohongshu_group_chats",
+            "label": "小红书群聊",
+            "options": [
+              "FAS机神圣殿 × 潮玩EDC",
+              "首页",
+              "笔记管理",
+              "数据看板",
+              "活动中心",
+              "笔记灵感",
+              "创作学院",
+              "#EDC",
+              "#固态硬盘",
+              "#数码EDC",
+              "更多",
+              "话题",
+              "用户",
+              "表情",
+              "0",
+              "/1000",
+              "活动话题",
+              "选择群聊",
+              "关联直播预告",
+              "标记地点或标记朋友",
+              "添加路线",
+              "店内商品",
+              "选择我店铺内的商品",
+              "添加商品",
+              "更多设置"
+            ]
+          }
+        ],
+        "operation_steps": [
+          {
+            "index": 1,
+            "label": "打开小红书创作服务平台发布笔记页"
+          },
+          {
+            "index": 2,
+            "label": "上传视频和封面"
+          },
+          {
+            "index": 3,
+            "label": "填写标题、正文、话题"
+          },
+          {
+            "index": 4,
+            "label": "展开内容设置"
+          },
+          {
+            "index": 5,
+            "label": "选择加入合集、原创声明、内容类型声明、群聊、地点/路线等可用选项"
+          },
+          {
+            "index": 6,
+            "label": "设置定时或保存草稿，发布前再次验证控件"
+          }
+        ],
+        "warnings": [],
+        "probe_meta": {
+          "draft_upload_requested": true,
+          "upload": {
+            "uploaded": true,
+            "skipped": true,
+            "reason": "media_already_present"
+          },
+          "actions": [
+            {
+              "clicked": true,
+              "text": "添加内容类型声明",
+              "label": "添加内容类型声明"
+            },
+            {
+              "clicked": true,
+              "text": "选择群聊",
+              "label": "选择群聊"
+            },
+            {
+              "clicked": true,
+              "text": "公开可见",
+              "label": "公开可见"
+            }
+          ]
+        }
+      },
+      "kuaishou": {
+        "status": "partial",
+        "platform": "kuaishou",
+        "message": "已在不点击发布按钮的前提下进行草稿上传摸底，并读取可见/已展开控件。",
+        "route": {
+          "url": "https://cp.kuaishou.com/article/publish/video",
+          "title": "快手创作者服务平台",
+          "domains": [
+            "cp.kuaishou.com",
+            "cp.kuaishou.com/article/publish/video"
+          ]
+        },
+        "field_groups": [],
+        "option_groups": [
+          {
+            "key": "declarations",
+            "label": "声明/权益/内容类型",
+            "options": [
+              "5分钟搞定视频剪辑，多种AI工具提高制作效率",
+              "立即体验",
+              "www.kuaishou.com 2019~2026 @ All rights Reserved 京ICP备15023266号-136",
+              "京公网安备11010802038443号",
+              "遇到",
+              "问题",
+              "你对PC版创作者服务平台是否满意？",
+              "非常不满意",
+              "不满意",
+              "一般"
+            ]
+          }
+        ],
+        "operation_steps": [
+          {
+            "index": 1,
+            "label": "打开平台创作/发布页"
+          },
+          {
+            "index": 2,
+            "label": "上传视频和封面"
+          },
+          {
+            "index": 3,
+            "label": "填写标题、正文、标签"
+          },
+          {
+            "index": 4,
+            "label": "选择平台真实可见的合集、分类、声明和定时设置"
+          },
+          {
+            "index": 5,
+            "label": "发布前再次验证页面和字段变化"
+          }
+        ],
+        "warnings": [],
+        "probe_meta": {
+          "draft_upload_requested": true,
+          "upload": {
+            "uploaded": true,
+            "input": {
+              "type": "file",
+              "accept": "video/*,.mp4,.mov,.flv,.f4v,.webm,.mkv,.rm,.rmvb,.m4v,.3gp,.3g2,.wmv,.avi,.asf,.mpg,.mpeg,.ts",
+              "style": "display: none; opacity: 0; width: 0px; height: 0px;"
+            },
+            "fileInputCount": 1
+          },
+          "actions": []
+        }
+      },
+      "wechat-channels": {
+        "status": "partial",
+        "platform": "wechat-channels",
+        "message": "已在不点击发布按钮的前提下进行草稿上传摸底，并读取可见/已展开控件。",
+        "route": {
+          "url": "https://channels.weixin.qq.com/platform/activity/index",
+          "title": "视频号助手",
+          "domains": [
+            "channels.weixin.qq.com"
+          ]
+        },
+        "field_groups": [
+          {
+            "key": "schedule",
+            "label": "定时发布",
+            "controls": [
+              {
+                "tag": "label",
+                "role": "",
+                "type": "",
+                "label": "不定时",
+                "checked": false
+              },
+              {
+                "tag": "label",
+                "role": "",
+                "type": "",
+                "label": "定时",
+                "checked": false
+              }
+            ]
+          },
+          {
+            "key": "visibility",
+            "label": "可见性/发布模式",
+            "controls": [
+              {
+                "tag": "button",
+                "role": "",
+                "type": "button",
+                "label": "保存草稿",
+                "checked": false
+              }
+            ]
+          }
+        ],
+        "option_groups": [
+          {
+            "key": "collections",
+            "label": "合集/栏目/播放列表",
+            "options": [
+              "添加到合集",
+              "选择合集",
+              "链接",
+              "选择链接",
+              "不参与活动",
+              "定时发表",
+              "不定时",
+              "定时",
+              "短标题"
+            ]
+          },
+          {
+            "key": "declarations",
+            "label": "声明/权益/内容类型",
+            "options": [
+              "声明原创",
+              "声明后，作品将展示原创标记，有机会获得广告收入。",
+              "手机预览",
+              "发表",
+              "关于腾讯微信视频号运营规范问题咨询",
+              "© 1998-2026 Tencent Inc. All Rights Reserved.",
+              "页面初始化中",
+              "活动管理",
+              "你还没有发起过活动",
+              "发起活动"
+            ]
+          }
+        ],
+        "operation_steps": [
+          {
+            "index": 1,
+            "label": "打开平台创作/发布页"
+          },
+          {
+            "index": 2,
+            "label": "上传视频和封面"
+          },
+          {
+            "index": 3,
+            "label": "填写标题、正文、标签"
+          },
+          {
+            "index": 4,
+            "label": "选择平台真实可见的合集、分类、声明和定时设置"
+          },
+          {
+            "index": 5,
+            "label": "发布前再次验证页面和字段变化"
+          }
+        ],
+        "warnings": [
+          "已请求草稿上传摸底，但未能启动上传：no_file_input。"
+        ],
+        "probe_meta": {
+          "draft_upload_requested": true,
+          "upload": {
+            "uploaded": false,
+            "reason": "no_file_input",
+            "fileInputs": []
+          },
+          "actions": [
+            {
+              "clicked": true,
+              "text": "活动",
+              "label": "活动"
+            }
+          ]
+        }
+      },
+      "toutiao": {
+        "status": "partial",
+        "platform": "toutiao",
+        "message": "已在不点击发布按钮的前提下进行草稿上传摸底，并读取可见/已展开控件。",
+        "route": {
+          "url": "https://mp.toutiao.com/profile_v4/xigua/publish-video",
+          "title": "头条号",
+          "domains": [
+            "mp.toutiao.com"
+          ]
+        },
+        "field_groups": [],
+        "option_groups": [
+          {
+            "key": "declarations",
+            "label": "声明/权益/内容类型",
+            "options": [
+              "创作权益",
+              "头条认证",
+              "创作灵感",
+              "创作训练营",
+              "工具",
+              "功能实验室",
+              "直播工具",
+              "创作保护",
+              "关于今日头条|用户协议|隐私政策|社区规范|自律公约|侵权投诉|联系我们© 2026 toutiao.com All Rights Reserved"
+            ]
+          }
+        ],
+        "operation_steps": [
+          {
+            "index": 1,
+            "label": "打开平台创作/发布页"
+          },
+          {
+            "index": 2,
+            "label": "上传视频和封面"
+          },
+          {
+            "index": 3,
+            "label": "填写标题、正文、标签"
+          },
+          {
+            "index": 4,
+            "label": "选择平台真实可见的合集、分类、声明和定时设置"
+          },
+          {
+            "index": 5,
+            "label": "发布前再次验证页面和字段变化"
+          }
+        ],
+        "warnings": [
+          "已请求草稿上传摸底，但未能启动上传：no_file_input。"
+        ],
+        "probe_meta": {
+          "draft_upload_requested": true,
+          "upload": {
+            "uploaded": false,
+            "reason": "no_file_input",
+            "fileInputs": []
+          },
+          "actions": []
+        }
+      },
+      "youtube": {
+        "status": "partial",
+        "platform": "youtube",
+        "message": "已在不点击发布按钮的前提下进行草稿上传摸底，并读取可见/已展开控件。",
+        "route": {
+          "url": "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw",
+          "title": "频道信息中心 - YouTube Studio",
+          "domains": [
+            "studio.youtube.com"
+          ]
+        },
+        "field_groups": [
+          {
+            "key": "title",
+            "label": "标题",
+            "controls": [
+              {
+                "tag": "div",
+                "role": "textbox",
+                "type": "",
+                "label": "MOT 风灵音叉推牌 锆合金版本",
+                "checked": false
+              }
+            ]
+          },
+          {
+            "key": "body",
+            "label": "正文/简介",
+            "controls": [
+              {
+                "tag": "div",
+                "role": "textbox",
+                "type": "",
+                "label": "MOT 风灵音叉推牌 锆合金版本",
+                "checked": false
+              }
+            ]
+          },
+          {
+            "key": "tags",
+            "label": "标签/话题",
+            "controls": [
+              {
+                "tag": "a",
+                "role": "",
+                "type": "",
+                "label": "了解详情",
+                "checked": false
+              },
+              {
+                "tag": "input",
+                "role": "",
+                "type": "",
+                "label": "标签",
+                "checked": false
+              }
+            ]
+          },
+          {
+            "key": "visibility",
+            "label": "可见性/发布模式",
+            "controls": [
+              {
+                "tag": "button",
+                "role": "tab",
+                "type": "",
+                "label": "公开范围",
+                "checked": false
+              }
+            ]
+          }
+        ],
+        "option_groups": [
+          {
+            "key": "collections",
+            "label": "合集/栏目/播放列表",
+            "options": [
+              "播放列表",
+              "将视频整理到一个或多个播放列表中，方便观看者浏览。 了解详情",
+              "选择",
+              "观众",
+              "此视频是面向儿童的内容吗？（必填）",
+              "根据法律要求，无论你身在何处，都必须遵守《儿童在线隐私保护法》(COPPA) 和/或其他法律。你必须指明自己的视频是否为面向儿童的内容。 什么是面向儿童的内容？",
+              "面向儿童的视频不支持个性化广告和通知等功能。如果你将视频设置为面向儿童的内容，系统就更有可能在观众观看其他儿童视频时推荐你的视频。 了解详情",
+              "是，内容是面向儿童的",
+              ".",
+              "新建播放列表",
+              "新建播客",
+              "没有可用的播放列表",
+              "创建播放列表",
+              "完成",
+              "16/100",
+              "此视频已设置为非面向儿童的内容",
+              "由你设置",
+              "为遵守 YouTube 的新政策，请前往“加工的内容”部分，向我们详细说明视频的相关情况",
+              "关闭"
+            ]
+          },
+          {
+            "key": "declarations",
+            "label": "声明/权益/内容类型",
+            "options": [
+              "此视频是面向儿童的内容吗？（必填）",
+              "根据法律要求，无论你身在何处，都必须遵守《儿童在线隐私保护法》(COPPA) 和/或其他法律。你必须指明自己的视频是否为面向儿童的内容。 什么是面向儿童的内容？",
+              "面向儿童的视频不支持个性化广告和通知等功能。如果你将视频设置为面向儿童的内容，系统就更有可能在观众观看其他儿童视频时推荐你的视频。 了解详情",
+              "是，内容是面向儿童的",
+              ".",
+              "不，内容不是面向儿童的",
+              "年龄限制（高级）",
+              "展开",
+              "付费宣传内容、联合创作、字幕等",
+              "0:00 / 3:12",
+              "视频链接",
+              "https://youtu.be/p8YEnglJVCE",
+              "文件名",
+              "此视频已设置为非面向儿童的内容",
+              "由你设置",
+              "为遵守 YouTube 的新政策，请前往“加工的内容”部分，向我们详细说明视频的相关情况",
+              "关闭",
+              "收起",
+              "付费宣传内容",
+              "如果你制作视频时接受了第三方的任何有价物，必须知会我们。我们会向观看者展示一条消息，告诉他们你的视频中包含付费宣传内容。",
+              "我的视频中包含付费宣传内容（如产品植入广告、赞助广告或代言广告）",
+              "选中此复选框即表示你确认付费宣传内容符合我们的广告政策及任何适用的法律法规。 了解详情",
+              "加工的内容",
+              "你的内容是否符合以下任何一项描述？",
+              "呈现真实人物的言论或行为，但实际并非本人言行",
+              "篡改有关真实事件或地点的视频片段",
+              "生成逼真但与实情不符的场景",
+              "是",
+              "否",
+              "按照 YouTube 的政策，如果你的内容看似真实，但实则经过加工或合成，则必须告知我们。其中包括使用 AI 或其他工具制作的逼真声音或画面。查看示例",
+              "如果选择“是”，系统会为内容加上披露声明。",
+              "联合创作",
+              "通过与其他创作者合作，扩大你的观众群，并让视频触达其他创作者的观众群。 了解详情",
+              "邀请合作者",
+              "自动划分章节",
+              "章节和重要时刻可以让观众更轻松的浏览视频内容。在视频说明中自行添加章节，即可替换系统自动创建的章节。 了解详情",
+              "允许自动划分章节和创建重要时刻",
+              "涉及的地点",
+              "此视频中是否有儿童出现？",
+              "请务必遵守我们的政策，保护未成年人免遭伤害、剥削、欺凌和违反劳动法的对待。 了解详情",
+              "想要获取内容相关的总体指导意见？",
+              "我们的《社区准则》可帮助你避免陷入麻烦，并可确保 YouTube 社区保持安全和活跃。 了解详情",
+              "返回"
+            ]
+          }
+        ],
+        "operation_steps": [
+          {
+            "index": 1,
+            "label": "打开 YouTube Studio 上传或视频详情页"
+          },
+          {
+            "index": 2,
+            "label": "上传视频和缩略图"
+          },
+          {
+            "index": 3,
+            "label": "填写标题、说明、标签和播放列表"
+          },
+          {
+            "index": 4,
+            "label": "确认是否面向儿童、可见性、评论限制和通知限制"
+          },
+          {
+            "index": 5,
+            "label": "设置预约发布时间，发布前再次验证限制弹窗"
+          }
+        ],
+        "warnings": [
+          "YouTube 页面显示功能受限/COPPA/评论或通知限制，发布方案必须保留并处理该限制。"
+        ],
+        "probe_meta": {
+          "draft_upload_requested": true,
+          "upload": {
+            "uploaded": true,
+            "skipped": true,
+            "reason": "media_already_present"
+          },
+          "actions": [
+            {
+              "clicked": true,
+              "text": "创建",
+              "label": "创建"
+            },
+            {
+              "clicked": true,
+              "text": "选择",
+              "label": "选择"
+            },
+            {
+              "clicked": true,
+              "text": "不，内容不是面向儿童的",
+              "label": "不，内容不是面向儿童的"
+            },
+            {
+              "clicked": true,
+              "text": "展开",
+              "label": "展开"
+            },
+            {
+              "clicked": true,
+              "text": "公开范围",
+              "label": "公开范围"
+            }
+          ]
+        }
+      },
+      "x": {
+        "status": "partial",
+        "platform": "x",
+        "message": "已在不点击发布按钮的前提下进行草稿上传摸底，并读取可见/已展开控件。",
+        "route": {
+          "url": "https://x.com/compose/post/schedule",
+          "title": "x.com/compose/post",
+          "domains": [
+            "x.com",
+            "twitter.com"
+          ]
+        },
+        "field_groups": [
+          {
+            "key": "title",
+            "label": "标题",
+            "controls": [
+              {
+                "tag": "div",
+                "role": "",
+                "type": "",
+                "label": "For you Following See new posts What’s happening? Post Your Home Timeline Elon Musk @elonmusk · May 20 Release notes for Grok Build will be published daily Quote skcd @skcd42 · May 20 Bug fixes shipping for Grok Build (release notes will be available in the TUI itself) - Copy only path on ReadTool block - Redirect stderr to /dev/null to fix incorrect TUI text interleaving - Distinguish system/user initiated cancellations - Guard against crash conditions in 2K 2.8K 23K 28M Kangmin Lee | 이강민 @kangminlee · 17h The show writers turned Homelander into a Trump analogue, and this is how they choose to end The Boys. This entire show was just a deranged sexual humiliation fantasy projected onto Trump. They can't even produce a decent superhero parody without injecting their twisted fetishes Show more 799 771 773 14K 1.1M Elon Musk @elonmusk · 12h Pathetic 802 803 772 775 20K 21K 2.5M 𝓘. @IANLOOKS · 17h ☆ #IAN #이안 24 474 475 7.7K 7.8K VideoArtGame @VideoArtGame · 18h Illustration | Death Note - Misa Amane Artist: @gamppan9 5 1.7K 16K 149K 150K Erling Haaland @ErlingHaaland · May 21 Not the ending we hoped for, but we’ll use this feeling the right way next season. To every City fan who travelled with us this season, thank you Congrats to Arsenal for the title. 7.3K 13K 139K 140K 4.6M @twaniimals · 13h 18 173 1.7K 1.8K 33K 34K breeze @wyabreeze · 3h just got my first car 571 582 368 386 4.3K 4.4K 998K 1M Kurrco @Kurrco · 59m Drake linked up with NYFlavaaa who always listens to Drake's music while driving with his kids 337 340 2.1K 2.2K 15K 16K 660K 666K",
+                "checked": false
+              },
+              {
+                "tag": "div",
+                "role": "",
+                "type": "",
+                "label": "Elon Musk @elonmusk · May 20 Release notes for Grok Build will be published daily Quote skcd @skcd42 · May 20 Bug fixes shipping for Grok Build (release notes will be available in the TUI itself) - Copy only path on ReadTool block - Redirect stderr to /dev/null to fix incorrect TUI text interleaving - Distinguish system/user initiated cancellations - Guard against crash conditions in 2K 2.8K 23K 28M Kangmin Lee | 이강민 @kangminlee · 17h The show writers turned Homelander into a Trump analogue, and this is how they choose to end The Boys. This entire show was just a deranged sexual humiliation fantasy projected onto Trump. They can't even produce a decent superhero parody without injecting their twisted fetishes Show more 799 771 773 14K 1.1M Elon Musk @elonmusk · 12h Pathetic 802 803 772 775 20K 21K 2.5M 𝓘. @IANLOOKS · 17h ☆ #IAN #이안 24 474 475 7.7K 7.8K VideoArtGame @VideoArtGame · 18h Illustration | Death Note - Misa Amane Artist: @gamppan9 5 1.7K 16K 149K 150K Erling Haaland @ErlingHaaland · May 21 Not the ending we hoped for, but we’ll use this feeling the right way next season. To every City fan who travelled with us this season, thank you Congrats to Arsenal for the title. 7.3K 13K 139K 140K 4.6M @twaniimals · 13h 18 173 1.7K 1.8K 33K 34K breeze @wyabreeze · 3h just got my first car 571 582 368 386 4.3K 4.4K 998K 1M Kurrco @Kurrco · 59m Drake linked up with NYFlavaaa who always listens to Drake's music while driving with his kids 337 340 2.1K 2.2K 15K 16K 660K 666K",
+                "checked": false
+              },
+              {
+                "tag": "div",
+                "role": "",
+                "type": "",
+                "label": "For you Following See new posts What’s happening? Post Your Home Timeline Elon Musk @elonmusk · May 20 Release notes for Grok Build will be published daily Quote skcd @skcd42 · May 20 Bug fixes shipping for Grok Build (release notes will be available in the TUI itself) - Copy only path on ReadTool block - Redirect stderr to /dev/null to fix incorrect TUI text interleaving - Distinguish system/user initiated cancellations - Guard against crash conditions in 2K 2.8K 23K 28M Kangmin Lee | 이강민 @kangminlee · 17h The show writers turned Homelander into a Trump analogue, and this is how they choose to end The Boys. This entire show was just a deranged sexual humiliation fantasy projected onto Trump. They can't even produce a decent superhero parody without injecting their twisted fetishes Show more 799 771 773 14K 1.1M Elon Musk @elonmusk · 12h Pathetic 802 803 772 775 20K 21K 2.5M 𝓘. @IANLOOKS · 17h ☆ #IAN #이안 24 474 475 7.7K 7.8K VideoArtGame @VideoArtGame · 18h Illustration | Death Note - Misa Amane Artist: @gamppan9 5 1.7K 16K 149K 150K Erling Haaland @ErlingHaaland · May 21 Not the ending we hoped for, but we’ll use this feeling the right way next season. To every City fan who travelled with us this season, thank you Congrats to Arsenal for the title. 7.3K 13K 139K 140K 4.6M @twaniimals · 13h 18 173 1.7K 1.8K 33K 34K breeze @wyabreeze · 3h just got my first car 571 582 368 386 4.3K 4.4K 998K 1M Kurrco @Kurrco · 59m Drake linked up with NYFlavaaa who always listens to Drake's music while driving with his kids 337 340 2.1K 2.2K 15K 16K 666K 673K",
+                "checked": false
+              },
+              {
+                "tag": "div",
+                "role": "",
+                "type": "",
+                "label": "Elon Musk @elonmusk · May 20 Release notes for Grok Build will be published daily Quote skcd @skcd42 · May 20 Bug fixes shipping for Grok Build (release notes will be available in the TUI itself) - Copy only path on ReadTool block - Redirect stderr to /dev/null to fix incorrect TUI text interleaving - Distinguish system/user initiated cancellations - Guard against crash conditions in 2K 2.8K 23K 28M Kangmin Lee | 이강민 @kangminlee · 17h The show writers turned Homelander into a Trump analogue, and this is how they choose to end The Boys. This entire show was just a deranged sexual humiliation fantasy projected onto Trump. They can't even produce a decent superhero parody without injecting their twisted fetishes Show more 799 771 773 14K 1.1M Elon Musk @elonmusk · 12h Pathetic 802 803 772 775 20K 21K 2.5M 𝓘. @IANLOOKS · 17h ☆ #IAN #이안 24 474 475 7.7K 7.8K VideoArtGame @VideoArtGame · 18h Illustration | Death Note - Misa Amane Artist: @gamppan9 5 1.7K 16K 149K 150K Erling Haaland @ErlingHaaland · May 21 Not the ending we hoped for, but we’ll use this feeling the right way next season. To every City fan who travelled with us this season, thank you Congrats to Arsenal for the title. 7.3K 13K 139K 140K 4.6M @twaniimals · 13h 18 173 1.7K 1.8K 33K 34K breeze @wyabreeze · 3h just got my first car 571 582 368 386 4.3K 4.4K 998K 1M Kurrco @Kurrco · 59m Drake linked up with NYFlavaaa who always listens to Drake's music while driving with his kids 337 340 2.1K 2.2K 15K 16K 666K 673K",
+                "checked": false
+              },
+              {
+                "tag": "div",
+                "role": "",
+                "type": "",
+                "label": "For you Following See new posts What’s happening? Post Your Home Timeline Elon Musk @elonmusk · May 20 Release notes for Grok Build will be published daily Quote skcd @skcd42 · May 20 Bug fixes shipping for Grok Build (release notes will be available in the TUI itself) - Copy only path on ReadTool block - Redirect stderr to /dev/null to fix incorrect TUI text interleaving - Distinguish system/user initiated cancellations - Guard against crash conditions in 2K 2.8K 23K 28M Kangmin Lee | 이강민 @kangminlee · 17h The show writers turned Homelander into a Trump analogue, and this is how they choose to end The Boys. This entire show was just a deranged sexual humiliation fantasy projected onto Trump. They can't even produce a decent superhero parody without injecting their twisted fetishes Show more 799 771 773 14K 1.1M Elon Musk @elonmusk · 12h Pathetic 802 803 772 775 20K 21K 2.5M 𝓘. @IANLOOKS · 17h ☆ #IAN #이안 24 475 476 7.7K 7.8K VideoArtGame @VideoArtGame · 18h Illustration | Death Note - Misa Amane Artist: @gamppan9 5 1.7K 16K 149K 150K Erling Haaland @ErlingHaaland · May 21 Not the ending we hoped for, but we’ll use this feeling the right way next season. To every City fan who travelled with us this season, thank you Congrats to Arsenal for the title. 7.3K 13K 139K 140K 4.6M @twaniimals · 13h 18 173 1.7K 1.8K 33K 34K breeze @wyabreeze · 3h just got my first car 571 582 368 386 4.3K 4.4K 998K 1M Kurrco @Kurrco · 59m Drake linked up with NYFlavaaa who always listens to Drake's music while driving with his kids 337 340 2.1K 2.2K 15K 16K 666K 673K",
+                "checked": false
+              },
+              {
+                "tag": "div",
+                "role": "",
+                "type": "",
+                "label": "Elon Musk @elonmusk · May 20 Release notes for Grok Build will be published daily Quote skcd @skcd42 · May 20 Bug fixes shipping for Grok Build (release notes will be available in the TUI itself) - Copy only path on ReadTool block - Redirect stderr to /dev/null to fix incorrect TUI text interleaving - Distinguish system/user initiated cancellations - Guard against crash conditions in 2K 2.8K 23K 28M Kangmin Lee | 이강민 @kangminlee · 17h The show writers turned Homelander into a Trump analogue, and this is how they choose to end The Boys. This entire show was just a deranged sexual humiliation fantasy projected onto Trump. They can't even produce a decent superhero parody without injecting their twisted fetishes Show more 799 771 773 14K 1.1M Elon Musk @elonmusk · 12h Pathetic 802 803 772 775 20K 21K 2.5M 𝓘. @IANLOOKS · 17h ☆ #IAN #이안 24 475 476 7.7K 7.8K VideoArtGame @VideoArtGame · 18h Illustration | Death Note - Misa Amane Artist: @gamppan9 5 1.7K 16K 149K 150K Erling Haaland @ErlingHaaland · May 21 Not the ending we hoped for, but we’ll use this feeling the right way next season. To every City fan who travelled with us this season, thank you Congrats to Arsenal for the title. 7.3K 13K 139K 140K 4.6M @twaniimals · 13h 18 173 1.7K 1.8K 33K 34K breeze @wyabreeze · 3h just got my first car 571 582 368 386 4.3K 4.4K 998K 1M Kurrco @Kurrco · 59m Drake linked up with NYFlavaaa who always listens to Drake's music while driving with his kids 337 340 2.1K 2.2K 15K 16K 666K 673K",
+                "checked": false
+              }
+            ]
+          },
+          {
+            "key": "tags",
+            "label": "标签/话题",
+            "controls": [
+              {
+                "tag": "button",
+                "role": "button",
+                "type": "button",
+                "label": "Tag location",
+                "checked": false
+              }
+            ]
+          },
+          {
+            "key": "schedule",
+            "label": "定时发布",
+            "controls": [
+              {
+                "tag": "button",
+                "role": "button",
+                "type": "button",
+                "label": "Schedule post",
+                "checked": false
+              },
+              {
+                "tag": "button",
+                "role": "button",
+                "type": "button",
+                "label": "Scheduled posts",
+                "checked": false
+              }
+            ]
+          }
+        ],
+        "option_groups": [
+          {
+            "key": "declarations",
+            "label": "声明/权益/内容类型",
+            "options": [
+              "Release notes for Grok Build will be published daily",
+              "Quote",
+              "skcd",
+              "@skcd42",
+              "- Copy only path on ReadTool block",
+              "- Redirect stderr to /dev/null to fix incorrect TUI text interleaving",
+              "- Distinguish system/user initiated cancellations",
+              "- Guard against crash conditions in",
+              "2K",
+              "2.8K",
+              "23K",
+              "28M",
+              "Kangmin Lee | 이강민",
+              "@kangminlee",
+              "17h",
+              "2 days ago · Entertainment · 481.2K posts",
+              "Trending now",
+              "What’s happening",
+              "Trending in Hong Kong SAR China",
+              "readymonitor",
+              "Business & finance · Trending",
+              "Telegram",
+              "#Revolution"
+            ]
+          },
+          {
+            "key": "group_chats",
+            "label": "群聊/社群",
+            "options": [
+              "Chat",
+              "Grok",
+              "Bookmarks",
+              "Creator Studio",
+              "Premium",
+              "Profile",
+              "More",
+              "Post"
+            ]
+          }
+        ],
+        "operation_steps": [
+          {
+            "index": 1,
+            "label": "打开平台创作/发布页"
+          },
+          {
+            "index": 2,
+            "label": "上传视频和封面"
+          },
+          {
+            "index": 3,
+            "label": "填写标题、正文、标签"
+          },
+          {
+            "index": 4,
+            "label": "选择平台真实可见的合集、分类、声明和定时设置"
+          },
+          {
+            "index": 5,
+            "label": "发布前再次验证页面和字段变化"
+          }
+        ],
+        "warnings": [],
+        "probe_meta": {
+          "draft_upload_requested": true,
+          "upload": {
+            "uploaded": true,
+            "input": {
+              "accept": "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime",
+              "multiple": "",
+              "type": "file",
+              "tabindex": "-1",
+              "class": "r-8akbif r-orgf3d r-1udh08x r-u8s1d r-xjis5s r-1wyyakw",
+              "data-testid": "fileInput"
+            },
+            "fileInputCount": 1
+          },
+          "actions": [
+            {
+              "clicked": true,
+              "text": "Schedule post",
+              "label": "Schedule post"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

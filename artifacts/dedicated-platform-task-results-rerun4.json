@@ -1,0 +1,851 @@
+{
+  "submitted": {
+    "toutiao": "a73d739e918f46f4bd9daa72c662cc1d-dedicated4",
+    "xiaohongshu": "80e6c37b127e4b38a393e9561274d076-dedicated4"
+  },
+  "results": {
+    "toutiao": {
+      "task_id": "a73d739e918f46f4bd9daa72c662cc1d-dedicated4",
+      "id": "a73d739e918f46f4bd9daa72c662cc1d-dedicated4",
+      "platform": "toutiao",
+      "profile_id": "d2d15bc6d77a47b79cf20a79b56596c2",
+      "status": "needs_human",
+      "created_at": "2026-05-23T10:22:06.639Z",
+      "updated_at": "2026-05-23T10:22:23.666Z",
+      "scheduled_publish_at": "2026-05-23T19:30",
+      "result": {
+        "draft_url": "https://mp.toutiao.com/profile_v4/graphic/publish?is_new_connect=0&is_new_user=0",
+        "route": {
+          "url": "https://mp.toutiao.com/profile_v4/graphic/publish?is_new_connect=0&is_new_user=0",
+          "title": "头条号"
+        },
+        "composite_framework": {
+          "enabled": true,
+          "platform": "toutiao",
+          "framework_id": "toutiao_xigua_composite_v1",
+          "dedicated_platform_framework": true,
+          "legacy_lightweight_script_used": false,
+          "material_integrity": {
+            "platform": "toutiao",
+            "fields": {
+              "title": {
+                "expected": "锆合金版风灵音叉推牌值得入吗？先看真实体验",
+                "verified": false
+              },
+              "body": {
+                "expected": "锆合金版本的音叉推牌到手，给我的直观感受是质感和分量都上了一个台阶。相比普通版本，这个版本的光泽更沉稳，拿在手里更稳当，操作手感也更顺滑。整体做工对得起定价，适合对EDC把玩件有一定要求的用户。",
+                "verified": true
+              },
+              "tags": {
+                "expected": [
+                  "EDC玩具",
+                  "音叉推牌",
+                  "锆合金",
+                  "开箱测评",
+                  "MOT风灵"
+                ],
+                "actual_checks": [
+                  {
+                    "tag": "EDC玩具",
+                    "present": true
+                  },
+                  {
+                    "tag": "音叉推牌",
+                    "present": true
+                  },
+                  {
+                    "tag": "锆合金",
+                    "present": true
+                  },
+                  {
+                    "tag": "开箱测评",
+                    "present": true
+                  },
+                  {
+                    "tag": "MOT风灵",
+                    "present": true
+                  }
+                ],
+                "verified": true
+              },
+              "collection": {
+                "expected": "",
+                "verified": true
+              },
+              "schedule": {
+                "expected": "2026-05-23 19:30",
+                "verified": false
+              },
+              "upload_ready": {
+                "verified": true
+              },
+              "declaration": {
+                "verified": true
+              },
+              "cover": {
+                "expected_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\smart-copy\\06-toutiao-cover.jpg",
+                "verified": false,
+                "cover_required_warning": false,
+                "youtube_auto_thumbnail": false,
+                "youtube_custom_thumbnail_preview": false
+              }
+            },
+            "verified": false,
+            "failures": [
+              "title",
+              "schedule",
+              "cover"
+            ],
+            "platform_extras": {
+              "youtube_link": "",
+              "youtube_scheduled": false,
+              "youtube_thumbnail_uploading": false,
+              "route": {
+                "url": "https://mp.toutiao.com/profile_v4/graphic/publish?is_new_connect=0&is_new_user=0",
+                "title": "头条号"
+              },
+              "image_sources": [
+                "https://sf1-cdn-tos.toutiaostatic.com/img/user-avatar/efbdee1d3c63d43bbc334f5cc2eaea08~300x300.image",
+                "data:image/png;base64,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",
+                "data:image/png;base64,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"
+              ],
+              "relevant_lines": [
+                "头条号发文规范 消息 12 发布文章 116 / 30 请输入正文 展示封面 单图 三图 无封面 预览 优质的封面有利于推荐，格式支持JPEG、PNG 添加位置 标记城市，让更多同城用户看到 投放广告 投放广告赚收益不投放广告 声明首发 头条首发 符合首发质量标准且72小时内仅在头条发布的内容，可享额外激励分成 详细了解 合集 添加至合集 同时发布微头条 发布得更多收益 作品声明 取材网络引用站内个人观点，仅供参考引用AI虚构演绎，故事经历投资观点，仅供参考健康医疗分享，仅供参考 草稿已保存 共 0 字 发文设置 预览定时发布预览并发布 已开启云端自动同步 1. 草稿将自动同步至云端，你可以在不同设备上进行编辑 2. 你可前往“设置 - 功能设置 - 内容隐私” 更改该设置 我知道了 头条创作助手 AI 创作内容建议 创作热点推荐 换一换 抖音这么火，如何抓住机会赚钱 你觉得卓威es2鼠标好用吗 罗宾尼表带怎么佩戴 求助，健身环太阳舞者上衣怎么获得 带里布的袖子总是会扭吗? 暂无建议 重新检测 检测成功，暂无建议"
+              ]
+            }
+          }
+        },
+        "actions": [
+          {
+            "clicked": false
+          },
+          {
+            "kind": "media_upload",
+            "uploaded": false,
+            "reason": "no_file_input",
+            "fileInputs": []
+          },
+          {
+            "kind": "toutiao_rich_text",
+            "filled": true,
+            "actions": [
+              {
+                "field": "body",
+                "ok": true,
+                "hint": "请输入文章标题（2～30个字） 锆合金版本的音叉推牌到手，给我的直观感受是质感和分量都上了一个台阶。相比普通版本，这个版本的光泽更沉稳，拿在手里更稳当，操作手感也更顺滑。整体做工对得起定价，适合对EDC把玩件有一定要求的用户。#EDC玩具 "
+              }
+            ],
+            "verified_body": false,
+            "verified_title": false,
+            "candidates": [
+              {
+                "text": "请输入文章标题（2～30个字） 锆合金版本的音叉推牌到手，给我的直观感受是质感和分量都上了一个台阶。相比普通版本，这个版本的光泽更沉稳，拿在手里更稳当，操作手感也更顺滑。整体做工对得起定价，适合对EDC把玩件有一定要求的用户。#EDC玩具 ",
+                "area": 117000,
+                "tag": "textarea"
+              },
+              {
+                "text": "输入创作主题、观点或大纲，AI 帮你写 EDC玩具 创作热点推荐 换一换 抖音这么火，如何抓住机会赚钱 你觉得卓威es2鼠标好用吗 罗宾尼表带怎么佩戴 求助，健身环太阳舞者上衣怎么获得 带里布的袖子总是会扭吗? 创作热点推荐 换一换 抖音这",
+                "area": 5852,
+                "tag": "textarea"
+              }
+            ]
+          },
+          {
+            "kind": "toutiao_cover_entry",
+            "clicked": false
+          },
+          {
+            "kind": "toutiao_cover_entry_loose",
+            "clicked": false,
+            "loose": true,
+            "candidates": [
+              "头条号发文规范 消息 12",
+              "头条号发文规范 消息 12",
+              "头条号发文规范 消息 12",
+              "头条号发文规范",
+              "头条号发文规范",
+              "消息 12",
+              "消息 12",
+              "消息 12",
+              "消息 12",
+              "消息",
+              "12",
+              "早上好，FAS机神圣殿潮玩EDC热点图库、小视频创作收益等 5 项权益信用分100分头条认证未认证设置退出登录",
+              "FAS机神圣殿潮玩EDC的个人主页",
+              "发布文章",
+              "发布文章",
+              "发布文章",
+              "发布文章",
+              "选择表格行列数",
+              "选择表格行列数",
+              "选择表格行列数"
+            ]
+          },
+          {
+            "kind": "toutiao_cover_local_upload",
+            "clicked": false
+          },
+          {
+            "kind": "toutiao_cover_local_upload_loose",
+            "clicked": false,
+            "loose": true,
+            "candidates": [
+              "头条号发文规范 消息 12",
+              "头条号发文规范 消息 12",
+              "头条号发文规范 消息 12",
+              "头条号发文规范",
+              "头条号发文规范",
+              "消息 12",
+              "消息 12",
+              "消息 12",
+              "消息 12",
+              "消息",
+              "12",
+              "早上好，FAS机神圣殿潮玩EDC热点图库、小视频创作收益等 5 项权益信用分100分头条认证未认证设置退出登录",
+              "FAS机神圣殿潮玩EDC的个人主页",
+              "发布文章",
+              "发布文章",
+              "发布文章",
+              "发布文章",
+              "选择表格行列数",
+              "选择表格行列数",
+              "选择表格行列数"
+            ]
+          },
+          {
+            "kind": "toutiao_cover_upload",
+            "uploaded": false,
+            "reason": "no_image_file_input",
+            "fileInputs": []
+          },
+          {
+            "kind": "toutiao_cover_next",
+            "clicked": false
+          },
+          {
+            "kind": "toutiao_cover_confirm",
+            "clicked": false
+          },
+          {
+            "kind": "toutiao_tag",
+            "filled": false,
+            "reason": "field_not_found",
+            "candidates": [
+              "请输入文章标题（2～30个字） 116 / 30 116 / 30",
+              "请输入正文 请输入正文 116 / 30 请输入正文",
+              "输入创作主题、观点或大纲，AI 帮你写 创作热点推荐 换一换 抖音这么火，如何抓住机会赚钱 你觉得卓威es2鼠标好用吗 罗宾尼表带怎么佩戴 求助，健身环太阳舞者上衣怎么获得 带里布的袖子总是会扭吗? 创作热点推荐 换一换 抖音这么火，如何抓住机会赚钱 你觉得卓威es2鼠标好用吗 罗宾尼表带怎么佩戴 求助，健身环太阳舞者上衣怎么获得 带里布的袖子总是会扭吗?"
+            ]
+          },
+          {
+            "kind": "toutiao_tag",
+            "filled": false,
+            "reason": "field_not_found",
+            "candidates": [
+              "请输入文章标题（2～30个字） 116 / 30 116 / 30",
+              "请输入正文 请输入正文 116 / 30 请输入正文",
+              "输入创作主题、观点或大纲，AI 帮你写 创作热点推荐 换一换 抖音这么火，如何抓住机会赚钱 你觉得卓威es2鼠标好用吗 罗宾尼表带怎么佩戴 求助，健身环太阳舞者上衣怎么获得 带里布的袖子总是会扭吗? 创作热点推荐 换一换 抖音这么火，如何抓住机会赚钱 你觉得卓威es2鼠标好用吗 罗宾尼表带怎么佩戴 求助，健身环太阳舞者上衣怎么获得 带里布的袖子总是会扭吗?"
+            ]
+          },
+          {
+            "kind": "toutiao_tag",
+            "filled": false,
+            "reason": "field_not_found",
+            "candidates": [
+              "请输入文章标题（2～30个字） 116 / 30 116 / 30",
+              "请输入正文 请输入正文 116 / 30 请输入正文",
+              "输入创作主题、观点或大纲，AI 帮你写 创作热点推荐 换一换 抖音这么火，如何抓住机会赚钱 你觉得卓威es2鼠标好用吗 罗宾尼表带怎么佩戴 求助，健身环太阳舞者上衣怎么获得 带里布的袖子总是会扭吗? 创作热点推荐 换一换 抖音这么火，如何抓住机会赚钱 你觉得卓威es2鼠标好用吗 罗宾尼表带怎么佩戴 求助，健身环太阳舞者上衣怎么获得 带里布的袖子总是会扭吗?"
+            ]
+          },
+          {
+            "kind": "toutiao_tag",
+            "filled": false,
+            "reason": "field_not_found",
+            "candidates": [
+              "请输入文章标题（2～30个字） 116 / 30 116 / 30",
+              "请输入正文 请输入正文 116 / 30 请输入正文",
+              "输入创作主题、观点或大纲，AI 帮你写 创作热点推荐 换一换 抖音这么火，如何抓住机会赚钱 你觉得卓威es2鼠标好用吗 罗宾尼表带怎么佩戴 求助，健身环太阳舞者上衣怎么获得 带里布的袖子总是会扭吗? 创作热点推荐 换一换 抖音这么火，如何抓住机会赚钱 你觉得卓威es2鼠标好用吗 罗宾尼表带怎么佩戴 求助，健身环太阳舞者上衣怎么获得 带里布的袖子总是会扭吗?"
+            ]
+          },
+          {
+            "kind": "toutiao_tag",
+            "filled": false,
+            "reason": "field_not_found",
+            "candidates": [
+              "请输入文章标题（2～30个字） 116 / 30 116 / 30",
+              "请输入正文 请输入正文 116 / 30 请输入正文",
+              "输入创作主题、观点或大纲，AI 帮你写 创作热点推荐 换一换 抖音这么火，如何抓住机会赚钱 你觉得卓威es2鼠标好用吗 罗宾尼表带怎么佩戴 求助，健身环太阳舞者上衣怎么获得 带里布的袖子总是会扭吗? 创作热点推荐 换一换 抖音这么火，如何抓住机会赚钱 你觉得卓威es2鼠标好用吗 罗宾尼表带怎么佩戴 求助，健身环太阳舞者上衣怎么获得 带里布的袖子总是会扭吗?"
+            ]
+          },
+          {
+            "kind": "toutiao_original_declaration",
+            "clicked": false
+          },
+          {
+            "kind": "toutiao_schedule_entry",
+            "clicked": true,
+            "text": "定时发布",
+            "label": "定时发布"
+          },
+          {
+            "kind": "toutiao_schedule_set",
+            "set": false,
+            "expected": {
+              "display": "2026-05-23 19:30",
+              "date": "2026-05-23",
+              "dateLabel": "05月23日",
+              "hour": "19",
+              "minute": "30",
+              "time": "19:30"
+            },
+            "body_after_had_schedule": false,
+            "actions": [
+              {
+                "clicked": "toutiao_schedule_footer_entry",
+                "ok": true,
+                "label": "定时发布"
+              },
+              {
+                "select": "toutiao_day",
+                "ok": false,
+                "reason": "missing_toutiao_schedule_modal"
+              },
+              {
+                "select": "toutiao_hour",
+                "ok": false,
+                "reason": "missing_toutiao_schedule_modal"
+              },
+              {
+                "select": "toutiao_minute",
+                "ok": false,
+                "reason": "missing_toutiao_schedule_modal"
+              },
+              {
+                "clicked": "toutiao_schedule_footer_entry",
+                "ok": true,
+                "label": "定时发布"
+              }
+            ],
+            "relevant_text": [
+              "头条号发文规范 消息 12 发布文章 116 / 30 请输入正文 展示封面 单图 三图 无封面 预览 优质的封面有利于推荐，格式支持JPEG、PNG 添加位置 标记城市，让更多同城用户看到 投放广告 投放广告赚收益不投放广告 声明首发 头条首发 符合首发质量标准且72小时内仅在头条发布的内容，可享额外激励分成 详细了解 合集 添加至合集 同时发布微头条 发布得更多收益 作品声明 取材网络引用站内个人观点，仅供参考引用AI虚构演绎，故事经历投资观点，仅供参考健康医疗分享，仅供参考 草稿已保存 共 0 字 发文设置 预览定时发布预览并发布 已开启云端自动同步 1. 草稿将自动同步至云端，你可以在不同设备上进行编辑 2. 你可前往“设置 - 功能设置 - 内容隐私” 更改该设置 我知道了 头条创作助手 AI 创作内容建议 创作热点推荐 换一换 抖音这么火，如何抓住机会赚钱 你觉得卓威es2鼠标好用吗 罗宾尼表带怎么佩戴 求助，健身环太阳舞者上衣怎么获得 带里布的袖子总是会扭吗? 暂无建议 重新检测 检测成功，暂无建议"
+            ]
+          }
+        ],
+        "visible_option_lines": [
+          "展示封面",
+          "无封面",
+          "优质的封面有利于推荐，格式支持JPEG、PNG",
+          "声明首发",
+          "合集",
+          "添加至合集",
+          "作品声明",
+          "预览定时发布预览并发布"
+        ],
+        "final_publish": {}
+      },
+      "error": {
+        "code": "toutiao_material_integrity_failed",
+        "message": "复合适配器发布前读回未通过：title, schedule, cover",
+        "details": {
+          "platform": "toutiao",
+          "fields": {
+            "title": {
+              "expected": "锆合金版风灵音叉推牌值得入吗？先看真实体验",
+              "verified": false
+            },
+            "body": {
+              "expected": "锆合金版本的音叉推牌到手，给我的直观感受是质感和分量都上了一个台阶。相比普通版本，这个版本的光泽更沉稳，拿在手里更稳当，操作手感也更顺滑。整体做工对得起定价，适合对EDC把玩件有一定要求的用户。",
+              "verified": true
+            },
+            "tags": {
+              "expected": [
+                "EDC玩具",
+                "音叉推牌",
+                "锆合金",
+                "开箱测评",
+                "MOT风灵"
+              ],
+              "actual_checks": [
+                {
+                  "tag": "EDC玩具",
+                  "present": true
+                },
+                {
+                  "tag": "音叉推牌",
+                  "present": true
+                },
+                {
+                  "tag": "锆合金",
+                  "present": true
+                },
+                {
+                  "tag": "开箱测评",
+                  "present": true
+                },
+                {
+                  "tag": "MOT风灵",
+                  "present": true
+                }
+              ],
+              "verified": true
+            },
+            "collection": {
+              "expected": "",
+              "verified": true
+            },
+            "schedule": {
+              "expected": "2026-05-23 19:30",
+              "verified": false
+            },
+            "upload_ready": {
+              "verified": true
+            },
+            "declaration": {
+              "verified": true
+            },
+            "cover": {
+              "expected_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\smart-copy\\06-toutiao-cover.jpg",
+              "verified": false,
+              "cover_required_warning": false,
+              "youtube_auto_thumbnail": false,
+              "youtube_custom_thumbnail_preview": false
+            }
+          },
+          "verified": false,
+          "failures": [
+            "title",
+            "schedule",
+            "cover"
+          ],
+          "platform_extras": {
+            "youtube_link": "",
+            "youtube_scheduled": false,
+            "youtube_thumbnail_uploading": false,
+            "route": {
+              "url": "https://mp.toutiao.com/profile_v4/graphic/publish?is_new_connect=0&is_new_user=0",
+              "title": "头条号"
+            },
+            "image_sources": [
+              "https://sf1-cdn-tos.toutiaostatic.com/img/user-avatar/efbdee1d3c63d43bbc334f5cc2eaea08~300x300.image",
+              "data:image/png;base64,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",
+              "data:image/png;base64,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"
+            ],
+            "relevant_lines": [
+              "头条号发文规范 消息 12 发布文章 116 / 30 请输入正文 展示封面 单图 三图 无封面 预览 优质的封面有利于推荐，格式支持JPEG、PNG 添加位置 标记城市，让更多同城用户看到 投放广告 投放广告赚收益不投放广告 声明首发 头条首发 符合首发质量标准且72小时内仅在头条发布的内容，可享额外激励分成 详细了解 合集 添加至合集 同时发布微头条 发布得更多收益 作品声明 取材网络引用站内个人观点，仅供参考引用AI虚构演绎，故事经历投资观点，仅供参考健康医疗分享，仅供参考 草稿已保存 共 0 字 发文设置 预览定时发布预览并发布 已开启云端自动同步 1. 草稿将自动同步至云端，你可以在不同设备上进行编辑 2. 你可前往“设置 - 功能设置 - 内容隐私” 更改该设置 我知道了 头条创作助手 AI 创作内容建议 创作热点推荐 换一换 抖音这么火，如何抓住机会赚钱 你觉得卓威es2鼠标好用吗 罗宾尼表带怎么佩戴 求助，健身环太阳舞者上衣怎么获得 带里布的袖子总是会扭吗? 暂无建议 重新检测 检测成功，暂无建议"
+            ]
+          }
+        }
+      }
+    },
+    "xiaohongshu": {
+      "task_id": "80e6c37b127e4b38a393e9561274d076-dedicated4",
+      "id": "80e6c37b127e4b38a393e9561274d076-dedicated4",
+      "platform": "xiaohongshu",
+      "profile_id": "d2d15bc6d77a47b79cf20a79b56596c2",
+      "status": "needs_human",
+      "created_at": "2026-05-23T10:22:06.618Z",
+      "updated_at": "2026-05-23T10:22:34.665Z",
+      "scheduled_publish_at": "2026-05-23T21:00",
+      "result": {
+        "draft_url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+        "route": {
+          "url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+          "title": "小红书创作服务平台"
+        },
+        "composite_framework": {
+          "enabled": true,
+          "platform": "xiaohongshu",
+          "framework_id": "xiaohongshu_creator_composite_v1",
+          "dedicated_platform_framework": true,
+          "legacy_lightweight_script_used": false,
+          "material_integrity": {
+            "platform": "xiaohongshu",
+            "fields": {
+              "title": {
+                "expected": "锆合金版本的音叉推牌，质感绝了",
+                "verified": true
+              },
+              "body": {
+                "expected": "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。",
+                "verified": true
+              },
+              "tags": {
+                "expected": [
+                  "EDC",
+                  "音叉推牌",
+                  "锆合金",
+                  "开箱分享",
+                  "把玩件",
+                  "随身玩具",
+                  "MOT风灵"
+                ],
+                "actual_checks": [
+                  {
+                    "tag": "EDC",
+                    "present": true
+                  },
+                  {
+                    "tag": "音叉推牌",
+                    "present": true
+                  },
+                  {
+                    "tag": "锆合金",
+                    "present": true
+                  },
+                  {
+                    "tag": "开箱分享",
+                    "present": true
+                  },
+                  {
+                    "tag": "把玩件",
+                    "present": true
+                  },
+                  {
+                    "tag": "随身玩具",
+                    "present": true
+                  },
+                  {
+                    "tag": "MOT风灵",
+                    "present": true
+                  }
+                ],
+                "verified": true
+              },
+              "collection": {
+                "expected": "EDC潮玩桌搭",
+                "verified": true
+              },
+              "schedule": {
+                "expected": "2026-05-23 21:00",
+                "verified": true
+              },
+              "upload_ready": {
+                "verified": true
+              },
+              "declaration": {
+                "verified": true
+              },
+              "cover": {
+                "expected_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\smart-copy\\02-xiaohongshu-cover.jpg",
+                "verified": false,
+                "cover_required_warning": false,
+                "youtube_auto_thumbnail": false,
+                "youtube_custom_thumbnail_preview": false
+              }
+            },
+            "verified": false,
+            "failures": [
+              "cover"
+            ],
+            "platform_extras": {
+              "youtube_link": "",
+              "youtube_scheduled": false,
+              "youtube_thumbnail_uploading": false,
+              "route": {
+                "url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+                "title": "小红书创作服务平台"
+              },
+              "image_sources": [
+                "https://sns-avatar-qc.xhscdn.com/avatar/1040g2jo31ipv3sch146g5pl0n6j93tvf4kkk6qg?imageView2/2/w/80/format/jpg",
+                "https://fe-img-qc.xhscdn.com/48fd625e5dfe43f5a44ea81f99668b223802391d?sign=e3193698c17efb19b00815953f9316cc&t=7c245f00&aegis=d3d856",
+                "data:image/png;base64,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",
+                "https://growth-img.xhscdn.com/ditto/104100n0320dsl2inlc06fvofv8270000000000ed9444a",
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAgCAYAAAAFQMh/AAABWElEQVR4Xu2W0Y2DMBBEU8KVwA8G8ZUSUkJKSAdJCdfBXQeUkOuEEiiBEu52ovVpMyB7PvIXnrSKxIzH4MUmh8POTmAYhmNKaWnb9sJaRPXJWNC3Bf7WAlWfjIVNCMQTsRZRfRJN03wgzGpmLaL6ZCzojMCu635Yi6i+TWzQ1QaPVI/l81/Wij7r9RdWgudZYebFB7+s+r4/8TwrzNRYXXLZwE8PmON1roLvxHNIJO+b1chaRPXJIAiBtX2p+mSSvzBoAWsR1SeBkNw31iKqT8ZfmmrfVJ9M7pvVmbWI6pOxw2RW+qb6JELfJtYiqq8INnve+DjquG84+sLBwL6JNWkFMKkHcP33zZb0tqGXaolzbIKn8Y/46PUYHO/alzXrT76N6yNuNExRx24Af18QVuyb6pNBfxCIFWAtovpkLOzuT1Lcl6pPJu/L2gdc9cl4YPX4U30778cf6hgADWVp6fsAAAAASUVORK5CYII=",
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAABgklEQVR4Xu2WwXGDMBBFKSElqISUQCmUkKPgQjqIO7A7cAkpJaUkerCylw8WCgdfkjezY6y/2s9Kwrhp/jFijCFF1/f9R/o8E3bdoWn+YVKxNsVniu+dIKfT+dWM4/iSOrj6gun72zAMr3RE2DUd+hui+6D1iljBL3fnreYoNicbMzdoziZi9q76HszJpqyS6ivivCSHzDLZlC1RbUGc92NaRtU8nE5Cxz3UsFqtajdcUlDNw3IROu7BqHjzmBQTHDWGUGwg3pezU02pNeQxelgzDZ4QebZUU2oN7TnF8KQaRS5b7dvP12TggjxiMa4HiVqWd/bjWdw0jHPnVYbkytyi4dOXdDo0bLRqSq1hrsmnar795zwW4BJa1Tw1hlUNYLSb1Nz2e70vDnfznWoL3DtwVK0W5lqN9elUeKXE+9H/takzo0ZQfRMSnSlLEzRHicu/IvVmGTO9WIFs3OlfDPu9zEbTO7DqxfsITHzBQpDT6vzD0JGZc0LPFlwzFjT/7/IDeHvnR7Pif3cAAAAASUVORK5CYII=",
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAAAiElEQVR4XmNgGAUjGtTX1wtUVlYGoIvTDFRUVOwH4v9APB9djiYA6LsCqIX0sxRoUcOAWgr09XlQ3KKroToYtZSmYMAtBeIJ6PJUB0BL6ulmIZpl94FYAV0N1cCAWUbzxDJ8LQNa0I8UZwvoahm6PNVBBaICXoAuRxMAtEihqqrKAF18FAxvAADqELJ8J/zf/wAAAABJRU5ErkJggg==",
+                "https://growth-img.xhscdn.com/ditto/104100n0320crtivl5k06fvofv8270000000000813n2ne",
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAgCAYAAAAFQMh/AAABWElEQVR4Xu2W0Y2DMBBEU8KVwA8G8ZUSUkJKSAdJCdfBXQeUkOuEEiiBEu52ovVpMyB7PvIXnrSKxIzH4MUmh8POTmAYhmNKaWnb9sJaRPXJWNC3Bf7WAlWfjIVNCMQTsRZRfRJN03wgzGpmLaL6ZCzojMCu635Yi6i+TWzQ1QaPVI/l81/Wij7r9RdWgudZYebFB7+s+r4/8TwrzNRYXXLZwE8PmON1roLvxHNIJO+b1chaRPXJIAiBtX2p+mSSvzBoAWsR1SeBkNw31iKqT8ZfmmrfVJ9M7pvVmbWI6pOxw2RW+qb6JELfJtYiqq8INnve+DjquG84+sLBwL6JNWkFMKkHcP33zZb0tqGXaolzbIKn8Y/46PUYHO/alzXrT76N6yNuNExRx24Af18QVuyb6pNBfxCIFWAtovpkLOzuT1Lcl6pPJu/L2gdc9cl4YPX4U30778cf6hgADWVp6fsAAAAASUVORK5CYII=",
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAABgklEQVR4Xu2WwXGDMBBFKSElqISUQCmUkKPgQjqIO7A7cAkpJaUkerCylw8WCgdfkjezY6y/2s9Kwrhp/jFijCFF1/f9R/o8E3bdoWn+YVKxNsVniu+dIKfT+dWM4/iSOrj6gun72zAMr3RE2DUd+hui+6D1iljBL3fnreYoNicbMzdoziZi9q76HszJpqyS6ivivCSHzDLZlC1RbUGc92NaRtU8nE5Cxz3UsFqtajdcUlDNw3IROu7BqHjzmBQTHDWGUGwg3pezU02pNeQxelgzDZ4QebZUU2oN7TnF8KQaRS5b7dvP12TggjxiMa4HiVqWd/bjWdw0jHPnVYbkytyi4dOXdDo0bLRqSq1hrsmnar795zwW4BJa1Tw1hlUNYLSb1Nz2e70vDnfznWoL3DtwVK0W5lqN9elUeKXE+9H/takzo0ZQfRMSnSlLEzRHicu/IvVmGTO9WIFs3OlfDPu9zEbTO7DqxfsITHzBQpDT6vzD0JGZc0LPFlwzFjT/7/IDeHvnR7Pif3cAAAAASUVORK5CYII=",
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAAAiElEQVR4XmNgGAUjGtTX1wtUVlYGoIvTDFRUVOwH4v9APB9djiYA6LsCqIX0sxRoUcOAWgr09XlQ3KKroToYtZSmYMAtBeIJ6PJUB0BL6ulmIZpl94FYAV0N1cCAWUbzxDJ8LQNa0I8UZwvoahm6PNVBBaICXoAuRxMAtEihqqrKAF18FAxvAADqELJ8J/zf/wAAAABJRU5ErkJggg==",
+                "https://sns-avatar-qc.xhscdn.com/avatar/1040g2jo31ipv3sch146g5pl0n6j93tvf4kkk6qg?imageView2/2/w/80/format/jpg"
+              ],
+              "relevant_lines": [
+                "遇到问题 创作服务平台 FAS机神圣殿 × 潮玩EDC 发布笔记 首页 笔记管理 数据看板 活动中心 笔记灵感 创作学院 创作百科 收起侧边栏 视频文件 重新上传 MOT 风灵音叉推牌 锆合金版本.mp4 检测为高清视频。清晰的画面能极大提升观看体验，有利于提升观看时长 设置封面 默认截取第一帧作为封面，优质的封面会吸引更多人浏览笔记 优质封面示例 智能推荐封面 封面效果评估通过，未发现封面质量问题 智能标题 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 #TEC无畏契约 #tec无畏契约 #指甲刀 #手机U盘 #大开口指甲刀 更多 话题 用户 表情 144 /1000 活动话题 更多 原神千星奇域 添加话题 活动详情 少东家夏日奇遇 添加话题 活动详情 内容设置 收起 添加章节 清晰的视频结构能提升观看体验，有助于完播率 去添加 加入合集 汇集系列视频，有利于连续性观看 EDC潮玩桌搭 原创声明 添加内容类型声明 添加组件 添加地点 选择群聊 关联直播预告 标记地点或标记朋友 添加路线 店内商品 选择我店铺内的商品 添加商品 更多设置 收起 公开可见 定时发布 2026-05-23 21:00 笔记预览 封面预览 FAS机神圣殿 × 潮玩EDC 关注 锆合金版本的音叉推牌，质感绝了 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 展开 合集·EDC潮玩桌搭 共2篇 EDC刀光火工具集 EDC潮玩桌搭 FAS新品 开箱视频 创建合集"
+              ]
+            }
+          }
+        },
+        "actions": [
+          {
+            "kind": "media_upload",
+            "uploaded": true,
+            "input": {
+              "data-v-3169bee3": "",
+              "class": "upload-input",
+              "type": "file",
+              "accept": ".mp4,.mov,.flv,.f4v,.mkv,.rm,.rmvb,.m4v,.mpg,.mpeg,.ts"
+            },
+            "fileInputCount": 1
+          },
+          {
+            "kind": "xiaohongshu_rich_text",
+            "filled": true,
+            "actions": [
+              {
+                "field": "title",
+                "ok": true,
+                "hint": "填写标题会有更多赞哦 锆合金版本的音叉推牌，质感绝了"
+              },
+              {
+                "field": "body",
+                "ok": true,
+                "hint": "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合",
+                "tag": "div"
+              },
+              {
+                "field": "title_reassert",
+                "ok": true,
+                "hint": "填写标题会有更多赞哦 锆合金版本的音叉推牌，质感绝了"
+              }
+            ],
+            "verified_body": true,
+            "verified_title": true,
+            "candidates": [
+              {
+                "text": "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合",
+                "area": 88480,
+                "tag": "div"
+              },
+              {
+                "text": "填写标题会有更多赞哦 锆合金版本的音叉推牌，质感绝了",
+                "area": 11998.5,
+                "tag": "input"
+              }
+            ]
+          },
+          {
+            "kind": "xiaohongshu_cover_entry",
+            "clicked": false
+          },
+          {
+            "kind": "xiaohongshu_cover_entry_loose",
+            "clicked": true,
+            "text": "设置封面",
+            "label": "设置封面",
+            "loose": true
+          },
+          {
+            "kind": "xiaohongshu_cover_ratio",
+            "clicked": false
+          },
+          {
+            "kind": "xiaohongshu_cover_upload_entry",
+            "clicked": false
+          },
+          {
+            "kind": "xiaohongshu_cover_upload_entry_loose",
+            "clicked": false,
+            "loose": true,
+            "candidates": [
+              "遇到问题",
+              "遇到问题",
+              "创作服务平台 FAS机神圣殿 × 潮玩EDC",
+              "创作服务平台 FAS机神圣殿 × 潮玩EDC",
+              "创作服务平台",
+              "创作服务平台",
+              "创作服务平台",
+              "FAS机神圣殿 × 潮玩EDC",
+              "FAS机神圣殿 × 潮玩EDC",
+              "FAS机神圣殿 × 潮玩EDC",
+              "发布笔记 首页 笔记管理 数据看板 活动中心 笔记灵感 创作学院 创作百科 收起侧边栏",
+              "发布笔记 首页 笔记管理 数据看板 活动中心 笔记灵感 创作学院 创作百科 收起侧边栏",
+              "发布笔记",
+              "发布笔记",
+              "发布笔记",
+              "发布笔记",
+              "首页 笔记管理 数据看板 活动中心 笔记灵感 创作学院 创作百科 收起侧边栏",
+              "首页 笔记管理 数据看板 活动中心 笔记灵感 创作学院 创作百科",
+              "首页",
+              "首页"
+            ]
+          },
+          {
+            "kind": "xiaohongshu_cover_upload",
+            "uploaded": false,
+            "reason": "no_image_file_input",
+            "fileInputs": [
+              {
+                "data-v-3169bee3": "",
+                "class": "upload-input",
+                "type": "file",
+                "accept": ".mp4,.mov,.flv,.f4v,.mkv,.rm,.rmvb,.m4v,.mpg,.mpeg,.ts"
+              }
+            ]
+          },
+          {
+            "kind": "xiaohongshu_cover_confirm",
+            "clicked": false
+          },
+          {
+            "kind": "xiaohongshu_collection_entry",
+            "clicked": true,
+            "text": "选择",
+            "label": "选择群聊"
+          },
+          {
+            "kind": "xiaohongshu_collection_select",
+            "clicked": false
+          },
+          {
+            "kind": "xiaohongshu_collection_select_loose",
+            "clicked": true,
+            "text": "EDC潮玩桌搭",
+            "label": "EDC潮玩桌搭",
+            "loose": true
+          },
+          {
+            "kind": "xiaohongshu_original_declaration",
+            "clicked": false
+          },
+          {
+            "kind": "xiaohongshu_schedule_set",
+            "set": true,
+            "expected": {
+              "display": "2026-05-23 21:00",
+              "date": "2026-05-23",
+              "time": "21:00"
+            },
+            "body_after_had_schedule": true,
+            "actions": [
+              {
+                "set": "xiaohongshu_datetime",
+                "ok": true,
+                "previous": "2026-05-23 21:00"
+              }
+            ],
+            "relevant_text": [
+              "遇到问题 创作服务平台 FAS机神圣殿 × 潮玩EDC 发布笔记 首页 笔记管理 数据看板 活动中心 笔记灵感 创作学院 创作百科 收起侧边栏 视频文件 重新上传 MOT 风灵音叉推牌 锆合金版本.mp4 检测为高清视频。清晰的画面能极大提升观看体验，有利于提升观看时长 设置封面 默认截取第一帧作为封面，优质的封面会吸引更多人浏览笔记 优质封面示例 智能推荐封面 封面效果评估通过，未发现封面质量问题 智能标题 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 #TEC无畏契约 #tec无畏契约 #指甲刀 #手机U盘 #大开口指甲刀 更多 话题 用户 表情 144 /1000 活动话题 更多 原神千星奇域 添加话题 活动详情 少东家夏日奇遇 添加话题 活动详情 内容设置 收起 添加章节 清晰的视频结构能提升观看体验，有助于完播率 去添加 加入合集 汇集系列视频，有利于连续性观看 EDC潮玩桌搭 原创声明 添加内容类型声明 添加组件 添加地点 选择群聊 关联直播预告 标记地点或标记朋友 添加路线 店内商品 选择我店铺内的商品 添加商品 更多设置 收起 公开可见 定时发布 2026-05-23 21:00 笔记预览 封面预览 FAS机神圣殿 × 潮玩EDC 关注 锆合金版本的音叉推牌，质感绝了 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 展开 合集·EDC潮玩桌搭 共2篇 EDC刀光火工具集 EDC潮玩桌搭 FAS新品 开箱视频 创建合集"
+            ]
+          }
+        ],
+        "visible_option_lines": [
+          "设置封面",
+          "默认截取第一帧作为封面，优质的封面会吸引更多人浏览笔记",
+          "优质封面示例",
+          "智能推荐封面",
+          "封面效果评估通过，未发现封面质量问题",
+          "加入合集",
+          "原创声明",
+          "添加内容类型声明",
+          "选择群聊",
+          "公开可见",
+          "定时发布",
+          "封面预览",
+          "合集·EDC潮玩桌搭",
+          "创建合集"
+        ],
+        "final_publish": {}
+      },
+      "error": {
+        "code": "xiaohongshu_material_integrity_failed",
+        "message": "复合适配器发布前读回未通过：cover",
+        "details": {
+          "platform": "xiaohongshu",
+          "fields": {
+            "title": {
+              "expected": "锆合金版本的音叉推牌，质感绝了",
+              "verified": true
+            },
+            "body": {
+              "expected": "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。",
+              "verified": true
+            },
+            "tags": {
+              "expected": [
+                "EDC",
+                "音叉推牌",
+                "锆合金",
+                "开箱分享",
+                "把玩件",
+                "随身玩具",
+                "MOT风灵"
+              ],
+              "actual_checks": [
+                {
+                  "tag": "EDC",
+                  "present": true
+                },
+                {
+                  "tag": "音叉推牌",
+                  "present": true
+                },
+                {
+                  "tag": "锆合金",
+                  "present": true
+                },
+                {
+                  "tag": "开箱分享",
+                  "present": true
+                },
+                {
+                  "tag": "把玩件",
+                  "present": true
+                },
+                {
+                  "tag": "随身玩具",
+                  "present": true
+                },
+                {
+                  "tag": "MOT风灵",
+                  "present": true
+                }
+              ],
+              "verified": true
+            },
+            "collection": {
+              "expected": "EDC潮玩桌搭",
+              "verified": true
+            },
+            "schedule": {
+              "expected": "2026-05-23 21:00",
+              "verified": true
+            },
+            "upload_ready": {
+              "verified": true
+            },
+            "declaration": {
+              "verified": true
+            },
+            "cover": {
+              "expected_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\smart-copy\\02-xiaohongshu-cover.jpg",
+              "verified": false,
+              "cover_required_warning": false,
+              "youtube_auto_thumbnail": false,
+              "youtube_custom_thumbnail_preview": false
+            }
+          },
+          "verified": false,
+          "failures": [
+            "cover"
+          ],
+          "platform_extras": {
+            "youtube_link": "",
+            "youtube_scheduled": false,
+            "youtube_thumbnail_uploading": false,
+            "route": {
+              "url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+              "title": "小红书创作服务平台"
+            },
+            "image_sources": [
+              "https://sns-avatar-qc.xhscdn.com/avatar/1040g2jo31ipv3sch146g5pl0n6j93tvf4kkk6qg?imageView2/2/w/80/format/jpg",
+              "https://fe-img-qc.xhscdn.com/48fd625e5dfe43f5a44ea81f99668b223802391d?sign=e3193698c17efb19b00815953f9316cc&t=7c245f00&aegis=d3d856",
+              "data:image/png;base64,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",
+              "https://growth-img.xhscdn.com/ditto/104100n0320dsl2inlc06fvofv8270000000000ed9444a",
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAgCAYAAAAFQMh/AAABWElEQVR4Xu2W0Y2DMBBEU8KVwA8G8ZUSUkJKSAdJCdfBXQeUkOuEEiiBEu52ovVpMyB7PvIXnrSKxIzH4MUmh8POTmAYhmNKaWnb9sJaRPXJWNC3Bf7WAlWfjIVNCMQTsRZRfRJN03wgzGpmLaL6ZCzojMCu635Yi6i+TWzQ1QaPVI/l81/Wij7r9RdWgudZYebFB7+s+r4/8TwrzNRYXXLZwE8PmON1roLvxHNIJO+b1chaRPXJIAiBtX2p+mSSvzBoAWsR1SeBkNw31iKqT8ZfmmrfVJ9M7pvVmbWI6pOxw2RW+qb6JELfJtYiqq8INnve+DjquG84+sLBwL6JNWkFMKkHcP33zZb0tqGXaolzbIKn8Y/46PUYHO/alzXrT76N6yNuNExRx24Af18QVuyb6pNBfxCIFWAtovpkLOzuT1Lcl6pPJu/L2gdc9cl4YPX4U30778cf6hgADWVp6fsAAAAASUVORK5CYII=",
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAABgklEQVR4Xu2WwXGDMBBFKSElqISUQCmUkKPgQjqIO7A7cAkpJaUkerCylw8WCgdfkjezY6y/2s9Kwrhp/jFijCFF1/f9R/o8E3bdoWn+YVKxNsVniu+dIKfT+dWM4/iSOrj6gun72zAMr3RE2DUd+hui+6D1iljBL3fnreYoNicbMzdoziZi9q76HszJpqyS6ivivCSHzDLZlC1RbUGc92NaRtU8nE5Cxz3UsFqtajdcUlDNw3IROu7BqHjzmBQTHDWGUGwg3pezU02pNeQxelgzDZ4QebZUU2oN7TnF8KQaRS5b7dvP12TggjxiMa4HiVqWd/bjWdw0jHPnVYbkytyi4dOXdDo0bLRqSq1hrsmnar795zwW4BJa1Tw1hlUNYLSb1Nz2e70vDnfznWoL3DtwVK0W5lqN9elUeKXE+9H/takzo0ZQfRMSnSlLEzRHicu/IvVmGTO9WIFs3OlfDPu9zEbTO7DqxfsITHzBQpDT6vzD0JGZc0LPFlwzFjT/7/IDeHvnR7Pif3cAAAAASUVORK5CYII=",
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAAAiElEQVR4XmNgGAUjGtTX1wtUVlYGoIvTDFRUVOwH4v9APB9djiYA6LsCqIX0sxRoUcOAWgr09XlQ3KKroToYtZSmYMAtBeIJ6PJUB0BL6ulmIZpl94FYAV0N1cCAWUbzxDJ8LQNa0I8UZwvoahm6PNVBBaICXoAuRxMAtEihqqrKAF18FAxvAADqELJ8J/zf/wAAAABJRU5ErkJggg==",
+              "https://growth-img.xhscdn.com/ditto/104100n0320crtivl5k06fvofv8270000000000813n2ne",
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAgCAYAAAAFQMh/AAABWElEQVR4Xu2W0Y2DMBBEU8KVwA8G8ZUSUkJKSAdJCdfBXQeUkOuEEiiBEu52ovVpMyB7PvIXnrSKxIzH4MUmh8POTmAYhmNKaWnb9sJaRPXJWNC3Bf7WAlWfjIVNCMQTsRZRfRJN03wgzGpmLaL6ZCzojMCu635Yi6i+TWzQ1QaPVI/l81/Wij7r9RdWgudZYebFB7+s+r4/8TwrzNRYXXLZwE8PmON1roLvxHNIJO+b1chaRPXJIAiBtX2p+mSSvzBoAWsR1SeBkNw31iKqT8ZfmmrfVJ9M7pvVmbWI6pOxw2RW+qb6JELfJtYiqq8INnve+DjquG84+sLBwL6JNWkFMKkHcP33zZb0tqGXaolzbIKn8Y/46PUYHO/alzXrT76N6yNuNExRx24Af18QVuyb6pNBfxCIFWAtovpkLOzuT1Lcl6pPJu/L2gdc9cl4YPX4U30778cf6hgADWVp6fsAAAAASUVORK5CYII=",
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAABgklEQVR4Xu2WwXGDMBBFKSElqISUQCmUkKPgQjqIO7A7cAkpJaUkerCylw8WCgdfkjezY6y/2s9Kwrhp/jFijCFF1/f9R/o8E3bdoWn+YVKxNsVniu+dIKfT+dWM4/iSOrj6gun72zAMr3RE2DUd+hui+6D1iljBL3fnreYoNicbMzdoziZi9q76HszJpqyS6ivivCSHzDLZlC1RbUGc92NaRtU8nE5Cxz3UsFqtajdcUlDNw3IROu7BqHjzmBQTHDWGUGwg3pezU02pNeQxelgzDZ4QebZUU2oN7TnF8KQaRS5b7dvP12TggjxiMa4HiVqWd/bjWdw0jHPnVYbkytyi4dOXdDo0bLRqSq1hrsmnar795zwW4BJa1Tw1hlUNYLSb1Nz2e70vDnfznWoL3DtwVK0W5lqN9elUeKXE+9H/takzo0ZQfRMSnSlLEzRHicu/IvVmGTO9WIFs3OlfDPu9zEbTO7DqxfsITHzBQpDT6vzD0JGZc0LPFlwzFjT/7/IDeHvnR7Pif3cAAAAASUVORK5CYII=",
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAAAiElEQVR4XmNgGAUjGtTX1wtUVlYGoIvTDFRUVOwH4v9APB9djiYA6LsCqIX0sxRoUcOAWgr09XlQ3KKroToYtZSmYMAtBeIJ6PJUB0BL6ulmIZpl94FYAV0N1cCAWUbzxDJ8LQNa0I8UZwvoahm6PNVBBaICXoAuRxMAtEihqqrKAF18FAxvAADqELJ8J/zf/wAAAABJRU5ErkJggg==",
+              "https://sns-avatar-qc.xhscdn.com/avatar/1040g2jo31ipv3sch146g5pl0n6j93tvf4kkk6qg?imageView2/2/w/80/format/jpg"
+            ],
+            "relevant_lines": [
+              "遇到问题 创作服务平台 FAS机神圣殿 × 潮玩EDC 发布笔记 首页 笔记管理 数据看板 活动中心 笔记灵感 创作学院 创作百科 收起侧边栏 视频文件 重新上传 MOT 风灵音叉推牌 锆合金版本.mp4 检测为高清视频。清晰的画面能极大提升观看体验，有利于提升观看时长 设置封面 默认截取第一帧作为封面，优质的封面会吸引更多人浏览笔记 优质封面示例 智能推荐封面 封面效果评估通过，未发现封面质量问题 智能标题 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 #TEC无畏契约 #tec无畏契约 #指甲刀 #手机U盘 #大开口指甲刀 更多 话题 用户 表情 144 /1000 活动话题 更多 原神千星奇域 添加话题 活动详情 少东家夏日奇遇 添加话题 活动详情 内容设置 收起 添加章节 清晰的视频结构能提升观看体验，有助于完播率 去添加 加入合集 汇集系列视频，有利于连续性观看 EDC潮玩桌搭 原创声明 添加内容类型声明 添加组件 添加地点 选择群聊 关联直播预告 标记地点或标记朋友 添加路线 店内商品 选择我店铺内的商品 添加商品 更多设置 收起 公开可见 定时发布 2026-05-23 21:00 笔记预览 封面预览 FAS机神圣殿 × 潮玩EDC 关注 锆合金版本的音叉推牌，质感绝了 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 展开 合集·EDC潮玩桌搭 共2篇 EDC刀光火工具集 EDC潮玩桌搭 FAS新品 开箱视频 创建合集"
+            ]
+          }
+        }
+      }
+    }
+  },
+  "source": "publication_browser_agent_service_/tasks_dedicated_frameworks_rerun4"
+}

@@ -1,5 +1,6 @@
 from .materials import (
     avatar_materials_root,
+    avatar_material_role_matches_kind,
     build_creator_profile_dashboard,
     build_avatar_material_requirements,
     create_profile_dir,
@@ -19,6 +20,7 @@ from .materials import (
 
 __all__ = [
     "avatar_materials_root",
+    "avatar_material_role_matches_kind",
     "build_creator_profile_dashboard",
     "build_avatar_material_requirements",
     "create_profile_dir",

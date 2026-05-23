@@ -285,6 +285,13 @@ PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
     "glossary_correction_review_threshold",
     "auto_select_cover_variant",
     "cover_selection_review_gap",
+    "intelligent_copy_cover_image_generation_enabled",
+    "intelligent_copy_cover_image_backend",
+    "intelligent_copy_cover_image_model",
+    "intelligent_copy_cover_image_quality",
+    "intelligent_copy_cover_image_timeout_sec",
+    "intelligent_copy_cover_codex_runner_model",
+    "intelligent_copy_cover_codex_runner_effort",
     "packaging_selection_review_gap",
     "packaging_selection_min_score",
     "streamlined_asr_pipeline_enabled",
@@ -568,6 +575,8 @@ class Settings(BaseSettings):
     intelligent_copy_cover_image_model: str = "image2"
     intelligent_copy_cover_image_quality: str = "medium"
     intelligent_copy_cover_image_timeout_sec: int = 90
+    intelligent_copy_cover_codex_runner_model: str = "gpt-5.4-mini"
+    intelligent_copy_cover_codex_runner_effort: str = "low"
     packaging_selection_review_gap: float = 0.08
     packaging_selection_min_score: float = 0.6
     edit_decision_llm_review_enabled: bool = True
@@ -1107,7 +1116,13 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
             normalized.get("backup_reasoning_model"),
         )
 
-    for key in ("reasoning_effort", "backup_reasoning_effort", "hybrid_analysis_effort", "hybrid_copy_effort"):
+    for key in (
+        "reasoning_effort",
+        "backup_reasoning_effort",
+        "hybrid_analysis_effort",
+        "hybrid_copy_effort",
+        "intelligent_copy_cover_codex_runner_effort",
+    ):
         if key in normalized:
             normalized[key] = _normalize_reasoning_effort(normalized.get(key)) or (
                 "high" if key == "hybrid_copy_effort" else "low"
@@ -1133,9 +1148,23 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
         "telegram_agent_codex_model",
         "acp_bridge_claude_model",
         "acp_bridge_codex_model",
+        "intelligent_copy_cover_image_model",
+        "intelligent_copy_cover_image_quality",
+        "intelligent_copy_cover_codex_runner_model",
     ):
         if key in normalized:
             normalized[key] = str(normalized.get(key) or "").strip()
+
+    if "intelligent_copy_cover_image_backend" in normalized:
+        backend = str(normalized.get("intelligent_copy_cover_image_backend") or "").strip().lower()
+        if backend in {"codex", "codex_cli", "codex_imagegen"}:
+            backend = "codex_builtin"
+        if backend == "openai_api":
+            backend = "openai_images_api"
+        normalized["intelligent_copy_cover_image_backend"] = backend if backend in {
+            "codex_builtin",
+            "openai_images_api",
+        } else "codex_builtin"
 
     for key in ("acp_bridge_backend", "acp_bridge_fallback_backend"):
         if key in normalized:

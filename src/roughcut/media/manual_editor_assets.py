@@ -19,6 +19,8 @@ MANUAL_EDITOR_PREVIEW_STATUS_FILENAME = "status.json"
 PREVIEW_AUDIO_TARGET_LUFS = -16.0
 PREVIEW_AUDIO_MIN_GAIN = 0.35
 PREVIEW_AUDIO_MAX_GAIN = 12.0
+_VIDEO_PROXY_READY_STAGES = {"proxy_webm", "proxy_audio", "loudness_analysis", "thumbnails", "ready", "cached"}
+_WEBM_PROXY_READY_STAGES = {"proxy_audio", "loudness_analysis", "thumbnails", "ready", "cached"}
 
 
 def manual_editor_asset_dir(job_id: uuid.UUID | str, *, output_project_dir: Path | str | None = None) -> Path:
@@ -95,6 +97,14 @@ def ensure_manual_editor_preview_assets(
                 source_fingerprint=source_fingerprint,
             )
             _generate_proxy_video(source_path, video_path)
+            status_payload = _write_asset_status(
+                asset_dir,
+                status="warming",
+                stage="proxy_webm",
+                progress=0.18,
+                detail="Generating optional browser fallback video",
+                source_fingerprint=source_fingerprint,
+            )
             webm_ready = _generate_proxy_webm_best_effort(source_path, webm_path)
             status_payload = _write_asset_status(
                 asset_dir,
@@ -226,8 +236,10 @@ def load_manual_editor_preview_assets(
         bool(source_fingerprint)
         and status_payload.get("source_fingerprint") == source_fingerprint
     )
-    video_ready = bool(video_path.exists() and (manifest_matches_source or status_matches_source))
-    video_fallback_ready = bool(webm_path.exists() and (manifest_matches_source or status_matches_source))
+    status_video_ready = _status_indicates_completed_proxy(status_payload, stages=_VIDEO_PROXY_READY_STAGES)
+    status_webm_ready = _status_indicates_completed_proxy(status_payload, stages=_WEBM_PROXY_READY_STAGES)
+    video_ready = bool(video_path.exists() and (manifest_matches_source or (status_matches_source and status_video_ready)))
+    video_fallback_ready = bool(webm_path.exists() and (manifest_matches_source or (status_matches_source and status_webm_ready)))
     audio_ready = bool(audio_path.exists() and peaks_path.exists() and (manifest_matches_source or status_matches_source))
     if not ready:
         return {
@@ -295,6 +307,12 @@ def _source_fingerprint(source_path: Path) -> str:
     stat = source_path.stat()
     payload = f"{source_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
     return hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _status_indicates_completed_proxy(status_payload: dict[str, Any], *, stages: set[str]) -> bool:
+    if str(status_payload.get("status") or "").strip() == "failed":
+        return False
+    return str(status_payload.get("stage") or "").strip() in stages
 
 
 def _generate_proxy_audio(source_path: Path, audio_path: Path) -> None:

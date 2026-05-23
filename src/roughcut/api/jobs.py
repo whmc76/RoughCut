@@ -106,6 +106,7 @@ from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_SUBTITLE_PROJECTION_
 from roughcut.publication import (
     active_publication_credentials,
     build_publication_plan,
+    check_publication_browser_agent_ready,
     list_publication_attempts,
     submit_publication_attempts,
 )
@@ -170,6 +171,7 @@ from roughcut.edit.render_plan import build_render_plan, build_smart_editing_acc
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 logger = logging.getLogger(__name__)
 _MANUAL_EDITOR_ASSET_WARMUPS: set[str] = set()
+_MANUAL_EDITOR_ASSET_WARMUPS_LOCK = threading.Lock()
 _MANUAL_EDITOR_ASSET_WARMUP_SEMAPHORE = threading.Semaphore(1)
 
 _CONTENT_PROFILE_PLACEHOLDER_JPEG = base64.b64decode(
@@ -4050,7 +4052,34 @@ def _warm_manual_editor_preview_assets(job_id: uuid.UUID, source_path: Path, dur
     except Exception:
         logger.exception("manual editor preview asset warmup failed job_id=%s", job_id)
     finally:
-        _MANUAL_EDITOR_ASSET_WARMUPS.discard(key)
+        with _MANUAL_EDITOR_ASSET_WARMUPS_LOCK:
+            _MANUAL_EDITOR_ASSET_WARMUPS.discard(key)
+
+
+def _manual_editor_asset_warmup_is_running(job_id: uuid.UUID) -> bool:
+    with _MANUAL_EDITOR_ASSET_WARMUPS_LOCK:
+        return str(job_id) in _MANUAL_EDITOR_ASSET_WARMUPS
+
+
+def _queue_manual_editor_asset_warmup(
+    job_id: uuid.UUID,
+    source_path: Path,
+    duration_sec: float,
+    asset_dir: Path,
+) -> bool:
+    key = str(job_id)
+    with _MANUAL_EDITOR_ASSET_WARMUPS_LOCK:
+        if key in _MANUAL_EDITOR_ASSET_WARMUPS:
+            return False
+        _MANUAL_EDITOR_ASSET_WARMUPS.add(key)
+    thread = threading.Thread(
+        target=_warm_manual_editor_preview_assets,
+        args=(job_id, source_path, duration_sec, asset_dir),
+        name=f"manual-editor-warmup-{key[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    return True
 
 
 async def _load_latest_timeline_by_type(
@@ -4586,14 +4615,13 @@ async def get_manual_editor_preview_assets_status(job_id: uuid.UUID, session: As
         job.id,
         payload,
         ready=bool(payload.get("ready", False)),
-        warming=str(job.id) in _MANUAL_EDITOR_ASSET_WARMUPS,
+        warming=_manual_editor_asset_warmup_is_running(job.id),
     )
 
 
 @router.post("/{job_id}/manual-editor/assets/warm", response_model=ManualEditorPreviewAssetsOut)
 async def warm_manual_editor_preview_assets(
     job_id: uuid.UUID,
-    background_tasks: BackgroundTasks,
     session: AsyncSession = Depends(get_session),
 ):
     job = await session.get(Job, job_id)
@@ -4610,11 +4638,10 @@ async def warm_manual_editor_preview_assets(
     if (
         not payload.get("ready")
         and str(payload.get("status") or "") != "failed"
-        and str(job.id) not in _MANUAL_EDITOR_ASSET_WARMUPS
+        and not _manual_editor_asset_warmup_is_running(job.id)
     ):
-        _MANUAL_EDITOR_ASSET_WARMUPS.add(str(job.id))
         payload = {**payload, **mark_manual_editor_preview_assets_queued(job.id, asset_dir=asset_dir)}
-        background_tasks.add_task(_warm_manual_editor_preview_assets, job.id, source_path, duration_sec, asset_dir)
+        _queue_manual_editor_asset_warmup(job.id, source_path, duration_sec, asset_dir)
     return _manual_editor_preview_assets_response(
         job.id,
         payload,
@@ -5053,10 +5080,14 @@ async def apply_manual_editor_timeline(
         if resolution_transform_changed
         else packaging_plan.get("export_resolution_preset") or video_transform.get("resolution_preset") or "1080p"
     )
+    export_frame_rate_mode = str(packaging_plan.get("export_frame_rate_mode") or "source")
+    export_frame_rate_preset = str(packaging_plan.get("export_frame_rate_preset") or "30")
     effective_video_transform = {
         **video_transform,
         "resolution_mode": export_resolution_mode,
         "resolution_preset": export_resolution_preset,
+        "frame_rate_mode": export_frame_rate_mode,
+        "frame_rate_preset": export_frame_rate_preset,
     }
 
     rebuilt_render_plan = build_render_plan(
@@ -5088,6 +5119,8 @@ async def apply_manual_editor_timeline(
         avatar_commentary_plan=previous_render_plan.get("avatar_commentary"),
         export_resolution_mode=export_resolution_mode,
         export_resolution_preset=export_resolution_preset,
+        export_frame_rate_mode=export_frame_rate_mode,
+        export_frame_rate_preset=export_frame_rate_preset,
     )
     rebuilt_render_plan["delivery"] = {
         **dict(rebuilt_render_plan.get("delivery") or {}),
@@ -5720,6 +5753,22 @@ async def publish_job_to_bound_platforms(
     )
     if not plan.get("publish_ready"):
         return plan
+    settings = get_settings()
+    agent_ready = await check_publication_browser_agent_ready(
+        browser_agent_base_url=str(getattr(settings, "publication_browser_agent_base_url", "") or ""),
+        auth_token=str(getattr(settings, "publication_browser_agent_auth_token", "") or ""),
+        target_platforms=[str(target.get("platform") or "") for target in (plan.get("targets") or []) if isinstance(target, dict)],
+        request_timeout_sec=max(5, int(getattr(settings, "publication_browser_agent_timeout_sec", 60) or 60)),
+    )
+    if not agent_ready.get("ready"):
+        return {
+            **plan,
+            "status": "blocked",
+            "publish_ready": False,
+            "blocked_reasons": [*(plan.get("blocked_reasons") or []), str(agent_ready.get("message") or "browser-agent 不支持正式发布。")],
+            "publication_executor_preflight": agent_ready,
+            "created_attempts": [],
+        }
     result = await submit_publication_attempts(session, plan)
     await session.commit()
     _dispatch_publication_worker_tick(len(result.get("created_attempts") or []))

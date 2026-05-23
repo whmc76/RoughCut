@@ -150,6 +150,7 @@ _COVER_STYLE_LABELS = {
     "collection_drop": "限定收藏",
     "upgrade_spotlight": "升级聚焦",
     "tactical_neon": "战术霓虹",
+    "edc_cinematic_hero": "EDC 电影英雄",
     "luxury_blackgold": "黑金奢感",
     "retro_poster": "复古海报",
     "creator_vlog": "创作者 vlog",

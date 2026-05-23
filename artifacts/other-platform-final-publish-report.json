@@ -1,0 +1,55 @@
+{
+  "generated_at": "2026-05-23T04:10:00+08:00",
+  "job_id": "334be3ca-b2fb-470a-8135-c31e2e30ec38",
+  "framework_validation": {
+    "effective": true,
+    "rule": "只有页面读回关键字段、完成平台二次确认/最终确认，并出现成功/预约/审核回执后，才允许写入 published 或 scheduled_pending。",
+    "guard_result": "B站成功写入 scheduled_pending；其他平台没有回执或最终按钮不可用，均保持 needs_human。"
+  },
+  "platforms": [
+    {
+      "platform": "bilibili",
+      "attempt_id": "1a00f2d38aea42efb2fcc02bf63634b5",
+      "status": "scheduled_pending",
+      "scheduled_publish_at": "2026-05-23T19:30:00+08:00",
+      "receipt": "稿件投递成功",
+      "evidence": "artifacts/bilibili-success-receipt.png"
+    },
+    {
+      "platform": "youtube",
+      "attempt_id": "85cf232ad90a414d9f41342bbfe88779",
+      "status": "needs_human",
+      "progress": [
+        "标题已写入并读回：MOT风灵音叉推牌锆合金版开箱：值不值",
+        "说明已写入并读回",
+        "缩略图文件已上传：07-youtube-cover.jpg",
+        "公开视频时间输入已改为 2026-05-23 20:00",
+        "YouTube 检查页显示：检查完毕。未发现任何问题。"
+      ],
+      "blocker": "最终“预定”按钮会被 YouTube Studio 组件重新置为 disabled，未出现预约回执。"
+    },
+    {
+      "platform": "xiaohongshu",
+      "attempt_id": "80e6c37b127e4b38a393e9561274d076",
+      "status": "needs_human",
+      "progress": [
+        "视频、标题、正文已读回",
+        "页面仍显示默认第一帧封面提示",
+        "定时发布未读到具体 2026-05-23 21:00 回执"
+      ],
+      "blocker": "封面和定时没有页面级确认，不能点击最终发布。"
+    },
+    {
+      "platform": "kuaishou",
+      "attempt_id": "3af0d21581b74456b2e4576b11e9d4d5",
+      "status": "needs_human",
+      "blocker": "发布页当前回到上传入口，未读到草稿字段。"
+    },
+    {
+      "platform": "toutiao",
+      "attempt_id": "a73d739e918f46f4bd9daa72c662cc1d",
+      "status": "needs_human",
+      "blocker": "头条视频页未加载可用上传/编辑控件，未读到视频草稿。"
+    }
+  ]
+}

@@ -1,0 +1,270 @@
+{
+  "task_id": "x-composite-final-20260523c",
+  "id": "x-composite-final-20260523c",
+  "platform": "x",
+  "profile_id": "d2d15bc6d77a47b79cf20a79b56596c2",
+  "status": "needs_human",
+  "created_at": "2026-05-22T21:11:52.223Z",
+  "updated_at": "2026-05-22T21:12:12.676Z",
+  "scheduled_publish_at": "2026-05-23T09:30",
+  "result": {
+    "draft_url": "https://x.com/compose/post",
+    "route": {
+      "url": "https://x.com/compose/post",
+      "title": "Home / X"
+    },
+    "composite_framework": {
+      "enabled": true,
+      "platform": "x",
+      "legacy_lightweight_script_used": false,
+      "material_integrity": {
+        "platform": "x",
+        "fields": {
+          "title": {
+            "expected": "",
+            "verified": true
+          },
+          "body": {
+            "expected": "锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。",
+            "verified": true
+          },
+          "tags": {
+            "expected": [
+              "EDC",
+              "音叉推牌"
+            ],
+            "actual_checks": [
+              {
+                "tag": "EDC",
+                "present": true
+              },
+              {
+                "tag": "音叉推牌",
+                "present": true
+              }
+            ],
+            "verified": true
+          },
+          "collection": {
+            "expected": "",
+            "verified": true
+          },
+          "schedule": {
+            "expected": "2026-05-23 09:30",
+            "verified": false
+          },
+          "declaration": {
+            "verified": true
+          },
+          "cover": {
+            "expected_path": "",
+            "verified": true,
+            "youtube_auto_thumbnail": false,
+            "youtube_custom_thumbnail_preview": false
+          }
+        },
+        "verified": false,
+        "failures": [
+          "schedule"
+        ],
+        "platform_extras": {
+          "youtube_link": "",
+          "youtube_scheduled": false,
+          "youtube_thumbnail_uploading": false,
+          "route": {
+            "url": "https://x.com/compose/post",
+            "title": "Home / X"
+          },
+          "image_sources": [
+            "https://pbs.twimg.com/profile_images/2057546175289692161/TFdPQ_K8_bigger.png",
+            "https://pbs.twimg.com/profile_images/2057546175289692161/TFdPQ_K8_bigger.png",
+            "blob:https://x.com/9f78e374-56da-4510-b231-02b4ee8f65ed",
+            "blob:https://x.com/c49bce40-94e8-4f83-b05f-8b7f4b7b5615",
+            "https://pbs.twimg.com/profile_images/2053244804520427520/m8mdWZCG_bigger.jpg",
+            "https://pbs.twimg.com/profile_images/1955359038532653056/OSHY3ewP_bigger.jpg",
+            "https://pbs.twimg.com/profile_images/1701820168660549632/NDAQbbcc_normal.jpg",
+            "https://pbs.twimg.com/profile_images/1769430779845611520/lIgjSJGU_bigger.jpg",
+            "https://pbs.twimg.com/profile_images/1985805202117558272/XC2Da_MB_bigger.jpg",
+            "https://pbs.twimg.com/profile_images/1696524738288615424/IveIyink_bigger.jpg",
+            "https://pbs.twimg.com/profile_images/378800000867032148/JdKa3H8o_normal.jpeg",
+            "https://pbs.twimg.com/profile_images/1948783535248027648/iZ82wv2B_normal.jpg"
+          ],
+          "relevant_lines": []
+        }
+      }
+    },
+    "actions": [
+      {
+        "kind": "media_upload",
+        "uploaded": true,
+        "input": {
+          "accept": "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime",
+          "multiple": "",
+          "type": "file",
+          "tabindex": "-1",
+          "class": "r-8akbif r-orgf3d r-1udh08x r-u8s1d r-xjis5s r-1wyyakw",
+          "data-testid": "fileInput"
+        },
+        "fileInputCount": 1
+      },
+      {
+        "filled": false,
+        "reason": "empty_value"
+      },
+      {
+        "filled": false,
+        "reason": "field_not_found",
+        "candidates": [
+          "Post text 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。 #EDC #音叉推牌 What’s happening? 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。 #EDC #音叉推牌 What’s happening? 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。 #EDC #音叉推牌"
+        ]
+      },
+      {
+        "kind": "platform_rich_text",
+        "filled": true,
+        "actions": [
+          {
+            "field": "body",
+            "ok": true,
+            "hint": "Post text tweetTextarea_0 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。 #EDC #音叉推牌 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比",
+            "tag": "div"
+          }
+        ],
+        "verified_body": true,
+        "verified_title": true,
+        "candidates": [
+          {
+            "text": "Post text tweetTextarea_0 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。 #EDC #音叉推牌 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比",
+            "area": 49344,
+            "tag": "div"
+          },
+          {
+            "text": "Search Search query SearchBox_Search_Input 音叉推牌",
+            "area": 12720,
+            "tag": "input"
+          }
+        ]
+      },
+      {
+        "filled": true,
+        "label": "Search query Search",
+        "tag": "input"
+      },
+      {
+        "filled": true,
+        "label": "Search query Search",
+        "tag": "input"
+      },
+      {
+        "kind": "schedule_entry",
+        "clicked": false
+      },
+      {
+        "kind": "schedule_set",
+        "set": false,
+        "expected": {
+          "display": "2026-05-23 09:30",
+          "date": "2026-05-23",
+          "time": "09:30"
+        },
+        "body_before_had_schedule": false,
+        "body_after_had_schedule": false,
+        "actions": [
+          {
+            "clicked": "x_schedule_button",
+            "ok": true,
+            "label": "Schedule post"
+          },
+          {
+            "clicked": "9",
+            "label": "979",
+            "ok": true
+          }
+        ],
+        "relevant_text": [
+          "To view keyboard shortcuts, press question mark View keyboard shortcuts Did someone say … cookies? X and its partners use cookies to provide you with a better, safer and faster service and to support our business. Some cookies are necessary to use our services, improve our services, and make sure they work properly. Show more about your choices. Accept all cookies Refuse non-essential cookies Home Explore Notifications Follow Chat Grok Bookmarks Creator Studio Premium Profile More Post FAS_EDC @FASEDC_Official For you Following See new posts What’s happening? 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。 #EDC #音叉推牌 Edit Edit Tag people Add descriptions Everyone can reply Post Your Home Timeline Elon Musk @elonmusk · May 20 Release notes for Grok Build will be published daily Quote skcd @skcd42 · May 20 Bug fixes shipping for Grok Build (release notes will be available in the TUI itself) - Copy only path on ReadTool block - Redirect stderr to /dev/null to fix incorrect TUI text interleaving - Distinguish system/user initiated cancellations - Guard against crash conditions in 2K 2.9K 23K 29M Kangmin Lee | 이강민 @kangminlee · May 21 The show writers turned Homelander into a Trump analogue, and this is how they choose to end The Boys. This entire show was just a deranged sexual humiliation fantasy projected onto Trump. They can't even produce a decent superhero parody without injecting their twisted fetishes Show more 979 938 17K 1.5M Subscribe to Premium 50% off Get rid of ads, see your analytics, boost your replies and unlock 20+ features. Subscribe Today’s News Chinese Stocks Drop 2% Wiping Out $294 Billion in Value 1 day ago · News · 8,969 posts Bill Seeks Permanent U.S. Strategic Bitcoin Reserve 1 day ago · News · 6,063 posts LISA, Anitta, and Rema Drop 'Goals' for 2026 World Cup Soundtrack 3 days ago · Entertainment · 481.2K posts Trending now What’s happening Technology · Trending Meta Trending in Hong Kong SAR China #efficiency Trending in Hong Kong SAR China apache 2.0 Politics · Trending Gaza Show more Who to follow Satya Nadella @satyanadella Follow Donald J. Trump @realDonaldTrump Follow Lauren Boebert @laurenboebert Follow Show more Terms of Service | Privacy Policy | Cookie Policy | Accessibility | Ads info | More © 2026 X Corp."
+        ]
+      }
+    ],
+    "visible_option_lines": [],
+    "final_publish": {}
+  },
+  "error": {
+    "code": "x_material_integrity_failed",
+    "message": "复合适配器发布前读回未通过：schedule",
+    "details": {
+      "platform": "x",
+      "fields": {
+        "title": {
+          "expected": "",
+          "verified": true
+        },
+        "body": {
+          "expected": "锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。",
+          "verified": true
+        },
+        "tags": {
+          "expected": [
+            "EDC",
+            "音叉推牌"
+          ],
+          "actual_checks": [
+            {
+              "tag": "EDC",
+              "present": true
+            },
+            {
+              "tag": "音叉推牌",
+              "present": true
+            }
+          ],
+          "verified": true
+        },
+        "collection": {
+          "expected": "",
+          "verified": true
+        },
+        "schedule": {
+          "expected": "2026-05-23 09:30",
+          "verified": false
+        },
+        "declaration": {
+          "verified": true
+        },
+        "cover": {
+          "expected_path": "",
+          "verified": true,
+          "youtube_auto_thumbnail": false,
+          "youtube_custom_thumbnail_preview": false
+        }
+      },
+      "verified": false,
+      "failures": [
+        "schedule"
+      ],
+      "platform_extras": {
+        "youtube_link": "",
+        "youtube_scheduled": false,
+        "youtube_thumbnail_uploading": false,
+        "route": {
+          "url": "https://x.com/compose/post",
+          "title": "Home / X"
+        },
+        "image_sources": [
+          "https://pbs.twimg.com/profile_images/2057546175289692161/TFdPQ_K8_bigger.png",
+          "https://pbs.twimg.com/profile_images/2057546175289692161/TFdPQ_K8_bigger.png",
+          "blob:https://x.com/9f78e374-56da-4510-b231-02b4ee8f65ed",
+          "blob:https://x.com/c49bce40-94e8-4f83-b05f-8b7f4b7b5615",
+          "https://pbs.twimg.com/profile_images/2053244804520427520/m8mdWZCG_bigger.jpg",
+          "https://pbs.twimg.com/profile_images/1955359038532653056/OSHY3ewP_bigger.jpg",
+          "https://pbs.twimg.com/profile_images/1701820168660549632/NDAQbbcc_normal.jpg",
+          "https://pbs.twimg.com/profile_images/1769430779845611520/lIgjSJGU_bigger.jpg",
+          "https://pbs.twimg.com/profile_images/1985805202117558272/XC2Da_MB_bigger.jpg",
+          "https://pbs.twimg.com/profile_images/1696524738288615424/IveIyink_bigger.jpg",
+          "https://pbs.twimg.com/profile_images/378800000867032148/JdKa3H8o_normal.jpeg",
+          "https://pbs.twimg.com/profile_images/1948783535248027648/iZ82wv2B_normal.jpg"
+        ],
+        "relevant_lines": []
+      }
+    }
+  }
+}

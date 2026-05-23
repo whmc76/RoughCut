@@ -12,6 +12,8 @@ import openai
 from roughcut.config import get_settings
 from roughcut.providers.auth import resolve_credential
 
+CODEX_BUILTIN_IMAGE_MODEL_LABEL = "codex_builtin_image_generation"
+
 
 class CodexImageGenerationPending(RuntimeError):
     def __init__(self, metadata: dict[str, Any]):
@@ -30,6 +32,20 @@ def resolve_image_generation_size(width: int, height: int) -> str:
     return "1024x1536"
 
 
+def resolve_codex_imagegen_runner_config(settings: Any | None = None) -> dict[str, str]:
+    current = settings or get_settings()
+    model = str(getattr(current, "intelligent_copy_cover_codex_runner_model", "") or "gpt-5.4-mini").strip()
+    effort = str(getattr(current, "intelligent_copy_cover_codex_runner_effort", "") or "low").strip().lower()
+    if effort not in {"minimal", "low", "medium", "high"}:
+        effort = "low"
+    return {
+        "model": model or "gpt-5.4-mini",
+        "reasoning_effort": effort,
+        "role": "codex_exec_agent",
+        "note": "This config controls the Codex text agent that invokes image_generation; it is not the underlying image model.",
+    }
+
+
 async def generate_edited_cover_image(
     *,
     source_image_path: Path,
@@ -45,9 +61,12 @@ async def generate_edited_cover_image(
     if backend in {"", "codex", "codex_cli", "codex_imagegen", "codex_builtin"}:
         final_path = final_output_path or output_path
         if request_path is not None and _codex_imagegen_request_completed(request_path, final_path):
+            runner_config = resolve_codex_imagegen_runner_config(settings)
             return {
                 "status": "completed",
                 "backend": "codex_builtin",
+                "image_model": CODEX_BUILTIN_IMAGE_MODEL_LABEL,
+                "codex_runner": runner_config,
                 "output_path": str(final_path),
                 "request_path": str(request_path),
                 "size": resolve_image_generation_size(width, height),
@@ -86,6 +105,8 @@ def _write_codex_imagegen_request(
     reference_path = request_file.with_name(f"{request_file.stem}-reference{source_image_path.suffix or '.jpg'}")
     if source_image_path.exists():
         shutil.copy2(source_image_path, reference_path)
+    runner_config = resolve_codex_imagegen_runner_config()
+    size = resolve_image_generation_size(width, height)
     payload = {
         "status": "pending_codex_imagegen",
         "backend": "codex_builtin",
@@ -94,10 +115,40 @@ def _write_codex_imagegen_request(
         "output_path": str(output_path),
         "prompt": prompt,
         "target_size": {"width": int(width), "height": int(height)},
-        "codex_imagegen_size": resolve_image_generation_size(width, height),
+        "image_generation": {
+            "backend": "codex_builtin",
+            "image_model": CODEX_BUILTIN_IMAGE_MODEL_LABEL,
+            "size": size,
+        },
+        "codex_runner": runner_config,
+        "codex_imagegen_size": size,
+        "cover_director_policy": {
+            "codex_role": "write_clear_image_generation_brief",
+            "goal": "Send the image model a concise cover brief and let the image model produce the final cover.",
+            "typography_owner": "image_model",
+            "forbidden_extra_visual_text": [
+                "subtitles",
+                "slogans",
+                "labels",
+                "buttons",
+                "watermarks",
+                "pseudo logos",
+                "Chinese or English words not explicitly requested in the prompt",
+            ],
+            "completion_requires": [
+                "A real bitmap generated with Codex built-in image_gen/edit mode.",
+                "The exact requested title is rendered by the image model as part of the cover.",
+                "Title text is readable at thumbnail size and stays within the image bounds.",
+                "Title text and key subject stay in the center safe area for common platform crops.",
+                "No extra unrequested typography or decorative text in the bitmap.",
+                "The generated bitmap copied to output_path before marking this request completed.",
+            ],
+        },
         "instructions": (
             "Use Codex built-in image_gen/edit mode with source_image_path as the edit target/reference. "
+            "Treat codex_runner.model as the Codex execution agent model only, not as the underlying image model. "
             "Do not use the OpenAI Images API fallback unless explicitly requested. "
+            "Pass the prompt as the concise image-generation brief; let the image model handle composition and typography. "
             "Copy the selected generated bitmap into output_path."
         ),
     }
@@ -105,10 +156,12 @@ def _write_codex_imagegen_request(
     return {
         "status": "pending_codex_imagegen",
         "backend": "codex_builtin",
+        "image_model": CODEX_BUILTIN_IMAGE_MODEL_LABEL,
+        "codex_runner": runner_config,
         "request_path": str(request_file),
         "source_image_path": str(reference_path),
         "output_path": str(output_path),
-        "size": resolve_image_generation_size(width, height),
+        "size": size,
     }
 
 

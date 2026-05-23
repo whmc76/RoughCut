@@ -421,6 +421,7 @@ class IntelligentCopyGenerateIn(BaseModel):
     folder_path: str
     copy_style: str | None = None
     platforms: list[str] = Field(default_factory=list)
+    use_existing_cover: bool = False
 
 
 class IntelligentPublishIn(BaseModel):
@@ -428,6 +429,16 @@ class IntelligentPublishIn(BaseModel):
     creator_profile_id: str | None = None
     platforms: list[str] = Field(default_factory=list)
     platform_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class IntelligentPublishSchemeIn(IntelligentPublishIn):
+    browser: str | None = None
+    force_probe: bool = False
+
+
+class IntelligentPublishSchemeModifyIn(BaseModel):
+    scheme: dict[str, Any] = Field(default_factory=dict)
+    instruction: str
 
 
 class AvatarPublicationProfileOut(BaseModel):
@@ -465,6 +476,7 @@ class IntelligentCopyPlatformMaterialOut(BaseModel):
     tag_label: str
     constraints: IntelligentCopyPlatformConstraintsOut
     titles: list[str] = []
+    title_goals: list[dict[str, str]] = Field(default_factory=list)
     primary_title: str = ""
     title_copy_all: str = ""
     body: str = ""
@@ -495,6 +507,7 @@ class IntelligentCopyResultOut(BaseModel):
     markdown_path: str
     json_path: str
     cover_source_path: str | None = None
+    use_existing_cover: bool = False
     copy_style: str
     inspection: IntelligentCopyInspectOut
     highlights: dict[str, Any] = {}
@@ -533,6 +546,7 @@ class IntelligentCopyGenerateTaskOut(BaseModel):
     id: str
     folder_path: str
     copy_style: str | None = None
+    use_existing_cover: bool = False
     status: str
     progress: int = 0
     stage: str = "queued"
@@ -663,6 +677,8 @@ class PackagingConfigOut(BaseModel):
     avatar_overlay_border_color: str = "#F4E4B8"
     export_resolution_mode: str = "source"
     export_resolution_preset: str = "1080p"
+    export_frame_rate_mode: str = "source"
+    export_frame_rate_preset: str = "30"
     enabled: bool = True
 
 
@@ -699,6 +715,8 @@ class PackagingConfigPatch(BaseModel):
     avatar_overlay_border_color: str | None = None
     export_resolution_mode: str | None = None
     export_resolution_preset: str | None = None
+    export_frame_rate_mode: str | None = None
+    export_frame_rate_preset: str | None = None
     enabled: bool | None = None
 
 

@@ -9,6 +9,10 @@ x-app-env: &app-env
   S3_BUCKET_NAME: roughcut
   S3_REGION: us-east-1
   DB_USE_NULL_POOL: "true"
+  ROUGHCUT_API_WORKERS: ${ROUGHCUT_API_WORKERS:-2}
+  ROUGHCUT_API_GRACEFUL_SHUTDOWN_SEC: ${ROUGHCUT_API_GRACEFUL_SHUTDOWN_SEC:-8}
+  ROUGHCUT_API_KEEP_ALIVE_SEC: ${ROUGHCUT_API_KEEP_ALIVE_SEC:-3}
+  ROUGHCUT_API_BACKLOG: ${ROUGHCUT_API_BACKLOG:-4096}
   ROUGHCUT_OUTPUT_ROOT: /app/data
   ROUGHCUT_TEST_OUTPUT_ROOT: /app/data/tests
   JOB_STORAGE_DIR: /app/data/jobs
@@ -35,6 +39,10 @@ x-app-env: &app-env
   AVATAR_API_BASE_URL: ${ROUGHCUT_DOCKER_AVATAR_API_BASE_URL:-http://host.docker.internal:49202}
   AVATAR_TRAINING_API_BASE_URL: ${ROUGHCUT_DOCKER_AVATAR_TRAINING_API_BASE_URL:-http://host.docker.internal:49204}
   VOICE_CLONE_API_BASE_URL: ${ROUGHCUT_DOCKER_VOICE_CLONE_API_BASE_URL:-http://host.docker.internal:49204}
+  COSYVOICE3_TTS_API_BASE_URL: ${ROUGHCUT_DOCKER_COSYVOICE3_TTS_API_BASE_URL:-http://cosyvoice3-tts:8080}
+  MOSS_TTS_LOCAL_API_BASE_URL: ${ROUGHCUT_DOCKER_MOSS_TTS_LOCAL_API_BASE_URL:-http://moss-tts-local:8080}
+  SEARXNG_URL: ${ROUGHCUT_DOCKER_SEARXNG_URL:-http://host.docker.internal:8080}
+  PUBLICATION_BROWSER_AGENT_BASE_URL: ${ROUGHCUT_DOCKER_PUBLICATION_BROWSER_AGENT_BASE_URL:-http://host.docker.internal:49310}
   OLLAMA_BASE_URL: ${ROUGHCUT_DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
   ROUGHCUT_ACP_BRIDGE_CODEX_PROXY_URL: ${ROUGHCUT_ACP_BRIDGE_CODEX_PROXY_URL:-}
   ROUGHCUT_ACP_BRIDGE_CODEX_PROXY_TOKEN: ${ROUGHCUT_ACP_BRIDGE_CODEX_PROXY_TOKEN:-}
@@ -95,13 +103,13 @@ services:
 
   api:
     <<: *app-common
-    command: ["roughcut", "api", "--host", "0.0.0.0", "--port", "${ROUGHCUT_API_INTERNAL_PORT:-8000}"]
+    command: ["roughcut", "api", "--host", "0.0.0.0", "--port", "${ROUGHCUT_API_INTERNAL_PORT:-8000}", "--workers", "${ROUGHCUT_API_WORKERS:-2}", "--timeout-graceful-shutdown", "${ROUGHCUT_API_GRACEFUL_SHUTDOWN_SEC:-8}", "--timeout-keep-alive", "${ROUGHCUT_API_KEEP_ALIVE_SEC:-3}"]
     ports:
       - "${ROUGHCUT_API_PORT:-38471}:${ROUGHCUT_API_INTERNAL_PORT:-8000}"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://localhost:${ROUGHCUT_API_INTERNAL_PORT:-8000}/healthz"]
       interval: 10s
-      timeout: 5s
+      timeout: 10s
       retries: 12
 
   orchestrator:

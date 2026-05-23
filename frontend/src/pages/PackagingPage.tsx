@@ -156,6 +156,27 @@ export function PackagingPage() {
                     { value: "2160p", label: "4K" },
                   ]}
                 />
+                <SelectField
+                  label="导出帧率模式"
+                  value={config.export_frame_rate_mode ?? "source"}
+                  onChange={(event) => workspace.saveConfig.mutate({ export_frame_rate_mode: event.target.value })}
+                  options={[
+                    { value: "source", label: "跟随视频原片" },
+                    { value: "specified", label: "指定帧率" },
+                  ]}
+                />
+                <SelectField
+                  label="指定帧率"
+                  value={config.export_frame_rate_preset ?? "30"}
+                  onChange={(event) => workspace.saveConfig.mutate({ export_frame_rate_preset: event.target.value })}
+                  options={[
+                    { value: "24", label: "24fps" },
+                    { value: "25", label: "25fps" },
+                    { value: "30", label: "30fps" },
+                    { value: "50", label: "50fps" },
+                    { value: "60", label: "60fps" },
+                  ]}
+                />
               </div>
             </section>
           </PageSection>

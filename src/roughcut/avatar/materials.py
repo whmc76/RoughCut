@@ -405,6 +405,9 @@ def normalize_creator_profile(
             "signature": _clean_text(publishing_raw.get("signature")),
             "default_call_to_action": _clean_text(publishing_raw.get("default_call_to_action")),
             "description_strategy": _clean_text(publishing_raw.get("description_strategy")),
+            "cover_style": _clean_text(publishing_raw.get("cover_style")),
+            "cover_style_label": _clean_text(publishing_raw.get("cover_style_label")),
+            "cover_packaging_scheme": _clean_text(publishing_raw.get("cover_packaging_scheme")),
             "platform_credentials": platform_credentials,
         },
         "business": {
@@ -461,9 +464,9 @@ def build_creator_profile_dashboard(profile: dict[str, Any]) -> dict[str, Any]:
     business = creator_profile.get("business") if isinstance(creator_profile.get("business"), dict) else {}
     files = list(profile.get("files") or [])
     material_counts = {
-        "speaking_videos": sum(1 for item in files if str(item.get("role") or "") == "speaking_video"),
-        "portrait_photos": sum(1 for item in files if str(item.get("role") or "") == "portrait_photo"),
-        "voice_samples": sum(1 for item in files if str(item.get("role") or "") == "voice_sample"),
+        "speaking_videos": sum(1 for item in files if _avatar_material_file_ready(item, "speaking_video")),
+        "portrait_photos": sum(1 for item in files if _avatar_material_file_ready(item, "portrait_photo")),
+        "voice_samples": sum(1 for item in files if _avatar_material_file_ready(item, "voice_sample")),
     }
     section_status = {
         "identity": bool(identity.get("public_name") and (identity.get("title") or identity.get("bio"))),
@@ -508,6 +511,30 @@ def build_creator_profile_dashboard(profile: dict[str, Any]) -> dict[str, Any]:
         "strengths": strengths[:5],
         "next_steps": next_steps[:6],
     }
+
+
+def avatar_material_role_matches_kind(role: Any, kind: Any) -> bool:
+    normalized_role = str(role or "").strip()
+    normalized_kind = str(kind or "").strip()
+    if not normalized_kind:
+        return True
+    return {
+        "speaking_video": "video",
+        "portrait_photo": "image",
+        "voice_sample": "audio",
+        "generic": "other",
+    }.get(normalized_role, normalized_kind) == normalized_kind
+
+
+def _avatar_material_file_ready(file: dict[str, Any], role: str) -> bool:
+    if str(file.get("role") or "") != role:
+        return False
+    if not avatar_material_role_matches_kind(file.get("role"), file.get("kind")):
+        return False
+    return not any(
+        str(check.get("level") or "").strip().lower() == "error"
+        for check in (file.get("checks") or [])
+    )
 
 
 def detect_avatar_material_library_warnings(profiles: list[dict[str, Any]]) -> list[str]:

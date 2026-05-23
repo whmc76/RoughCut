@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -240,9 +241,26 @@ def build_output_name(source_name: str, created_at: datetime | None = None) -> s
     return _sanitize(name)
 
 
+def _is_windows_absolute_path(value: str) -> bool:
+    normalized = str(value or "").strip().replace("\\", "/")
+    return bool(re.match(r"^[A-Za-z]:/", normalized) or normalized.startswith("//"))
+
+
+def _resolve_configured_output_dir(
+    output_dir: str | None,
+    settings_output_dir: str | None,
+    *,
+    platform_name: str | None = None,
+) -> str:
+    configured = str(output_dir or settings_output_dir or "").strip()
+    if output_dir and (platform_name or os.name) != "nt" and _is_windows_absolute_path(configured):
+        configured = str(settings_output_dir or "").strip()
+    return configured
+
+
 def get_output_dir(output_dir: str | None = None) -> Path:
     settings = get_settings()
-    configured = str(output_dir or settings.output_dir or "").strip()
+    configured = _resolve_configured_output_dir(output_dir, settings.output_dir)
     p = Path(configured or "output")
     p.mkdir(parents=True, exist_ok=True)
     return p
@@ -1545,6 +1563,22 @@ def _cover_style_tokens(style_name: str, *, title_lines: dict[str, str]) -> dict
             "bottom_border": "0xB1430BFF",
             "bottom_borderw": 10,
             "top_y": 60,
+        }
+    if style_name == "edc_cinematic_hero":
+        return {
+            "top_size": _fit_font_size(title_lines.get("top", ""), 112, min_size=84),
+            "top_fill": "0xFFD36CFF",
+            "top_border": "0x16070BFF",
+            "top_borderw": 14,
+            "main_size": _fit_font_size(title_lines.get("main", ""), 154, min_size=98),
+            "main_fill": "0xF7F7F7FF",
+            "main_border": "0x10121AFF",
+            "main_borderw": 16,
+            "bottom_size": _fit_font_size(title_lines.get("bottom", ""), 112, min_size=84),
+            "bottom_fill": "0xFFE08CFF",
+            "bottom_border": "0xA43D0AFF",
+            "bottom_borderw": 12,
+            "top_y": 52,
         }
     if style_name == "luxury_blackgold":
         return {

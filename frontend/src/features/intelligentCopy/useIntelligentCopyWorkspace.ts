@@ -8,6 +8,7 @@ import type {
   IntelligentCopyResult,
   AvatarPublicationProfile,
   PublicationAttempt,
+  PublicationIntelligenceScheme,
   PublicationPlatformPublishOptions,
 } from "../../types";
 
@@ -22,8 +23,16 @@ export type PublishPlatformOptionDraft = {
 const FOLDER_PATH_HISTORY_STORAGE_KEY = "roughcut.intelligentCopy.folderPathHistory";
 const SELECTED_GENERATE_TASK_STORAGE_KEY = "roughcut.intelligentCopy.selectedGenerateTaskId";
 const SELECTED_PUBLICATION_ATTEMPT_STORAGE_KEY = "roughcut.intelligentCopy.selectedPublicationAttemptId";
+const SELECTED_PUBLICATION_BROWSER_STORAGE_KEY = "roughcut.intelligentCopy.selectedPublicationBrowser";
 const FOLDER_PATH_HISTORY_LIMIT = 12;
 const FOLDER_PATH_AUTOCOMPLETE_LIMIT = 8;
+
+export const publicationBrowserOptions = [
+  { id: "edge", label: "Microsoft Edge" },
+  { id: "chrome", label: "Google Chrome" },
+  { id: "firefox", label: "Firefox" },
+  { id: "browser-agent", label: "Browser Agent 默认浏览器" },
+] as const;
 
 export const intelligentCopyPlatformOptions = [
   { id: "bilibili", label: "B站", detail: "横版封面、搜索标题" },
@@ -79,6 +88,22 @@ function buildPublicationPlatformOptions(
       return [platform, option] as const;
     })
     .filter(([, option]) => Object.keys(option).length > 0);
+  return Object.fromEntries(entries);
+}
+
+function draftFromPublicationPlatformOptions(
+  options: Record<string, PublicationPlatformPublishOptions> | null | undefined,
+): Record<string, PublishPlatformOptionDraft> {
+  const entries = Object.entries(options ?? {}).map(([platform, value]) => [
+    platform,
+    {
+      scheduled_publish_at: String(value.scheduled_publish_at ?? ""),
+      collection_id: String(value.collection_id ?? ""),
+      collection_name: String(value.collection_name ?? ""),
+      category: String(value.category ?? ""),
+      visibility_or_publish_mode: String(value.visibility_or_publish_mode ?? ""),
+    },
+  ] as const);
   return Object.fromEntries(entries);
 }
 
@@ -165,8 +190,27 @@ function writeStoredSelectedPublicationAttemptId(attemptId: string) {
   }
 }
 
+function readStoredSelectedPublicationBrowser(): string {
+  if (typeof window === "undefined") return "edge";
+  try {
+    const stored = window.localStorage.getItem(SELECTED_PUBLICATION_BROWSER_STORAGE_KEY) ?? "";
+    return publicationBrowserOptions.some((option) => option.id === stored) ? stored : "edge";
+  } catch {
+    return "edge";
+  }
+}
+
+function writeStoredSelectedPublicationBrowser(browser: string) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(SELECTED_PUBLICATION_BROWSER_STORAGE_KEY, browser);
+  } catch {
+    // Browser selection is only a local convenience.
+  }
+}
+
 function isTerminalGenerateTaskStatus(status: string | null | undefined): boolean {
-  return ["completed", "failed", "cancelled"].includes(String(status ?? ""));
+  return ["completed", "blocked", "failed", "cancelled"].includes(String(status ?? ""));
 }
 
 function hasActivePublicationAttempt(attempts: PublicationAttempt[] | undefined): boolean {
@@ -221,15 +265,20 @@ export function useIntelligentCopyWorkspace() {
   const [debouncedFolderPath, setDebouncedFolderPath] = useState("");
   const [folderPathHistory, setFolderPathHistory] = useState<string[]>(readStoredFolderPathHistory);
   const [copyStyle, setCopyStyle] = useState("attention_grabbing");
+  const [useExistingCover, setUseExistingCover] = useState(false);
   const [inspection, setInspection] = useState<IntelligentCopyInspect | null>(null);
   const [result, setResult] = useState<IntelligentCopyResult | null>(null);
   const [copyFeedback, setCopyFeedback] = useState("");
   const [selectedGenerateTaskId, setSelectedGenerateTaskIdState] = useState(readStoredSelectedGenerateTaskId);
   const [selectedPublicationAttemptId, setSelectedPublicationAttemptIdState] = useState(readStoredSelectedPublicationAttemptId);
   const [selectedPublicationProfileId, setSelectedPublicationProfileId] = useState("");
+  const [selectedPublicationBrowser, setSelectedPublicationBrowserState] = useState(readStoredSelectedPublicationBrowser);
+  const [publicationLoginMatchMessage, setPublicationLoginMatchMessage] = useState("");
   const [selectedMaterialPlatformIds, setSelectedMaterialPlatformIds] = useState<string[]>(defaultIntelligentCopyPlatformIds);
   const [selectedPlatformIds, setSelectedPlatformIds] = useState<string[]>([]);
   const [publicationPlatformOptions, setPublicationPlatformOptions] = useState<Record<string, PublishPlatformOptionDraft>>({});
+  const [publicationScheme, setPublicationScheme] = useState<PublicationIntelligenceScheme | null>(null);
+  const [publicationSchemeInstruction, setPublicationSchemeInstruction] = useState("");
 
   const publicationProfilesQuery = useQuery({
     queryKey: ["avatar-materials", "publication-profiles"],
@@ -288,7 +337,7 @@ export function useIntelligentCopyWorkspace() {
 
   const recentGenerateTasks = useQuery({
     queryKey: ["intelligent-copy", "generate-tasks", "recent"],
-    queryFn: () => api.getRecentIntelligentCopyGenerateTasks(12),
+    queryFn: () => api.getRecentIntelligentCopyGenerateTasks(30),
     refetchInterval: (query) => {
       const hasActive = (query.state.data?.tasks ?? []).some((task) => !isTerminalGenerateTaskStatus(task.status));
       return hasActive ? 1_500 : 8_000;
@@ -296,8 +345,15 @@ export function useIntelligentCopyWorkspace() {
   });
 
   useEffect(() => {
-    if (selectedGenerateTaskId || !recentGenerateTasks.data?.tasks.length) return;
-    const latest = recentGenerateTasks.data.tasks[0];
+    const tasks = recentGenerateTasks.data?.tasks;
+    if (!tasks) return;
+    if (selectedGenerateTaskId && !tasks.some((task) => task.id === selectedGenerateTaskId)) {
+      setSelectedGenerateTaskId("");
+      setResult(null);
+      return;
+    }
+    if (selectedGenerateTaskId || !tasks.length) return;
+    const latest = tasks[0];
     if (latest) setSelectedGenerateTaskId(latest.id);
   }, [recentGenerateTasks.data?.tasks, selectedGenerateTaskId]);
 
@@ -305,20 +361,32 @@ export function useIntelligentCopyWorkspace() {
     queryKey: ["intelligent-copy", "generate-task", selectedGenerateTaskId],
     queryFn: () => api.getIntelligentCopyGenerateTask(selectedGenerateTaskId),
     enabled: Boolean(selectedGenerateTaskId),
+    retry: false,
     refetchInterval: (query) => {
       const task = query.state.data;
       return isTerminalGenerateTaskStatus(task?.status) ? false : 1_000;
     },
   });
 
+  useEffect(() => {
+    if (!selectedGenerateTaskId || !selectedGenerateTask.isError) return;
+    setSelectedGenerateTaskId("");
+    setResult(null);
+  }, [selectedGenerateTask.isError, selectedGenerateTaskId]);
+
   const setSelectedPublicationAttemptId = (attemptId: string) => {
     setSelectedPublicationAttemptIdState(attemptId);
     writeStoredSelectedPublicationAttemptId(attemptId);
   };
 
+  const setSelectedPublicationBrowser = (browser: string) => {
+    setSelectedPublicationBrowserState(browser);
+    writeStoredSelectedPublicationBrowser(browser);
+  };
+
   const recentPublicationAttempts = useQuery({
     queryKey: ["intelligent-publication-attempts", "recent"],
-    queryFn: () => api.getRecentPublicationAttempts(24),
+    queryFn: () => api.getRecentPublicationAttempts(48),
     refetchInterval: (query) => (hasActivePublicationAttempt(query.state.data?.attempts) ? 1_500 : 8_000),
   });
 
@@ -347,14 +415,21 @@ export function useIntelligentCopyWorkspace() {
   }, [selectedGenerateTask.data]);
 
   const generate = useMutation({
-    mutationFn: (payload: { folderPath: string; copyStyle: string; platforms: string[] }) =>
-      api.createIntelligentCopyGenerateTask(payload.folderPath, payload.copyStyle, payload.platforms),
+    mutationFn: (payload: { folderPath: string; copyStyle: string; platforms: string[]; useExistingCover: boolean }) =>
+      api.createIntelligentCopyGenerateTask(
+        payload.folderPath,
+        payload.copyStyle,
+        payload.platforms,
+        payload.useExistingCover,
+      ),
     onSuccess: (payload) => {
       rememberFolderPath(payload.inspection?.folder_path || payload.folder_path);
       if (payload.inspection) setInspection(payload.inspection);
       setResult(materialFromTask(payload));
       setSelectedGenerateTaskId(payload.id);
       setSelectedPlatformIds([]);
+      setPublicationScheme(null);
+      setPublicationSchemeInstruction("");
       void queryClient.invalidateQueries({ queryKey: ["intelligent-copy", "generate-tasks", "recent"] });
       void queryClient.invalidateQueries({ queryKey: ["intelligent-publication-plan"] });
     },
@@ -382,11 +457,34 @@ export function useIntelligentCopyWorkspace() {
     refetchInterval: (query) => (hasActivePublicationAttempt(query.state.data?.existing_attempts) ? 1_500 : false),
   });
 
+  const matchPublicationBrowserLogin = useMutation({
+    mutationFn: () =>
+      api.matchPublicationBrowserLogin(
+        selectedPublicationProfileId,
+        selectedPublicationBrowser,
+        (result?.platforms ?? []).map((platform) => platform.key),
+      ),
+    onSuccess: async (payload) => {
+      queryClient.setQueryData(["avatar-materials", "publication-profiles"], payload);
+      const matchedCount =
+        payload.profiles
+          .find((profile) => profile.id === selectedPublicationProfileId)
+          ?.creator_profile?.publishing?.platform_credentials?.filter((credential) => credential.enabled !== false).length ?? 0;
+      setPublicationLoginMatchMessage(`已匹配本地浏览器会话引用，当前创作者卡片有 ${matchedCount} 个可用发布绑定。`);
+      await queryClient.invalidateQueries({ queryKey: ["avatar-materials", "publication-profiles"] });
+      await queryClient.invalidateQueries({ queryKey: ["intelligent-publication-plan"] });
+    },
+    onError: (error) => {
+      setPublicationLoginMatchMessage((error as Error).message || "自动匹配登录信息失败。");
+    },
+  });
+
   useEffect(() => {
     const targetPlatforms = (publicationPlan.data?.targets ?? []).map((target) => target.platform);
     if (!targetPlatforms.length) {
       setSelectedPlatformIds([]);
       setPublicationPlatformOptions({});
+      setPublicationScheme(null);
       return;
     }
     setSelectedPlatformIds((current) => {
@@ -398,6 +496,11 @@ export function useIntelligentCopyWorkspace() {
       return Object.keys(next).length === Object.keys(current).length ? current : next;
     });
   }, [publicationPlan.data?.targets]);
+
+  useEffect(() => {
+    setPublicationScheme(null);
+    setPublicationSchemeInstruction("");
+  }, [selectedPublicationProfileId, selectedPublicationBrowser, inspection?.folder_path]);
 
   const updatePublicationPlatformOption = (platform: string, patch: Partial<PublishPlatformOptionDraft>) => {
     setPublicationPlatformOptions((current) => {
@@ -430,7 +533,7 @@ export function useIntelligentCopyWorkspace() {
       api.publishIntelligentFolder(inspection?.folder_path || folderPath, {
         creator_profile_id: selectedPublicationProfileId || null,
         platforms: selectedPlatformIds,
-        platform_options: buildPublicationPlatformOptions(publicationPlatformOptions),
+        platform_options: publicationScheme?.platform_options ?? buildPublicationPlatformOptions(publicationPlatformOptions),
       }),
     onSuccess: async (payload) => {
       queryClient.setQueryData(publicationQueryKey, payload);
@@ -438,6 +541,40 @@ export function useIntelligentCopyWorkspace() {
       if (createdAttempt) setSelectedPublicationAttemptId(createdAttempt.id);
       await queryClient.invalidateQueries({ queryKey: ["intelligent-publication-plan"] });
       await queryClient.invalidateQueries({ queryKey: ["intelligent-publication-attempts"] });
+    },
+  });
+
+  const applyPublicationScheme = (scheme: PublicationIntelligenceScheme) => {
+    setPublicationScheme(scheme);
+    setPublicationPlatformOptions(draftFromPublicationPlatformOptions(scheme.platform_options));
+    const schemePlatforms = (scheme.items ?? []).map((item) => item.platform).filter(Boolean);
+    if (schemePlatforms.length) setSelectedPlatformIds(schemePlatforms);
+  };
+
+  const generatePublicationScheme = useMutation<PublicationIntelligenceScheme, Error, boolean | undefined>({
+    mutationFn: (forceProbe) =>
+      api.generateIntelligentPublishScheme(inspection?.folder_path || folderPath, {
+        creator_profile_id: selectedPublicationProfileId || null,
+        platforms: selectedPlatformIds.length
+          ? selectedPlatformIds
+          : (publicationPlan.data?.targets ?? []).map((target) => target.platform),
+        platform_options: buildPublicationPlatformOptions(publicationPlatformOptions),
+        browser: selectedPublicationBrowser,
+        force_probe: Boolean(forceProbe),
+      }),
+    onSuccess: (payload) => {
+      applyPublicationScheme(payload);
+      if (payload.plan) queryClient.setQueryData(publicationQueryKey, payload.plan);
+    },
+  });
+
+  const modifyPublicationScheme = useMutation({
+    mutationFn: () => {
+      if (!publicationScheme) throw new Error("请先生成智能发布方案。");
+      return api.modifyIntelligentPublishScheme(publicationScheme, publicationSchemeInstruction);
+    },
+    onSuccess: (payload) => {
+      applyPublicationScheme(payload);
     },
   });
 
@@ -483,6 +620,8 @@ export function useIntelligentCopyWorkspace() {
     filesystemPathSuggestions,
     copyStyle,
     setCopyStyle,
+    useExistingCover,
+    setUseExistingCover,
     inspection,
     result,
     recentGenerateTasks,
@@ -497,6 +636,11 @@ export function useIntelligentCopyWorkspace() {
     publicationProfiles,
     selectedPublicationProfileId,
     setSelectedPublicationProfileId,
+    publicationBrowserOptions,
+    selectedPublicationBrowser,
+    setSelectedPublicationBrowser,
+    matchPublicationBrowserLogin,
+    publicationLoginMatchMessage,
     materialPlatformOptions: intelligentCopyPlatformOptions,
     selectedMaterialPlatformIds,
     toggleMaterialPlatform,
@@ -505,6 +649,11 @@ export function useIntelligentCopyWorkspace() {
     togglePlatform,
     publicationPlatformOptions,
     updatePublicationPlatformOption,
+    publicationScheme,
+    publicationSchemeInstruction,
+    setPublicationSchemeInstruction,
+    generatePublicationScheme,
+    modifyPublicationScheme,
     publicationPlan,
     recentPublicationAttempts,
     selectedPublicationAttemptId,

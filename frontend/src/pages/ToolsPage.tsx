@@ -10,6 +10,9 @@ import type { ToolAsrResult, ToolAvatarResult, ToolRunStage, ToolRunStatus, Tool
 import { formatDate } from "../utils";
 import "./ToolsPage.css";
 
+type ToolKey = "tts" | "asr" | "avatar";
+type ToolStatusMap = Partial<Record<ToolKey, ToolServiceStatus>>;
+
 const toolCards = [
   {
     key: "tts",
@@ -26,8 +29,8 @@ const toolCards = [
     label: "音频转文字",
     verb: "开始转写",
     route: "/tools/asr",
-    provider: "MOSS-Audio / Local HTTP ASR",
-    detail: "上传音频，复用当前本地 ASR 配置输出文本和片段。",
+    provider: "faster-whisper large-v3 beam5 nohot",
+    detail: "上传音频，调用当前本地 faster-whisper ASR 输出文本和片段。",
   },
   {
     key: "avatar",
@@ -38,7 +41,19 @@ const toolCards = [
     provider: "HeyGem",
     detail: "上传主播视频和配音音频，生成一段数字人口播预览。",
   },
-];
+] satisfies Array<{
+  key: ToolKey;
+  title: string;
+  label: string;
+  verb: string;
+  route: string;
+  provider: string;
+  detail: string;
+}>;
+
+function getToolProviderLabel(tool: (typeof toolCards)[number], statuses?: ToolStatusMap): string {
+  return statuses?.[tool.key]?.name?.trim() || tool.provider;
+}
 
 const toolOptionStorageKeys = {
   tts: "roughcut.tools.tts.options",
@@ -737,7 +752,7 @@ export function ToolsPage() {
               </span>
               <span className="tool-entry-copy">
                 <strong>{tool.label}</strong>
-                <span className="tool-entry-provider">{tool.provider}</span>
+                <span className="tool-entry-provider">{getToolProviderLabel(tool, status.data?.tools)}</span>
                 <span className="tool-entry-detail">{tool.detail}</span>
               </span>
               <span className="tool-entry-cta">{tool.verb}</span>
@@ -751,7 +766,7 @@ export function ToolsPage() {
           <PanelHeader title="Service endpoints" description={status.data?.checked_at ?? "正在检查服务状态"} />
           <div className="service-grid">
             {toolCards.map((tool) => (
-              <ToolStatusCard key={tool.key} status={status.data?.tools[tool.key as "tts" | "asr" | "avatar"]} />
+              <ToolStatusCard key={tool.key} status={status.data?.tools[tool.key]} />
             ))}
           </div>
           {status.isError ? <div className="notice top-gap">{(status.error as Error).message}</div> : null}
@@ -772,15 +787,35 @@ function ToolStatusCard({ status }: { status?: ToolServiceStatus }) {
   );
 }
 
-function ToolNav() {
+function ToolNav({ statuses }: { statuses?: ToolStatusMap }) {
   const location = useLocation();
   return (
-    <div className="tool-tabs" role="navigation" aria-label="Tool pages">
+    <div className="tool-tabs" role="tablist" aria-label="百宝箱工具页签">
       {toolCards.map((tool) => (
-        <Link key={tool.key} className={location.pathname === tool.route ? "tool-tab active" : "tool-tab"} to={tool.route}>
-          {tool.label}
+        <Link
+          key={tool.key}
+          className={location.pathname === tool.route ? `tool-tab tool-tab-${tool.key} active` : `tool-tab tool-tab-${tool.key}`}
+          to={tool.route}
+          role="tab"
+          aria-selected={location.pathname === tool.route}
+          aria-current={location.pathname === tool.route ? "page" : undefined}
+        >
+          <span className="tool-tab-code">{tool.title}</span>
+          <span className="tool-tab-label">{tool.label}</span>
+          <span className="tool-tab-provider">{getToolProviderLabel(tool, statuses)}</span>
         </Link>
       ))}
+    </div>
+  );
+}
+
+function ToolPageChrome({ statuses }: { statuses?: ToolStatusMap }) {
+  return (
+    <div className="tool-page-chrome">
+      <ToolNav statuses={statuses} />
+      <Link className="button ghost tool-page-back" to="/tools">
+        返回百宝箱
+      </Link>
     </div>
   );
 }
@@ -963,13 +998,7 @@ export function TtsToolPage() {
 
   return (
     <section className="page-stack tools-page">
-      <PageHeader
-        eyebrow="TTS"
-        title="文本转语音"
-        description="CosyVoice3 与 MOSS-TTS Local 都通过本地 Docker 服务提供推理，提交后返回可试听的 WAV。"
-        actions={<Link className="button ghost" to="/tools">返回百宝箱</Link>}
-      />
-      <ToolNav />
+      <ToolPageChrome statuses={status.data?.tools} />
       <PageSection className="tool-run-section" eyebrow="调用" title="生成语音" description="覆盖 CosyVoice3 和 MOSS-TTS Local 官方模式；按 provider 展开对应参数。">
         <div className="panel-grid tool-workbench tts-workbench-vertical">
           <section className="panel tool-panel tool-input-panel tts-input-panel">
@@ -978,108 +1007,110 @@ export function TtsToolPage() {
               <input type="hidden" name="provider" value={selectedProvider.key} />
               <input type="hidden" name="mode" value={selectedMode.key} />
               <input type="hidden" name="reference_history_path" value={selectedReferencePath} />
-              <div className="tts-style-field">
-                <div>
-                  <span className="field-label">provider</span>
+              <div className="tts-routing-grid">
+                <div className="tts-style-field tts-provider-field">
+                  <div>
+                    <span className="field-label">provider</span>
+                  </div>
+                  <div className="tts-provider-grid" role="radiogroup" aria-label="TTS provider">
+                    {ttsProviders.map((provider) => (
+                      <button
+                        key={provider.key}
+                        type="button"
+                        className={provider.key === selectedProvider.key ? `tts-style-option tts-provider-option-${provider.key} active` : `tts-style-option tts-provider-option-${provider.key}`}
+                        aria-checked={provider.key === selectedProvider.key}
+                        aria-label={`${provider.label}${provider.recommended ? " 推荐" : ""}`}
+                        role="radio"
+                        onClick={() =>
+                          setTtsOptions((current) => ({
+                            ...current,
+                            provider: provider.key,
+                            mode: provider.key === "moss_tts_local" ? "moss_voice_clone" : "instruct2",
+                            mossTemperature: provider.key === "moss_tts_local" ? "1.0" : current.mossTemperature,
+                            mossTopP: provider.key === "moss_tts_local" ? "0.95" : current.mossTopP,
+                            mossTopK: provider.key === "moss_tts_local" ? "50" : current.mossTopK,
+                            mossRepetitionPenalty: provider.key === "moss_tts_local" ? "1.1" : current.mossRepetitionPenalty,
+                          }))
+                        }
+                      >
+                        <span className="tts-mode-title-row">
+                          <strong>{provider.label}</strong>
+                          {provider.recommended ? <span className="tts-mode-recommended">推荐</span> : null}
+                        </span>
+                        <span className="tts-mode-summary">{provider.summary}</span>
+                        <span className="tts-mode-use-case">{provider.detail}</span>
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="tts-provider-grid" role="radiogroup" aria-label="TTS provider">
-                  {ttsProviders.map((provider) => (
-                    <button
-                      key={provider.key}
-                      type="button"
-                      className={provider.key === selectedProvider.key ? "tts-style-option active" : "tts-style-option"}
-                      aria-checked={provider.key === selectedProvider.key}
-                      aria-label={`${provider.label}${provider.recommended ? " 推荐" : ""}`}
-                      role="radio"
-                      onClick={() =>
-                        setTtsOptions((current) => ({
-                          ...current,
-                          provider: provider.key,
-                          mode: provider.key === "moss_tts_local" ? "moss_voice_clone" : "instruct2",
-                          mossTemperature: provider.key === "moss_tts_local" ? "1.0" : current.mossTemperature,
-                          mossTopP: provider.key === "moss_tts_local" ? "0.95" : current.mossTopP,
-                          mossTopK: provider.key === "moss_tts_local" ? "50" : current.mossTopK,
-                          mossRepetitionPenalty: provider.key === "moss_tts_local" ? "1.1" : current.mossRepetitionPenalty,
-                        }))
-                      }
-                    >
-                      <span className="tts-mode-title-row">
-                        <strong>{provider.label}</strong>
-                        {provider.recommended ? <span className="tts-mode-recommended">推荐</span> : null}
-                      </span>
-                      <span className="tts-mode-summary">{provider.summary}</span>
-                      <span className="tts-mode-use-case">{provider.detail}</span>
-                    </button>
-                  ))}
-                </div>
+                {!isMossProvider ? (
+                  <div className="tts-style-field tts-mode-field">
+                    <div>
+                      <span className="field-label">mode</span>
+                    </div>
+                    <div className="tts-mode-grid" role="radiogroup" aria-label={`${selectedProvider.label} mode`}>
+                      {cosyVoiceTtsModes.map((mode) => (
+                        <button
+                          key={mode.key}
+                          type="button"
+                          className={mode.key === selectedMode.key ? `tts-style-option tts-mode-option-${mode.key} active` : `tts-style-option tts-mode-option-${mode.key}`}
+                          aria-checked={mode.key === selectedMode.key}
+                          aria-label={`${mode.label} ${mode.name}${mode.recommended ? " 推荐" : ""}`}
+                          role="radio"
+                          onClick={() =>
+                            setTtsOptions((current) => ({
+                              ...current,
+                              mode: mode.key,
+                              promptText: mode.key === "zero_shot" && !current.promptText.trim() ? defaultTtsOptions.promptText : current.promptText,
+                              instructText: mode.key === "instruct2" && !current.instructText.trim() ? defaultInstructTextPreset : current.instructText,
+                            }))
+                          }
+                        >
+                          <span className="tts-mode-title-row">
+                            <strong>{mode.label}</strong>
+                            {mode.recommended ? <span className="tts-mode-recommended">推荐</span> : null}
+                          </span>
+                          <span className="tts-mode-name">{mode.name}</span>
+                          <span className="tts-mode-summary">{mode.summary}</span>
+                          <span className="tts-mode-use-case">{mode.useCase}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="tts-style-field tts-mode-field">
+                    <div>
+                      <span className="field-label">mode</span>
+                    </div>
+                    <div className="tts-mode-grid" role="radiogroup" aria-label={`${selectedProvider.label} mode`}>
+                      {selectedMossModes.map((mode) => (
+                        <button
+                          key={mode.key}
+                          type="button"
+                          className={mode.key === selectedMode.key ? `tts-style-option tts-mode-option-${mode.key} active` : `tts-style-option tts-mode-option-${mode.key}`}
+                          aria-checked={mode.key === selectedMode.key}
+                          aria-label={`${mode.label} ${mode.name}${mode.recommended ? " 推荐" : ""}`}
+                          role="radio"
+                          onClick={() =>
+                            setTtsOptions((current) => ({
+                              ...current,
+                              mode: mode.key,
+                            }))
+                          }
+                        >
+                          <span className="tts-mode-title-row">
+                            <strong>{mode.label}</strong>
+                            {mode.recommended ? <span className="tts-mode-recommended">推荐</span> : null}
+                          </span>
+                          <span className="tts-mode-name">{mode.name}</span>
+                          <span className="tts-mode-summary">{mode.summary}</span>
+                          <span className="tts-mode-use-case">{mode.useCase}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
-              {!isMossProvider ? (
-                <div className="tts-style-field">
-                  <div>
-                    <span className="field-label">mode</span>
-                  </div>
-                  <div className="tts-mode-grid" role="radiogroup" aria-label={`${selectedProvider.label} mode`}>
-                    {cosyVoiceTtsModes.map((mode) => (
-                      <button
-                        key={mode.key}
-                        type="button"
-                        className={mode.key === selectedMode.key ? "tts-style-option active" : "tts-style-option"}
-                        aria-checked={mode.key === selectedMode.key}
-                        aria-label={`${mode.label} ${mode.name}${mode.recommended ? " 推荐" : ""}`}
-                        role="radio"
-                        onClick={() =>
-                          setTtsOptions((current) => ({
-                            ...current,
-                            mode: mode.key,
-                            promptText: mode.key === "zero_shot" && !current.promptText.trim() ? defaultTtsOptions.promptText : current.promptText,
-                            instructText: mode.key === "instruct2" && !current.instructText.trim() ? defaultInstructTextPreset : current.instructText,
-                          }))
-                        }
-                      >
-                        <span className="tts-mode-title-row">
-                          <strong>{mode.label}</strong>
-                          {mode.recommended ? <span className="tts-mode-recommended">推荐</span> : null}
-                        </span>
-                        <span className="tts-mode-name">{mode.name}</span>
-                        <span className="tts-mode-summary">{mode.summary}</span>
-                        <span className="tts-mode-use-case">{mode.useCase}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <div className="tts-style-field">
-                  <div>
-                    <span className="field-label">mode</span>
-                  </div>
-                  <div className="tts-mode-grid" role="radiogroup" aria-label={`${selectedProvider.label} mode`}>
-                    {selectedMossModes.map((mode) => (
-                      <button
-                        key={mode.key}
-                        type="button"
-                        className={mode.key === selectedMode.key ? "tts-style-option active" : "tts-style-option"}
-                        aria-checked={mode.key === selectedMode.key}
-                        aria-label={`${mode.label} ${mode.name}${mode.recommended ? " 推荐" : ""}`}
-                        role="radio"
-                        onClick={() =>
-                          setTtsOptions((current) => ({
-                            ...current,
-                            mode: mode.key,
-                          }))
-                        }
-                      >
-                        <span className="tts-mode-title-row">
-                          <strong>{mode.label}</strong>
-                          {mode.recommended ? <span className="tts-mode-recommended">推荐</span> : null}
-                        </span>
-                        <span className="tts-mode-name">{mode.name}</span>
-                        <span className="tts-mode-summary">{mode.summary}</span>
-                        <span className="tts-mode-use-case">{mode.useCase}</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
               <label className="tool-control-block tool-control-block-main">
                 <span>tts_text / text</span>
                 <textarea
@@ -1712,7 +1743,9 @@ function TtsResult({ run, error, pending }: { run?: ToolRunStatus<ToolTtsResult>
 
 export function AsrToolPage() {
   const { mutation, run, pending, error } = useToolRun<ToolAsrResult>(api.runToolAsr, toolOptionStorageKeys.asrRun);
+  const status = useQuery({ queryKey: ["tools", "status"], queryFn: api.getToolStatus, refetchInterval: 30_000 });
   const [asrOptions, setAsrOptions] = useStoredOptions(toolOptionStorageKeys.asr, defaultAsrOptions, coerceAsrOptions);
+  const asrServiceName = status.data?.tools.asr?.name?.trim() || toolCards.find((tool) => tool.key === "asr")?.provider || "本地 ASR";
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -1721,14 +1754,8 @@ export function AsrToolPage() {
 
   return (
     <section className="page-stack tools-page">
-      <PageHeader
-        eyebrow="ASR"
-        title="音频转文字"
-        description="上传音频后直接调用当前本地 HTTP ASR 服务，返回文本和片段。"
-        actions={<Link className="button ghost" to="/tools">返回百宝箱</Link>}
-      />
-      <ToolNav />
-      <PageSection className="tool-run-section" eyebrow="调用" title="转写音频" description="热词会作为上下文传给本地 ASR，用于产品名、型号和专有名词。">
+      <ToolPageChrome statuses={status.data?.tools} />
+      <PageSection className="tool-run-section" eyebrow="调用" title="转写音频" description={`当前调用 ${asrServiceName}；热词会作为上下文传给本地 ASR，用于产品名、型号和专有名词。`}>
         <div className="panel-grid two-up tool-workbench">
           <section className="panel tool-panel tool-input-panel">
             <PanelHeader title="输入" description="支持本地 ASR 服务能处理的音频格式。" />
@@ -1811,6 +1838,7 @@ function AsrResult({ run, error, pending }: { run?: ToolRunStatus<ToolAsrResult>
 
 export function AvatarToolPage() {
   const { mutation, run, pending, error } = useToolRun<ToolAvatarResult>(api.runToolAvatar, toolOptionStorageKeys.avatarRun);
+  const status = useQuery({ queryKey: ["tools", "status"], queryFn: api.getToolStatus, refetchInterval: 30_000 });
   const [avatarOptions, setAvatarOptions] = useStoredOptions(toolOptionStorageKeys.avatar, defaultAvatarOptions, coerceAvatarOptions);
 
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -1820,13 +1848,7 @@ export function AvatarToolPage() {
 
   return (
     <section className="page-stack tools-page">
-      <PageHeader
-        eyebrow="Avatar"
-        title="数字人口播"
-        description="上传一段主播视频和配音音频，直接调用 HeyGem 生成单段预览。"
-        actions={<Link className="button ghost" to="/tools">返回百宝箱</Link>}
-      />
-      <ToolNav />
+      <ToolPageChrome statuses={status.data?.tools} />
       <PageSection className="tool-run-section" eyebrow="调用" title="生成口播预览" description="这页适合验证视频素材、音频素材和 HeyGem 服务是否能协同跑通。">
         <div className="panel-grid two-up tool-workbench">
           <section className="panel tool-panel tool-input-panel">

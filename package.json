@@ -15,6 +15,7 @@
     "dev:worker:media": "uv run roughcut worker --queue media_queue",
     "dev:worker:llm": "uv run roughcut worker --queue llm_queue",
     "dev:worker:agent": "uv run roughcut worker --queue agent_queue",
+    "dev:publication-browser-agent": "node scripts/publication_browser_agent_service.mjs",
     "dev:watcher": "uv run roughcut watcher watch",
     "dev:telegram-agent": "uv run roughcut telegram-agent",
     "build": "pnpm run build:frontend",

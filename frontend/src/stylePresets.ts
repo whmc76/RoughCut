@@ -216,6 +216,7 @@ export const coverStylePresets: StylePreset[] = [
   { key: "collection_drop", label: "限定收藏", groupId: "brand", summary: "更像收藏海报和限定发布。", accent: "#f2c07c", badge: "收藏", sampleTop: "联名收藏", sampleBottom: "质感拉满", sampleFoot: "适合限定版" },
   { key: "upgrade_spotlight", label: "升级聚焦", groupId: "product", summary: "突出升级点和对比关系。", accent: "#ffa25e", badge: "升级", sampleTop: "这次升级", sampleBottom: "到底值不值", sampleFoot: "适合改版内容" },
   { key: "tactical_neon", label: "战术霓虹", groupId: "cyber", summary: "冷光霓虹和硬核装备感。", accent: "#53d4ff", badge: "战术", sampleTop: "硬核装备", sampleBottom: "夜感更强", sampleFoot: "适合 EDC" },
+  { key: "edc_cinematic_hero", label: "EDC 电影英雄", groupId: "cinema", summary: "电影级暖色冒险背景、霓虹电光和 3D 金属大字，适合 EDC 开箱封面。", accent: "#f4a23c", badge: "EDC", sampleTop: "MOT风灵", sampleBottom: "锆合金推牌", sampleFoot: "强点击英雄封面" },
   { key: "luxury_blackgold", label: "黑金奢感", groupId: "brand", summary: "高客单、精品、礼盒感更强。", accent: "#f2c35b", badge: "黑金", sampleTop: "高级限定", sampleBottom: "一眼就贵", sampleFoot: "品牌视觉更强" },
   { key: "retro_poster", label: "复古海报", groupId: "cinema", summary: "偏复古海报和收藏印刷感。", accent: "#ff9177", badge: "复古", sampleTop: "旧海报感", sampleBottom: "很抓眼", sampleFoot: "情绪更浓" },
   { key: "creator_vlog", label: "创作者 vlog", groupId: "content", summary: "生活化、有人味，适合日常记录。", accent: "#ffb7a0", badge: "vlog", sampleTop: "今天这一套", sampleBottom: "太会了", sampleFoot: "生活感更强" },

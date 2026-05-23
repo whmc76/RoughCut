@@ -1,0 +1,91 @@
+{
+  "result": {
+    "contract": "browser_agent_publication_inventory_v1",
+    "status": "needs_pages",
+    "source": "browser_agent_inventory",
+    "probe_id": "e61b35ab-9d7d-49bb-9761-8f6f4cc88cba",
+    "browser": "Chrome CDP",
+    "generated_at": "2026-05-22T05:24:29.577Z",
+    "platforms": {
+      "douyin": {
+        "status": "needs_expanded_controls",
+        "platform": "douyin",
+        "message": "已从当前浏览器页面读取可见控件；折叠菜单需要在平台页面展开后重新摸底。",
+        "route": {
+          "url": "https://creator.douyin.com/creator-micro/content/upload",
+          "title": "抖音创作者中心",
+          "domains": [
+            "creator.douyin.com",
+            "creator-micro.douyin.com"
+          ]
+        },
+        "field_groups": [],
+        "option_groups": [],
+        "operation_steps": [
+          {
+            "index": 1,
+            "label": "打开平台创作/发布页"
+          },
+          {
+            "index": 2,
+            "label": "上传视频和封面"
+          },
+          {
+            "index": 3,
+            "label": "填写标题、正文、标签"
+          },
+          {
+            "index": 4,
+            "label": "选择平台真实可见的合集、分类、声明和定时设置"
+          },
+          {
+            "index": 5,
+            "label": "发布前再次验证页面和字段变化"
+          }
+        ],
+        "warnings": [
+          "抖音当前停留在上传入口；标题、合集、声明、定时等发布参数通常要完成草稿上传后才会出现，不能用侧边栏文字冒充发布选项。",
+          "已连接真实页面，但没有识别到可用下拉/候选选项；需要展开页面控件后重新摸底。"
+        ],
+        "probe_meta": {
+          "draft_upload_requested": false,
+          "upload": {
+            "uploaded": false,
+            "reason": "upload_probe_not_requested"
+          },
+          "actions": [],
+          "interruptions": [
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://creator.douyin.com",
+              "setting": "denied",
+              "stage": "before_probe"
+            },
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://creator.douyin.com",
+              "setting": "denied",
+              "stage": "before_expand_更多设置"
+            },
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://creator.douyin.com",
+              "setting": "denied",
+              "stage": "before_expand_展开"
+            },
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://creator.douyin.com",
+              "setting": "denied",
+              "stage": "before_api_inventory"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

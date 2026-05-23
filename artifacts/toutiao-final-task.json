@@ -1,0 +1,331 @@
+{
+  "payload": {
+    "contract": "browser_agent_publication_v1",
+    "task_id": "toutiao-final-1779543029621",
+    "platform": "toutiao",
+    "profile_id": "d2d15bc6d77a47b79cf20a79b56596c2",
+    "content": {
+      "title": "锆合金版风灵音叉推牌值得入吗？先看真实体验",
+      "body": "锆合金版本的音叉推牌到手，给我的直观感受是质感和分量都上了一个台阶。相比普通版本，这个版本的光泽更沉稳，拿在手里更稳当，操作手感也更顺滑。整体做工对得起定价，适合对EDC把玩件有一定要求的用户。",
+      "content_kind": "video",
+      "hashtags": [
+        "EDC玩具",
+        "音叉推牌",
+        "锆合金",
+        "开箱测评",
+        "MOT风灵"
+      ],
+      "display_hashtags": [
+        "#EDC玩具",
+        "#音叉推牌",
+        "#锆合金",
+        "#开箱测评",
+        "#MOT风灵"
+      ],
+      "structured_tags": [
+        "EDC玩具",
+        "音叉推牌",
+        "锆合金",
+        "开箱测评",
+        "MOT风灵"
+      ],
+      "native_topics": [],
+      "category": "头条认证",
+      "collection": null,
+      "cover_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\smart-copy\\06-toutiao-cover.jpg",
+      "copy_material": {
+        "source": "platform_packaging",
+        "primary_title": "锆合金版风灵音叉推牌值得入吗？先看真实体验",
+        "titles": [
+          "锆合金版风灵音叉推牌值得入吗？先看真实体验",
+          "换个材质体验完全不同：风灵音叉推牌锆合金版测评",
+          "MOT风灵音叉推牌锆合金版上手，这些细节值得关注"
+        ],
+        "body": "锆合金版本的音叉推牌到手，给我的直观感受是质感和分量都上了一个台阶。相比普通版本，这个版本的光泽更沉稳，拿在手里更稳当，操作手感也更顺滑。整体做工对得起定价，适合对EDC把玩件有一定要求的用户。",
+        "tags": [
+          "EDC玩具",
+          "音叉推牌",
+          "锆合金",
+          "开箱测评",
+          "MOT风灵"
+        ],
+        "cover_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\smart-copy\\06-toutiao-cover.jpg",
+        "full_copy": ""
+      },
+      "visibility_or_publish_mode": "scheduled",
+      "scheduled_publish_at": "2026-05-24T10:00",
+      "ui_control_semantics": {
+        "schedule_publish": true,
+        "collection_select": false
+      },
+      "platform_specific_overrides": {
+        "declaration_options": [
+          "创作权益",
+          "头条认证",
+          "创作灵感",
+          "创作训练营",
+          "工具",
+          "功能实验室",
+          "直播工具",
+          "创作保护",
+          "关于今日头条|用户协议|隐私政策|社区规范|自律公约|侵权投诉|联系我们© 2026 toutiao.com All Rights Reserved",
+          "创作 文章 视频 微头条 音频",
+          "文章 视频 微头条 音频",
+          "管理 作品管理 评论管理 草稿箱",
+          "作品管理 评论管理 草稿箱",
+          "数据 收益数据 作品数据 粉丝数据",
+          "收益数据 作品数据 粉丝数据",
+          "进阶创作 付费专栏",
+          "成长指南 首发激励 创作权益 头条认证 创作灵感 创作训练营",
+          "首发激励 创作权益 头条认证 创作灵感 创作训练营",
+          "工具 功能实验室 直播工具 创作保护 图片素材",
+          "功能实验室 直播工具 创作保护 图片素材",
+          "投放广告",
+          "投放广告赚收益不投放广告",
+          "声明首发",
+          "头条首发",
+          "符合首发质量标准且72小时内仅在头条发布的内容，可享额外激励分成 详细了解",
+          "合集",
+          "添加至合集",
+          "作品声明",
+          "取材网络引用站内个人观点，仅供参考引用AI虚构演绎，故事经历投资观点，仅供参考健康医疗分享，仅供参考",
+          "共 0 字"
+        ],
+        "selected_declarations": [],
+        "field_groups": [
+          {
+            "key": "visibility",
+            "label": "可见性/发布模式",
+            "controls": [
+              {
+                "tag": "div",
+                "role": "",
+                "type": "",
+                "label": "主页 创作 文章 视频 微头条 音频 管理 作品管理 评论管理 草稿箱 数据 收益数据 作品数据 粉丝数据 进阶创作 付费专栏 提现 成长指南 首发激励 创作权益 头条认证 创作灵感 创作训练营 工具 功能实验室 直播工具 创作保护 图片素材 设置",
+                "checked": false
+              },
+              {
+                "tag": "div",
+                "role": "",
+                "type": "",
+                "label": "管理 作品管理 评论管理 草稿箱",
+                "checked": false
+              },
+              {
+                "tag": "div",
+                "role": "",
+                "type": "",
+                "label": "作品管理 评论管理 草稿箱",
+                "checked": false
+              },
+              {
+                "tag": "div",
+                "role": "",
+                "type": "",
+                "label": "草稿箱",
+                "checked": false
+              }
+            ]
+          }
+        ],
+        "option_groups": [
+          {
+            "key": "declarations",
+            "label": "声明/权益/内容类型",
+            "options": [
+              "创作权益",
+              "头条认证",
+              "创作灵感",
+              "创作训练营",
+              "工具",
+              "功能实验室",
+              "直播工具",
+              "创作保护",
+              "关于今日头条|用户协议|隐私政策|社区规范|自律公约|侵权投诉|联系我们© 2026 toutiao.com All Rights Reserved",
+              "创作 文章 视频 微头条 音频",
+              "文章 视频 微头条 音频",
+              "管理 作品管理 评论管理 草稿箱",
+              "作品管理 评论管理 草稿箱",
+              "数据 收益数据 作品数据 粉丝数据",
+              "收益数据 作品数据 粉丝数据",
+              "进阶创作 付费专栏",
+              "成长指南 首发激励 创作权益 头条认证 创作灵感 创作训练营",
+              "首发激励 创作权益 头条认证 创作灵感 创作训练营",
+              "工具 功能实验室 直播工具 创作保护 图片素材",
+              "功能实验室 直播工具 创作保护 图片素材",
+              "投放广告",
+              "投放广告赚收益不投放广告",
+              "声明首发",
+              "头条首发",
+              "符合首发质量标准且72小时内仅在头条发布的内容，可享额外激励分成 详细了解",
+              "合集",
+              "添加至合集",
+              "作品声明",
+              "取材网络引用站内个人观点，仅供参考引用AI虚构演绎，故事经历投资观点，仅供参考健康医疗分享，仅供参考",
+              "共 0 字",
+              "发文设置",
+              "预览定时发布预览并发布",
+              "已开启云端自动同步",
+              "1. 草稿将自动同步至云端，你可以在不同设备上进行编辑",
+              "2. 你可前往“设置 - 功能设置 - 内容隐私” 更改该设置",
+              "AI 创作内容建议",
+              "创作热点推荐",
+              "换一换",
+              "抖音这么火，如何抓住机会赚钱",
+              "你觉得卓威es2鼠标好用吗",
+              "罗宾尼表带怎么佩戴",
+              "求助，健身环太阳舞者上衣怎么获得",
+              "带里布的袖子总是会扭吗?"
+            ],
+            "values": []
+          },
+          {
+            "key": "toutiao_categories",
+            "label": "头条分类/声明",
+            "options": [
+              "创作权益",
+              "头条认证",
+              "创作灵感",
+              "创作训练营",
+              "工具",
+              "功能实验室",
+              "直播工具",
+              "创作保护",
+              "创作 文章 视频 微头条 音频",
+              "文章 视频 微头条 音频",
+              "管理 作品管理 评论管理 草稿箱",
+              "作品管理 评论管理 草稿箱",
+              "数据 收益数据 作品数据 粉丝数据",
+              "收益数据 作品数据 粉丝数据",
+              "进阶创作 付费专栏",
+              "成长指南 首发激励 创作权益 头条认证 创作灵感 创作训练营",
+              "首发激励 创作权益 头条认证 创作灵感 创作训练营",
+              "工具 功能实验室 直播工具 创作保护 图片素材",
+              "功能实验室 直播工具 创作保护 图片素材",
+              "声明首发",
+              "头条首发",
+              "符合首发质量标准且72小时内仅在头条发布的内容，可享额外激励分成 详细了解",
+              "合集",
+              "添加至合集",
+              "作品声明",
+              "取材网络引用站内个人观点，仅供参考引用AI虚构演绎，故事经历投资观点，仅供参考健康医疗分享，仅供参考",
+              "共 0 字",
+              "发文设置",
+              "预览定时发布预览并发布",
+              "已开启云端自动同步",
+              "1. 草稿将自动同步至云端，你可以在不同设备上进行编辑",
+              "2. 你可前往“设置 - 功能设置 - 内容隐私” 更改该设置",
+              "我知道了",
+              "头条创作助手",
+              "AI 创作内容建议",
+              "创作热点推荐"
+            ],
+            "values": []
+          },
+          {
+            "key": "collections",
+            "label": "合集/栏目/播放列表",
+            "options": [
+              "合集",
+              "添加至合集",
+              "作品声明",
+              "取材网络引用站内个人观点，仅供参考引用AI虚构演绎，故事经历投资观点，仅供参考健康医疗分享，仅供参考",
+              "共 0 字",
+              "发文设置"
+            ]
+          }
+        ],
+        "operation_steps": [
+          {
+            "index": 1,
+            "label": "打开平台创作/发布页"
+          },
+          {
+            "index": 2,
+            "label": "上传视频和封面"
+          },
+          {
+            "index": 3,
+            "label": "填写标题、正文、标签"
+          },
+          {
+            "index": 4,
+            "label": "选择平台真实可见的合集、分类、声明和定时设置"
+          },
+          {
+            "index": 5,
+            "label": "发布前再次验证页面和字段变化"
+          }
+        ],
+        "platform_warnings": [
+          "已请求草稿上传摸底，但未能启动上传：no_file_input。"
+        ],
+        "decision_policy": "only_choose_from_browser_agent_inventory",
+        "collection_management": {
+          "kind": "collection",
+          "status": "needs_create",
+          "target_collection_name": "EDC潮玩桌搭",
+          "selected_collection_name": "",
+          "create_required": true,
+          "post_publish_association_required": true,
+          "reason": "当前账号没有读到目标合集，需要先创建并保存到账号目录，后续同类型视频复用同名合集。"
+        }
+      },
+      "media_items": [
+        {
+          "kind": "video",
+          "local_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\MOT 风灵音叉推牌 锆合金版本.mp4",
+          "source_url": null,
+          "uploaded_url": null,
+          "mime_type": "video/mp4"
+        }
+      ],
+      "media_urls": [
+        "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\MOT 风灵音叉推牌 锆合金版本.mp4"
+      ],
+      "metadata": {
+        "adapter": "browser_agent",
+        "browser_profile_id": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:toutiao",
+        "credential_id": "db437af2d30c467f84b9fafed826a4c8",
+        "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:toutiao",
+        "account_label": "FAS · Chrome",
+        "creator_profile_id": "d2d15bc6d77a47b79cf20a79b56596c2",
+        "creator_profile_name": "FAS",
+        "publication_guard": {
+          "ready": true,
+          "review_gate_blocked": false,
+          "formal_plan": {
+            "ready": true,
+            "reasons": []
+          },
+          "release_payload": {
+            "ready": true,
+            "reasons": []
+          }
+        }
+      },
+      "publication_capability": {
+        "adapter": "browser_agent",
+        "platform": "toutiao",
+        "requires_local_media": true,
+        "supports_scheduled_publish": true,
+        "supports_collection_select": true
+      },
+      "validation_contract": "browser_agent_publication_v1"
+    }
+  },
+  "start": {
+    "task": {
+      "task_id": "toutiao-final-1779543029621",
+      "id": "toutiao-final-1779543029621",
+      "platform": "toutiao",
+      "profile_id": "d2d15bc6d77a47b79cf20a79b56596c2",
+      "status": "queued",
+      "created_at": "2026-05-23T13:30:29.640Z",
+      "updated_at": "2026-05-23T13:30:29.640Z",
+      "scheduled_publish_at": "2026-05-24T10:00",
+      "result": {},
+      "error": null
+    }
+  }
+}

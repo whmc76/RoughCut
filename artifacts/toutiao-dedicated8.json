@@ -1,0 +1,474 @@
+{
+  "generated_at": "2026-05-23T12:15:25.690Z",
+  "task": {
+    "task_id": "toutiao-dedicated8-1779538430604",
+    "id": "toutiao-dedicated8-1779538430604",
+    "platform": "toutiao",
+    "profile_id": "d2d15bc6d77a47b79cf20a79b56596c2",
+    "status": "needs_human",
+    "created_at": "2026-05-23T12:13:50.628Z",
+    "updated_at": "2026-05-23T12:15:24.658Z",
+    "scheduled_publish_at": "2026-05-23T19:30",
+    "result": {
+      "draft_url": "https://mp.toutiao.com/profile_v4/xigua/upload-video?index=0",
+      "route": {
+        "url": "https://mp.toutiao.com/profile_v4/xigua/upload-video?index=0",
+        "title": "头条号"
+      },
+      "composite_framework": {
+        "enabled": true,
+        "platform": "toutiao",
+        "framework_id": "toutiao_xigua_composite_v1",
+        "dedicated_platform_framework": true,
+        "legacy_lightweight_script_used": false,
+        "material_integrity": {
+          "platform": "toutiao",
+          "fields": {
+            "title": {
+              "expected": "锆合金版风灵音叉推牌值得入吗？先看真实体验",
+              "verified": true
+            },
+            "body": {
+              "expected": "锆合金版本的音叉推牌到手，给我的直观感受是质感和分量都上了一个台阶。相比普通版本，这个版本的光泽更沉稳，拿在手里更稳当，操作手感也更顺滑。整体做工对得起定价，适合对EDC把玩件有一定要求的用户。",
+              "verified": true
+            },
+            "tags": {
+              "expected": [
+                "EDC玩具",
+                "音叉推牌",
+                "锆合金",
+                "开箱测评",
+                "MOT风灵"
+              ],
+              "actual_checks": [
+                {
+                  "tag": "EDC玩具",
+                  "present": true
+                },
+                {
+                  "tag": "音叉推牌",
+                  "present": true
+                },
+                {
+                  "tag": "锆合金",
+                  "present": true
+                },
+                {
+                  "tag": "开箱测评",
+                  "present": true
+                },
+                {
+                  "tag": "MOT风灵",
+                  "present": true
+                }
+              ],
+              "verified": true
+            },
+            "collection": {
+              "expected": "",
+              "verified": true
+            },
+            "schedule": {
+              "expected": "2026-05-23 19:30",
+              "verified": false
+            },
+            "upload_ready": {
+              "verified": true
+            },
+            "declaration": {
+              "verified": true
+            },
+            "cover": {
+              "expected_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\smart-copy\\06-toutiao-cover.jpg",
+              "verified": false,
+              "cover_required_warning": true,
+              "youtube_auto_thumbnail": false,
+              "youtube_custom_thumbnail_preview": false
+            }
+          },
+          "verified": false,
+          "failures": [
+            "schedule",
+            "cover"
+          ],
+          "platform_extras": {
+            "youtube_link": "",
+            "youtube_scheduled": false,
+            "youtube_thumbnail_uploading": false,
+            "route": {
+              "url": "https://mp.toutiao.com/profile_v4/xigua/upload-video?index=0",
+              "title": "头条号"
+            },
+            "image_sources": [
+              "https://sf1-cdn-tos.toutiaostatic.com/img/user-avatar/efbdee1d3c63d43bbc334f5cc2eaea08~300x300.image",
+              "https://sf1-cdn-tos.toutiaostatic.com/img/user-avatar/efbdee1d3c63d43bbc334f5cc2eaea08~300x300.image",
+              "blob:https://mp.toutiao.com/c485fc8c-febe-4be5-8cf0-f9812a088c94",
+              "https://p26-sign.bdxiguaimg.com/xigua-short-video/short/b9d41605085739d6ac0c265b41b4149c.jpg~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=2GYt3c3wcjOIM8kHmIKypn%2F7gOY%3D",
+              "https://p3-sign.bdxiguaimg.com/eden-cn/uhyboeh7lpqbps/xg-cover-editor/tpl/tpl-48.png~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=6ntOzANqnVseWPO35wVQkAlmjz8%3D",
+              "https://p3-sign.bdxiguaimg.com/xigua-short-video/short/60517da04889c122ff479ee5e9b012f5.png~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=ZeQhrZshGpXqQwpG6VL%2B5RJMTnA%3D",
+              "https://p26-sign.bdxiguaimg.com/eden-cn/uhyboeh7lpqbps/xg-cover-editor/tpl/tpl-11.jpeg~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=Z4HTFlZavy45i4msG%2BuAjAucvrQ%3D",
+              "https://p3-sign.bdxiguaimg.com/xigua-short-video/short/a3a3498587dfacee0c9cbfe81b280c5d.jpg~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=dNu50hx7YZvU70MZ6aIVYEnb920%3D",
+              "https://p26-sign.bdxiguaimg.com/xigua-short-video/short/b4ef8be39920687fd4c16a4806c6be55.png~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=7%2FSF%2B0KI5hi%2BundOxjc9u3pzPVo%3D",
+              "https://p3-sign.bdxiguaimg.com/xigua-short-video/short/ecb1284def90c5fa01d1251d4209791b.jpg~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=yKKgmvZjRX3Kc7OD9NcmuuwYCw4%3D",
+              "https://p3-sign.bdxiguaimg.com/xigua-short-video/short/a7c373412a2b091de308db9a4e1d901c.jpg~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=%2FY3A4jkwMLeFoSt%2FYuN%2B3EElSXE%3D",
+              "https://p3-sign.bdxiguaimg.com/xigua-short-video/short/97ed4fd1e6eb9433d98bca5d0d099684.png~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=y7yCccuoCEwQjYNzSGt6ghx1LYA%3D"
+            ],
+            "relevant_lines": [
+              "头条号 消息 12 发布视频 发布视频创建合集 MOT 风灵音叉推牌 锆合金版本.mp4 添加视频 上传成功 MOT 风灵音叉推牌 锆合金版本.mp4 大小: 240.1MB 视频时长: 3min 11s 修改视频 删除 基本信息 标题 21/30 话题 还可以添加10个话题 封面 上传封面 清晰美观的封面有利于推荐，建议分辨率不低于 1920*1080（大小不超过 20M）建议的封面 视频简介 128/400 视频生成图文 生成图文生成的内容将与视频同时发布 与视频同时发布仅保存草稿 创作收益 发布横版视频可获得创作收益 高级设置 合集 选择合集 互动贴纸 添加贴纸 在视频中添加互动贴纸，可以获得更多的关注、点赞 作品声明 取自站外引用站内自行拍摄AI生成虚构演绎，故事经历投资观点，仅供参考健康医疗分享，仅供参考 扩展链接 在今日头条APP的固定位置插入链接 了解扩展链接 谁可以看 公开粉丝可见仅我可见 存草稿定时发布发布 推荐 FAS机神圣殿潮玩EDC 锆合金版风灵音叉推牌值得入吗？先看真实体验 03:11 今日头条 封面编辑 模版 贴纸 文字 滤镜 我的 推荐 vlog 美食 音乐 时尚 知识 无模版 保存为模板 重选封面 确定 该视频需要上传一个封面 #MOT风灵 完成后无法继续编辑，是否确定完成？ 取消 确定"
+            ]
+          }
+        }
+      },
+      "actions": [
+        {
+          "kind": "ensure_platform_publish_route",
+          "navigated": true,
+          "from": "https://mp.toutiao.com/profile_v4/xigua/content-manage-v2",
+          "to": "https://mp.toutiao.com/profile_v4/xigua/upload-video?index=0",
+          "url": "https://mp.toutiao.com/profile_v4/xigua/upload-video?index=0",
+          "verified": true
+        },
+        {
+          "clicked": true,
+          "text": "发布视频",
+          "label": "发布视频"
+        },
+        {
+          "kind": "media_upload",
+          "uploaded": true,
+          "input": {
+            "type": "file",
+            "accept": ".mp4,.flv,.wmv,.avi,.mov,.dat,.asf,.rm,.rmvb,.ram,.mpg,.mpeg,.3gp,.m4v,.dvix,.dv,.mkv,.vob,.qt,.cpk,.fli,.flc,.mod,.ts,.webm,.m2ts,video/*",
+            "multiple": "",
+            "style": "display: none;"
+          },
+          "fileInputCount": 1
+        },
+        {
+          "kind": "toutiao_upload_ready_wait",
+          "ready": true,
+          "waited_ms": 55029,
+          "last": {
+            "platform": "toutiao",
+            "ready": true,
+            "busy": false,
+            "failed": false,
+            "mediaPresent": true,
+            "uploadPromptOnly": false,
+            "expected": {
+              "mediaName": "MOT 风灵音叉推牌 锆合金版本.mp4",
+              "mediaStem": "MOT 风灵音叉推牌 锆合金版本"
+            },
+            "lines": [
+              "头条号 消息 12 发布视频 发布视频创建合集 MOT 风灵音叉推牌 锆合金版本.mp4 添加视频 上传成功 MOT 风灵音叉推牌 锆合金版本.mp4 大小: 240.1MB 视频时长: 3min 11s 修改视频 删除 基本信息 标题 14/30 话题 还可以添加10个话题 封面 上传封面 清晰美观的封面有利于推荐，建议分辨率不低于 1920*1080（大小不超过 20M）建议的封面 视频简介 0/400 视频生成图文 生成图文生成的内容将与视频同时发布 与视频同时发布仅保存草稿 创作收益 发布横版视频可获得创作收益 高级设置 合集 选择合集 互动贴纸 添加贴纸 在视频中添加互动贴纸，可以获得更多的关注、点赞 作品声明 取自站外引用站内自行拍摄AI生成虚构演绎，故事经历投资观点，仅供参考健康医疗分享，仅供参考 扩展链接 在今日头条APP的固定位置插入链接 了解扩展链接 谁可以看 公开粉丝可见仅我可见 存草稿定时发布发布 推荐 FAS机神圣殿潮玩EDC MOT 风灵音叉推牌 锆合金版本 03:11 今日头条"
+            ]
+          }
+        },
+        {
+          "kind": "toutiao_rich_text",
+          "filled": true,
+          "actions": [
+            {
+              "field": "title",
+              "ok": true,
+              "hint": "请输入 1～30 个字符 MOT 风灵音叉推牌 锆合金版本 14/30 14/30 14/30 14/30"
+            },
+            {
+              "field": "body",
+              "ok": true,
+              "hint": "请输入视频简介 0/400 0/400 0/400 视频简介 0/400"
+            }
+          ],
+          "verified_body": false,
+          "verified_title": true,
+          "candidates": [
+            {
+              "text": "请输入 1～30 个字符 MOT 风灵音叉推牌 锆合金版本 14/30 14/30 14/30 14/30",
+              "area": 20664,
+              "tag": "input"
+            },
+            {
+              "text": "请输入 还可以添加10个话题 还可以添加10个话题 还可以添加10个话题",
+              "area": 1160,
+              "tag": "input"
+            },
+            {
+              "text": "请输入视频简介 0/400 0/400 0/400 视频简介 0/400",
+              "area": 20664,
+              "tag": "textarea"
+            }
+          ]
+        },
+        {
+          "kind": "toutiao_cover_entry",
+          "clicked": false
+        },
+        {
+          "kind": "toutiao_cover_entry_loose",
+          "clicked": true,
+          "text": "上传封面",
+          "label": "上传封面",
+          "loose": true
+        },
+        {
+          "kind": "toutiao_cover_local_upload",
+          "clicked": false
+        },
+        {
+          "kind": "toutiao_cover_local_upload_loose",
+          "clicked": true,
+          "text": "本地上传",
+          "label": "本地上传",
+          "loose": true
+        },
+        {
+          "kind": "toutiao_cover_upload",
+          "uploaded": true,
+          "expected_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\smart-copy\\06-toutiao-cover.jpg",
+          "input": {
+            "type": "file",
+            "accept": "image/jpg,image/jpeg,image/png,image/x-png,image/webp",
+            "style": "display: none;"
+          },
+          "fileInputCount": 3
+        },
+        {
+          "kind": "toutiao_cover_next",
+          "clicked": false
+        },
+        {
+          "kind": "toutiao_cover_confirm",
+          "clicked": true,
+          "text": "确定",
+          "label": "确定"
+        },
+        {
+          "kind": "toutiao_cover_completion_confirm",
+          "clicked": true,
+          "text": "确定",
+          "label": "确定",
+          "dialog_text": "封面编辑 模版 贴纸 文字 滤镜 我的 推荐 vlog 美食 音乐 时尚 知识 无模版 保存为模板 重选封面 确定"
+        },
+        {
+          "kind": "toutiao_tag",
+          "filled": true,
+          "label": "请输入 还可以添加10个话题 还可以添加10个话题",
+          "tag": "input"
+        },
+        {
+          "kind": "toutiao_tag",
+          "filled": true,
+          "label": "请输入 还可以添加10个话题 还可以添加10个话题",
+          "tag": "input"
+        },
+        {
+          "kind": "toutiao_tag",
+          "filled": true,
+          "label": "请输入 还可以添加10个话题 还可以添加10个话题",
+          "tag": "input"
+        },
+        {
+          "kind": "toutiao_tag",
+          "filled": true,
+          "label": "请输入 还可以添加10个话题 还可以添加10个话题",
+          "tag": "input"
+        },
+        {
+          "kind": "toutiao_tag",
+          "filled": true,
+          "label": "请输入 还可以添加10个话题 还可以添加10个话题",
+          "tag": "input"
+        },
+        {
+          "kind": "toutiao_original_declaration",
+          "clicked": false
+        },
+        {
+          "kind": "toutiao_schedule_entry",
+          "clicked": true,
+          "text": "定时发布",
+          "label": "定时发布"
+        },
+        {
+          "kind": "toutiao_schedule_set",
+          "set": false,
+          "expected": {
+            "display": "2026-05-23 19:30",
+            "date": "2026-05-23",
+            "dateLabel": "05月23日",
+            "hour": "19",
+            "minute": "30",
+            "time": "19:30"
+          },
+          "body_after_had_schedule": false,
+          "actions": [
+            {
+              "clicked": "toutiao_cover_editor_ok",
+              "ok": true,
+              "dialog": "封面编辑 模版 贴纸 文字 滤镜 我的 推荐 vlog 美食 音乐 时尚 知识 无模版 保存为模板 重选封面 确定"
+            },
+            {
+              "clicked": "toutiao_blocking_completion_confirm",
+              "ok": false,
+              "dialog": "完成后无法继续编辑，是否确定完成？ 取消 确定"
+            },
+            {
+              "clicked": "toutiao_cover_editor_ok",
+              "ok": true,
+              "dialog": "封面编辑 模版 贴纸 文字 滤镜 我的 推荐 vlog 美食 音乐 时尚 知识 无模版 保存为模板 重选封面 确定"
+            },
+            {
+              "clicked": "toutiao_blocking_completion_confirm",
+              "ok": false,
+              "dialog": "完成后无法继续编辑，是否确定完成？ 取消 确定"
+            },
+            {
+              "clicked": "toutiao_schedule_footer_entry",
+              "ok": true,
+              "label": "定时发布"
+            },
+            {
+              "select": "toutiao_day",
+              "ok": false,
+              "reason": "missing_toutiao_schedule_modal"
+            },
+            {
+              "select": "toutiao_hour",
+              "ok": false,
+              "reason": "missing_toutiao_schedule_modal"
+            },
+            {
+              "select": "toutiao_minute",
+              "ok": false,
+              "reason": "missing_toutiao_schedule_modal"
+            },
+            {
+              "clicked": "toutiao_schedule_footer_entry",
+              "ok": true,
+              "label": "定时发布"
+            }
+          ],
+          "relevant_text": [
+            "头条号 消息 12 发布视频 发布视频创建合集 MOT 风灵音叉推牌 锆合金版本.mp4 添加视频 上传成功 MOT 风灵音叉推牌 锆合金版本.mp4 大小: 240.1MB 视频时长: 3min 11s 修改视频 删除 基本信息 标题 21/30 话题 还可以添加10个话题 封面 上传封面 清晰美观的封面有利于推荐，建议分辨率不低于 1920*1080（大小不超过 20M）建议的封面 视频简介 128/400 视频生成图文 生成图文生成的内容将与视频同时发布 与视频同时发布仅保存草稿 创作收益 发布横版视频可获得创作收益 高级设置 合集 选择合集 互动贴纸 添加贴纸 在视频中添加互动贴纸，可以获得更多的关注、点赞 作品声明 取自站外引用站内自行拍摄AI生成虚构演绎，故事经历投资观点，仅供参考健康医疗分享，仅供参考 扩展链接 在今日头条APP的固定位置插入链接 了解扩展链接 谁可以看 公开粉丝可见仅我可见 存草稿定时发布发布 推荐 FAS机神圣殿潮玩EDC 锆合金版风灵音叉推牌值得入吗？先看真实体验 03:11 今日头条 封面编辑 模版 贴纸 文字 滤镜 我的 推荐 vlog 美食 音乐 时尚 知识 无模版 保存为模板 重选封面 确定 该视频需要上传一个封面 #MOT风灵 完成后无法继续编辑，是否确定完成？ 取消 确定"
+          ]
+        }
+      ],
+      "visible_option_lines": [
+        "发布视频创建合集",
+        "封面",
+        "上传封面",
+        "清晰美观的封面有利于推荐，建议分辨率不低于 1920*1080（大小不超过 20M）建议的封面",
+        "合集",
+        "选择合集",
+        "作品声明",
+        "公开粉丝可见仅我可见",
+        "存草稿定时发布发布",
+        "封面编辑",
+        "重选封面",
+        "该视频需要上传一个封面"
+      ],
+      "final_publish": {}
+    },
+    "error": {
+      "code": "toutiao_material_integrity_failed",
+      "message": "复合适配器发布前读回未通过：schedule, cover",
+      "details": {
+        "platform": "toutiao",
+        "fields": {
+          "title": {
+            "expected": "锆合金版风灵音叉推牌值得入吗？先看真实体验",
+            "verified": true
+          },
+          "body": {
+            "expected": "锆合金版本的音叉推牌到手，给我的直观感受是质感和分量都上了一个台阶。相比普通版本，这个版本的光泽更沉稳，拿在手里更稳当，操作手感也更顺滑。整体做工对得起定价，适合对EDC把玩件有一定要求的用户。",
+            "verified": true
+          },
+          "tags": {
+            "expected": [
+              "EDC玩具",
+              "音叉推牌",
+              "锆合金",
+              "开箱测评",
+              "MOT风灵"
+            ],
+            "actual_checks": [
+              {
+                "tag": "EDC玩具",
+                "present": true
+              },
+              {
+                "tag": "音叉推牌",
+                "present": true
+              },
+              {
+                "tag": "锆合金",
+                "present": true
+              },
+              {
+                "tag": "开箱测评",
+                "present": true
+              },
+              {
+                "tag": "MOT风灵",
+                "present": true
+              }
+            ],
+            "verified": true
+          },
+          "collection": {
+            "expected": "",
+            "verified": true
+          },
+          "schedule": {
+            "expected": "2026-05-23 19:30",
+            "verified": false
+          },
+          "upload_ready": {
+            "verified": true
+          },
+          "declaration": {
+            "verified": true
+          },
+          "cover": {
+            "expected_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\smart-copy\\06-toutiao-cover.jpg",
+            "verified": false,
+            "cover_required_warning": true,
+            "youtube_auto_thumbnail": false,
+            "youtube_custom_thumbnail_preview": false
+          }
+        },
+        "verified": false,
+        "failures": [
+          "schedule",
+          "cover"
+        ],
+        "platform_extras": {
+          "youtube_link": "",
+          "youtube_scheduled": false,
+          "youtube_thumbnail_uploading": false,
+          "route": {
+            "url": "https://mp.toutiao.com/profile_v4/xigua/upload-video?index=0",
+            "title": "头条号"
+          },
+          "image_sources": [
+            "https://sf1-cdn-tos.toutiaostatic.com/img/user-avatar/efbdee1d3c63d43bbc334f5cc2eaea08~300x300.image",
+            "https://sf1-cdn-tos.toutiaostatic.com/img/user-avatar/efbdee1d3c63d43bbc334f5cc2eaea08~300x300.image",
+            "blob:https://mp.toutiao.com/c485fc8c-febe-4be5-8cf0-f9812a088c94",
+            "https://p26-sign.bdxiguaimg.com/xigua-short-video/short/b9d41605085739d6ac0c265b41b4149c.jpg~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=2GYt3c3wcjOIM8kHmIKypn%2F7gOY%3D",
+            "https://p3-sign.bdxiguaimg.com/eden-cn/uhyboeh7lpqbps/xg-cover-editor/tpl/tpl-48.png~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=6ntOzANqnVseWPO35wVQkAlmjz8%3D",
+            "https://p3-sign.bdxiguaimg.com/xigua-short-video/short/60517da04889c122ff479ee5e9b012f5.png~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=ZeQhrZshGpXqQwpG6VL%2B5RJMTnA%3D",
+            "https://p26-sign.bdxiguaimg.com/eden-cn/uhyboeh7lpqbps/xg-cover-editor/tpl/tpl-11.jpeg~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=Z4HTFlZavy45i4msG%2BuAjAucvrQ%3D",
+            "https://p3-sign.bdxiguaimg.com/xigua-short-video/short/a3a3498587dfacee0c9cbfe81b280c5d.jpg~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=dNu50hx7YZvU70MZ6aIVYEnb920%3D",
+            "https://p26-sign.bdxiguaimg.com/xigua-short-video/short/b4ef8be39920687fd4c16a4806c6be55.png~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=7%2FSF%2B0KI5hi%2BundOxjc9u3pzPVo%3D",
+            "https://p3-sign.bdxiguaimg.com/xigua-short-video/short/ecb1284def90c5fa01d1251d4209791b.jpg~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=yKKgmvZjRX3Kc7OD9NcmuuwYCw4%3D",
+            "https://p3-sign.bdxiguaimg.com/xigua-short-video/short/a7c373412a2b091de308db9a4e1d901c.jpg~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=%2FY3A4jkwMLeFoSt%2FYuN%2B3EElSXE%3D",
+            "https://p3-sign.bdxiguaimg.com/xigua-short-video/short/97ed4fd1e6eb9433d98bca5d0d099684.png~tplv-pk90l89vgd-crop-center:0:0.png?lk3s=ba7ee7da&x-expires=1782216906&x-signature=y7yCccuoCEwQjYNzSGt6ghx1LYA%3D"
+          ],
+          "relevant_lines": [
+            "头条号 消息 12 发布视频 发布视频创建合集 MOT 风灵音叉推牌 锆合金版本.mp4 添加视频 上传成功 MOT 风灵音叉推牌 锆合金版本.mp4 大小: 240.1MB 视频时长: 3min 11s 修改视频 删除 基本信息 标题 21/30 话题 还可以添加10个话题 封面 上传封面 清晰美观的封面有利于推荐，建议分辨率不低于 1920*1080（大小不超过 20M）建议的封面 视频简介 128/400 视频生成图文 生成图文生成的内容将与视频同时发布 与视频同时发布仅保存草稿 创作收益 发布横版视频可获得创作收益 高级设置 合集 选择合集 互动贴纸 添加贴纸 在视频中添加互动贴纸，可以获得更多的关注、点赞 作品声明 取自站外引用站内自行拍摄AI生成虚构演绎，故事经历投资观点，仅供参考健康医疗分享，仅供参考 扩展链接 在今日头条APP的固定位置插入链接 了解扩展链接 谁可以看 公开粉丝可见仅我可见 存草稿定时发布发布 推荐 FAS机神圣殿潮玩EDC 锆合金版风灵音叉推牌值得入吗？先看真实体验 03:11 今日头条 封面编辑 模版 贴纸 文字 滤镜 我的 推荐 vlog 美食 音乐 时尚 知识 无模版 保存为模板 重选封面 确定 该视频需要上传一个封面 #MOT风灵 完成后无法继续编辑，是否确定完成？ 取消 确定"
+          ]
+        }
+      }
+    }
+  }
+}

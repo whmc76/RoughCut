@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { SelectField } from "../components/forms/SelectField";
@@ -9,11 +9,12 @@ import { PanelHeader } from "../components/ui/PanelHeader";
 import { publicationAttemptStatusLabel, useIntelligentCopyWorkspace } from "../features/intelligentCopy/useIntelligentCopyWorkspace";
 import { useI18n } from "../i18n";
 import { copyStylePresets } from "../stylePresets";
-import type { IntelligentCopyGenerateTask, IntelligentCopyPlatformMaterial, PublicationAttempt } from "../types";
+import type { IntelligentCopyGenerateTask, IntelligentCopyPlatformMaterial, PublicationAttempt, PublicationSchemeItem } from "../types";
 
 export function IntelligentCopyPage() {
   const { t } = useI18n();
   const workspace = useIntelligentCopyWorkspace();
+  const [activePage, setActivePage] = useState<"generate" | "publish">("generate");
   const [previewPlatformKey, setPreviewPlatformKey] = useState<string | null>(null);
   const [pathInputFocused, setPathInputFocused] = useState(false);
   const [highlightedPathIndex, setHighlightedPathIndex] = useState(0);
@@ -24,6 +25,16 @@ export function IntelligentCopyPage() {
   );
   const previewPlatform = workspace.result?.platforms.find((platform) => platform.key === previewPlatformKey) ?? null;
   const generateDisabled = !workspace.folderPath.trim() || workspace.generate.isPending || workspace.selectedMaterialPlatformIds.length === 0;
+  const recentGenerateTasks = workspace.recentGenerateTasks.data?.tasks ?? [];
+  const completedMaterialTasks = useMemo(
+    () => recentGenerateTasks.filter((task) => task.status === "completed" && task.result?.publish_ready !== false),
+    [recentGenerateTasks],
+  );
+  const selectedCompletedMaterialTask = completedMaterialTasks.find((task) => task.id === workspace.selectedGenerateTaskId) ?? null;
+  const availableMaterialPlatformKeys = useMemo(
+    () => new Set((workspace.result?.platforms ?? []).map((platform) => normalizePublicationPlatformKey(platform.key))),
+    [workspace.result?.platforms],
+  );
   const parentPathSuggestions = workspace.parentFolderSuggestions;
   const autocompletePathSuggestions = workspace.folderPathAutocompleteOptions.filter((path) => !parentPathSuggestions.includes(path));
   const pathDropdownItems = [
@@ -46,11 +57,6 @@ export function IntelligentCopyPage() {
         eyebrow={t("smartCopy.page.eyebrow")}
         title={t("smartCopy.page.title")}
         description={t("smartCopy.page.description")}
-        summary={[
-          { label: "直接读取", value: "成片 + 字幕 + 可选封面", detail: "先对现成目录出发布物料" },
-          { label: "账号选择", value: "创作者卡片", detail: "先选择创作者，再检查各平台自动登录" },
-          { label: "一键发布", value: "平台可勾选", detail: "按平台创建发布任务并交给发布运行器" },
-        ]}
         actions={
           <div className="toolbar">
             <Link className="button ghost" to="/creator-profiles">
@@ -60,208 +66,226 @@ export function IntelligentCopyPage() {
         }
       />
 
-      <section className="watch-command-strip">
-        <article className="watch-command-chip">
-          <span className="watch-command-label">{t("smartCopy.page.folderLabel")}</span>
-          <strong>{workspace.inspection?.folder_path || t("smartCopy.page.folderPlaceholder")}</strong>
-        </article>
-        <article className="watch-command-chip">
-          <span className="watch-command-label">{t("smartCopy.page.videoLabel")}</span>
-          <strong>{workspace.inspection?.video_file || "—"}</strong>
-        </article>
-        <article className="watch-command-chip">
-          <span className="watch-command-label">{t("smartCopy.page.subtitleLabel")}</span>
-          <strong>{workspace.inspection?.subtitle_file || "—"}</strong>
-        </article>
-        <article className="watch-command-chip">
-          <span className="watch-command-label">{t("smartCopy.page.outputLabel")}</span>
-          <strong>{workspace.result?.material_dir || workspace.inspection?.material_dir || "—"}</strong>
-        </article>
-      </section>
+      <nav className="smart-copy-page-tabs" role="tablist" aria-label="智能发布页面切换">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activePage === "generate"}
+          className={`smart-copy-page-tab${activePage === "generate" ? " active" : ""}`}
+          onClick={() => setActivePage("generate")}
+        >
+          <strong>生成物料</strong>
+          <span>目录识别、封面和多平台文案</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activePage === "publish"}
+          className={`smart-copy-page-tab${activePage === "publish" ? " active" : ""}`}
+          onClick={() => setActivePage("publish")}
+        >
+          <strong>一键发布</strong>
+          <span>选择完成物料并提交发布队列</span>
+        </button>
+      </nav>
 
-      <div className="panel-grid two-up">
-        <section className="panel">
-          <PanelHeader
-            title={t("smartCopy.form.title")}
-            description={t("smartCopy.form.description")}
-            actions={
-              <button
-                type="button"
-                className="button ghost"
-                onClick={() => workspace.inspect.mutate(workspace.folderPath)}
-                disabled={!workspace.folderPath.trim() || workspace.inspect.isPending}
-              >
-                {workspace.inspect.isPending ? t("smartCopy.page.inspecting") : t("smartCopy.page.inspect")}
-              </button>
-            }
-          />
-          <div className="form-grid">
-            <div className="smart-copy-path-field">
-              <div className="smart-copy-path-autocomplete">
-                <label>
-                  <span>{t("smartCopy.form.folderPath")}</span>
-                  <input
-                    className="input"
-                    type="text"
-                    value={workspace.folderPath}
-                    onFocus={() => setPathInputFocused(true)}
-                    onBlur={() => setPathInputFocused(false)}
-                    onChange={(event) => {
-                      workspace.setFolderPath(event.target.value);
-                      setHighlightedPathIndex(0);
-                      setPathInputFocused(true);
-                    }}
-                    onKeyDown={(event) => {
-                      if (pathDropdownOpen && event.key === "ArrowDown") {
-                        event.preventDefault();
-                        setHighlightedPathIndex((current) => Math.min(pathDropdownItems.length - 1, current + 1));
-                        return;
-                      }
-                      if (pathDropdownOpen && event.key === "ArrowUp") {
-                        event.preventDefault();
-                        setHighlightedPathIndex((current) => Math.max(0, current - 1));
-                        return;
-                      }
-                      if (pathDropdownOpen && event.key === "Enter" && activePathSuggestion) {
-                        event.preventDefault();
-                        choosePathSuggestion(activePathSuggestion);
-                        return;
-                      }
-                      if (pathDropdownOpen && event.key === "Escape") {
-                        event.preventDefault();
-                        setPathInputFocused(false);
-                        return;
-                      }
-                      if (event.key === "Enter" && workspace.folderPath.trim() && !workspace.inspect.isPending) {
-                        workspace.inspect.mutate(workspace.folderPath);
-                      }
-                    }}
-                    placeholder={t("smartCopy.form.folderPlaceholder")}
-                    autoComplete="off"
-                    role="combobox"
-                    aria-expanded={pathDropdownOpen}
-                    aria-controls="smart-copy-folder-path-dropdown"
-                  />
-                </label>
-                {pathDropdownOpen ? (
-                  <div
-                    id="smart-copy-folder-path-dropdown"
-                    className="smart-copy-path-dropdown"
-                    role="listbox"
-                    aria-label={t("smartCopy.form.pathSuggestions")}
+      {activePage === "generate" ? (
+        <>
+          <div className="panel-grid two-up">
+            <section className="panel">
+              <PanelHeader
+                title={t("smartCopy.form.title")}
+                description={t("smartCopy.form.description")}
+                actions={
+                  <button
+                    type="button"
+                    className="button ghost"
+                    onClick={() => workspace.inspect.mutate(workspace.folderPath)}
+                    disabled={!workspace.folderPath.trim() || workspace.inspect.isPending}
                   >
-                    {parentPathSuggestions.length ? (
-                      <div className="smart-copy-path-dropdown-group" role="presentation">
-                        <div className="smart-copy-path-dropdown-label">{t("smartCopy.form.parentFolders")}</div>
-                        {parentPathSuggestions.map((path, index) => (
-                          <button
-                            key={`parent-${path}`}
-                            type="button"
-                            role="option"
-                            aria-selected={path === activePathSuggestion}
-                            className={`smart-copy-path-dropdown-option parent${path === activePathSuggestion ? " selected" : ""}`}
-                            onMouseDown={(event) => event.preventDefault()}
-                            onClick={() => choosePathSuggestion(path)}
-                            onMouseEnter={() => setHighlightedPathIndex(index)}
-                            title={path}
-                          >
-                            {path}
-                          </button>
-                        ))}
-                      </div>
-                    ) : null}
-                    {autocompletePathSuggestions.length ? (
-                      <div className="smart-copy-path-dropdown-group" role="presentation">
-                        <div className="smart-copy-path-dropdown-label">{t("smartCopy.form.pathSuggestions")}</div>
-                        {autocompletePathSuggestions.map((path, index) => {
-                          const itemIndex = parentPathSuggestions.length + index;
-                          return (
-                            <button
-                              key={`autocomplete-${path}`}
-                              type="button"
-                              role="option"
-                              aria-selected={path === activePathSuggestion}
-                              className={`smart-copy-path-dropdown-option${path === activePathSuggestion ? " selected" : ""}`}
-                              onMouseDown={(event) => event.preventDefault()}
-                              onClick={() => choosePathSuggestion(path)}
-                              onMouseEnter={() => setHighlightedPathIndex(itemIndex)}
-                              title={path}
-                            >
-                              {path}
-                            </button>
-                          );
-                        })}
+                    {workspace.inspect.isPending ? t("smartCopy.page.inspecting") : t("smartCopy.page.inspect")}
+                  </button>
+                }
+              />
+              <div className="form-grid">
+                <div className="smart-copy-path-field">
+                  <div className="smart-copy-path-autocomplete">
+                    <label>
+                      <span>{t("smartCopy.form.folderPath")}</span>
+                      <input
+                        className="input"
+                        type="text"
+                        value={workspace.folderPath}
+                        onFocus={() => setPathInputFocused(true)}
+                        onBlur={() => setPathInputFocused(false)}
+                        onChange={(event) => {
+                          workspace.setFolderPath(event.target.value);
+                          setHighlightedPathIndex(0);
+                          setPathInputFocused(true);
+                        }}
+                        onKeyDown={(event) => {
+                          if (pathDropdownOpen && event.key === "ArrowDown") {
+                            event.preventDefault();
+                            setHighlightedPathIndex((current) => Math.min(pathDropdownItems.length - 1, current + 1));
+                            return;
+                          }
+                          if (pathDropdownOpen && event.key === "ArrowUp") {
+                            event.preventDefault();
+                            setHighlightedPathIndex((current) => Math.max(0, current - 1));
+                            return;
+                          }
+                          if (pathDropdownOpen && event.key === "Enter" && activePathSuggestion) {
+                            event.preventDefault();
+                            choosePathSuggestion(activePathSuggestion);
+                            return;
+                          }
+                          if (pathDropdownOpen && event.key === "Escape") {
+                            event.preventDefault();
+                            setPathInputFocused(false);
+                            return;
+                          }
+                          if (event.key === "Enter" && workspace.folderPath.trim() && !workspace.inspect.isPending) {
+                            workspace.inspect.mutate(workspace.folderPath);
+                          }
+                        }}
+                        placeholder={t("smartCopy.form.folderPlaceholder")}
+                        autoComplete="off"
+                        role="combobox"
+                        aria-expanded={pathDropdownOpen}
+                        aria-controls="smart-copy-folder-path-dropdown"
+                      />
+                    </label>
+                    {pathDropdownOpen ? (
+                      <div
+                        id="smart-copy-folder-path-dropdown"
+                        className="smart-copy-path-dropdown"
+                        role="listbox"
+                        aria-label={t("smartCopy.form.pathSuggestions")}
+                      >
+                        {parentPathSuggestions.length ? (
+                          <div className="smart-copy-path-dropdown-group" role="presentation">
+                            <div className="smart-copy-path-dropdown-label">{t("smartCopy.form.parentFolders")}</div>
+                            {parentPathSuggestions.map((path, index) => (
+                              <button
+                                key={`parent-${path}`}
+                                type="button"
+                                role="option"
+                                aria-selected={path === activePathSuggestion}
+                                className={`smart-copy-path-dropdown-option parent${path === activePathSuggestion ? " selected" : ""}`}
+                                onMouseDown={(event) => event.preventDefault()}
+                                onClick={() => choosePathSuggestion(path)}
+                                onMouseEnter={() => setHighlightedPathIndex(index)}
+                                title={path}
+                              >
+                                {path}
+                              </button>
+                            ))}
+                          </div>
+                        ) : null}
+                        {autocompletePathSuggestions.length ? (
+                          <div className="smart-copy-path-dropdown-group" role="presentation">
+                            <div className="smart-copy-path-dropdown-label">{t("smartCopy.form.pathSuggestions")}</div>
+                            {autocompletePathSuggestions.map((path, index) => {
+                              const itemIndex = parentPathSuggestions.length + index;
+                              return (
+                                <button
+                                  key={`autocomplete-${path}`}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={path === activePathSuggestion}
+                                  className={`smart-copy-path-dropdown-option${path === activePathSuggestion ? " selected" : ""}`}
+                                  onMouseDown={(event) => event.preventDefault()}
+                                  onClick={() => choosePathSuggestion(path)}
+                                  onMouseEnter={() => setHighlightedPathIndex(itemIndex)}
+                                  title={path}
+                                >
+                                  {path}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
                   </div>
-                ) : null}
-              </div>
-            </div>
-            <SelectField
-              label={t("smartCopy.form.copyStyle")}
-              value={workspace.copyStyle}
-              onChange={(event) => workspace.setCopyStyle(event.target.value)}
-              options={copyStylePresets.map((preset) => ({ value: preset.key, label: preset.label }))}
-            />
-          </div>
-          {workspace.copyFeedback ? <div className="notice top-gap">{workspace.copyFeedback}</div> : null}
-          {workspace.inspect.error ? <div className="notice top-gap">{(workspace.inspect.error as Error).message}</div> : null}
-          {workspace.generate.error ? <div className="notice top-gap">{(workspace.generate.error as Error).message}</div> : null}
-        </section>
-
-        <section className="panel">
-          <PanelHeader title={t("smartCopy.inspect.title")} description={t("smartCopy.inspect.description")} />
-          {workspace.inspection ? (
-            <div className="list-stack">
-              <div>
-                <div className="row-title">{t("smartCopy.inspect.mainAssets")}</div>
-                <div className="muted">{workspace.inspection.video_file || "—"}</div>
-                <div className="muted">{workspace.inspection.subtitle_file || "—"}</div>
-                <div className="muted">{workspace.inspection.cover_file || "—"}</div>
-              </div>
-              {workspace.inspection.warnings.length ? (
-                <div>
-                  <div className="row-title">{t("smartCopy.inspect.warnings")}</div>
-                  {workspace.inspection.warnings.map((warning) => (
-                    <div key={warning} className="muted">{warning}</div>
-                  ))}
                 </div>
-              ) : null}
-            </div>
-          ) : (
-            <EmptyState message={t("smartCopy.inspect.empty")} />
-          )}
-        </section>
-      </div>
+                <SelectField
+                  label={t("smartCopy.form.copyStyle")}
+                  value={workspace.copyStyle}
+                  onChange={(event) => workspace.setCopyStyle(event.target.value)}
+                  options={copyStylePresets.map((preset) => ({ value: preset.key, label: preset.label }))}
+                />
+                <label className="checkbox-line">
+                  <input
+                    type="checkbox"
+                    checked={workspace.useExistingCover}
+                    onChange={(event) => workspace.setUseExistingCover(event.target.checked)}
+                  />
+                  <span>
+                    <strong>{t("smartCopy.form.useExistingCover")}</strong>
+                    <small>{t("smartCopy.form.useExistingCoverHint")}</small>
+                  </span>
+                </label>
+              </div>
+              {workspace.copyFeedback ? <div className="notice top-gap">{workspace.copyFeedback}</div> : null}
+              {workspace.inspect.error ? <div className="notice top-gap">{(workspace.inspect.error as Error).message}</div> : null}
+              {workspace.generate.error ? <div className="notice top-gap">{(workspace.generate.error as Error).message}</div> : null}
+            </section>
 
-      <PageSection
-        eyebrow={t("smartCopy.materials.eyebrow")}
-        title={t("smartCopy.materials.title")}
-        description={t("smartCopy.materials.description")}
-        actions={
-          <div className="toolbar">
-            {workspace.result?.material_dir ? (
-              <button type="button" className="button ghost" onClick={() => workspace.openFolder.mutate(workspace.result?.material_dir || "")}>
-                {t("smartCopy.page.openOutput")}
-              </button>
-            ) : null}
-            <button
-              type="button"
-              className="button primary"
-              onClick={() =>
-                workspace.generate.mutate({
-                  folderPath: workspace.folderPath,
-                  copyStyle: workspace.copyStyle,
-                  platforms: workspace.selectedMaterialPlatformIds,
-                })
-              }
-              disabled={generateDisabled}
-            >
-              {workspace.generate.isPending ? t("smartCopy.page.generating") : t("smartCopy.page.generate")}
-            </button>
+            <section className="panel">
+              <PanelHeader title={t("smartCopy.inspect.title")} description={t("smartCopy.inspect.description")} />
+              {workspace.inspection ? (
+                <div className="list-stack">
+                  <div>
+                    <div className="row-title">{t("smartCopy.inspect.mainAssets")}</div>
+                    <div className="muted">{workspace.inspection.video_file || "—"}</div>
+                    <div className="muted">{workspace.inspection.subtitle_file || "—"}</div>
+                    <div className="muted">{workspace.inspection.cover_file || "—"}</div>
+                  </div>
+                  {workspace.inspection.warnings.length ? (
+                    <div>
+                      <div className="row-title">{t("smartCopy.inspect.warnings")}</div>
+                      {workspace.inspection.warnings.map((warning) => (
+                        <div key={warning} className="muted">{warning}</div>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <EmptyState message={t("smartCopy.inspect.empty")} />
+              )}
+            </section>
           </div>
-        }
-      >
+
+          <PageSection
+            eyebrow={t("smartCopy.materials.eyebrow")}
+            title={t("smartCopy.materials.title")}
+            description={t("smartCopy.materials.description")}
+            actions={
+              <div className="toolbar">
+                {workspace.result?.material_dir ? (
+                  <button type="button" className="button ghost" onClick={() => workspace.openFolder.mutate(workspace.result?.material_dir || "")}>
+                    {t("smartCopy.page.openOutput")}
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  className="button primary"
+                  onClick={() =>
+                    workspace.generate.mutate({
+                      folderPath: workspace.folderPath,
+                      copyStyle: workspace.copyStyle,
+                      platforms: workspace.selectedMaterialPlatformIds,
+                      useExistingCover: workspace.useExistingCover,
+                    })
+                  }
+                  disabled={generateDisabled}
+                >
+                  {workspace.generate.isPending ? t("smartCopy.page.generating") : t("smartCopy.page.generate")}
+                </button>
+              </div>
+            }
+          >
         <section className="panel smart-copy-platform-picker">
           <PanelHeader
             title={t("smartCopy.materials.platformPickerTitle")}
@@ -339,19 +363,73 @@ export function IntelligentCopyPage() {
           <EmptyState message={t("smartCopy.materials.empty")} />
         )}
       </PageSection>
+        </>
+      ) : (
+        <PageSection
+          eyebrow={t("smartCopy.publish.eyebrow")}
+          title={t("smartCopy.publish.title")}
+          description="选择一个已完成的物料生成任务，确认视频、字幕和可发布平台后提交一键发布。发布任务会进入队列，页面可持续恢复每个平台的执行状态。"
+        >
+          <section className="panel smart-copy-publish-material-picker">
+            <PanelHeader
+              title="选择已完成物料任务"
+              description="只列出已经生成完成且可发布的物料任务。选择后会自动定位对应的视频、字幕、输出目录和平台物料。"
+              actions={
+                <div className="toolbar">
+                  <select
+                    className="input smart-copy-history-select"
+                    value={selectedCompletedMaterialTask?.id ?? ""}
+                    onChange={(event) => workspace.setSelectedGenerateTaskId(event.target.value)}
+                    disabled={!completedMaterialTasks.length}
+                    aria-label="选择已完成物料任务"
+                  >
+                    <option value="">选择已完成物料任务</option>
+                    {completedMaterialTasks.map((task) => (
+                      <option key={task.id} value={task.id}>
+                        {formatGenerateTaskOptionTime(task)} · {task.folder_path.split(/[\\/]/).filter(Boolean).at(-1) || task.folder_path}
+                      </option>
+                    ))}
+                  </select>
+                  <span className="mode-chip subtle">{completedMaterialTasks.length} 个可发布任务</span>
+                </div>
+              }
+            />
+            {selectedCompletedMaterialTask ? (
+              <div className="smart-copy-publish-task-grid">
+                <article className="activity-card">
+                  <span className="stat-label">当前任务</span>
+                  <strong>{selectedCompletedMaterialTask.folder_path.split(/[\\/]/).filter(Boolean).at(-1) || selectedCompletedMaterialTask.folder_path}</strong>
+                  <div className="muted compact-top">{selectedCompletedMaterialTask.message || "物料已完成，可进入发布队列。"}</div>
+                </article>
+                <article className="activity-card">
+                  <span className="stat-label">发布平台</span>
+                  <strong>{workspace.result?.platforms.length ?? 0} 个平台物料</strong>
+                  <div className="mode-chip-list compact-top">
+                    {(workspace.result?.platforms ?? []).map((platform) => (
+                      <span className="mode-chip subtle" key={platform.key}>{platform.label}</span>
+                    ))}
+                  </div>
+                </article>
+                <article className="activity-card">
+                  <span className="stat-label">队列恢复</span>
+                  <strong>持久化发布任务</strong>
+                  <div className="muted compact-top">提交后按平台创建发布记录，刷新页面也能继续跟踪状态和链接。</div>
+                </article>
+              </div>
+            ) : (
+              <EmptyState message="暂无可发布物料任务。请先到“生成物料”页完成一次物料生成。" />
+            )}
+          </section>
 
-      <PageSection
-        eyebrow={t("smartCopy.publish.eyebrow")}
-        title={t("smartCopy.publish.title")}
-        description={t("smartCopy.publish.description")}
-      >
-        <PublicationHistoryPanel
-          attempts={workspace.recentPublicationAttempts.data?.attempts ?? []}
-          selectedAttempt={workspace.selectedPublicationAttempt}
-          selectedAttemptId={workspace.selectedPublicationAttemptId}
-          loading={workspace.recentPublicationAttempts.isLoading}
-          onSelect={workspace.setSelectedPublicationAttemptId}
-        />
+          <section className="panel top-gap">
+            <PanelHeader title="视频与字幕定位" description="发布前确认本次物料绑定的成片、字幕、封面和输出目录。" />
+            <div className="smart-copy-publish-asset-grid">
+              <PathSummaryCard label="成片视频" value={workspace.inspection?.video_file} />
+              <PathSummaryCard label="字幕文件" value={workspace.inspection?.subtitle_file} />
+              <PathSummaryCard label="封面来源" value={workspace.inspection?.cover_file || workspace.result?.cover_source_path} />
+              <PathSummaryCard label="物料目录" value={workspace.result?.material_dir || workspace.inspection?.material_dir} />
+            </div>
+          </section>
 
         <div className="panel-grid two-up">
           <section className="panel">
@@ -377,7 +455,39 @@ export function IntelligentCopyPage() {
                   ))}
                 </select>
               </label>
+              <label>
+                <span>浏览器</span>
+                <select
+                  className="input"
+                  value={workspace.selectedPublicationBrowser}
+                  onChange={(event) => workspace.setSelectedPublicationBrowser(event.target.value)}
+                >
+                  {workspace.publicationBrowserOptions.map((option) => (
+                    <option key={option.id} value={option.id}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </div>
+            <div className="toolbar compact-top">
+              <button
+                type="button"
+                className="button secondary"
+                disabled={
+                  !selectedPublicationProfile ||
+                  !workspace.result?.platforms.length ||
+                  workspace.matchPublicationBrowserLogin.isPending
+                }
+                onClick={() => workspace.matchPublicationBrowserLogin.mutate()}
+              >
+                {workspace.matchPublicationBrowserLogin.isPending ? "匹配中..." : "自动匹配登录信息"}
+              </button>
+              <span className="muted">只记录本地浏览器会话引用，不读取或保存平台密码、Cookie。</span>
+            </div>
+            {workspace.publicationLoginMatchMessage ? (
+              <div className="notice compact-top">{workspace.publicationLoginMatchMessage}</div>
+            ) : null}
             {workspace.avatarMaterials.isLoading ? <div className="muted compact-top">{t("smartCopy.publish.loadingAccounts")}</div> : null}
             {selectedPublicationProfile ? (
               <div className="mode-chip-list top-gap">
@@ -413,7 +523,7 @@ export function IntelligentCopyPage() {
             {workspace.publicationPlan.data?.targets?.length ? (
               <div className="list-stack compact-top">
                 {workspace.publicationPlan.data.targets.map((target) => (
-                  <label className="activity-card" key={target.platform}>
+                  <label className={`activity-card smart-copy-publish-target${workspace.selectedPlatformIds.includes(target.platform) ? " selected" : ""}`} key={target.platform}>
                     <div className="toolbar">
                       <div>
                         <strong>{target.platform_label}</strong>
@@ -425,6 +535,11 @@ export function IntelligentCopyPage() {
                         onChange={() => workspace.togglePlatform(target.platform)}
                       />
                     </div>
+                    {availableMaterialPlatformKeys.has(target.platform) ? (
+                      <span className="status-pill done compact-top">已有平台物料</span>
+                    ) : (
+                      <span className="status-pill pending compact-top">未在当前物料中生成</span>
+                    )}
                     <div className="muted compact-top">{target.title}</div>
                   </label>
                 ))}
@@ -437,105 +552,121 @@ export function IntelligentCopyPage() {
 
         {selectedTargets.length ? (
           <section className="panel top-gap">
-            <PanelHeader title={t("smartCopy.publish.optionsTitle")} description={t("smartCopy.publish.optionsDescription")} />
-            <div className="list-stack">
-              {selectedTargets.map((target) => (
-                <article className="activity-card" key={target.platform}>
-                  <div className="toolbar">
-                    <strong>{target.platform_label}</strong>
-                    <span className="status-pill done">{t("smartCopy.publish.selected")}</span>
-                  </div>
-                  <div className="form-grid two-up compact-top">
-                    <label>
-                      <span>{t("smartCopy.publish.schedule")}</span>
-                      <input
-                        className="input"
-                        type="datetime-local"
-                        value={workspace.publicationPlatformOptions[target.platform]?.scheduled_publish_at ?? ""}
-                        onChange={(event) =>
-                          workspace.updatePublicationPlatformOption(target.platform, { scheduled_publish_at: event.target.value })
-                        }
-                      />
-                    </label>
-                    <label>
-                      <span>{t("smartCopy.publish.mode")}</span>
-                      <select
-                        className="input"
-                        value={workspace.publicationPlatformOptions[target.platform]?.visibility_or_publish_mode ?? ""}
-                        onChange={(event) =>
-                          workspace.updatePublicationPlatformOption(target.platform, { visibility_or_publish_mode: event.target.value })
-                        }
-                      >
-                        <option value="">{t("smartCopy.publish.modeDefault")}</option>
-                        <option value="scheduled">{t("smartCopy.publish.modeScheduled")}</option>
-                        <option value="draft">{t("smartCopy.publish.modeDraft")}</option>
-                        <option value="private">{t("smartCopy.publish.modePrivate")}</option>
-                      </select>
-                    </label>
-                    <label>
-                      <span>{t("smartCopy.publish.collectionId")}</span>
-                      <input
-                        className="input"
-                        type="text"
-                        value={workspace.publicationPlatformOptions[target.platform]?.collection_id ?? ""}
-                        onChange={(event) =>
-                          workspace.updatePublicationPlatformOption(target.platform, { collection_id: event.target.value })
-                        }
-                        placeholder={t("smartCopy.publish.collectionIdPlaceholder")}
-                      />
-                    </label>
-                    <label>
-                      <span>{t("smartCopy.publish.collectionName")}</span>
-                      <input
-                        className="input"
-                        type="text"
-                        value={workspace.publicationPlatformOptions[target.platform]?.collection_name ?? ""}
-                        onChange={(event) =>
-                          workspace.updatePublicationPlatformOption(target.platform, { collection_name: event.target.value })
-                        }
-                        placeholder={t("smartCopy.publish.collectionNamePlaceholder")}
-                      />
-                    </label>
-                    <label>
-                      <span>{t("smartCopy.publish.category")}</span>
-                      <input
-                        className="input"
-                        type="text"
-                        value={workspace.publicationPlatformOptions[target.platform]?.category ?? ""}
-                        onChange={(event) =>
-                          workspace.updatePublicationPlatformOption(target.platform, { category: event.target.value })
-                        }
-                        placeholder={t("smartCopy.publish.categoryPlaceholder")}
-                      />
-                    </label>
-                  </div>
-                </article>
-              ))}
-            </div>
+            <PanelHeader
+              title="智能发布方案"
+              description="只使用真实平台数据生成合集/栏目和分类；未摸底到真实选项时只给发布时间，不自动填写伪造栏目。"
+              actions={
+                <div className="toolbar">
+                  <button
+                    className="button secondary"
+                    type="button"
+                    disabled={workspace.generatePublicationScheme.isPending || !workspace.publicationPlan.data?.publish_ready}
+                    onClick={() => workspace.generatePublicationScheme.mutate(false)}
+                  >
+                    {workspace.generatePublicationScheme.isPending ? "生成中..." : workspace.publicationScheme ? "重新生成方案" : "生成智能发布方案"}
+                  </button>
+                  <button
+                    className="button ghost"
+                    type="button"
+                    disabled={workspace.generatePublicationScheme.isPending || !workspace.publicationPlan.data?.publish_ready}
+                    onClick={() => workspace.generatePublicationScheme.mutate(true)}
+                  >
+                    刷新摸底
+                  </button>
+                </div>
+              }
+            />
+            {workspace.generatePublicationScheme.error ? (
+              <div className="notice compact-top">{String(workspace.generatePublicationScheme.error)}</div>
+            ) : null}
+            {workspace.publicationScheme?.blocked_reasons?.length ? (
+              <div className="list-stack compact-top">
+                {workspace.publicationScheme.blocked_reasons.map((reason) => (
+                  <div className="notice" key={reason}>{reason}</div>
+                ))}
+              </div>
+            ) : null}
+            {workspace.publicationScheme?.items?.length ? (
+              <>
+                <div className="smart-copy-scheme-meta compact-top">
+                  <span className="status-pill done">摸底：{workspace.publicationScheme.probe?.status || "cached"}</span>
+                  <span className="status-pill">调研：{workspace.publicationScheme.research?.search_status || "fallback"} / LLM {workspace.publicationScheme.research?.llm_status || "fallback"}</span>
+                  <span className="muted">{workspace.publicationScheme.research?.summary}</span>
+                </div>
+                <div className="smart-copy-scheme-grid compact-top">
+                  {workspace.publicationScheme.items.map((item) => (
+                    <article className="activity-card smart-copy-scheme-card" key={item.platform}>
+                      <div className="toolbar">
+                        <div>
+                          <strong>{item.platform_label}</strong>
+                          <div className="muted compact-top">{item.account_label || "当前创作者账号"}</div>
+                        </div>
+                        <span className="status-pill done">{item.visibility_or_publish_mode || "scheduled"}</span>
+                      </div>
+                      <div className="smart-copy-scheme-fields">
+                        <div>
+                          <span>发布时间</span>
+                          <strong>{item.scheduled_publish_at || "发布时决定"}</strong>
+                        </div>
+                        <div>
+                          <span>合集/栏目</span>
+                          <strong>{item.collection_name || "未摸底"}</strong>
+                        </div>
+                        <div>
+                          <span>分类</span>
+                          <strong>{item.category || "未摸底"}</strong>
+                        </div>
+                      </div>
+                      <p className="muted compact-top">{item.rationale}</p>
+                      <p className="muted compact-top">{item.probe_summary}</p>
+                      <PublicationSchemeInventory item={item} />
+                    </article>
+                  ))}
+                </div>
+                <div className="smart-copy-scheme-modifier compact-top">
+                  <textarea
+                    className="input"
+                    rows={3}
+                    value={workspace.publicationSchemeInstruction}
+                    onChange={(event) => workspace.setPublicationSchemeInstruction(event.target.value)}
+                    placeholder="直接写你的修改想法，例如：B站放到 EDC装备评测合集，YouTube 改成今晚 21:30，小红书只建草稿。"
+                  />
+                  <button
+                    className="button secondary"
+                    type="button"
+                    disabled={!workspace.publicationSchemeInstruction.trim() || workspace.modifyPublicationScheme.isPending}
+                    onClick={() => workspace.modifyPublicationScheme.mutate()}
+                  >
+                    {workspace.modifyPublicationScheme.isPending ? "修改中..." : "修改方案"}
+                  </button>
+                </div>
+                {workspace.modifyPublicationScheme.error ? (
+                  <div className="notice compact-top">{String(workspace.modifyPublicationScheme.error)}</div>
+                ) : null}
+              </>
+            ) : (
+              <EmptyState message="已选平台后点击生成智能发布方案，系统会给出发布时间、合集/栏目、分类和发布模式建议。" />
+            )}
           </section>
         ) : null}
 
         {workspace.publish.error ? <div className="notice top-gap">{String(workspace.publish.error)}</div> : null}
-        {workspace.publicationPlan.data?.existing_attempts?.length ? (
-          <section className="panel top-gap">
-            <PanelHeader title={t("smartCopy.publish.historyTitle")} description={t("smartCopy.publish.historyDescription")} />
-            <div className="timeline-list">
-              {workspace.publicationPlan.data.existing_attempts.slice(0, 6).map((attempt) => (
-                <div className="timeline-item" key={attempt.id}>
-                  <div className="toolbar">
-                    <strong>{attempt.platform_label || attempt.platform}</strong>
-                    <span className={`status-pill ${attempt.status === "failed" ? "failed" : attempt.status === "published" ? "done" : "running"}`}>
-                      {publicationAttemptStatusLabel(attempt.status)}
-                    </span>
-                  </div>
-                  <div className="muted">
-                    {attempt.account_label} · {attempt.operator_summary || attempt.run_status || t("smartCopy.publish.waitingRunner")}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-        ) : null}
+        <PublicationPlatformProgressPanel
+          targets={workspace.publicationPlan.data?.targets ?? []}
+          attempts={[
+            ...(workspace.publicationPlan.data?.created_attempts ?? []),
+            ...(workspace.publicationPlan.data?.existing_attempts ?? []),
+          ]}
+          selectedPlatformIds={workspace.selectedPlatformIds}
+        />
+
+        <PublicationHistoryPanel
+          attempts={workspace.recentPublicationAttempts.data?.attempts ?? []}
+          selectedAttempt={workspace.selectedPublicationAttempt}
+          selectedAttemptId={workspace.selectedPublicationAttemptId}
+          loading={workspace.recentPublicationAttempts.isLoading}
+          onSelect={workspace.setSelectedPublicationAttemptId}
+        />
 
         <div className="toolbar top-gap">
           <button
@@ -543,8 +674,10 @@ export function IntelligentCopyPage() {
             type="button"
             disabled={
               !workspace.result ||
+              !selectedCompletedMaterialTask ||
               !workspace.publicationPlan.data?.publish_ready ||
               !workspace.selectedPlatformIds.length ||
+              !workspace.publicationScheme?.items?.length ||
               workspace.publish.isPending
             }
             onClick={() => workspace.publish.mutate()}
@@ -552,8 +685,10 @@ export function IntelligentCopyPage() {
             {workspace.publish.isPending ? t("smartCopy.publish.submitting") : t("smartCopy.publish.submit")}
           </button>
           {!workspace.result ? <span className="muted">{t("smartCopy.publish.needGenerate")}</span> : null}
+          {workspace.result && !selectedCompletedMaterialTask ? <span className="muted">请先选择一个已完成的物料任务。</span> : null}
         </div>
       </PageSection>
+      )}
 
       {previewPlatform ? (
         <PlatformMaterialPreviewModal
@@ -593,7 +728,7 @@ function RecentGenerateTasksPanel({ tasks, selectedTaskId, loading, onSelect }: 
               <option value="">{t("smartCopy.tasks.select")}</option>
               {tasks.map((task) => (
                 <option key={task.id} value={task.id}>
-                  {generateTaskStatusLabel(task.status)} · {task.folder_path.split(/[\\/]/).filter(Boolean).at(-1) || task.folder_path}
+                  {generateTaskStatusLabel(task.status)} · {formatGenerateTaskOptionTime(task)} · {task.folder_path.split(/[\\/]/).filter(Boolean).at(-1) || task.folder_path}
                 </option>
               ))}
             </select>
@@ -612,6 +747,7 @@ function RecentGenerateTasksPanel({ tasks, selectedTaskId, loading, onSelect }: 
             >
               <span className={`status-pill ${taskStatusTone(task.status)}`}>{generateTaskStatusLabel(task.status)}</span>
               <strong>{task.folder_path.split(/[\\/]/).filter(Boolean).at(-1) || task.folder_path}</strong>
+              <span className="smart-copy-task-timestamp">{formatGenerateTaskTimeline(task)}</span>
               <span className="muted">{task.message || task.stage}</span>
               <div
                 className={`progress-bar smart-copy-task-mini-progress${isGenerateTaskRunning(task) ? " is-animated" : ""}`}
@@ -640,6 +776,166 @@ type PublicationHistoryPanelProps = {
   loading: boolean;
   onSelect: (attemptId: string) => void;
 };
+
+function PathSummaryCard({ label, value }: { label: string; value?: string | null }) {
+  return (
+    <article className="activity-card smart-copy-path-summary-card">
+      <span className="stat-label">{label}</span>
+      <strong title={value || "—"}>{value || "—"}</strong>
+    </article>
+  );
+}
+
+function normalizePublicationPlatformKey(value: string) {
+  const key = String(value || "").trim().toLowerCase().replace(/_/g, "-");
+  if (key === "wechat-channels") return "wechat-channels";
+  return key;
+}
+
+type PublicationPlatformProgressPanelProps = {
+  targets: Array<{
+    platform: string;
+    platform_label: string;
+    account_label: string;
+    title: string;
+  }>;
+  attempts: PublicationAttempt[];
+  selectedPlatformIds: string[];
+};
+
+function PublicationPlatformProgressPanel({ targets, attempts, selectedPlatformIds }: PublicationPlatformProgressPanelProps) {
+  const { t } = useI18n();
+  const selectedTargets = targets.filter((target) => selectedPlatformIds.includes(target.platform));
+  if (!selectedTargets.length) {
+    return (
+      <section className="panel top-gap">
+        <PanelHeader title="发布进度" description="勾选发布平台后，这里会展示每个平台的队列状态、执行摘要和跟踪链接。" />
+        <EmptyState message="还没有选择发布平台。" />
+      </section>
+    );
+  }
+  return (
+    <section className="panel top-gap">
+      <PanelHeader title="发布进度" description="每个平台独立进入发布队列，可单独查看状态、错误、执行摘要和最终链接。" />
+      <div className="smart-copy-publication-progress-grid">
+        {selectedTargets.map((target) => {
+          const attempt = latestPublicationAttemptForPlatform(attempts, target.platform);
+          const attemptUrl = publicationAttemptUrl(attempt);
+          const latestRun = attempt?.runs?.[0];
+          return (
+            <article className="activity-card smart-copy-publication-progress-card" key={target.platform}>
+              <div className="toolbar">
+                <div>
+                  <strong>{target.platform_label}</strong>
+                  <div className="muted compact-top">{target.account_label || t("smartCopy.publish.unnamedAccount")}</div>
+                </div>
+                <span className={`status-pill ${publicationStatusTone(attempt?.status || "queued")}`}>
+                  {attempt ? publicationAttemptStatusLabel(attempt.status) : "待提交"}
+                </span>
+              </div>
+              <div className="smart-copy-publication-meta compact-top">
+                <span>标题：{target.title || "—"}</span>
+                <span>状态：{attempt?.operator_summary || attempt?.run_status || (attempt ? t("smartCopy.publish.waitingRunner") : "尚未创建发布记录")}</span>
+                <span>更新：{formatDateTime(attempt?.updated_at || attempt?.created_at)}</span>
+                {latestRun?.phase ? <span>阶段：{latestRun.phase}</span> : null}
+                {latestRun?.provider_task_id ? <span>任务：{latestRun.provider_task_id}</span> : null}
+              </div>
+              {attempt?.error_message ? <div className="notice notice-error compact-top">{attempt.error_message}</div> : null}
+              <div className="toolbar compact-top">
+                {attemptUrl ? (
+                  <a className="button ghost button-sm" href={attemptUrl} target="_blank" rel="noreferrer">
+                    打开跟踪链接
+                  </a>
+                ) : (
+                  <span className="muted">{attempt ? t("smartCopy.publish.publicUrlPending") : "提交后生成跟踪链接"}</span>
+                )}
+                {attempt?.payload_path ? <span className="mode-chip subtle" title={attempt.payload_path}>payload</span> : null}
+              </div>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function PublicationSchemeInventory({ item }: { item: PublicationSchemeItem }) {
+  const selectedOptions = item.selected_options ?? {};
+  const selectedDeclarations = asStringList(selectedOptions.selected_declarations);
+  const selectedGroupChat = String(selectedOptions.selected_group_chat ?? "");
+  const operationSteps = item.operation_steps ?? [];
+  const optionGroups = item.option_groups ?? [];
+  const hasInventory =
+    Boolean(item.declaration_options?.length) ||
+    Boolean(item.group_chat_options?.length) ||
+    Boolean(operationSteps.length) ||
+    Boolean(optionGroups.length) ||
+    Boolean(item.platform_warnings?.length);
+
+  if (!hasInventory) {
+    return <div className="notice compact-top">尚未读取到该平台的真实声明、群聊、分区/合集控件和发布路径。</div>;
+  }
+
+  return (
+    <div className="smart-copy-scheme-inventory">
+      {item.platform_warnings?.length ? (
+        <div className="notice notice-error compact-top">{item.platform_warnings[0]}</div>
+      ) : null}
+      {item.declaration_options?.length ? (
+        <div>
+          <span className="stat-label">声明候选</span>
+          <div className="smart-copy-scheme-chip-row">
+            {item.declaration_options.slice(0, 8).map((option) => (
+              <span className={`mode-chip ${selectedDeclarations.includes(option) ? "done" : "subtle"}`} key={option}>
+                {option}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {item.group_chat_options?.length ? (
+        <div>
+          <span className="stat-label">群聊候选</span>
+          <div className="smart-copy-scheme-chip-row">
+            {item.group_chat_options.slice(0, 6).map((option) => (
+              <span className={`mode-chip ${selectedGroupChat === option ? "done" : "subtle"}`} key={option}>
+                {option}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {optionGroups.length ? (
+        <div>
+          <span className="stat-label">平台选项摸底</span>
+          <div className="smart-copy-scheme-option-list">
+            {optionGroups.slice(0, 5).map((group, index) => (
+              <span key={`${item.platform}-option-${index}`}>
+                {String(group.label ?? group.name ?? group.key ?? "选项组")}：{asStringList(group.options ?? group.values).slice(0, 5).join("、") || "已识别控件"}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {operationSteps.length ? (
+        <div>
+          <span className="stat-label">发布路径</span>
+          <ol className="smart-copy-scheme-steps">
+            {operationSteps.slice(0, 6).map((step, index) => (
+              <li key={`${item.platform}-step-${index}`}>{String(step.label ?? step.action ?? step.name ?? step.selector ?? "页面操作")}</li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function asStringList(value: unknown): string[] {
+  if (Array.isArray(value)) return value.map((item) => String(item ?? "").trim()).filter(Boolean);
+  if (typeof value === "string") return value.split(/[，,、;\n]+/).map((item) => item.trim()).filter(Boolean);
+  return [];
+}
 
 function PublicationHistoryPanel({ attempts, selectedAttempt, selectedAttemptId, loading, onSelect }: PublicationHistoryPanelProps) {
   const { t } = useI18n();
@@ -769,7 +1065,7 @@ function isGenerateTaskRunning(task: IntelligentCopyGenerateTask): boolean {
 
 function taskStatusTone(status: string): string {
   if (status === "completed") return "done";
-  if (status === "blocked") return "failed";
+  if (status === "blocked") return "running";
   if (status === "failed") return "failed";
   return "running";
 }
@@ -784,6 +1080,16 @@ function publicationAttemptUrl(attempt: PublicationAttempt | null): string {
   return String(attempt?.public_url || attempt?.external_url || "").trim();
 }
 
+function latestPublicationAttemptForPlatform(attempts: PublicationAttempt[], platform: string): PublicationAttempt | null {
+  const matched = attempts.filter((attempt) => attempt.platform === platform);
+  if (!matched.length) return null;
+  return [...matched].sort((left, right) => {
+    const leftTime = new Date(left.updated_at || left.created_at).getTime();
+    const rightTime = new Date(right.updated_at || right.created_at).getTime();
+    return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0);
+  })[0] ?? null;
+}
+
 function formatDateTime(value: string | null | undefined): string {
   if (!value) return "—";
   const date = new Date(value);
@@ -796,11 +1102,22 @@ function formatDateTime(value: string | null | undefined): string {
   });
 }
 
+function formatGenerateTaskOptionTime(task: IntelligentCopyGenerateTask): string {
+  return formatDateTime(task.completed_at || task.updated_at || task.started_at || task.created_at);
+}
+
+function formatGenerateTaskTimeline(task: IntelligentCopyGenerateTask): string {
+  const created = formatDateTime(task.created_at);
+  if (task.completed_at) return `创建 ${created} · 完成 ${formatDateTime(task.completed_at)}`;
+  if (task.started_at) return `创建 ${created} · 开始 ${formatDateTime(task.started_at)} · 更新 ${formatDateTime(task.updated_at)}`;
+  return `创建 ${created} · 更新 ${formatDateTime(task.updated_at)}`;
+}
+
 function generateTaskStatusLabel(status: string): string {
   if (status === "queued") return "已排队";
   if (status === "running") return "生成中";
   if (status === "completed") return "已完成";
-  if (status === "blocked") return "有阻断项";
+  if (status === "blocked") return "待补封面";
   if (status === "failed") return "失败";
   return status || "待处理";
 }
@@ -816,6 +1133,7 @@ function PlatformMaterialPreviewModal({ platform, onClose, onCopy, onOpenCover }
   const { t } = useI18n();
   const title = platform.primary_title || platform.titles[0] || platform.label;
   const previewClassName = `platform-preview-shell ${platformPreviewClass(platform.key)}`;
+  const coverPreviewUrl = platform.cover_path ? localImagePreviewUrl(platform.cover_path, platform.cover_generation) : "";
 
   return (
     <div className="floating-modal-backdrop smart-copy-preview-backdrop" onClick={onClose} role="presentation">
@@ -855,7 +1173,11 @@ function PlatformMaterialPreviewModal({ platform, onClose, onCopy, onOpenCover }
                 <span>{t("smartCopy.materials.previewMode")}</span>
               </div>
               <div className="platform-preview-media">
-                <span>{platform.cover_path ? t("smartCopy.materials.coverReady") : t("smartCopy.materials.videoCover")}</span>
+                {coverPreviewUrl ? (
+                  <img src={coverPreviewUrl} alt={`${platform.label} ${t("smartCopy.results.openCover")}`} />
+                ) : (
+                  <span>{t("smartCopy.materials.videoCover")}</span>
+                )}
               </div>
               <div className="platform-preview-content">
                 <strong>{title}</strong>
@@ -881,7 +1203,14 @@ function PlatformMaterialPreviewModal({ platform, onClose, onCopy, onOpenCover }
                   <div className="row-title">{platform.title_label}</div>
                   {platform.titles.map((item, index) => (
                     <div key={`${platform.key}-${index}`} className="panel-subcard smart-copy-title-option">
-                      <span>{`${index + 1}. ${item}`}</span>
+                      <div className="smart-copy-title-copy">
+                        <span>{`${index + 1}. ${item}`}</span>
+                        {platform.title_goals?.[index] ? (
+                          <small>
+                            {`${platform.title_goals[index]?.goal || "创作目标"}：${platform.title_goals[index]?.direction || "明确这条标题承担的发布目标。"}`}
+                          </small>
+                        ) : null}
+                      </div>
                       <button type="button" className="button ghost button-sm" onClick={() => onCopy(item, `${platform.label} 标题 ${index + 1} 已复制`)}>
                         {t("smartCopy.results.copyTitle")}
                       </button>
@@ -916,6 +1245,15 @@ function PlatformMaterialPreviewModal({ platform, onClose, onCopy, onOpenCover }
       </div>
     </div>
   );
+}
+
+function localImagePreviewUrl(path: string, metadata?: Record<string, unknown> | null): string {
+  const imageGeneration = metadata && typeof metadata === "object" ? metadata.image_generation : null;
+  const completedAt =
+    imageGeneration && typeof imageGeneration === "object" && "completed_at" in imageGeneration
+      ? String((imageGeneration as Record<string, unknown>).completed_at ?? "")
+      : "";
+  return `/__roughcut_local_image?path=${encodeURIComponent(path)}&v=${encodeURIComponent(completedAt || path)}`;
 }
 
 function platformPreviewClass(platform: string): string {

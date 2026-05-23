@@ -1,0 +1,270 @@
+{
+  "generated_at": "2026-05-21T20:02:38.071Z",
+  "video_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\MOT 风灵音叉推牌 锆合金版本.mp4",
+  "results": {
+    "wechat-channels": {
+      "platform": "wechat-channels",
+      "status": "upload_not_started",
+      "route": {
+        "url": "https://channels.weixin.qq.com/platform/post/create",
+        "title": "视频号助手"
+      },
+      "clicks": [
+        {
+          "clicked": false
+        }
+      ],
+      "upload_clicks": [
+        {
+          "clicked": false
+        }
+      ],
+      "upload": {
+        "uploaded": false,
+        "reason": "no_file_input",
+        "fileInputs": []
+      },
+      "before": {
+        "url": "https://channels.weixin.qq.com/platform/post/create",
+        "title": "视频号助手",
+        "file_inputs": [],
+        "option_lines": [],
+        "controls": []
+      },
+      "after": {
+        "url": "https://channels.weixin.qq.com/platform/post/create",
+        "title": "视频号助手",
+        "file_inputs": [],
+        "option_lines": [],
+        "controls": []
+      },
+      "expanded": {
+        "url": "https://channels.weixin.qq.com/platform/post/create",
+        "title": "视频号助手",
+        "file_inputs": [],
+        "option_lines": [],
+        "controls": []
+      }
+    },
+    "toutiao": {
+      "platform": "toutiao",
+      "status": "upload_not_started",
+      "route": {
+        "url": "https://mp.toutiao.com/profile_v4/xigua/publish-video",
+        "title": "头条号"
+      },
+      "clicks": [
+        {
+          "clicked": false
+        }
+      ],
+      "upload_clicks": [
+        {
+          "clicked": false
+        }
+      ],
+      "upload": {
+        "uploaded": false,
+        "reason": "no_file_input",
+        "fileInputs": []
+      },
+      "before": {
+        "url": "https://mp.toutiao.com/profile_v4/xigua/publish-video",
+        "title": "头条号",
+        "file_inputs": [],
+        "option_lines": [
+          "头条号 消息 12 在头条创作的第 33 天 FAS机神圣殿潮玩EDC 主页 创作 文章 视频 微头条 音频 管理 作品管理 评论管理 草稿箱 数据 收益数据 作品数据 粉丝数据 进阶创作 付费专栏 提现 成长指南 首发激励 创作权益 头条认证 创作灵感 创作训练营 工具 功能实验室 直播工具 创作保护 图片素材 设置 关于今日头条|用户协议|隐私政策|社区规范|自律公约|侵权投诉|联系我们© 2026 toutiao.com All Rights Reserved"
+        ],
+        "controls": []
+      },
+      "after": {
+        "url": "https://mp.toutiao.com/profile_v4/xigua/publish-video",
+        "title": "头条号",
+        "file_inputs": [],
+        "option_lines": [
+          "头条号 消息 12 在头条创作的第 33 天 FAS机神圣殿潮玩EDC 主页 创作 文章 视频 微头条 音频 管理 作品管理 评论管理 草稿箱 数据 收益数据 作品数据 粉丝数据 进阶创作 付费专栏 提现 成长指南 首发激励 创作权益 头条认证 创作灵感 创作训练营 工具 功能实验室 直播工具 创作保护 图片素材 设置 关于今日头条|用户协议|隐私政策|社区规范|自律公约|侵权投诉|联系我们© 2026 toutiao.com All Rights Reserved"
+        ],
+        "controls": []
+      },
+      "expanded": {
+        "url": "https://mp.toutiao.com/profile_v4/xigua/publish-video",
+        "title": "头条号",
+        "file_inputs": [],
+        "option_lines": [
+          "头条号 消息 12 在头条创作的第 33 天 FAS机神圣殿潮玩EDC 主页 创作 文章 视频 微头条 音频 管理 作品管理 评论管理 草稿箱 数据 收益数据 作品数据 粉丝数据 进阶创作 付费专栏 提现 成长指南 首发激励 创作权益 头条认证 创作灵感 创作训练营 工具 功能实验室 直播工具 创作保护 图片素材 设置 关于今日头条|用户协议|隐私政策|社区规范|自律公约|侵权投诉|联系我们© 2026 toutiao.com All Rights Reserved"
+        ],
+        "controls": []
+      }
+    },
+    "youtube": {
+      "platform": "youtube",
+      "status": "uploaded_for_probe",
+      "route": {
+        "url": "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw",
+        "title": "频道信息中心 - YouTube Studio"
+      },
+      "clicks": [
+        {
+          "clicked": true,
+          "text": "创建",
+          "label": "创建"
+        },
+        {
+          "clicked": true,
+          "text": "展开",
+          "label": "MOT 风灵音叉推牌 锆合金版本 已保存为私享视频 详细信息 视频元素 检查 公开范围 详细信息 重复使用详细信息 标题（必填） MOT 风灵音叉推牌 锆合金版本 说明 缩略图 设置与众不同的缩略图，吸引观看者注意。 了解详情 上传文件 自动生成 A/B 测试 播放列表 将视频整理到一个或多个播放列表中，方便观看者浏览。 了解详情 选择 观众 此视频是面向儿童的内容吗？（必填） 根据法律要求，无论你身在何处，都必须遵守《儿童在线隐私保护法》(COPPA) 和/或其他法律。你必须指明自己的视频是否为面向儿童的内容。 什么是面向儿童的内容？ 面向儿童的视频不支持个性化广告和通知等功能。如果你将视频设置为面向儿童的内容，系统就更有可能在观众观看其他儿童视频时推荐你的视频。 了解详情 是，内容是面向儿童的 . 面向儿童的视频不支持个性化广告和通知等功能。如果你将视频设置为面向儿童的内容，系统就更有可能在观众观看其他儿童视频时推荐你的视频。 了解详情 不，内容不是面向儿童的 年龄限制（高级） 展开 付费宣传内容、联合创作、字幕等 正在上传视频… 视频链接 https://youtu.be/p8YEnglJVCE 文件名 MOT 风灵音叉推牌 锆合金版本.mp4 正在上传，已完成 96% ... 剩余时间：3秒钟 继续"
+        }
+      ],
+      "upload_clicks": [
+        {
+          "clicked": true,
+          "text": "上传视频",
+          "label": "上传视频"
+        }
+      ],
+      "upload": {
+        "uploaded": true,
+        "input": {
+          "type": "file",
+          "name": "Filedata",
+          "multiple": "",
+          "aria-hidden": "true",
+          "tabindex": "-1",
+          "style": "position: absolute; overflow: hidden; height: 0px; width: 0px; opacity: 0; left: 0px; top: 0px; display: none;"
+        },
+        "fileInputCount": 1
+      },
+      "before": {
+        "url": "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw",
+        "title": "频道信息中心 - YouTube Studio",
+        "file_inputs": [],
+        "option_lines": [
+          "问问 Studio：频道的创意合作伙伴 试用新的实验性功能，询问有关评论、频道分析和视频创意的问题。 关闭 频道信息中心 跳过导航 创建 我的频道 FAS机神圣殿x潮玩EDC 信息中心 内容 数据分析 社区 字幕 内容检测 创收 自定义 音频库 设置 发送反馈 频道信息中心 想查看你近期视频的指标？ 上传并发布一个视频，即可开始体验。 上传视频 频道分析 当前订阅人数 0 摘要 过去 28 天 观看次数 0 — 观看时长（小时） 0.0 — 热门内容 过去 48 小时 · 观看次数 前往频道数据分析 使用条款 隐私权政策 政策和安全 上传视频 开始直播 新建播放列表 新建播客"
+        ],
+        "controls": []
+      },
+      "after": {
+        "url": "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw",
+        "title": "频道信息中心 - YouTube Studio",
+        "file_inputs": [
+          {
+            "index": 0,
+            "accept": "image/jpeg,image/png",
+            "multiple": false,
+            "visible": false
+          }
+        ],
+        "option_lines": [
+          "频道信息中心 跳过导航 创建 我的频道 FAS机神圣殿x潮玩EDC 信息中心 内容 数据分析 社区 字幕 内容检测 创收 自定义 音频库 设置 发送反馈 频道信息中心 想查看你近期视频的指标？ 上传并发布一个视频，即可开始体验。 上传视频 频道分析 当前订阅人数 0 摘要 过去 28 天 观看次数 0 — 观看时长（小时） 0.0 — 热门内容 过去 48 小时 · 观看次数 前往频道数据分析 使用条款 隐私权政策 政策和安全 MOT 风灵音叉推牌 锆合金版本 已保存为私享视频 详细信息 视频元素 检查 公开范围 详细信息 重复使用详细信息 标题（必填） MOT 风灵音叉推牌 锆合金版本 说明 缩略图 设置与众不同的缩略图，吸引观看者注意。 了解详情 上传文件 自动生成 A/B 测试 播放列表 将视频整理到一个或多个播放列表中，方便观看者浏览。 了解详情 选择 观众 此视频是面向儿童的内容吗？（必填） 根据法律要求，无论你身在何处，都必须遵守《儿童在线隐私保护法》(COPPA) 和/或其他法律。你必须指明自己的视频是否为面向儿童的内容。 什么是面向儿童的内容？ 面向儿童的视频不支持个性化广告和通知等功能。如果你将视频设置为面向儿童的内容，系统就更有可能在观众观看其他儿童视频时推荐你的视频。 了解详情 是，内容是面向儿童的 . 面向儿童的视频不支持个性化广告和通知等功能。如果你将视频设置为面向儿童的内容，系统就更有可能在观众观看其他儿童视频时推荐你的视频。 了解详情 不，内容不是面向儿童的 年龄限制（高级） 展开 付费宣传内容、联合创作、字幕等 正在上传视频… 视频链接 https://youtu.be/p8YEnglJVCE 文件名 MOT 风灵音叉推牌 锆合金版本.mp4 正在上传，已完成 96% ... 剩余时间：3秒钟 继续"
+        ],
+        "controls": [
+          {
+            "tag": "button",
+            "type": "",
+            "role": "tab",
+            "text": "公开范围",
+            "ariaLabel": "",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          },
+          {
+            "tag": "a",
+            "type": "",
+            "role": "",
+            "text": "了解详情",
+            "ariaLabel": "详细了解播放列表",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          },
+          {
+            "tag": "ytcp-video-metadata-playlists",
+            "type": "",
+            "role": "",
+            "text": "选择",
+            "ariaLabel": "添加到播放列表",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          },
+          {
+            "tag": "ytcp-dropdown-trigger",
+            "type": "",
+            "role": "button",
+            "text": "选择",
+            "ariaLabel": "选择播放列表",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          }
+        ]
+      },
+      "expanded": {
+        "url": "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw",
+        "title": "频道信息中心 - YouTube Studio",
+        "file_inputs": [
+          {
+            "index": 0,
+            "accept": "image/jpeg,image/png",
+            "multiple": false,
+            "visible": false
+          }
+        ],
+        "option_lines": [
+          "频道信息中心 跳过导航 创建 我的频道 FAS机神圣殿x潮玩EDC 信息中心 内容 数据分析 社区 字幕 内容检测 创收 自定义 音频库 设置 发送反馈 频道信息中心 想查看你近期视频的指标？ 上传并发布一个视频，即可开始体验。 上传视频 频道分析 当前订阅人数 0 摘要 过去 28 天 观看次数 0 — 观看时长（小时） 0.0 — 热门内容 过去 48 小时 · 观看次数 前往频道数据分析 使用条款 隐私权政策 政策和安全 MOT 风灵音叉推牌 锆合金版本 已保存为私享视频 详细信息 视频元素 检查 公开范围 详细信息 重复使用详细信息 标题（必填） MOT 风灵音叉推牌 锆合金版本 说明 缩略图 设置与众不同的缩略图，吸引观看者注意。 了解详情 上传文件 自动生成 A/B 测试 播放列表 将视频整理到一个或多个播放列表中，方便观看者浏览。 了解详情 选择 观众 此视频是面向儿童的内容吗？（必填） 根据法律要求，无论你身在何处，都必须遵守《儿童在线隐私保护法》(COPPA) 和/或其他法律。你必须指明自己的视频是否为面向儿童的内容。 什么是面向儿童的内容？ 面向儿童的视频不支持个性化广告和通知等功能。如果你将视频设置为面向儿童的内容，系统就更有可能在观众观看其他儿童视频时推荐你的视频。 了解详情 是，内容是面向儿童的 . 面向儿童的视频不支持个性化广告和通知等功能。如果你将视频设置为面向儿童的内容，系统就更有可能在观众观看其他儿童视频时推荐你的视频。 了解详情 不，内容不是面向儿童的 年龄限制（高级） 展开 付费宣传内容、联合创作、字幕等 即将开始处理 视频链接 https://youtu.be/p8YEnglJVCE 文件名 MOT 风灵音叉推牌 锆合金版本.mp4 上传完毕 ... 即将开始处理 继续"
+        ],
+        "controls": [
+          {
+            "tag": "button",
+            "type": "",
+            "role": "tab",
+            "text": "公开范围",
+            "ariaLabel": "",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          },
+          {
+            "tag": "a",
+            "type": "",
+            "role": "",
+            "text": "了解详情",
+            "ariaLabel": "详细了解播放列表",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          },
+          {
+            "tag": "ytcp-video-metadata-playlists",
+            "type": "",
+            "role": "",
+            "text": "选择",
+            "ariaLabel": "添加到播放列表",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          },
+          {
+            "tag": "ytcp-dropdown-trigger",
+            "type": "",
+            "role": "button",
+            "text": "选择",
+            "ariaLabel": "选择播放列表",
+            "placeholder": "",
+            "checked": false,
+            "disabled": false,
+            "options": []
+          }
+        ]
+      }
+    }
+  }
+}

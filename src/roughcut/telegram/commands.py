@@ -237,6 +237,7 @@ async def _handle_status_command(send_text: SendText) -> None:
         f"- Orchestrator：{_render_service_state(services['orchestrator'])}",
         f"- Media Worker：{_render_service_state(services['media_worker'])}",
         f"- LLM Worker：{_render_service_state(services['llm_worker'])}",
+        f"- Agent Worker：{_render_service_state(services.get('agent_worker', False))}",
         f"- PostgreSQL：{_render_service_state(services['postgres'])}",
         f"- Redis：{_render_service_state(services['redis'])}",
         f"- Runtime Ready：{runtime.get('readiness_status', 'unknown')}",

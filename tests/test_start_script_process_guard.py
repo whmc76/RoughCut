@@ -112,6 +112,16 @@ def test_automation_compose_mounts_runtime_root_inside_container() -> None:
     assert "${ROUGHCUT_OUTPUT_HOST_ROOT:-./data/runtime}:/app/data" in source
 
 
+def test_docker_compose_overrides_host_local_service_urls_for_containers() -> None:
+    for compose_name in ("docker-compose.yml", "docker-compose.runtime.yml", "docker-compose.automation.yml"):
+        source = (REPO_ROOT / compose_name).read_text(encoding="utf-8")
+
+        assert "COSYVOICE3_TTS_API_BASE_URL: ${ROUGHCUT_DOCKER_COSYVOICE3_TTS_API_BASE_URL:-http://cosyvoice3-tts:8080}" in source
+        assert "MOSS_TTS_LOCAL_API_BASE_URL: ${ROUGHCUT_DOCKER_MOSS_TTS_LOCAL_API_BASE_URL:-http://moss-tts-local:8080}" in source
+        assert "SEARXNG_URL: ${ROUGHCUT_DOCKER_SEARXNG_URL:-http://host.docker.internal:8080}" in source
+        assert "PUBLICATION_BROWSER_AGENT_BASE_URL: ${ROUGHCUT_DOCKER_PUBLICATION_BROWSER_AGENT_BASE_URL:-http://host.docker.internal:49310}" in source
+
+
 def test_autostart_installs_windows_logon_full_dev_without_build() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
     body = _function_body(source, "Install-RoughCutDockerAutostart")

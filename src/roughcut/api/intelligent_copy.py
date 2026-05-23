@@ -27,21 +27,26 @@ from roughcut.api.schemas import (
     IntelligentCopyPathSuggestOut,
     IntelligentCopyPathSuggestionOut,
     IntelligentPublishIn,
+    IntelligentPublishSchemeIn,
+    IntelligentPublishSchemeModifyIn,
     IntelligentCopyGenerateTaskListOut,
     IntelligentCopyGenerateTaskOut,
     IntelligentCopyResultOut,
     OpenFolderOut,
 )
 from roughcut.avatar import get_avatar_material_profile, list_avatar_material_profiles
+from roughcut.config import get_settings
 from roughcut.db.models import Job, RenderOutput
 from roughcut.db.session import get_session
 from roughcut.pipeline.celery_app import celery_app
 from roughcut.publication import (
     active_publication_credentials,
     build_publication_plan,
+    check_publication_browser_agent_ready,
     list_publication_attempts,
     submit_publication_attempts,
 )
+from roughcut.publication_intelligence import generate_publication_scheme, modify_publication_scheme
 from roughcut.providers.image_generation import mark_codex_imagegen_request_completed
 from roughcut.review.intelligent_copy import generate_intelligent_copy, inspect_intelligent_copy_folder
 
@@ -68,7 +73,12 @@ def suggest_folder_paths(body: IntelligentCopyPathSuggestIn):
 @router.post("/generate", response_model=IntelligentCopyResultOut)
 async def generate_folder_materials(body: IntelligentCopyGenerateIn):
     try:
-        return await generate_intelligent_copy(body.folder_path, copy_style=body.copy_style, platforms=body.platforms)
+        return await generate_intelligent_copy(
+            body.folder_path,
+            copy_style=body.copy_style,
+            platforms=body.platforms,
+            use_existing_cover=body.use_existing_cover,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -82,7 +92,12 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
 
     folder_path = str(inspection["folder_path"])
     requested_platforms = _normalize_generation_platforms(body.platforms)
-    active_task = _find_active_generation_task(folder_path=folder_path, copy_style=body.copy_style, platforms=requested_platforms)
+    active_task = _find_active_generation_task(
+        folder_path=folder_path,
+        copy_style=body.copy_style,
+        platforms=requested_platforms,
+        use_existing_cover=body.use_existing_cover,
+    )
     if active_task is not None:
         return active_task
 
@@ -92,6 +107,7 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
         "id": task_id,
         "folder_path": folder_path,
         "copy_style": str(body.copy_style or "").strip() or None,
+        "use_existing_cover": bool(body.use_existing_cover),
         "platforms": requested_platforms,
         "status": "queued",
         "progress": 0,
@@ -108,7 +124,13 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
         "result": None,
     }
     _upsert_generation_task(task)
-    _schedule_generation_task(task_id, folder_path=folder_path, copy_style=body.copy_style, platforms=requested_platforms)
+    _schedule_generation_task(
+        task_id,
+        folder_path=folder_path,
+        copy_style=body.copy_style,
+        platforms=requested_platforms,
+        use_existing_cover=body.use_existing_cover,
+    )
     return _get_generation_task(task_id) or task
 
 
@@ -217,6 +239,52 @@ async def get_intelligent_publish_plan(body: IntelligentPublishIn, session: Asyn
     )
 
 
+@router.post("/publication/scheme")
+async def get_intelligent_publish_scheme(body: IntelligentPublishSchemeIn, session: AsyncSession = Depends(get_session)):
+    try:
+        plan_inputs = await _load_intelligent_publish_inputs(
+            folder_path=body.folder_path,
+            creator_profile_id=body.creator_profile_id,
+            session=session,
+            materialize_job=False,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    existing_attempts = await _list_existing_intelligent_publish_attempts(session, plan_inputs["job"])
+    plan = build_publication_plan(
+        job=plan_inputs["job"],
+        render_output=plan_inputs["render_output"],
+        platform_packaging=plan_inputs["packaging"],
+        creator_profile=plan_inputs["creator_profile"],
+        requested_platforms=body.platforms,
+        platform_options=body.platform_options,
+        existing_attempts=existing_attempts,
+    )
+    if not plan.get("publish_ready"):
+        return {
+            "status": "blocked",
+            "blocked_reasons": plan.get("blocked_reasons") or ["当前物料或账号暂不满足发布条件。"],
+            "warnings": plan.get("warnings") or [],
+            "platform_options": {},
+            "items": [],
+            "plan": plan,
+        }
+    scheme = await generate_publication_scheme(
+        plan=plan,
+        creator_profile=plan_inputs["creator_profile"],
+        folder_path=str(body.folder_path or ""),
+        browser=body.browser,
+        force_probe=body.force_probe,
+    )
+    scheme["plan"] = plan
+    return scheme
+
+
+@router.post("/publication/scheme/modify")
+async def modify_intelligent_publish_scheme(body: IntelligentPublishSchemeModifyIn):
+    return await modify_publication_scheme(scheme=body.scheme, instruction=body.instruction)
+
+
 @router.post("/publication/publish")
 async def publish_intelligent_folder(body: IntelligentPublishIn, session: AsyncSession = Depends(get_session)):
     try:
@@ -239,6 +307,22 @@ async def publish_intelligent_folder(body: IntelligentPublishIn, session: AsyncS
     )
     if not plan.get("publish_ready"):
         return plan
+    settings = get_settings()
+    agent_ready = await check_publication_browser_agent_ready(
+        browser_agent_base_url=str(getattr(settings, "publication_browser_agent_base_url", "") or ""),
+        auth_token=str(getattr(settings, "publication_browser_agent_auth_token", "") or ""),
+        target_platforms=[str(target.get("platform") or "") for target in (plan.get("targets") or []) if isinstance(target, dict)],
+        request_timeout_sec=max(5, int(getattr(settings, "publication_browser_agent_timeout_sec", 60) or 60)),
+    )
+    if not agent_ready.get("ready"):
+        return {
+            **plan,
+            "status": "blocked",
+            "publish_ready": False,
+            "blocked_reasons": [*(plan.get("blocked_reasons") or []), str(agent_ready.get("message") or "browser-agent 不支持正式发布。")],
+            "publication_executor_preflight": agent_ready,
+            "created_attempts": [],
+        }
     result = await submit_publication_attempts(session, plan)
     await session.commit()
     _dispatch_publication_worker_tick(len(result.get("created_attempts") or []))
@@ -387,7 +471,13 @@ def _normalize_generation_platforms(platforms: list[str] | None) -> list[str]:
     return normalized
 
 
-def _find_active_generation_task(*, folder_path: str, copy_style: str | None, platforms: list[str] | None) -> dict[str, Any] | None:
+def _find_active_generation_task(
+    *,
+    folder_path: str,
+    copy_style: str | None,
+    platforms: list[str] | None,
+    use_existing_cover: bool,
+) -> dict[str, Any] | None:
     normalized_style = str(copy_style or "").strip()
     normalized_platforms = _normalize_generation_platforms(platforms)
     for item in _load_generation_tasks():
@@ -397,6 +487,8 @@ def _find_active_generation_task(*, folder_path: str, copy_style: str | None, pl
         if str(item.get("copy_style") or "").strip() != normalized_style:
             continue
         if _normalize_generation_platforms(item.get("platforms") or []) != normalized_platforms:
+            continue
+        if bool(item.get("use_existing_cover")) != bool(use_existing_cover):
             continue
         if item.get("status") in {"queued", "running"} and task_id in _GENERATION_TASKS:
             return item
@@ -424,18 +516,46 @@ def _mark_stale_generation_tasks() -> None:
             _mark_generation_task_failed(task_id, "生成任务已中断，请重新生成。")
 
 
-def _schedule_generation_task(task_id: str, *, folder_path: str, copy_style: str | None, platforms: list[str] | None) -> None:
+def _schedule_generation_task(
+    task_id: str,
+    *,
+    folder_path: str,
+    copy_style: str | None,
+    platforms: list[str] | None,
+    use_existing_cover: bool,
+) -> None:
     async def runner() -> None:
-        await asyncio.to_thread(_run_generation_task_thread, task_id, folder_path, copy_style, platforms)
+        await asyncio.to_thread(_run_generation_task_thread, task_id, folder_path, copy_style, platforms, use_existing_cover)
 
     _GENERATION_TASKS[task_id] = asyncio.create_task(runner())
 
 
-def _run_generation_task_thread(task_id: str, folder_path: str, copy_style: str | None, platforms: list[str] | None) -> None:
-    asyncio.run(_run_generation_task(task_id, folder_path=folder_path, copy_style=copy_style, platforms=platforms))
+def _run_generation_task_thread(
+    task_id: str,
+    folder_path: str,
+    copy_style: str | None,
+    platforms: list[str] | None,
+    use_existing_cover: bool,
+) -> None:
+    asyncio.run(
+        _run_generation_task(
+            task_id,
+            folder_path=folder_path,
+            copy_style=copy_style,
+            platforms=platforms,
+            use_existing_cover=use_existing_cover,
+        )
+    )
 
 
-async def _run_generation_task(task_id: str, *, folder_path: str, copy_style: str | None, platforms: list[str] | None) -> None:
+async def _run_generation_task(
+    task_id: str,
+    *,
+    folder_path: str,
+    copy_style: str | None,
+    platforms: list[str] | None,
+    use_existing_cover: bool,
+) -> None:
     try:
         _patch_generation_task(
             task_id,
@@ -461,7 +581,13 @@ async def _run_generation_task(task_id: str, *, folder_path: str, copy_style: st
                     patch[key] = update[key]
             _patch_generation_task(task_id, patch)
 
-        result = await generate_intelligent_copy(folder_path, copy_style=copy_style, platforms=platforms, progress_callback=progress_callback)
+        result = await generate_intelligent_copy(
+            folder_path,
+            copy_style=copy_style,
+            platforms=platforms,
+            use_existing_cover=use_existing_cover,
+            progress_callback=progress_callback,
+        )
         publish_ready = bool(result.get("publish_ready"))
         blocking_reasons = [str(item).strip() for item in (result.get("blocking_reasons") or []) if str(item).strip()]
         _patch_generation_task(
@@ -564,11 +690,21 @@ async def _load_intelligent_publish_inputs(
     session: AsyncSession,
     materialize_job: bool,
 ) -> dict[str, Any]:
-    inspection = inspect_intelligent_copy_folder(folder_path)
+    task_snapshot: dict[str, Any] | None = None
+    try:
+        inspection = inspect_intelligent_copy_folder(folder_path)
+    except ValueError:
+        task_snapshot = _find_generation_task_snapshot(folder_path)
+        inspection = _inspection_from_generation_task_snapshot(task_snapshot)
+        if inspection is None:
+            raise
     video_path = Path(str(inspection.get("video_file") or ""))
-    if not video_path.exists() or not video_path.is_file():
+    video_path_raw = str(inspection.get("video_file") or "").strip()
+    if not _is_publish_media_path_usable(video_path_raw):
         raise ValueError("目录内未找到可用成片视频。")
     packaging = _load_intelligent_copy_packaging(Path(str(inspection["folder_path"])))
+    if packaging is None and task_snapshot is not None:
+        packaging = _load_intelligent_copy_packaging_from_task_snapshot(task_snapshot)
     creator_profile = _resolve_intelligent_publish_creator_profile(creator_profile_id)
     if materialize_job:
         job = await _get_or_create_intelligent_publish_job(session, video_path=video_path, folder_path=Path(str(inspection["folder_path"])))
@@ -577,17 +713,88 @@ async def _load_intelligent_publish_inputs(
         job = await _find_existing_intelligent_publish_job(session, video_path=video_path)
         if job is None:
             job = SimpleNamespace(
-                id=uuid.uuid5(uuid.NAMESPACE_URL, f"roughcut:intelligent-publish:{video_path.resolve()}"),
+                id=uuid.uuid5(uuid.NAMESPACE_URL, f"roughcut:intelligent-publish:{_stable_publish_path(video_path)}"),
                 status="done",
                 source_name=video_path.name,
             )
-        render_output = SimpleNamespace(output_path=str(video_path.resolve()))
+        render_output = SimpleNamespace(output_path=_stable_publish_path(video_path))
     return {
         "job": job,
         "render_output": render_output,
         "packaging": packaging,
         "creator_profile": creator_profile,
     }
+
+
+def _is_publish_media_path_usable(raw_path: str) -> bool:
+    raw = str(raw_path or "").strip()
+    if not raw:
+        return False
+    path = Path(raw)
+    try:
+        if path.exists() and path.is_file():
+            return True
+    except OSError:
+        pass
+    return raw.startswith("\\\\") or raw.startswith("//")
+
+
+def _stable_publish_path(path: Path) -> str:
+    try:
+        if path.exists():
+            return str(path.resolve())
+    except OSError:
+        pass
+    return str(path)
+
+
+def _find_generation_task_snapshot(folder_path: str) -> dict[str, Any] | None:
+    requested = _normalize_publish_folder_key(folder_path)
+    candidates = sorted(
+        _load_generation_tasks(),
+        key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+        reverse=True,
+    )
+    for task in candidates:
+        if _normalize_publish_folder_key(task.get("folder_path")) == requested:
+            return task
+        inspection = task.get("inspection") if isinstance(task.get("inspection"), dict) else {}
+        if _normalize_publish_folder_key(inspection.get("folder_path")) == requested:
+            return task
+        material = task.get("result") if isinstance(task.get("result"), dict) else task.get("partial_result")
+        material = material if isinstance(material, dict) else {}
+        if _normalize_publish_folder_key(material.get("folder_path")) == requested:
+            return task
+    return None
+
+
+def _normalize_publish_folder_key(value: Any) -> str:
+    return re.sub(r"[\\/]+$", "", str(value or "").strip()).lower()
+
+
+def _inspection_from_generation_task_snapshot(task: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(task, dict):
+        return None
+    inspection = task.get("inspection") if isinstance(task.get("inspection"), dict) else None
+    if inspection and inspection.get("folder_path") and inspection.get("video_file"):
+        return inspection
+    for key in ("result", "partial_result"):
+        material = task.get(key) if isinstance(task.get(key), dict) else None
+        material_inspection = material.get("inspection") if isinstance(material, dict) and isinstance(material.get("inspection"), dict) else None
+        if material_inspection and material_inspection.get("folder_path") and material_inspection.get("video_file"):
+            return material_inspection
+    return None
+
+
+def _load_intelligent_copy_packaging_from_task_snapshot(task: dict[str, Any]) -> dict[str, Any] | None:
+    for key in ("result", "partial_result"):
+        material = task.get(key) if isinstance(task.get(key), dict) else None
+        if not material:
+            continue
+        packaging = _normalize_intelligent_copy_payload_as_packaging(material)
+        if packaging:
+            return packaging
+    return None
 
 
 def _load_intelligent_copy_packaging(folder_path: Path) -> dict[str, Any] | None:
@@ -598,6 +805,10 @@ def _load_intelligent_copy_packaging(folder_path: Path) -> dict[str, Any] | None
         payload = json.loads(json_path.read_text(encoding="utf-8"))
     except Exception:
         return None
+    return _normalize_intelligent_copy_payload_as_packaging(payload, material_dir=str(folder_path / "smart-copy"))
+
+
+def _normalize_intelligent_copy_payload_as_packaging(payload: dict[str, Any], material_dir: str | None = None) -> dict[str, Any] | None:
     platforms: dict[str, dict[str, Any]] = {}
     for item in payload.get("platforms") if isinstance(payload.get("platforms"), list) else []:
         if not isinstance(item, dict):
@@ -620,7 +831,7 @@ def _load_intelligent_copy_packaging(folder_path: Path) -> dict[str, Any] | None
     return {
         "platforms": platforms,
         "source": "intelligent_publish",
-        "material_dir": str(folder_path / "smart-copy"),
+        "material_dir": str(material_dir or payload.get("material_dir") or ""),
         "publish_ready": bool(payload.get("publish_ready", False)),
         "blocking_reasons": [str(reason).strip() for reason in (payload.get("blocking_reasons") or []) if str(reason).strip()],
     }
@@ -640,7 +851,7 @@ def _resolve_intelligent_publish_creator_profile(creator_profile_id: str | None)
 async def _find_existing_intelligent_publish_job(session: AsyncSession, *, video_path: Path) -> Job | None:
     result = await session.execute(
         select(Job)
-        .where(Job.source_path == str(video_path.resolve()), Job.status == "done")
+        .where(Job.source_path == _stable_publish_path(video_path), Job.status == "done")
         .order_by(Job.created_at.desc())
         .limit(1)
     )
@@ -652,11 +863,11 @@ async def _get_or_create_intelligent_publish_job(session: AsyncSession, *, video
     if existing is not None:
         return existing
     job = Job(
-        source_path=str(video_path.resolve()),
+        source_path=_stable_publish_path(video_path),
         source_name=video_path.name,
         status="done",
         workflow_template="intelligent_publish",
-        output_dir=str(folder_path.resolve()),
+        output_dir=_stable_publish_path(folder_path),
         job_flow_mode="auto",
         workflow_mode="standard_edit",
         language="zh-CN",
@@ -672,7 +883,7 @@ async def _get_or_create_intelligent_publish_render_output(
     job: Job,
     video_path: Path,
 ) -> RenderOutput:
-    resolved_video_path = str(video_path.resolve())
+    resolved_video_path = _stable_publish_path(video_path)
     result = await session.execute(
         select(RenderOutput)
         .where(RenderOutput.job_id == job.id, RenderOutput.output_path == resolved_video_path, RenderOutput.status == "done")

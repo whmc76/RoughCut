@@ -1,9 +1,12 @@
 x-dev-app-env: &dev-app-env
   WATCHFILES_FORCE_POLLING: "true"
   PYTHONPATH: /app/src
+  DB_USE_NULL_POOL: "true"
+  SEARXNG_URL: "http://host.docker.internal:8080"
 
 x-dev-source-sync-volumes: &dev-source-sync-volumes
   - ./src:/app/src
+  - ./scripts:/app/scripts:ro
   - ./frontend/dist:/app/frontend/dist
   - ./alembic.ini:/app/alembic.ini:ro
   - ./pyproject.toml:/app/pyproject.toml:ro
@@ -17,7 +20,7 @@ services:
   api:
     environment:
       <<: *dev-app-env
-    command: ["roughcut", "api", "--host", "0.0.0.0", "--port", "${ROUGHCUT_API_INTERNAL_PORT:-8000}", "--reload"]
+    command: ["roughcut", "api", "--host", "0.0.0.0", "--port", "${ROUGHCUT_API_INTERNAL_PORT:-8000}", "--reload", "--timeout-graceful-shutdown", "${ROUGHCUT_API_GRACEFUL_SHUTDOWN_SEC:-8}", "--timeout-keep-alive", "${ROUGHCUT_API_KEEP_ALIVE_SEC:-3}"]
     volumes: *dev-source-sync-volumes
     depends_on:
       frontend-watch:

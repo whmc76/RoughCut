@@ -35,6 +35,7 @@ _EXPERIENCE_DETAIL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(上手|到手|开箱|拆开|拿起|握持|按下|点亮|挂上|装进|塞进|掏出|拉开|合上|展开|切|削|照|扫|对比|试了|用了|戴上|闻到|尝了)"),
     re.compile(r"(手感|质感|重量|厚度|尺寸|亮度|泛光|光斑|收纳|口袋|卡扣|拉链|阻尼|声音|味道|口感|续航|发热|边缘|纹理)"),
     re.compile(r"(镜头里|画面里|实拍|近看|细看|现场|这一段|这一下|这个角度|这次)"),
+    re.compile(r"\b(hands?-on|unboxing|build quality|handling|handle|texture|sound|detail|details|close[- ]?up|real use|version differences?|first impressions?)\b", re.IGNORECASE),
 )
 
 _CONCRETE_DETAIL_PATTERN = re.compile(
@@ -43,7 +44,7 @@ _CONCRETE_DETAIL_PATTERN = re.compile(
 )
 
 _ABSOLUTE_FACT_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(唯一|首个|首次|第一|最强|最好|顶级|完全|永久|绝对|百分百|100%)"),
+    re.compile(r"(唯一|首个|首次|第一(?:名|款|个|家|批|位)?|最强|最好|顶级|完全|永久|绝对|百分百|100%)"),
     re.compile(r"(官方|认证|获奖|专利|军规|医用|治疗|治愈|防过敏|无副作用)"),
 )
 
@@ -191,23 +192,47 @@ def _flatten_text_values(value: Any) -> list[str]:
 
 
 def _usable_anchor(value: str) -> bool:
+    if re.search(r"(人工核对|保守策略|发布素材|老本行|今天|我们|建议|具体型号|参数)", str(value or "")):
+        return False
     compact = _compact(value)
     if len(compact) < 2:
+        return False
+    if len(compact) > 24:
         return False
     return compact not in {"内容待确认", "待确认", "未知", "开箱", "展示", "体验", "视频", "内容"}
 
 
 def _contains_any_anchor(text: str, anchors: list[str]) -> bool:
     compact_text = _compact(text).lower()
+    token_text = _anchor_token_text(text)
     for anchor in anchors:
         compact_anchor = _compact(anchor).lower()
         if compact_anchor and compact_anchor in compact_text:
+            return True
+        tokens = _anchor_tokens(anchor)
+        if tokens and any(token in token_text for token in tokens):
             return True
     return False
 
 
 def _compact(value: str) -> str:
     return re.sub(r"[\s\-_·:：/|，,。.!！?？#【】\[\]()（）]+", "", value or "")
+
+
+def _anchor_token_text(value: str) -> str:
+    return " ".join(_anchor_tokens(value))
+
+
+def _anchor_tokens(value: str) -> list[str]:
+    text = str(value or "").lower()
+    tokens = re.findall(r"[a-z0-9]{2,}", text)
+    chinese_chunks = re.findall(r"[\u4e00-\u9fff]{2,}", text)
+    for chunk in chinese_chunks:
+        if len(chunk) <= 4:
+            tokens.append(chunk)
+        else:
+            tokens.extend(chunk[index : index + 2] for index in range(0, len(chunk) - 1))
+    return _dedupe(token for token in tokens if token not in {"the", "and", "with", "version", "开箱", "上手", "体验", "版本"})
 
 
 def _apply_platform_tone_checks(
@@ -242,7 +267,12 @@ def _apply_fact_risk_checks(
     repair_hints: list[str],
 ) -> None:
     parameter_hits = _dedupe(match.group(0) for match in _PARAMETER_FACT_PATTERN.finditer(text))
-    absolute_hits = _dedupe(match.group(0) for pattern in _ABSOLUTE_FACT_PATTERNS for match in pattern.finditer(text))
+    absolute_hits = _dedupe(
+        match.group(0)
+        for pattern in _ABSOLUTE_FACT_PATTERNS
+        for match in pattern.finditer(text)
+        if not _is_benign_absolute_context(text, match)
+    )
     if not parameter_hits and not absolute_hits:
         return
 
@@ -259,6 +289,16 @@ def _apply_fact_risk_checks(
     if absolute_hits and not verified:
         blocking_reasons.append(f"正文包含高风险事实/绝对化词：{_join_preview(absolute_hits)}")
         repair_hints.append("删除唯一、最强、官方认证、治疗等未经核验的绝对化事实。")
+
+
+def _is_benign_absolute_context(text: str, match: re.Match[str]) -> bool:
+    value = match.group(0)
+    start = match.start()
+    end = match.end()
+    window = text[max(0, start - 4) : min(len(text), end + 4)]
+    if value == "第一" and re.search(r"第一(眼|次|时间|反应|感觉|印象|视角)", window):
+        return True
+    return False
 
 
 def _fact_sheet_verified(fact_sheet: Mapping[str, Any] | None) -> bool:

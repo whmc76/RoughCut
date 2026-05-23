@@ -1,0 +1,2 @@
+publication browser-agent inventory service listening on http://0.0.0.0:49310
+CDP target: http://127.0.0.1:9222

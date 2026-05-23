@@ -12,6 +12,7 @@ from pydantic import BaseModel, field_validator
 
 from roughcut.pipeline.live_readiness import load_live_readiness_snapshot
 from roughcut.pipeline.orchestrator import get_orchestrator_lock_snapshot
+from roughcut.config import get_settings
 from roughcut.runtime_health import build_readiness_payload
 from roughcut.telegram.review_notification_service import (
     build_review_notification_snapshot,
@@ -106,7 +107,7 @@ def _has_process(substring: str) -> bool:
 def _running_compose_service_names() -> set[str]:
     containers = _running_container_names()
     services: set[str] = set()
-    for service in ("orchestrator", "worker-media", "worker-llm"):
+    for service in ("orchestrator", "worker-media", "worker-llm", "worker-agent"):
         if _has_compose_container(containers, service):
             services.add(service)
     return services
@@ -174,6 +175,7 @@ def _running_celery_queues() -> set[str]:
 
 
 async def build_service_status(*, api_running: bool) -> dict[str, object]:
+    settings = get_settings()
     containers = _running_container_names()
     compose_services = _running_compose_service_names()
     try:
@@ -217,7 +219,8 @@ async def build_service_status(*, api_running: bool) -> dict[str, object]:
         "checked_at": datetime.now(timezone.utc).isoformat(),
         "services": {
             "api": api_running,
-            "telegram_agent": _has_process("telegram-agent"),
+            "telegram_agent": (not bool(getattr(settings, "telegram_agent_enabled", False)))
+            or _has_process("telegram-agent"),
             "orchestrator": _service_status_from_runtime(
                 compose_services=compose_services,
                 service_name="orchestrator",
@@ -235,6 +238,12 @@ async def build_service_status(*, api_running: bool) -> dict[str, object]:
                 service_name="worker-llm",
                 process_needle="celery -A roughcut.pipeline.celery_app:celery_app worker --queues=llm_queue",
                 celery_queue="llm_queue",
+            ),
+            "agent_worker": _service_status_from_runtime(
+                compose_services=compose_services,
+                service_name="worker-agent",
+                process_needle="celery -A roughcut.pipeline.celery_app:celery_app worker --queues=agent_queue",
+                celery_queue="agent_queue",
             ),
             "postgres": _has_container(containers, "roughcut-postgres")
             or readiness.get("checks", {}).get("database", {}).get("status") == "ok",

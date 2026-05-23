@@ -72,6 +72,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "avatar_overlay_border_color": "#F4E4B8",
     "export_resolution_mode": "source",
     "export_resolution_preset": "1080p",
+    "export_frame_rate_mode": "source",
+    "export_frame_rate_preset": "30",
     "enabled": True,
 }
 
@@ -179,6 +181,8 @@ SMART_EFFECT_STYLE_OPTIONS = {
 
 EXPORT_RESOLUTION_MODE_OPTIONS = {"source", "specified"}
 EXPORT_RESOLUTION_PRESET_OPTIONS = {"1080p", "1440p", "2160p"}
+EXPORT_FRAME_RATE_MODE_OPTIONS = {"source", "specified"}
+EXPORT_FRAME_RATE_PRESET_OPTIONS = {"24", "25", "30", "50", "60"}
 
 COVER_STYLE_OPTIONS = {
     "preset_default",
@@ -579,6 +583,8 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
             "smart_effect_style": DEFAULT_CONFIG["smart_effect_style"],
             "export_resolution_mode": DEFAULT_CONFIG["export_resolution_mode"],
             "export_resolution_preset": DEFAULT_CONFIG["export_resolution_preset"],
+            "export_frame_rate_mode": DEFAULT_CONFIG["export_frame_rate_mode"],
+            "export_frame_rate_preset": DEFAULT_CONFIG["export_frame_rate_preset"],
     }
 
     assets_by_id = {
@@ -645,6 +651,8 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
         "avatar_overlay_border_color": config["avatar_overlay_border_color"],
         "export_resolution_mode": config["export_resolution_mode"],
         "export_resolution_preset": config["export_resolution_preset"],
+        "export_frame_rate_mode": config["export_frame_rate_mode"],
+        "export_frame_rate_preset": config["export_frame_rate_preset"],
     }
 
 
@@ -1378,6 +1386,20 @@ def _normalize_config(config: dict[str, Any], assets_by_id: dict[str, dict[str, 
     if export_resolution_preset not in EXPORT_RESOLUTION_PRESET_OPTIONS:
         export_resolution_preset = DEFAULT_CONFIG["export_resolution_preset"]
     normalized["export_resolution_preset"] = export_resolution_preset
+
+    export_frame_rate_mode = str(
+        normalized.get("export_frame_rate_mode") or DEFAULT_CONFIG["export_frame_rate_mode"]
+    ).strip() or DEFAULT_CONFIG["export_frame_rate_mode"]
+    if export_frame_rate_mode not in EXPORT_FRAME_RATE_MODE_OPTIONS:
+        export_frame_rate_mode = DEFAULT_CONFIG["export_frame_rate_mode"]
+    normalized["export_frame_rate_mode"] = export_frame_rate_mode
+
+    export_frame_rate_preset = str(
+        normalized.get("export_frame_rate_preset") or DEFAULT_CONFIG["export_frame_rate_preset"]
+    ).strip() or DEFAULT_CONFIG["export_frame_rate_preset"]
+    if export_frame_rate_preset not in EXPORT_FRAME_RATE_PRESET_OPTIONS:
+        export_frame_rate_preset = DEFAULT_CONFIG["export_frame_rate_preset"]
+    normalized["export_frame_rate_preset"] = export_frame_rate_preset
 
     normalized["music_volume"] = float(normalized.get("music_volume") or DEFAULT_CONFIG["music_volume"])
     normalized["watermark_opacity"] = float(normalized.get("watermark_opacity") or DEFAULT_CONFIG["watermark_opacity"])

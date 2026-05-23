@@ -18,10 +18,11 @@ from roughcut.review.content_profile_memory import merge_content_profile_creativ
 from roughcut.review.platform_body_quality import assess_platform_body
 from roughcut.review.platform_tag_quality import assess_platform_tags
 from roughcut.review.platform_title_quality import assess_platform_titles
+from roughcut.review.subtitle_translation import detect_subtitle_language
 from roughcut.usage import track_usage_operation
 
 _PLATFORM_FACT_SHEET_CACHE_VERSION = "2026-04-03.fact-sheet.v2"
-_PLATFORM_PACKAGE_CACHE_VERSION = "2026-04-03.generate.v2"
+_PLATFORM_PACKAGE_CACHE_VERSION = "2026-05-21.generate.source-language.v1"
 
 PLATFORM_ORDER = [
     ("bilibili", "B站", "简介", "标签"),
@@ -130,8 +131,8 @@ _TITLE_AUDIT_RULES: dict[str, dict[str, Any]] = {
         "max_emojis": 0,
         "max_exclamations": 1,
         "style_hint": "更适合信息明确、可检索、带主题和结论的标题。",
-        "audience_hint": "用户会先扫主体、差异、结论和关键词，过于网感的中文爆词不稳定。",
-        "preferred_tokens": ("review", "unboxing", "test", "hands-on", "体验", "评测", "开箱", "实测"),
+        "audience_hint": "用户会先扫主体、差异、结论和关键词；源视频是中文时，检索信号也必须用中文表达。",
+        "preferred_tokens": ("体验", "评测", "开箱", "实测", "上手", "细节", "差异", "值不值"),
         "avoid_tokens": ("绝绝子", "杀疯", "封神"),
     },
     "x": {
@@ -144,7 +145,7 @@ _TITLE_AUDIT_RULES: dict[str, dict[str, Any]] = {
         "max_exclamations": 1,
         "style_hint": "更像贴文开头句，短促、可转发、先给信息点。",
         "audience_hint": "用户更容易接受一句判断或一个明确观察，不适合堆太多修饰。",
-        "preferred_tokens": ("实测", "结论", "观察", "体验", "先看", "quick take", "hands-on"),
+        "preferred_tokens": ("实测", "结论", "观察", "体验", "先看", "上手", "重点", "值不值"),
         "avoid_tokens": ("长文解析", "绝绝子", "封神"),
     },
 }
@@ -241,6 +242,7 @@ def build_packaging_prompt_brief(
         },
         "manual_review_applied": bool(str(profile.get("review_mode") or "").strip() == "manual_confirmed" or resolved_feedback),
         "resolved_review_user_feedback": resolved_feedback,
+        "source_language": detect_subtitle_language(subtitle_items),
         "transcript_excerpt": build_transcript_for_packaging(subtitle_items, max_chars=max_transcript_chars),
     }
 
@@ -419,28 +421,33 @@ async def generate_platform_packaging(
     fact_guardrail_text = _build_fact_guardrail_text(fact_sheet)
     author_prompt_text = _build_author_prompt_text(author_profile)
     creative_guidance_text = _build_packaging_creative_guidance_text(content_profile)
+    source_language_instruction = _build_source_language_instruction(
+        str(prompt_brief.get("source_language") or detect_subtitle_language(subtitle_items))
+    )
     prompt = (
         "你是多平台视频包装官，负责把字幕整理成适合不同平台发布的标题、简介和标签。"
         f"{_domain_prompt_voice_instruction(content_profile)}"
         "要求：\n"
         "1. 输出真实自然，不要像硬广，不编造事实。\n"
         "2. 刀具、EDC、工具相关内容必须保守合规，避免危险导向表述。\n"
-        "3. 每个平台必须提供 5 个标题、1 段简介/正文、1 组标签，且五个平台的简介/正文不能只是轻微同义改写。\n"
-        "4. 标题要有角度差异：爆点型、稳妥型、提问型、情绪型、结论型。\n"
+        "3. 每个平台必须提供 3 个标题、1 段简介/正文、1 组标签，且各平台的简介/正文不能只是轻微同义改写。\n"
+        "4. 标题要有明确创作目标差异：流量入口、质感细节、决策判断。不要为了凑数输出同义标题。\n"
         "5. 标签必须贴合产品、品类、场景、风格、视频类型。\n"
         "6. 不要输出空字段。\n"
         "7. 参数、功率、流明、毫瓦、射程、容量、价格、发布时间、升级倍率，只能写在“已核验事实”里出现过的信息。\n"
         "8. 如果没有核验证据，改写成保守表达，只写到手体验、外观、做工、上手感受，不写具体参数。\n\n"
-        "9. 如果给了作者信息，只能按平台策略选择最合适的 0 到 3 个字段自然带出，不要所有平台重复同一段自我介绍。\n"
-        "10. 平台简介策略必须明显区分：\n"
+        f"9. {source_language_instruction}\n"
+        "10. 如果给了作者信息，只能按平台策略选择最合适的 0 到 3 个字段自然带出，不要所有平台重复同一段自我介绍。\n"
+        "11. 平台简介策略必须明显区分：\n"
         "- B站：先给核心判断，再说这期重点拆什么，可自然带作者专业身份或长期关注方向。\n"
         "- 小红书：像真实分享笔记，带一点作者人设、审美/使用偏好、到手感受。\n"
         "- 抖音：一句结果 + 一句记忆点，可带极短作者身份锚点，节奏要快。\n"
         "- 快手：像当面讲实话，直给、不绕，可带接地气的人设表达。\n"
         "- 视频号：稳妥可信，偏总结式，可带作者职业/内容定位增强可信度。\n"
         "- 头条号：偏资讯/观点摘要，标题和正文要先把判断讲明白。\n"
-        "- YouTube：描述可更完整，适合补充结构、关键看点和检索关键词。\n"
-        "- X：没有独立视频标题，推文正文要短，像可直接发出的贴文。\n\n"
+        "- YouTube：描述可更完整，适合补充结构、关键看点和检索关键词，但不能因此自动改成英文。\n"
+        "- X：没有独立视频标题，推文正文要短，像可直接发出的贴文。\n"
+        "12. 简介/正文允许适度加入 emoji 增强可读性和生动感：小红书、抖音、快手可用 1-3 个；B站、视频号、头条号、YouTube、X 控制在 0-2 个。emoji 必须服务于语义，不要堆砌，不要放在标题里。\n\n"
         f"本次统一文案风格：{_copy_style_instruction(copy_style)}\n\n"
         f"{fact_guardrail_text}\n\n"
         f"{author_prompt_text}\n\n"
@@ -477,10 +484,15 @@ async def generate_platform_packaging(
         prompt,
         content_profile=content_profile,
         fact_sheet=fact_sheet,
+        copy_style=copy_style,
+        author_profile=author_profile,
     )
-    packaging = _normalize_generated_platform_packaging_strict(
+    packaging = normalize_platform_packaging(
         raw_response,
         content_profile=content_profile,
+        copy_style=copy_style,
+        fact_sheet=fact_sheet,
+        author_profile=author_profile,
     )
     _assert_platform_packaging_publishable(packaging, content_profile=content_profile, fact_sheet=fact_sheet)
     packaging["fact_sheet"] = fact_sheet
@@ -493,6 +505,8 @@ async def _generate_platform_packaging_with_repair(
     *,
     content_profile: dict[str, Any] | None,
     fact_sheet: dict[str, Any] | None,
+    copy_style: str,
+    author_profile: dict[str, Any] | None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     trace: list[dict[str, Any]] = []
     last_payload: dict[str, Any] = {}
@@ -505,6 +519,9 @@ async def _generate_platform_packaging_with_repair(
             attempt_prompt = (
                 prompt
                 + "\n\n上一次输出没有通过发布物料校验，禁止改用模板兜底，必须基于原始视频摘要重新修复。"
+                + "\n如果问题是 JSON 解析失败，说明上一次输出不是合法 JSON 或被截断；这次必须返回完整、可解析、未截断的 JSON 对象。"
+                + "\n重要边界：不要输出“这条视频主要围绕/建议人工核对/根据素材整理/先说结论”等兜底、审核或模板句。"
+                + "\n只修复被指出的平台字段；标题和正文必须由你重新创作，不要复述错误原因。"
                 + "\n需要修复的问题："
                 + json.dumps(last_issues or [last_error], ensure_ascii=False)
                 + "\n修复建议："
@@ -531,18 +548,34 @@ async def _generate_platform_packaging_with_repair(
                                 Message(role="user", content=attempt_prompt),
                             ],
                             temperature=0.45 if attempt == 1 else 0.25,
-                            max_tokens=3800,
+                            max_tokens=7000,
                             json_mode=True,
                         ),
                         timeout=90,
                     )
             candidate = response.as_json()
             last_payload = candidate if isinstance(candidate, dict) else {}
-            assessment = _assess_platform_packaging_candidate(
-                last_payload,
-                content_profile=content_profile,
-                fact_sheet=fact_sheet,
-            )
+            structural_issues = _validate_raw_platform_packaging(last_payload)
+            if structural_issues:
+                assessment = {
+                    "publish_ready": False,
+                    "blocking_reasons": structural_issues,
+                    "warnings": [],
+                    "repair_hints": ["返回完整 JSON，所有平台都必须包含 titles、description、tags。"],
+                }
+            else:
+                normalized_candidate = normalize_platform_packaging(
+                    last_payload,
+                    content_profile=content_profile,
+                    copy_style=copy_style,
+                    fact_sheet=fact_sheet,
+                    author_profile=author_profile,
+                )
+                assessment = _assess_platform_packaging_quality(
+                    normalized_candidate,
+                    content_profile=content_profile,
+                    fact_sheet=fact_sheet,
+                )
             last_issues = list(assessment.get("blocking_reasons") or [])
             last_repair_hints = list(assessment.get("repair_hints") or [])
             trace.append(
@@ -555,6 +588,8 @@ async def _generate_platform_packaging_with_repair(
                 }
             )
             if not last_issues:
+                return last_payload, trace
+            if attempt == 3 and not structural_issues:
                 return last_payload, trace
         except Exception as exc:
             last_error = str(exc)
@@ -635,7 +670,7 @@ def _normalize_generated_platform_packaging_strict(
         description = _clean_generated_copy_text(platform_raw.get("description"))
         tags = [str(item).strip().lstrip("#") for item in (platform_raw.get("tags") or []) if str(item).strip()]
         normalized["platforms"][key] = {
-            "titles": _dedupe_non_empty([item for item in titles if item])[:5],
+            "titles": _dedupe_non_empty([item for item in titles if item])[:3],
             "description": description,
             "tags": _dedupe_non_empty(tags)[:8],
         }
@@ -673,6 +708,7 @@ def _assess_platform_packaging_quality(
     content_profile: dict[str, Any] | None = None,
     fact_sheet: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    quality_profile = _quality_content_profile(content_profile)
     platforms = packaging.get("platforms") if isinstance(packaging.get("platforms"), dict) else {}
     problems: list[str] = []
     warnings: list[str] = []
@@ -689,9 +725,9 @@ def _assess_platform_packaging_quality(
             problems.append(f"{label}缺少正文")
         if not tags:
             problems.append(f"{label}缺少标签")
-        title_assessment = assess_platform_titles(key, titles, content_profile=content_profile)
-        body_assessment = assess_platform_body(key, description, content_profile=content_profile, fact_sheet=fact_sheet)
-        tag_assessment = assess_platform_tags(key, tags, content_profile=content_profile)
+        title_assessment = assess_platform_titles(key, titles, content_profile=quality_profile)
+        body_assessment = assess_platform_body(key, description, content_profile=quality_profile, fact_sheet=fact_sheet)
+        tag_assessment = assess_platform_tags(key, tags, content_profile=quality_profile)
         platform_reports[key] = {
             "title": title_assessment,
             "body": body_assessment,
@@ -708,6 +744,21 @@ def _assess_platform_packaging_quality(
         "repair_hints": _dedupe_non_empty(repair_hints),
         "platforms": platform_reports,
     }
+
+
+def _quality_content_profile(content_profile: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(content_profile, dict):
+        return None
+    identity = _packaging_subject_identity(content_profile)
+    cleaned = dict(content_profile)
+    cleaned["subject_brand"] = identity.get("brand") or ""
+    cleaned["subject_model"] = identity.get("model") or ""
+    cleaned["subject_type"] = identity.get("subject_type") or _safe_identity_text(content_profile.get("subject_type"))
+    for key in ("summary", "hook_line", "visible_text"):
+        value = str(cleaned.get(key) or "")
+        if re.search(r"(人工核对|保守策略|发布素材|老本行|建议发布前)", value):
+            cleaned.pop(key, None)
+    return cleaned
 
 
 def normalize_platform_packaging(
@@ -749,24 +800,163 @@ def normalize_platform_packaging(
             "tags": tags,
         }
 
-    guarded = _enforce_packaging_fact_guardrails(
+    normalized["title_audit"] = audit_platform_packaging_titles(
         normalized,
         content_profile=content_profile,
-        copy_style=copy_style,
-        fact_sheet=fact_sheet,
-        author_profile=author_profile,
     )
-    varied = _enforce_platform_description_variation(
-        guarded,
+    return normalized
+
+
+def _harden_platform_packaging_for_publish(
+    packaging: dict[str, Any],
+    *,
+    content_profile: dict[str, Any] | None,
+    copy_style: str,
+    fact_sheet: dict[str, Any] | None = None,
+    author_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Apply only mechanical cleanup; creative repair must come from the LLM repair loop."""
+
+    hardened: dict[str, Any] = {
+        "highlights": dict(packaging.get("highlights") or {}),
+        "platforms": {key: dict(value or {}) for key, value in (packaging.get("platforms") or {}).items()},
+    }
+    if isinstance(packaging.get("fact_sheet"), dict):
+        hardened["fact_sheet"] = dict(packaging["fact_sheet"])
+
+    for key, label, _, _ in PLATFORM_ORDER:
+        platform = hardened["platforms"].setdefault(key, {})
+        platform["titles"] = _fit_titles_to_platform(
+            [str(item).strip() for item in (platform.get("titles") or []) if str(item).strip()],
+            label=label,
+            content_profile=content_profile,
+            copy_style=copy_style,
+        )
+        platform["description"] = _scrub_publish_blocking_terms(str(platform.get("description") or "").strip())
+    hardened["title_audit"] = audit_platform_packaging_titles(
+        hardened,
+        content_profile=content_profile,
+    )
+    return hardened
+
+
+def _merge_publish_safe_titles(
+    titles: list[str],
+    fallback_titles: list[str],
+    *,
+    key: str,
+    label: str,
+    content_profile: dict[str, Any] | None,
+    copy_style: str,
+) -> list[str]:
+    anchored = [title for title in titles if _contains_confirmed_product_anchor(title, content_profile)]
+    candidates = anchored + fallback_titles + titles
+    merged = _fit_titles_to_platform(
+        candidates,
+        label=label,
         content_profile=content_profile,
         copy_style=copy_style,
-        author_profile=author_profile,
     )
-    varied["title_audit"] = audit_platform_packaging_titles(
-        varied,
+    if not assess_platform_titles(key, merged, content_profile=_quality_content_profile(content_profile)).get("blocking_reasons"):
+        return merged
+    return fallback_titles
+
+
+def _force_publish_safe_titles(
+    *,
+    key: str,
+    label: str,
+    content_profile: dict[str, Any] | None,
+    copy_style: str,
+) -> list[str]:
+    quality_profile = _quality_content_profile(content_profile)
+    compact = _fit_titles_to_platform(
+        _build_compact_fallback_titles(label=label, content_profile=content_profile, copy_style=copy_style),
+        label=label,
         content_profile=content_profile,
+        copy_style=copy_style,
     )
-    return varied
+    if not assess_platform_titles(key, compact, content_profile=quality_profile).get("blocking_reasons"):
+        return compact
+
+    product = _compact_product_label(content_profile, label=label) or _preferred_product_label(content_profile, label=label) or "这款产品"
+    product = _sanitize_title_text(product).replace(" ", "")
+    subject = _compact_subject_label(content_profile, label=label)
+    forced = [
+        f"{product}到手",
+        f"{product}细节先看",
+        f"{product}开箱重点",
+        f"{product}值不值",
+        f"{subject}上手记录",
+    ]
+    return _fit_titles_to_platform(forced, label=label, content_profile=content_profile, copy_style=copy_style)
+
+
+def _scrub_publish_blocking_terms(text: str) -> str:
+    cleaned = str(text or "")
+    replacements = {
+        "第一眼": "到手后",
+        "第一": "先",
+        "最强": "明显",
+        "最好": "更稳妥",
+        "顶级": "质感较强",
+        "唯一": "一个",
+        "首个": "一个",
+        "首次": "这次",
+        "绝对": "",
+        "完全": "整体",
+        "永久": "长期",
+        "百分百": "尽量",
+        "100%": "尽量",
+        "官方认证": "现有信息确认",
+        "官方": "现有信息",
+        "认证": "确认",
+    }
+    for source, target in replacements.items():
+        cleaned = cleaned.replace(source, target)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _prefix_description_with_product_anchor(
+    description: str,
+    *,
+    label: str,
+    content_profile: dict[str, Any] | None,
+) -> str:
+    product = _preferred_product_label(content_profile, label=label)
+    if not product:
+        return description
+    text = str(description or "").strip()
+    if not text:
+        return f"{product}这次开箱，重点看外观细节、做工和上手感受。"
+    if label == "X":
+        return f"{product}这次开箱：{text}"
+    return f"{product}这次开箱，{text}"
+
+
+def _build_publish_safe_description(
+    *,
+    label: str,
+    content_profile: dict[str, Any] | None,
+    author_profile: dict[str, Any] | None = None,
+) -> str:
+    product = _preferred_product_label(content_profile, label=label) or "这款产品"
+    focus = _creative_preference_description_focus(content_profile) or "外观细节、做工和上手感受"
+    question = _fallback_question_with_author(content_profile, author_profile)
+    if label == "抖音":
+        return f"{product}这次开箱直接看{focus}，到手后的质感和近景细节都放在视频里。"
+    if label == "快手":
+        return f"{product}这次开箱我直接说，重点看{focus}，细节咋样就按画面里的表现聊。"
+    if label == "视频号":
+        return f"{product}开箱记录，重点看{focus}，用真实画面帮助快速判断这次内容。"
+    if label == "小红书":
+        return f"{product}到手分享，重点看{focus}。这期更像一次真实开箱记录，细节和感受都按画面来聊。{question}"
+    if label == "YouTube":
+        return f"{product}开箱和上手记录，重点看{focus}，并补充到手后的近景观察、手感和实际画面表现，方便快速判断这期内容的重点。"
+    if label == "X":
+        return f"{product}这次开箱重点看{focus}，到手细节比照片更直观。"
+    return f"{product}这次开箱重点看{focus}。视频里主要记录到手后的外观细节、近景观察和上手感受，所有判断都基于画面里的真实表现。{question}"
 
 
 def render_platform_packaging_markdown(packaging: dict[str, Any]) -> str:
@@ -945,9 +1135,9 @@ def _packaging_subject_identity(content_profile: dict[str, Any] | None) -> dict[
     profile = content_profile or {}
     resolved_feedback = _resolved_review_feedback_payload(profile)
     return {
-        "brand": str(resolved_feedback.get("subject_brand") or profile.get("subject_brand") or "").strip(),
-        "model": str(resolved_feedback.get("subject_model") or profile.get("subject_model") or "").strip(),
-        "subject_type": str(resolved_feedback.get("subject_type") or profile.get("subject_type") or "").strip(),
+        "brand": _safe_identity_text(resolved_feedback.get("subject_brand") or profile.get("subject_brand")),
+        "model": _safe_identity_text(resolved_feedback.get("subject_model") or profile.get("subject_model")),
+        "subject_type": _safe_identity_text(resolved_feedback.get("subject_type") or profile.get("subject_type")),
     }
 
 
@@ -1067,6 +1257,8 @@ def _enforce_packaging_fact_guardrails(
     fact_sheet: dict[str, Any] | None,
     author_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Mechanical fact cleanup only; creative repair belongs to the LLM repair loop."""
+
     sheet = fact_sheet or {}
     verified_blob = "\n".join(str(item.get("fact") or "") for item in sheet.get("verified_facts") or [])
     guarded = {
@@ -1080,40 +1272,25 @@ def _enforce_packaging_fact_guardrails(
     if _contains_unverified_claim(str(highlights.get("strongest_selling_point") or ""), verified_blob):
         highlights["strongest_selling_point"] = ""
     if _contains_unverified_claim(str(highlights.get("title_hook") or ""), verified_blob):
-        highlights["title_hook"] = str((content_profile or {}).get("hook_line") or "").strip()
-    if not _contains_confirmed_product_anchor(str(highlights.get("title_hook") or ""), content_profile):
-        highlights["title_hook"] = _build_confirmed_title_hook(content_profile)
+        highlights["title_hook"] = ""
 
     for key, label, _, _ in PLATFORM_ORDER:
         platform = guarded["platforms"].get(key) or {}
-        fallback_titles = _fit_titles_to_platform(
-            build_fallback_titles(label=label, content_profile=content_profile, copy_style=copy_style),
-            label=label,
-            content_profile=content_profile,
-            copy_style=copy_style,
-        )
         titles = list(platform.get("titles") or [])
         guarded_titles: list[str] = []
-        for idx, title in enumerate(titles[:5]):
-            replacement = fallback_titles[min(idx, len(fallback_titles) - 1)] if fallback_titles else _sanitize_title_text(title)
-            if _contains_unverified_claim(title, verified_blob) or not _contains_confirmed_product_anchor(title, content_profile):
-                guarded_titles.append(replacement)
-            else:
-                guarded_titles.append(title)
+        for title in titles[:3]:
+            if _contains_unverified_claim(str(title), verified_blob):
+                continue
+            guarded_titles.append(_sanitize_title_text(title))
         platform["titles"] = _fit_titles_to_platform(
-            guarded_titles + fallback_titles[len(guarded_titles):5],
+            guarded_titles,
             label=label,
             content_profile=content_profile,
             copy_style=copy_style,
         )
         description = str(platform.get("description") or "").strip()
         if _contains_unverified_claim(description, verified_blob):
-            platform["description"] = build_fallback_description(
-                label=label,
-                content_profile=content_profile,
-                copy_style=copy_style,
-                author_profile=author_profile,
-            )
+            platform["description"] = ""
         guarded["platforms"][key] = platform
     return guarded
 
@@ -1185,19 +1362,7 @@ def _looks_like_fact_sensitive_claim(text: str) -> bool:
 
 def _normalize_titles(value: Any, *, label: str, content_profile: dict[str, Any] | None, copy_style: str) -> list[str]:
     titles = [str(item).strip() for item in (value or []) if str(item).strip()]
-    if len(titles) >= 5:
-        return _fit_titles_to_platform(titles[:5], label=label, content_profile=content_profile, copy_style=copy_style)
-
-    fallback = build_fallback_titles(label=label, content_profile=content_profile, copy_style=copy_style)
-    seen: set[str] = set()
-    merged: list[str] = []
-    for title in titles + fallback:
-        if title not in seen:
-            seen.add(title)
-            merged.append(title)
-        if len(merged) >= 5:
-            break
-    return _fit_titles_to_platform(merged, label=label, content_profile=content_profile, copy_style=copy_style)
+    return _fit_titles_to_platform(titles[:3], label=label, content_profile=content_profile, copy_style=copy_style)
 
 
 def _fit_titles_to_platform(
@@ -1214,40 +1379,18 @@ def _fit_titles_to_platform(
         or rule.get("recommended_max_chars")
         or rule.get("display_max_chars")
     )
-    compact_fallbacks = _build_compact_fallback_titles(label=label, content_profile=content_profile, copy_style=copy_style)
     seen: set[str] = set()
     fitted: list[str] = []
-    fallback_cursor = 0
     for raw_title in titles:
         title = _sanitize_title_text(raw_title)
-        if isinstance(max_chars, int) and _text_display_units_ceiling(title) > max_chars:
-            replacement = ""
-            while fallback_cursor < len(compact_fallbacks):
-                candidate = _sanitize_title_text(compact_fallbacks[fallback_cursor])
-                fallback_cursor += 1
-                if candidate and _text_display_units_ceiling(candidate) <= max_chars and candidate not in seen:
-                    replacement = candidate
-                    break
-            title = replacement or _truncate_title(title, max_chars)
-        if not title or title in seen:
-            continue
-        seen.add(title)
-        fitted.append(title)
-        if len(fitted) >= 5:
-            return fitted
-
-    for candidate in compact_fallbacks:
-        title = _sanitize_title_text(candidate)
-        if not title or title in seen:
-            continue
         if isinstance(max_chars, int) and _text_display_units_ceiling(title) > max_chars:
             title = _truncate_title(title, max_chars)
         if not title or title in seen:
             continue
         seen.add(title)
         fitted.append(title)
-        if len(fitted) >= 5:
-            break
+        if len(fitted) >= 3:
+            return fitted
     return fitted
 
 
@@ -1260,19 +1403,19 @@ def _build_compact_fallback_titles(
     del copy_style
     if not _has_specific_subject_identity(content_profile):
         if label == "小红书":
-            return ["终于到手了", "先看开箱细节", "这次质感真不错", "细节先看清", "值不值先聊聊"]
+            return ["到手质感记录", "开箱细节实拍", "上手感受分享", "做工细节观察", "值不值看实拍"]
         if label == "抖音":
-            return ["先看这次开箱", "这次值不值", "重点直接看", "细节先看", "上手先说结论"]
+            return ["开箱质感实拍", "到手值不值", "上手细节记录", "做工表现看这里", "真实开箱观察"]
         if label == "快手":
-            return ["给你们看个真东西", "这次我说实话", "值不值我直说", "先看细节", "到底咋样"]
+            return ["开箱给你看明白", "这次按实拍聊", "值不值看做工", "细节表现记录", "到手到底咋样"]
         if label == "视频号":
-            return ["开箱重点记录", "到手体验总结", "值不值先看", "细节重点", "上手记录"]
+            return ["开箱重点记录", "到手体验总结", "值不值看细节", "细节表现记录", "上手记录"]
         if label == "头条号":
-            return ["开箱重点总结", "先看核心结论", "这次体验怎么说", "值不值先讲明白", "开箱观察记录"]
+            return ["开箱重点总结", "核心差异观察", "这次体验怎么说", "值不值看细节", "开箱观察记录"]
         if label == "YouTube":
-            return ["Hands-on quick take", "Unboxing first look", "What stands out first", "Worth it or not", "Key details first"]
+            return ["开箱重点先看", "上手体验记录", "值不值看细节", "核心差异观察", "真实开箱判断"]
         if label == "X":
-            return ["Quick take first", "First look in one post", "Worth it at first glance?", "Key detail first", "Hands-on note"]
+            return ["先看一个重点", "开箱一句话观察", "值不值看细节", "关键细节先看", "上手感受记录"]
         return ["开箱重点先看", "值不值一次说清", "这次先看细节", "上手体验记录", "开箱真实判断"]
 
     product = _compact_product_label(content_profile, label=label)
@@ -1319,19 +1462,19 @@ def _build_compact_fallback_titles(
         ]
     if label == "YouTube":
         return [
-            f"{product} review",
-            f"{product} hands-on",
-            f"{product} first look",
-            f"{subject} quick review",
-            f"{product} worth it?",
+            f"{product}开箱评测",
+            f"{product}上手体验",
+            f"{product}细节先看",
+            f"{subject}真实开箱",
+            f"{product}值不值",
         ]
     if label == "X":
         return [
-            f"{product} quick take",
-            f"{product} first look",
-            f"{product} one-line verdict",
-            f"{subject} first impression",
-            f"{product} key detail",
+            f"{product}一句话观察",
+            f"{product}上手先看",
+            f"{product}直接说结论",
+            f"{subject}第一眼感受",
+            f"{product}关键细节",
         ]
     return [
         f"{product}开箱实测",
@@ -1344,20 +1487,23 @@ def _build_compact_fallback_titles(
 
 def _compact_product_label(content_profile: dict[str, Any] | None, *, label: str) -> str:
     brand = _localized_brand_label(
-        str((content_profile or {}).get("subject_brand") or "").strip(),
+        _safe_identity_text((content_profile or {}).get("subject_brand")),
         label=label,
         content_profile=content_profile,
     )
-    model = str((content_profile or {}).get("subject_model") or "").strip()
-    subject = _specific_subject_type(content_profile) or str((content_profile or {}).get("subject_type") or "").strip() or "这款产品"
+    model = _safe_identity_text((content_profile or {}).get("subject_model"))
+    subject = _specific_subject_type(content_profile) or "这款产品"
     max_chars = 12 if label in {"小红书", "视频号"} else 14
-    for candidate in (
+    candidates = [
         " ".join(part for part in (brand, model) if part).strip(),
         model,
         brand,
-        subject,
-        "这款产品",
-    ):
+    ]
+    if subject != "这款产品":
+        candidates.append(subject)
+    if not model and not brand:
+        candidates.append("这款产品")
+    for candidate in candidates:
         text = _sanitize_title_text(candidate)
         if text and _text_display_units_ceiling(text) <= max_chars:
             return text
@@ -1365,7 +1511,7 @@ def _compact_product_label(content_profile: dict[str, Any] | None, *, label: str
 
 
 def _compact_subject_label(content_profile: dict[str, Any] | None, *, label: str) -> str:
-    subject = _specific_subject_type(content_profile) or str((content_profile or {}).get("subject_type") or "").strip() or "这次开箱"
+    subject = _specific_subject_type(content_profile) or _safe_identity_text((content_profile or {}).get("subject_model")) or "这次开箱"
     max_chars = 8 if label == "视频号" else 10
     return _truncate_title(_sanitize_title_text(subject), max_chars) or "这次开箱"
 
@@ -1513,11 +1659,11 @@ def _localized_brand_label(brand: str, *, label: str, content_profile: dict[str,
 
 def _localized_product_label(content_profile: dict[str, Any] | None, *, label: str) -> str:
     brand = _localized_brand_label(
-        str((content_profile or {}).get("subject_brand") or "").strip(),
+        _safe_identity_text((content_profile or {}).get("subject_brand")),
         label=label,
         content_profile=content_profile,
     )
-    model = str((content_profile or {}).get("subject_model") or "").strip()
+    model = _safe_identity_text((content_profile or {}).get("subject_model"))
     subject = _specific_subject_type(content_profile)
     return " ".join(part for part in (brand, model or subject) if part).strip()
 
@@ -1564,12 +1710,7 @@ def _normalize_platform_description(
 ) -> str:
     description = str(value or "").strip()
     if not description:
-        return build_fallback_description(
-            label=label,
-            content_profile=content_profile,
-            copy_style=copy_style,
-            author_profile=author_profile,
-        )
+        return ""
     return _inject_author_context_into_description(label, description, author_profile)
 
 
@@ -1580,33 +1721,8 @@ def _enforce_platform_description_variation(
     copy_style: str,
     author_profile: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    platforms = packaging.get("platforms")
-    if not isinstance(platforms, dict):
-        return packaging
+    """Report duplicate descriptions through quality gates; do not synthesize replacements."""
 
-    seen_descriptions: list[str] = []
-    for key, label, _, _ in PLATFORM_ORDER:
-        platform = platforms.get(key)
-        if not isinstance(platform, dict):
-            continue
-        description = str(platform.get("description") or "").strip()
-        if not description:
-            platform["description"] = build_fallback_description(
-                label=label,
-                content_profile=content_profile,
-                copy_style=copy_style,
-                author_profile=author_profile,
-            )
-            description = str(platform.get("description") or "").strip()
-        if any(_description_similarity(description, item) >= 0.82 for item in seen_descriptions):
-            platform["description"] = build_fallback_description(
-                label=label,
-                content_profile=content_profile,
-                copy_style=copy_style,
-                author_profile=author_profile,
-            )
-            description = str(platform.get("description") or "").strip()
-        seen_descriptions.append(description)
     return packaging
 
 
@@ -1711,7 +1827,7 @@ def _audit_platform_titles(
         issue = _build_audit_issue(
             severity="warning",
             code="identity_anchor_weak",
-            message=f"{label} 5 个标题里只有 {anchored_titles} 个带明显主体锚点，搜索和识别会偏弱。",
+            message=f"{label} {len(normalized_titles)} 个标题里只有 {anchored_titles} 个带明显主体锚点，搜索和识别会偏弱。",
         )
         issues.append(issue)
         warning_count += 1
@@ -2019,11 +2135,11 @@ def _audit_platform_audience_fit(
             message=f"{label} 标题 {index} 少了点“当面讲实话”的口语感。",
             title_index=index,
         )
-    if key == "youtube" and not re.search(r"review|unboxing|hands-on|first look|体验|评测|开箱|实测", title, re.IGNORECASE):
+    if key == "youtube" and not re.search(r"体验|评测|开箱|实测|上手|细节|差异|值不值|review|unboxing|hands-on|first look", title, re.IGNORECASE):
         return _build_audit_issue(
             severity="warning",
             code="search_signal_weak",
-            message=f"{label} 标题 {index} 缺少 review / unboxing / hands-on 一类可检索信号。",
+            message=f"{label} 标题 {index} 缺少源语言里的评测、开箱、上手、差异一类可检索信号。",
             title_index=index,
         )
     if key == "x" and not re.search(r"结论|观察|体验|先看|quick|take|first look|hands-on", title, re.IGNORECASE):
@@ -2052,19 +2168,19 @@ def _audit_title_diversity(
     primary_angles: list[str],
     title_count: int,
 ) -> dict[str, Any] | None:
-    if title_count < 5:
+    if title_count < 3:
         return _build_audit_issue(
             severity="error",
             code="title_count_missing",
-            message=f"{label} 只有 {title_count} 个标题，没满足 5 个版本输出要求。",
+            message=f"{label} 只有 {title_count} 个标题，没满足 3 个版本输出要求。",
         )
     unique_angles = {item for item in primary_angles if item and item != "generic"}
-    if len(unique_angles) >= 4:
+    if len(unique_angles) >= 2:
         return None
     return _build_audit_issue(
         severity="warning",
         code="angle_diversity_low",
-        message=f"{label} 5 个标题只有 {len(unique_angles)} 种明显角度，版本差异不够开。",
+        message=f"{label} 3 个标题只有 {len(unique_angles)} 种明显角度，版本差异不够开。",
     )
 
 
@@ -2554,9 +2670,9 @@ def build_fallback_description(
 
 
 def _fallback_product(content_profile: dict[str, Any] | None, *, label: str | None = None) -> str:
-    brand_raw = str((content_profile or {}).get("subject_brand") or "").strip()
+    brand_raw = _safe_identity_text((content_profile or {}).get("subject_brand"))
     brand = _localized_brand_label(brand_raw, label=label or "", content_profile=content_profile) if label else brand_raw
-    model = str((content_profile or {}).get("subject_model") or "").strip()
+    model = _safe_identity_text((content_profile or {}).get("subject_model"))
     subject = _specific_subject_type(content_profile)
     return " ".join(part for part in (brand, model or subject) if part).strip()
 
@@ -2568,9 +2684,9 @@ def _preferred_product_label(content_profile: dict[str, Any] | None, label: str 
 def _preferred_subject_label(content_profile: dict[str, Any] | None) -> str:
     profile = content_profile or {}
     return (
-        str(profile.get("subject_model") or "").strip()
+        _safe_identity_text(profile.get("subject_model"))
         or _specific_subject_type(profile)
-        or str(profile.get("subject_type") or "").strip()
+        or _safe_identity_text(profile.get("subject_type"))
         or "产品"
     )
 
@@ -2588,6 +2704,8 @@ def _fallback_video_type(content_profile: dict[str, Any] | None) -> str:
 
 def _fallback_question(content_profile: dict[str, Any] | None) -> str:
     question = str((content_profile or {}).get("engagement_question") or "").strip()
+    if re.search(r"(这条视频主要在讲什么|这个视频主要讲什么|视频主要在讲什么|内容主要在讲什么)", question):
+        question = ""
     return question or "你觉得这次到手值不值？"
 
 
@@ -2608,7 +2726,7 @@ def _has_specific_subject_identity(content_profile: dict[str, Any] | None) -> bo
 
 
 def _specific_subject_type(content_profile: dict[str, Any] | None) -> str:
-    subject = str((content_profile or {}).get("subject_type") or "").strip()
+    subject = _safe_identity_text((content_profile or {}).get("subject_type"))
     if not subject:
         return ""
     generic_subjects = {
@@ -2713,9 +2831,18 @@ def _contains_confirmed_product_anchor(text: str, content_profile: dict[str, Any
 def _build_confirmed_identity_anchors(content_profile: dict[str, Any] | None) -> dict[str, str]:
     profile = content_profile or {}
     return {
-        "brand": _primary_anchor_token(str(profile.get("subject_brand") or "")),
-        "model": _primary_anchor_token(str(profile.get("subject_model") or "")),
+        "brand": _primary_anchor_token(_safe_identity_text(profile.get("subject_brand"))),
+        "model": _primary_anchor_token(_safe_identity_text(profile.get("subject_model"))),
     }
+
+
+def _safe_identity_text(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    text = re.split(r"[，,。.!！?？；;\n\r]", text, maxsplit=1)[0].strip()
+    text = re.sub(r"(建议发布前人工核对.*|已按保守策略.*|今天回到.*)$", "", text).strip()
+    return text
 
 
 def _primary_anchor_token(text: str) -> str:
@@ -2742,7 +2869,7 @@ def _hashify_tags(tags: list[str]) -> list[str]:
 
 def _copy_style_instruction(copy_style: str) -> str:
     mapping = {
-        "attention_grabbing": "吸引眼球：允许强爆点、强情绪、强反差，但不编造事实。",
+        "attention_grabbing": "点击友好：标题要有明确看点和判断，但禁止廉价爆词、模板腔和虚假强情绪。",
         "balanced": "平衡稳妥：有吸引力，但不过度浮夸，优先清晰和自然。",
         "premium_editorial": "高级编辑感：克制、干净、像杂志编辑或品牌文案。",
         "trusted_expert": "专业可信：更像经验分享和专家拆解，少营销腔。",
@@ -2760,10 +2887,29 @@ def _platform_bias_instruction(label: str) -> str:
         "快手": "更接地气、更直给，像当面把真实体验讲明白。",
         "视频号": "更稳妥可信，适合快速概括重点和结论。",
         "头条号": "更像资讯摘要或观点导语，适合先抛判断、再补重点。",
-        "YouTube": "更强调主题明确、可检索、结构完整，适合 review / hands-on / first look 语气。",
+        "YouTube": "更强调主题明确、可检索、结构完整；未启用翻译增强时必须使用视频源语言，不要把中文源内容改成英文。",
         "X": "更像可直接转发的贴文，先给一个观察或结论，尽量短促。",
     }
     return mapping.get(label, "按平台用户习惯自动调整语气和信息密度。")
+
+
+def _build_source_language_instruction(source_language: str) -> str:
+    normalized = str(source_language or "").strip() or "zh-CN"
+    lower = normalized.lower()
+    if lower.startswith("zh"):
+        language_name = "中文"
+    elif lower.startswith("en"):
+        language_name = "英文"
+    elif lower.startswith("ja"):
+        language_name = "日文"
+    elif lower.startswith("ko"):
+        language_name = "韩文"
+    else:
+        language_name = normalized
+    return (
+        f"视频源语言是 {language_name}（{normalized}）。未显式启用翻译增强时，所有平台的标题、简介/正文、标签都必须沿用源语言；"
+        "平台适配只调整信息结构、语气和长度，不能把 YouTube 或 X 自动翻译成英文。"
+    )
 
 
 def _domain_prompt_voice_instruction(content_profile: dict[str, Any] | None) -> str:
@@ -2795,12 +2941,12 @@ def _copy_style_headline_hook(copy_style: str, *, hook: str, brand: str, subject
         return f"{subject}这次真有点狠"
     if copy_style == "emotional_story":
         return f"{subject}这次真的等很久"
-    return hook or f"{brand}{subject}这次太狠了"
+    return hook or f"{brand}{subject}这次重点看差异"
 
 
 def _copy_style_bilibili_angle(copy_style: str) -> str:
     mapping = {
-        "attention_grabbing": "到底强得有多离谱",
+        "attention_grabbing": "版本差异一次说清",
         "balanced": "到底值不值得看",
         "premium_editorial": "这次有哪些细节变化",
         "trusted_expert": "核心差异一次讲清",
@@ -2824,7 +2970,7 @@ def _copy_style_explainer(copy_style: str) -> str:
 
 def _copy_style_waiting_angle(copy_style: str, subject: str) -> str:
     mapping = {
-        "attention_grabbing": f"等了很久才到手，这把{subject}太狠了",
+        "attention_grabbing": f"这把{subject}到手后先看质感",
         "balanced": f"等了很久才到手，这把{subject}怎么样",
         "premium_editorial": f"这把{subject}到手后，第一眼细节很加分",
         "trusted_expert": f"这把{subject}到手后，先看几个关键点",
@@ -2836,7 +2982,7 @@ def _copy_style_waiting_angle(copy_style: str, subject: str) -> str:
 
 def _copy_style_record_angle(copy_style: str) -> str:
     mapping = {
-        "attention_grabbing": "开箱+真实暴击体验",
+        "attention_grabbing": "开箱+真实上手体验",
         "balanced": "开箱+真实体验记录",
         "premium_editorial": "到手观察与细节记录",
         "trusted_expert": "实测记录与判断",
@@ -2848,7 +2994,7 @@ def _copy_style_record_angle(copy_style: str) -> str:
 
 def _copy_style_texture_angle(copy_style: str) -> str:
     mapping = {
-        "attention_grabbing": "摆上桌直接杀疯了",
+        "attention_grabbing": "摆上桌质感很明显",
         "balanced": "摆上桌，质感一下就出来了",
         "premium_editorial": "摆上桌，整体气质立刻出来了",
         "trusted_expert": "摆上桌，几个关键细节很清楚",
@@ -2860,7 +3006,7 @@ def _copy_style_texture_angle(copy_style: str) -> str:
 
 def _copy_style_detail_angle(copy_style: str) -> str:
     mapping = {
-        "attention_grabbing": "细节党真的会看上头",
+        "attention_grabbing": "细节党会多看几眼",
         "balanced": "细节控真的会看很久",
         "premium_editorial": "细节质感会让人慢慢看很久",
         "trusted_expert": "几个细节位都值得放大看",
@@ -2872,7 +3018,7 @@ def _copy_style_detail_angle(copy_style: str) -> str:
 
 def _copy_style_judgement_angle(copy_style: str) -> str:
     mapping = {
-        "attention_grabbing": "到底香不香",
+        "attention_grabbing": "到底值不值",
         "balanced": "值不值我直说",
         "premium_editorial": "到底值不值得收藏",
         "trusted_expert": "到底值不值得入手",
@@ -2884,7 +3030,7 @@ def _copy_style_judgement_angle(copy_style: str) -> str:
 
 def _copy_style_short_burst(copy_style: str) -> str:
     mapping = {
-        "attention_grabbing": "直接炸场",
+        "attention_grabbing": "开箱先看差异",
         "balanced": "终于到手",
         "premium_editorial": "很值得看",
         "trusted_expert": "先看关键差异",
@@ -2896,7 +3042,7 @@ def _copy_style_short_burst(copy_style: str) -> str:
 
 def _copy_style_unboxing_burst(copy_style: str) -> str:
     mapping = {
-        "attention_grabbing": "这次开箱直接上头",
+        "attention_grabbing": "这次开箱看质感",
         "balanced": "这次开箱有点上头",
         "premium_editorial": "这次开箱的质感很在线",
         "trusted_expert": "这次开箱先看几个重点",
@@ -2908,7 +3054,7 @@ def _copy_style_unboxing_burst(copy_style: str) -> str:
 
 def _copy_style_detail_focus(copy_style: str) -> str:
     mapping = {
-        "attention_grabbing": "最狠细节",
+        "attention_grabbing": "关键细节",
         "balanced": "细节",
         "premium_editorial": "关键细节",
         "trusted_expert": "核心细节",
@@ -2920,7 +3066,7 @@ def _copy_style_detail_focus(copy_style: str) -> str:
 
 def _copy_style_truth_angle(copy_style: str) -> str:
     mapping = {
-        "attention_grabbing": "值不值我直接摊牌",
+        "attention_grabbing": "值不值我直接说",
         "balanced": "值不值，咱实话实说",
         "premium_editorial": "到底值不值得慢慢看",
         "trusted_expert": "到底值不值得入手",
@@ -2932,7 +3078,7 @@ def _copy_style_truth_angle(copy_style: str) -> str:
 
 def _copy_style_opening(copy_style: str) -> str:
     mapping = {
-        "attention_grabbing": "先说结论，",
+        "attention_grabbing": "",
         "balanced": "",
         "premium_editorial": "如果只看重点，",
         "trusted_expert": "先把核心判断放前面，",
@@ -2944,7 +3090,7 @@ def _copy_style_opening(copy_style: str) -> str:
 
 def _copy_style_neutral_hook(copy_style: str) -> str:
     mapping = {
-        "attention_grabbing": "先说重点，",
+        "attention_grabbing": "",
         "balanced": "",
         "premium_editorial": "如果只看重点，",
         "trusted_expert": "先看核心信息，",
@@ -2961,7 +3107,7 @@ def _copy_style_xhs_title(copy_style: str, *, brand: str, subject: str) -> str:
     if subject and normalized_subject and normalized_subject not in normalized_brand:
         merged = f"{brand}{subject}"
     mapping = {
-        "attention_grabbing": f"{merged}终于到手，细节直接封神",
+        "attention_grabbing": f"{merged}到手后值不值",
         "balanced": f"这把{subject}终于到手，细节真的很顶",
         "premium_editorial": f"{merged}到手后，气质一下就出来了",
         "trusted_expert": f"{merged}到手后，先看这几个关键点",

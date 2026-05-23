@@ -628,6 +628,8 @@ export type PackagingConfig = {
   avatar_overlay_border_color: string;
   export_resolution_mode?: string;
   export_resolution_preset?: string;
+  export_frame_rate_mode?: string;
+  export_frame_rate_preset?: string;
   enabled: boolean;
 };
 
@@ -678,6 +680,11 @@ export type IntelligentCopyPlatformMaterial = {
     rule_note: string;
   };
   titles: string[];
+  title_goals?: {
+    title?: string;
+    goal?: string;
+    direction?: string;
+  }[];
   primary_title: string;
   title_copy_all: string;
   body: string;
@@ -696,6 +703,7 @@ export type IntelligentCopyResult = {
   markdown_path: string;
   json_path: string;
   cover_source_path?: string | null;
+  use_existing_cover?: boolean;
   copy_style: string;
   inspection: IntelligentCopyInspect;
   highlights: Record<string, string>;
@@ -710,6 +718,7 @@ export type IntelligentCopyGenerateTask = {
   id: string;
   folder_path: string;
   copy_style?: string | null;
+  use_existing_cover?: boolean;
   status: "queued" | "running" | "completed" | "failed" | string;
   progress: number;
   stage: string;
@@ -832,6 +841,9 @@ export type AvatarCreatorProfile = {
     signature?: string | null;
     default_call_to_action?: string | null;
     description_strategy?: string | null;
+    cover_style?: string | null;
+    cover_style_label?: string | null;
+    cover_packaging_scheme?: string | null;
     platform_credentials?: PublicationCredentialBinding[];
   };
   business?: {
@@ -883,6 +895,64 @@ export type PublicationPlatformPublishOptions = {
   collection_name?: string | null;
   category?: string | null;
   visibility_or_publish_mode?: string | null;
+  platform_specific_overrides?: Record<string, unknown>;
+};
+
+export type PublicationSchemeItem = {
+  platform: string;
+  platform_label: string;
+  account_label?: string | null;
+  title?: string | null;
+  scheduled_publish_at?: string | null;
+  collection_name?: string | null;
+  category?: string | null;
+  visibility_or_publish_mode?: string | null;
+  rationale?: string | null;
+  probe_summary?: string | null;
+  validation_status?: string | null;
+  required_fields?: string[];
+  available_collections?: string[];
+  available_categories?: string[];
+  declaration_options?: string[];
+  group_chat_options?: string[];
+  selected_options?: Record<string, unknown>;
+  field_groups?: Array<Record<string, unknown>>;
+  option_groups?: Array<Record<string, unknown>>;
+  operation_steps?: Array<Record<string, unknown>>;
+  platform_warnings?: string[];
+  route?: Record<string, unknown>;
+};
+
+export type PublicationIntelligenceScheme = {
+  status: string;
+  folder_path?: string;
+  browser?: string;
+  creator_profile_id?: string;
+  creator_profile_name?: string;
+  generated_at?: string;
+  modified_at?: string;
+  last_instruction?: string;
+  blocked_reasons?: string[];
+  warnings?: string[];
+  probe?: {
+    status?: string;
+    probed_at?: string | null;
+    browser?: string;
+    note?: string;
+  };
+  research?: {
+    summary?: string;
+    search_status?: string;
+    llm_status?: string;
+    topic?: string;
+    content_type?: string;
+    evidence?: Array<{ title?: string; url?: string; snippet?: string; query?: string }>;
+    search_errors?: string[];
+  };
+  platform_options: Record<string, PublicationPlatformPublishOptions>;
+  items: PublicationSchemeItem[];
+  notes?: string[];
+  plan?: PublicationPlan;
 };
 
 export type PublicationAttempt = {
@@ -1262,6 +1332,13 @@ export type Config = {
   glossary_correction_review_threshold: number;
   auto_select_cover_variant: boolean;
   cover_selection_review_gap: number;
+  intelligent_copy_cover_image_generation_enabled: boolean;
+  intelligent_copy_cover_image_backend: string;
+  intelligent_copy_cover_image_model: string;
+  intelligent_copy_cover_image_quality: string;
+  intelligent_copy_cover_image_timeout_sec: number;
+  intelligent_copy_cover_codex_runner_model: string;
+  intelligent_copy_cover_codex_runner_effort: string;
   packaging_selection_review_gap: number;
   packaging_selection_min_score: number;
   subtitle_filler_cleanup_enabled: boolean;

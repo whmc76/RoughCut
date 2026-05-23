@@ -21,6 +21,12 @@ x-automation-app-env: &automation-app-env
   HEYGEM_VOICE_ROOT: /code/data/voice/data
   AVATAR_API_BASE_URL: ${ROUGHCUT_DOCKER_AVATAR_API_BASE_URL:-http://host.docker.internal:49202}
   AVATAR_TRAINING_API_BASE_URL: ${ROUGHCUT_DOCKER_AVATAR_TRAINING_API_BASE_URL:-http://host.docker.internal:49204}
+  VOICE_CLONE_API_BASE_URL: ${ROUGHCUT_DOCKER_VOICE_CLONE_API_BASE_URL:-http://host.docker.internal:49204}
+  COSYVOICE3_TTS_API_BASE_URL: ${ROUGHCUT_DOCKER_COSYVOICE3_TTS_API_BASE_URL:-http://cosyvoice3-tts:8080}
+  MOSS_TTS_LOCAL_API_BASE_URL: ${ROUGHCUT_DOCKER_MOSS_TTS_LOCAL_API_BASE_URL:-http://moss-tts-local:8080}
+  SEARXNG_URL: ${ROUGHCUT_DOCKER_SEARXNG_URL:-http://host.docker.internal:8080}
+  PUBLICATION_BROWSER_AGENT_BASE_URL: ${ROUGHCUT_DOCKER_PUBLICATION_BROWSER_AGENT_BASE_URL:-http://host.docker.internal:49310}
+  OLLAMA_BASE_URL: ${ROUGHCUT_DOCKER_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
 
 x-automation-app-common: &automation-app-common
   build:

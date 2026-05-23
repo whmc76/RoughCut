@@ -5,6 +5,7 @@ import type {
   IntelligentCopyInspect,
   IntelligentCopyPathSuggestResponse,
   IntelligentCopyResult,
+  PublicationIntelligenceScheme,
   PublicationAttemptList,
   PublicationPlan,
   PublicationPlatformPublishOptions,
@@ -22,15 +23,25 @@ export const intelligentCopyApi = {
       method: "POST",
       body: JSON.stringify({ query, limit }),
     }),
-  generateIntelligentCopy: (folderPath: string, copyStyle?: string, platforms?: string[]) =>
+  generateIntelligentCopy: (folderPath: string, copyStyle?: string, platforms?: string[], useExistingCover = false) =>
     request<IntelligentCopyResult>("/intelligent-copy/generate", {
       method: "POST",
-      body: JSON.stringify({ folder_path: folderPath, copy_style: copyStyle || null, platforms: platforms ?? [] }),
+      body: JSON.stringify({
+        folder_path: folderPath,
+        copy_style: copyStyle || null,
+        platforms: platforms ?? [],
+        use_existing_cover: useExistingCover,
+      }),
     }),
-  createIntelligentCopyGenerateTask: (folderPath: string, copyStyle?: string, platforms?: string[]) =>
+  createIntelligentCopyGenerateTask: (folderPath: string, copyStyle?: string, platforms?: string[], useExistingCover = false) =>
     request<IntelligentCopyGenerateTask>("/intelligent-copy/generate-tasks", {
       method: "POST",
-      body: JSON.stringify({ folder_path: folderPath, copy_style: copyStyle || null, platforms: platforms ?? [] }),
+      body: JSON.stringify({
+        folder_path: folderPath,
+        copy_style: copyStyle || null,
+        platforms: platforms ?? [],
+        use_existing_cover: useExistingCover,
+      }),
     }),
   getIntelligentCopyGenerateTask: (taskId: string) =>
     request<IntelligentCopyGenerateTask>(`/intelligent-copy/generate-tasks/${taskId}`),
@@ -57,6 +68,25 @@ export const intelligentCopyApi = {
     request<PublicationPlan>("/intelligent-copy/publication/plan", {
       method: "POST",
       body: JSON.stringify({ folder_path: folderPath, ...body }),
+    }),
+  generateIntelligentPublishScheme: (
+    folderPath: string,
+    body: {
+      creator_profile_id?: string | null;
+      platforms?: string[];
+      platform_options?: Record<string, PublicationPlatformPublishOptions>;
+      browser?: string | null;
+      force_probe?: boolean;
+    },
+  ) =>
+    request<PublicationIntelligenceScheme>("/intelligent-copy/publication/scheme", {
+      method: "POST",
+      body: JSON.stringify({ folder_path: folderPath, ...body }),
+    }),
+  modifyIntelligentPublishScheme: (scheme: PublicationIntelligenceScheme, instruction: string) =>
+    request<PublicationIntelligenceScheme>("/intelligent-copy/publication/scheme/modify", {
+      method: "POST",
+      body: JSON.stringify({ scheme, instruction }),
     }),
   getRecentPublicationAttempts: (limit = 24, creatorProfileId?: string | null) => {
     const params = new URLSearchParams({ limit: String(limit) });

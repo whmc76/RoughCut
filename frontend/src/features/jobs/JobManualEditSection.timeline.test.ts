@@ -13,6 +13,7 @@ import {
   findSubtitleIndexNearOutputTime,
   buildSmartCutRulePreviews,
   normalizeAdjacentSubtitleTextOverlaps,
+  normalizeReviewPauseRanges,
   outputTimeToSourceTimeForSegments,
   outputTimeToSourceTime,
   projectedTranscriptMissesKeptSpeech,
@@ -116,6 +117,50 @@ describe("manual editor timeline mapping", () => {
     ]);
     expect(changes[0].detail).toContain("输出时长变化 -0:01.00");
     expect(changes[4].detail).toBe("2 条（文本 1 / 时间 1 / 删除 1）");
+  });
+
+  it("restores source ASR words over stale transcript drafts after refresh", () => {
+    const rows = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          {
+            index: 0,
+            start_time: 0,
+            end_time: 3,
+            text_final: "小玩具也是耗尽了我这次的欧气啊",
+            transcript_text: "小玩具啊嗯这个也是耗尽了我这次的欧气啊我靠我",
+          },
+        ],
+        projected_subtitles: [],
+      },
+      [],
+      {
+        0: { text_final: "小玩具也是耗尽了我这次的欧气啊" },
+      },
+    );
+
+    expect(rows.map((row) => row.text_final).join("")).toBe("小玩具啊嗯这个也是耗尽了我这次的欧气啊我靠我");
+  });
+
+  it("keeps canonical text when raw ASR is a shorter scrambled fragment", () => {
+    const rows = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          {
+            index: 0,
+            start_time: 17,
+            end_time: 20.8,
+            text_final: "太难了，难上加难",
+            transcript_text: "太了难",
+          },
+        ],
+        projected_subtitles: [],
+      },
+      [],
+      {},
+    );
+
+    expect(rows.map((row) => row.text_final).join("")).toBe("太难了，难上加难");
   });
 
   it("keeps split source-subtitle fragments addressable with unique row indexes", () => {
@@ -270,6 +315,39 @@ describe("manual editor timeline mapping", () => {
     expect(projection.remapped[0].end_time).toBeCloseTo(4, 3);
   });
 
+  it("does not split Chinese words when projected subtitle fragments cross a cut boundary", () => {
+    const projection = remapProjectedSubtitlesFromBaseTimeline(
+      [
+        {
+          index: 0,
+          source_index: 0,
+          start_time: 0,
+          end_time: 4,
+          text_final: "好，今天我们直奔主题",
+          words: [
+            { word: "好", start: 0, end: 0.3 },
+            { word: "今天", start: 0.8, end: 1.5 },
+            { word: "我们直奔主题", start: 1.5, end: 4 },
+          ],
+        },
+      ],
+      [{ start: 10, end: 14 }],
+      [
+        { start: 10, end: 11.1 },
+        { start: 11.3, end: 14 },
+      ],
+    );
+
+    expect(projection.remapped.map((subtitle) => subtitle.text_final)).toEqual([
+      "好，",
+      "今天我们直奔主题",
+    ]);
+    expect(projection.remapped.map((subtitle) => subtitle.text_final)).not.toEqual([
+      "好，今",
+      "天我们直奔主题",
+    ]);
+  });
+
   it("marks transcript tokens as cut when they overlap the current source cut ranges", () => {
     const tokens = buildTranscriptTokens(
       [{ index: 0, start_time: 10, end_time: 15, text_raw: "呃没想到啊", text_final: "呃没想到啊" }],
@@ -370,7 +448,7 @@ describe("manual editor timeline mapping", () => {
     expect(projectedTranscriptMissesKeptSpeech(projected, source, [{ start: 1.32, end: 100.6 }, { start: 113.82, end: 121.5 }])).toBe(false);
   });
 
-  it("keeps full-text transcript timing on the source timeline", () => {
+  it("keeps full-text transcript timing and source text on the source timeline", () => {
     const transcript = buildSourceTranscriptSubtitlesForTimeline(
       {
         source_subtitles: [
@@ -389,7 +467,7 @@ describe("manual editor timeline mapping", () => {
     ]);
   });
 
-  it("uses source_index instead of projected row index when rebuilding full-text transcript", () => {
+  it("uses source_index only for timing lookup and does not replace source transcript text", () => {
     const transcript = buildSourceTranscriptSubtitlesForTimeline(
       {
         source_subtitles: [
@@ -545,7 +623,7 @@ describe("manual editor timeline mapping", () => {
     expect(transcript.map((item) => item.text_final)).toEqual(["嗯", "我们开始"]);
   });
 
-  it("uses corrected canonical subtitle text before raw ASR text in the full transcript", () => {
+  it("keeps cleaned ASR text before noisy raw text in the full transcript", () => {
     const transcript = buildSourceTranscriptSubtitlesForTimeline(
       {
         source_subtitles: [
@@ -564,6 +642,178 @@ describe("manual editor timeline mapping", () => {
     );
 
     expect(transcript[0].text_final).toBe("NOC的这个发售太难了");
+  });
+
+  it("applies conservative word-level ASR corrections without rewriting the transcript", () => {
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          {
+            index: 0,
+            start_time: 0,
+            end_time: 1,
+            text_final: "612一把呢，就是现在这个",
+          },
+        ],
+        projected_subtitles: [],
+      },
+      [],
+      {},
+    );
+
+    expect(transcript[0].text_final).toBe("另外一把呢，就是现在这个");
+  });
+
+  it("reveals raw ASR fillers when cleaned ASR text only removed filler words", () => {
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          {
+            index: 0,
+            start_time: 0,
+            end_time: 1,
+            text_raw: "嗯我们开始啊",
+            text_final: "我们开始",
+          },
+        ],
+        projected_subtitles: [],
+      },
+      [],
+      {},
+    );
+
+    expect(transcript[0].text_final).toBe("嗯我们开始啊");
+  });
+
+  it("keeps denoised ASR transcript words before cleaned subtitle text in the full transcript", () => {
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          {
+            index: 0,
+            start_time: 0,
+            end_time: 1,
+            text_final: "很多兄弟一样耗尽了我这次的欧气",
+            transcript_text: "很多兄弟一样饮恨耗尽了我这次的欧气啊我靠",
+          },
+        ],
+        projected_subtitles: [],
+      },
+      [],
+      {},
+    );
+
+    expect(transcript[0].text_final).toBe("很多兄弟一样饮恨耗尽了我这次的欧气啊我靠");
+  });
+
+  it("keeps ASR filler words from transcript_text available for filler rules", () => {
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          {
+            index: 0,
+            start_time: 0,
+            end_time: 1,
+            text_final: "我们开始",
+            transcript_text: "嗯嗯我们开始吧呀",
+          },
+        ],
+        projected_subtitles: [],
+      },
+      [],
+      {},
+    );
+
+    expect(transcript[0].text_final).toBe("嗯嗯我们开始吧呀");
+  });
+
+  it("denoises mechanical ASR duplicate text before using transcript_text", () => {
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          {
+            index: 0,
+            start_time: 0,
+            end_time: 1,
+            text_final: "NOC的这个发售太难了",
+            transcript_text: "NNOCOC的的这个个发发售售太太难难了了",
+          },
+        ],
+        projected_subtitles: [],
+      },
+      [],
+      {},
+    );
+
+    expect(transcript[0].text_final).toBe("NOC的这个发售太难了");
+  });
+
+  it("syncs full-text transcript rendering when a source row draft replaces old transcript_text", () => {
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          {
+            index: 0,
+            start_time: 0,
+            end_time: 2,
+            text_final: "这个3G啊",
+            transcript_text: "这个3G啊",
+            alignment_tokens: Array.from("这个3G啊").map((text, index) => ({
+              text,
+              start: index * 0.3,
+              end: (index + 1) * 0.3,
+            })),
+          },
+        ],
+        projected_subtitles: [],
+      },
+      [],
+      { 0: { text_final: "这个37啊" } },
+    );
+    const rendered = buildTranscriptTokens(transcript, [{ start: 0, end: 2 }])
+      .filter((token) => token.kind === "char")
+      .map((token) => token.text)
+      .join("");
+
+    expect(transcript[0].transcript_text).toBe("这个37啊");
+    expect(rendered).toBe("这个37啊");
+  });
+
+  it("applies batch subtitle replacements to source full-text transcript rows", () => {
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          {
+            index: 0,
+            start_time: 0,
+            end_time: 3,
+            text_final: "这个3G和EC啊",
+            transcript_text: "这个3G和EC啊",
+            alignment_tokens: Array.from("这个3G和EC啊").map((text, index) => ({
+              text,
+              start: index * 0.25,
+              end: (index + 1) * 0.25,
+            })),
+          },
+        ],
+        projected_subtitles: [
+          { index: 10, source_index: 0, start_time: 0, end_time: 3, text_final: "这个37和EDC啊" },
+        ],
+      },
+      [],
+      {},
+      [
+        { original: "3G", replacement: "37", occurrence_count: 1 },
+        { original: "EC", replacement: "EDC", occurrence_count: 1 },
+      ],
+    );
+    const rendered = buildTranscriptTokens(transcript, [{ start: 0, end: 3 }])
+      .filter((token) => token.kind === "char")
+      .map((token) => token.text)
+      .join("");
+
+    expect(transcript[0].text_final).toBe("这个37和EDC啊");
+    expect(rendered).toBe("这个37和EDC啊");
   });
 
   it("keeps full-text transcript on raw source even when a projected baseline exists", () => {
@@ -686,7 +936,7 @@ describe("manual editor timeline mapping", () => {
     expect(tokens.filter((token) => token.kind === "char").map((token) => token.text).join("")).toBe("NOC的，这个发售啊，嗯，太难了。");
   });
 
-  it("keeps full-text editing on source subtitles even when projected subtitles look cleaner", () => {
+  it("keeps full-text editing on source transcript even when projected subtitles look cleaner", () => {
     const session = {
       keep_segments: [{ start: 0, end: 30 }],
       source_subtitles: [
@@ -823,6 +1073,31 @@ describe("manual editor timeline mapping", () => {
 
     expect(analysis.repeated).toEqual([]);
     expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([]);
+  });
+
+  it("does not mark protected model text or conversational connector repeats as repeated speech", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: true, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 1,
+          start_time: 0,
+          end_time: 4,
+          text_final: "这个这个经常会EDEDC用的啊",
+          words: [
+            { word: "这个", start: 0, end: 0.3 },
+            { word: "这个", start: 0.3, end: 0.6 },
+            { word: "经常会", start: 0.8, end: 1.2 },
+            { word: "EDEDC", start: 1.2, end: 1.8 },
+            { word: "用的啊", start: 1.8, end: 2.3 },
+          ],
+        },
+      ],
+      rules,
+      [],
+    );
+
+    expect(analysis.repeated).toEqual([]);
   });
 
   it("does not auto-cut long VAD pauses inside meaningful subtitle text", () => {
@@ -1102,7 +1377,7 @@ describe("manual editor timeline mapping", () => {
     expect(nextVisibleToken?.text).toBe("最");
   });
 
-  it("splits long pause chips by actual kept and cut timeline ranges", () => {
+  it("coalesces final display pause tokens even when keep segments split the silence", () => {
     const tokens = buildTranscriptTokens(
       [],
       [{ start: 0, end: 1 }, { start: 2, end: 3 }],
@@ -1114,10 +1389,19 @@ describe("manual editor timeline mapping", () => {
       start: token.start,
       end: token.end,
       kept: token.kept,
+      pauseDuration: token.pauseDuration,
+      pauseCount: token.pauseCount,
+      pauseRanges: token.pauseRanges,
     }))).toEqual([
-      { kind: "pause", start: 0, end: 1, kept: true },
-      { kind: "pause", start: 1, end: 2, kept: false },
-      { kind: "pause", start: 2, end: 3, kept: true },
+      {
+        kind: "pause",
+        start: 0,
+        end: 3,
+        kept: false,
+        pauseDuration: 3,
+        pauseCount: 3,
+        pauseRanges: [{ start: 0, end: 1 }, { start: 1, end: 2 }, { start: 2, end: 3 }],
+      },
     ]);
   });
 
@@ -1137,9 +1421,180 @@ describe("manual editor timeline mapping", () => {
       end: token.end,
       kept: token.kept,
       pauseDuration: token.pauseDuration,
+      pauseCount: token.pauseCount,
+      pauseRanges: token.pauseRanges,
     }))).toEqual([
-      { kind: "pause", start: 0, end: 1.6, kept: false, pauseDuration: 1.6 },
+      {
+        kind: "pause",
+        start: 0,
+        end: 1.6,
+        kept: false,
+        pauseDuration: 1.6,
+        pauseCount: 2,
+        pauseRanges: [{ start: 0, end: 1.3 }, { start: 1.3, end: 1.6 }],
+      },
     ]);
+  });
+
+  it("renders nearby pause fragments as one pause chip when no speech is between them", () => {
+    const tokens = buildTranscriptTokens(
+      [],
+      [{ start: 2, end: 3 }],
+      [
+        { start: 0, end: 0.3, duration_sec: 0.3, source: "audio_vad" },
+        { start: 0.78, end: 1.12, duration_sec: 0.34, source: "word_gap" },
+      ],
+    );
+
+    expect(tokens.map((token) => ({
+      kind: token.kind,
+      start: token.start,
+      end: token.end,
+      pauseDuration: token.pauseDuration,
+      pauseCount: token.pauseCount,
+      pauseRanges: token.pauseRanges,
+    }))).toEqual([
+      {
+        kind: "pause",
+        start: 0,
+        end: 1.12,
+        pauseDuration: 1.12,
+        pauseCount: 2,
+        pauseRanges: [{ start: 0, end: 0.3 }, { start: 0.78, end: 1.12 }],
+      },
+    ]);
+  });
+
+  it("coalesces final adjacent pause tokens even after display ordering", () => {
+    const tokens = buildTranscriptTokens(
+      [
+        {
+          index: 0,
+          start_time: 0.9,
+          end_time: 1.05,
+          text_final: "好",
+          words: [{ word: "好", start: 0.9, end: 1.05 }],
+        },
+        {
+          index: 1,
+          start_time: 1.6,
+          end_time: 2.4,
+          text_final: "今天我们直奔主题",
+          words: [{ word: "今天我们直奔主题", start: 1.6, end: 2.4 }],
+        },
+      ],
+      [{ start: 0, end: 3 }],
+      [
+        { start: 0, end: 0.7, duration_sec: 0.7, source: "audio_vad" },
+        { start: 0.72, end: 0.88, duration_sec: 0.16, source: "word_gap" },
+        { start: 1.08, end: 1.24, duration_sec: 0.16, source: "word_gap" },
+        { start: 1.3, end: 1.42, duration_sec: 0.12, source: "audio_vad" },
+        { start: 1.48, end: 1.58, duration_sec: 0.1, source: "audio_vad" },
+      ],
+    );
+
+    expect(tokens.map((token) => token.text).join("")).toBe("[...,0.9s]好。[...,0.3s]今天我们直奔主题");
+    expect(tokens.filter((token) => token.kind === "pause").map((token) => ({
+      start: token.start,
+      end: token.end,
+      pauseCount: token.pauseCount,
+      pauseRanges: token.pauseRanges,
+    }))).toEqual([
+      {
+        start: 0,
+        end: 0.88,
+        pauseCount: 2,
+        pauseRanges: [{ start: 0, end: 0.7 }, { start: 0.72, end: 0.88 }],
+      },
+      {
+        start: 1.08,
+        end: 1.42,
+        pauseCount: 2,
+        pauseRanges: [{ start: 1.08, end: 1.24 }, { start: 1.3, end: 1.42 }],
+      },
+    ]);
+  });
+
+  it("does not coalesce display pause tokens across visible transcript text", () => {
+    const tokens = buildTranscriptTokens(
+      [
+        {
+          index: 0,
+          start_time: 0.45,
+          end_time: 0.55,
+          text_final: "好",
+          words: [{ word: "好", start: 0.45, end: 0.55 }],
+        },
+      ],
+      [{ start: 0, end: 1 }],
+      [
+        { start: 0, end: 0.3, duration_sec: 0.3, source: "audio_vad" },
+        { start: 0.7, end: 1, duration_sec: 0.3, source: "audio_vad" },
+      ],
+    );
+
+    expect(tokens.map((token) => token.text).join("")).toBe("[...,0.3s]好[...,0.3s]");
+    expect(tokens.filter((token) => token.kind === "pause")).toHaveLength(2);
+  });
+
+  it("marks transcript sentence boundaries as real line breaks", () => {
+    const tokens = buildTranscriptTokens(
+      [
+        { index: 0, start_time: 0, end_time: 1, text_final: "前一句内容" },
+        { index: 1, start_time: 2.3, end_time: 3, text_final: "后一句内容" },
+      ],
+      [{ start: 0, end: 3 }],
+      [],
+    );
+    const boundaryToken = tokens.find((token) => token.kind === "punctuation" && token.subtitleIndex === 0);
+
+    expect(boundaryToken?.breakAfter).toBe("soft");
+  });
+
+  it("keeps dense phrase pauses in transcript order without cutting intervening text", () => {
+    const tokens = buildTranscriptTokens(
+      [
+        {
+          index: 1,
+          start_time: 0,
+          end_time: 5,
+          text_final: "前面中间后面",
+          words: [
+            { word: "前面", start: 0, end: 0.5 },
+            { word: "中间", start: 1.1, end: 1.5 },
+            { word: "后面", start: 2.2, end: 2.8 },
+          ],
+        },
+      ],
+      [{ start: 0, end: 5 }],
+      [
+        { start: 0.6, end: 0.9, duration_sec: 0.3, source: "audio_vad" },
+        { start: 1.7, end: 2.0, duration_sec: 0.3, source: "audio_vad" },
+      ],
+    );
+    const pauseTokens = tokens.filter((token) => token.kind === "pause");
+    const cutRanges = transcriptCutRangesForSelection(
+      [],
+      tokens,
+      {
+        startTokenIndex: tokens.findIndex((token) => token.kind === "pause"),
+        endTokenIndex: tokens.findIndex((token) => token.kind === "pause"),
+      },
+      5,
+    );
+
+    expect(tokens.map((token) => token.text).join("")).toBe("前面[...,0.3s]中间[...,0.3s]后面");
+    expect(pauseTokens).toHaveLength(2);
+    expect(pauseTokens.map((token) => ({
+      start: token.start,
+      end: token.end,
+      pauseDuration: token.pauseDuration,
+      pauseRanges: token.pauseRanges,
+    }))).toEqual([
+      { start: 0.6, end: 0.9, pauseDuration: 0.3, pauseRanges: [{ start: 0.6, end: 0.9 }] },
+      { start: 1.7, end: 2, pauseDuration: 0.3, pauseRanges: [{ start: 1.7, end: 2 }] },
+    ]);
+    expect(cutRanges).toEqual([{ start: 0.6, end: 0.9 }]);
   });
 
   it("keeps pause auto-cuts away from neighboring word edges", () => {
@@ -1211,7 +1666,7 @@ describe("manual editor timeline mapping", () => {
     expect(tokens.some((token) => token.kind === "pause")).toBe(false);
   });
 
-  it("renders audio VAD pauses inside coarse backend alignment spans", () => {
+  it("does not render audio VAD pauses over coarse backend alignment speech", () => {
     const tokens = buildTranscriptTokens(
       [
         {
@@ -1234,7 +1689,7 @@ describe("manual editor timeline mapping", () => {
       [{ start: 5.85, end: 6.21, duration_sec: 0.36, source: "audio_vad" }],
     );
 
-    expect(tokens.some((token) => token.kind === "pause" && token.start === 5.85 && token.end === 6.21)).toBe(true);
+    expect(tokens.some((token) => token.kind === "pause")).toBe(false);
   });
 
   it("still auto-cuts long VAD pauses between subtitle rows", () => {
@@ -1268,10 +1723,164 @@ describe("manual editor timeline mapping", () => {
       { start: 1, end: 1.35, kind: "pause" },
       { start: 1.45, end: 1.9, kind: "pause" },
     ]);
-    expect(analysis.pause).toEqual(analysis.pauseCandidates);
+    expect(analysis.pause).toEqual([
+      { start: 1, end: 1.35, kind: "pause" },
+      { start: 1.45, end: 1.9, kind: "pause" },
+    ]);
   });
 
-  it("does not group short pauses across meaningful speech", () => {
+  it("applies clustered pause cuts as pause-only ranges before adding breath", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, pauseBreathSec: 0.08, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 0, end_time: 1, text_final: "前一句内容" },
+        { index: 1, start_time: 2.2, end_time: 3, text_final: "后一句内容" },
+      ],
+      rules,
+      [
+        { start: 1, end: 1.35, duration_sec: 0.35, source: "audio_vad" },
+        { start: 1.45, end: 1.9, duration_sec: 0.45, source: "audio_vad" },
+      ],
+    );
+
+    const nextSegments = applySmartCutRuleRangesToSegments(
+      [{ start: 0, end: 3 }],
+      autoSmartCutRuleRanges(analysis, rules),
+      smartCutRuleManagedRanges(analysis),
+      3,
+      [],
+      rules,
+    );
+    const tokens = buildTranscriptTokens(
+      [],
+      nextSegments,
+      [
+        { start: 1, end: 1.35, duration_sec: 0.35, source: "audio_vad" },
+        { start: 1.45, end: 1.9, duration_sec: 0.45, source: "audio_vad" },
+      ],
+    );
+
+    expect(nextSegments).toEqual([{ start: 0, end: 1.08 }, { start: 1.27, end: 1.53 }, { start: 1.82, end: 3 }]);
+    expect(tokens.map((token) => ({
+      kind: token.kind,
+      start: token.start,
+      end: token.end,
+      kept: token.kept,
+      pauseDuration: token.pauseDuration,
+    }))).toEqual([
+      { kind: "pause", start: 1.08, end: 1.82, kept: false, pauseDuration: 0.74 },
+    ]);
+  });
+
+  it("never applies pause cuts across protected ASR speech timings", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, pauseBreathSec: 0, fillers: "嗯,呃" };
+    const nextSegments = applySmartCutRuleRangesToSegments(
+      [{ start: 0, end: 2 }],
+      [{ start: 0.7, end: 1.3, kind: "pause" }],
+      [{ start: 0.7, end: 1.3, kind: "pause" }],
+      2,
+      [],
+      rules,
+      [{ start: 0.9, end: 1.05 }],
+    );
+    const tokens = buildTranscriptTokens(
+      [{ index: 0, start_time: 0.9, end_time: 1.05, text_final: "好", words: [{ word: "好", start: 0.9, end: 1.05 }] }],
+      nextSegments,
+      [],
+    );
+
+    expect(tokens.find((token) => token.text === "好")?.kept).toBe(true);
+    expect(nextSegments).toEqual([{ start: 0, end: 0.7 }, { start: 0.87, end: 1.08 }, { start: 1.3, end: 2 }]);
+  });
+
+  it("normalizes raw pause evidence into visible review pause units", () => {
+    const normalized = normalizeReviewPauseRanges(
+      [
+        { start: 0.2, end: 0.7, duration_sec: 0.5, source: "audio_vad" },
+        { start: 1, end: 1.35, duration_sec: 0.35, source: "audio_vad" },
+        { start: 1.45, end: 1.9, duration_sec: 0.45, source: "word_gap" },
+        { start: 3, end: 3.7, duration_sec: 0.7, source: "audio_vad" },
+        { start: 4, end: 4.92, duration_sec: 0.92, source: "audio_vad" },
+      ],
+      [],
+      { fillers: [] },
+    );
+
+    expect(normalized).toEqual([
+      { start: 0.2, end: 1.9, duration_sec: 1.7, source: "mixed" },
+      { start: 3, end: 4.92, duration_sec: 1.92, source: "audio_vad" },
+    ]);
+  });
+
+  it("keeps fragmented short pauses separate across meaningful speech", () => {
+    const normalized = normalizeReviewPauseRanges(
+      [
+        { start: 1, end: 1.35, duration_sec: 0.35, source: "audio_vad" },
+        { start: 1.5, end: 1.95, duration_sec: 0.45, source: "audio_vad" },
+      ],
+      [{ index: 1, start_time: 1.38, end_time: 1.48, text_final: "中间" }],
+      { fillers: [] },
+    );
+
+    expect(normalized).toEqual([
+      { start: 1, end: 1.35, duration_sec: 0.35, source: "audio_vad" },
+      { start: 1.5, end: 1.95, duration_sec: 0.45, source: "audio_vad" },
+    ]);
+  });
+
+  it("merges adjacent pauses inside a coarse subtitle row when no timed speech sits between them", () => {
+    const normalized = normalizeReviewPauseRanges(
+      [
+        { start: 0.6, end: 0.9, duration_sec: 0.3, source: "audio_vad" },
+        { start: 1.08, end: 1.42, duration_sec: 0.34, source: "word_gap" },
+      ],
+      [
+        {
+          index: 1,
+          start_time: 0,
+          end_time: 3,
+          text_final: "前面后面",
+          words: [
+            { word: "前面", start: 0, end: 0.5 },
+            { word: "后面", start: 1.8, end: 2.3 },
+          ],
+        },
+      ],
+      { fillers: [] },
+    );
+
+    expect(normalized).toEqual([{ start: 0.6, end: 1.42, duration_sec: 0.82, source: "mixed" }]);
+  });
+
+  it("does not merge adjacent pauses when timed speech sits between them", () => {
+    const normalized = normalizeReviewPauseRanges(
+      [
+        { start: 0.6, end: 0.9, duration_sec: 0.3, source: "audio_vad" },
+        { start: 1.18, end: 1.5, duration_sec: 0.32, source: "audio_vad" },
+      ],
+      [
+        {
+          index: 1,
+          start_time: 0,
+          end_time: 3,
+          text_final: "前中后",
+          words: [
+            { word: "前", start: 0, end: 0.5 },
+            { word: "中", start: 0.98, end: 1.08 },
+            { word: "后", start: 1.8, end: 2.3 },
+          ],
+        },
+      ],
+      { fillers: [] },
+    );
+
+    expect(normalized).toEqual([
+      { start: 0.6, end: 0.9, duration_sec: 0.3, source: "audio_vad" },
+      { start: 1.18, end: 1.5, duration_sec: 0.32, source: "audio_vad" },
+    ]);
+  });
+
+  it("uses dense short pause groups for threshold detection while cutting only pause ranges", () => {
     const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
     const analysis = buildSmartCutRuleAnalysis(
       [
@@ -1290,7 +1899,11 @@ describe("manual editor timeline mapping", () => {
       { start: 1, end: 1.35, kind: "pause" },
       { start: 1.5, end: 1.95, kind: "pause" },
     ]);
-    expect(analysis.pause).toEqual([]);
+    expect(analysis.pause).toEqual([
+      { start: 1, end: 1.35, kind: "pause" },
+      { start: 1.5, end: 1.95, kind: "pause" },
+    ]);
+    expect(sourceRangeOverlapsCutRanges(1.38, 1.48, autoSmartCutRuleRanges(analysis, rules))).toBe(false);
   });
 
   it("recomputes rule-managed pauses from the restored baseline instead of preserving stale short cuts", () => {
@@ -1315,8 +1928,11 @@ describe("manual editor timeline mapping", () => {
       3,
     );
 
-    expect(analysis.pause).toEqual([{ start: 1.3, end: 2.5, kind: "pause" }]);
-    expect(nextSegments).toEqual([{ start: 0, end: 1.38 }, { start: 2.42, end: 3 }]);
+    expect(analysis.pause).toEqual([
+      { start: 0.5, end: 0.9, kind: "pause" },
+      { start: 1.3, end: 2.5, kind: "pause" },
+    ]);
+    expect(nextSegments).toEqual([{ start: 0, end: 0.58 }, { start: 0.82, end: 1.38 }, { start: 2.42, end: 3 }]);
   });
 
   it("does not auto-cut a pause range after the user manually restores it", () => {

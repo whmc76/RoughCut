@@ -1,0 +1,708 @@
+{
+  "generated_at": "2026-05-23T05:09:17.0059060+08:00",
+  "source": "publication_browser_agent_service_/tasks",
+  "results": {
+    "x": {
+      "task_id": "x-composite-final-20260523b",
+      "id": "x-composite-final-20260523b",
+      "platform": "x",
+      "profile_id": "d2d15bc6d77a47b79cf20a79b56596c2",
+      "status": "needs_human",
+      "created_at": "2026-05-22T21:08:52.984Z",
+      "updated_at": "2026-05-22T21:09:16.675Z",
+      "scheduled_publish_at": "2026-05-23T09:30",
+      "result": {
+        "draft_url": "https://x.com/compose/post",
+        "route": {
+          "url": "https://x.com/compose/post",
+          "title": "Home / X"
+        },
+        "composite_framework": {
+          "enabled": true,
+          "platform": "x",
+          "legacy_lightweight_script_used": false,
+          "material_integrity": {
+            "platform": "x",
+            "fields": {
+              "title": {
+                "expected": "",
+                "verified": true
+              },
+              "body": {
+                "expected": "锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。",
+                "verified": true
+              },
+              "tags": {
+                "expected": [
+                  "EDC",
+                  "音叉推牌"
+                ],
+                "actual_checks": [
+                  {
+                    "tag": "EDC",
+                    "present": true
+                  },
+                  {
+                    "tag": "音叉推牌",
+                    "present": true
+                  }
+                ],
+                "verified": true
+              },
+              "collection": {
+                "expected": "",
+                "verified": true
+              },
+              "schedule": {
+                "expected": "2026-05-23 09:30",
+                "verified": false
+              },
+              "declaration": {
+                "verified": true
+              },
+              "cover": {
+                "expected_path": "",
+                "verified": true,
+                "youtube_auto_thumbnail": false,
+                "youtube_custom_thumbnail_preview": false
+              }
+            },
+            "verified": false,
+            "failures": [
+              "schedule"
+            ],
+            "platform_extras": {
+              "youtube_link": "",
+              "youtube_scheduled": false,
+              "youtube_thumbnail_uploading": false,
+              "route": {
+                "url": "https://x.com/compose/post",
+                "title": "Home / X"
+              },
+              "image_sources": [
+                "https://pbs.twimg.com/profile_images/2057546175289692161/TFdPQ_K8_bigger.png",
+                "https://pbs.twimg.com/profile_images/2057546175289692161/TFdPQ_K8_bigger.png",
+                "blob:https://x.com/9f78e374-56da-4510-b231-02b4ee8f65ed",
+                "blob:https://x.com/c49bce40-94e8-4f83-b05f-8b7f4b7b5615",
+                "https://pbs.twimg.com/profile_images/2053244804520427520/m8mdWZCG_bigger.jpg",
+                "https://pbs.twimg.com/profile_images/1955359038532653056/OSHY3ewP_bigger.jpg",
+                "https://pbs.twimg.com/profile_images/1701820168660549632/NDAQbbcc_normal.jpg",
+                "https://pbs.twimg.com/profile_images/1769430779845611520/lIgjSJGU_bigger.jpg",
+                "https://pbs.twimg.com/profile_images/1985805202117558272/XC2Da_MB_bigger.jpg",
+                "https://pbs.twimg.com/profile_images/1696524738288615424/IveIyink_bigger.jpg",
+                "https://pbs.twimg.com/profile_images/378800000867032148/JdKa3H8o_normal.jpeg",
+                "https://pbs.twimg.com/profile_images/1948783535248027648/iZ82wv2B_normal.jpg"
+              ],
+              "relevant_lines": []
+            }
+          }
+        },
+        "actions": [
+          {
+            "kind": "media_upload",
+            "uploaded": true,
+            "input": {
+              "accept": "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime",
+              "multiple": "",
+              "type": "file",
+              "tabindex": "-1",
+              "class": "r-8akbif r-orgf3d r-1udh08x r-u8s1d r-xjis5s r-1wyyakw",
+              "data-testid": "fileInput"
+            },
+            "fileInputCount": 1
+          },
+          {
+            "filled": false,
+            "reason": "empty_value"
+          },
+          {
+            "filled": false,
+            "reason": "field_not_found",
+            "candidates": [
+              "Post text 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。 #EDC #音叉推牌 What’s happening? 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。 #EDC #音叉推牌 What’s happening? 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。 #EDC #音叉推牌"
+            ]
+          },
+          {
+            "kind": "platform_rich_text",
+            "filled": true,
+            "actions": [
+              {
+                "field": "body",
+                "ok": true,
+                "hint": "Post text tweetTextarea_0 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。 #EDC #音叉推牌 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比",
+                "tag": "div"
+              }
+            ],
+            "verified_body": true,
+            "verified_title": true,
+            "candidates": [
+              {
+                "text": "Post text tweetTextarea_0 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。 #EDC #音叉推牌 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比",
+                "area": 49344,
+                "tag": "div"
+              },
+              {
+                "text": "Search Search query SearchBox_Search_Input 音叉推牌",
+                "area": 12720,
+                "tag": "input"
+              }
+            ]
+          },
+          {
+            "kind": "cover_entry",
+            "clicked": false
+          },
+          {
+            "kind": "cover_upload",
+            "uploaded": true,
+            "expected_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\smart-copy\\08-x-cover.jpg",
+            "input": {
+              "accept": "image/jpeg,image/png,image/webp,image/gif,video/mp4,video/quicktime",
+              "multiple": "",
+              "type": "file",
+              "tabindex": "-1",
+              "class": "r-8akbif r-orgf3d r-1udh08x r-u8s1d r-xjis5s r-1wyyakw",
+              "data-testid": "fileInput"
+            },
+            "fileInputCount": 1
+          },
+          {
+            "filled": true,
+            "label": "Search query Search",
+            "tag": "input"
+          },
+          {
+            "filled": true,
+            "label": "Search query Search",
+            "tag": "input"
+          },
+          {
+            "kind": "schedule_entry",
+            "clicked": false
+          },
+          {
+            "kind": "schedule_set",
+            "set": false,
+            "expected": {
+              "display": "2026-05-23 09:30",
+              "date": "2026-05-23",
+              "time": "09:30"
+            },
+            "body_before_had_schedule": false,
+            "body_after_had_schedule": false,
+            "actions": [
+              {
+                "clicked": "9",
+                "label": "979",
+                "ok": true
+              }
+            ],
+            "relevant_text": [
+              "To view keyboard shortcuts, press question mark View keyboard shortcuts Did someone say … cookies? X and its partners use cookies to provide you with a better, safer and faster service and to support our business. Some cookies are necessary to use our services, improve our services, and make sure they work properly. Show more about your choices. Accept all cookies Refuse non-essential cookies Home Explore Notifications Follow Chat Grok Bookmarks Creator Studio Premium Profile More Post FAS_EDC @FASEDC_Official For you Following See new posts What’s happening? 锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。 #EDC #音叉推牌 Edit Edit Tag people Add descriptions Everyone can reply Post Your Home Timeline Elon Musk @elonmusk · May 20 Release notes for Grok Build will be published daily Quote skcd @skcd42 · May 20 Bug fixes shipping for Grok Build (release notes will be available in the TUI itself) - Copy only path on ReadTool block - Redirect stderr to /dev/null to fix incorrect TUI text interleaving - Distinguish system/user initiated cancellations - Guard against crash conditions in 2K 2.9K 23K 29M Kangmin Lee | 이강민 @kangminlee · May 21 The show writers turned Homelander into a Trump analogue, and this is how they choose to end The Boys. This entire show was just a deranged sexual humiliation fantasy projected onto Trump. They can't even produce a decent superhero parody without injecting their twisted fetishes Show more 979 938 17K 1.5M Subscribe to Premium 50% off Get rid of ads, see your analytics, boost your replies and unlock 20+ features. Subscribe Today’s News Chinese Stocks Drop 2% Wiping Out $294 Billion in Value 1 day ago · News · 8,969 posts Bill Seeks Permanent U.S. Strategic Bitcoin Reserve 1 day ago · News · 6,063 posts LISA, Anitta, and Rema Drop 'Goals' for 2026 World Cup Soundtrack 3 days ago · Entertainment · 481.2K posts Trending now What’s happening Technology · Trending Meta Trending in Hong Kong SAR China #efficiency Trending in Hong Kong SAR China apache 2.0 Politics · Trending Gaza Show more Who to follow Satya Nadella @satyanadella Follow Donald J. Trump @realDonaldTrump Follow Lauren Boebert @laurenboebert Follow Show more Terms of Service | Privacy Policy | Cookie Policy | Accessibility | Ads info | More © 2026 X Corp."
+            ]
+          }
+        ],
+        "visible_option_lines": [],
+        "final_publish": {}
+      },
+      "error": {
+        "code": "x_material_integrity_failed",
+        "message": "复合适配器发布前读回未通过：schedule",
+        "details": {
+          "platform": "x",
+          "fields": {
+            "title": {
+              "expected": "",
+              "verified": true
+            },
+            "body": {
+              "expected": "锆合金版本的音叉推牌到手，分量感适中，操作顺滑，质感明显比普通版上一个档次。做工扎实，随身带着解压挺合适。",
+              "verified": true
+            },
+            "tags": {
+              "expected": [
+                "EDC",
+                "音叉推牌"
+              ],
+              "actual_checks": [
+                {
+                  "tag": "EDC",
+                  "present": true
+                },
+                {
+                  "tag": "音叉推牌",
+                  "present": true
+                }
+              ],
+              "verified": true
+            },
+            "collection": {
+              "expected": "",
+              "verified": true
+            },
+            "schedule": {
+              "expected": "2026-05-23 09:30",
+              "verified": false
+            },
+            "declaration": {
+              "verified": true
+            },
+            "cover": {
+              "expected_path": "",
+              "verified": true,
+              "youtube_auto_thumbnail": false,
+              "youtube_custom_thumbnail_preview": false
+            }
+          },
+          "verified": false,
+          "failures": [
+            "schedule"
+          ],
+          "platform_extras": {
+            "youtube_link": "",
+            "youtube_scheduled": false,
+            "youtube_thumbnail_uploading": false,
+            "route": {
+              "url": "https://x.com/compose/post",
+              "title": "Home / X"
+            },
+            "image_sources": [
+              "https://pbs.twimg.com/profile_images/2057546175289692161/TFdPQ_K8_bigger.png",
+              "https://pbs.twimg.com/profile_images/2057546175289692161/TFdPQ_K8_bigger.png",
+              "blob:https://x.com/9f78e374-56da-4510-b231-02b4ee8f65ed",
+              "blob:https://x.com/c49bce40-94e8-4f83-b05f-8b7f4b7b5615",
+              "https://pbs.twimg.com/profile_images/2053244804520427520/m8mdWZCG_bigger.jpg",
+              "https://pbs.twimg.com/profile_images/1955359038532653056/OSHY3ewP_bigger.jpg",
+              "https://pbs.twimg.com/profile_images/1701820168660549632/NDAQbbcc_normal.jpg",
+              "https://pbs.twimg.com/profile_images/1769430779845611520/lIgjSJGU_bigger.jpg",
+              "https://pbs.twimg.com/profile_images/1985805202117558272/XC2Da_MB_bigger.jpg",
+              "https://pbs.twimg.com/profile_images/1696524738288615424/IveIyink_bigger.jpg",
+              "https://pbs.twimg.com/profile_images/378800000867032148/JdKa3H8o_normal.jpeg",
+              "https://pbs.twimg.com/profile_images/1948783535248027648/iZ82wv2B_normal.jpg"
+            ],
+            "relevant_lines": []
+          }
+        }
+      }
+    },
+    "xiaohongshu": {
+      "task_id": "80e6c37b127e4b38a393e9561274d076",
+      "id": "80e6c37b127e4b38a393e9561274d076",
+      "platform": "xiaohongshu",
+      "profile_id": "d2d15bc6d77a47b79cf20a79b56596c2",
+      "status": "needs_human",
+      "created_at": "2026-05-22T21:07:28.867Z",
+      "updated_at": "2026-05-22T21:07:56.698Z",
+      "scheduled_publish_at": "2026-05-23T21:00",
+      "result": {
+        "draft_url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+        "route": {
+          "url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+          "title": "小红书创作服务平台"
+        },
+        "composite_framework": {
+          "enabled": true,
+          "platform": "xiaohongshu",
+          "legacy_lightweight_script_used": false,
+          "material_integrity": {
+            "platform": "xiaohongshu",
+            "fields": {
+              "title": {
+                "expected": "锆合金版本的音叉推牌，质感绝了",
+                "verified": true
+              },
+              "body": {
+                "expected": "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。",
+                "verified": true
+              },
+              "tags": {
+                "expected": [
+                  "EDC",
+                  "音叉推牌",
+                  "锆合金",
+                  "开箱分享",
+                  "把玩件",
+                  "随身玩具",
+                  "MOT风灵"
+                ],
+                "actual_checks": [
+                  {
+                    "tag": "EDC",
+                    "present": true
+                  },
+                  {
+                    "tag": "音叉推牌",
+                    "present": true
+                  },
+                  {
+                    "tag": "锆合金",
+                    "present": true
+                  },
+                  {
+                    "tag": "开箱分享",
+                    "present": true
+                  },
+                  {
+                    "tag": "把玩件",
+                    "present": true
+                  },
+                  {
+                    "tag": "随身玩具",
+                    "present": true
+                  },
+                  {
+                    "tag": "MOT风灵",
+                    "present": true
+                  }
+                ],
+                "verified": true
+              },
+              "collection": {
+                "expected": "EDC潮玩桌搭",
+                "verified": false
+              },
+              "schedule": {
+                "expected": "2026-05-23 21:00",
+                "verified": false
+              },
+              "declaration": {
+                "verified": true
+              },
+              "cover": {
+                "expected_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\smart-copy\\02-xiaohongshu-cover.jpg",
+                "verified": true,
+                "youtube_auto_thumbnail": false,
+                "youtube_custom_thumbnail_preview": false
+              }
+            },
+            "verified": false,
+            "failures": [
+              "collection",
+              "schedule"
+            ],
+            "platform_extras": {
+              "youtube_link": "",
+              "youtube_scheduled": false,
+              "youtube_thumbnail_uploading": false,
+              "route": {
+                "url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+                "title": "小红书创作服务平台"
+              },
+              "image_sources": [
+                "https://sns-avatar-qc.xhscdn.com/avatar/1040g2jo31ipv3sch146g5pl0n6j93tvf4kkk6qg?imageView2/2/w/80/format/jpg",
+                "https://fe-img-qc.xhscdn.com/48fd625e5dfe43f5a44ea81f99668b223802391d?sign=e3193698c17efb19b00815953f9316cc&t=7c245f00&aegis=d3d856",
+                "data:image/png;base64,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",
+                "https://growth-img.xhscdn.com/ditto/104100n0320dsl2inlc06fvofv8270000000000ed9444a",
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAgCAYAAAAFQMh/AAABWElEQVR4Xu2W0Y2DMBBEU8KVwA8G8ZUSUkJKSAdJCdfBXQeUkOuEEiiBEu52ovVpMyB7PvIXnrSKxIzH4MUmh8POTmAYhmNKaWnb9sJaRPXJWNC3Bf7WAlWfjIVNCMQTsRZRfRJN03wgzGpmLaL6ZCzojMCu635Yi6i+TWzQ1QaPVI/l81/Wij7r9RdWgudZYebFB7+s+r4/8TwrzNRYXXLZwE8PmON1roLvxHNIJO+b1chaRPXJIAiBtX2p+mSSvzBoAWsR1SeBkNw31iKqT8ZfmmrfVJ9M7pvVmbWI6pOxw2RW+qb6JELfJtYiqq8INnve+DjquG84+sLBwL6JNWkFMKkHcP33zZb0tqGXaolzbIKn8Y/46PUYHO/alzXrT76N6yNuNExRx24Af18QVuyb6pNBfxCIFWAtovpkLOzuT1Lcl6pPJu/L2gdc9cl4YPX4U30778cf6hgADWVp6fsAAAAASUVORK5CYII=",
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAABgklEQVR4Xu2WwXGDMBBFKSElqISUQCmUkKPgQjqIO7A7cAkpJaUkerCylw8WCgdfkjezY6y/2s9Kwrhp/jFijCFF1/f9R/o8E3bdoWn+YVKxNsVniu+dIKfT+dWM4/iSOrj6gun72zAMr3RE2DUd+hui+6D1iljBL3fnreYoNicbMzdoziZi9q76HszJpqyS6ivivCSHzDLZlC1RbUGc92NaRtU8nE5Cxz3UsFqtajdcUlDNw3IROu7BqHjzmBQTHDWGUGwg3pezU02pNeQxelgzDZ4QebZUU2oN7TnF8KQaRS5b7dvP12TggjxiMa4HiVqWd/bjWdw0jHPnVYbkytyi4dOXdDo0bLRqSq1hrsmnar795zwW4BJa1Tw1hlUNYLSb1Nz2e70vDnfznWoL3DtwVK0W5lqN9elUeKXE+9H/takzo0ZQfRMSnSlLEzRHicu/IvVmGTO9WIFs3OlfDPu9zEbTO7DqxfsITHzBQpDT6vzD0JGZc0LPFlwzFjT/7/IDeHvnR7Pif3cAAAAASUVORK5CYII=",
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAAAiElEQVR4XmNgGAUjGtTX1wtUVlYGoIvTDFRUVOwH4v9APB9djiYA6LsCqIX0sxRoUcOAWgr09XlQ3KKroToYtZSmYMAtBeIJ6PJUB0BL6ulmIZpl94FYAV0N1cCAWUbzxDJ8LQNa0I8UZwvoahm6PNVBBaICXoAuRxMAtEihqqrKAF18FAxvAADqELJ8J/zf/wAAAABJRU5ErkJggg==",
+                "https://growth-img.xhscdn.com/ditto/104100n0320crtivl5k06fvofv8270000000000813n2ne",
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAgCAYAAAAFQMh/AAABWElEQVR4Xu2W0Y2DMBBEU8KVwA8G8ZUSUkJKSAdJCdfBXQeUkOuEEiiBEu52ovVpMyB7PvIXnrSKxIzH4MUmh8POTmAYhmNKaWnb9sJaRPXJWNC3Bf7WAlWfjIVNCMQTsRZRfRJN03wgzGpmLaL6ZCzojMCu635Yi6i+TWzQ1QaPVI/l81/Wij7r9RdWgudZYebFB7+s+r4/8TwrzNRYXXLZwE8PmON1roLvxHNIJO+b1chaRPXJIAiBtX2p+mSSvzBoAWsR1SeBkNw31iKqT8ZfmmrfVJ9M7pvVmbWI6pOxw2RW+qb6JELfJtYiqq8INnve+DjquG84+sLBwL6JNWkFMKkHcP33zZb0tqGXaolzbIKn8Y/46PUYHO/alzXrT76N6yNuNExRx24Af18QVuyb6pNBfxCIFWAtovpkLOzuT1Lcl6pPJu/L2gdc9cl4YPX4U30778cf6hgADWVp6fsAAAAASUVORK5CYII=",
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAABgklEQVR4Xu2WwXGDMBBFKSElqISUQCmUkKPgQjqIO7A7cAkpJaUkerCylw8WCgdfkjezY6y/2s9Kwrhp/jFijCFF1/f9R/o8E3bdoWn+YVKxNsVniu+dIKfT+dWM4/iSOrj6gun72zAMr3RE2DUd+hui+6D1iljBL3fnreYoNicbMzdoziZi9q76HszJpqyS6ivivCSHzDLZlC1RbUGc92NaRtU8nE5Cxz3UsFqtajdcUlDNw3IROu7BqHjzmBQTHDWGUGwg3pezU02pNeQxelgzDZ4QebZUU2oN7TnF8KQaRS5b7dvP12TggjxiMa4HiVqWd/bjWdw0jHPnVYbkytyi4dOXdDo0bLRqSq1hrsmnar795zwW4BJa1Tw1hlUNYLSb1Nz2e70vDnfznWoL3DtwVK0W5lqN9elUeKXE+9H/takzo0ZQfRMSnSlLEzRHicu/IvVmGTO9WIFs3OlfDPu9zEbTO7DqxfsITHzBQpDT6vzD0JGZc0LPFlwzFjT/7/IDeHvnR7Pif3cAAAAASUVORK5CYII=",
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAAAiElEQVR4XmNgGAUjGtTX1wtUVlYGoIvTDFRUVOwH4v9APB9djiYA6LsCqIX0sxRoUcOAWgr09XlQ3KKroToYtZSmYMAtBeIJ6PJUB0BL6ulmIZpl94FYAV0N1cCAWUbzxDJ8LQNa0I8UZwvoahm6PNVBBaICXoAuRxMAtEihqqrKAF18FAxvAADqELJ8J/zf/wAAAABJRU5ErkJggg==",
+                "https://sns-avatar-qc.xhscdn.com/avatar/1040g2jo31ipv3sch146g5pl0n6j93tvf4kkk6qg?imageView2/2/w/80/format/jpg"
+              ],
+              "relevant_lines": [
+                "遇到问题 创作服务平台 FAS机神圣殿 × 潮玩EDC 发布笔记 首页 笔记管理 数据看板 活动中心 笔记灵感 创作学院 创作百科 收起侧边栏 视频文件 取消上传 MOT 风灵音叉推牌 锆合金版本.mp4 上传中 82% 当前速度：7.34MB/s 剩余时间：5s 设置封面 默认截取第一帧作为封面，优质的封面会吸引更多人浏览笔记 优质封面示例 智能推荐封面 封面效果评估通过，未发现封面质量问题 智能标题 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 #TEC无畏契约 #tec无畏契约 #指甲刀 #手机U盘 #大开口指甲刀 更多 话题 用户 表情 145 /1000 活动话题 更多 原神千星奇域 添加话题 活动详情 少东家夏日奇遇 添加话题 活动详情 内容设置 收起 添加章节 清晰的视频结构能提升观看体验，有助于完播率 去添加 加入合集 汇集系列视频，有利于连续性观看 选择合集 原创声明 添加内容类型声明 添加组件 添加地点 选择群聊 关联直播预告 标记地点或标记朋友 添加路线 店内商品 选择我店铺内的商品 添加商品 更多设置 收起 公开可见 定时发布 笔记预览 封面预览 FAS机神圣殿 × 潮玩EDC 关注 锆合金版本的音叉推牌，质感绝了 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 展开"
+              ]
+            }
+          }
+        },
+        "actions": [
+          {
+            "kind": "media_upload",
+            "uploaded": true,
+            "input": {
+              "data-v-3169bee3": "",
+              "class": "upload-input",
+              "type": "file",
+              "accept": ".mp4,.mov,.flv,.f4v,.mkv,.rm,.rmvb,.m4v,.mpg,.mpeg,.ts"
+            },
+            "fileInputCount": 1
+          },
+          {
+            "filled": true,
+            "label": "填写标题会有更多赞哦 135 / 20",
+            "tag": "input"
+          },
+          {
+            "filled": false,
+            "reason": "field_not_found",
+            "candidates": [
+              "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #TEC无畏契约 #tec无畏契约 #指甲刀 #手机U盘 #大开口指甲刀 更多"
+            ]
+          },
+          {
+            "kind": "platform_rich_text",
+            "filled": true,
+            "actions": [
+              {
+                "field": "title",
+                "ok": true,
+                "hint": "填写标题会有更多赞哦 锆合金版本的音叉推牌，质感绝了"
+              },
+              {
+                "field": "body",
+                "ok": true,
+                "hint": "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 拿在手里掂了掂，锆合金的光泽",
+                "tag": "div"
+              },
+              {
+                "field": "title_reassert",
+                "ok": true,
+                "hint": "填写标题会有更多赞哦 锆合金版本的音叉推牌，质感绝了"
+              }
+            ],
+            "verified_body": true,
+            "verified_title": false,
+            "candidates": [
+              {
+                "text": "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 拿在手里掂了掂，锆合金的光泽",
+                "area": 88480,
+                "tag": "div"
+              },
+              {
+                "text": "填写标题会有更多赞哦 锆合金版本的音叉推牌，质感绝了",
+                "area": 11998.5,
+                "tag": "input"
+              }
+            ]
+          },
+          {
+            "kind": "cover_entry",
+            "clicked": false
+          },
+          {
+            "kind": "xiaohongshu_cover_ratio",
+            "clicked": false
+          },
+          {
+            "kind": "cover_upload",
+            "uploaded": false,
+            "reason": "no_image_file_input",
+            "fileInputs": [
+              {
+                "data-v-3169bee3": "",
+                "class": "upload-input",
+                "type": "file",
+                "accept": ".mp4,.mov,.flv,.f4v,.mkv,.rm,.rmvb,.m4v,.mpg,.mpeg,.ts"
+              }
+            ]
+          },
+          {
+            "kind": "xiaohongshu_cover_confirm",
+            "clicked": false
+          },
+          {
+            "filled": false,
+            "reason": "field_not_found",
+            "candidates": [
+              "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 #TEC无畏契约 #tec无畏契约 #指甲刀 #手机U盘 #大开口指甲刀 更多"
+            ]
+          },
+          {
+            "filled": false,
+            "reason": "field_not_found",
+            "candidates": [
+              "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 #TEC无畏契约 #tec无畏契约 #指甲刀 #手机U盘 #大开口指甲刀 更多"
+            ]
+          },
+          {
+            "filled": false,
+            "reason": "field_not_found",
+            "candidates": [
+              "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 #TEC无畏契约 #tec无畏契约 #指甲刀 #手机U盘 #大开口指甲刀 更多"
+            ]
+          },
+          {
+            "filled": false,
+            "reason": "field_not_found",
+            "candidates": [
+              "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 #TEC无畏契约 #tec无畏契约 #指甲刀 #手机U盘 #大开口指甲刀 更多"
+            ]
+          },
+          {
+            "filled": false,
+            "reason": "field_not_found",
+            "candidates": [
+              "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 #TEC无畏契约 #tec无畏契约 #指甲刀 #手机U盘 #大开口指甲刀 更多"
+            ]
+          },
+          {
+            "filled": false,
+            "reason": "field_not_found",
+            "candidates": [
+              "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 #TEC无畏契约 #tec无畏契约 #指甲刀 #手机U盘 #大开口指甲刀 更多"
+            ]
+          },
+          {
+            "filled": false,
+            "reason": "field_not_found",
+            "candidates": [
+              "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 #TEC无畏契约 #tec无畏契约 #指甲刀 #手机U盘 #大开口指甲刀 更多"
+            ]
+          },
+          {
+            "kind": "collection_entry",
+            "clicked": true,
+            "text": "选择",
+            "label": "选择合集"
+          },
+          {
+            "kind": "collection_select",
+            "clicked": false
+          },
+          {
+            "kind": "xiaohongshu_original_declaration",
+            "clicked": false
+          },
+          {
+            "kind": "schedule_entry",
+            "clicked": false
+          },
+          {
+            "kind": "schedule_set"
+          }
+        ],
+        "visible_option_lines": [
+          "设置封面",
+          "默认截取第一帧作为封面，优质的封面会吸引更多人浏览笔记",
+          "优质封面示例",
+          "智能推荐封面",
+          "封面效果评估通过，未发现封面质量问题",
+          "加入合集",
+          "选择合集",
+          "原创声明",
+          "添加内容类型声明",
+          "选择群聊",
+          "公开可见",
+          "定时发布",
+          "封面预览"
+        ],
+        "final_publish": {}
+      },
+      "error": {
+        "code": "xiaohongshu_material_integrity_failed",
+        "message": "复合适配器发布前读回未通过：collection, schedule",
+        "details": {
+          "platform": "xiaohongshu",
+          "fields": {
+            "title": {
+              "expected": "锆合金版本的音叉推牌，质感绝了",
+              "verified": true
+            },
+            "body": {
+              "expected": "拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。",
+              "verified": true
+            },
+            "tags": {
+              "expected": [
+                "EDC",
+                "音叉推牌",
+                "锆合金",
+                "开箱分享",
+                "把玩件",
+                "随身玩具",
+                "MOT风灵"
+              ],
+              "actual_checks": [
+                {
+                  "tag": "EDC",
+                  "present": true
+                },
+                {
+                  "tag": "音叉推牌",
+                  "present": true
+                },
+                {
+                  "tag": "锆合金",
+                  "present": true
+                },
+                {
+                  "tag": "开箱分享",
+                  "present": true
+                },
+                {
+                  "tag": "把玩件",
+                  "present": true
+                },
+                {
+                  "tag": "随身玩具",
+                  "present": true
+                },
+                {
+                  "tag": "MOT风灵",
+                  "present": true
+                }
+              ],
+              "verified": true
+            },
+            "collection": {
+              "expected": "EDC潮玩桌搭",
+              "verified": false
+            },
+            "schedule": {
+              "expected": "2026-05-23 21:00",
+              "verified": false
+            },
+            "declaration": {
+              "verified": true
+            },
+            "cover": {
+              "expected_path": "\\\\Z4pro-gwil\\团队文件-媒体工作台\\EDC系列\\待发布\\MOT 风灵音叉推牌 锆合金版本\\smart-copy\\02-xiaohongshu-cover.jpg",
+              "verified": true,
+              "youtube_auto_thumbnail": false,
+              "youtube_custom_thumbnail_preview": false
+            }
+          },
+          "verified": false,
+          "failures": [
+            "collection",
+            "schedule"
+          ],
+          "platform_extras": {
+            "youtube_link": "",
+            "youtube_scheduled": false,
+            "youtube_thumbnail_uploading": false,
+            "route": {
+              "url": "https://creator.xiaohongshu.com/publish/publish?source=official",
+              "title": "小红书创作服务平台"
+            },
+            "image_sources": [
+              "https://sns-avatar-qc.xhscdn.com/avatar/1040g2jo31ipv3sch146g5pl0n6j93tvf4kkk6qg?imageView2/2/w/80/format/jpg",
+              "https://fe-img-qc.xhscdn.com/48fd625e5dfe43f5a44ea81f99668b223802391d?sign=e3193698c17efb19b00815953f9316cc&t=7c245f00&aegis=d3d856",
+              "data:image/png;base64,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",
+              "https://growth-img.xhscdn.com/ditto/104100n0320dsl2inlc06fvofv8270000000000ed9444a",
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAgCAYAAAAFQMh/AAABWElEQVR4Xu2W0Y2DMBBEU8KVwA8G8ZUSUkJKSAdJCdfBXQeUkOuEEiiBEu52ovVpMyB7PvIXnrSKxIzH4MUmh8POTmAYhmNKaWnb9sJaRPXJWNC3Bf7WAlWfjIVNCMQTsRZRfRJN03wgzGpmLaL6ZCzojMCu635Yi6i+TWzQ1QaPVI/l81/Wij7r9RdWgudZYebFB7+s+r4/8TwrzNRYXXLZwE8PmON1roLvxHNIJO+b1chaRPXJIAiBtX2p+mSSvzBoAWsR1SeBkNw31iKqT8ZfmmrfVJ9M7pvVmbWI6pOxw2RW+qb6JELfJtYiqq8INnve+DjquG84+sLBwL6JNWkFMKkHcP33zZb0tqGXaolzbIKn8Y/46PUYHO/alzXrT76N6yNuNExRx24Af18QVuyb6pNBfxCIFWAtovpkLOzuT1Lcl6pPJu/L2gdc9cl4YPX4U30778cf6hgADWVp6fsAAAAASUVORK5CYII=",
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAABgklEQVR4Xu2WwXGDMBBFKSElqISUQCmUkKPgQjqIO7A7cAkpJaUkerCylw8WCgdfkjezY6y/2s9Kwrhp/jFijCFF1/f9R/o8E3bdoWn+YVKxNsVniu+dIKfT+dWM4/iSOrj6gun72zAMr3RE2DUd+hui+6D1iljBL3fnreYoNicbMzdoziZi9q76HszJpqyS6ivivCSHzDLZlC1RbUGc92NaRtU8nE5Cxz3UsFqtajdcUlDNw3IROu7BqHjzmBQTHDWGUGwg3pezU02pNeQxelgzDZ4QebZUU2oN7TnF8KQaRS5b7dvP12TggjxiMa4HiVqWd/bjWdw0jHPnVYbkytyi4dOXdDo0bLRqSq1hrsmnar795zwW4BJa1Tw1hlUNYLSb1Nz2e70vDnfznWoL3DtwVK0W5lqN9elUeKXE+9H/takzo0ZQfRMSnSlLEzRHicu/IvVmGTO9WIFs3OlfDPu9zEbTO7DqxfsITHzBQpDT6vzD0JGZc0LPFlwzFjT/7/IDeHvnR7Pif3cAAAAASUVORK5CYII=",
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAAAiElEQVR4XmNgGAUjGtTX1wtUVlYGoIvTDFRUVOwH4v9APB9djiYA6LsCqIX0sxRoUcOAWgr09XlQ3KKroToYtZSmYMAtBeIJ6PJUB0BL6ulmIZpl94FYAV0N1cCAWUbzxDJ8LQNa0I8UZwvoahm6PNVBBaICXoAuRxMAtEihqqrKAF18FAxvAADqELJ8J/zf/wAAAABJRU5ErkJggg==",
+              "https://growth-img.xhscdn.com/ditto/104100n0320crtivl5k06fvofv8270000000000813n2ne",
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAB4AAAAgCAYAAAAFQMh/AAABWElEQVR4Xu2W0Y2DMBBEU8KVwA8G8ZUSUkJKSAdJCdfBXQeUkOuEEiiBEu52ovVpMyB7PvIXnrSKxIzH4MUmh8POTmAYhmNKaWnb9sJaRPXJWNC3Bf7WAlWfjIVNCMQTsRZRfRJN03wgzGpmLaL6ZCzojMCu635Yi6i+TWzQ1QaPVI/l81/Wij7r9RdWgudZYebFB7+s+r4/8TwrzNRYXXLZwE8PmON1roLvxHNIJO+b1chaRPXJIAiBtX2p+mSSvzBoAWsR1SeBkNw31iKqT8ZfmmrfVJ9M7pvVmbWI6pOxw2RW+qb6JELfJtYiqq8INnve+DjquG84+sLBwL6JNWkFMKkHcP33zZb0tqGXaolzbIKn8Y/46PUYHO/alzXrT76N6yNuNExRx24Af18QVuyb6pNBfxCIFWAtovpkLOzuT1Lcl6pPJu/L2gdc9cl4YPX4U30778cf6hgADWVp6fsAAAAASUVORK5CYII=",
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAABgklEQVR4Xu2WwXGDMBBFKSElqISUQCmUkKPgQjqIO7A7cAkpJaUkerCylw8WCgdfkjezY6y/2s9Kwrhp/jFijCFF1/f9R/o8E3bdoWn+YVKxNsVniu+dIKfT+dWM4/iSOrj6gun72zAMr3RE2DUd+hui+6D1iljBL3fnreYoNicbMzdoziZi9q76HszJpqyS6ivivCSHzDLZlC1RbUGc92NaRtU8nE5Cxz3UsFqtajdcUlDNw3IROu7BqHjzmBQTHDWGUGwg3pezU02pNeQxelgzDZ4QebZUU2oN7TnF8KQaRS5b7dvP12TggjxiMa4HiVqWd/bjWdw0jHPnVYbkytyi4dOXdDo0bLRqSq1hrsmnar795zwW4BJa1Tw1hlUNYLSb1Nz2e70vDnfznWoL3DtwVK0W5lqN9elUeKXE+9H/takzo0ZQfRMSnSlLEzRHicu/IvVmGTO9WIFs3OlfDPu9zEbTO7DqxfsITHzBQpDT6vzD0JGZc0LPFlwzFjT/7/IDeHvnR7Pif3cAAAAASUVORK5CYII=",
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABwAAAAcCAYAAAByDd+UAAAAiElEQVR4XmNgGAUjGtTX1wtUVlYGoIvTDFRUVOwH4v9APB9djiYA6LsCqIX0sxRoUcOAWgr09XlQ3KKroToYtZSmYMAtBeIJ6PJUB0BL6ulmIZpl94FYAV0N1cCAWUbzxDJ8LQNa0I8UZwvoahm6PNVBBaICXoAuRxMAtEihqqrKAF18FAxvAADqELJ8J/zf/wAAAABJRU5ErkJggg==",
+              "https://sns-avatar-qc.xhscdn.com/avatar/1040g2jo31ipv3sch146g5pl0n6j93tvf4kkk6qg?imageView2/2/w/80/format/jpg"
+            ],
+            "relevant_lines": [
+              "遇到问题 创作服务平台 FAS机神圣殿 × 潮玩EDC 发布笔记 首页 笔记管理 数据看板 活动中心 笔记灵感 创作学院 创作百科 收起侧边栏 视频文件 取消上传 MOT 风灵音叉推牌 锆合金版本.mp4 上传中 82% 当前速度：7.34MB/s 剩余时间：5s 设置封面 默认截取第一帧作为封面，优质的封面会吸引更多人浏览笔记 优质封面示例 智能推荐封面 封面效果评估通过，未发现封面质量问题 智能标题 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 #TEC无畏契约 #tec无畏契约 #指甲刀 #手机U盘 #大开口指甲刀 更多 话题 用户 表情 145 /1000 活动话题 更多 原神千星奇域 添加话题 活动详情 少东家夏日奇遇 添加话题 活动详情 内容设置 收起 添加章节 清晰的视频结构能提升观看体验，有助于完播率 去添加 加入合集 汇集系列视频，有利于连续性观看 选择合集 原创声明 添加内容类型声明 添加组件 添加地点 选择群聊 关联直播预告 标记地点或标记朋友 添加路线 店内商品 选择我店铺内的商品 添加商品 更多设置 收起 公开可见 定时发布 笔记预览 封面预览 FAS机神圣殿 × 潮玩EDC 关注 锆合金版本的音叉推牌，质感绝了 拿在手里掂了掂，锆合金的光泽感和普通金属确实不一样，有点像那种低调但很显档次的风格。分量感刚刚好，操作起来很跟手，音叉的回弹也很干脆。配了收纳袋，随手塞兜里或者挂包上都方便。算是近期把玩频率比较高的一个小物件。 #EDC #音叉推牌 #锆合金 #开箱分享 #把玩件 #随身玩具 #MOT风灵 展开"
+            ]
+          }
+        }
+      }
+    },
+    "kuaishou": {
+      "task_id": "3af0d21581b74456b2e4576b11e9d4d5",
+      "id": "3af0d21581b74456b2e4576b11e9d4d5",
+      "platform": "kuaishou",
+      "profile_id": "d2d15bc6d77a47b79cf20a79b56596c2",
+      "status": "failed",
+      "created_at": "2026-05-22T21:07:58.93Z",
+      "updated_at": "2026-05-22T21:08:52.825Z",
+      "scheduled_publish_at": "2026-05-23T20:00",
+      "result": {},
+      "error": {
+        "code": "browser_agent_task_failed",
+        "message": "CDP Runtime.evaluate timed out after 30000ms"
+      }
+    }
+  }
+}

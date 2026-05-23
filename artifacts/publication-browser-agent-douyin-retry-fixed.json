@@ -1,0 +1,125 @@
+{
+  "result": {
+    "contract": "browser_agent_publication_inventory_v1",
+    "status": "partial",
+    "source": "browser_agent_inventory",
+    "probe_id": "3874a22f-f204-4388-9ef9-00a88b575e87",
+    "browser": "Chrome CDP",
+    "generated_at": "2026-05-22T05:20:36.483Z",
+    "platforms": {
+      "douyin": {
+        "status": "partial",
+        "platform": "douyin",
+        "message": "已从当前浏览器页面读取可见控件；折叠菜单需要在平台页面展开后重新摸底。",
+        "route": {
+          "url": "https://creator.douyin.com/creator-micro/home",
+          "title": "抖音创作者中心",
+          "domains": [
+            "creator.douyin.com",
+            "creator-micro.douyin.com"
+          ]
+        },
+        "field_groups": [],
+        "option_groups": [
+          {
+            "key": "collections",
+            "label": "合集/栏目/播放列表",
+            "options": [
+              "合集管理",
+              "共创中心",
+              "原创保护中心",
+              "互动管理",
+              "数据中心",
+              "变现中心",
+              "创作中心",
+              "通知",
+              "曾舜晞新专辑投稿抽奖",
+              "05-11~06-20",
+              "图文问答活动赢大奖·苹果手机",
+              "美食",
+              "05-10~07-29",
+              "发作品邀开播，赢DOU+",
+              "05-09~06-30",
+              "求618必买清单！分享赢奖励"
+            ]
+          },
+          {
+            "key": "declarations",
+            "label": "声明/权益/内容类型",
+            "options": [
+              "原创保护中心",
+              "互动管理",
+              "数据中心",
+              "变现中心",
+              "创作中心",
+              "通知",
+              "网址",
+              "抖音"
+            ]
+          }
+        ],
+        "operation_steps": [
+          {
+            "index": 1,
+            "label": "打开平台创作/发布页"
+          },
+          {
+            "index": 2,
+            "label": "上传视频和封面"
+          },
+          {
+            "index": 3,
+            "label": "填写标题、正文、标签"
+          },
+          {
+            "index": 4,
+            "label": "选择平台真实可见的合集、分类、声明和定时设置"
+          },
+          {
+            "index": 5,
+            "label": "发布前再次验证页面和字段变化"
+          }
+        ],
+        "warnings": [],
+        "probe_meta": {
+          "draft_upload_requested": false,
+          "upload": {
+            "uploaded": false,
+            "reason": "upload_probe_not_requested"
+          },
+          "actions": [],
+          "interruptions": [
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://creator.douyin.com",
+              "setting": "denied",
+              "stage": "before_probe"
+            },
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://creator.douyin.com",
+              "setting": "denied",
+              "stage": "before_expand_更多设置"
+            },
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://creator.douyin.com",
+              "setting": "denied",
+              "stage": "before_expand_展开"
+            },
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://creator.douyin.com",
+              "setting": "denied",
+              "stage": "before_api_inventory"
+            }
+          ]
+        }
+      }
+    }
+  }
+}

@@ -11,7 +11,7 @@ _PLATFORM_RULES: dict[str, dict[str, Any]] = {
     "bilibili": {
         "label": "B站",
         "min_titles": 3,
-        "max_titles": 5,
+        "max_titles": 3,
         "hard_max": 80,
         "recommended_min": 10,
         "recommended_max": 30,
@@ -22,7 +22,7 @@ _PLATFORM_RULES: dict[str, dict[str, Any]] = {
     "xiaohongshu": {
         "label": "小红书",
         "min_titles": 3,
-        "max_titles": 5,
+        "max_titles": 3,
         "hard_max": 20,
         "recommended_min": 8,
         "recommended_max": 20,
@@ -33,7 +33,7 @@ _PLATFORM_RULES: dict[str, dict[str, Any]] = {
     "douyin": {
         "label": "抖音",
         "min_titles": 3,
-        "max_titles": 5,
+        "max_titles": 3,
         "hard_max": 55,
         "recommended_min": 6,
         "recommended_max": 22,
@@ -44,7 +44,7 @@ _PLATFORM_RULES: dict[str, dict[str, Any]] = {
     "kuaishou": {
         "label": "快手",
         "min_titles": 3,
-        "max_titles": 5,
+        "max_titles": 3,
         "hard_max": None,
         "recommended_min": 6,
         "recommended_max": 26,
@@ -55,7 +55,7 @@ _PLATFORM_RULES: dict[str, dict[str, Any]] = {
     "wechat_channels": {
         "label": "视频号",
         "min_titles": 3,
-        "max_titles": 5,
+        "max_titles": 3,
         "hard_max": None,
         "recommended_min": 6,
         "recommended_max": 16,
@@ -66,7 +66,7 @@ _PLATFORM_RULES: dict[str, dict[str, Any]] = {
     "toutiao": {
         "label": "头条号",
         "min_titles": 3,
-        "max_titles": 5,
+        "max_titles": 3,
         "hard_max": 30,
         "recommended_min": 10,
         "recommended_max": 28,
@@ -77,13 +77,13 @@ _PLATFORM_RULES: dict[str, dict[str, Any]] = {
     "youtube": {
         "label": "YouTube",
         "min_titles": 3,
-        "max_titles": 5,
+        "max_titles": 3,
         "hard_max": 100,
         "recommended_min": 18,
         "recommended_max": 70,
-        "preferred": ("review", "unboxing", "test", "hands-on", "体验", "评测", "开箱", "实测"),
+        "preferred": ("体验", "评测", "开箱", "实测", "上手", "细节", "差异", "值不值"),
         "avoid": ("绝绝子", "杀疯", "封神"),
-        "tone_hint": "补足可检索的主体、差异点和评测角度。",
+        "tone_hint": "用源语言补足可检索的主体、差异点和评测角度，不要因 YouTube 自动改成英文。",
     },
     "x": {
         "label": "X",
@@ -92,7 +92,7 @@ _PLATFORM_RULES: dict[str, dict[str, Any]] = {
         "hard_max": 50,
         "recommended_min": 8,
         "recommended_max": 28,
-        "preferred": ("实测", "结论", "观察", "体验", "先看", "quick take", "hands-on"),
+        "preferred": ("实测", "结论", "观察", "体验", "先看", "上手", "重点", "值不值"),
         "avoid": ("长文解析", "绝绝子", "封神"),
         "tone_hint": "改成一句短促、可转发的明确观察。",
     },
@@ -103,12 +103,15 @@ _ANGLE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("emotion", re.compile(r"终于|真香|封神|上头|离谱|惊到|杀疯|爽飞|感动")),
     ("conclusion", re.compile(r"结论|建议|劝退|推荐|不推荐|可买|别买|直说|实话")),
     ("explosive", re.compile(r"直接|居然|原来|先看|一条|炸场|太狠|暴击|开箱")),
-    ("informational", re.compile(r"实测|对比|体验|评测|细节|拆解|记录|总结|重点|判断|review|test|hands-on", re.I)),
+    ("informational", re.compile(r"实测|对比|体验|评测|细节|拆解|记录|总结|重点|判断|上手|开箱|review|test|hands-on", re.I)),
 )
 
 _GENERIC_TITLE_EXACT = {
     "这条视频会怎么发",
     "先看细节",
+    "版本差异先看",
+    "差异先看",
+    "这次开箱直接上头",
     "真实体验",
     "真实分享",
     "值得一看",
@@ -144,6 +147,11 @@ _AI_TEMPLATE_PATTERNS: tuple[re.Pattern[str], ...] = (
 _MARKETING_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(全网|爆款|必看|闭眼入|天花板|颠覆|王炸|震撼|史上|超值|买它)"),
     re.compile(r"(不看后悔|错过亏大|直接封神|杀疯了|绝绝子)"),
+)
+_LOW_INFORMATION_TITLE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^(版本差异先看|差异先看|先看版本差异|开箱看细节|这次开箱直接上头)$"),
+    re.compile(r"^(版本差异|近景细节|上手实测|流程重点|实测结果|细节重点)(先看|总结|记录)?$"),
+    re.compile(r"^(终于到手|到货|到手|值不值|先看重点|重点直接看)$"),
 )
 
 
@@ -205,6 +213,9 @@ def assess_platform_titles(
         if _is_generic_unanchored_title(title, anchor_terms):
             blocking_reasons.append(f"{label}标题 {index}“{title}”没有主体锚点，属于空泛标题。")
             repair_hints.append(f"把标题 {index} 改成“具体主体 + 具体看点/结论”，不要只写体验、细节或这条视频。")
+        elif _is_low_information_title(title, anchor_terms, units=units, recommended_min=recommended_min):
+            blocking_reasons.append(f"{label}标题 {index}“{title}”信息量过弱，缺少主体或爆点。")
+            repair_hints.append(f"给标题 {index} 标明创作方向，例如“主体 + 流量钩子/质感卖点/差异对比/值不值结论”。")
         elif not anchored:
             warnings.append(f"{label}标题 {index}缺少明显主体锚点，识别和搜索会偏弱。")
 
@@ -234,7 +245,7 @@ def assess_platform_titles(
         angle, count = angle_counts.most_common(1)[0]
         if count >= len(normalized_titles) - 1:
             warnings.append(f"{label}标题角度过于集中，{count} 个标题都偏“{angle}”。")
-            repair_hints.append("增加一个明显不同的平台化角度，避免 5 个标题像同一模板改字。")
+            repair_hints.append("增加一个明显不同的平台化角度，避免 3 个标题像同一模板改字。")
 
     if not any(_contains_token(title, token) for title in normalized_titles for token in rule["preferred"]):
         warnings.append(f"{label}标题缺少平台常用表达。")
@@ -274,18 +285,10 @@ def _build_anchor_terms(content_profile: dict[str, Any] | None) -> list[str]:
         "subject_model",
         "subject_type",
         "subject_domain",
-        "video_theme",
-        "summary",
-        "hook_line",
-        "visible_text",
     ):
         value = str(content_profile.get(key) or "").strip()
         if value:
             values.append(value)
-    for item in content_profile.get("search_queries") or []:
-        text = str(item or "").strip()
-        if text:
-            values.append(text)
 
     terms: list[str] = []
     for value in values:
@@ -311,6 +314,8 @@ def _clean_anchor_term(term: str) -> str:
     if len(compact) < 2:
         return ""
     if len(compact) > 18:
+        return ""
+    if re.search(r"(人工核对|保守策略|发布素材|老本行|今天|我们|建议|具体型号|参数)", value):
         return ""
     if compact in _GENERIC_WORDS:
         return ""
@@ -349,6 +354,19 @@ def _is_generic_unanchored_title(title: str, anchor_terms: list[str]) -> bool:
         return True
     generic_hits = sum(1 for word in _GENERIC_WORDS if word in title)
     return generic_hits >= 2 and len(tokens) <= 1
+
+
+def _is_low_information_title(title: str, anchor_terms: list[str], *, units: int, recommended_min: int) -> bool:
+    compact = _compact_for_compare(title)
+    if any(pattern.search(compact) for pattern in _LOW_INFORMATION_TITLE_PATTERNS):
+        return True
+    if _has_subject_anchor(title, anchor_terms):
+        return False
+    tokens = _specific_tokens_without_profile(title)
+    if units < recommended_min and len(tokens) <= 1:
+        return True
+    generic_hits = sum(1 for word in _GENERIC_WORDS if word in title)
+    return units <= recommended_min + 1 and generic_hits >= 1 and len(tokens) <= 2
 
 
 def _primary_angle(title: str) -> str:

@@ -242,17 +242,80 @@ def doctor(json_output: bool):
 @click.option("--host", default="0.0.0.0", help="Bind host")
 @click.option("--port", default=None, type=int, help="Bind port. Defaults to ROUGHCUT_API_PORT in roughcut.ports.env.")
 @click.option("--reload", is_flag=True, default=False, help="Enable auto-reload (dev)")
-@click.option("--workers", default=1, type=int, help="Number of uvicorn workers")
-def api(host: str, port: int | None, reload: bool, workers: int):
+@click.option(
+    "--workers",
+    default=None,
+    type=int,
+    help="Number of uvicorn workers. Defaults to ROUGHCUT_API_WORKERS or 1.",
+)
+@click.option(
+    "--timeout-graceful-shutdown",
+    default=None,
+    type=int,
+    help="Seconds to wait for in-flight requests during shutdown/reload.",
+)
+@click.option(
+    "--timeout-keep-alive",
+    default=None,
+    type=int,
+    help="Seconds to keep idle HTTP connections open.",
+)
+@click.option(
+    "--limit-concurrency",
+    default=None,
+    type=int,
+    help="Maximum concurrent connections/tasks accepted by uvicorn.",
+)
+@click.option(
+    "--backlog",
+    default=None,
+    type=int,
+    help="Socket listen backlog.",
+)
+def api(
+    host: str,
+    port: int | None,
+    reload: bool,
+    workers: int | None,
+    timeout_graceful_shutdown: int | None,
+    timeout_keep_alive: int | None,
+    limit_concurrency: int | None,
+    backlog: int | None,
+):
     """Start the FastAPI server."""
     bind_port = port if port is not None else _configured_int("ROUGHCUT_API_PORT", 38471)
+    resolved_workers = workers if workers is not None else _configured_int("ROUGHCUT_API_WORKERS", 1)
+    resolved_graceful_shutdown = (
+        timeout_graceful_shutdown
+        if timeout_graceful_shutdown is not None
+        else _configured_int("ROUGHCUT_API_GRACEFUL_SHUTDOWN_SEC", 8)
+    )
+    resolved_keep_alive = (
+        timeout_keep_alive
+        if timeout_keep_alive is not None
+        else _configured_int("ROUGHCUT_API_KEEP_ALIVE_SEC", 3)
+    )
+    resolved_backlog = backlog if backlog is not None else _configured_int("ROUGHCUT_API_BACKLOG", 4096)
+    resolved_limit_concurrency = limit_concurrency
+    if resolved_limit_concurrency is None:
+        configured_limit = os.getenv("ROUGHCUT_API_LIMIT_CONCURRENCY", "").strip()
+        if configured_limit:
+            try:
+                resolved_limit_concurrency = max(1, int(configured_limit))
+            except ValueError:
+                resolved_limit_concurrency = None
     uvicorn.run(
         "roughcut.main:app",
         host=host,
         port=bind_port,
         reload=reload,
-        workers=workers if not reload else 1,
+        reload_dirs=[str(_repo_root() / "src")] if reload else None,
+        workers=resolved_workers if not reload else 1,
         log_level="info",
+        timeout_graceful_shutdown=max(1, resolved_graceful_shutdown),
+        timeout_keep_alive=max(1, resolved_keep_alive),
+        limit_concurrency=resolved_limit_concurrency,
+        backlog=max(1, resolved_backlog),
     )
 
 

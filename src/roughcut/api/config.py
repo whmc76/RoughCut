@@ -172,6 +172,13 @@ class ConfigOut(BaseModel):
     glossary_correction_review_threshold: float
     auto_select_cover_variant: bool
     cover_selection_review_gap: float
+    intelligent_copy_cover_image_generation_enabled: bool
+    intelligent_copy_cover_image_backend: str
+    intelligent_copy_cover_image_model: str
+    intelligent_copy_cover_image_quality: str
+    intelligent_copy_cover_image_timeout_sec: int
+    intelligent_copy_cover_codex_runner_model: str
+    intelligent_copy_cover_codex_runner_effort: str
     packaging_selection_review_gap: float
     packaging_selection_min_score: float
     subtitle_filler_cleanup_enabled: bool
@@ -423,6 +430,13 @@ class ConfigPatch(BaseModel):
     glossary_correction_review_threshold: float | None = None
     auto_select_cover_variant: bool | None = None
     cover_selection_review_gap: float | None = None
+    intelligent_copy_cover_image_generation_enabled: bool | None = None
+    intelligent_copy_cover_image_backend: str | None = None
+    intelligent_copy_cover_image_model: str | None = None
+    intelligent_copy_cover_image_quality: str | None = None
+    intelligent_copy_cover_image_timeout_sec: int | None = None
+    intelligent_copy_cover_codex_runner_model: str | None = None
+    intelligent_copy_cover_codex_runner_effort: str | None = None
     packaging_selection_review_gap: float | None = None
     packaging_selection_min_score: float | None = None
     subtitle_filler_cleanup_enabled: bool | None = None
@@ -554,6 +568,13 @@ def get_config():
         glossary_correction_review_threshold=s.glossary_correction_review_threshold,
         auto_select_cover_variant=s.auto_select_cover_variant,
         cover_selection_review_gap=s.cover_selection_review_gap,
+        intelligent_copy_cover_image_generation_enabled=s.intelligent_copy_cover_image_generation_enabled,
+        intelligent_copy_cover_image_backend=s.intelligent_copy_cover_image_backend,
+        intelligent_copy_cover_image_model=s.intelligent_copy_cover_image_model,
+        intelligent_copy_cover_image_quality=s.intelligent_copy_cover_image_quality,
+        intelligent_copy_cover_image_timeout_sec=s.intelligent_copy_cover_image_timeout_sec,
+        intelligent_copy_cover_codex_runner_model=s.intelligent_copy_cover_codex_runner_model,
+        intelligent_copy_cover_codex_runner_effort=s.intelligent_copy_cover_codex_runner_effort,
         packaging_selection_review_gap=s.packaging_selection_review_gap,
         packaging_selection_min_score=s.packaging_selection_min_score,
         subtitle_filler_cleanup_enabled=s.subtitle_filler_cleanup_enabled,
@@ -901,6 +922,38 @@ def patch_config(body: ConfigPatch):
         updates["cover_selection_review_gap"] = max(
             0.0,
             min(1.0, float(updates["cover_selection_review_gap"])),
+        )
+    if "intelligent_copy_cover_image_backend" in updates:
+        backend = str(updates["intelligent_copy_cover_image_backend"] or "").strip().lower()
+        if backend in {"codex", "codex_cli", "codex_imagegen"}:
+            backend = "codex_builtin"
+        if backend in {"openai_api"}:
+            backend = "openai_images_api"
+        if backend not in {"codex_builtin", "openai_images_api"}:
+            raise HTTPException(
+                status_code=400,
+                detail="intelligent_copy_cover_image_backend must be codex_builtin or openai_images_api",
+            )
+        updates["intelligent_copy_cover_image_backend"] = backend
+    for key in (
+        "intelligent_copy_cover_image_model",
+        "intelligent_copy_cover_image_quality",
+        "intelligent_copy_cover_codex_runner_model",
+    ):
+        if key in updates:
+            updates[key] = str(updates[key] or "").strip()
+    if "intelligent_copy_cover_codex_runner_effort" in updates:
+        effort = str(updates["intelligent_copy_cover_codex_runner_effort"] or "").strip().lower()
+        if effort not in {"minimal", "low", "medium", "high"}:
+            raise HTTPException(
+                status_code=400,
+                detail="intelligent_copy_cover_codex_runner_effort must be minimal, low, medium, or high",
+            )
+        updates["intelligent_copy_cover_codex_runner_effort"] = effort
+    if "intelligent_copy_cover_image_timeout_sec" in updates:
+        updates["intelligent_copy_cover_image_timeout_sec"] = max(
+            30,
+            min(900, int(updates["intelligent_copy_cover_image_timeout_sec"])),
         )
     if "packaging_selection_review_gap" in updates:
         updates["packaging_selection_review_gap"] = max(

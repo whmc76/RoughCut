@@ -1,0 +1,182 @@
+{
+  "result": {
+    "contract": "browser_agent_publication_inventory_v1",
+    "status": "partial",
+    "source": "browser_agent_inventory",
+    "probe_id": "5e9f6e6c-2dbc-43d8-9d95-d861945e6405",
+    "browser": "chrome",
+    "generated_at": "2026-05-22T06:49:34.009Z",
+    "platforms": {
+      "kuaishou": {
+        "status": "partial",
+        "platform": "kuaishou",
+        "message": "已从当前浏览器页面读取可见控件；折叠菜单需要在平台页面展开后重新摸底。",
+        "route": {
+          "url": "https://cp.kuaishou.com/article/publish/video",
+          "title": "快手创作者服务平台",
+          "domains": [
+            "cp.kuaishou.com",
+            "cp.kuaishou.com/article/publish/video"
+          ],
+          "related_routes": [
+            {
+              "url": "https://cp.kuaishou.com/article/manage/collection",
+              "title": "快手创作者服务平台"
+            }
+          ]
+        },
+        "field_groups": [],
+        "option_groups": [
+          {
+            "key": "declarations",
+            "label": "声明/权益/内容类型",
+            "options": [
+              "5分钟搞定视频剪辑，多种AI工具提高制作效率",
+              "立即体验",
+              "www.kuaishou.com 2019~2026 @ All rights Reserved 京ICP备15023266号-136",
+              "京公网安备11010802038443号",
+              "遇到",
+              "问题",
+              "你对PC版创作者服务平台是否满意？",
+              "非常不满意",
+              "不满意",
+              "一般"
+            ]
+          },
+          {
+            "key": "kuaishou_collection_catalog",
+            "label": "快手合集目录",
+            "options": [
+              "EDC潮玩桌搭",
+              "FAS新品",
+              "EDC刀光火工具集",
+              "机能户外装备"
+            ],
+            "values": [
+              {
+                "name": "EDC潮玩桌搭",
+                "status": "未公开展示",
+                "selectable": false,
+                "video_count": 4,
+                "source": "kuaishou_collection_management_page",
+                "note": "包含4个视频"
+              },
+              {
+                "name": "FAS新品",
+                "status": "",
+                "selectable": true,
+                "video_count": 0,
+                "source": "kuaishou_collection_management_page",
+                "note": "包含0个视频"
+              },
+              {
+                "name": "EDC刀光火工具集",
+                "status": "未公开展示",
+                "selectable": false,
+                "video_count": 0,
+                "source": "kuaishou_collection_management_page",
+                "note": "包含0个视频"
+              },
+              {
+                "name": "机能户外装备",
+                "status": "未公开展示",
+                "selectable": false,
+                "video_count": null,
+                "source": "kuaishou_collection_management_page",
+                "note": ""
+              }
+            ]
+          }
+        ],
+        "operation_steps": [
+          {
+            "index": 1,
+            "label": "打开平台创作/发布页"
+          },
+          {
+            "index": 2,
+            "label": "上传视频和封面"
+          },
+          {
+            "index": 3,
+            "label": "填写标题、正文、标签"
+          },
+          {
+            "index": 4,
+            "label": "选择平台真实可见的合集、分类、声明和定时设置"
+          },
+          {
+            "index": 5,
+            "label": "发布前再次验证页面和字段变化"
+          }
+        ],
+        "warnings": [],
+        "probe_meta": {
+          "draft_upload_requested": false,
+          "upload": {
+            "uploaded": false,
+            "reason": "upload_probe_not_requested"
+          },
+          "actions": [],
+          "interruptions": [
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://cp.kuaishou.com",
+              "setting": "denied",
+              "stage": "before_probe"
+            },
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://cp.kuaishou.com",
+              "setting": "denied",
+              "stage": "before_expand_作品分类"
+            },
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://cp.kuaishou.com",
+              "setting": "denied",
+              "stage": "before_expand_分类"
+            },
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://cp.kuaishou.com",
+              "setting": "denied",
+              "stage": "before_expand_合集"
+            },
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://cp.kuaishou.com",
+              "setting": "denied",
+              "stage": "before_expand_定时发布"
+            },
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://cp.kuaishou.com",
+              "setting": "denied",
+              "stage": "before_expand_更多设置"
+            },
+            {
+              "handled": true,
+              "kind": "notification_permission",
+              "origin": "https://cp.kuaishou.com",
+              "setting": "denied",
+              "stage": "before_api_inventory"
+            }
+          ],
+          "sidecar_tabs_read": [
+            {
+              "url": "https://cp.kuaishou.com/article/manage/collection",
+              "title": "快手创作者服务平台"
+            }
+          ]
+        }
+      }
+    }
+  }
+}
