@@ -2044,7 +2044,36 @@ def _manual_editor_normalize_word_payloads_for_text(words: list[dict[str, Any]],
                 "source": raw_word.get("source") or "transcript_words",
             }
         )
+    if _manual_editor_word_payloads_have_collapsed_timing(normalized):
+        return []
     return normalized
+
+
+def _manual_editor_word_payloads_have_collapsed_timing(words: list[dict[str, Any]]) -> bool:
+    timed: list[tuple[float, float]] = []
+    for word in words:
+        try:
+            start = float(word.get("start", 0.0) or 0.0)
+            end = float(word.get("end", start) or start)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        timed.append((start, end))
+    if len(timed) < 4:
+        return False
+    tiny_count = sum(1 for start, end in timed if end <= start + 0.006)
+    duplicate_count = sum(
+        1
+        for previous, current in zip(timed, timed[1:])
+        if abs(previous[0] - current[0]) < 0.001 and abs(previous[1] - current[1]) < 0.001
+    )
+    if tiny_count / len(timed) > 0.25:
+        return True
+    if duplicate_count >= 2:
+        return True
+    span = max(end for _, end in timed) - min(start for start, _ in timed)
+    return len(timed) >= 8 and span < 0.12
 
 
 def _attach_manual_editor_words_to_subtitles(

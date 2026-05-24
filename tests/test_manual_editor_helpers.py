@@ -1100,6 +1100,24 @@ def test_manual_editor_normalizes_legacy_word_timing_noise_before_attach() -> No
     assert all(word["source"] == "provider" for word in normalized)
 
 
+def test_manual_editor_drops_collapsed_duplicate_word_timestamps() -> None:
+    normalized = _manual_editor_normalize_word_payloads_for_text(
+        [
+            {"word": "这", "start": 10.0, "end": 10.001, "source": "provider"},
+            {"word": "个", "start": 10.001, "end": 10.002, "source": "provider"},
+            {"word": "开", "start": 10.002, "end": 10.003, "source": "provider"},
+            {"word": "法", "start": 10.003, "end": 10.004, "source": "provider"},
+            {"word": "很", "start": 10.004, "end": 10.005, "source": "provider"},
+            {"word": "顺", "start": 10.005, "end": 10.006, "source": "provider"},
+            {"word": "手", "start": 10.006, "end": 10.007, "source": "provider"},
+            {"word": "啊", "start": 10.007, "end": 10.008, "source": "provider"},
+        ],
+        "这个开法很顺手啊",
+    )
+
+    assert normalized == []
+
+
 def test_manual_editor_subtitle_payload_reprojects_attached_words_to_canonical_text() -> None:
     payload = _manual_editor_subtitle_payload(
         {

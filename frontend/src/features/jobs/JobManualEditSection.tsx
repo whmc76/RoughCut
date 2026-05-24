@@ -2744,8 +2744,19 @@ function asrTimedSpeechRangesForSubtitle(subtitle: JobManualEditSubtitle) {
     })
     .filter((range): range is AsrTimedSpeechRange => Boolean(range));
   if (alignmentRanges.length) {
+    if (
+      !subtitleAlignmentTimingTextMatchesSubtitleText(
+        subtitle,
+        (subtitle.alignment_tokens || []).map((token) => String(token.text || "")).join(""),
+      )
+      || !subtitleTimingRangesArePlausible(subtitle, alignmentRanges)
+    ) {
+      return [];
+    }
     return alignmentRanges.sort((left, right) => left.start - right.start || left.end - right.end);
   }
+
+  if (!subtitleWordTimingsMatchSubtitleText(subtitle)) return [];
 
   return (subtitle.words || [])
     .map((word): AsrTimedSpeechRange | null => {
@@ -2761,6 +2772,67 @@ function asrTimedSpeechRangesForSubtitle(subtitle: JobManualEditSubtitle) {
     })
     .filter((range): range is AsrTimedSpeechRange => Boolean(range))
     .sort((left, right) => left.start - right.start || left.end - right.end);
+}
+
+function subtitleCanonicalTimingText(subtitle: JobManualEditSubtitle) {
+  return subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle);
+}
+
+function subtitleTimingTextMatchesSubtitleText(subtitle: JobManualEditSubtitle, timingText: string) {
+  const subtitleKey = compactTranscriptText(subtitleCanonicalTimingText(subtitle));
+  const timingKey = compactTranscriptText(timingText);
+  if (!subtitleKey || !timingKey) return false;
+  if (subtitleKey === timingKey) return true;
+  if (timingKey.length >= 4 && subtitleKey.includes(timingKey)) return true;
+  if (timingKey.length >= 4 && transcriptTextIsSubsequence(timingKey, subtitleKey)) return true;
+  const commonRatio = transcriptTextCommonSubsequenceRatio(subtitleKey, timingKey);
+  const lengthRatio = Math.max(subtitleKey.length, timingKey.length) / Math.max(1, Math.min(subtitleKey.length, timingKey.length));
+  return commonRatio >= 0.6 && lengthRatio <= 1.8;
+}
+
+function subtitleAlignmentTimingTextMatchesSubtitleText(subtitle: JobManualEditSubtitle, timingText: string) {
+  if (subtitleTimingTextMatchesSubtitleText(subtitle, timingText)) return true;
+  const diagnostics = subtitle.alignment_diagnostics;
+  const matchedRatio = Number(diagnostics?.matched_ratio ?? 0);
+  const boundaryPartialAlignment = (diagnostics?.issues || []).some((issue) => /unmatched_text_(prefix|suffix)/.test(String(issue || "")));
+  return diagnostics?.status === "warning"
+    && boundaryPartialAlignment
+    && matchedRatio >= 0.35
+    && compactTranscriptText(timingText).length >= 2;
+}
+
+function subtitleTimingRangesArePlausible(subtitle: JobManualEditSubtitle, ranges: KeepSegment[]) {
+  const sorted = [...ranges].sort((left, right) => left.start - right.start || left.end - right.end);
+  if (sorted.length < 2) return true;
+  const subtitleStart = Number(subtitle.start_time || 0);
+  const subtitleEnd = Number(subtitle.end_time || subtitleStart);
+  const subtitleDuration = Math.max(0.001, subtitleEnd - subtitleStart);
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  if (!first || !last) return false;
+  if (first.start < subtitleStart - 0.35 || last.end > subtitleEnd + 0.35) return false;
+  const span = Math.max(0, last.end - first.start);
+  const tinyDurationRatio = sorted.filter((range) => range.end <= range.start + 0.006).length / sorted.length;
+  if (sorted.length >= 4 && tinyDurationRatio > 0.35) return false;
+  const timedTextLength = compactTranscriptText(subtitleCanonicalTimingText(subtitle)).length;
+  if (timedTextLength >= 6 && span < Math.min(subtitleDuration * 0.18, timedTextLength * 0.035)) return false;
+  return true;
+}
+
+function subtitleWordTimingsMatchSubtitleText(subtitle: JobManualEditSubtitle) {
+  const words = subtitle.words || [];
+  if (!words.length) return false;
+  const timingText = words.map((word) => String(word.word || "")).join("");
+  if (!subtitleTimingTextMatchesSubtitleText(subtitle, timingText)) return false;
+  const ranges = words
+    .map((word): KeepSegment | null => {
+      const start = Number(word.start);
+      const end = Number(word.end);
+      if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+      return { start, end };
+    })
+    .filter((range): range is KeepSegment => Boolean(range));
+  return subtitleTimingRangesArePlausible(subtitle, ranges);
 }
 
 function asrTimedSpeechRangesForSubtitles(subtitles: JobManualEditSubtitle[]) {
@@ -2963,6 +3035,7 @@ function buildTimedTranscriptCharTokens(
   options: { sourceIndex: number; tokenKeyScope: string },
 ): TranscriptToken[] | null {
   const { sourceIndex, tokenKeyScope } = options;
+  if (!subtitleWordTimingsMatchSubtitleText(subtitle)) return null;
   const timedChars = timedCharsFromWords(subtitle.words);
   if (!timedChars.length) return null;
   const chars = Array.from(text);
@@ -3041,10 +3114,16 @@ function buildBackendAlignedTranscriptTokens(
     });
   });
   if (!backendTokens.length) return null;
+  const rawAlignedText = backendTokens.map((token) => token.text).join("");
+  if (
+    !subtitleAlignmentTimingTextMatchesSubtitleText(subtitle, rawAlignedText)
+    || !subtitleTimingRangesArePlausible(subtitle, backendTokens.map((token) => ({ start: token.start, end: token.end })))
+  ) {
+    return null;
+  }
   const diagnostics = subtitle.alignment_diagnostics;
   const matchedRatio = Number(diagnostics?.matched_ratio ?? 0);
   if (diagnostics?.status === "warning" && matchedRatio < 0.35) return null;
-  const rawAlignedText = backendTokens.map((token) => token.text).join("");
   const canonicalText = subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle);
   const canUseCanonicalText = shouldUseCanonicalAlignedTranscriptText(canonicalText, rawAlignedText, diagnostics?.issues);
   return normalizeAlignedTranscriptTokens(backendTokens, sourceIndex, tokenKeyScope, segments, canUseCanonicalText ? canonicalText : undefined);
@@ -3784,6 +3863,7 @@ function smartCutMeaningfulText(text: string, fillers: string[]) {
 }
 
 function subtitleHasUsableWordTimings(subtitle: JobManualEditSubtitle) {
+  if (!subtitleWordTimingsMatchSubtitleText(subtitle)) return false;
   return Boolean(subtitle.words?.some((word) => {
     const start = Number(word.start);
     const end = Number(word.end);
@@ -3913,6 +3993,9 @@ function fallbackCuttablePauseRanges(range: SilenceRange, subtitles: JobManualEd
   if (boundedRanges.length) {
     return boundedRanges.filter((candidate) => !rangeOverlapsSubtitleSpeech(candidate, subtitles, fillers));
   }
+  if (silenceRangeHasAudioEvidence(range) && rangeOverlapsUntrustedSubtitleSpeech(range, subtitles, fillers)) {
+    return [];
+  }
   if (
     silenceRangeHasAudioEvidence(range)
     && !audioRangeBroadlyOverlapsSubtitleSpeech(range, subtitles, fillers)
@@ -3921,6 +4004,15 @@ function fallbackCuttablePauseRanges(range: SilenceRange, subtitles: JobManualEd
     return [{ start: range.start, end: range.end }];
   }
   return pauseRangeOverlapsMeaningfulSpeech(range, subtitles, fillers) ? [] : [{ start: range.start, end: range.end }];
+}
+
+function rangeOverlapsUntrustedSubtitleSpeech(range: KeepSegment, subtitles: JobManualEditSubtitle[], fillers: string[]) {
+  return subtitles.some((subtitle) => {
+    if (smartCutMeaningfulText(subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle), fillers).length < 2) return false;
+    const overlap = Math.min(range.end, subtitle.end_time) - Math.max(range.start, subtitle.start_time);
+    if (overlap <= 0.08) return false;
+    return !asrTimedSpeechRangesForSubtitle(subtitle).length;
+  });
 }
 
 function audioRangeBroadlyOverlapsSubtitleSpeech(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
@@ -4084,6 +4176,7 @@ export function buildSmartCutRuleAnalysis(
   const pauseCandidates: SmartCutRuleMatch[] = [];
   for (const range of silenceRanges) {
     for (const cuttableRange of cuttablePauseRanges(range, subtitles, fillers)) {
+      if (rangeOverlapsUntrustedSubtitleSpeech(cuttableRange, subtitles, fillers)) continue;
       const pauseMatch = {
         start: Number(cuttableRange.start.toFixed(3)),
         end: Number(cuttableRange.end.toFixed(3)),
@@ -4179,6 +4272,23 @@ export function autoSmartCutRuleRanges(analysis: SmartCutRuleAnalysis, rules: Sm
     ...(rules.repeatedEnabled ? analysis.repeated : []),
     ...(rules.pauseEnabled ? analysis.pause : []),
   ];
+}
+
+export function blockAutoSmartCutRangesForSmartDeleteReview(
+  autoRanges: SmartCutRuleMatch[],
+  smartDeleteRanges: SmartCutRuleMatch[],
+  rules: SmartCutRules,
+  confirmedRanges: KeepSegment[] = [],
+) {
+  if (!rules.smartDeleteEnabled || !smartDeleteRanges.length || !autoRanges.length) return autoRanges;
+  const reviewBlocks = smartDeleteRanges.filter((range) => (
+    !range.protected
+    && !sourceRangeOverlapsCutRanges(range.start, range.end, confirmedRanges)
+  ));
+  if (!reviewBlocks.length) return autoRanges;
+  return autoRanges.filter((range) => (
+    !sourceRangeOverlapsCutRanges(range.start, range.end, reviewBlocks)
+  ));
 }
 
 export function smartDeleteSuggestionRanges(
@@ -4646,11 +4756,13 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     [smartCutRules, sourceSilenceRanges, sourceTranscriptSubtitles, session.smart_delete_segments],
   );
   const smartCutRuleRanges = useMemo(
-    () => [
-      ...autoSmartCutRuleRanges(smartCutRuleAnalysis, smartCutRules),
-      ...(smartCutRules.smartDeleteEnabled ? manualSmartCutConfirmRanges.map((range) => ({ ...range, kind: "smart_delete" as const })) : []),
-    ],
-    [manualSmartCutConfirmRanges, smartCutRuleAnalysis, smartCutRules],
+    () => {
+      const confirmedSmartDeleteRanges = smartCutRules.smartDeleteEnabled
+        ? manualSmartCutConfirmRanges.map((range) => ({ ...range, kind: "smart_delete" as const }))
+        : [];
+      return confirmedSmartDeleteRanges;
+    },
+    [manualSmartCutConfirmRanges, smartCutRules.smartDeleteEnabled],
   );
   const smartCutManagedRanges = useMemo(
     () => smartCutRuleManagedRanges(smartCutRuleAnalysis),
@@ -4672,18 +4784,18 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   );
   const smartCutRuleCounts = useMemo(
     () => ({
-      filler: activeSmartCutRuleRanges.filter((range) => range.kind === "filler").length,
-      repeated: activeSmartCutRuleRanges.filter((range) => range.kind === "repeated").length,
-      pause: activeSmartCutRuleRanges.filter((range) => range.kind === "pause").length,
+      filler: smartCutRules.fillerEnabled ? smartCutRuleAnalysis.filler.filter((range) => !range.protected).length : 0,
+      repeated: smartCutRules.repeatedEnabled ? smartCutRuleAnalysis.repeated.filter((range) => !range.protected).length : 0,
+      pause: smartCutRules.pauseEnabled ? smartCutRuleAnalysis.pause.filter((range) => !range.protected).length : 0,
       smartDelete: pendingSmartDeleteRanges.length,
     }),
-    [activeSmartCutRuleRanges, pendingSmartDeleteRanges.length],
+    [pendingSmartDeleteRanges.length, smartCutRuleAnalysis, smartCutRules],
   );
   const smartCutRulePreviews = useMemo(
     () => buildSmartCutRulePreviews(smartCutRuleAnalysis, smartCutRules, sourceTranscriptSubtitles),
     [smartCutRuleAnalysis, smartCutRules, sourceTranscriptSubtitles],
   );
-  const activeSmartCutRuleRangeCount = activeSmartCutRuleRanges.length;
+  const activeSmartCutRuleRangeCount = smartCutRuleCounts.filler + smartCutRuleCounts.repeated + smartCutRuleCounts.pause;
   const pendingSmartDeleteRangeCount = pendingSmartDeleteRanges.length;
 
   const totalOutputDuration = projection.totalDuration;
@@ -7339,7 +7451,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                     <strong>剪辑规则</strong>
                     <span>{smartCutRulesExpanded ? "收起" : "展开"}</span>
                   </button>
-                  <span className="status-pill pending">规则命中 待剪 {activeSmartCutRuleRangeCount}</span>
+                  <span className="status-pill pending">规则候选 {activeSmartCutRuleRangeCount}</span>
                   {pendingSmartDeleteRangeCount ? <span className="status-pill running">智能待确认 {pendingSmartDeleteRangeCount}</span> : null}
                 </div>
                 {smartCutRulesExpanded ? (
@@ -7462,7 +7574,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                         ))}
                       </div>
                     ) : null}
-                    <div className="manual-editor-rule-memory">划线内容会进入待剪区间；智能废片只作为点状建议标记，必须逐条确认或撤销后才允许进入最终剪辑决策。规则设置已全局记忆。</div>
+                    <div className="manual-editor-rule-memory">规则候选只用于定位复核，不会直接进入待剪区间；智能废片必须逐条确认后才允许进入最终剪辑决策。规则设置已全局记忆。</div>
                   </>
                 ) : null}
               </div>

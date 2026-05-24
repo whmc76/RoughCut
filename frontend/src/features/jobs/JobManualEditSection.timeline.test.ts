@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   applySmartCutRuleRangesToSegments,
   autoSmartCutRuleRanges,
+  blockAutoSmartCutRangesForSmartDeleteReview,
   buildManualEditChangeList,
   buildSourceTranscriptProjectedBaseline,
   buildSmartCutRuleAnalysis,
@@ -316,6 +317,69 @@ describe("manual editor timeline mapping", () => {
     expect(projection.remapped[0].end_time).toBeCloseTo(4, 3);
   });
 
+  it("does not auto-gray rule cuts inside an unconfirmed smart delete review range", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 10, end_time: 11, text_final: "前一句" },
+        { index: 1, start_time: 13, end_time: 14, text_final: "后一句" },
+      ],
+      rules,
+      [{ start: 11, end: 13, duration_sec: 2, source: "word_timing" }],
+      [{ start: 10, end: 14, duration_sec: 4, reason: "timing_trim", source: "manual_editor_rule_candidate" }],
+    );
+    const autoRanges = autoSmartCutRuleRanges(analysis, rules);
+    const blockedAutoRanges = blockAutoSmartCutRangesForSmartDeleteReview(
+      autoRanges,
+      analysis.smartDelete,
+      rules,
+      [],
+    );
+    const nextSegments = applySmartCutRuleRangesToSegments(
+      [{ start: 10, end: 14 }],
+      blockedAutoRanges,
+      smartCutRuleManagedRanges(analysis),
+      14,
+    );
+
+    expect(autoRanges).toEqual([{ start: 11, end: 13, kind: "pause" }]);
+    expect(blockedAutoRanges).toEqual([]);
+    expect(smartDeleteSuggestionRanges(analysis, rules)).toHaveLength(1);
+    expect(nextSegments).toEqual([{ start: 10, end: 14 }]);
+  });
+
+  it("allows confirmed smart delete review ranges to enter the actual cut timeline", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 10, end_time: 11, text_final: "前一句" },
+        { index: 1, start_time: 13, end_time: 14, text_final: "后一句" },
+      ],
+      rules,
+      [{ start: 11, end: 13, duration_sec: 2, source: "word_timing" }],
+      [{ start: 10, end: 14, duration_sec: 4, reason: "timing_trim", source: "manual_editor_rule_candidate" }],
+    );
+    const confirmed = [{ start: 10, end: 14 }];
+    const blockedAutoRanges = blockAutoSmartCutRangesForSmartDeleteReview(
+      autoSmartCutRuleRanges(analysis, rules),
+      analysis.smartDelete,
+      rules,
+      confirmed,
+    );
+    const nextSegments = applySmartCutRuleRangesToSegments(
+      [{ start: 10, end: 14 }],
+      [
+        ...blockedAutoRanges,
+        ...confirmed.map((range) => ({ ...range, kind: "smart_delete" as const })),
+      ],
+      smartCutRuleManagedRanges(analysis),
+      14,
+    );
+
+    expect(blockedAutoRanges).toEqual([{ start: 11, end: 13, kind: "pause" }]);
+    expect(nextSegments).toEqual([{ start: 10, end: 10.08 }, { start: 13.92, end: 14 }]);
+  });
+
   it("does not split Chinese words when projected subtitle fragments cross a cut boundary", () => {
     const projection = remapProjectedSubtitlesFromBaseTimeline(
       [
@@ -374,7 +438,7 @@ describe("manual editor timeline mapping", () => {
     expect(tokens.filter((token) => token.kind === "char").map((token) => token.text).join("")).toBe("这一段其实还有完整语音内容");
   });
 
-  it("lets long audio VAD pauses become smart-cut candidates without word timings", () => {
+  it("does not auto-cut audio VAD pauses inside subtitle text without trusted word timings", () => {
     const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
     const analysis = buildSmartCutRuleAnalysis(
       [{ index: 0, start_time: 0, end_time: 4, text_final: "收到了第三次" }],
@@ -382,7 +446,7 @@ describe("manual editor timeline mapping", () => {
       [{ start: 0.8, end: 1.8, duration_sec: 1.0, source: "audio_vad" }],
     );
 
-    expect(analysis.pause).toEqual([{ start: 0.8, end: 1.8, kind: "pause" }]);
+    expect(analysis.pause).toEqual([]);
   });
 
   it("keeps inferred transcript punctuation selectable as a source boundary range", () => {
@@ -1140,6 +1204,31 @@ describe("manual editor timeline mapping", () => {
     expect(autoSmartCutRuleRanges(analysis, { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" })).toEqual([]);
   });
 
+  it("does not auto-cut audio silence inside subtitle text when word timings are stale", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 8,
+          start_time: 29.894,
+          end_time: 34.609,
+          text_final: "购难度直线上升没想",
+          words: [
+            { word: "也", start: 30.88, end: 30.96 },
+            { word: "是", start: 30.96, end: 31.28 },
+            { word: "啊", start: 31.28, end: 31.44 },
+            { word: "我", start: 31.44, end: 31.6 },
+          ],
+        },
+      ],
+      rules,
+      [{ start: 29.72, end: 30.78, duration_sec: 1.06, source: "audio_vad" }],
+    );
+
+    expect(analysis.pause).toEqual([]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([]);
+  });
+
   it("does not auto-cut a VAD pause that overlaps orphan transcript speech", () => {
     const analysis = buildSmartCutRuleAnalysis(
       [
@@ -1361,6 +1450,74 @@ describe("manual editor timeline mapping", () => {
 
     expect(pauses).toEqual([{ start: 10.98, end: 12.02, duration_sec: 1.04, source: "word_gap" }]);
     expect(tokens.some((token) => token.kind === "pause" && token.text === "[...,1.0s]")).toBe(true);
+  });
+
+  it("ignores word timing gaps when the words belong to a different subtitle row", () => {
+    const subtitles = [
+      {
+        index: 7,
+        start_time: 25.178,
+        end_time: 29.894,
+        text_final: "了难上加难导致这个抢",
+        words: [
+          { word: "没", start: 26.32, end: 26.4 },
+          { word: "想", start: 26.4, end: 26.56 },
+          { word: "到", start: 26.56, end: 26.72 },
+          { word: "啊", start: 26.72, end: 26.96 },
+          { word: "N", start: 27.467, end: 27.538 },
+          { word: "O", start: 27.538, end: 27.609 },
+          { word: "C", start: 27.609, end: 27.68 },
+        ],
+      },
+      {
+        index: 8,
+        start_time: 29.894,
+        end_time: 34.609,
+        text_final: "购难度直线上升没想",
+        words: [
+          { word: "也", start: 30.88, end: 30.96 },
+          { word: "是", start: 30.96, end: 31.28 },
+          { word: "啊", start: 31.28, end: 31.44 },
+          { word: "我", start: 31.44, end: 31.6 },
+        ],
+      },
+    ];
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+
+    expect(wordTimingPauseIntervals(subtitles)).toEqual([]);
+    expect(buildSmartCutRuleAnalysis(subtitles, rules, [{ start: 29.72, end: 30.72, duration_sec: 1, source: "word_gap" }]).pause).toEqual([]);
+  });
+
+  it("falls back to estimated transcript timing when backend alignment is implausibly compressed", () => {
+    const tokens = buildTranscriptTokens(
+      [
+        {
+          index: 7,
+          start_time: 25.178,
+          end_time: 29.894,
+          text_final: "了难上加难导致这个抢",
+          alignment_tokens: [
+            { text: "了", start: 28.88, end: 28.881 },
+            { text: "难", start: 28.881, end: 28.882 },
+            { text: "上", start: 28.882, end: 28.883 },
+            { text: "加", start: 28.883, end: 28.884 },
+            { text: "难", start: 28.884, end: 28.885 },
+            { text: "导", start: 28.885, end: 28.886 },
+            { text: "致", start: 28.886, end: 28.887 },
+            { text: "这", start: 28.88, end: 29.04 },
+            { text: "个", start: 29.04, end: 29.041 },
+            { text: "抢", start: 29.041, end: 29.042 },
+          ],
+        },
+      ],
+      [{ start: 25.178, end: 29.894 }],
+      [],
+    );
+
+    const speechTokens = tokens.filter((token) => token.kind === "char");
+    expect(speechTokens[0]).toEqual(expect.objectContaining({ text: "了", timingSource: "estimated" }));
+    expect(speechTokens[0]?.start).toBe(25.178);
+    expect(speechTokens.some((token) => token.end <= token.start + 0.006)).toBe(false);
   });
 
   it("uses audio VAD to bound untranscribed ASR gaps but still displays nearby fragments as one pause chip", () => {
