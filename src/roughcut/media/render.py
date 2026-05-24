@@ -96,6 +96,28 @@ def _audio_encode_args(*, sample_rate: int | None = None, channels: int | None =
     return args
 
 
+def _bounded_positive_int(value: Any, *, upper: int = 256) -> int:
+    try:
+        resolved = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(upper, resolved))
+
+
+def _ffmpeg_filter_thread_args() -> list[str]:
+    threads = _bounded_positive_int(getattr(get_settings(), "render_ffmpeg_filter_threads", 0), upper=128)
+    return ["-filter_threads", str(threads)] if threads > 0 else []
+
+
+def _ffmpeg_encode_thread_args() -> list[str]:
+    threads = _bounded_positive_int(getattr(get_settings(), "render_ffmpeg_threads", 0), upper=256)
+    return ["-threads", str(threads)] if threads > 0 else []
+
+
+def _ffmpeg_base_cmd() -> list[str]:
+    return ["ffmpeg", "-y", *_ffmpeg_filter_thread_args()]
+
+
 def _delivery_color_metadata_args() -> list[str]:
     return [
         "-colorspace",
@@ -173,6 +195,7 @@ def _video_encode_args(*, prefer_hardware: bool = True) -> list[str]:
         str(settings.render_cpu_preset or "veryfast"),
         "-crf",
         str(int(settings.render_crf or 19)),
+        *_ffmpeg_encode_thread_args(),
         "-pix_fmt",
         "yuv420p",
     ]
@@ -627,8 +650,7 @@ async def render_video(
     filter_complex = ";".join(filter_parts)
 
     cmd = [
-        "ffmpeg",
-        "-y",
+        *_ffmpeg_base_cmd(),
         "-noautorotate",
         "-i",
         str(source_path),
@@ -1549,8 +1571,7 @@ async def _apply_timed_overlays_to_video(
         return output_path
 
     cmd = [
-        "ffmpeg",
-        "-y",
+        *_ffmpeg_base_cmd(),
         "-i",
         str(source_path),
         "-filter_complex",
@@ -2209,8 +2230,7 @@ async def _apply_insert_clip(
         filter_parts.append(f"[{current_video}][{current_audio}][v2][a2]concat=n=2:v=1:a=1[vout][aout]")
     filter_complex = ";".join(filter_parts)
     cmd = [
-        "ffmpeg",
-        "-y",
+        *_ffmpeg_base_cmd(),
         "-i",
         str(source_path),
         "-i",
@@ -2369,7 +2389,7 @@ async def _apply_intro_outro(
     if len(prepared_paths) == 1:
         return source_path
 
-    cmd = ["ffmpeg", "-y"]
+    cmd = _ffmpeg_base_cmd()
     for path in prepared_paths:
         cmd.extend(["-i", str(path)])
 
@@ -2568,7 +2588,7 @@ async def _prepare_multi_track_music_loop(
     if len(unique_paths) == 1:
         return unique_paths[0]
 
-    cmd = ["ffmpeg", "-y"]
+    cmd = _ffmpeg_base_cmd()
     for path in unique_paths:
         cmd.extend(["-i", str(path)])
     concat_inputs = "".join(f"[{index}:a]" for index in range(len(unique_paths)))
@@ -2622,7 +2642,7 @@ async def _prepare_packaging_clip(
         video_filters.extend([f"fps={_ffmpeg_fps_expr(target_fps)}", "settb=AVTB"])
     scale_filter = ",".join(video_filters)
 
-    cmd = ["ffmpeg", "-y", "-i", str(source_path)]
+    cmd = [*_ffmpeg_base_cmd(), "-i", str(source_path)]
     if not has_audio:
         cmd.extend(
             [
@@ -2670,8 +2690,7 @@ async def _concat_prepared_bookends(
     ]
     concat_list.write_text("\n".join(concat_lines), encoding="utf-8")
     cmd = [
-        "ffmpeg",
-        "-y",
+        *_ffmpeg_base_cmd(),
         "-f",
         "concat",
         "-safe",
@@ -2729,8 +2748,7 @@ async def _normalize_rendered_output(
     if info["rotation_cw"] != 0:
         stripped = output_path.with_name(f"{output_path.stem}.rotation0{output_path.suffix}")
         strip_cmd = [
-            "ffmpeg",
-            "-y",
+            *_ffmpeg_base_cmd(),
             "-display_rotation:v:0",
             "0",
             "-i",
@@ -2753,8 +2771,7 @@ async def _normalize_rendered_output(
         baked = output_path.with_name(f"{output_path.stem}.normalized{output_path.suffix}")
         bake_filter = _rotation_filter_for_cw(info["rotation_cw"])
         bake_cmd = [
-            "ffmpeg",
-            "-y",
+            *_ffmpeg_base_cmd(),
             "-noautorotate",
             "-i",
             str(output_path),

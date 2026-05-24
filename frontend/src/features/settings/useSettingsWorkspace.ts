@@ -89,6 +89,8 @@ function buildSettingsForm(config: NonNullable<ReturnType<typeof api.getConfig> 
     max_upload_size_mb: config.max_upload_size_mb,
     max_video_duration_sec: config.max_video_duration_sec,
     ffmpeg_timeout_sec: config.ffmpeg_timeout_sec,
+    render_ffmpeg_threads: config.render_ffmpeg_threads,
+    render_ffmpeg_filter_threads: config.render_ffmpeg_filter_threads,
     transcribe_runtime_timeout_sec: config.transcribe_runtime_timeout_sec,
     fact_check_enabled: config.fact_check_enabled,
     auto_confirm_content_profile: config.auto_confirm_content_profile,

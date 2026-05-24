@@ -829,7 +829,28 @@ function normalizePreviewVideoSources(previewAssets: JobManualEditPreviewAssets 
     }
     return sources;
   }
-  return sourceUrl ? [{ url: sourceUrl, type: undefined }] : [];
+  const assetStatus = String(previewAssets?.status || "").trim();
+  const mayUseOriginalFallback = Boolean(previewAssets && (previewAssets.error || assetStatus === "failed"));
+  return sourceUrl && mayUseOriginalFallback ? [{ url: sourceUrl, type: undefined }] : [];
+}
+
+function previewUnavailableMessage(
+  previewAssets: JobManualEditPreviewAssets | undefined,
+  sourceUrl: string | null | undefined,
+) {
+  if (!sourceUrl) {
+    return "当前机器拿不到原片本地路径，暂时不能内嵌预览，但仍可调整并保存时间线。";
+  }
+  if (!previewAssets) {
+    return "正在启动轻量视频代理，避免直接加载完整原片。";
+  }
+  if (previewAssets.error || previewAssets.status === "failed") {
+    return "视频代理生成失败，已允许使用完整原片兜底；如果仍然加载缓慢，请重新生成预览资产或检查 ffmpeg。";
+  }
+  if (previewAssets.warming || previewAssets.status === "warming" || previewAssets.status === "missing") {
+    return "正在生成轻量视频代理，完成后会自动启用预览。";
+  }
+  return "正在等待视频代理文件可用。";
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -4694,6 +4715,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     [previewAssets, session.source_url],
   );
   const previewVideoUrl = previewVideoSources[0]?.url ?? null;
+  const previewDisabledMessage = previewUnavailableMessage(previewAssets, session.source_url);
   const previewVideoSourceKey = previewVideoSources.map((source) => `${source.url}:${source.type || ""}`).join("|") || "manual-preview";
   const previewVideoUsingProxy = Boolean(previewAssets?.video_url || previewAssets?.video_sources?.length);
   const waveformUrl = previewAssets?.ready && previewAssets.audio_url ? previewAssets.audio_url : "";
@@ -6883,7 +6905,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
           <div className="manual-editor-preview-main">
             <div className="manual-editor-video-column">
               {previewDisabled ? (
-                <div className="notice">当前机器拿不到原片本地路径，暂时不能内嵌预览，但仍可调整并保存时间线。</div>
+                <div className="notice">{previewDisabledMessage}</div>
               ) : (
                 <div
                   ref={previewDockRef}

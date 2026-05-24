@@ -69,6 +69,10 @@ from roughcut.media.output import (
     load_cover_selection_summary,
     write_srt_file,
 )
+from roughcut.media.manual_editor_assets import (
+    ensure_manual_editor_preview_assets,
+    mark_manual_editor_preview_assets_queued,
+)
 from roughcut.media.scene import detect_scenes
 from roughcut.media.subtitle_text import (
     clean_final_subtitle_text,
@@ -5008,6 +5012,99 @@ async def _resolve_source(
     raise FileNotFoundError(job.source_path)
 
 
+def _resolve_local_preview_source(job: Job) -> Path | None:
+    source_path = Path(str(job.source_path or "")).expanduser()
+    if source_path.exists() and source_path.is_file():
+        return source_path
+    resolve_path = getattr(get_storage(), "resolve_path", None)
+    if callable(resolve_path):
+        resolved = resolve_path(str(job.source_path or ""))
+        if resolved.exists() and resolved.is_file():
+            return resolved
+    return None
+
+
+async def _warm_manual_editor_preview_assets_for_job(
+    session,
+    *,
+    job: Job,
+    step: JobStep,
+    duration_sec: float,
+    content_profile: dict[str, Any],
+) -> dict[str, Any] | None:
+    if str(getattr(job, "job_flow_mode", "") or "").strip() != "smart_assist":
+        return None
+    source_path = _resolve_local_preview_source(job)
+    if source_path is None:
+        await _set_step_progress(
+            session,
+            step,
+            detail="剪辑决策已生成；源片不在本机可直接读取路径，跳过手动预览代理预热",
+            progress=0.94,
+            metadata_updates={"manual_editor_preview_assets": {"status": "skipped", "reason": "source_not_local"}},
+        )
+        return None
+
+    output_project_dir = get_output_project_dir(
+        str(job.source_name or ""),
+        job.created_at,
+        content_profile=content_profile,
+        output_dir=job.output_dir,
+    )
+    asset_dir = output_project_dir / "manual-editor"
+    queued_payload = mark_manual_editor_preview_assets_queued(job.id, asset_dir=asset_dir)
+    await _set_step_progress(
+        session,
+        step,
+        detail="预生成手动调整轻量预览代理",
+        progress=0.93,
+        metadata_updates={"manual_editor_preview_assets": queued_payload},
+    )
+    try:
+        async with _maintain_step_heartbeat(step, detail="预生成手动调整轻量预览代理", progress=0.93):
+            payload = await asyncio.to_thread(
+                ensure_manual_editor_preview_assets,
+                job_id=job.id,
+                source_path=source_path,
+                duration_sec=float(duration_sec or 0.0),
+                asset_dir=asset_dir,
+            )
+    except Exception as exc:
+        logger.exception("Manual editor preview asset prewarm failed for job %s", job.id)
+        await _set_step_progress(
+            session,
+            step,
+            detail="轻量预览代理预生成失败，进入编辑器时仍可重试生成",
+            progress=0.96,
+            metadata_updates={
+                "manual_editor_preview_assets": {
+                    "status": "failed",
+                    "stage": "failed",
+                    "error": str(exc)[-500:],
+                }
+            },
+        )
+        return None
+    await _set_step_progress(
+        session,
+        step,
+        detail="手动调整轻量预览代理已生成",
+        progress=0.98,
+        metadata_updates={
+            "manual_editor_preview_assets": {
+                "status": str(payload.get("status") or "ready"),
+                "stage": str(payload.get("stage") or "ready"),
+                "progress": float(payload.get("progress") or 1.0),
+                "asset_version": int(payload.get("asset_version") or 0),
+                "video_ready": bool(payload.get("video_ready")),
+                "audio_ready": bool(payload.get("audio_ready")),
+                "thumbnail_count": len(list(payload.get("thumbnail_items") or [])),
+            }
+        },
+    )
+    return payload
+
+
 async def _resolve_storage_reference(
     reference: str,
     *,
@@ -7900,6 +7997,13 @@ async def run_edit_plan(job_id: str) -> dict:
             )
         )
 
+        await _warm_manual_editor_preview_assets_for_job(
+            session,
+            job=job,
+            step=step,
+            duration_sec=float(duration or 0.0),
+            content_profile=content_profile,
+        )
         await _set_step_progress(session, step, detail="剪辑决策已生成", progress=1.0)
         await session.commit()
         return {

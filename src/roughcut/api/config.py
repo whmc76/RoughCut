@@ -138,6 +138,8 @@ class ConfigOut(BaseModel):
     max_upload_size_mb: int
     max_video_duration_sec: int
     ffmpeg_timeout_sec: int
+    render_ffmpeg_threads: int
+    render_ffmpeg_filter_threads: int
     transcribe_runtime_timeout_sec: int
     allowed_extensions: list[str]
     preferred_ui_language: str
@@ -396,6 +398,8 @@ class ConfigPatch(BaseModel):
     max_upload_size_mb: int | None = None
     max_video_duration_sec: int | None = None
     ffmpeg_timeout_sec: int | None = None
+    render_ffmpeg_threads: int | None = None
+    render_ffmpeg_filter_threads: int | None = None
     transcribe_runtime_timeout_sec: int | None = None
     allowed_extensions: list[str] | None = None
     output_dir: str | None = None
@@ -535,6 +539,8 @@ def get_config():
         max_upload_size_mb=s.max_upload_size_mb,
         max_video_duration_sec=s.max_video_duration_sec,
         ffmpeg_timeout_sec=s.ffmpeg_timeout_sec,
+        render_ffmpeg_threads=s.render_ffmpeg_threads,
+        render_ffmpeg_filter_threads=s.render_ffmpeg_filter_threads,
         transcribe_runtime_timeout_sec=s.transcribe_runtime_timeout_sec,
         allowed_extensions=s.allowed_extensions,
         preferred_ui_language=s.preferred_ui_language,

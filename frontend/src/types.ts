@@ -1300,6 +1300,8 @@ export type Config = {
   max_upload_size_mb: number;
   max_video_duration_sec: number;
   ffmpeg_timeout_sec: number;
+  render_ffmpeg_threads: number;
+  render_ffmpeg_filter_threads: number;
   transcribe_runtime_timeout_sec: number;
   allowed_extensions: string[];
   preferred_ui_language: string;

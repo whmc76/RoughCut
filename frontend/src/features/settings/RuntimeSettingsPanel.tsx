@@ -28,6 +28,8 @@ export function RuntimeSettingsPanel({ form, runtimeEnvironment, serviceStatus, 
   const maxUploadSizeMb = Number(form.max_upload_size_mb ?? 2048);
   const maxVideoDurationSec = Number(form.max_video_duration_sec ?? 7200);
   const ffmpegTimeoutSec = Number(form.ffmpeg_timeout_sec ?? 600);
+  const renderFfmpegThreads = Number(form.render_ffmpeg_threads ?? 0);
+  const renderFfmpegFilterThreads = Number(form.render_ffmpeg_filter_threads ?? 0);
   const transcribeRuntimeTimeoutSec = Number(form.transcribe_runtime_timeout_sec ?? 900);
   const transcriptionChunkingEnabled = Boolean(form.transcription_chunking_enabled ?? true);
   const transcriptionChunkThresholdSec = Number(form.transcription_chunk_threshold_sec ?? 600);
@@ -81,7 +83,7 @@ export function RuntimeSettingsPanel({ form, runtimeEnvironment, serviceStatus, 
           <strong>{getServiceSummary(serviceStatus)}</strong>
           <div className="muted">当前输出目录：{String(runtimeEnvironment?.output_dir ?? DEFAULT_OUTPUT_DIR)}</div>
           <div className="muted">
-            上传 {maxUploadSizeMb} MB · 视频 {maxVideoDurationSec} 秒 · FFmpeg {ffmpegTimeoutSec} 秒 · 转写 {transcribeRuntimeTimeoutSec} 秒
+            上传 {maxUploadSizeMb} MB · 视频 {maxVideoDurationSec} 秒 · FFmpeg {ffmpegTimeoutSec} 秒 · 渲染线程 {renderFfmpegThreads || "自动"} · 转写 {transcribeRuntimeTimeoutSec} 秒
           </div>
         </article>
       </div>
@@ -147,6 +149,18 @@ export function RuntimeSettingsPanel({ form, runtimeEnvironment, serviceStatus, 
               type="number"
               value={String(ffmpegTimeoutSec)}
               onChange={(event) => onChange("ffmpeg_timeout_sec", Number(event.target.value))}
+            />
+            <TextField
+              label="渲染编码线程数"
+              type="number"
+              value={String(renderFfmpegThreads)}
+              onChange={(event) => onChange("render_ffmpeg_threads", Number(event.target.value))}
+            />
+            <TextField
+              label="渲染滤镜线程数"
+              type="number"
+              value={String(renderFfmpegFilterThreads)}
+              onChange={(event) => onChange("render_ffmpeg_filter_threads", Number(event.target.value))}
             />
             <TextField
               label="转写运行时超时秒数"

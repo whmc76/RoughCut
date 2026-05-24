@@ -522,6 +522,8 @@ class Settings(BaseSettings):
     render_nvenc_preset: str = "p5"             # NVENC preset balancing speed/quality
     render_nvenc_cq: int = 21                   # NVENC constant quality target
     render_audio_bitrate: str = "192k"
+    render_ffmpeg_threads: int = 0              # 0 lets ffmpeg choose; set >0 to cap encode threads
+    render_ffmpeg_filter_threads: int = 0       # 0 lets ffmpeg choose; set >0 to cap filter graph threads
     allowed_extensions: list[str] = [".mp4", ".mov", ".mkv", ".avi", ".webm"]
 
     # Output
