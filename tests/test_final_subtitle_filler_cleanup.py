@@ -9,6 +9,7 @@ from roughcut.media.subtitle_text import (
     clean_final_subtitle_text,
     clean_subtitle_payloads,
     normalize_contextual_noc_alias_text,
+    normalize_contextual_unboxing_sale_text,
     normalize_editable_subtitle_text,
     normalize_source_transcript_text,
     subtitle_display_suppression_reason,
@@ -73,12 +74,27 @@ def test_contextual_noc_alias_correction_requires_noc_context() -> None:
     ) == "这个手机NFC功能"
 
 
+def test_contextual_unboxing_sale_correction_requires_sale_context() -> None:
+    context = "开箱NOC MT34 抢购 发售 一刀难求"
+
+    assert normalize_contextual_unboxing_sale_text("最近这个发烧啊", context_text=context) == "最近这个发售啊"
+    assert normalize_contextual_unboxing_sale_text("两次发烧都是极限赶涨", context_text=context) == "两次发售都是极限赶涨"
+    assert normalize_contextual_unboxing_sale_text("这个发烧友很懂", context_text=context) == "这个发烧友很懂"
+    assert normalize_contextual_unboxing_sale_text("真的发烧了", context_text="体温记录") == "真的发烧了"
+
+
 def test_normalize_editable_subtitle_text_collapses_function_word_asr_prefix_stutter() -> None:
     assert normalize_editable_subtitle_text("纸纸箱了之类") == "纸箱了之类"
     assert normalize_editable_subtitle_text("既既能这个切菜，又又很帅") == "既能这个切菜，又很帅"
     assert normalize_editable_subtitle_text("尾部呢，还有有一个挂孔") == "尾部呢，还有一个挂孔"
     assert normalize_editable_subtitle_text("因为我我应该是指甲有点短") == "因为我应该是指甲有点短"
     assert normalize_editable_subtitle_text("开开箱，轻轻这么一指，试试它") == "开开箱，轻轻这么一指，试试它"
+
+
+def test_normalize_editable_subtitle_text_collapses_overlapping_phrase_stutter() -> None:
+    assert normalize_editable_subtitle_text("要手落在这个防滑防防滑纹上") == "要手落在这个防滑纹上"
+    assert normalize_editable_subtitle_text("最近这个发售发发售啊太难") == "最近这个发售啊太难"
+    assert normalize_editable_subtitle_text("一点点手法") == "一点点手法"
 
 
 def test_normalize_source_transcript_text_preserves_real_spoken_fillers_and_interjections() -> None:

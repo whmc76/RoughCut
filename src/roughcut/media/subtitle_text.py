@@ -64,6 +64,8 @@ _FLASHLIGHT_MODEL_ALIAS_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
 )
 _NOC_CONTEXT_PATTERN = re.compile(r"(?<![A-Za-z0-9])NOC(?![A-Za-z0-9])", re.IGNORECASE)
 _NFC_TOKEN_PATTERN = re.compile(r"(?<![A-Za-z0-9])NFC(?![A-Za-z0-9])", re.IGNORECASE)
+_SALE_CONTEXT_PATTERN = re.compile(r"NOC|MT34|开箱|抢购|抢到|发售|抽签|限量|一刀难求|热门|售罄|年前|小玩具", re.IGNORECASE)
+_MISHEARD_SALE_PATTERN = re.compile(r"发烧(?!友)")
 
 
 def clean_final_subtitle_text(text: object) -> str:
@@ -107,6 +109,16 @@ def normalize_contextual_noc_alias_text(text: object, *, context_text: object = 
     if not normalized or not _NOC_CONTEXT_PATTERN.search(str(context_text or "")):
         return normalized
     return _NFC_TOKEN_PATTERN.sub("NOC", normalized)
+
+
+def normalize_contextual_unboxing_sale_text(text: object, *, context_text: object = "") -> str:
+    normalized = str(text or "")
+    if not normalized or "发烧" not in normalized:
+        return normalized
+    combined = f"{context_text}\n{normalized}"
+    if not _SALE_CONTEXT_PATTERN.search(combined):
+        return normalized
+    return _MISHEARD_SALE_PATTERN.sub("发售", normalized)
 
 
 def subtitle_display_suppression_reason(text: object) -> str:
@@ -255,10 +267,12 @@ def _collapse_asr_stutter_text(text: str) -> str:
     normalized = _collapse_repeated_mixed_anchor_noise(normalized)
     normalized = _collapse_partial_prefix_stutter_noise(normalized)
     normalized = _collapse_function_prefix_stutter_noise(normalized)
+    normalized = _collapse_overlapping_cjk_prefix_stutter_noise(normalized)
     normalized = _collapse_repeated_cjk_phrase_noise(normalized)
     normalized = _collapse_repeated_cjk_char_noise(normalized)
     normalized = _collapse_partial_prefix_stutter_noise(normalized)
     normalized = _collapse_function_prefix_stutter_noise(normalized)
+    normalized = _collapse_overlapping_cjk_prefix_stutter_noise(normalized)
     return _collapse_repeated_cjk_phrase_noise(normalized)
 
 
@@ -346,6 +360,19 @@ def _collapse_repeated_cjk_phrase_noise(text: str) -> str:
         pattern = re.compile(rf"([\u4e00-\u9fff]{{{unit_len}}})\1+")
         result = pattern.sub(
             lambda match: match.group(0) if match.group(1) in {"没有", "工业"} else match.group(1),
+            result,
+        )
+    return result
+
+
+def _collapse_overlapping_cjk_prefix_stutter_noise(text: str) -> str:
+    result = str(text or "")
+    for unit_len in range(4, 1, -1):
+        pattern = re.compile(rf"([\u4e00-\u9fff])([\u4e00-\u9fff]{{{unit_len - 1}}})\1\1\2")
+        result = pattern.sub(
+            lambda match: f"{match.group(1)}{match.group(2)}"
+            if f"{match.group(1)}{match.group(2)}" != "没有"
+            else match.group(0),
             result,
         )
     return result

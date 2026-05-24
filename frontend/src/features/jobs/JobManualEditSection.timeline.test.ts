@@ -279,6 +279,17 @@ describe("manual editor timeline mapping", () => {
     expect(projection.remapped[1].end_time).toBeCloseTo(3, 3);
   });
 
+  it("rejects projected subtitles that drop kept source words like this-also", () => {
+    const source = [
+      { index: 0, start_time: 0, end_time: 5, text_final: "最后的一款小玩具啊这个也是耗尽了我这次的欧气啊" },
+    ];
+    const projected = [
+      { index: 0, start_time: 0, end_time: 5, text_final: "最后的一款小玩具啊也是耗尽了我这次的欧气啊" },
+    ];
+
+    expect(projectedTranscriptMissesKeptSpeech(projected, source, [{ start: 0, end: 5 }])).toBe(true);
+  });
+
   it("trims projected subtitle text when a leading filler is cut from the source timeline", () => {
     const rules = { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "呃" };
     const analysis = buildSmartCutRuleAnalysis(
@@ -487,6 +498,22 @@ describe("manual editor timeline mapping", () => {
     expect(normalized[1].text_final).toBe("值来说它还是不错");
   });
 
+  it("trims single-character duplicate projection boundaries at zero gap", () => {
+    const normalized = normalizeAdjacentSubtitleTextOverlaps([
+      { index: 0, start_time: 10, end_time: 12, text_final: "这个一把是EDC37是" },
+      { index: 1, start_time: 12, end_time: 15, text_final: "是之前我一直经常会EDC用的" },
+      { index: 2, start_time: 15, end_time: 16, text_final: "一根线一个手绳没啥好说电池" },
+      { index: 3, start_time: 16, end_time: 17, text_final: "池然后一根线" },
+    ]);
+
+    expect(normalized.map((item) => item.text_final)).toEqual([
+      "这个一把是EDC37",
+      "是之前我一直经常会EDC用的",
+      "一根线一个手绳没啥好说电",
+      "池然后一根线",
+    ]);
+  });
+
   it("does not fuzzy-trim similar sentence boundaries when timestamps do not overlap", () => {
     const normalized = normalizeAdjacentSubtitleTextOverlaps([
       { index: 0, start_time: 10, end_time: 11, text_final: "整体来说" },
@@ -511,6 +538,30 @@ describe("manual editor timeline mapping", () => {
 
     expect(projectedTranscriptMissesKeptSpeech(projected, source, [{ start: 1.32, end: 121.5 }])).toBe(true);
     expect(projectedTranscriptMissesKeptSpeech(projected, source, [{ start: 1.32, end: 100.6 }, { start: 113.82, end: 121.5 }])).toBe(false);
+  });
+
+  it("rejects projected transcript text that drops real source words inside a kept range", () => {
+    const projected = [
+      { index: 0, start_time: 0, end_time: 3, text_final: "最后的一款小玩具啊也是耗尽了我这次的欧气啊" },
+    ];
+    const source = [
+      { index: 0, start_time: 0, end_time: 3, text_final: "最后的一款小玩具啊这个也是耗尽了我这次的欧气啊" },
+    ];
+
+    expect(projectedTranscriptMissesKeptSpeech(projected, source, [{ start: 0, end: 3 }])).toBe(true);
+  });
+
+  it("rejects projected transcript text that is noisier than the source row", () => {
+    const projected = [
+      { index: 0, start_time: 0, end_time: 2, text_final: "这个一把是EDC37是是之前我一直用的" },
+      { index: 1, start_time: 2, end_time: 4, text_final: "那支电池池然后一根线" },
+    ];
+    const source = [
+      { index: 0, start_time: 0, end_time: 2, text_final: "这个一把是EDC37是之前我一直用的" },
+      { index: 1, start_time: 2, end_time: 4, text_final: "那支电池然后一根线" },
+    ];
+
+    expect(projectedTranscriptMissesKeptSpeech(projected, source, [{ start: 0, end: 4 }])).toBe(true);
   });
 
   it("keeps full-text transcript timing and source text on the source timeline", () => {
@@ -1117,6 +1168,31 @@ describe("manual editor timeline mapping", () => {
     expect(autoSmartCutRuleRanges(analysis, { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯" })).toEqual([
       { start: 0, end: 0.4, kind: "filler" },
     ]);
+  });
+
+  it("matches configured single-character particles such as ah in full transcript rules", () => {
+    const rules = { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "啊" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 0,
+          start_time: 0,
+          end_time: 2,
+          text_final: "小玩具啊这个也是",
+          words: [
+            { word: "小玩具", start: 0, end: 0.5 },
+            { word: "啊", start: 0.5, end: 0.7 },
+            { word: "这个", start: 0.7, end: 1.1 },
+            { word: "也是", start: 1.1, end: 1.6 },
+          ],
+        },
+      ],
+      rules,
+      [],
+    );
+
+    expect(analysis.filler).toEqual([{ start: 0.5, end: 0.7, kind: "filler" }]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([{ start: 0.5, end: 0.7, kind: "filler" }]);
   });
 
   it("detects repeated phrase retakes beyond short duplicated words", () => {

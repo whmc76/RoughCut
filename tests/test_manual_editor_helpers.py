@@ -563,6 +563,60 @@ def test_manual_editor_projection_source_annotation_uses_output_mapping() -> Non
     assert annotated[0]["source_indexes"][0] == 54
 
 
+def test_manual_editor_split_source_fragments_get_unique_source_indexes() -> None:
+    rows = _manual_editor_split_long_subtitle_rows(
+        [
+            {
+                "index": 0,
+                "source_index": 0,
+                "source_indexes": [0],
+                "start_time": 0.0,
+                "end_time": 18.0,
+                "text_final": "今天终于收到了年前的最后的一款小玩具啊这个也是耗尽了我这次的欧气啊",
+                "transcript_text": "今天终于收到了年前的最后的一款小玩具啊嗯这个也是耗尽了我这次的欧气啊",
+            }
+        ],
+        reindex_fragments=True,
+    )
+
+    assert len(rows) > 1
+    assert [row["source_index"] for row in rows] == [row["index"] for row in rows]
+    assert len({row["source_index"] for row in rows}) == len(rows)
+    assert all(row["transcript_text"] == row["text_final"] for row in rows)
+
+
+def test_manual_editor_revealed_asr_words_do_not_duplicate_adjacent_fragments() -> None:
+    rows = _manual_editor_reveal_source_asr_words(
+        [
+            {
+                "index": 3,
+                "start_time": 6.316,
+                "end_time": 11.031,
+                "text_final": "最后的一款小玩具啊",
+            },
+            {
+                "index": 4,
+                "start_time": 11.031,
+                "end_time": 15.747,
+                "text_final": "这个也是耗尽了我这次的欧",
+            },
+        ],
+        [
+            {"word": "最", "start": 6.4, "end": 6.5},
+            {"word": "后的", "start": 6.5, "end": 7.0},
+            {"word": "一款", "start": 7.0, "end": 8.0},
+            {"word": "小玩具", "start": 8.0, "end": 9.4},
+            {"word": "啊", "start": 9.4, "end": 9.6},
+            {"word": "嗯", "start": 9.7, "end": 9.8},
+            {"word": "这个也是", "start": 9.8, "end": 10.9},
+            {"word": "耗尽", "start": 11.1, "end": 11.7},
+        ],
+    )
+
+    assert rows[0]["transcript_text"] == "最后的一款小玩具啊嗯"
+    assert rows[1]["transcript_text"] == "这个也是耗尽了我这次的欧"
+
+
 def test_manual_editor_rejects_projection_text_mapped_to_wrong_source_phrase() -> None:
     assert _manual_projection_has_source_text_mismatch(
         [
@@ -582,6 +636,66 @@ def test_manual_editor_rejects_projection_text_mapped_to_wrong_source_phrase() -
                 "end_time": 138.4,
                 "text_final": "那身份卡啊",
             }
+        ],
+    )
+
+
+def test_manual_editor_rejects_projection_that_drops_kept_source_words() -> None:
+    assert _manual_projection_has_source_text_mismatch(
+        [
+            {
+                "index": 1,
+                "source_index": 2,
+                "source_indexes": [2],
+                "start_time": 10.0,
+                "end_time": 14.8,
+                "text_final": "也是耗尽了我这次的欧气啊靠",
+            }
+        ],
+        [
+            {
+                "index": 2,
+                "start_time": 11.0,
+                "end_time": 15.7,
+                "text_final": "这个也是耗尽了我这次的欧气啊靠",
+            }
+        ],
+    )
+
+
+def test_manual_editor_rejects_projection_with_duplicate_noise_not_in_source() -> None:
+    assert _manual_projection_has_source_text_mismatch(
+        [
+            {
+                "index": 0,
+                "source_index": 0,
+                "source_indexes": [0],
+                "start_time": 0.0,
+                "end_time": 4.0,
+                "text_final": "一把是EDC37是是之前我一直经常会用",
+            },
+            {
+                "index": 1,
+                "source_index": 1,
+                "source_indexes": [1],
+                "start_time": 4.0,
+                "end_time": 8.0,
+                "text_final": "那支电池池然后一根线",
+            },
+        ],
+        [
+            {
+                "index": 0,
+                "start_time": 0.0,
+                "end_time": 4.0,
+                "text_final": "一把是EDC37 是之前我一直经常会用",
+            },
+            {
+                "index": 1,
+                "start_time": 4.0,
+                "end_time": 8.0,
+                "text_final": "那支电池然后一根线",
+            },
         ],
     )
 
@@ -1319,6 +1433,14 @@ def test_manual_editor_source_text_correction_normalizes_flashlight_model_aliase
 
     assert _manual_editor_apply_source_text_corrections("所以呢我的选择就是这个幺七", context_text=context) == "所以呢我的选择就是这个EDC17"
     assert _manual_editor_apply_source_text_corrections("为什么三七一直没换", context_text=context) == "为什么EDC37一直没换"
+
+
+def test_manual_editor_source_text_correction_normalizes_noc_sale_mishear() -> None:
+    context = "20260212-134637 开箱NOC MT34 也叫S06mini 折刀，还有玩法展示.mp4 抢购 一刀难求"
+
+    assert _manual_editor_apply_source_text_corrections("我最近这三次最近这个发烧啊", context_text=context) == "我最近这三次最近这个发售啊"
+    assert _manual_editor_apply_source_text_corrections("这两次抢那个两次发烧都是极限赶涨", context_text=context) == "这两次抢那个两次发售都是极限赶涨"
+    assert _manual_editor_apply_source_text_corrections("这个发烧友很懂", context_text=context) == "这个发烧友很懂"
 
 
 def test_manual_editor_canonical_source_rows_keep_text_authority_over_words() -> None:

@@ -197,6 +197,7 @@ type SmartCutRuleMatch = KeepSegment & {
   detail?: string | null;
   sourceText?: string;
   protected?: boolean;
+  autoCut?: boolean;
 };
 
 type TimedSourceRange = KeepSegment & {
@@ -1204,6 +1205,17 @@ function findSubtitleBoundaryOverlapLength(previousText: string, currentText: st
     if (previousSuffix === currentPrefix && meaningfulOverlapText(previousSuffix).length >= SUBTITLE_BOUNDARY_OVERLAP_MIN_CHARS) {
       return length;
     }
+  }
+  const previousLast = previousChars[previousChars.length - 1];
+  const currentFirst = currentChars[0];
+  if (
+    previousChars.length > 1
+    && previousLast
+    && currentFirst
+    && previousLast === currentFirst
+    && /[\u4e00-\u9fff]/.test(previousLast)
+  ) {
+    return 1;
   }
   return 0;
 }
@@ -2520,6 +2532,69 @@ function sourceRangeOverlapsKeptSegments(start: number, end: number, segments: K
   return segments.some((segment) => Math.min(end, segment.end) > Math.max(start, segment.start) + 0.02);
 }
 
+function projectedTranscriptMissesSourceText(
+  projectedTranscript: JobManualEditSubtitle[],
+  sourceSubtitle: JobManualEditSubtitle,
+) {
+  const sourceKey = compactTranscriptText(subtitleTranscriptSourceText(sourceSubtitle) || subtitleText(sourceSubtitle));
+  if (sourceKey.length < 8) return false;
+  const projectedKey = compactTranscriptText(
+    projectedTranscript
+      .filter((subtitle) => Math.min(subtitle.end_time, sourceSubtitle.end_time) > Math.max(subtitle.start_time, sourceSubtitle.start_time) + 0.08)
+      .map((subtitle) => subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle))
+      .join(""),
+  );
+  if (!projectedKey) return true;
+  if (projectedKey.includes(sourceKey) || transcriptTextIsSubsequence(sourceKey, projectedKey)) return false;
+  const commonRatio = transcriptTextCommonSubsequenceRatio(sourceKey, projectedKey);
+  const missingChars = Array.from(sourceKey).length - Math.round(commonRatio * Math.max(Array.from(sourceKey).length, Array.from(projectedKey).length));
+  return missingChars >= 2 && commonRatio < 0.94;
+}
+
+const SOURCE_FALLBACK_ALLOWED_DUPLICATE_TERMS = new Set(["看看", "慢慢", "常常", "刚刚", "哥哥", "弟弟", "谢谢", "讲讲", "静静", "试试", "轻轻", "削削", "好好好", "对对对"]);
+const SOURCE_FALLBACK_PROJECTED_ALIAS_MISMATCHES: Array<[RegExp, string]> = [
+  [/发烧(?!友)/g, "发售"],
+  [/电池池/g, "电池"],
+  [/是是/g, "是"],
+];
+
+function textHasUnmatchedMechanicalDuplicate(projectedKey: string, sourceKey: string) {
+  for (let index = 1; index < projectedKey.length; index += 1) {
+    const previous = projectedKey[index - 1];
+    const current = projectedKey[index];
+    if (!previous || previous !== current || !/[\u4e00-\u9fff]/.test(current)) continue;
+    const duplicate = `${current}${current}`;
+    if (SOURCE_FALLBACK_ALLOWED_DUPLICATE_TERMS.has(duplicate)) continue;
+    if (sourceKey.includes(duplicate)) continue;
+    return true;
+  }
+  return false;
+}
+
+function projectedTranscriptHasNoisierTextThanSource(
+  projectedTranscript: JobManualEditSubtitle[],
+  sourceSubtitle: JobManualEditSubtitle,
+) {
+  const sourceKey = compactTranscriptText(subtitleTranscriptSourceText(sourceSubtitle) || subtitleText(sourceSubtitle));
+  if (sourceKey.length < 4) return false;
+  const projectedKey = compactTranscriptText(
+    projectedTranscript
+      .filter((subtitle) => Math.min(subtitle.end_time, sourceSubtitle.end_time) > Math.max(subtitle.start_time, sourceSubtitle.start_time) + 0.08)
+      .map((subtitle) => subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle))
+      .join(""),
+  );
+  if (!projectedKey) return false;
+  for (const [pattern, replacement] of SOURCE_FALLBACK_PROJECTED_ALIAS_MISMATCHES) {
+    pattern.lastIndex = 0;
+    if (pattern.test(projectedKey) && sourceKey.includes(replacement) && !sourceKey.includes(projectedKey.match(pattern)?.[0] || "")) {
+      pattern.lastIndex = 0;
+      return true;
+    }
+    pattern.lastIndex = 0;
+  }
+  return textHasUnmatchedMechanicalDuplicate(projectedKey, sourceKey);
+}
+
 export function sourceRangeOverlapsCutRanges(start: number, end: number, cutRanges: KeepSegment[]) {
   const rangeStart = Math.min(start, end);
   const rangeEnd = Math.max(start, end);
@@ -2901,6 +2976,12 @@ export function projectedTranscriptMissesKeptSpeech(
       return overlapEnd > overlapStart + 0.12 && sourceRangeOverlapsKeptSegments(overlapStart, overlapEnd, segments);
     });
     if (hasKeptSourceSpeech) return true;
+  }
+  for (const source of sortedSource) {
+    if (!subtitleText(source).trim()) continue;
+    if (!sourceRangeOverlapsKeptSegments(source.start_time, source.end_time, segments)) continue;
+    if (projectedTranscriptMissesSourceText(sortedProjected, source)) return true;
+    if (projectedTranscriptHasNoisierTextThanSource(sortedProjected, source)) return true;
   }
   return false;
 }
@@ -3652,7 +3733,7 @@ export function transcriptCutRangesForSelection(
     selectedCharTokensBySource.set(sourceIndex, selected);
   });
 
-  const ranges: KeepSegment[] = [];
+  const ranges: Array<KeepSegment & { autoCut?: boolean }> = [];
   for (const token of selectedBoundaryTokens) {
     ranges.push({
       start: Number(Math.max(0, token.start).toFixed(3)),
@@ -3698,6 +3779,7 @@ function parseSmartCutFillers(value: string) {
 
 const SMART_CUT_BOUNDARY_PATTERN = /[\s,，、。.!！?？;；:：()[\]（）【】"'“”‘’]/;
 const SMART_CUT_HESITATION_FILLERS = new Set(["嗯", "呃", "额", "呃呃", "嗯嗯"]);
+const SMART_CUT_SINGLE_PARTICLE_FILLERS = new Set(["啊", "呀", "呢", "吧", "嘛", "哦", "喔", "哎", "唉", "诶", "欸", "嗯", "呃", "额"]);
 const SMART_CUT_WORD_BOUNDARY_GUARD_SEC = 0.16;
 const SMART_CUT_REPEAT_STOP_PHRASES = new Set(["这个", "那个", "然后", "就是", "因为", "所以", "但是", "不过", "经常", "常会", "我们", "大家"]);
 const SMART_CUT_REPEAT_PROTECTED_PATTERN = /(?:EDC|NITECORE|NOC|UV|流明|\d)/i;
@@ -3721,14 +3803,20 @@ function findTextRangesInSubtitle(subtitle: JobManualEditSubtitle, needle: strin
     const after = chars[endChar];
     const exactBoundaryMatch = isSmartCutBoundary(before) && isSmartCutBoundary(after);
     const leadingHesitation = startChar === 0 && SMART_CUT_HESITATION_FILLERS.has(needle);
-    if (!exactBoundaryMatch && !leadingHesitation) {
+    const singleParticle = Array.from(needle).length === 1 && SMART_CUT_SINGLE_PARTICLE_FILLERS.has(needle);
+    if (!exactBoundaryMatch && !leadingHesitation && !singleParticle) {
       searchFrom = matchIndex + needle.length;
       continue;
     }
     const range = sourceRangeForSubtitleChars(subtitle, startChar, endChar);
-    if (rangeHasReliableTextCutTiming(range, subtitle)) {
-      ranges.push({ start: range.start, end: range.end });
+    const matchRange: KeepSegment & { autoCut?: boolean } = {
+      start: range.start,
+      end: range.end,
+    };
+    if (!rangeHasReliableTextCutTiming(range, subtitle)) {
+      matchRange.autoCut = false;
     }
+    ranges.push(matchRange);
     searchFrom = matchIndex + needle.length;
   }
   return ranges;
@@ -4268,9 +4356,9 @@ export function buildSmartCutRulePreviews(
 
 export function autoSmartCutRuleRanges(analysis: SmartCutRuleAnalysis, rules: SmartCutRules) {
   return [
-    ...(rules.fillerEnabled ? analysis.filler : []),
-    ...(rules.repeatedEnabled ? analysis.repeated : []),
-    ...(rules.pauseEnabled ? analysis.pause : []),
+    ...(rules.fillerEnabled ? analysis.filler.filter((range) => range.autoCut !== false) : []),
+    ...(rules.repeatedEnabled ? analysis.repeated.filter((range) => range.autoCut !== false) : []),
+    ...(rules.pauseEnabled ? analysis.pause.filter((range) => range.autoCut !== false) : []),
   ];
 }
 
@@ -4760,9 +4848,17 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       const confirmedSmartDeleteRanges = smartCutRules.smartDeleteEnabled
         ? manualSmartCutConfirmRanges.map((range) => ({ ...range, kind: "smart_delete" as const }))
         : [];
-      return confirmedSmartDeleteRanges;
+      return [
+        ...blockAutoSmartCutRangesForSmartDeleteReview(
+          autoSmartCutRuleRanges(smartCutRuleAnalysis, smartCutRules),
+          smartCutRuleAnalysis.smartDelete,
+          smartCutRules,
+          manualSmartCutConfirmRanges,
+        ),
+        ...confirmedSmartDeleteRanges,
+      ];
     },
-    [manualSmartCutConfirmRanges, smartCutRules.smartDeleteEnabled],
+    [manualSmartCutConfirmRanges, smartCutRuleAnalysis, smartCutRules],
   );
   const smartCutManagedRanges = useMemo(
     () => smartCutRuleManagedRanges(smartCutRuleAnalysis),
@@ -4795,7 +4891,6 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     () => buildSmartCutRulePreviews(smartCutRuleAnalysis, smartCutRules, sourceTranscriptSubtitles),
     [smartCutRuleAnalysis, smartCutRules, sourceTranscriptSubtitles],
   );
-  const activeSmartCutRuleRangeCount = smartCutRuleCounts.filler + smartCutRuleCounts.repeated + smartCutRuleCounts.pause;
   const pendingSmartDeleteRangeCount = pendingSmartDeleteRanges.length;
 
   const totalOutputDuration = projection.totalDuration;
@@ -7451,7 +7546,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                     <strong>剪辑规则</strong>
                     <span>{smartCutRulesExpanded ? "收起" : "展开"}</span>
                   </button>
-                  <span className="status-pill pending">规则候选 {activeSmartCutRuleRangeCount}</span>
+                  <span className="status-pill pending">规则命中 待剪 {activeSmartCutRuleRanges.length}</span>
                   {pendingSmartDeleteRangeCount ? <span className="status-pill running">智能待确认 {pendingSmartDeleteRangeCount}</span> : null}
                 </div>
                 {smartCutRulesExpanded ? (
@@ -7574,7 +7669,7 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                         ))}
                       </div>
                     ) : null}
-                    <div className="manual-editor-rule-memory">规则候选只用于定位复核，不会直接进入待剪区间；智能废片必须逐条确认后才允许进入最终剪辑决策。规则设置已全局记忆。</div>
+                    <div className="manual-editor-rule-memory">语气词、重复口误和长停顿规则会在可信时间范围内自动进入待剪区间；没有可信时间的命中只计为候选。智能废片必须逐条确认后才允许进入最终剪辑决策。规则设置已全局记忆。</div>
                   </>
                 ) : null}
               </div>

@@ -78,6 +78,7 @@ from roughcut.media.subtitle_text import (
     clean_final_subtitle_text,
     clean_subtitle_payloads,
     normalize_contextual_noc_alias_text,
+    normalize_contextual_unboxing_sale_text,
     normalize_flashlight_model_alias_text,
 )
 from roughcut.media.subtitle_fingerprint import subtitle_payload_fingerprint
@@ -336,6 +337,7 @@ def _apply_subtitle_semantic_cleanup(
             or ""
         ).strip()
         normalized = normalize_contextual_noc_alias_text(current, context_text=context_text)
+        normalized = normalize_contextual_unboxing_sale_text(normalized, context_text=context_text)
         if normalized == current:
             continue
         if hasattr(item, "text_norm"):

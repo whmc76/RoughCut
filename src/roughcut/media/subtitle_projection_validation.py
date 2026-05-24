@@ -52,6 +52,20 @@ SYNTHETIC_TRANSCRIPT_ALIGNMENT_SOURCES = {
     "synthetic",
 }
 
+_ALLOWED_CJK_DOUBLE_TERMS = {
+    "看看",
+    "慢慢",
+    "常常",
+    "刚刚",
+    "哥哥",
+    "弟弟",
+    "谢谢",
+    "讲讲",
+    "试试",
+    "轻轻",
+}
+_CJK_DOUBLE_CHAR_PATTERN = re.compile(r"([\u4e00-\u9fff])\1")
+
 
 def subtitle_projection_display_text(item: dict[str, Any]) -> str:
     return str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or item.get("text") or "")
@@ -62,10 +76,15 @@ def compact_projection_text(value: object) -> str:
 
 
 def projection_text_common_subsequence_ratio(left: str, right: str) -> float:
+    length = projection_text_common_subsequence_length(left, right)
+    return length / max(len(left), len(right)) if left and right else 0.0
+
+
+def projection_text_common_subsequence_length(left: str, right: str) -> int:
     left_chars = list(left)
     right_chars = list(right)
     if not left_chars or not right_chars:
-        return 0.0
+        return 0
     previous = [0] * (len(right_chars) + 1)
     for left_char in left_chars:
         diagonal = 0
@@ -77,7 +96,7 @@ def projection_text_common_subsequence_ratio(left: str, right: str) -> float:
                 else max(previous[right_index + 1], previous[right_index])
             )
             diagonal = saved
-    return previous[-1] / max(len(left_chars), len(right_chars))
+    return previous[-1]
 
 
 def source_ranges_for_output_range(
@@ -274,8 +293,17 @@ def projection_has_source_text_mismatch(
         if len(source_key) < 4 or len(projected_key) < 4:
             continue
         checked += 1
-        if len(source_key) > len(projected_key) and source_key.find(projected_key) >= 0:
-            continue
+        if projection_text_has_mechanical_duplicate_absent_from_source(projected_key, source_key):
+            return True
+        common_length = projection_text_common_subsequence_length(source_key, projected_key)
+        missing_source_units = len(source_key) - common_length
+        projected_extra_units = len(projected_key) - common_length
+        if (
+            missing_source_units >= 2
+            and missing_source_units >= projected_extra_units
+            and common_length / max(1, len(source_key)) >= 0.68
+        ):
+            return True
         similarity = projection_text_common_subsequence_ratio(source_key, projected_key)
         length_ratio = max(len(source_key), len(projected_key)) / max(1, min(len(source_key), len(projected_key)))
         if similarity < 0.32 and length_ratio >= 1.8:
@@ -283,6 +311,18 @@ def projection_has_source_text_mismatch(
             if severe_mismatches >= 1:
                 return True
     return checked >= 4 and severe_mismatches / checked >= 0.25
+
+
+def projection_text_has_mechanical_duplicate_absent_from_source(projected_key: str, source_key: str) -> bool:
+    if not projected_key:
+        return False
+    for match in _CJK_DOUBLE_CHAR_PATTERN.finditer(projected_key):
+        duplicate = match.group(0)
+        if duplicate in _ALLOWED_CJK_DOUBLE_TERMS:
+            continue
+        if duplicate not in source_key:
+            return True
+    return False
 
 
 def _source_indexes_for_projection_item(item: dict[str, Any]) -> set[int]:
