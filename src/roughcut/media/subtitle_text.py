@@ -36,7 +36,7 @@ _ASR_NOISE_MARKER_PATTERN = re.compile(
 )
 _ASR_INLINE_NOISE_MARKER_PATTERN = re.compile(_ASR_INLINE_NOISE_LABEL, re.IGNORECASE)
 _ASR_NOISE_ONLY_PATTERN = re.compile(
-    rf"(?i)^(?:(?:{_ASR_NOISE_LABEL})(?:\s+(?:{_ASR_NOISE_LABEL}))*|静音|无语音)$"
+    rf"(?i)^(?:(?:{_ASR_NOISE_LABEL})(?:\s+(?:{_ASR_NOISE_LABEL}))*|静音|无语音|噪音|杂音|背景音|环境音|音乐|笑声|咳嗽|掌声)$"
 )
 _DISRUPTION_CLAUSE_PATTERN = re.compile(
     r"^(?:滚|滚开|别吵|别说话|别闹|走开|待会再说|没事|停一下|暂停一下|等一下|先停一下|别打扰|不要打扰|干嘛)$"

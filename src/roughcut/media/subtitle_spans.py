@@ -62,6 +62,7 @@ def subtitle_display_unit_key(char: str) -> str:
 
 def normalized_subtitle_words(item: dict[str, Any]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, float, float]] = set()
     for raw_word in list((item or {}).get("words") or (item or {}).get("words_json") or []):
         if not isinstance(raw_word, dict):
             continue
@@ -75,6 +76,10 @@ def normalized_subtitle_words(item: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         if end <= start:
             continue
+        key = (text, round(start, 6), round(end, 6))
+        if key in seen:
+            continue
+        seen.add(key)
         normalized.append({"word": text, "start": start, "end": end})
     normalized.sort(key=lambda word: (word["start"], word["end"]))
     return normalized
@@ -143,7 +148,7 @@ def build_subtitle_span_alignment(item: dict[str, Any]) -> SubtitleSpanAlignment
     return SubtitleSpanAlignment(
         text=text,
         units=units,
-        word_text="".join(unit.text for unit in word_units),
+        word_text="".join(unit.text for unit in units),
         matched_ratio=len(matched_indexes) / max(1, len(display_units)),
         unmatched_prefix="".join(display_units[:first_matched]),
         unmatched_suffix="".join(display_units[last_matched + 1:]),
@@ -171,7 +176,7 @@ def subtitle_span_alignment_diagnostics(item: dict[str, Any]) -> dict[str, Any]:
         "issues": issues,
         "matched_ratio": round(alignment.matched_ratio, 4),
         "text_unit_count": len(text_units),
-        "word_unit_count": len(word_units),
+        "word_unit_count": len(alignment.units) if alignment.units else len(word_units),
         "timed_unit_count": len(alignment.units),
         "unmatched_prefix": alignment.unmatched_prefix,
         "unmatched_suffix": alignment.unmatched_suffix,

@@ -42,6 +42,16 @@ def test_filler_cut_only_removes_pure_filler_subtitle() -> None:
     assert candidates[0].reason == "filler_word"
 
 
+def test_subtitle_rule_marks_noise_subtitle_candidate() -> None:
+    candidates = _build_subtitle_cut_candidates(
+        [_subtitle("噪音", start=1.0, end=1.6)],
+        content_profile=None,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].reason == "noise_subtitle"
+
+
 def test_auto_subtitle_rule_cuts_leading_hesitation_filler_only() -> None:
     candidates = _build_subtitle_cut_candidates(
         [

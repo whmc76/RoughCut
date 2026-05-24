@@ -87,6 +87,12 @@ _NOISE_MARKER_TERMS = (
     "音乐",
     "咳嗽",
 )
+_NOISE_ONLY_TERMS = frozenset(_NOISE_MARKER_TERMS) | {
+    "静音",
+    "无语音",
+    "背景音",
+    "环境音",
+}
 _NOISE_INTERJECTION_CHARS = frozenset("啊嗯呃哦哎诶欸哈呵咳")
 _VISUAL_SHOWCASE_TERMS = (
     "欣赏",
@@ -1149,6 +1155,18 @@ def _build_subtitle_cut_candidates(
     candidates: list[CutCandidate] = []
     for item in subtitle_items:
         text = _semantic_subtitle_text(item)
+        compact = _compact_subtitle_text(text)
+        if _looks_like_noise_subtitle(compact):
+            _append_subtitle_rule_candidate(
+                candidates,
+                start=float(item["start_time"]),
+                end=float(item["end_time"]),
+                reason="noise_subtitle",
+                signals=["noise_subtitle"],
+                transcript_segments=transcript_segments,
+                content_profile=content_profile,
+            )
+            continue
         if FILLER_PATTERN.search(text):
             clean = PUNCTUATION_PATTERN.sub("", FILLER_PATTERN.sub("", text).strip())
             if not clean:
@@ -1274,6 +1292,11 @@ def _subtitle_rule_cut_allowed_by_transcript(
                 for word in overlapping_words
             ),
             "subtitle_rule_confirmed_by_transcript_repetition",
+        )
+    if reason == "noise_subtitle":
+        return (
+            all(_looks_like_noise_subtitle(word) for word in overlapping_words),
+            "subtitle_rule_confirmed_by_transcript_noise",
         )
     return False, "blocked_by_unverified_subtitle_rule"
 
@@ -2705,6 +2728,8 @@ def _looks_like_noise_subtitle(text: str) -> bool:
     compact = _compact_subtitle_text(text)
     if not compact:
         return False
+    if compact in _NOISE_ONLY_TERMS:
+        return True
     if any(marker in compact for marker in _NOISE_MARKER_TERMS):
         return True
     if len(compact) <= 6 and set(compact) <= _NOISE_INTERJECTION_CHARS and len(compact) >= 3:

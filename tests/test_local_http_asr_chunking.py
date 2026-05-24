@@ -315,6 +315,108 @@ def test_local_http_asr_collapses_repeated_decoder_loop_text_without_terminal_pu
     assert [segment.text for segment in result.segments] == [sentence]
 
 
+def test_local_http_asr_collapses_qwen3_short_duplicate_noise_but_keeps_real_repeats(tmp_path: Path) -> None:
+    provider = LocalHTTPASRProvider()
+    provider._model_name = "qwen3-asr-1.7b-forced-aligner"
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"stub")
+    payload = {
+        "duration": 10.0,
+        "segments": [
+            {
+                "start_time": 0.0,
+                "end_time": 10.0,
+                "text": "啊啊！不过好在呢，还还算抢到了啊，没没有没有这个像很多兄弟一样隐恨啊，我最近这这三次三次NOC的这个发售啊。",
+                "words": [
+                    {"text": "啊", "start": 0.0, "end": 0.1},
+                    {"text": "啊", "start": 0.1, "end": 0.2},
+                    {"text": "还", "start": 1.0, "end": 1.1},
+                    {"text": "还", "start": 1.1, "end": 1.2},
+                    {"text": "没", "start": 2.0, "end": 2.1},
+                    {"text": "没有", "start": 2.1, "end": 2.3},
+                    {"text": "没有", "start": 2.3, "end": 2.5},
+                    {"text": "这", "start": 3.0, "end": 3.1},
+                    {"text": "这", "start": 3.1, "end": 3.2},
+                    {"text": "三次", "start": 3.2, "end": 3.4},
+                    {"text": "三次", "start": 3.4, "end": 3.6},
+                ],
+            }
+        ],
+    }
+
+    result = provider._build_result_from_payload(
+        payload,
+        audio_path=audio_path,
+        language="zh-CN",
+        context="",
+        progress_callback=None,
+    )
+
+    segment = result.segments[0]
+    assert "啊啊" not in segment.text
+    assert "还还" not in segment.text
+    assert "没没有没有" not in segment.text
+    assert "这这三次三次" in segment.text
+    assert [word.word for word in segment.words] == ["啊", "还", "没有", "这", "这", "三次", "三次"]
+    assert segment.words[2].start == 2.0
+    filtering = segment.raw_payload["_roughcut_filtering"]["collapsed_short_duplicate_noise"]
+    assert filtering["dropped_word_count"] == 4
+
+
+def test_local_http_asr_applies_short_duplicate_noise_to_funasr_nano(tmp_path: Path) -> None:
+    provider = LocalHTTPASRProvider()
+    provider._model_name = "FunAudioLLM/Fun-ASR-Nano-2512"
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"stub")
+    payload = {
+        "duration": 2.0,
+        "segments": [
+            {
+                "start_time": 0.0,
+                "end_time": 2.0,
+                "text": "啊啊，不过好在呢，还还算抢到了啊，没没有没有这个。",
+            }
+        ],
+    }
+
+    result = provider._build_result_from_payload(
+        payload,
+        audio_path=audio_path,
+        language="zh-CN",
+        context="",
+        progress_callback=None,
+    )
+
+    assert result.segments[0].text == "啊，不过好在呢，还算抢到了啊，没有这个。"
+
+
+def test_local_http_asr_keeps_short_duplicate_noise_for_other_models(tmp_path: Path) -> None:
+    provider = LocalHTTPASRProvider()
+    provider._model_name = "faster-whisper-large-v3-beam5-nohot"
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"stub")
+    payload = {
+        "duration": 2.0,
+        "segments": [
+            {
+                "start_time": 0.0,
+                "end_time": 2.0,
+                "text": "啊啊，还还，没没有没有。",
+            }
+        ],
+    }
+
+    result = provider._build_result_from_payload(
+        payload,
+        audio_path=audio_path,
+        language="zh-CN",
+        context="",
+        progress_callback=None,
+    )
+
+    assert result.segments[0].text == "啊啊，还还，没没有没有。"
+
+
 def test_local_http_asr_preserves_provider_word_timestamps(tmp_path: Path) -> None:
     provider = LocalHTTPASRProvider()
     audio_path = tmp_path / "audio.wav"

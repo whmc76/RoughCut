@@ -46,6 +46,33 @@ services:
       - --idle-unload-seconds
       - "${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-900}"
 
+  funasr-nano-2512:
+    <<: *asr-common
+    profiles: ["asr-matrix", "funasr-nano"]
+    build:
+      context: .
+      dockerfile: deploy/funasr/Dockerfile
+      args:
+        BASE_IMAGE: ${ASR_MATRIX_BASE_IMAGE:-pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime}
+        APT_MIRROR: ${APT_MIRROR:-http://mirrors.aliyun.com/ubuntu}
+        HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
+        PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.aliyun.com}
+    image: roughcut-funasr-nano-2512:local
+    container_name: asr-funasr-nano-2512
+    ports:
+      - "${FUNASR_NANO_2512_PORT:-30210}:30000"
+    command:
+      - --model
+      - ${FUNASR_NANO_2512_MODEL:-FunAudioLLM/Fun-ASR-Nano-2512}
+      - --mode
+      - asr
+      - --device
+      - cuda:0
+      - --lazy-load
+      - --idle-unload-seconds
+      - "${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-900}"
+
   funasr-fa-zh:
     <<: *asr-common
     profiles: ["asr-matrix", "funasr-align"]
@@ -69,6 +96,37 @@ services:
       - align
       - --device
       - cuda:0
+      - --lazy-load
+      - --idle-unload-seconds
+      - "${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-900}"
+
+  qwen3-asr:
+    <<: *asr-common
+    profiles: ["asr-matrix", "qwen3-asr"]
+    build:
+      context: .
+      dockerfile: deploy/qwen3-asr/Dockerfile
+      args:
+        BASE_IMAGE: ${QWEN3_ASR_BASE_IMAGE:-pytorch/pytorch:2.9.1-cuda12.8-cudnn9-runtime}
+        QWEN3_ASR_INSTALL_DEPS: ${QWEN3_ASR_INSTALL_DEPS:-true}
+    image: roughcut-qwen3-asr:local
+    container_name: asr-qwen3-asr
+    environment:
+      HF_ENDPOINT: ${HF_ENDPOINT:-https://hf-mirror.com}
+      HF_HOME: /models/huggingface
+      HUGGINGFACE_HUB_CACHE: /models/huggingface/hub
+      MODELSCOPE_CACHE: /models/modelscope
+      QWEN3_ASR_MODEL: ${QWEN3_ASR_MODEL:-/models/modelscope/Qwen/Qwen3-ASR-1.7B}
+      QWEN3_ASR_ALIGNER: ${QWEN3_ASR_ALIGNER:-/models/modelscope/Qwen/Qwen3-ForcedAligner-0.6B}
+      QWEN3_ASR_DEVICE_MAP: ${QWEN3_ASR_DEVICE_MAP:-cuda:0}
+      QWEN3_ASR_IDLE_UNLOAD_SECONDS: ${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-900}
+      NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
+      NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
+    ports:
+      - "${QWEN3_ASR_MATRIX_PORT:-30230}:30000"
+    command:
+      - python3
+      - /app/server.py
       - --lazy-load
       - --idle-unload-seconds
       - "${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-900}"

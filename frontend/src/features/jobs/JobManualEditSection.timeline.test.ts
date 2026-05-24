@@ -12,6 +12,7 @@ import {
   buildOutputWaveformBars,
   findSubtitleIndexNearOutputTime,
   buildSmartCutRulePreviews,
+  intersectInferredPausesWithAudioSilence,
   normalizeAdjacentSubtitleTextOverlaps,
   normalizeReviewPauseRanges,
   outputTimeToSourceTimeForSegments,
@@ -621,6 +622,27 @@ describe("manual editor timeline mapping", () => {
     );
 
     expect(transcript.map((item) => item.text_final)).toEqual(["嗯", "我们开始"]);
+  });
+
+  it("keeps standalone fillers visible but hides suppressed noise rows in the full transcript", () => {
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          { index: 0, start_time: 0, end_time: 0.4, text_raw: "嗯", text_final: "", display_suppressed_reason: "standalone_filler" },
+          { index: 1, start_time: 0.4, end_time: 0.9, text_raw: "噪音", text_final: "", display_suppressed_reason: "asr_noise_marker" },
+          { index: 2, start_time: 0.9, end_time: 1.6, text_raw: "我们开始", text_final: "我们开始" },
+        ],
+        projected_subtitles: [],
+      },
+      [],
+      {},
+    );
+
+    expect(transcript.map((item) => item.text_final)).toEqual(["嗯", "", "我们开始"]);
+    const rendered = buildTranscriptTokens(transcript, [{ start: 0, end: 2 }]).map((token) => token.text).join("");
+    expect(rendered).toContain("嗯");
+    expect(rendered).toContain("我们开始");
+    expect(rendered).not.toContain("噪音");
   });
 
   it("keeps cleaned ASR text before noisy raw text in the full transcript", () => {
@@ -1339,6 +1361,25 @@ describe("manual editor timeline mapping", () => {
 
     expect(pauses).toEqual([{ start: 10.98, end: 12.02, duration_sec: 1.04, source: "word_gap" }]);
     expect(tokens.some((token) => token.kind === "pause" && token.text === "[...,1.0s]")).toBe(true);
+  });
+
+  it("uses audio VAD to bound untranscribed ASR gaps but still displays nearby fragments as one pause chip", () => {
+    const inferredPauses = [
+      { start: 3.76, end: 5.66, duration_sec: 1.9, source: "word_gap" },
+    ];
+    const audioSilences = [
+      { start: 4.34, end: 4.76, duration_sec: 0.42, source: "audio_vad" },
+      { start: 5.42, end: 5.92, duration_sec: 0.5, source: "audio_vad" },
+    ];
+    const boundedPauses = intersectInferredPausesWithAudioSilence(inferredPauses, audioSilences);
+
+    expect(boundedPauses).toEqual([
+      { start: 4.34, end: 4.76, duration_sec: 0.42, source: "word_gap+audio_vad" },
+      { start: 5.42, end: 5.66, duration_sec: 0.24, source: "word_gap+audio_vad" },
+    ]);
+    const tokens = buildTranscriptTokens([], [{ start: 0, end: 8 }], boundedPauses);
+    expect(tokens.filter((token) => token.kind === "pause").map((token) => token.text)).toEqual(["[...,1.3s]"]);
+    expect(tokens.filter((token) => token.kind === "pause").map((token) => token.pauseCount)).toEqual([2]);
   });
 
   it("uses real ASR alignment gaps for long split transcript rows", () => {

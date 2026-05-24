@@ -555,6 +555,8 @@ export function subtitleAutoCorrectionSummary(subtitle: JobManualEditSubtitle) {
 }
 
 function subtitleTranscriptSourceText(subtitle: JobManualEditSubtitle) {
+  const suppressedReason = String(subtitle.display_suppressed_reason || "").trim();
+  if (suppressedReason && suppressedReason !== "standalone_filler") return "";
   const finalText = subtitleText(subtitle);
   const normText = String(subtitle.text_norm || "").trim();
   const rawText = String(subtitle.text_raw || "").trim();
@@ -2678,6 +2680,30 @@ function subtitlePauseIntervals(subtitles: JobManualEditSubtitle[]) {
   return intervals;
 }
 
+export function intersectInferredPausesWithAudioSilence(inferredPauses: SilenceRange[], audioSilences: SilenceRange[]) {
+  if (!audioSilences.length) return inferredPauses;
+  const sortedAudioSilences = [...audioSilences].sort((left, right) => left.start - right.start || left.end - right.end);
+  const intervals: SilenceRange[] = [];
+  inferredPauses.forEach((pause) => {
+    sortedAudioSilences.forEach((silence) => {
+      const start = Number(Math.max(pause.start, silence.start).toFixed(3));
+      const end = Number(Math.min(pause.end, silence.end).toFixed(3));
+      if (end <= start + TRANSCRIPT_MIN_VISIBLE_PAUSE_SEC - 0.001) return;
+      intervals.push({
+        start,
+        end,
+        duration_sec: Number((end - start).toFixed(3)),
+        source: `${pause.source}+${silence.source || "audio_vad"}`,
+      });
+    });
+  });
+  return intervals;
+}
+
+function silenceRangesOverlap(left: KeepSegment, right: KeepSegment) {
+  return Math.min(left.end, right.end) - Math.max(left.start, right.start) > 0.02;
+}
+
 type AsrTimedSpeechRange = KeepSegment & {
   source: "alignment" | "word";
 };
@@ -4516,32 +4542,44 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     () => asrTimedSpeechRangesForSubtitles(sourceTranscriptSubtitles),
     [sourceTranscriptSubtitles],
   );
-  const sourceSilenceRanges = useMemo(() => {
+  const sourceTranscriptDisplaySilenceRanges = useMemo(() => {
     const audioSilences = previewAssets?.silence_intervals?.length
       ? previewAssets.silence_intervals
       : session.silence_segments || [];
-    const rawPauseEvidence = normalizeSilenceRanges(
+    const inferredPauses = [
+      ...subtitlePauseIntervals(sourceTranscriptSubtitles),
+      ...wordTimingPauseIntervals(sourceTranscriptTimingRows),
+    ];
+    const audioBackedInferredPauses = intersectInferredPausesWithAudioSilence(inferredPauses, audioSilences);
+    const standaloneAudioSilences = audioSilences.filter(
+      (silence) => !audioBackedInferredPauses.some((pause) => silenceRangesOverlap(silence, pause)),
+    );
+    return normalizeSilenceRanges(
       [
-        ...subtitlePauseIntervals(sourceTranscriptSubtitles),
-        ...wordTimingPauseIntervals(sourceTranscriptTimingRows),
-        ...audioSilences,
+        ...audioBackedInferredPauses,
+        ...standaloneAudioSilences,
       ],
       session.source_duration_sec,
     );
-    return normalizeReviewPauseRanges(rawPauseEvidence, sourceTranscriptSubtitles, {
-      fillers: parseSmartCutFillers(smartCutRules.fillers),
-    });
   }, [
     previewAssets?.silence_intervals,
     session.silence_segments,
     session.source_duration_sec,
-    smartCutRules.fillers,
     sourceTranscriptSubtitles,
     sourceTranscriptTimingRows,
   ]);
+  const sourceSilenceRanges = useMemo(() => {
+    return normalizeReviewPauseRanges(sourceTranscriptDisplaySilenceRanges, sourceTranscriptSubtitles, {
+      fillers: parseSmartCutFillers(smartCutRules.fillers),
+    });
+  }, [
+    smartCutRules.fillers,
+    sourceTranscriptDisplaySilenceRanges,
+    sourceTranscriptSubtitles,
+  ]);
   const transcriptTokens = useMemo(
-    () => buildTranscriptTokens(sourceTranscriptSubtitles, effectiveSegments, sourceSilenceRanges),
-    [effectiveSegments, sourceSilenceRanges, sourceTranscriptSubtitles],
+    () => buildTranscriptTokens(sourceTranscriptSubtitles, effectiveSegments, sourceTranscriptDisplaySilenceRanges),
+    [effectiveSegments, sourceTranscriptDisplaySilenceRanges, sourceTranscriptSubtitles],
   );
   const transcriptCutRanges = useMemo(
     () => sourceCutRangesFromKeepSegments(effectiveSegments, session.source_duration_sec),

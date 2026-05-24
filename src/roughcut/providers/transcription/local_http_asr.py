@@ -34,6 +34,8 @@ from roughcut.review.hotword_learning import extract_prompt_hotwords
 class LocalHTTPASRProvider(TranscriptionProvider):
     _DECODE_LOOP_MIN_TEXT_UNITS = 12
     _DECODE_LOOP_MIN_REPEATS = 4
+    _SHORT_DUPLICATE_NOISE_TERMS = frozenset({"啊", "呃", "嗯", "哦", "哎", "诶", "呀", "呢", "嘛", "吧", "吗", "了", "的", "还"})
+    _SHORT_DUPLICATE_NOISE_RE = re.compile(r"([啊呃嗯哦哎诶呀呢嘛吧吗了的还])\1+")
 
     def __init__(self, *, model_name: str = "faster-whisper-large-v3-beam5-nohot") -> None:
         settings = get_settings()
@@ -382,10 +384,14 @@ class LocalHTTPASRProvider(TranscriptionProvider):
 
         if self._decode_loop_sanitizer_enabled():
             segments = self._sanitize_decode_loop_segments(segments)
+        if self._short_duplicate_noise_sanitizer_enabled():
+            segments = self._sanitize_short_duplicate_noise_segments(segments)
         raw_segments_copy = list(segments)
         segments = self._repair_segments(segments, duration=duration)
         if self._decode_loop_sanitizer_enabled():
             segments = self._sanitize_decode_loop_segments(segments)
+        if self._short_duplicate_noise_sanitizer_enabled():
+            segments = self._sanitize_short_duplicate_noise_segments(segments)
 
         if progress_callback is not None:
             total = duration if duration > 0 else (segments[-1].end if segments else 0.0)
@@ -814,10 +820,132 @@ class LocalHTTPASRProvider(TranscriptionProvider):
     def _decode_loop_sanitizer_enabled(self) -> bool:
         return "qwen3-asr" in str(self._model_name or "").strip().lower()
 
+    def _short_duplicate_noise_sanitizer_enabled(self) -> bool:
+        model_name = str(self._model_name or "").strip().lower()
+        return any(
+            marker in model_name
+            for marker in (
+                "qwen3-asr",
+                "fun-asr-nano",
+                "fun_asr_nano",
+                "funasr-nano",
+                "funasr_nano",
+            )
+        )
+
     @staticmethod
     def _filtering_payload(raw_payload: dict[str, Any]) -> dict[str, Any]:
         filtering = raw_payload.get("_roughcut_filtering")
         return dict(filtering) if isinstance(filtering, dict) else {}
+
+    def _sanitize_short_duplicate_noise_segments(self, segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
+        sanitized: list[TranscriptSegment] = []
+        for index, segment in enumerate(list(segments or [])):
+            text = self._collapse_short_duplicate_noise_text(segment.text)
+            words, dropped_word_count = self._collapse_short_duplicate_noise_words(segment.words)
+            text_changed = text != str(segment.text or "").strip()
+            words_changed = words != list(segment.words)
+            raw_payload = dict(segment.raw_payload)
+            if text_changed or words_changed:
+                raw_payload["_roughcut_filtering"] = {
+                    **self._filtering_payload(raw_payload),
+                    "collapsed_short_duplicate_noise": {
+                        "original_text": segment.text,
+                        "text": text,
+                        "dropped_word_count": dropped_word_count,
+                    },
+                }
+            sanitized.append(
+                TranscriptSegment(
+                    index=index,
+                    start=segment.start,
+                    end=segment.end,
+                    text=text,
+                    words=words,
+                    speaker=segment.speaker,
+                    provider=segment.provider,
+                    model=segment.model,
+                    raw_payload=raw_payload,
+                    raw_text=segment.raw_text or segment.text,
+                    context=segment.context,
+                    hotword=segment.hotword,
+                    confidence=segment.confidence,
+                    logprob=segment.logprob,
+                    alignment=segment.alignment,
+                )
+            )
+        return [segment for segment in sanitized if str(segment.text or "").strip()]
+
+    @classmethod
+    def _collapse_short_duplicate_noise_text(cls, text: str) -> str:
+        cleaned = str(text or "").strip()
+        if not cleaned:
+            return ""
+        cleaned = re.sub(r"没(?:没有)+", "没有", cleaned)
+        return cls._SHORT_DUPLICATE_NOISE_RE.sub(r"\1", cleaned).strip()
+
+    def _collapse_short_duplicate_noise_words(self, words: list[WordTiming]) -> tuple[list[WordTiming], int]:
+        source = list(words or [])
+        if not source:
+            return [], 0
+
+        cleaned: list[WordTiming] = []
+        dropped_count = 0
+        index = 0
+        while index < len(source):
+            word = source[index]
+            key = self._short_duplicate_noise_key(word.word)
+
+            if key == "没" and index + 1 < len(source) and self._short_duplicate_noise_key(source[index + 1].word) == "没有":
+                end_index = index + 2
+                while end_index < len(source) and self._short_duplicate_noise_key(source[end_index].word) == "没有":
+                    end_index += 1
+                kept = self._copy_word_timing(source[index + 1], word_text="没有", start=word.start)
+                cleaned.append(kept)
+                dropped_count += end_index - index - 1
+                index = end_index
+                continue
+
+            if key in self._SHORT_DUPLICATE_NOISE_TERMS:
+                run_end = index + 1
+                while run_end < len(source) and self._short_duplicate_noise_key(source[run_end].word) == key:
+                    run_end += 1
+                cleaned.append(self._copy_word_timing(word))
+                dropped_count += run_end - index - 1
+                index = run_end
+                continue
+
+            cleaned.append(self._copy_word_timing(word))
+            index += 1
+
+        return cleaned, dropped_count
+
+    @classmethod
+    def _short_duplicate_noise_key(cls, text: str) -> str:
+        return cls._decode_loop_key(text)
+
+    @staticmethod
+    def _copy_word_timing(
+        word: WordTiming,
+        *,
+        word_text: str | None = None,
+        start: float | None = None,
+        end: float | None = None,
+    ) -> WordTiming:
+        return WordTiming(
+            word=word.word if word_text is None else word_text,
+            start=word.start if start is None else start,
+            end=word.end if end is None else end,
+            provider=word.provider,
+            model=word.model,
+            raw_payload=dict(word.raw_payload),
+            raw_text=word.raw_text,
+            context=word.context,
+            hotword=word.hotword,
+            confidence=word.confidence,
+            logprob=word.logprob,
+            alignment=word.alignment,
+        )
 
     def _collapse_decode_loop_text(self, text: str) -> str:
         original = str(text or "").strip()

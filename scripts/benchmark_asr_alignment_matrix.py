@@ -45,6 +45,11 @@ FUNASR_PARAFORMER_HTTP_VARIANTS: dict[str, dict[str, Any]] = {
     "funasr_paraformer_itn": {"language": "zh", "hotwords": "sample", "use_itn": "true"},
 }
 
+QWEN3_HTTP_VARIANTS: dict[str, dict[str, Any]] = {
+    "qwen3_asr_http": {"language": "Chinese", "hotwords": "sample", "max_new_tokens": "256"},
+    "qwen3_asr_nohot": {"language": "Chinese", "hotwords": "", "max_new_tokens": "256"},
+}
+
 
 @dataclass
 class SampleSpec:
@@ -131,6 +136,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--moss-bnb4-url", default="http://127.0.0.1:30221")
     parser.add_argument("--moss-fp16-url", default="http://127.0.0.1:30222")
     parser.add_argument("--moss-container-audio-root", default="/bench/audio")
+    parser.add_argument("--qwen-asr-url", default="http://127.0.0.1:30230")
     parser.add_argument("--qwen-align-url", default="")
     parser.add_argument("--funasr-nano-model", default="FunAudioLLM/Fun-ASR-Nano-2512")
     parser.add_argument("--funasr-paraformer-model", default="damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch")
@@ -340,6 +346,7 @@ def is_http_asr_candidate(candidate: str) -> bool:
         *FASTER_WHISPER_HTTP_VARIANTS,
         *FUNASR_NANO_HTTP_VARIANTS,
         *FUNASR_PARAFORMER_HTTP_VARIANTS,
+        *QWEN3_HTTP_VARIANTS,
         "moss_audio",
         "moss_audio_bnb4",
         "moss_audio_fp16",
@@ -354,6 +361,8 @@ def asr_candidate_url(candidate: str, args: argparse.Namespace) -> str:
         return args.funasr_nano_url
     if candidate in FUNASR_PARAFORMER_HTTP_VARIANTS:
         return args.funasr_paraformer_url
+    if candidate in QWEN3_HTTP_VARIANTS:
+        return args.qwen_asr_url
     if candidate in {"moss_audio", "moss_audio_timestamp"}:
         return args.moss_url
     if candidate == "moss_audio_bnb4":
@@ -372,6 +381,7 @@ def unload_all_http_services(args: argparse.Namespace) -> None:
         args.moss_url,
         args.moss_bnb4_url,
         args.moss_fp16_url,
+        args.qwen_asr_url,
         args.qwen_align_url,
     }:
         unload_http_service(str(url or ""), args.timeout_sec)
@@ -394,6 +404,8 @@ def dispatch_asr(candidate: str, sample: Sample, args: argparse.Namespace) -> tu
         return call_asr_http(sample, args.funasr_nano_url, args.timeout_sec, data=build_http_variant_data(candidate, sample, FUNASR_NANO_HTTP_VARIANTS))
     if candidate in FUNASR_PARAFORMER_HTTP_VARIANTS:
         return call_asr_http(sample, args.funasr_paraformer_url, args.timeout_sec, data=build_http_variant_data(candidate, sample, FUNASR_PARAFORMER_HTTP_VARIANTS))
+    if candidate in QWEN3_HTTP_VARIANTS:
+        return call_asr_http(sample, args.qwen_asr_url, args.timeout_sec, data=build_http_variant_data(candidate, sample, QWEN3_HTTP_VARIANTS))
     if candidate == "faster_whisper_large_v3":
         return run_faster_whisper(sample, model_size="large-v3")
     if candidate == "funasr_nano_2512":

@@ -174,6 +174,7 @@ export type JobManualEditSubtitle = {
   text_norm?: string | null;
   text_final?: string | null;
   transcript_text?: string | null;
+  display_suppressed_reason?: string | null;
   words?: JobManualEditWord[];
   alignment_tokens?: JobManualEditAlignmentToken[];
   alignment_diagnostics?: JobManualEditAlignmentDiagnostics | null;

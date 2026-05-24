@@ -14,14 +14,16 @@ services:
     environment:
       HF_HOME: /models/huggingface
       HUGGINGFACE_HUB_CACHE: /models/huggingface/hub
-      QWEN3_ASR_MODEL: ${QWEN3_ASR_MODEL:-Qwen/Qwen3-ASR-1.7B}
-      QWEN3_ASR_ALIGNER: ${QWEN3_ASR_ALIGNER:-Qwen/Qwen3-ForcedAligner-0.6B}
+      MODELSCOPE_CACHE: /models/modelscope
+      QWEN3_ASR_MODEL: ${QWEN3_ASR_MODEL:-/models/modelscope/Qwen/Qwen3-ASR-1.7B}
+      QWEN3_ASR_ALIGNER: ${QWEN3_ASR_ALIGNER:-/models/modelscope/Qwen/Qwen3-ForcedAligner-0.6B}
       QWEN3_ASR_DEVICE_MAP: ${QWEN3_ASR_DEVICE_MAP:-cuda:0}
       QWEN3_ASR_IDLE_UNLOAD_SECONDS: ${QWEN3_ASR_IDLE_UNLOAD_SECONDS:-10}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     volumes:
       - ${QWEN3_ASR_HF_CACHE:-E:/WorkSpace/RoughCut/.model-cache/huggingface}:/models/huggingface
+      - ${QWEN3_ASR_MODELSCOPE_CACHE:-E:/WorkSpace/RoughCut/.model-cache/modelscope}:/models/modelscope
       - ./output/test/asr-bench/samples:/bench/audio:ro
     ports:
       - "${QWEN3_ASR_PORT:-30080}:30000"

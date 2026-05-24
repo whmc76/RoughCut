@@ -393,6 +393,7 @@ class ManualEditorSubtitleOut(BaseModel):
     text_norm: str | None = None
     text_final: str | None = None
     transcript_text: str | None = None
+    display_suppressed_reason: str | None = None
     words: list[ManualEditorWordOut] = Field(default_factory=list)
     alignment_tokens: list[ManualEditorSubtitleSpanTokenOut] = Field(default_factory=list)
     alignment_diagnostics: dict[str, Any] | None = None
@@ -1622,6 +1623,7 @@ _MANUAL_EDITOR_SMART_DELETE_REASONS = {
     "rollback_instruction",
     "restart_retake",
     "restart_cue",
+    "noise_subtitle",
     "low_signal_subtitle",
     "long_non_dialogue",
     "timing_trim",
@@ -1637,6 +1639,7 @@ _MANUAL_EDITOR_FRONTEND_MANAGED_AUTO_CUT_REASONS = {
     "rollback_instruction",
     "restart_retake",
     "restart_cue",
+    "noise_subtitle",
     "low_signal_subtitle",
     "long_non_dialogue",
     "timing_trim",
@@ -1651,6 +1654,7 @@ _MANUAL_EDITOR_SMART_DELETE_REASON_LABELS = {
     "rollback_instruction": "口播指令回删前段",
     "restart_retake": "疑似重录废片",
     "restart_cue": "明确重来/口误提示",
+    "noise_subtitle": "规则候选：ASR 噪音标记",
     "low_signal_subtitle": "低信息字幕废片",
     "long_non_dialogue": "长段非口播废片",
     "timing_trim": "规则候选：节奏边界修剪",
@@ -2903,15 +2907,6 @@ def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> Manu
             continue
     if source_index not in source_indexes:
         source_indexes.insert(0, source_index)
-    raw_alignment_token_payloads = subtitle_span_token_payloads(item)
-    alignment_tokens = [
-        ManualEditorSubtitleSpanTokenOut(**token)
-        for token in _manual_editor_normalize_alignment_token_payloads(
-            raw_alignment_token_payloads,
-            canonical_text=canonical_source_text or text_final,
-        )
-    ]
-    alignment_diagnostics = subtitle_span_alignment_diagnostics(item)
     word_payloads = [
         word.model_dump()
         for raw_word in list(item.get("words") or [])
@@ -2922,6 +2917,16 @@ def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> Manu
         word_payloads,
         transcript_text or canonical_source_text or text_final,
     )
+    alignment_item = {**item, "words": normalized_word_payloads}
+    raw_alignment_token_payloads = subtitle_span_token_payloads(alignment_item)
+    alignment_tokens = [
+        ManualEditorSubtitleSpanTokenOut(**token)
+        for token in _manual_editor_normalize_alignment_token_payloads(
+            raw_alignment_token_payloads,
+            canonical_text=canonical_source_text or text_final,
+        )
+    ]
+    alignment_diagnostics = subtitle_span_alignment_diagnostics(item)
     return ManualEditorSubtitleOut(
         index=item_index,
         source_index=source_index,
@@ -2953,6 +2958,7 @@ def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> Manu
         text_norm=_manual_editor_editable_text(item.get("text_norm")) or None,
         text_final=text_final,
         transcript_text=transcript_text or None,
+        display_suppressed_reason=str(item.get("display_suppressed_reason") or "").strip() or None,
         words=[ManualEditorWordOut(**word) for word in normalized_word_payloads],
         alignment_tokens=alignment_tokens,
         alignment_diagnostics=alignment_diagnostics,
@@ -4324,7 +4330,7 @@ async def _build_manual_editor_session(
         raw_source_subtitle_dicts,
         drop_empty=False,
         collapse_repeats=False,
-        clean_text=False,
+        clean_text=True,
     )
     subtitle_fingerprint = _manual_editor_subtitle_fingerprint(source_subtitle_dicts)
     timeline_subtitle_fingerprint = _manual_editor_subtitle_fingerprint(raw_subtitle_dicts or source_subtitle_dicts)
@@ -4879,7 +4885,7 @@ async def apply_manual_editor_timeline(
         raw_source_subtitle_dicts,
         drop_empty=False,
         collapse_repeats=False,
-        clean_text=False,
+        clean_text=True,
     )
     source_subtitle_dicts = _attach_manual_editor_words_to_subtitles(
         source_subtitle_dicts,

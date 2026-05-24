@@ -911,6 +911,69 @@ def test_manual_editor_subtitle_payload_exposes_alignment_diagnostics_and_tokens
     assert "unmatched_text_suffix" in payload.alignment_diagnostics["issues"]
 
 
+def test_manual_editor_alignment_uses_normalized_word_timings_for_multi_char_words() -> None:
+    payload = _manual_editor_subtitle_payload(
+        {
+            "index": 0,
+            "start_time": 2.14,
+            "end_time": 3.76,
+            "text_final": "今天我们直奔主题",
+            "words": [
+                {"word": "今天", "start": 2.37, "end": 2.6},
+                {"word": "我们", "start": 2.83, "end": 3.06},
+                {"word": "直", "start": 3.06, "end": 3.38},
+                {"word": "奔", "start": 3.38, "end": 3.5},
+                {"word": "主", "start": 3.5, "end": 3.6},
+                {"word": "题", "start": 3.6, "end": 3.76},
+            ],
+        },
+        index=0,
+    )
+
+    assert [word.word for word in payload.words] == list("今天我们直奔主题")
+    assert [(word.word, word.start, word.end) for word in payload.words[:4]] == [
+        ("今", 2.37, 2.485),
+        ("天", 2.485, 2.6),
+        ("我", 2.83, 2.945),
+        ("们", 2.945, 3.06),
+    ]
+    assert [(token.text, token.start, token.end) for token in payload.alignment_tokens[:4]] == [
+        ("今", 2.37, 2.485),
+        ("天", 2.485, 2.6),
+        ("我", 2.83, 2.945),
+        ("们", 2.945, 3.06),
+    ]
+    assert payload.alignment_diagnostics is not None
+    assert payload.alignment_diagnostics["word_text"] == "今天我们直奔主题"
+    assert payload.alignment_diagnostics["word_unit_count"] == 8
+
+
+def test_manual_editor_alignment_diagnostics_deduplicate_repeated_word_timing_rows() -> None:
+    payload = _manual_editor_subtitle_payload(
+        {
+            "index": 0,
+            "start_time": 2.14,
+            "end_time": 3.76,
+            "text_final": "今天我们直奔主题",
+            "words": [
+                {"word": "今天", "start": 2.37, "end": 2.6},
+                {"word": "今天", "start": 2.37, "end": 2.6},
+                {"word": "我们", "start": 2.83, "end": 3.06},
+                {"word": "我们", "start": 2.83, "end": 3.06},
+                {"word": "直", "start": 3.06, "end": 3.38},
+                {"word": "奔", "start": 3.38, "end": 3.5},
+                {"word": "主", "start": 3.5, "end": 3.6},
+                {"word": "题", "start": 3.6, "end": 3.76},
+            ],
+        },
+        index=0,
+    )
+
+    assert payload.alignment_diagnostics is not None
+    assert payload.alignment_diagnostics["word_text"] == "今天我们直奔主题"
+    assert payload.alignment_diagnostics["word_unit_count"] == 8
+
+
 def test_manual_editor_keeps_projection_text_when_it_matches_source_phrase() -> None:
     assert not _manual_projection_has_source_text_mismatch(
         [

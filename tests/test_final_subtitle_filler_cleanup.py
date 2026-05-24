@@ -104,6 +104,8 @@ def test_clean_final_subtitle_text_hides_asr_noise_markers() -> None:
     assert clean_final_subtitle_text("这个细节 [music] 继续看") == "这个细节继续看"
     assert clean_final_subtitle_text("这个细节 silence music 继续看。") == "这个细节 silence music 继续看"
     assert clean_final_subtitle_text("给它塞进去啊EnvironmentalSounds哎") == "给它塞进去啊"
+    assert clean_final_subtitle_text("噪音") == ""
+    assert clean_final_subtitle_text("背景音") == ""
 
 
 def test_clean_subtitle_payloads_marks_explicit_display_suppression_reason() -> None:
