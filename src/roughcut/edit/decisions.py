@@ -1748,7 +1748,10 @@ def _enrich_subtitle_items_with_transcript_evidence(
 ) -> list[dict[str, Any]]:
     enriched: list[dict[str, Any]] = []
     for item in subtitle_items:
-        overlaps = _overlapping_transcript_segments(item["start_time"], item["end_time"], transcript_segments)
+        item_start = float(item["start_time"])
+        item_end = float(item["end_time"])
+        item_duration = max(0.0, item_end - item_start)
+        overlaps = _overlapping_transcript_segments(item_start, item_end, transcript_segments)
         confidence_values: list[float] = []
         logprob_values: list[float] = []
         speaker_labels: list[str] = []
@@ -1756,7 +1759,12 @@ def _enrich_subtitle_items_with_transcript_evidence(
         has_alignment = False
         word_count = 0
         for segment in overlaps:
-            segment_text = str(segment.get("text") or "").strip()
+            segment_text = _transcript_text_for_subtitle_window(
+                segment,
+                start_time=item_start,
+                end_time=item_end,
+                max_window_duration=max(item_duration, 0.001),
+            )
             if segment_text:
                 transcript_texts.append(segment_text)
             if segment.get("confidence") is not None:
@@ -1792,6 +1800,45 @@ def _enrich_subtitle_items_with_transcript_evidence(
             }
         )
     return enriched
+
+
+def _transcript_text_for_subtitle_window(
+    segment: dict[str, Any],
+    *,
+    start_time: float,
+    end_time: float,
+    max_window_duration: float,
+) -> str:
+    words = [word for word in list(segment.get("words") or []) if isinstance(word, dict)]
+    clipped_words: list[str] = []
+    for word in words:
+        word_start = _optional_float(word.get("start"))
+        word_end = _optional_float(word.get("end"))
+        if word_start is None:
+            continue
+        if word_end is None:
+            word_end = word_start
+        if word_end <= word_start:
+            continue
+        word_overlap = _range_overlap_seconds(start_time, end_time, word_start, word_end)
+        word_duration = max(0.001, word_end - word_start)
+        if word_overlap < min(0.04, max(0.012, word_duration * 0.2)):
+            continue
+        text = str(word.get("word") or word.get("raw_text") or "").strip()
+        if text:
+            clipped_words.append(text)
+    if clipped_words:
+        return "".join(clipped_words).strip()
+
+    segment_start = _as_float(segment.get("start"))
+    segment_end = _as_float(segment.get("end"), fallback=segment_start)
+    segment_duration = max(0.0, segment_end - segment_start)
+    if segment_duration > max(8.0, max_window_duration * 3.0):
+        return ""
+    overlap = _range_overlap_seconds(start_time, end_time, segment_start, segment_end)
+    if overlap <= 0.0 or overlap < min(max_window_duration, segment_duration) * 0.5:
+        return ""
+    return str(segment.get("text") or "").strip()
 
 
 def _merge_cut_intervals(cuts: list[tuple[float, float, str]]) -> list[tuple[float, float, str]]:
@@ -2530,6 +2577,9 @@ def _subtitle_text(item: dict) -> str:
 def _semantic_subtitle_text(item: dict[str, Any] | None) -> str:
     if not item:
         return ""
+    subtitle_text = _subtitle_text(item).strip()
+    if subtitle_text:
+        return subtitle_text
     transcript_text = str(item.get("transcript_text") or "").strip()
     if transcript_text:
         return transcript_text

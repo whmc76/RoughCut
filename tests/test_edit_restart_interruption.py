@@ -73,6 +73,34 @@ def test_build_edit_decision_marks_rollback_instruction_for_manual_full_transcri
     assert not any(segment.type == "remove" and segment.start == 10.0 and segment.end == 18.0 for segment in decision.segments)
 
 
+def test_coarse_transcript_text_does_not_create_rollback_candidates_for_every_subtitle() -> None:
+    decision = build_edit_decision(
+        "demo.mp4",
+        duration=40.0,
+        silence_segments=[],
+        subtitle_items=[
+            _subtitle(0, 1.0, 5.0, "今天看这个小工具"),
+            _subtitle(1, 5.0, 9.0, "它的手感还不错"),
+            _subtitle(2, 9.0, 13.0, "接下来展示一下开合"),
+        ],
+        transcript_segments=[
+            {
+                "index": 0,
+                "start": 0.0,
+                "end": 300.0,
+                "text": "今天看这个小工具，它的手感还不错。后面误识别成这段剪掉但这不是当前字幕。",
+                "words": [],
+            }
+        ],
+        content_profile={"content_kind": "unboxing"},
+    )
+
+    assert not any(
+        cut["reason"] == "rollback_instruction"
+        for cut in decision.analysis["manual_editor_rule_candidates"]
+    )
+
+
 def test_interruption_between_retake_lines_becomes_cut_candidate() -> None:
     cuts = _collect_restart_retake_cuts(
         [
