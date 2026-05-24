@@ -115,6 +115,8 @@ TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
         "gpt-4o-mini-transcribe",
     ],
     "local_http_asr": [
+        "qwen3-asr-1.7b-forced-aligner",
+        "fun-asr-nano-2512",
         "faster-whisper-large-v3-beam5-nohot",
     ],
 }
@@ -197,13 +199,12 @@ DEFAULT_TRANSCRIPTION_MODELS: dict[str, str] = {
     "funasr": "sensevoice-small",
     "faster_whisper": "large-v3",
     "openai": "gpt-4o-transcribe",
-    "local_http_asr": "faster-whisper-large-v3-beam5-nohot",
+    "local_http_asr": "qwen3-asr-1.7b-forced-aligner",
 }
 LEGACY_LOCAL_HTTP_ASR_MODELS: tuple[str, ...] = (
     "local-asr-current",
     "vibevoice-asr-int8",
     "moss-audio-8b-instruct",
-    "qwen3-asr-1.7b-forced-aligner",
 )
 LEGACY_LOCAL_HTTP_ASR_URLS: tuple[str, ...] = (
     "http://127.0.0.1:6001",
@@ -351,9 +352,9 @@ class Settings(BaseSettings):
     transcription_dialect: str = DEFAULT_TRANSCRIPTION_DIALECT
     transcription_alignment_mode: str = "auto"  # auto | provider_only | synthetic
     transcription_alignment_min_word_coverage: float = 0.72
-    local_asr_api_base_url: str = "http://127.0.0.1:30200"
-    local_asr_model_name: str = "faster-whisper-large-v3-beam5-nohot"
-    local_asr_display_name: str = "faster-whisper large-v3 beam5 nohot"
+    local_asr_api_base_url: str = "http://127.0.0.1:30230"
+    local_asr_model_name: str = "qwen3-asr-1.7b-forced-aligner"
+    local_asr_display_name: str = "Qwen3-ASR 1.7B + ForcedAligner"
     local_asr_health_path: str = "/health"
     local_asr_transcribe_path: str = "/transcribe"
     local_asr_hotwords_field: str = "hotwords"
@@ -417,7 +418,7 @@ class Settings(BaseSettings):
     local_asr_docker_guard_enabled: bool = True
     local_asr_docker_compose_file: str = "E:/WorkSpace/RoughCut/docker-compose.asr-matrix.yml"
     local_asr_docker_env_file: str = ""
-    local_asr_docker_services: str = "faster-whisper-large-v3"
+    local_asr_docker_services: str = "qwen3-asr"
     local_asr_docker_idle_timeout_sec: int = 900
     cosyvoice3_tts_api_base_url: str = "http://127.0.0.1:30180"
     cosyvoice3_tts_health_path: str = "/health"

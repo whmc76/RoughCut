@@ -123,7 +123,7 @@ def test_transcription_runtime_keeps_explicit_supported_provider_routes() -> Non
     ]
 
 
-def test_legacy_local_http_asr_snapshot_is_normalized_to_faster_whisper_service() -> None:
+def test_legacy_local_http_asr_snapshot_is_normalized_to_current_http_asr_service() -> None:
     normalized = _normalize_runtime_override_values(
         {
             "transcription_provider": "local_http_asr",
@@ -134,10 +134,10 @@ def test_legacy_local_http_asr_snapshot_is_normalized_to_faster_whisper_service(
         }
     )
 
-    assert normalized["transcription_model"] == "faster-whisper-large-v3-beam5-nohot"
-    assert normalized["local_asr_api_base_url"] == "http://127.0.0.1:30200"
-    assert normalized["local_asr_model_name"] == "faster-whisper-large-v3-beam5-nohot"
-    assert normalized["local_asr_display_name"] == "faster-whisper large-v3 beam5 nohot"
+    assert normalized["transcription_model"] == "qwen3-asr-1.7b-forced-aligner"
+    assert normalized["local_asr_api_base_url"] == "http://127.0.0.1:30230"
+    assert normalized["local_asr_model_name"] == "qwen3-asr-1.7b-forced-aligner"
+    assert normalized["local_asr_display_name"] == "Qwen3-ASR 1.7B + ForcedAligner"
 
 
 def test_avatar_capability_status_uses_business_capability_keys() -> None:

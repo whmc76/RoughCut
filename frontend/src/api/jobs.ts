@@ -202,6 +202,8 @@ export const jobsApi = {
     request<{ applied: number }>(`/jobs/${jobId}/review/apply`, { method: "POST", body: JSON.stringify({ actions }) }),
   contentProfileThumbnailUrl: (jobId: string, index: number, version?: string | null) =>
     apiPath(`/jobs/${jobId}/content-profile/thumbnail?index=${index}${version ? `&v=${encodeURIComponent(version)}` : ""}`),
+  jobCoverThumbnailUrl: (jobId: string, version?: string | null) =>
+    apiPath(`/jobs/${jobId}/cover-thumbnail${version ? `?v=${encodeURIComponent(version)}` : ""}`),
   warmContentProfileThumbnails: (jobId: string) => request<{ status: string; job_id: string }>(`/jobs/${jobId}/content-profile/thumbnails/warm`, {
     method: "POST",
   }),

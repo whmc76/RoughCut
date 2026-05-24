@@ -118,6 +118,7 @@ def test_source_name_edc_identity_terms_are_frontloaded_in_transcription_prompt(
     hotwords = extract_prompt_hotwords(prompt)
     assert hotwords[:6] == ["NOC", "MT34", "MT", "S06mini", "锆合金", "折刀"]
     assert "NOC MT34" in hotwords
+    assert "欧气" in hotwords
     assert len(hotwords) <= 12
     assert len(prompt) <= 320
 

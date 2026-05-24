@@ -1957,6 +1957,12 @@ select.input option:focus {
   color: #b5e7cb;
 }
 
+.mode-chip.publication {
+  border-color: rgba(255, 178, 89, 0.28);
+  background: rgba(255, 178, 89, 0.1);
+  color: #ffd29b;
+}
+
 .job-queue-thumb {
   width: 116px;
   height: 66px;
@@ -9100,6 +9106,12 @@ textarea.input {
   border-color: rgba(37, 99, 235, 0.24);
   background: #eef5ff;
   color: #184dd8;
+}
+
+.mode-chip.publication {
+  border-color: rgba(194, 105, 12, 0.24);
+  background: #fff4e4;
+  color: #9a4d00;
 }
 
 .status-chip.failed,

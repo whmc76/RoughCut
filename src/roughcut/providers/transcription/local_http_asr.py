@@ -34,8 +34,16 @@ from roughcut.review.hotword_learning import extract_prompt_hotwords
 class LocalHTTPASRProvider(TranscriptionProvider):
     _DECODE_LOOP_MIN_TEXT_UNITS = 12
     _DECODE_LOOP_MIN_REPEATS = 4
-    _SHORT_DUPLICATE_NOISE_TERMS = frozenset({"啊", "呃", "嗯", "哦", "哎", "诶", "呀", "呢", "嘛", "吧", "吗", "了", "的", "还"})
-    _SHORT_DUPLICATE_NOISE_RE = re.compile(r"([啊呃嗯哦哎诶呀呢嘛吧吗了的还])\1+")
+    _SHORT_DUPLICATE_NOISE_TERMS = frozenset(
+        {
+            "啊", "呃", "嗯", "哦", "哎", "诶", "呀", "呢", "嘛", "吧", "吗",
+            "了", "的", "还", "又", "就", "也", "都", "再", "很", "太",
+            "是", "个", "我", "你", "他", "她", "它", "给", "把",
+        }
+    )
+    _SHORT_PREFIX_DUPLICATE_NOISE_TERMS = frozenset({"开", "有", "借", "简"})
+    _SHORT_DUPLICATE_NOISE_RE = re.compile(r"([啊呃嗯哦哎诶呀呢嘛吧吗了的还又就也都再很太是个我你他她它给把])\1+")
+    _SHORT_PREFIX_DUPLICATE_NOISE_RE = re.compile(r"([开有借简])\1(?=[\u4e00-\u9fff])")
 
     def __init__(self, *, model_name: str = "faster-whisper-large-v3-beam5-nohot") -> None:
         settings = get_settings()
@@ -882,6 +890,10 @@ class LocalHTTPASRProvider(TranscriptionProvider):
         if not cleaned:
             return ""
         cleaned = re.sub(r"没(?:没有)+", "没有", cleaned)
+        cleaned = re.sub(r"(?:没有){2,}", "没有", cleaned)
+        cleaned = re.sub(r"这(?=这个)", "", cleaned)
+        cleaned = re.sub(r"那(?=那个)", "", cleaned)
+        cleaned = cls._SHORT_PREFIX_DUPLICATE_NOISE_RE.sub(r"\1", cleaned)
         return cls._SHORT_DUPLICATE_NOISE_RE.sub(r"\1", cleaned).strip()
 
     def _collapse_short_duplicate_noise_words(self, words: list[WordTiming]) -> tuple[list[WordTiming], int]:
@@ -905,6 +917,31 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                 dropped_count += end_index - index - 1
                 index = end_index
                 continue
+
+            if key == "没有":
+                run_end = index + 1
+                while run_end < len(source) and self._short_duplicate_noise_key(source[run_end].word) == "没有":
+                    run_end += 1
+                cleaned.append(self._copy_word_timing(word))
+                dropped_count += run_end - index - 1
+                index = run_end
+                continue
+
+            if key in {"这", "那"} and index + 1 < len(source):
+                next_key = self._short_duplicate_noise_key(source[index + 1].word)
+                if next_key == f"{key}个":
+                    cleaned.append(self._copy_word_timing(source[index + 1], start=word.start))
+                    dropped_count += 1
+                    index += 2
+                    continue
+
+            if key in self._SHORT_PREFIX_DUPLICATE_NOISE_TERMS and index + 1 < len(source):
+                next_key = self._short_duplicate_noise_key(source[index + 1].word)
+                if next_key == key or next_key.startswith(key):
+                    cleaned.append(self._copy_word_timing(source[index + 1], start=word.start))
+                    dropped_count += 1
+                    index += 2
+                    continue
 
             if key in self._SHORT_DUPLICATE_NOISE_TERMS:
                 run_end = index + 1

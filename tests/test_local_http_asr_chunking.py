@@ -326,7 +326,7 @@ def test_local_http_asr_collapses_qwen3_short_duplicate_noise_but_keeps_real_rep
             {
                 "start_time": 0.0,
                 "end_time": 10.0,
-                "text": "啊啊！不过好在呢，还还算抢到了啊，没没有没有这个像很多兄弟一样隐恨啊，我最近这这三次三次NOC的这个发售啊。",
+                "text": "啊啊！不过好在呢，还还算抢到了啊，没没有没有这个像很多兄弟一样隐恨啊，没有没有边夹到一下，这这个我我看开开启和借借位，然后又又很很帅，简简单地说，那个之前有朋友，我最近这这三次三次NOC的这个发售啊。",
                 "words": [
                     {"text": "啊", "start": 0.0, "end": 0.1},
                     {"text": "啊", "start": 0.1, "end": 0.2},
@@ -335,10 +335,26 @@ def test_local_http_asr_collapses_qwen3_short_duplicate_noise_but_keeps_real_rep
                     {"text": "没", "start": 2.0, "end": 2.1},
                     {"text": "没有", "start": 2.1, "end": 2.3},
                     {"text": "没有", "start": 2.3, "end": 2.5},
+                    {"text": "没有", "start": 2.6, "end": 2.8},
+                    {"text": "没有", "start": 2.8, "end": 3.0},
                     {"text": "这", "start": 3.0, "end": 3.1},
-                    {"text": "这", "start": 3.1, "end": 3.2},
-                    {"text": "三次", "start": 3.2, "end": 3.4},
-                    {"text": "三次", "start": 3.4, "end": 3.6},
+                    {"text": "这个", "start": 3.1, "end": 3.3},
+                    {"text": "我", "start": 3.3, "end": 3.4},
+                    {"text": "我", "start": 3.4, "end": 3.5},
+                    {"text": "开", "start": 4.0, "end": 4.1},
+                    {"text": "开启", "start": 4.1, "end": 4.4},
+                    {"text": "借", "start": 4.4, "end": 4.5},
+                    {"text": "借位", "start": 4.5, "end": 4.8},
+                    {"text": "又", "start": 4.8, "end": 4.9},
+                    {"text": "又", "start": 4.9, "end": 5.0},
+                    {"text": "很", "start": 5.0, "end": 5.1},
+                    {"text": "很", "start": 5.1, "end": 5.2},
+                    {"text": "简", "start": 5.2, "end": 5.3},
+                    {"text": "简单", "start": 5.3, "end": 5.6},
+                    {"text": "这", "start": 6.0, "end": 6.1},
+                    {"text": "这", "start": 6.1, "end": 6.2},
+                    {"text": "三次", "start": 6.2, "end": 6.4},
+                    {"text": "三次", "start": 6.4, "end": 6.6},
                 ],
             }
         ],
@@ -356,11 +372,29 @@ def test_local_http_asr_collapses_qwen3_short_duplicate_noise_but_keeps_real_rep
     assert "啊啊" not in segment.text
     assert "还还" not in segment.text
     assert "没没有没有" not in segment.text
+    assert "没有没有" not in segment.text
+    assert "这这个" not in segment.text
+    assert "开开启" not in segment.text
+    assert "借借位" not in segment.text
+    assert "又又" not in segment.text
+    assert "我我" not in segment.text
+    assert "很很" not in segment.text
+    assert "简简单" not in segment.text
+    assert "这个我看" in segment.text
+    assert "我看开启和借位" in segment.text
+    assert "简单地说" in segment.text
     assert "这这三次三次" in segment.text
-    assert [word.word for word in segment.words] == ["啊", "还", "没有", "这", "这", "三次", "三次"]
+    assert [word.word for word in segment.words] == [
+        "啊", "还", "没有", "这个", "我", "开启", "借位",
+        "又", "很", "简单", "这", "这", "三次", "三次",
+    ]
     assert segment.words[2].start == 2.0
+    assert segment.words[3].start == 3.0
+    assert segment.words[5].start == 4.0
+    assert segment.words[6].start == 4.4
+    assert segment.words[9].start == 5.2
     filtering = segment.raw_payload["_roughcut_filtering"]["collapsed_short_duplicate_noise"]
-    assert filtering["dropped_word_count"] == 4
+    assert filtering["dropped_word_count"] == 13
 
 
 def test_local_http_asr_applies_short_duplicate_noise_to_funasr_nano(tmp_path: Path) -> None:

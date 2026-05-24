@@ -63,6 +63,8 @@ export type Job = {
   avatar_delivery_summary?: string | null;
   publication_status?: string;
   publication_summary?: string | null;
+  queue_task_kind?: "edit" | "publication";
+  queue_thumbnail_source?: "cover" | "content_profile";
   status: string;
   language: string;
   workflow_template?: string | null;

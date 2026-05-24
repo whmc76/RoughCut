@@ -591,19 +591,6 @@ _INFO_COUNT_NOUN_PREFIXES = (
     "续航",
 )
 _SUBTITLE_FILLER_PREFIX_TOKENS = (
-    "呃",
-    "嗯",
-    "啊",
-    "吧",
-    "呢",
-    "吗",
-    "嘛",
-    "呀",
-    "哈",
-    "哦",
-    "诶",
-    "欸",
-    "哎",
     "那个",
     "这个",
     "就是",
@@ -1417,27 +1404,10 @@ def cleanup_subtitle_fillers(text: str) -> str:
         clause = piece.strip()
         if not clause:
             continue
-        original_clause = clause
-        clause = _strip_subtitle_filler_prefixes(clause)
-        clause = _ER_FILLER_RE.sub("", clause)
-        clause = _INLINE_FILLER_RE.sub("", clause)
-        clause = _INLINE_PARTICLE_RE.sub("", clause)
-        clause = _strip_subtitle_filler_suffixes(
-            clause,
-            keep_sentence_final_particle=_next_piece_is_terminal_punctuation(pieces, index),
-        )
         clause = _strip_subtitle_filler_prefixes(clause)
         clause = clause.strip("，, ")
         if (
-            _is_short_subtitle_fragment(clause)
-            and not _is_short_subtitle_fragment(original_clause)
-            and len(re.sub(r"\s+", "", original_clause)) > len(clause)
-            and not _is_low_signal_short_clause(clause)
-        ):
-            clause = original_clause.strip("，, ")
-        if (
             not clause
-            or clause in _SUBTITLE_FILLER_WHOLE_CLAUSE_TOKENS
             or _is_low_signal_short_clause(clause)
         ):
             continue

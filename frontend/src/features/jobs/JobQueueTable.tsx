@@ -1,4 +1,5 @@
 import type { Job } from "../../types";
+import { useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { api } from "../../api";
@@ -137,6 +138,45 @@ function canOpenManualEditorFromQueue(job: Job) {
   return job.steps.some((step) => step.step_name === "edit_plan" && step.status === "done");
 }
 
+function queueTaskKindLabel(job: Job) {
+  return job.queue_task_kind === "publication" ? "发布任务" : "剪辑任务";
+}
+
+function JobQueueThumbnail({ job }: { job: Job }) {
+  const contentThumbnailUrl = api.contentProfileThumbnailUrl(job.id, 0, job.updated_at);
+  const coverThumbnailUrl = api.jobCoverThumbnailUrl(job.id, job.updated_at);
+  const [source, setSource] = useState<"cover" | "content_profile" | "fallback">(
+    job.queue_thumbnail_source === "cover" ? "cover" : "content_profile",
+  );
+  const thumbnailUrl = source === "cover" ? coverThumbnailUrl : contentThumbnailUrl;
+
+  if (source === "fallback") {
+    return (
+      <div className="job-queue-thumb job-queue-thumb-fallback visible" aria-hidden="true">
+        无封面
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <img
+        className="job-queue-thumb"
+        src={thumbnailUrl}
+        alt={job.source_name}
+        loading="lazy"
+        decoding="async"
+        onError={() => {
+          setSource((current) => (current === "cover" ? "content_profile" : "fallback"));
+        }}
+      />
+      <div className="job-queue-thumb job-queue-thumb-fallback" aria-hidden="true">
+        无封面
+      </div>
+    </>
+  );
+}
+
 type JobQueueTableProps = {
   jobs: Job[];
   selectedJobId: string | null;
@@ -264,24 +304,7 @@ export function JobQueueTable({
                 <tr key={job.id} className={classNames(selectedJobId === job.id && "selected-row")} onClick={() => onSelect(job.id)}>
                   <td>
                     <div className="job-file-cell">
-                      <img
-                        className="job-queue-thumb"
-                        src={api.contentProfileThumbnailUrl(job.id, 0, job.updated_at)}
-                        alt={job.source_name}
-                        loading="lazy"
-                        decoding="async"
-                        onLoad={(event) => {
-                          event.currentTarget.style.display = "";
-                          event.currentTarget.nextElementSibling?.classList.remove("visible");
-                        }}
-                        onError={(event) => {
-                          event.currentTarget.style.display = "none";
-                          event.currentTarget.nextElementSibling?.classList.add("visible");
-                        }}
-                      />
-                      <div className="job-queue-thumb job-queue-thumb-fallback" aria-hidden="true">
-                        {t("jobs.queue.noThumbnail")}
-                      </div>
+                      <JobQueueThumbnail job={job} />
                       <div className="job-file-copy">
                         <div className="row-title">{job.source_name}</div>
                         <div className="muted line-clamp-2">{reviewPreviewText(job, t)}</div>
@@ -292,6 +315,9 @@ export function JobQueueTable({
                           </div>
                         ) : null}
                         <div className="mode-chip-list compact-top">
+                          <span className={classNames("mode-chip", job.queue_task_kind === "publication" ? "publication" : "planned")}>
+                            {queueTaskKindLabel(job)}
+                          </span>
                           <span className="mode-chip planned">{jobFlowModeLabel(job.job_flow_mode || "auto")}</span>
                           <span className="mode-chip">{workflowModeLabel(job.workflow_mode)}</span>
                           {job.enhancement_modes.map((mode) => (

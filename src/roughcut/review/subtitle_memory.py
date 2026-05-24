@@ -112,6 +112,13 @@ _SOURCE_CONTEXT_HOTWORD_TERMS = (
     "钢材",
     "DLC",
 )
+_UNBOXING_SPOKEN_HOTWORD_TERMS = (
+    "欧气",
+    "发售",
+    "抢购",
+    "饮恨",
+    "一刀难求",
+)
 
 _SOURCE_CONTEXT_ACRONYMS = {
     "EDC",
@@ -1558,7 +1565,22 @@ def _collect_source_context_hotword_terms(
                 append(f"NOC {model.upper()}")
                 break
 
+    if _context_suggests_drop_or_unboxing_speech(context):
+        for term in _UNBOXING_SPOKEN_HOTWORD_TERMS:
+            append(term)
+
     return terms[:10]
+
+
+def _context_suggests_drop_or_unboxing_speech(context: str) -> bool:
+    normalized = str(context or "")
+    if not normalized:
+        return False
+    return bool(
+        re.search(r"开箱|抢购|发售|抽签|限量|一刀难求", normalized)
+        or re.search(r"\b(?:NOC|EDC|FAS|REATE)\b", normalized, re.IGNORECASE)
+        or any(term in normalized for term in ("折刀", "手电", "潮玩", "小玩具"))
+    )
 
 
 def _contains_brand_alias_chain(term: str) -> bool:

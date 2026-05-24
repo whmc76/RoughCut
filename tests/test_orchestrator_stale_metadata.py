@@ -55,7 +55,7 @@ def test_worker_started_at_after_dispatch_is_runtime_heartbeat() -> None:
     assert _step_last_heartbeat_at(step) == worker_started
 
 
-def test_lost_task_recovery_detects_unacked_only_task() -> None:
+def test_lost_task_recovery_keeps_unacked_only_task() -> None:
     step = JobStep(
         step_name="content_profile",
         status="running",
@@ -69,8 +69,7 @@ def test_lost_task_recovery_detects_unacked_only_task() -> None:
 
     result = _lost_task_recovery_detail(step, snapshot=snapshot)
 
-    assert result is not None
-    assert result[0] == "unacked"
+    assert result is None
 
 
 def test_lost_task_recovery_keeps_worker_active_task() -> None:
@@ -98,7 +97,7 @@ def test_extract_broker_message_task_id_from_unacked_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_recover_stale_running_step_when_task_only_unacked(monkeypatch) -> None:
+async def test_recover_stale_running_step_keeps_recent_unacked_task(monkeypatch) -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     try:
         async with engine.begin() as conn:
@@ -155,13 +154,12 @@ async def test_recover_stale_running_step_when_task_only_unacked(monkeypatch) ->
 
             refreshed = await session.get(JobStep, step.id)
             assert refreshed is not None
-            assert refreshed.status == "pending"
-            assert refreshed.started_at is None
+            assert refreshed.status == "running"
+            assert refreshed.started_at == stale_at
             assert refreshed.finished_at is None
             assert refreshed.error_message is None
-            assert refreshed.metadata_["last_task_id"] == task_id
-            assert refreshed.metadata_["recovery_presence"] == "unacked"
-            assert "unacked" in refreshed.metadata_["detail"]
+            assert refreshed.metadata_["task_id"] == task_id
+            assert "recovery_presence" not in refreshed.metadata_
 
             artifact_count = (
                 await session.execute(
@@ -171,7 +169,7 @@ async def test_recover_stale_running_step_when_task_only_unacked(monkeypatch) ->
                     )
                 )
             ).scalars().all()
-            assert len(artifact_count) == 1
+            assert len(artifact_count) == 0
     finally:
         await engine.dispose()
 

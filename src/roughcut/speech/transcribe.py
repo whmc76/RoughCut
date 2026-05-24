@@ -79,6 +79,7 @@ _ASR_FUNCTION_STUTTER_RE = re.compile(
 )
 _ASR_PREFIX_STUTTER_RE = re.compile(r"(?P<char>[\u4e00-\u9fff])(?P=char)(?=[\u4e00-\u9fff])")
 _ASR_REPEAT_ALLOWED_CHARS = frozenset(
+    "一二三四五六七八九零两"
     "试看想听说讲问找拿用摸擦敲聊闻尝轻慢快小大多少点微静悄渐晃摇拉推按翻搓揉洗刷切削划扫"
 )
 _ASR_REPEAT_ALLOWED_PREFIXES = frozenset(("开开箱", "一点点"))
@@ -208,6 +209,16 @@ def _append_quality_fallbacks(provider_plan: list[tuple[str, str]]) -> list[tupl
 
 
 def _result_quality_text_units(result: TranscriptResult) -> list[tuple[str, str]]:
+    model = str(getattr(result, "model", "") or "").strip().lower()
+    if "qwen3-asr" in model:
+        segment_units = [
+            (f"segment:{index}", str(getattr(seg, "text", "") or "").strip())
+            for index, seg in enumerate(result.raw_segments or result.segments or [])
+            if str(getattr(seg, "text", "") or "").strip()
+        ]
+        if segment_units:
+            return segment_units
+
     raw_payload = result.raw_payload if isinstance(result.raw_payload, dict) else {}
     chunks = raw_payload.get("chunks")
     units: list[tuple[str, str]] = []

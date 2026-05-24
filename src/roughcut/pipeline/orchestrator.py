@@ -811,10 +811,7 @@ def _lost_task_recovery_detail(
     if presence == "queued":
         return None
     if presence == "unacked":
-        return (
-            presence,
-            "检测到步骤心跳停止，且 Celery 任务只滞留在 broker unacked 集合中，调度器已自动回收并重新入队。",
-        )
+        return None
     if presence == "missing":
         return (
             presence,

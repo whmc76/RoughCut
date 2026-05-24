@@ -193,7 +193,7 @@ def test_normalize_display_text_hides_asr_noise_markers_before_review() -> None:
     assert normalize_display_text("OK的EnvironmentalSoundsSounds") == "OK的"
     assert normalize_display_text("细节 <|music|> 继续看") == "细节继续看"
     assert normalize_display_text("细节 silence music 继续看") == "细节 silence music 继续看"
-    assert normalize_display_text("给它塞进去啊EnvironmentalSounds哎") == "给它塞进去"
+    assert normalize_display_text("给它塞进去啊EnvironmentalSounds哎") == "给它塞进去啊， 哎"
 
 
 @pytest.mark.asyncio

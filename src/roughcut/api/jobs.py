@@ -3910,6 +3910,8 @@ def _media_type_for_path(path: Path) -> str:
         return "image/jpeg"
     if suffix == ".png":
         return "image/png"
+    if suffix == ".webp":
+        return "image/webp"
     if suffix in {".srt", ".txt"}:
         return "text/plain; charset=utf-8"
     return "application/octet-stream"
@@ -5415,6 +5417,30 @@ async def get_content_profile_thumbnail(
         thumbnail,
         media_type="image/jpeg",
         headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+@router.get("/{job_id}/cover-thumbnail")
+async def get_job_cover_thumbnail(
+    job_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.execute(
+        select(Job)
+        .options(selectinload(Job.artifacts), selectinload(Job.publication_attempts))
+        .where(Job.id == job_id)
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    cover_path = _resolve_job_queue_cover_path(job)
+    if cover_path is None:
+        raise HTTPException(status_code=404, detail="Cover thumbnail not found")
+    return FileResponse(
+        cover_path,
+        media_type=_media_type_for_path(cover_path),
+        content_disposition_type="inline",
+        headers={"Cache-Control": "public, max-age=300"},
     )
 
 
@@ -7618,11 +7644,83 @@ def _attach_job_preview(job: Job, *, lightweight: bool = False) -> None:
     publication_preview = _resolve_job_publication_preview(job)
     job.publication_status = publication_preview["status"]
     job.publication_summary = publication_preview["summary"]
+    job.queue_task_kind = _resolve_job_queue_task_kind(job)
+    job.queue_thumbnail_source = "cover" if _resolve_job_queue_cover_path(job) else "content_profile"
     job.progress_percent = _calculate_job_progress_percent(job)
 
 
+def _resolve_job_queue_task_kind(job: Job) -> str:
+    if str(getattr(job, "workflow_template", "") or "").strip() == "intelligent_publish":
+        return "publication"
+    if str(getattr(job, "status", "") or "").strip() == "published":
+        return "publication"
+    steps = [step for step in list(getattr(job, "steps", None) or []) if str(getattr(step, "step_name", "") or "").strip()]
+    if steps:
+        return "edit"
+    try:
+        attempts_unloaded = "publication_attempts" in inspect(job).unloaded
+    except Exception:
+        attempts_unloaded = True
+    if not attempts_unloaded and list(getattr(job, "publication_attempts", None) or []):
+        return "publication"
+    return "edit"
+
+
+def _resolve_job_queue_cover_path(job: Job) -> Path | None:
+    for artifact in list(getattr(job, "artifacts", None) or []):
+        if str(getattr(artifact, "artifact_type", "") or "") != "render_outputs":
+            continue
+        data = getattr(artifact, "data_json", None)
+        if not isinstance(data, dict):
+            continue
+        path = _normalize_existing_image_path(data.get("cover"))
+        if path is not None:
+            return path
+        for value in list(data.get("cover_variants") or []):
+            path = _normalize_existing_image_path(value)
+            if path is not None:
+                return path
+
+    try:
+        if "publication_attempts" in inspect(job).unloaded:
+            return None
+    except Exception:
+        return None
+    for attempt in sorted(
+        list(getattr(job, "publication_attempts", None) or []),
+        key=lambda item: getattr(item, "updated_at", None) or getattr(item, "created_at", None) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    ):
+        payload = getattr(attempt, "request_payload", None)
+        if not isinstance(payload, dict):
+            continue
+        for value in (
+            payload.get("cover_path"),
+            (payload.get("copy_material") or {}).get("cover_path") if isinstance(payload.get("copy_material"), dict) else None,
+        ):
+            path = _normalize_existing_image_path(value)
+            if path is not None:
+                return path
+    return None
+
+
+def _normalize_existing_image_path(value: object) -> Path | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if path.suffix.lower() not in {".jpg", ".jpeg", ".png", ".webp"}:
+        return None
+    try:
+        if path.exists() and path.is_file():
+            return path
+    except OSError:
+        return None
+    return None
+
+
 def _resolve_job_publication_preview(job: Job) -> dict[str, str | None]:
-    if str(job.status or "").strip() != "done":
+    if str(job.status or "").strip() not in {"done", "published"}:
         return {"status": "not_applicable", "summary": None}
     try:
         if "publication_attempts" in inspect(job).unloaded:

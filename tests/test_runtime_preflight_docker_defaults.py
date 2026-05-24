@@ -14,7 +14,7 @@ def test_docker_autostart_defaults_to_disabled() -> None:
     assert settings.avatar_render_no_progress_timeout_sec == 0
     assert settings.local_asr_docker_guard_enabled is True
     assert settings.local_asr_docker_compose_file.endswith("docker-compose.asr-matrix.yml")
-    assert settings.local_asr_docker_services == "faster-whisper-large-v3"
+    assert settings.local_asr_docker_services == "qwen3-asr"
     assert settings.cosyvoice3_tts_docker_guard_enabled is True
     assert settings.cosyvoice3_tts_docker_services == "cosyvoice3-tts"
     assert settings.moss_tts_local_docker_guard_enabled is True

@@ -130,6 +130,8 @@ class JobOut(BaseModel):
     avatar_delivery_summary: str | None = None
     publication_status: str = "unpublished"
     publication_summary: str | None = None
+    queue_task_kind: Literal["edit", "publication"] = "edit"
+    queue_thumbnail_source: Literal["cover", "content_profile"] = "content_profile"
     status: str
     language: str
     workflow_template: str | None

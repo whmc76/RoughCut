@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import uuid
 from types import SimpleNamespace
 
 import pytest
@@ -9,7 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from roughcut import publication
 from roughcut.api.jobs import _attach_job_preview
-from roughcut.db.models import Job
+from roughcut.db.models import Artifact, Job, PublicationAttempt
 from roughcut.db.session import Base
 
 
@@ -88,6 +89,49 @@ class _FakeBrowserAgentHealthClient:
                 },
             }
         )
+
+
+def test_job_queue_preview_marks_publication_task_and_uses_attempt_cover(tmp_path):
+    cover_path = tmp_path / "cover.jpg"
+    cover_path.write_bytes(b"cover")
+    job = Job(id=uuid.uuid4(), source_path="source.mp4", source_name="source.mp4", status="done", workflow_template="intelligent_publish")
+    job.publication_attempts = [
+        PublicationAttempt(
+            id="attempt-1",
+            job_id=job.id,
+            content_id=str(job.id),
+            platform="douyin",
+            platform_label="抖音",
+            idempotency_key="key-1",
+            semantic_fingerprint="fingerprint-1",
+            adapter="browser_agent",
+            status="queued",
+            request_payload={"cover_path": str(cover_path)},
+        )
+    ]
+
+    _attach_job_preview(job, lightweight=True)
+
+    assert job.queue_task_kind == "publication"
+    assert job.queue_thumbnail_source == "cover"
+
+
+def test_job_queue_preview_prefers_render_cover_for_edit_task(tmp_path):
+    cover_path = tmp_path / "render-cover.jpg"
+    cover_path.write_bytes(b"cover")
+    job = Job(id=uuid.uuid4(), source_path="source.mp4", source_name="source.mp4", status="done")
+    job.artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="render_outputs",
+            data_json={"cover": str(cover_path)},
+        )
+    ]
+
+    _attach_job_preview(job, lightweight=True)
+
+    assert job.queue_task_kind == "edit"
+    assert job.queue_thumbnail_source == "cover"
 
 
 def test_normalize_publication_credentials_filters_to_browser_agent():

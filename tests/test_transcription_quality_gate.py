@@ -19,7 +19,7 @@ class _FakeProvider:
         return self._result
 
 
-def _result(provider: str, model: str, text: str) -> TranscriptResult:
+def _result(provider: str, model: str, text: str, *, raw_chunk_text: str | None = None) -> TranscriptResult:
     segment = TranscriptSegment(
         index=0,
         start=0.0,
@@ -36,19 +36,20 @@ def _result(provider: str, model: str, text: str) -> TranscriptResult:
         duration=3.0,
         provider=provider,
         model=model,
-        raw_payload={"chunks": [{"text": text}]},
+        raw_payload={"chunks": [{"text": raw_chunk_text if raw_chunk_text is not None else text}]},
     )
 
 
 @pytest.mark.asyncio
-async def test_qwen3_local_asr_duplicate_noise_is_rejected_without_fallback(monkeypatch, tmp_path: Path) -> None:
-    bad = _result(
+async def test_qwen3_local_asr_short_duplicate_noise_uses_cleaned_segments(monkeypatch, tmp_path: Path) -> None:
+    cleaned = _result(
         "local_http_asr",
         "qwen3-asr-1.7b-forced-aligner",
-        "你看啊啊好，不过好在呢，还还算抢到了啊，没没有没有这个像很多兄弟一样隐恨啊。",
+        "你看啊好，不过好在呢，还算抢到了啊，没有这个像很多兄弟一样隐恨啊。",
+        raw_chunk_text="你看啊啊好，不过好在呢，还还算抢到了啊，没没有没有这个像很多兄弟一样隐恨啊。",
     )
     providers = {
-        ("local_http_asr", "qwen3-asr-1.7b-forced-aligner"): _FakeProvider(bad),
+        ("local_http_asr", "qwen3-asr-1.7b-forced-aligner"): _FakeProvider(cleaned),
     }
 
     def fake_get_transcription_provider(*, provider: str, model: str, **kwargs) -> _FakeProvider:
@@ -57,15 +58,17 @@ async def test_qwen3_local_asr_duplicate_noise_is_rejected_without_fallback(monk
 
     monkeypatch.setattr("roughcut.speech.transcribe.get_transcription_provider", fake_get_transcription_provider)
 
-    with pytest.raises(RuntimeError) as exc_info:
-        await execute_transcription_plan(
-            audio_path=tmp_path / "audio.wav",
-            language="zh-CN",
-            prompt=None,
-            provider_plan=[("local_http_asr", "qwen3-asr-1.7b-forced-aligner")],
-        )
+    selected_result, selected_provider, selected_model, attempt_errors = await execute_transcription_plan(
+        audio_path=tmp_path / "audio.wav",
+        language="zh-CN",
+        prompt=None,
+        provider_plan=[("local_http_asr", "qwen3-asr-1.7b-forced-aligner")],
+    )
 
-    assert "asr_quality_gate" in str(exc_info.value)
+    assert selected_result is cleaned
+    assert selected_provider == "local_http_asr"
+    assert selected_model == "qwen3-asr-1.7b-forced-aligner"
+    assert attempt_errors == []
 
 
 @pytest.mark.asyncio
@@ -99,7 +102,7 @@ def test_normal_reduplication_does_not_trip_asr_quality_gate() -> None:
     result = _result(
         "local_http_asr",
         "qwen3-asr-1.7b-forced-aligner",
-        "我们开开箱吧，试试这个，轻轻一推，一点点手法。",
+        "我们开开箱吧，试试这个，轻轻一推，一点点手法，三三的背夹。",
     )
 
     analysis = analyze_transcript_asr_quality(result)
