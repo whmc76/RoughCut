@@ -1241,6 +1241,7 @@ export type Config = {
     profiles_store: string;
     packaging_store: string;
   };
+  model_routes: ModelRouteEntry[];
   transcription_provider: string;
   transcription_model: string;
   transcription_dialect: string;
@@ -1353,6 +1354,7 @@ export type Config = {
   override_keys: string[];
   session_secret_keys: string[];
   profile_bindable_keys: string[];
+  global_model_route_keys: string[];
   overrides: Record<string, unknown>;
 };
 
@@ -1392,6 +1394,15 @@ export type ProviderCheckResult = {
   status: string;
   detail?: string | null;
   models: string[];
+};
+
+export type ModelRouteEntry = {
+  key: string;
+  label: string;
+  provider: string;
+  model: string;
+  enabled: boolean;
+  details: string[];
 };
 
 export type ModelCatalog = {
@@ -1480,12 +1491,7 @@ export type ConfigProfile = {
   is_dirty: boolean;
   dirty_keys: string[];
   dirty_details: ConfigProfileDirtyDetail[];
-  llm_mode: string;
-  transcription_provider: string;
-  transcription_model: string;
   transcription_dialect: string;
-  reasoning_provider: string;
-  reasoning_model: string;
   workflow_mode: string;
   enhancement_modes: string[];
   auto_confirm_content_profile: boolean;

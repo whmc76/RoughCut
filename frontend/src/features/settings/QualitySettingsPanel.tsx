@@ -1,9 +1,8 @@
 import { CheckboxField } from "../../components/forms/CheckboxField";
-import { SelectField } from "../../components/forms/SelectField";
 import { TextField } from "../../components/forms/TextField";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import type { Config } from "../../types";
-import { CODEX_RUNNER_EFFORT_OPTIONS, COVER_IMAGE_BACKEND_OPTIONS, type SettingsForm } from "./constants";
+import type { SettingsForm } from "./constants";
 
 type QualitySettingsPanelProps = {
   form: SettingsForm;
@@ -22,10 +21,6 @@ export function QualitySettingsPanel({ form, config, onChange }: QualitySettings
   const contentProfileMinSamples = Number(form.content_profile_auto_review_min_samples ?? 20);
   const glossaryThreshold = Number(form.glossary_correction_review_threshold ?? 0.9);
   const coverGap = Number(form.cover_selection_review_gap ?? 0.08);
-  const coverImageGenerationEnabled = Boolean(form.intelligent_copy_cover_image_generation_enabled ?? true);
-  const coverImageBackend = String(form.intelligent_copy_cover_image_backend ?? "codex_builtin");
-  const coverCodexRunnerModel = String(form.intelligent_copy_cover_codex_runner_model ?? "gpt-5.4-mini");
-  const coverCodexRunnerEffort = String(form.intelligent_copy_cover_codex_runner_effort ?? "low");
   const packagingGap = Number(form.packaging_selection_review_gap ?? 0.08);
   const packagingMinScore = Number(form.packaging_selection_min_score ?? 0.6);
   const rerunBelowScore = Number(form.quality_auto_rerun_below_score ?? 75);
@@ -36,10 +31,6 @@ export function QualitySettingsPanel({ form, config, onChange }: QualitySettings
     contentProfileMinSamples !== 20 ||
     Math.abs(glossaryThreshold - 0.9) > 0.001 ||
     Math.abs(coverGap - 0.08) > 0.001 ||
-    !coverImageGenerationEnabled ||
-    coverImageBackend !== "codex_builtin" ||
-    coverCodexRunnerModel !== "gpt-5.4-mini" ||
-    coverCodexRunnerEffort !== "low" ||
     Math.abs(packagingGap - 0.08) > 0.001 ||
     Math.abs(packagingMinScore - 0.6) > 0.001 ||
     rerunBelowScore !== 75 ||
@@ -47,7 +38,6 @@ export function QualitySettingsPanel({ form, config, onChange }: QualitySettings
   const summaryParts = [
     `画像异常门 ${contentProfileThreshold.toFixed(2)} / ${contentProfileMinAccuracy.toFixed(2)} / ${contentProfileMinSamples}`,
     glossaryAutoEnabled ? `术语 ${glossaryThreshold.toFixed(2)}` : "术语手动确认",
-    coverImageGenerationEnabled ? `生图 ${coverImageBackend}` : "生图关闭",
     `包装 ${packagingMinScore.toFixed(2)}`,
     rerunEnabled ? `复跑 < ${rerunBelowScore} · ${rerunMaxAttempts} 次` : "低分复跑关闭",
   ];
@@ -82,11 +72,6 @@ export function QualitySettingsPanel({ form, config, onChange }: QualitySettings
           label="允许自动选封面"
           checked={coverAutoEnabled}
           onChange={(event) => onChange("auto_select_cover_variant", event.target.checked)}
-        />
-        <CheckboxField
-          label="启用智能发布封面生图"
-          checked={coverImageGenerationEnabled}
-          onChange={(event) => onChange("intelligent_copy_cover_image_generation_enabled", event.target.checked)}
         />
         <CheckboxField
           label="去除字幕口癖和填充词"
@@ -177,63 +162,6 @@ export function QualitySettingsPanel({ form, config, onChange }: QualitySettings
                   onChange={(event) => onChange("packaging_selection_min_score", Number(event.target.value))}
                 />
               </section>
-              {coverImageGenerationEnabled ? (
-                <section className="settings-subsection">
-                  <div className="settings-subsection-head">
-                    <strong>智能发布封面生图</strong>
-                    <span className="muted">Codex 模型只负责执行，不决定底层画质</span>
-                  </div>
-                  <SelectField
-                    label="封面生图后端"
-                    value={coverImageBackend}
-                    onChange={(event) => onChange("intelligent_copy_cover_image_backend", event.target.value)}
-                    options={COVER_IMAGE_BACKEND_OPTIONS.map((backend) => ({
-                      value: backend,
-                      label: backend === "codex_builtin" ? "Codex 内置 image_gen" : "OpenAI Images API",
-                    }))}
-                  />
-                  {coverImageBackend === "codex_builtin" ? (
-                    <div className="field-row">
-                      <TextField
-                        label="Codex 执行代理模型"
-                        value={coverCodexRunnerModel}
-                        onChange={(event) => onChange("intelligent_copy_cover_codex_runner_model", event.target.value)}
-                        placeholder="gpt-5.4-mini"
-                      />
-                      <SelectField
-                        label="Codex 执行推理强度"
-                        value={coverCodexRunnerEffort}
-                        onChange={(event) => onChange("intelligent_copy_cover_codex_runner_effort", event.target.value)}
-                        options={CODEX_RUNNER_EFFORT_OPTIONS.map((effort) => ({
-                          value: effort,
-                          label: effort,
-                        }))}
-                      />
-                    </div>
-                  ) : (
-                    <>
-                      <div className="field-row">
-                        <TextField
-                          label="Images API 模型"
-                          value={String(form.intelligent_copy_cover_image_model ?? "image2")}
-                          onChange={(event) => onChange("intelligent_copy_cover_image_model", event.target.value)}
-                        />
-                        <TextField
-                          label="Images API 质量"
-                          value={String(form.intelligent_copy_cover_image_quality ?? "medium")}
-                          onChange={(event) => onChange("intelligent_copy_cover_image_quality", event.target.value)}
-                        />
-                      </div>
-                      <TextField
-                        label="Images API 超时秒数"
-                        type="number"
-                        value={String(form.intelligent_copy_cover_image_timeout_sec ?? 90)}
-                        onChange={(event) => onChange("intelligent_copy_cover_image_timeout_sec", Number(event.target.value))}
-                      />
-                    </>
-                  )}
-                </section>
-              ) : null}
               {rerunEnabled ? (
                 <section className="settings-subsection">
                   <div className="settings-subsection-head">

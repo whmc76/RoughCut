@@ -25,6 +25,7 @@ from roughcut.config import (
     AVATAR_PROVIDER_OPTIONS,
     DEFAULT_TRANSCRIPTION_PROVIDER,
     ENV_MANAGED_SETTINGS,
+    GLOBAL_MODEL_ROUTE_SETTINGS,
     HYBRID_REASONING_PROVIDER_VALUES,
     PROFILE_BINDABLE_SETTINGS,
     SEARCH_FALLBACK_PROVIDER_VALUES,
@@ -67,8 +68,22 @@ _SECRET_OVERRIDE_KEYS = {
 }
 
 
+class ModelRouteEntryOut(BaseModel):
+    key: str
+    label: str
+    provider: str
+    model: str = ""
+    enabled: bool = True
+    details: list[str] = Field(default_factory=list)
+
+
+class ModelRouteTableOut(BaseModel):
+    entries: list[ModelRouteEntryOut]
+
+
 class ConfigOut(BaseModel):
     persistence: dict[str, Any]
+    model_routes: list[ModelRouteEntryOut]
     # Transcription
     transcription_provider: str
     transcription_model: str
@@ -191,6 +206,7 @@ class ConfigOut(BaseModel):
     override_keys: list[str]
     session_secret_keys: list[str]
     profile_bindable_keys: list[str]
+    global_model_route_keys: list[str]
     overrides: dict
 
 
@@ -252,6 +268,155 @@ def _sanitize_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
+def _resolve_cover_route_model(settings: Any) -> str:
+    backend = str(getattr(settings, "intelligent_copy_cover_image_backend", "") or "codex_builtin").strip().lower()
+    configured_model = str(getattr(settings, "intelligent_copy_cover_image_model", "") or "").strip()
+    if backend == "codex_builtin":
+        return "codex_builtin_image_generation"
+    if backend == "minimax_images_api":
+        return configured_model or "image-01"
+    return configured_model or "image2"
+
+
+def _build_model_route_entries(settings: Any) -> list[dict[str, Any]]:
+    primary_reasoning_provider = str(getattr(settings, "active_reasoning_provider", "") or "").strip().lower()
+    primary_reasoning_model = normalize_reasoning_model_for_provider(
+        primary_reasoning_provider,
+        str(getattr(settings, "active_reasoning_model", "") or "").strip(),
+    )
+    backup_reasoning_provider = str(getattr(settings, "backup_reasoning_provider", "") or "").strip().lower()
+    backup_reasoning_model = normalize_reasoning_model_for_provider(
+        backup_reasoning_provider,
+        str(getattr(settings, "backup_reasoning_model", "") or "").strip(),
+    )
+    hybrid_analysis_provider = str(getattr(settings, "hybrid_analysis_provider", "") or "").strip().lower()
+    hybrid_analysis_model = normalize_reasoning_model_for_provider(
+        hybrid_analysis_provider,
+        str(getattr(settings, "hybrid_analysis_model", "") or "").strip(),
+    )
+    hybrid_copy_provider = str(getattr(settings, "hybrid_copy_provider", "") or "").strip().lower()
+    hybrid_copy_model = normalize_reasoning_model_for_provider(
+        hybrid_copy_provider,
+        str(getattr(settings, "hybrid_copy_model", "") or "").strip(),
+    )
+    cover_backend = str(getattr(settings, "intelligent_copy_cover_image_backend", "") or "codex_builtin").strip().lower()
+    cover_details = [
+        f"quality={str(getattr(settings, 'intelligent_copy_cover_image_quality', '') or 'medium').strip()}",
+        f"timeout={int(getattr(settings, 'intelligent_copy_cover_image_timeout_sec', 90) or 90)}s",
+    ]
+    if cover_backend == "codex_builtin":
+        cover_details.extend(
+            [
+                f"runner={str(getattr(settings, 'intelligent_copy_cover_codex_runner_model', '') or 'gpt-5.4-mini').strip()}",
+                f"effort={str(getattr(settings, 'intelligent_copy_cover_codex_runner_effort', '') or 'low').strip().lower()}",
+            ]
+        )
+
+    return [
+        {
+            "key": "transcription",
+            "label": "转写",
+            "provider": str(getattr(settings, "transcription_provider", "") or "").strip().lower(),
+            "model": str(getattr(settings, "transcription_model", "") or "").strip(),
+            "details": [
+                f"dialect={str(getattr(settings, 'transcription_dialect', '') or 'mandarin').strip().lower()}",
+                f"service={str(getattr(settings, 'local_asr_display_name', '') or '').strip() or str(getattr(settings, 'local_asr_model_name', '') or '').strip() or '-'}",
+            ],
+        },
+        {
+            "key": "reasoning_primary",
+            "label": "主推理",
+            "provider": primary_reasoning_provider,
+            "model": primary_reasoning_model,
+            "details": [
+                f"mode={str(getattr(settings, 'llm_mode', '') or 'performance').strip().lower()}",
+                f"routing={str(getattr(settings, 'llm_routing_mode', '') or 'bundled').strip().lower()}",
+                f"effort={str(getattr(settings, 'active_reasoning_effort', '') or 'low').strip().lower()}",
+            ],
+        },
+        {
+            "key": "reasoning_backup",
+            "label": "推理备路由",
+            "provider": backup_reasoning_provider,
+            "model": backup_reasoning_model,
+            "enabled": bool(getattr(settings, "llm_backup_enabled", True)),
+            "details": [
+                f"effort={str(getattr(settings, 'backup_reasoning_effort', '') or 'low').strip().lower()}",
+                f"search={str(getattr(settings, 'backup_search_provider', '') or 'auto').strip().lower()}",
+            ],
+        },
+        {
+            "key": "reasoning_hybrid_analysis",
+            "label": "Hybrid 分析路由",
+            "provider": hybrid_analysis_provider,
+            "model": hybrid_analysis_model,
+            "enabled": str(getattr(settings, "llm_routing_mode", "") or "bundled").strip().lower() == "hybrid_performance",
+            "details": [
+                f"effort={str(getattr(settings, 'hybrid_analysis_effort', '') or 'low').strip().lower()}",
+                f"search={str(getattr(settings, 'hybrid_analysis_search_mode', '') or 'entity_gated').strip().lower()}",
+            ],
+        },
+        {
+            "key": "reasoning_hybrid_copy",
+            "label": "Hybrid 文案路由",
+            "provider": hybrid_copy_provider,
+            "model": hybrid_copy_model,
+            "enabled": str(getattr(settings, "llm_routing_mode", "") or "bundled").strip().lower() == "hybrid_performance",
+            "details": [
+                f"effort={str(getattr(settings, 'hybrid_copy_effort', '') or 'high').strip().lower()}",
+                f"search={str(getattr(settings, 'hybrid_copy_search_mode', '') or 'follow_provider').strip().lower()}",
+            ],
+        },
+        {
+            "key": "search_primary",
+            "label": "搜索",
+            "provider": str(getattr(settings, "search_provider", "") or "auto").strip().lower(),
+            "model": "",
+            "details": [
+                f"fallback={str(getattr(settings, 'search_fallback_provider', '') or 'auto').strip().lower()}",
+                f"helper={str(getattr(settings, 'model_search_helper', '') or '').strip() or '-'}",
+            ],
+        },
+        {
+            "key": "multimodal_fallback",
+            "label": "多模态回退",
+            "provider": str(getattr(settings, "multimodal_fallback_provider", "") or "").strip().lower(),
+            "model": str(getattr(settings, "multimodal_fallback_model", "") or "").strip(),
+            "details": [],
+        },
+        {
+            "key": "voice",
+            "label": "配音",
+            "provider": str(getattr(settings, "voice_provider", "") or "").strip().lower(),
+            "model": "",
+            "details": [],
+        },
+        {
+            "key": "avatar",
+            "label": "数字人",
+            "provider": str(getattr(settings, "avatar_provider", "") or "").strip().lower(),
+            "model": "",
+            "details": [],
+        },
+        {
+            "key": "ocr",
+            "label": "OCR",
+            "provider": str(getattr(settings, "ocr_provider", "") or "paddleocr").strip().lower(),
+            "model": "",
+            "enabled": bool(getattr(settings, "ocr_enabled", False)),
+            "details": [],
+        },
+        {
+            "key": "cover_image_generation",
+            "label": "封面生成",
+            "provider": cover_backend,
+            "model": _resolve_cover_route_model(settings),
+            "enabled": bool(getattr(settings, "intelligent_copy_cover_image_generation_enabled", True)),
+            "details": cover_details,
+        },
+    ]
+
+
 class ConfigOptionsOut(BaseModel):
     job_languages: list[dict[str, str]]
     workflow_templates: list[dict[str, str]]
@@ -277,12 +442,7 @@ class ConfigProfileOut(BaseModel):
     is_dirty: bool
     dirty_keys: list[str]
     dirty_details: list[dict[str, Any]]
-    llm_mode: str
-    transcription_provider: str
-    transcription_model: str
     transcription_dialect: str
-    reasoning_provider: str
-    reasoning_model: str
     workflow_mode: str
     enhancement_modes: list[str]
     auto_confirm_content_profile: bool
@@ -455,6 +615,7 @@ def get_config():
     overrides = load_runtime_overrides()
     sanitized_overrides = _sanitize_overrides(overrides)
     session_secret_keys = get_session_secret_override_keys()
+    model_routes = _build_model_route_entries(s)
     reasoning_model = normalize_reasoning_model_for_provider(s.reasoning_provider, s.reasoning_model)
     backup_reasoning_model = normalize_reasoning_model_for_provider(
         s.backup_reasoning_provider,
@@ -474,6 +635,7 @@ def get_config():
             "profiles_store": "database",
             "packaging_store": "database",
         },
+        model_routes=[ModelRouteEntryOut(**entry) for entry in model_routes],
         transcription_provider=s.transcription_provider,
         transcription_model=s.transcription_model,
         transcription_dialect=s.transcription_dialect,
@@ -590,6 +752,7 @@ def get_config():
         override_keys=sorted(overrides.keys()),
         session_secret_keys=session_secret_keys,
         profile_bindable_keys=sorted(PROFILE_BINDABLE_SETTINGS),
+        global_model_route_keys=sorted(GLOBAL_MODEL_ROUTE_SETTINGS),
         overrides=sanitized_overrides,
     )
 
@@ -618,6 +781,11 @@ def get_runtime_environment():
 @router.get("/service-status", response_model=ProviderServiceStatusOut)
 def get_service_status():
     return ProviderServiceStatusOut(**build_service_status_payload())
+
+
+@router.get("/model-routes", response_model=ModelRouteTableOut)
+def get_model_routes():
+    return ModelRouteTableOut(entries=[ModelRouteEntryOut(**entry) for entry in _build_model_route_entries(get_settings())])
 
 
 @router.get("/provider-check", response_model=ProviderCheckOut)
@@ -935,10 +1103,12 @@ def patch_config(body: ConfigPatch):
             backend = "codex_builtin"
         if backend in {"openai_api"}:
             backend = "openai_images_api"
-        if backend not in {"codex_builtin", "openai_images_api"}:
+        if backend in {"minimax", "minimax_api"}:
+            backend = "minimax_images_api"
+        if backend not in {"codex_builtin", "openai_images_api", "minimax_images_api"}:
             raise HTTPException(
                 status_code=400,
-                detail="intelligent_copy_cover_image_backend must be codex_builtin or openai_images_api",
+                detail="intelligent_copy_cover_image_backend must be codex_builtin, openai_images_api, or minimax_images_api",
             )
         updates["intelligent_copy_cover_image_backend"] = backend
     for key in (

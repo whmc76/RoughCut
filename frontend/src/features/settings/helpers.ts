@@ -3,12 +3,16 @@ import type { SettingsForm } from "./constants";
 
 export const PROVIDER_LABELS: Record<string, string> = {
   anthropic: "Anthropic",
+  codex_builtin: "Codex 内置生图",
   heygem: "HeyGem",
   indextts2: "IndexTTS2",
   minimax: "MiniMax",
+  minimax_images_api: "MiniMax Images API",
   model: "模型辅助搜索",
   ollama: "Ollama",
   openai: "OpenAI",
+  openai_images_api: "OpenAI Images API",
+  paddleocr: "PaddleOCR",
   local_http_asr: "本地 HTTP ASR",
   runninghub: "RunningHub",
   searxng: "SearXNG",

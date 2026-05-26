@@ -2,12 +2,8 @@ import type { Config, ConfigProfiles, ProviderServiceStatus, RuntimeEnvironment 
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import type { SettingsForm } from "./constants";
 import {
-  getActiveReasoningModel,
-  getActiveReasoningProvider,
   getProviderLabel,
   getProviderStatusLabel,
-  getSearchSummary,
-  getTranscriptionProviderLabel,
 } from "./helpers";
 import { formatDirtyDetailValue, formatDirtyKeyLabel } from "../configProfiles/diffPresentation";
 
@@ -36,17 +32,13 @@ function buildServiceSummary(serviceStatus?: ProviderServiceStatus) {
 }
 
 export function SettingsOverviewPanel({ form, config, runtimeEnvironment, serviceStatus, configProfiles }: SettingsOverviewPanelProps) {
-  const transcriptionProvider = String(form.transcription_provider ?? "");
-  const activeReasoningProvider = getActiveReasoningProvider(form);
-  const activeReasoningModel = getActiveReasoningModel(form);
   const activeProfile = configProfiles?.profiles.find((profile) => profile.is_active) ?? null;
   const dirtyDetails = configProfiles?.active_profile_dirty_details ?? [];
   const serviceSummary = buildServiceSummary(serviceStatus);
-  const executionSummary = [
-    `转写 ${getTranscriptionProviderLabel(transcriptionProvider)} / ${String(form.transcription_model ?? "未设置")}`,
-    `推理 ${getProviderLabel(activeReasoningProvider)} / ${activeReasoningModel || "未设置模型"}`,
-    `搜索 ${getSearchSummary(form)}`,
-  ];
+  const routeSummary = (config?.model_routes ?? [])
+    .slice(0, 4)
+    .map((route) => `${route.label} ${getProviderLabel(route.provider)}${route.model ? ` / ${route.model}` : ""}`)
+    .join(" · ");
   const storageSummary = `设置 ${config?.persistence.settings_store ?? "database"} · 方案 ${config?.persistence.profiles_store ?? "database"} · 包装 ${config?.persistence.packaging_store ?? "database"}`;
   const profileSummary = configProfiles?.active_profile_dirty
     ? `当前设置偏离激活方案 ${dirtyDetails.length || configProfiles.active_profile_dirty_keys.length} 项`
@@ -64,9 +56,9 @@ export function SettingsOverviewPanel({ form, config, runtimeEnvironment, servic
       <PanelHeader title="当前状态" description="这里显示模型、服务和当前方案。" />
       <div className="settings-summary-grid">
         <article className="settings-command-card">
-          <span className="settings-overview-label">模型组合</span>
-          <strong>{getTranscriptionProviderLabel(transcriptionProvider)} + {getProviderLabel(activeReasoningProvider)}</strong>
-          <div className="muted">{executionSummary.join(" · ")}</div>
+          <span className="settings-overview-label">全局路由表</span>
+          <strong>{config?.global_model_route_keys.length ?? 0} 条全局路由字段</strong>
+          <div className="muted">{routeSummary || "还没有路由数据"}</div>
         </article>
         <article className="settings-command-card">
           <span className="settings-overview-label">服务</span>

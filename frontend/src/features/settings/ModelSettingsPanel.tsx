@@ -15,7 +15,7 @@ import { SelectField } from "../../components/forms/SelectField";
 import { TextField } from "../../components/forms/TextField";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import type { SettingsForm } from "./constants";
-import { REASONING_PROVIDER_OPTIONS } from "./constants";
+import { CODEX_RUNNER_EFFORT_OPTIONS, COVER_IMAGE_BACKEND_OPTIONS, REASONING_PROVIDER_OPTIONS } from "./constants";
 import {
   getActiveReasoningModel,
   getActiveReasoningProvider,
@@ -200,6 +200,13 @@ function formatCheckTime(value: string | undefined) {
   });
 }
 
+function formatRouteDetails(details: string[]) {
+  return details
+    .filter(Boolean)
+    .map((detail) => detail.replace(/=/g, " "))
+    .join(" · ");
+}
+
 function getProviderSummary(
   provider: string,
   serviceEntry: ProviderServiceStatusEntry | undefined,
@@ -247,6 +254,10 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
   const hybridAnalysisSearchMode = readFormString(form, "hybrid_analysis_search_mode", "entity_gated");
   const hybridCopySearchMode = readFormString(form, "hybrid_copy_search_mode", "follow_provider");
   const searchFallbackProvider = readFormString(form, "search_fallback_provider", "openai");
+  const coverImageGenerationEnabled = Boolean(form.intelligent_copy_cover_image_generation_enabled ?? true);
+  const coverImageBackend = readFormString(form, "intelligent_copy_cover_image_backend", "codex_builtin");
+  const coverCodexRunnerModel = readFormString(form, "intelligent_copy_cover_codex_runner_model", "gpt-5.4-mini");
+  const coverCodexRunnerEffort = readFormString(form, "intelligent_copy_cover_codex_runner_effort", "low");
   const transcriptionDialects = options?.transcription_dialects ?? [{ value: "mandarin", label: "普通话" }];
   const multimodalFallbackProviders = options?.multimodal_fallback_providers ?? [{ value: "ollama", label: "Ollama" }];
   const searchProviders = options?.search_providers ?? [{ value: "auto", label: "自动选择" }];
@@ -300,6 +311,7 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
   const hybridCopyModels = hybridCopyCatalog.data?.models ?? [];
   const backupReasoningModels = backupReasoningCatalog.data?.models ?? [];
   const backupVisionModels = backupVisionCatalog.data?.models ?? [];
+  const modelRoutes = config?.model_routes ?? [];
 
   const refreshCatalog = async (provider: string, kind: string) => {
     const next = await api.getModelCatalog({ provider, kind, refresh: true });
@@ -403,10 +415,39 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
 
   return (
     <section className="panel settings-core-panel">
-      <PanelHeader title="核心链路配置" description="把配置、Provider 卡、检测动作、混合路由和模型刷新放到同一块里。" />
+      <PanelHeader title="全局模型路由" description="唯一权威路由表和对应的执行配置都在这里。创作者方案不再承载这些字段。" />
       <div className="settings-provider-deck-head">
         <div>
-          <strong>活跃 Provider</strong>
+          <strong>权威路由表</strong>
+          <div className="muted">
+            当前共有 {modelRoutes.length} 条全局路由，覆盖转写、推理、搜索、OCR、数字人、配音和封面生成。
+          </div>
+        </div>
+      </div>
+      <div className="settings-provider-deck">
+        {modelRoutes.map((route) => (
+          <article key={route.key} className={`settings-provider-card tone-${route.enabled ? "route" : "local"} informational`}>
+            <div className="settings-provider-card-head">
+              <div>
+                <span className="settings-overview-label">{route.label}</span>
+                <strong>{getProviderLabel(route.provider)}</strong>
+              </div>
+              <span className={`status-pill ${route.enabled ? "done" : "pending"}`}>
+                {route.enabled ? "生效中" : "已关闭"}
+              </span>
+            </div>
+            <div className="settings-provider-card-copy">
+              <div className="settings-provider-summary">
+                {route.model ? `模型 ${route.model}` : "无独立模型字段"}
+              </div>
+              {route.details.length ? <div className="muted compact-top">{formatRouteDetails(route.details)}</div> : null}
+            </div>
+          </article>
+        ))}
+      </div>
+      <div className="settings-provider-deck-head">
+        <div>
+          <strong>Provider 检测</strong>
           <div className="muted">
             当前链路：转写 {getTranscriptionProviderLabel(transcriptionProvider)} · {getRoutingSummary(form)} · 搜索 {getSearchSummary(form)}
           </div>
@@ -743,6 +784,76 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
               />
             ) : (
               <div className="settings-chain-note muted">仅在启用模型代理搜索时需要辅助模型。</div>
+            )}
+          </div>
+        </section>
+
+        <section className="settings-chain-card">
+          <div className="settings-chain-card-head">
+            <div>
+              <span className="settings-overview-label">封面生成</span>
+              <strong>智能发布封面生图</strong>
+            </div>
+            <div className="muted">
+              {coverImageGenerationEnabled ? `${getProviderLabel(coverImageBackend)} · 生效中` : "当前关闭"}
+            </div>
+          </div>
+          <div className="settings-chain-card-body form-grid three-up">
+            <CheckboxField
+              label="启用封面生图"
+              checked={coverImageGenerationEnabled}
+              onChange={(event) => onChange("intelligent_copy_cover_image_generation_enabled", event.target.checked)}
+              className="settings-chain-note"
+            />
+            <SelectField
+              label="封面生图后端"
+              value={coverImageBackend}
+              onChange={(event) => onChange("intelligent_copy_cover_image_backend", event.target.value)}
+              options={COVER_IMAGE_BACKEND_OPTIONS.map((backend) => ({
+                value: backend,
+                label: getProviderLabel(backend),
+              }))}
+            />
+            {coverImageBackend === "codex_builtin" ? (
+              <>
+                <TextField
+                  label="Codex 执行代理模型"
+                  value={coverCodexRunnerModel}
+                  onChange={(event) => onChange("intelligent_copy_cover_codex_runner_model", event.target.value)}
+                  placeholder="gpt-5.4-mini"
+                />
+                <SelectField
+                  label="Codex 执行推理强度"
+                  value={coverCodexRunnerEffort}
+                  onChange={(event) => onChange("intelligent_copy_cover_codex_runner_effort", event.target.value)}
+                  options={CODEX_RUNNER_EFFORT_OPTIONS.map((effort) => ({
+                    value: effort,
+                    label: effort,
+                  }))}
+                />
+                <div className="settings-chain-note muted">
+                  `Codex runner` 只是执行代理；底层图片模型按内置生图链路处理。
+                </div>
+              </>
+            ) : (
+              <>
+                <TextField
+                  label="图片模型"
+                  value={String(form.intelligent_copy_cover_image_model ?? "image2")}
+                  onChange={(event) => onChange("intelligent_copy_cover_image_model", event.target.value)}
+                />
+                <TextField
+                  label="图片质量"
+                  value={String(form.intelligent_copy_cover_image_quality ?? "medium")}
+                  onChange={(event) => onChange("intelligent_copy_cover_image_quality", event.target.value)}
+                />
+                <TextField
+                  label="请求超时秒数"
+                  type="number"
+                  value={String(form.intelligent_copy_cover_image_timeout_sec ?? 90)}
+                  onChange={(event) => onChange("intelligent_copy_cover_image_timeout_sec", Number(event.target.value))}
+                />
+              </>
             )}
           </div>
         </section>

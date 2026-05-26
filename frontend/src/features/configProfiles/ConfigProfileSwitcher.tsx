@@ -4,7 +4,6 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../../api";
 import type { ConfigProfile } from "../../types";
 import { classNames } from "../../utils";
-import { getTranscriptionProviderLabel } from "../settings/helpers";
 import { formatDirtyDetailValue, formatDirtyKeyLabel, formatDirtyValue, summarizeDirtyDetails } from "./diffPresentation";
 
 type ConfigProfileSwitcherProps = {
@@ -526,10 +525,8 @@ function formatProfileSummary(profile: ConfigProfile) {
     ? `包装开 ${profile.insert_pool_size}/${profile.music_pool_size}`
     : "包装关闭";
   return [
-    `${profile.llm_mode === "local" ? "本地" : "云端"}推理`,
-    `转写 ${getTranscriptionProviderLabel(profile.transcription_provider)}`,
-    `推理 ${profile.reasoning_provider}`,
     `工作流 ${profile.workflow_mode}`,
+    `方言 ${profile.transcription_dialect || "默认"}`,
     enhancementLabel,
     profile.auto_confirm_content_profile ? `画像自动确认 ${profile.content_profile_review_threshold}` : "画像人工确认",
     profile.quality_auto_rerun_enabled ? `低分复跑 ${profile.quality_auto_rerun_below_score}` : "关闭复跑",
@@ -612,40 +609,10 @@ function buildProfileSections(
 function buildProfileComparisonDetails(activeProfile: ConfigProfile, previewProfile: ConfigProfile) {
   const comparisons = [
     {
-      key: "llm_mode",
-      label: "推理模式",
-      active_value: activeProfile.llm_mode === "local" ? "本地" : "云端",
-      preview_value: previewProfile.llm_mode === "local" ? "本地" : "云端",
-    },
-    {
-      key: "transcription_provider",
-      label: "转写 provider",
-      active_value: getTranscriptionProviderLabel(activeProfile.transcription_provider),
-      preview_value: getTranscriptionProviderLabel(previewProfile.transcription_provider),
-    },
-    {
-      key: "transcription_model",
-      label: "转写模型",
-      active_value: activeProfile.transcription_model,
-      preview_value: previewProfile.transcription_model,
-    },
-    {
       key: "transcription_dialect",
       label: "转写方言",
       active_value: activeProfile.transcription_dialect,
       preview_value: previewProfile.transcription_dialect,
-    },
-    {
-      key: "reasoning_provider",
-      label: "推理 provider",
-      active_value: activeProfile.reasoning_provider,
-      preview_value: previewProfile.reasoning_provider,
-    },
-    {
-      key: "reasoning_model",
-      label: "推理模型",
-      active_value: activeProfile.reasoning_model,
-      preview_value: previewProfile.reasoning_model,
     },
     {
       key: "workflow_mode",
@@ -751,12 +718,9 @@ function buildProfileComparisonDetails(activeProfile: ConfigProfile, previewProf
 function buildProfileSummaryGroups(profile: ConfigProfile) {
   return [
     {
-      label: "生产链路",
+      label: "工作流",
       items: [
-        `${profile.llm_mode === "local" ? "本地" : "云端"}推理`,
-        `转写 ${getTranscriptionProviderLabel(profile.transcription_provider)} / ${profile.transcription_model || "未设置"}`,
         `方言 ${profile.transcription_dialect || "默认"}`,
-        `推理 ${profile.reasoning_provider} / ${profile.reasoning_model || "未设置"}`,
         `工作流 ${profile.workflow_mode}`,
         profile.enhancement_modes.length ? `增强 ${profile.enhancement_modes.length} 项` : "无增强",
       ],

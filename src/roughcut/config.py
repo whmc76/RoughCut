@@ -222,23 +222,12 @@ CONTENT_UNDERSTANDING_CAPABILITY_SLOTS: tuple[str, ...] = (
     "reasoning",
     "verification",
 )
-PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
+GLOBAL_MODEL_ROUTE_SETTINGS: tuple[str, ...] = (
     "transcription_provider",
     "transcription_model",
-    "transcription_dialect",
-    "transcription_alignment_mode",
-    "transcription_alignment_min_word_coverage",
     "local_asr_api_base_url",
     "local_asr_model_name",
     "local_asr_display_name",
-    "transcription_chunking_enabled",
-    "transcription_chunk_threshold_sec",
-    "transcription_chunk_size_sec",
-    "transcription_chunk_min_sec",
-    "transcription_chunk_overlap_sec",
-    "transcription_chunk_request_timeout_sec",
-    "transcription_chunk_request_max_retries",
-    "transcription_chunk_request_retry_backoff_sec",
     "llm_mode",
     "llm_routing_mode",
     "reasoning_provider",
@@ -268,11 +257,32 @@ PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
     "search_fallback_provider",
     "model_search_helper",
     "avatar_provider",
+    "voice_provider",
+    "ocr_provider",
+    "intelligent_copy_cover_image_generation_enabled",
+    "intelligent_copy_cover_image_backend",
+    "intelligent_copy_cover_image_model",
+    "intelligent_copy_cover_image_quality",
+    "intelligent_copy_cover_image_timeout_sec",
+    "intelligent_copy_cover_codex_runner_model",
+    "intelligent_copy_cover_codex_runner_effort",
+)
+PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
+    "transcription_dialect",
+    "transcription_alignment_mode",
+    "transcription_alignment_min_word_coverage",
+    "transcription_chunking_enabled",
+    "transcription_chunk_threshold_sec",
+    "transcription_chunk_size_sec",
+    "transcription_chunk_min_sec",
+    "transcription_chunk_overlap_sec",
+    "transcription_chunk_request_timeout_sec",
+    "transcription_chunk_request_max_retries",
+    "transcription_chunk_request_retry_backoff_sec",
     "avatar_presenter_id",
     "avatar_layout_template",
     "avatar_safe_margin",
     "avatar_overlay_scale",
-    "voice_provider",
     "voice_clone_voice_id",
     "director_rewrite_strength",
     "default_job_workflow_mode",
@@ -286,13 +296,6 @@ PROFILE_BINDABLE_SETTINGS: tuple[str, ...] = (
     "glossary_correction_review_threshold",
     "auto_select_cover_variant",
     "cover_selection_review_gap",
-    "intelligent_copy_cover_image_generation_enabled",
-    "intelligent_copy_cover_image_backend",
-    "intelligent_copy_cover_image_model",
-    "intelligent_copy_cover_image_quality",
-    "intelligent_copy_cover_image_timeout_sec",
-    "intelligent_copy_cover_codex_runner_model",
-    "intelligent_copy_cover_codex_runner_effort",
     "packaging_selection_review_gap",
     "packaging_selection_min_score",
     "streamlined_asr_pipeline_enabled",
@@ -1164,9 +1167,12 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
             backend = "codex_builtin"
         if backend == "openai_api":
             backend = "openai_images_api"
+        if backend in {"minimax", "minimax_api"}:
+            backend = "minimax_images_api"
         normalized["intelligent_copy_cover_image_backend"] = backend if backend in {
             "codex_builtin",
             "openai_images_api",
+            "minimax_images_api",
         } else "codex_builtin"
 
     for key in ("acp_bridge_backend", "acp_bridge_fallback_backend"):

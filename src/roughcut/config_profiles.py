@@ -11,10 +11,8 @@ from sqlalchemy import select
 from roughcut.config import (
     ENV_MANAGED_SETTINGS,
     PROFILE_BINDABLE_SETTINGS,
-    DEFAULT_REASONING_PROVIDER,
     apply_runtime_overrides,
     get_settings,
-    normalize_transcription_settings,
 )
 from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
 from roughcut.packaging.library import (
@@ -23,7 +21,6 @@ from roughcut.packaging.library import (
     list_packaging_assets,
     update_packaging_config,
 )
-from roughcut.naming import VOICE_PROVIDER_VALUES
 from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_transcription_dialect
 from roughcut.state_store import ACTIVE_CONFIG_PROFILE_KEY, run_db_operation, set_json_setting
 
@@ -250,12 +247,7 @@ def _build_profile_payload(
         "is_dirty": is_dirty,
         "dirty_keys": dirty_keys,
         "dirty_details": dirty_details,
-        "llm_mode": str(config_snapshot.get("llm_mode") or "performance"),
-        "transcription_provider": str(config_snapshot.get("transcription_provider") or "local_http_asr"),
-        "transcription_model": str(config_snapshot.get("transcription_model") or ""),
         "transcription_dialect": str(config_snapshot.get("transcription_dialect") or DEFAULT_TRANSCRIPTION_DIALECT),
-        "reasoning_provider": str(config_snapshot.get("reasoning_provider") or DEFAULT_REASONING_PROVIDER),
-        "reasoning_model": str(config_snapshot.get("reasoning_model") or ""),
         "workflow_mode": str(config_snapshot.get("default_job_workflow_mode") or "standard_edit"),
         "enhancement_modes": list(config_snapshot.get("default_job_enhancement_modes") or []),
         "auto_confirm_content_profile": bool(config_snapshot.get("auto_confirm_content_profile")),
@@ -346,7 +338,7 @@ def _normalize_profile_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
         key: deepcopy(getattr(settings, key))
         for key in PROFILE_CONFIG_FIELDS
     }
-    config_snapshot.update(dict(snapshot.get("config") or {}))
+    config_snapshot.update(_filter_profile_config(snapshot.get("config") or {}))
     packaging_snapshot = dict(DEFAULT_PACKAGING_CONFIG)
     packaging_snapshot.update(dict(snapshot.get("packaging") or {}))
 
@@ -367,97 +359,12 @@ def _normalize_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
         key: deepcopy(getattr(settings, key))
         for key in PROFILE_CONFIG_FIELDS
     }
-    normalized.update(dict(config or {}))
+    normalized.update(_filter_profile_config(config or {}))
     for key in ENV_MANAGED_SETTINGS:
         normalized.pop(key, None)
-
-    provider, model = normalize_transcription_settings(
-        normalized.get("transcription_provider"),
-        normalized.get("transcription_model"),
-    )
-    normalized["transcription_provider"] = provider
-    normalized["transcription_model"] = model
     normalized["transcription_dialect"] = normalize_transcription_dialect(
         normalized.get("transcription_dialect") or DEFAULT_TRANSCRIPTION_DIALECT
     )
-    normalized["local_asr_api_base_url"] = str(
-        normalized.get("local_asr_api_base_url") or settings.local_asr_api_base_url
-    ).strip()
-    normalized["local_asr_model_name"] = str(
-        normalized.get("local_asr_model_name") or settings.local_asr_model_name
-    ).strip()
-    normalized["local_asr_display_name"] = str(
-        normalized.get("local_asr_display_name") or settings.local_asr_display_name
-    ).strip()
-    normalized["llm_mode"] = str(normalized.get("llm_mode") or settings.llm_mode).strip().lower() or settings.llm_mode
-    normalized["llm_routing_mode"] = str(
-        normalized.get("llm_routing_mode") or settings.llm_routing_mode
-    ).strip().lower() or settings.llm_routing_mode
-    normalized["reasoning_provider"] = str(normalized.get("reasoning_provider") or settings.reasoning_provider).strip().lower()
-    normalized["reasoning_model"] = str(normalized.get("reasoning_model") or settings.reasoning_model).strip()
-    normalized["reasoning_effort"] = str(normalized.get("reasoning_effort") or settings.reasoning_effort).strip().lower()
-    normalized["llm_backup_enabled"] = bool(normalized.get("llm_backup_enabled", settings.llm_backup_enabled))
-    normalized["backup_reasoning_provider"] = str(
-        normalized.get("backup_reasoning_provider") or settings.backup_reasoning_provider
-    ).strip().lower()
-    normalized["backup_reasoning_model"] = str(
-        normalized.get("backup_reasoning_model") or settings.backup_reasoning_model
-    ).strip()
-    normalized["backup_reasoning_effort"] = str(
-        normalized.get("backup_reasoning_effort") or settings.backup_reasoning_effort
-    ).strip().lower()
-    normalized["backup_vision_model"] = str(
-        normalized.get("backup_vision_model") or settings.backup_vision_model
-    ).strip()
-    normalized["backup_search_provider"] = str(
-        normalized.get("backup_search_provider") or settings.backup_search_provider
-    ).strip().lower()
-    normalized["backup_search_fallback_provider"] = str(
-        normalized.get("backup_search_fallback_provider") or settings.backup_search_fallback_provider
-    ).strip().lower()
-    normalized["backup_model_search_helper"] = str(
-        normalized.get("backup_model_search_helper") or settings.backup_model_search_helper
-    ).strip()
-    normalized["local_reasoning_model"] = str(
-        normalized.get("local_reasoning_model") or settings.local_reasoning_model
-    ).strip()
-    normalized["local_vision_model"] = str(normalized.get("local_vision_model") or settings.local_vision_model).strip()
-    normalized["hybrid_analysis_provider"] = str(
-        normalized.get("hybrid_analysis_provider") or settings.hybrid_analysis_provider
-    ).strip().lower()
-    normalized["hybrid_analysis_model"] = str(
-        normalized.get("hybrid_analysis_model") or settings.hybrid_analysis_model
-    ).strip()
-    normalized["hybrid_analysis_effort"] = str(
-        normalized.get("hybrid_analysis_effort") or settings.hybrid_analysis_effort
-    ).strip().lower()
-    normalized["hybrid_analysis_search_mode"] = str(
-        normalized.get("hybrid_analysis_search_mode") or settings.hybrid_analysis_search_mode
-    ).strip().lower()
-    normalized["hybrid_copy_provider"] = str(
-        normalized.get("hybrid_copy_provider") or settings.hybrid_copy_provider
-    ).strip().lower()
-    normalized["hybrid_copy_model"] = str(
-        normalized.get("hybrid_copy_model") or settings.hybrid_copy_model
-    ).strip()
-    normalized["hybrid_copy_effort"] = str(
-        normalized.get("hybrid_copy_effort") or settings.hybrid_copy_effort
-    ).strip().lower()
-    normalized["hybrid_copy_search_mode"] = str(
-        normalized.get("hybrid_copy_search_mode") or settings.hybrid_copy_search_mode
-    ).strip().lower()
-    normalized["multimodal_fallback_provider"] = str(
-        normalized.get("multimodal_fallback_provider") or settings.multimodal_fallback_provider
-    ).strip().lower()
-    normalized["multimodal_fallback_model"] = str(
-        normalized.get("multimodal_fallback_model") or settings.multimodal_fallback_model
-    ).strip()
-    normalized["search_provider"] = str(normalized.get("search_provider") or settings.search_provider).strip().lower()
-    normalized["search_fallback_provider"] = str(
-        normalized.get("search_fallback_provider") or settings.search_fallback_provider
-    ).strip().lower()
-    normalized["model_search_helper"] = str(normalized.get("model_search_helper") or settings.model_search_helper).strip()
-    normalized["avatar_provider"] = str(normalized.get("avatar_provider") or settings.avatar_provider).strip().lower()
     normalized["avatar_presenter_id"] = str(normalized.get("avatar_presenter_id") or "").strip()
     normalized["avatar_layout_template"] = str(
         normalized.get("avatar_layout_template") or settings.avatar_layout_template
@@ -470,7 +377,6 @@ def _normalize_config_snapshot(config: dict[str, Any]) -> dict[str, Any]:
         max(0.08, min(0.5, _coerce_float(normalized.get("avatar_overlay_scale"), settings.avatar_overlay_scale))),
         4,
     )
-    normalized["voice_provider"] = _normalize_voice_provider(normalized.get("voice_provider"))
     normalized["voice_clone_voice_id"] = str(normalized.get("voice_clone_voice_id") or "").strip()
     normalized["director_rewrite_strength"] = round(
         max(0.0, min(1.0, _coerce_float(normalized.get("director_rewrite_strength"), settings.director_rewrite_strength))),
@@ -607,11 +513,13 @@ def _normalize_profile_description(value: Any) -> str | None:
     return description[:160]
 
 
-def _normalize_voice_provider(value: Any) -> str:
-    provider = str(value or "").strip().lower()
-    if provider not in VOICE_PROVIDER_VALUES:
-        return get_settings().voice_provider
-    return provider
+def _filter_profile_config(config: dict[str, Any]) -> dict[str, Any]:
+    allowed = set(PROFILE_CONFIG_FIELDS)
+    return {
+        key: deepcopy(value)
+        for key, value in dict(config or {}).items()
+        if key in allowed
+    }
 
 
 def _coerce_float(value: Any, fallback: float) -> float:

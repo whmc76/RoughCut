@@ -7,7 +7,6 @@ import type { ConfigProfile, SelectOption } from "../../types";
 import { PanelHeader } from "../../components/ui/PanelHeader";
 import { useI18n } from "../../i18n";
 import { classNames } from "../../utils";
-import { getTranscriptionProviderLabel } from "../settings/helpers";
 
 type WatchRootFormPanelProps = {
   form: RootForm;
@@ -197,12 +196,9 @@ export function WatchRootFormPanel({
 function buildProfileSummaryGroups(profile: ConfigProfile) {
   return [
     {
-      label: "生产链路",
+      label: "工作流",
       items: [
-        `${profile.llm_mode === "local" ? "本地" : "云端"}推理`,
-        `转写 ${getTranscriptionProviderLabel(profile.transcription_provider)} / ${profile.transcription_model || "未设置"}`,
         `方言 ${profile.transcription_dialect || "默认"}`,
-        `推理 ${profile.reasoning_provider} / ${profile.reasoning_model || "未设置"}`,
         `工作流 ${profile.workflow_mode}`,
         profile.enhancement_modes.length ? `增强 ${profile.enhancement_modes.length} 项` : "无增强",
       ],
