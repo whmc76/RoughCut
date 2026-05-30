@@ -15,8 +15,8 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
-from fastapi import APIRouter, Body, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 
 from roughcut.config import DEFAULT_MINIMAX_REASONING_MODEL, DEFAULT_OUTPUT_ROOT, get_settings, uses_codex_auth_helper
 from roughcut.docker_gpu_guard import hold_managed_gpu_services_async
@@ -66,6 +66,7 @@ _COSYVOICE3_INSTRUCT_MAX_CHARS = 160
 _MIN_TTS_AUDIO_DURATION_SEC = 0.05
 _TTS_TEXT_SEGMENT_MAX_CHARS = 2000
 _MOSS_TTS_TEXT_SEGMENT_MAX_CHARS = 120
+_MOSS_TTS_STREAM_TEXT_MAX_CHARS = 240
 _TTS_TEXT_HARD_BOUNDARY_CHARS = frozenset("。！？!?；;….")
 _TTS_TEXT_SOFT_BOUNDARY_CHARS = frozenset("，,、：:")
 _MAX_REFERENCE_AUDIO_SEC = 30.0
@@ -86,6 +87,7 @@ _MOSS_DURATION_MAX_NEW_TOKEN_HEADROOM = 120
 _MOSS_REQUEST_HEARTBEAT_SECONDS = 15.0
 _MOSS_SEGMENT_REQUEST_TIMEOUT_SECONDS = 300.0
 _MOSS_SEGMENT_GENERATION_MAX_SECONDS = 240.0
+_MOSS_STREAM_SESSION_POLL_INTERVAL_SECONDS = 0.2
 _MOSS_SERVICE_READY_TIMEOUT_SECONDS = 900.0
 _MOSS_SERVICE_READY_POLL_SECONDS = 5.0
 _REFERENCE_AUDIO_HISTORY_LIMIT = 5
@@ -296,7 +298,7 @@ async def run_tts(
     instruct_text: str = Form(default=""),
     spk_id: str = Form(default=""),
     zero_shot_spk_id: str = Form(default=""),
-    stream: bool = Form(default=True),
+    stream: bool = Form(default=False),
     speed: float = Form(default=1.0),
     seed: int = Form(default=0),
     text_frontend: bool = Form(default=True),
@@ -433,6 +435,46 @@ async def get_tool_run(run_id: str) -> dict[str, Any]:
     return _run_public_payload(run)
 
 
+@router.get("/runs/{run_id}/live")
+async def stream_tool_run(run_id: str, request: Request):
+    _ensure_tool_queue_worker()
+    resolved_run_id = str(run_id or "").strip()
+    if not resolved_run_id:
+        raise HTTPException(status_code=400, detail="run_id is required")
+    if _RUNS.get(resolved_run_id) is None:
+        raise HTTPException(status_code=404, detail="run not found")
+
+    async def _event_stream() -> Any:
+        previous_payload = None
+        while True:
+            if await request.is_disconnected():
+                break
+
+            run = _RUNS.get(resolved_run_id)
+            if run is None:
+                break
+
+            payload = _run_public_payload(run)
+            payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            if payload_json != previous_payload:
+                previous_payload = payload_json
+                yield f"data: {payload_json}\n\n"
+                if payload.get("status") in _TERMINAL_RUN_STATUSES:
+                    break
+
+            await asyncio.sleep(1.0)
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-store",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 async def _execute_tts_run(
     run_id: str,
     *,
@@ -477,6 +519,7 @@ async def _execute_tts_run(
             top_k=moss_top_k,
             repetition_penalty=moss_repetition_penalty,
             seed=seed,
+            stream=False,
             auto_prompt_text_asr=auto_prompt_text_asr,
             reference_path=reference_path,
         )
@@ -531,9 +574,16 @@ async def _execute_tts_run(
         raise RuntimeError("CosyVoice3 sft TTS requires spk_id from /query_tts_model")
     if stream and abs(float(speed or 1.0) - 1.0) > 0.0001:
         raise RuntimeError("CosyVoice3 streaming mode requires speed=1; use stream=false for speed changes")
-    text_segments = _split_tts_text_for_synthesis(text)
+    text_segments = _split_tts_text_for_synthesis(text) if not stream else [text]
     if not text_segments:
         raise RuntimeError("text is required")
+    display_segment_count = 1 if stream else len(text_segments)
+    display_text_segments = [] if stream else [
+        {"index": index, "text": segment_text, "char_count": len(segment_text)}
+        for index, segment_text in enumerate(text_segments, start=1)
+    ]
+    created_at = datetime.now(timezone.utc)
+    live_segments: list[dict[str, Any]] = []
     endpoint = "/inference"
     base_data: dict[str, str] = {
         "mode": resolved_mode,
@@ -549,6 +599,31 @@ async def _execute_tts_run(
     segment_output_paths: list[Path] = []
     response: httpx.Response | None = None
     sample_rate = int(settings.cosyvoice3_tts_sample_rate or 24000)
+    _set_partial_tts_run_result(
+        run_id,
+        {
+            "status": "running",
+            "provider": "official-cosyvoice3",
+            "mode": resolved_mode,
+            "created_at": created_at.isoformat(),
+            "text": text,
+            "tts_text": text,
+            "original_text": original_text,
+            "prompt_text": user_prompt_text,
+            "prompt_text_source": prompt_text_source,
+            "instruct_text": resolved_instruct_text,
+            "raw_instruct_text": user_instruct_text if user_instruct_text != resolved_instruct_text else "",
+            "stream": stream,
+            "speed": float(speed or 1.0),
+            "seed": int(seed or 0),
+            "text_frontend": text_frontend,
+            "segment_count": display_segment_count,
+            "text_segments": display_text_segments,
+            "live_segments": live_segments,
+            "format": "wav",
+            "sample_rate": sample_rate,
+        },
+    )
 
     try:
         _update_run_stage(run_id, "service_start", detail="Starting CosyVoice3 TTS service")
@@ -599,9 +674,18 @@ async def _execute_tts_run(
                             segment_index=index,
                             segment_count=len(text_segments),
                         )
-                        segment_path = _TTS_ROOT / f"tts_{run_id}_{index:03d}.segment.wav"
-                        _write_tts_response_audio(response, output_path=segment_path, sample_rate=sample_rate)
-                        segment_output_paths.append(segment_path)
+                    segment_path = _TTS_ROOT / f"tts_{run_id}_{index:03d}.segment.wav"
+                    _write_tts_response_audio(response, output_path=segment_path, sample_rate=sample_rate)
+                    segment_output_paths.append(segment_path)
+                    segment_entry: dict[str, Any] = {
+                        "index": index,
+                        "text": segment_text,
+                        "char_count": len(segment_text),
+                        "path": str(segment_path),
+                        "audio_url": f"/api/v1/tools/artifacts/tts/{segment_path.name}",
+                    }
+                    live_segments.append(segment_entry)
+                    _set_partial_tts_run_result(run_id, {"live_segments": live_segments})
         _update_run_stage(run_id, "process", detail="CosyVoice3 response received")
     except httpx.HTTPStatusError as exc:
         _cleanup_paths(segment_output_paths)
@@ -611,7 +695,6 @@ async def _execute_tts_run(
         _cleanup_paths(segment_output_paths)
         raise RuntimeError(f"CosyVoice3 TTS unavailable: {exc}") from exc
 
-    created_at = datetime.now(timezone.utc)
     output_path = _unique_upload_path(
         _TTS_ROOT,
         _build_tts_output_filename(
@@ -641,7 +724,8 @@ async def _execute_tts_run(
         output_path.unlink(missing_ok=True)
         raise
     finally:
-        _cleanup_paths(segment_output_paths)
+        if requested_session_mode:
+            _cleanup_paths(segment_output_paths)
     result = {
         "status": "success",
         "provider": "official-cosyvoice3",
@@ -677,11 +761,9 @@ async def _execute_tts_run(
         "text_frontend": text_frontend,
         "output_path": str(output_path),
         "audio_url": f"/api/v1/tools/artifacts/tts/{output_path.name}",
-        "segment_count": len(text_segments),
-        "text_segments": [
-            {"index": index, "text": segment_text, "char_count": len(segment_text)}
-            for index, segment_text in enumerate(text_segments, start=1)
-        ],
+        "live_segments": live_segments,
+        "segment_count": display_segment_count,
+        "text_segments": display_text_segments,
         **meta,
     }
     _write_tts_output_metadata(output_path, result)
@@ -702,6 +784,7 @@ async def _execute_moss_tts_local_run(
     top_k: int,
     repetition_penalty: float,
     seed: int,
+    stream: bool,
     auto_prompt_text_asr: bool,
     reference_path: Path | None,
 ) -> None:
@@ -750,14 +833,19 @@ async def _execute_moss_tts_local_run(
         duration_tokens=requested_duration_tokens,
     )
 
-    text_segments = _split_tts_text_for_synthesis(text, max_chars=_MOSS_TTS_TEXT_SEGMENT_MAX_CHARS)
+    moss_stream_max_chars = _MOSS_TTS_TEXT_SEGMENT_MAX_CHARS
+    text_segments = _split_tts_text_for_synthesis(text, max_chars=moss_stream_max_chars)
     if not text_segments:
         raise RuntimeError("text is required")
+    requested_session_mode = False
 
     endpoint = "/inference"
+    session_endpoint = "/tts/session/start"
     sample_rate = int(settings.moss_tts_local_sample_rate or 24000)
     segment_output_paths: list[Path] = []
+    live_segments: list[dict[str, Any]] = []
     response: httpx.Response | None = None
+    session_id = ""
     segment_duration_tokens = [
         _resolve_moss_segment_duration_tokens(
             segment_text,
@@ -775,6 +863,47 @@ async def _execute_moss_tts_local_run(
         )
         for index, segment_text in enumerate(text_segments)
     ]
+    display_segment_count = 1 if stream else len(text_segments)
+    display_text_segments = (
+        [{
+            "index": 1,
+            "text": text,
+            "char_count": _moss_tts_text_char_count(text),
+            "duration_tokens": sum(segment_duration_tokens),
+            "max_new_tokens": max(segment_max_new_tokens),
+            "stream_chunks": len(text_segments),
+        }]
+        if requested_session_mode
+        else [
+            {
+                "index": index,
+                "text": segment_text,
+                "char_count": _moss_tts_text_char_count(segment_text),
+                "duration_tokens": segment_duration_tokens[index - 1],
+                "max_new_tokens": segment_max_new_tokens[index - 1],
+            }
+            for index, segment_text in enumerate(text_segments, start=1)
+        ]
+    )
+    _set_partial_tts_run_result(
+        run_id,
+        {
+            "status": "running",
+            "provider": "official-moss-tts-local",
+            "mode": resolved_mode,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "text": text,
+            "tts_text": text,
+            "original_text": original_text,
+            "prompt_text": user_prompt_text,
+            "prompt_text_source": prompt_text_source,
+            "segment_count": display_segment_count,
+            "text_segments": display_text_segments,
+            "live_segments": live_segments,
+            "format": "wav",
+            "sample_rate": sample_rate,
+        },
+    )
 
     try:
         _update_run_stage(run_id, "service_start", detail="Starting MOSS-TTS Local service")
@@ -791,55 +920,186 @@ async def _execute_moss_tts_local_run(
                     if len(text_segments) == 1
                     else f"Submitting MOSS-TTS Local request 1/{len(text_segments)}"
                 ),
-                endpoint=endpoint,
+                endpoint=session_endpoint if requested_session_mode else endpoint,
                 mode=resolved_mode,
+                stream=requested_session_mode,
                 segment_count=len(text_segments),
             )
             async with httpx.AsyncClient(timeout=httpx.Timeout(900.0, connect=20.0), follow_redirects=True) as client:
-                for index, segment_text in enumerate(text_segments, start=1):
-                    if len(text_segments) > 1:
-                        _update_run_stage(
-                            run_id,
-                            "request",
-                            detail=f"Submitting MOSS-TTS Local request {index}/{len(text_segments)}",
-                            progress=0.34 + ((index - 1) / max(len(text_segments), 1)) * 0.36,
-                            endpoint=endpoint,
+                if requested_session_mode:
+                    base_url = settings.moss_tts_local_api_base_url.rstrip("/")
+                    seen_chunk_indexes: set[int] = set()
+                    try:
+                        session_payload = await _post_tts_session_request(
+                            client=client,
+                            url=f"{base_url}{session_endpoint}",
+                            data=_build_moss_tts_local_session_form_data(
+                                mode=resolved_mode,
+                                prompt_text=user_prompt_text,
+                                duration_tokens=max(segment_duration_tokens) if segment_duration_tokens else requested_duration_tokens,
+                                max_new_tokens=max(segment_max_new_tokens),
+                                temperature=temperature,
+                                top_p=top_p,
+                                top_k=top_k,
+                                repetition_penalty=repetition_penalty,
+                                seed=seed,
+                            ),
+                            reference_path=reference_path,
+                        )
+                        session_id = str(session_payload.get("session_id") or "").strip()
+                        if not session_id:
+                            raise RuntimeError("MOSS-TTS Local failed to create stream session")
+
+                        for index, segment_text in enumerate(text_segments, start=1):
+                            if len(text_segments) > 1:
+                                _update_run_stage(
+                                    run_id,
+                                    "request",
+                                    detail=f"Submitting MOSS-TTS Local stream chunk {index}/{len(text_segments)}",
+                                    progress=0.34 + ((index - 1) / max(len(text_segments), 1)) * 0.36,
+                                    endpoint=f"{session_endpoint}/push",
+                                    mode=resolved_mode,
+                                    segment_index=index,
+                                    segment_count=len(text_segments),
+                                    stream=requested_session_mode,
+                                )
+                            await _post_tts_session_request(
+                                client=client,
+                                url=f"{base_url}/tts/session/push",
+                                data={
+                                    "session_id": session_id,
+                                    "text": segment_text,
+                                    "is_final": "true" if index == len(text_segments) else "false",
+                                },
+                            )
+
+                        started_at = datetime.now(timezone.utc)
+                        audio_after = 0
+                        received_chunks = 0
+                        while True:
+                            poll_payload = await _get_tts_session_audio(
+                                client=client,
+                                base_url=base_url,
+                                session_id=session_id,
+                                after=audio_after,
+                            )
+                            error_message = str(poll_payload.get("error") or "").strip()
+                            if error_message:
+                                raise RuntimeError(f"MOSS-TTS Local stream reported error: {error_message}")
+
+                            audio_chunks = poll_payload.get("audio_chunks")
+                            if not isinstance(audio_chunks, list):
+                                audio_chunks = []
+                            for chunk in audio_chunks:
+                                if not isinstance(chunk, dict):
+                                    continue
+                                chunk_index_raw = chunk.get("index")
+                                chunk_text_index = 0
+                                try:
+                                    chunk_index = int(chunk_index_raw or 0)
+                                except (TypeError, ValueError):
+                                    chunk_index = len(seen_chunk_indexes)
+                                if chunk_index in seen_chunk_indexes:
+                                    continue
+                                seen_chunk_indexes.add(chunk_index)
+                                chunk_pcm_b64 = str(chunk.get("audio_base64") or "").strip()
+                                if not chunk_pcm_b64:
+                                    continue
+                                if text_segments:
+                                    chunk_text_index = max(0, min(chunk_index, len(text_segments) - 1))
+                                chunk_text = text_segments[chunk_text_index] if text_segments else ""
+                                segment_path = _TTS_ROOT / f"tts_{run_id}_{chunk_index:03d}.segment.wav"
+                                chunk_pcm = base64.b64decode(chunk_pcm_b64)
+                                _write_pcm16_wav(segment_path, chunk_pcm, sample_rate=sample_rate)
+                                segment_output_paths.append(segment_path)
+                                seen_chunk_index_for_stats = max(0, min(chunk_index, len(segment_duration_tokens) - 1)) if segment_duration_tokens else 0
+                                seen_chunk_index_for_stats = max(0, min(seen_chunk_index_for_stats, len(segment_max_new_tokens) - 1)) if segment_max_new_tokens else 0
+                                segment_entry: dict[str, Any] = {
+                                    "index": chunk_index + 1,
+                                    "text": chunk_text,
+                                    "duration_tokens": segment_duration_tokens[seen_chunk_index_for_stats],
+                                    "max_new_tokens": segment_max_new_tokens[seen_chunk_index_for_stats],
+                                    "path": str(segment_path),
+                                    "audio_url": f"/api/v1/tools/artifacts/tts/{segment_path.name}",
+                                }
+                                live_segments.append(segment_entry)
+                                _set_partial_tts_run_result(run_id, {"live_segments": live_segments})
+                                received_chunks += 1
+
+                            audio_after = max(
+                                int(audio_after),
+                                int(poll_payload.get("next_after") or 0),
+                            )
+                            if poll_payload.get("finished") and not audio_chunks:
+                                break
+                            if (datetime.now(timezone.utc) - started_at).total_seconds() > _MOSS_SERVICE_READY_TIMEOUT_SECONDS:
+                                raise RuntimeError(
+                                    f"MOSS-TTS Local stream timeout with {received_chunks}/{len(text_segments)} chunks produced"
+                                )
+                            await asyncio.sleep(_MOSS_STREAM_SESSION_POLL_INTERVAL_SECONDS)
+
+                        await _post_tts_session_request(
+                            client=client,
+                            url=f"{base_url}/tts/session/close",
+                            data={"session_id": session_id},
+                        )
+                        response = None
+                    except Exception:
+                        if session_id:
+                            try:
+                                await _post_tts_session_request(
+                                    client=client,
+                                    url=f"{base_url}/tts/session/abort",
+                                    data={"session_id": session_id},
+                                )
+                            except Exception:
+                                pass
+                        raise
+                else:
+                    for index, segment_text in enumerate(text_segments, start=1):
+                        if len(text_segments) > 1:
+                            _update_run_stage(
+                                run_id,
+                                "request",
+                                detail=f"Submitting MOSS-TTS Local request {index}/{len(text_segments)}",
+                                progress=0.34 + ((index - 1) / max(len(text_segments), 1)) * 0.36,
+                                endpoint=endpoint,
+                                mode=resolved_mode,
+                                segment_index=index,
+                                segment_count=len(text_segments),
+                            )
+                        data = _build_moss_tts_local_form_data(
+                            text=segment_text,
                             mode=resolved_mode,
-                            segment_index=index,
-                            segment_count=len(text_segments),
+                            prompt_text=user_prompt_text,
+                            duration_tokens=segment_duration_tokens[index - 1],
+                            max_new_tokens=segment_max_new_tokens[index - 1],
+                            temperature=temperature,
+                            top_p=top_p,
+                            top_k=top_k,
+                            repetition_penalty=repetition_penalty,
+                            seed=seed,
                         )
-                    data = _build_moss_tts_local_form_data(
-                        text=segment_text,
-                        mode=resolved_mode,
-                        prompt_text=user_prompt_text,
-                        duration_tokens=segment_duration_tokens[index - 1],
-                        max_new_tokens=segment_max_new_tokens[index - 1],
-                        temperature=temperature,
-                        top_p=top_p,
-                        top_k=top_k,
-                        repetition_penalty=repetition_penalty,
-                        seed=seed,
-                    )
-                    response = await _post_moss_tts_segment_request_with_progress(
-                        run_id,
-                        client,
-                        f"{settings.moss_tts_local_api_base_url.rstrip('/')}{endpoint}",
-                        data=data,
-                        reference_path=reference_path,
-                        segment_index=index,
-                        segment_count=len(text_segments),
-                        max_new_tokens=segment_max_new_tokens[index - 1],
-                    )
-                    response.raise_for_status()
-                    if len(text_segments) > 1:
-                        _update_run_stage(
+                        response = await _post_moss_tts_segment_request_with_progress(
                             run_id,
-                            "process",
-                            detail=f"MOSS-TTS Local response received {index}/{len(text_segments)}",
-                            progress=0.55 + (index / max(len(text_segments), 1)) * 0.24,
+                            client,
+                            f"{settings.moss_tts_local_api_base_url.rstrip('/')}{endpoint}",
+                            data=data,
+                            reference_path=reference_path,
                             segment_index=index,
                             segment_count=len(text_segments),
+                            max_new_tokens=segment_max_new_tokens[index - 1],
                         )
+                        response.raise_for_status()
+                        if len(text_segments) > 1:
+                            _update_run_stage(
+                                run_id,
+                                "process",
+                                detail=f"MOSS-TTS Local response received {index}/{len(text_segments)}",
+                                progress=0.55 + (index / max(len(text_segments), 1)) * 0.24,
+                                segment_index=index,
+                                segment_count=len(text_segments),
+                            )
                         segment_path = _TTS_ROOT / f"tts_{run_id}_{index:03d}.segment.wav"
                         _write_tts_response_audio(response, output_path=segment_path, sample_rate=sample_rate)
                         segment_duration = _validate_tts_audio_output(segment_path, service_label="MOSS-TTS Local", segment_index=index)
@@ -850,6 +1110,16 @@ async def _execute_moss_tts_local_run(
                             segment_index=index,
                         )
                         segment_output_paths.append(segment_path)
+                        segment_entry: dict[str, Any] = {
+                            "index": index,
+                            "text": segment_text,
+                            "duration_tokens": segment_duration_tokens[index - 1],
+                            "max_new_tokens": segment_max_new_tokens[index - 1],
+                            "path": str(segment_path),
+                            "audio_url": f"/api/v1/tools/artifacts/tts/{segment_path.name}",
+                        }
+                        live_segments.append(segment_entry)
+                        _set_partial_tts_run_result(run_id, {"live_segments": live_segments})
         _update_run_stage(run_id, "process", detail="MOSS-TTS Local response received")
     except httpx.HTTPStatusError as exc:
         _cleanup_paths(segment_output_paths)
@@ -869,7 +1139,7 @@ async def _execute_moss_tts_local_run(
             instruct_text="",
             spk_id="",
             zero_shot_spk_id="",
-            stream=False,
+            stream=stream,
             speed=1.0,
             seed=int(seed or 0),
             text_frontend=True,
@@ -879,10 +1149,19 @@ async def _execute_moss_tts_local_run(
     )
     _update_run_stage(run_id, "write_artifact", detail="Writing synthesized audio", output_path=str(output_path))
     try:
-        if len(text_segments) == 1:
+        if not requested_session_mode and len(text_segments) == 1:
             if response is None:
                 raise RuntimeError("MOSS-TTS Local did not return a response")
             meta = _write_tts_response_audio(response, output_path=output_path, sample_rate=sample_rate)
+            meta["duration"] = _validate_tts_audio_output(output_path, service_label="MOSS-TTS Local")
+        elif requested_session_mode and not segment_output_paths:
+            raise RuntimeError("MOSS-TTS Local stream produced no audio chunks")
+        elif requested_session_mode and segment_output_paths:
+            if len(segment_output_paths) == 1:
+                output_path.write_bytes(segment_output_paths[0].read_bytes())
+                meta = {"format": "wav", "sample_rate": sample_rate}
+            else:
+                meta = _concatenate_tts_wav_segments(segment_output_paths, output_path=output_path)
             meta["duration"] = _validate_tts_audio_output(output_path, service_label="MOSS-TTS Local")
         else:
             meta = _concatenate_tts_wav_segments(segment_output_paths, output_path=output_path)
@@ -896,7 +1175,8 @@ async def _execute_moss_tts_local_run(
         output_path.unlink(missing_ok=True)
         raise
     finally:
-        _cleanup_paths(segment_output_paths)
+        if not live_segments:
+            _cleanup_paths(segment_output_paths)
 
     sampling_params = {
         "max_new_tokens": max(segment_max_new_tokens),
@@ -919,7 +1199,7 @@ async def _execute_moss_tts_local_run(
             duration_tokens=requested_duration_tokens,
             segment_duration_tokens=segment_duration_tokens,
             sampling_params=sampling_params,
-            segment_count=len(text_segments),
+            segment_count=display_segment_count,
         ),
         "text": text,
         "tts_text": text,
@@ -927,19 +1207,12 @@ async def _execute_moss_tts_local_run(
         "prompt_text": user_prompt_text,
         "prompt_text_source": prompt_text_source,
         "reference_audio": str(source_reference_path) if source_reference_path is not None else None,
+        "stream": stream,
         "output_path": str(output_path),
         "audio_url": f"/api/v1/tools/artifacts/tts/{output_path.name}",
-        "segment_count": len(text_segments),
-        "text_segments": [
-            {
-                "index": index,
-                "text": segment_text,
-                "char_count": _moss_tts_text_char_count(segment_text),
-                "duration_tokens": segment_duration_tokens[index - 1],
-                "max_new_tokens": segment_max_new_tokens[index - 1],
-            }
-            for index, segment_text in enumerate(text_segments, start=1)
-        ],
+        "live_segments": live_segments,
+        "segment_count": display_segment_count,
+        "text_segments": display_text_segments,
         "moss_duration_tokens": requested_duration_tokens,
         "moss_segment_duration_tokens": segment_duration_tokens,
         "sampling_params": sampling_params,
@@ -969,12 +1242,40 @@ def _build_moss_tts_local_form_data(
     repetition_penalty: float,
     seed: int,
 ) -> dict[str, str]:
+    data = _build_moss_tts_local_session_form_data(
+        mode=mode,
+        prompt_text=prompt_text,
+        duration_tokens=duration_tokens,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        top_p=top_p,
+        top_k=top_k,
+        repetition_penalty=repetition_penalty,
+        seed=seed,
+    )
+    data.update({
+        "tts_text": str(text or ""),
+        "text": str(text or ""),
+    })
+    return data
+
+
+def _build_moss_tts_local_session_form_data(
+    *,
+    mode: str,
+    prompt_text: str,
+    duration_tokens: int,
+    max_new_tokens: int,
+    temperature: float,
+    top_p: float,
+    top_k: int,
+    repetition_penalty: float,
+    seed: int,
+) -> dict[str, str]:
     resolved_mode = _normalize_moss_tts_local_mode(mode)
     resolved_seed = max(0, int(seed or 0))
     return {
         "mode": resolved_mode,
-        "tts_text": str(text or ""),
-        "text": str(text or ""),
         "prompt_text": str(prompt_text or ""),
         "continuation": "true" if resolved_mode == "moss_continuation_clone" else "false",
         "duration_tokens": str(max(0, int(duration_tokens or 0))),
@@ -986,6 +1287,46 @@ def _build_moss_tts_local_form_data(
         "seed": str(resolved_seed),
         "max_generation_seconds": _format_config_number(_MOSS_SEGMENT_GENERATION_MAX_SECONDS),
     }
+
+
+async def _post_tts_session_request(
+    *,
+    client: httpx.AsyncClient,
+    url: str,
+    data: dict[str, str],
+    reference_path: Path | None = None,
+) -> dict[str, Any]:
+    response = await _post_tts_segment_request(
+        client=client,
+        url=url,
+        data=data,
+        reference_path=reference_path,
+    )
+    response.raise_for_status()
+    if "application/json" not in response.headers.get("content-type", "").lower():
+        raise RuntimeError("MOSS-TTS session endpoint did not return JSON")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("MOSS-TTS session endpoint returned invalid payload")
+    return payload
+
+
+async def _get_tts_session_audio(
+    *,
+    client: httpx.AsyncClient,
+    base_url: str,
+    session_id: str,
+    after: int,
+) -> dict[str, Any]:
+    url = f"{base_url.rstrip('/')}/tts/session/{session_id}/audio"
+    response = await client.get(url, params={"after": int(max(0, after))})
+    response.raise_for_status()
+    if "application/json" not in response.headers.get("content-type", "").lower():
+        raise RuntimeError("MOSS-TTS session audio endpoint did not return JSON")
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError("MOSS-TTS session audio endpoint returned invalid payload")
+    return payload
 
 
 async def _post_moss_tts_segment_request_with_progress(
@@ -1185,6 +1526,64 @@ def _split_tts_text_for_synthesis(text: str, *, max_chars: int = _TTS_TEXT_SEGME
     if current:
         segments.append(current)
     return [segment for segment in segments if segment.strip()]
+
+
+def _split_tts_text_for_tts_stream(text: str, *, max_chars: int = _MOSS_TTS_TEXT_SEGMENT_MAX_CHARS) -> list[str]:
+    normalized = " ".join(str(text or "").split()).strip()
+    if not normalized:
+        return []
+    max_chars = max(1, int(max_chars or _MOSS_TTS_TEXT_SEGMENT_MAX_CHARS))
+    if len(normalized) <= max_chars:
+        return [normalized]
+
+    units = re.findall(r"[A-Za-z0-9]+(?:[-'’][A-Za-z0-9]+)*|[\u4e00-\u9fff]|[^\w\s\u4e00-\u9fff]", normalized)
+    if not units:
+        return [normalized]
+
+    chunks: list[str] = []
+    current: list[str] = []
+
+    for unit in units:
+        unit = unit.strip()
+        if not unit:
+            continue
+
+        tentative = _join_tts_stream_tokens(current + [unit])
+        if len(tentative) <= max_chars and current:
+            current.append(unit)
+            continue
+        if not current:
+            if len(unit) <= max_chars:
+                current.append(unit)
+            else:
+                chunks.extend(_hard_split_tts_text(unit, max_chars=max_chars))
+            continue
+        chunks.append(_join_tts_stream_tokens(current))
+        if len(unit) <= max_chars:
+            current = [unit]
+        else:
+            chunks.extend(_hard_split_tts_text(unit, max_chars=max_chars))
+            current = []
+
+    if current:
+        chunks.append(_join_tts_stream_tokens(current))
+    return [chunk for chunk in chunks if chunk.strip()]
+
+
+def _join_tts_stream_tokens(tokens: list[str]) -> str:
+    if not tokens:
+        return ""
+    output = tokens[0]
+    for previous, current in zip(tokens, tokens[1:]):
+        if previous and current and _is_tts_stream_text_word(previous) and _is_tts_stream_text_word(current):
+            output += f" {current}"
+        else:
+            output += current
+    return output
+
+
+def _is_tts_stream_text_word(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9]+(?:[-'’][A-Za-z0-9]+)*", value or ""))
 
 
 def _split_tts_text_units(text: str, *, boundary_chars: frozenset[str]) -> list[str]:
@@ -1941,17 +2340,17 @@ async def _execute_persisted_run(run: dict[str, Any]) -> None:
             instruct_text=str(request.get("instruct_text") or ""),
             spk_id=str(request.get("spk_id") or ""),
             zero_shot_spk_id=str(request.get("zero_shot_spk_id") or ""),
-            stream=bool(request.get("stream", True)),
+            stream=_coerce_bool(request.get("stream"), default=False),
             speed=float(request.get("speed") or 1.0),
             seed=int(request.get("seed") or 0),
-            text_frontend=bool(request.get("text_frontend", True)),
+            text_frontend=_coerce_bool(request.get("text_frontend"), default=True),
             moss_duration_tokens=int(request.get("moss_duration_tokens") or 0),
             moss_max_new_tokens=int(request.get("moss_max_new_tokens") or 0),
             moss_temperature=float(request.get("moss_temperature") or 1.1),
             moss_top_p=float(request.get("moss_top_p") or 0.9),
             moss_top_k=int(request.get("moss_top_k") or 50),
             moss_repetition_penalty=float(request.get("moss_repetition_penalty") or 1.1),
-            auto_prompt_text_asr=bool(request.get("auto_prompt_text_asr", True)),
+            auto_prompt_text_asr=_coerce_bool(request.get("auto_prompt_text_asr"), default=True),
             reference_path=Path(str(reference_value)) if reference_value else None,
         )
         return
@@ -2048,6 +2447,19 @@ def _complete_run(run_id: str, result: dict[str, Any]) -> None:
     if failed is not None and failed["status"] == "pending":
         failed["progress"] = 0.0
     run.update({"status": "completed", "progress": 1.0, "result": result, "error": None, "updated_at": now})
+    _persist_run(run)
+
+
+def _set_partial_tts_run_result(run_id: str, patch: dict[str, Any]) -> None:
+    run = _RUNS.get(run_id)
+    if run is None:
+        return
+    result = run.get("result")
+    if not isinstance(result, dict):
+        result = {}
+        run["result"] = result
+    result.update(_json_safe(patch))
+    run["updated_at"] = datetime.now(timezone.utc).isoformat()
     _persist_run(run)
 
 
@@ -2238,6 +2650,23 @@ def _coerce_progress(value: Any) -> float | None:
     if progress > 1.0:
         progress = progress / 100.0
     return min(1.0, max(0.0, progress))
+
+
+def _coerce_bool(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "t", "yes", "on", "enable", "enabled"}:
+            return True
+        if normalized in {"0", "false", "f", "no", "off", "disable", "disabled"}:
+            return False
+        return default
+    return default
 
 
 def _compact_progress_payload(payload: dict[str, Any]) -> dict[str, Any]:
