@@ -10,7 +10,7 @@ from pathlib import Path
 from roughcut.config import normalize_transcription_provider_name
 from roughcut.docker_gpu_guard import _probe_service_health
 from roughcut.config import get_settings
-from roughcut.docker_gpu_guard import hold_managed_gpu_services_async
+from roughcut.docker_gpu_guard import adopt_running_idle_managed_gpu_services, hold_managed_gpu_services_async
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ async def ensure_runtime_services_ready(*, force: bool = False, reason: str = ""
             return
 
         await asyncio.to_thread(_ensure_core_compose_services_started)
+        await asyncio.to_thread(adopt_running_idle_managed_gpu_services, reason=reason or "runtime_preflight_adopt")
         await _ensure_managed_service_urls_ready(reason=reason or "runtime_preflight")
         _last_preflight_at = time.monotonic()
 

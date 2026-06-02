@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import httpx
 import uuid
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,11 @@ from roughcut.naming import (
     normalize_avatar_capability_status,
 )
 from roughcut.publication import CANONICAL_PUBLICATION_ADAPTER, normalize_publication_platform, platform_label
+from roughcut.publication import (
+    build_publication_browser_profile_id,
+    normalize_publication_browser_binding,
+    normalize_publication_browser_name,
+)
 
 router = APIRouter(prefix="/avatar-materials", tags=["avatar-materials"])
 
@@ -64,6 +70,9 @@ class AvatarMaterialProfileUpdate(BaseModel):
 class PublicationBrowserLoginMatchIn(BaseModel):
     browser: str
     platforms: list[str] = []
+    user_data_dir: str | None = None
+    profile_directory: str | None = None
+    cdp_base_url: str | None = None
 
 
 @router.get("", response_model=AvatarMaterialLibraryOut)
@@ -103,18 +112,7 @@ def get_avatar_publication_profiles():
 
 
 def _normalize_publication_browser(value: str) -> str:
-    normalized = str(value or "").strip().lower().replace(" ", "-").replace("_", "-")
-    aliases = {
-        "chrome": "chrome",
-        "google-chrome": "chrome",
-        "edge": "edge",
-        "msedge": "edge",
-        "microsoft-edge": "edge",
-        "firefox": "firefox",
-        "browser-agent": "browser-agent",
-        "default": "browser-agent",
-    }
-    browser = aliases.get(normalized)
+    browser = normalize_publication_browser_name(value)
     if browser:
         return browser
     raise HTTPException(status_code=400, detail="不支持的浏览器选项。")
@@ -136,6 +134,241 @@ def _normalize_publication_browser_platforms(platforms: list[str]) -> list[str]:
         if platform and platform not in normalized:
             normalized.append(platform)
     return normalized
+
+
+def _publication_browser_local_state_path(browser: str) -> Path | None:
+    local_app_data = Path.home() / "AppData" / "Local"
+    candidates = {
+        "chrome": local_app_data / "Google" / "Chrome" / "User Data" / "Local State",
+        "edge": local_app_data / "Microsoft" / "Edge" / "User Data" / "Local State",
+    }
+    path = candidates.get(browser)
+    return path if path and path.exists() else None
+
+
+def _publication_browser_user_data_dir(browser: str) -> Path | None:
+    state_path = _publication_browser_local_state_path(browser)
+    return state_path.parent if state_path is not None else None
+
+
+def _collect_creator_identity_tokens(profile: dict[str, Any]) -> set[str]:
+    creator_identity = (
+        profile.get("creator_profile", {}).get("identity", {})
+        if isinstance(profile.get("creator_profile"), dict)
+        else {}
+    )
+    personal_info = (
+        profile.get("personal_info", {})
+        if isinstance(profile.get("personal_info"), dict)
+        else {}
+    )
+    business = (
+        profile.get("creator_profile", {}).get("business", {})
+        if isinstance(profile.get("creator_profile"), dict)
+        else {}
+    )
+    raw_tokens = [
+        profile.get("display_name"),
+        profile.get("presenter_alias"),
+        creator_identity.get("public_name"),
+        creator_identity.get("real_name"),
+        creator_identity.get("email"),
+        personal_info.get("contact"),
+        business.get("contact"),
+    ]
+    tokens: set[str] = set()
+    for raw in raw_tokens:
+        value = str(raw or "").strip().replace("_", " ").replace("-", " ")
+        for token in value.split():
+            token = token.strip()
+            if len(token) >= 2:
+                tokens.add(token.lower())
+    return tokens
+
+
+def _resolve_existing_browser_binding(profile: dict[str, Any], browser: str) -> dict[str, Any]:
+    publishing = profile.get("creator_profile", {}).get("publishing", {})
+    if not isinstance(publishing, dict):
+        return {}
+    credentials = publishing.get("platform_credentials")
+    if not isinstance(credentials, list):
+        return {}
+    normalized_browser = normalize_publication_browser_name(browser)
+    candidates: list[dict[str, Any]] = []
+    for item in credentials:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("adapter") or "").strip().lower().replace("-", "_") != CANONICAL_PUBLICATION_ADAPTER:
+            continue
+        browser_binding = item.get("browser_binding")
+        if not isinstance(browser_binding, dict):
+            continue
+        if normalize_publication_browser_name(browser_binding.get("browser")) != normalized_browser:
+            continue
+        if not browser_binding.get("profile_id"):
+            continue
+        candidates.append(browser_binding)
+    unique_ids = {
+        str(item.get("profile_id") or "").strip()
+        for item in candidates
+        if str(item.get("profile_id") or "").strip()
+    }
+    if len(unique_ids) != 1:
+        return {}
+    return normalize_publication_browser_binding(candidates[0])
+
+
+def _resolve_agent_attached_browser_binding(browser: str) -> dict[str, Any]:
+    settings = get_settings()
+    base_url = str(getattr(settings, "publication_browser_agent_base_url", "") or "").strip().rstrip("/")
+    if not base_url:
+        return {}
+    normalized_browser = normalize_publication_browser_name(browser)
+    if not normalized_browser:
+        return {}
+    headers: dict[str, str] = {}
+    auth_token = str(getattr(settings, "publication_browser_agent_auth_token", "") or "").strip()
+    if auth_token:
+        headers["Authorization"] = f"Bearer {auth_token}"
+    try:
+        with httpx.Client(timeout=httpx.Timeout(2.0)) as client:
+            response = client.get(f"{base_url}/healthz", headers=headers)
+            response.raise_for_status()
+            payload = response.json() or {}
+    except Exception:
+        return {}
+    attached = payload.get("attached_profile_binding") if isinstance(payload, dict) else None
+    if not isinstance(attached, dict):
+        return {}
+    if normalize_publication_browser_name(attached.get("browser")) != normalized_browser:
+        return {}
+    return normalize_publication_browser_binding(
+        {
+            "browser": attached.get("browser"),
+            "user_data_dir": attached.get("user_data_dir"),
+            "profile_directory": attached.get("profile_directory"),
+            "cdp_base_url": attached.get("cdp_base_url") if isinstance(attached.get("cdp_base_url"), str) else None,
+        }
+    )
+
+
+def _resolve_browser_profile_binding_for_creator(
+    *,
+    browser: str,
+    profile: dict[str, Any],
+    body: PublicationBrowserLoginMatchIn,
+) -> dict[str, Any]:
+    explicit_binding = normalize_publication_browser_binding(
+        {
+            "browser": browser,
+            "user_data_dir": body.user_data_dir,
+            "profile_directory": body.profile_directory,
+            "cdp_base_url": body.cdp_base_url,
+        }
+    )
+    if explicit_binding.get("profile_id"):
+        return explicit_binding
+    if browser not in {"chrome", "edge"}:
+        return explicit_binding
+    agent_binding = normalize_publication_browser_binding(_resolve_agent_attached_browser_binding(browser=browser))
+    local_state_path = _publication_browser_local_state_path(browser)
+    user_data_dir = _publication_browser_user_data_dir(browser)
+    if local_state_path is None or user_data_dir is None:
+        return agent_binding if agent_binding.get("profile_id") else explicit_binding
+    try:
+        payload = json.loads(local_state_path.read_text(encoding="utf-8"))
+    except Exception:
+        if existing_binding := _resolve_existing_browser_binding(profile=profile, browser=browser):
+            return existing_binding
+        return agent_binding if agent_binding.get("profile_id") else explicit_binding
+    info_cache = (
+        (payload.get("profile") or {}).get("info_cache")
+        if isinstance((payload.get("profile") or {}), dict)
+        else {}
+    )
+    if not isinstance(info_cache, dict):
+        if existing_binding := _resolve_existing_browser_binding(profile=profile, browser=browser):
+            return existing_binding
+        return agent_binding if agent_binding.get("profile_id") else explicit_binding
+    creator_tokens = _collect_creator_identity_tokens(profile)
+    if not creator_tokens:
+        return _resolve_existing_browser_binding(profile=profile, browser=browser) or (
+            agent_binding if agent_binding.get("profile_id") else explicit_binding
+        )
+    matches: list[dict[str, Any]] = []
+    for directory, raw_entry in info_cache.items():
+        entry = raw_entry if isinstance(raw_entry, dict) else {}
+        searchable = " ".join(
+            [
+                str(directory or ""),
+                str(entry.get("name") or ""),
+                str(entry.get("gaia_given_name") or ""),
+                str(entry.get("gaia_name") or ""),
+                str(entry.get("user_name") or ""),
+            ]
+        ).lower()
+        score = sum(1 for token in creator_tokens if token in searchable)
+        if score <= 0:
+            continue
+        matches.append(
+            {
+                "score": score,
+                "profile_directory": str(directory or "").strip(),
+                "profile_name": str(entry.get("name") or "").strip() or None,
+                "profile_email": str(entry.get("user_name") or "").strip() or None,
+            }
+        )
+    if not matches:
+        return _resolve_existing_browser_binding(profile=profile, browser=browser) or (
+            agent_binding if agent_binding.get("profile_id") else explicit_binding
+        )
+    matches.sort(key=lambda item: (-int(item.get("score") or 0), str(item.get("profile_directory") or "")))
+    best = matches[0]
+    if len(matches) > 1 and int(matches[1].get("score") or 0) == int(best.get("score") or 0):
+        return explicit_binding
+    resolved = normalize_publication_browser_binding(
+        {
+            "browser": browser,
+            "user_data_dir": str(user_data_dir),
+            "profile_directory": best.get("profile_directory"),
+            "profile_name": best.get("profile_name"),
+            "profile_email": best.get("profile_email"),
+            "cdp_base_url": body.cdp_base_url,
+            "profile_id": build_publication_browser_profile_id(
+                browser=browser,
+                user_data_dir=str(user_data_dir),
+                profile_directory=best.get("profile_directory"),
+            ),
+        }
+    )
+    return resolved
+
+
+def _preserve_profile_credentials_on_update(
+    existing_creator_profile: dict[str, Any] | None,
+    creator_profile_update: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(creator_profile_update, dict):
+        return {}
+
+    update_payload = dict(creator_profile_update)
+    if not isinstance(existing_creator_profile, dict):
+        return update_payload
+
+    existing_publishing = existing_creator_profile.get("publishing")
+    if not isinstance(existing_publishing, dict):
+        return update_payload
+
+    update_publishing = update_payload.get("publishing")
+    if not isinstance(update_publishing, dict):
+        return update_payload
+
+    if "platform_credentials" not in update_publishing:
+        merged_publishing = dict(update_publishing)
+        merged_publishing["platform_credentials"] = existing_publishing.get("platform_credentials", [])
+        update_payload["publishing"] = merged_publishing
+
+    return update_payload
 
 
 @router.post("/publication-profiles/{profile_id}/match-browser-login", response_model=AvatarPublicationProfileListOut)
@@ -164,13 +397,23 @@ def match_publication_browser_login(profile_id: str, body: PublicationBrowserLog
 
     browser_label = _publication_browser_label(browser)
     profile_name = str(profile.get("display_name") or profile.get("presenter_alias") or "发布账号").strip()
+    browser_binding = _resolve_browser_profile_binding_for_creator(browser=browser, profile=profile, body=body)
     credentials = [
         dict(item)
         for item in (publishing.get("platform_credentials") or [])
         if isinstance(item, dict) and normalize_publication_platform(item.get("platform"))
     ]
     now = now_iso()
-    note = f"由智能发布页根据用户选择的{browser_label}本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。"
+    binding_note = ""
+    if browser_binding.get("profile_directory") and browser_binding.get("user_data_dir"):
+        binding_note = (
+            f" 已绑定真实浏览器 profile：{browser_binding.get('profile_directory')}"
+            f" @ {browser_binding.get('user_data_dir')}。"
+        )
+    note = (
+        f"由智能发布页根据用户选择的{browser_label}本地浏览器会话引用自动匹配；"
+        f"未读取或保存平台密码、Cookie 或浏览器凭证。{binding_note}"
+    ).strip()
     for platform in platforms:
         existing = next(
             (
@@ -189,6 +432,10 @@ def match_publication_browser_login(profile_id: str, body: PublicationBrowserLog
             "platform_label": platform_label(platform),
             "account_label": str((existing or {}).get("account_label") or f"{profile_name} · {browser_label}").strip(),
             "credential_ref": credential_ref,
+            "browser_profile_id": str(
+                browser_binding.get("profile_id") or (existing or {}).get("browser_profile_id") or credential_ref
+            ).strip(),
+            "browser_binding": browser_binding,
             "status": "logged_in",
             "enabled": True,
             "adapter": CANONICAL_PUBLICATION_ADAPTER,
@@ -477,8 +724,12 @@ async def update_avatar_material_profile(profile_id: str, payload: AvatarMateria
         )
 
     if payload.creator_profile is not None:
+        normalized_creator_profile = _preserve_profile_credentials_on_update(
+            existing_creator_profile=profile.get("creator_profile") if isinstance(profile.get("creator_profile"), dict) else None,
+            creator_profile_update=payload.creator_profile,
+        )
         profile["creator_profile"] = normalize_creator_profile(
-            payload.creator_profile,
+            normalized_creator_profile,
             personal_info=profile.get("personal_info") if isinstance(profile.get("personal_info"), dict) else None,
             display_name=str(profile.get("display_name") or "").strip(),
             presenter_alias=str(profile.get("presenter_alias") or "").strip(),

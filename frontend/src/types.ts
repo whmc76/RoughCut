@@ -134,6 +134,19 @@ export type JobManualEditSmartDelete = {
   evidence?: string[];
 };
 
+export type JobManualEditRuleSegment = {
+  start: number;
+  end: number;
+  duration_sec: number;
+  kind: "filler" | "repeated" | "pause" | "smart_delete";
+  reason: string;
+  source?: string;
+  confidence?: number | null;
+  detail?: string | null;
+  evidence?: string[];
+  auto_applied?: boolean;
+};
+
 export type JobManualEditWord = {
   word: string;
   start: number;
@@ -196,6 +209,7 @@ export type JobManualEditSession = {
   keep_segments: JobManualEditSegment[];
   base_keep_segments?: JobManualEditSegment[];
   silence_segments?: JobManualEditSilence[];
+  rule_segments?: JobManualEditRuleSegment[];
   smart_delete_segments?: JobManualEditSmartDelete[];
   source_subtitles: JobManualEditSubtitle[];
   projected_subtitles: JobManualEditSubtitle[];
@@ -696,8 +710,27 @@ export type IntelligentCopyPlatformMaterial = {
   full_copy: string;
   cover_path?: string | null;
   cover_generation?: Record<string, unknown> | null;
+  declaration?: string | null;
+  category?: string | null;
+  collection_name?: string | null;
+  collection?: Record<string, unknown> | null;
+  visibility_or_publish_mode?: string | null;
+  scheduled_publish_at?: string | null;
+  copy_material?: Record<string, unknown> | null;
+  live_publish_preflight?: Record<string, unknown> | null;
+  platform_specific_overrides?: Record<string, unknown> | null;
+  manual_handoff_only?: boolean;
+  manual_publish_entry_url?: string | null;
   publish_ready?: boolean;
   blocking_reasons?: string[];
+};
+
+export type ManualHandoffTarget = {
+  platform: string;
+  label?: string | null;
+  status?: string | null;
+  login_url?: string | null;
+  reason?: string | null;
 };
 
 export type IntelligentCopyResult = {
@@ -712,7 +745,11 @@ export type IntelligentCopyResult = {
   highlights: Record<string, string>;
   content_profile_summary: Record<string, unknown>;
   platforms: IntelligentCopyPlatformMaterial[];
+  material_contract?: Record<string, unknown> | null;
+  status?: string;
   publish_ready?: boolean;
+  manual_handoff_ready?: boolean;
+  manual_handoff_targets?: ManualHandoffTarget[];
   blocking_reasons?: string[];
   warnings: string[];
 };
@@ -722,7 +759,7 @@ export type IntelligentCopyGenerateTask = {
   folder_path: string;
   copy_style?: string | null;
   use_existing_cover?: boolean;
-  status: "queued" | "running" | "completed" | "failed" | string;
+  status: "queued" | "running" | "completed" | "manual_handoff" | "blocked" | "failed" | string;
   progress: number;
   stage: string;
   message: string;
@@ -937,6 +974,8 @@ export type PublicationIntelligenceScheme = {
   last_instruction?: string;
   blocked_reasons?: string[];
   warnings?: string[];
+  manual_handoff_ready?: boolean;
+  manual_handoff_targets?: ManualHandoffTarget[];
   probe?: {
     status?: string;
     probed_at?: string | null;
@@ -1011,6 +1050,9 @@ export type PublicationPlan = {
   job_id: string;
   status: string;
   publish_ready: boolean;
+  manual_handoff_ready?: boolean;
+  manual_handoff_targets?: ManualHandoffTarget[];
+  publication_executor_preflight?: Record<string, unknown>;
   blocked_reasons: string[];
   warnings: string[];
   adapter: string;
@@ -1090,6 +1132,7 @@ export type IdentitySupportSourceKey =
 
 export type ContentProfilePayload = Record<string, any> & {
   content_understanding?: Partial<ContentUnderstanding> | null;
+  video_understanding?: Partial<VideoUnderstanding> | null;
   keywords?: string[];
   search_queries?: string[];
 };
@@ -1144,10 +1187,20 @@ export type ContentUnderstanding = {
   question?: string;
   search_queries: string[];
   evidence_spans: Record<string, any>[];
+  timed_focus_spans: Record<string, any>[];
   uncertainties: string[];
   confidence: Record<string, number>;
   needs_review: boolean;
   review_reasons: string[];
+};
+
+export type VideoUnderstanding = {
+  schema_version?: string;
+  global_understanding?: Record<string, any> | null;
+  segment_understanding?: Record<string, any>[];
+  evidence?: Record<string, any> | null;
+  automation_hints?: Record<string, any> | null;
+  review?: Record<string, any> | null;
 };
 
 export type ContentProfileMemoryStats = {
@@ -1290,6 +1343,7 @@ export type Config = {
   voice_clone_voice_id: string;
   director_rewrite_strength: number;
   publication_browser_agent_base_url: string;
+  publication_browser_cdp_url: string;
   publication_browser_agent_auth_token_set: boolean;
   publication_worker_poll_interval_sec: number;
   publication_worker_batch_limit: number;
@@ -1372,6 +1426,7 @@ export type RuntimeEnvironment = {
   avatar_training_api_base_url: string;
   voice_clone_api_base_url: string;
   publication_browser_agent_base_url: string;
+  publication_browser_cdp_url: string;
   output_dir: string;
 };
 
@@ -1698,6 +1753,15 @@ export type ToolTtsResult = {
     index: number;
     text: string;
     char_count?: number | null;
+  }>;
+  live_segments?: Array<{
+    index: number;
+    text: string;
+    char_count?: number | null;
+    duration_tokens?: number | null;
+    max_new_tokens?: number | null;
+    path?: string | null;
+    audio_url?: string | null;
   }>;
   source_format?: string;
   raw?: Record<string, unknown>;

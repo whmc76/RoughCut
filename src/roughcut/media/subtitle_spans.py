@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 
@@ -58,6 +59,19 @@ def subtitle_display_units(text: str) -> list[str]:
 def subtitle_display_unit_key(char: str) -> str:
     value = str(char or "").strip().lower()
     return _CHINESE_DIGIT_KEYS.get(value, value)
+
+
+def has_unsafe_unmatched_alnum_units(
+    display_units: list[str],
+    *,
+    matched_indexes: set[int],
+) -> bool:
+    for index, unit in enumerate(display_units):
+        if index in matched_indexes:
+            continue
+        if re.fullmatch(r"[A-Za-z0-9]", subtitle_display_unit_key(unit), re.IGNORECASE):
+            return True
+    return False
 
 
 def normalized_subtitle_words(item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -166,9 +180,19 @@ def subtitle_span_alignment_diagnostics(item: dict[str, Any]) -> dict[str, Any]:
         issues.append("missing_display_text")
     if text_units and word_units and alignment.matched_ratio < 0.6:
         issues.append("low_text_word_alignment")
-    if alignment.unmatched_prefix:
+    if alignment.unmatched_prefix and not _subtitle_fragment_boundary_alignment_noise(
+        item,
+        unmatched_text=alignment.unmatched_prefix,
+        matched_ratio=alignment.matched_ratio,
+        side="prefix",
+    ):
         issues.append("unmatched_text_prefix")
-    if alignment.unmatched_suffix:
+    if alignment.unmatched_suffix and not _subtitle_fragment_boundary_alignment_noise(
+        item,
+        unmatched_text=alignment.unmatched_suffix,
+        matched_ratio=alignment.matched_ratio,
+        side="suffix",
+    ):
         issues.append("unmatched_text_suffix")
     status = "ok" if not issues else "warning"
     return {
@@ -182,6 +206,30 @@ def subtitle_span_alignment_diagnostics(item: dict[str, Any]) -> dict[str, Any]:
         "unmatched_suffix": alignment.unmatched_suffix,
         "word_text": alignment.word_text,
     }
+
+
+def _subtitle_fragment_boundary_alignment_noise(
+    item: dict[str, Any],
+    *,
+    unmatched_text: str,
+    matched_ratio: float,
+    side: str,
+) -> bool:
+    unmatched_units = subtitle_display_units(unmatched_text)
+    if not unmatched_units or len(unmatched_units) > 2 or matched_ratio < 0.85:
+        return False
+    try:
+        fragment_index = int(item.get("source_fragment_index"))
+        fragment_count = int(item.get("source_fragment_count"))
+    except (TypeError, ValueError):
+        return False
+    if fragment_count <= 1:
+        return False
+    if side == "prefix":
+        return fragment_index > 0
+    if side == "suffix":
+        return fragment_index < fragment_count - 1
+    return False
 
 
 def subtitle_span_token_payloads(item: dict[str, Any]) -> list[dict[str, Any]]:

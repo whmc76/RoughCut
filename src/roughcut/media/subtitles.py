@@ -523,8 +523,14 @@ def remap_subtitles_to_timeline(
 
         if not mapped_ranges:
             continue
-        mapped_ranges = _merge_short_atomic_mapped_ranges(item, mapped_ranges)
+        range_components = {mapped_range: [mapped_range] for mapped_range in mapped_ranges}
+        mapped_ranges, range_components = _merge_short_atomic_mapped_ranges(item, mapped_ranges, range_components)
         fragment_texts = _split_remapped_subtitle_text(item, mapped_ranges)
+        mapped_ranges, fragment_texts, range_components = _merge_short_remapped_text_fragments(
+            mapped_ranges,
+            fragment_texts,
+            range_components,
+        )
         emitted_ranges = [
             (mapped_range, fragment_text)
             for mapped_range, fragment_text in zip(mapped_ranges, fragment_texts)
@@ -533,6 +539,12 @@ def remap_subtitles_to_timeline(
         item_index = _subtitle_index_as_int(item.get("index"), len(remapped))
         source_index, source_indexes = _subtitle_source_index_metadata(item, item_index)
         for fragment_index, ((new_start, new_end, overlap_start, overlap_end), fragment_text) in enumerate(emitted_ranges):
+            fragment_words = _remapped_fragment_word_payloads(
+                item,
+                (new_start, new_end, overlap_start, overlap_end),
+                fragment_text=fragment_text,
+                components=range_components.get((new_start, new_end, overlap_start, overlap_end)),
+            )
             remapped_item = {
                 **item,
                 "index": item_index,
@@ -547,6 +559,16 @@ def remap_subtitles_to_timeline(
                 remapped_item["source_text_full"] = _subtitle_item_display_text(item)
                 remapped_item["source_overlap_start_time"] = overlap_start
                 remapped_item["source_overlap_end_time"] = overlap_end
+            if fragment_words:
+                remapped_item["words"] = fragment_words
+                remapped_item["transcript_text"] = _remapped_fragment_transcript_text(
+                    item,
+                    fragment_words,
+                    fragment_text,
+                    overlap_start=overlap_start,
+                    overlap_end=overlap_end,
+                )
+                remapped_item = _tighten_remapped_item_to_fragment_words(remapped_item)
             remapped_item = _with_remapped_fragment_text(remapped_item, fragment_text)
             remapped.append(remapped_item)
 
@@ -628,6 +650,148 @@ def _with_remapped_fragment_text(item: dict[str, Any], text: str) -> dict[str, A
     return resolved
 
 
+def _normalized_subtitle_word_payloads(item: dict[str, Any]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, float, float]] = set()
+    for raw_word in list((item or {}).get("words") or (item or {}).get("words_json") or []):
+        if not isinstance(raw_word, dict):
+            continue
+        text = str(raw_word.get("word") or raw_word.get("raw_text") or raw_word.get("text") or "").strip()
+        if not text:
+            continue
+        try:
+            start = float(raw_word.get("start", 0.0) or 0.0)
+            end = float(raw_word.get("end", start) or start)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        key = (text, round(start, 6), round(end, 6))
+        if key in seen:
+            continue
+        seen.add(key)
+        payload = dict(raw_word)
+        payload["word"] = text
+        payload["start"] = start
+        payload["end"] = end
+        normalized.append(payload)
+    normalized.sort(key=lambda word: (float(word["start"]), float(word["end"])))
+    return normalized
+
+
+def _remapped_fragment_word_payloads(
+    item: dict[str, Any],
+    mapped_range: tuple[float, float, float, float],
+    *,
+    fragment_text: str = "",
+    components: list[tuple[float, float, float, float]] | None = None,
+) -> list[dict[str, Any]]:
+    new_start, _new_end, overlap_start, overlap_end = mapped_range
+    words = _normalized_subtitle_word_payloads(item)
+    if not words:
+        return []
+    component_ranges = list(components or [mapped_range])
+    clipped: list[dict[str, Any]] = []
+    seen: set[tuple[str, float, float]] = set()
+    for word in words:
+        for component_new_start, _component_new_end, component_overlap_start, component_overlap_end in component_ranges:
+            source_start = max(float(word["start"]), float(component_overlap_start))
+            source_end = min(float(word["end"]), float(component_overlap_end))
+            if source_end <= source_start + 0.001:
+                continue
+            payload = dict(word)
+            payload["start"] = round(float(component_new_start) + (source_start - float(component_overlap_start)), 3)
+            payload["end"] = round(float(component_new_start) + (source_end - float(component_overlap_start)), 3)
+            key = (str(payload.get("word") or ""), float(payload["start"]), float(payload["end"]))
+            if key in seen:
+                continue
+            seen.add(key)
+            clipped.append(payload)
+    clipped.sort(key=lambda payload: (float(payload.get("start", 0.0) or 0.0), float(payload.get("end", 0.0) or 0.0)))
+    return _filter_remapped_words_to_fragment_text(clipped, fragment_text) or clipped
+
+
+def _filter_remapped_words_to_fragment_text(words: list[dict[str, Any]], fragment_text: str) -> list[dict[str, Any]]:
+    display_keys = [_subtitle_display_unit_key(char) for char in _subtitle_display_units(fragment_text)]
+    if not words or not display_keys:
+        return words
+    word_units: list[dict[str, Any]] = []
+    for word_index, word in enumerate(words):
+        for char in _subtitle_display_units(str(word.get("word") or "")):
+            word_units.append({"key": _subtitle_display_unit_key(char), "word_index": word_index})
+    if not word_units:
+        return words
+    word_keys = [str(unit["key"]) for unit in word_units]
+    match_start = _find_subsequence(word_keys, display_keys)
+    if match_start < 0:
+        return words
+    matched_word_indexes = {
+        int(word_units[match_start + offset]["word_index"])
+        for offset in range(len(display_keys))
+        if 0 <= match_start + offset < len(word_units)
+    }
+    if not matched_word_indexes:
+        return words
+    return [
+        dict(word)
+        for index, word in enumerate(words)
+        if index in matched_word_indexes
+    ]
+
+
+def _tighten_remapped_item_to_fragment_words(item: dict[str, Any]) -> dict[str, Any]:
+    words = _normalized_subtitle_word_payloads(item)
+    if not words:
+        return item
+    word_start = min(float(word["start"]) for word in words)
+    word_end = max(float(word["end"]) for word in words)
+    if word_end <= word_start:
+        return item
+    payload = dict(item)
+    try:
+        row_start = float(payload.get("start_time", payload.get("start", word_start)) or word_start)
+        row_end = float(payload.get("end_time", payload.get("end", word_end)) or word_end)
+    except (TypeError, ValueError):
+        row_start = word_start
+        row_end = word_end
+    if word_start >= row_start - 0.001 and word_end <= row_end + 0.001:
+        payload["start_time"] = round(word_start, 3)
+        payload["end_time"] = round(word_end, 3)
+    return payload
+
+
+def _remapped_fragment_transcript_text(
+    item: dict[str, Any],
+    fragment_words: list[dict[str, Any]],
+    fragment_text: str,
+    *,
+    overlap_start: float,
+    overlap_end: float,
+) -> str | None:
+    if fragment_words:
+        transcript_joiner = (
+            " "
+            if " " in str((item or {}).get("transcript_text") or (item or {}).get("text_raw") or "").strip()
+            else ""
+        )
+        transcript_text = transcript_joiner.join(
+            str(word.get("word") or "").strip()
+            for word in fragment_words
+            if str(word.get("word") or "").strip()
+        ).strip()
+        if transcript_text:
+            return transcript_text
+    source_transcript_text = str((item or {}).get("transcript_text") or "").strip()
+    if not source_transcript_text:
+        return None
+    return _slice_subtitle_text_by_source_overlap(
+        item,
+        source_transcript_text or fragment_text,
+        overlap_start,
+        overlap_end,
+    )
+
+
 def _split_remapped_subtitle_text(
     item: dict[str, Any],
     mapped_ranges: list[tuple[float, float, float, float]],
@@ -686,25 +850,94 @@ def _mapped_range_covers_full_subtitle(
 def _merge_short_atomic_mapped_ranges(
     item: dict[str, Any],
     mapped_ranges: list[tuple[float, float, float, float]],
-) -> list[tuple[float, float, float, float]]:
+    range_components: dict[tuple[float, float, float, float], list[tuple[float, float, float, float]]],
+) -> tuple[
+    list[tuple[float, float, float, float]],
+    dict[tuple[float, float, float, float], list[tuple[float, float, float, float]]],
+]:
     if len(mapped_ranges) <= 1:
-        return mapped_ranges
+        return mapped_ranges, range_components
     text = _subtitle_item_display_text(item)
     compact = "".join(_subtitle_display_units(text))
     if not (2 <= len(compact) <= 5):
-        return mapped_ranges
+        return mapped_ranges, range_components
 
     fragment_texts = _split_remapped_subtitle_text_by_display_words(item, mapped_ranges)
     if fragment_texts is None:
         fragment_texts = _split_remapped_subtitle_text_by_words(item, mapped_ranges)
     if fragment_texts is None:
-        return mapped_ranges
+        return mapped_ranges, range_components
     if "".join(str(fragment or "").strip() for fragment in fragment_texts) != compact:
-        return mapped_ranges
+        return mapped_ranges, range_components
 
     first = mapped_ranges[0]
     last = mapped_ranges[-1]
-    return [(first[0], last[1], first[2], last[3])]
+    merged_range = (first[0], last[1], first[2], last[3])
+    merged_components: list[tuple[float, float, float, float]] = []
+    for mapped_range in mapped_ranges:
+        merged_components.extend(range_components.get(mapped_range, [mapped_range]))
+    return [merged_range], {merged_range: merged_components}
+
+
+def _merge_short_remapped_text_fragments(
+    mapped_ranges: list[tuple[float, float, float, float]],
+    fragment_texts: list[str],
+    range_components: dict[tuple[float, float, float, float], list[tuple[float, float, float, float]]],
+) -> tuple[
+    list[tuple[float, float, float, float]],
+    list[str],
+    dict[tuple[float, float, float, float], list[tuple[float, float, float, float]]],
+]:
+    if len(mapped_ranges) <= 1 or len(mapped_ranges) != len(fragment_texts):
+        return mapped_ranges, fragment_texts, range_components
+    pairs = [
+        [mapped_range, str(fragment_text or "").strip()]
+        for mapped_range, fragment_text in zip(mapped_ranges, fragment_texts)
+    ]
+    current_components = dict(range_components)
+    index = 0
+    while index < len(pairs):
+        mapped_range = pairs[index][0]
+        text = str(pairs[index][1] or "")
+        duration = max(0.0, float(mapped_range[1]) - float(mapped_range[0]))
+        compact_len = len(_subtitle_display_units(text))
+        if compact_len == 0:
+            pairs.pop(index)
+            continue
+        if compact_len <= 1 and duration <= 0.55 and len(pairs) > 1:
+            target_index = index + 1 if index + 1 < len(pairs) else index - 1
+            target_range = pairs[target_index][0]
+            merged_range = (
+                min(float(target_range[0]), float(mapped_range[0])),
+                max(float(target_range[1]), float(mapped_range[1])),
+                min(float(target_range[2]), float(mapped_range[2])),
+                max(float(target_range[3]), float(mapped_range[3])),
+            )
+            if target_index > index:
+                pairs[target_index][1] = f"{text}{pairs[target_index][1]}".strip()
+            else:
+                pairs[target_index][1] = f"{pairs[target_index][1]}{text}".strip()
+            pairs[target_index][0] = merged_range
+            current_components[merged_range] = [
+                *current_components.get(target_range, [target_range]),
+                *current_components.get(mapped_range, [mapped_range]),
+            ]
+            current_components.pop(target_range, None)
+            current_components.pop(mapped_range, None)
+            pairs.pop(index)
+            if target_index < index:
+                index = max(0, target_index)
+            continue
+        index += 1
+    merged_components = {
+        pair[0]: current_components.get(pair[0], [pair[0]])
+        for pair in pairs
+    }
+    return (
+        [pair[0] for pair in pairs],
+        [str(pair[1]) for pair in pairs],
+        merged_components,
+    )
 
 
 def _dominant_fragment_texts_for_lopsided_ranges(
@@ -945,6 +1178,7 @@ def split_subtitle_display_text(text: str, *, max_chars: int) -> list[str]:
     normalized = re.sub(r"\s{2,}", " ", str(text or "").strip())
     if not normalized:
         return []
+    max_chars = max(1, int(max_chars or 1))
     tokens = normalized.split(" ")
     if len(tokens) <= 1:
         compact = normalized.replace(" ", "")
@@ -955,11 +1189,22 @@ def split_subtitle_display_text(text: str, *, max_chars: int) -> list[str]:
     pieces: list[str] = []
     current = ""
     for token in tokens:
+        compact_token = token.replace(" ", "")
+        if len(compact_token) > max_chars:
+            if current:
+                pieces.append(current)
+                current = ""
+            pieces.extend(
+                compact_token[index:index + max_chars]
+                for index in range(0, len(compact_token), max_chars)
+            )
+            continue
         candidate = f"{current} {token}".strip() if current else token
-        if len(candidate.replace(" ", "")) <= max_chars or not current:
+        if len(candidate.replace(" ", "")) <= max_chars:
             current = candidate
             continue
-        pieces.append(current)
+        if current:
+            pieces.append(current)
         current = token
     if current:
         pieces.append(current)

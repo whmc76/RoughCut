@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
+import re
 import shutil
 import subprocess
 import threading
@@ -16,7 +18,7 @@ from urllib.parse import urlparse
 import httpx
 from redis import Redis
 
-from roughcut.config import get_settings
+from roughcut.config import DEFAULT_PROJECT_ROOT, get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,35 @@ async def hold_managed_gpu_services_async(*, required_urls: Iterable[str], reaso
         yield
     finally:
         await asyncio.to_thread(lease.__exit__, None, None, None)
+
+
+def adopt_running_idle_managed_gpu_services(*, reason: str = "") -> None:
+    """Attach idle-stop timers to already-running managed GPU services.
+
+    This closes the gap where a container was started before the guard was enabled
+    or before the current process observed any lease lifecycle for that target.
+    """
+
+    settings = get_settings()
+    for target in _build_target_configs(settings):
+        try:
+            if not _target_management_supported(target):
+                continue
+            if _current_lease_count(target.key) > 0:
+                continue
+            if not _target_ready(target):
+                continue
+            with _TARGET_LOCK:
+                if _current_lease_count(target.key) > 0:
+                    continue
+                if target.key in _IDLE_TIMERS:
+                    continue
+                last_release_at = _read_float_key(target.key, "last_release_at", default=0.0)
+                if last_release_at <= 0:
+                    _write_float_key(target.key, "last_release_at", time.time())
+                _schedule_idle_stop_locked(target=target, reason=reason or "adopt_running_idle_target")
+        except Exception as exc:
+            logger.warning("unable to adopt managed gpu target=%s: %s", target.key, exc)
 
 
 class _ManagedGPUServiceLease:
@@ -187,10 +218,13 @@ def _ensure_target_started(*, target: _ManagedDockerTarget, reason: str) -> None
             ",".join(services) if services else "all",
             reason or "-",
         )
-        if services:
-            _run_compose_command(target, "up", "-d", *services)
+        if _can_manage_target_via_compose(target):
+            if services:
+                _run_compose_command(target, "up", "-d", *services)
+            else:
+                _run_compose_command(target, "up", "-d")
         else:
-            _run_compose_command(target, "up", "-d")
+            _run_docker_container_command(target, "start")
         _wait_until_target_ready(target)
     finally:
         if lock_acquired:
@@ -237,11 +271,14 @@ def _stop_target_if_idle(*, target: _ManagedDockerTarget, reason: str) -> None:
             idle_for,
             reason or "-",
         )
-        services = _resolve_target_services(target)
-        if services:
-            _run_compose_command(target, "stop", *services)
+        if _can_manage_target_via_compose(target):
+            services = _resolve_target_services(target)
+            if services:
+                _run_compose_command(target, "stop", *services)
+            else:
+                _run_compose_command(target, "stop")
         else:
-            _run_compose_command(target, "stop")
+            _run_docker_container_command(target, "stop")
     finally:
         _release_operation_lock(target.key, token)
 
@@ -256,6 +293,12 @@ def _target_management_supported(target: _ManagedDockerTarget) -> bool:
         return False
     if not target.services:
         return False
+    if _can_manage_target_via_compose(target):
+        return True
+    return bool(_resolve_target_container_ids(target))
+
+
+def _can_manage_target_via_compose(target: _ManagedDockerTarget) -> bool:
     compose_file = _resolve_path(target.compose_file)
     return compose_file is not None and compose_file.exists()
 
@@ -330,12 +373,109 @@ def _run_compose_command(target: _ManagedDockerTarget, *compose_args: str) -> No
         raise RuntimeError(f"docker compose {' '.join(compose_args)} failed for {target.key}: {detail}")
 
 
+def _resolve_target_container_ids(target: _ManagedDockerTarget) -> tuple[str, ...]:
+    services = _resolve_target_services(target)
+    if not services:
+        return ()
+    container_ids: list[str] = []
+    for service in services:
+        command = [
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            f"label=com.docker.compose.service={service}",
+            "--format",
+            "{{.ID}}",
+        ]
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            check=False,
+        )
+        if result.returncode != 0:
+            continue
+        container_ids.extend(line.strip() for line in (result.stdout or "").splitlines() if line.strip())
+    # Preserve order while removing duplicates.
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for container_id in container_ids:
+        if container_id in seen:
+            continue
+        seen.add(container_id)
+        deduped.append(container_id)
+    return tuple(deduped)
+
+
+def _run_docker_container_command(target: _ManagedDockerTarget, action: str) -> None:
+    container_ids = _resolve_target_container_ids(target)
+    if not container_ids:
+        raise RuntimeError(f"docker target {target.key} has no resolvable containers for action={action}")
+    command = ["docker", action, *container_ids]
+    result = subprocess.run(
+        command,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="ignore",
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()[-2000:]
+        raise RuntimeError(f"docker {action} failed for {target.key}: {detail}")
+
+
 def _resolve_path(raw_value: str) -> Path | None:
     value = str(raw_value or "").strip()
     if not value:
         return None
+    remapped_workspace_path = _remap_windows_workspace_path(value)
+    if remapped_workspace_path is not None:
+        return remapped_workspace_path
+    if _is_windows_absolute_path(value):
+        if os.name == "nt":
+            return Path(value)
+        return None
     path = Path(value)
     return path if path.is_absolute() else Path.cwd() / path
+
+
+def _remap_windows_workspace_path(raw_value: str) -> Path | None:
+    normalized = str(raw_value or "").strip().replace("\\", "/")
+    if not re.match(r"^[A-Za-z]:/", normalized):
+        return None
+
+    workspace_root = DEFAULT_PROJECT_ROOT.resolve()
+    workspace_name = workspace_root.name.strip()
+    if not workspace_name:
+        return None
+
+    marker = f"/{workspace_name}/"
+    folded = normalized.casefold()
+    marker_index = folded.find(marker.casefold())
+    if marker_index >= 0:
+        relative = normalized[marker_index + len(marker) :].strip("/")
+        return workspace_root if not relative else (workspace_root / Path(relative))
+
+    exact_workspace = normalized.rstrip("/")
+    if exact_workspace.casefold().endswith(f"/{workspace_name}".casefold()):
+        return workspace_root
+
+    drive_relative = normalized[2:].strip("/")
+    if drive_relative.casefold().startswith(f"{workspace_name}/".casefold()):
+        relative = drive_relative[len(workspace_name) :].strip("/")
+        return workspace_root if not relative else (workspace_root / Path(relative))
+    if drive_relative.casefold() == workspace_name.casefold():
+        return workspace_root
+    return None
+
+
+def _is_windows_absolute_path(raw_value: str) -> bool:
+    normalized = str(raw_value or "").strip().replace("\\", "/")
+    return bool(re.match(r"^[A-Za-z]:/", normalized) or normalized.startswith("//"))
 
 
 def _normalize_base_url(raw_url: object) -> str:
@@ -518,7 +658,7 @@ def _resolve_target_services(target: _ManagedDockerTarget) -> tuple[str, ...]:
 
 def _compose_services(target: _ManagedDockerTarget) -> tuple[str, ...]:
     compose_file = _resolve_path(target.compose_file)
-    if compose_file is None:
+    if compose_file is None or not compose_file.exists():
         return ()
     command = ["docker", "compose", "-f", str(compose_file), "config", "--services"]
     result = subprocess.run(
@@ -546,7 +686,7 @@ def _resolve_services_by_base_port(
         return ()
 
     compose_file = _resolve_path(target.compose_file)
-    if compose_file is None:
+    if compose_file is None or not compose_file.exists():
         return ()
 
     ps_command = ["docker", "compose", "-f", str(compose_file), "ps", "-q"]

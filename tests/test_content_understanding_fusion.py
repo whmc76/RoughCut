@@ -2,6 +2,7 @@ import pytest
 
 from roughcut.review.content_understanding_evidence import build_evidence_bundle
 from roughcut.review.content_understanding_facts import infer_content_semantic_facts
+from roughcut.review.content_understanding_infer import _normalize_understanding_evidence_spans
 from roughcut.review.content_understanding_schema import (
     ContentSemanticFacts,
     ContentUnderstanding,
@@ -119,3 +120,53 @@ def test_dict_primary_subject_payload_maps_to_name_not_repr() -> None:
 
     assert "傲雷掠夺者2mini战术手电" in profile["subject_type"]
     assert "{" not in profile["subject_type"]
+
+
+def test_build_evidence_bundle_emits_timed_focus_spans() -> None:
+    bundle = build_evidence_bundle(
+        source_name="20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4",
+        subtitle_items=[
+            {"start_time": 0.0, "end_time": 2.0, "text_final": "今天看一下NITECORE EDC17这支EDC手电。"},
+            {"start_time": 2.0, "end_time": 5.0, "text_final": "顺便和我之前常用的EDC37做个对比。"},
+            {"start_time": 5.0, "end_time": 7.0, "text_final": "这支手电有UV光和1500mAh电池。"},
+        ],
+        transcript_excerpt="今天看一下NITECORE EDC17这支EDC手电，顺便和EDC37做个对比。",
+    )
+
+    timed_focus_spans = bundle["semantic_fact_inputs"]["timed_focus_spans"]
+
+    assert any(
+        span["timestamp"] == "00:00-00:02" and span["type"] == "hook"
+        for span in timed_focus_spans
+    )
+    assert any(
+        span["type"] == "comparison" and span["start_time"] == 2.0 and span["end_time"] == 5.0
+        for span in timed_focus_spans
+    )
+
+
+def test_understanding_evidence_spans_backfill_timing_from_bundle() -> None:
+    bundle = build_evidence_bundle(
+        source_name="demo.mp4",
+        subtitle_items=[
+            {"start_time": 0.0, "end_time": 1.8, "text_final": "先讲结论这个 EDC17 到底值不值。"},
+            {"start_time": 2.0, "end_time": 5.5, "text_final": "这里拿 EDC17 和 EDC37 做个对比。"},
+            {"start_time": 5.8, "end_time": 7.2, "text_final": "你会怎么选欢迎留言。"},
+        ],
+        transcript_excerpt="先讲结论这个 EDC17 到底值不值，这里拿 EDC17 和 EDC37 做个对比。",
+    )
+    understanding = ContentUnderstanding(
+        video_type="unboxing",
+        content_domain="flashlight",
+        primary_subject="NITECORE EDC17 手电",
+        evidence_spans=[
+            {"text": "这里拿 EDC17 和 EDC37 做个对比。", "type": "comparison"},
+        ],
+        needs_review=False,
+    )
+
+    normalized = _normalize_understanding_evidence_spans(understanding, bundle)
+
+    assert normalized.evidence_spans[0]["timestamp"] == "00:02-00:05"
+    assert normalized.evidence_spans[0]["start_time"] == 2.0
+    assert normalized.evidence_spans[0]["end_time"] == 5.5

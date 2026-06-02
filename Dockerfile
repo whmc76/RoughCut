@@ -11,6 +11,9 @@ COPY frontend ./frontend
 RUN pnpm --dir frontend build
 
 
+FROM docker:cli AS docker-cli
+
+
 FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -66,6 +69,7 @@ RUN --mount=type=cache,target=/root/.cache/uv if [ -n "${ROUGHCUT_PYTHON_EXTRAS}
 COPY src ./src
 COPY frontend ./frontend
 COPY --from=frontend-builder /frontend/frontend/dist ./frontend/dist
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 
 RUN --mount=type=cache,target=/root/.cache/uv if [ -n "${ROUGHCUT_PYTHON_EXTRAS}" ]; then \
         set --; \

@@ -77,6 +77,7 @@ _GENERIC_TOKEN_STOPWORDS = {
     "demo",
 }
 _ENTITY_TOKEN_PATTERN = r"[A-Za-z][A-Za-z0-9_-]{1,}|[\u4e00-\u9fff]{2,8}"
+_TEXT_KEY_NORMALIZE_RE = re.compile(r"[\s\u3000，。！？!?、；;：:,.~\-—_\[\]【】()（）\"'`]+")
 _VISUAL_CATEGORY_ALIAS_MAP: dict[str, tuple[str, ...]] = {
     "backpack": ("背包", "双肩包"),
     "bag": ("包",),
@@ -320,6 +321,132 @@ def _collect_temporal_focus_lines(subtitle_items: list[dict[str, Any]]) -> tuple
     return _pick(opening_window), _pick(closing_window)
 
 
+def _normalize_text_key(value: Any) -> str:
+    text = _as_text(value).casefold()
+    if not text:
+        return ""
+    return _TEXT_KEY_NORMALIZE_RE.sub("", text)
+
+
+def _format_span_timestamp(start_time: float, end_time: float) -> str:
+    return f"{_format_time_token(start_time)}-{_format_time_token(end_time)}"
+
+
+def _format_time_token(value: float) -> str:
+    total = max(0.0, float(value or 0.0))
+    hours = int(total // 3600)
+    minutes = int((total % 3600) // 60)
+    seconds = int(total % 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _resolve_focus_span_type(label: str, text: str) -> str:
+    normalized_label = str(label or "").strip().lower()
+    normalized_text = _as_text(text)
+    if any(token in normalized_text for token in ("对比", "差异", "区别")):
+        return "comparison"
+    if any(token in normalized_text for token in ("演示", "上手", "实测", "操作")):
+        return "demo"
+    if any(token in normalized_text for token in ("细节", "展示", "特写")):
+        return "detail"
+    if normalized_label == "opening":
+        return "hook"
+    if normalized_label == "closing":
+        return "cta"
+    return "body"
+
+
+def _line_timing_items(
+    text: str,
+    items: list[dict[str, Any]],
+) -> tuple[float, float] | None:
+    target_key = _normalize_text_key(text)
+    if not target_key:
+        return None
+
+    def item_text(item: dict[str, Any]) -> str:
+        return _as_text(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or item.get("text") or item.get("value"))
+
+    best: tuple[int, float, float] | None = None
+    for window_size in (1, 2, 3):
+        for start_index in range(0, max(0, len(items) - window_size + 1)):
+            window = items[start_index:start_index + window_size]
+            combined = "".join(_normalize_text_key(item_text(item)) for item in window)
+            if not combined:
+                continue
+            score = 0
+            if combined == target_key:
+                score = 4
+            elif target_key in combined or combined in target_key:
+                score = 3
+            elif any(_normalize_text_key(item_text(item)) == target_key for item in window):
+                score = 3
+            elif any(
+                _normalize_text_key(item_text(item)) and _normalize_text_key(item_text(item)) in target_key
+                for item in window
+            ):
+                score = 2
+            if score <= 0:
+                continue
+            start_time = float(window[0].get("start_time", 0.0) or 0.0)
+            end_time = float(window[-1].get("end_time", window[-1].get("start_time", 0.0)) or 0.0)
+            candidate = (score, start_time, end_time)
+            if best is None or candidate[0] > best[0]:
+                best = candidate
+        if best is not None:
+            break
+    if best is None:
+        return None
+    return round(best[1], 3), round(best[2], 3)
+
+
+def _collect_timed_focus_spans(
+    *,
+    subtitle_items: list[dict[str, Any]],
+    transcript_items: list[dict[str, Any]],
+    cue_lines: list[str],
+    opening_focus_lines: list[str],
+    closing_focus_lines: list[str],
+) -> list[dict[str, Any]]:
+    timing_items = subtitle_items or transcript_items
+    if not timing_items:
+        return []
+    planned_lines: list[tuple[str, str]] = []
+    for text in opening_focus_lines[:3]:
+        if text:
+            planned_lines.append(("opening", text))
+    for text in cue_lines[:4]:
+        if text and text not in [line for _, line in planned_lines]:
+            planned_lines.append(("cue", text))
+    for text in closing_focus_lines[:3]:
+        if text and text not in [line for _, line in planned_lines]:
+            planned_lines.append(("closing", text))
+
+    spans: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, float, float]] = set()
+    for label, text in planned_lines:
+        resolved = _line_timing_items(text, timing_items)
+        if resolved is None:
+            continue
+        start_time, end_time = resolved
+        key = (_normalize_text_key(text), start_time, end_time)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        spans.append(
+            {
+                "type": _resolve_focus_span_type(label, text),
+                "text": _as_text(text),
+                "start_time": start_time,
+                "end_time": end_time,
+                "timestamp": _format_span_timestamp(start_time, end_time),
+            }
+        )
+    return spans[:8]
+
+
 def _tokenize_entity_like_text(value: str) -> list[str]:
     normalized = _as_text(value)
     if not normalized:
@@ -444,10 +571,14 @@ def _merge_semantic_fact_inputs(
         "editorial_context_lines",
         "hint_candidates",
         "entity_like_tokens",
+        "timed_focus_spans",
     ):
         raw = provided.get(key)
         if isinstance(raw, list):
-            values = [str(item).strip() for item in raw if str(item).strip()]
+            if key == "timed_focus_spans":
+                values = [dict(item) for item in raw if isinstance(item, dict)]
+            else:
+                values = [str(item).strip() for item in raw if str(item).strip()]
             if values:
                 merged[key] = values
     raw_source_context = provided.get("source_context")
@@ -587,6 +718,13 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
     cue_lines = _collect_cue_lines(subtitle_lines, transcript_excerpt)
     opening_focus_lines, closing_focus_lines = _collect_temporal_focus_lines(subtitle_items)
     relation_hints = _collect_relation_hints(cue_lines, transcript_excerpt)
+    timed_focus_spans = _collect_timed_focus_spans(
+        subtitle_items=subtitle_items,
+        transcript_items=transcript_items,
+        cue_lines=cue_lines,
+        opening_focus_lines=opening_focus_lines,
+        closing_focus_lines=closing_focus_lines,
+    )
     editorial_context_lines = _source_context_lines(source_context, fallback_source_name=source_name)
     computed_semantic_inputs = {
         "source_name": source_name,
@@ -600,6 +738,7 @@ def normalize_evidence_bundle(bundle: object | None) -> dict[str, Any]:
         "visible_text": visible_text,
         "hint_candidates": hint_candidates,
         "relation_hints": relation_hints,
+        "timed_focus_spans": timed_focus_spans,
         "entity_like_tokens": _collect_entity_like_tokens(
             source_name=source_name,
             visible_text=visible_text,

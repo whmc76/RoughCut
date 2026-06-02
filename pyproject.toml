@@ -27,6 +27,7 @@ dependencies = [
     "click",
     "python-multipart",
     "aiofiles",
+    "pillow",
 ]
 
 [project.optional-dependencies]

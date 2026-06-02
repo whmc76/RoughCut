@@ -970,7 +970,97 @@ def _extract_creative_preference_items_from_profile(
             resolved_review_feedback.get(key)
             for key in ("video_theme", "summary", "hook_line", "correction_notes", "supplemental_context")
         )
-    return _extract_creative_preference_items_from_texts(values)
+    items = _extract_creative_preference_items_from_texts(values)
+    items.extend(_extract_creative_preference_items_from_video_understanding(profile))
+    return _dedupe_creative_preference_items(items)
+
+
+def _extract_creative_preference_items_from_video_understanding(
+    content_profile: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    profile = content_profile or {}
+    video_understanding = profile.get("video_understanding")
+    if not isinstance(video_understanding, dict):
+        return []
+    global_understanding = (
+        video_understanding.get("global_understanding")
+        if isinstance(video_understanding.get("global_understanding"), dict)
+        else {}
+    )
+    style_profile = (
+        global_understanding.get("style_profile")
+        if isinstance(global_understanding.get("style_profile"), dict)
+        else {}
+    )
+    automation_hints = (
+        video_understanding.get("automation_hints")
+        if isinstance(video_understanding.get("automation_hints"), dict)
+        else {}
+    )
+    editing_bias = (
+        automation_hints.get("editing_bias")
+        if isinstance(automation_hints.get("editing_bias"), dict)
+        else {}
+    )
+    tags: list[tuple[str, str]] = []
+
+    protect_roles = {
+        str(item or "").strip().lower()
+        for item in (editing_bias.get("protect_roles") or [])
+        if str(item or "").strip()
+    }
+    preferred_sections = {
+        str(item or "").strip().lower()
+        for item in (editing_bias.get("preferred_sections") or [])
+        if str(item or "").strip()
+    }
+    pace = str(style_profile.get("pace") or "").strip().lower()
+    information_density = str(style_profile.get("information_density") or "").strip().lower()
+
+    if "comparison" in protect_roles:
+        tags.append(("comparison_focus", "video_understanding: comparison protect"))
+    if {"detail_showcase", "detail", "closeup"} & protect_roles:
+        tags.append(("detail_focus", "video_understanding: detail showcase protect"))
+    if {"demo", "silence_showcase"} & protect_roles:
+        tags.append(("practical_demo", "video_understanding: demo protect"))
+    if pace == "fast":
+        tags.append(("fast_paced", "video_understanding: fast pace"))
+    if information_density == "high":
+        tags.append(("workflow_breakdown", "video_understanding: high information density"))
+    if "hook" in preferred_sections and pace == "fast":
+        tags.append(("conclusion_first", "video_understanding: hook priority"))
+
+    items: list[dict[str, Any]] = []
+    for tag, example in tags:
+        items.append(
+            {
+                "tag": tag,
+                "count": 2,
+                "label": _creative_preference_label(tag),
+                "guidance": _creative_preference_guidance(tag),
+                "example": example,
+            }
+        )
+    return items
+
+
+def _dedupe_creative_preference_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        tag = _clean_memory_value(item.get("tag"))
+        if not tag:
+            continue
+        current = merged.get(tag)
+        if current is None:
+            merged[tag] = dict(item)
+            continue
+        current["count"] = max(int(current.get("count") or 0), int(item.get("count") or 0))
+        if not current.get("example") and item.get("example"):
+            current["example"] = item.get("example")
+        merged[tag] = current
+    return list(merged.values())
 
 
 def _extract_creative_preference_items_from_texts(values: list[Any]) -> list[dict[str, Any]]:

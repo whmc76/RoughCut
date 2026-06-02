@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import subprocess
 import wave
@@ -14,7 +15,7 @@ from roughcut.config import get_settings
 from roughcut.media.silence import detect_silence
 
 MANUAL_EDITOR_PREVIEW_ARTIFACT_TYPE = "manual_editor_preview_assets"
-MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 10
+MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 11
 MANUAL_EDITOR_PREVIEW_STATUS_FILENAME = "status.json"
 PREVIEW_AUDIO_TARGET_LUFS = -16.0
 PREVIEW_AUDIO_MIN_GAIN = 0.35
@@ -234,6 +235,7 @@ def load_manual_editor_preview_assets(
     )
     status_matches_source = (
         bool(source_fingerprint)
+        and status_payload.get("asset_version") == MANUAL_EDITOR_PREVIEW_ASSET_VERSION
         and status_payload.get("source_fingerprint") == source_fingerprint
     )
     status_video_ready = _status_indicates_completed_proxy(status_payload, stages=_VIDEO_PROXY_READY_STAGES)
@@ -305,8 +307,26 @@ def load_manual_editor_preview_assets(
 
 def _source_fingerprint(source_path: Path) -> str:
     stat = source_path.stat()
-    payload = f"{source_path.resolve()}:{stat.st_size}:{stat.st_mtime_ns}"
+    payload = f"{source_path.resolve()}:{stat.st_size}:{_sampled_file_digest(source_path, stat.st_size)}"
     return hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _sampled_file_digest(source_path: Path, size: int) -> str:
+    digest = hashlib.sha256()
+    if size <= 0:
+        return digest.hexdigest()
+    sample_size = 1024 * 1024
+    offsets = [0]
+    if size > sample_size * 2:
+        offsets.append(max(0, (size // 2) - (sample_size // 2)))
+    if size > sample_size:
+        offsets.append(max(0, size - sample_size))
+    with source_path.open("rb") as file:
+        for offset in dict.fromkeys(offsets):
+            file.seek(offset)
+            digest.update(offset.to_bytes(8, "little", signed=False))
+            digest.update(file.read(sample_size))
+    return digest.hexdigest()
 
 
 def _status_indicates_completed_proxy(status_payload: dict[str, Any], *, stages: set[str]) -> bool:
@@ -344,8 +364,51 @@ def _generate_proxy_audio(source_path: Path, audio_path: Path) -> None:
         raise RuntimeError(f"manual editor proxy audio failed: {result.stderr[-1000:]}")
 
 
+def _temporary_output_path(target_path: Path) -> Path:
+    return target_path.with_name(f".{target_path.stem}.{uuid.uuid4().hex}.tmp{target_path.suffix}")
+
+
+def _unlink_best_effort(path: Path) -> None:
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
+def _assert_proxy_video_decodable(video_path: Path) -> None:
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-v",
+        "error",
+        "-xerror",
+        "-i",
+        str(video_path),
+        "-map",
+        "0:v:0",
+        "-frames:v",
+        "120",
+        "-f",
+        "null",
+        "-",
+    ]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=90,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"manual editor proxy video validation failed: {result.stderr[-1000:]}")
+
+
 def _generate_proxy_video(source_path: Path, video_path: Path) -> None:
     settings = get_settings()
+    temp_path = _temporary_output_path(video_path)
     cmd = [
         "ffmpeg",
         "-y",
@@ -379,19 +442,24 @@ def _generate_proxy_video(source_path: Path, video_path: Path) -> None:
         "+faststart",
         "-max_muxing_queue_size",
         "1024",
-        str(video_path),
+        str(temp_path),
     ]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=max(60, min(int(getattr(settings, "ffmpeg_timeout_sec", 600) or 600), 1800)),
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"manual editor proxy video failed: {result.stderr[-1000:]}")
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=max(60, min(int(getattr(settings, "ffmpeg_timeout_sec", 600) or 600), 1800)),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"manual editor proxy video failed: {result.stderr[-1000:]}")
+        _assert_proxy_video_decodable(temp_path)
+        os.replace(temp_path, video_path)
+    finally:
+        _unlink_best_effort(temp_path)
 
 
 def _generate_proxy_webm_best_effort(source_path: Path, webm_path: Path) -> bool:
@@ -404,6 +472,7 @@ def _generate_proxy_webm_best_effort(source_path: Path, webm_path: Path) -> bool
 
 def _generate_proxy_webm(source_path: Path, webm_path: Path) -> None:
     settings = get_settings()
+    temp_path = _temporary_output_path(webm_path)
     cmd = [
         "ffmpeg",
         "-y",
@@ -435,19 +504,24 @@ def _generate_proxy_webm(source_path: Path, webm_path: Path) -> None:
         "96k",
         "-max_muxing_queue_size",
         "1024",
-        str(webm_path),
+        str(temp_path),
     ]
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        timeout=max(60, min(int(getattr(settings, "ffmpeg_timeout_sec", 600) or 600), 1800)),
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    if result.returncode != 0:
-        raise RuntimeError(f"manual editor proxy webm failed: {result.stderr[-1000:]}")
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=max(60, min(int(getattr(settings, "ffmpeg_timeout_sec", 600) or 600), 1800)),
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"manual editor proxy webm failed: {result.stderr[-1000:]}")
+        _assert_proxy_video_decodable(temp_path)
+        os.replace(temp_path, webm_path)
+    finally:
+        _unlink_best_effort(temp_path)
 
 
 def _generate_waveform_peaks(audio_path: Path, *, duration_sec: float, target_points: int | None = None) -> dict[str, Any]:

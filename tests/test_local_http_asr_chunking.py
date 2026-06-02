@@ -34,9 +34,34 @@ def test_build_audio_chunk_specs_for_long_audio() -> None:
     assert [(chunk.start, chunk.end) for chunk in chunks[:3]] == [
         (0.0, 60.0),
         (58.5, 118.5),
-        (117.0, 185.0),
+        (117.0, 177.0),
     ]
     assert chunks[-1].end == 185.0
+    assert all(chunk.duration <= 60.0 for chunk in chunks)
+
+
+def test_build_audio_chunk_specs_adds_overlapping_tail_instead_of_extending_last_chunk() -> None:
+    config = AudioChunkConfig(
+        enabled=True,
+        threshold_sec=120.0,
+        chunk_size_sec=300.0,
+        min_chunk_sec=60.0,
+        overlap_sec=0.0,
+        request_timeout_sec=180.0,
+        request_max_retries=2,
+        request_retry_backoff_sec=5.0,
+        export_timeout_sec=180.0,
+    )
+
+    chunks = build_audio_chunk_specs(952.64, config=config)
+
+    assert [(chunk.start, chunk.end) for chunk in chunks] == [
+        (0.0, 300.0),
+        (300.0, 600.0),
+        (600.0, 900.0),
+        (652.64, 952.64),
+    ]
+    assert all(chunk.duration <= 300.0 for chunk in chunks)
 
 
 @pytest.mark.asyncio
@@ -84,6 +109,7 @@ async def test_transcribe_long_audio_in_chunks_offsets_segments_and_reports_prog
 
     monkeypatch.setattr("roughcut.providers.transcription.local_http_asr.export_audio_chunk", _export_audio_chunk)
     monkeypatch.setattr(provider, "_post_transcribe_request", _post_transcribe_request)
+    monkeypatch.setattr(provider, "_should_retry_chunk_for_anchor_recovery", lambda **kwargs: False)
 
     progress_events: list[dict] = []
     result = await provider._transcribe_long_audio_in_chunks(
@@ -250,8 +276,92 @@ def test_qwen3_local_http_asr_caps_transformers_token_budget() -> None:
     provider = LocalHTTPASRProvider()
     provider._model_name = "qwen3-asr-1.7b-forced-aligner"
 
-    assert provider._resolve_max_new_tokens(SimpleNamespace(local_asr_max_new_tokens=2048), audio_duration=20.0) == 256
-    assert provider._resolve_max_new_tokens(SimpleNamespace(local_asr_max_new_tokens=128), audio_duration=20.0) == 128
+    assert provider._resolve_max_new_tokens(SimpleNamespace(local_asr_max_new_tokens=2048), audio_duration=20.0) == 1024
+    assert provider._resolve_max_new_tokens(SimpleNamespace(local_asr_max_new_tokens=128), audio_duration=20.0) == 512
+    assert provider._resolve_max_new_tokens(SimpleNamespace(local_asr_max_new_tokens=128), audio_duration=45.0) == 768
+    assert provider._resolve_max_new_tokens(SimpleNamespace(local_asr_max_new_tokens=128), audio_duration=300.0) == 1024
+
+
+def test_qwen3_local_http_asr_uses_shorter_chunks() -> None:
+    provider = LocalHTTPASRProvider()
+    provider._model_name = "qwen3-asr-1.7b-forced-aligner"
+    config = AudioChunkConfig(
+        enabled=True,
+        threshold_sec=300.0,
+        chunk_size_sec=300.0,
+        min_chunk_sec=60.0,
+        overlap_sec=0.0,
+        request_timeout_sec=900.0,
+        request_max_retries=2,
+        request_retry_backoff_sec=5.0,
+        export_timeout_sec=600.0,
+    )
+
+    effective = provider._resolve_effective_chunk_config(config)
+
+    assert effective.chunk_size_sec == 75.0
+    assert effective.min_chunk_sec == 60.0
+
+
+@pytest.mark.asyncio
+async def test_qwen3_local_http_asr_recovers_truncated_chunk_with_smaller_splits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    provider = LocalHTTPASRProvider()
+    provider._model_name = "qwen3-asr-1.7b-forced-aligner"
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"stub")
+    chunk_config = AudioChunkConfig(
+        enabled=True,
+        threshold_sec=10.0,
+        chunk_size_sec=75.0,
+        min_chunk_sec=20.0,
+        overlap_sec=0.0,
+        request_timeout_sec=180.0,
+        request_max_retries=2,
+        request_retry_backoff_sec=5.0,
+        export_timeout_sec=180.0,
+    )
+
+    def _export_audio_chunk(_: Path, chunk_path: Path, *, start: float, end: float, timeout_sec: float | None = None) -> None:
+        chunk_path.write_bytes(f"{start:.1f}-{end:.1f}".encode("utf-8"))
+
+    async def _post_transcribe_request(chunk_path: Path, *, context: str | None, max_new_tokens: int, timeout):
+        marker = chunk_path.read_bytes().decode("utf-8")
+        if marker == "0.0-75.0":
+            return {
+                "duration": 75.0,
+                "segments": [
+                    {"start_time": 0.0, "end_time": 40.0, "text": "首段"},
+                ],
+            }
+        if marker == "0.0-30.0":
+            return {"duration": 30.0, "segments": [{"start_time": 0.0, "end_time": 30.0, "text": "第一段"}]}
+        if marker == "30.0-60.0":
+            return {"duration": 30.0, "segments": [{"start_time": 0.0, "end_time": 30.0, "text": "第二段"}]}
+        return {"duration": 15.0, "segments": [{"start_time": 0.0, "end_time": 15.0, "text": "第三段"}]}
+
+    monkeypatch.setattr("roughcut.providers.transcription.local_http_asr.export_audio_chunk", _export_audio_chunk)
+    monkeypatch.setattr(provider, "_post_transcribe_request", _post_transcribe_request)
+    monkeypatch.setattr(provider, "_tail_has_voiced_audio", lambda *args, **kwargs: True)
+
+    progress_events: list[dict] = []
+    result = await provider._transcribe_long_audio_in_chunks(
+        audio_path,
+        language="zh-CN",
+        context="",
+        total_duration=75.0,
+        max_new_tokens=1024,
+        chunk_config=chunk_config,
+        progress_callback=progress_events.append,
+    )
+
+    assert [segment.start for segment in result.segments] == [0.0, 30.0, 60.0]
+    assert [segment.end for segment in result.segments] == [30.0, 60.0, 75.0]
+    assert [segment.text for segment in result.segments] == ["第一段", "第二段", "第三段"]
+    assert len(result.raw_payload["chunks"]) == 4
+    assert any(event.get("phase") == "anchor_recovery" for event in progress_events)
 
 
 def test_local_http_asr_collapses_repeated_decoder_loop_text_before_splitting(tmp_path: Path) -> None:

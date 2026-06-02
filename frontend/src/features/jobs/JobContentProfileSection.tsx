@@ -4,6 +4,7 @@ import type { ContentProfileReview } from "../../types";
 import { statusLabel } from "../../utils";
 import { CONTENT_FIELDS, contentFieldLabel } from "./constants";
 import {
+  buildVideoUnderstandingSnapshot,
   formatIdentityEvidenceGlossaryAliases,
   formatIdentityEvidenceSources,
   getTextValue,
@@ -111,6 +112,7 @@ export function JobContentProfileSection({
     getTextValue(sourceContextFeedback?.correction_notes),
     getTextValue(sourceContextFeedback?.supplemental_context),
   ].filter(Boolean);
+  const videoUnderstanding = buildVideoUnderstandingSnapshot(effectiveContentSource, contentDraft);
 
   return (
     <section className={["detail-block", reviewMode ? "summary-review-editor" : ""].filter(Boolean).join(" ")}>
@@ -236,6 +238,69 @@ export function JobContentProfileSection({
                     ))}
                   </div>
                 ) : null}
+              </div>
+            </div>
+          ) : null}
+          {videoUnderstanding ? (
+            <div className="timeline-list top-gap">
+              <div className={["timeline-item", reviewMode ? "summary-review-evidence-card" : ""].filter(Boolean).join(" ")} data-testid="video-understanding-card">
+                <div className="toolbar">
+                  <strong>视频理解</strong>
+                  {videoUnderstanding.videoType ? (
+                    <span className="status-pill pending">{videoUnderstanding.videoType}</span>
+                  ) : null}
+                </div>
+                {videoUnderstanding.videoTheme ? (
+                  <div className="compact-top">
+                    <div className="muted">主题</div>
+                    <div>{videoUnderstanding.videoTheme}</div>
+                  </div>
+                ) : null}
+                {videoUnderstanding.summary ? (
+                  <div className="compact-top">
+                    <div className="muted">总结</div>
+                    <div>{videoUnderstanding.summary}</div>
+                  </div>
+                ) : null}
+                <div className="mode-chip-list compact-top">
+                  {videoUnderstanding.primarySubject ? (
+                    <span className="mode-chip subtle">主体：{videoUnderstanding.primarySubject}</span>
+                  ) : null}
+                  {videoUnderstanding.contentDomain ? (
+                    <span className="mode-chip subtle">领域：{videoUnderstanding.contentDomain}</span>
+                  ) : null}
+                  {videoUnderstanding.styleProfile.map((item) => (
+                    <span key={item} className="mode-chip subtle">{item}</span>
+                  ))}
+                </div>
+                {videoUnderstanding.narrativeSections.length ? (
+                  <div className="compact-top">
+                    <div className="muted">结构判断</div>
+                    <div>{videoUnderstanding.narrativeSections.join(" / ")}</div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+          {videoUnderstanding?.semanticSpans.length ? (
+            <div className="timeline-list top-gap">
+              <div className={["timeline-item", reviewMode ? "summary-review-evidence-card" : ""].filter(Boolean).join(" ")} data-testid="semantic-spans-card">
+                <div className="toolbar">
+                  <strong>时间证据</strong>
+                  <span className="muted">优先显示确定性时间锚点，再补充模型证据段</span>
+                </div>
+                <div className="timeline-list compact-top">
+                  {videoUnderstanding.semanticSpans.map((span) => (
+                    <div key={span.key} className="timeline-item">
+                      <div className="toolbar">
+                        <strong>{span.label}</strong>
+                        {span.timestamp ? <span className="status-pill pending">{span.timestamp}</span> : null}
+                      </div>
+                      {span.text ? <div>{span.text}</div> : null}
+                      {span.detail.length ? <div className="muted compact-top">{span.detail.join(" / ")}</div> : null}
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           ) : null}

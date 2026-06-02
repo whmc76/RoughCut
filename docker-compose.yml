@@ -57,11 +57,13 @@ x-app-common: &app-common
     - "host.docker.internal:host-gateway"
   volumes:
     - ${ROUGHCUT_OUTPUT_HOST_ROOT:-./data/runtime}:/app/data
+    - ${ROUGHCUT_AVATAR_MATERIALS_HOST_ROOT:-./data/avatar_materials}:/app/data/avatar_materials
     - ${ROUGHCUT_OUTPUT_HOST_ROOT:-./data/runtime}/render-debug:/app/logs/render-debug
     - ./logs:/app/logs
     - ./watch:/app/watch
     - ${HEYGEM_SHARED_HOST_DIR:-D:/duix_avatar_data/face2face}:/code/data
     - ${ROUGHCUT_CODEX_AUTH_HOST_DIR:-C:/Users/28687/.codex}:/host-codex:ro
+    - /var/run/docker.sock:/var/run/docker.sock
   depends_on:
     postgres:
       condition: service_healthy
@@ -176,6 +178,10 @@ services:
   worker-agent:
     <<: *app-common
     command: ["roughcut", "worker", "--queue", "agent_queue", "--pool", "prefork", "--concurrency", "2"]
+
+  worker-publication:
+    <<: *app-common
+    command: ["roughcut", "worker", "--queue", "publication_queue", "--pool", "prefork", "--concurrency", "1"]
 
   watcher:
     <<: *app-common

@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from pathlib import Path
 
+import httpx
 import openai
 
 from roughcut.config import get_settings, uses_codex_auth_helper
 from roughcut.host.codex_bridge import run_codex_exec
+from roughcut.host.codex_proxy import resolve_codex_proxy_token, resolve_codex_proxy_url
 from roughcut.providers.auth import resolve_credential
 from roughcut.providers.openai_responses import (
     build_message_input,
@@ -98,16 +101,25 @@ class OpenAIReasoningProvider(ReasoningProvider):
     ) -> ReasoningResponse:
         if self._bridge_mode:
             del temperature, max_tokens
-            result = await asyncio.to_thread(
-                run_codex_exec,
-                {
-                    "repo_root": str(Path.cwd()),
-                    "prompt": self._build_codex_prompt(messages, json_mode=json_mode),
-                    "model": self._model,
-                    "timeout_sec": 300,
-                    "output_schema": self._CODEX_JSON_WRAPPER_SCHEMA if json_mode else None,
-                },
-            )
+            payload = {
+                "repo_root": str(Path.cwd()),
+                "prompt": self._build_codex_prompt(messages, json_mode=json_mode),
+                "model": self._model,
+                "timeout_sec": 300,
+                "output_schema": self._CODEX_JSON_WRAPPER_SCHEMA if json_mode else None,
+            }
+            bridge_url = _resolve_codex_bridge_exec_url()
+            if bridge_url:
+                headers = {"Content-Type": "application/json"}
+                bridge_token = resolve_codex_proxy_token()
+                if bridge_token:
+                    headers["Authorization"] = f"Bearer {bridge_token}"
+                async with httpx.AsyncClient(timeout=300) as client:
+                    response = await client.post(bridge_url, json=payload, headers=headers)
+                    response.raise_for_status()
+                    result = response.json()
+            else:
+                result = await asyncio.to_thread(run_codex_exec, payload)
             raw_content = str(result.get("stdout") or result.get("excerpt") or "").strip()
             if json_mode:
                 payload = json.loads(raw_content)
@@ -156,3 +168,13 @@ class OpenAIReasoningProvider(ReasoningProvider):
             model=response.model,
             raw_content=extract_response_output_text(response),
         )
+
+
+def _resolve_codex_bridge_exec_url() -> str:
+    explicit = str(os.getenv("ROUGHCUT_REASONING_CODEX_BRIDGE_URL", "") or "").strip()
+    if explicit:
+        return explicit
+    proxy_url = resolve_codex_proxy_url()
+    if proxy_url.endswith("/v1/codex/exec"):
+        return proxy_url
+    return ""

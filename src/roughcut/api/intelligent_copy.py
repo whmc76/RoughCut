@@ -13,12 +13,14 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.api.schemas import (
     IntelligentCopyGenerateIn,
+    IntelligentCopyUpgradeIn,
     IntelligentCopyInspectIn,
     IntelligentCopyInspectOut,
     IntelligentCopyImagegenCompleteIn,
@@ -36,6 +38,7 @@ from roughcut.api.schemas import (
 )
 from roughcut.avatar import get_avatar_material_profile, list_avatar_material_profiles
 from roughcut.config import get_settings
+from roughcut.host.codex_proxy import resolve_codex_proxy_sibling_url, resolve_codex_proxy_token
 from roughcut.db.models import Job, RenderOutput
 from roughcut.db.session import get_session
 from roughcut.pipeline.celery_app import celery_app
@@ -44,17 +47,173 @@ from roughcut.publication import (
     build_publication_plan,
     check_publication_browser_agent_ready,
     list_publication_attempts,
+    publication_plan_is_publishable,
+    publication_plan_is_manual_handoff_ready,
+    publication_plan_status,
+    reconcile_publication_attempt_from_browser_agent_payload,
     submit_publication_attempts,
+)
+from roughcut.publication_packaging import (
+    load_publication_packaging_payload,
+    normalize_publication_packaging_payload,
 )
 from roughcut.publication_intelligence import generate_publication_scheme, modify_publication_scheme
 from roughcut.providers.image_generation import mark_codex_imagegen_request_completed
-from roughcut.review.intelligent_copy import generate_intelligent_copy, inspect_intelligent_copy_folder
+from roughcut.review.intelligent_copy import (
+    generate_intelligent_copy,
+    inspect_intelligent_copy_folder,
+    upgrade_existing_intelligent_copy_result,
+)
 
 router = APIRouter(prefix="/intelligent-copy", tags=["intelligent-copy"])
 _GENERATION_TASKS: dict[str, asyncio.Task] = {}
 _GENERATION_TASK_STORE_LOCK = RLock()
 _GENERATION_TASK_STORE_PATH = Path("data/intelligent_copy/generation_tasks.json")
 _GENERATION_TASK_HISTORY_LIMIT = 30
+_GENERATION_TASK_STALE_AFTER_SECONDS = 6 * 60 * 60
+
+
+def _build_publication_plan_gate_response(plan: dict[str, Any], **extra: Any) -> dict[str, Any]:
+    plan_status = publication_plan_status(plan)
+    response = {
+        "status": "manual_handoff" if plan_status == "manual_handoff" else "blocked",
+        "publish_ready": False,
+        "blocked_reasons": plan.get("blocked_reasons") or ["当前物料或账号暂不满足发布条件。"],
+        "warnings": plan.get("warnings") or [],
+        "manual_handoff_ready": publication_plan_is_manual_handoff_ready(plan),
+        "manual_handoff_targets": plan.get("manual_handoff_targets") or [],
+        "platform_options": {},
+        "items": [],
+        "plan": plan,
+    }
+    response.update(extra)
+    return response
+
+
+def _build_publication_executor_gate_response(
+    plan: dict[str, Any],
+    *,
+    blocked_reasons: list[str] | None = None,
+    publication_executor_preflight: dict[str, Any] | None = None,
+    created_attempts: list[Any] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    gated_plan = dict(plan)
+    if blocked_reasons is not None:
+        gated_plan["blocked_reasons"] = [str(item).strip() for item in blocked_reasons if str(item).strip()]
+    response = _build_publication_plan_gate_response(gated_plan)
+    response["created_attempts"] = list(created_attempts or [])
+    if publication_executor_preflight is not None:
+        response["publication_executor_preflight"] = publication_executor_preflight
+    response.update(extra)
+    return response
+
+
+def _material_contract_status(result_contract: dict[str, Any]) -> str:
+    if not isinstance(result_contract, dict):
+        return ""
+    status = str(result_contract.get("status") or "").strip().lower()
+    if status in {"passed", "manual_handoff", "failed", "blocked"}:
+        return status
+    platform_contracts = result_contract.get("platforms") if isinstance(result_contract.get("platforms"), dict) else {}
+    has_root_blocking_reasons = bool(
+        [str(item).strip() for item in (result_contract.get("blocking_reasons") or []) if str(item).strip()]
+    )
+    has_manual_handoff_platforms = bool(result_contract.get("manual_handoff_platforms"))
+    if platform_contracts:
+        platform_statuses = {
+            str(item.get("status") or "").strip().lower()
+            for item in platform_contracts.values()
+            if isinstance(item, dict) and str(item.get("status") or "").strip()
+        }
+        if "failed" in platform_statuses or "blocked" in platform_statuses:
+            return "failed"
+        if "manual_handoff" in platform_statuses:
+            return "manual_handoff"
+        if any(
+            bool(item.get("manual_handoff_only"))
+            for item in platform_contracts.values()
+            if isinstance(item, dict)
+        ):
+            return "manual_handoff"
+        if platform_statuses and platform_statuses <= {"passed"}:
+            return "passed"
+    if has_manual_handoff_platforms and bool(result_contract.get("one_click_publish_ready")):
+        return "manual_handoff"
+    if has_root_blocking_reasons:
+        return "failed"
+    if has_manual_handoff_platforms:
+        return "manual_handoff"
+    return ""
+
+
+def _derive_generation_task_terminal_patch(result: dict[str, Any]) -> dict[str, Any]:
+    material_contract = result.get("material_contract") if isinstance(result.get("material_contract"), dict) else {}
+    contract_status = _material_contract_status(material_contract)
+    contract_present = bool(material_contract)
+    contract_blocking_reasons = [
+        str(item).strip()
+        for item in (material_contract.get("blocking_reasons") or [])
+        if str(item).strip()
+    ]
+    root_blocking_reasons = [
+        str(item).strip()
+        for item in (result.get("blocking_reasons") or [])
+        if str(item).strip()
+    ]
+    blocking_reasons = list(dict.fromkeys([*contract_blocking_reasons, *root_blocking_reasons]))
+    manual_handoff_targets = list(result.get("manual_handoff_targets") or material_contract.get("manual_handoff_platforms") or [])
+    root_status = str(result.get("status") or "").strip().lower()
+    manual_handoff_ready = (
+        (contract_status == "manual_handoff")
+        if contract_present
+        else (
+            bool(result.get("manual_handoff_ready"))
+            or root_status == "manual_handoff"
+            or bool(manual_handoff_targets)
+        )
+    )
+    contract_publish_ready = (
+        True
+        if contract_status == "passed"
+        else False
+        if contract_status in {"manual_handoff", "failed", "blocked"}
+        else bool(material_contract.get("one_click_publish_ready"))
+    )
+    publish_ready = (
+        contract_publish_ready
+        if contract_present
+        else (
+            False
+            if manual_handoff_ready or blocking_reasons or root_status in {"blocked", "failed"}
+            else bool(result.get("publish_ready"))
+        )
+    )
+    if publish_ready:
+        return {
+            "status": "completed",
+            "stage": "completed",
+            "message": "物料生成完成。",
+            "error": None,
+        }
+    if manual_handoff_ready:
+        labels = [str(item.get("label") or item.get("platform") or "").strip() for item in manual_handoff_targets if isinstance(item, dict)]
+        target_summary = "、".join([label for label in labels if label])
+        message = "物料生成完成，部分平台需人工登录后继续发布。"
+        if target_summary:
+            message = f"{message} 需人工接管平台：{target_summary}。"
+        return {
+            "status": "manual_handoff",
+            "stage": "manual_handoff",
+            "message": message,
+            "error": None,
+        }
+    return {
+        "status": "blocked",
+        "stage": "blocked",
+        "message": "物料生成完成，但仍有阻断项，不能发布。",
+        "error": "；".join(blocking_reasons[:5]) if blocking_reasons else "物料仍有阻断项。",
+    }
 
 
 @router.post("/inspect", response_model=IntelligentCopyInspectOut)
@@ -72,12 +231,33 @@ def suggest_folder_paths(body: IntelligentCopyPathSuggestIn):
 
 @router.post("/generate", response_model=IntelligentCopyResultOut)
 async def generate_folder_materials(body: IntelligentCopyGenerateIn):
+    creator_profile = _resolve_generation_creator_profile(body.creator_profile_id)
     try:
         return await generate_intelligent_copy(
             body.folder_path,
             copy_style=body.copy_style,
             platforms=body.platforms,
             use_existing_cover=body.use_existing_cover,
+            creator_profile_id=str(body.creator_profile_id or "").strip() or None,
+            creator_profile_name=str((creator_profile or {}).get("display_name") or "").strip() or None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/upgrade", response_model=IntelligentCopyResultOut)
+async def upgrade_folder_materials(body: IntelligentCopyUpgradeIn):
+    creator_profile = _resolve_generation_creator_profile(body.creator_profile_id)
+    try:
+        return upgrade_existing_intelligent_copy_result(
+            body.folder_path,
+            platforms=body.platforms,
+            platform_options=body.platform_options,
+            publication_scheme=body.publication_scheme,
+            publication_scheme_path=str(body.publication_scheme_path or "").strip() or None,
+            creator_profile_id=str(body.creator_profile_id or "").strip() or None,
+            creator_profile_name=str((creator_profile or {}).get("display_name") or "").strip() or None,
+            browser=str(body.browser or "chrome").strip() or "chrome",
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -85,6 +265,7 @@ async def generate_folder_materials(body: IntelligentCopyGenerateIn):
 
 @router.post("/generate-tasks", response_model=IntelligentCopyGenerateTaskOut)
 async def create_generate_task(body: IntelligentCopyGenerateIn):
+    creator_profile = _resolve_generation_creator_profile(body.creator_profile_id)
     try:
         inspection = inspect_intelligent_copy_folder(body.folder_path)
     except ValueError as exc:
@@ -97,6 +278,7 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
         copy_style=body.copy_style,
         platforms=requested_platforms,
         use_existing_cover=body.use_existing_cover,
+        creator_profile_id=str(body.creator_profile_id or "").strip() or None,
     )
     if active_task is not None:
         return active_task
@@ -109,6 +291,8 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
         "copy_style": str(body.copy_style or "").strip() or None,
         "use_existing_cover": bool(body.use_existing_cover),
         "platforms": requested_platforms,
+        "creator_profile_id": str(body.creator_profile_id or "").strip() or None,
+        "creator_profile_name": str((creator_profile or {}).get("display_name") or "").strip() or None,
         "status": "queued",
         "progress": 0,
         "stage": "queued",
@@ -130,6 +314,8 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
         copy_style=body.copy_style,
         platforms=requested_platforms,
         use_existing_cover=body.use_existing_cover,
+        creator_profile_id=str(body.creator_profile_id or "").strip() or None,
+        creator_profile_name=str((creator_profile or {}).get("display_name") or "").strip() or None,
     )
     return _get_generation_task(task_id) or task
 
@@ -138,11 +324,7 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
 async def list_recent_generate_tasks(limit: int = 12):
     _mark_stale_generation_tasks()
     safe_limit = max(1, min(int(limit or 12), _GENERATION_TASK_HISTORY_LIMIT))
-    tasks = sorted(
-        _load_generation_tasks(),
-        key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
-        reverse=True,
-    )
+    tasks = _sorted_generation_tasks()
     return {"tasks": tasks[:safe_limit]}
 
 
@@ -151,7 +333,7 @@ async def get_generate_task(task_id: str):
     task = _get_generation_task(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="生成任务不存在。")
-    if task.get("status") in {"queued", "running"} and task_id not in _GENERATION_TASKS:
+    if task.get("status") in {"queued", "running"} and task_id not in _GENERATION_TASKS and _generation_task_is_stale(task):
         task = _mark_generation_task_failed(task_id, "生成任务已中断，请重新生成。") or task
     return task
 
@@ -216,6 +398,16 @@ async def list_recent_publication_attempts(
     return {"attempts": attempts}
 
 
+@router.post("/publication/reconcile-task")
+async def reconcile_publication_task_payload(
+    payload: dict[str, Any],
+    session: AsyncSession = Depends(get_session),
+):
+    result = await reconcile_publication_attempt_from_browser_agent_payload(session, payload)
+    await session.commit()
+    return result
+
+
 @router.post("/publication/plan")
 async def get_intelligent_publish_plan(body: IntelligentPublishIn, session: AsyncSession = Depends(get_session)):
     try:
@@ -260,15 +452,8 @@ async def get_intelligent_publish_scheme(body: IntelligentPublishSchemeIn, sessi
         platform_options=body.platform_options,
         existing_attempts=existing_attempts,
     )
-    if not plan.get("publish_ready"):
-        return {
-            "status": "blocked",
-            "blocked_reasons": plan.get("blocked_reasons") or ["当前物料或账号暂不满足发布条件。"],
-            "warnings": plan.get("warnings") or [],
-            "platform_options": {},
-            "items": [],
-            "plan": plan,
-        }
+    if not publication_plan_is_publishable(plan):
+        return _build_publication_plan_gate_response(plan)
     scheme = await generate_publication_scheme(
         plan=plan,
         creator_profile=plan_inputs["creator_profile"],
@@ -305,24 +490,29 @@ async def publish_intelligent_folder(body: IntelligentPublishIn, session: AsyncS
         platform_options=body.platform_options,
         existing_attempts=await list_publication_attempts(session, job_id=str(plan_inputs["job"].id)),
     )
-    if not plan.get("publish_ready"):
-        return plan
+    if not publication_plan_is_publishable(plan):
+        return _build_publication_executor_gate_response(plan)
     settings = get_settings()
     agent_ready = await check_publication_browser_agent_ready(
         browser_agent_base_url=str(getattr(settings, "publication_browser_agent_base_url", "") or ""),
         auth_token=str(getattr(settings, "publication_browser_agent_auth_token", "") or ""),
         target_platforms=[str(target.get("platform") or "") for target in (plan.get("targets") or []) if isinstance(target, dict)],
+        target_profile_ids=[
+            str(target.get("browser_profile_id") or target.get("credential_ref") or "")
+            for target in (plan.get("targets") or [])
+            if isinstance(target, dict)
+        ],
         request_timeout_sec=max(5, int(getattr(settings, "publication_browser_agent_timeout_sec", 60) or 60)),
     )
     if not agent_ready.get("ready"):
-        return {
-            **plan,
-            "status": "blocked",
-            "publish_ready": False,
-            "blocked_reasons": [*(plan.get("blocked_reasons") or []), str(agent_ready.get("message") or "browser-agent 不支持正式发布。")],
-            "publication_executor_preflight": agent_ready,
-            "created_attempts": [],
-        }
+        return _build_publication_executor_gate_response(
+            plan,
+            blocked_reasons=[
+                *(plan.get("blocked_reasons") or []),
+                str(agent_ready.get("message") or "browser-agent 不支持正式发布。"),
+            ],
+            publication_executor_preflight=agent_ready,
+        )
     result = await submit_publication_attempts(session, plan)
     await session.commit()
     _dispatch_publication_worker_tick(len(result.get("created_attempts") or []))
@@ -369,10 +559,12 @@ def _load_generation_tasks() -> list[dict[str, Any]]:
 def _save_generation_tasks(tasks: list[dict[str, Any]]) -> None:
     with _GENERATION_TASK_STORE_LOCK:
         _GENERATION_TASK_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        pruned = sorted(
-            tasks,
-            key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
-            reverse=True,
+        pruned = _dedupe_generation_tasks_by_target(
+            sorted(
+                tasks,
+                key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+                reverse=True,
+            )
         )[:_GENERATION_TASK_HISTORY_LIMIT]
         _GENERATION_TASK_STORE_PATH.write_text(
             json.dumps({"tasks": pruned}, ensure_ascii=False, indent=2),
@@ -380,7 +572,65 @@ def _save_generation_tasks(tasks: list[dict[str, Any]]) -> None:
         )
 
 
+def _dedupe_generation_tasks_by_target(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: dict[str, int] = {}
+    deduped: list[dict[str, Any]] = []
+    for item in tasks:
+        key = _generation_task_target_key(item)
+        if key and key in seen:
+            existing_index = seen[key]
+            existing = deduped[existing_index]
+            if _generation_task_is_currently_active(item) and not _generation_task_is_currently_active(existing):
+                deduped[existing_index] = item
+            continue
+        if key:
+            seen[key] = len(deduped)
+        deduped.append(item)
+    return deduped
+
+
+def _generation_task_is_currently_active(item: dict[str, Any]) -> bool:
+    return item.get("status") in {"queued", "running"} and str(item.get("id") or "") in _GENERATION_TASKS
+
+
+def _generation_task_target_key(item: dict[str, Any]) -> str:
+    material_dir = str(item.get("material_dir") or "").strip()
+    if not material_dir:
+        inspection = item.get("inspection") if isinstance(item.get("inspection"), dict) else {}
+        material_dir = str(inspection.get("material_dir") or "").strip()
+    if material_dir:
+        normalized_material = material_dir.replace("\\", "/").rstrip("/")
+        if normalized_material.endswith("/smart-copy"):
+            return normalized_material[: -len("/smart-copy")].rstrip("/").lower()
+        return normalized_material.lower()
+    return _normalize_publish_folder_key(item.get("folder_path"))
+
+
+def _remove_generation_tasks_for_target(task: dict[str, Any]) -> None:
+    target_key = _generation_task_target_key(task)
+    if not target_key:
+        return
+    active_ids = set(_GENERATION_TASKS)
+    tasks = [
+        item
+        for item in _load_generation_tasks()
+        if str(item.get("id") or "") in active_ids or _generation_task_target_key(item) != target_key
+    ]
+    _save_generation_tasks(tasks)
+
+
+def _sorted_generation_tasks() -> list[dict[str, Any]]:
+    return _dedupe_generation_tasks_by_target(
+        sorted(
+            _load_generation_tasks(),
+            key=lambda item: str(item.get("updated_at") or item.get("created_at") or ""),
+            reverse=True,
+        )
+    )
+
+
 def _upsert_generation_task(task: dict[str, Any]) -> None:
+    _remove_generation_tasks_for_target(task)
     tasks = _load_generation_tasks()
     task_id = str(task.get("id") or "").strip()
     next_tasks = [item for item in tasks if str(item.get("id") or "") != task_id]
@@ -477,9 +727,11 @@ def _find_active_generation_task(
     copy_style: str | None,
     platforms: list[str] | None,
     use_existing_cover: bool,
+    creator_profile_id: str | None = None,
 ) -> dict[str, Any] | None:
     normalized_style = str(copy_style or "").strip()
     normalized_platforms = _normalize_generation_platforms(platforms)
+    normalized_creator_profile_id = str(creator_profile_id or "").strip()
     for item in _load_generation_tasks():
         task_id = str(item.get("id") or "")
         if item.get("folder_path") != folder_path:
@@ -489,6 +741,8 @@ def _find_active_generation_task(
         if _normalize_generation_platforms(item.get("platforms") or []) != normalized_platforms:
             continue
         if bool(item.get("use_existing_cover")) != bool(use_existing_cover):
+            continue
+        if str(item.get("creator_profile_id") or "").strip() != normalized_creator_profile_id:
             continue
         if item.get("status") in {"queued", "running"} and task_id in _GENERATION_TASKS:
             return item
@@ -513,7 +767,22 @@ def _mark_stale_generation_tasks() -> None:
     for item in _load_generation_tasks():
         task_id = str(item.get("id") or "")
         if item.get("status") in {"queued", "running"} and task_id not in _GENERATION_TASKS:
+            if not _generation_task_is_stale(item):
+                continue
             _mark_generation_task_failed(task_id, "生成任务已中断，请重新生成。")
+
+
+def _generation_task_is_stale(item: dict[str, Any]) -> bool:
+    timestamp = str(item.get("updated_at") or item.get("started_at") or item.get("created_at") or "").strip()
+    if not timestamp:
+        return False
+    try:
+        updated_at = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return False
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - updated_at).total_seconds() > _GENERATION_TASK_STALE_AFTER_SECONDS
 
 
 def _schedule_generation_task(
@@ -523,9 +792,20 @@ def _schedule_generation_task(
     copy_style: str | None,
     platforms: list[str] | None,
     use_existing_cover: bool,
+    creator_profile_id: str | None,
+    creator_profile_name: str | None,
 ) -> None:
     async def runner() -> None:
-        await asyncio.to_thread(_run_generation_task_thread, task_id, folder_path, copy_style, platforms, use_existing_cover)
+        await asyncio.to_thread(
+            _run_generation_task_thread,
+            task_id,
+            folder_path,
+            copy_style,
+            platforms,
+            use_existing_cover,
+            creator_profile_id,
+            creator_profile_name,
+        )
 
     _GENERATION_TASKS[task_id] = asyncio.create_task(runner())
 
@@ -536,6 +816,8 @@ def _run_generation_task_thread(
     copy_style: str | None,
     platforms: list[str] | None,
     use_existing_cover: bool,
+    creator_profile_id: str | None,
+    creator_profile_name: str | None,
 ) -> None:
     asyncio.run(
         _run_generation_task(
@@ -544,6 +826,8 @@ def _run_generation_task_thread(
             copy_style=copy_style,
             platforms=platforms,
             use_existing_cover=use_existing_cover,
+            creator_profile_id=creator_profile_id,
+            creator_profile_name=creator_profile_name,
         )
     )
 
@@ -555,6 +839,8 @@ async def _run_generation_task(
     copy_style: str | None,
     platforms: list[str] | None,
     use_existing_cover: bool,
+    creator_profile_id: str | None,
+    creator_profile_name: str | None,
 ) -> None:
     try:
         _patch_generation_task(
@@ -586,23 +872,21 @@ async def _run_generation_task(
             copy_style=copy_style,
             platforms=platforms,
             use_existing_cover=use_existing_cover,
+            creator_profile_id=creator_profile_id,
+            creator_profile_name=creator_profile_name,
             progress_callback=progress_callback,
         )
-        publish_ready = bool(result.get("publish_ready"))
-        blocking_reasons = [str(item).strip() for item in (result.get("blocking_reasons") or []) if str(item).strip()]
+        terminal_patch = _derive_generation_task_terminal_patch(result)
         _patch_generation_task(
             task_id,
             {
-                "status": "completed" if publish_ready else "blocked",
+                **terminal_patch,
                 "progress": 100,
-                "stage": "completed" if publish_ready else "blocked",
-                "message": "物料生成完成。" if publish_ready else "物料生成完成，但仍有阻断项，不能发布。",
                 "completed_at": _now_iso(),
                 "material_dir": str(result.get("material_dir") or ""),
                 "inspection": result.get("inspection"),
                 "partial_result": result,
                 "result": result,
-                "error": None if publish_ready else "；".join(blocking_reasons[:5]),
             },
         )
     except Exception as exc:
@@ -617,7 +901,14 @@ def suggest_directory_paths(query: str, *, limit: int = 12) -> list[IntelligentC
     if not raw_query:
         return []
 
-    base_dir, prefix = _split_directory_suggestion_query(raw_query)
+    local_suggestions = _suggest_directory_paths_local(raw_query, limit=safe_limit)
+    if local_suggestions:
+        return local_suggestions
+    return _suggest_directory_paths_from_host_bridge(raw_query, limit=safe_limit)
+
+
+def _suggest_directory_paths_local(query: str, *, limit: int) -> list[IntelligentCopyPathSuggestionOut]:
+    base_dir, prefix = _split_directory_suggestion_query(query)
     if base_dir is None:
         return []
 
@@ -659,9 +950,67 @@ def suggest_directory_paths(query: str, *, limit: int = 12) -> list[IntelligentC
                 parent=str(base_dir),
             )
         )
-        if len(suggestions) >= safe_limit:
+        if len(suggestions) >= limit:
             break
     return suggestions
+
+
+def _suggest_directory_paths_from_host_bridge(query: str, *, limit: int) -> list[IntelligentCopyPathSuggestionOut]:
+    url = _resolve_host_path_suggestions_url()
+    if not url:
+        return []
+
+    headers = {"Content-Type": "application/json"}
+    token = resolve_codex_proxy_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        response = httpx.post(
+            url,
+            json={"query": query, "limit": limit},
+            headers=headers,
+            timeout=float(os.getenv("ROUGHCUT_HOST_PATH_SUGGESTIONS_TIMEOUT_SEC", "4") or "4"),
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return []
+
+    raw_suggestions = payload.get("suggestions") if isinstance(payload, dict) else None
+    if not isinstance(raw_suggestions, list):
+        return []
+
+    suggestions: list[IntelligentCopyPathSuggestionOut] = []
+    seen: set[str] = set()
+    for item in raw_suggestions:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or "").strip()
+        if not path:
+            continue
+        key = path.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        suggestions.append(
+            IntelligentCopyPathSuggestionOut(
+                path=path,
+                label=str(item.get("label") or Path(path).name or path),
+                parent=str(item.get("parent") or ""),
+                kind=str(item.get("kind") or "folder"),
+            )
+        )
+        if len(suggestions) >= limit:
+            break
+    return suggestions
+
+
+def _resolve_host_path_suggestions_url() -> str:
+    explicit = str(os.getenv("ROUGHCUT_HOST_PATH_SUGGESTIONS_URL", "") or "").strip()
+    if explicit:
+        return explicit
+    return resolve_codex_proxy_sibling_url("/v1/host/path-suggestions")
 
 
 def _split_directory_suggestion_query(raw_query: str) -> tuple[Path | None, str]:
@@ -702,12 +1051,15 @@ async def _load_intelligent_publish_inputs(
     video_path_raw = str(inspection.get("video_file") or "").strip()
     if not _is_publish_media_path_usable(video_path_raw):
         raise ValueError("目录内未找到可用成片视频。")
-    packaging = _load_intelligent_copy_packaging(Path(str(inspection["folder_path"])))
+    processing_folder = Path(str(inspection.get("material_dir") or "")).parent
+    if not str(processing_folder) or str(processing_folder) == ".":
+        processing_folder = Path(str(inspection["folder_path"]))
+    packaging = _load_intelligent_copy_packaging(processing_folder)
     if packaging is None and task_snapshot is not None:
         packaging = _load_intelligent_copy_packaging_from_task_snapshot(task_snapshot)
     creator_profile = _resolve_intelligent_publish_creator_profile(creator_profile_id)
     if materialize_job:
-        job = await _get_or_create_intelligent_publish_job(session, video_path=video_path, folder_path=Path(str(inspection["folder_path"])))
+        job = await _get_or_create_intelligent_publish_job(session, video_path=video_path, folder_path=processing_folder)
         render_output = await _get_or_create_intelligent_publish_render_output(session, job=job, video_path=video_path)
     else:
         job = await _find_existing_intelligent_publish_job(session, video_path=video_path)
@@ -772,6 +1124,16 @@ def _normalize_publish_folder_key(value: Any) -> str:
     return re.sub(r"[\\/]+$", "", str(value or "").strip()).lower()
 
 
+def _resolve_generation_creator_profile(creator_profile_id: str | None) -> dict[str, Any] | None:
+    profile_id = str(creator_profile_id or "").strip()
+    if not profile_id:
+        return None
+    try:
+        return get_avatar_material_profile(profile_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Creator profile not found") from exc
+
+
 def _inspection_from_generation_task_snapshot(task: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(task, dict):
         return None
@@ -798,43 +1160,16 @@ def _load_intelligent_copy_packaging_from_task_snapshot(task: dict[str, Any]) ->
 
 
 def _load_intelligent_copy_packaging(folder_path: Path) -> dict[str, Any] | None:
-    json_path = folder_path / "smart-copy" / "smart-copy.json"
-    if not json_path.exists():
-        return None
-    try:
-        payload = json.loads(json_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    return _normalize_intelligent_copy_payload_as_packaging(payload, material_dir=str(folder_path / "smart-copy"))
+    material_dir = folder_path / "smart-copy"
+    packaging, _sources = load_publication_packaging_payload(
+        material_json=str(material_dir / "smart-copy.json"),
+        platform_packaging=str(material_dir / "platform-packaging.json"),
+    )
+    return packaging
 
 
 def _normalize_intelligent_copy_payload_as_packaging(payload: dict[str, Any], material_dir: str | None = None) -> dict[str, Any] | None:
-    platforms: dict[str, dict[str, Any]] = {}
-    for item in payload.get("platforms") if isinstance(payload.get("platforms"), list) else []:
-        if not isinstance(item, dict):
-            continue
-        key = str(item.get("key") or "").strip()
-        if not key:
-            continue
-        platforms[key] = {
-            "titles": [str(title).strip() for title in (item.get("titles") or []) if str(title).strip()],
-            "primary_title": str(item.get("primary_title") or "").strip(),
-            "description": str(item.get("body") or "").strip(),
-            "body": str(item.get("body") or "").strip(),
-            "tags": [str(tag).strip().lstrip("#") for tag in (item.get("tags") or []) if str(tag).strip()],
-            "cover_path": str(item.get("cover_path") or "").strip(),
-            "publish_ready": bool(item.get("publish_ready", True)),
-            "blocking_reasons": [str(reason).strip() for reason in (item.get("blocking_reasons") or []) if str(reason).strip()],
-        }
-    if not platforms:
-        return None
-    return {
-        "platforms": platforms,
-        "source": "intelligent_publish",
-        "material_dir": str(material_dir or payload.get("material_dir") or ""),
-        "publish_ready": bool(payload.get("publish_ready", False)),
-        "blocking_reasons": [str(reason).strip() for reason in (payload.get("blocking_reasons") or []) if str(reason).strip()],
-    }
+    return normalize_publication_packaging_payload(payload, material_dir=material_dir)
 
 
 def _resolve_intelligent_publish_creator_profile(creator_profile_id: str | None) -> dict[str, Any] | None:

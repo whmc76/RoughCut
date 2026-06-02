@@ -8,6 +8,7 @@ import { PageSection } from "../components/ui/PageSection";
 import { PanelHeader } from "../components/ui/PanelHeader";
 import type { ToolAsrResult, ToolAvatarResult, ToolRunStage, ToolRunStatus, ToolServiceStatus, ToolTtsMode, ToolTtsOralizeStyle, ToolTtsProvider, ToolTtsReferenceAudioItem, ToolTtsResult } from "../types";
 import { formatDate } from "../utils";
+import { maybeNotify } from "../utils/browserNotifications";
 import "./ToolsPage.css";
 
 type ToolKey = "tts" | "asr" | "avatar";
@@ -590,6 +591,8 @@ function toneForStatus(status?: string) {
   return status === "online" || status === "success" || status === "completed" ? "status-ok" : status === "failed" ? "status-off" : "status-off";
 }
 
+const TOOL_NOTIFY_TAG_PREFIX = "roughcut-tool-run";
+
 function isTerminalStatus(status?: string | null) {
   return status === "completed" || status === "success" || status === "failed";
 }
@@ -636,12 +639,15 @@ function stageStatusClass(status?: string | null): string {
   return `tool-stage-status-${safeStatus}`;
 }
 
-function useToolRun<Result>(runTool: (formData: FormData) => Promise<ToolRunStatus<Result>>, storageKey: string) {
+function useToolRun<Result>(runTool: (formData: FormData) => Promise<ToolRunStatus<Result>>, storageKey: string, toolLabel = "工具") {
   const [runId, setRunId] = useState<string | null>(() => window.localStorage.getItem(storageKey));
+  const [streamRun, setStreamRun] = useState<ToolRunStatus<Result> | null>(null);
+  const previousRunStatusByIdRef = useRef(new Map<string, string>());
   const mutation = useMutation<ToolRunStatus<Result>, Error, FormData>({
     mutationFn: runTool,
     onSuccess: (run) => {
       setRunId(run.run_id);
+      setStreamRun(run);
       window.localStorage.setItem(storageKey, run.run_id);
     },
   });
@@ -654,9 +660,63 @@ function useToolRun<Result>(runTool: (formData: FormData) => Promise<ToolRunStat
       return isTerminalStatus(data?.status) ? false : 1_200;
     },
   });
-  const run = runQuery.data ?? mutation.data;
+  const activeRunId = mutation.data?.run_id ?? runQuery.data?.run_id ?? runId;
+  const terminalRun = isTerminalStatus(streamRun?.status) || isTerminalStatus(mutation.data?.status) || isTerminalStatus(runQuery.data?.status);
+  const run = streamRun ?? mutation.data ?? runQuery.data;
+
+  useEffect(() => {
+    if (!activeRunId) {
+      setStreamRun(null);
+    }
+  }, [activeRunId]);
+
+  useEffect(() => {
+    if (!activeRunId || terminalRun || typeof EventSource === "undefined") {
+      return;
+    }
+    const eventSource = new EventSource(api.getToolRunStreamUrl(activeRunId));
+    eventSource.onmessage = (event) => {
+      try {
+        const nextRun = JSON.parse(event.data) as ToolRunStatus<Result>;
+        if (!nextRun || nextRun.run_id !== activeRunId) {
+          return;
+        }
+        setStreamRun(nextRun);
+        if (isTerminalStatus(nextRun.status)) {
+          eventSource.close();
+        }
+      } catch {
+        return;
+      }
+    };
+    eventSource.onerror = () => {
+      eventSource.close();
+    };
+    return () => eventSource.close();
+  }, [activeRunId, terminalRun]);
+
   const pending = mutation.isPending || (Boolean(run) && !isTerminalStatus(run?.status) && !runQuery.isError);
   const error = mutation.error ?? (runQuery.error as Error | null);
+
+  useEffect(() => {
+    if (!run?.run_id || !run.status) return;
+
+    const currentRunId = run.run_id;
+    const previousStatus = previousRunStatusByIdRef.current.get(currentRunId);
+    if (
+      previousStatus
+      && previousStatus !== run.status
+      && isTerminalStatus(run.status)
+    ) {
+      const isCompleted = run.status === "completed" || run.status === "success";
+      void maybeNotify({
+        title: `${toolLabel}任务${isCompleted ? "已完成" : "失败"}`,
+        body: `任务 ${currentRunId} ${isCompleted ? "已完成" : "失败"}`,
+        tag: `${TOOL_NOTIFY_TAG_PREFIX}-${currentRunId}-${run.status}`,
+      });
+    }
+    previousRunStatusByIdRef.current.set(currentRunId, run.status);
+  }, [run?.run_id, run?.status, toolLabel]);
 
   useEffect(() => {
     if (runQuery.isError) {
@@ -821,7 +881,11 @@ function ToolPageChrome({ statuses }: { statuses?: ToolStatusMap }) {
 }
 
 export function TtsToolPage() {
-  const { mutation, run, pending, error } = useToolRun<ToolTtsResult>(api.runToolTts, toolOptionStorageKeys.ttsRun);
+  const { mutation, run, pending, error } = useToolRun<ToolTtsResult>(
+    api.runToolTts,
+    toolOptionStorageKeys.ttsRun,
+    "文本转语音",
+  );
   const status = useQuery({ queryKey: ["tools", "status"], queryFn: api.getToolStatus, refetchInterval: 30_000 });
   const referenceHistory = useQuery({ queryKey: ["tools", "tts", "reference-audio"], queryFn: api.getToolTtsReferenceAudio, refetchInterval: 20_000 });
   const outputHistory = useQuery({ queryKey: ["tools", "tts", "outputs"], queryFn: api.getToolTtsOutputs, refetchInterval: 20_000 });
@@ -1695,6 +1759,11 @@ function TtsResult({ run, error, pending }: { run?: ToolRunStatus<ToolTtsResult>
   if (error) return <div className="notice">{error.message}</div>;
   if (!run) return <div className="empty-state compact">还没有生成结果。</div>;
   const result = run.result;
+  const liveSegments = result?.live_segments ?? [];
+  const isStreaming = result?.stream === true;
+  const isMossStreaming = isStreaming && result?.provider === "official-moss-tts-local";
+  const streamPreviewText = liveSegments.length > 0 ? String(liveSegments[liveSegments.length - 1]?.text || "") : "";
+  const latestStreamChunkUrl = liveSegments.length > 0 ? liveSegments[liveSegments.length - 1]?.audio_url || null : null;
   return (
     <div className="tool-result">
       <ToolRunProgress run={run} />
@@ -1703,7 +1772,7 @@ function TtsResult({ run, error, pending }: { run?: ToolRunStatus<ToolTtsResult>
         <>
           <audio className="tool-media" controls src={assetUrl(result.audio_url)} />
           <div className="muted">{result.output_path}</div>
-          <div className="mode-chip-list">
+            <div className="mode-chip-list">
             <span className="mode-chip subtle">{result.provider}</span>
             <span className="mode-chip subtle">{result.mode}</span>
             <span className="mode-chip subtle">{result.format}</span>
@@ -1723,10 +1792,21 @@ function TtsResult({ run, error, pending }: { run?: ToolRunStatus<ToolTtsResult>
           {result.text_segments && result.text_segments.length > 1 ? (
             <div className="tts-style-preview result-preview">
               <div className="tts-style-preview-head">
-                <strong>自动分段</strong>
+                <strong>{isStreaming ? "流式切分" : "自动分段"}</strong>
                 <span className="mode-chip subtle">{result.text_segments.length} 段</span>
               </div>
               <pre>{result.text_segments.map((segment) => `${segment.index}. ${segment.text}`).join("\n")}</pre>
+            </div>
+          ) : null}
+          {isStreaming && liveSegments.length > 0 ? (
+            <div className="tts-style-preview result-preview">
+              <div className="tts-style-preview-head">
+                <strong>{isMossStreaming ? "MOSS 流式逐词生成中" : "流式分段音频"}</strong>
+                <span className="mode-chip subtle">{liveSegments.length} 段已到达</span>
+              </div>
+              <div className="muted">{isMossStreaming ? "已开始按词级片段生成，完成后输出完整 wav。可在进度里查看实时片段数。" : ""}</div>
+              {latestStreamChunkUrl ? <audio className="tool-media" controls src={assetUrl(latestStreamChunkUrl)} /> : null}
+              {streamPreviewText ? <pre>{streamPreviewText}</pre> : null}
             </div>
           ) : null}
           {result.prompt_text || result.instruct_text ? (
@@ -1742,7 +1822,11 @@ function TtsResult({ run, error, pending }: { run?: ToolRunStatus<ToolTtsResult>
 }
 
 export function AsrToolPage() {
-  const { mutation, run, pending, error } = useToolRun<ToolAsrResult>(api.runToolAsr, toolOptionStorageKeys.asrRun);
+  const { mutation, run, pending, error } = useToolRun<ToolAsrResult>(
+    api.runToolAsr,
+    toolOptionStorageKeys.asrRun,
+    "音频转文字",
+  );
   const status = useQuery({ queryKey: ["tools", "status"], queryFn: api.getToolStatus, refetchInterval: 30_000 });
   const [asrOptions, setAsrOptions] = useStoredOptions(toolOptionStorageKeys.asr, defaultAsrOptions, coerceAsrOptions);
   const asrServiceName = status.data?.tools.asr?.name?.trim() || toolCards.find((tool) => tool.key === "asr")?.provider || "本地 ASR";
@@ -1837,7 +1921,11 @@ function AsrResult({ run, error, pending }: { run?: ToolRunStatus<ToolAsrResult>
 }
 
 export function AvatarToolPage() {
-  const { mutation, run, pending, error } = useToolRun<ToolAvatarResult>(api.runToolAvatar, toolOptionStorageKeys.avatarRun);
+  const { mutation, run, pending, error } = useToolRun<ToolAvatarResult>(
+    api.runToolAvatar,
+    toolOptionStorageKeys.avatarRun,
+    "数字人口播",
+  );
   const status = useQuery({ queryKey: ["tools", "status"], queryFn: api.getToolStatus, refetchInterval: 30_000 });
   const [avatarOptions, setAvatarOptions] = useStoredOptions(toolOptionStorageKeys.avatar, defaultAvatarOptions, coerceAvatarOptions);
 

@@ -2,11 +2,13 @@ import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, typ
 import type WaveSurfer from "wavesurfer.js";
 import type { RegionsPlugin as RegionsPluginInstance } from "wavesurfer.js/dist/plugins/regions.esm.js";
 
-import type { Job, JobManualEditApplyPayload, JobManualEditPreviewAssets, JobManualEditSession, JobManualEditSilence, JobManualEditSmartDelete, JobManualEditSubtitle, JobManualEditSubtitleOverride, JobManualEditWord, JobManualSubtitleReplacement, JobManualVideoTransform } from "../../types";
+import type { ContentProfileReview, Job, JobManualEditApplyPayload, JobManualEditPreviewAssets, JobManualEditRuleSegment, JobManualEditSession, JobManualEditSilence, JobManualEditSmartDelete, JobManualEditSubtitle, JobManualEditSubtitleOverride, JobManualEditWord, JobManualSubtitleReplacement, JobManualVideoTransform } from "../../types";
 import { classNames } from "../../utils";
+import { buildVideoUnderstandingSnapshot } from "./contentProfile";
 
 type JobManualEditSectionProps = {
   job?: Job;
+  contentProfile?: ContentProfileReview | null;
   session: JobManualEditSession;
   previewAssets?: JobManualEditPreviewAssets;
   saving: boolean;
@@ -86,6 +88,23 @@ type SourceTimelineThumbnailItem = {
 type SourceTimelineRangeItem = KeepSegment & {
   leftPercent: number;
   widthPercent: number;
+};
+
+type ManualTimelineSemanticMarker = {
+  key: string;
+  label: string;
+  text: string;
+  timestamp: string;
+  leftPercent: number;
+  widthPercent: number;
+  start: number;
+  end: number;
+  detail: string[];
+};
+
+type ManualTimelineSemanticFocus = {
+  primary: ManualTimelineSemanticMarker | null;
+  active: ManualTimelineSemanticMarker[];
 };
 
 type FrequentTermKind = "名词/术语" | "动作词" | "描述词" | "专名/型号" | "低置信词";
@@ -185,7 +204,6 @@ type SmartCutRules = {
   pauseEnabled: boolean;
   smartDeleteEnabled: boolean;
   pauseThresholdSec: number;
-  pauseBreathSec?: number;
   fillers: string;
 };
 
@@ -198,6 +216,16 @@ type SmartCutRuleMatch = KeepSegment & {
   sourceText?: string;
   protected?: boolean;
   autoCut?: boolean;
+};
+
+type SmartDeleteSuggestion = {
+  start: number;
+  end: number;
+  sourceRanges: KeepSegment[];
+  primaryRange: SmartCutRuleMatch;
+  text: string;
+  reasonSummary: string;
+  detailSummary?: string;
 };
 
 type TimedSourceRange = KeepSegment & {
@@ -419,14 +447,13 @@ const RESOLUTION_PRESET_OPTIONS = [
 const PREVIEW_AUTO_VOLUME_MIN_GAIN = 0.35;
 const PREVIEW_AUTO_VOLUME_MAX_GAIN = 12;
 const DEFAULT_SMART_CUT_FILLERS = "嗯,呃,额,呃呃,嗯嗯";
-const SMART_CUT_RULE_STORAGE_KEY = "roughcut.manualEditor.smartCutRules.v3";
+const SMART_CUT_RULE_STORAGE_KEY = "roughcut.manualEditor.smartCutRules.v4";
 const DEFAULT_SMART_CUT_RULES: SmartCutRules = {
   fillerEnabled: true,
   repeatedEnabled: true,
   pauseEnabled: true,
   smartDeleteEnabled: true,
   pauseThresholdSec: 0.8,
-  pauseBreathSec: 0.08,
   fillers: DEFAULT_SMART_CUT_FILLERS,
 };
 
@@ -441,14 +468,12 @@ const SMART_DELETE_PROTECTED_TERM_PATTERN = /(?:^|[^A-Za-z0-9])(?:EDC\s*\d{1,4}|
 
 function normalizeSmartCutRules(value: Partial<SmartCutRules> | null | undefined): SmartCutRules {
   const pauseThresholdSec = Number(value?.pauseThresholdSec);
-  const pauseBreathSec = Number(value?.pauseBreathSec);
   return {
     fillerEnabled: typeof value?.fillerEnabled === "boolean" ? value.fillerEnabled : DEFAULT_SMART_CUT_RULES.fillerEnabled,
     repeatedEnabled: typeof value?.repeatedEnabled === "boolean" ? value.repeatedEnabled : DEFAULT_SMART_CUT_RULES.repeatedEnabled,
     pauseEnabled: typeof value?.pauseEnabled === "boolean" ? value.pauseEnabled : DEFAULT_SMART_CUT_RULES.pauseEnabled,
     smartDeleteEnabled: typeof value?.smartDeleteEnabled === "boolean" ? value.smartDeleteEnabled : DEFAULT_SMART_CUT_RULES.smartDeleteEnabled,
     pauseThresholdSec: Number.isFinite(pauseThresholdSec) ? clamp(pauseThresholdSec, 0.1, 5) : DEFAULT_SMART_CUT_RULES.pauseThresholdSec,
-    pauseBreathSec: Number.isFinite(pauseBreathSec) ? clamp(pauseBreathSec, 0, 1) : DEFAULT_SMART_CUT_RULES.pauseBreathSec,
     fillers: typeof value?.fillers === "string" && value.fillers.trim() ? value.fillers : DEFAULT_SMART_CUT_RULES.fillers,
   };
 }
@@ -552,6 +577,69 @@ export function subtitleAutoCorrectionSummary(subtitle: JobManualEditSubtitle) {
     label: llmChanged ? (ruleChanged ? "规则清理 + LLM精修" : "LLM精修") : "规则清理",
     source,
     current,
+  };
+}
+
+export function buildManualTimelineSemanticMarkers(
+  contentProfile: ContentProfileReview | null | undefined,
+  sourceTimelineDuration: number,
+): ManualTimelineSemanticMarker[] {
+  if (!contentProfile || sourceTimelineDuration <= 0) {
+    return [];
+  }
+  const contentSource = (contentProfile.final ?? contentProfile.draft ?? null) as Record<string, unknown> | null;
+  const contentDraft = (contentProfile.draft ?? contentProfile.final ?? null) as Record<string, unknown> | null;
+  const snapshot = buildVideoUnderstandingSnapshot(contentSource, contentDraft);
+  if (!snapshot?.semanticSpans.length) {
+    return [];
+  }
+  const markers: ManualTimelineSemanticMarker[] = [];
+  const seen = new Set<string>();
+  snapshot.semanticSpans.forEach((span, index) => {
+    const start = clamp(span.startTime ?? 0, 0, sourceTimelineDuration);
+    const fallbackEnd = span.endTime ?? (span.startTime != null ? span.startTime + 0.8 : null);
+    const end = clamp(fallbackEnd ?? start, start, sourceTimelineDuration);
+    const leftPercent = clamp((start / sourceTimelineDuration) * 100, 0, 100);
+    const rawWidth = end > start ? ((end - start) / sourceTimelineDuration) * 100 : 0;
+    const widthPercent = clamp(rawWidth, 0.8, 16);
+    const dedupeKey = `${span.timestamp}|${span.label}|${span.text}`;
+    if (seen.has(dedupeKey)) {
+      return;
+    }
+    seen.add(dedupeKey);
+    markers.push({
+      key: `${dedupeKey}|${index}`,
+      label: span.label,
+      text: span.text,
+      timestamp: span.timestamp,
+      leftPercent,
+      widthPercent,
+      start,
+      end: Math.max(end, start),
+      detail: span.detail,
+    });
+  });
+  return markers.slice(0, 12);
+}
+
+export function resolveManualTimelineSemanticFocus(
+  markers: ManualTimelineSemanticMarker[],
+  sourceTime: number | null,
+): ManualTimelineSemanticFocus {
+  if (!markers.length || sourceTime == null || !Number.isFinite(sourceTime)) {
+    return { primary: null, active: [] };
+  }
+  const active = markers.filter((marker) => sourceTime >= marker.start - 0.015 && sourceTime <= marker.end + 0.015);
+  const ordered = [...active].sort((left, right) => {
+    const widthGap = (left.end - left.start) - (right.end - right.start);
+    if (widthGap !== 0) {
+      return widthGap;
+    }
+    return left.start - right.start;
+  });
+  return {
+    primary: ordered[0] ?? null,
+    active: ordered,
   };
 }
 
@@ -2334,13 +2422,39 @@ export function findSubtitleIndexNearOutputTime(
   if (!subtitles.length) return -1;
   const time = Number(outputTime ?? 0);
   if (!Number.isFinite(time)) return 0;
-  let previousIndex = -1;
+  let activeIndex = -1;
   for (let index = 0; index < subtitles.length; index += 1) {
     const subtitle = subtitles[index];
-    if (time <= subtitle.end_time + 0.02) return index;
-    previousIndex = index;
+    if (time >= subtitle.start_time - 0.02 && time <= subtitle.end_time + 0.02) {
+      activeIndex = index;
+      continue;
+    }
+    if (time < subtitle.start_time - 0.02) {
+      return activeIndex >= 0 ? activeIndex : index;
+    }
   }
-  return previousIndex >= 0 ? previousIndex : 0;
+  return activeIndex >= 0 ? activeIndex : subtitles.length - 1;
+}
+
+function findActiveSubtitleIndexAtOutputTime(
+  subtitles: Pick<JobManualEditSubtitle, "start_time" | "end_time">[],
+  outputTime: number | null | undefined,
+) {
+  if (!subtitles.length) return -1;
+  const time = Number(outputTime ?? 0);
+  if (!Number.isFinite(time)) return -1;
+  let activeIndex = -1;
+  for (let index = 0; index < subtitles.length; index += 1) {
+    const subtitle = subtitles[index];
+    if (time >= subtitle.start_time - 0.02 && time <= subtitle.end_time + 0.02) {
+      activeIndex = index;
+      continue;
+    }
+    if (activeIndex >= 0 && time < subtitle.start_time - 0.02) {
+      break;
+    }
+  }
+  return activeIndex;
 }
 
 export function buildOutputWaveformBars(
@@ -2607,8 +2721,24 @@ function smartDeleteReasonLabel(reason?: string | null) {
   switch (reason) {
     case "rollback_instruction":
       return "口播指令回删";
+    case "restart_cue":
+      return "重录提示";
     case "restart_retake":
       return "重说/返工片段";
+    case "noise_subtitle":
+      return "疑似噪音/误识别";
+    case "low_signal_subtitle":
+      return "低信息量片段";
+    case "long_non_dialogue":
+      return "长时间无有效口播";
+    case "timing_trim":
+      return "句子边角修剪";
+    case "micro_keep":
+      return "短空段清理";
+    case "micro_keep_bridge":
+      return "碎片桥段清理";
+    case "gap_fill":
+      return "时间线空隙清理";
     case "duplicate":
       return "重复表达";
     case "off_topic":
@@ -2622,6 +2752,51 @@ function smartDeleteReasonLabel(reason?: string | null) {
   }
 }
 
+function isPacingOnlySmartDeleteReason(reason?: string | null) {
+  return reason === "timing_trim" || reason === "micro_keep" || reason === "micro_keep_bridge" || reason === "gap_fill";
+}
+
+function smartDeleteReasonPriority(reason?: string | null) {
+  switch (reason) {
+    case "rollback_instruction":
+      return 6;
+    case "restart_retake":
+      return 5;
+    case "restart_cue":
+      return 4;
+    case "noise_subtitle":
+      return 3;
+    case "low_signal_subtitle":
+    case "long_non_dialogue":
+      return 2;
+    default:
+      return isPacingOnlySmartDeleteReason(reason) ? 1 : 0;
+  }
+}
+
+function smartDeleteReasonSummary(reason?: string | null) {
+  switch (reason) {
+    case "rollback_instruction":
+      return "这段里有明确的剪辑口令，建议整段删除。";
+    case "restart_retake":
+    case "restart_cue":
+      return "这段像是重说或返工，建议删掉前一版。";
+    case "noise_subtitle":
+      return "这段更像噪音或误识别，不像有效口播。";
+    case "low_signal_subtitle":
+      return "这段信息量很低，删掉通常不影响理解。";
+    case "long_non_dialogue":
+      return "这段缺少有效口播，建议直接收掉。";
+    case "timing_trim":
+    case "micro_keep":
+    case "micro_keep_bridge":
+    case "gap_fill":
+      return "这不是整段内容判断，主要是在修掉句子边上的空拍和零碎尾巴。";
+    default:
+      return `建议剪掉${smartDeleteReasonLabel(reason)}。`;
+  }
+}
+
 function smartCutRuleLabel(kind: SmartCutRuleKind) {
   switch (kind) {
     case "filler":
@@ -2629,9 +2804,9 @@ function smartCutRuleLabel(kind: SmartCutRuleKind) {
     case "repeated":
       return "重复口误";
     case "pause":
-      return "长停顿";
+      return "停顿";
     case "smart_delete":
-      return "智能废片";
+      return "智能删减";
     default:
       return "剪辑规则";
   }
@@ -2645,8 +2820,14 @@ function smartCutRuleReason(kind: SmartCutRuleKind, match?: SmartCutRuleMatch | 
       return "删除重说时多出来的重复字词。";
     case "pause":
       return "删除超过阈值且不压到有效语音的空白。";
-    case "smart_delete":
-      return `建议剪掉${smartDeleteReasonLabel(match?.detail || match?.reason)}，需逐条确认。`;
+    case "smart_delete": {
+      const explicitDetail = typeof match?.detail === "string" && !match.detail.startsWith("规则候选：")
+        ? match.detail.trim()
+        : "";
+      return explicitDetail
+        ? `${explicitDetail} ${smartDeleteReasonSummary(match?.reason)} 需逐条确认。`
+        : `${smartDeleteReasonSummary(match?.reason)} 需逐条确认。`;
+    }
     default:
       return "按当前规则进入待剪区间。";
   }
@@ -4240,11 +4421,79 @@ function smartDeleteRuleRanges(smartDeleteSegments: JobManualEditSmartDelete[] =
     .filter((range) => range.end > range.start + 0.02);
 }
 
+function smartCutRuleRangesOverlapEnough(left: SmartCutRuleMatch, right: SmartCutRuleMatch) {
+  if (left.kind !== right.kind) return false;
+  const overlap = Math.min(left.end, right.end) - Math.max(left.start, right.start);
+  if (overlap <= 0.02) return false;
+  const minDuration = Math.min(
+    Math.max(0.02, left.end - left.start),
+    Math.max(0.02, right.end - right.start),
+  );
+  return overlap / minDuration >= 0.72;
+}
+
+function mergePreferredSmartCutRuleMatches(preferred: SmartCutRuleMatch[], fallback: SmartCutRuleMatch[]) {
+  const merged = [...preferred];
+  for (const range of fallback) {
+    if (preferred.some((existing) => smartCutRuleRangesOverlapEnough(existing, range))) continue;
+    merged.push(range);
+  }
+  return merged
+    .filter((range) => range.end > range.start + 0.02)
+    .sort((left, right) => left.start - right.start || left.end - right.end || left.kind.localeCompare(right.kind));
+}
+
+function backendSmartCutRuleRanges(
+  ruleSegments: JobManualEditRuleSegment[] = [],
+  subtitles: JobManualEditSubtitle[] = [],
+): SmartCutRuleAnalysis {
+  const analysis: SmartCutRuleAnalysis = {
+    filler: [],
+    repeated: [],
+    pause: [],
+    pauseCandidates: [],
+    smartDelete: [],
+  };
+  for (const segment of ruleSegments) {
+    const start = Number(segment.start);
+    const end = Number(segment.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start + 0.02) continue;
+    const range: SmartCutRuleMatch = {
+      start: Number(start.toFixed(3)),
+      end: Number(end.toFixed(3)),
+      kind: segment.kind,
+      reason: segment.reason,
+      detail: segment.detail || undefined,
+      sourceText: segment.evidence?.find((item) => item.trim()) || segment.detail || segment.reason,
+      autoCut: segment.kind === "smart_delete" ? false : true,
+    };
+    if (segment.kind === "smart_delete") {
+      range.protected = smartDeleteRangeContainsProtectedTerm(range, subtitles);
+      analysis.smartDelete.push(range);
+      continue;
+    }
+    if (segment.kind === "pause") {
+      analysis.pauseCandidates.push(range);
+      analysis.pause.push(range);
+      continue;
+    }
+    if (segment.kind === "filler") {
+      analysis.filler.push(range);
+      continue;
+    }
+    if (segment.kind === "repeated") {
+      analysis.repeated.push(range);
+    }
+  }
+  return analysis;
+}
+
 export function buildSmartCutRuleAnalysis(
   subtitles: JobManualEditSubtitle[],
   rules: SmartCutRules,
   silenceRanges: SilenceRange[] = [],
   smartDeleteSegments: JobManualEditSmartDelete[] = [],
+  ruleSegments: JobManualEditRuleSegment[] = [],
 ): SmartCutRuleAnalysis {
   const analysis: SmartCutRuleAnalysis = {
     filler: [],
@@ -4280,12 +4529,28 @@ export function buildSmartCutRuleAnalysis(
       analysis.pause.push(...group);
     }
   }
+  const backendAnalysis = backendSmartCutRuleRanges(ruleSegments, subtitles);
   return {
-    filler: analysis.filler.filter((range) => range.end > range.start + 0.02),
-    repeated: analysis.repeated.filter((range) => range.end > range.start + 0.02),
-    pause: analysis.pause.filter((range) => range.end > range.start + 0.02),
-    pauseCandidates: analysis.pauseCandidates.filter((range) => range.end > range.start + 0.02),
-    smartDelete: analysis.smartDelete,
+    filler: mergePreferredSmartCutRuleMatches(
+      backendAnalysis.filler,
+      analysis.filler.filter((range) => range.end > range.start + 0.02),
+    ),
+    repeated: mergePreferredSmartCutRuleMatches(
+      backendAnalysis.repeated,
+      analysis.repeated.filter((range) => range.end > range.start + 0.02),
+    ),
+    pause: mergePreferredSmartCutRuleMatches(
+      backendAnalysis.pause,
+      analysis.pause.filter((range) => range.end > range.start + 0.02),
+    ),
+    pauseCandidates: mergePreferredSmartCutRuleMatches(
+      backendAnalysis.pauseCandidates,
+      analysis.pauseCandidates.filter((range) => range.end > range.start + 0.02),
+    ),
+    smartDelete: mergePreferredSmartCutRuleMatches(
+      backendAnalysis.smartDelete,
+      analysis.smartDelete,
+    ),
   };
 }
 
@@ -4298,6 +4563,15 @@ function textSnippet(value: string, maxChars = 18) {
 
 function subtitleSnippetForSourceRange(range: KeepSegment, subtitles: JobManualEditSubtitle[]) {
   return textSnippet(subtitleTextForSourceRange(range, subtitles));
+}
+
+function subtitleSnippetForSourceRanges(ranges: KeepSegment[], subtitles: JobManualEditSubtitle[], maxChars = 42) {
+  const fragments = ranges
+    .map((range) => subtitleTextForSourceRange(range, subtitles))
+    .map((text) => text.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  if (!fragments.length) return "";
+  return textSnippet(Array.from(new Set(fragments)).join(" … "), maxChars);
 }
 
 function sampleTextForSmartCutRange(kind: SmartCutRuleKind, range: SmartCutRuleMatch | undefined, subtitles: JobManualEditSubtitle[]) {
@@ -4391,6 +4665,59 @@ export function smartDeleteSuggestionRanges(
   ));
 }
 
+export function buildSmartDeleteSuggestions(
+  analysis: SmartCutRuleAnalysis,
+  rules: SmartCutRules,
+  subtitles: JobManualEditSubtitle[],
+  dismissedRanges: KeepSegment[] = [],
+): SmartDeleteSuggestion[] {
+  const ranges = smartDeleteSuggestionRanges(analysis, rules, dismissedRanges);
+  if (!ranges.length) return [];
+  const sorted = [...ranges].sort((left, right) => left.start - right.start || left.end - right.end);
+  const groups: SmartCutRuleMatch[][] = [];
+  for (const range of sorted) {
+    const group = groups[groups.length - 1];
+    if (!group) {
+      groups.push([range]);
+      continue;
+    }
+    const previous = group[group.length - 1];
+    const gap = range.start - previous.end;
+    const shouldMerge = gap <= 0.9 || (
+      gap <= 1.4
+      && (isPacingOnlySmartDeleteReason(previous.reason) || isPacingOnlySmartDeleteReason(range.reason))
+    );
+    if (shouldMerge) {
+      group.push(range);
+    } else {
+      groups.push([range]);
+    }
+  }
+  return groups.map((group) => {
+    const sourceRanges = group.map((range) => ({ start: range.start, end: range.end }));
+    const primaryRange = [...group].sort((left, right) => (
+      smartDeleteReasonPriority(right.reason) - smartDeleteReasonPriority(left.reason)
+      || (right.end - right.start) - (left.end - left.start)
+      || left.start - right.start
+    ))[0];
+    const pacingCount = group.filter((range) => isPacingOnlySmartDeleteReason(range.reason)).length;
+    const text = subtitleSnippetForSourceRanges(sourceRanges, subtitles, 56)
+      || textSnippet(primaryRange.sourceText || primaryRange.detail || smartDeleteReasonLabel(primaryRange.reason), 56);
+    const detailSummary = pacingCount > 0 && !isPacingOnlySmartDeleteReason(primaryRange.reason)
+      ? `已合并 ${pacingCount} 处句子边角修剪，不再拆成多条。`
+      : undefined;
+    return {
+      start: group[0].start,
+      end: group[group.length - 1].end,
+      sourceRanges,
+      primaryRange,
+      text,
+      reasonSummary: smartDeleteReasonSummary(primaryRange.reason),
+      detailSummary,
+    };
+  });
+}
+
 export function smartCutRuleManagedRanges(analysis: SmartCutRuleAnalysis) {
   return [
     ...analysis.filler,
@@ -4401,20 +4728,68 @@ export function smartCutRuleManagedRanges(analysis: SmartCutRuleAnalysis) {
   ];
 }
 
-function smartCutSafetyPadding(kind: SmartCutRuleKind | undefined, rules?: Partial<SmartCutRules>) {
-  if (kind === "pause") {
-    return normalizeSmartCutRules(rules).pauseBreathSec ?? DEFAULT_SMART_CUT_RULES.pauseBreathSec ?? 0;
-  }
+function smartCutSafetyPadding(kind: SmartCutRuleKind | undefined) {
   return kind ? SMART_CUT_AUDIO_SAFETY_SEC[kind] ?? 0 : 0;
 }
 
 function applyAutomaticCutSafetyPadding(ranges: KeepSegment[], sourceDuration: number, rules?: Partial<SmartCutRules>) {
-  return ranges
+  const normalizedRules = normalizeSmartCutRules(rules);
+  const outputRanges: KeepSegment[] = [];
+  const pauseGroup: KeepSegment[] = [];
+  const flushPauseGroup = () => {
+    if (!pauseGroup.length) return;
+    const pauseDuration = pauseGroup.reduce((total, range) => total + Math.max(0, range.end - range.start), 0);
+    const retainedPerSideSec = Math.min(normalizedRules.pauseThresholdSec, pauseDuration) / 2;
+    let remainingHeadKeep = retainedPerSideSec;
+    let remainingTailKeep = retainedPerSideSec;
+    const cutStarts = new Map<KeepSegment, number>();
+    const cutEnds = new Map<KeepSegment, number>();
+    for (const range of pauseGroup) {
+      const duration = Math.max(0, range.end - range.start);
+      const headKeep = Math.min(duration, remainingHeadKeep);
+      cutStarts.set(range, range.start + headKeep);
+      remainingHeadKeep -= headKeep;
+    }
+    for (const range of [...pauseGroup].reverse()) {
+      const duration = Math.max(0, range.end - range.start);
+      const tailKeep = Math.min(duration, remainingTailKeep);
+      cutEnds.set(range, range.end - tailKeep);
+      remainingTailKeep -= tailKeep;
+    }
+    for (const range of pauseGroup) {
+      const start = Number(clamp(cutStarts.get(range) ?? range.start, 0, sourceDuration).toFixed(3));
+      const end = Number(clamp(cutEnds.get(range) ?? range.end, start, sourceDuration).toFixed(3));
+      if (end > start + 0.02) outputRanges.push({ ...range, start, end });
+    }
+    pauseGroup.length = 0;
+  };
+  for (const range of [...ranges].sort((left, right) => left.start - right.start || left.end - right.end)) {
+    const kind = (range as SmartCutRuleMatch).kind;
+    if (kind === "pause") {
+      const previous = pauseGroup[pauseGroup.length - 1];
+      if (
+        previous
+        && (
+          range.start > previous.end + SMART_CUT_PAUSE_REVIEW_GROUP_GAP_SEC + 0.001
+          || range.end - pauseGroup[0].start > SMART_CUT_PAUSE_REVIEW_GROUP_MAX_SPAN_SEC
+        )
+      ) {
+        flushPauseGroup();
+      }
+      pauseGroup.push(range);
+      continue;
+    }
+    flushPauseGroup();
+    const padding = smartCutSafetyPadding(kind);
+    const start = Number(clamp(range.start + padding, 0, sourceDuration).toFixed(3));
+    const end = Number(clamp(range.end - padding, start, sourceDuration).toFixed(3));
+    if (end > start + 0.02) outputRanges.push({ ...range, start, end });
+  }
+  flushPauseGroup();
+  return outputRanges
     .map((range) => {
-      const kind = (range as SmartCutRuleMatch).kind;
-      const padding = smartCutSafetyPadding(kind, rules);
-      const start = Number(clamp(range.start + padding, 0, sourceDuration).toFixed(3));
-      const end = Number(clamp(range.end - padding, start, sourceDuration).toFixed(3));
+      const start = Number(clamp(range.start, 0, sourceDuration).toFixed(3));
+      const end = Number(clamp(range.end, start, sourceDuration).toFixed(3));
       return { ...range, start, end };
     })
     .filter((range) => range.end > range.start + 0.02);
@@ -4468,7 +4843,6 @@ function smartCutRulesSignature(rules: SmartCutRules) {
     pauseEnabled: normalized.pauseEnabled,
     smartDeleteEnabled: normalized.smartDeleteEnabled,
     pauseThresholdSec: normalized.pauseThresholdSec,
-    pauseBreathSec: normalized.pauseBreathSec,
     fillers: parseSmartCutFillers(normalized.fillers),
   });
 }
@@ -4492,7 +4866,7 @@ function cloneUndoSnapshot(snapshot: ManualEditUndoSnapshot): ManualEditUndoSnap
   };
 }
 
-export function JobManualEditSection({ job, session, previewAssets, saving, autosaving = false, autosavedAt, detectingRotation = false, resetSignal = 0, renderActionLabel = "根据当前改动重新渲染", onStateChange, onApply, onAutoSave, onDetectRotation }: JobManualEditSectionProps) {
+export function JobManualEditSection({ job, contentProfile, session, previewAssets, saving, autosaving = false, autosavedAt, detectingRotation = false, resetSignal = 0, renderActionLabel = "根据当前改动重新渲染", onStateChange, onApply, onAutoSave, onDetectRotation }: JobManualEditSectionProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const previewAudioContextRef = useRef<AudioContext | null>(null);
   const previewAudioSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
@@ -4834,14 +5208,20 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   const activeSubtitleIndex = useMemo(
     () => {
       if (activePreviewOutputTime == null) return -1;
-      return projection.remapped.findIndex((item) => activePreviewOutputTime >= item.start_time && activePreviewOutputTime <= item.end_time + 0.02);
+      return findActiveSubtitleIndexAtOutputTime(projection.remapped, activePreviewOutputTime);
     },
     [activePreviewOutputTime, projection.remapped],
   );
 
   const smartCutRuleAnalysis = useMemo(
-    () => buildSmartCutRuleAnalysis(sourceTranscriptSubtitles, smartCutRules, sourceSilenceRanges, session.smart_delete_segments || []),
-    [smartCutRules, sourceSilenceRanges, sourceTranscriptSubtitles, session.smart_delete_segments],
+    () => buildSmartCutRuleAnalysis(
+      sourceTranscriptSubtitles,
+      smartCutRules,
+      sourceSilenceRanges,
+      session.smart_delete_segments || [],
+      session.rule_segments || [],
+    ),
+    [smartCutRules, sourceSilenceRanges, sourceTranscriptSubtitles, session.rule_segments, session.smart_delete_segments],
   );
   const smartCutRuleRanges = useMemo(
     () => {
@@ -4872,6 +5252,15 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     ),
     [manualSmartCutConfirmRanges, manualSmartCutDismissRanges, smartCutRuleAnalysis, smartCutRules],
   );
+  const pendingSmartDeleteSuggestions = useMemo(
+    () => buildSmartDeleteSuggestions(
+      smartCutRuleAnalysis,
+      smartCutRules,
+      sourceTranscriptSubtitles,
+      [...manualSmartCutDismissRanges, ...manualSmartCutConfirmRanges],
+    ),
+    [manualSmartCutConfirmRanges, manualSmartCutDismissRanges, smartCutRuleAnalysis, smartCutRules, sourceTranscriptSubtitles],
+  );
   const activeSmartCutRuleRanges = useMemo(
     () => (manualSmartCutRestoreRanges.length
       ? smartCutRuleRanges.filter((range) => !sourceRangeOverlapsCutRanges(range.start, range.end, manualSmartCutRestoreRanges))
@@ -4883,15 +5272,15 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
       filler: smartCutRules.fillerEnabled ? smartCutRuleAnalysis.filler.filter((range) => !range.protected).length : 0,
       repeated: smartCutRules.repeatedEnabled ? smartCutRuleAnalysis.repeated.filter((range) => !range.protected).length : 0,
       pause: smartCutRules.pauseEnabled ? smartCutRuleAnalysis.pause.filter((range) => !range.protected).length : 0,
-      smartDelete: pendingSmartDeleteRanges.length,
+      smartDelete: pendingSmartDeleteSuggestions.length,
     }),
-    [pendingSmartDeleteRanges.length, smartCutRuleAnalysis, smartCutRules],
+    [pendingSmartDeleteSuggestions.length, smartCutRuleAnalysis, smartCutRules],
   );
   const smartCutRulePreviews = useMemo(
     () => buildSmartCutRulePreviews(smartCutRuleAnalysis, smartCutRules, sourceTranscriptSubtitles),
     [smartCutRuleAnalysis, smartCutRules, sourceTranscriptSubtitles],
   );
-  const pendingSmartDeleteRangeCount = pendingSmartDeleteRanges.length;
+  const pendingSmartDeleteRangeCount = pendingSmartDeleteSuggestions.length;
 
   const totalOutputDuration = projection.totalDuration;
   const activeSubtitle = activeSubtitleIndex >= 0 ? projection.remapped[activeSubtitleIndex] : null;
@@ -4923,7 +5312,11 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
   );
   const previewVideoUrl = previewVideoSources[0]?.url ?? null;
   const previewDisabledMessage = previewUnavailableMessage(previewAssets, session.source_url);
-  const previewVideoSourceKey = previewVideoSources.map((source) => `${source.url}:${source.type || ""}`).join("|") || "manual-preview";
+  const previewVideoSourceKey = [
+    previewAssets?.asset_version ?? "",
+    previewAssets?.updated_at ?? "",
+    ...previewVideoSources.map((source) => `${source.url}:${source.type || ""}`),
+  ].join("|") || "manual-preview";
   const previewVideoUsingProxy = Boolean(previewAssets?.video_url || previewAssets?.video_sources?.length);
   const waveformUrl = previewAssets?.ready && previewAssets.audio_url ? previewAssets.audio_url : "";
   const waveformPeaks = useMemo(
@@ -4982,7 +5375,16 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     }),
     [sourceTimelineDuration],
   );
+  const semanticTimelineMarkers = useMemo(
+    () => buildManualTimelineSemanticMarkers(contentProfile, sourceTimelineDuration),
+    [contentProfile, sourceTimelineDuration],
+  );
   const timelinePlayheadSourceTime = clamp(currentSourceTime, 0, Math.max(0, sourceTimelineDuration));
+  const semanticFocusTime = timelineHoverSourceTime ?? timelinePlayheadSourceTime;
+  const semanticFocus = useMemo(
+    () => resolveManualTimelineSemanticFocus(semanticTimelineMarkers, semanticFocusTime),
+    [semanticFocusTime, semanticTimelineMarkers],
+  );
   const unifiedTimelineStyle = {
     "--playhead-left": `${sourceTimelineDuration > 0 ? (timelinePlayheadSourceTime / sourceTimelineDuration) * 100 : 0}%`,
     "--hover-left": timelineHoverSourceTime == null || sourceTimelineDuration <= 0
@@ -6134,24 +6536,24 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
     setManualSmartCutConfirmRanges((current) => removeSourceRangesFromSegments(current, ranges));
   };
 
-  const confirmSmartDeleteSuggestion = (range: SmartCutRuleMatch) => {
-    const nextRange = { start: range.start, end: range.end };
-    const nextSegments = removeSourceRangesFromSegments(effectiveSegments, [nextRange]);
+  const confirmSmartDeleteSuggestion = (suggestion: SmartCutRuleMatch | SmartDeleteSuggestion) => {
+    const sourceRanges = "sourceRanges" in suggestion ? suggestion.sourceRanges : [{ start: suggestion.start, end: suggestion.end }];
+    const nextSegments = removeSourceRangesFromSegments(effectiveSegments, sourceRanges);
     if (!nextSegments.length) return;
     recordUndoSnapshot();
     pauseEditedTimeline();
     setSegments(nextSegments);
-    setManualSmartCutConfirmRanges((current) => addSourceRangesToSegments(current, [nextRange], session.source_duration_sec));
-    setManualSmartCutDismissRanges((current) => removeSourceRangesFromSegments(current, [nextRange]));
+    setManualSmartCutConfirmRanges((current) => addSourceRangesToSegments(current, sourceRanges, session.source_duration_sec));
+    setManualSmartCutDismissRanges((current) => removeSourceRangesFromSegments(current, sourceRanges));
     setSelectedSegmentIndex((current) => clamp(current, 0, nextSegments.length - 1));
     reanchorPreviewToSegments(nextSegments);
   };
 
-  const dismissSmartDeleteSuggestion = (range: SmartCutRuleMatch) => {
-    const nextRange = { start: range.start, end: range.end };
+  const dismissSmartDeleteSuggestion = (suggestion: SmartCutRuleMatch | SmartDeleteSuggestion) => {
+    const sourceRanges = "sourceRanges" in suggestion ? suggestion.sourceRanges : [{ start: suggestion.start, end: suggestion.end }];
     recordUndoSnapshot();
-    setManualSmartCutDismissRanges((current) => addSourceRangesToSegments(current, [nextRange], session.source_duration_sec));
-    setManualSmartCutConfirmRanges((current) => removeSourceRangesFromSegments(current, [nextRange]));
+    setManualSmartCutDismissRanges((current) => addSourceRangesToSegments(current, sourceRanges, session.source_duration_sec));
+    setManualSmartCutConfirmRanges((current) => removeSourceRangesFromSegments(current, sourceRanges));
   };
 
   const applySmartCutRuleRanges = (ranges: KeepSegment[], managedRanges: KeepSegment[]) => {
@@ -7402,9 +7804,9 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                               if (element) {
                                 transcriptTokenRefs.current.set(index, element);
                               } else {
-                              transcriptTokenRefs.current.delete(index);
-                            }
-                          }}
+                                transcriptTokenRefs.current.delete(index);
+                              }
+                            }}
                             className={classNames("manual-editor-transcript-pause", cut && "cut", cutKind && `cut-${cutKind}`, smartDeleteSuggestion && "suggested-smart_delete", active && "active", selected && "selected")}
                             data-transcript-token-index={index}
                             onClick={() => selectTranscriptToken(index)}
@@ -7552,75 +7954,70 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                 {smartCutRulesExpanded ? (
                   <>
                     <div className="manual-editor-rule-grid">
-                      <label>
+                      <section className="manual-editor-rule-item">
+                        <label className="manual-editor-rule-control">
+                          <input
+                            type="checkbox"
+                            checked={smartCutRules.fillerEnabled}
+                            onChange={(event) => updateSmartCutRule({ fillerEnabled: event.target.checked })}
+                          />
+                          <span>语气词</span>
+                          <strong>{smartCutRuleCounts.filler}</strong>
+                        </label>
                         <input
-                          type="checkbox"
-                          checked={smartCutRules.fillerEnabled}
-                          onChange={(event) => updateSmartCutRule({ fillerEnabled: event.target.checked })}
+                          className="input manual-editor-rule-field"
+                          value={smartCutRules.fillers}
+                          onChange={(event) => updateSmartCutRule({ fillers: event.target.value })}
+                          placeholder="自定义语气词，用逗号分隔"
                         />
-                        <span>语气词</span>
-                        <strong>{smartCutRuleCounts.filler}</strong>
-                      </label>
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={smartCutRules.repeatedEnabled}
-                          onChange={(event) => updateSmartCutRule({ repeatedEnabled: event.target.checked })}
-                        />
-                        <span>重复口误</span>
-                        <strong>{smartCutRuleCounts.repeated}</strong>
-                      </label>
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={smartCutRules.pauseEnabled}
-                          onChange={(event) => updateSmartCutRule({ pauseEnabled: event.target.checked })}
-                        />
-                        <span>长停顿</span>
-                        <strong>{smartCutRuleCounts.pause}</strong>
-                      </label>
-                      <label>
-                        <input
-                          type="checkbox"
-                          checked={smartCutRules.smartDeleteEnabled}
-                          onChange={(event) => updateSmartCutRule({ smartDeleteEnabled: event.target.checked })}
-                        />
-                        <span>智能废片</span>
-                        <strong>{smartCutRuleCounts.smartDelete}</strong>
-                      </label>
-                      <label>
-                        停顿
-                        <input
-                          className="input"
-                          type="number"
-                          min={0.1}
-                          max={5}
-                          step={0.1}
-                          value={smartCutRules.pauseThresholdSec}
-                          onChange={(event) => updateSmartCutRule({ pauseThresholdSec: Number(event.target.value || 0.8) })}
-                        />
-                        秒
-                      </label>
-                      <label>
-                        保留气口
-                        <input
-                          className="input"
-                          type="number"
-                          min={0}
-                          max={1}
-                          step={0.01}
-                          value={smartCutRules.pauseBreathSec ?? DEFAULT_SMART_CUT_RULES.pauseBreathSec}
-                          onChange={(event) => updateSmartCutRule({ pauseBreathSec: Number(event.target.value || 0) })}
-                        />
-                        秒/侧
-                      </label>
+                      </section>
+                      <section className="manual-editor-rule-item">
+                        <label className="manual-editor-rule-control">
+                          <input
+                            type="checkbox"
+                            checked={smartCutRules.repeatedEnabled}
+                            onChange={(event) => updateSmartCutRule({ repeatedEnabled: event.target.checked })}
+                          />
+                          <span>重复口误</span>
+                          <strong>{smartCutRuleCounts.repeated}</strong>
+                        </label>
+                      </section>
+                      <section className="manual-editor-rule-item">
+                        <label className="manual-editor-rule-control">
+                          <input
+                            type="checkbox"
+                            checked={smartCutRules.pauseEnabled}
+                            onChange={(event) => updateSmartCutRule({ pauseEnabled: event.target.checked })}
+                          />
+                          <span>停顿</span>
+                          <strong>{smartCutRuleCounts.pause}</strong>
+                        </label>
+                        <label className="manual-editor-rule-setting">
+                          <span>停顿阈值</span>
+                          <input
+                            className="input"
+                            type="number"
+                            min={0.1}
+                            max={5}
+                            step={0.1}
+                            value={smartCutRules.pauseThresholdSec}
+                            onChange={(event) => updateSmartCutRule({ pauseThresholdSec: Number(event.target.value || 0.8) })}
+                          />
+                          <span>秒</span>
+                        </label>
+                      </section>
+                      <section className="manual-editor-rule-item">
+                        <label className="manual-editor-rule-control">
+                          <input
+                            type="checkbox"
+                            checked={smartCutRules.smartDeleteEnabled}
+                            onChange={(event) => updateSmartCutRule({ smartDeleteEnabled: event.target.checked })}
+                          />
+                          <span>智能删减</span>
+                          <strong>{smartCutRuleCounts.smartDelete}</strong>
+                        </label>
+                      </section>
                     </div>
-                    <input
-                      className="input"
-                      value={smartCutRules.fillers}
-                      onChange={(event) => updateSmartCutRule({ fillers: event.target.value })}
-                      placeholder="自定义语气词，用逗号分隔"
-                    />
                     <div className="manual-editor-rule-examples" aria-label="剪辑规则删除样式示范">
                       {smartCutRulePreviews.map((preview) => (
                         <article key={preview.kind} className={classNames("manual-editor-rule-example", !preview.enabled && "disabled")}>
@@ -7644,32 +8041,34 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                         </article>
                       ))}
                     </div>
-                    {pendingSmartDeleteRanges.length ? (
+                    {pendingSmartDeleteSuggestions.length ? (
                       <div className="manual-editor-smart-suggestions" aria-label="智能剪辑建议">
                         <div className="manual-editor-smart-suggestions-head">
-                          <strong>智能废片建议</strong>
-                          <span>{pendingSmartDeleteRanges.length} 条需确认</span>
+                          <strong>智能删减建议</strong>
+                          <span>{pendingSmartDeleteSuggestions.length} 条需确认</span>
                         </div>
-                        {pendingSmartDeleteRanges.map((range) => (
-                          <article key={`${range.start}-${range.end}-${range.reason || ""}`} className="manual-editor-smart-suggestion">
+                        {pendingSmartDeleteSuggestions.map((suggestion) => (
+                          <article key={`${suggestion.start}-${suggestion.end}-${suggestion.primaryRange.reason || ""}`} className="manual-editor-smart-suggestion">
                             <button
                               type="button"
                               className="manual-editor-smart-suggestion-main"
-                              onClick={() => jumpToSourceTime(range.start)}
-                              title={`定位 ${formatSeconds(range.start)} - ${formatSeconds(range.end)}`}
+                              onClick={() => jumpToSourceTime(suggestion.start)}
+                              title={`定位 ${formatSeconds(suggestion.start)} - ${formatSeconds(suggestion.end)}`}
                             >
-                              <strong>{formatSeconds(range.start)} - {formatSeconds(range.end)}</strong>
-                              <span>{textSnippet(range.sourceText || range.detail || range.reason || smartDeleteReasonLabel(range.reason), 42)}</span>
+                              <strong>{formatSeconds(suggestion.start)} - {formatSeconds(suggestion.end)}</strong>
+                              <span className="manual-editor-smart-suggestion-text">{suggestion.text || "待删内容"}</span>
+                              <span className="manual-editor-smart-suggestion-reason">{suggestion.reasonSummary}</span>
+                              {suggestion.detailSummary ? <span className="manual-editor-smart-suggestion-detail">{suggestion.detailSummary}</span> : null}
                             </button>
                             <div className="manual-editor-smart-suggestion-actions">
-                              <button type="button" className="button small secondary" disabled={!session.editable} onClick={() => dismissSmartDeleteSuggestion(range)}>撤销</button>
-                              <button type="button" className="button small danger" disabled={!session.editable} onClick={() => confirmSmartDeleteSuggestion(range)}>确认剪掉</button>
+                              <button type="button" className="button small secondary" disabled={!session.editable} onClick={() => dismissSmartDeleteSuggestion(suggestion)}>撤销</button>
+                              <button type="button" className="button small danger" disabled={!session.editable} onClick={() => confirmSmartDeleteSuggestion(suggestion)}>确认剪掉</button>
                             </div>
                           </article>
                         ))}
                       </div>
                     ) : null}
-                    <div className="manual-editor-rule-memory">语气词、重复口误和长停顿规则会在可信时间范围内自动进入待剪区间；没有可信时间的命中只计为候选。智能废片必须逐条确认后才允许进入最终剪辑决策。规则设置已全局记忆。</div>
+                    <div className="manual-editor-rule-memory">语气词、重复口误和停顿规则会在可信时间范围内自动进入待剪区间；没有可信时间的命中只计为候选。智能删减必须逐条确认后才允许进入最终剪辑决策。规则设置已全局记忆。</div>
                   </>
                 ) : null}
               </div>
@@ -7681,7 +8080,17 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
         <section className="manual-editor-timeline">
           <div className="manual-editor-preview-head">
             <strong>统一时间轴</strong>
-            <span className="muted">移动只显示时间，单击才定位监看；字幕和预览共用同一播放头。</span>
+            <div className="manual-editor-semantic-summary">
+              {semanticFocus.primary ? (
+                <>
+                  <span className="status-pill pending">{semanticFocus.primary.label}</span>
+                  {semanticFocus.primary.timestamp ? <span className="muted">{semanticFocus.primary.timestamp}</span> : null}
+                  {semanticFocus.primary.text ? <span className="muted">{semanticFocus.primary.text}</span> : null}
+                </>
+              ) : (
+                <span className="muted">移动只显示时间，单击才定位监看；字幕和预览共用同一播放头。</span>
+              )}
+            </div>
           </div>
 
           <div
@@ -7800,6 +8209,29 @@ export function JobManualEditSection({ job, session, previewAssets, saving, auto
                     </button>
                   );
                 })}
+              </div>
+            ) : null}
+            {semanticTimelineMarkers.length ? (
+              <div className="manual-editor-unified-semantic-track" aria-label="语义时间锚点">
+                {semanticTimelineMarkers.map((marker) => (
+                  <button
+                    key={marker.key}
+                    type="button"
+                    className={classNames(
+                      "manual-editor-unified-semantic-marker",
+                      semanticFocus.active.some((item) => item.key === marker.key) && "active",
+                    )}
+                    style={{ left: `${marker.leftPercent}%`, width: `${marker.widthPercent}%` }}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      selectSubtitleNearSourceTime(marker.start);
+                      jumpToSourceTime(marker.start);
+                    }}
+                    title={`${marker.timestamp || `${formatSeconds(marker.start)} - ${formatSeconds(marker.end)}`} ${marker.label}${marker.text ? `：${marker.text}` : ""}${marker.detail.length ? ` / ${marker.detail.join(" / ")}` : ""}`}
+                  >
+                    <span>{marker.label}</span>
+                  </button>
+                ))}
               </div>
             ) : null}
           </div>

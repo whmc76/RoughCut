@@ -8,6 +8,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+try:
+    from roughcut.host.codex_bridge import _resolve_codex_command_candidates
+except Exception:  # pragma: no cover - helper must still work outside the package runtime
+    _resolve_codex_command_candidates = None
+
 
 def _read_query() -> str:
     query = str(os.getenv("ROUGHCUT_SEARCH_QUERY") or "").strip()
@@ -27,6 +32,10 @@ def _read_max_results() -> int:
 
 def _resolve_command() -> str:
     command_name = str(os.getenv("ROUGHCUT_CODEX_SEARCH_COMMAND") or "codex").strip() or "codex"
+    if _resolve_codex_command_candidates is not None:
+        candidates = _resolve_codex_command_candidates(command_name)
+        if candidates:
+            return candidates[0]
     resolved = shutil.which(command_name)
     if not resolved:
         raise RuntimeError(f"Codex command not found in PATH: {command_name}")

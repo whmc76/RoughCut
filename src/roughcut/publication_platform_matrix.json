@@ -1,0 +1,82 @@
+{
+  "collection_policy_skip_values": [
+    "skip",
+    "none",
+    "not_applicable",
+    "no_collection"
+  ],
+  "cover_policy_skip_values": [
+    "skip",
+    "default",
+    "auto",
+    "platform_default",
+    "not_applicable",
+    "no_custom_cover"
+  ],
+  "platforms": {
+    "bilibili": {
+      "requires_explicit_collection_policy": true,
+      "requires_custom_cover_policy": true,
+      "supports_declaration": true,
+      "default_declaration": "内容无需标注",
+      "supports_scheduled_publish": true
+    },
+    "douyin": {
+      "requires_explicit_collection_policy": true,
+      "requires_custom_cover_policy": true,
+      "supports_declaration": true,
+      "default_declaration": "无需添加自主声明",
+      "supports_scheduled_publish": true
+    },
+    "kuaishou": {
+      "requires_explicit_collection_policy": true,
+      "requires_custom_cover_policy": true,
+      "supports_declaration": false,
+      "default_declaration": "",
+      "supports_scheduled_publish": true
+    },
+    "toutiao": {
+      "requires_explicit_collection_policy": true,
+      "requires_custom_cover_policy": true,
+      "supports_declaration": false,
+      "default_declaration": "",
+      "supports_scheduled_publish": true
+    },
+    "wechat-channels": {
+      "requires_explicit_collection_policy": true,
+      "requires_custom_cover_policy": true,
+      "supports_declaration": false,
+      "default_declaration": "",
+      "supports_scheduled_publish": true,
+      "manual_handoff_only": true,
+      "manual_publish_entry_url": "https://channels.weixin.qq.com/login.html",
+      "manual_publish_reason": "视频号暂不支持自动一键发布，需要人工登录后继续发布。"
+    },
+    "xiaohongshu": {
+      "requires_explicit_collection_policy": true,
+      "requires_custom_cover_policy": true,
+      "supports_declaration": false,
+      "default_declaration": "",
+      "supports_scheduled_publish": true,
+      "minimum_schedule_lead_minutes": 60
+    },
+    "youtube": {
+      "requires_explicit_collection_policy": true,
+      "requires_custom_cover_policy": true,
+      "supports_declaration": false,
+      "default_declaration": "",
+      "supports_scheduled_publish": true,
+      "soft_verification_fields": [
+        "tags"
+      ],
+      "skip_explicit_tag_entry": true
+    },
+    "x": {
+      "requires_explicit_collection_policy": false,
+      "requires_custom_cover_policy": false,
+      "supports_declaration": false,
+      "default_declaration": "",
+      "supports_scheduled_publish": true
+    }
+  }
+}

@@ -66,3 +66,36 @@ watch/
 roughcut.ports.env
 frame_*.jpg
 data/intelligent_copy/
+
+# Local debug and runtime scratch outputs
+.hydra-host-dev/
+/3305
+/tmp-dedupe-video.mp4
+
+# Generated artifact runs kept locally during publication/manual-editor debugging
+artifacts/*manual-editor*.json
+artifacts/api-*.json
+artifacts/current-manual-editor*.json
+artifacts/first-source-rows-debug.json
+artifacts/formal_preflight*.json
+artifacts/formal_release*.json
+artifacts/job-verify-utf8.json
+artifacts/live-*-manual-editor*.json
+artifacts/maxace4-*.json
+artifacts/platform_packaging_formal_release_six.json
+artifacts/publication-agent*.log
+artifacts/publication-autopilot-knowledge.json
+artifacts/publication-autopilot/
+artifacts/publication-autopilot-*/
+artifacts/publication-formal-*.json
+artifacts/publication-packaging-*.json
+artifacts/publication-preflight*.json
+artifacts/publication-real-release-gate*.json
+artifacts/publication-recovery-knowledge-base.json
+artifacts/publication-release-gate.json
+artifacts/publication_browser_agent_service.error.log
+artifacts/publication-visual-evidence/
+artifacts/*manual-handoff-cli-smoke/
+artifacts/*objective-smoke/
+artifacts/*.wav
+artifacts/*.mp4

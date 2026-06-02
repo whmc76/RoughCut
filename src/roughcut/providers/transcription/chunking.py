@@ -104,8 +104,17 @@ def build_audio_chunk_specs(duration: float, *, config: AudioChunkConfig) -> lis
     if not ranges:
         ranges = [(0.0, round(duration, 3))]
     elif ranges[-1][1] < round(duration, 3):
-        last_start, _ = ranges[-1]
-        ranges[-1] = (last_start, round(duration, 3))
+        duration_end = round(duration, 3)
+        last_start, last_end = ranges[-1]
+        remaining = duration_end - last_end
+        if remaining >= config.min_chunk_sec:
+            ranges.append((last_end, duration_end))
+        else:
+            tail_start = round(max(0.0, duration_end - config.chunk_size_sec), 3)
+            if tail_start > last_start + 0.1:
+                ranges.append((tail_start, duration_end))
+            else:
+                ranges[-1] = (last_start, duration_end)
     count = len(ranges)
     return [
         AudioChunkSpec(index=index, count=count, start=start, end=end)

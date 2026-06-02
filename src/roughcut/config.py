@@ -96,6 +96,7 @@ ENV_EXPLICIT_OVERRIDE_SETTINGS: tuple[str, ...] = ENV_MANAGED_SETTINGS + (
     "publication_worker_batch_limit",
     "publication_attempt_lease_sec",
     "publication_browser_agent_timeout_sec",
+    "publication_browser_cdp_url",
 )
 TRANSCRIPTION_PROVIDER_PRIORITY: tuple[str, ...] = TRANSCRIPTION_PROVIDER_VALUES
 TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
@@ -125,22 +126,25 @@ HYBRID_REASONING_PROVIDER_VALUES: tuple[str, ...] = REASONING_PROVIDER_VALUES
 LLM_ROUTING_MODE_VALUES: tuple[str, ...] = ("bundled", "hybrid_performance")
 HYBRID_SEARCH_MODE_VALUES: tuple[str, ...] = ("off", "entity_gated", "follow_provider")
 REASONING_EFFORT_VALUES: tuple[str, ...] = ("minimal", "low", "medium", "high")
-DEFAULT_REASONING_PROVIDER = "openai"
-DEFAULT_REASONING_MODEL = "gpt-5.5"
-DEFAULT_BACKUP_REASONING_PROVIDER = "openai"
-DEFAULT_BACKUP_REASONING_MODEL = "gpt-5.5"
-DEFAULT_BACKUP_VISION_MODEL = "gpt-5.5"
-DEFAULT_HYBRID_ANALYSIS_PROVIDER = "openai"
-DEFAULT_HYBRID_ANALYSIS_MODEL = "gpt-5.5"
-DEFAULT_MINIMAX_REASONING_MODEL = "MiniMax-M2.7"
+DEFAULT_MINIMAX_REASONING_MODEL = "MiniMax-M3"
+DEFAULT_REASONING_PROVIDER = "minimax"
+DEFAULT_REASONING_MODEL = DEFAULT_MINIMAX_REASONING_MODEL
+DEFAULT_BACKUP_REASONING_PROVIDER = "minimax"
+DEFAULT_BACKUP_REASONING_MODEL = DEFAULT_MINIMAX_REASONING_MODEL
+DEFAULT_BACKUP_VISION_MODEL = DEFAULT_MINIMAX_REASONING_MODEL
+DEFAULT_HYBRID_ANALYSIS_PROVIDER = "minimax"
+DEFAULT_HYBRID_ANALYSIS_MODEL = DEFAULT_MINIMAX_REASONING_MODEL
 DEFAULT_HYBRID_COPY_PROVIDER = "minimax"
 DEFAULT_HYBRID_COPY_MODEL = DEFAULT_MINIMAX_REASONING_MODEL
-DEFAULT_SEARCH_FALLBACK_PROVIDER = "openai"
-DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER = "openai"
-DEFAULT_MULTIMODAL_FALLBACK_PROVIDER = "openai"
-DEFAULT_MULTIMODAL_FALLBACK_MODEL = "gpt-5.5"
+DEFAULT_SEARCH_PROVIDER = "searxng"
+DEFAULT_SEARCH_FALLBACK_PROVIDER = "searxng"
+DEFAULT_BACKUP_SEARCH_PROVIDER = "searxng"
+DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER = "searxng"
+DEFAULT_MULTIMODAL_FALLBACK_PROVIDER = "minimax"
+DEFAULT_MULTIMODAL_FALLBACK_MODEL = DEFAULT_MINIMAX_REASONING_MODEL
 DEFAULT_MODEL_SEARCH_HELPER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "codex_model_search_helper.py"
 MINIMAX_REASONING_MODEL_ALIASES: dict[str, str] = {
+    "minimax-m3": "MiniMax-M3",
     "minimax-m2.7-highspeed": "MiniMax-M2.7",
 }
 
@@ -406,36 +410,36 @@ class Settings(BaseSettings):
     render_step_packaging_stale_timeout_sec: int = 2400
     avatar_render_no_progress_timeout_sec: int = 0
     runtime_preflight_docker_enabled: bool = False
-    docker_gpu_guard_enabled: bool = False
+    docker_gpu_guard_enabled: bool = True
     docker_gpu_guard_idle_timeout_sec: int = 900
     heygem_docker_guard_enabled: bool = True
     heygem_docker_compose_file: str = "E:/WorkSpace/heygem/docker-compose.yml"
     heygem_docker_env_file: str = "E:/WorkSpace/heygem/.env"
     heygem_docker_services: str = "heygem"
     heygem_docker_idle_timeout_sec: int = 900
-    indextts2_docker_guard_enabled: bool = True
+    indextts2_docker_guard_enabled: bool = False
     indextts2_docker_compose_file: str = "E:/WorkSpace/indextts2-service/docker-compose.yml"
     indextts2_docker_env_file: str = "E:/WorkSpace/indextts2-service/.env"
     indextts2_docker_services: str = "indextts2"
-    indextts2_docker_idle_timeout_sec: int = 900
+    indextts2_docker_idle_timeout_sec: int = 10
     local_asr_docker_guard_enabled: bool = True
-    local_asr_docker_compose_file: str = "E:/WorkSpace/RoughCut/docker-compose.asr-matrix.yml"
+    local_asr_docker_compose_file: str = str((DEFAULT_PROJECT_ROOT / "docker-compose.asr-matrix.yml").as_posix())
     local_asr_docker_env_file: str = ""
     local_asr_docker_services: str = "qwen3-asr"
-    local_asr_docker_idle_timeout_sec: int = 900
+    local_asr_docker_idle_timeout_sec: int = 10
     cosyvoice3_tts_api_base_url: str = "http://127.0.0.1:30180"
     cosyvoice3_tts_health_path: str = "/health"
     cosyvoice3_tts_sample_rate: int = 24000
     cosyvoice3_tts_docker_guard_enabled: bool = True
-    cosyvoice3_tts_docker_compose_file: str = "E:/WorkSpace/RoughCut/docker-compose.cosyvoice3.yml"
+    cosyvoice3_tts_docker_compose_file: str = str((DEFAULT_PROJECT_ROOT / "docker-compose.cosyvoice3.yml").as_posix())
     cosyvoice3_tts_docker_env_file: str = ""
     cosyvoice3_tts_docker_services: str = "cosyvoice3-tts"
-    cosyvoice3_tts_docker_idle_timeout_sec: int = 900
+    cosyvoice3_tts_docker_idle_timeout_sec: int = 10
     moss_tts_local_api_base_url: str = "http://127.0.0.1:30191"
     moss_tts_local_health_path: str = "/health"
     moss_tts_local_sample_rate: int = 24000
     moss_tts_local_docker_guard_enabled: bool = True
-    moss_tts_local_docker_compose_file: str = "E:/WorkSpace/RoughCut/docker-compose.moss-tts-local.yml"
+    moss_tts_local_docker_compose_file: str = str((DEFAULT_PROJECT_ROOT / "docker-compose.moss-tts-local.yml").as_posix())
     moss_tts_local_docker_env_file: str = ""
     moss_tts_local_docker_services: str = "moss-tts-local"
     moss_tts_local_docker_idle_timeout_sec: int = 10
@@ -453,7 +457,7 @@ class Settings(BaseSettings):
     backup_reasoning_model: str = DEFAULT_BACKUP_REASONING_MODEL
     backup_reasoning_effort: str = "low"
     backup_vision_model: str = DEFAULT_BACKUP_VISION_MODEL
-    backup_search_provider: str = "auto"
+    backup_search_provider: str = DEFAULT_BACKUP_SEARCH_PROVIDER
     backup_search_fallback_provider: str = DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER
     backup_model_search_helper: str = ""
     local_reasoning_model: str = "qwen3.5:9b"
@@ -470,7 +474,7 @@ class Settings(BaseSettings):
     multimodal_fallback_model: str = DEFAULT_MULTIMODAL_FALLBACK_MODEL
 
     # Search (Phase 2)
-    search_provider: str = "auto"  # auto | openai | anthropic | minimax | ollama | model | searxng
+    search_provider: str = DEFAULT_SEARCH_PROVIDER  # auto | openai | anthropic | minimax | ollama | model | searxng
     search_fallback_provider: str = DEFAULT_SEARCH_FALLBACK_PROVIDER  # openai | anthropic | minimax | ollama | model | searxng
     model_search_helper: str = ""
     searxng_url: str = "http://localhost:8080"
@@ -510,7 +514,9 @@ class Settings(BaseSettings):
 
     # Publication / browser-agent
     publication_browser_agent_base_url: str = "http://127.0.0.1:49310"
+    publication_browser_cdp_url: str = "http://127.0.0.1:9222"
     publication_browser_agent_auth_token: str = ""
+    publication_reconcile_callback_base_url: str = ""
     publication_worker_poll_interval_sec: int = 30
     publication_worker_batch_limit: int = 5
     publication_attempt_lease_sec: int = 300
@@ -577,12 +583,35 @@ class Settings(BaseSettings):
     auto_select_cover_variant: bool = True
     cover_selection_review_gap: float = 0.08
     intelligent_copy_cover_image_generation_enabled: bool = True
-    intelligent_copy_cover_image_backend: str = "codex_builtin"  # codex_builtin | openai_images_api
+    intelligent_copy_cover_image_backend: str = "codex_builtin"  # codex_builtin | openai_images_api | minimax_images_api | dreamina_web
     intelligent_copy_cover_image_model: str = "image2"
     intelligent_copy_cover_image_quality: str = "medium"
     intelligent_copy_cover_image_timeout_sec: int = 90
+    intelligent_copy_cover_codex_max_attempts: int = 1
     intelligent_copy_cover_codex_runner_model: str = "gpt-5.4-mini"
     intelligent_copy_cover_codex_runner_effort: str = "low"
+    intelligent_copy_cover_dreamina_command: str = "node"
+    intelligent_copy_cover_dreamina_runner_script: str = ""
+    intelligent_copy_cover_dreamina_cdp_base_url: str = "http://127.0.0.1:9222"
+    intelligent_copy_cover_dreamina_cookie_source_base_url: str = "http://127.0.0.1:9222"
+    intelligent_copy_cover_dreamina_page_url: str = "https://jimeng.jianying.com/ai-tool/generate/?type=image"
+    intelligent_copy_cover_dreamina_page_url_pattern: str = "jimeng.jianying.com/ai-tool/generate"
+    intelligent_copy_cover_dreamina_user_data_dir: str = "C:/Users/Administrator/AppData/Local/HydraDreaminaCDPProfile"
+    intelligent_copy_cover_dreamina_headless_user_data_dir: str = (
+        "C:/Users/Administrator/AppData/Local/HydraDreaminaCDPProfileHeadless"
+    )
+    intelligent_copy_cover_dreamina_template_path: str = ""
+    intelligent_copy_cover_dreamina_submit_state_path: str = ""
+    intelligent_copy_cover_dreamina_executable_path: str = ""
+    intelligent_copy_cover_dreamina_http_replay_enabled: bool = True
+    intelligent_copy_cover_dreamina_auto_launch: bool = True
+    intelligent_copy_cover_dreamina_headless: bool = True
+    intelligent_copy_cover_dreamina_keep_alive: bool = False
+    intelligent_copy_cover_dreamina_poll_interval_ms: int = 5000
+    intelligent_copy_cover_dreamina_poll_timeout_ms: int = 300000
+    intelligent_copy_cover_dreamina_submit_timeout_ms: int = 60000
+    intelligent_copy_cover_dreamina_capture_timeout_ms: int = 120000
+    intelligent_copy_cover_dreamina_min_submit_interval_ms: int = 45000
     packaging_selection_review_gap: float = 0.08
     packaging_selection_min_score: float = 0.6
     edit_decision_llm_review_enabled: bool = True
@@ -760,6 +789,10 @@ def normalize_reasoning_model_for_provider(provider: object, model: object) -> s
 
 def _has_minimax_reasoning_credentials(settings: Any) -> bool:
     return bool(str(getattr(settings, "minimax_api_key", "") or "").strip())
+
+
+def _has_configured_searxng(settings: Any) -> bool:
+    return bool(str(getattr(settings, "searxng_url", "") or "").strip())
 
 
 def _resolve_codex_bridge_command(settings: Any) -> str:
@@ -1069,12 +1102,13 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
         normalized["llm_routing_mode"] = routing_mode if routing_mode in LLM_ROUTING_MODE_VALUES else "bundled"
 
     if "search_provider" in normalized:
-        normalized["search_provider"] = "auto"
+        provider = str(normalized.get("search_provider") or "").strip().lower()
+        normalized["search_provider"] = provider if provider in SEARCH_PROVIDER_VALUES else DEFAULT_SEARCH_PROVIDER
 
     if "search_fallback_provider" in normalized:
         fallback = str(normalized.get("search_fallback_provider") or "").strip().lower()
         normalized["search_fallback_provider"] = (
-            fallback if fallback in SEARCH_FALLBACK_PROVIDER_VALUES else "searxng"
+            fallback if fallback in SEARCH_FALLBACK_PROVIDER_VALUES else DEFAULT_SEARCH_FALLBACK_PROVIDER
         )
 
     if "backup_search_provider" in normalized:
@@ -1157,6 +1191,17 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
         "intelligent_copy_cover_image_model",
         "intelligent_copy_cover_image_quality",
         "intelligent_copy_cover_codex_runner_model",
+        "intelligent_copy_cover_dreamina_command",
+        "intelligent_copy_cover_dreamina_runner_script",
+        "intelligent_copy_cover_dreamina_cdp_base_url",
+        "intelligent_copy_cover_dreamina_cookie_source_base_url",
+        "intelligent_copy_cover_dreamina_page_url",
+        "intelligent_copy_cover_dreamina_page_url_pattern",
+        "intelligent_copy_cover_dreamina_user_data_dir",
+        "intelligent_copy_cover_dreamina_headless_user_data_dir",
+        "intelligent_copy_cover_dreamina_template_path",
+        "intelligent_copy_cover_dreamina_submit_state_path",
+        "intelligent_copy_cover_dreamina_executable_path",
     ):
         if key in normalized:
             normalized[key] = str(normalized.get(key) or "").strip()
@@ -1169,10 +1214,13 @@ def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
             backend = "openai_images_api"
         if backend in {"minimax", "minimax_api"}:
             backend = "minimax_images_api"
+        if backend in {"dreamina", "dreamina_cdp", "dreamina_web_cdp"}:
+            backend = "dreamina_web"
         normalized["intelligent_copy_cover_image_backend"] = backend if backend in {
             "codex_builtin",
             "openai_images_api",
             "minimax_images_api",
+            "dreamina_web",
         } else "codex_builtin"
 
     for key in ("acp_bridge_backend", "acp_bridge_fallback_backend"):
@@ -1307,10 +1355,14 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
     backup_search_provider = str(getattr(settings, "backup_search_provider", "") or "").strip().lower()
     if backup_search_provider not in SEARCH_PROVIDER_VALUES:
         backup_search_provider = "auto"
+    if backup_search_provider == "minimax" and not _has_minimax_reasoning_credentials(settings) and _has_configured_searxng(settings):
+        backup_search_provider = "searxng"
     object.__setattr__(settings, "backup_search_provider", backup_search_provider)
     backup_search_fallback = str(getattr(settings, "backup_search_fallback_provider", "") or "").strip().lower()
     if backup_search_fallback not in SEARCH_FALLBACK_PROVIDER_VALUES:
         backup_search_fallback = DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER
+    if backup_search_fallback == "minimax" and not _has_minimax_reasoning_credentials(settings) and _has_configured_searxng(settings):
+        backup_search_fallback = "searxng"
     object.__setattr__(settings, "backup_search_fallback_provider", backup_search_fallback)
     object.__setattr__(
         settings,
@@ -1331,7 +1383,14 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
     search_fallback = str(getattr(settings, "search_fallback_provider", "") or "").strip().lower()
     if search_fallback not in SEARCH_FALLBACK_PROVIDER_VALUES:
         search_fallback = DEFAULT_SEARCH_FALLBACK_PROVIDER
-    object.__setattr__(settings, "search_provider", "auto")
+    search_provider = str(getattr(settings, "search_provider", "") or "").strip().lower()
+    if search_provider not in SEARCH_PROVIDER_VALUES:
+        search_provider = DEFAULT_SEARCH_PROVIDER
+    if search_provider == "minimax" and not _has_minimax_reasoning_credentials(settings) and _has_configured_searxng(settings):
+        search_provider = "searxng"
+    if search_fallback == "minimax" and not _has_minimax_reasoning_credentials(settings) and _has_configured_searxng(settings):
+        search_fallback = "searxng"
+    object.__setattr__(settings, "search_provider", search_provider)
     object.__setattr__(settings, "search_fallback_provider", search_fallback)
 
     multimodal_fallback = str(getattr(settings, "multimodal_fallback_provider", "") or "").strip().lower()
@@ -1446,6 +1505,13 @@ def resolve_llm_task_route(task_name: str, *, settings: Settings | None = None) 
             route["reasoning_effort"] = effort
         return route
     if normalized_task == "copy":
+        active_provider = str(
+            getattr(current, "active_reasoning_provider", "")
+            or getattr(current, "reasoning_provider", "")
+            or ""
+        ).strip().lower()
+        if active_provider == "openai" and uses_codex_auth_helper(current):
+            return {}
         selected_provider = "minimax"
         selected_model = str(
             getattr(current, "hybrid_copy_model", DEFAULT_HYBRID_COPY_MODEL)

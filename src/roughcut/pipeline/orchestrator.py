@@ -1860,7 +1860,7 @@ def _artifact_types_for_quality_rerun(rerun_steps: set[str], *, issue_codes: lis
     if "transcribe" in rerun_steps and bool(getattr(settings, "asr_evidence_enabled", False)):
         artifact_types.add(ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE)
     if "content_profile" in rerun_steps:
-        artifact_types.update({"content_profile", "content_profile_draft", "content_profile_final"})
+        artifact_types.update({"content_profile", "content_profile_draft", "content_profile_final", "video_understanding"})
         if bool(getattr(settings, "ocr_enabled", False)):
             artifact_types.add(ARTIFACT_TYPE_CONTENT_PROFILE_OCR)
         if bool(getattr(settings, "entity_graph_enabled", False)):

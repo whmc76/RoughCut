@@ -230,6 +230,7 @@ TITLE_STYLE_OPTIONS = {
 COPY_STYLE_OPTIONS = {
     "attention_grabbing",
     "balanced",
+    "claim_grounded",
     "premium_editorial",
     "trusted_expert",
     "playful_meme",

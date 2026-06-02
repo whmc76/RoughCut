@@ -44,7 +44,7 @@ _CONCRETE_DETAIL_PATTERN = re.compile(
 )
 
 _ABSOLUTE_FACT_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(唯一|首个|首次|第一(?:名|款|个|家|批|位)?|最强|最好|顶级|完全|永久|绝对|百分百|100%)"),
+    re.compile(r"(唯一|首个|首次|(?:全球|全国|行业|同级|全网)?第一(?:名|款|个|家|批|位)|最强|最好|顶级|完全|永久|绝对|百分百|100%)"),
     re.compile(r"(官方|认证|获奖|专利|军规|医用|治疗|治愈|防过敏|无副作用)"),
 )
 

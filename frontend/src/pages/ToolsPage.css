@@ -1123,6 +1123,28 @@
   font: 12px/1.55 "IBM Plex Mono", "Consolas", monospace;
 }
 
+.tts-segments-list {
+  display: grid;
+  gap: 10px;
+}
+
+.tts-segment-item {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(15, 118, 110, 0.12);
+}
+
+.tts-segment-item:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.tts-segment-item pre {
+  max-height: 140px;
+  margin: 0;
+}
+
 .tool-run-progress {
   gap: 12px;
   padding: 14px;

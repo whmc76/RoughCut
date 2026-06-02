@@ -57,6 +57,16 @@ def test_batch_default_launches_docker_full_dev_mode() -> None:
     assert "start_roughcut.ps1\" -Mode local" in source
 
 
+def test_batch_test_alias_launches_docker_full_with_frontend_dev() -> None:
+    source = START_BAT.read_text(encoding="utf-8")
+
+    assert 'if /I "%~1"=="test" goto powershell_full_test' in source
+    assert 'if /I "%~1"=="full-test" goto powershell_full_test' in source
+    assert 'if /I "%~1"=="runtime-test" goto powershell_runtime_test' in source
+    assert 'start_roughcut.ps1" -Mode full -FrontendDev' in source
+    assert 'start_roughcut.ps1" -Mode runtime -FrontendDev' in source
+
+
 def test_powershell_default_launches_docker_full_dev_mode() -> None:
     source = START_SCRIPT.read_text(encoding="utf-8")
 
@@ -138,6 +148,16 @@ def test_frontend_lan_urls_are_preserved_as_an_array() -> None:
 
     assert "$frontendLanUrls = @(if ($NoFrontendDev)" in source
     assert "Get-RoughCutFrontendLanUrls -FrontendPort $resolvedFrontendDevPort" in source
+
+
+def test_docker_frontend_dev_session_attaches_vite_to_compose_api() -> None:
+    source = START_SCRIPT.read_text(encoding="utf-8")
+    body = _function_body(source, "Start-RoughCutDockerFrontendDevSession")
+
+    assert "Resolve-ContainerMappedPort -ContainerName \"roughcut-api-1\" -ContainerPort 8000" in source
+    assert "Start-RoughCutFrontendDevServer -FrontendPort $resolvedFrontendDevPort -ApiPort $apiPort" in body
+    assert "Wait-RoughCutHttpServiceReady -ServiceName \"Frontend dev server\"" in body
+    assert "Wait-LauncherClose" in body
 
 
 def test_launcher_supervisor_restarts_exited_processes() -> None:

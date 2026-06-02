@@ -290,6 +290,7 @@ export function JobQueueTable({
               </tr>
             )}
             {jobs.map((job) => {
+              const isPublicationTask = job.queue_task_kind === "publication";
               const showReviewAction = job.status === "needs_review";
               const highlightedReviewAction = isHighlightedReviewAction(job);
               const { filenameDescription } = splitVideoDescription(job.video_description);
@@ -301,7 +302,14 @@ export function JobQueueTable({
               const manualEditorReady = canOpenManualEditorFromQueue(job);
 
               return (
-                <tr key={job.id} className={classNames(selectedJobId === job.id && "selected-row")} onClick={() => onSelect(job.id)}>
+                <tr
+                  key={job.id}
+                  className={classNames(
+                    selectedJobId === job.id && "selected-row",
+                    isPublicationTask && "job-row-publication",
+                  )}
+                  onClick={() => onSelect(job.id)}
+                >
                   <td>
                     <div className="job-file-cell">
                       <JobQueueThumbnail job={job} />
@@ -354,6 +362,7 @@ export function JobQueueTable({
                   <td>
                     <div className="form-stack compact-top">
                       <span className={`status-chip ${jobStatusTone(job)}`}>{reviewStatusLabel(job)}</span>
+                      {isPublicationTask ? <span className="status-pill publication">发布任务</span> : null}
                       {manualEditStatus ? (
                         <span className="status-pill pending">{manualEditStatus}</span>
                       ) : null}
@@ -390,7 +399,7 @@ export function JobQueueTable({
                           {reviewActionLabel(job, t)}
                         </button>
                       ) : null}
-                      {job.status === "done" ? (
+                      {job.status === "done" && !isPublicationTask ? (
                         <button
                           className="button button-sm job-publish-cta"
                           type="button"
@@ -403,18 +412,20 @@ export function JobQueueTable({
                           <span>一键发布</span>
                         </button>
                       ) : null}
-                      <Link
-                        className={classNames(
-                          "button button-sm",
-                          manualEditorReady ? "job-manual-edit-cta" : "ghost",
-                        )}
-                        to={`/jobs/${job.id}/manual-editor`}
-                        onMouseEnter={() => prefetchManualEditor(job.id)}
-                        onFocus={() => prefetchManualEditor(job.id)}
-                        onClick={(event) => event.stopPropagation()}
-                      >
-                        手动调整
-                      </Link>
+                      {!isPublicationTask ? (
+                        <Link
+                          className={classNames(
+                            "button button-sm",
+                            manualEditorReady ? "job-manual-edit-cta" : "ghost",
+                          )}
+                          to={`/jobs/${job.id}/manual-editor`}
+                          onMouseEnter={() => prefetchManualEditor(job.id)}
+                          onFocus={() => prefetchManualEditor(job.id)}
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          手动调整
+                        </Link>
+                      ) : null}
                       {showOpenFolder ? (
                         <button
                           className="button ghost button-sm"

@@ -12,6 +12,9 @@ from roughcut.telegram.output_codec import decode_process_output
 
 
 _WINDOWS_EXECUTABLE_SUFFIXES = {".exe", ".cmd", ".bat", ".com"}
+_RETRIABLE_CODEX_LAUNCHER_ERROR_MARKERS = (
+    "requires a newer version of codex",
+)
 
 
 def _is_direct_process_command(path: str) -> bool:
@@ -44,9 +47,7 @@ def _resolve_codex_command_candidates(command_name: str) -> list[str]:
         _append_command_candidate(candidates, shutil.which(command_name), allow_shell_script=os.name != "nt")
 
     explicit = candidates[0] if candidates else shutil.which(command_name)
-    if not explicit:
-        return candidates
-    explicit_path = Path(explicit)
+    explicit_path = Path(explicit) if explicit else None
 
     path_candidates: list[Path] = []
 
@@ -57,6 +58,13 @@ def _resolve_codex_command_candidates(command_name: str) -> list[str]:
             if candidate.exists():
                 path_candidates.append(candidate)
 
+    codex_app_bin_root = Path(os.environ.get("LOCALAPPDATA", "")) / "OpenAI" / "Codex" / "bin"
+    if codex_app_bin_root.exists():
+        for child in sorted(codex_app_bin_root.iterdir(), key=lambda item: item.name, reverse=True):
+            candidate = child / "codex.exe"
+            if candidate.exists():
+                path_candidates.append(candidate)
+
     package_root = Path(r"C:\Program Files\WindowsApps")
     if package_root.exists():
         for child in sorted(package_root.glob("OpenAI.Codex_*"), reverse=True):
@@ -64,20 +72,27 @@ def _resolve_codex_command_candidates(command_name: str) -> list[str]:
             if candidate.exists():
                 path_candidates.append(candidate)
 
-    for sibling_name in ("codex.cmd", "codex.exe", "codex"):
-        sibling = explicit_path.with_name(sibling_name)
-        if sibling.exists():
-            path_candidates.append(sibling)
+    if explicit_path is not None:
+        for sibling_name in ("codex.cmd", "codex.exe", "codex"):
+            sibling = explicit_path.with_name(sibling_name)
+            if sibling.exists():
+                path_candidates.append(sibling)
 
     for candidate in path_candidates:
         _append_command_candidate(candidates, str(candidate))
-    _append_command_candidate(candidates, str(explicit_path), allow_shell_script=os.name != "nt")
+    if explicit_path is not None:
+        _append_command_candidate(candidates, str(explicit_path), allow_shell_script=os.name != "nt")
     return candidates
 
 
 def _resolve_codex_command(command_name: str) -> str | None:
     candidates = _resolve_codex_command_candidates(command_name)
     return candidates[0] if candidates else None
+
+
+def _is_retriable_codex_launcher_error(stdout: str, stderr: str) -> bool:
+    text = f"{stderr}\n{stdout}".strip().lower()
+    return any(marker in text for marker in _RETRIABLE_CODEX_LAUNCHER_ERROR_MARKERS)
 
 
 def _terminate_process_tree(process: subprocess.Popen[bytes]) -> None:
@@ -100,6 +115,7 @@ def run_codex_exec(payload: dict[str, Any]) -> dict[str, Any]:
     prompt = str(payload.get("prompt") or "").strip()
     if not prompt:
         raise ValueError("prompt is required")
+    image_paths = _resolve_codex_image_paths(payload.get("images"))
 
     command_name = str(
         payload.get("command")
@@ -126,6 +142,7 @@ def run_codex_exec(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
     with tempfile.TemporaryDirectory(prefix="roughcut-host-codex-") as temp_dir:
+        print(json.dumps({"stage": "run_codex_exec_start", "repo_root": str(repo_root), "image_count": len(image_paths)}, ensure_ascii=False), flush=True)
         stdout_override_path = Path(temp_dir) / "last-message.txt"
         output_schema = payload.get("output_schema")
         output_schema_path: Path | None = None
@@ -135,7 +152,9 @@ def run_codex_exec(payload: dict[str, Any]) -> dict[str, Any]:
         elif output_schema:
             output_schema_path = Path(str(output_schema)).resolve()
         last_start_error: OSError | None = None
+        retriable_launcher_errors: list[str] = []
         for candidate_command in command_candidates:
+            print(json.dumps({"stage": "run_codex_exec_candidate", "command": candidate_command}, ensure_ascii=False), flush=True)
             command = [
                 candidate_command,
                 "-a",
@@ -146,6 +165,8 @@ def run_codex_exec(payload: dict[str, Any]) -> dict[str, Any]:
             command.extend(
                 [
                     "exec",
+                    "--ignore-user-config",
+                    "--ignore-rules",
                     "--color",
                     "never",
                     "-C",
@@ -158,6 +179,8 @@ def run_codex_exec(payload: dict[str, Any]) -> dict[str, Any]:
             )
             if output_schema_path is not None:
                 command.extend(["--output-schema", str(output_schema_path)])
+            for image_path in image_paths:
+                command.extend(["-i", str(image_path)])
             command.append("-")
             try:
                 process = subprocess.Popen(
@@ -171,13 +194,16 @@ def run_codex_exec(payload: dict[str, Any]) -> dict[str, Any]:
                 )
             except OSError as exc:
                 last_start_error = exc
+                print(json.dumps({"stage": "run_codex_exec_spawn_error", "command": candidate_command, "error": str(exc)}, ensure_ascii=False), flush=True)
                 continue
+            print(json.dumps({"stage": "run_codex_exec_spawned", "command": candidate_command, "pid": process.pid}, ensure_ascii=False), flush=True)
             try:
                 stdout_bytes, stderr_bytes = process.communicate(
                     input=prompt.encode("utf-8"),
                     timeout=timeout_sec,
                 )
             except subprocess.TimeoutExpired as exc:
+                print(json.dumps({"stage": "run_codex_exec_timeout", "command": candidate_command, "pid": process.pid, "timeout_sec": timeout_sec}, ensure_ascii=False), flush=True)
                 _terminate_process_tree(process)
                 try:
                     stdout_bytes, stderr_bytes = process.communicate(timeout=5)
@@ -198,14 +224,20 @@ def run_codex_exec(payload: dict[str, Any]) -> dict[str, Any]:
             if not stdout:
                 stdout = decode_process_output(stdout_bytes)
             stderr = decode_process_output(stderr_bytes)
+            print(json.dumps({"stage": "run_codex_exec_process_exit", "command": candidate_command, "pid": process.pid, "returncode": process.returncode, "stdout_len": len(stdout), "stderr_len": len(stderr)}, ensure_ascii=False), flush=True)
             excerpt = stdout or stderr
             if len(excerpt) > 3500:
                 excerpt = excerpt[:3484].rstrip() + "\n...[truncated]"
             if process.returncode != 0:
-                raise RuntimeError(stderr or stdout or f"codex exited with code {process.returncode}")
+                error_text = stderr or stdout or f"codex exited with code {process.returncode}"
+                if _is_retriable_codex_launcher_error(stdout, stderr):
+                    retriable_launcher_errors.append(f"{candidate_command}: {error_text}")
+                    continue
+                raise RuntimeError(error_text)
             return {
                 "provider": "acp",
                 "backend": "codex",
+                "command": candidate_command,
                 "stdout": stdout,
                 "stderr": stderr,
                 "excerpt": excerpt,
@@ -214,4 +246,24 @@ def run_codex_exec(payload: dict[str, Any]) -> dict[str, Any]:
             }
         if last_start_error is not None:
             raise last_start_error
+        if retriable_launcher_errors:
+            joined = "\n\n".join(retriable_launcher_errors)
+            raise RuntimeError(f"All Codex command candidates rejected the requested model:\n{joined}")
         raise RuntimeError(f"Codex command could not be started: {command_name}")
+
+
+def _resolve_codex_image_paths(raw_images: Any) -> list[Path]:
+    if raw_images in (None, ""):
+        return []
+    if not isinstance(raw_images, list):
+        raise ValueError("images must be a list of file paths")
+    image_paths: list[Path] = []
+    for raw_image in raw_images:
+        image_path = Path(str(raw_image or "").strip().strip('"')).expanduser()
+        if not str(image_path):
+            continue
+        resolved = image_path.resolve()
+        if not resolved.exists() or not resolved.is_file():
+            raise ValueError(f"Codex image path does not exist or is not a file: {image_path}")
+        image_paths.append(resolved)
+    return image_paths

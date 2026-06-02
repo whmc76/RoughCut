@@ -294,7 +294,7 @@ def _build_auto_search_provider_bundle() -> list[tuple[str, SearchProvider]]:
             return
         providers.append((name, instance))
 
-    if str(os.getenv("SEARXNG_URL", "") or "").strip() and str(getattr(settings, "searxng_url", "") or "").strip():
+    if str(getattr(settings, "searxng_url", "") or "").strip():
         _append("searxng", _build_searxng_search_provider)
 
     native_provider = str(settings.active_reasoning_provider or "").strip().lower()

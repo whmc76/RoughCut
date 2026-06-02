@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
 import re
 from pathlib import Path
@@ -11,6 +12,7 @@ import httpx
 
 from roughcut.config import get_settings
 from roughcut.docker_gpu_guard import hold_managed_gpu_services_async
+from roughcut.media.silence import detect_silence
 from roughcut.providers.transcription.base import (
     TranscriptionProgressCallback,
     TranscriptResult,
@@ -32,6 +34,15 @@ from roughcut.review.hotword_learning import extract_prompt_hotwords
 
 
 class LocalHTTPASRProvider(TranscriptionProvider):
+    _QWEN3_ASR_MAX_CHUNK_SEC = 75.0
+    _QWEN3_ASR_RETRY_CHUNK_SEC = 30.0
+    _QWEN3_ASR_RETRY_MIN_CHUNK_SEC = 12.0
+    _QWEN3_ASR_MIN_MAX_NEW_TOKENS = 512
+    _QWEN3_ASR_MID_MAX_NEW_TOKENS = 768
+    _QWEN3_ASR_MAX_MAX_NEW_TOKENS = 1024
+    _QWEN3_ASR_TAIL_GAP_MIN_SEC = 6.0
+    _QWEN3_ASR_TAIL_GAP_MIN_RATIO = 0.12
+    _QWEN3_ASR_VOICED_TAIL_MIN_SEC = 1.2
     _DECODE_LOOP_MIN_TEXT_UNITS = 12
     _DECODE_LOOP_MIN_REPEATS = 4
     _SHORT_DUPLICATE_NOISE_TERMS = frozenset(
@@ -68,7 +79,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
     ) -> TranscriptResult:
         settings = get_settings()
         context = self._resolve_hotword_context(prompt)
-        chunk_config = resolve_audio_chunk_config(settings)
+        chunk_config = self._resolve_effective_chunk_config(resolve_audio_chunk_config(settings))
         probed_duration = probe_audio_duration(audio_path)
         max_new_tokens = self._resolve_max_new_tokens(settings, audio_duration=probed_duration)
         if should_chunk_audio(duration=probed_duration, config=chunk_config):
@@ -142,33 +153,13 @@ class LocalHTTPASRProvider(TranscriptionProvider):
         emitted_end = 0.0
         with tempfile.TemporaryDirectory() as tmpdir:
             for chunk in chunk_specs:
-                chunk_path = Path(tmpdir) / f"chunk_{chunk.start:.2f}_{chunk.end:.2f}.wav"
-                if progress_callback is not None:
-                    progress_callback(
-                        chunk_progress_payload(
-                            chunk=chunk,
-                            covered_until=emitted_end,
-                            total_duration=total_duration,
-                            segment_count=len(segments),
-                            text=segments[-1].text if segments else "",
-                            phase="export",
-                            detail=f"导出 chunk {chunk.index + 1}/{chunk.count} 音频片段",
-                        )
-                    )
-                await asyncio.to_thread(
-                    export_audio_chunk,
-                    audio_path,
-                    chunk_path,
-                    start=chunk.start,
-                    end=chunk.end,
-                    timeout_sec=float(chunk_config.export_timeout_sec),
-                )
-                chunk_payload = await self._post_chunk_transcribe_request(
-                    chunk_path=chunk_path,
+                chunk_result, chunk_payload_group = await self._transcribe_chunk_with_anchor_recovery(
+                    audio_path=audio_path,
+                    tmpdir=Path(tmpdir),
                     chunk=chunk,
                     context=context,
+                    language=language,
                     max_new_tokens=max_new_tokens,
-                    timeout=httpx.Timeout(float(chunk_config.request_timeout_sec), connect=30.0),
                     chunk_config=chunk_config,
                     covered_until=emitted_end,
                     total_duration=total_duration,
@@ -176,14 +167,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                     latest_text=segments[-1].text if segments else "",
                     progress_callback=progress_callback,
                 )
-                payloads.append(payload_to_dict(chunk_payload))
-                chunk_result = self._build_result_from_payload(
-                    chunk_payload,
-                    audio_path=chunk_path,
-                    language=language,
-                    context=context,
-                    progress_callback=None,
-                )
+                payloads.extend(chunk_payload_group)
                 merged_segments, emitted_end = merge_chunk_result_segments(
                     chunk_result,
                     chunk=chunk,
@@ -239,6 +223,302 @@ class LocalHTTPASRProvider(TranscriptionProvider):
             hotword=context,
         )
 
+    async def _transcribe_chunk_with_anchor_recovery(
+        self,
+        *,
+        audio_path: Path,
+        tmpdir: Path,
+        chunk,
+        context: str | None,
+        language: str,
+        max_new_tokens: int,
+        chunk_config,
+        covered_until: float,
+        total_duration: float,
+        segment_count: int,
+        latest_text: str,
+        progress_callback: TranscriptionProgressCallback | None,
+    ) -> tuple[TranscriptResult, list[dict[str, Any]]]:
+        chunk_path = tmpdir / f"chunk_{chunk.start:.2f}_{chunk.end:.2f}.wav"
+        await self._export_chunk_audio(
+            audio_path=audio_path,
+            chunk_path=chunk_path,
+            chunk=chunk,
+            chunk_config=chunk_config,
+            covered_until=covered_until,
+            total_duration=total_duration,
+            segment_count=segment_count,
+            latest_text=latest_text,
+            progress_callback=progress_callback,
+        )
+        payloads: list[dict[str, Any]] = []
+        chunk_payload = await self._post_chunk_transcribe_request(
+            chunk_path=chunk_path,
+            chunk=chunk,
+            context=context,
+            max_new_tokens=max_new_tokens,
+            timeout=httpx.Timeout(float(chunk_config.request_timeout_sec), connect=30.0),
+            chunk_config=chunk_config,
+            covered_until=covered_until,
+            total_duration=total_duration,
+            segment_count=segment_count,
+            latest_text=latest_text,
+            progress_callback=progress_callback,
+        )
+        payloads.append(payload_to_dict(chunk_payload))
+        chunk_result = self._build_result_from_payload(
+            chunk_payload,
+            audio_path=chunk_path,
+            language=language,
+            context=context,
+            progress_callback=None,
+        )
+        if not self._should_retry_chunk_for_anchor_recovery(
+            chunk_result=chunk_result,
+            chunk=chunk,
+            chunk_path=chunk_path,
+        ):
+            return chunk_result, payloads
+
+        recovered_result, retry_payloads = await self._retry_chunk_with_smaller_splits(
+            audio_path=audio_path,
+            tmpdir=tmpdir,
+            parent_chunk=chunk,
+            context=context,
+            language=language,
+            parent_chunk_config=chunk_config,
+            covered_until=covered_until,
+            total_duration=total_duration,
+            segment_count=segment_count,
+            latest_text=latest_text,
+            progress_callback=progress_callback,
+        )
+        payloads.extend(retry_payloads)
+        if self._covered_end_seconds(recovered_result) > self._covered_end_seconds(chunk_result) + 1.0:
+            return recovered_result, payloads
+        return chunk_result, payloads
+
+    async def _retry_chunk_with_smaller_splits(
+        self,
+        *,
+        audio_path: Path,
+        tmpdir: Path,
+        parent_chunk,
+        context: str | None,
+        language: str,
+        parent_chunk_config,
+        covered_until: float,
+        total_duration: float,
+        segment_count: int,
+        latest_text: str,
+        progress_callback: TranscriptionProgressCallback | None,
+    ) -> tuple[TranscriptResult, list[dict[str, Any]]]:
+        retry_config = replace(
+            parent_chunk_config,
+            enabled=True,
+            threshold_sec=0.0,
+            chunk_size_sec=min(float(parent_chunk.duration), self._QWEN3_ASR_RETRY_CHUNK_SEC),
+            min_chunk_sec=min(
+                float(parent_chunk.duration),
+                min(float(parent_chunk_config.min_chunk_sec), self._QWEN3_ASR_RETRY_MIN_CHUNK_SEC),
+            ),
+            overlap_sec=0.0,
+        )
+        retry_specs = build_audio_chunk_specs(float(parent_chunk.duration), config=retry_config)
+        if len(retry_specs) <= 1:
+            return TranscriptResult(
+                segments=[],
+                language=language,
+                duration=float(parent_chunk.duration),
+                provider="local_http_asr",
+                model=self._model_name,
+                raw_payload={"anchor_recovery": "skipped"},
+            ), []
+
+        if progress_callback is not None:
+            progress_callback(
+                chunk_progress_payload(
+                    chunk=parent_chunk,
+                    covered_until=covered_until,
+                    total_duration=total_duration,
+                    segment_count=segment_count,
+                    text=latest_text,
+                    phase="anchor_recovery",
+                    detail=(
+                        f"chunk {parent_chunk.index + 1}/{parent_chunk.count} 覆盖不足，"
+                        f"拆成 {len(retry_specs)} 个更短片段重跑"
+                    ),
+                )
+            )
+
+        payloads: list[dict[str, Any]] = []
+        recovered_segments: list[TranscriptSegment] = []
+        local_emitted_end = 0.0
+        local_next_index = 0
+        for retry_chunk in retry_specs:
+            absolute_chunk = replace(
+                retry_chunk,
+                start=round(float(parent_chunk.start) + float(retry_chunk.start), 3),
+                end=round(float(parent_chunk.start) + float(retry_chunk.end), 3),
+            )
+            retry_chunk_path = tmpdir / (
+                f"chunk_{parent_chunk.start:.2f}_{parent_chunk.end:.2f}_retry_{retry_chunk.index + 1}.wav"
+            )
+            await self._export_chunk_audio(
+                audio_path=audio_path,
+                chunk_path=retry_chunk_path,
+                chunk=absolute_chunk,
+                chunk_config=parent_chunk_config,
+                covered_until=covered_until,
+                total_duration=total_duration,
+                segment_count=segment_count + len(recovered_segments),
+                latest_text=latest_text,
+                progress_callback=progress_callback,
+            )
+            retry_max_new_tokens = self._resolve_max_new_tokens(
+                get_settings(),
+                audio_duration=float(retry_chunk.duration),
+            )
+            retry_payload = await self._post_chunk_transcribe_request(
+                chunk_path=retry_chunk_path,
+                chunk=absolute_chunk,
+                context=context,
+                max_new_tokens=retry_max_new_tokens,
+                timeout=httpx.Timeout(float(parent_chunk_config.request_timeout_sec), connect=30.0),
+                chunk_config=parent_chunk_config,
+                covered_until=covered_until,
+                total_duration=total_duration,
+                segment_count=segment_count + len(recovered_segments),
+                latest_text=latest_text,
+                progress_callback=progress_callback,
+            )
+            payloads.append(payload_to_dict(retry_payload))
+            retry_result = self._build_result_from_payload(
+                retry_payload,
+                audio_path=retry_chunk_path,
+                language=language,
+                context=context,
+                progress_callback=None,
+            )
+            local_segments, local_emitted_end = merge_chunk_result_segments(
+                retry_result,
+                chunk=retry_chunk,
+                start_index=local_next_index,
+                emitted_end=local_emitted_end,
+            )
+            recovered_segments.extend(local_segments)
+            local_next_index += len(local_segments)
+        return TranscriptResult(
+            segments=recovered_segments,
+            language=language,
+            duration=float(parent_chunk.duration),
+            provider="local_http_asr",
+            model=self._model_name,
+            raw_payload={
+                "anchor_recovery": {
+                    "parent_start": round(float(parent_chunk.start), 3),
+                    "parent_end": round(float(parent_chunk.end), 3),
+                    "retry_chunk_count": len(retry_specs),
+                }
+            },
+            raw_segments=list(recovered_segments),
+            context=context,
+            hotword=context,
+        ), payloads
+
+    async def _export_chunk_audio(
+        self,
+        *,
+        audio_path: Path,
+        chunk_path: Path,
+        chunk,
+        chunk_config,
+        covered_until: float,
+        total_duration: float,
+        segment_count: int,
+        latest_text: str,
+        progress_callback: TranscriptionProgressCallback | None,
+    ) -> None:
+        if progress_callback is not None:
+            progress_callback(
+                chunk_progress_payload(
+                    chunk=chunk,
+                    covered_until=covered_until,
+                    total_duration=total_duration,
+                    segment_count=segment_count,
+                    text=latest_text,
+                    phase="export",
+                    detail=f"导出 chunk {chunk.index + 1}/{chunk.count} 音频片段",
+                )
+            )
+        await asyncio.to_thread(
+            export_audio_chunk,
+            audio_path,
+            chunk_path,
+            start=chunk.start,
+            end=chunk.end,
+            timeout_sec=float(chunk_config.export_timeout_sec),
+        )
+
+    def _should_retry_chunk_for_anchor_recovery(
+        self,
+        *,
+        chunk_result: TranscriptResult,
+        chunk,
+        chunk_path: Path,
+    ) -> bool:
+        if "qwen3-asr" not in str(self._model_name or "").strip().lower():
+            return False
+        chunk_duration = max(0.0, float(chunk.duration))
+        if chunk_duration < self._QWEN3_ASR_RETRY_CHUNK_SEC:
+            return False
+        covered_end = self._covered_end_seconds(chunk_result)
+        tail_gap = max(0.0, chunk_duration - covered_end)
+        if not chunk_result.segments:
+            return not self._tail_is_mostly_silence(chunk_path, start=max(0.0, chunk_duration - 8.0), end=chunk_duration)
+        if tail_gap < max(self._QWEN3_ASR_TAIL_GAP_MIN_SEC, chunk_duration * self._QWEN3_ASR_TAIL_GAP_MIN_RATIO):
+            return False
+        return self._tail_has_voiced_audio(chunk_path, start=covered_end, end=chunk_duration)
+
+    def _covered_end_seconds(self, result: TranscriptResult) -> float:
+        covered = 0.0
+        for segment in list(result.segments or []):
+            covered = max(covered, float(getattr(segment, "end", 0.0) or 0.0))
+            for word in list(getattr(segment, "words", None) or []):
+                covered = max(covered, float(getattr(word, "end", 0.0) or 0.0))
+        return round(max(0.0, covered), 3)
+
+    def _tail_has_voiced_audio(self, chunk_path: Path, *, start: float, end: float) -> bool:
+        tail_duration = max(0.0, float(end) - float(start))
+        if tail_duration <= 0.25:
+            return False
+        if tail_duration <= self._QWEN3_ASR_VOICED_TAIL_MIN_SEC:
+            return True
+        return not self._tail_is_mostly_silence(chunk_path, start=start, end=end)
+
+    def _tail_is_mostly_silence(self, chunk_path: Path, *, start: float, end: float) -> bool:
+        window_start = max(0.0, float(start))
+        window_end = max(window_start, float(end))
+        if window_end <= window_start + 0.15:
+            return True
+        try:
+            silences = detect_silence(
+                chunk_path,
+                aggressiveness=2,
+                frame_duration_ms=30,
+                min_silence_duration_ms=180,
+                padding_ms=30,
+            )
+        except Exception:
+            return False
+        covered_silence = 0.0
+        for silence in silences:
+            overlap_start = max(window_start, float(silence.start))
+            overlap_end = min(window_end, float(silence.end))
+            if overlap_end > overlap_start:
+                covered_silence += overlap_end - overlap_start
+        return covered_silence >= (window_end - window_start) * 0.72
+
     def _resolve_hotword_context(self, prompt: str | None) -> str | None:
         if not self._hotwords_enabled:
             return None
@@ -250,16 +530,37 @@ class LocalHTTPASRProvider(TranscriptionProvider):
             return ", ".join(hotwords[:16])
         return text[:160]
 
+    def _resolve_effective_chunk_config(self, chunk_config):
+        if not self._decode_loop_sanitizer_enabled():
+            return chunk_config
+        chunk_size = min(float(chunk_config.chunk_size_sec), self._QWEN3_ASR_MAX_CHUNK_SEC)
+        if chunk_size >= float(chunk_config.chunk_size_sec):
+            return chunk_config
+        min_chunk = min(float(chunk_config.min_chunk_sec), chunk_size)
+        overlap = min(float(chunk_config.overlap_sec), max(0.0, chunk_size - min_chunk))
+        return replace(
+            chunk_config,
+            chunk_size_sec=chunk_size,
+            min_chunk_sec=min_chunk,
+            overlap_sec=overlap,
+        )
+
     def _resolve_max_new_tokens(self, settings: object, *, audio_duration: float) -> int:
         configured = int(getattr(settings, "local_asr_max_new_tokens", 256) or 256)
         configured = max(32, configured)
         if "qwen3-asr" not in str(self._model_name or "").strip().lower():
             return configured
-        del audio_duration
-        # qwen-asr's transformers + forced-aligner examples use 256. The larger
-        # vLLM-oriented 2048 budget lets short chunk requests drift into repeated
-        # CJK filler/function characters before EOS.
-        return min(configured, 256)
+        duration = max(0.0, float(audio_duration or 0.0))
+        # Qwen3-ASR is sensitive to dense long-form Mandarin. Use a staged
+        # budget that tracks chunk duration, then let the decode-loop sanitizer
+        # catch pathological repetition.
+        if duration <= 35.0:
+            target = self._QWEN3_ASR_MIN_MAX_NEW_TOKENS
+        elif duration <= 60.0:
+            target = self._QWEN3_ASR_MID_MAX_NEW_TOKENS
+        else:
+            target = self._QWEN3_ASR_MAX_MAX_NEW_TOKENS
+        return min(max(configured, target), self._QWEN3_ASR_MAX_MAX_NEW_TOKENS)
 
     async def _post_chunk_transcribe_request(
         self,

@@ -44,7 +44,7 @@ services:
       - float16
       - --lazy-load
       - --idle-unload-seconds
-      - "${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-900}"
+      - "${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-10}"
 
   funasr-nano-2512:
     <<: *asr-common
@@ -71,7 +71,7 @@ services:
       - cuda:0
       - --lazy-load
       - --idle-unload-seconds
-      - "${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-900}"
+      - "${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-10}"
 
   funasr-fa-zh:
     <<: *asr-common
@@ -98,7 +98,7 @@ services:
       - cuda:0
       - --lazy-load
       - --idle-unload-seconds
-      - "${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-900}"
+      - "${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-10}"
 
   qwen3-asr:
     <<: *asr-common
@@ -119,7 +119,7 @@ services:
       QWEN3_ASR_MODEL: ${QWEN3_ASR_MODEL:-/models/modelscope/Qwen/Qwen3-ASR-1.7B}
       QWEN3_ASR_ALIGNER: ${QWEN3_ASR_ALIGNER:-/models/modelscope/Qwen/Qwen3-ForcedAligner-0.6B}
       QWEN3_ASR_DEVICE_MAP: ${QWEN3_ASR_DEVICE_MAP:-cuda:0}
-      QWEN3_ASR_IDLE_UNLOAD_SECONDS: ${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-900}
+      QWEN3_ASR_IDLE_UNLOAD_SECONDS: ${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-10}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     ports:
@@ -129,7 +129,7 @@ services:
       - /app/server.py
       - --lazy-load
       - --idle-unload-seconds
-      - "${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-900}"
+      - "${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-10}"
 
   moss-audio-8b-instruct-fp16:
     <<: *asr-common
@@ -154,7 +154,7 @@ services:
       MODELSCOPE_CACHE: /models/modelscope
       PIP_INDEX_URL: ${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}
       PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-mirrors.aliyun.com}
-      MOSS_AUDIO_IDLE_UNLOAD_SECONDS: ${MOSS_AUDIO_IDLE_UNLOAD_SECONDS:-900}
+      MOSS_AUDIO_IDLE_UNLOAD_SECONDS: ${MOSS_AUDIO_IDLE_UNLOAD_SECONDS:-10}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     ports:
@@ -166,4 +166,4 @@ services:
       - none
       - --lazy-load
       - --idle-unload-seconds
-      - "${MOSS_AUDIO_IDLE_UNLOAD_SECONDS:-900}"
+      - "${MOSS_AUDIO_IDLE_UNLOAD_SECONDS:-10}"

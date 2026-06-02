@@ -238,8 +238,13 @@ MiniMax 默认配置：
 
 ```env
 MINIMAX_API_KEY=sk-...
+MINIMAX_CODING_PLAN_API_KEY=sk-... # 可留空，默认复用 MINIMAX_API_KEY
 REASONING_PROVIDER=minimax
 REASONING_MODEL=MiniMax-M2.7
+MULTIMODAL_FALLBACK_PROVIDER=minimax
+MULTIMODAL_FALLBACK_MODEL=MiniMax-M2.7
+SEARCH_PROVIDER=minimax
+SEARCH_FALLBACK_PROVIDER=minimax
 ```
 
 OpenAI 兼容替代配置：
@@ -256,8 +261,8 @@ TRANSCRIPTION_MODEL=gpt-4o-transcribe
 
 Codex 图片请求完成后，用 `uv run python scripts/run_codex_imagegen_queue.py <smart-copy目录> --complete <请求json> --result <Codex生成图片>` 回填并标记完成；只有请求 JSON 状态为 `completed` 且输出文件存在，封面才会进入可发布状态。
 
-如果你希望 RoughCut 走 Codex / GPT-5 系列的工程型模型链路，当前 OpenAI Provider 已统一切到 `Responses API`，
-因此这条链路会同时覆盖：
+如果你希望 RoughCut 走 Codex / GPT-5 系列的工程型模型链路，仍可显式切回 OpenAI Provider。当前 OpenAI Provider 已统一切到 `Responses API`，
+因此这条可选链路会同时覆盖：
 
 - 推理生成
 - 多帧图像理解
@@ -396,6 +401,12 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
   启动 runtime，并显式在 Docker 镜像里启用 `local-asr` extras
 - `start_roughcut.bat full`
   显式容器模式。启动 runtime + automation（当前包含 `watcher`）；`runtime/full` 默认会带上 `docker-compose.dev.yml`，通过 bind mount + 容器内 watcher 提供 live source sync；默认不在容器里安装 `local-asr` extras
+- `start_roughcut.bat test`
+  启动默认 Docker full dev 栈后，再附加一个本地 Vite 测试端口。前端走热更新，API 仍代理到 Docker `roughcut-api-1`。适合联调全文剪辑、投影字幕和手动编辑页
+- `start_roughcut.bat full-test`
+  与 `test` 相同
+- `start_roughcut.bat runtime-test`
+  启动 Docker runtime 后附加本地 Vite 测试端口；不带 automation
 - `start_roughcut.bat full-local-asr`
   启动 full stack，并显式在 Docker 镜像里启用 `local-asr` extras
 - `start_roughcut.bat runtime-down`
@@ -419,9 +430,17 @@ Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roug
 - `start_roughcut.bat build`
   运行 `pnpm build`
 
+如果你已经习惯默认入口，也可以直接这样用而不记新别名：
+
+```powershell
+./start_roughcut.bat -FrontendDev
+```
+
+这会等价于 `full + 本地 Vite 测试端口`。
+
 `start_roughcut.ps1` 是当前主脚本，也是一键启动的实际实现。
 
-默认开发建议是把 `start_roughcut.bat` 作为 Docker full dev 入口；本地 Python 模式保留为 `start_roughcut.bat local`。运行时 Docker preflight 和外部 GPU/ASR 容器 guard 默认关闭，只有显式设置 `RUNTIME_PREFLIGHT_DOCKER_ENABLED=true` 或 `DOCKER_GPU_GUARD_ENABLED=true` 时才会由 RoughCut 自动管理容器。`pnpm docker:up/down` 现在只作为 `infra` 快捷别名保留。
+默认开发建议是把 `start_roughcut.bat` 作为 Docker full dev 入口；本地 Python 模式保留为 `start_roughcut.bat local`。运行时 core infra preflight 默认关闭，但外部 GPU ASR/TTS 服务 guard 默认开启，会在空闲后自动停掉共享容器；如需禁用，再显式设置 `DOCKER_GPU_GUARD_ENABLED=false`。只有显式设置 `RUNTIME_PREFLIGHT_DOCKER_ENABLED=true` 时，RoughCut 才会自动管理 PostgreSQL / Redis / MinIO 这类 core infra 容器。`pnpm docker:up/down` 现在只作为 `infra` 快捷别名保留。
 
 ---
 
@@ -643,14 +662,14 @@ curl "${ROUGHCUT_API_BASE:-http://localhost:38471/api/v1}/jobs/{job_id}/report"
 | `OUTPUT_DIR` | `./data/runtime/output` | 成片输出目录 |
 | `OUTPUT_NAME_PATTERN` | `{date}_{stem}` | 输出文件名模板 |
 | `RENDER_DEBUG_DIR` | `./data/runtime/render-debug` | render 调试产物目录 |
-| `REASONING_PROVIDER` | `openai` | 推理后端：`openai` / `anthropic` / `minimax` / `ollama` |
-| `REASONING_MODEL` | `gpt-5.5` | 推理模型名称 |
-| `REASONING_EFFORT` | `low` | GPT 推理强度默认值 |
-| `MULTIMODAL_FALLBACK_PROVIDER` | `openai` | 主模型视觉失败时的备份 provider |
-| `MULTIMODAL_FALLBACK_MODEL` | `gpt-5.5` | 主模型视觉失败时的备份视觉/多模态模型 |
-| `SEARCH_PROVIDER` | `auto` | 搜索后端：优先主模型搜索桥接，失败回退本地搜索 |
-| `SEARCH_FALLBACK_PROVIDER` | `searxng` | 主模型搜索失败时的兜底搜索后端 |
-| `MODEL_SEARCH_HELPER` | `""` | 主模型搜索/MCP 的本地桥接命令，读取 `ROUGHCUT_SEARCH_QUERY` 环境变量；Codex CLI 可用 `python scripts/codex_model_search_helper.py` |
+| `REASONING_PROVIDER` | `minimax` | 推理后端：`openai` / `anthropic` / `minimax` / `ollama` |
+| `REASONING_MODEL` | `MiniMax-M2.7` | 推理模型名称 |
+| `REASONING_EFFORT` | `low` | 推理强度默认值 |
+| `MULTIMODAL_FALLBACK_PROVIDER` | `minimax` | 主模型视觉失败时的备份 provider |
+| `MULTIMODAL_FALLBACK_MODEL` | `MiniMax-M2.7` | 主模型视觉失败时的备份视觉/多模态模型 |
+| `SEARCH_PROVIDER` | `minimax` | 搜索后端；默认使用 MiniMax Coding Plan / MCP 搜索 |
+| `SEARCH_FALLBACK_PROVIDER` | `minimax` | 主模型搜索失败时的兜底搜索后端 |
+| `MODEL_SEARCH_HELPER` | `""` | 本地模型搜索桥接命令；MiniMax MCP 搜索默认不需要 Codex helper |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | OpenAI/Codex 兼容接口地址 |
 | `OPENAI_AUTH_MODE` | `api_key` | `api_key` / `helper` |
 | `OPENAI_API_KEY_HELPER` | `""` | helper 模式下返回 OpenAI Platform API key 的本地命令；不要把 ChatGPT access token 直接当作 Platform search API 凭证 |
@@ -668,7 +687,7 @@ curl "${ROUGHCUT_API_BASE:-http://localhost:38471/api/v1}/jobs/{job_id}/report"
 | `LOCAL_ASR_MODEL_NAME` | `qwen3-asr-1.7b-forced-aligner` | 当前本地 HTTP ASR 实际模型名 |
 | `LOCAL_ASR_DISPLAY_NAME` | `Qwen3-ASR 1.7B + ForcedAligner` | 前端显示名称 |
 | `RUNTIME_PREFLIGHT_DOCKER_ENABLED` | `false` | 是否允许运行时 preflight 自动启动 Docker 中的 PostgreSQL / Redis |
-| `DOCKER_GPU_GUARD_ENABLED` | `false` | 是否允许 ASR / HeyGem / IndexTTS2 guard 自动启动外部 Docker 服务 |
+| `DOCKER_GPU_GUARD_ENABLED` | `true` | 是否允许外部 GPU 服务 guard 自动启动并在空闲后停掉共享 ASR / TTS / 数字人 Docker 服务 |
 | `SUBTITLE_FONT` | `Microsoft YaHei` | 字幕字体 |
 | `SUBTITLE_FONT_SIZE` | `80` | 字幕字号（pt，相对 PlayResY） |
 | `SUBTITLE_COLOR` | `000000` | 字幕文字颜色（RGB hex，黑色） |
@@ -725,10 +744,129 @@ ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.4-mini
 | `INTELLIGENT_COPY_COVER_IMAGE_TIMEOUT_SEC` | `90` | 智能发布单张封面图像编辑超时（秒） |
 | `INTELLIGENT_COPY_COVER_CODEX_RUNNER_MODEL` | `gpt-5.4-mini` | Codex 内置路径的执行代理模型；只负责理解请求、调用 `image_gen`、保存文件，不是底层图像模型 |
 | `INTELLIGENT_COPY_COVER_CODEX_RUNNER_EFFORT` | `low` | Codex 内置路径的执行代理推理强度；默认低推理即可，画质优先通过 prompt contract / QC / 重试策略提升 |
+| `PUBLICATION_BROWSER_AGENT_BASE_URL` | `http://127.0.0.1:49310` | 浏览器发布 agent 健康探针与正式发布入口 |
+| `PUBLICATION_BROWSER_AGENT_TIMEOUT_SEC` | `60` | 与浏览器发布 agent 通信超时（秒） |
+| `PUBLICATION_BROWSER_CDP_URL` | `http://127.0.0.1:9222` | 连接已打开的 Chrome/Edge 远程调试端口 |
+| `PUBLICATION_BROWSER` | `chrome` | 发布时要绑定的浏览器类型标识 |
+| `PUBLICATION_BROWSER_USER_DATA_DIR` | - | 固定发布 profile 的 Chrome/Edge `User Data` 目录 |
+| `PUBLICATION_BROWSER_PROFILE_DIRECTORY` | - | 固定发布 profile 子目录名（如 `Profile 1`） |
+| `PUBLICATION_BROWSER_ALLOW_TAB_AUTOCREATE` | `false` | 关闭时要求任务前该平台发布页已在当前 CDP 会话中打开 |
+| `PUBLICATION_BROWSER_AGENT_AUTH_TOKEN` | - | 访问发布 agent 的可选 token |
 | `PACKAGING_ASSET_DIR` | `assets/packaging` | 包装素材持久目录；不要放在输出目录，避免清理成片时误删 BGM/水印/片头片尾 |
 | `PACKAGING_ASSET_STORAGE_BACKEND` | `local` | 包装素材后端，当前为本地目录；预留给后续 OSS 热切换 |
 | `PACKAGING_SELECTION_REVIEW_GAP` | `0.08` | BGM/插入素材首选与次优的最小安全分差，过近时建议确认 |
 | `PACKAGING_SELECTION_MIN_SCORE` | `0.6` | BGM/插入素材最低自动通过分，低于该值建议确认 |
+
+### 浏览器发布代理启动建议
+
+- 浏览器先行登录，使用固定 profile。
+- 不要再手写一整串 Chrome 启动参数，`User Data` / `Profile 2` 这种带空格值一旦拆参，就会额外打开 `data/`、`0.0.0.2` 之类的废页面。
+- 推荐统一走仓库脚本：
+
+```powershell
+powershell -File .\scripts\start_publication_browser_session.ps1 `
+  -UserDataDir "C:\Users\28687\AppData\Local\Google\Chrome\User Data" `
+  -ProfileDirectory "Profile 2"
+```
+
+- 如果是即梦生图 fallback 的独立 profile，再显式换成那套目录，不要和发布 profile 混用。
+
+- 建议统一走仓库脚本启动 `publication-browser-agent`，不要再手写 `pwsh -Command` 拼环境变量：
+
+```powershell
+powershell -File .\scripts\start_publication_browser_agent.ps1 `
+  -UserDataDir "C:\Users\28687\AppData\Local\Google\Chrome\User Data" `
+  -ProfileDirectory "Profile 2" `
+  -EnableLivePublish `
+  -StopExisting
+```
+
+- 根因说明：如果用手写的 `pwsh -Command` 串接 `$env:` 赋值，值里一旦有空格或变量名被拼坏，agent 子进程会直接丢失 `PUBLICATION_LIVE_PUBLISH_ENABLED` / profile 绑定信息，健康探针会退化成 `live_publish=false`、`attached_profile_binding=null`。
+- 默认 `PUBLICATION_BROWSER_ALLOW_TAB_AUTOCREATE=false`，避免 agent 在错误 profile 下偷偷补开新页面。
+
+发布任务开始前请先在该会话中手动打开对应平台发布页（例如抖音/小红书/B站发布页），否则后台会返回 `platform_tab_autocreate_disabled` 提示并阻止直接摸底发布。
+
+统一发布前置检查命令（用于每次正式发布前复用）：
+
+```bash
+pnpm run publication:preflight
+pnpm run publication:preflight:json   # 输出 artifacts/publication-preflight.json
+```
+
+该命令会同时校验：
+- browser-agent 的能力与生效 profile 是否可复用；
+- CDP 是否可连通、目标发布页 tab 是否存在；
+- 返回标准化诊断结果（`ready` + `cdp_connected` + 各平台 tab 命中状态），便于复用到 CI/脚本。
+
+如果你要把“正式发布前置网关”做成一条可复用链路，建议使用：
+
+```bash
+pnpm run publication:release-gate
+pnpm run publication:release-gate:dry   # 只做 preflight，不做后端发布合同烟测
+pnpm run publication:release-gate:real --media-path <你的本地视频路径>  # 进入真实发布执行链路校验
+```
+
+`publication:release-gate` 的通过标准（用于“发布前置可复用条件”）：
+- 1）`browser-agent` 健康探针与能力检查 `ready=true`；
+- 2）`cdp_connected=true`；
+- 3）按 `--require-tabs` 时，所有目标平台的发布页 tab 都命中（`found`）；
+- 4）后端发布合同烟测通过（`backend_contract_smoke.status=passed`，`created_attempts` 等于目标平台数）。
+
+这不是“直接发真实平台”，而是“在可复用的前置条件下，保证发布链路在同一套约束下可复现且可判定”。
+
+建议再补一层“发布成功语义回归”用于 CI/里程碑门禁（仍不触发真实发布）：
+
+```bash
+pnpm run publication:release-gate:published
+```
+
+它把后端合同烟测的预期终态提升为 `published`，用于验证“发布任务流”合约能把状态推进到发布成功语义；如果你要验证真实平台发帖成功，需要把 `publication_attempts` 运行态回表/日志与平台侧可见性对齐后人工复核。
+
+`publication:release-gate:real` 用于“真实执行闭环验收”（会触发真实 publication attempt）：
+- 需要传入真实本地视频文件 `--media-path`；
+- 会先复用 `preflight` 能力校验；
+- 构造临时 `Job + 发布计划 + publication attempts` ；
+- 跑 worker 并轮询到目标状态（默认为 `published`）；
+- 默认不设置 `visibility_or_publish_mode`，交给平台默认发布行为（通常对应公开发布）；如需仅验证流程可加 `--visibility-mode draft` 或 `--visibility-mode private` 并配套 `--expected-status`；
+- 输出中会包含每个平台 attempt 最新状态、provider 回执、`provider_task_id`、`external_post_id/external_url`，用于你做最终人工/平台侧复核。
+
+草稿链路示例（仅验证 workflow，不会走公开发布）：
+
+```bash
+pnpm run publication:release-gate:real --media-path ./assets/sample.mp4 --visibility-mode draft --expected-status draft_created
+```
+
+### 多适配器自动化发布闭环（autopilot）
+
+如果你要把“环境检查→合同验收→真实执行→失败自动诊断→建议修复方案”做成一条统一动作，使用：
+
+```bash
+pnpm run publication:autopilot \
+  --media-path ./assets/sample.mp4 \
+  --platform-packaging ./artifacts/platform-packaging.json \
+  --material-json ./smart-copy/smart-copy.json \
+  --platform douyin --platform x \
+  --target-profile-id <fas_profile_id> \
+  --platform-adapter x=x_link_share \
+  --platform-execution-mode x=link_share \
+  --auto-retry --retry-cycles 2
+```
+
+`autopilot` 自动按以下策略运行：
+
+- 先执行 `material_gate`；要求存在 `smart-copy.json` 里的 `material_contract`，且目标平台 `one_click_publish_ready=true`，否则不会进入真实发布。
+- `stable-primary`：先跑稳定平台（douyin/小红书/B 站/快手/头条/YouTube）；
+- `x-post`：再按 `x-mode` 处理 X（默认 `link_share`，会使用 `x_link_share`）；
+- 每一阶段会串联 `preflight`、`release-gate`（默认开启）和 `real-release-gate`；
+- 每一轮会附带 `mitigation.steps`（快速处理建议）和 `mitigation.playbook`（可执行建议映射）；
+- 失败知识会追加入 `artifacts/publication-autopilot/publication-autopilot-knowledge.json`。
+
+`autopilot` 覆盖两类关键参数：
+
+- `--platform-adapter platform=adapter`，支持例如 `x=x_link_share`；
+- `--platform-execution-mode platform=mode`，支持例如 `x=link_share` / `x=video`。
+
+更多适配器矩阵、错误信号与故障固化流程见：[publication-adapter-autopilot-runbook.md](docs/publication-adapter-autopilot-runbook.md)。
 
 ---
 

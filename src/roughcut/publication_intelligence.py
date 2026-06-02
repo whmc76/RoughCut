@@ -13,9 +13,11 @@ from roughcut.providers.factory import get_reasoning_provider, get_search_provid
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.config import get_settings
 from roughcut.publication_probe import BROWSER_AGENT_INVENTORY_CONTRACT, probe_browser_agent_publication_inventory
+from roughcut.publication_platform_matrix import platform_supports_scheduled_publish
 from roughcut.publication import normalize_publication_platform, platform_label
 
-CACHE_PATH = Path("data/publication_intelligence/cache.json")
+CACHE_PATH = Path("data/runtime/publication_intelligence/cache.json")
+LEGACY_CACHE_PATH = Path("data/publication_intelligence/cache.json")
 CACHE_VERSION = "publication-intelligence-v2"
 _CACHE_LOCK = RLock()
 
@@ -29,6 +31,8 @@ DEFAULT_TIME_SLOTS: dict[str, str] = {
     "youtube": "20:00",
     "x": "09:30",
 }
+
+PROBE_VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
 
 EDC_TOY_COLLECTION_NAME = "EDC潮玩桌搭"
 PUBLICATION_POLICY_VERSION = "account-publication-policy-v1"
@@ -66,49 +70,49 @@ PLATFORM_FIELD_HINTS: dict[str, dict[str, Any]] = {
     "douyin": {
         "visibility_modes": ["scheduled", "draft", "private"],
         "required_fields": ["标题", "视频", "简介", "话题"],
-        "supports_scheduled_publish": True,
+        "supports_scheduled_publish": platform_supports_scheduled_publish("douyin"),
         "option_notes": "尚未取得真实合集/栏目列表；发布前必须由 browser-agent 做页面验证。",
     },
     "xiaohongshu": {
         "visibility_modes": ["scheduled", "draft"],
         "required_fields": ["标题", "正文", "话题", "封面"],
-        "supports_scheduled_publish": True,
+        "supports_scheduled_publish": platform_supports_scheduled_publish("xiaohongshu"),
         "option_notes": "尚未取得真实专辑/合集列表；发布前必须由 browser-agent 做页面验证。",
     },
     "bilibili": {
         "visibility_modes": ["scheduled", "draft", "private"],
         "required_fields": ["标题", "分区", "简介", "标签", "合集"],
-        "supports_scheduled_publish": True,
+        "supports_scheduled_publish": platform_supports_scheduled_publish("bilibili"),
         "option_notes": "尚未取得真实分区、合集/系列列表；发布前必须由 browser-agent 做页面验证。",
     },
     "kuaishou": {
         "visibility_modes": ["scheduled", "draft", "private"],
         "required_fields": ["标题", "视频", "简介"],
-        "supports_scheduled_publish": True,
+        "supports_scheduled_publish": platform_supports_scheduled_publish("kuaishou"),
         "option_notes": "尚未取得真实合集入口数据；发布前必须由 browser-agent 做页面验证。",
     },
     "wechat-channels": {
         "visibility_modes": ["scheduled", "draft"],
         "required_fields": ["描述", "视频", "封面"],
-        "supports_scheduled_publish": True,
+        "supports_scheduled_publish": platform_supports_scheduled_publish("wechat-channels"),
         "option_notes": "尚未取得真实活动/合集入口数据；发布前必须由 browser-agent 做页面验证。",
     },
     "toutiao": {
         "visibility_modes": ["scheduled", "draft"],
         "required_fields": ["标题", "分类", "简介", "标签"],
-        "supports_scheduled_publish": True,
+        "supports_scheduled_publish": platform_supports_scheduled_publish("toutiao"),
         "option_notes": "尚未取得真实分类/合集数据；发布前必须由 browser-agent 做页面验证。",
     },
     "youtube": {
         "visibility_modes": ["scheduled", "draft", "private", "unlisted"],
         "required_fields": ["title", "description", "tags", "visibility", "playlist"],
-        "supports_scheduled_publish": True,
+        "supports_scheduled_publish": platform_supports_scheduled_publish("youtube"),
         "option_notes": "尚未取得真实 playlist 列表；发布前必须由 browser-agent 做页面验证。",
     },
     "x": {
         "visibility_modes": ["scheduled", "draft"],
         "required_fields": ["post text", "media"],
-        "supports_scheduled_publish": True,
+        "supports_scheduled_publish": platform_supports_scheduled_publish("x"),
         "option_notes": "尚未取得真实发布选项；发布前必须由 browser-agent 做页面验证。",
     },
 }
@@ -351,11 +355,13 @@ def _build_scheme_from_record(*, plan: dict[str, Any], record: dict[str, Any], f
         if collection_management.get("status") != "select_existing":
             collection_name = ""
         category = _choose_real_category(capability, target, publication_policy=publication_policy)
-        visibility = "scheduled" if capability.get("supports_scheduled_publish", True) else "draft"
+        effective_scheduled_publish = _capability_supports_effective_scheduled_publish(capability)
+        visibility = "scheduled" if effective_scheduled_publish else "draft"
         option = {
-            "scheduled_publish_at": scheduled_at,
             "visibility_or_publish_mode": visibility,
         }
+        if effective_scheduled_publish:
+            option["scheduled_publish_at"] = scheduled_at
         if collection_name:
             option["collection_name"] = collection_name
         if category:
@@ -370,7 +376,7 @@ def _build_scheme_from_record(*, plan: dict[str, Any], record: dict[str, Any], f
         if category_selection_plan:
             selected_options["category_selection_plan"] = category_selection_plan
         selected_options["collection_management"] = collection_management
-        live_publish_preflight = _build_live_publish_preflight(capability)
+        live_publish_preflight = _build_live_publish_preflight(capability, supports_scheduled_publish=effective_scheduled_publish)
         selected_options["live_publish_preflight"] = live_publish_preflight
         option["live_publish_preflight"] = live_publish_preflight
         if selected_options:
@@ -389,7 +395,7 @@ def _build_scheme_from_record(*, plan: dict[str, Any], record: dict[str, Any], f
                 "cover_path": str(target.get("cover_path") or ""),
                 "full_copy": str(target.get("full_copy") or ""),
                 "copy_material": target.get("copy_material") if isinstance(target.get("copy_material"), dict) else {},
-                "scheduled_publish_at": scheduled_at,
+                "scheduled_publish_at": scheduled_at if effective_scheduled_publish else "",
                 "collection_name": collection_name,
                 "collection_management": collection_management,
                 "category": category,
@@ -834,12 +840,13 @@ def _repair_policy_category_choice(item: dict[str, Any], fallback_item: dict[str
 
 def _load_cache() -> dict[str, Any]:
     with _CACHE_LOCK:
-        try:
-            payload = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-        if isinstance(payload, dict) and payload.get("version") == CACHE_VERSION and isinstance(payload.get("records"), dict):
-            return payload["records"]
+        for path in _cache_path_candidates():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if isinstance(payload, dict) and payload.get("version") == CACHE_VERSION and isinstance(payload.get("records"), dict):
+                return payload["records"]
         return {}
 
 
@@ -850,6 +857,46 @@ def _save_cache(records: dict[str, Any]) -> None:
             json.dumps({"version": CACHE_VERSION, "records": records}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+
+def _cache_path_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    for path in (CACHE_PATH, LEGACY_CACHE_PATH):
+        if path in candidates:
+            continue
+        candidates.append(path)
+    return candidates
+
+
+def build_cached_publication_scheme(
+    *,
+    creator_profile_id: str,
+    creator_profile_name: str,
+    folder_path: str,
+    browser: str,
+    targets: list[dict[str, Any]],
+) -> dict[str, Any]:
+    records = _load_cache()
+    cache_key = _cache_key(str(creator_profile_id or "").strip(), _normalize_browser(browser))
+    record = records.get(cache_key) if isinstance(records.get(cache_key), dict) else None
+    if not isinstance(record, dict):
+        return {
+            "status": "blocked",
+            "blocked_reasons": [f"未找到 {cache_key} 的 publication intelligence 缓存。"],
+            "platform_options": {},
+            "items": [],
+        }
+    plan = {
+        "creator_profile_id": str(creator_profile_id or "").strip(),
+        "creator_profile_name": str(creator_profile_name or "").strip(),
+        "targets": [target for target in targets if isinstance(target, dict)],
+    }
+    return _build_scheme_from_record(
+        plan=plan,
+        record=record,
+        folder_path=folder_path,
+        browser=_normalize_browser(browser),
+    )
 
 
 def _cache_key(profile_id: str, browser: str) -> str:
@@ -904,11 +951,13 @@ async def _probe_real_platform_inventory(
 
 def _content_sample_for_probe(targets: list[dict[str, Any]], *, plan: dict[str, Any] | None = None, folder_path: str = "") -> dict[str, Any]:
     first = next((target for target in targets if isinstance(target, dict)), {})
+    media_path, media_path_source = _resolve_probe_media_path(plan=plan, folder_path=folder_path)
     return {
         "title": str(first.get("title") or ""),
         "body": str(first.get("body") or "")[:1200],
         "tags": [str(item) for item in (first.get("tags") or []) if str(item).strip()][:20],
-        "media_path": str((plan or {}).get("media_path") or ""),
+        "media_path": media_path,
+        "media_path_source": media_path_source,
         "folder_path": str(folder_path or ""),
         "platform_titles": {
             str(target.get("platform") or ""): str(target.get("title") or "")
@@ -916,6 +965,42 @@ def _content_sample_for_probe(targets: list[dict[str, Any]], *, plan: dict[str, 
             if isinstance(target, dict) and target.get("platform")
         },
     }
+
+
+def _resolve_probe_media_path(*, plan: dict[str, Any] | None = None, folder_path: str = "") -> tuple[str, str]:
+    explicit_media_path = str((plan or {}).get("media_path") or "").strip()
+    if explicit_media_path:
+        return explicit_media_path, "plan_media_path"
+
+    folder = Path(str(folder_path or "").strip())
+    if not folder.is_dir():
+        return "", "missing"
+
+    video_candidates: list[Path] = []
+    try:
+        video_candidates = [
+            item
+            for item in folder.iterdir()
+            if item.is_file() and item.suffix.lower() in PROBE_VIDEO_SUFFIXES
+        ]
+    except OSError:
+        return "", "missing"
+
+    if not video_candidates:
+        return "", "missing"
+
+    primary_video = sorted(
+        video_candidates,
+        key=lambda item: (-_probe_media_file_size(item), item.name.lower()),
+    )[0]
+    return str(primary_video), "folder_primary_video"
+
+
+def _probe_media_file_size(path: Path) -> int:
+    try:
+        return int(path.stat().st_size)
+    except OSError:
+        return 0
 
 
 def _normalize_inventory_platform_options(value: Any) -> dict[str, Any]:
@@ -1684,11 +1769,52 @@ def _capability_summary(capability: dict[str, Any]) -> str:
     return "尚未完成真实平台摸底：当前只有登录会话引用，没有读取到平台已有合集/栏目/分类。不会自动填写这些字段。"
 
 
-def _build_live_publish_preflight(capability: dict[str, Any]) -> dict[str, Any]:
+def _surface_keys(items: Any) -> list[str]:
+    normalized: list[str] = []
+    for item in items or []:
+        if isinstance(item, dict):
+            value = str(item.get("key") or item.get("label") or "").strip()
+        else:
+            value = str(item).strip()
+        if value:
+            normalized.append(value)
+    return normalized
+
+
+def _capability_supports_effective_scheduled_publish(capability: dict[str, Any]) -> bool:
+    if not capability.get("supports_scheduled_publish"):
+        return False
+    coverage = capability.get("coverage") if isinstance(capability.get("coverage"), dict) else {}
+    missing_keys = set(_surface_keys(coverage.get("missing_required_surfaces")))
+    if "schedule" in missing_keys:
+        return False
+    for surface in coverage.get("required_surfaces") or []:
+        if not isinstance(surface, dict):
+            continue
+        if str(surface.get("key") or "").strip() != "schedule":
+            continue
+        if str(surface.get("status") or "").strip().lower() == "missing":
+            return False
+    return True
+
+
+def _build_live_publish_preflight(
+    capability: dict[str, Any],
+    *,
+    supports_scheduled_publish: bool | None = None,
+) -> dict[str, Any]:
     coverage = capability.get("coverage") if isinstance(capability.get("coverage"), dict) else {}
     evidence = capability.get("evidence") if isinstance(capability.get("evidence"), dict) else {}
-    missing = [str(item).strip() for item in (coverage.get("missing_required_surfaces") or []) if str(item).strip()]
-    required = [str(item).strip() for item in (coverage.get("required_surfaces") or []) if str(item).strip()]
+    required = _surface_keys(coverage.get("required_surfaces"))
+    missing = _surface_keys(coverage.get("missing_required_surfaces"))
+    effective_scheduled_publish = (
+        _capability_supports_effective_scheduled_publish(capability)
+        if supports_scheduled_publish is None
+        else bool(supports_scheduled_publish)
+    )
+    if not effective_scheduled_publish:
+        required = [item for item in required if item != "schedule"]
+        missing = [item for item in missing if item != "schedule"]
     weak: list[str] = []
     by_surface = evidence.get("by_surface") if isinstance(evidence.get("by_surface"), list) else []
     for item in by_surface:

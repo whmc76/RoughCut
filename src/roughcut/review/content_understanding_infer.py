@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from roughcut.config import get_settings
@@ -29,6 +30,7 @@ _GLOSSARY_BRAND_TERMS: list[dict[str, Any]] = [
     for term in list(pack.get("terms") or [])
     if isinstance(term, dict) and str(term.get("category") or "").strip().lower().endswith("_brand")
 ]
+_TEXT_KEY_NORMALIZE_RE = re.compile(r"[\s\u3000，。！？!?、；;：:,.~\-—_\[\]【】()（）\"'`]+")
 
 
 def parse_content_understanding_payload(data: Any) -> ContentUnderstanding:
@@ -108,6 +110,7 @@ async def infer_final_understanding(
         repaired_understanding = parse_content_understanding_payload(repaired_payload)
         if not _needs_understanding_repair(repaired_understanding, semantic_facts):
             understanding = repaired_understanding
+    understanding = _normalize_understanding_evidence_spans(understanding, evidence_bundle)
     if understanding.semantic_facts == ContentSemanticFacts():
         understanding = ContentUnderstanding(
             video_type=understanding.video_type,
@@ -804,13 +807,22 @@ def _build_compact_evidence_payload(evidence_bundle: dict[str, Any]) -> dict[str
             for item in (raw_semantic_inputs.get("closing_focus_lines") or [])
             if str(item).strip()
         ][:6],
-        "relation_hints": [
+            "relation_hints": [
+                {
+                    str(key): str(value).strip()
+                    for key, value in item.items()
+                    if str(value).strip()
+                }
+                for item in (raw_semantic_inputs.get("relation_hints") or [])
+                if isinstance(item, dict)
+            ][:8],
+        "timed_focus_spans": [
             {
-                str(key): str(value).strip()
+                str(key): value
                 for key, value in item.items()
-                if str(value).strip()
+                if key in {"type", "text", "timestamp", "start_time", "end_time"}
             }
-            for item in (raw_semantic_inputs.get("relation_hints") or [])
+            for item in (raw_semantic_inputs.get("timed_focus_spans") or [])
             if isinstance(item, dict)
         ][:8],
         "transcript_text": str(raw_semantic_inputs.get("transcript_text") or "").strip(),
@@ -995,3 +1007,191 @@ def _resolve_capability_matrix(evidence_bundle: dict[str, Any]) -> dict[str, Any
         visual_provider=visual_provider,
         visual_mcp_provider="",
     )
+
+
+def _normalize_understanding_evidence_spans(
+    understanding: ContentUnderstanding,
+    evidence_bundle: dict[str, Any],
+) -> ContentUnderstanding:
+    semantic_inputs = evidence_bundle.get("semantic_fact_inputs")
+    semantic_inputs = semantic_inputs if isinstance(semantic_inputs, dict) else {}
+    timed_focus_spans = [dict(item) for item in list(semantic_inputs.get("timed_focus_spans") or []) if isinstance(item, dict)]
+    if not timed_focus_spans and not understanding.evidence_spans:
+        return understanding
+
+    normalized: list[dict[str, Any]] = []
+    used_keys: set[tuple[str, float, float, str]] = set()
+    for span in understanding.evidence_spans:
+        if not isinstance(span, dict):
+            continue
+        aligned = _align_understanding_span_to_candidates(span, timed_focus_spans)
+        if not aligned:
+            continue
+        key = (
+            _normalize_text_key(aligned.get("text")),
+            float(aligned.get("start_time", 0.0) or 0.0),
+            float(aligned.get("end_time", 0.0) or 0.0),
+            str(aligned.get("type") or "").strip().lower(),
+        )
+        if key in used_keys:
+            continue
+        used_keys.add(key)
+        normalized.append(aligned)
+    if not normalized:
+        for candidate in timed_focus_spans[:4]:
+            aligned = _align_understanding_span_to_candidates(candidate, timed_focus_spans)
+            if not aligned:
+                continue
+            key = (
+                _normalize_text_key(aligned.get("text")),
+                float(aligned.get("start_time", 0.0) or 0.0),
+                float(aligned.get("end_time", 0.0) or 0.0),
+                str(aligned.get("type") or "").strip().lower(),
+            )
+            if key in used_keys:
+                continue
+            used_keys.add(key)
+            normalized.append(aligned)
+
+    if normalized == understanding.evidence_spans:
+        return understanding
+    return ContentUnderstanding(
+        video_type=understanding.video_type,
+        content_domain=understanding.content_domain,
+        primary_subject=understanding.primary_subject,
+        semantic_facts=understanding.semantic_facts,
+        subject_entities=understanding.subject_entities,
+        observed_entities=understanding.observed_entities,
+        resolved_entities=understanding.resolved_entities,
+        resolved_primary_subject=understanding.resolved_primary_subject,
+        entity_resolution_map=understanding.entity_resolution_map,
+        video_theme=understanding.video_theme,
+        summary=understanding.summary,
+        hook_line=understanding.hook_line,
+        engagement_question=understanding.engagement_question,
+        search_queries=understanding.search_queries,
+        evidence_spans=normalized[:4],
+        uncertainties=understanding.uncertainties,
+        conflicts=understanding.conflicts,
+        confidence=understanding.confidence,
+        needs_review=understanding.needs_review,
+        review_reasons=understanding.review_reasons,
+        capability_matrix=understanding.capability_matrix,
+        orchestration_trace=understanding.orchestration_trace,
+    )
+
+
+def _align_understanding_span_to_candidates(
+    span: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    payload = dict(span)
+    text = str(payload.get("text") or "").strip()
+    span_type = str(payload.get("type") or "").strip()
+    start_time = _parse_span_time_value(payload.get("start_time"))
+    end_time = _parse_span_time_value(payload.get("end_time"))
+    if start_time is None or end_time is None or end_time <= start_time:
+        timestamp_range = _parse_span_timestamp_range(payload.get("timestamp"))
+        if timestamp_range is not None:
+            start_time, end_time = timestamp_range
+    if (start_time is None or end_time is None or end_time <= start_time) and text and candidates:
+        best = _match_span_candidate(text, span_type, candidates)
+        if best is not None:
+            start_time = float(best.get("start_time", 0.0) or 0.0)
+            end_time = float(best.get("end_time", start_time) or start_time)
+            if not span_type:
+                span_type = str(best.get("type") or "").strip()
+            if not payload.get("timestamp"):
+                payload["timestamp"] = best.get("timestamp") or ""
+    if start_time is None or end_time is None or end_time <= start_time:
+        return {}
+    payload["text"] = text
+    payload["type"] = span_type
+    payload["start_time"] = round(float(start_time), 3)
+    payload["end_time"] = round(float(end_time), 3)
+    payload["timestamp"] = str(payload.get("timestamp") or _format_span_timestamp(float(start_time), float(end_time))).strip()
+    return payload
+
+
+def _match_span_candidate(
+    text: str,
+    span_type: str,
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    target_key = _normalize_text_key(text)
+    normalized_type = str(span_type or "").strip().lower()
+    best: tuple[int, dict[str, Any]] | None = None
+    for candidate in candidates:
+        candidate_text = str(candidate.get("text") or "").strip()
+        candidate_key = _normalize_text_key(candidate_text)
+        if not candidate_key:
+            continue
+        score = 0
+        if candidate_key == target_key:
+            score = 4
+        elif target_key and (target_key in candidate_key or candidate_key in target_key):
+            score = 3
+        if normalized_type and normalized_type == str(candidate.get("type") or "").strip().lower():
+            score += 1
+        if score <= 0:
+            continue
+        if best is None or score > best[0]:
+            best = (score, candidate)
+    return best[1] if best is not None else None
+
+
+def _normalize_text_key(value: Any) -> str:
+    text = str(value or "").casefold()
+    if not text:
+        return ""
+    return _TEXT_KEY_NORMALIZE_RE.sub("", text)
+
+
+def _parse_span_timestamp_range(value: Any) -> tuple[float, float] | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for separator in ("-", "~", "—", "–", "至", "到"):
+        if separator not in text:
+            continue
+        left, right = text.split(separator, 1)
+        start = _parse_span_time_value(left)
+        end = _parse_span_time_value(right)
+        if start is not None and end is not None:
+            return start, end
+    return None
+
+
+def _parse_span_time_value(value: Any) -> float | None:
+    if value is None or value == "":
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d+(?:\.\d+)?", text):
+        return float(text)
+    parts = text.split(":")
+    if not 1 <= len(parts) <= 3:
+        return None
+    try:
+        numbers = [float(part) for part in parts]
+    except ValueError:
+        return None
+    seconds = 0.0
+    for number in numbers:
+        seconds = seconds * 60 + number
+    return seconds
+
+
+def _format_span_timestamp(start_time: float, end_time: float) -> str:
+    return f"{_format_time_token(start_time)}-{_format_time_token(end_time)}"
+
+
+def _format_time_token(value: float) -> str:
+    total = max(0.0, float(value or 0.0))
+    hours = int(total // 3600)
+    minutes = int((total % 3600) // 60)
+    seconds = int(total % 60)
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"

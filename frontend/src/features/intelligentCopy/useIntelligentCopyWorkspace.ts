@@ -1,14 +1,16 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { api } from "../../api";
 import type {
   IntelligentCopyGenerateTask,
   IntelligentCopyInspect,
   IntelligentCopyResult,
+  ManualHandoffTarget,
   AvatarPublicationProfile,
   PublicationAttempt,
   PublicationIntelligenceScheme,
+  PublicationPlan,
   PublicationPlatformPublishOptions,
 } from "../../types";
 
@@ -26,6 +28,7 @@ const SELECTED_PUBLICATION_ATTEMPT_STORAGE_KEY = "roughcut.intelligentCopy.selec
 const SELECTED_PUBLICATION_BROWSER_STORAGE_KEY = "roughcut.intelligentCopy.selectedPublicationBrowser";
 const FOLDER_PATH_HISTORY_LIMIT = 12;
 const FOLDER_PATH_AUTOCOMPLETE_LIMIT = 8;
+const FOLDER_PATH_AUTO_INSPECT_DELAY_MS = 900;
 
 export const publicationBrowserOptions = [
   { id: "edge", label: "Microsoft Edge" },
@@ -34,18 +37,26 @@ export const publicationBrowserOptions = [
   { id: "browser-agent", label: "Browser Agent 默认浏览器" },
 ] as const;
 
+export function normalizeIntelligentCopyPlatformId(value: string | null | undefined): string {
+  const key = String(value ?? "").trim().toLowerCase().replace(/_/g, "-");
+  if (key === "wechat" || key === "wechat-channels") return "wechat-channels";
+  return key;
+}
+
 export const intelligentCopyPlatformOptions = [
   { id: "bilibili", label: "B站", detail: "横版封面、搜索标题" },
   { id: "xiaohongshu", label: "小红书", detail: "笔记正文、话题串" },
   { id: "douyin", label: "抖音", detail: "竖版封面、短节奏" },
   { id: "kuaishou", label: "快手", detail: "口语简介、竖版封面" },
-  { id: "wechat_channels", label: "视频号", detail: "稳妥摘要、可信表达" },
+  { id: "wechat-channels", label: "视频号", detail: "稳妥摘要、可信表达" },
   { id: "toutiao", label: "头条号", detail: "资讯导语、结论先行" },
   { id: "youtube", label: "YouTube", detail: "检索描述、标签列表" },
   { id: "x", label: "X", detail: "短推文、少量话题" },
 ] as const;
 
-const defaultIntelligentCopyPlatformIds = intelligentCopyPlatformOptions.map((platform) => platform.id);
+const defaultIntelligentCopyPlatformIds = intelligentCopyPlatformOptions.map((platform) =>
+  normalizeIntelligentCopyPlatformId(platform.id),
+);
 
 export function publicationAttemptStatusLabel(status: string) {
   if (status === "queued") return "已排队";
@@ -111,12 +122,65 @@ function normalizeFolderPath(value: string | null | undefined): string {
   return String(value ?? "").trim();
 }
 
+export function buildIntelligentPublicationPlanQueryKey(args: {
+  resultJsonPath?: string | null;
+  folderPath?: string | null;
+  selectedPublicationProfileId?: string | null;
+  selectedGenerateTaskId?: string | null;
+  selectedGenerateTaskUpdatedAt?: string | null;
+}) {
+  return [
+    "intelligent-publication-plan",
+    String(args.resultJsonPath ?? ""),
+    normalizeFolderPath(args.folderPath),
+    String(args.selectedPublicationProfileId ?? ""),
+    String(args.selectedGenerateTaskId ?? ""),
+    String(args.selectedGenerateTaskUpdatedAt ?? ""),
+  ] as const;
+}
+
+function normalizePlatformSignature(platforms: Array<string | null | undefined>): string {
+  return platforms
+    .map((platform) => normalizeIntelligentCopyPlatformId(platform))
+    .filter(Boolean)
+    .sort()
+    .join("|");
+}
+
+export function buildPublicationSchemeContextKey(args: {
+  folderPath?: string | null;
+  selectedPublicationProfileId?: string | null;
+  selectedPublicationBrowser?: string | null;
+  selectedGenerateTaskId?: string | null;
+  selectedGenerateTaskUpdatedAt?: string | null;
+  targetPlatforms?: Array<string | null | undefined>;
+}) {
+  return [
+    normalizeFolderPath(args.folderPath),
+    String(args.selectedPublicationProfileId ?? ""),
+    String(args.selectedPublicationBrowser ?? ""),
+    String(args.selectedGenerateTaskId ?? ""),
+    String(args.selectedGenerateTaskUpdatedAt ?? ""),
+    normalizePlatformSignature(args.targetPlatforms ?? []),
+  ].join("::");
+}
+
+function isMaterializedContainerFolderPath(value: string | null | undefined): boolean {
+  return normalizeFolderPath(value).replace(/\\/g, "/").startsWith("/app/data/host-intelligent-copy/");
+}
+
+function preferredVisibleFolderPath(...paths: Array<string | null | undefined>): string {
+  const normalized = paths.map(normalizeFolderPath).filter(Boolean);
+  return normalized.find((path) => !isMaterializedContainerFolderPath(path)) ?? normalized[0] ?? "";
+}
+
 export function mergeFolderPathHistory(paths: Array<string | null | undefined>, limit = FOLDER_PATH_HISTORY_LIMIT): string[] {
   const seen = new Set<string>();
   const next: string[] = [];
   for (const path of paths) {
     const folderPath = normalizeFolderPath(path);
     if (!folderPath) continue;
+    if (isMaterializedContainerFolderPath(folderPath)) continue;
     const key = folderPath.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
@@ -210,7 +274,7 @@ function writeStoredSelectedPublicationBrowser(browser: string) {
 }
 
 function isTerminalGenerateTaskStatus(status: string | null | undefined): boolean {
-  return ["completed", "blocked", "failed", "cancelled"].includes(String(status ?? ""));
+  return ["completed", "manual_handoff", "blocked", "failed", "cancelled"].includes(String(status ?? ""));
 }
 
 function hasActivePublicationAttempt(attempts: PublicationAttempt[] | undefined): boolean {
@@ -221,6 +285,197 @@ function hasActivePublicationAttempt(attempts: PublicationAttempt[] | undefined)
 
 function materialFromTask(task: IntelligentCopyGenerateTask | null | undefined): IntelligentCopyResult | null {
   return task?.result ?? task?.partial_result ?? null;
+}
+
+function resultMaterialContract(result: IntelligentCopyResult | null | undefined): Record<string, unknown> | null {
+  if (!result || !result.material_contract || typeof result.material_contract !== "object") return null;
+  return result.material_contract;
+}
+
+function resultContractStatus(result: IntelligentCopyResult | null | undefined): string {
+  const contract = resultMaterialContract(result);
+  const status = String(contract?.status ?? "").trim().toLowerCase();
+  if (status === "passed" || status === "manual_handoff" || status === "failed" || status === "blocked") {
+    return status;
+  }
+  const platformContracts = contract?.platforms;
+  const hasRootBlockingReasons = Array.isArray(contract?.blocking_reasons)
+    && contract.blocking_reasons.some((item) => typeof item === "string" && item.trim().length > 0);
+  const hasManualHandoffPlatforms = Array.isArray(contract?.manual_handoff_platforms) && contract.manual_handoff_platforms.length > 0;
+  if (platformContracts && typeof platformContracts === "object") {
+    const platformStatuses = new Set(
+      Object.values(platformContracts)
+        .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === "object"))
+        .map((item) => String(item.status ?? "").trim().toLowerCase())
+        .filter(Boolean),
+    );
+    if (platformStatuses.has("failed") || platformStatuses.has("blocked")) return "failed";
+    if (platformStatuses.has("manual_handoff")) return "manual_handoff";
+    if (
+      Object.values(platformContracts).some(
+        (item) => Boolean(item && typeof item === "object" && (item as Record<string, unknown>).manual_handoff_only),
+      )
+    ) {
+      return "manual_handoff";
+    }
+    if (platformStatuses.size > 0 && Array.from(platformStatuses).every((item) => item === "passed")) return "passed";
+  }
+  if (hasManualHandoffPlatforms && contract?.one_click_publish_ready === true) {
+    return "manual_handoff";
+  }
+  if (hasRootBlockingReasons) {
+    return "failed";
+  }
+  if (hasManualHandoffPlatforms) {
+    return "manual_handoff";
+  }
+  return "";
+}
+
+function resultContractOneClickPublishReady(result: IntelligentCopyResult | null | undefined): boolean | null {
+  const contract = resultMaterialContract(result);
+  if (!contract) return null;
+  const contractStatus = resultContractStatus(result);
+  if (contractStatus === "passed") return true;
+  if (contractStatus === "manual_handoff" || contractStatus === "failed" || contractStatus === "blocked") return false;
+  if (contract.one_click_publish_ready === true) return true;
+  if (contract.one_click_publish_ready === false) return false;
+  return null;
+}
+
+export function resultBlockingReasons(result: IntelligentCopyResult | null | undefined): string[] {
+  const contract = resultMaterialContract(result);
+  const contractReasons = Array.isArray(contract?.blocking_reasons)
+    ? contract.blocking_reasons.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const rootReasons = Array.isArray(result?.blocking_reasons)
+    ? result.blocking_reasons.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  return Array.from(new Set([...(contractReasons || []), ...(rootReasons || [])]));
+}
+
+function resultContractManualHandoffTargets(result: IntelligentCopyResult | null | undefined): unknown[] {
+  const contract = resultMaterialContract(result);
+  const rawTargets = contract?.manual_handoff_platforms;
+  return Array.isArray(rawTargets) ? rawTargets : [];
+}
+
+export function resultManualHandoffTargets(result: IntelligentCopyResult | null | undefined): ManualHandoffTarget[] {
+  const rawTargets: unknown[] = Array.isArray(result?.manual_handoff_targets)
+    ? result!.manual_handoff_targets
+    : resultContractManualHandoffTargets(result);
+  return rawTargets
+    .map((item) => {
+      if (!item || typeof item !== "object" || !("platform" in item)) return item;
+      const candidate = item as ManualHandoffTarget & { platform?: unknown };
+      if (!candidate.platform) return item;
+      return {
+        ...candidate,
+        platform: normalizeIntelligentCopyPlatformId(String(candidate.platform)),
+      };
+    })
+    .filter((item): item is ManualHandoffTarget => (
+      Boolean(item && typeof item === "object" && "platform" in item && (item as { platform?: unknown }).platform)
+    ));
+}
+
+export function resultHasManualHandoffReady(result: IntelligentCopyResult | null | undefined): boolean {
+  if (!result) return false;
+  if (resultContractStatus(result) === "manual_handoff") return true;
+  if (result.manual_handoff_ready) return true;
+  if (String(result.status ?? "").trim().toLowerCase() === "manual_handoff") return true;
+  if (resultManualHandoffTargets(result).length > 0) return true;
+  if (result.publish_ready) return false;
+  return false;
+}
+
+export function resultStatusKind(result: IntelligentCopyResult | null | undefined): "ready" | "blocked" | "manual_handoff" {
+  if (!result) return "blocked";
+  if (resultHasManualHandoffReady(result)) return "manual_handoff";
+  const contractReady = resultContractOneClickPublishReady(result);
+  if (contractReady === true) return "ready";
+  if (contractReady === false) return "blocked";
+  if (resultBlockingReasons(result).length > 0) return "blocked";
+  if (String(result.status ?? "").trim().toLowerCase() === "blocked") return "blocked";
+  if (String(result.status ?? "").trim().toLowerCase() === "failed") return "blocked";
+  if (result.publish_ready === false) return "blocked";
+  if (result.publish_ready === true) return "ready";
+  return "blocked";
+}
+
+export function taskHasContinueReadyMaterial(task: IntelligentCopyGenerateTask | null | undefined): boolean {
+  const material = materialFromTask(task);
+  if (!material) return false;
+  return resultStatusKind(material) !== "blocked";
+}
+
+export function publicationPlanManualHandoffTargets(plan: PublicationPlan | null | undefined): ManualHandoffTarget[] {
+  return Array.isArray(plan?.manual_handoff_targets)
+    ? plan!.manual_handoff_targets
+      .map((item) => {
+        if (!item || typeof item !== "object" || !("platform" in item)) return item;
+        const candidate = item as ManualHandoffTarget & { platform?: unknown };
+        if (!candidate.platform) return item;
+        return {
+          ...candidate,
+          platform: normalizeIntelligentCopyPlatformId(String(candidate.platform)),
+        };
+      })
+      .filter((item): item is ManualHandoffTarget => (
+        Boolean(item && typeof item === "object" && "platform" in item && (item as { platform?: unknown }).platform)
+      ))
+    : [];
+}
+
+export function publicationPlanHasManualHandoffReady(plan: PublicationPlan | null | undefined): boolean {
+  if (!plan) return false;
+  if (plan.manual_handoff_ready) return true;
+  if (String(plan.status ?? "").trim().toLowerCase() === "manual_handoff") return true;
+  if (publicationPlanManualHandoffTargets(plan).length > 0) return true;
+  if (plan.publish_ready) return false;
+  return false;
+}
+
+function publicationPlanHasExecutableTargets(plan: PublicationPlan | null | undefined): boolean {
+  return Array.isArray(plan?.targets) && plan!.targets.length > 0;
+}
+
+export function publicationPlanStatusKind(plan: PublicationPlan | null | undefined): "ready" | "blocked" | "manual_handoff" {
+  if (!plan) return "blocked";
+  if (publicationPlanHasManualHandoffReady(plan)) return "manual_handoff";
+  const status = String(plan.status ?? "").trim().toLowerCase();
+  if ((status === "ready" || status === "passed") && publicationPlanHasExecutableTargets(plan)) return "ready";
+  if (status === "blocked" || status === "failed") return "blocked";
+  if (Array.isArray(plan.blocked_reasons) && plan.blocked_reasons.length > 0) return "blocked";
+  if (plan.publish_ready === true && publicationPlanHasExecutableTargets(plan)) return "ready";
+  if (plan.publish_ready === false) return "blocked";
+  return "blocked";
+}
+
+export function publicationPlanIsReady(plan: PublicationPlan | null | undefined): boolean {
+  return publicationPlanStatusKind(plan) === "ready";
+}
+
+export function publicationPlanExecutorPreflightMessages(plan: PublicationPlan | null | undefined): string[] {
+  const preflight =
+    plan?.publication_executor_preflight && typeof plan.publication_executor_preflight === "object"
+      ? plan.publication_executor_preflight
+      : null;
+  if (!preflight) return [];
+  const messages = [
+    typeof preflight.message === "string" ? preflight.message.trim() : "",
+    ...(Array.isArray(preflight.failures)
+      ? preflight.failures.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+      : []),
+  ].filter(Boolean);
+  return Array.from(new Set(messages));
+}
+
+export function openManualHandoffTarget(target: ManualHandoffTarget | null | undefined): boolean {
+  const url = String(target?.login_url ?? "").trim();
+  if (!url || typeof window === "undefined") return false;
+  window.open(url, "_blank", "noopener,noreferrer");
+  return true;
 }
 
 function withoutTrailingSeparators(path: string): string {
@@ -259,9 +514,18 @@ function rankHistoricalFolderPaths(paths: string[], query: string): string[] {
     .map((item) => item.path);
 }
 
+function shouldAutoInspectFolderPath(path: string): boolean {
+  const normalized = normalizeFolderPath(path);
+  if (normalized.length < 3) return false;
+  if (/^[A-Za-z]:[\\/]?$/.test(normalized)) return false;
+  return normalized.split(/[\\/]/).filter(Boolean).length >= 3;
+}
+
 export function useIntelligentCopyWorkspace() {
   const queryClient = useQueryClient();
-  const [folderPath, setFolderPath] = useState("");
+  const lastAutoInspectPathRef = useRef("");
+  const folderPathSourceRef = useRef<"manual" | "task_restore">("manual");
+  const [folderPath, setFolderPathState] = useState("");
   const [debouncedFolderPath, setDebouncedFolderPath] = useState("");
   const [folderPathHistory, setFolderPathHistory] = useState<string[]>(readStoredFolderPathHistory);
   const [copyStyle, setCopyStyle] = useState("attention_grabbing");
@@ -322,13 +586,53 @@ export function useIntelligentCopyWorkspace() {
 
   const inspect = useMutation({
     mutationFn: (path: string) => api.inspectIntelligentCopyFolder(path),
+    onMutate: (path) => {
+      const nextPath = normalizeFolderPath(path);
+      const currentPath = normalizeFolderPath(inspection?.folder_path);
+      if (nextPath && currentPath && nextPath !== currentPath) {
+        setInspection(null);
+        setResult(null);
+      }
+    },
     onSuccess: (payload) => {
       rememberFolderPath(payload.folder_path);
       setInspection(payload);
       setResult(null);
       setSelectedPlatformIds([]);
     },
+    onError: () => {
+      setInspection(null);
+      setResult(null);
+    },
   });
+
+  useEffect(() => {
+    const normalizedPath = normalizeFolderPath(debouncedFolderPath);
+    if (!shouldAutoInspectFolderPath(normalizedPath)) return;
+    if (folderPathSourceRef.current !== "manual") return;
+    if (inspect.isPending) return;
+    if (lastAutoInspectPathRef.current === normalizedPath) return;
+
+    const handle = window.setTimeout(() => {
+      lastAutoInspectPathRef.current = normalizedPath;
+      inspect.mutate(normalizedPath);
+    }, FOLDER_PATH_AUTO_INSPECT_DELAY_MS);
+    return () => window.clearTimeout(handle);
+  }, [debouncedFolderPath, inspect.isPending, inspect.mutate]);
+
+  const setFolderPath = (value: string) => {
+    folderPathSourceRef.current = "manual";
+    setFolderPathState(value);
+  };
+
+  const restoreFolderPathFromTask = (nextPath: string) => {
+    const normalizedPath = normalizeFolderPath(nextPath);
+    if (!normalizedPath) {
+      return;
+    }
+    folderPathSourceRef.current = "task_restore";
+    setFolderPathState(normalizedPath);
+  };
 
   const setSelectedGenerateTaskId = (taskId: string) => {
     setSelectedGenerateTaskIdState(taskId);
@@ -400,11 +704,12 @@ export function useIntelligentCopyWorkspace() {
   useEffect(() => {
     const task = selectedGenerateTask.data;
     if (!task) return;
+    const restoredFolderPath = preferredVisibleFolderPath(task.inspection?.folder_path, task.folder_path, folderPath);
     if (task.inspection) {
       setInspection(task.inspection);
-      setFolderPath(task.inspection.folder_path || task.folder_path || "");
+      restoreFolderPathFromTask(restoredFolderPath);
     } else if (task.folder_path) {
-      setFolderPath(task.folder_path);
+      restoreFolderPathFromTask(restoredFolderPath);
     }
     const material = materialFromTask(task);
     if (material) {
@@ -421,13 +726,14 @@ export function useIntelligentCopyWorkspace() {
         payload.copyStyle,
         payload.platforms,
         payload.useExistingCover,
-      ),
+    ),
     onSuccess: (payload) => {
-      rememberFolderPath(payload.inspection?.folder_path || payload.folder_path);
+      rememberFolderPath(preferredVisibleFolderPath(payload.inspection?.folder_path, payload.folder_path, folderPath));
       if (payload.inspection) setInspection(payload.inspection);
       setResult(materialFromTask(payload));
       setSelectedGenerateTaskId(payload.id);
       setSelectedPlatformIds([]);
+      setPublicationPlatformOptions({});
       setPublicationScheme(null);
       setPublicationSchemeInstruction("");
       void queryClient.invalidateQueries({ queryKey: ["intelligent-copy", "generate-tasks", "recent"] });
@@ -439,12 +745,13 @@ export function useIntelligentCopyWorkspace() {
     mutationFn: (path: string) => api.openIntelligentCopyFolder(path),
   });
 
-  const publicationQueryKey = [
-    "intelligent-publication-plan",
-    result?.json_path ?? "",
-    inspection?.folder_path ?? folderPath,
+  const publicationQueryKey = buildIntelligentPublicationPlanQueryKey({
+    resultJsonPath: result?.json_path,
+    folderPath: inspection?.folder_path ?? folderPath,
     selectedPublicationProfileId,
-  ] as const;
+    selectedGenerateTaskId,
+    selectedGenerateTaskUpdatedAt: selectedGenerateTask.data?.updated_at,
+  });
   const hasResolvedPublicationProfileSelection = Boolean(publicationProfilesQuery.data) || publicationProfilesQuery.isFetched;
   const hasPublicationPlanInput = Boolean((result || inspection) && (inspection?.folder_path || folderPath).trim());
   const publicationPlan = useQuery({
@@ -455,6 +762,14 @@ export function useIntelligentCopyWorkspace() {
       }),
     enabled: hasPublicationPlanInput && hasResolvedPublicationProfileSelection,
     refetchInterval: (query) => (hasActivePublicationAttempt(query.state.data?.existing_attempts) ? 1_500 : false),
+  });
+  const publicationSchemeContextKey = buildPublicationSchemeContextKey({
+    folderPath: inspection?.folder_path ?? folderPath,
+    selectedPublicationProfileId,
+    selectedPublicationBrowser,
+    selectedGenerateTaskId,
+    selectedGenerateTaskUpdatedAt: selectedGenerateTask.data?.updated_at,
+    targetPlatforms: (publicationPlan.data?.targets ?? []).map((target) => target.platform),
   });
 
   const matchPublicationBrowserLogin = useMutation({
@@ -480,7 +795,9 @@ export function useIntelligentCopyWorkspace() {
   });
 
   useEffect(() => {
-    const targetPlatforms = (publicationPlan.data?.targets ?? []).map((target) => target.platform);
+    const targetPlatforms = (publicationPlan.data?.targets ?? [])
+      .map((target) => normalizeIntelligentCopyPlatformId(target.platform))
+      .filter(Boolean);
     if (!targetPlatforms.length) {
       setSelectedPlatformIds([]);
       setPublicationPlatformOptions({});
@@ -498,9 +815,10 @@ export function useIntelligentCopyWorkspace() {
   }, [publicationPlan.data?.targets]);
 
   useEffect(() => {
+    setPublicationPlatformOptions({});
     setPublicationScheme(null);
     setPublicationSchemeInstruction("");
-  }, [selectedPublicationProfileId, selectedPublicationBrowser, inspection?.folder_path]);
+  }, [publicationSchemeContextKey]);
 
   const updatePublicationPlatformOption = (platform: string, patch: Partial<PublishPlatformOptionDraft>) => {
     setPublicationPlatformOptions((current) => {
@@ -513,14 +831,20 @@ export function useIntelligentCopyWorkspace() {
   };
 
   const togglePlatform = (platform: string) => {
+    const normalizedPlatform = normalizeIntelligentCopyPlatformId(platform);
     setSelectedPlatformIds((current) =>
-      current.includes(platform) ? current.filter((item) => item !== platform) : [...current, platform],
+      current.includes(normalizedPlatform)
+        ? current.filter((item) => item !== normalizedPlatform)
+        : [...current, normalizedPlatform],
     );
   };
 
   const toggleMaterialPlatform = (platform: string) => {
+    const normalizedPlatform = normalizeIntelligentCopyPlatformId(platform);
     setSelectedMaterialPlatformIds((current) =>
-      current.includes(platform) ? current.filter((item) => item !== platform) : [...current, platform],
+      current.includes(normalizedPlatform)
+        ? current.filter((item) => item !== normalizedPlatform)
+        : [...current, normalizedPlatform],
     );
   };
 
@@ -547,7 +871,9 @@ export function useIntelligentCopyWorkspace() {
   const applyPublicationScheme = (scheme: PublicationIntelligenceScheme) => {
     setPublicationScheme(scheme);
     setPublicationPlatformOptions(draftFromPublicationPlatformOptions(scheme.platform_options));
-    const schemePlatforms = (scheme.items ?? []).map((item) => item.platform).filter(Boolean);
+    const schemePlatforms = (scheme.items ?? [])
+      .map((item) => normalizeIntelligentCopyPlatformId(item.platform))
+      .filter(Boolean);
     if (schemePlatforms.length) setSelectedPlatformIds(schemePlatforms);
   };
 

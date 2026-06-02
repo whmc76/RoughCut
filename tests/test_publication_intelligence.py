@@ -3,6 +3,52 @@ import pytest
 from roughcut import publication_intelligence as intelligence
 
 
+def test_content_sample_for_probe_falls_back_to_primary_folder_video(tmp_path) -> None:
+    primary_video = tmp_path / "clip.mp4"
+    secondary_video = tmp_path / "alt.mov"
+    primary_video.write_bytes(b"video-primary" * 8)
+    secondary_video.write_bytes(b"video-secondary")
+
+    sample = intelligence._content_sample_for_probe(
+        [{"platform": "bilibili", "title": "测试标题"}],
+        plan={},
+        folder_path=str(tmp_path),
+    )
+
+    assert sample["media_path"] == str(primary_video)
+    assert sample["media_path_source"] == "folder_primary_video"
+
+
+def test_content_sample_for_probe_prefers_explicit_plan_media_path(tmp_path) -> None:
+    fallback_video = tmp_path / "clip.mp4"
+    fallback_video.write_bytes(b"video")
+    explicit_media_path = r"E:\media\authoritative.mp4"
+
+    sample = intelligence._content_sample_for_probe(
+        [{"platform": "youtube", "title": "测试标题"}],
+        plan={"media_path": explicit_media_path},
+        folder_path=str(tmp_path),
+    )
+
+    assert sample["media_path"] == explicit_media_path
+    assert sample["media_path_source"] == "plan_media_path"
+
+
+def test_load_cache_falls_back_to_legacy_path(tmp_path, monkeypatch) -> None:
+    runtime_path = tmp_path / "runtime-cache.json"
+    legacy_path = tmp_path / "legacy-cache.json"
+    legacy_path.write_text(
+        '{"version":"publication-intelligence-v2","records":{"profile-1::chrome":{"creator_profile_name":"FAS"}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(intelligence, "CACHE_PATH", runtime_path)
+    monkeypatch.setattr(intelligence, "LEGACY_CACHE_PATH", legacy_path)
+
+    records = intelligence._load_cache()
+
+    assert records["profile-1::chrome"]["creator_profile_name"] == "FAS"
+
+
 @pytest.mark.asyncio
 async def test_generate_publication_scheme_does_not_invent_platform_collections(monkeypatch, tmp_path):
     async def _fake_research(targets):
@@ -512,9 +558,68 @@ def test_build_scheme_marks_live_publish_preflight_blocked_when_required_surface
 
     preflight = scheme["items"][0]["live_publish_preflight"]
     assert preflight["status"] == "blocked"
-    assert preflight["missing_required_surfaces"] == ["cover", "visibility", "schedule"]
+    assert scheme["items"][0]["visibility_or_publish_mode"] == "draft"
+    assert preflight["missing_required_surfaces"] == ["cover", "visibility"]
+    assert "schedule" not in preflight["required_surfaces"]
     assert scheme["platform_options"]["kuaishou"]["live_publish_preflight"] == preflight
     assert scheme["platform_options"]["kuaishou"]["platform_specific_overrides"]["live_publish_preflight"] == preflight
+
+
+def test_build_scheme_downgrades_xiaohongshu_schedule_when_surface_missing():
+    scheme = intelligence._build_scheme_from_record(
+        plan={
+            "creator_profile_id": "profile-1",
+            "creator_profile_name": "FAS",
+            "targets": [
+                {
+                    "platform": "xiaohongshu",
+                    "platform_label": "小红书",
+                    "title": "真实生成标题",
+                    "body": "真实生成正文",
+                    "tags": ["EDC"],
+                }
+            ],
+        },
+        record={
+            "creator_profile_id": "profile-1",
+            "creator_profile_name": "FAS",
+            "publication_policy": intelligence._empty_publication_policy(),
+            "time_strategy": {"platform_slots": {"xiaohongshu": [{"time": "21:00", "reason": "test"}]}},
+            "platforms": {
+                "xiaohongshu": {
+                    "supports_scheduled_publish": True,
+                    "coverage": {
+                        "required_surfaces": [
+                            {"key": "topics", "status": "options_collected"},
+                            {"key": "collection", "status": "options_collected"},
+                            {"key": "visibility", "status": "surface_seen_without_options"},
+                            {"key": "schedule", "status": "missing"},
+                        ],
+                        "missing_required_surfaces": [
+                            {"key": "schedule", "status": "missing"},
+                        ],
+                        "partial_required_surfaces": [
+                            {"key": "visibility", "status": "surface_seen_without_options"},
+                        ],
+                    },
+                }
+            },
+        },
+        folder_path="D:/material",
+        browser="chrome",
+    )
+
+    item = scheme["items"][0]
+    preflight = item["live_publish_preflight"]
+    platform_option = scheme["platform_options"]["xiaohongshu"]
+
+    assert item["visibility_or_publish_mode"] == "draft"
+    assert item["scheduled_publish_at"] == ""
+    assert platform_option["visibility_or_publish_mode"] == "draft"
+    assert "scheduled_publish_at" not in platform_option
+    assert preflight["status"] == "ready"
+    assert "schedule" not in preflight["required_surfaces"]
+    assert "schedule" not in preflight["missing_required_surfaces"]
 
 
 @pytest.mark.asyncio

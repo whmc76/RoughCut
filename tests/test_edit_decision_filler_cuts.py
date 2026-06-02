@@ -337,6 +337,136 @@ def test_synthetic_transcript_word_timing_does_not_veto_vad_silence() -> None:
     assert any("vad_gap_over_synthetic_timing" in signal for cut in decision.analysis["accepted_cuts"] for signal in cut["signals"])
 
 
+def test_subtitle_text_still_vetoes_vad_silence_when_transcript_words_are_synthetic() -> None:
+    decision = build_edit_decision(
+        "demo.mp4",
+        duration=12.0,
+        silence_segments=[SilenceSegment(start=6.0, end=9.0)],
+        subtitle_items=[
+            {
+                "index": 7,
+                "start_time": 6.0,
+                "end_time": 9.0,
+                "text_final": "你的大拇指去戳也很顺手",
+            }
+        ],
+        transcript_segments=[
+            {
+                "index": 0,
+                "start": 4.0,
+                "end": 10.0,
+                "text": "你的大拇指去戳也很顺手",
+                "words": [
+                    {
+                        "word": "大拇指",
+                        "start": 6.6,
+                        "end": 7.2,
+                        "alignment": {"source": "roughcut_synthesized"},
+                        "raw_payload": {"source": "roughcut_synthesized"},
+                    }
+                ],
+            }
+        ],
+        content_profile=None,
+    )
+
+    assert not any(cut["reason"] == "silence" for cut in decision.analysis["accepted_cuts"])
+
+
+def test_partial_subtitle_row_silence_does_not_veto_when_text_row_mostly_remains() -> None:
+    decision = build_edit_decision(
+        "demo.mp4",
+        duration=12.0,
+        silence_segments=[SilenceSegment(start=6.0, end=6.8)],
+        subtitle_items=[
+            {
+                "index": 7,
+                "start_time": 4.0,
+                "end_time": 9.0,
+                "text_final": "你的大拇指去戳也很顺手",
+            }
+        ],
+        transcript_segments=[],
+        content_profile=None,
+    )
+
+    silence_cuts = [cut for cut in decision.analysis["accepted_cuts"] if cut["reason"] == "silence"]
+
+    assert len(silence_cuts) == 1
+    assert "protected_subtitle_text_overlap" not in silence_cuts[0]["signals"]
+
+
+def test_long_canonical_transcript_segment_does_not_veto_internal_vad_silence() -> None:
+    decision = build_edit_decision(
+        "demo.mp4",
+        duration=80.0,
+        silence_segments=[SilenceSegment(start=30.0, end=34.0)],
+        subtitle_items=[
+            {
+                "index": 0,
+                "start_time": 0.0,
+                "end_time": 70.0,
+                "text_final": "这是一整段很长的 canonical transcript，不应该保护内部所有静默。",
+                "projection_source": "canonical_transcript",
+            }
+        ],
+        transcript_segments=[
+            {
+                "index": 0,
+                "start": 0.0,
+                "end": 70.0,
+                "text": "这是一整段很长的 canonical transcript，不应该保护内部所有静默。",
+                "words": [
+                    {
+                        "word": "静默",
+                        "start": 31.0,
+                        "end": 31.4,
+                        "alignment": {"source": "roughcut_synthesized"},
+                        "raw_payload": {"source": "roughcut_synthesized"},
+                    }
+                ],
+            }
+        ],
+        content_profile=None,
+    )
+
+    assert any(cut["reason"] == "silence" for cut in decision.analysis["accepted_cuts"])
+
+
+def test_silence_with_single_trusted_word_anchor_still_cuts_surrounding_gap() -> None:
+    decision = build_edit_decision(
+        "demo.mp4",
+        duration=12.0,
+        silence_segments=[SilenceSegment(start=3.0, end=7.0)],
+        subtitle_items=[],
+        transcript_segments=[
+            {
+                "index": 0,
+                "start": 0.0,
+                "end": 10.0,
+                "text": "前面 词 后面",
+                "words": [
+                    {
+                        "word": "词",
+                        "start": 4.9,
+                        "end": 5.1,
+                        "alignment": {"source": "provider"},
+                    }
+                ],
+            }
+        ],
+        content_profile=None,
+    )
+
+    silence_cuts = [cut for cut in decision.analysis["accepted_cuts"] if cut["reason"] == "silence"]
+
+    assert len(silence_cuts) == 2
+    assert silence_cuts[0]["start"] == 3.0
+    assert silence_cuts[0]["end"] < 4.9
+    assert silence_cuts[1]["start"] > 5.1
+    assert silence_cuts[1]["end"] == 7.0
+
+
 def test_trusted_transcript_word_timing_still_protects_speech_from_silence_cut() -> None:
     decision = build_edit_decision(
         "demo.mp4",

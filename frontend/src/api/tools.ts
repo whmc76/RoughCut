@@ -9,13 +9,14 @@ import type {
   ToolTtsReferenceAudioHistory,
   ToolTtsResult,
 } from "../types";
-import { request, requestForm } from "./core";
+import { apiPath, request, requestForm } from "./core";
 
 export const toolsApi = {
   getToolStatus: () => request<ToolStatus>("/tools/status"),
   getToolTtsReferenceAudio: () => request<ToolTtsReferenceAudioHistory>("/tools/tts/reference-audio"),
   getToolTtsOutputs: () => request<ToolTtsOutputHistory>("/tools/tts/outputs"),
   getToolRun: <Result>(runId: string) => request<ToolRunStatus<Result>>(`/tools/runs/${encodeURIComponent(runId)}`),
+  getToolRunStreamUrl: (runId: string) => apiPath(`/tools/runs/${encodeURIComponent(runId)}/live`),
   oralizeToolTtsText: (body: ToolTtsOralizeRequest) =>
     request<ToolTtsOralizeResult>("/tools/tts/oralize", {
       method: "POST",

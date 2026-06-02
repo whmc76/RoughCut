@@ -241,7 +241,7 @@ class PublicationAttempt(Base):
     account_label: Mapped[str] = mapped_column(Text, nullable=False, default="")
     credential_id: Mapped[str] = mapped_column(Text, nullable=False, default="")
     idempotency_key: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    semantic_fingerprint: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    semantic_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
     adapter: Mapped[str] = mapped_column(Text, nullable=False, default="")
     status: Mapped[str] = mapped_column(Text, nullable=False, default="queued")
     run_status: Mapped[str | None] = mapped_column(Text)

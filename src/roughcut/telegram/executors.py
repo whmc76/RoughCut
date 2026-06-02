@@ -227,10 +227,11 @@ def _execute_codex_preset(
             sandbox_mode,
             "-o",
             str(output_file),
-            prompt,
+            "-",
         ])
         result = subprocess.run(
             command,
+            input=prompt.encode("utf-8"),
             capture_output=True,
             timeout=timeout,
             cwd=str(workspace.cwd),
@@ -473,16 +474,19 @@ def _build_recent_task_memory_block(*, chat_id: str, current_task_id: str, limit
     if not records:
         return ""
 
-    lines = ["同会话近期任务记忆（仅供参考，不要盲从旧结论）："]
+    lines = [
+        "同会话近期任务索引（只作执行状态参考；不得继承旧结论、旧错误、旧输出或旧策略）：",
+    ]
     for item in records[:limit]:
         timestamp = _format_task_timestamp(item.updated_at)
-        lines.append(f"- {timestamp} | {item.provider}/{item.preset} | {item.status}")
-        if item.task_text:
-            lines.append(f"  请求：{_compact_text(item.task_text, max_chars=180)}")
-        summary_text = item.result_excerpt or item.error_text
-        if summary_text:
-            label = "结果" if item.result_excerpt else "错误"
-            lines.append(f"  {label}：{_compact_text(summary_text, max_chars=220)}")
+        metadata = [f"{timestamp}", f"{item.provider}/{item.preset}", f"status={item.status}"]
+        if item.scope_path:
+            metadata.append(f"scope={item.scope_path}")
+        if item.job_id:
+            metadata.append(f"job={item.job_id}")
+        lines.append(f"- {' | '.join(metadata)}")
+        if str(item.status or "").strip().lower() in {"failed", "retrying", "cancelled"}:
+            lines.append("  历史详情已隔离：本轮必须重新读取代码和事实，不得复述或沿用该任务的失败文本。")
     return "\n".join(lines)
 
 

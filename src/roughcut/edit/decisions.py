@@ -10,6 +10,7 @@ from roughcut.edit.timeline_contract import audit_edit_decision_contract
 from roughcut.media.scene import SceneBoundary
 from roughcut.media.silence import SilenceSegment
 from roughcut.media.subtitle_spans import build_subtitle_span_alignment, subtitle_display_units
+from roughcut.review.video_understanding import normalize_video_understanding_segment_hints
 
 
 FILLER_WORDS = [
@@ -258,6 +259,8 @@ _ROLLBACK_LOOKBACK_MAX_SEC = 24.0
 _ROLLBACK_LOOKBACK_MAX_GAP_SEC = 3.2
 _ROLLBACK_MIN_CUT_SEC = 1.5
 _EMPHASIS_REPEAT_CUE_RE = re.compile(r"(?:说|讲|重复)(?:一|两|二|三|3|好多)遍")
+_MULTIMODAL_POSITIVE_ROLES = frozenset({"hook", "cta", "comparison", "detail_showcase", "demo", "body"})
+_MULTIMODAL_NEGATIVE_ROLES = frozenset({"retake", "junk"})
 _COUNTING_REPEAT_UNIT_RE = re.compile(r"^(?:第[\u4e00-\u9fff\d]{1,3}|[\u4e00-\u9fff\d]{1,3}个)$")
 _TERMINAL_PUNCTUATION_CHARS = "。！？!?…~"
 _INCOMPLETE_TAIL_SUFFIXES = (
@@ -332,6 +335,8 @@ _SILENCE_CUT_SCORE_THRESHOLD = 0.32
 _SILENCE_DURATION_SCORE_BASE = 0.22
 _SILENCE_DURATION_SCORE_PER_SEC = 0.35
 _SILENCE_DURATION_SCORE_MAX = 0.55
+_SUBTITLE_TEXT_SILENCE_PROTECTION_MAX_SEC = 18.0
+_SUBTITLE_TEXT_SILENCE_PROTECTION_MIN_COVERAGE = 0.82
 _SYNTHETIC_WORD_ALIGNMENT_SOURCES = {
     "canonical_realign",
     "synthetic",
@@ -426,6 +431,9 @@ class EditRangeEvidence:
     retake_score: float = 0.0
     protection_score: float = 0.0
     removal_score: float = 0.0
+    multimodal_role: str = ""
+    multimodal_keep_priority: str = ""
+    multimodal_score: float = 0.0
     tags: list[str] = field(default_factory=list)
     previous_text: str = ""
     next_text: str = ""
@@ -446,6 +454,9 @@ class EditRangeEvidence:
             "retake_score": round(self.retake_score, 3),
             "protection_score": round(self.protection_score, 3),
             "removal_score": round(self.removal_score, 3),
+            "multimodal_role": self.multimodal_role,
+            "multimodal_keep_priority": self.multimodal_keep_priority,
+            "multimodal_score": round(self.multimodal_score, 3),
             "tags": list(dict.fromkeys(self.tags)),
         }
         if self.previous_text:
@@ -732,6 +743,10 @@ def infer_timeline_analysis(
         )
 
     sections = _merge_semantic_sections(annotated)
+    multimodal_segment_hints = _build_multimodal_segment_hints(
+        content_profile=content_profile,
+        duration=total_duration,
+    )
     hook_end_sec = 0.0
     for section in sections:
         if section["role"] == "hook":
@@ -747,10 +762,19 @@ def infer_timeline_analysis(
         "hook_end_sec": round(hook_end_sec, 3),
         "cta_start_sec": round(cta_start_sec, 3) if cta_start_sec is not None else None,
         "semantic_sections": sections,
-        "section_directives": _build_section_directives(sections, editing_skill=resolved_skill),
-        "section_actions": _build_section_actions(sections, editing_skill=resolved_skill),
+        "section_directives": _build_section_directives(
+            sections,
+            editing_skill=resolved_skill,
+            multimodal_segment_hints=multimodal_segment_hints,
+        ),
+        "section_actions": _build_section_actions(
+            sections,
+            editing_skill=resolved_skill,
+            multimodal_segment_hints=multimodal_segment_hints,
+        ),
         "editing_skill": resolved_skill,
         "emphasis_candidates": emphasis_candidates,
+        "multimodal_segment_hints": multimodal_segment_hints,
     }
 
 
@@ -806,6 +830,10 @@ def _cuttable_silence_ranges(
     if not word_ranges:
         return [silence]
     bounded_ranges: list[SilenceSegment] = []
+    first = word_ranges[0]
+    leading_end = min(silence.end, first["start"] - _SILENCE_WORD_BOUNDARY_GUARD_SEC)
+    if leading_end > silence.start + _MIN_CUT_DURATION_SEC:
+        bounded_ranges.append(SilenceSegment(start=round(silence.start, 3), end=round(leading_end, 3)))
     for index in range(1, len(word_ranges)):
         previous = word_ranges[index - 1]
         next_item = word_ranges[index]
@@ -813,6 +841,10 @@ def _cuttable_silence_ranges(
         end = min(silence.end, next_item["start"] - _SILENCE_WORD_BOUNDARY_GUARD_SEC)
         if end > start + _MIN_CUT_DURATION_SEC:
             bounded_ranges.append(SilenceSegment(start=round(start, 3), end=round(end, 3)))
+    last = word_ranges[-1]
+    trailing_start = max(silence.start, last["end"] + _SILENCE_WORD_BOUNDARY_GUARD_SEC)
+    if silence.end > trailing_start + _MIN_CUT_DURATION_SEC:
+        bounded_ranges.append(SilenceSegment(start=round(trailing_start, 3), end=round(silence.end, 3)))
     return bounded_ranges
 
 
@@ -897,6 +929,12 @@ def _score_silence_cut(
     previous_item = _find_previous_subtitle(silence.start, subtitle_items)
     next_item = _find_next_subtitle(silence.end, subtitle_items)
     overlaps = _overlapping_subtitle_items(silence.start, silence.end, subtitle_items)
+    protected_subtitle_text_overlap = _range_has_protected_subtitle_text_overlap(
+        silence.start,
+        silence.end,
+        subtitle_items=subtitle_items,
+        content_profile=content_profile,
+    )
     protected_speech_overlap = _range_has_protected_speech_evidence(
         silence.start,
         silence.end,
@@ -994,7 +1032,10 @@ def _score_silence_cut(
     if range_evidence.removal_score >= 0.72:
         score += min(0.22, range_evidence.removal_score * 0.14)
         signals.append(f"evidence_remove={range_evidence.removal_score:.2f}")
-    if protected_speech_overlap and synthetic_timing_overlap and not trusted_word_overlap:
+    if protected_subtitle_text_overlap:
+        score = min(score - 0.72, _SILENCE_CUT_SCORE_THRESHOLD - 0.01)
+        signals.append("protected_subtitle_text_overlap")
+    elif protected_speech_overlap and synthetic_timing_overlap and not trusted_word_overlap:
         vad_gap_bonus = min(0.16, 0.09 + max(0.0, silence.duration - min_silence_to_cut) * 0.05)
         score += vad_gap_bonus
         signals.append(f"vad_gap_over_synthetic_timing={vad_gap_bonus:.2f}")
@@ -1056,6 +1097,13 @@ def _build_range_evidence(
     overlap_texts = [_semantic_subtitle_text(item) for item in subtitle_overlaps]
     context_texts = [text for text in [previous_text, *overlap_texts, next_text] if text]
     tags: list[str] = []
+    multimodal_signal = _summarize_multimodal_signal_for_range(
+        start,
+        end,
+        multimodal_segment_hints=(timeline_analysis or {}).get("multimodal_segment_hints"),
+    )
+    multimodal_role = str((multimodal_signal.get("roles") or [""])[0] or "")
+    multimodal_keep_priority = str(multimodal_signal.get("keep_priority") or "")
 
     visual_score = 0.0
     if any(_has_visual_showcase_signal(text, content_profile=content_profile) for text in context_texts):
@@ -1078,6 +1126,14 @@ def _build_range_evidence(
     if _editing_skill_has_creative_tag(timeline_analysis, {"detail_focus", "closeup_focus", "practical_demo", "workflow_breakdown"}):
         visual_score += 0.12
         tags.append("creative_visual_priority")
+    positive_multimodal = float(multimodal_signal.get("positive_score", 0.0) or 0.0)
+    negative_multimodal = float(multimodal_signal.get("negative_score", 0.0) or 0.0)
+    if positive_multimodal > 0.0:
+        visual_score += min(0.24, positive_multimodal * 0.16)
+        tags.append(f"multimodal_keep_{multimodal_keep_priority or 'signal'}")
+    if negative_multimodal > 0.0:
+        visual_score -= min(0.18, negative_multimodal * 0.1)
+        tags.append("multimodal_drop_signal")
 
     language_scores = [
         _subtitle_signal_score(text, content_profile=content_profile)
@@ -1103,6 +1159,9 @@ def _build_range_evidence(
         tags.append("incomplete_overlap")
     if transcript_overlaps and transcript_coverage < 0.18 and not subtitle_overlaps:
         tags.append("weak_transcript_coverage")
+    if negative_multimodal > 0.0 and multimodal_role in _MULTIMODAL_NEGATIVE_ROLES:
+        retake_score += min(0.34, negative_multimodal * 0.2)
+        tags.append(f"multimodal_role_{multimodal_role}")
 
     protection_score = visual_score * 0.72 + language_score * 0.46
     if transcript_coverage >= 0.25:
@@ -1111,6 +1170,8 @@ def _build_range_evidence(
     if section_role in {"hook", "cta"}:
         protection_score += 0.12
         tags.append(f"{section_role}_guard")
+    if positive_multimodal > 0.0:
+        protection_score += min(0.34, positive_multimodal * 0.18)
 
     removal_score = 0.0
     if not subtitle_overlaps and transcript_coverage <= 0.05:
@@ -1124,6 +1185,10 @@ def _build_range_evidence(
         removal_score -= min(0.34, visual_score * 0.24)
     if language_score >= 0.72:
         removal_score -= 0.18
+    if negative_multimodal > 0.0:
+        removal_score += min(0.38, negative_multimodal * 0.24)
+    if positive_multimodal > 0.0:
+        removal_score -= min(0.24, positive_multimodal * 0.16)
 
     return EditRangeEvidence(
         start=start,
@@ -1140,6 +1205,9 @@ def _build_range_evidence(
         retake_score=max(0.0, min(1.4, retake_score)),
         protection_score=max(0.0, min(1.6, protection_score)),
         removal_score=max(0.0, min(1.6, removal_score)),
+        multimodal_role=multimodal_role,
+        multimodal_keep_priority=multimodal_keep_priority,
+        multimodal_score=max(-1.6, min(1.6, float(multimodal_signal.get("score", 0.0) or 0.0))),
         tags=list(dict.fromkeys(tags)),
         previous_text=previous_text,
         next_text=next_text,
@@ -1532,6 +1600,7 @@ def _build_section_directives(
     sections: list[dict[str, Any]],
     *,
     editing_skill: dict[str, Any] | None = None,
+    multimodal_segment_hints: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     section_policy = dict((editing_skill or {}).get("section_policy") or {})
     creative_tags = _editing_skill_creative_preferences(editing_skill)
@@ -1543,19 +1612,28 @@ def _build_section_directives(
         music_entry_allowed = bool(policy.get("music_entry_allowed", role != "cta"))
         insert_allowed = bool(policy.get("insert_allowed", role in {"detail", "body"}))
         preference_labels, rationale = _section_creative_preference_annotation(role=role, creative_tags=creative_tags)
+        multimodal_signal = _summarize_multimodal_signal_for_range(
+            float(section.get("start_sec") or 0.0),
+            float(section.get("end_sec") or 0.0),
+            multimodal_segment_hints=multimodal_segment_hints,
+        )
+        overlay_weight += float(multimodal_signal.get("overlay_bonus", 0.0) or 0.0)
         directives.append(
             {
                 "index": index,
                 "role": role,
                 "start_sec": round(float(section.get("start_sec") or 0.0), 3),
                 "end_sec": round(float(section.get("end_sec") or 0.0), 3),
-                "overlay_weight": overlay_weight,
+                "overlay_weight": round(overlay_weight, 3),
                 "music_entry_allowed": music_entry_allowed,
                 "music_entry_bonus": round(float(policy.get("music_entry_bonus", 0.0) or 0.0), 3),
                 "insert_allowed": insert_allowed,
                 "insert_priority": round(float(policy.get("insert_priority", 0.0) or 0.0), 3),
                 "creative_preferences": preference_labels,
                 "creative_rationale": rationale,
+                "multimodal_roles": list(multimodal_signal.get("roles") or []),
+                "multimodal_keep_priority": str(multimodal_signal.get("keep_priority") or ""),
+                "multimodal_signal": round(float(multimodal_signal.get("score", 0.0) or 0.0), 3),
             }
         )
     return directives
@@ -1565,6 +1643,7 @@ def _build_section_actions(
     sections: list[dict[str, Any]],
     *,
     editing_skill: dict[str, Any] | None = None,
+    multimodal_segment_hints: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     section_policy = dict((editing_skill or {}).get("section_policy") or {})
     creative_tags = _editing_skill_creative_preferences(editing_skill)
@@ -1577,6 +1656,14 @@ def _build_section_actions(
         policy = dict(section_policy.get(role) or {})
         anchor_bias = min(1.0, max(0.0, float(policy.get("broll_anchor_bias", 0.5) or 0.5)))
         preference_labels, rationale = _section_creative_preference_annotation(role=role, creative_tags=creative_tags)
+        multimodal_signal = _summarize_multimodal_signal_for_range(
+            start_sec,
+            end_sec,
+            multimodal_segment_hints=multimodal_segment_hints,
+        )
+        trim_intensity = str(policy.get("trim_intensity") or "balanced")
+        if bool(multimodal_signal.get("preserve_trim")) and trim_intensity == "balanced":
+            trim_intensity = "preserve"
         actions.append(
             {
                 "index": index,
@@ -1584,15 +1671,26 @@ def _build_section_actions(
                 "start_sec": start_sec,
                 "end_sec": end_sec,
                 "duration_sec": round(duration_sec, 3),
-                "trim_intensity": str(policy.get("trim_intensity") or "balanced"),
+                "trim_intensity": trim_intensity,
                 "packaging_intent": str(policy.get("packaging_intent") or f"{role}_support"),
-                "transition_boost": round(float(policy.get("transition_boost", 0.0) or 0.0), 3),
+                "transition_boost": round(
+                    float(policy.get("transition_boost", 0.0) or 0.0)
+                    + float(multimodal_signal.get("transition_bonus", 0.0) or 0.0),
+                    3,
+                ),
                 "transition_anchor_sec": start_sec,
                 "broll_allowed": bool(policy.get("broll_allowed", False)),
                 "broll_anchor_sec": round(start_sec + duration_sec * anchor_bias, 3),
-                "action_priority": round(float(policy.get("insert_priority", 0.0) or 0.0), 3),
+                "action_priority": round(
+                    float(policy.get("insert_priority", 0.0) or 0.0)
+                    + float(multimodal_signal.get("action_bonus", 0.0) or 0.0),
+                    3,
+                ),
                 "creative_preferences": preference_labels,
                 "creative_rationale": rationale,
+                "multimodal_roles": list(multimodal_signal.get("roles") or []),
+                "multimodal_keep_priority": str(multimodal_signal.get("keep_priority") or ""),
+                "multimodal_signal": round(float(multimodal_signal.get("score", 0.0) or 0.0), 3),
             }
         )
     return actions
@@ -1616,6 +1714,151 @@ def _editing_skill_has_creative_tag(
     if not isinstance(skill, dict):
         return False
     return bool(_editing_skill_creative_preferences(skill) & tags)
+
+
+def _build_multimodal_segment_hints(
+    *,
+    content_profile: dict | None,
+    duration: float | None,
+) -> list[dict[str, Any]]:
+    video_understanding = ((content_profile or {}).get("video_understanding") or {})
+    if not isinstance(video_understanding, dict):
+        return []
+    return normalize_video_understanding_segment_hints(video_understanding, duration=duration)
+
+
+def _video_understanding_hints_for_range(
+    start_time: float,
+    end_time: float,
+    *,
+    multimodal_segment_hints: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    matched: list[dict[str, Any]] = []
+    for hint in list(multimodal_segment_hints or []):
+        if not isinstance(hint, dict):
+            continue
+        hint_start = float(hint.get("start", 0.0) or 0.0)
+        hint_end = float(hint.get("end", hint_start) or hint_start)
+        if hint_end <= start_time or hint_start >= end_time:
+            continue
+        matched.append(hint)
+    return matched
+
+
+def _priority_rank(value: str) -> int:
+    return {"drop": 0, "low": 1, "medium": 2, "high": 3}.get(str(value or "").strip().lower(), -1)
+
+
+def _priority_weight(value: str) -> float:
+    return {
+        "drop": 0.95,
+        "low": 0.22,
+        "medium": 0.52,
+        "high": 0.88,
+    }.get(str(value or "").strip().lower(), 0.0)
+
+
+def _multimodal_overlap_strength(
+    start_time: float,
+    end_time: float,
+    *,
+    hint: dict[str, Any],
+) -> float:
+    overlap = max(
+        0.0,
+        min(end_time, float(hint.get("end", 0.0) or 0.0)) - max(start_time, float(hint.get("start", 0.0) or 0.0)),
+    )
+    if overlap <= 0.0:
+        return 0.0
+    range_duration = max(0.6, end_time - start_time)
+    hint_duration = max(0.6, float(hint.get("duration_sec", 0.0) or 0.0))
+    confidence = max(0.24, float(hint.get("confidence", 0.0) or 0.0))
+    return min(1.2, overlap / min(range_duration, hint_duration) * confidence)
+
+
+def _summarize_multimodal_signal_for_range(
+    start_time: float,
+    end_time: float,
+    *,
+    multimodal_segment_hints: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    matched = _video_understanding_hints_for_range(
+        start_time,
+        end_time,
+        multimodal_segment_hints=multimodal_segment_hints,
+    )
+    if not matched:
+        return {
+            "roles": [],
+            "keep_priority": "",
+            "score": 0.0,
+            "positive_score": 0.0,
+            "negative_score": 0.0,
+            "overlay_bonus": 0.0,
+            "action_bonus": 0.0,
+            "transition_bonus": 0.0,
+            "preserve_trim": False,
+        }
+
+    positive_score = 0.0
+    negative_score = 0.0
+    strongest_positive = ("", "", 0.0)
+    strongest_negative = ("", "", 0.0)
+    roles: list[str] = []
+    for hint in matched:
+        role = str(hint.get("role") or "").strip().lower()
+        keep_priority = str(hint.get("keep_priority") or "").strip().lower()
+        strength = _multimodal_overlap_strength(start_time, end_time, hint=hint)
+        weighted = strength * _priority_weight(keep_priority or "medium")
+        if role and role not in roles:
+            roles.append(role)
+        if keep_priority == "drop" or role in _MULTIMODAL_NEGATIVE_ROLES:
+            negative_score += weighted
+            if weighted > strongest_negative[2]:
+                strongest_negative = (role, keep_priority, weighted)
+            continue
+        if role in _MULTIMODAL_POSITIVE_ROLES:
+            role_bonus = 1.0
+            if role in {"comparison", "detail_showcase", "demo"}:
+                role_bonus = 1.18
+            elif role in {"hook", "cta"}:
+                role_bonus = 1.1
+            weighted *= role_bonus
+        positive_score += weighted
+        if weighted > strongest_positive[2]:
+            strongest_positive = (role, keep_priority, weighted)
+
+    dominant_priority = ""
+    if strongest_positive[2] >= strongest_negative[2]:
+        dominant_priority = strongest_positive[1]
+    elif strongest_negative[2] > 0:
+        dominant_priority = strongest_negative[1] or "drop"
+    net_score = positive_score - negative_score
+    strongest_role = strongest_positive[0] if strongest_positive[2] >= strongest_negative[2] else strongest_negative[0]
+    overlay_bonus = 0.0
+    action_bonus = 0.0
+    transition_bonus = 0.0
+    preserve_trim = False
+    if positive_score > 0:
+        overlay_bonus += min(0.22, positive_score * 0.12)
+        action_bonus += min(0.26, positive_score * 0.14)
+        transition_bonus += min(0.18, positive_score * 0.1)
+        preserve_trim = positive_score >= 0.42 and strongest_role in {"comparison", "detail_showcase", "demo", "hook", "cta"}
+    if negative_score > 0:
+        overlay_bonus -= min(0.12, negative_score * 0.08)
+        action_bonus -= min(0.18, negative_score * 0.1)
+        transition_bonus -= min(0.12, negative_score * 0.08)
+    return {
+        "roles": roles[:4],
+        "keep_priority": dominant_priority,
+        "score": round(net_score, 3),
+        "positive_score": round(positive_score, 3),
+        "negative_score": round(negative_score, 3),
+        "overlay_bonus": round(overlay_bonus, 3),
+        "action_bonus": round(action_bonus, 3),
+        "transition_bonus": round(transition_bonus, 3),
+        "preserve_trim": preserve_trim,
+    }
 
 
 def _section_creative_preference_annotation(*, role: str, creative_tags: set[str]) -> tuple[list[str], str]:
@@ -2124,6 +2367,18 @@ def _resolve_keep_energy_for_segment(
             energy += focus_bonus
         break
 
+    multimodal_signal = _summarize_multimodal_signal_for_range(
+        segment.start,
+        segment.end,
+        multimodal_segment_hints=(timeline_analysis or {}).get("multimodal_segment_hints"),
+    )
+    positive_multimodal = float(multimodal_signal.get("positive_score", 0.0) or 0.0)
+    negative_multimodal = float(multimodal_signal.get("negative_score", 0.0) or 0.0)
+    if positive_multimodal > 0.0:
+        energy += min(0.42, positive_multimodal * 0.22)
+    if negative_multimodal > 0.0:
+        energy -= min(0.48, negative_multimodal * 0.28)
+
     energy *= {
         "tight": 0.52,
         "balanced": 1.0,
@@ -2195,6 +2450,9 @@ def _build_keep_energy_segments_analysis(
                 "trim_intensity": str((section_action or {}).get("trim_intensity") or "balanced"),
                 "packaging_intent": str((section_action or {}).get("packaging_intent") or ""),
                 "emphasis_hits": emphasis_count,
+                "multimodal_roles": list(((section_action or {}).get("multimodal_roles") or []))[:4],
+                "multimodal_keep_priority": str((section_action or {}).get("multimodal_keep_priority") or ""),
+                "multimodal_signal": round(float((section_action or {}).get("multimodal_signal", 0.0) or 0.0), 3),
             }
         )
     return analysis
@@ -2418,12 +2676,50 @@ def _range_has_protected_speech_evidence(
     content_profile: dict | None,
 ) -> bool:
     for item in _overlapping_subtitle_items(start_time, end_time, subtitle_items):
+        if not _subtitle_overlap_has_protected_text_coverage(item, start_time=start_time, end_time=end_time):
+            continue
         if _subtitle_has_protected_speech_text(_semantic_subtitle_text(item), content_profile=content_profile):
             return True
     for segment in _overlapping_transcript_segments(start_time, end_time, transcript_segments):
         if _transcript_segment_has_protected_speech(segment, start_time=start_time, end_time=end_time, content_profile=content_profile):
             return True
     return False
+
+
+def _range_has_protected_subtitle_text_overlap(
+    start_time: float,
+    end_time: float,
+    *,
+    subtitle_items: list[dict[str, Any]],
+    content_profile: dict | None,
+) -> bool:
+    for item in _overlapping_subtitle_items(start_time, end_time, subtitle_items):
+        if not _subtitle_overlap_has_protected_text_coverage(item, start_time=start_time, end_time=end_time):
+            continue
+        if _subtitle_has_protected_speech_text(_semantic_subtitle_text(item), content_profile=content_profile):
+            return True
+    return False
+
+
+def _subtitle_overlap_has_protected_text_coverage(
+    item: dict[str, Any],
+    *,
+    start_time: float,
+    end_time: float,
+) -> bool:
+    try:
+        item_start = float(item.get("start_time", 0.0) or 0.0)
+        item_end = float(item.get("end_time", item_start) or item_start)
+    except (TypeError, ValueError):
+        return False
+    item_duration = max(0.0, item_end - item_start)
+    if item_duration > _SUBTITLE_TEXT_SILENCE_PROTECTION_MAX_SEC:
+        return False
+    overlap = min(end_time, item_end) - max(start_time, item_start)
+    if overlap <= 0.001:
+        return False
+    coverage = overlap / max(0.001, item_duration)
+    return coverage >= _SUBTITLE_TEXT_SILENCE_PROTECTION_MIN_COVERAGE or overlap >= item_duration - 0.08
 
 
 def _subtitle_has_protected_speech_text(text: str, *, content_profile: dict | None) -> bool:

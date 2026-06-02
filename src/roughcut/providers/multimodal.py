@@ -3,8 +3,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import logging
+import mimetypes
+import os
 import re
+import shutil
+import tempfile
 import time
 from pathlib import Path
 from threading import Lock
@@ -13,6 +18,8 @@ import httpx
 import openai
 
 from roughcut.config import DEFAULT_MINIMAX_REASONING_MODEL, get_settings, uses_codex_auth_helper
+from roughcut.host.codex_proxy import resolve_codex_proxy_token, resolve_codex_proxy_url
+from roughcut.providers.minimax_compat import resolve_minimax_anthropic_base_url
 from roughcut.providers.auth import resolve_credential
 from roughcut.providers.openai_responses import (
     build_multimodal_input,
@@ -28,6 +35,7 @@ from roughcut.usage import record_usage_event
 _VISION_MODEL_CACHE: str | None = None
 _MULTIMODAL_CACHE_TTL_SECS = 15 * 60
 _MULTIMODAL_MAX_CACHE_ENTRIES = 128
+_DEFAULT_OPENAI_MULTIMODAL_MODEL = "gpt-5.5"
 _MULTIMODAL_PROVIDER_DEFAULT_COOLDOWN_MS = {
     "minimax": 45_000,
     "openai": 15_000,
@@ -81,10 +89,34 @@ def _active_multimodal_fallback_model(settings) -> str:
 
 
 def _openai_direct_api_unavailable(settings) -> bool:
-    return (
-        uses_codex_auth_helper(settings)
-        and not str(getattr(settings, "openai_api_key", "") or "").strip()
-    )
+    if not uses_codex_auth_helper(settings):
+        return False
+    if str(getattr(settings, "openai_api_key", "") or "").strip():
+        return False
+    return not str(getattr(settings, "openai_api_key_helper", "") or "").strip()
+
+
+def _is_provider_compatible_multimodal_model(provider: str, model: str) -> bool:
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_model = str(model or "").strip().lower()
+    if not normalized_model:
+        return False
+    if normalized_provider == "openai":
+        return normalized_model.startswith(("gpt-", "o1", "o3", "o4")) or "codex" in normalized_model
+    if normalized_provider == "minimax":
+        return normalized_model.startswith("minimax") or normalized_model.startswith("abab")
+    if normalized_provider == "anthropic":
+        return normalized_model.startswith("claude")
+    return True
+
+
+def _default_multimodal_model_for_provider(provider: str) -> str:
+    normalized_provider = str(provider or "").strip().lower()
+    if normalized_provider == "openai":
+        return _DEFAULT_OPENAI_MULTIMODAL_MODEL
+    if normalized_provider == "minimax":
+        return DEFAULT_MINIMAX_REASONING_MODEL
+    return ""
 
 
 def _has_minimax_multimodal_credentials(settings) -> bool:
@@ -107,6 +139,8 @@ async def complete_with_images(
     max_tokens: int = 800,
     temperature: float = 0.2,
     json_mode: bool = False,
+    preferred_provider: str | None = None,
+    preferred_model: str | None = None,
 ) -> str:
     settings = get_settings()
     image_bytes = [path.read_bytes() for path in image_paths]
@@ -122,6 +156,8 @@ async def complete_with_images(
                     str(settings.active_vision_model or settings.vision_model or "").strip(),
                     _active_multimodal_fallback_provider(settings),
                     _active_multimodal_fallback_model(settings),
+                    str(preferred_provider or "").strip().lower(),
+                    str(preferred_model or "").strip(),
                     str(settings.llm_mode or "").strip().lower(),
                 )
             ),
@@ -132,10 +168,20 @@ async def complete_with_images(
 
     images_b64 = [base64.b64encode(blob).decode() for blob in image_bytes]
 
+    normalized_preferred_provider = str(preferred_provider or "").strip().lower()
+    normalized_preferred_model = str(preferred_model or "").strip()
     primary_provider = settings.active_reasoning_provider.lower()
     attempts: list[tuple[str, str]] = []
     preferred_error: Exception | None = None
-    if _can_attempt_multimodal_provider(primary_provider, settings):
+    if normalized_preferred_provider:
+        if _can_attempt_multimodal_provider(normalized_preferred_provider, settings):
+            preferred_attempt_model = normalized_preferred_model or await _resolve_vision_model(provider=normalized_preferred_provider)
+            attempts.append((normalized_preferred_provider, preferred_attempt_model))
+        else:
+            preferred_error = RuntimeError(
+                f"Multimodal provider {normalized_preferred_provider} is unavailable with the current credential mode"
+            )
+    elif _can_attempt_multimodal_provider(primary_provider, settings):
         attempts.append(
             (
                 primary_provider,
@@ -148,7 +194,8 @@ async def complete_with_images(
         )
 
     fallback_provider = _active_multimodal_fallback_provider(settings)
-    if settings.llm_mode != "local" and fallback_provider and fallback_provider != primary_provider:
+    effective_primary_provider = normalized_preferred_provider or primary_provider
+    if settings.llm_mode != "local" and fallback_provider and fallback_provider != effective_primary_provider:
         try:
             if _can_attempt_multimodal_provider(fallback_provider, settings):
                 fallback_model = _active_multimodal_fallback_model(settings) or await _resolve_vision_model(provider=fallback_provider)
@@ -162,6 +209,20 @@ async def complete_with_images(
             else DEFAULT_MINIMAX_REASONING_MODEL
         )
         attempts.append(("minimax", minimax_model or DEFAULT_MINIMAX_REASONING_MODEL))
+    configured_attempt_providers = {provider for provider, _model in attempts}
+    if len(configured_attempt_providers) <= 1:
+        for alternate_provider in ("openai", "anthropic"):
+            if alternate_provider in configured_attempt_providers:
+                continue
+            if not _can_attempt_multimodal_provider(alternate_provider, settings):
+                continue
+            try:
+                alternate_model = await _resolve_vision_model(provider=alternate_provider)
+            except Exception:
+                continue
+            attempts.append((alternate_provider, alternate_model))
+            configured_attempt_providers.add(alternate_provider)
+            break
 
     last_error: Exception | None = None
     for provider, model in attempts:
@@ -179,11 +240,13 @@ async def complete_with_images(
                 provider=provider,
                 model=model,
                 prompt=prompt,
+                image_paths=image_paths,
                 images_b64=images_b64,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 json_mode=json_mode,
             )
+            content = _normalize_json_mode_multimodal_content(content, json_mode=json_mode)
             _store_cached_multimodal_result(cache_key, content)
             return content
         except Exception as exc:
@@ -201,8 +264,23 @@ async def complete_with_images(
             elif _looks_like_fast_fallback_error(exc):
                 preferred_error = preferred_error or exc
 
-    final_error = preferred_error or last_error
+    final_error = last_error or preferred_error
     raise ValueError(f"Multimodal completion failed for providers {[name for name, _ in attempts]}: {final_error}")
+
+
+def _normalize_json_mode_multimodal_content(content: str, *, json_mode: bool) -> str:
+    if not json_mode:
+        return content
+    try:
+        payload = json.loads(str(content or ""))
+    except Exception:
+        return content
+    if set(payload.keys()) != {"text"}:
+        return content
+    shell_text = _strip_reasoning_tags(str(payload.get("text") or "").strip())
+    if not shell_text:
+        raise ValueError("Multimodal json_mode returned an empty text shell")
+    return extract_json_text(shell_text)
 
 
 async def _complete_once(
@@ -210,6 +288,7 @@ async def _complete_once(
     provider: str,
     model: str,
     prompt: str,
+    image_paths: list[Path],
     images_b64: list[str],
     max_tokens: int,
     temperature: float,
@@ -224,6 +303,7 @@ async def _complete_once(
                 provider=provider,
                 model=model,
                 prompt=prompt,
+                image_paths=image_paths,
                 images_b64=images_b64,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -239,6 +319,7 @@ async def _complete_once(
                 provider=provider,
                 model=model,
                 prompt=prompt,
+                image_paths=image_paths,
                 images_b64=images_b64,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -255,6 +336,7 @@ async def _complete_once_unthrottled(
     provider: str,
     model: str,
     prompt: str,
+    image_paths: list[Path],
     images_b64: list[str],
     max_tokens: int,
     temperature: float,
@@ -291,6 +373,14 @@ async def _complete_once_unthrottled(
         return _finalize_text(data.get("message", {}).get("content", ""), json_mode=json_mode)
 
     if provider == "openai":
+        if uses_codex_auth_helper(settings) and not str(getattr(settings, "openai_api_key", "") or "").strip():
+            return await _complete_openai_via_codex_bridge(
+                model=model,
+                prompt=prompt,
+                media_paths=image_paths,
+                json_mode=json_mode,
+                settings=settings,
+            )
         client = openai.AsyncOpenAI(
             api_key=resolve_credential(
                 mode=settings.openai_auth_mode,
@@ -300,7 +390,10 @@ async def _complete_once_unthrottled(
             ),
             base_url=settings.openai_base_url.rstrip("/"),
         )
-        data_urls = [f"data:image/jpeg;base64,{image}" for image in images_b64]
+        data_urls = [
+            f"data:{_guess_media_type(path)};base64,{image}"
+            for path, image in zip(image_paths, images_b64, strict=False)
+        ]
         payload: dict[str, object] = {
             "model": model,
             "input": build_multimodal_input(prompt, data_urls),
@@ -327,38 +420,16 @@ async def _complete_once_unthrottled(
         return _finalize_text(extract_response_output_text(response), json_mode=json_mode)
 
     if provider == "minimax":
-        base_url, token = _resolve_chat_api_endpoint(provider)
-        content: list[dict] = [{"type": "text", "text": prompt}]
-        for image in images_b64:
-            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image}"}})
-        payload: dict = {
-            "model": model,
-            "messages": [{"role": "user", "content": content}],
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        if json_mode:
-            payload["response_format"] = {"type": "json_object"}
-        async with httpx.AsyncClient(timeout=120) as client:
-            response = await client.post(
-                f"{base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {token}"},
-                json=payload,
-            )
-            await _raise_for_multimodal_status(provider, response)
-            data = response.json()
-        _clear_provider_cooldown(provider)
-        usage_data = data.get("usage", {}) or {}
-        await record_usage_event(
-            provider=provider,
-            model=str(data.get("model") or model),
-            usage={
-                "prompt_tokens": usage_data.get("prompt_tokens", 0),
-                "completion_tokens": usage_data.get("completion_tokens", 0),
-            },
-            kind="multimodal",
+        return await _complete_minimax_anthropic_multimodal(
+            prompt=prompt,
+            image_paths=image_paths,
+            images_b64=images_b64,
+            json_mode=json_mode,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            settings=settings,
         )
-        return _finalize_text(data["choices"][0]["message"]["content"], json_mode=json_mode)
 
     if provider == "anthropic":
         token = resolve_credential(
@@ -368,11 +439,11 @@ async def _complete_once_unthrottled(
             provider_name="Anthropic",
         )
         content: list[dict] = [{"type": "text", "text": prompt}]
-        for image in images_b64:
+        for path, image in zip(image_paths, images_b64, strict=False):
             content.append(
                 {
                     "type": "image",
-                    "source": {"type": "base64", "media_type": "image/jpeg", "data": image},
+                    "source": {"type": "base64", "media_type": _guess_media_type(path), "data": image},
                 }
             )
         payload = {
@@ -410,6 +481,232 @@ async def _complete_once_unthrottled(
         return _finalize_text(text, json_mode=json_mode)
 
     raise ValueError(f"Provider {provider} does not support multimodal completion")
+
+
+async def _complete_openai_via_codex_bridge(
+    *,
+    model: str,
+    prompt: str,
+    media_paths: list[Path],
+    json_mode: bool,
+    settings,
+) -> str:
+    del settings
+    url = _resolve_codex_bridge_exec_url()
+    if not url:
+        raise RuntimeError("Codex host bridge is not configured for OpenAI multimodal completion")
+
+    timeout = max(30, int(os.getenv("ROUGHCUT_MULTIMODAL_CODEX_TIMEOUT_SEC", "300") or "300"))
+    staged_media_context = _stage_codex_bridge_media_paths(media_paths)
+    with staged_media_context as staged_media_paths:
+        payload: dict[str, object] = {
+            "repo_root": str(Path.cwd()),
+            "prompt": _build_codex_multimodal_prompt(prompt, json_mode=json_mode),
+            "model": model,
+            "timeout_sec": timeout,
+            "images": [str(path) for path in staged_media_paths],
+        }
+        if json_mode:
+            payload["output_schema"] = {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "payload_json": {"type": "string"},
+                },
+                "required": ["payload_json"],
+            }
+
+        headers = {"Content-Type": "application/json"}
+        token = resolve_codex_proxy_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            response.raise_for_status()
+            data = response.json()
+
+    _clear_provider_cooldown("openai")
+    raw_text = str(data.get("stdout") or data.get("excerpt") or "").strip()
+    if json_mode:
+        try:
+            raw_text = str(json.loads(raw_text).get("payload_json") or "").strip()
+        except Exception:
+            pass
+    await record_usage_event(
+        provider="openai",
+        model=model,
+        usage={"prompt_tokens": 0, "completion_tokens": 0},
+        kind="multimodal",
+    )
+    return _finalize_text(raw_text, json_mode=json_mode)
+
+
+def _stage_codex_bridge_media_paths(media_paths: list[Path]):
+    if not any(_should_stage_codex_bridge_media_path(path) for path in media_paths):
+        return _passthrough_media_paths_context(media_paths)
+    tempdir = tempfile.TemporaryDirectory(prefix="roughcut-codex-mm-")
+    staged_paths: list[Path] = []
+    temp_root = Path(tempdir.name)
+    for index, original in enumerate(media_paths, start=1):
+        suffix = original.suffix or ".bin"
+        staged = temp_root / f"media_{index:02d}{suffix}"
+        shutil.copyfile(original, staged)
+        staged_paths.append(staged)
+    return _temporary_media_paths_context(tempdir, staged_paths)
+
+
+def _should_stage_codex_bridge_media_path(path: Path) -> bool:
+    normalized = str(path or "")
+    return normalized.startswith("\\\\")
+
+
+class _passthrough_media_paths_context:
+    def __init__(self, media_paths: list[Path]):
+        self._media_paths = list(media_paths)
+
+    def __enter__(self) -> list[Path]:
+        return list(self._media_paths)
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+class _temporary_media_paths_context:
+    def __init__(self, tempdir: tempfile.TemporaryDirectory, staged_paths: list[Path]):
+        self._tempdir = tempdir
+        self._staged_paths = list(staged_paths)
+
+    def __enter__(self) -> list[Path]:
+        return list(self._staged_paths)
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        self._tempdir.cleanup()
+        return False
+
+
+async def _complete_minimax_anthropic_multimodal(
+    *,
+    prompt: str,
+    image_paths: list[Path],
+    images_b64: list[str],
+    json_mode: bool,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    settings,
+) -> str:
+    token = str(getattr(settings, "minimax_api_key", "") or "").strip()
+    if not token:
+        raise ValueError("MiniMax API key is not configured")
+    if not images_b64:
+        return _finalize_text("", json_mode=json_mode)
+
+    base_url = resolve_minimax_anthropic_base_url(
+        base_url=str(getattr(settings, "minimax_base_url", "") or ""),
+        api_host=str(getattr(settings, "minimax_api_host", "") or ""),
+    )
+    payload = {
+        "model": _resolve_minimax_multimodal_model(model),
+        "max_tokens": max_tokens,
+        "temperature": temperature,
+        "messages": [
+            {
+                "role": "user",
+                "content": _build_minimax_multimodal_content(
+                    prompt=prompt,
+                    image_paths=image_paths,
+                    images_b64=images_b64,
+                ),
+            }
+        ],
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "x-api-key": token,
+        "authorization": f"Bearer {token}",
+        "anthropic-version": "2023-06-01",
+    }
+    async with httpx.AsyncClient(timeout=120) as client:
+        response = await client.post(
+            f"{base_url}/v1/messages",
+            headers=headers,
+            json=payload,
+        )
+        await _raise_for_multimodal_status("minimax", response)
+        data = response.json()
+
+    _clear_provider_cooldown("minimax")
+    parts = data.get("content", []) or []
+    text = "".join(part.get("text", "") for part in parts if part.get("type") == "text")
+    usage_data = data.get("usage", {}) or {}
+    await record_usage_event(
+        provider="minimax",
+        model=str(data.get("model") or _resolve_minimax_multimodal_model(model)),
+        usage={
+            "prompt_tokens": int(usage_data.get("input_tokens", 0) or 0),
+            "completion_tokens": int(usage_data.get("output_tokens", 0) or 0),
+        },
+        kind="multimodal",
+    )
+    return _finalize_text(text, json_mode=json_mode)
+
+
+def _build_minimax_multimodal_content(
+    *,
+    prompt: str,
+    image_paths: list[Path],
+    images_b64: list[str],
+) -> list[dict[str, object]]:
+    content: list[dict[str, object]] = [{"type": "text", "text": str(prompt or "").strip()}]
+    for path, image in zip(image_paths, images_b64, strict=False):
+        content.append(
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": _guess_media_type(path), "data": image},
+            }
+        )
+    return content
+
+
+def _resolve_minimax_multimodal_model(model: str) -> str:
+    normalized = str(model or "").strip().lower()
+    if normalized == "minimax-m3":
+        return "MiniMax-M3"
+    return "MiniMax-M3"
+
+
+def _guess_media_type(path: Path) -> str:
+    guessed, _encoding = mimetypes.guess_type(str(path))
+    return guessed or "application/octet-stream"
+
+
+def _build_codex_multimodal_prompt(prompt: str, *, json_mode: bool) -> str:
+    instructions = [
+        "Complete the visual task below using the attached image files.",
+        "Use the images as the source of truth for visual details.",
+        "Do not ask for clarification.",
+    ]
+    if json_mode:
+        instructions.extend(
+            [
+                'Return only valid JSON as {"payload_json":"<final_json_minified>"} with no markdown fences.',
+                'The value of "payload_json" must itself be valid minified JSON for the final result.',
+            ]
+        )
+    else:
+        instructions.append("Return only the final answer with no preamble.")
+    return "\n\n".join([*instructions, "USER REQUEST:", str(prompt or "").strip(), "Produce the answer now."]).strip()
+
+
+def _resolve_codex_bridge_exec_url() -> str:
+    explicit = str(os.getenv("ROUGHCUT_MULTIMODAL_CODEX_BRIDGE_URL", "") or "").strip()
+    if explicit:
+        return explicit
+    proxy_url = resolve_codex_proxy_url()
+    if proxy_url.endswith("/v1/codex/exec"):
+        return proxy_url
+    return ""
 
 
 async def _raise_for_multimodal_status(provider: str, response: httpx.Response) -> None:
@@ -654,7 +951,10 @@ def _resolve_chat_api_endpoint(provider: str) -> tuple[str, str]:
 def _finalize_text(text: str, *, json_mode: bool) -> str:
     cleaned = _strip_reasoning_tags(str(text).strip())
     if json_mode:
-        return extract_json_text(cleaned)
+        try:
+            return extract_json_text(cleaned)
+        except Exception:
+            return json.dumps({"text": cleaned}, ensure_ascii=False)
     return cleaned
 
 
@@ -664,13 +964,24 @@ async def _resolve_vision_model(*, provider: str | None = None) -> str:
         return _VISION_MODEL_CACHE
 
     settings = get_settings()
-    if settings.vision_model:
+    if settings.vision_model and _is_provider_compatible_multimodal_model(provider or settings.active_reasoning_provider, settings.vision_model):
         if provider is None:
             _VISION_MODEL_CACHE = settings.vision_model
         return settings.vision_model
 
     active_provider = (provider or settings.active_reasoning_provider).lower()
     if active_provider != "ollama":
+        if _is_provider_compatible_multimodal_model(active_provider, settings.active_vision_model):
+            if provider is None:
+                _VISION_MODEL_CACHE = settings.active_vision_model
+                return _VISION_MODEL_CACHE
+            return settings.active_vision_model
+        default_model = _default_multimodal_model_for_provider(active_provider)
+        if default_model:
+            if provider is None:
+                _VISION_MODEL_CACHE = default_model
+                return _VISION_MODEL_CACHE
+            return default_model
         if provider is None:
             _VISION_MODEL_CACHE = settings.active_vision_model
             return _VISION_MODEL_CACHE

@@ -38,10 +38,6 @@ def _resolve_visual_capability(*, visual_provider: str, visual_mcp_provider: str
     if native_provider:
         return _ready_capability(provider=native_provider, mode="native_multimodal")
 
-    mcp_provider = _clean_text(visual_mcp_provider)
-    if mcp_provider:
-        return _ready_capability(provider=mcp_provider, mode="visual_mcp")
-
     return _unavailable_capability()
 
 

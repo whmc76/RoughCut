@@ -138,6 +138,7 @@ class ConfigOut(BaseModel):
     voice_clone_voice_id: str
     director_rewrite_strength: float
     publication_browser_agent_base_url: str
+    publication_browser_cdp_url: str
     publication_browser_agent_auth_token_set: bool
     publication_worker_poll_interval_sec: int
     publication_worker_batch_limit: int
@@ -224,6 +225,7 @@ class RuntimeEnvironmentOut(BaseModel):
     avatar_training_api_base_url: str
     voice_clone_api_base_url: str
     publication_browser_agent_base_url: str
+    publication_browser_cdp_url: str
     output_dir: str
 
 
@@ -275,6 +277,8 @@ def _resolve_cover_route_model(settings: Any) -> str:
         return "codex_builtin_image_generation"
     if backend == "minimax_images_api":
         return configured_model or "image-01"
+    if backend == "dreamina_web":
+        return configured_model or "auto(4.5_text/5.0_reference)"
     return configured_model or "image2"
 
 
@@ -309,6 +313,13 @@ def _build_model_route_entries(settings: Any) -> list[dict[str, Any]]:
             [
                 f"runner={str(getattr(settings, 'intelligent_copy_cover_codex_runner_model', '') or 'gpt-5.4-mini').strip()}",
                 f"effort={str(getattr(settings, 'intelligent_copy_cover_codex_runner_effort', '') or 'low').strip().lower()}",
+            ]
+        )
+    if cover_backend == "dreamina_web":
+        cover_details.extend(
+            [
+                f"runner={str(getattr(settings, 'intelligent_copy_cover_dreamina_command', '') or 'node').strip()}",
+                "routing=text->http_replay,reference->cdp_page",
             ]
         )
 
@@ -548,6 +559,7 @@ class ConfigPatch(BaseModel):
     voice_clone_voice_id: str | None = None
     director_rewrite_strength: float | None = None
     publication_browser_agent_base_url: str | None = None
+    publication_browser_cdp_url: str | None = None
     publication_browser_agent_auth_token: str | None = None
     publication_worker_poll_interval_sec: int | None = None
     publication_worker_batch_limit: int | None = None
@@ -688,6 +700,7 @@ def get_config():
         voice_clone_voice_id=s.voice_clone_voice_id,
         director_rewrite_strength=s.director_rewrite_strength,
         publication_browser_agent_base_url=s.publication_browser_agent_base_url,
+        publication_browser_cdp_url=s.publication_browser_cdp_url,
         publication_browser_agent_auth_token_set=bool(s.publication_browser_agent_auth_token),
         publication_worker_poll_interval_sec=s.publication_worker_poll_interval_sec,
         publication_worker_batch_limit=s.publication_worker_batch_limit,
@@ -774,6 +787,7 @@ def get_runtime_environment():
         avatar_training_api_base_url=s.avatar_training_api_base_url,
         voice_clone_api_base_url=s.voice_clone_api_base_url,
         publication_browser_agent_base_url=s.publication_browser_agent_base_url,
+        publication_browser_cdp_url=s.publication_browser_cdp_url,
         output_dir=s.output_dir,
     )
 
@@ -1014,6 +1028,11 @@ def patch_config(body: ConfigPatch):
         if not browser_agent_base_url:
             raise HTTPException(status_code=400, detail="publication_browser_agent_base_url cannot be empty")
         updates["publication_browser_agent_base_url"] = browser_agent_base_url
+    if "publication_browser_cdp_url" in updates:
+        cdp_url = str(updates["publication_browser_cdp_url"]).strip().rstrip("/")
+        if not cdp_url:
+            raise HTTPException(status_code=400, detail="publication_browser_cdp_url cannot be empty")
+        updates["publication_browser_cdp_url"] = cdp_url
     if "telegram_agent_claude_command" in updates:
         updates["telegram_agent_claude_command"] = str(updates["telegram_agent_claude_command"] or "").strip() or "claude"
     if "telegram_agent_claude_model" in updates:
@@ -1105,10 +1124,15 @@ def patch_config(body: ConfigPatch):
             backend = "openai_images_api"
         if backend in {"minimax", "minimax_api"}:
             backend = "minimax_images_api"
-        if backend not in {"codex_builtin", "openai_images_api", "minimax_images_api"}:
+        if backend in {"dreamina", "dreamina_cdp", "dreamina_web_cdp"}:
+            backend = "dreamina_web"
+        if backend not in {"codex_builtin", "openai_images_api", "minimax_images_api", "dreamina_web"}:
             raise HTTPException(
                 status_code=400,
-                detail="intelligent_copy_cover_image_backend must be codex_builtin, openai_images_api, or minimax_images_api",
+                detail=(
+                    "intelligent_copy_cover_image_backend must be codex_builtin, "
+                    "openai_images_api, minimax_images_api, or dreamina_web"
+                ),
             )
         updates["intelligent_copy_cover_image_backend"] = backend
     for key in (

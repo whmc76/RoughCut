@@ -202,6 +202,13 @@ export function JobManualEditorPage() {
     staleTime: 15_000,
     retry: 1,
   });
+  const contentProfile = useQuery({
+    queryKey: ["job-content-profile", jobId],
+    queryFn: () => api.getContentProfile(jobId),
+    enabled: Boolean(jobId),
+    staleTime: 15_000,
+    retry: 1,
+  });
   const manualEditorAssets = useQuery({
     queryKey: ["job-manual-editor-assets", jobId],
     queryFn: () => api.warmJobManualEditorAssets(jobId),
@@ -460,6 +467,7 @@ export function JobManualEditorPage() {
         >
           <JobManualEditSection
             job={job.data}
+            contentProfile={contentProfile.data}
             session={manualEditor.data}
             previewAssets={manualEditorAssets.data}
             saving={applyManualEditor.isPending}

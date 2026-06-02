@@ -256,6 +256,7 @@ export const titleStylePresets: StylePreset[] = [
 
 export const copyStylePresets: StylePreset[] = [
   { key: "attention_grabbing", label: "吸引眼球", groupId: "growth", summary: "默认推荐。爆点、反差、结果感更强。", accent: "#ff7a59", badge: "默认", sampleTop: "这功能强得离谱", sampleBottom: "点击欲最强", sampleFoot: "适合大多数短视频" },
+  { key: "m27_claim_grounded", label: "M2.7 证据闭环", groupId: "growth", summary: "实验模式。先建事实账本，再生成、审核和最小修复文案。", accent: "#36c7a3", badge: "实验", sampleTop: "只写证据支持", sampleBottom: "速度和事实并重", sampleFoot: "适合 M2.7 快速物料" },
   { key: "balanced", label: "平衡稳妥", groupId: "balanced", summary: "有吸引力但不过火，适合泛用内容。", accent: "#7fb6ff", badge: "稳", sampleTop: "核心流程讲清了", sampleBottom: "信息和情绪都在线", sampleFoot: "泛用性最好" },
   { key: "premium_editorial", label: "高级编辑感", groupId: "brand", summary: "像编辑和品牌文案，更克制、更有质感。", accent: "#f0c77d", badge: "编辑", sampleTop: "这次很值得看", sampleBottom: "更像杂志导语", sampleFoot: "适合品牌和精品" },
   { key: "trusted_expert", label: "专业可信", groupId: "persona", summary: "像经验分享和专家拆解，强调判断和方法。", accent: "#86d6c3", badge: "专业", sampleTop: "关键差异讲明白", sampleBottom: "更像可靠建议", sampleFoot: "适合教程和评测" },

@@ -324,6 +324,8 @@ def _collapse_ascii_overlap_token(token: str) -> str:
     value = str(token or "")
     if len(value) < 4:
         return value
+    if re.fullmatch(r"\d+(?:\.\d+)?", value):
+        return value
     if re.search(r"[a-z]", value):
         return value
     collapsed = re.sub(r"([A-Z])\1(?=[A-Z])", r"\1", value)

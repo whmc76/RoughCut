@@ -111,6 +111,34 @@ def test_normal_reduplication_does_not_trip_asr_quality_gate() -> None:
     assert analysis["suspicious_duplicate_count"] == 0
 
 
+def test_two_isolated_qwen_duplicate_findings_are_advisory_not_blocking() -> None:
+    result = TranscriptResult(
+        segments=[],
+        raw_segments=[],
+        language="zh-CN",
+        duration=120.0,
+        provider="local_http_asr",
+        model="qwen3-asr-1.7b-forced-aligner",
+        raw_payload={
+            "chunks": [
+                {"text": "样的。哦，沉甸甸的，好沉的。赶紧看看"},
+                {"text": "这把刀是能用的吧？呃，既既能这个切菜，又能削水"},
+                {"text": "这里是正常的一段产品展示，没有重复污染。"},
+                {"text": "这里也是正常的一段手感描述。"},
+                {"text": "继续说一下快开和背夹。"},
+                {"text": "这个角度可以看到细节。"},
+                {"text": "合上以后再试一下。"},
+                {"text": "最后说一下整体感觉。"},
+            ],
+        },
+    )
+
+    analysis = analyze_transcript_asr_quality(result)
+
+    assert analysis["rejected"] is False
+    assert analysis["suspicious_duplicate_count"] == 2
+
+
 @pytest.mark.asyncio
 async def test_rejected_qwen3_local_asr_result_is_not_returned(monkeypatch, tmp_path: Path) -> None:
     bad = _result(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import asyncio
 from difflib import SequenceMatcher
 import json
@@ -13,7 +14,7 @@ from urllib.parse import urlparse
 from roughcut.config import llm_task_route
 from roughcut.llm_cache import digest_payload
 from roughcut.providers.factory import get_reasoning_provider, get_search_provider
-from roughcut.providers.reasoning.base import Message
+from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.review.content_profile_memory import merge_content_profile_creative_preferences
 from roughcut.review.platform_body_quality import assess_platform_body
 from roughcut.review.platform_tag_quality import assess_platform_tags
@@ -22,7 +23,7 @@ from roughcut.review.subtitle_translation import detect_subtitle_language
 from roughcut.usage import track_usage_operation
 
 _PLATFORM_FACT_SHEET_CACHE_VERSION = "2026-04-03.fact-sheet.v2"
-_PLATFORM_PACKAGE_CACHE_VERSION = "2026-05-21.generate.source-language.v1"
+_PLATFORM_PACKAGE_CACHE_VERSION = "2026-05-26.generate.claim-grounded.v1"
 
 PLATFORM_ORDER = [
     ("bilibili", "B站", "简介", "标签"),
@@ -407,6 +408,7 @@ async def generate_platform_packaging(
     author_profile: dict[str, Any] | None = None,
     prompt_brief: dict[str, Any] | None = None,
     fact_sheet: dict[str, Any] | None = None,
+    target_platforms: list[str] | None = None,
 ) -> dict[str, Any]:
     prompt_brief = prompt_brief or build_packaging_prompt_brief(
         source_name=source_name,
@@ -418,6 +420,17 @@ async def generate_platform_packaging(
         content_profile=content_profile,
         subtitle_items=subtitle_items,
     )
+    if str(copy_style or "").strip().lower() == "claim_grounded":
+        return await _generate_claim_grounded_platform_packaging(
+            source_name=source_name,
+            content_profile=content_profile,
+            subtitle_items=subtitle_items,
+            copy_style=copy_style,
+            author_profile=author_profile,
+            prompt_brief=prompt_brief,
+            fact_sheet=fact_sheet,
+            target_platforms=target_platforms,
+        )
     fact_guardrail_text = _build_fact_guardrail_text(fact_sheet)
     author_prompt_text = _build_author_prompt_text(author_profile)
     creative_guidance_text = _build_packaging_creative_guidance_text(content_profile)
@@ -486,6 +499,7 @@ async def generate_platform_packaging(
         fact_sheet=fact_sheet,
         copy_style=copy_style,
         author_profile=author_profile,
+        target_platforms=target_platforms,
     )
     packaging = normalize_platform_packaging(
         raw_response,
@@ -494,9 +508,105 @@ async def generate_platform_packaging(
         fact_sheet=fact_sheet,
         author_profile=author_profile,
     )
-    _assert_platform_packaging_publishable(packaging, content_profile=content_profile, fact_sheet=fact_sheet)
+    _assert_platform_packaging_publishable(
+        packaging,
+        content_profile=content_profile,
+        fact_sheet=fact_sheet,
+        target_platforms=target_platforms,
+    )
+    if target_platforms:
+        target_order = _resolve_target_platform_order(target_platforms)
+        packaging = _prune_packaging_platforms(packaging, platform_keys=[key for key, _label, _body_label, _tag_label in target_order])
     packaging["fact_sheet"] = fact_sheet
     packaging["generation_repair_trace"] = repair_trace
+    return packaging
+
+
+async def _generate_claim_grounded_platform_packaging(
+    *,
+    source_name: str,
+    content_profile: dict[str, Any] | None,
+    subtitle_items: list[dict[str, Any]],
+    copy_style: str,
+    author_profile: dict[str, Any] | None,
+    prompt_brief: dict[str, Any],
+    fact_sheet: dict[str, Any],
+    target_platforms: list[str] | None = None,
+) -> dict[str, Any]:
+    evidence_pack = _build_platform_claim_evidence_pack(
+        source_name=source_name,
+        prompt_brief=prompt_brief,
+        fact_sheet=fact_sheet,
+        subtitle_items=subtitle_items,
+        content_profile=content_profile,
+    )
+    trace: list[dict[str, Any]] = []
+
+    with llm_task_route("copy", search_enabled=False):
+        provider = get_reasoning_provider()
+        with track_usage_operation("platform_package.claim_ledger"):
+            claim_payload = await _complete_json_with_same_model_repair(
+                [
+                    Message(
+                        role="system",
+                        content=(
+                            "你是严格的发布事实账本助手。"
+                            "你的任务是把证据改写成可引用的 claim，不写发布文案。只输出 JSON。"
+                        ),
+                    ),
+                    Message(role="user", content=_build_claim_ledger_prompt(evidence_pack)),
+                ],
+                temperature=0.0,
+                max_tokens=2200,
+                timeout=75,
+                schema_hint='{"claims":[],"uncertain_claims":[],"disallowed_inferences":[]}',
+            )
+    claim_ledger = _augment_claim_ledger_with_evidence_pack_claims(
+        _normalize_claim_ledger(claim_payload),
+        evidence_pack=evidence_pack,
+    )
+    trace.append(
+        {
+            "stage": "claim_ledger",
+            "claim_count": len(claim_ledger.get("claims") or []),
+            "disallowed_count": len(claim_ledger.get("disallowed_inferences") or []),
+        }
+    )
+
+    current_draft = await _generate_claim_grounded_platforms_incrementally(
+        evidence_pack=evidence_pack,
+        claim_ledger=claim_ledger,
+        content_profile=content_profile,
+        author_profile=author_profile,
+        trace=trace,
+        target_platforms=target_platforms,
+    )
+    current_draft = _remove_unsupported_claim_grounded_highlights(current_draft, claim_ledger=claim_ledger)
+    target_order = _resolve_target_platform_order(target_platforms)
+    target_keys = [key for key, _label, _body_label, _tag_label in target_order]
+    effective_fact_sheet = _merge_claim_ledger_into_fact_sheet(fact_sheet, claim_ledger)
+    packaging, publish_assessment = await _finalize_claim_grounded_packaging_with_repair(
+        current_draft=current_draft,
+        claim_ledger=claim_ledger,
+        target_keys=target_keys,
+        effective_fact_sheet=effective_fact_sheet,
+        content_profile=content_profile,
+        copy_style=copy_style,
+        author_profile=author_profile,
+        trace=trace,
+    )
+    if target_platforms:
+        packaging = _prune_packaging_platforms(packaging, platform_keys=target_keys)
+    if not publish_assessment["publish_ready"]:
+        raise RuntimeError("文案模型输出质量不达标，禁止发布：" + "；".join(publish_assessment["blocking_reasons"][:12]))
+    packaging["fact_sheet"] = effective_fact_sheet
+    packaging["claim_grounding"] = {
+        "mode": "claim_grounded",
+        "evidence_pack": evidence_pack,
+        "claim_ledger": claim_ledger,
+        "audit": _claim_grounding_trace_summary(trace),
+        "trace": trace,
+    }
     return packaging
 
 
@@ -507,6 +617,7 @@ async def _generate_platform_packaging_with_repair(
     fact_sheet: dict[str, Any] | None,
     copy_style: str,
     author_profile: dict[str, Any] | None,
+    target_platforms: list[str] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     trace: list[dict[str, Any]] = []
     last_payload: dict[str, Any] = {}
@@ -555,13 +666,13 @@ async def _generate_platform_packaging_with_repair(
                     )
             candidate = response.as_json()
             last_payload = candidate if isinstance(candidate, dict) else {}
-            structural_issues = _validate_raw_platform_packaging(last_payload)
+            structural_issues = _validate_raw_platform_packaging(last_payload, target_platforms=target_platforms)
             if structural_issues:
                 assessment = {
                     "publish_ready": False,
                     "blocking_reasons": structural_issues,
                     "warnings": [],
-                    "repair_hints": ["返回完整 JSON，所有平台都必须包含 titles、description、tags。"],
+                    "repair_hints": ["返回完整 JSON，目标平台都必须包含 titles、description、tags。"],
                 }
             else:
                 normalized_candidate = normalize_platform_packaging(
@@ -575,6 +686,7 @@ async def _generate_platform_packaging_with_repair(
                     normalized_candidate,
                     content_profile=content_profile,
                     fact_sheet=fact_sheet,
+                    target_platforms=target_platforms,
                 )
             last_issues = list(assessment.get("blocking_reasons") or [])
             last_repair_hints = list(assessment.get("repair_hints") or [])
@@ -596,10 +708,10 @@ async def _generate_platform_packaging_with_repair(
             trace.append({"attempt": attempt, "status": "error", "error": last_error})
             last_issues = [last_error]
     detail = "；".join(last_issues or [last_error] or ["未知错误"])
-    raise RuntimeError(f"MiniMax 文案生成经过修复重试后仍不合格，禁止发布：{detail}")
+    raise RuntimeError(f"文案生成经过修复重试后仍不合格，禁止发布：{detail}")
 
 
-def _validate_raw_platform_packaging(raw: dict[str, Any]) -> list[str]:
+def _validate_raw_platform_packaging(raw: dict[str, Any], *, target_platforms: list[str] | None = None) -> list[str]:
     problems: list[str] = []
     if not isinstance(raw.get("highlights"), dict):
         problems.append("缺少 highlights")
@@ -607,7 +719,7 @@ def _validate_raw_platform_packaging(raw: dict[str, Any]) -> list[str]:
     if not raw_platforms:
         problems.append("缺少 platforms")
         return problems
-    for key, label, _body_label, _tag_label in PLATFORM_ORDER:
+    for key, label, _body_label, _tag_label in _resolve_target_platform_order(target_platforms):
         payload = raw_platforms.get(key) if isinstance(raw_platforms.get(key), dict) else {}
         titles = [str(item).strip() for item in (payload.get("titles") or []) if str(item).strip()]
         description = str(payload.get("description") or "").strip()
@@ -619,6 +731,1618 @@ def _validate_raw_platform_packaging(raw: dict[str, Any]) -> list[str]:
         if len(tags) < 2:
             problems.append(f"{label}标签少于 2 个")
     return problems
+
+
+async def _generate_claim_grounded_platforms_incrementally(
+    *,
+    evidence_pack: dict[str, Any],
+    claim_ledger: dict[str, Any],
+    content_profile: dict[str, Any] | None,
+    author_profile: dict[str, Any] | None,
+    trace: list[dict[str, Any]],
+    target_platforms: list[str] | None = None,
+) -> dict[str, Any]:
+    highlights = await _generate_claim_grounded_highlights(
+        evidence_pack=evidence_pack,
+        claim_ledger=claim_ledger,
+        content_profile=content_profile,
+        author_profile=author_profile,
+    )
+    draft: dict[str, Any] = {"highlights": highlights, "platforms": {}}
+    platform_order = _resolve_target_platform_order(target_platforms)
+    platform_results = await asyncio.gather(
+        *[
+            _generate_one_claim_grounded_platform_with_repair(
+                platform_key=platform_key,
+                label=label,
+                body_label=body_label,
+                tag_label=tag_label,
+                evidence_pack=evidence_pack,
+                claim_ledger=claim_ledger,
+                content_profile=content_profile,
+                author_profile=author_profile,
+            )
+            for platform_key, label, body_label, tag_label in platform_order
+        ]
+    )
+    for platform_key, label, platform_draft, platform_audit, platform_trace in platform_results:
+        trace.extend(platform_trace)
+        if not _claim_grounding_audit_passes(platform_audit):
+            reasons = [
+                str(item.get("reason") or item.get("unsupported_span") or "").strip()
+                for item in platform_audit.get("unsupported") or []
+                if isinstance(item, dict)
+            ]
+            raise RuntimeError(f"{label} claim-grounded 文案未通过审核：" + "；".join(_dedupe_non_empty(reasons)[:8]))
+        draft["platforms"][platform_key] = platform_draft
+    return draft
+
+
+async def _generate_one_claim_grounded_platform_with_repair(
+    *,
+    platform_key: str,
+    label: str,
+    body_label: str,
+    tag_label: str,
+    evidence_pack: dict[str, Any],
+    claim_ledger: dict[str, Any],
+    content_profile: dict[str, Any] | None,
+    author_profile: dict[str, Any] | None,
+) -> tuple[str, str, dict[str, Any], dict[str, Any], list[dict[str, Any]]]:
+    platform_trace: list[dict[str, Any]] = []
+    platform_draft = await _generate_one_claim_grounded_platform(
+        platform_key=platform_key,
+        label=label,
+        body_label=body_label,
+        tag_label=tag_label,
+        evidence_pack=evidence_pack,
+        claim_ledger=claim_ledger,
+        content_profile=content_profile,
+        author_profile=author_profile,
+    )
+    platform_draft = _normalize_and_harden_claim_grounded_platform(
+        platform_key=platform_key,
+        platform_draft=platform_draft,
+        claim_ledger=claim_ledger,
+        evidence_pack=evidence_pack,
+    )
+    platform_audit = _local_claim_grounded_platform_audit(platform_key, platform_draft, claim_ledger=claim_ledger)
+    for round_index in range(1, 4):
+        if not _claim_grounding_audit_passes(platform_audit):
+            platform_draft = await _repair_one_claim_grounded_platform(
+            platform_key=platform_key,
+            label=label,
+                platform_draft=platform_draft,
+                audit=platform_audit,
+                claim_ledger=claim_ledger,
+            )
+            platform_draft = _normalize_and_harden_claim_grounded_platform(
+                platform_key=platform_key,
+                platform_draft=platform_draft,
+                claim_ledger=claim_ledger,
+                evidence_pack=evidence_pack,
+            )
+            platform_audit = _local_claim_grounded_platform_audit(platform_key, platform_draft, claim_ledger=claim_ledger)
+        if _claim_grounding_audit_passes(platform_audit):
+            platform_audit = await _maybe_run_claim_entailment_audit(
+                platform_key=platform_key,
+                platform_draft=platform_draft,
+                claim_ledger=claim_ledger,
+            )
+            if _claim_grounding_audit_passes(platform_audit):
+                break
+            platform_draft = await _repair_one_claim_grounded_platform(
+                platform_key=platform_key,
+                label=label,
+                platform_draft=platform_draft,
+                audit=platform_audit,
+                claim_ledger=claim_ledger,
+            )
+            platform_draft = _normalize_and_harden_claim_grounded_platform(
+                platform_key=platform_key,
+                platform_draft=platform_draft,
+                claim_ledger=claim_ledger,
+                evidence_pack=evidence_pack,
+            )
+            platform_audit = _local_claim_grounded_platform_audit(platform_key, platform_draft, claim_ledger=claim_ledger)
+    platform_trace.append(
+        {
+            "stage": "platform_claim_grounding",
+            "platform": platform_key,
+            "verdict": platform_audit.get("verdict"),
+            "unsupported_count": len(platform_audit.get("unsupported") or []),
+        }
+    )
+    return platform_key, label, platform_draft, platform_audit, platform_trace
+
+
+def _normalize_and_harden_claim_grounded_platform(
+    *,
+    platform_key: str,
+    platform_draft: dict[str, Any],
+    claim_ledger: dict[str, Any],
+    evidence_pack: dict[str, Any],
+) -> dict[str, Any]:
+    hardened = _normalize_single_platform_claim_draft(platform_key, platform_draft)
+    hardened = _enforce_claim_grounded_title_anchors(hardened, claim_ledger=claim_ledger, evidence_pack=evidence_pack)
+    hardened = _backfill_missing_claim_refs_from_subject(hardened, claim_ledger=claim_ledger, evidence_pack=evidence_pack)
+    hardened = _complete_claim_grounded_title_count(platform_key, hardened, claim_ledger=claim_ledger, evidence_pack=evidence_pack)
+    return hardened
+
+
+def _local_claim_grounded_platform_audit(
+    platform_key: str, platform_draft: dict[str, Any], *, claim_ledger: dict[str, Any]
+) -> dict[str, Any]:
+    structure_audit = _platform_claim_structure_audit(platform_key, platform_draft)
+    return _merge_claim_audit_issues(
+        structure_audit,
+        _claim_ledger_semantic_invariant_issues(
+            {"platforms": {platform_key: platform_draft}},
+            claim_ledger=claim_ledger,
+        ),
+    )
+
+
+async def _maybe_run_claim_entailment_audit(
+    *,
+    platform_key: str,
+    platform_draft: dict[str, Any],
+    claim_ledger: dict[str, Any],
+) -> dict[str, Any]:
+    invariant_issues = _claim_ledger_semantic_invariant_issues(
+        {"platforms": {platform_key: platform_draft}},
+        claim_ledger=claim_ledger,
+    )
+    if not invariant_issues:
+        return _normalize_claim_entailment_audit({"verdict": "pass", "unsupported": [], "summary": "local risk gate pass"})
+    platform_wrapper = {"platforms": {platform_key: platform_draft}}
+    with llm_task_route("copy", search_enabled=False):
+        provider = get_reasoning_provider()
+        with track_usage_operation("platform_package.claim_entailment_audit.platform"):
+            audit_raw = await _complete_json_with_same_model_repair(
+                [
+                    Message(
+                        role="system",
+                        content=(
+                            "你是语义蕴含审核助手。"
+                            "只判断文案是否被 claim ledger 支持，不按关键词黑名单判断。只输出 JSON。"
+                        ),
+                    ),
+                    Message(
+                        role="user",
+                        content=_build_claim_entailment_audit_prompt(
+                            draft=platform_wrapper,
+                            claim_ledger=claim_ledger,
+                        ),
+                    ),
+                ],
+                temperature=0.0,
+                max_tokens=2200,
+                timeout=75,
+                schema_hint='{"verdict":"pass","unsupported":[],"summary":""}',
+            )
+    platform_audit = _normalize_claim_entailment_audit(audit_raw)
+    return _merge_claim_audit_issues(platform_audit, invariant_issues)
+
+
+def _resolve_target_platform_order(target_platforms: list[str] | None) -> list[tuple[str, str, str, str]]:
+    if not target_platforms:
+        return list(PLATFORM_ORDER)
+    wanted = {str(item or "").strip() for item in target_platforms if str(item or "").strip()}
+    if not wanted:
+        return list(PLATFORM_ORDER)
+    return [item for item in PLATFORM_ORDER if item[0] in wanted]
+
+
+def _normalize_single_platform_claim_draft(platform_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    payload = _unwrap_single_platform_payload(platform_key, payload)
+    return {
+        "titles": _normalize_claim_field_list(
+            _first_present_value(
+                payload,
+                ("titles", "title_options", "title_suggestions", "title_list", "标题", "title", "标题列表", "标题建议", "标题候选"),
+            )
+        ),
+        "description": _normalize_claim_field_list(
+            _first_present_value(
+                payload,
+                (
+                    "description",
+                    "descriptions",
+                    "body",
+                    "bodies",
+                    "content",
+                    "caption",
+                    "copywriting",
+                    "main_text",
+                    "正文",
+                    "简介",
+                    "文案",
+                    "正文文案",
+                ),
+            )
+        ),
+        "tags": _normalize_claim_field_list(
+            _first_present_value(payload, ("tags", "hashtags", "hashtag", "topics", "tag_list", "话题", "标签", "tag"))
+        ),
+    }
+
+
+def _unwrap_single_platform_payload(platform_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    if _payload_has_single_platform_fields(payload):
+        return payload
+    if isinstance(payload.get("platforms"), dict):
+        nested = payload["platforms"].get(platform_key)
+        if isinstance(nested, dict):
+            return _unwrap_single_platform_payload(platform_key, nested)
+    if isinstance(payload.get(platform_key), dict):
+        return _unwrap_single_platform_payload(platform_key, payload[platform_key])
+    for key in ("platform_copy", "copy", "content", "result", "data", "draft", "output"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            return _unwrap_single_platform_payload(platform_key, nested)
+    for nested in payload.values():
+        if isinstance(nested, dict) and _payload_has_single_platform_fields(nested):
+            return _unwrap_single_platform_payload(platform_key, nested)
+    return payload
+
+
+def _first_present_value(payload: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in payload and payload.get(key) not in (None, "", []):
+            return payload.get(key)
+    return None
+
+
+def _payload_has_single_platform_fields(payload: dict[str, Any]) -> bool:
+    return any(
+        key in payload
+        for key in (
+            "titles",
+            "title_options",
+            "title_suggestions",
+            "title_list",
+            "标题",
+            "title",
+            "标题列表",
+            "标题建议",
+            "标题候选",
+            "description",
+            "descriptions",
+            "body",
+            "bodies",
+            "content",
+            "caption",
+            "copywriting",
+            "main_text",
+            "正文",
+            "简介",
+            "文案",
+            "正文文案",
+            "tags",
+            "hashtags",
+            "hashtag",
+            "topics",
+            "tag_list",
+            "话题",
+            "标签",
+            "tag",
+        )
+    )
+
+
+def _enforce_claim_grounded_title_anchors(
+    platform_draft: dict[str, Any], *, claim_ledger: dict[str, Any], evidence_pack: dict[str, Any]
+) -> dict[str, Any]:
+    anchor, refs = _claim_grounded_subject_anchor(claim_ledger=claim_ledger, evidence_pack=evidence_pack)
+    if not anchor:
+        return platform_draft
+    draft = dict(platform_draft)
+    titles: list[dict[str, Any]] = []
+    for index, item in enumerate(draft.get("titles") or []):
+        text, item_refs = _extract_claim_text_and_refs(item)
+        if not text:
+            continue
+        merged_refs = _dedupe_non_empty(item_refs + refs)
+        if index < 2 and anchor.lower() not in text.lower():
+            text = f"{anchor} {text}".strip()
+        titles.append({"text": text, "claim_refs": merged_refs})
+    draft["titles"] = titles
+    return draft
+
+
+def _backfill_missing_claim_refs_from_subject(
+    platform_draft: dict[str, Any], *, claim_ledger: dict[str, Any], evidence_pack: dict[str, Any]
+) -> dict[str, Any]:
+    _anchor, refs = _claim_grounded_subject_anchor(claim_ledger=claim_ledger, evidence_pack=evidence_pack)
+    if not refs:
+        return platform_draft
+    draft = dict(platform_draft)
+    for field in ("titles", "description", "tags"):
+        values = []
+        for item in draft.get(field) or []:
+            text, item_refs = _extract_claim_text_and_refs(item)
+            if not text:
+                continue
+            values.append({"text": text, "claim_refs": item_refs or refs})
+        draft[field] = values
+    return draft
+
+
+def _complete_claim_grounded_title_count(
+    platform_key: str, platform_draft: dict[str, Any], *, claim_ledger: dict[str, Any], evidence_pack: dict[str, Any]
+) -> dict[str, Any]:
+    draft = dict(platform_draft)
+    titles = list(draft.get("titles") or [])
+    required = 1 if platform_key == "x" else 3
+    if len([item for item in titles if _extract_claim_text_and_refs(item)[0]]) >= required:
+        return draft
+    anchor, anchor_refs = _claim_grounded_subject_anchor(claim_ledger=claim_ledger, evidence_pack=evidence_pack)
+    existing_text = {_extract_claim_text_and_refs(item)[0] for item in titles}
+    for claim in claim_ledger.get("claims") or []:
+        if len([item for item in titles if _extract_claim_text_and_refs(item)[0]]) >= required:
+            break
+        if not isinstance(claim, dict):
+            continue
+        claim_text = str(claim.get("claim") or "").strip()
+        claim_id = str(claim.get("claim_id") or "").strip()
+        title = _claim_text_to_conservative_title(claim_text, anchor=anchor)
+        if not title or title in existing_text:
+            continue
+        existing_text.add(title)
+        refs = _dedupe_non_empty(([claim_id] if claim_id else []) + anchor_refs)
+        titles.append({"text": title, "claim_refs": refs})
+    draft["titles"] = titles
+    return draft
+
+
+def _claim_text_to_conservative_title(claim_text: str, *, anchor: str) -> str:
+    text = re.sub(r"^视频(内容|中)?(涉及|出现|展示)?", "", str(claim_text or "")).strip(" ：:，,。")
+    text = re.sub(r"^创作者(表示|认为|成功)?", "", text).strip(" ：:，,。")
+    if not text:
+        return ""
+    if anchor and anchor.lower() not in text.lower():
+        text = f"{anchor} {text}"
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:36]
+
+
+def _claim_grounded_subject_anchor(*, claim_ledger: dict[str, Any], evidence_pack: dict[str, Any]) -> tuple[str, list[str]]:
+    identity = evidence_pack.get("subject_identity") if isinstance(evidence_pack.get("subject_identity"), dict) else {}
+    brand = str(identity.get("brand") or "").strip()
+    model = str(identity.get("model") or "").strip()
+    anchor = " ".join(item for item in (brand, model) if item).strip()
+    if not anchor:
+        anchor = brand or model
+    if not anchor:
+        return "", []
+    refs: list[str] = []
+    anchor_tokens = [item.lower() for item in (brand, model) if item]
+    for claim in claim_ledger.get("claims") or []:
+        if not isinstance(claim, dict):
+            continue
+        text = str(claim.get("claim") or claim.get("text") or "").lower()
+        if anchor_tokens and all(token in text for token in anchor_tokens):
+            claim_id = str(claim.get("claim_id") or "").strip()
+            if claim_id:
+                refs.append(claim_id)
+    return anchor, _dedupe_non_empty(refs)
+
+
+def _merge_claim_ledger_into_fact_sheet(fact_sheet: dict[str, Any] | None, claim_ledger: dict[str, Any]) -> dict[str, Any]:
+    sheet = dict(fact_sheet or {})
+    existing_facts = [
+        item
+        for item in sheet.get("verified_facts") or []
+        if isinstance(item, dict) and str(item.get("fact") or "").strip()
+    ]
+    seen = {str(item.get("fact") or "").strip() for item in existing_facts}
+    ledger_facts: list[dict[str, Any]] = []
+    for claim in claim_ledger.get("claims") or []:
+        if not isinstance(claim, dict):
+            continue
+        text = str(claim.get("claim") or claim.get("text") or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        ledger_facts.append(
+            {
+                "fact": text,
+                "source": "claim_ledger",
+                "evidence_ids": list(claim.get("evidence_ids") or claim.get("evidence_refs") or []),
+            }
+        )
+    sheet["verified_facts"] = existing_facts + ledger_facts
+    if ledger_facts:
+        summary = str(sheet.get("guardrail_summary") or "").strip()
+        ledger_summary = "本次 claim-grounded 链路已把 claim ledger 作为可发布事实来源。"
+        sheet["guardrail_summary"] = f"{summary}\n{ledger_summary}".strip() if summary else ledger_summary
+    return sheet
+
+
+async def _finalize_claim_grounded_packaging_with_repair(
+    *,
+    current_draft: dict[str, Any],
+    claim_ledger: dict[str, Any],
+    target_keys: list[str],
+    effective_fact_sheet: dict[str, Any],
+    content_profile: dict[str, Any] | None,
+    copy_style: str,
+    author_profile: dict[str, Any] | None,
+    trace: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    draft = current_draft
+    assessment: dict[str, Any] = {"publish_ready": False, "blocking_reasons": []}
+    packaging: dict[str, Any] = {}
+    for attempt in range(1, 3):
+        raw_packaging = _strip_claim_refs_from_packaging(draft, platform_keys=target_keys)
+        raw_packaging = _enforce_packaging_fact_guardrails(
+            raw_packaging,
+            content_profile=content_profile,
+            copy_style=copy_style,
+            fact_sheet=effective_fact_sheet,
+            author_profile=author_profile,
+        )
+        packaging = normalize_platform_packaging(
+            raw_packaging,
+            content_profile=content_profile,
+            copy_style=copy_style,
+            fact_sheet=effective_fact_sheet,
+            author_profile=author_profile,
+        )
+        assessment = _assess_platform_packaging_quality(
+            packaging,
+            content_profile=content_profile,
+            fact_sheet=effective_fact_sheet,
+            target_platforms=target_keys,
+        )
+        trace.append(
+            {
+                "stage": "publish_quality_gate",
+                "attempt": attempt,
+                "publish_ready": bool(assessment.get("publish_ready")),
+                "blocking_count": len(assessment.get("blocking_reasons") or []),
+            }
+        )
+        if assessment["publish_ready"]:
+            return packaging, assessment
+        if attempt == 2:
+            break
+        draft = await _repair_claim_grounded_draft_for_publish_quality(
+            draft=draft,
+            claim_ledger=claim_ledger,
+            assessment=assessment,
+            target_keys=target_keys,
+        )
+    return packaging, assessment
+
+
+async def _repair_claim_grounded_draft_for_publish_quality(
+    *,
+    draft: dict[str, Any],
+    claim_ledger: dict[str, Any],
+    assessment: dict[str, Any],
+    target_keys: list[str],
+) -> dict[str, Any]:
+    audit = {
+        "verdict": "repair_required",
+        "unsupported": [
+            {
+                "location": "",
+                "unsupported_span": str(reason),
+                "verdict": "unsupported",
+                "reason": str(reason),
+                "allowed_repair": "按发布质量门修复，但不得新增 claim ledger 未支持的事实。",
+            }
+            for reason in assessment.get("blocking_reasons") or []
+        ],
+        "summary": "publish quality gate repair",
+    }
+    prompt = (
+        "请修复 claim-grounded 发布 draft，使它通过发布质量门。"
+        "返回完整 draft JSON，必须保留 highlights 和 platforms。"
+        "只修复审核指出的问题；不得新增 claim ledger 未支持的事实；每个标题、正文句子、标签都必须带 claim_refs。"
+        "如果标题缺少主体锚点，优先加入 claim ledger 支持的品牌/型号。"
+        "如果正文包含未核验参数，删除该参数或改成 claim ledger 支持的非参数表达。"
+        "如果字段过长，压缩表达，不要补充新信息。"
+        f"\n目标平台：{json.dumps(target_keys, ensure_ascii=False)}"
+        f"\nclaim ledger：{json.dumps(claim_ledger, ensure_ascii=False)}"
+        f"\n发布质量问题：{json.dumps(audit, ensure_ascii=False)}"
+        f"\n原 draft：{json.dumps(draft, ensure_ascii=False)}"
+    )
+    with llm_task_route("copy", search_enabled=False):
+        provider = get_reasoning_provider()
+        with track_usage_operation("platform_package.claim_grounded_publish_repair"):
+            repaired = await _complete_json_with_same_model_repair(
+                [
+                    Message(role="system", content="你是证据约束下的发布质量修复助手。只输出完整 JSON。"),
+                    Message(role="user", content=prompt),
+                ],
+                temperature=0.15,
+                max_tokens=3200,
+                timeout=90,
+                schema_hint='{"highlights":{},"platforms":{}}',
+            )
+    repaired = _coerce_claim_grounded_draft_shape(repaired, target_keys=target_keys)
+    normalized: dict[str, Any] = {"highlights": repaired.get("highlights") if isinstance(repaired.get("highlights"), dict) else {}, "platforms": {}}
+    raw_platforms = repaired.get("platforms") if isinstance(repaired.get("platforms"), dict) else {}
+    for platform_key in target_keys:
+        raw_platform = raw_platforms.get(platform_key) if isinstance(raw_platforms.get(platform_key), dict) else repaired.get(platform_key)
+        normalized["platforms"][platform_key] = _normalize_single_platform_claim_draft(platform_key, raw_platform if isinstance(raw_platform, dict) else {})
+    if _claim_grounded_draft_text_count(normalized) < _claim_grounded_draft_text_count(draft):
+        return draft
+    return normalized
+
+
+def _claim_grounded_draft_text_count(draft: dict[str, Any]) -> int:
+    count = 0
+    for _location, text, _refs in _iter_claim_grounded_text_with_refs(draft):
+        if text:
+            count += 1
+    return count
+
+
+def _coerce_claim_grounded_draft_shape(payload: dict[str, Any], *, target_keys: list[str]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"highlights": {}, "platforms": {}}
+    if isinstance(payload.get("platforms"), dict):
+        return payload
+    coerced: dict[str, Any] = {"highlights": payload.get("highlights") if isinstance(payload.get("highlights"), dict) else {}, "platforms": {}}
+    for key in target_keys:
+        if isinstance(payload.get(key), dict):
+            coerced["platforms"][key] = payload[key]
+    items = payload.get("items")
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            platform_key = str(item.get("platform_key") or item.get("platform") or item.get("key") or item.get("name") or "").strip()
+            platform_key = _normalize_platform_key_alias(platform_key)
+            if platform_key in target_keys:
+                coerced["platforms"][platform_key] = item
+    if coerced["platforms"]:
+        return coerced
+    if len(target_keys) == 1 and _payload_has_single_platform_fields(payload):
+        coerced["platforms"][target_keys[0]] = payload
+    return coerced
+
+
+def _normalize_platform_key_alias(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    aliases = {
+        "b站": "bilibili",
+        "哔哩哔哩": "bilibili",
+        "bilibili": "bilibili",
+        "小红书": "xiaohongshu",
+        "xiaohongshu": "xiaohongshu",
+        "rednote": "xiaohongshu",
+        "抖音": "douyin",
+        "douyin": "douyin",
+        "tiktok": "douyin",
+    }
+    return aliases.get(normalized, normalized)
+
+
+def _claim_grounding_trace_summary(trace: list[dict[str, Any]]) -> dict[str, Any]:
+    platform_items = [item for item in trace if item.get("stage") == "platform_claim_grounding"]
+    unsupported: list[dict[str, str]] = []
+    for item in platform_items:
+        if str(item.get("verdict") or "").strip().lower() != "pass":
+            unsupported.append(
+                {
+                    "location": str(item.get("platform") or ""),
+                    "unsupported_span": "",
+                    "verdict": str(item.get("verdict") or "repair_required"),
+                    "reason": "platform claim grounding did not pass",
+                    "allowed_repair": "",
+                }
+            )
+    return {
+        "verdict": "repair_required" if unsupported else "pass",
+        "unsupported": unsupported,
+        "platform_count": len(platform_items),
+    }
+
+
+def _remove_unsupported_claim_grounded_highlights(
+    draft: dict[str, Any], *, claim_ledger: dict[str, Any]
+) -> dict[str, Any]:
+    issues = _claim_ledger_semantic_invariant_issues({"highlights": draft.get("highlights") or {}}, claim_ledger=claim_ledger)
+    if not issues:
+        return draft
+    cleaned = dict(draft)
+    highlights = dict(cleaned.get("highlights") or {})
+    for issue in issues:
+        location = str(issue.get("location") or "")
+        if not location.startswith("highlights."):
+            continue
+        field = location.split(".", 1)[1]
+        if field in highlights:
+            highlights[field] = {"text": "", "claim_refs": []}
+    cleaned["highlights"] = highlights
+    return cleaned
+
+
+def _normalize_claim_field_list(value: Any) -> list[dict[str, Any]]:
+    raw_items = value if isinstance(value, list) else [value]
+    normalized: list[dict[str, Any]] = []
+    for item in raw_items:
+        text, refs = _extract_claim_text_and_refs(item)
+        if not text:
+            continue
+        normalized.append({"text": text, "claim_refs": refs})
+    return normalized
+
+
+async def _generate_claim_grounded_highlights(
+    *,
+    evidence_pack: dict[str, Any],
+    claim_ledger: dict[str, Any],
+    content_profile: dict[str, Any] | None,
+    author_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    prompt = (
+        "请生成发布物料 highlights。每个字段都必须带 claim_refs。"
+        "只返回 JSON："
+        "{\"product\":{\"text\":\"\",\"claim_refs\":[\"\"]},\"video_type\":{\"text\":\"\",\"claim_refs\":[\"\"]},"
+        "\"strongest_selling_point\":{\"text\":\"\",\"claim_refs\":[\"\"]},\"strongest_emotion\":{\"text\":\"\",\"claim_refs\":[\"\"]},"
+        "\"title_hook\":{\"text\":\"\",\"claim_refs\":[\"\"]},\"engagement_question\":{\"text\":\"\",\"claim_refs\":[\"\"]}}"
+        f"\n证据包：{json.dumps(evidence_pack, ensure_ascii=False)}"
+        f"\nclaim ledger：{json.dumps(claim_ledger, ensure_ascii=False)}"
+        f"\n作者信息：{json.dumps(author_profile or {}, ensure_ascii=False)}"
+        f"\n内容风格约束：{_domain_prompt_voice_instruction(content_profile)}"
+    )
+    with llm_task_route("copy", search_enabled=False):
+        provider = get_reasoning_provider()
+        with track_usage_operation("platform_package.claim_grounded_highlights"):
+            payload = await _complete_json_with_same_model_repair(
+                [
+                    Message(role="system", content="你是证据约束下的发布 highlight 助手。只输出 JSON。"),
+                    Message(role="user", content=prompt),
+                ],
+                temperature=0.2,
+                max_tokens=1400,
+                timeout=60,
+                schema_hint='{"product":{},"video_type":{},"title_hook":{},"engagement_question":{}}',
+            )
+    return payload
+
+
+async def _generate_one_claim_grounded_platform(
+    *,
+    platform_key: str,
+    label: str,
+    body_label: str,
+    tag_label: str,
+    evidence_pack: dict[str, Any],
+    claim_ledger: dict[str, Any],
+    content_profile: dict[str, Any] | None,
+    author_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    prompt = (
+        f"请只生成 {label} 的发布文案。"
+        f"输出 3 个标题、1 段{body_label}、2-8 个{tag_label}。"
+        "每个标题、正文句子、标签都必须带 claim_refs。"
+        "claim_refs 只能引用 claim ledger 中的 claim_id。"
+        "严格语义边界：claim 只支持“获得/到手/收到”时，不得写“抢到/抢购成功”；"
+        "claim 只支持“抢购难度高”时，不得写“限量、错过不再、抢先、失败、没抢到、三连跪、具体三次发售”。"
+        "不要输出其他平台，不要输出 highlights。"
+        f"\n平台偏置：{_platform_bias_instruction(label)}"
+        f"\n内容风格约束：{_domain_prompt_voice_instruction(content_profile)}"
+        "\n输出 JSON：{\"titles\":[{\"text\":\"\",\"claim_refs\":[\"\"]},{\"text\":\"\",\"claim_refs\":[\"\"]},{\"text\":\"\",\"claim_refs\":[\"\"]}],\"description\":[{\"text\":\"\",\"claim_refs\":[\"\"]}],\"tags\":[{\"text\":\"\",\"claim_refs\":[\"\"]},{\"text\":\"\",\"claim_refs\":[\"\"]}]}"
+        f"\n证据包：{json.dumps(evidence_pack, ensure_ascii=False)}"
+        f"\nclaim ledger：{json.dumps(claim_ledger, ensure_ascii=False)}"
+        f"\n作者信息：{json.dumps(author_profile or {}, ensure_ascii=False)}"
+    )
+    with llm_task_route("copy", search_enabled=False):
+        provider = get_reasoning_provider()
+        with track_usage_operation(f"platform_package.claim_grounded_draft.{platform_key}"):
+            return await _complete_json_with_same_model_repair(
+                [
+                    Message(role="system", content="你是证据约束下的单平台发布文案助手。只输出 JSON。"),
+                    Message(role="user", content=prompt),
+                ],
+                temperature=0.25,
+                max_tokens=1800,
+                timeout=75,
+                schema_hint='{"titles":[],"description":[],"tags":[]}',
+            )
+
+
+async def _repair_one_claim_grounded_platform(
+    *,
+    platform_key: str,
+    label: str,
+    platform_draft: dict[str, Any],
+    audit: dict[str, Any],
+    claim_ledger: dict[str, Any],
+) -> dict[str, Any]:
+    prompt = (
+        f"请修复 {label} 的发布文案。"
+        "返回完整平台 JSON，不是补丁。必须包含 titles、description、tags。"
+        "titles 必须 3 个；description 至少 1 个句子；tags 至少 2 个。"
+        "每个字段都必须保留 claim_refs，且只能引用 claim ledger。"
+        "只修复审核指出的问题，不新增未支持事实。"
+        "如果审核指出“抢到/抢购成功”不被支持，改成“到手/收到/获得”；"
+        "如果审核指出“限量/错过不再/抢先/失败/三连跪/具体三次发售”不被支持，删除该语义，只保留抢购难度高。"
+        "\n输出 JSON：{\"titles\":[{\"text\":\"\",\"claim_refs\":[\"\"]},{\"text\":\"\",\"claim_refs\":[\"\"]},{\"text\":\"\",\"claim_refs\":[\"\"]}],\"description\":[{\"text\":\"\",\"claim_refs\":[\"\"]}],\"tags\":[{\"text\":\"\",\"claim_refs\":[\"\"]},{\"text\":\"\",\"claim_refs\":[\"\"]}]}"
+        f"\nclaim ledger：{json.dumps(claim_ledger, ensure_ascii=False)}"
+        f"\n审核结果：{json.dumps(audit, ensure_ascii=False)}"
+        f"\n原平台文案：{json.dumps(platform_draft, ensure_ascii=False)}"
+    )
+    with llm_task_route("copy", search_enabled=False):
+        provider = get_reasoning_provider()
+        with track_usage_operation(f"platform_package.claim_grounded_repair.{platform_key}"):
+            return await _complete_json_with_same_model_repair(
+                [
+                    Message(role="system", content="你是证据约束下的单平台文案修复助手。只输出完整 JSON。"),
+                    Message(role="user", content=prompt),
+                ],
+                temperature=0.15,
+                max_tokens=1800,
+                timeout=75,
+                schema_hint='{"titles":[],"description":[],"tags":[]}',
+            )
+
+
+def _platform_claim_structure_audit(platform_key: str, platform_draft: dict[str, Any]) -> dict[str, Any]:
+    issues: list[dict[str, Any]] = []
+    platform = platform_draft if isinstance(platform_draft, dict) else {}
+    titles_value = platform.get("titles") if isinstance(platform.get("titles"), list) else []
+    if platform_key != "x" and len([item for item in titles_value if _extract_claim_text_and_refs(item)[0]]) < 3:
+        issues.append({"location": f"{platform_key}.titles", "unsupported_span": "", "reason": "标题少于 3 个"})
+    description_value = platform.get("description")
+    if isinstance(description_value, list):
+        description_text = "\n".join(_extract_claim_text_and_refs(item)[0] for item in description_value)
+    else:
+        description_text = _extract_claim_text_and_refs(description_value)[0]
+    if len(description_text.strip()) < 12:
+        issues.append({"location": f"{platform_key}.description", "unsupported_span": description_text.strip(), "reason": "正文过短或缺失"})
+    tags_value = platform.get("tags") if isinstance(platform.get("tags"), list) else []
+    if len([item for item in tags_value if _extract_claim_text_and_refs(item)[0]]) < 2:
+        issues.append({"location": f"{platform_key}.tags", "unsupported_span": "", "reason": "标签少于 2 个"})
+    for field in ("titles", "description", "tags"):
+        values = platform.get(field)
+        if isinstance(values, str):
+            if values.strip():
+                issues.append({"location": f"{platform_key}.{field}", "unsupported_span": values.strip(), "reason": "字符串字段缺少 claim_refs"})
+            continue
+        for index, item in enumerate(values or []):
+            text, refs = _extract_claim_text_and_refs(item)
+            if text and not refs:
+                issues.append(
+                    {
+                        "location": f"{platform_key}.{field}[{index}]",
+                        "unsupported_span": text,
+                        "reason": "缺少 claim_refs",
+                    }
+                )
+    return _normalize_claim_entailment_audit({"unsupported": issues, "summary": "platform structure audit"})
+
+
+async def _complete_json_with_same_model_repair(
+    messages: list[Message],
+    *,
+    temperature: float,
+    max_tokens: int,
+    timeout: int,
+    schema_hint: str,
+) -> dict[str, Any]:
+    provider = get_reasoning_provider()
+    response = await asyncio.wait_for(
+        provider.complete(
+            messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            json_mode=True,
+        ),
+        timeout=timeout,
+    )
+    try:
+        return _loads_jsonish_object(response.content)
+    except Exception as first_error:
+        repair_prompt = (
+            "上一次输出不是可解析 JSON。"
+            "请只把它转换成一个完整、合法、未截断的 JSON 对象。"
+            "不要新增事实，不要解释，不要输出 Markdown。"
+            f"\n目标结构示例：{schema_hint}"
+            f"\n解析错误：{type(first_error).__name__}: {first_error}"
+            f"\n上一次原文：{response.content}"
+        )
+        repaired = await asyncio.wait_for(
+            provider.complete(
+                [
+                    Message(role="system", content="你是 JSON 修复器，只输出合法 JSON 对象。"),
+                    Message(role="user", content=repair_prompt),
+                ],
+                temperature=0.0,
+                max_tokens=max_tokens,
+                json_mode=True,
+            ),
+            timeout=timeout,
+        )
+        try:
+            return _loads_jsonish_object(repaired.content)
+        except Exception:
+            repair_retry_prompt = (
+                "上一次 JSON 修复仍失败。"
+                "请重新输出一个最小但完整的合法 JSON 对象。"
+                "必须使用英文双引号，不能用单引号，不能输出注释或 Markdown。"
+                f"\n目标结构示例：{schema_hint}"
+                f"\n上一次原文：{repaired.content}"
+            )
+            retry = await asyncio.wait_for(
+                provider.complete(
+                    [
+                        Message(role="system", content="你是 JSON 修复器，只输出合法 JSON 对象。"),
+                        Message(role="user", content=repair_retry_prompt),
+                    ],
+                    temperature=0.0,
+                    max_tokens=max_tokens,
+                    json_mode=True,
+                ),
+                timeout=timeout,
+            )
+            return _loads_jsonish_object(retry.content)
+
+
+def _loads_jsonish_object(text: str) -> dict[str, Any]:
+    raw_text = str(text or "")
+    try:
+        extracted = extract_json_text(raw_text)
+    except Exception:
+        extracted = raw_text.strip()
+    try:
+        payload = json.loads(extracted)
+    except json.JSONDecodeError as json_error:
+        try:
+            payload = ast.literal_eval(extracted)
+        except Exception as literal_error:
+            raise ValueError(f"JSON-ish response is not parseable: {literal_error}") from json_error
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, list):
+        return {"items": payload}
+    raise ValueError("JSON response is not an object")
+
+
+def _build_platform_claim_evidence_pack(
+    *,
+    source_name: str,
+    prompt_brief: dict[str, Any],
+    fact_sheet: dict[str, Any],
+    subtitle_items: list[dict[str, Any]],
+    content_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    profile = content_profile or {}
+    transcript_lines: list[dict[str, Any]] = []
+    for index, item in enumerate(subtitle_items[:160], start=1):
+        text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        if not text:
+            continue
+        transcript_lines.append(
+            {
+                "id": f"sub_{index}",
+                "start": float(item.get("start_time") or 0.0),
+                "end": float(item.get("end_time") or 0.0),
+                "text": text,
+            }
+        )
+    verified_facts = []
+    for index, item in enumerate(fact_sheet.get("verified_facts") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        fact = str(item.get("fact") or "").strip()
+        if fact:
+            verified_facts.append(
+                {
+                    "id": f"verified_{index}",
+                    "fact": fact,
+                    "source_url": str(item.get("source_url") or "").strip(),
+                    "source_title": str(item.get("source_title") or "").strip(),
+                }
+            )
+    return {
+        "version": "2026-05-26.claim-evidence-pack.v1",
+        "source_name": str(source_name or "").strip(),
+        "subject_identity": _packaging_subject_identity(profile),
+        "prompt_brief": {
+            key: prompt_brief.get(key)
+            for key in (
+                "subject_brand",
+                "subject_model",
+                "subject_type",
+                "subject_domain",
+                "video_theme",
+                "summary",
+                "hook_line",
+                "engagement_question",
+                "visible_text",
+            )
+            if prompt_brief.get(key)
+        },
+        "transcript": transcript_lines,
+        "verified_external_facts": verified_facts,
+        "fact_guardrail_summary": str(fact_sheet.get("guardrail_summary") or "").strip(),
+    }
+
+
+def _build_claim_ledger_prompt(evidence_pack: dict[str, Any]) -> str:
+    return (
+        "请基于证据包建立发布事实账本。"
+        "claim 必须是可以被字幕、内容画像或外部核验事实直接支持的最小事实。"
+        "不要把情绪、营销话术、推断结论写成 confirmed claim。"
+        "对没有直接证据的品类、结果、参数、失败经历、价格、版本差异，放入 disallowed_inferences。"
+        "注意：“质感拉满、手感绝了、新品、新兄弟”等主观种草/平台表达不等同于事实漂移；"
+        "只有它们被写成具体参数、客观评测结论、未支持对比或供应事实时才需要限制。"
+        "\n输出 JSON："
+        "{"
+        "\"claims\":[{\"claim_id\":\"c1\",\"claim\":\"\",\"claim_type\":\"identity|acquisition|availability|purchase_success|release_count|scarcity|early_access|parameter|comparison|performance|subjective_opinion|other\",\"evidence_ids\":[\"\"],\"confidence\":\"high|medium|low\",\"allowed_usage\":\"\"}],"
+        "\"uncertain_claims\":[{\"claim\":\"\",\"reason\":\"\"}],"
+        "\"disallowed_inferences\":[{\"claim\":\"\",\"reason\":\"\"}]"
+        "}"
+        f"\n证据包：{json.dumps(evidence_pack, ensure_ascii=False)}"
+    )
+
+
+def _normalize_claim_ledger(raw: dict[str, Any]) -> dict[str, Any]:
+    claims: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, item in enumerate(raw.get("claims") or [], start=1):
+        if not isinstance(item, dict):
+            continue
+        claim = str(item.get("claim") or "").strip()
+        if not claim:
+            continue
+        claim_id = str(item.get("claim_id") or f"c{index}").strip()
+        claim_id = re.sub(r"[^a-zA-Z0-9_-]+", "_", claim_id) or f"c{index}"
+        if claim_id in seen_ids:
+            claim_id = f"c{index}"
+        seen_ids.add(claim_id)
+        evidence_ids = [str(value).strip() for value in (item.get("evidence_ids") or []) if str(value).strip()]
+        claim_type = _normalize_claim_type(item.get("claim_type") or item.get("type") or "")
+        if claim_type == "other":
+            claim_type = _infer_claim_type_from_text(claim)
+        claims.append(
+            {
+                "claim_id": claim_id,
+                "claim": claim,
+                "claim_type": claim_type,
+                "evidence_ids": evidence_ids,
+                "confidence": str(item.get("confidence") or "medium").strip(),
+                "allowed_usage": str(item.get("allowed_usage") or "").strip(),
+            }
+        )
+    uncertain = _normalize_claim_issue_list(raw.get("uncertain_claims"))
+    disallowed = _normalize_claim_issue_list(raw.get("disallowed_inferences"))
+    return {
+        "claims": claims,
+        "uncertain_claims": uncertain,
+        "disallowed_inferences": disallowed,
+    }
+
+
+def _normalize_claim_issue_list(value: Any) -> list[dict[str, str]]:
+    issues: list[dict[str, str]] = []
+    for item in value or []:
+        if not isinstance(item, dict):
+            text = str(item or "").strip()
+            if text:
+                issues.append({"claim": text, "reason": ""})
+            continue
+        claim = str(item.get("claim") or item.get("text") or "").strip()
+        reason = str(item.get("reason") or "").strip()
+        if claim or reason:
+            issues.append({"claim": claim, "reason": reason})
+    return issues
+
+
+def _augment_claim_ledger_with_evidence_pack_claims(
+    claim_ledger: dict[str, Any], *, evidence_pack: dict[str, Any]
+) -> dict[str, Any]:
+    augmented = {
+        "claims": list(claim_ledger.get("claims") or []),
+        "uncertain_claims": list(claim_ledger.get("uncertain_claims") or []),
+        "disallowed_inferences": list(claim_ledger.get("disallowed_inferences") or []),
+    }
+    source_name = str(evidence_pack.get("source_name") or "")
+    prompt_brief = evidence_pack.get("prompt_brief") if isinstance(evidence_pack.get("prompt_brief"), dict) else {}
+    brief_text = json.dumps(prompt_brief, ensure_ascii=False)
+    evidence_text = f"{source_name}\n{brief_text}"
+    existing_text = "\n".join(str(item.get("claim") or "") for item in augmented["claims"] if isinstance(item, dict))
+    next_index = len(augmented["claims"]) + 1
+    if re.search(r"对比|vs\.?|VS|versus|和.+比|与.+比", evidence_text) and "对比" not in existing_text:
+        augmented["claims"].append(
+            {
+                "claim_id": f"c{next_index}",
+                "claim": "视频主题包含对比展示",
+                "claim_type": "comparison",
+                "evidence_ids": ["source_name"],
+                "confidence": "medium",
+                "allowed_usage": "只可表达视频包含对比展示；不得推出未支持的优劣结论。",
+            }
+        )
+    return augmented
+
+
+def _normalize_claim_type(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    mapping = {
+        "identity": "identity",
+        "subject": "identity",
+        "acquisition": "acquisition",
+        "obtained": "acquisition",
+        "availability": "availability",
+        "difficulty": "availability",
+        "purchase_success": "purchase_success",
+        "purchase-result": "purchase_success",
+        "release_count": "release_count",
+        "release-count": "release_count",
+        "scarcity": "scarcity",
+        "limited": "scarcity",
+        "early_access": "early_access",
+        "early-access": "early_access",
+        "parameter": "parameter",
+        "spec": "parameter",
+        "comparison": "comparison",
+        "performance": "performance",
+        "objective_quality": "performance",
+        "subjective_opinion": "subjective_opinion",
+        "subjective": "subjective_opinion",
+        "opinion": "subjective_opinion",
+        "other": "other",
+    }
+    return mapping.get(normalized, "other")
+
+
+def _infer_claim_type_from_text(text: str) -> str:
+    types = _infer_claim_types_from_text(text)
+    if not types:
+        return "other"
+    priority = (
+        "parameter",
+        "purchase_success",
+        "release_count",
+        "scarcity",
+        "early_access",
+        "comparison",
+        "performance",
+        "availability",
+        "acquisition",
+        "identity",
+        "subjective_opinion",
+    )
+    for claim_type in priority:
+        if claim_type in types:
+            return claim_type
+    return sorted(types)[0]
+
+
+def _build_claim_grounded_draft_prompt(
+    *,
+    evidence_pack: dict[str, Any],
+    claim_ledger: dict[str, Any],
+    content_profile: dict[str, Any] | None,
+    author_profile: dict[str, Any] | None,
+) -> str:
+    return (
+        "请生成多平台发布文案。"
+        "每个平台给 3 个标题、1 段简介、2-8 个标签。"
+        "每个标题、简介中的每个事实性句子、每个标签都必须带 claim_refs。"
+        "claim_refs 只能引用 claim_ledger.claims 里的 claim_id。"
+        "允许风格化表达，但不能新增 claim ledger 未支持的事实或结果。"
+        "不得使用 disallowed_inferences 中的推断，也不得换一种说法表达同样推断。"
+        "必须完整输出所有平台，不能只输出示例平台。"
+        f"{_domain_prompt_voice_instruction(content_profile)}"
+        "\n输出 JSON："
+        + _claim_grounded_output_schema_text()
+        + "\n必须覆盖这些平台："
+        + ", ".join(key for key, _label, _body_label, _tag_label in PLATFORM_ORDER)
+        + f"\n证据包：{json.dumps(evidence_pack, ensure_ascii=False)}"
+        + f"\nclaim ledger：{json.dumps(claim_ledger, ensure_ascii=False)}"
+        + f"\n作者信息：{json.dumps(author_profile or {}, ensure_ascii=False)}"
+    )
+
+
+def _find_untraced_claim_grounded_spans(draft: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    highlights = draft.get("highlights") if isinstance(draft.get("highlights"), dict) else {}
+    for key, value in highlights.items():
+        text, refs = _extract_claim_text_and_refs(value)
+        if text and not refs:
+            issues.append({"location": f"highlights.{key}", "text": text, "reason": "缺少 claim_refs"})
+    platforms = draft.get("platforms") if isinstance(draft.get("platforms"), dict) else {}
+    for platform_key, _label, _body_label, _tag_label in PLATFORM_ORDER:
+        platform = platforms.get(platform_key) if isinstance(platforms.get(platform_key), dict) else {}
+        if not platform:
+            issues.append({"location": platform_key, "text": "", "reason": "缺少平台字段"})
+            continue
+        titles_value = platform.get("titles") if isinstance(platform.get("titles"), list) else []
+        if platform_key != "x" and len([item for item in titles_value if _extract_claim_text_and_refs(item)[0]]) < 3:
+            issues.append({"location": f"{platform_key}.titles", "text": "", "reason": "标题少于 3 个"})
+        description_value = platform.get("description")
+        if isinstance(description_value, list):
+            description_text = "\n".join(_extract_claim_text_and_refs(item)[0] for item in description_value)
+        else:
+            description_text = _extract_claim_text_and_refs(description_value)[0]
+        if len(description_text.strip()) < 12:
+            issues.append({"location": f"{platform_key}.description", "text": description_text.strip(), "reason": "正文过短或缺失"})
+        tags_value = platform.get("tags") if isinstance(platform.get("tags"), list) else []
+        if len([item for item in tags_value if _extract_claim_text_and_refs(item)[0]]) < 2:
+            issues.append({"location": f"{platform_key}.tags", "text": "", "reason": "标签少于 2 个"})
+        for field in ("titles", "description", "tags"):
+            values = platform.get(field)
+            if isinstance(values, str):
+                if values.strip():
+                    issues.append({"location": f"{platform_key}.{field}", "text": values.strip(), "reason": "字符串字段缺少 claim_refs"})
+                continue
+            for index, item in enumerate(values or []):
+                text, refs = _extract_claim_text_and_refs(item)
+                if text and not refs:
+                    issues.append(
+                        {
+                            "location": f"{platform_key}.{field}[{index}]",
+                            "text": text,
+                            "reason": "缺少 claim_refs",
+                        }
+                    )
+    return issues
+
+
+def _claim_grounded_output_schema_text() -> str:
+    platform_parts = []
+    platform_schema = "{\"titles\":[{\"text\":\"\",\"claim_refs\":[\"\"]},{\"text\":\"\",\"claim_refs\":[\"\"]},{\"text\":\"\",\"claim_refs\":[\"\"]}],\"description\":[{\"text\":\"\",\"claim_refs\":[\"\"]}],\"tags\":[{\"text\":\"\",\"claim_refs\":[\"\"]},{\"text\":\"\",\"claim_refs\":[\"\"]}]}"
+    for key, _label, _body_label, _tag_label in PLATFORM_ORDER:
+        platform_parts.append(f"\"{key}\":{platform_schema}")
+    return (
+        "{"
+        "\"highlights\":{"
+        "\"product\":{\"text\":\"\",\"claim_refs\":[\"\"]},"
+        "\"video_type\":{\"text\":\"\",\"claim_refs\":[\"\"]},"
+        "\"strongest_selling_point\":{\"text\":\"\",\"claim_refs\":[\"\"]},"
+        "\"strongest_emotion\":{\"text\":\"\",\"claim_refs\":[\"\"]},"
+        "\"title_hook\":{\"text\":\"\",\"claim_refs\":[\"\"]},"
+        "\"engagement_question\":{\"text\":\"\",\"claim_refs\":[\"\"]}"
+        "},"
+        "\"platforms\":{"
+        + ",".join(platform_parts)
+        + "}"
+        + "}"
+    )
+
+
+def _extract_claim_text_and_refs(value: Any) -> tuple[str, list[str]]:
+    if isinstance(value, dict):
+        text = str(
+            value.get("text")
+            or value.get("title")
+            or value.get("description")
+            or value.get("content")
+            or value.get("body")
+            or value.get("tag")
+            or value.get("name")
+            or ""
+        ).strip()
+        raw_refs = (
+            value.get("claim_refs")
+            or value.get("claim_ref")
+            or value.get("claim_ids")
+            or value.get("claim_id")
+            or value.get("claims")
+            or value.get("refs")
+            or value.get("evidence_refs")
+            or value.get("evidence_ids")
+            or []
+        )
+        if isinstance(raw_refs, str):
+            raw_refs = [raw_refs]
+        refs = [str(item).strip() for item in raw_refs if str(item).strip()]
+        return text, refs
+    return str(value or "").strip(), []
+
+
+def _build_claim_entailment_audit_prompt(*, draft: dict[str, Any], claim_ledger: dict[str, Any]) -> str:
+    return (
+        "请做语义蕴含审核。"
+        "逐条检查发布文案是否被其 claim_refs 指向的 claims 支持。"
+        "判断标准是语义支持关系，不是关键词匹配。"
+        "等价规则：如果 claim 明确支持“收到/到手/入手产品”，文案可使用“收到、到手、入手”；"
+        "但“抢到、抢购成功、三连跪、翻车、没抢到”只有在 claim 明确支持时才允许。"
+        "如果文案增加了结果、品类、失败经历、参数、版本差异、价格、用途等 claims 未支持的信息，标 unsupported。"
+        "不要把主观平台表达误判为事实漂移：例如“质感拉满、手感绝了、新品、新兄弟”可以作为创作者观感或发布语气通过；"
+        "只有当它们引入未支持的具体参数、客观评测等级、供应/发售状态、或未支持对比结论时才标 unsupported。"
+        "如果和 claim 冲突，标 contradicted。"
+        "\n输出 JSON："
+        "{"
+        "\"verdict\":\"pass|repair_required\","
+        "\"unsupported\":[{\"location\":\"\",\"unsupported_span\":\"\",\"verdict\":\"unsupported|contradicted|partially_supported\",\"reason\":\"\",\"allowed_repair\":\"\"}],"
+        "\"summary\":\"\""
+        "}"
+        f"\nclaim ledger：{json.dumps(claim_ledger, ensure_ascii=False)}"
+        f"\n待审核文案：{json.dumps(draft, ensure_ascii=False)}"
+    )
+
+
+def _normalize_claim_entailment_audit(raw: dict[str, Any]) -> dict[str, Any]:
+    unsupported: list[dict[str, str]] = []
+    for item in raw.get("unsupported") or []:
+        if not isinstance(item, dict):
+            text = str(item or "").strip()
+            if text:
+                unsupported.append({"location": "", "unsupported_span": text, "verdict": "unsupported", "reason": "", "allowed_repair": ""})
+            continue
+        unsupported.append(
+            {
+                "location": str(item.get("location") or "").strip(),
+                "unsupported_span": str(item.get("unsupported_span") or item.get("text") or "").strip(),
+                "verdict": str(item.get("verdict") or "unsupported").strip(),
+                "reason": str(item.get("reason") or "").strip(),
+                "allowed_repair": str(item.get("allowed_repair") or "").strip(),
+            }
+        )
+    verdict = str(raw.get("verdict") or "").strip().lower()
+    if verdict not in {"pass", "repair_required"}:
+        verdict = "repair_required" if unsupported else "pass"
+    if unsupported:
+        verdict = "repair_required"
+    return {
+        "verdict": verdict,
+        "unsupported": unsupported,
+        "summary": str(raw.get("summary") or "").strip(),
+    }
+
+
+def _merge_claim_audit_issues(audit: dict[str, Any], extra_issues: list[dict[str, str]]) -> dict[str, Any]:
+    if not extra_issues:
+        return audit
+    merged = dict(audit)
+    unsupported = list(merged.get("unsupported") or [])
+    seen = {
+        (
+            str(item.get("location") or ""),
+            str(item.get("unsupported_span") or ""),
+            str(item.get("reason") or ""),
+        )
+        for item in unsupported
+        if isinstance(item, dict)
+    }
+    for issue in extra_issues:
+        key = (
+            str(issue.get("location") or ""),
+            str(issue.get("unsupported_span") or ""),
+            str(issue.get("reason") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        unsupported.append(issue)
+    merged["unsupported"] = unsupported
+    merged["verdict"] = "repair_required"
+    return merged
+
+
+def _claim_ledger_semantic_invariant_issues(draft: dict[str, Any], *, claim_ledger: dict[str, Any]) -> list[dict[str, str]]:
+    typed_issues = _claim_type_semantic_invariant_issues(draft, claim_ledger=claim_ledger)
+    if typed_issues:
+        return typed_issues
+    claim_text = "\n".join(
+        str(item.get("claim") or item.get("text") or "")
+        for item in claim_ledger.get("claims") or []
+        if isinstance(item, dict)
+    )
+    disallowed_text = "\n".join(
+        str(item.get("claim") or item.get("text") or item.get("reason") or "")
+        for item in claim_ledger.get("disallowed_inferences") or []
+        if isinstance(item, dict)
+    )
+    uncertain_text = "\n".join(
+        str(item.get("claim") or item.get("text") or item.get("reason") or "")
+        for item in claim_ledger.get("uncertain_claims") or []
+        if isinstance(item, dict)
+    )
+    issues: list[dict[str, str]] = []
+    supports_purchase_success = bool(re.search(r"抢到|抢购成功|成功抢购|买到", claim_text))
+    supports_limited = bool(re.search(r"限量|错过不再|不再有|售罄|绝版|稀缺", claim_text))
+    supports_early_access = bool(re.search(r"抢先|提前|首发|首批", claim_text))
+    supports_failed_release = bool(re.search(r"失败|没抢到|三连跪|落空", claim_text))
+    supports_specific_release_count = bool(re.search(r"三次发售|3次发售|具体.*三次", claim_text))
+    disallows_failed_release = bool(re.search(r"失败经历|失败|没抢到|三连跪", disallowed_text))
+    uncertain_specific_release_count = bool(re.search(r"具体.*三次|哪三次|三次发售", uncertain_text))
+
+    for location, text in _iter_claim_grounded_text(draft):
+        if not supports_purchase_success and re.search(r"抢到|抢购成功|成功抢购", text):
+            issues.append(
+                {
+                    "location": location,
+                    "unsupported_span": text,
+                    "verdict": "unsupported",
+                    "reason": "claim ledger only supports obtained/received plus purchase difficulty, not purchase success wording.",
+                    "allowed_repair": "把“抢到/抢购成功”改为“到手/收到/获得”，保留抢购难度表达。",
+                }
+            )
+        if not supports_limited and re.search(r"限量|错过不再|不再有|售罄|绝版|稀缺", text):
+            issues.append(
+                {
+                    "location": location,
+                    "unsupported_span": text,
+                    "verdict": "unsupported",
+                    "reason": "claim ledger does not support scarcity or limited availability.",
+                    "allowed_repair": "删除稀缺性表达，只写抢购难度高或到手体验。",
+                }
+            )
+        if not supports_early_access and re.search(r"抢先|提前看|首发|首批", text):
+            issues.append(
+                {
+                    "location": location,
+                    "unsupported_span": text,
+                    "verdict": "unsupported",
+                    "reason": "claim ledger does not support early-access or first-look wording.",
+                    "allowed_repair": "删除抢先/首发表达，改成普通开箱或到手记录。",
+                }
+            )
+        if (disallows_failed_release or not supports_failed_release) and re.search(r"三连跪|没抢到|抢购失败|失败经历", text):
+            issues.append(
+                {
+                    "location": location,
+                    "unsupported_span": text,
+                    "verdict": "unsupported",
+                    "reason": "claim ledger does not support failed release experience.",
+                    "allowed_repair": "删除失败经历，只保留“抢购难度高”。",
+                }
+            )
+        if uncertain_specific_release_count and not supports_specific_release_count and re.search(r"最近这三次|三次发售|3次发售", text):
+            issues.append(
+                {
+                    "location": location,
+                    "unsupported_span": text,
+                    "verdict": "unsupported",
+                    "reason": "claim ledger marks the exact three releases as uncertain.",
+                    "allowed_repair": "改成“最近发售难度上升”或“抢购难度上升”。",
+                }
+            )
+    return issues
+
+
+def _claim_type_semantic_invariant_issues(draft: dict[str, Any], *, claim_ledger: dict[str, Any]) -> list[dict[str, str]]:
+    claim_types_by_id: dict[str, set[str]] = {}
+    all_supported_types: set[str] = set()
+    for claim in claim_ledger.get("claims") or []:
+        if not isinstance(claim, dict):
+            continue
+        claim_id = str(claim.get("claim_id") or "").strip()
+        claim_text = str(claim.get("claim") or claim.get("text") or "")
+        claim_type = _normalize_claim_type(claim.get("claim_type") or claim.get("type") or "")
+        inferred_types = _infer_claim_types_from_text(claim_text)
+        types = {claim_type} if claim_type != "other" else set()
+        types.update(inferred_types)
+        if "purchase_success" in types:
+            types.add("acquisition")
+        if "scarcity" in types or "release_count" in types:
+            types.add("availability")
+        if not types:
+            types.add("other")
+        if claim_id:
+            claim_types_by_id[claim_id] = types
+        all_supported_types.update(types)
+
+    disallowed_types = _infer_claim_types_from_issue_list(claim_ledger.get("disallowed_inferences") or [])
+    uncertain_types = _infer_claim_types_from_issue_list(claim_ledger.get("uncertain_claims") or [])
+    issues: list[dict[str, str]] = []
+    for location, text, refs in _iter_claim_grounded_text_with_refs(draft):
+        span_types = _infer_claim_types_from_text(text)
+        objective_types = span_types - {"subjective_opinion", "identity", "other"}
+        if not objective_types:
+            continue
+        referenced_types: set[str] = set()
+        for ref in refs:
+            referenced_types.update(claim_types_by_id.get(ref) or set())
+        if not referenced_types:
+            referenced_types = set(all_supported_types)
+        for span_type in sorted(objective_types):
+            if span_type in {"availability"} and (referenced_types & {"availability", "purchase_success", "scarcity", "release_count"}):
+                continue
+            if span_type in {"acquisition"} and (referenced_types & {"acquisition", "purchase_success"}):
+                continue
+            if span_type in referenced_types:
+                continue
+            if span_type in {"purchase_success", "release_count", "scarcity", "early_access", "parameter", "comparison"}:
+                issues.append(
+                    {
+                        "location": location,
+                        "unsupported_span": text,
+                        "verdict": "unsupported",
+                        "reason": f"span type {span_type} is not supported by referenced claim types: {sorted(referenced_types)}.",
+                        "allowed_repair": _claim_type_allowed_repair(span_type),
+                    }
+                )
+        blocked_types = objective_types & (disallowed_types | uncertain_types)
+        for span_type in sorted(blocked_types):
+            if span_type not in referenced_types:
+                issues.append(
+                    {
+                        "location": location,
+                        "unsupported_span": text,
+                        "verdict": "unsupported",
+                        "reason": f"span type {span_type} is marked disallowed or uncertain by claim ledger.",
+                        "allowed_repair": _claim_type_allowed_repair(span_type),
+                    }
+                )
+    return _dedupe_claim_audit_issues(issues)
+
+
+def _infer_claim_types_from_issue_list(items: list[Any]) -> set[str]:
+    inferred: set[str] = set()
+    for item in items:
+        if isinstance(item, dict):
+            inferred.update(_infer_claim_types_from_text(f"{item.get('claim') or ''}\n{item.get('reason') or ''}"))
+        else:
+            inferred.update(_infer_claim_types_from_text(str(item or "")))
+    return inferred
+
+
+def _infer_claim_types_from_text(text: str) -> set[str]:
+    normalized = str(text or "")
+    types: set[str] = set()
+    if re.search(r"\d+(?:\.\d+)?\s*(毫安|mah|mAh|mm|毫米|cm|厘米|g|克|小时|分钟|瓦|w|W|流明|lm|元|块)", normalized):
+        types.add("parameter")
+    if re.search(r"对比|相比|比.*更|升级|退役|换到|差异|不同", normalized):
+        types.add("comparison")
+    if re.search(r"抢到|抢购成功|成功抢购|买到", normalized):
+        types.add("purchase_success")
+    if re.search(r"收到|到手|入手|拿到|获得|到货", normalized):
+        types.add("acquisition")
+    if re.search(r"难抢|抢购难度|太难买|发售难|获取难度|难度.*上升|火爆|热门", normalized):
+        types.add("availability")
+    if re.search(r"三次发售|3次发售|最近这三次|两次转让|失败次数|成功率", normalized):
+        types.add("release_count")
+    if re.search(r"限量|错过不再|不再有|售罄|绝版|稀缺", normalized):
+        types.add("scarcity")
+    if re.search(r"抢先|提前看|首发|首批", normalized):
+        types.add("early_access")
+    if re.search(r"续航|亮度|性能|效率|速度|排名|评分|等级|认证", normalized):
+        types.add("performance")
+    if re.search(r"品牌|型号|叫|称为|是|NOC|MT34|EDC17|EDC37|S06", normalized, flags=re.IGNORECASE):
+        types.add("identity")
+    if re.search(r"质感|手感|绝了|拉满|好看|心水|喜欢|惊喜|新兄弟|新品|治愈|戳我|值不值|真实感受", normalized):
+        types.add("subjective_opinion")
+    return types
+
+
+def _claim_type_allowed_repair(claim_type: str) -> str:
+    mapping = {
+        "purchase_success": "改成“到手/收到/获得”等 acquisition 表达，除非 claim 明确支持抢购成功。",
+        "release_count": "删除具体次数，只保留 claim 支持的抢购难度或到手体验。",
+        "scarcity": "删除稀缺性/错过不再表达，只保留 claim 支持的发售难度。",
+        "early_access": "删除抢先/首发表达，改成普通开箱或到手记录。",
+        "parameter": "删除未支持参数，或改成 claim ledger 已支持的参数。",
+        "comparison": "删除未支持对比结论，只保留视频中明确出现的对比对象。",
+        "performance": "删除客观性能结论，改成主观体验表达。",
+    }
+    return mapping.get(claim_type, "删除未被 claim ledger 支持的客观事实。")
+
+
+def _dedupe_claim_audit_issues(issues: list[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for issue in issues:
+        key = (
+            str(issue.get("location") or ""),
+            str(issue.get("unsupported_span") or ""),
+            str(issue.get("reason") or ""),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(issue)
+    return deduped
+
+
+def _iter_claim_grounded_text(draft: dict[str, Any]) -> list[tuple[str, str]]:
+    return [(location, text) for location, text, _refs in _iter_claim_grounded_text_with_refs(draft)]
+
+
+def _iter_claim_grounded_text_with_refs(draft: dict[str, Any]) -> list[tuple[str, str, list[str]]]:
+    items: list[tuple[str, str, list[str]]] = []
+    highlights = draft.get("highlights") if isinstance(draft.get("highlights"), dict) else {}
+    for key, value in highlights.items():
+        text, refs = _extract_claim_text_and_refs(value)
+        if text:
+            items.append((f"highlights.{key}", text, refs))
+    platforms = draft.get("platforms") if isinstance(draft.get("platforms"), dict) else {}
+    for platform_key, platform in platforms.items():
+        if not isinstance(platform, dict):
+            continue
+        for field in ("titles", "description", "tags"):
+            value = platform.get(field)
+            values = value if isinstance(value, list) else [value]
+            for index, item in enumerate(values):
+                text, refs = _extract_claim_text_and_refs(item)
+                if text:
+                    items.append((f"{platform_key}.{field}[{index}]", text, refs))
+    return items
+
+
+def _claim_grounding_audit_passes(audit: dict[str, Any]) -> bool:
+    return str(audit.get("verdict") or "").strip().lower() == "pass" and not list(audit.get("unsupported") or [])
+
+
+def _build_claim_grounded_repair_prompt(
+    *,
+    draft: dict[str, Any],
+    audit: dict[str, Any],
+    claim_ledger: dict[str, Any],
+) -> str:
+    return (
+        "请基于审核结果做最小语义修复。"
+        "返回值必须是完整 draft，不是补丁，不是局部字段；所有平台、所有标题、正文、标签都必须保留或补齐。"
+        "只能替换 unsupported_span 所在表达，不能重写整套文案，不能新增 claim。"
+        "修复后的每个标题、简介句子、标签仍必须带 claim_refs。"
+        "如果审核来自 publish_quality_gate，必须补齐对应平台的 titles/description/tags，并保留其他已通过平台。"
+        "如果缺少整个平台字段，必须按原 schema 补齐该平台，不能省略。"
+        "如果审核指出“抢到/抢购成功”不被支持，优先改成“到手/收到/难抢/抢购难度上升”中被 claim 支持的表达。"
+        "如果某个 unsupported_span 没有可支持替代表达，就删除该表达。"
+        "只返回完整 JSON，结构与原 draft 一致。"
+        f"\nclaim ledger：{json.dumps(claim_ledger, ensure_ascii=False)}"
+        f"\n审核结果：{json.dumps(audit, ensure_ascii=False)}"
+        f"\n原 draft：{json.dumps(draft, ensure_ascii=False)}"
+    )
+
+
+def _strip_claim_refs_from_packaging(draft: dict[str, Any], *, platform_keys: list[str] | None = None) -> dict[str, Any]:
+    highlights_raw = draft.get("highlights") if isinstance(draft.get("highlights"), dict) else {}
+    highlights: dict[str, str] = {}
+    for key in ("product", "video_type", "strongest_selling_point", "strongest_emotion", "title_hook", "engagement_question"):
+        text, _refs = _extract_claim_text_and_refs(highlights_raw.get(key))
+        highlights[key] = text
+    platforms: dict[str, Any] = {}
+    raw_platforms = draft.get("platforms") if isinstance(draft.get("platforms"), dict) else {}
+    platform_order = _resolve_target_platform_order(platform_keys)
+    for key, _label, _body_label, _tag_label in platform_order:
+        platform = raw_platforms.get(key) if isinstance(raw_platforms.get(key), dict) else {}
+        titles = []
+        for item in platform.get("titles") or []:
+            text, _refs = _extract_claim_text_and_refs(item)
+            if text:
+                titles.append(text)
+        description_parts = []
+        description_value = platform.get("description")
+        if isinstance(description_value, list):
+            for item in description_value:
+                text, _refs = _extract_claim_text_and_refs(item)
+                if text:
+                    description_parts.append(text)
+        else:
+            text, _refs = _extract_claim_text_and_refs(description_value)
+            if text:
+                description_parts.append(text)
+        tags = []
+        for item in platform.get("tags") or []:
+            text, _refs = _extract_claim_text_and_refs(item)
+            if text:
+                tags.append(text)
+        platforms[key] = {
+            "titles": titles,
+            "description": "\n".join(description_parts).strip(),
+            "tags": tags,
+        }
+    return {"highlights": highlights, "platforms": platforms}
+
+
+def _prune_packaging_platforms(packaging: dict[str, Any], *, platform_keys: list[str]) -> dict[str, Any]:
+    allowed = {str(key) for key in platform_keys}
+    pruned = dict(packaging)
+    platforms = packaging.get("platforms") if isinstance(packaging.get("platforms"), dict) else {}
+    pruned["platforms"] = {key: value for key, value in platforms.items() if key in allowed}
+    title_audit = packaging.get("title_audit") if isinstance(packaging.get("title_audit"), dict) else {}
+    audit_platforms = title_audit.get("platforms") if isinstance(title_audit.get("platforms"), dict) else {}
+    if title_audit:
+        pruned["title_audit"] = {
+            **title_audit,
+            "platforms": {key: value for key, value in audit_platforms.items() if key in allowed},
+        }
+    return pruned
 
 
 def _assess_platform_packaging_candidate(
@@ -669,11 +2393,13 @@ def _normalize_generated_platform_packaging_strict(
         titles = [_sanitize_title_text(item) for item in (platform_raw.get("titles") or [])]
         description = _clean_generated_copy_text(platform_raw.get("description"))
         tags = [str(item).strip().lstrip("#") for item in (platform_raw.get("tags") or []) if str(item).strip()]
-        normalized["platforms"][key] = {
+        normalized_platform = {
             "titles": _dedupe_non_empty([item for item in titles if item])[:3],
             "description": description,
             "tags": _dedupe_non_empty(tags)[:8],
         }
+        normalized_platform.update(_normalize_platform_publication_metadata(platform_raw))
+        normalized["platforms"][key] = normalized_platform
     audit = audit_platform_packaging_titles(normalized, content_profile=content_profile)
     normalized["title_audit"] = audit
     return normalized
@@ -692,11 +2418,13 @@ def _assert_platform_packaging_publishable(
     *,
     content_profile: dict[str, Any] | None = None,
     fact_sheet: dict[str, Any] | None = None,
+    target_platforms: list[str] | None = None,
 ) -> None:
     assessment = _assess_platform_packaging_quality(
         packaging,
         content_profile=content_profile,
         fact_sheet=fact_sheet,
+        target_platforms=target_platforms,
     )
     if not assessment["publish_ready"]:
         raise RuntimeError("文案模型输出质量不达标，禁止发布：" + "；".join(assessment["blocking_reasons"][:12]))
@@ -707,6 +2435,7 @@ def _assess_platform_packaging_quality(
     *,
     content_profile: dict[str, Any] | None = None,
     fact_sheet: dict[str, Any] | None = None,
+    target_platforms: list[str] | None = None,
 ) -> dict[str, Any]:
     quality_profile = _quality_content_profile(content_profile)
     platforms = packaging.get("platforms") if isinstance(packaging.get("platforms"), dict) else {}
@@ -714,7 +2443,7 @@ def _assess_platform_packaging_quality(
     warnings: list[str] = []
     repair_hints: list[str] = []
     platform_reports: dict[str, Any] = {}
-    for key, label, _body_label, _tag_label in PLATFORM_ORDER:
+    for key, label, _body_label, _tag_label in _resolve_target_platform_order(target_platforms):
         payload = platforms.get(key) if isinstance(platforms.get(key), dict) else {}
         titles = [str(item).strip() for item in (payload.get("titles") or []) if str(item).strip()]
         description = str(payload.get("description") or "").strip()
@@ -794,11 +2523,13 @@ def normalize_platform_packaging(
             author_profile=author_profile,
         )
         tags = _normalize_tags(platform_raw.get("tags"), content_profile=content_profile)
-        normalized["platforms"][key] = {
+        normalized_platform = {
             "titles": titles,
             "description": description,
             "tags": tags,
         }
+        normalized_platform.update(_normalize_platform_publication_metadata(platform_raw))
+        normalized["platforms"][key] = normalized_platform
 
     normalized["title_audit"] = audit_platform_packaging_titles(
         normalized,
@@ -833,11 +2564,69 @@ def _harden_platform_packaging_for_publish(
             copy_style=copy_style,
         )
         platform["description"] = _scrub_publish_blocking_terms(str(platform.get("description") or "").strip())
+        platform.update(_normalize_platform_publication_metadata(platform))
     hardened["title_audit"] = audit_platform_packaging_titles(
         hardened,
         content_profile=content_profile,
     )
     return hardened
+
+
+def _normalize_platform_publication_metadata(platform_raw: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    cover_path = str(platform_raw.get("cover_path") or "").strip()
+    if cover_path:
+        normalized["cover_path"] = cover_path
+    declaration = str(platform_raw.get("declaration") or "").strip()
+    if declaration:
+        normalized["declaration"] = declaration
+    category = str(platform_raw.get("category") or "").strip()
+    if category:
+        normalized["category"] = category
+    visibility_or_publish_mode = str(platform_raw.get("visibility_or_publish_mode") or "").strip()
+    if visibility_or_publish_mode:
+        normalized["visibility_or_publish_mode"] = visibility_or_publish_mode
+    scheduled_publish_at = str(platform_raw.get("scheduled_publish_at") or "").strip()
+    if scheduled_publish_at:
+        normalized["scheduled_publish_at"] = scheduled_publish_at
+    collection = _normalize_platform_collection(platform_raw)
+    if collection:
+        normalized["collection"] = collection
+        if str(collection.get("name") or "").strip():
+            normalized["collection_name"] = str(collection.get("name") or "").strip()
+    else:
+        collection_name = str(platform_raw.get("collection_name") or "").strip()
+        if collection_name:
+            normalized["collection_name"] = collection_name
+    copy_material = platform_raw.get("copy_material") if isinstance(platform_raw.get("copy_material"), dict) else {}
+    if copy_material:
+        normalized["copy_material"] = {
+            key: value
+            for key, value in copy_material.items()
+            if value not in (None, "", [], {})
+        }
+    platform_specific_overrides = platform_raw.get("platform_specific_overrides")
+    if isinstance(platform_specific_overrides, dict) and platform_specific_overrides:
+        normalized["platform_specific_overrides"] = dict(platform_specific_overrides)
+    return normalized
+
+
+def _normalize_platform_collection(platform_raw: dict[str, Any]) -> dict[str, str] | None:
+    raw_collection = platform_raw.get("collection")
+    if isinstance(raw_collection, dict):
+        collection_id = str(raw_collection.get("id") or raw_collection.get("collection_id") or "").strip()
+        collection_name = str(raw_collection.get("name") or raw_collection.get("title") or raw_collection.get("label") or "").strip()
+    else:
+        collection_id = str(platform_raw.get("collection_id") or "").strip()
+        collection_name = str(platform_raw.get("collection_name") or raw_collection or "").strip()
+    if not collection_id and not collection_name:
+        return None
+    collection: dict[str, str] = {}
+    if collection_id:
+        collection["id"] = collection_id[:160]
+    if collection_name:
+        collection["name"] = collection_name[:160]
+    return collection
 
 
 def _merge_publish_safe_titles(
@@ -2871,6 +4660,7 @@ def _copy_style_instruction(copy_style: str) -> str:
     mapping = {
         "attention_grabbing": "点击友好：标题要有明确看点和判断，但禁止廉价爆词、模板腔和虚假强情绪。",
         "balanced": "平衡稳妥：有吸引力，但不过度浮夸，优先清晰和自然。",
+        "claim_grounded": "证据闭环：先遵守 claim ledger，再做平台表达；宁可保守，也不能补故事。",
         "premium_editorial": "高级编辑感：克制、干净、像杂志编辑或品牌文案。",
         "trusted_expert": "专业可信：更像经验分享和专家拆解，少营销腔。",
         "playful_meme": "轻松玩梗：允许更口语、更俏皮、更有网感。",

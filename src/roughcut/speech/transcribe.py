@@ -13,7 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.db.models import Artifact, FactClaim, JobStep, SubtitleCorrection, SubtitleItem, TranscriptSegment
 from roughcut.config import get_settings
-from roughcut.media.subtitle_spans import subtitle_display_unit_key, subtitle_display_units
+from roughcut.media.subtitle_spans import (
+    has_unsafe_unmatched_alnum_units,
+    subtitle_display_unit_key,
+    subtitle_display_units,
+)
 from roughcut.media.subtitle_text import normalize_flashlight_model_alias_text, normalize_source_transcript_text
 from roughcut.providers.factory import get_transcription_provider, resolve_transcription_provider_plan
 from roughcut.providers.transcription.base import TranscriptResult, TranscriptSegment as ProviderTranscriptSegment, TranscriptionProgressCallback, WordTiming
@@ -286,7 +290,6 @@ def analyze_transcript_asr_quality(result: TranscriptResult) -> dict[str, Any]:
     rejected = (
         suspicious_duplicate_count >= 3
         or affected_count >= 3
-        or (affected_count >= 2 and affected_ratio >= 0.05)
     )
     return {
         "rejected": rejected,
@@ -696,6 +699,11 @@ def _normalize_segment_word_timings_for_text(
         [str(unit["key"]) for unit in raw_units],
     )
     matched_by_canonical = {canonical_index: raw_index for canonical_index, raw_index in pairs}
+    if has_unsafe_unmatched_alnum_units(
+        canonical_units,
+        matched_indexes=set(matched_by_canonical),
+    ):
+        return list(seg.words or [])
     previous_end = float(raw_units[0]["start"])
     normalized_words: list[WordTiming] = []
     for canonical_index, unit in enumerate(canonical_units):

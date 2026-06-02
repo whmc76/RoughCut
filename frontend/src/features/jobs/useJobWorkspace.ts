@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../../api";
 import type { Job, JobActivity } from "../../types";
+import { maybeNotify } from "../../utils/browserNotifications";
 import { normalizeKeywordList } from "./contentProfile";
 import type { UploadForm } from "./constants";
 
@@ -41,6 +42,20 @@ const JOB_STATUS_GROUP_PRIORITY: Record<string, number> = {
   processing: 1,
   pending: 1,
 };
+const JOB_NOTIFY_TAG_PREFIX = "roughcut-job-status";
+const JOB_STATUS_NOTIFY = {
+  completed: "done",
+  needsReview: "needs_review",
+  manualEdit: "awaiting_manual_edit",
+};
+const JOB_TYPE_LABEL: Record<string, string> = {
+  publication: "发布任务",
+  edit: "剪辑任务",
+};
+
+function jobTaskTypeLabel(job: Pick<Job, "queue_task_kind" | "source_name">): string {
+  return JOB_TYPE_LABEL[job.queue_task_kind ?? "edit"] ?? "任务";
+}
 
 export type JobQueueFilter = "all" | "pending" | "running" | "done" | "attention";
 
@@ -172,6 +187,7 @@ function compareJobs(a: { status: string; updated_at: string }, b: { status: str
 export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions = {}) {
   const queryClient = useQueryClient();
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
+  const previousJobStatusRef = useRef<Map<string, string>>(new Map());
   const [keyword, setKeyword] = useState("");
   const [queueFilter, setQueueFilter] = useState<JobQueueFilter>("all");
   const [jobsPage, setJobsPage] = useState(0);
@@ -193,6 +209,50 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     queryFn: () => api.listJobs(JOBS_PAGE_SIZE, jobsPage * JOBS_PAGE_SIZE),
     refetchInterval: 8_000,
   });
+
+  useEffect(() => {
+    const items = jobs.data;
+    if (!items?.length) {
+      previousJobStatusRef.current = new Map();
+      return;
+    }
+
+    const nextStatusById = new Map<string, string>();
+    const notifications: Array<{ title: string; body: string; tag: string }> = [];
+
+    items.forEach((job) => {
+      const previousStatus = previousJobStatusRef.current.get(job.id);
+      nextStatusById.set(job.id, job.status);
+
+      if (!previousStatus || previousStatus === job.status) return;
+
+      if (job.status === JOB_STATUS_NOTIFY.completed) {
+        notifications.push({
+          title: `${jobTaskTypeLabel(job)}完成`,
+          body: `${job.source_name} 已完成`,
+          tag: `${JOB_NOTIFY_TAG_PREFIX}-completed-${job.id}`,
+        });
+      } else if (job.status === JOB_STATUS_NOTIFY.needsReview) {
+        notifications.push({
+          title: `${jobTaskTypeLabel(job)}进入待核对`,
+          body: `${job.source_name} 已进入审核阶段`,
+          tag: `${JOB_NOTIFY_TAG_PREFIX}-needs-review-${job.id}`,
+        });
+      } else if (job.status === JOB_STATUS_NOTIFY.manualEdit) {
+        notifications.push({
+          title: `${jobTaskTypeLabel(job)}进入手工剪辑`,
+          body: `${job.source_name} 已进入手工调整阶段`,
+          tag: `${JOB_NOTIFY_TAG_PREFIX}-manual-edit-${job.id}`,
+        });
+      }
+    });
+
+    previousJobStatusRef.current = nextStatusById;
+    notifications.forEach((notification) => {
+      void maybeNotify(notification);
+    });
+  }, [jobs.data]);
+
   const detail = useQuery({
     queryKey: ["job", selectedJobId],
     queryFn: () => api.getJob(selectedJobId!),

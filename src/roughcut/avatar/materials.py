@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import json
 import re
+import os
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from roughcut.publication import normalize_publication_credentials
+from roughcut.config import DEFAULT_PROJECT_ROOT
 
-_AVATAR_MATERIALS_ROOT = Path("data/avatar_materials")
+_AVATAR_MATERIALS_ENV = "ROUGHCUT_AVATAR_MATERIALS_DIR"
 
 _PERSONAL_INFO_FIELDS = (
     "public_name",
@@ -52,7 +54,12 @@ _DEMO_PROFILE_NAME_PATTERNS = (
 
 
 def avatar_materials_root() -> Path:
-    root = _AVATAR_MATERIALS_ROOT
+    root = Path(
+        os.getenv(
+            _AVATAR_MATERIALS_ENV,
+            str((DEFAULT_PROJECT_ROOT / "data" / "avatar_materials").as_posix()),
+        )
+    ).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     (root / "profiles").mkdir(parents=True, exist_ok=True)
     return root

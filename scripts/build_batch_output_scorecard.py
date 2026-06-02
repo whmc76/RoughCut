@@ -14,6 +14,12 @@ from sqlalchemy import select
 
 from roughcut.db.models import Artifact, Timeline
 from roughcut.db.session import get_session_factory
+from roughcut.publication_platform_matrix import (
+    normalize_publication_platform_name,
+    platform_manual_handoff_only,
+    platform_soft_verification_fields,
+)
+from roughcut.publication_packaging import publication_packaging_entry_publish_ready
 
 
 def parse_args() -> argparse.Namespace:
@@ -70,6 +76,43 @@ def _score_from_status(status: str | None, *, pass_score: float = 100.0, warn_sc
 def _file_exists(raw_path: str | None) -> bool:
     value = str(raw_path or "").strip()
     return bool(value) and Path(value).exists()
+
+
+def _normalize_packaging_platforms(packaging: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    raw_platforms = packaging.get("platforms")
+    if isinstance(raw_platforms, dict):
+        return {
+            normalize_publication_platform_name(platform): dict(payload)
+            for platform, payload in raw_platforms.items()
+            if isinstance(payload, dict)
+        }
+    if isinstance(raw_platforms, list):
+        normalized: dict[str, dict[str, Any]] = {}
+        for payload in raw_platforms:
+            if not isinstance(payload, dict):
+                continue
+            platform = normalize_publication_platform_name(payload.get("platform") or payload.get("platform_name"))
+            if not platform:
+                continue
+            normalized[platform] = dict(payload)
+        return normalized
+    return {}
+
+
+def _platform_packaging_title(payload: dict[str, Any]) -> str:
+    titles = list(payload.get("titles") or []) if isinstance(payload.get("titles"), list) else []
+    if titles:
+        return str(titles[0] or "").strip()
+    copy_material = payload.get("copy_material") if isinstance(payload.get("copy_material"), dict) else {}
+    return str(copy_material.get("primary_title") or "").strip()
+
+
+def _platform_packaging_body(payload: dict[str, Any]) -> str:
+    description = str(payload.get("description") or "").strip()
+    if description:
+        return description
+    copy_material = payload.get("copy_material") if isinstance(payload.get("copy_material"), dict) else {}
+    return str(copy_material.get("body") or "").strip()
 
 
 def _summarize_variant_score(name: str, media_path: str | None, quality_check: dict[str, Any] | None) -> dict[str, Any]:
@@ -135,45 +178,78 @@ def _score_platform_package(packaging: dict[str, Any], publish_path: str | None)
             "platform_scores": [],
         }
 
-    platforms = packaging.get("platforms") if isinstance(packaging.get("platforms"), dict) else {}
+    platforms = _normalize_packaging_platforms(packaging)
     title_audit = packaging.get("title_audit") if isinstance(packaging.get("title_audit"), dict) else {}
     platform_audits = title_audit.get("platforms") if isinstance(title_audit.get("platforms"), dict) else {}
     platform_scores: list[dict[str, Any]] = []
     per_platform_values: list[float] = []
+    ready_count = 0
+    manual_handoff_count = 0
+    blocked_count = 0
     for platform_name, payload in platforms.items():
+        normalized_platform = normalize_publication_platform_name(platform_name)
         audit = platform_audits.get(platform_name) if isinstance(platform_audits.get(platform_name), dict) else {}
+        if not audit and isinstance(platform_audits.get(normalized_platform), dict):
+            audit = platform_audits.get(normalized_platform)
         summary = audit.get("summary") if isinstance(audit.get("summary"), dict) else {}
         warning_count = int(summary.get("warning_count") or 0)
         error_count = int(summary.get("error_count") or 0)
         titles = list(payload.get("titles") or []) if isinstance(payload, dict) else []
         tags = list(payload.get("tags") or []) if isinstance(payload, dict) else []
-        description = str((payload or {}).get("description") or "").strip() if isinstance(payload, dict) else ""
+        title = _platform_packaging_title(payload) if isinstance(payload, dict) else ""
+        description = _platform_packaging_body(payload) if isinstance(payload, dict) else ""
+        live_publish_preflight = payload.get("live_publish_preflight") if isinstance(payload.get("live_publish_preflight"), dict) else {}
+        preflight_status = str(live_publish_preflight.get("status") or "").strip().lower()
+        blocking_reasons = list(live_publish_preflight.get("blocking_reasons") or [])
+        manual_handoff = bool(payload.get("manual_handoff_only")) or platform_manual_handoff_only(normalized_platform)
+        soft_fields = platform_soft_verification_fields(normalized_platform)
 
-        score = 100.0
-        if not titles:
-            score -= 35.0
-        if not tags:
-            score -= 15.0
-        if not description:
-            score -= 20.0
+        if manual_handoff:
+            score = 100.0
+            platform_status = "manual_handoff"
+            manual_handoff_count += 1
+        else:
+            platform_ready = publication_packaging_entry_publish_ready(payload)
+            score = 100.0
+            if not title:
+                score -= 35.0
+            if not description:
+                score -= 20.0
+            if "tags" not in soft_fields and not tags:
+                score -= 15.0
+            if preflight_status and preflight_status not in {"ready", "pass", "verified"}:
+                score -= min(40.0, max(1, len(blocking_reasons)) * 10.0)
+            if blocking_reasons:
+                score -= min(20.0, len(blocking_reasons) * 5.0)
+            platform_status = "ready" if platform_ready else "blocked"
+            if platform_status == "ready":
+                ready_count += 1
+            else:
+                blocked_count += 1
         score -= min(30.0, warning_count * 3.0)
         score -= min(50.0, error_count * 12.0)
         score = _round_score(score)
         per_platform_values.append(score)
         platform_scores.append(
             {
-                "platform": platform_name,
+                "platform": normalized_platform,
                 "score": score,
                 "grade": _score_to_grade(score),
-                "title_count": len(titles),
+                "status": platform_status,
+                "title_count": len(titles) if titles else (1 if title else 0),
                 "tag_count": len(tags),
                 "warning_count": warning_count,
                 "error_count": error_count,
+                "blocking_reason_count": len(blocking_reasons),
             }
         )
 
     score = _mean(per_platform_values) if per_platform_values else (100.0 if _file_exists(publish_path) else 60.0)
     summary = f"已生成 {len(platforms)} 个平台包装版本"
+    if manual_handoff_count:
+        summary += f"，人工接管 {manual_handoff_count} 个"
+    if ready_count or blocked_count:
+        summary += f"，预发布就绪 {ready_count} 个，阻断 {blocked_count} 个"
     if title_audit:
         overall = title_audit.get("summary") if isinstance(title_audit.get("summary"), dict) else {}
         summary += f"，标题审核 warning={int(overall.get('warning_count') or 0)} error={int(overall.get('error_count') or 0)}"
@@ -184,6 +260,9 @@ def _score_platform_package(packaging: dict[str, Any], publish_path: str | None)
         "summary": summary,
         "platform_scores": platform_scores,
         "publish_path": publish_path or "",
+        "manual_handoff_count": manual_handoff_count,
+        "ready_count": ready_count,
+        "blocked_count": blocked_count,
     }
 
 

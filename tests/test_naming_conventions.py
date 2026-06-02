@@ -53,27 +53,74 @@ def test_codex_token_helper_uses_cli_bridge_for_responses() -> None:
     assert uses_codex_auth_helper(cli_bridge_settings) is True
 
 
-def test_content_profile_route_uses_gpt55_low_for_analysis_after_quality_comparison(monkeypatch) -> None:
+def test_content_profile_route_defaults_to_minimax_for_analysis() -> None:
     settings = Settings(
         _env_file=None,
         llm_mode="performance",
         llm_routing_mode="hybrid_performance",
-        reasoning_provider="openai",
-        hybrid_analysis_provider="openai",
-        hybrid_analysis_model="gpt-5.5",
-        openai_auth_mode="helper",
-        openai_api_key="",
-        openai_api_key_helper="python scripts/print_codex_access_token.py",
         minimax_api_key="configured",
     )
     _normalize_settings(settings)
-    monkeypatch.setattr("roughcut.config.shutil.which", lambda _command: "codex.cmd")
 
     route = resolve_llm_task_route("content_profile", settings=settings)
 
-    assert route["reasoning_provider"] == "openai"
-    assert route["reasoning_model"] == "gpt-5.5"
+    assert route["reasoning_provider"] == "minimax"
+    assert route["reasoning_model"] == "MiniMax-M3"
     assert route["reasoning_effort"] == "low"
+
+
+def test_minimax_is_default_main_reasoning_visual_and_searxng_search_route() -> None:
+    settings = Settings(_env_file=None)
+    _normalize_settings(settings)
+
+    assert settings.reasoning_provider == "minimax"
+    assert settings.reasoning_model == "MiniMax-M3"
+    assert settings.active_vision_model == "MiniMax-M3"
+    assert settings.multimodal_fallback_provider == "minimax"
+    assert settings.multimodal_fallback_model == "MiniMax-M3"
+    assert settings.search_provider == "searxng"
+    assert settings.search_fallback_provider == "searxng"
+
+
+def test_searxng_is_default_search_provider_override_shape() -> None:
+    normalized = _normalize_runtime_override_values(
+        {
+            "search_provider": "searxng",
+            "search_fallback_provider": "searxng",
+            "model_search_helper": "python scripts/codex_model_search_helper.py",
+        }
+    )
+
+    assert normalized["search_provider"] == "searxng"
+    assert normalized["search_fallback_provider"] == "searxng"
+
+
+def test_search_minimax_route_downgrades_to_searxng_without_minimax_key() -> None:
+    settings = Settings(
+        _env_file=None,
+        minimax_api_key="",
+        search_provider="minimax",
+        search_fallback_provider="minimax",
+        backup_search_provider="minimax",
+        backup_search_fallback_provider="minimax",
+        searxng_url="http://localhost:8080",
+    )
+    _normalize_settings(settings)
+
+    assert settings.search_provider == "searxng"
+    assert settings.search_fallback_provider == "searxng"
+    assert settings.backup_search_provider == "searxng"
+    assert settings.backup_search_fallback_provider == "searxng"
+
+
+def test_cover_image_backend_accepts_minimax_aliases() -> None:
+    normalized = _normalize_runtime_override_values(
+        {
+            "intelligent_copy_cover_image_backend": "minimax_api",
+        }
+    )
+
+    assert normalized["intelligent_copy_cover_image_backend"] == "minimax_images_api"
 
 
 def test_copy_route_defaults_to_minimax_for_final_copywriting_production() -> None:
@@ -87,7 +134,7 @@ def test_copy_route_defaults_to_minimax_for_final_copywriting_production() -> No
     route = resolve_llm_task_route("copy", settings=settings)
 
     assert route["reasoning_provider"] == "minimax"
-    assert route["reasoning_model"] == "MiniMax-M2.7"
+    assert route["reasoning_model"] == "MiniMax-M3"
 
 
 def test_copy_route_rejects_gpt_as_final_copywriting_model() -> None:
@@ -103,7 +150,25 @@ def test_copy_route_rejects_gpt_as_final_copywriting_model() -> None:
     route = resolve_llm_task_route("copy", settings=settings)
 
     assert route["reasoning_provider"] == "minimax"
-    assert route["reasoning_model"] == "MiniMax-M2.7"
+    assert route["reasoning_model"] == "MiniMax-M3"
+
+
+def test_copy_route_keeps_codex_openai_priority_chain() -> None:
+    settings = Settings(
+        _env_file=None,
+        llm_mode="performance",
+        llm_routing_mode="hybrid_performance",
+        reasoning_provider="openai",
+        reasoning_model="gpt-5.5",
+        openai_auth_mode="helper",
+        openai_api_key="",
+        openai_api_key_helper="python scripts/print_codex_access_token.py",
+    )
+    _normalize_settings(settings)
+
+    route = resolve_llm_task_route("copy", settings=settings)
+
+    assert route == {}
 
 
 def test_transcription_aliases_only_keep_canonical_provider_shapes() -> None:

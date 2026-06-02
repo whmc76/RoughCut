@@ -11,6 +11,8 @@ def build_topic_fact_confirmation_snapshot(
 ) -> dict[str, Any]:
     payload = dict(profile or {})
     understanding = _as_dict(payload.get("content_understanding"))
+    video_understanding = _as_dict(payload.get("video_understanding"))
+    video_global = _as_dict(video_understanding.get("global_understanding"))
     verification = _as_dict(verification_evidence) or _as_dict(payload.get("verification_evidence"))
 
     support_sources = _collect_support_sources(payload, understanding, verification)
@@ -19,12 +21,20 @@ def build_topic_fact_confirmation_snapshot(
     review_reasons = _string_list(understanding.get("review_reasons"))
 
     subject = {
-        "domain": _text(payload.get("subject_domain") or understanding.get("content_domain")),
-        "brand": _text(payload.get("subject_brand")),
-        "model": _text(payload.get("subject_model")),
-        "type": _text(payload.get("subject_type") or understanding.get("primary_subject")),
-        "theme": _text(payload.get("video_theme") or understanding.get("video_theme")),
-        "summary": _text(payload.get("summary") or understanding.get("summary")),
+        "domain": _text(
+            payload.get("subject_domain")
+            or video_global.get("content_domain")
+            or understanding.get("content_domain")
+        ),
+        "brand": _text(payload.get("subject_brand") or _as_dict(video_global.get("primary_subject")).get("brand")),
+        "model": _text(payload.get("subject_model") or _as_dict(video_global.get("primary_subject")).get("model")),
+        "type": _text(
+            payload.get("subject_type")
+            or _as_dict(video_global.get("primary_subject")).get("type")
+            or understanding.get("primary_subject")
+        ),
+        "theme": _text(payload.get("video_theme") or video_global.get("video_theme") or understanding.get("video_theme")),
+        "summary": _text(payload.get("summary") or video_global.get("summary") or understanding.get("summary")),
     }
     query_list = _dedupe_strings(
         [
@@ -111,8 +121,19 @@ def _collect_support_sources(
             support_sources.append(source)
 
     source_context = _as_dict(profile.get("source_context"))
+    video_understanding = _as_dict(profile.get("video_understanding"))
+    video_global = _as_dict(video_understanding.get("global_understanding"))
+    video_review = _as_dict(video_understanding.get("review"))
     add("task_context", bool(source_context))
     add("asr_transcript", bool(_text(profile.get("transcript_excerpt") or profile.get("transcript_source"))))
+    add(
+        "video_understanding",
+        bool(
+            video_global
+            or _as_dict(video_understanding.get("evidence"))
+            or _string_list(video_review.get("review_reasons"))
+        ),
+    )
     add("visual_ocr", bool(_text(profile.get("visible_text")) or _as_dict(profile.get("ocr_profile"))))
     add(
         "visual_semantic",

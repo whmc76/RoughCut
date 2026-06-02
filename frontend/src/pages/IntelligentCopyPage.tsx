@@ -6,7 +6,21 @@ import { EmptyState } from "../components/ui/EmptyState";
 import { PageHeader } from "../components/ui/PageHeader";
 import { PageSection } from "../components/ui/PageSection";
 import { PanelHeader } from "../components/ui/PanelHeader";
-import { publicationAttemptStatusLabel, useIntelligentCopyWorkspace } from "../features/intelligentCopy/useIntelligentCopyWorkspace";
+import {
+  normalizeIntelligentCopyPlatformId,
+  openManualHandoffTarget,
+  publicationAttemptStatusLabel,
+  publicationPlanExecutorPreflightMessages,
+  publicationPlanIsReady,
+  publicationPlanHasManualHandoffReady,
+  publicationPlanManualHandoffTargets,
+  resultBlockingReasons,
+  resultManualHandoffTargets,
+  resultStatusKind,
+  taskHasContinueReadyMaterial,
+  useIntelligentCopyWorkspace,
+} from "../features/intelligentCopy/useIntelligentCopyWorkspace";
+import { publicationAttemptReceiptId, publicationAttemptUrl } from "../features/publication/publicationAttempt";
 import { useI18n } from "../i18n";
 import { copyStylePresets } from "../stylePresets";
 import type { IntelligentCopyGenerateTask, IntelligentCopyPlatformMaterial, PublicationAttempt, PublicationSchemeItem } from "../types";
@@ -21,13 +35,13 @@ export function IntelligentCopyPage() {
   const selectedPublicationProfile = workspace.publicationProfiles.find((profile) => profile.id === workspace.selectedPublicationProfileId);
   const selectedPublicationCredentials = selectedPublicationProfile?.creator_profile?.publishing?.platform_credentials ?? [];
   const selectedTargets = (workspace.publicationPlan.data?.targets ?? []).filter((target) =>
-    workspace.selectedPlatformIds.includes(target.platform),
+    workspace.selectedPlatformIds.includes(normalizeIntelligentCopyPlatformId(target.platform)),
   );
   const previewPlatform = workspace.result?.platforms.find((platform) => platform.key === previewPlatformKey) ?? null;
   const generateDisabled = !workspace.folderPath.trim() || workspace.generate.isPending || workspace.selectedMaterialPlatformIds.length === 0;
   const recentGenerateTasks = workspace.recentGenerateTasks.data?.tasks ?? [];
   const completedMaterialTasks = useMemo(
-    () => recentGenerateTasks.filter((task) => task.status === "completed" && task.result?.publish_ready !== false),
+    () => recentGenerateTasks.filter((task) => taskHasContinueReadyMaterial(task)),
     [recentGenerateTasks],
   );
   const selectedCompletedMaterialTask = completedMaterialTasks.find((task) => task.id === workspace.selectedGenerateTaskId) ?? null;
@@ -44,6 +58,11 @@ export function IntelligentCopyPage() {
   const pathDropdownOpen = pathInputFocused && pathDropdownItems.length > 0;
   const activePathSuggestion =
     pathDropdownItems[Math.min(highlightedPathIndex, Math.max(0, pathDropdownItems.length - 1))]?.path ?? "";
+  const publicationPlanManualTargets = publicationPlanManualHandoffTargets(workspace.publicationPlan.data);
+  const publicationPlanNeedsManualHandoff = publicationPlanHasManualHandoffReady(workspace.publicationPlan.data);
+  const publicationPlanReady = publicationPlanIsReady(workspace.publicationPlan.data);
+  const publicationPlanPreflightMessages = publicationPlanExecutorPreflightMessages(workspace.publicationPlan.data);
+  const resultManualTargets = resultManualHandoffTargets(workspace.result);
 
   const choosePathSuggestion = (path: string) => {
     workspace.setFolderPath(path);
@@ -96,16 +115,6 @@ export function IntelligentCopyPage() {
               <PanelHeader
                 title={t("smartCopy.form.title")}
                 description={t("smartCopy.form.description")}
-                actions={
-                  <button
-                    type="button"
-                    className="button ghost"
-                    onClick={() => workspace.inspect.mutate(workspace.folderPath)}
-                    disabled={!workspace.folderPath.trim() || workspace.inspect.isPending}
-                  >
-                    {workspace.inspect.isPending ? t("smartCopy.page.inspecting") : t("smartCopy.page.inspect")}
-                  </button>
-                }
               />
               <div className="form-grid">
                 <div className="smart-copy-path-field">
@@ -328,10 +337,29 @@ export function IntelligentCopyPage() {
           onSelect={workspace.setSelectedGenerateTaskId}
         />
         <GenerateTaskProgress task={workspace.selectedGenerateTask} loading={workspace.selectedGenerateTaskQuery.isLoading} />
-        {workspace.result && workspace.result.publish_ready === false && workspace.result.blocking_reasons?.length ? (
+        {workspace.result && resultStatusKind(workspace.result) === "blocked" && resultBlockingReasons(workspace.result).length ? (
           <div className="list-stack compact-top">
-            {workspace.result.blocking_reasons.slice(0, 6).map((reason) => (
+            {resultBlockingReasons(workspace.result).slice(0, 6).map((reason) => (
               <div key={reason} className="notice notice-error">{reason}</div>
+            ))}
+          </div>
+        ) : null}
+        {workspace.result && resultStatusKind(workspace.result) === "manual_handoff" && resultManualTargets.length ? (
+          <div className="list-stack compact-top">
+            {resultManualTargets.map((target) => (
+              <div className="activity-card" key={`${target.platform}-${target.login_url || "manual"}`}>
+                <div className="toolbar">
+                  <div>
+                    <strong>{target.label || target.platform}</strong>
+                    <div className="muted compact-top">{target.reason || "当前平台需人工登录后继续发布。"}</div>
+                  </div>
+                  {target.login_url ? (
+                    <button type="button" className="button secondary" onClick={() => openManualHandoffTarget(target)}>
+                      打开登录页
+                    </button>
+                  ) : null}
+                </div>
+              </div>
             ))}
           </div>
         ) : null}
@@ -345,13 +373,16 @@ export function IntelligentCopyPage() {
                 onClick={() => setPreviewPlatformKey(platform.key)}
               >
                 <span className="smart-copy-version-kicker">{platform.label}</span>
-                <span className={`status-pill ${platform.publish_ready === false ? "failed" : "done"}`}>
-                  {platform.publish_ready === false ? t("smartCopy.materials.blocked") : t("smartCopy.materials.ready")}
+                <span className={`status-pill ${platformMaterialStatusTone(platform)}`}>
+                  {platformMaterialStatusLabel(platform, t)}
                 </span>
                 <strong>{platform.primary_title || platform.titles[0] || platform.label}</strong>
                 <span className="smart-copy-version-body">{platform.body}</span>
-                {platform.blocking_reasons?.length ? (
+                {platformMaterialStatusKind(platform) === "blocked" && platform.blocking_reasons?.length ? (
                   <span className="notice notice-error compact-top">{platform.blocking_reasons[0]}</span>
+                ) : null}
+                {platformMaterialStatusKind(platform) === "manual_handoff" ? (
+                  <span className="mode-chip subtle compact-top">需人工登录后继续发布</span>
                 ) : null}
                 <span className="smart-copy-version-meta">
                   {platform.has_title ? `${platform.titles.length} ${t("smartCopy.materials.titleCount")}` : t("smartCopy.materials.bodyOnly")} · {platform.tags.length} {t("smartCopy.materials.tagCount")}
@@ -373,7 +404,7 @@ export function IntelligentCopyPage() {
           <section className="panel smart-copy-publish-material-picker">
             <PanelHeader
               title="选择已完成物料任务"
-              description="只列出已经生成完成且可发布的物料任务。选择后会自动定位对应的视频、字幕、输出目录和平台物料。"
+              description="只列出已经生成完成、可继续自动发布或人工接管的物料任务。选择后会自动定位对应的视频、字幕、输出目录和平台物料。"
               actions={
                 <div className="toolbar">
                   <select
@@ -386,11 +417,11 @@ export function IntelligentCopyPage() {
                     <option value="">选择已完成物料任务</option>
                     {completedMaterialTasks.map((task) => (
                       <option key={task.id} value={task.id}>
-                        {formatGenerateTaskOptionTime(task)} · {task.folder_path.split(/[\\/]/).filter(Boolean).at(-1) || task.folder_path}
+                        {formatGenerateTaskOptionTime(task)} · {formatGenerateTaskFolderName(task)}
                       </option>
                     ))}
                   </select>
-                  <span className="mode-chip subtle">{completedMaterialTasks.length} 个可发布任务</span>
+                  <span className="mode-chip subtle">{completedMaterialTasks.length} 个可继续任务</span>
                 </div>
               }
             />
@@ -398,7 +429,7 @@ export function IntelligentCopyPage() {
               <div className="smart-copy-publish-task-grid">
                 <article className="activity-card">
                   <span className="stat-label">当前任务</span>
-                  <strong>{selectedCompletedMaterialTask.folder_path.split(/[\\/]/).filter(Boolean).at(-1) || selectedCompletedMaterialTask.folder_path}</strong>
+                  <strong>{formatGenerateTaskFolderName(selectedCompletedMaterialTask)}</strong>
                   <div className="muted compact-top">{selectedCompletedMaterialTask.message || "物料已完成，可进入发布队列。"}</div>
                 </article>
                 <article className="activity-card">
@@ -520,6 +551,32 @@ export function IntelligentCopyPage() {
                 ))}
               </div>
             ) : null}
+            {publicationPlanPreflightMessages.length ? (
+              <div className="list-stack compact-top">
+                {publicationPlanPreflightMessages.map((message) => (
+                  <div key={message} className="activity-card">{message}</div>
+                ))}
+              </div>
+            ) : null}
+            {publicationPlanManualTargets.length ? (
+              <div className="list-stack compact-top">
+                {publicationPlanManualTargets.map((target) => (
+                  <div className="activity-card" key={`${target.platform}-${target.login_url || "manual"}`}>
+                    <div className="toolbar">
+                      <div>
+                        <strong>{target.label || target.platform}</strong>
+                        <div className="muted compact-top">{target.reason || "该平台已切换为人工接管，不再进入自动一键发布。"}</div>
+                      </div>
+                      {target.login_url ? (
+                        <button type="button" className="button secondary" onClick={() => openManualHandoffTarget(target)}>
+                          打开登录页
+                        </button>
+                      ) : null}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
             {workspace.publicationPlan.data?.targets?.length ? (
               <div className="list-stack compact-top">
                 {workspace.publicationPlan.data.targets.map((target) => (
@@ -545,7 +602,7 @@ export function IntelligentCopyPage() {
                 ))}
               </div>
             ) : (
-              <EmptyState message={t("smartCopy.publish.platformEmpty")} />
+              <EmptyState message={publicationPlanNeedsManualHandoff ? "当前所选平台需人工登录接管，自动发布目标为空。" : t("smartCopy.publish.platformEmpty")} />
             )}
           </section>
         </div>
@@ -560,7 +617,7 @@ export function IntelligentCopyPage() {
                   <button
                     className="button secondary"
                     type="button"
-                    disabled={workspace.generatePublicationScheme.isPending || !workspace.publicationPlan.data?.publish_ready}
+                    disabled={workspace.generatePublicationScheme.isPending || !publicationPlanReady}
                     onClick={() => workspace.generatePublicationScheme.mutate(false)}
                   >
                     {workspace.generatePublicationScheme.isPending ? "生成中..." : workspace.publicationScheme ? "重新生成方案" : "生成智能发布方案"}
@@ -568,7 +625,7 @@ export function IntelligentCopyPage() {
                   <button
                     className="button ghost"
                     type="button"
-                    disabled={workspace.generatePublicationScheme.isPending || !workspace.publicationPlan.data?.publish_ready}
+                    disabled={workspace.generatePublicationScheme.isPending || !publicationPlanReady}
                     onClick={() => workspace.generatePublicationScheme.mutate(true)}
                   >
                     刷新摸底
@@ -675,7 +732,7 @@ export function IntelligentCopyPage() {
             disabled={
               !workspace.result ||
               !selectedCompletedMaterialTask ||
-              !workspace.publicationPlan.data?.publish_ready ||
+              !publicationPlanReady ||
               !workspace.selectedPlatformIds.length ||
               !workspace.publicationScheme?.items?.length ||
               workspace.publish.isPending
@@ -684,6 +741,19 @@ export function IntelligentCopyPage() {
           >
             {workspace.publish.isPending ? t("smartCopy.publish.submitting") : t("smartCopy.publish.submit")}
           </button>
+          {publicationPlanManualTargets.length ? (
+            <button
+              className="button secondary"
+              type="button"
+              onClick={() => {
+                publicationPlanManualTargets.forEach((target) => {
+                  openManualHandoffTarget(target);
+                });
+              }}
+            >
+              打开人工登录页
+            </button>
+          ) : null}
           {!workspace.result ? <span className="muted">{t("smartCopy.publish.needGenerate")}</span> : null}
           {workspace.result && !selectedCompletedMaterialTask ? <span className="muted">请先选择一个已完成的物料任务。</span> : null}
         </div>
@@ -728,7 +798,7 @@ function RecentGenerateTasksPanel({ tasks, selectedTaskId, loading, onSelect }: 
               <option value="">{t("smartCopy.tasks.select")}</option>
               {tasks.map((task) => (
                 <option key={task.id} value={task.id}>
-                  {generateTaskStatusLabel(task.status)} · {formatGenerateTaskOptionTime(task)} · {task.folder_path.split(/[\\/]/).filter(Boolean).at(-1) || task.folder_path}
+                  {generateTaskStatusLabel(task.status)} · {formatGenerateTaskOptionTime(task)} · {formatGenerateTaskFolderName(task)}
                 </option>
               ))}
             </select>
@@ -746,7 +816,7 @@ function RecentGenerateTasksPanel({ tasks, selectedTaskId, loading, onSelect }: 
               onClick={() => onSelect(task.id)}
             >
               <span className={`status-pill ${taskStatusTone(task.status)}`}>{generateTaskStatusLabel(task.status)}</span>
-              <strong>{task.folder_path.split(/[\\/]/).filter(Boolean).at(-1) || task.folder_path}</strong>
+              <strong>{formatGenerateTaskFolderName(task)}</strong>
               <span className="smart-copy-task-timestamp">{formatGenerateTaskTimeline(task)}</span>
               <span className="muted">{task.message || task.stage}</span>
               <div
@@ -787,9 +857,7 @@ function PathSummaryCard({ label, value }: { label: string; value?: string | nul
 }
 
 function normalizePublicationPlatformKey(value: string) {
-  const key = String(value || "").trim().toLowerCase().replace(/_/g, "-");
-  if (key === "wechat-channels") return "wechat-channels";
-  return key;
+  return normalizeIntelligentCopyPlatformId(value);
 }
 
 type PublicationPlatformProgressPanelProps = {
@@ -805,7 +873,9 @@ type PublicationPlatformProgressPanelProps = {
 
 function PublicationPlatformProgressPanel({ targets, attempts, selectedPlatformIds }: PublicationPlatformProgressPanelProps) {
   const { t } = useI18n();
-  const selectedTargets = targets.filter((target) => selectedPlatformIds.includes(target.platform));
+  const selectedTargets = targets.filter((target) =>
+    selectedPlatformIds.includes(normalizePublicationPlatformKey(target.platform)),
+  );
   if (!selectedTargets.length) {
     return (
       <section className="panel top-gap">
@@ -839,6 +909,9 @@ function PublicationPlatformProgressPanel({ targets, attempts, selectedPlatformI
                 <span>更新：{formatDateTime(attempt?.updated_at || attempt?.created_at)}</span>
                 {latestRun?.phase ? <span>阶段：{latestRun.phase}</span> : null}
                 {latestRun?.provider_task_id ? <span>任务：{latestRun.provider_task_id}</span> : null}
+                {publicationAttemptReceiptId(attempt) ? (
+                  <span title={publicationAttemptReceiptId(attempt)}>回执：{publicationAttemptReceiptId(attempt)}</span>
+                ) : null}
               </div>
               {attempt?.error_message ? <div className="notice notice-error compact-top">{attempt.error_message}</div> : null}
               <div className="toolbar compact-top">
@@ -983,6 +1056,9 @@ function PublicationHistoryPanel({ attempts, selectedAttempt, selectedAttemptId,
               <span>{t("smartCopy.publish.updatedAt")}: {formatDateTime(selectedAttempt.updated_at || selectedAttempt.created_at)}</span>
               <span>{t("smartCopy.publish.runStatus")}: {selectedAttempt.operator_summary || selectedAttempt.run_status || t("smartCopy.publish.waitingRunner")}</span>
               {selectedAttempt.external_post_id ? <span>Post ID: {selectedAttempt.external_post_id}</span> : null}
+              {publicationAttemptReceiptId(selectedAttempt) ? (
+                <span title={publicationAttemptReceiptId(selectedAttempt)}>回执：{publicationAttemptReceiptId(selectedAttempt)}</span>
+              ) : null}
             </div>
             {selectedAttempt.error_message ? <div className="notice notice-error compact-top">{selectedAttempt.error_message}</div> : null}
             <div className="toolbar compact-top">
@@ -1060,11 +1136,12 @@ function normalizePercent(value: number | null | undefined): number {
 }
 
 function isGenerateTaskRunning(task: IntelligentCopyGenerateTask): boolean {
-  return !["completed", "blocked", "failed", "cancelled"].includes(task.status);
+  return !["completed", "manual_handoff", "blocked", "failed", "cancelled"].includes(task.status);
 }
 
 function taskStatusTone(status: string): string {
   if (status === "completed") return "done";
+  if (status === "manual_handoff") return "pending";
   if (status === "blocked") return "running";
   if (status === "failed") return "failed";
   return "running";
@@ -1074,10 +1151,6 @@ function publicationStatusTone(status: string): string {
   if (status === "published" || status === "draft_created" || status === "scheduled_pending") return "done";
   if (status === "failed") return "failed";
   return "running";
-}
-
-function publicationAttemptUrl(attempt: PublicationAttempt | null): string {
-  return String(attempt?.public_url || attempt?.external_url || "").trim();
 }
 
 function latestPublicationAttemptForPlatform(attempts: PublicationAttempt[], platform: string): PublicationAttempt | null {
@@ -1113,13 +1186,118 @@ function formatGenerateTaskTimeline(task: IntelligentCopyGenerateTask): string {
   return `创建 ${created} · 更新 ${formatDateTime(task.updated_at)}`;
 }
 
+function formatGenerateTaskFolderName(task: IntelligentCopyGenerateTask): string {
+  return formatFolderName(
+    task.inspection?.folder_path
+    || task.result?.folder_path
+    || task.partial_result?.folder_path
+    || task.folder_path,
+  );
+}
+
+function formatFolderName(path: string | null | undefined): string {
+  const raw = String(path ?? "").trim();
+  if (!raw) return "";
+  const segments = raw.split(/[\\/]/).filter(Boolean);
+  const name = segments.at(-1) || raw;
+  return name.replace(/^[a-f0-9]{16}-/i, "");
+}
+
 function generateTaskStatusLabel(status: string): string {
   if (status === "queued") return "已排队";
   if (status === "running") return "生成中";
   if (status === "completed") return "已完成";
+  if (status === "manual_handoff") return "人工接管";
   if (status === "blocked") return "待补封面";
   if (status === "failed") return "失败";
   return status || "待处理";
+}
+
+export function buildPlatformPreviewMetadataRows(platform: IntelligentCopyPlatformMaterial): Array<{ label: string; value: string }> {
+  const rows: Array<{ label: string; value: string }> = [];
+  const manualPublishEntryUrl = String(platform.manual_publish_entry_url ?? "").trim();
+  const declaration = String(platform.declaration ?? "").trim();
+  const collectionName =
+    String(platform.collection_name ?? "").trim() ||
+    String((platform.collection as Record<string, unknown> | null | undefined)?.name ?? "").trim();
+  const visibility = String(platform.visibility_or_publish_mode ?? "").trim();
+  const scheduledAt = String(platform.scheduled_publish_at ?? "").trim();
+  const preflight = platform.live_publish_preflight && typeof platform.live_publish_preflight === "object"
+    ? platform.live_publish_preflight
+    : null;
+  const preflightStatus = String((preflight as Record<string, unknown> | null)?.status ?? "").trim();
+  const preflightSummary = String((preflight as Record<string, unknown> | null)?.summary ?? "").trim();
+  const missingRequiredSurfaces = Array.isArray((preflight as Record<string, unknown> | null)?.missing_required_surfaces)
+    ? ((preflight as Record<string, unknown>).missing_required_surfaces as unknown[])
+      .map((item) => String(item ?? "").trim())
+      .filter(Boolean)
+    : [];
+
+  if (platformMaterialStatusKind(platform) === "manual_handoff") {
+    rows.push({ label: "发布方式", value: "人工接管" });
+    if (manualPublishEntryUrl) rows.push({ label: "登录入口", value: manualPublishEntryUrl });
+  }
+  if (declaration) rows.push({ label: "声明", value: declaration });
+  if (collectionName) rows.push({ label: "合集", value: collectionName });
+  if (visibility) rows.push({ label: "发布模式", value: visibility });
+  if (scheduledAt) rows.push({ label: "定时", value: scheduledAt });
+  if (preflightStatus || preflightSummary || missingRequiredSurfaces.length) {
+    const statusLabel = preflightStatus || "unknown";
+    const summary = preflightSummary || (missingRequiredSurfaces.length ? `缺少：${missingRequiredSurfaces.join("、")}` : "");
+    rows.push({
+      label: "预发布门禁",
+      value: [statusLabel, summary].filter(Boolean).join(" · "),
+    });
+  }
+  return rows;
+}
+
+export function platformMaterialStatusKind(
+  platform: IntelligentCopyPlatformMaterial,
+): "ready" | "blocked" | "manual_handoff" {
+  if (platform.manual_handoff_only || String(platform.manual_publish_entry_url ?? "").trim()) {
+    return "manual_handoff";
+  }
+  const preflight = platform.live_publish_preflight && typeof platform.live_publish_preflight === "object"
+    ? platform.live_publish_preflight
+    : null;
+  const preflightStatus = String(preflight?.status ?? "").trim().toLowerCase();
+  const missingRequiredSurfaces = Array.isArray(preflight?.missing_required_surfaces)
+    ? preflight.missing_required_surfaces.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  const blockingReasons = Array.isArray(platform.blocking_reasons)
+    ? platform.blocking_reasons.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : [];
+  if (
+    platform.publish_ready === false
+    || preflightStatus === "blocked"
+    || preflightStatus === "missing_required_surfaces"
+    || missingRequiredSurfaces.length > 0
+    || blockingReasons.length > 0
+  ) {
+    return "blocked";
+  }
+  if (platform.publish_ready === true) {
+    return "ready";
+  }
+  return "blocked";
+}
+
+export function platformMaterialStatusTone(platform: IntelligentCopyPlatformMaterial): string {
+  const status = platformMaterialStatusKind(platform);
+  if (status === "manual_handoff") return "pending";
+  if (status === "blocked") return "failed";
+  return "done";
+}
+
+export function platformMaterialStatusLabel(
+  platform: IntelligentCopyPlatformMaterial,
+  t: (key: string) => string,
+): string {
+  const status = platformMaterialStatusKind(platform);
+  if (status === "manual_handoff") return "人工接管";
+  if (status === "blocked") return t("smartCopy.materials.blocked");
+  return t("smartCopy.materials.ready");
 }
 
 type PlatformMaterialPreviewModalProps = {
@@ -1134,6 +1312,7 @@ function PlatformMaterialPreviewModal({ platform, onClose, onCopy, onOpenCover }
   const title = platform.primary_title || platform.titles[0] || platform.label;
   const previewClassName = `platform-preview-shell ${platformPreviewClass(platform.key)}`;
   const coverPreviewUrl = platform.cover_path ? localImagePreviewUrl(platform.cover_path, platform.cover_generation) : "";
+  const publicationMetadataRows = buildPlatformPreviewMetadataRows(platform);
 
   return (
     <div className="floating-modal-backdrop smart-copy-preview-backdrop" onClick={onClose} role="presentation">
@@ -1158,7 +1337,7 @@ function PlatformMaterialPreviewModal({ platform, onClose, onCopy, onOpenCover }
               </div>
             }
           />
-          {platform.publish_ready === false && platform.blocking_reasons?.length ? (
+          {platformMaterialStatusKind(platform) === "blocked" && platform.blocking_reasons?.length ? (
             <div className="list-stack compact-top">
               {platform.blocking_reasons.map((reason) => (
                 <div key={reason} className="notice notice-error">{reason}</div>
@@ -1237,6 +1416,16 @@ function PlatformMaterialPreviewModal({ platform, onClose, onCopy, onOpenCover }
                 <div className="muted">
                   {`${t("smartCopy.results.constraints")}${platform.constraints.title_limit}/${platform.constraints.body_limit}/${platform.constraints.tag_limit}`}
                 </div>
+                {publicationMetadataRows.length ? (
+                  <div className="list-stack">
+                    {publicationMetadataRows.map((row) => (
+                      <div key={`${platform.key}-${row.label}`} className="panel-subcard">
+                        <div className="row-title">{row.label}</div>
+                        <div>{row.value}</div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 {platform.cover_path ? <div className="muted">{platform.cover_path}</div> : null}
               </div>
             </div>

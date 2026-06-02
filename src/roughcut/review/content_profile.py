@@ -69,6 +69,7 @@ from roughcut.review.model_identity import model_numbers_conflict
 from roughcut.review.platform_copy import build_transcript_for_packaging
 from roughcut.review.text_rewrite_policy import disabled_text_rewrite
 from roughcut.review.topic_fact_confirmation import build_topic_fact_confirmation_snapshot
+from roughcut.review.video_understanding import build_video_understanding_payload
 from roughcut.review.subtitle_memory import (
     _DEFAULT_TERM_ALIASES,
     _extract_compound_components,
@@ -3873,6 +3874,53 @@ def _apply_confirmed_profile_fields(profile: dict[str, Any], confirmed_fields: d
             profile[key] = value
 
 
+def _refresh_video_understanding_profile_payload(
+    profile: dict[str, Any],
+    *,
+    source_name: str,
+    transcript_excerpt: str,
+) -> dict[str, Any]:
+    profile["video_understanding"] = build_video_understanding_payload(
+        profile,
+        source_name=source_name,
+        transcript_excerpt=transcript_excerpt,
+    )
+    return profile
+
+
+def _attach_content_understanding_timed_focus_spans(
+    profile: dict[str, Any],
+    *,
+    evidence_bundle: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    content_understanding = (
+        dict(profile.get("content_understanding") or {})
+        if isinstance(profile.get("content_understanding"), dict)
+        else {}
+    )
+    semantic_inputs = (
+        dict((evidence_bundle or {}).get("semantic_fact_inputs") or {})
+        if isinstance((evidence_bundle or {}).get("semantic_fact_inputs"), dict)
+        else {}
+    )
+    timed_focus_spans = [
+        dict(item)
+        for item in list(semantic_inputs.get("timed_focus_spans") or [])
+        if isinstance(item, dict)
+    ]
+    if not timed_focus_spans:
+        timed_focus_spans = [
+            dict(item)
+            for item in list(content_understanding.get("timed_focus_spans") or [])
+            if isinstance(item, dict)
+        ]
+    if not timed_focus_spans:
+        return profile
+    content_understanding["timed_focus_spans"] = timed_focus_spans[:8]
+    profile["content_understanding"] = content_understanding
+    return profile
+
+
 async def infer_content_profile(
     *,
     source_path: Path,
@@ -3984,6 +4032,10 @@ async def infer_content_profile(
 
     profile = map_content_understanding_to_profile(understanding)
     profile["content_understanding"] = profile.get("content_understanding") or {}
+    profile = _attach_content_understanding_timed_focus_spans(
+        profile,
+        evidence_bundle=evidence_bundle,
+    )
     profile["transcript_excerpt"] = transcript_excerpt
     if _transcript_items_source:
         profile["transcript_source"] = transcript_excerpt_source
@@ -4037,6 +4089,11 @@ async def infer_content_profile(
             "main": "内容待确认",
             "bottom": "",
         }
+    profile = _refresh_video_understanding_profile_payload(
+        profile,
+        source_name=source_name,
+        transcript_excerpt=transcript_excerpt,
+    )
     profile["topic_fact_confirmation"] = build_topic_fact_confirmation_snapshot(profile)
     return profile
 
@@ -4884,7 +4941,7 @@ async def enrich_content_profile(
         if inferred_subject_domain:
             enriched["subject_domain"] = inferred_subject_domain
 
-    llm_understanding = await _infer_content_understanding_for_enrich(
+    llm_understanding, llm_evidence_bundle = await _infer_content_understanding_for_enrich(
         profile=enriched,
         source_name=source_name,
         transcript_excerpt=transcript_excerpt,
@@ -4912,6 +4969,10 @@ async def enrich_content_profile(
                         continue
                 enriched[key] = llm_profile[key]
         enriched["content_understanding"] = llm_profile.get("content_understanding") or {}
+        enriched = _attach_content_understanding_timed_focus_spans(
+            enriched,
+            evidence_bundle=llm_evidence_bundle,
+        )
     if not str(enriched.get("subject_type") or "").strip():
         _ensure_subject_type_main(enriched)
 
@@ -5106,6 +5167,11 @@ async def enrich_content_profile(
     ):
         enriched["cover_title"] = build_cover_title(enriched, preset)
     _ensure_review_fields_not_empty(enriched, source_name=source_name, transcript_excerpt=transcript_excerpt)
+    enriched = _refresh_video_understanding_profile_payload(
+        enriched,
+        source_name=source_name,
+        transcript_excerpt=transcript_excerpt,
+    )
     enriched["topic_fact_confirmation"] = build_topic_fact_confirmation_snapshot(enriched)
     return enriched
 
@@ -5117,7 +5183,7 @@ async def _infer_content_understanding_for_enrich(
     transcript_excerpt: str,
     transcript_evidence: dict[str, Any] | None = None,
     include_research: bool,
-) -> Any | None:
+) -> tuple[Any | None, dict[str, Any] | None]:
     evidence_bundle = build_evidence_bundle(
         source_name=source_name,
         subtitle_items=[],
@@ -5140,7 +5206,7 @@ async def _infer_content_understanding_for_enrich(
                 timeout=infer_timeout_sec,
             )
     except Exception:
-        return None
+        return None, evidence_bundle
 
     verification_queries = build_verification_search_queries(understanding)
     if include_research and verification_queries:
@@ -5168,7 +5234,7 @@ async def _infer_content_understanding_for_enrich(
                 profile["verification_evidence"] = _build_profile_verification_snapshot(verification_bundle)
         except Exception:
             pass
-    return understanding
+    return understanding, evidence_bundle
 
 
 def _enrich_ocr_profile(profile: dict[str, Any] | None) -> dict[str, Any]:

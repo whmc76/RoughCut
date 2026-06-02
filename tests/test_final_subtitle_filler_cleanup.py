@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from roughcut.media.output import write_srt_file
-from roughcut.media.subtitles import write_ass_file
+from roughcut.media.subtitles import split_subtitle_display_text, write_ass_file
 from roughcut.media.subtitle_text import (
     clean_final_subtitle_text,
     clean_subtitle_payloads,
@@ -105,6 +105,11 @@ def test_normalize_source_transcript_text_preserves_real_spoken_fillers_and_inte
     assert normalize_source_transcript_text("经常会EDEDC用的啊") == "经常会EDC用的啊"
     assert normalize_source_transcript_text("太太难了") == "太太难了"
     assert normalize_source_transcript_text("<|nospeech|> 啊我靠饮恨") == "啊我靠饮恨"
+
+
+def test_normalize_source_transcript_text_preserves_legitimate_repeated_digits() -> None:
+    assert normalize_source_transcript_text("最高2500流明，日用1500流明") == "最高2500流明，日用1500流明"
+    assert normalize_editable_subtitle_text("这个8200给你的安全感更足") == "这个8200给你的安全感更足"
 
 
 def test_clean_final_subtitle_text_hides_asr_noise_markers() -> None:
@@ -365,3 +370,13 @@ def test_write_ass_file_splits_long_dialogues_instead_of_truncating(tmp_path: Pa
     assert len(dialogue_lines) >= 2
     assert "…" not in "\n".join(dialogue_lines)
     assert "很多兄弟一样" in "\n".join(dialogue_lines)
+
+
+def test_split_subtitle_display_text_splits_oversized_chinese_token_before_latin_token() -> None:
+    text = "今天我们直奔主题啊大家看到现在这个镜头里有两把手电啊这个一把是EDC37之前我一直经常会用的 EDC37"
+
+    pieces = split_subtitle_display_text(text, max_chars=16)
+
+    assert len(pieces) > 2
+    assert all(len(piece.replace(" ", "")) <= 16 for piece in pieces)
+    assert "".join(piece.replace(" ", "") for piece in pieces) == text.replace(" ", "")

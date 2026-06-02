@@ -2,6 +2,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 
 import { api } from "../../api";
+import {
+  openManualHandoffTarget,
+  publicationPlanExecutorPreflightMessages,
+  publicationPlanHasManualHandoffReady,
+  publicationPlanIsReady,
+  publicationPlanManualHandoffTargets,
+  publicationPlanStatusKind,
+} from "../intelligentCopy/useIntelligentCopyWorkspace";
+import { publicationAttemptReceiptId } from "../publication/publicationAttempt";
 import type {
   Job,
   PublicationAttempt,
@@ -64,6 +73,31 @@ function hasActivePublicationAttempt(attempts: PublicationAttempt[] | undefined)
   );
 }
 
+export function buildJobPublicationPlanQueryKey(
+  jobId: string | null | undefined,
+  selectedPublicationProfileId: string | null | undefined,
+  jobUpdatedAt: string | null | undefined,
+) {
+  return [
+    "job-publication-plan",
+    String(jobId ?? ""),
+    String(selectedPublicationProfileId ?? ""),
+    String(jobUpdatedAt ?? ""),
+  ] as const;
+}
+
+export function buildJobPublicationDraftContextKey(
+  jobId: string | null | undefined,
+  selectedPublicationProfileId: string | null | undefined,
+  jobUpdatedAt: string | null | undefined,
+) {
+  return [
+    String(jobId ?? ""),
+    String(selectedPublicationProfileId ?? ""),
+    String(jobUpdatedAt ?? ""),
+  ].join("::");
+}
+
 type JobPublicationPanelProps = {
   job: Job;
   onCancel?: () => void;
@@ -93,13 +127,31 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
     );
   }, [publicationProfiles]);
 
-  const publicationQueryKey = ["job-publication-plan", job.id, selectedPublicationProfileId] as const;
+  const publicationQueryKey = buildJobPublicationPlanQueryKey(
+    job.id,
+    selectedPublicationProfileId,
+    job.updated_at,
+  );
+  const publicationDraftContextKey = buildJobPublicationDraftContextKey(
+    job.id,
+    selectedPublicationProfileId,
+    job.updated_at,
+  );
   const publicationPlan = useQuery<PublicationPlan>({
     queryKey: publicationQueryKey,
     queryFn: () => api.getJobPublicationPlan(job.id, selectedPublicationProfileId || null),
     enabled: Boolean(job.id && job.status === "done"),
     refetchInterval: (query) => (hasActivePublicationAttempt(query.state.data?.existing_attempts) ? 1_500 : false),
   });
+  const manualHandoffTargets = publicationPlanManualHandoffTargets(publicationPlan.data);
+  const manualHandoffReady = publicationPlanHasManualHandoffReady(publicationPlan.data);
+  const publicationPlanStatus = publicationPlanStatusKind(publicationPlan.data);
+  const publicationPlanReady = publicationPlanIsReady(publicationPlan.data);
+  const publicationExecutorPreflightMessages = publicationPlanExecutorPreflightMessages(publicationPlan.data);
+
+  useEffect(() => {
+    setPublicationPlatformOptions({});
+  }, [publicationDraftContextKey]);
 
   useEffect(() => {
     const targetPlatforms = new Set((publicationPlan.data?.targets ?? []).map((target) => target.platform));
@@ -138,8 +190,8 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
           <strong>发布到创作者卡片绑定平台</strong>
           <div className="muted compact-top">{job.source_name}</div>
         </div>
-        <span className={`status-pill ${publicationPlan.data?.publish_ready ? "done" : "pending"}`}>
-          {publicationPlan.data?.publish_ready ? "可发布" : "待补齐"}
+        <span className={`status-pill ${publicationPlanStatus === "ready" ? "done" : "pending"}`}>
+          {publicationPlanStatus === "ready" ? "可发布" : manualHandoffReady ? "人工接管" : "待补齐"}
         </span>
       </div>
 
@@ -174,6 +226,32 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
         <div className="list-stack compact-top">
           {publicationPlan.data.warnings.map((warning) => (
             <div key={warning} className="activity-card">{warning}</div>
+          ))}
+        </div>
+      ) : null}
+      {publicationExecutorPreflightMessages.length ? (
+        <div className="list-stack compact-top">
+          {publicationExecutorPreflightMessages.map((message) => (
+            <div key={message} className="activity-card">{message}</div>
+          ))}
+        </div>
+      ) : null}
+      {manualHandoffTargets.length ? (
+        <div className="list-stack compact-top">
+          {manualHandoffTargets.map((target) => (
+            <article className="activity-card" key={`${target.platform}-${target.login_url || "manual"}`}>
+              <div className="toolbar">
+                <div>
+                  <strong>{target.label || target.platform}</strong>
+                  <div className="muted compact-top">{target.reason || "该平台需人工登录后继续发布。"}</div>
+                </div>
+                {target.login_url ? (
+                  <button type="button" className="button secondary" onClick={() => openManualHandoffTarget(target)}>
+                    打开登录页
+                  </button>
+                ) : null}
+              </div>
+            </article>
           ))}
         </div>
       ) : null}
@@ -271,6 +349,11 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
               <div className="muted">
                 {attempt.account_label} · {attempt.operator_summary || attempt.run_status || "等待运行器处理"}
               </div>
+              {publicationAttemptReceiptId(attempt) ? (
+                <div className="muted" title={publicationAttemptReceiptId(attempt)}>
+                  回执：{publicationAttemptReceiptId(attempt)}
+                </div>
+              ) : null}
             </div>
           ))}
         </div>
@@ -279,10 +362,23 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
         <button className="button ghost" type="button" onClick={onCancel}>
           取消
         </button>
+        {manualHandoffTargets.length ? (
+          <button
+            className="button secondary"
+            type="button"
+            onClick={() => {
+              manualHandoffTargets.forEach((target) => {
+                openManualHandoffTarget(target);
+              });
+            }}
+          >
+            打开人工登录页
+          </button>
+        ) : null}
         <button
           className="button primary"
           type="button"
-          disabled={!publicationPlan.data?.publish_ready || publishMutation.isPending}
+          disabled={!publicationPlanReady || publishMutation.isPending}
           onClick={() => publishMutation.mutate()}
         >
           {publishMutation.isPending ? "提交中..." : "发布"}

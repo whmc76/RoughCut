@@ -365,8 +365,18 @@
             "enabled": true,
             "adapter": "browser_agent",
             "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
-            "last_error": null
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null,
+            "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+            "browser_binding": {
+              "browser": "chrome",
+              "user_data_dir": "C:/Users/28687/AppData/Local/Google/Chrome/User Data",
+              "profile_directory": "Profile 2",
+              "profile_name": "FAS_EDC",
+              "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": "http://127.0.0.1:9222",
+              "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
+            }
           },
           {
             "id": "e5588d6ef8fc4726bf1e3b1eb06c5a8b",
@@ -378,8 +388,18 @@
             "enabled": true,
             "adapter": "browser_agent",
             "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
-            "last_error": null
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null,
+            "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+            "browser_binding": {
+              "browser": "chrome",
+              "user_data_dir": "C:/Users/28687/AppData/Local/Google/Chrome/User Data",
+              "profile_directory": "Profile 2",
+              "profile_name": "FAS_EDC",
+              "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": "http://127.0.0.1:9222",
+              "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
+            }
           },
           {
             "id": "e4572d771c9748218502c7dd7f000653",
@@ -391,8 +411,18 @@
             "enabled": true,
             "adapter": "browser_agent",
             "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
-            "last_error": null
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null,
+            "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+            "browser_binding": {
+              "browser": "chrome",
+              "user_data_dir": "C:/Users/28687/AppData/Local/Google/Chrome/User Data",
+              "profile_directory": "Profile 2",
+              "profile_name": "FAS_EDC",
+              "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": "http://127.0.0.1:9222",
+              "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
+            }
           },
           {
             "id": "2f2c9087bb3e4041b171a7ff0194acf1",
@@ -404,8 +434,18 @@
             "enabled": true,
             "adapter": "browser_agent",
             "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
-            "last_error": null
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null,
+            "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+            "browser_binding": {
+              "browser": "chrome",
+              "user_data_dir": "C:/Users/28687/AppData/Local/Google/Chrome/User Data",
+              "profile_directory": "Profile 2",
+              "profile_name": "FAS_EDC",
+              "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": "http://127.0.0.1:9222",
+              "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
+            }
           },
           {
             "id": "eb99653c03cc47888081422f53bfcd60",
@@ -417,8 +457,18 @@
             "enabled": true,
             "adapter": "browser_agent",
             "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
-            "last_error": null
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null,
+            "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+            "browser_binding": {
+              "browser": "chrome",
+              "user_data_dir": "C:/Users/28687/AppData/Local/Google/Chrome/User Data",
+              "profile_directory": "Profile 2",
+              "profile_name": "FAS_EDC",
+              "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": "http://127.0.0.1:9222",
+              "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
+            }
           },
           {
             "id": "db437af2d30c467f84b9fafed826a4c8",
@@ -430,8 +480,18 @@
             "enabled": true,
             "adapter": "browser_agent",
             "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
-            "last_error": null
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null,
+            "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+            "browser_binding": {
+              "browser": "chrome",
+              "user_data_dir": "C:/Users/28687/AppData/Local/Google/Chrome/User Data",
+              "profile_directory": "Profile 2",
+              "profile_name": "FAS_EDC",
+              "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": "http://127.0.0.1:9222",
+              "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
+            }
           },
           {
             "id": "8a4a60e148ac4059a4febf4a0edd5519",
@@ -443,8 +503,18 @@
             "enabled": true,
             "adapter": "browser_agent",
             "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
-            "last_error": null
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null,
+            "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+            "browser_binding": {
+              "browser": "chrome",
+              "user_data_dir": "C:/Users/28687/AppData/Local/Google/Chrome/User Data",
+              "profile_directory": "Profile 2",
+              "profile_name": "FAS_EDC",
+              "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": "http://127.0.0.1:9222",
+              "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
+            }
           },
           {
             "id": "6abd7e2ca16f49728b8656d4de3ada1c",
@@ -456,8 +526,18 @@
             "enabled": true,
             "adapter": "browser_agent",
             "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。",
-            "last_error": null
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null,
+            "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+            "browser_binding": {
+              "browser": "chrome",
+              "user_data_dir": "C:/Users/28687/AppData/Local/Google/Chrome/User Data",
+              "profile_directory": "Profile 2",
+              "profile_name": "FAS_EDC",
+              "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": "http://127.0.0.1:9222",
+              "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
+            }
           }
         ]
       },

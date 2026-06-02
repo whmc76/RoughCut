@@ -55,6 +55,7 @@ async def build_ai_director_plan(
             if video_description:
                 constraint_lines.append(f"任务说明：{video_description}")
         constraint_section = f"\n强约束：{constraint_lines}" if constraint_lines else ""
+        video_understanding_section = _build_video_understanding_prompt_section(effective_content_profile)
         prompt = (
             "你是短视频 AI 导演。请根据字幕和内容画像，输出 JSON，给出："
             "opening_hook、bridge_line、science_boost、closing_prompt、rewrite_strategy、voiceover_segments。"
@@ -63,6 +64,7 @@ async def build_ai_director_plan(
             "如果任务说明或文件名已经明确品牌、型号、主体类型、对比关系，这些都是强约束，不得改写成别的产品。"
             f"\n源文件：{source_name}"
             f"\n内容画像：{effective_content_profile or {}}"
+            f"{video_understanding_section}"
             f"{constraint_section}"
             f"\n字幕：{subtitle_items[:14]}"
             f"\n当前启发式草案：{heuristic}"
@@ -92,6 +94,7 @@ async def build_ai_director_plan(
             "source_name": source_name,
             "rewrite_strength": get_settings().director_rewrite_strength,
             "subject": str((effective_content_profile or {}).get("subject_type") or ""),
+            "video_understanding_theme": str((((effective_content_profile or {}).get("video_understanding") or {}).get("global_understanding") or {}).get("video_theme") or ""),
         },
     )
     return heuristic
@@ -168,6 +171,43 @@ def _build_heuristic_director_plan(
         "rewrite_strategy": _director_rewrite_strategy(preference_tags),
         "voiceover_segments": voiceover_segments,
     }
+
+
+def _build_video_understanding_prompt_section(content_profile: dict[str, Any] | None) -> str:
+    profile = content_profile or {}
+    video_understanding = profile.get("video_understanding")
+    if not isinstance(video_understanding, dict):
+        return ""
+    global_understanding = (
+        video_understanding.get("global_understanding")
+        if isinstance(video_understanding.get("global_understanding"), dict)
+        else {}
+    )
+    automation_hints = (
+        video_understanding.get("automation_hints")
+        if isinstance(video_understanding.get("automation_hints"), dict)
+        else {}
+    )
+    editing_bias = (
+        automation_hints.get("editing_bias")
+        if isinstance(automation_hints.get("editing_bias"), dict)
+        else {}
+    )
+    style_profile = (
+        global_understanding.get("style_profile")
+        if isinstance(global_understanding.get("style_profile"), dict)
+        else {}
+    )
+    if not (global_understanding or editing_bias):
+        return ""
+    section = {
+        "video_theme": str(global_understanding.get("video_theme") or "").strip(),
+        "summary": str(global_understanding.get("summary") or "").strip(),
+        "narrative_structure": list(global_understanding.get("narrative_structure") or [])[:4],
+        "style_profile": style_profile,
+        "editing_bias": editing_bias,
+    }
+    return f"\n多模态视频理解：{section}"
 
 
 def _subtitle_text(subtitle_items: list[dict[str, Any]], index: int) -> str:

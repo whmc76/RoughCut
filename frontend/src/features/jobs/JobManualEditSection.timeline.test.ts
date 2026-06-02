@@ -5,8 +5,11 @@ import {
   autoSmartCutRuleRanges,
   blockAutoSmartCutRangesForSmartDeleteReview,
   buildManualEditChangeList,
+  buildManualTimelineSemanticMarkers,
+  resolveManualTimelineSemanticFocus,
   buildSourceTranscriptProjectedBaseline,
   buildSmartCutRuleAnalysis,
+  buildSmartDeleteSuggestions,
   buildTranscriptTokens,
   buildVisibleSubtitleRows,
   buildSourceTranscriptSubtitlesForTimeline,
@@ -181,6 +184,102 @@ describe("manual editor timeline mapping", () => {
     expect(projection.remapped.map((subtitle) => subtitle.source_fragment_index)).toEqual([0, 1]);
   });
 
+  it("builds semantic timeline markers from timed focus spans for the source timeline", () => {
+    const markers = buildManualTimelineSemanticMarkers(
+      {
+        job_id: "job-1",
+        status: "done",
+        review_step_status: "done",
+        workflow_mode: "standard",
+        enhancement_modes: [],
+        ocr_evidence: {},
+        transcript_evidence: {},
+        entity_resolution_trace: {},
+        draft: null,
+        final: {
+          content_understanding: {
+            timed_focus_spans: [
+              {
+                type: "hook",
+                timestamp: "00:00-00:02",
+                start_time: 0,
+                end_time: 2,
+                text: "先抛出结论",
+              },
+            ],
+            evidence_spans: [
+              {
+                type: "comparison",
+                timestamp: "00:02-00:05",
+                start_time: 2,
+                end_time: 5,
+                text: "亮度对比",
+              },
+            ],
+          },
+          video_understanding: {
+            global_understanding: {
+              video_type: "tutorial",
+            },
+          },
+        },
+        memory: null,
+      },
+      10,
+    );
+
+    expect(markers).toHaveLength(2);
+    expect(markers[0]).toMatchObject({
+      label: "开场 Hook",
+      timestamp: "00:00-00:02",
+      start: 0,
+      end: 2,
+    });
+    expect(markers[1]).toMatchObject({
+      label: "对比段",
+      timestamp: "00:02-00:05",
+      start: 2,
+      end: 5,
+    });
+    expect(markers[1].leftPercent).toBe(20);
+  });
+
+  it("resolves the active semantic focus around the current source time", () => {
+    const markers = [
+      {
+        key: "hook",
+        label: "开场 Hook",
+        text: "先抛结论",
+        timestamp: "00:00-00:02",
+        leftPercent: 0,
+        widthPercent: 20,
+        start: 0,
+        end: 2,
+        detail: [],
+      },
+      {
+        key: "comparison",
+        label: "对比段",
+        text: "亮度对比",
+        timestamp: "00:02-00:05",
+        leftPercent: 20,
+        widthPercent: 30,
+        start: 2,
+        end: 5,
+        detail: [],
+      },
+    ];
+
+    expect(resolveManualTimelineSemanticFocus(markers, 2.4)).toMatchObject({
+      primary: expect.objectContaining({ key: "comparison" }),
+    });
+    expect(resolveManualTimelineSemanticFocus(markers, 2.4).active).toHaveLength(1);
+    expect(resolveManualTimelineSemanticFocus(markers, null)).toEqual({
+      primary: null,
+      active: [],
+    });
+  });
+
   it("starts edited preview from the next kept range when the playhead is inside a cut", () => {
     expect(sourceTimeToEditedPlaybackStartTime(41.5, ranges)).toBe(42.21);
     expect(sourceTimeToEditedPlaybackStartTime(10, ranges)).toBe(10);
@@ -258,6 +357,24 @@ describe("manual editor timeline mapping", () => {
     expect(findSubtitleIndexNearOutputTime(subtitles, 6)).toBe(1);
     expect(findSubtitleIndexNearOutputTime(subtitles, 40)).toBe(3);
     expect(findSubtitleIndexNearOutputTime(subtitles, 120)).toBe(3);
+  });
+
+  it("prefers the later subtitle when adjacent projected rows overlap slightly", () => {
+    const subtitles = [
+      { start_time: 439.0, end_time: 441.52 },
+      { start_time: 441.44, end_time: 443.52 },
+    ];
+
+    expect(findSubtitleIndexNearOutputTime(subtitles, 441.48)).toBe(1);
+  });
+
+  it("anchors to the next subtitle across a gap instead of sticking to the previous end", () => {
+    const subtitles = [
+      { start_time: 409.68, end_time: 411.36 },
+      { start_time: 413.84, end_time: 415.52 },
+    ];
+
+    expect(findSubtitleIndexNearOutputTime(subtitles, 412.2)).toBe(1);
   });
 
   it("keeps projected subtitle text intact when a local deletion changes keep segments", () => {
@@ -1195,6 +1312,42 @@ describe("manual editor timeline mapping", () => {
     expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([{ start: 0.5, end: 0.7, kind: "filler" }]);
   });
 
+  it("prefers backend filler rule ranges when cleaned transcript text no longer exposes the particle", () => {
+    const rules = { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 0,
+          start_time: 0,
+          end_time: 1.2,
+          text_final: "我们开始",
+          transcript_text: "嗯我们开始",
+        },
+      ],
+      rules,
+      [],
+      [],
+      [
+        {
+          start: 0,
+          end: 0.18,
+          duration_sec: 0.18,
+          kind: "filler",
+          reason: "filler_word",
+          source: "manual_editor_rule_candidate",
+          auto_applied: false,
+        },
+      ],
+    );
+
+    expect(analysis.filler).toEqual([
+      expect.objectContaining({ start: 0, end: 0.18, kind: "filler", reason: "filler_word" }),
+    ]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([
+      expect.objectContaining({ start: 0, end: 0.18, kind: "filler" }),
+    ]);
+  });
+
   it("detects repeated phrase retakes beyond short duplicated words", () => {
     const rules = { fillerEnabled: false, repeatedEnabled: true, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
     const text = "找了一个小兄弟找了一个小兄弟";
@@ -1349,6 +1502,41 @@ describe("manual editor timeline mapping", () => {
 
     expect(analysis.pause).toEqual([]);
     expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([]);
+  });
+
+  it("prefers backend pause rule ranges over stale local pause inference", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 1,
+          start_time: 4.88,
+          end_time: 11.52,
+          text_final: "大家看到现在这个镜头里有两把手电",
+        },
+      ],
+      rules,
+      [{ start: 8.37, end: 9.45, duration_sec: 1.08, source: "audio_vad" }],
+      [],
+      [
+        {
+          start: 8.37,
+          end: 9.3,
+          duration_sec: 0.93,
+          kind: "pause",
+          reason: "silence",
+          source: "auto_edit_decision",
+          auto_applied: true,
+        },
+      ],
+    );
+
+    expect(analysis.pause).toEqual([
+      expect.objectContaining({ start: 8.37, end: 9.3, kind: "pause", reason: "silence" }),
+    ]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([
+      expect.objectContaining({ start: 8.37, end: 9.3, kind: "pause" }),
+    ]);
   });
 
   it("auto-cuts long VAD pauses between word timings inside a coarse subtitle row", () => {
@@ -2003,8 +2191,8 @@ describe("manual editor timeline mapping", () => {
     ]);
   });
 
-  it("applies clustered pause cuts as pause-only ranges before adding breath", () => {
-    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, pauseBreathSec: 0.08, fillers: "嗯,呃" };
+  it("applies clustered pause cuts as pause-only ranges while retaining the threshold duration", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.6, fillers: "嗯,呃" };
     const analysis = buildSmartCutRuleAnalysis(
       [
         { index: 0, start_time: 0, end_time: 1, text_final: "前一句内容" },
@@ -2034,7 +2222,7 @@ describe("manual editor timeline mapping", () => {
       ],
     );
 
-    expect(nextSegments).toEqual([{ start: 0, end: 1.08 }, { start: 1.27, end: 1.53 }, { start: 1.82, end: 3 }]);
+    expect(nextSegments).toEqual([{ start: 0, end: 1.3 }, { start: 1.35, end: 1.45 }, { start: 1.6, end: 3 }]);
     expect(tokens.map((token) => ({
       kind: token.kind,
       start: token.start,
@@ -2042,16 +2230,16 @@ describe("manual editor timeline mapping", () => {
       kept: token.kept,
       pauseDuration: token.pauseDuration,
     }))).toEqual([
-      { kind: "pause", start: 1.08, end: 1.82, kept: false, pauseDuration: 0.74 },
+      { kind: "pause", start: 1, end: 1.9, kept: false, pauseDuration: 0.9 },
     ]);
   });
 
   it("never applies pause cuts across protected ASR speech timings", () => {
-    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, pauseBreathSec: 0, fillers: "嗯,呃" };
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
     const nextSegments = applySmartCutRuleRangesToSegments(
       [{ start: 0, end: 2 }],
-      [{ start: 0.7, end: 1.3, kind: "pause" }],
-      [{ start: 0.7, end: 1.3, kind: "pause" }],
+      [{ start: 0.4, end: 1.6, kind: "pause" }],
+      [{ start: 0.4, end: 1.6, kind: "pause" }],
       2,
       [],
       rules,
@@ -2064,7 +2252,7 @@ describe("manual editor timeline mapping", () => {
     );
 
     expect(tokens.find((token) => token.text === "好")?.kept).toBe(true);
-    expect(nextSegments).toEqual([{ start: 0, end: 0.7 }, { start: 0.87, end: 1.08 }, { start: 1.3, end: 2 }]);
+    expect(nextSegments).toEqual([{ start: 0, end: 0.8 }, { start: 0.87, end: 1.08 }, { start: 1.2, end: 2 }]);
   });
 
   it("normalizes raw pause evidence into visible review pause units", () => {
@@ -2206,7 +2394,7 @@ describe("manual editor timeline mapping", () => {
       { start: 0.5, end: 0.9, kind: "pause" },
       { start: 1.3, end: 2.5, kind: "pause" },
     ]);
-    expect(nextSegments).toEqual([{ start: 0, end: 0.58 }, { start: 0.82, end: 1.38 }, { start: 2.42, end: 3 }]);
+    expect(nextSegments).toEqual([{ start: 0, end: 1.3 }, { start: 2.1, end: 3 }]);
   });
 
   it("does not auto-cut a pause range after the user manually restores it", () => {
@@ -2221,14 +2409,14 @@ describe("manual editor timeline mapping", () => {
     expect(nextSegments).toEqual([{ start: 0, end: 3 }]);
   });
 
-  it("uses the configured pause breath when shrinking deleted pause ranges", () => {
+  it("uses the pause threshold as the retained pause duration when shrinking deleted pause ranges", () => {
     const nextSegments = applySmartCutRuleRangesToSegments(
       [{ start: 0, end: 1 }, { start: 2, end: 3 }],
       [{ start: 1, end: 2, kind: "pause" }],
       [{ start: 1, end: 2, kind: "pause" }],
       3,
       [],
-      { pauseBreathSec: 0.2 },
+      { pauseThresholdSec: 0.4 },
     );
 
     expect(nextSegments).toEqual([{ start: 0, end: 1.2 }, { start: 1.8, end: 3 }]);
@@ -2331,10 +2519,35 @@ describe("manual editor timeline mapping", () => {
 
     const previews = buildSmartCutRulePreviews(analysis, rules, subtitles);
 
-    expect(previews.map((preview) => preview.label)).toEqual(["语气词", "重复口误", "长停顿", "智能废片"]);
+    expect(previews.map((preview) => preview.label)).toEqual(["语气词", "重复口误", "停顿", "智能删减"]);
     expect(previews.find((preview) => preview.kind === "filler")?.sampleText).toBe("嗯");
     expect(previews.find((preview) => preview.kind === "pause")?.sampleText).toBe("[0.8s]");
     expect(previews.find((preview) => preview.kind === "smart_delete")?.reason).toContain("开头重说");
+  });
+
+  it("groups smart-delete pacing fragments into one readable suggestion", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const subtitles = [
+      { index: 0, start_time: 10, end_time: 11, text_final: "前面这句正常" },
+      { index: 1, start_time: 11, end_time: 12.4, text_final: "这里说错了重来" },
+      { index: 2, start_time: 12.4, end_time: 13.5, text_final: "正式开始" },
+    ];
+    const analysis = buildSmartCutRuleAnalysis(
+      subtitles,
+      rules,
+      [],
+      [
+        { start: 10.9, end: 12.1, duration_sec: 1.2, reason: "rollback_instruction", detail: "前面这段删掉重来" },
+        { start: 12.18, end: 12.5, duration_sec: 0.32, reason: "timing_trim", detail: "规则候选：节奏边界修剪" },
+      ],
+    );
+
+    const suggestions = buildSmartDeleteSuggestions(analysis, rules, subtitles);
+
+    expect(suggestions).toHaveLength(1);
+    expect(suggestions[0]?.sourceRanges).toEqual([{ start: 10.9, end: 12.1 }, { start: 12.18, end: 12.5 }]);
+    expect(suggestions[0]?.reasonSummary).toContain("明确的剪辑口令");
+    expect(suggestions[0]?.detailSummary).toContain("句子边角修剪");
   });
 
   it("removes selected transcript text from subtitle drafts when cutting text from preview", () => {

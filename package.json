@@ -7,6 +7,8 @@
     "setup": "uv run roughcut init",
     "doctor": "uv run roughcut doctor",
     "benchmark:reasoning": "uv run python scripts/benchmark_reasoning.py",
+    "publication:preflight": "uv run python scripts/run_publication_preflight.py --require-tabs",
+    "publication:preflight:json": "uv run python scripts/run_publication_preflight.py --require-tabs --output artifacts/publication-preflight.json",
     "migrate": "uv run roughcut migrate",
     "dev": "concurrently -k -n web,api,orchestrator,media,llm,agent -c magenta,cyan,yellow,green,blue,white \"pnpm dev:web\" \"pnpm dev:api\" \"pnpm dev:orchestrator\" \"pnpm dev:worker:media\" \"pnpm dev:worker:llm\" \"pnpm dev:worker:agent\"",
     "dev:web": "pnpm --dir frontend dev",
@@ -53,7 +55,12 @@
     "docker:auto:logs": "docker compose --env-file roughcut.ports.env -f docker-compose.infra.yml -f docker-compose.runtime.yml -f docker-compose.dev.yml -f docker-compose.automation.yml logs -f",
     "docker:auto:refresh": "pwsh -NoProfile -File scripts/run-roughcut-docker-refresh-session.ps1 -ComposeMode full",
     "docker:auto:watch": "pwsh -NoProfile -File scripts/watch-roughcut-docker-runtime.ps1 -ComposeMode full",
-    "docker:auto:watch:local-asr": "pwsh -NoProfile -File scripts/watch-roughcut-docker-runtime.ps1 -ComposeMode full -DockerPythonExtras local-asr"
+    "docker:auto:watch:local-asr": "pwsh -NoProfile -File scripts/watch-roughcut-docker-runtime.ps1 -ComposeMode full -DockerPythonExtras local-asr",
+    "publication:release-gate": "uv run python scripts/run_publication_release_gate.py --require-tabs --output artifacts/publication-release-gate.json",
+    "publication:release-gate:dry": "uv run python scripts/run_publication_release_gate.py --skip-backend-smoke --require-tabs --output artifacts/publication-release-gate.json",
+    "publication:release-gate:published": "uv run python scripts/run_publication_release_gate.py --require-tabs --fake-agent-status published --contract-success-status published --output artifacts/publication-release-gate.json",
+    "publication:release-gate:real": "uv run python scripts/run_publication_real_release_gate.py --require-tabs --output artifacts/publication-real-release-gate.json",
+    "publication:autopilot": "uv run python scripts/run_publication_autopilot.py"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

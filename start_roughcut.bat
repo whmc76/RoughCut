@@ -8,9 +8,12 @@ if /I "%~1"=="dev" goto pnpm_dev
 if /I "%~1"=="infra" goto powershell_infra
 if /I "%~1"=="docker-dev" goto powershell_full
 if /I "%~1"=="runtime" goto powershell_runtime
+if /I "%~1"=="runtime-test" goto powershell_runtime_test
 if /I "%~1"=="runtime-local-asr" goto powershell_runtime_local_asr
 if /I "%~1"=="runtime-auto-watch" goto powershell_runtime_auto_watch
 if /I "%~1"=="full" goto powershell_full
+if /I "%~1"=="test" goto powershell_full_test
+if /I "%~1"=="full-test" goto powershell_full_test
 if /I "%~1"=="rebuild" goto powershell_full_rebuild
 if /I "%~1"=="full-build" goto powershell_full_rebuild
 if /I "%~1"=="full-local-asr" goto powershell_full_local_asr
@@ -145,6 +148,16 @@ if %ERRORLEVEL%==0 (
 set EXIT_CODE=%ERRORLEVEL%
 goto finish
 
+:powershell_runtime_test
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode runtime -FrontendDev
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode runtime -FrontendDev
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
 :powershell_runtime_local_asr
 where pwsh >nul 2>nul
 if %ERRORLEVEL%==0 (
@@ -171,6 +184,16 @@ if %ERRORLEVEL%==0 (
   pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full
 ) else (
   powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full
+)
+set EXIT_CODE=%ERRORLEVEL%
+goto finish
+
+:powershell_full_test
+where pwsh >nul 2>nul
+if %ERRORLEVEL%==0 (
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full -FrontendDev
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%SCRIPT_DIR%start_roughcut.ps1" -Mode full -FrontendDev
 )
 set EXIT_CODE=%ERRORLEVEL%
 goto finish
@@ -284,8 +307,11 @@ echo   start_roughcut.bat rebuild     Same as default, but force rebuild roughcu
 echo   start_roughcut.bat local       Start local Python + local Vite launcher
 echo   start_roughcut.bat infra       Start only PostgreSQL / Redis / MinIO containers
 echo   start_roughcut.bat runtime     Start explicit containerized runtime mode
+echo   start_roughcut.bat runtime-test Start runtime and attach local Vite test port
 echo   start_roughcut.bat runtime-local-asr  Start runtime with local-asr extras enabled inside Docker
 echo   start_roughcut.bat full        Start explicit containerized runtime plus automation services
+echo   start_roughcut.bat test        Start full stack and attach local Vite test port
+echo   start_roughcut.bat full-test   Same as test
 echo   start_roughcut.bat full-local-asr     Start full stack with local-asr extras enabled inside Docker
 echo   start_roughcut.bat runtime-down Stop runtime services
 echo   start_roughcut.bat full-down    Stop runtime plus automation services

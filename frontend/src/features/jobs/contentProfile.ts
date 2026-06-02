@@ -183,3 +183,203 @@ export function hasIdentityEvidence(identityReview: {
     ),
   );
 }
+
+function getObjectValue(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function getNumericValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
+export type SemanticSpanView = {
+  key: string;
+  label: string;
+  timestamp: string;
+  text: string;
+  detail: string[];
+  startTime: number | null;
+  endTime: number | null;
+};
+
+export type VideoUnderstandingSnapshot = {
+  videoType: string;
+  contentDomain: string;
+  primarySubject: string;
+  videoTheme: string;
+  summary: string;
+  styleProfile: string[];
+  narrativeSections: string[];
+  semanticSpans: SemanticSpanView[];
+};
+
+export function formatSecondsLabel(value: unknown) {
+  const seconds = getNumericValue(value);
+  if (seconds == null) {
+    return "";
+  }
+  const totalSeconds = Math.max(0, Math.floor(seconds));
+  const minutes = Math.floor(totalSeconds / 60);
+  const remain = totalSeconds % 60;
+  return `${String(minutes).padStart(2, "0")}:${String(remain).padStart(2, "0")}`;
+}
+
+export function formatSemanticSpanLabel(value: unknown) {
+  const normalized = getTextValue(value).toLowerCase();
+  if (!normalized) {
+    return "内容片段";
+  }
+  const labels: Record<string, string> = {
+    hook: "开场 Hook",
+    setup: "铺垫",
+    body: "主体段落",
+    demo: "演示段",
+    comparison: "对比段",
+    detail: "细节段",
+    detail_showcase: "细节展示",
+    conclusion: "结论段",
+    cta: "行动引导",
+    transition: "过渡段",
+    junk: "无效片段",
+    retake: "重复拍摄",
+  };
+  return labels[normalized] ?? normalized;
+}
+
+function buildSemanticSpanTimestamp(span: Record<string, unknown>) {
+  const explicitTimestamp = getTextValue(span.timestamp);
+  if (explicitTimestamp) {
+    return explicitTimestamp;
+  }
+  const start = formatSecondsLabel(span.start_time ?? span.start);
+  const end = formatSecondsLabel(span.end_time ?? span.end);
+  if (start && end) {
+    return `${start}-${end}`;
+  }
+  return start || end;
+}
+
+function buildSemanticSpanDetail(span: Record<string, unknown>) {
+  const detail: string[] = [];
+  const keepPriority = getTextValue(span.keep_priority);
+  const alignment = getTextValue(span.speech_visual_alignment);
+  const reasonTags = normalizeKeywordList(span.reason_tags);
+  if (keepPriority) {
+    detail.push(`保留优先级：${keepPriority}`);
+  }
+  if (alignment) {
+    detail.push(`视听一致性：${alignment}`);
+  }
+  if (reasonTags.length) {
+    detail.push(`标签：${reasonTags.join("、")}`);
+  }
+  return detail;
+}
+
+function normalizeSemanticSpans(values: unknown) {
+  if (!Array.isArray(values)) {
+    return [];
+  }
+  const spans: SemanticSpanView[] = [];
+  const seen = new Set<string>();
+  values.forEach((value, index) => {
+    const span = getObjectValue(value);
+    if (!span) {
+      return;
+    }
+    const label = formatSemanticSpanLabel(span.type ?? span.role);
+    const timestamp = buildSemanticSpanTimestamp(span);
+    const text = getTextValue(span.text ?? span.summary);
+    const detail = buildSemanticSpanDetail(span);
+    const key = `${timestamp}|${label}|${text || detail.join("|")}|${index}`;
+    const dedupeKey = `${timestamp}|${label}|${text || detail.join("|")}`;
+    if (seen.has(dedupeKey)) {
+      return;
+    }
+    seen.add(dedupeKey);
+    spans.push({
+      key,
+      label,
+      timestamp,
+      text,
+      detail,
+      startTime: getNumericValue(span.start_time ?? span.start),
+      endTime: getNumericValue(span.end_time ?? span.end),
+    });
+  });
+  return spans;
+}
+
+export function buildVideoUnderstandingSnapshot(
+  contentSource: Record<string, unknown> | null | undefined,
+  contentDraft?: Record<string, unknown> | null,
+): VideoUnderstandingSnapshot | null {
+  const sourceVideoUnderstanding = getObjectValue(contentSource?.video_understanding);
+  const draftVideoUnderstanding = getObjectValue(contentDraft?.video_understanding);
+  const videoUnderstanding = sourceVideoUnderstanding ?? draftVideoUnderstanding;
+  const globalUnderstanding = getObjectValue(videoUnderstanding?.global_understanding);
+  const styleProfile = getObjectValue(globalUnderstanding?.style_profile);
+  const contentUnderstanding = getObjectValue(contentSource?.content_understanding);
+  const draftUnderstanding = getObjectValue(contentDraft?.content_understanding);
+  const understanding = contentUnderstanding ?? draftUnderstanding;
+  const evidenceSpans = normalizeSemanticSpans(understanding?.evidence_spans);
+  const timedFocusSpans = normalizeSemanticSpans(understanding?.timed_focus_spans);
+  const semanticSpans = [...timedFocusSpans, ...evidenceSpans].slice(0, 10);
+  const narrativeSections = Array.isArray(globalUnderstanding?.narrative_structure)
+    ? (globalUnderstanding?.narrative_structure as unknown[])
+      .map((item) => {
+        const section = getObjectValue(item);
+        if (!section) {
+          return "";
+        }
+        const label = formatSemanticSpanLabel(section.label);
+        const timestamp = buildSemanticSpanTimestamp(section);
+        return [timestamp, label].filter(Boolean).join(" ");
+      })
+      .filter(Boolean)
+    : [];
+  const styleSummary = [
+    getTextValue(styleProfile?.pace) ? `节奏 ${getTextValue(styleProfile?.pace)}` : "",
+    getTextValue(styleProfile?.information_density) ? `信息密度 ${getTextValue(styleProfile?.information_density)}` : "",
+    getTextValue(styleProfile?.emotion_intensity) ? `情绪 ${getTextValue(styleProfile?.emotion_intensity)}` : "",
+  ].filter(Boolean);
+  const snapshot: VideoUnderstandingSnapshot = {
+    videoType: getTextValue(globalUnderstanding?.video_type ?? contentSource?.video_type ?? understanding?.video_type),
+    contentDomain: getTextValue(globalUnderstanding?.content_domain ?? understanding?.content_domain),
+    primarySubject: getTextValue(
+      getObjectValue(globalUnderstanding?.primary_subject)?.name
+      ?? understanding?.primary_subject
+      ?? contentSource?.subject_type,
+    ),
+    videoTheme: getTextValue(globalUnderstanding?.video_theme ?? contentSource?.video_theme ?? understanding?.video_theme),
+    summary: getTextValue(globalUnderstanding?.summary ?? contentSource?.summary ?? understanding?.summary),
+    styleProfile: styleSummary,
+    narrativeSections,
+    semanticSpans,
+  };
+  if (
+    !snapshot.videoType
+    && !snapshot.contentDomain
+    && !snapshot.primarySubject
+    && !snapshot.videoTheme
+    && !snapshot.summary
+    && !snapshot.styleProfile.length
+    && !snapshot.narrativeSections.length
+    && !snapshot.semanticSpans.length
+  ) {
+    return null;
+  }
+  return snapshot;
+}

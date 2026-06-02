@@ -120,3 +120,52 @@ async def test_llm_cut_review_skips_when_credentials_are_unconfigured(
         "error": "llm_cut_review_unconfigured",
         "fallback": "deterministic_evidence",
     }
+
+
+@pytest.mark.asyncio
+async def test_llm_cut_review_falls_back_when_payload_repair_still_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decision = EditDecision(source="unit-test")
+    settings = SimpleNamespace(
+        edit_decision_llm_review_enabled=True,
+        edit_decision_llm_review_min_confidence=0.72,
+        active_reasoning_provider="openai",
+        active_reasoning_model="gpt-5",
+    )
+
+    monkeypatch.setattr("roughcut.pipeline.steps.get_settings", lambda: settings)
+    monkeypatch.setattr("roughcut.pipeline.steps.llm_task_route", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(
+        "roughcut.pipeline.steps._build_edit_decision_llm_review_candidates",
+        lambda **kwargs: [{"candidate_id": "cut-1"}],
+    )
+    monkeypatch.setattr(
+        "roughcut.pipeline.steps.build_high_risk_cut_review_prompt",
+        lambda **kwargs: [{"role": "system", "content": "review"}],
+    )
+    monkeypatch.setattr("roughcut.pipeline.steps.get_reasoning_provider", lambda: object())
+    monkeypatch.setattr(
+        "roughcut.pipeline.steps._complete_reasoning_with_timeout",
+        lambda *args, **kwargs: SimpleNamespace(content='{"decisions":[],"summary":""}', raw_content='{"decisions":[],"summary":""}', usage=None),
+    )
+    monkeypatch.setattr(
+        "roughcut.pipeline.steps._load_edit_decision_cut_review_json_payload",
+        lambda **kwargs: (_ for _ in ()).throw(ValueError("edit decision cut review payload remained unusable after repair")),
+    )
+
+    result = await _maybe_review_edit_decision_cuts_with_llm(
+        job_id=uuid.uuid4(),
+        source_name="sample.mp4",
+        decision=decision,
+        subtitle_items=[],
+        transcript_segments=[],
+        content_profile={},
+    )
+
+    assert result.analysis["llm_cut_review"] == {
+        "reviewed": False,
+        "candidate_count": 1,
+        "error": "llm_cut_review_failed",
+        "fallback": "deterministic_evidence",
+    }

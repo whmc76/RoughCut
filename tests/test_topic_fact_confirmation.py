@@ -59,6 +59,40 @@ def test_topic_fact_confirmation_requires_review_without_cross_evidence() -> Non
     assert "品牌/型号缺少深度调研或内部实体库交叉印证" in snapshot["review_reasons"]
 
 
+def test_topic_fact_confirmation_reads_video_understanding_as_support_source() -> None:
+    snapshot = build_topic_fact_confirmation_snapshot(
+        {
+            "video_understanding": {
+                "global_understanding": {
+                    "content_domain": "flashlight",
+                    "primary_subject": {
+                        "brand": "NITECORE",
+                        "model": "EDC17",
+                        "type": "NITECORE EDC17 手电",
+                    },
+                    "video_theme": "NITECORE EDC17 开箱对比",
+                    "summary": "这期围绕 NITECORE EDC17 和 EDC37 的对比体验展开。",
+                },
+                "review": {"confidence": {"overall": 0.79}},
+                "evidence": {"visual_semantic_evidence": {"subject_candidates": ["flashlight"]}},
+            },
+            "content_understanding": {
+                "confidence": {"overall": 0.74},
+                "needs_review": False,
+            },
+            "verification_evidence": {
+                "online_count": 1,
+                "entity_catalog_count": 1,
+            },
+        }
+    )
+
+    assert snapshot["subject"]["brand"] == "NITECORE"
+    assert snapshot["subject"]["model"] == "EDC17"
+    assert snapshot["subject"]["theme"] == "NITECORE EDC17 开箱对比"
+    assert "video_understanding" in snapshot["support_sources"]
+
+
 def test_content_profile_automation_surfaces_topic_fact_review_reasons() -> None:
     automation = assess_content_profile_automation(
         {

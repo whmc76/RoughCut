@@ -5,6 +5,7 @@ from typing import Any
 
 from roughcut.db.models import Artifact
 from roughcut.review.downstream_context import build_downstream_context
+from roughcut.review.video_understanding import ARTIFACT_TYPE_VIDEO_UNDERSTANDING
 
 ARTIFACT_TYPE_CONTENT_PROFILE_DRAFT = "content_profile_draft"
 ARTIFACT_TYPE_CONTENT_PROFILE_FINAL = "content_profile_final"
@@ -17,6 +18,7 @@ class ContentProfileArtifactPayloads:
     downstream_context: dict[str, Any]
     subtitle_quality_report: dict[str, Any]
     ocr_profile: dict[str, Any] | None = None
+    video_understanding: dict[str, Any] | None = None
 
 
 def build_content_profile_artifact_payloads(
@@ -27,12 +29,18 @@ def build_content_profile_artifact_payloads(
     subtitle_quality_report: dict[str, Any],
     ocr_profile: dict[str, Any] | None = None,
 ) -> ContentProfileArtifactPayloads:
+    video_understanding = (
+        dict(draft_profile.get("video_understanding") or {})
+        if isinstance(draft_profile.get("video_understanding"), dict)
+        else None
+    )
     return ContentProfileArtifactPayloads(
         draft_profile=dict(draft_profile),
         final_profile=dict(final_profile) if final_profile is not None else None,
         downstream_context=build_downstream_context(downstream_profile),
         subtitle_quality_report=dict(subtitle_quality_report),
         ocr_profile=dict(ocr_profile) if ocr_profile is not None else None,
+        video_understanding=video_understanding,
     )
 
 
@@ -88,6 +96,15 @@ def persist_content_profile_artifacts(
             data_json=payloads.downstream_context,
         )
     )
+    if payloads.video_understanding is not None:
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=step.id,
+                artifact_type=ARTIFACT_TYPE_VIDEO_UNDERSTANDING,
+                data_json=payloads.video_understanding,
+            )
+        )
     if payloads.final_profile is not None:
         session.add(
             Artifact(

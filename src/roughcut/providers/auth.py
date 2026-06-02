@@ -1,8 +1,40 @@
 from __future__ import annotations
 
+import json
+import os
 import subprocess
+from pathlib import Path
 
 from roughcut.naming import normalize_auth_mode
+
+
+def _read_codex_access_token_from_auth_file() -> str:
+    candidates: list[Path] = []
+    env_path = str(os.getenv("ROUGHCUT_CODEX_AUTH_FILE") or "").strip()
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(Path("/host-codex/auth.json"))
+    candidates.append(Path.home() / ".codex" / "auth.json")
+
+    for candidate in candidates:
+        try:
+            if not candidate.exists():
+                continue
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        direct_token = str(payload.get("OPENAI_API_KEY") or "").strip()
+        if direct_token:
+            return direct_token
+        access_token = str(((payload.get("tokens") or {}).get("access_token")) or "").strip()
+        if access_token:
+            return access_token
+    raise RuntimeError("Codex auth.json not found or missing access token")
+
+
+def _helper_command_uses_codex_token_file(helper_command: str) -> bool:
+    normalized = str(helper_command or "").replace("\\", "/").strip().lower()
+    return "print_codex_access_token.py" in normalized
 
 
 def resolve_credential(
@@ -20,6 +52,14 @@ def resolve_credential(
         return value
 
     if helper_command.strip():
+        if _helper_command_uses_codex_token_file(helper_command):
+            script_candidates = [
+                part
+                for part in helper_command.strip().split()
+                if "print_codex_access_token.py" in part.replace("\\", "/")
+            ]
+            if script_candidates and not Path(script_candidates[0]).exists():
+                return _read_codex_access_token_from_auth_file()
         result = subprocess.run(
             helper_command,
             shell=True,

@@ -53,6 +53,18 @@ def test_unverified_parameter_risk_blocks_without_fact_sheet() -> None:
     assert any("高风险事实" in reason for reason in result["blocking_reasons"])
 
 
+def test_standalone_first_is_not_blocked_as_absolute_fact() -> None:
+    result = assess_platform_body(
+        "xiaohongshu",
+        "MAXACE 美杜莎4 这次第一眼看过去，顶配和次顶配的质感差别挺明显。"
+        "上手以后主要能感到刀柄纹理、开合阻尼和细节处理不太一样。",
+        content_profile={"subject_brand": "MAXACE", "subject_model": "美杜莎4", "subject_type": "折刀"},
+    )
+
+    assert result["publish_ready"] is True
+    assert not any("高风险事实" in reason for reason in result["blocking_reasons"])
+
+
 def test_soft_unverified_parameter_gets_warning_not_blocking() -> None:
     result = assess_platform_body(
         "douyin",

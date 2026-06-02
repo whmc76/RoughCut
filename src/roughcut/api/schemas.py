@@ -388,6 +388,7 @@ class ContentUnderstandingOut(BaseModel):
     engagement_question: str = ""
     search_queries: list[str] = Field(default_factory=list)
     evidence_spans: list[dict[str, Any]] = Field(default_factory=list)
+    timed_focus_spans: list[dict[str, Any]] = Field(default_factory=list)
     uncertainties: list[str] = Field(default_factory=list)
     confidence: dict[str, float] = Field(default_factory=dict)
     needs_review: bool = True
@@ -424,6 +425,17 @@ class IntelligentCopyGenerateIn(BaseModel):
     copy_style: str | None = None
     platforms: list[str] = Field(default_factory=list)
     use_existing_cover: bool = False
+    creator_profile_id: str | None = None
+
+
+class IntelligentCopyUpgradeIn(BaseModel):
+    folder_path: str
+    platforms: list[str] = Field(default_factory=list)
+    creator_profile_id: str | None = None
+    browser: str = "chrome"
+    platform_options: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    publication_scheme: dict[str, Any] = Field(default_factory=dict)
+    publication_scheme_path: str | None = None
 
 
 class IntelligentPublishIn(BaseModel):
@@ -469,6 +481,13 @@ class IntelligentCopyPlatformConstraintsOut(BaseModel):
     rule_note: str
 
 
+class IntelligentCopyManualHandoffTargetOut(BaseModel):
+    platform: str
+    label: str = ""
+    status: str | None = None
+    login_url: str | None = None
+
+
 class IntelligentCopyPlatformMaterialOut(BaseModel):
     key: str
     label: str
@@ -476,7 +495,16 @@ class IntelligentCopyPlatformMaterialOut(BaseModel):
     title_label: str = "标题"
     body_label: str
     tag_label: str
-    constraints: IntelligentCopyPlatformConstraintsOut
+    constraints: IntelligentCopyPlatformConstraintsOut = Field(
+        default_factory=lambda: IntelligentCopyPlatformConstraintsOut(
+            title_limit=0,
+            body_limit=0,
+            tag_limit=0,
+            tag_style="",
+            cover_size=IntelligentCopyCoverSizeOut(width=0, height=0),
+            rule_note="",
+        )
+    )
     titles: list[str] = []
     title_goals: list[dict[str, str]] = Field(default_factory=list)
     primary_title: str = ""
@@ -487,7 +515,18 @@ class IntelligentCopyPlatformMaterialOut(BaseModel):
     full_copy: str = ""
     cover_path: str | None = None
     cover_generation: dict[str, Any] | None = None
-    publish_ready: bool = True
+    declaration: str | None = None
+    category: str | None = None
+    collection_name: str | None = None
+    collection: dict[str, Any] | None = None
+    visibility_or_publish_mode: str | None = None
+    scheduled_publish_at: str | None = None
+    copy_material: dict[str, Any] | None = None
+    live_publish_preflight: dict[str, Any] | None = None
+    platform_specific_overrides: dict[str, Any] | None = None
+    manual_handoff_only: bool = False
+    manual_publish_entry_url: str | None = None
+    publish_ready: bool = False
     blocking_reasons: list[str] = Field(default_factory=list)
 
 
@@ -508,6 +547,7 @@ class IntelligentCopyResultOut(BaseModel):
     material_dir: str
     markdown_path: str
     json_path: str
+    status: str = ""
     cover_source_path: str | None = None
     use_existing_cover: bool = False
     copy_style: str
@@ -515,7 +555,10 @@ class IntelligentCopyResultOut(BaseModel):
     highlights: dict[str, Any] = {}
     content_profile_summary: dict[str, Any] = {}
     platforms: list[IntelligentCopyPlatformMaterialOut] = []
+    material_contract: dict[str, Any] = {}
     publish_ready: bool = False
+    manual_handoff_ready: bool = False
+    manual_handoff_targets: list[IntelligentCopyManualHandoffTargetOut] = Field(default_factory=list)
     blocking_reasons: list[str] = Field(default_factory=list)
     warnings: list[str] = []
 

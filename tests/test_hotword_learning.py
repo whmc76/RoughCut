@@ -196,6 +196,52 @@ def test_llm_transcription_prior_allows_and_blocks_hotwords() -> None:
     assert "手电" not in prompt
 
 
+def test_video_understanding_hotwords_flow_into_transcription_prompt() -> None:
+    content_profile = {
+        "video_understanding": {
+            "global_understanding": {
+                "content_domain": "flashlight",
+                "primary_subject": {
+                    "brand": "NITECORE",
+                    "model": "EDC17",
+                    "type": "EDC手电",
+                },
+                "video_theme": "NITECORE EDC17 开箱对比",
+                "summary": "这期重点看 EDC17 的上手和对比。",
+            },
+            "automation_hints": {
+                "term_correction_bias": {
+                    "allowed_hotwords": ["NITECORE", "EDC17", "EDC37", "UV"],
+                    "blocked_hotwords": [],
+                }
+            },
+        }
+    }
+    review_memory = build_subtitle_review_memory(
+        workflow_template="unboxing_standard",
+        subject_domain=None,
+        source_name="nitecore EDC17开箱.mp4",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[],
+        content_profile=content_profile,
+        include_recent_terms=False,
+        include_recent_examples=False,
+    )
+    prompt = build_transcription_prompt(
+        source_name="nitecore EDC17开箱.mp4",
+        workflow_template="unboxing_standard",
+        review_memory=review_memory,
+        dialect_profile="mandarin",
+        content_profile=content_profile,
+    )
+
+    hotwords = extract_prompt_hotwords(prompt)
+    assert "NITECORE" in hotwords[:4]
+    assert "EDC17" in hotwords[:4]
+    assert "UV" in hotwords
+
+
 def test_llm_transcription_prior_can_scope_subject_domain() -> None:
     content_profile = {
         "transcription_context_prior": {

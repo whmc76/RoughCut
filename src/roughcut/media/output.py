@@ -1200,26 +1200,15 @@ async def _overlay_title_layout(
     layers = _build_cover_safe_area_layers(title_lines)
 
     fontfile = settings.cover_title_font_path.replace("\\", "/").replace(":", "\\:")
-    for line_key in ("top", "main", "bottom"):
+    for line_key in _ordered_cover_title_style_keys(style, title_lines):
         if not title_lines.get(line_key):
             continue
         line_style = style.get(line_key) or {}
-        layers.append(
-            _drawtext(
+        layers.extend(
+            _build_cover_title_line_layers(
                 text=title_lines[line_key],
                 fontfile=fontfile,
-                fontsize=int(line_style["size"]),
-                fontcolor=str(line_style["fill"]),
-                bordercolor=str(line_style["border"]),
-                borderw=int(line_style["borderw"]),
-                x=str(line_style["x"]),
-                y=str(line_style["y"]),
-                shadowcolor=str(line_style.get("shadowcolor") or "0x000000AA"),
-                shadowx=int(line_style.get("shadowx", 4)),
-                shadowy=int(line_style.get("shadowy", 4)),
-                box=bool(line_style.get("box")),
-                boxcolor=str(line_style.get("boxcolor") or "0x00000000"),
-                boxborderw=int(line_style.get("boxborderw", 16)),
+                line_style=line_style,
             )
         )
 
@@ -1243,9 +1232,91 @@ async def _overlay_title_layout(
         tmp.replace(cover_path)
 
 
+def _ordered_cover_title_style_keys(
+    style_tokens: dict[str, dict[str, Any]],
+    title_lines: dict[str, str],
+) -> list[str]:
+    ordered = ["brand", "top", "main", "sub", "bottom", "hook"]
+    seen: set[str] = set()
+    keys: list[str] = []
+    for key in ordered:
+        if key in style_tokens and str(title_lines.get(key) or "").strip():
+            keys.append(key)
+            seen.add(key)
+    for key in style_tokens.keys():
+        if key not in seen and str(title_lines.get(key) or "").strip():
+            keys.append(key)
+    return keys
+
+
 def _build_cover_safe_area_layers(title_lines: dict[str, str]) -> list[str]:
     del title_lines
     return []
+
+
+def _build_cover_title_line_layers(
+    *,
+    text: str,
+    fontfile: str,
+    line_style: dict[str, Any],
+) -> list[str]:
+    base_size = int(line_style["size"])
+    base_x = str(line_style["x"])
+    base_y = str(line_style["y"])
+    passes = line_style.get("passes")
+    if not isinstance(passes, list) or not passes:
+        return [
+            _drawtext(
+                text=text,
+                fontfile=fontfile,
+                fontsize=base_size,
+                fontcolor=str(line_style["fill"]),
+                bordercolor=str(line_style["border"]),
+                borderw=int(line_style["borderw"]),
+                x=base_x,
+                y=base_y,
+                shadowcolor=str(line_style.get("shadowcolor") or "0x000000AA"),
+                shadowx=int(line_style.get("shadowx", 4)),
+                shadowy=int(line_style.get("shadowy", 4)),
+                box=bool(line_style.get("box")),
+                boxcolor=str(line_style.get("boxcolor") or "0x00000000"),
+                boxborderw=int(line_style.get("boxborderw", 16)),
+            )
+        ]
+
+    layers: list[str] = []
+    for overlay_pass in passes:
+        if not isinstance(overlay_pass, dict):
+            continue
+        scale = float(overlay_pass.get("scale", 1.0) or 1.0)
+        layers.append(
+            _drawtext(
+                text=text,
+                fontfile=fontfile,
+                fontsize=max(1, int(round(base_size * scale))),
+                fontcolor=str(overlay_pass.get("fill") or line_style.get("fill") or "0xFFFFFFFF"),
+                bordercolor=str(overlay_pass.get("border") or line_style.get("border") or "0x000000FF"),
+                borderw=int(overlay_pass.get("borderw", line_style.get("borderw", 0))),
+                x=_offset_drawtext_expr(base_x, int(overlay_pass.get("dx", 0))),
+                y=_offset_drawtext_expr(base_y, int(overlay_pass.get("dy", 0))),
+                shadowcolor=str(overlay_pass.get("shadowcolor") or line_style.get("shadowcolor") or "0x000000AA"),
+                shadowx=int(overlay_pass.get("shadowx", line_style.get("shadowx", 4))),
+                shadowy=int(overlay_pass.get("shadowy", line_style.get("shadowy", 4))),
+                box=bool(overlay_pass.get("box", line_style.get("box"))),
+                boxcolor=str(overlay_pass.get("boxcolor") or line_style.get("boxcolor") or "0x00000000"),
+                boxborderw=int(overlay_pass.get("boxborderw", line_style.get("boxborderw", 16))),
+            )
+        )
+    return layers
+
+
+def _offset_drawtext_expr(expr: str, delta: int) -> str:
+    safe_expr = str(expr or "").strip()
+    if not delta:
+        return safe_expr
+    if safe_expr.startswith("(") and safe_expr.endswith(")"):
+        return f"{safe_expr}+{delta}"
+    return f"({safe_expr})+{delta}"
 
 
 def _drawtext(
@@ -1296,6 +1367,7 @@ def _title_style_tokens(
     title_lines: dict[str, str],
     cover_style: str,
 ) -> dict[str, dict[str, Any]]:
+    title_lines = _normalize_cover_title_line_contract(title_lines)
     if style_name == "preset_default":
         base_tokens = _cover_style_tokens(cover_style, title_lines=title_lines)
         return _apply_cross_platform_safe_zone(
@@ -1423,6 +1495,218 @@ def _title_style_tokens(
         },
             title_lines=title_lines,
         )
+    if style_name == "edc_cover_battle":
+        return _apply_cross_platform_safe_zone(
+            {
+            "top": {
+                "size": _fit_font_size(title_lines.get("top", ""), 82, min_size=60),
+                "fill": "0xFFCC63FF",
+                "border": "0x2A1206FF",
+                "borderw": 8,
+                "x": "(w-text_w)/2",
+                "y": "34",
+                "shadowcolor": "0x182EFFFF",
+                "shadowx": 5,
+                "shadowy": 5,
+                "safe_width_ratio": 0.30,
+                "safe_y_expr": "max(h*0.07,26)",
+            },
+            "main": {
+                "size": _fit_font_size(title_lines.get("main", ""), 146, min_size=92),
+                "fill": "0xF3F4F8FF",
+                "border": "0xA11F15FF",
+                "borderw": 14,
+                "x": "(w-text_w)/2",
+                "y": "h*0.34-text_h/2",
+                "shadowcolor": "0x0A183CFF",
+                "shadowx": 6,
+                "shadowy": 6,
+                "safe_width_ratio": 0.52,
+                "safe_y_expr": "h*0.34-text_h/2",
+            },
+            "bottom": {
+                "size": _fit_font_size(title_lines.get("bottom", ""), 90, min_size=68),
+                "fill": "0xFFD774FF",
+                "border": "0xB73A12FF",
+                "borderw": 8,
+                "x": "(w-text_w)/2",
+                "y": "h*0.80-text_h/2",
+                "shadowcolor": "0x000000AA",
+                "shadowx": 4,
+                "shadowy": 4,
+                "safe_width_ratio": 0.46,
+                "safe_y_expr": "h*0.80-text_h/2",
+            },
+        },
+            title_lines=title_lines,
+        )
+    if style_name == "account_metal_cyber_stack":
+        brand_size = _fit_font_size(title_lines.get("brand", ""), 66, min_size=48)
+        main_size = _fit_font_size(title_lines.get("main", ""), 150, min_size=100)
+        sub_size = _fit_font_size(title_lines.get("sub", ""), 108, min_size=72)
+        hook_size = _fit_font_size(title_lines.get("hook", ""), 88, min_size=60)
+        return _apply_cross_platform_safe_zone(
+            {
+                "brand": {
+                    "size": brand_size,
+                    "fill": "0xFFE7A6FF",
+                    "border": "0x3A1404FF",
+                    "borderw": 6,
+                    "x": "(w-text_w)/2",
+                    "y": "40",
+                    "box": True,
+                    "boxcolor": "0x10151EDC",
+                    "boxborderw": 18,
+                    "shadowcolor": "0x15A8FFFF",
+                    "shadowx": 4,
+                    "shadowy": 4,
+                    "safe_width_ratio": 0.28,
+                    "safe_y_expr": "max(h*0.06,28)",
+                    "passes": [
+                        {
+                            "fill": "0x0D32FFFF",
+                            "border": "0x0D32FFFF",
+                            "borderw": 8,
+                            "dx": 5,
+                            "dy": 5,
+                            "shadowcolor": "0x0D32FFFF",
+                            "shadowx": 0,
+                            "shadowy": 0,
+                            "box": True,
+                            "boxcolor": "0x10151EDC",
+                            "boxborderw": 18,
+                        },
+                        {
+                            "fill": "0xFFE7A6FF",
+                            "border": "0x251109FF",
+                            "borderw": 6,
+                            "box": True,
+                            "boxcolor": "0x10151EDC",
+                            "boxborderw": 18,
+                        },
+                    ],
+                },
+                "main": {
+                    "size": main_size,
+                    "fill": "0xFFF7DBFF",
+                    "border": "0x091A26FF",
+                    "borderw": 18,
+                    "x": "(w-text_w)/2",
+                    "y": "h*0.32-text_h/2",
+                    "shadowcolor": "0xFF6A00FF",
+                    "shadowx": 8,
+                    "shadowy": 8,
+                    "safe_width_ratio": 0.58,
+                    "safe_y_expr": "h*0.32-text_h/2",
+                    "passes": [
+                        {
+                            "fill": "0x123AFFFF",
+                            "border": "0x123AFFFF",
+                            "borderw": 20,
+                            "dx": 10,
+                            "dy": 10,
+                            "shadowcolor": "0x123AFFFF",
+                            "shadowx": 0,
+                            "shadowy": 0,
+                        },
+                        {
+                            "fill": "0xB41F17FF",
+                            "border": "0xB41F17FF",
+                            "borderw": 16,
+                            "dx": 4,
+                            "dy": 4,
+                            "shadowcolor": "0x6B0F0AFF",
+                            "shadowx": 0,
+                            "shadowy": 0,
+                        },
+                        {
+                            "fill": "0xFFF0CBFF",
+                            "border": "0x4C1308FF",
+                            "borderw": 8,
+                            "shadowcolor": "0xF4A23EFF",
+                            "shadowx": 4,
+                            "shadowy": 4,
+                        },
+                    ],
+                },
+                "sub": {
+                    "size": sub_size,
+                    "fill": "0x7AF6FFFF",
+                    "border": "0x0B1830FF",
+                    "borderw": 10,
+                    "x": "(w-text_w)/2",
+                    "y": "h*0.54-text_h/2",
+                    "shadowcolor": "0xF72585FF",
+                    "shadowx": 6,
+                    "shadowy": 6,
+                    "safe_width_ratio": 0.62,
+                    "safe_y_expr": "h*0.54-text_h/2",
+                    "box": True,
+                    "boxcolor": "0x10151ED0",
+                    "boxborderw": 20,
+                    "passes": [
+                        {
+                            "fill": "0x1334FFFF",
+                            "border": "0x1334FFFF",
+                            "borderw": 12,
+                            "dx": 5,
+                            "dy": 5,
+                            "box": True,
+                            "boxcolor": "0x10151ED0",
+                            "boxborderw": 20,
+                        },
+                        {
+                            "fill": "0xFFF4D8FF",
+                            "border": "0x60210BFF",
+                            "borderw": 6,
+                            "box": True,
+                            "boxcolor": "0x10151ED0",
+                            "boxborderw": 20,
+                            "shadowcolor": "0xFF7A00FF",
+                            "shadowx": 2,
+                            "shadowy": 2,
+                        },
+                    ],
+                },
+                "hook": {
+                    "size": hook_size,
+                    "fill": "0xFFF4D5FF",
+                    "border": "0x5A1200FF",
+                    "borderw": 8,
+                    "x": "(w-text_w)/2",
+                    "y": "h*0.80-text_h/2",
+                    "box": True,
+                    "boxcolor": "0xCA1747E0",
+                    "boxborderw": 18,
+                    "shadowcolor": "0x000000AA",
+                    "shadowx": 4,
+                    "shadowy": 4,
+                    "safe_width_ratio": 0.52,
+                    "safe_y_expr": "h*0.80-text_h/2",
+                    "passes": [
+                        {
+                            "fill": "0x0D32FFFF",
+                            "border": "0x0D32FFFF",
+                            "borderw": 10,
+                            "dx": 4,
+                            "dy": 4,
+                            "box": True,
+                            "boxcolor": "0xCA1747E0",
+                            "boxborderw": 18,
+                        },
+                        {
+                            "fill": "0xFFF4D5FF",
+                            "border": "0x621208FF",
+                            "borderw": 6,
+                            "box": True,
+                            "boxcolor": "0xCA1747E0",
+                            "boxborderw": 18,
+                        },
+                    ],
+                },
+            },
+            title_lines=title_lines,
+        )
     return _title_style_tokens("preset_default", title_lines=title_lines, cover_style=cover_style)
 
 
@@ -1437,16 +1721,38 @@ def _apply_cross_platform_safe_zone(
         text = str(title_lines.get(line_key) or "").strip()
         box_padding = int(style.get("boxborderw", 0)) if style.get("box") else 0
         min_size = _cover_min_font_size(line_key)
+        safe_width_ratio = float(style.get("safe_width_ratio", _COVER_SAFE_TEXT_WIDTH_RATIO))
         style["size"] = _fit_cover_text_to_safe_zone(
             text,
             int(style.get("size", min_size)),
             min_size=min_size,
             box_padding=box_padding,
+            width_ratio=safe_width_ratio,
         )
         style["x"] = _clamp_cover_title_x("(w-text_w)/2", box_padding=box_padding)
-        style["y"] = _clamp_cover_title_y(_cover_focus_line_y(line_key), box_padding=box_padding)
+        style["y"] = _clamp_cover_title_y(
+            str(style.get("safe_y_expr") or _cover_focus_line_y(line_key)),
+            box_padding=box_padding,
+        )
         safe_layout[line_key] = style
     return safe_layout
+
+
+def _normalize_cover_title_line_contract(title_lines: dict[str, str] | None) -> dict[str, str]:
+    lines = dict(title_lines or {})
+    brand = str(lines.get("brand") or lines.get("top") or "").strip()
+    main = str(lines.get("main") or "").strip()
+    sub = str(lines.get("sub") or lines.get("bottom") or "").strip()
+    hook = str(lines.get("hook") or "").strip()
+    normalized = {
+        "brand": brand[:14],
+        "top": brand[:14],
+        "main": main[:18],
+        "sub": sub[:18],
+        "bottom": sub[:18],
+        "hook": hook[:18],
+    }
+    return normalized
 
 
 def _cover_focus_line_y(line_key: str) -> str:
@@ -1471,12 +1777,18 @@ def _fit_cover_text_to_safe_zone(
     *,
     min_size: int,
     box_padding: int = 0,
+    width_ratio: float = _COVER_SAFE_TEXT_WIDTH_RATIO,
 ) -> int:
     cleaned = str(text or "").strip()
     if not cleaned:
         return max(min_size, base_size)
     estimated_units = _estimate_cover_text_units(cleaned)
-    usable_width = max(220, int(1280 * _COVER_SAFE_TEXT_WIDTH_RATIO) - (box_padding * 2) - (_COVER_SAFE_MIN_INNER_PADDING * 2))
+    usable_width = max(
+        220,
+        int(1280 * max(0.2, min(0.92, float(width_ratio or _COVER_SAFE_TEXT_WIDTH_RATIO))))
+        - (box_padding * 2)
+        - (_COVER_SAFE_MIN_INNER_PADDING * 2),
+    )
     estimated_size = int(usable_width / max(estimated_units, 1.0))
     return max(min_size, min(base_size, estimated_size))
 

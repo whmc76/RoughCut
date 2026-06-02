@@ -46,3 +46,57 @@ def test_codex_exec_falls_back_when_first_launcher_cannot_start(monkeypatch, tmp
 
     assert calls == [r"C:\bad.exe", r"C:\codex.cmd"]
     assert result["stdout"] == "ok"
+
+
+def test_codex_exec_tries_next_candidate_when_launcher_is_too_old(monkeypatch, tmp_path) -> None:
+    calls: list[str] = []
+
+    class FakeProcess:
+        def __init__(self, command: list[str]) -> None:
+            self.command = command
+            self.returncode = 1 if command[0].endswith("old-codex.cmd") else 0
+
+        def communicate(self, *, input=None, timeout=None):
+            if self.returncode:
+                return b"", b"ERROR: The 'gpt-5.5' model requires a newer version of Codex."
+            return b"ok", b""
+
+    def fake_popen(command, **_kwargs):
+        calls.append(command[0])
+        return FakeProcess(command)
+
+    monkeypatch.setattr(codex_bridge, "_resolve_codex_command_candidates", lambda _command: [r"C:\old-codex.cmd", r"C:\new-codex.cmd"])
+    monkeypatch.setattr(codex_bridge.subprocess, "Popen", fake_popen)
+
+    result = codex_bridge.run_codex_exec({"repo_root": str(tmp_path), "prompt": "say ok", "model": "gpt-5.5"})
+
+    assert calls == [r"C:\old-codex.cmd", r"C:\new-codex.cmd"]
+    assert result["command"] == r"C:\new-codex.cmd"
+    assert result["stdout"] == "ok"
+
+
+def test_codex_exec_passes_image_arguments(monkeypatch, tmp_path) -> None:
+    image_path = tmp_path / "frame.jpg"
+    image_path.write_bytes(b"fake-jpeg")
+    captured: dict[str, list[str]] = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def communicate(self, *, input=None, timeout=None):
+            return b"ok", b""
+
+    def fake_popen(command, **_kwargs):
+        captured["command"] = command
+        return FakeProcess()
+
+    monkeypatch.setattr(codex_bridge, "_resolve_codex_command_candidates", lambda _command: [r"C:\codex.cmd"])
+    monkeypatch.setattr(codex_bridge.subprocess, "Popen", fake_popen)
+
+    result = codex_bridge.run_codex_exec(
+        {"repo_root": str(tmp_path), "prompt": "describe", "images": [str(image_path)]}
+    )
+
+    assert result["stdout"] == "ok"
+    image_flag_index = captured["command"].index("-i")
+    assert captured["command"][image_flag_index + 1] == str(image_path.resolve())

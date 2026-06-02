@@ -15,6 +15,7 @@ param(
     [switch]$NoPause,
     [switch]$SafeStart,
     [switch]$OpenBrowser,
+    [switch]$FrontendDev,
     [switch]$NoFrontendDev,
     [switch]$NoOrchestrator,
     [switch]$NoWorkers,
@@ -1790,6 +1791,20 @@ function Get-RoughCutFrontendLanUrls {
     })
 }
 
+function Get-RoughCutDockerApiPort {
+    $mappedPort = Resolve-ContainerMappedPort -ContainerName "roughcut-api-1" -ContainerPort 8000
+    if ($null -ne $mappedPort) {
+        return $mappedPort
+    }
+
+    $configuredPort = Parse-PortValue -Value $(if ($env:ROUGHCUT_API_PORT) { $env:ROUGHCUT_API_PORT } else { Get-LocalDotEnvValue -Key "ROUGHCUT_API_PORT" })
+    if ($null -ne $configuredPort) {
+        return $configuredPort
+    }
+
+    return 38471
+}
+
 function Stop-RoughCutProcess {
     param(
         [string]$Name,
@@ -2114,6 +2129,51 @@ function Start-RoughCutFrontendDevServer {
             VITE_DEV_HOST = "0.0.0.0"
             VITE_DEV_PORT = "$FrontendPort"
         }
+}
+
+function Start-RoughCutDockerFrontendDevSession {
+    param([switch]$OpenBrowserAfterStart)
+
+    $apiPort = Get-RoughCutDockerApiPort
+    $usedPorts = @{ $apiPort = $true }
+    $resolvedFrontendDevPort = Resolve-StandalonePort -EnvVarName "ROUGHCUT_FRONTEND_DEV_PORT" -PreferredPorts @($FrontendDevDefaultPort, 5174, 5175, 5176, 5177) -UsedPorts $usedPorts
+
+    New-Item -ItemType Directory -Force -Path (Join-Path $RepoRoot "logs") | Out-Null
+    Start-RoughCutFrontendDevServer -FrontendPort $resolvedFrontendDevPort -ApiPort $apiPort
+
+    $apiLocalUrl = "http://127.0.0.1:$apiPort"
+    $frontendLocalUrl = "http://127.0.0.1:$resolvedFrontendDevPort"
+    $frontendLanUrls = @(Get-RoughCutFrontendLanUrls -FrontendPort $resolvedFrontendDevPort)
+
+    Write-Host ""
+    Write-Host "Docker runtime is up; local frontend dev server is attached." -ForegroundColor Green
+    Write-Host "Frontend URL: $frontendLocalUrl (Vite HMR enabled)" -ForegroundColor Green
+    if ($frontendLanUrls.Count -eq 1) {
+        Write-Host "Frontend LAN URL (192.168, Vite HMR): $($frontendLanUrls[0])" -ForegroundColor Green
+    } elseif ($frontendLanUrls.Count -gt 1) {
+        Write-Host "Frontend LAN URLs (192.168, Vite HMR):" -ForegroundColor Green
+        foreach ($frontendLanUrl in $frontendLanUrls) {
+            Write-Host "  $frontendLanUrl" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "Frontend LAN URL (192.168, Vite HMR): unavailable (no active 192.168 IPv4 address found)." -ForegroundColor DarkGray
+    }
+    Write-Host "API URL: $apiLocalUrl" -ForegroundColor Green
+    Write-Host "Logs: .\logs\frontend-dev.out.log / .\logs\frontend-dev.err.log" -ForegroundColor DarkGray
+
+    Wait-RoughCutHttpServiceReady -ServiceName "Frontend dev server" -BaseUrl $frontendLocalUrl -HealthPaths @("/") -TimeoutSec 20 | Out-Null
+    if (Wait-ApiReady -TestPort $apiPort) {
+        if ($OpenBrowserAfterStart) {
+            Start-Process "$frontendLocalUrl/" | Out-Null
+            Write-Host "GUI opened in your default browser." -ForegroundColor Green
+        } else {
+            Write-Host "API is ready. Open $frontendLocalUrl/ for hot-updating frontend development." -ForegroundColor Green
+        }
+    } else {
+        Write-Host "API did not become ready in time. Check logs if the GUI does not open." -ForegroundColor Yellow
+    }
+
+    Wait-LauncherClose
 }
 
 function Start-RoughCutHostTelegramAgent {
@@ -2485,6 +2545,10 @@ if ($Mode -in @("runtime-watch", "full-watch")) {
     exit 0
 }
 
+if ($FrontendDev -and $NoFrontendDev) {
+    throw "-FrontendDev and -NoFrontendDev cannot be used together."
+}
+
 if ($Mode -eq "runtime-down") {
     Stop-RoughCutComposeMode -ComposeMode "runtime"
     exit 0
@@ -2505,6 +2569,9 @@ if ($Mode -ne "local") {
     Start-RoughCutComposeMode -ComposeMode $Mode
     if ($Mode -eq "full") {
         Start-RoughCutHostTelegramAgent
+    }
+    if ($FrontendDev) {
+        Start-RoughCutDockerFrontendDevSession -OpenBrowserAfterStart:$OpenBrowser
     }
     exit 0
 }

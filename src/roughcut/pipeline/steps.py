@@ -700,6 +700,26 @@ def _resolve_edit_decision_llm_review_timeout_seconds(settings: object, *, candi
     return max(configured_timeout, scaled_timeout)
 
 
+async def _complete_reasoning_with_timeout(
+    provider: object,
+    messages: list[Message],
+    *,
+    temperature: float,
+    max_tokens: int,
+    json_mode: bool,
+    timeout_sec: float,
+) -> Any:
+    completion = provider.complete(
+        messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        json_mode=json_mode,
+    )
+    if bool(getattr(provider, "_bridge_mode", False)):
+        return await completion
+    return await asyncio.wait_for(completion, timeout=timeout_sec)
+
+
 def _merge_edit_segments(segments: list[EditSegment]) -> list[EditSegment]:
     ordered = sorted(
         (segment for segment in segments if segment.end > segment.start),
@@ -875,14 +895,13 @@ async def _maybe_review_edit_decision_cuts_with_llm(
             provider = get_reasoning_provider()
             prompt_message_objects = [Message(role=str(item["role"]), content=str(item["content"])) for item in prompt_messages]
             with track_usage_operation("edit_plan.cut_review"):
-                response = await asyncio.wait_for(
-                    provider.complete(
-                        prompt_message_objects,
-                        temperature=0.1,
-                        max_tokens=1200,
-                        json_mode=True,
-                    ),
-                    timeout=review_timeout_sec,
+                response = await _complete_reasoning_with_timeout(
+                    provider,
+                    prompt_message_objects,
+                    temperature=0.1,
+                    max_tokens=1200,
+                    json_mode=True,
+                    timeout_sec=review_timeout_sec,
                 )
             review_payload = await _load_edit_decision_cut_review_json_payload(
                 provider=provider,
@@ -920,7 +939,7 @@ async def _maybe_review_edit_decision_cuts_with_llm(
                 subtitle_items=subtitle_items,
                 content_profile=content_profile,
             )
-    except asyncio.TimeoutError:
+    except (asyncio.TimeoutError, TimeoutError):
         logger.warning("LLM cut review timed out during edit_plan for job %s", job_id)
         decision.analysis["llm_cut_review"] = {
             "reviewed": False,
@@ -932,17 +951,28 @@ async def _maybe_review_edit_decision_cuts_with_llm(
         return decision
     except ValueError as exc:
         message = str(exc).strip()
-        if "credential is not configured" not in message and "no helper command or token is configured" not in message:
-            raise
+        if "credential is not configured" in message or "no helper command or token is configured" in message:
+            logger.warning(
+                "LLM cut review skipped during edit_plan for job %s because provider credentials are not configured: %s",
+                job_id,
+                message,
+            )
+            decision.analysis["llm_cut_review"] = {
+                "reviewed": False,
+                "candidate_count": len(candidates),
+                "error": "llm_cut_review_unconfigured",
+                "fallback": "deterministic_evidence",
+            }
+            return decision
         logger.warning(
-            "LLM cut review skipped during edit_plan for job %s because provider credentials are not configured: %s",
+            "LLM cut review produced an unusable payload during edit_plan for job %s; falling back to deterministic evidence: %s",
             job_id,
             message,
         )
         decision.analysis["llm_cut_review"] = {
             "reviewed": False,
             "candidate_count": len(candidates),
-            "error": "llm_cut_review_unconfigured",
+            "error": "llm_cut_review_failed",
             "fallback": "deterministic_evidence",
         }
         return decision
@@ -1479,14 +1509,13 @@ async def _load_edit_decision_cut_review_json_payload(
                 ),
             )
         )
-        repaired = await asyncio.wait_for(
-            provider.complete(
-                repair_messages,
-                temperature=0.0,
-                max_tokens=900,
-                json_mode=False,
-            ),
-            timeout=max(8.0, min(float(timeout_sec), 16.0)),
+        repaired = await _complete_reasoning_with_timeout(
+            provider,
+            repair_messages,
+            temperature=0.0,
+            max_tokens=900,
+            json_mode=False,
+            timeout_sec=max(8.0, min(float(timeout_sec), 16.0)),
         )
         payload = _parse_reasoning_json_payload(repaired)
         if _payload_needs_repair(payload):
@@ -1497,17 +1526,16 @@ async def _load_edit_decision_cut_review_json_payload(
                 '如果缺字段就补成：{"decisions":[],"summary":""}。'
                 f"\n原始输出:\n{getattr(repaired, 'content', '') or raw_content}"
             )
-            final_response = await asyncio.wait_for(
-                provider.complete(
-                    [
-                        Message(role="system", content="你是 JSON 修复器，只输出严格 JSON。"),
-                        Message(role="user", content=repair_prompt),
-                    ],
-                    temperature=0.0,
-                    max_tokens=900,
-                    json_mode=True,
-                ),
-                timeout=max(8.0, min(float(timeout_sec), 16.0)),
+            final_response = await _complete_reasoning_with_timeout(
+                provider,
+                [
+                    Message(role="system", content="你是 JSON 修复器，只输出严格 JSON。"),
+                    Message(role="user", content=repair_prompt),
+                ],
+                temperature=0.0,
+                max_tokens=900,
+                json_mode=True,
+                timeout_sec=max(8.0, min(float(timeout_sec), 16.0)),
             )
             payload = _parse_reasoning_json_payload(final_response)
     if _payload_needs_repair(payload):
@@ -2604,14 +2632,7 @@ async def _build_canonical_refresh_projection(
         source_name=source_name,
         content_profile={},
     )
-    projection_candidates = [
-        {
-            "basis": "display_baseline_preserved",
-            "transcript_layer": str(effective_projection_data.get("transcript_layer") or "transcript_fact"),
-            "items": existing_projection_items,
-            "analysis": existing_projection_analysis,
-            "quality_report": existing_quality_report,
-        },
+    candidate_pool = [
         {
             "basis": "canonical_refresh",
             "transcript_layer": "canonical_transcript",
@@ -2633,17 +2654,39 @@ async def _build_canonical_refresh_projection(
             "analysis": display_boundary_hybrid_analysis,
             "quality_report": display_boundary_hybrid_quality_report,
         },
+        {
+            "basis": "display_baseline_preserved",
+            "transcript_layer": "subtitle_item",
+            "items": existing_projection_items,
+            "analysis": existing_projection_analysis,
+            "quality_report": existing_quality_report,
+        },
     ]
     selected_candidate, correction_score_report = _select_projection_candidate(
-        candidates=projection_candidates,
+        candidates=candidate_pool,
         reference_items=canonical_projection_items,
         canonical_transcript_layer=canonical_transcript_layer,
     )
+    if canonical_projection_items:
+        selected_candidate = next(
+            candidate
+            for candidate in candidate_pool
+            if str(candidate["basis"]) == "canonical_refresh"
+        )
     projection_items = list(selected_candidate["items"])
     projection_analysis = selected_candidate["analysis"]
     subtitle_quality_report = dict(selected_candidate["quality_report"] or {})
     projection_basis = str(selected_candidate["basis"])
     transcript_layer = str(selected_candidate["transcript_layer"])
+    correction_score_report = {
+        **dict(correction_score_report or {}),
+        "selected_basis": projection_basis,
+        "selection_policy": (
+            "canonical_transcript_is_single_projection_authority"
+            if canonical_projection_items
+            else "display_baseline_preserved_as_legacy_fallback"
+        ),
+    }
     subtitle_quality_report["correction_score"] = correction_score_report
     refreshed_projection_layer = build_subtitle_projection_layer(
         projection_items,
@@ -3820,10 +3863,49 @@ def _projection_has_suspicious_subtitle_timing(
         except (TypeError, ValueError):
             continue
         duration = max(0.0, end - start)
+        if _projection_entry_word_timings_mismatch_row_window(entry, row_start=start, row_end=end):
+            return True
         text = str(entry.get("text_final") or entry.get("text_norm") or entry.get("text_raw") or entry.get("text") or "")
         compact_len = len(re.sub(r"[\s，。！？!?；;：:,、（）()[]【】{}\"'《》<>]+", "", text))
         if duration > duration_limit and compact_len <= compact_limit:
             return True
+    return False
+
+
+def _projection_entry_word_timings_mismatch_row_window(
+    entry: dict[str, Any],
+    *,
+    row_start: float,
+    row_end: float,
+    tolerance_sec: float = 0.35,
+) -> bool:
+    words = [
+        word
+        for word in list(entry.get("words") or entry.get("words_json") or [])
+        if isinstance(word, dict)
+    ]
+    if not words or row_end <= row_start:
+        return False
+    timed: list[tuple[float, float]] = []
+    for word in words:
+        try:
+            start = float(word.get("start", 0.0) or 0.0)
+            end = float(word.get("end", start) or start)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        timed.append((start, end))
+    if not timed:
+        return False
+    word_start = min(start for start, _ in timed)
+    word_end = max(end for _, end in timed)
+    if word_end < row_start - tolerance_sec or word_start > row_end + tolerance_sec:
+        return True
+    if word_start < row_start - tolerance_sec:
+        return True
+    if word_end > row_end + tolerance_sec:
+        return True
     return False
 
 
@@ -3835,25 +3917,6 @@ async def _build_edited_subtitle_projection(
     projection_data: dict[str, Any] | None,
     fallback_subtitles: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    canonical_artifact = await _load_latest_optional_artifact(
-        session,
-        job_id=job_id,
-        artifact_types=(ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,),
-    )
-    media_meta = await _load_latest_optional_artifact(session, job_id=job_id, artifact_types=("media_meta",))
-    media_meta_json = media_meta.data_json if media_meta and isinstance(media_meta.data_json, dict) else {}
-    split_profile = _resolve_projection_split_profile(projection_data, media_meta_json)
-    canonical_data = canonical_artifact.data_json if canonical_artifact and isinstance(canonical_artifact.data_json, dict) else {}
-    projected_entries = _project_canonical_transcript_to_timeline(
-        canonical_data,
-        keep_segments,
-        split_profile=split_profile,
-    )
-    if projected_entries and not _projection_has_suspicious_subtitle_timing(
-        projected_entries,
-        split_profile=split_profile,
-    ):
-        return projected_entries
     return remap_subtitles_to_timeline(fallback_subtitles, keep_segments)
 
 
@@ -3956,7 +4019,17 @@ async def _load_latest_subtitle_payloads(
             return cleaned_subtitles, projection_data
     elif not fallback_to_items:
         return [], projection_data
-    subtitle_items = await _load_subtitle_items(session, job_id=job_id)
+    subtitle_items = await _load_subtitle_items(session, job_id=job_id) if fallback_to_items else []
+    if subtitle_items:
+        subtitle_item_projection_data = {
+            **dict(projection_data or {}),
+            "projection_kind": "subtitle_item_baseline",
+            "transcript_layer": "subtitle_item",
+        }
+        return (
+            clean_subtitle_payloads([_subtitle_item_payload(item) for item in subtitle_items], drop_empty=drop_empty),
+            subtitle_item_projection_data,
+        )
     return clean_subtitle_payloads([_subtitle_item_payload(item) for item in subtitle_items], drop_empty=drop_empty), {}
 
 
@@ -3974,11 +4047,112 @@ async def _load_source_subtitle_payloads_for_projection_validation(
     *,
     job_id: uuid.UUID,
 ) -> list[dict[str, Any]]:
+    canonical_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=(ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,),
+    )
+    canonical_layer = canonical_artifact.data_json if canonical_artifact and isinstance(canonical_artifact.data_json, dict) else {}
+    canonical_segments = [
+        segment
+        for segment in list(canonical_layer.get("segments") or [])
+        if isinstance(segment, dict)
+    ]
+    if canonical_segments:
+        return clean_subtitle_payloads(
+            [
+                {
+                    "index": int(segment.get("index", index) or index),
+                    "source_index": int(segment.get("index", index) or index),
+                    "source_indexes": [int(segment.get("index", index) or index)],
+                    "start_time": float(segment.get("start", segment.get("start_time", 0.0)) or 0.0),
+                    "end_time": float(segment.get("end", segment.get("end_time", 0.0)) or 0.0),
+                    "text_raw": str(segment.get("text_raw") or segment.get("text") or ""),
+                    "text_norm": str(segment.get("text_canonical") or segment.get("text") or segment.get("text_raw") or ""),
+                    "text_final": str(segment.get("text_canonical") or segment.get("text") or segment.get("text_raw") or ""),
+                    "transcript_text": str(segment.get("text_raw") or segment.get("text") or ""),
+                    "words": [dict(word) for word in list(segment.get("words") or []) if isinstance(word, dict)],
+                    "projection_source": "canonical_transcript",
+                }
+                for index, segment in enumerate(canonical_segments)
+            ],
+            drop_empty=False,
+            collapse_repeats=False,
+        )
+    transcript_result = await session.execute(
+        select(TranscriptSegment)
+        .where(TranscriptSegment.job_id == job_id)
+        .order_by(TranscriptSegment.version.desc(), TranscriptSegment.segment_index.asc())
+    )
+    transcript_rows = transcript_result.scalars().all()
+    if transcript_rows:
+        latest_version = max(int(row.version or 1) for row in transcript_rows)
+        transcript_payloads = [
+            {
+                "index": int(row.segment_index if row.segment_index is not None else index),
+                "source_index": int(row.segment_index if row.segment_index is not None else index),
+                "source_indexes": [int(row.segment_index if row.segment_index is not None else index)],
+                "start_time": float(row.start_time),
+                "end_time": float(row.end_time),
+                "text_raw": str(row.text or ""),
+                "text_norm": str(row.text or ""),
+                "text_final": str(row.text or ""),
+                "transcript_text": str(row.text or ""),
+                "words": [dict(word) for word in list(row.words_json or []) if isinstance(word, dict)],
+                "projection_source": "transcript_segment",
+            }
+            for index, row in enumerate(transcript_rows)
+            if int(row.version or 1) == latest_version
+        ]
+        if transcript_payloads:
+            return clean_subtitle_payloads(
+                transcript_payloads,
+                drop_empty=False,
+                collapse_repeats=False,
+            )
     return clean_subtitle_payloads(
         [_subtitle_item_payload(item) for item in await _load_subtitle_items(session, job_id=job_id)],
         drop_empty=False,
         collapse_repeats=False,
     )
+
+
+async def _load_edit_plan_source_subtitles(
+    session,
+    *,
+    job: Job,
+) -> list[dict[str, Any]]:
+    from roughcut.api.jobs import _load_manual_editor_aligned_source_subtitle_dicts
+
+    try:
+        aligned_rows = await _load_manual_editor_aligned_source_subtitle_dicts(
+            session,
+            job=job,
+            clean_text=False,
+        )
+    except Exception:
+        logger.exception("Failed to load aligned source subtitles for edit plan job=%s", job.id)
+        aligned_rows = []
+    if aligned_rows:
+        return clean_subtitle_payloads(
+            aligned_rows,
+            drop_empty=False,
+            collapse_repeats=False,
+            clean_text=False,
+        )
+    return await _load_source_subtitle_payloads_for_projection_validation(session, job_id=job.id)
+
+
+def _source_subtitle_basis(source_subtitles: list[dict[str, Any]]) -> str:
+    sources = {
+        str(item.get("projection_source") or "").strip()
+        for item in source_subtitles
+        if isinstance(item, dict)
+    }
+    for basis in ("canonical_transcript", "transcript_segment", "subtitle_item"):
+        if basis in sources:
+            return basis
+    return "subtitle_projection"
 
 
 async def _validated_subtitle_projection_for_timeline(
@@ -7225,6 +7399,8 @@ async def run_transcript_review(job_id: str) -> dict:
             refreshed_projection_layer=refreshed_projection_layer,
         )
         result_payload["persisted_subtitle_count"] = persisted_subtitle_count
+        result_payload["subtitle_items_preserved"] = False
+        result_payload["subtitle_items_refreshed"] = persisted_subtitle_count > 0
         await _set_step_progress(
             session,
             step,
@@ -7687,6 +7863,19 @@ async def run_edit_plan(job_id: str) -> dict:
             session,
             job_id=job.id,
         )
+        source_subtitle_dicts = await _load_edit_plan_source_subtitles(session, job=job)
+        edit_source_subtitles = source_subtitle_dicts or clean_subtitle_payloads(
+            subtitle_dicts,
+            drop_empty=False,
+            collapse_repeats=False,
+            clean_text=False,
+        )
+        decision_subtitles = [dict(item) for item in edit_source_subtitles] or clean_subtitle_payloads(
+            subtitle_dicts,
+            drop_empty=False,
+            collapse_repeats=False,
+            clean_text=False,
+        )
         transcript_result = await session.execute(
             select(TranscriptSegment)
             .where(TranscriptSegment.job_id == job.id, TranscriptSegment.version == 1)
@@ -7820,7 +8009,7 @@ async def run_edit_plan(job_id: str) -> dict:
             source_path=job.source_path,
             duration=duration,
             silence_segments=silences,
-            subtitle_items=subtitle_dicts,
+            subtitle_items=decision_subtitles,
             content_profile=content_profile,
             transcript_segments=transcript_segment_dicts,
             scene_boundaries=scene_boundaries,
@@ -7830,7 +8019,7 @@ async def run_edit_plan(job_id: str) -> dict:
             job_id=job.id,
             source_name=str(job.source_name or ""),
             decision=decision,
-            subtitle_items=subtitle_dicts,
+            subtitle_items=decision_subtitles,
             transcript_segments=transcript_segment_dicts,
             content_profile=content_profile,
         )
@@ -7838,18 +8027,14 @@ async def run_edit_plan(job_id: str) -> dict:
             decision,
             duration=duration,
             transcript_segments=transcript_segment_dicts,
-            subtitle_items=subtitle_dicts,
+            subtitle_items=decision_subtitles,
             silence_segments=silences,
         )
         manual_editor_analysis = decision.analysis.setdefault("manual_editor", {})
         if isinstance(manual_editor_analysis, dict):
-            manual_editor_analysis["timeline_subtitle_fingerprint"] = subtitle_payload_fingerprint(subtitle_dicts)
-            manual_editor_analysis["source_subtitle_basis"] = str(
-                projection_data.get("projection_kind")
-                or projection_data.get("basis")
-                or projection_data.get("source_basis")
-                or "subtitle_items"
-            )
+            manual_editor_analysis["timeline_subtitle_fingerprint"] = subtitle_payload_fingerprint(decision_subtitles)
+            manual_editor_analysis["source_subtitle_basis"] = _source_subtitle_basis(edit_source_subtitles)
+            manual_editor_analysis["decision_subtitle_basis"] = _source_subtitle_basis(decision_subtitles)
         await _set_step_progress(session, step, detail="生成剪辑时间线与渲染计划", progress=0.85)
 
         editorial_timeline = await save_editorial_timeline(job.id, decision, session)
@@ -7868,15 +8053,15 @@ async def run_edit_plan(job_id: str) -> dict:
             job_id=job.id,
             keep_segments=keep_segments,
             projection_data=projection_data,
-            fallback_subtitles=subtitle_dicts,
+            fallback_subtitles=decision_subtitles,
         )
         remapped_subtitles = await _validated_subtitle_projection_for_timeline(
             session,
             job_id=job.id,
             projected_subtitles=remapped_subtitles,
             keep_segments=keep_segments,
-            source_subtitles=subtitle_dicts,
-            fallback_source_subtitles=subtitle_dicts,
+            source_subtitles=decision_subtitles,
+            fallback_source_subtitles=decision_subtitles,
         )
         subtitle_source_projection_validation = _build_source_transcript_projection_validation(
             remapped_subtitles=remapped_subtitles,
@@ -8081,6 +8266,19 @@ async def run_render(job_id: str) -> dict:
             session,
             job_id=job.id,
         )
+        source_subtitle_dicts = await _load_edit_plan_source_subtitles(session, job=job)
+        edit_source_subtitles = source_subtitle_dicts or clean_subtitle_payloads(
+            subtitle_dicts,
+            drop_empty=False,
+            collapse_repeats=False,
+            clean_text=False,
+        )
+        decision_subtitles = [dict(item) for item in edit_source_subtitles] or clean_subtitle_payloads(
+            subtitle_dicts,
+            drop_empty=False,
+            collapse_repeats=False,
+            clean_text=False,
+        )
 
         stale_render_outputs_result = await session.execute(
             select(RenderOutput).where(RenderOutput.job_id == job.id, RenderOutput.status == "running")
@@ -8205,7 +8403,7 @@ async def run_render(job_id: str) -> dict:
                     job_id=uuid.UUID(job_id),
                     keep_segments=keep_segments,
                     projection_data=projection_data,
-                    fallback_subtitles=subtitle_dicts,
+                    fallback_subtitles=decision_subtitles,
                 )
                 manual_editor_subtitles = _manual_editor_subtitle_items_from_editorial(editorial_timeline.data_json)
                 if manual_editor_subtitles:
@@ -8215,8 +8413,8 @@ async def run_render(job_id: str) -> dict:
                     job_id=uuid.UUID(job_id),
                     projected_subtitles=remapped_subtitles,
                     keep_segments=keep_segments,
-                    source_subtitles=subtitle_dicts,
-                    fallback_source_subtitles=subtitle_dicts,
+                    source_subtitles=decision_subtitles,
+                    fallback_source_subtitles=decision_subtitles,
                 )
             ai_effect_render_plan = build_ai_effect_render_plan(
                 render_plan_timeline.data_json,
@@ -8800,6 +8998,19 @@ async def run_platform_package(job_id: str) -> dict:
             session,
             job_id=job.id,
         )
+        source_subtitle_dicts = await _load_edit_plan_source_subtitles(session, job=job)
+        edit_source_subtitles = source_subtitle_dicts or clean_subtitle_payloads(
+            subtitle_dicts,
+            drop_empty=False,
+            collapse_repeats=False,
+            clean_text=False,
+        )
+        decision_subtitles = [dict(item) for item in edit_source_subtitles] or clean_subtitle_payloads(
+            subtitle_dicts,
+            drop_empty=False,
+            collapse_repeats=False,
+            clean_text=False,
+        )
         editorial_timeline = await _load_latest_timeline(session, job.id, "editorial")
         manual_editor_subtitles = _manual_editor_subtitle_items_from_editorial(editorial_timeline.data_json if editorial_timeline else None)
         if manual_editor_subtitles:
@@ -8812,8 +9023,8 @@ async def run_platform_package(job_id: str) -> dict:
                 job_id=job.id,
                 projected_subtitles=manual_editor_subtitles,
                 keep_segments=keep_segments,
-                source_subtitles=subtitle_dicts,
-                fallback_source_subtitles=subtitle_dicts,
+                source_subtitles=decision_subtitles,
+                fallback_source_subtitles=decision_subtitles,
             )
 
         render_output_result = await session.execute(

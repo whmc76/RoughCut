@@ -80,6 +80,10 @@ def test_remap_subtitle_spanning_cut_uses_word_timestamps_for_fragment_text() ->
     )
 
     assert [item["text_final"] for item in remapped] == ["这个产品", "真的不错"]
+    assert [word["word"] for word in remapped[0]["words"]] == ["这个", "产品"]
+    assert [word["word"] for word in remapped[1]["words"]] == ["真的", "不错"]
+    assert remapped[0]["words"][0]["start"] == 0.0
+    assert remapped[0]["words"][-1]["end"] == 0.75
 
 
 def test_remap_clipped_single_fragment_uses_word_timestamps_for_text() -> None:
@@ -194,6 +198,57 @@ def test_remap_uses_display_word_times_when_subtitle_start_includes_filler_pause
 
     assert len(remapped) == 1
     assert remapped[0]["text_final"] == "没想到"
+    assert remapped[0]["start_time"] == 0.08
+    assert remapped[0]["end_time"] == 0.48
+
+
+def test_remap_preserves_transcript_text_from_fragment_words() -> None:
+    remapped = remap_subtitles_to_timeline(
+        [
+            {
+                "index": 0,
+                "start_time": 1.0,
+                "end_time": 5.0,
+                "text_final": "今天看这个",
+                "transcript_text": "嗯今天看这个",
+                "words": [
+                    {"word": "嗯", "start": 1.0, "end": 1.08},
+                    {"word": "今天", "start": 1.08, "end": 1.35},
+                    {"word": "看", "start": 1.35, "end": 1.55},
+                    {"word": "这个", "start": 1.55, "end": 2.0},
+                    {"word": "真的", "start": 4.0, "end": 4.5},
+                    {"word": "不错", "start": 4.5, "end": 5.0},
+                ],
+            }
+        ],
+        [
+            {"start": 1.08, "end": 2.0},
+            {"start": 4.0, "end": 5.0},
+        ],
+    )
+
+    assert [item["transcript_text"] for item in remapped] == ["今天看这个", "真的不错"]
+
+
+def test_remap_merges_single_character_fragment_created_by_internal_silence_cut() -> None:
+    remapped = remap_subtitles_to_timeline(
+        [
+            {
+                "index": 114,
+                "start_time": 652.808,
+                "end_time": 662.32,
+                "text_final": "很顺手的多开几次我的建议你就是这次简单的给大家",
+            }
+        ],
+        [
+            {"start": 652.808, "end": 655.7},
+            {"start": 655.9, "end": 656.08},
+            {"start": 656.08, "end": 659.45},
+        ],
+    )
+
+    assert all(len(item["text_final"]) > 1 for item in remapped)
+    assert "".join(item["text_final"] for item in remapped) == "很顺手的多开几次我的建议你就是这次简单的给大家"
 
 
 def test_remap_matches_normalized_chinese_digits_to_display_numbers() -> None:
@@ -249,3 +304,42 @@ def test_remap_keeps_short_protected_phrase_when_internal_pause_is_cut() -> None
 
     assert len(remapped) == 1
     assert remapped[0]["text_final"] == "毫不费力"
+    assert remapped[0]["start_time"] == 1.82
+    assert remapped[0]["end_time"] == 2.62
+    assert all(
+        remapped[0]["start_time"] <= word["start"] <= word["end"] <= remapped[0]["end_time"]
+        for word in remapped[0]["words"]
+    )
+
+
+def test_remap_merged_short_fragments_map_words_through_real_kept_ranges() -> None:
+    remapped = remap_subtitles_to_timeline(
+        [
+            {
+                "index": 120,
+                "start_time": 560.0,
+                "end_time": 566.0,
+                "text_final": "我们再试",
+                "words": [
+                    {"word": "我", "start": 560.0, "end": 560.2},
+                    {"word": "们", "start": 564.0, "end": 564.2},
+                    {"word": "再", "start": 564.2, "end": 564.4},
+                    {"word": "试", "start": 564.4, "end": 564.6},
+                ],
+            }
+        ],
+        [
+            {"start": 560.0, "end": 560.2},
+            {"start": 564.0, "end": 564.6},
+        ],
+    )
+
+    assert len(remapped) == 1
+    assert remapped[0]["text_final"] == "我们再试"
+    assert remapped[0]["start_time"] == 0.0
+    assert remapped[0]["end_time"] == 0.8
+    assert [word["word"] for word in remapped[0]["words"]] == ["我", "们", "再", "试"]
+    assert all(
+        remapped[0]["start_time"] <= word["start"] <= word["end"] <= remapped[0]["end_time"]
+        for word in remapped[0]["words"]
+    )

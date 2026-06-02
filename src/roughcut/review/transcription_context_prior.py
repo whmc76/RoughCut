@@ -29,17 +29,16 @@ async def infer_transcription_context_prior(
     for attempt in range(2):
         try:
             provider = get_reasoning_provider()
-            response = await asyncio.wait_for(
-                provider.complete(
-                    [
-                        Message(role="system", content="你是中文短视频转写热词前置判断器，只输出 JSON。"),
-                        Message(role="user", content=_build_prior_prompt(context)),
-                    ],
-                    temperature=0.1,
-                    max_tokens=700,
-                    json_mode=True,
-                ),
-                timeout=max(5.0, float(timeout_sec or 25.0)),
+            response = await _complete_with_provider_timeout(
+                provider,
+                [
+                    Message(role="system", content="你是中文短视频转写热词前置判断器，只输出 JSON。"),
+                    Message(role="user", content=_build_prior_prompt(context)),
+                ],
+                temperature=0.1,
+                max_tokens=700,
+                json_mode=True,
+                timeout_sec=max(5.0, float(timeout_sec or 25.0)),
             )
             payload = response.as_json()
             normalized = normalize_transcription_context_prior(payload)
@@ -59,6 +58,26 @@ async def infer_transcription_context_prior(
             "attempt_count": 2,
         }
     return {}
+
+
+async def _complete_with_provider_timeout(
+    provider: object,
+    messages: list[Message],
+    *,
+    temperature: float,
+    max_tokens: int,
+    json_mode: bool,
+    timeout_sec: float,
+) -> Any:
+    completion = provider.complete(
+        messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        json_mode=json_mode,
+    )
+    if bool(getattr(provider, "_bridge_mode", False)):
+        return await completion
+    return await asyncio.wait_for(completion, timeout=timeout_sec)
 
 
 def normalize_transcription_context_prior(payload: Any) -> dict[str, Any]:

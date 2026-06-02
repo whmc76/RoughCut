@@ -122,7 +122,7 @@ def build_backend_command(payload: dict[str, Any], *, backend: str | None = None
             str(repo_root),
             "-s",
             sandbox_mode,
-            prompt,
+            "-",
         ])
         return command, repo_root, max(30, timeout)
 
@@ -177,10 +177,10 @@ def _run_backend(payload: dict[str, Any], *, backend: str) -> dict[str, Any]:
         stdout_override_path = Path(temp_dir.name) / "last-message.txt"
         command = [*command[:-1], "-o", str(stdout_override_path), command[-1]]
     try:
-        stdin_payload = payload.get("prompt") if backend == "claude" else None
+        stdin_payload = payload.get("prompt") if backend in {"claude", "codex"} else None
         result = subprocess.run(
             command,
-            input=str(stdin_payload or "").encode("utf-8") if backend == "claude" else None,
+            input=str(stdin_payload or "").encode("utf-8") if stdin_payload is not None else None,
             capture_output=True,
             timeout=timeout,
             cwd=str(cwd),

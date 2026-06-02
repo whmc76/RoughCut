@@ -167,6 +167,37 @@ def test_normalize_transcript_result_normalizes_flashlight_edc17_shorthand() -> 
     assert normalized.segments[0].text == "所以呢我的选择就是这个EDC17"
 
 
+def test_normalize_transcript_result_keeps_original_word_timings_when_model_alias_adds_ascii_units() -> None:
+    raw = "所以呢我的选择就是这个幺七"
+    result = TranscriptResult(
+        segments=[
+            TranscriptSegment(
+                index=0,
+                start=0.0,
+                end=3.0,
+                text=raw,
+                words=[
+                    WordTiming(word=char, start=index * 0.1, end=(index + 1) * 0.1)
+                    for index, char in enumerate(raw)
+                ],
+            )
+        ],
+        language="zh-CN",
+        duration=3.0,
+        raw_payload={},
+    )
+
+    normalized = _normalize_transcript_result(
+        result,
+        glossary_terms=[],
+        review_memory={"terms": [{"term": "EDC17", "count": 10, "category_scope": "flashlight"}]},
+    )
+
+    assert normalized.segments[0].text == "所以呢我的选择就是这个EDC17"
+    assert "".join(word.word for word in normalized.segments[0].words) == raw
+    assert all(word.end - word.start >= 0.01 for word in normalized.segments[0].words)
+
+
 def test_transcript_first_canonical_layer_normalizes_flashlight_edc17_shorthand() -> None:
     row = type(
         "TranscriptRow",

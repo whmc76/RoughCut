@@ -474,7 +474,7 @@ def validate_projected_subtitles_against_source(
         )
 
     fallback = remap_subtitles_to_timeline(fallback_source_subtitles, keep_segments)
-    fallback = annotate_projected_subtitle_sources(fallback, source_subtitles, keep_segments)
+    fallback = annotate_projected_subtitle_sources(fallback, fallback_source_subtitles, keep_segments)
     return SubtitleProjectionValidationResult(
         subtitles=fallback,
         mismatch_detected=True,

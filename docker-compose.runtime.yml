@@ -68,6 +68,7 @@ x-app-common: &app-common
     - ./watch:/app/watch
     - ${HEYGEM_SHARED_HOST_DIR:-D:/duix_avatar_data/face2face}:/code/data
     - ${ROUGHCUT_CODEX_AUTH_HOST_DIR:-C:/Users/28687/.codex}:/host-codex:ro
+    - /var/run/docker.sock:/var/run/docker.sock
   depends_on:
     postgres:
       condition: service_healthy

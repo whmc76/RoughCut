@@ -4,6 +4,7 @@ import pytest
 
 from roughcut.review import platform_copy
 from roughcut.review.platform_body_quality import assess_platform_body
+from roughcut.packaging import library as packaging_library
 
 
 def _valid_packaging() -> dict:
@@ -43,6 +44,38 @@ def test_platform_packaging_quality_gate_accepts_specific_creator_copy() -> None
     )
 
     assert assessment["publish_ready"] is True
+
+
+def test_claim_grounded_is_the_only_supported_claim_strategy_name() -> None:
+    assert "claim_grounded" in packaging_library.COPY_STYLE_OPTIONS
+    assert "m27_claim_grounded" not in packaging_library.COPY_STYLE_OPTIONS
+    assert "m2_7_claim_grounded" not in packaging_library.COPY_STYLE_OPTIONS
+
+
+@pytest.mark.asyncio
+async def test_generate_platform_packaging_old_claim_style_name_no_longer_routes_to_claim_grounded(monkeypatch) -> None:
+    async def fake_build_fact_sheet(**_kwargs):
+        return {"status": "unverified", "verified_facts": []}
+
+    async def fake_generate_with_repair(*_args, **_kwargs):
+        return _valid_packaging(), []
+
+    async def fake_claim_grounded(**_kwargs):
+        raise AssertionError("old style name should not route to claim_grounded")
+
+    monkeypatch.setattr(platform_copy, "build_packaging_fact_sheet", fake_build_fact_sheet)
+    monkeypatch.setattr(platform_copy, "_generate_platform_packaging_with_repair", fake_generate_with_repair)
+    monkeypatch.setattr(platform_copy, "_generate_claim_grounded_platform_packaging", fake_claim_grounded)
+
+    result = await platform_copy.generate_platform_packaging(
+        source_name="demo.mp4",
+        content_profile={"subject_model": "MOT 风灵音叉", "subject_type": "音叉推牌"},
+        subtitle_items=[{"text_final": "开箱上手"}],
+        copy_style="m27_claim_grounded",
+        prompt_brief={"source_language": "zh", "transcript_excerpt": "开箱上手"},
+    )
+
+    assert "title_audit" in result
 
 
 def test_platform_packaging_quality_gate_rejects_ai_fallback_copy() -> None:
@@ -280,3 +313,331 @@ def test_normalize_does_not_backfill_missing_description() -> None:
     )
 
     assert normalized["platforms"]["xiaohongshu"]["description"] == ""
+
+
+def test_normalize_preserves_platform_publication_metadata() -> None:
+    raw = _valid_packaging()
+    raw["platforms"]["xiaohongshu"].update(
+        {
+            "cover_path": "D:/material/smart-copy/02-xiaohongshu-cover.jpg",
+            "declaration": "原创声明",
+            "collection_name": "FAS EDC 装备",
+            "visibility_or_publish_mode": "draft",
+            "scheduled_publish_at": "2026-06-01T21:00",
+            "copy_material": {"source": "platform_packaging", "primary_title": "真实生成标题"},
+        }
+    )
+
+    normalized = platform_copy.normalize_platform_packaging(
+        raw,
+        content_profile={"subject_model": "MOT 风灵音叉", "subject_type": "音叉推牌"},
+        copy_style="attention_grabbing",
+        fact_sheet={"status": "unverified"},
+    )
+
+    xhs = normalized["platforms"]["xiaohongshu"]
+    assert xhs["cover_path"] == "D:/material/smart-copy/02-xiaohongshu-cover.jpg"
+    assert xhs["declaration"] == "原创声明"
+    assert xhs["collection_name"] == "FAS EDC 装备"
+    assert xhs["visibility_or_publish_mode"] == "draft"
+    assert xhs["scheduled_publish_at"] == "2026-06-01T21:00"
+    assert xhs["copy_material"]["primary_title"] == "真实生成标题"
+
+
+def test_claim_grounded_untraced_spans_require_repair() -> None:
+    draft = {
+        "highlights": {"title_hook": {"text": "年前最后一抽三连跪", "claim_refs": []}},
+        "platforms": {
+            "bilibili": {
+                "titles": [{"text": "NOC 盲盒三连跪", "claim_refs": []}],
+                "description": [{"text": "最近 NOC 发售难度上升。", "claim_refs": ["c1"]}],
+                "tags": [{"text": "NOC", "claim_refs": ["c2"]}],
+            }
+        },
+    }
+
+    issues = platform_copy._find_untraced_claim_grounded_spans(draft)
+    locations = {item["location"] for item in issues}
+
+    assert {"highlights.title_hook", "bilibili.titles[0]", "bilibili.titles"} <= locations
+    assert "douyin" in locations
+
+
+def test_claim_grounded_strip_claim_refs_preserves_existing_packaging_shape() -> None:
+    draft = {
+        "highlights": {
+            "product": {"text": "NOC MT34", "claim_refs": ["c1"]},
+            "video_type": {"text": "开箱记录", "claim_refs": ["c2"]},
+            "title_hook": {"text": "NOC MT34 到手真难抢", "claim_refs": ["c1", "c3"]},
+            "engagement_question": {"text": "你最近抢新品也觉得难吗？", "claim_refs": ["c3"]},
+        },
+        "platforms": {
+            "bilibili": {
+                "titles": [
+                    {"text": "NOC MT34 到手：抢购难度上来了", "claim_refs": ["c1", "c3"]},
+                    {"text": "年前最后一款 NOC 小玩具", "claim_refs": ["c1"]},
+                    {"text": "NOC 发售体验记录", "claim_refs": ["c3"]},
+                ],
+                "description": [
+                    {"text": "这次主要记录 NOC MT34 到手和发售难抢的体验。", "claim_refs": ["c1", "c3"]},
+                    {"text": "不补参数，只聊视频里能确认的内容。", "claim_refs": ["c2"]},
+                ],
+                "tags": [{"text": "NOC", "claim_refs": ["c1"]}, {"text": "MT34", "claim_refs": ["c1"]}],
+            }
+        },
+    }
+
+    stripped = platform_copy._strip_claim_refs_from_packaging(draft)
+
+    assert stripped["highlights"]["product"] == "NOC MT34"
+    assert stripped["platforms"]["bilibili"]["titles"][0] == "NOC MT34 到手：抢购难度上来了"
+    assert stripped["platforms"]["bilibili"]["description"] == (
+        "这次主要记录 NOC MT34 到手和发售难抢的体验。\n"
+        "不补参数，只聊视频里能确认的内容。"
+    )
+    assert stripped["platforms"]["bilibili"]["tags"] == ["NOC", "MT34"]
+
+
+def test_claim_entailment_audit_normalization_forces_repair_when_unsupported_exists() -> None:
+    audit = platform_copy._normalize_claim_entailment_audit(
+        {
+            "verdict": "pass",
+            "unsupported": [
+                {
+                    "location": "douyin.titles[0]",
+                    "unsupported_span": "三连跪",
+                    "verdict": "unsupported",
+                    "reason": "claim ledger only supports 抢购难度上升, not repeated failure.",
+                    "allowed_repair": "改为“难抢”",
+                }
+            ],
+        }
+    )
+
+    assert audit["verdict"] == "repair_required"
+    assert platform_copy._claim_grounding_audit_passes(audit) is False
+    assert audit["unsupported"][0]["unsupported_span"] == "三连跪"
+
+
+def test_claim_ledger_normalization_keeps_disallowed_inferences() -> None:
+    ledger = platform_copy._normalize_claim_ledger(
+        {
+            "claims": [
+                {"claim_id": "c1", "claim": "作者收到了年前最后一款 NOC 小玩具", "evidence_ids": ["sub_1"]},
+                {"claim_id": "c1", "claim": "作者认为抢购难度上升", "evidence_ids": ["sub_5"]},
+            ],
+            "disallowed_inferences": [{"claim": "这是盲盒", "reason": "证据未出现盲盒品类"}],
+        }
+    )
+
+    assert [item["claim_id"] for item in ledger["claims"]] == ["c1", "c2"]
+    assert ledger["disallowed_inferences"] == [{"claim": "这是盲盒", "reason": "证据未出现盲盒品类"}]
+
+
+def test_claim_grounded_single_platform_normalizer_accepts_nested_chinese_fields() -> None:
+    normalized = platform_copy._normalize_single_platform_claim_draft(
+        "bilibili",
+        {
+            "result": {
+                "bilibili": {
+                    "标题": [
+                        {"title": "NOC MT34 到手记录", "claim_refs": ["c1"]},
+                        {"text": "年前最后一款 NOC 小玩具", "claim_refs": ["c1"]},
+                        {"text": "NOC 发售难度上来了", "claim_refs": ["c2"]},
+                    ],
+                    "正文": [{"content": "这次记录 NOC MT34 到手和发售难度变化。", "claim_refs": ["c1", "c2"]}],
+                    "话题": [{"tag": "NOC", "claim_refs": ["c1"]}, {"text": "MT34", "claim_refs": ["c1"]}],
+                }
+            }
+        },
+    )
+
+    assert [item["text"] for item in normalized["titles"]] == [
+        "NOC MT34 到手记录",
+        "年前最后一款 NOC 小玩具",
+        "NOC 发售难度上来了",
+    ]
+    assert normalized["description"][0]["text"] == "这次记录 NOC MT34 到手和发售难度变化。"
+    assert [item["text"] for item in normalized["tags"]] == ["NOC", "MT34"]
+
+
+def test_claim_ledger_is_merged_into_fact_sheet_for_guardrails() -> None:
+    merged = platform_copy._merge_claim_ledger_into_fact_sheet(
+        {"verified_facts": [], "guardrail_summary": "只用本地证据。"},
+        {
+            "claims": [
+                {"claim_id": "c1", "claim": "作者收到了 NOC MT34", "evidence_ids": ["sub_1"]},
+                {"claim_id": "c2", "claim": "作者认为发售难度上升", "evidence_ids": ["sub_5"]},
+            ]
+        },
+    )
+
+    facts = [item["fact"] for item in merged["verified_facts"]]
+    assert facts == ["作者收到了 NOC MT34", "作者认为发售难度上升"]
+    assert "claim ledger" in merged["guardrail_summary"]
+
+
+def test_claim_ledger_semantic_invariants_reject_purchase_success_drift() -> None:
+    issues = platform_copy._claim_ledger_semantic_invariant_issues(
+        {
+            "platforms": {
+                "xiaohongshu": {
+                    "titles": [{"text": "耗尽欧气才抢到的 NOC MT34", "claim_refs": ["c1", "c2"]}],
+                    "description": [{"text": "最近这三次发售都太难了，抢先看 NOC MT34。", "claim_refs": ["c2"]}],
+                    "tags": [{"text": "NOC", "claim_refs": ["c1"]}],
+                }
+            }
+        },
+        claim_ledger={
+            "claims": [
+                {"claim_id": "c1", "claim": "视频内容涉及 NOC MT34"},
+                {"claim_id": "c2", "claim": "该产品的抢购环节存在一定难度"},
+                {"claim_id": "c3", "claim": "该产品在视频发布前已通过某种方式获得"},
+            ],
+            "uncertain_claims": [{"claim": "具体是哪三次发售", "reason": "字幕未明确"}],
+            "disallowed_inferences": [{"claim": "发售失败经历", "reason": "字幕未明确描述失败经历"}],
+        },
+    )
+
+    reasons = "\n".join(item["reason"] for item in issues)
+    assert "purchase_success" in reasons
+    assert "release_count" in reasons
+    assert "early_access" in reasons
+
+
+def test_claim_ledger_semantic_invariants_allow_subjective_platform_expression() -> None:
+    issues = platform_copy._claim_ledger_semantic_invariant_issues(
+        {
+            "platforms": {
+                "xiaohongshu": {
+                    "titles": [{"text": "NOC MT34 新品开箱，质感拉满手感绝了", "claim_refs": ["c1"]}],
+                    "description": [{"text": "这次上手第一感觉很惊喜，主观体验很加分。", "claim_refs": ["c1"]}],
+                    "tags": [{"text": "质感开箱", "claim_refs": ["c1"]}],
+                }
+            }
+        },
+        claim_ledger={
+            "claims": [{"claim_id": "c1", "claim": "视频内容涉及 NOC MT34", "claim_type": "identity"}],
+            "uncertain_claims": [],
+            "disallowed_inferences": [{"claim": "产品具体参数", "reason": "证据未提供参数"}],
+        },
+    )
+
+    assert issues == []
+
+
+def test_unsupported_claim_grounded_highlights_are_removed() -> None:
+    cleaned = platform_copy._remove_unsupported_claim_grounded_highlights(
+        {
+            "highlights": {
+                "strongest_selling_point": {"text": "错过不再有，抢购难度爆表", "claim_refs": ["c1"]},
+                "title_hook": {"text": "NOC MT34 到手了", "claim_refs": ["c1"]},
+            },
+            "platforms": {},
+        },
+        claim_ledger={"claims": [{"claim_id": "c1", "claim": "该产品的抢购环节存在一定难度"}]},
+    )
+
+    assert cleaned["highlights"]["strongest_selling_point"]["text"] == ""
+    assert cleaned["highlights"]["title_hook"]["text"] == "NOC MT34 到手了"
+
+
+def test_claim_text_extraction_accepts_reference_aliases() -> None:
+    text, refs = platform_copy._extract_claim_text_and_refs({"text": "NOC MT34 到手", "claim_ids": ["c1", "c2"]})
+
+    assert text == "NOC MT34 到手"
+    assert refs == ["c1", "c2"]
+
+
+def test_claim_grounded_title_anchor_is_added_from_subject_claim() -> None:
+    anchored = platform_copy._enforce_claim_grounded_title_anchors(
+        {
+            "titles": [
+                {"text": "终于到手了", "claim_refs": ["c2"]},
+                {"text": "发售难度上来了", "claim_refs": ["c3"]},
+                {"text": "NOC MT34 开箱记录", "claim_refs": ["c1"]},
+            ],
+            "description": [],
+            "tags": [],
+        },
+        evidence_pack={"subject_identity": {"brand": "NOC", "model": "MT34"}},
+        claim_ledger={"claims": [{"claim_id": "c1", "claim": "视频内容涉及 NOC 品牌 MT34 型号产品"}]},
+    )
+
+    assert anchored["titles"][0]["text"] == "NOC MT34 终于到手了"
+    assert anchored["titles"][1]["text"] == "NOC MT34 发售难度上来了"
+    assert "c1" in anchored["titles"][0]["claim_refs"]
+
+
+def test_missing_claim_refs_are_backfilled_from_subject_claim() -> None:
+    draft = platform_copy._backfill_missing_claim_refs_from_subject(
+        {
+            "titles": [{"text": "NOC MT34 开箱", "claim_refs": ["c2"]}],
+            "description": [],
+            "tags": [{"text": "折刀开箱", "claim_refs": []}],
+        },
+        evidence_pack={"subject_identity": {"brand": "NOC", "model": "MT34"}},
+        claim_ledger={"claims": [{"claim_id": "c1", "claim": "视频中的EDC折刀品牌为NOC，型号为MT34"}]},
+    )
+
+    assert draft["titles"][0]["claim_refs"] == ["c2"]
+    assert draft["tags"][0]["claim_refs"] == ["c1"]
+
+
+def test_jsonish_loader_accepts_python_literal_object() -> None:
+    payload = platform_copy._loads_jsonish_object("{'titles': [{'text': 'NOC MT34', 'claim_refs': ['c1']}]}")
+
+    assert payload["titles"][0]["claim_refs"] == ["c1"]
+
+
+def test_claim_grounded_title_count_is_completed_from_ledger_claims() -> None:
+    completed = platform_copy._complete_claim_grounded_title_count(
+        "bilibili",
+        {"titles": [{"text": "NITECORE EDC17 开箱", "claim_refs": ["c1"]}], "description": [], "tags": []},
+        evidence_pack={"subject_identity": {"brand": "NITECORE", "model": "EDC17"}},
+        claim_ledger={
+            "claims": [
+                {"claim_id": "c1", "claim": "视频内容涉及 NITECORE EDC17"},
+                {"claim_id": "c2", "claim": "EDC17 与 EDC37 有对比展示"},
+                {"claim_id": "c3", "claim": "包装中出现电池和配件"},
+            ]
+        },
+    )
+
+    assert len(completed["titles"]) == 3
+    assert completed["titles"][1]["claim_refs"]
+
+
+def test_claim_grounded_draft_shape_coerces_platform_item_lists() -> None:
+    coerced = platform_copy._coerce_claim_grounded_draft_shape(
+        {
+            "items": [
+                {"platform": "B站", "titles": [{"text": "NOC MT34 开箱", "claim_refs": ["c1"]}]},
+                {"platform": "小红书", "titles": [{"text": "NOC MT34 到手", "claim_refs": ["c1"]}]},
+            ]
+        },
+        target_keys=["bilibili", "xiaohongshu"],
+    )
+
+    assert "bilibili" in coerced["platforms"]
+    assert "xiaohongshu" in coerced["platforms"]
+
+
+def test_claim_grounded_draft_text_count_detects_empty_repair() -> None:
+    assert platform_copy._claim_grounded_draft_text_count({"platforms": {"bilibili": {"titles": []}}}) == 0
+    assert (
+        platform_copy._claim_grounded_draft_text_count(
+            {"platforms": {"bilibili": {"titles": [{"text": "NOC MT34 开箱", "claim_refs": ["c1"]}]}}}
+        )
+        == 1
+    )
+
+
+def test_evidence_pack_adds_neutral_comparison_claim_from_source_name() -> None:
+    ledger = platform_copy._augment_claim_ledger_with_evidence_pack_claims(
+        {"claims": [{"claim_id": "c1", "claim": "视频内容涉及 EDC17", "claim_type": "identity"}]},
+        evidence_pack={"source_name": "EDC17开箱以及和edc37的对比.mp4", "prompt_brief": {}},
+    )
+
+    assert ledger["claims"][-1]["claim_type"] == "comparison"
+    assert "不得推出未支持的优劣结论" in ledger["claims"][-1]["allowed_usage"]

@@ -196,6 +196,68 @@ _DEFAULT_TERM_ALIASES: dict[str, tuple[str, ...]] = {
     "EDC37": ("EDC三七",),
 }
 
+
+def _video_understanding_term_bias(content_profile: dict[str, Any] | None) -> dict[str, Any]:
+    profile = content_profile or {}
+    video_understanding = profile.get("video_understanding")
+    if not isinstance(video_understanding, dict):
+        return {
+            "allowed_hotwords": [],
+            "blocked_hotwords": [],
+            "subject_summary": "",
+            "subject_domain": "",
+            "category_scope": "",
+        }
+    automation_hints = (
+        video_understanding.get("automation_hints")
+        if isinstance(video_understanding.get("automation_hints"), dict)
+        else {}
+    )
+    term_bias = (
+        automation_hints.get("term_correction_bias")
+        if isinstance(automation_hints.get("term_correction_bias"), dict)
+        else {}
+    )
+    global_understanding = (
+        video_understanding.get("global_understanding")
+        if isinstance(video_understanding.get("global_understanding"), dict)
+        else {}
+    )
+    style_profile = (
+        global_understanding.get("style_profile")
+        if isinstance(global_understanding.get("style_profile"), dict)
+        else {}
+    )
+    primary_subject = (
+        global_understanding.get("primary_subject")
+        if isinstance(global_understanding.get("primary_subject"), dict)
+        else {}
+    )
+    allowed = _normalize_prior_term_list(term_bias.get("allowed_hotwords"), limit=16)
+    blocked = _normalize_prior_term_list(term_bias.get("blocked_hotwords"), limit=24)
+    for key in ("brand", "model", "type"):
+        value = str(primary_subject.get(key) or "").strip()
+        if value and value not in allowed:
+            allowed.append(value)
+    subject_summary = " ".join(
+        part
+        for part in (
+            str(global_understanding.get("video_theme") or "").strip(),
+            str(global_understanding.get("summary") or "").strip(),
+            str(global_understanding.get("hook_hypothesis") or "").strip(),
+            str(style_profile.get("information_density") or "").strip(),
+        )
+        if part
+    )[:160]
+    subject_domain = str(global_understanding.get("content_domain") or profile.get("subject_domain") or "").strip()
+    return {
+        "allowed_hotwords": allowed[:16],
+        "blocked_hotwords": blocked[:24],
+        "subject_summary": subject_summary,
+        "subject_domain": str(normalize_subject_domain(subject_domain) or subject_domain or "").strip().lower(),
+        "category_scope": _category_scope_from_domain(subject_domain),
+    }
+
 _GENERIC_SAFE_REPLACEMENTS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"执用"), "实用"),
     (re.compile(r"(?:螺四|罗丝|罗四|螺司|锣丝)(?=(?:刀|批|口|位|孔|头|帽|钉|拧|拆|装|固定|调节|上|下|很|太|比较|特别|非常|也|都|就|了|的|$))"), "螺丝"),
@@ -451,6 +513,7 @@ def build_subtitle_review_memory(
     transcription_context_prior = _normalize_transcription_context_prior(
         (content_profile or {}).get("transcription_context_prior")
     )
+    video_understanding_bias = _video_understanding_term_bias(content_profile)
     manual_guidance_texts = _collect_manual_guidance_texts(content_profile)
     context_text = " ".join(
         str(item or "")
@@ -459,6 +522,8 @@ def build_subtitle_review_memory(
             *((content_profile or {}).get(key) or "" for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "summary", "hook_line")),
             transcription_context_prior.get("subject_summary") or "",
             *list(transcription_context_prior.get("allowed_hotwords") or []),
+            video_understanding_bias.get("subject_summary") or "",
+            *list(video_understanding_bias.get("allowed_hotwords") or []),
             *manual_guidance_texts,
         ]
     )
@@ -502,6 +567,19 @@ def build_subtitle_review_memory(
                 "source_kind": "llm_context_prior",
                 "domain": prior_domain,
                 "category_scope": prior_scope,
+                "evidence_strong": True,
+            },
+        )
+    video_understanding_scope = str(video_understanding_bias.get("category_scope") or "").strip()
+    video_understanding_domain = str(video_understanding_bias.get("subject_domain") or "").strip()
+    for term in video_understanding_bias.get("allowed_hotwords") or []:
+        remember_term(
+            term,
+            10,
+            metadata={
+                "source_kind": "video_understanding",
+                "domain": video_understanding_domain,
+                "category_scope": video_understanding_scope,
                 "evidence_strong": True,
             },
         )
@@ -792,6 +870,7 @@ def build_subtitle_review_memory(
         "transcription_seed_term_details": transcription_seed_term_details[:16],
         "aliases": alias_pairs[:120],
         "blocked_terms": list(transcription_context_prior.get("blocked_hotwords") or [])[:24],
+        "video_understanding_allowed_hotwords": list(video_understanding_bias.get("allowed_hotwords") or [])[:16],
         "transcription_context_prior": transcription_context_prior,
         "confirmed_entities": confirmed_entities[:6],
         "negative_alias_pairs": list((user_memory or {}).get("negative_alias_pairs") or [])[:40],
@@ -1088,11 +1167,15 @@ def _resolve_context_category_scope(
     scopes.update(_category_scopes_for_text(source_name))
     profile = content_profile or {}
     prior = _normalize_transcription_context_prior(profile.get("transcription_context_prior"))
+    video_understanding_bias = _video_understanding_term_bias(profile)
     prior_scope = str(prior.get("category_scope") or "").strip().lower()
     if prior_scope:
         scopes.add(prior_scope)
     for key in ("subject_type", "subject_model", "subject_brand", "video_theme", "summary", "hook_line"):
         scopes.update(_category_scopes_for_text(profile.get(key)))
+    scopes.update(_category_scopes_for_text(video_understanding_bias.get("subject_summary")))
+    for item in video_understanding_bias.get("allowed_hotwords") or []:
+        scopes.update(_category_scopes_for_text(item))
     for text in _collect_manual_guidance_texts(profile):
         scopes.update(_category_scopes_for_text(text))
     if len(scopes) == 1:
@@ -1122,6 +1205,7 @@ def resolve_transcription_category_scope(
     fallback_scope_scores: Counter[str] = Counter()
     source_kind_weights = {
         "content_profile": 6,
+        "video_understanding": 6,
         "llm_context_prior": 6,
         "manual_guidance": 5,
         "confirmed_entity": 5,
@@ -1154,6 +1238,12 @@ def resolve_transcription_category_scope(
         ("hook_line", 3),
     ):
         note_text_scopes((content_profile or {}).get(key), weight)
+    video_understanding_bias = _video_understanding_term_bias(content_profile)
+    note_text_scopes(video_understanding_bias.get("subject_summary"), 6)
+    note_scope(video_understanding_bias.get("category_scope"), 7)
+    note_scope(_category_scope_from_domain(video_understanding_bias.get("subject_domain")), 6)
+    for item in video_understanding_bias.get("allowed_hotwords") or []:
+        note_text_scopes(item, 5)
 
     for item in (review_memory or {}).get("transcription_seed_term_details") or []:
         note_scope(str(item.get("category_scope") or "").split(",")[0], 7)
@@ -1217,7 +1307,7 @@ def _term_item_supported_by_transcription_scope(item: dict[str, Any], scope: str
         if subject_domain_scope:
             supported_scopes.add(subject_domain_scope)
     if not supported_scopes:
-        if bool(item.get("context_match")):
+        if bool(item.get("context_match")) or bool(item.get("evidence_strong")):
             return True
         source_kind = str(item.get("source_kind") or "").strip()
         return source_kind in {"content_profile", "manual_guidance"}
@@ -1436,6 +1526,39 @@ def build_transcription_prompt(
         existing_terms=[],
         limit=12,
     )
+    video_understanding_terms: list[str] = []
+    video_understanding_term_items = [
+        dict(item)
+        for item in (review_memory or {}).get("terms") or []
+        if isinstance(item, dict)
+        and str(item.get("source_kind") or "").strip() == "video_understanding"
+        and not _term_blocked_by_prior(str(item.get("term") or "").strip(), blocked_terms)
+        and _prompt_term_item_supported_by_context(
+            item,
+            str(item.get("term") or "").strip(),
+            category_scope=category_scope,
+            context_text=prompt_context_text,
+        )
+    ]
+    for item in video_understanding_term_items:
+        term = str(item.get("term") or "").strip()
+        if term and term not in video_understanding_terms:
+            video_understanding_terms.append(term)
+    for item in (review_memory or {}).get("video_understanding_allowed_hotwords") or []:
+        term = str(item).strip()
+        if (
+            not term
+            or term in video_understanding_terms
+            or _term_blocked_by_prior(term, blocked_terms)
+            or not _prompt_term_item_supported_by_context(
+                {"source_kind": "video_understanding", "evidence_strong": True},
+                term,
+                category_scope=category_scope,
+                context_text=prompt_context_text,
+            )
+        ):
+            continue
+        video_understanding_terms.append(term)
     source_hotword_terms = _collect_source_context_hotword_terms(
         source_name=source_name,
         content_profile=content_profile,
@@ -1444,6 +1567,11 @@ def build_transcription_prompt(
     reserved_dialect_slots = min(4, len(dialect_hotwords))
     term_limit = max(0, 12 - reserved_dialect_slots)
     terms: list[str] = []
+    for item in video_understanding_terms:
+        if item and item not in terms:
+            terms.append(item)
+        if len(terms) >= term_limit:
+            break
     for item in source_hotword_terms:
         if item and item not in terms and not _term_blocked_by_prior(item, blocked_terms):
             terms.append(item)
@@ -2128,6 +2256,33 @@ def _extract_confirmed_profile_fields(content_profile: dict[str, Any] | None) ->
 
     if keywords:
         confirmed["keywords"] = keywords
+    video_understanding = profile.get("video_understanding")
+    if isinstance(video_understanding, dict):
+        global_understanding = (
+            video_understanding.get("global_understanding")
+            if isinstance(video_understanding.get("global_understanding"), dict)
+            else {}
+        )
+        primary_subject = (
+            global_understanding.get("primary_subject")
+            if isinstance(global_understanding.get("primary_subject"), dict)
+            else {}
+        )
+        for key, source_key in (
+            ("subject_brand", "brand"),
+            ("subject_model", "model"),
+            ("subject_type", "type"),
+        ):
+            if key not in confirmed:
+                value = str(primary_subject.get(source_key) or "").strip()
+                if value:
+                    confirmed[key] = value
+                    confirmed[f"{key}_candidates"] = [value]
+        if "video_theme" not in confirmed:
+            theme = str(global_understanding.get("video_theme") or "").strip()
+            if theme:
+                confirmed["video_theme"] = theme
+                confirmed["video_theme_candidates"] = [theme]
     for key, values in candidate_values.items():
         if values:
             confirmed[f"{key}_candidates"] = values
