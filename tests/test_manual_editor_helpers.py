@@ -1042,6 +1042,30 @@ def test_multimodal_trim_review_payload_selects_review_required_candidates() -> 
     assert payload["candidates"][0]["reason"] == "low_signal_subtitle"
     assert payload["candidates"][0]["multimodal_keep_priority"] == "high"
     assert payload["candidates"][0]["multimodal_roles"] == ["detail_showcase"]
+    assert payload["candidates"][0]["review_trigger"] == "visual_protection"
+
+
+def test_multimodal_trim_review_payload_includes_low_signal_candidates_without_video_hints() -> None:
+    cut_analysis = build_cut_analysis_payload(
+        editorial_analysis={},
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 0.9, "text_final": "然后呢"},
+            {"start_time": 1.0, "end_time": 2.0, "text_final": "EDC17亮度一千五流明"},
+        ],
+        smart_cut_rules={"smartDeleteEnabled": True},
+    )
+
+    payload = build_multimodal_trim_review_payload(
+        cut_analysis,
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+    )
+
+    assert payload["candidate_count"] == 1
+    assert payload["candidates"][0]["reason"] == "low_signal_subtitle"
+    assert payload["candidates"][0]["review_trigger"] == "semantic_uncertainty"
 
 
 def test_manual_editor_smart_cut_rules_payload_defaults_when_missing() -> None:

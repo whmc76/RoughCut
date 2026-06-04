@@ -5,6 +5,7 @@ from typing import Any
 
 ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW = "multimodal_trim_review"
 MULTIMODAL_TRIM_REVIEW_SCHEMA_VERSION = "multimodal_trim_review.v1"
+_DEFAULT_REVIEW_REASONS = {"low_signal_subtitle", "timing_trim", "long_non_dialogue"}
 
 
 def _candidate_id(item: dict[str, Any]) -> str:
@@ -35,14 +36,16 @@ def build_multimodal_trim_review_payload(
     for item in list(analysis.get("rule_candidates") or []):
         if not isinstance(item, dict):
             continue
-        if not bool(item.get("multimodal_review_required")):
+        reason = str(item.get("reason") or "").strip()
+        review_required = bool(item.get("multimodal_review_required"))
+        if not review_required and reason not in _DEFAULT_REVIEW_REASONS:
             continue
         pending.append(
             {
                 "candidate_id": _candidate_id(item),
                 "start": round(float(item.get("start", 0.0) or 0.0), 3),
                 "end": round(float(item.get("end", item.get("start", 0.0)) or item.get("start", 0.0) or 0.0), 3),
-                "reason": str(item.get("reason") or "").strip(),
+                "reason": reason,
                 "source_text": str(item.get("source_text") or "").strip() or None,
                 "score": round(float(item.get("score", 0.0) or 0.0), 3),
                 "multimodal_roles": [
@@ -52,6 +55,7 @@ def build_multimodal_trim_review_payload(
                 ][:4],
                 "multimodal_keep_priority": str(item.get("multimodal_keep_priority") or "").strip() or None,
                 "multimodal_confidence": round(float(item.get("multimodal_confidence", 0.0) or 0.0), 3),
+                "review_trigger": "visual_protection" if review_required else "semantic_uncertainty",
                 "review_state": "pending",
             }
         )
