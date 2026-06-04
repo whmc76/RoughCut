@@ -434,23 +434,28 @@ def _score_subtitle_effects(render_plan: dict[str, Any]) -> dict[str, Any]:
 
 
 def _score_editing(job: dict[str, Any], editorial: dict[str, Any], render_plan: dict[str, Any]) -> dict[str, Any]:
-    analysis = editorial.get("analysis") if isinstance(editorial.get("analysis"), dict) else {}
-    keep_ratio = _safe_float(job.get("keep_ratio")) or 0.0
-    accepted_cuts = list(analysis.get("accepted_cuts") or [])
-    llm_cut_review = analysis.get("llm_cut_review") if isinstance(analysis.get("llm_cut_review"), dict) else {}
-    llm_reviewed = bool(llm_cut_review.get("reviewed"))
-    llm_error = str(llm_cut_review.get("error") or "").strip()
-    llm_candidate_count = int(llm_cut_review.get("candidate_count") or 0)
-    transitions = (((render_plan.get("editing_accents") or {}).get("transitions")) or {}) if isinstance(render_plan, dict) else {}
-    boundary_indexes = list(transitions.get("boundary_indexes") or []) if isinstance(transitions, dict) else []
+    return _score_editing_from_legacy_editorial(job, editorial, render_plan)
 
+
+def _score_editing_from_inputs(
+    *,
+    keep_ratio: float,
+    accepted_cut_count: int,
+    llm_reviewed: bool,
+    llm_error: str,
+    llm_candidate_count: int,
+    boundary_indexes: list[Any],
+    issue_codes: list[str],
+    refine_mode: str = "",
+    refine_candidate_total: int = 0,
+) -> dict[str, Any]:
     score = 70.0
     if keep_ratio > 0:
         score += 10.0
     if 0.35 <= keep_ratio <= 0.8:
         score += 8.0
-    if accepted_cuts:
-        score += min(8.0, len(accepted_cuts))
+    if accepted_cut_count:
+        score += min(8.0, accepted_cut_count)
     if llm_reviewed:
         score += 6.0
     elif llm_error:
@@ -459,7 +464,6 @@ def _score_editing(job: dict[str, Any], editorial: dict[str, Any], render_plan: 
         score -= 6.0
     if boundary_indexes:
         score += min(6.0, len(boundary_indexes) * 2.0)
-    issue_codes = [str(code).strip() for code in list(job.get("quality_issue_codes") or []) if str(code).strip()]
     if "edit_plan_llm_cut_review_timeout" in issue_codes:
         score -= 8.0
     if "subtitle_sync_issue" in issue_codes:
@@ -470,13 +474,41 @@ def _score_editing(job: dict[str, Any], editorial: dict[str, Any], render_plan: 
         "grade": _score_to_grade(score),
         "status": "done",
         "summary": (
-            f"保留比 {keep_ratio:.1%}，accepted_cuts={len(accepted_cuts)}，"
+            f"保留比 {keep_ratio:.1%}，accepted_cuts={accepted_cut_count}，"
             f"llm_cut_review={'yes' if llm_reviewed else 'no'}，"
             f"transition_boundaries={len(boundary_indexes)}"
+            + (f"，refine_mode={refine_mode}" if refine_mode else "")
+            + (f"，refine_candidates={refine_candidate_total}" if refine_candidate_total else "")
             + (f"，llm_error={llm_error}" if llm_error else "")
             + (f"，llm_candidates={llm_candidate_count}" if llm_candidate_count else "")
         ),
     }
+
+
+def _score_editing_from_legacy_editorial(
+    job: dict[str, Any],
+    editorial: dict[str, Any],
+    render_plan: dict[str, Any],
+) -> dict[str, Any]:
+    analysis = editorial.get("analysis") if isinstance(editorial.get("analysis"), dict) else {}
+    keep_ratio = _safe_float(job.get("keep_ratio")) or 0.0
+    accepted_cuts = list(analysis.get("accepted_cuts") or [])
+    llm_cut_review = analysis.get("llm_cut_review") if isinstance(analysis.get("llm_cut_review"), dict) else {}
+    llm_reviewed = bool(llm_cut_review.get("reviewed"))
+    llm_error = str(llm_cut_review.get("error") or "").strip()
+    llm_candidate_count = int(llm_cut_review.get("candidate_count") or 0)
+    transitions = (((render_plan.get("editing_accents") or {}).get("transitions")) or {}) if isinstance(render_plan, dict) else {}
+    boundary_indexes = list(transitions.get("boundary_indexes") or []) if isinstance(transitions, dict) else []
+    issue_codes = [str(code).strip() for code in list(job.get("quality_issue_codes") or []) if str(code).strip()]
+    return _score_editing_from_inputs(
+        keep_ratio=keep_ratio,
+        accepted_cut_count=len(accepted_cuts),
+        llm_reviewed=llm_reviewed,
+        llm_error=llm_error,
+        llm_candidate_count=llm_candidate_count,
+        boundary_indexes=boundary_indexes,
+        issue_codes=issue_codes,
+    )
 
 
 def _score_editing_with_variant_bundle(
@@ -500,44 +532,20 @@ def _score_editing_with_variant_bundle(
     llm_candidate_count = int(llm_cut_review.get("candidate_count") or 0)
     transitions = (((render_plan.get("editing_accents") or {}).get("transitions")) or {}) if isinstance(render_plan, dict) else {}
     boundary_indexes = list(transitions.get("boundary_indexes") or []) if isinstance(transitions, dict) else []
-
-    score = 70.0
-    if keep_ratio > 0:
-        score += 10.0
-    if 0.35 <= keep_ratio <= 0.8:
-        score += 8.0
-    if accepted_cut_count:
-        score += min(8.0, accepted_cut_count)
-    if llm_reviewed:
-        score += 6.0
-    elif llm_error:
-        score -= 12.0
-    elif llm_candidate_count > 0:
-        score -= 6.0
-    if boundary_indexes:
-        score += min(6.0, len(boundary_indexes) * 2.0)
     issue_codes = [str(code).strip() for code in list(job.get("quality_issue_codes") or []) if str(code).strip()]
-    if "edit_plan_llm_cut_review_timeout" in issue_codes:
-        score -= 8.0
-    if "subtitle_sync_issue" in issue_codes:
-        score -= 10.0
-    score = _round_score(score)
     refine_mode = str(refine_decision_summary.get("mode") or "").strip()
     refine_candidate_total = int(refine_decision_summary.get("candidate_total") or 0)
-    return {
-        "score": score,
-        "grade": _score_to_grade(score),
-        "status": "done",
-        "summary": (
-            f"保留比 {keep_ratio:.1%}，accepted_cuts={accepted_cut_count}，"
-            f"llm_cut_review={'yes' if llm_reviewed else 'no'}，"
-            f"transition_boundaries={len(boundary_indexes)}"
-            + (f"，refine_mode={refine_mode}" if refine_mode else "")
-            + (f"，refine_candidates={refine_candidate_total}" if refine_candidate_total else "")
-            + (f"，llm_error={llm_error}" if llm_error else "")
-            + (f"，llm_candidates={llm_candidate_count}" if llm_candidate_count else "")
-        ),
-    }
+    return _score_editing_from_inputs(
+        keep_ratio=keep_ratio,
+        accepted_cut_count=accepted_cut_count,
+        llm_reviewed=llm_reviewed,
+        llm_error=llm_error,
+        llm_candidate_count=llm_candidate_count,
+        boundary_indexes=boundary_indexes,
+        issue_codes=issue_codes,
+        refine_mode=refine_mode,
+        refine_candidate_total=refine_candidate_total,
+    )
 
 
 def _build_stage_scores(job: dict[str, Any]) -> list[dict[str, Any]]:

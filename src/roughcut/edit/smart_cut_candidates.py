@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from roughcut.edit.low_signal_text import compact_subtitle_text, is_low_signal_subtitle_text, subtitle_signal_score
 from roughcut.edit.smart_cut_rules import normalize_smart_cut_rules_payload
 
 
@@ -343,6 +344,7 @@ def build_smart_cut_rule_candidates(
     subtitles: list[dict[str, Any]] | None,
     smart_cut_rules: dict[str, Any] | None,
     silence_segments: list[dict[str, Any]] | None = None,
+    content_profile: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     rules = normalize_smart_cut_rules_payload(smart_cut_rules)
     filler_terms = _parse_term_list(rules.get("fillers")) if bool(rules.get("fillerEnabled")) else []
@@ -401,6 +403,30 @@ def build_smart_cut_rule_candidates(
                         "source_text": term,
                     }
                 )
+        if bool(rules.get("smartDeleteEnabled")):
+            subtitle_start, subtitle_end = _subtitle_range(subtitle)
+            duration = subtitle_end - subtitle_start
+            if (
+                duration >= 0.18
+                and duration <= 4.5
+                and len(compact_subtitle_text(text)) >= 3
+                and is_low_signal_subtitle_text(text, content_profile=content_profile)
+                and subtitle_signal_score(text, content_profile=content_profile) <= 0.15
+            ):
+                key = ("low_signal_subtitle", subtitle_start, subtitle_end, text, "")
+                if key not in seen:
+                    seen.add(key)
+                    candidates.append(
+                        {
+                            "start": subtitle_start,
+                            "end": subtitle_end,
+                            "reason": "low_signal_subtitle",
+                            "candidate_stage": SMART_CUT_RULE_CANDIDATE_STAGE,
+                            "auto_applied": False,
+                            "score": 0.62,
+                            "source_text": text,
+                        }
+                    )
     if bool(rules.get("pauseEnabled")):
         low_signal_terms = sorted(dict.fromkeys([*catchphrase_terms, *filler_terms]), key=lambda item: (-len(item), item))
         for silence in list(silence_segments or []):

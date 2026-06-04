@@ -43,6 +43,7 @@ def build_cut_analysis_payload(
     job_flow_mode: str = "auto",
     source_subtitles: list[dict[str, Any]] | None = None,
     smart_cut_rules: dict[str, Any] | None = None,
+    content_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     analysis = editorial_analysis if isinstance(editorial_analysis, dict) else {}
     accepted_cuts = _dict_items(analysis.get("accepted_cuts"))
@@ -61,6 +62,7 @@ def build_cut_analysis_payload(
         source_subtitles,
         smart_cut_rules,
         silence_segments=silence_segments,
+        content_profile=content_profile,
     )
     if smart_cut_rule_candidates:
         existing_keys = {

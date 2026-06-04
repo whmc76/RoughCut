@@ -1812,6 +1812,7 @@ def _manual_editor_cut_analysis_payload(
     job_flow_mode: str,
     source_subtitles: list[dict[str, Any]] | None = None,
     smart_cut_rules: dict[str, Any] | None = None,
+    content_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if isinstance(artifact_payload, dict) and str(artifact_payload.get("schema") or "").strip() == CUT_ANALYSIS_SCHEMA_VERSION:
         return build_cut_analysis_payload(
@@ -1820,6 +1821,7 @@ def _manual_editor_cut_analysis_payload(
             job_flow_mode=job_flow_mode,
             source_subtitles=source_subtitles,
             smart_cut_rules=smart_cut_rules,
+            content_profile=content_profile,
         )
     return build_cut_analysis_payload(
         editorial_analysis=editorial_analysis,
@@ -1827,6 +1829,7 @@ def _manual_editor_cut_analysis_payload(
         job_flow_mode=job_flow_mode,
         source_subtitles=source_subtitles,
         smart_cut_rules=smart_cut_rules,
+        content_profile=content_profile,
     )
 
 
@@ -1837,6 +1840,7 @@ async def _load_manual_editor_cut_analysis_payload(
     editorial_timeline_payload: dict[str, Any] | None,
     source_subtitles: list[dict[str, Any]] | None = None,
     smart_cut_rules: dict[str, Any] | None = None,
+    content_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     current_cut_analysis_artifact = await _load_latest_optional_artifact(
         session,
@@ -1857,6 +1861,7 @@ async def _load_manual_editor_cut_analysis_payload(
         job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
         source_subtitles=source_subtitles,
         smart_cut_rules=smart_cut_rules,
+        content_profile=content_profile,
     )
 
 
@@ -5278,6 +5283,7 @@ async def _build_manual_editor_session(
 ) -> ManualEditorSessionOut:
     from roughcut.pipeline.steps import (
         _load_latest_subtitle_payloads,
+        _load_preferred_downstream_profile,
         _projection_has_suspicious_subtitle_timing,
     )
 
@@ -5338,6 +5344,7 @@ async def _build_manual_editor_session(
         drop_empty=False,
         fallback_to_items=False,
     )
+    _content_profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
     source_subtitle_dicts = await _load_manual_editor_aligned_source_subtitle_dicts(session, job=job)
     current_smart_cut_rules = _manual_editor_smart_cut_rules_payload(
         refine_decision_plan_artifact.data_json.get("smart_cut_rules")
@@ -5351,6 +5358,7 @@ async def _build_manual_editor_session(
         editorial_timeline_payload=editorial_timeline.data_json if isinstance(editorial_timeline.data_json, dict) else None,
         source_subtitles=source_subtitle_dicts,
         smart_cut_rules=current_smart_cut_rules,
+        content_profile=content_profile,
     )
     raw_silence_segments = cut_analysis_silence_segments(cut_analysis_payload)
     silence_segments = [
@@ -5731,6 +5739,8 @@ async def save_manual_editor_draft(
     request: ManualEditorApplyIn,
     session: AsyncSession = Depends(get_session),
 ):
+    from roughcut.pipeline.steps import _load_preferred_downstream_profile
+
     job_result = await session.execute(
         select(Job)
         .options(selectinload(Job.steps))
@@ -5767,6 +5777,7 @@ async def save_manual_editor_draft(
         )
     keep_segments = _normalize_manual_keep_segments(request.keep_segments, source_duration_sec=source_duration_sec)
     current_source_subtitles = await _load_manual_editor_aligned_source_subtitle_dicts(session, job=job)
+    _content_profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
     subtitle_fingerprint = _manual_editor_subtitle_fingerprint(current_source_subtitles)
     _validate_manual_editor_subtitle_revision(request, subtitle_fingerprint)
     request_subtitles_match = _manual_editor_request_subtitles_match_fingerprint(request, subtitle_fingerprint)
@@ -5830,6 +5841,7 @@ async def save_manual_editor_draft(
         editorial_timeline_payload=editorial_timeline.data_json if isinstance(editorial_timeline.data_json, dict) else None,
         source_subtitles=current_source_subtitles,
         smart_cut_rules=smart_cut_rules,
+        content_profile=content_profile,
     )
     session.add(
         Artifact(
@@ -6125,6 +6137,7 @@ async def apply_manual_editor_timeline(
         else None,
         source_subtitles=source_subtitle_dicts,
         smart_cut_rules=smart_cut_rules,
+        content_profile=content_profile,
     )
     session.add(
         Artifact(

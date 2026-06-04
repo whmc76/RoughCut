@@ -105,7 +105,7 @@ def analyze_sample(api_base: str, sample: SampleSpec) -> dict[str, Any]:
     source_rows = list(session.get("source_subtitles") or [])
     projected_rows = list(session.get("projected_subtitles") or [])
     rule_segments = [item for item in (session.get("rule_segments") or []) if isinstance(item, dict)]
-    smart_delete_segments = [item for item in rule_segments if str(item.get("kind") or "").strip() == "smart_delete"]
+    smart_delete_rule_segments = [item for item in rule_segments if str(item.get("kind") or "").strip() == "smart_delete"]
     cut_analysis = session.get("cut_analysis") if isinstance(session.get("cut_analysis"), dict) else {}
     refine_decision_plan = (
         session.get("refine_decision_plan")
@@ -140,7 +140,7 @@ def analyze_sample(api_base: str, sample: SampleSpec) -> dict[str, Any]:
             "source_subtitles": len(source_rows),
             "projected_subtitles": len(projected_rows),
             "keep_segments": len(session.get("keep_segments") or []),
-            "smart_delete_segments": len(smart_delete_segments),
+            "smart_delete_rule_segments": len(smart_delete_rule_segments),
             "rule_segments": len(rule_segments),
             "cut_analysis_candidates": int(cut_analysis.get("candidate_count") or 0),
             "refine_keep_segments": len(refine_decision_plan.get("keep_segments") or []),

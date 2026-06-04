@@ -591,6 +591,35 @@ async def test_load_manual_editor_cut_analysis_payload_prefers_artifact_and_reap
     )
 
 
+@pytest.mark.asyncio
+async def test_load_manual_editor_cut_analysis_payload_passes_content_profile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_load_latest_optional_artifact(*args: object, **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(data_json={"schema": "cut_analysis.v1"})
+
+    def _fake_build_cut_analysis_payload(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"schema": "cut_analysis.v1", "rule_candidates": []}
+
+    monkeypatch.setattr(jobs_module, "_load_latest_optional_artifact", _fake_load_latest_optional_artifact)
+    monkeypatch.setattr(jobs_module, "build_cut_analysis_payload", _fake_build_cut_analysis_payload)
+
+    content_profile = {"subject_model": "EDC17", "subject_type": "手电"}
+    await _load_manual_editor_cut_analysis_payload(
+        SimpleNamespace(),
+        job=SimpleNamespace(id=uuid4(), source_name="demo.mp4", job_flow_mode="manual"),
+        editorial_timeline_payload={"analysis": {"accepted_cuts": []}},
+        source_subtitles=[{"start_time": 0.0, "end_time": 1.0, "text_final": "然后呢"}],
+        smart_cut_rules={"smartDeleteEnabled": True},
+        content_profile=content_profile,
+    )
+
+    assert captured["content_profile"] == content_profile
+
+
 def test_manual_editor_build_refine_decision_plan_from_render_plan_reuses_shared_contract() -> None:
     payload = _manual_editor_build_refine_decision_plan_from_render_plan(
         keep_segments=[{"start": 0.0, "end": 5.0}],
@@ -910,6 +939,30 @@ def test_manual_editor_rule_segments_expose_backend_pause_candidates() -> None:
     assert [(item.kind, item.start, item.end, item.source) for item in segments] == [
         ("pause", 2.0, 3.1, "manual_editor_rule_candidate"),
     ]
+
+
+def test_backend_smart_cut_candidates_include_low_signal_subtitle_waste() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={},
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 0.9, "text_final": "然后呢"},
+            {"start_time": 1.0, "end_time": 2.2, "text_final": "EDC17亮度一千五流明"},
+        ],
+        smart_cut_rules={"smartDeleteEnabled": True},
+    )
+
+    low_signal = [
+        item
+        for item in payload.get("rule_candidates") or []
+        if str(item.get("reason") or "") == "low_signal_subtitle"
+    ]
+
+    assert len(low_signal) == 1
+    assert low_signal[0]["start"] == 0.0
+    assert low_signal[0]["end"] == 0.9
+    assert low_signal[0]["source_text"] == "然后呢"
 
 
 def test_manual_editor_smart_cut_rules_payload_defaults_when_missing() -> None:

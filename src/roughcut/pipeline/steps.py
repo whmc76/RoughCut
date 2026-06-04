@@ -8160,6 +8160,7 @@ async def run_edit_plan(job_id: str) -> dict:
             job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
             source_subtitles=edit_source_subtitles,
             smart_cut_rules=default_smart_cut_rules_payload(),
+            content_profile=content_profile,
         )
         refine_decision_plan_payload = build_refine_decision_plan_from_render_plan(
             keep_segments=keep_segments,
