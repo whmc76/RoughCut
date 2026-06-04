@@ -50,8 +50,19 @@ from roughcut.edit.decisions import (
     infer_timeline_analysis,
     refresh_source_timeline_contract_analysis,
 )
+from roughcut.edit.cut_analysis import (
+    ARTIFACT_TYPE_CUT_ANALYSIS,
+    build_cut_analysis_payload,
+    cut_analysis_accepted_cuts,
+)
 from roughcut.edit.otio_export import export_to_otio
 from roughcut.edit.presets import normalize_workflow_template_name
+from roughcut.edit.refine_decisions import (
+    ARTIFACT_TYPE_REFINE_DECISION_PLAN,
+    build_refine_decision_plan_from_render_plan,
+    resolve_refine_keep_segments_for_timeline,
+)
+from roughcut.edit.smart_cut_rules import default_smart_cut_rules_payload
 from roughcut.edit.render_plan import (
     build_ai_effect_render_plan,
     build_plain_render_plan,
@@ -74,6 +85,7 @@ from roughcut.media.manual_editor_assets import (
     mark_manual_editor_preview_assets_queued,
 )
 from roughcut.media.scene import detect_scenes
+from roughcut.media.subtitle_spans import drop_redundant_synthetic_word_payloads, sanitize_transcript_segment_word_rows
 from roughcut.media.subtitle_text import (
     clean_final_subtitle_text,
     clean_subtitle_payloads,
@@ -1909,7 +1921,7 @@ def _build_edit_plan_transcript_segments(
                 "end": float(row.end_time),
                 "text": str(row.text or ""),
                 "speaker": row.speaker,
-                "words": list(row.words_json or []),
+                "words": drop_redundant_synthetic_word_payloads(list(row.words_json or [])),
             }
         )
     return fallback_segments
@@ -1930,7 +1942,7 @@ def _normalize_transcript_segment_payloads(raw_segments: list[Any]) -> list[dict
                 "confidence": item.get("confidence"),
                 "logprob": item.get("logprob"),
                 "alignment": item.get("alignment"),
-                "words": list(item.get("words") or []),
+                "words": drop_redundant_synthetic_word_payloads(list(item.get("words") or [])),
             }
         )
     return normalized
@@ -2550,7 +2562,7 @@ def _build_reference_segment_adapters(transcript_rows: list[TranscriptSegment]) 
                 start_time=float(getattr(row, "start_time", 0.0) or 0.0),
                 end_time=float(getattr(row, "end_time", 0.0) or 0.0),
                 text=str(getattr(row, "text", "") or ""),
-                words_json=list(getattr(row, "words_json", None) or []),
+                words_json=drop_redundant_synthetic_word_payloads(list(getattr(row, "words_json", None) or [])),
             )
         )
     return adapters
@@ -3863,49 +3875,10 @@ def _projection_has_suspicious_subtitle_timing(
         except (TypeError, ValueError):
             continue
         duration = max(0.0, end - start)
-        if _projection_entry_word_timings_mismatch_row_window(entry, row_start=start, row_end=end):
-            return True
         text = str(entry.get("text_final") or entry.get("text_norm") or entry.get("text_raw") or entry.get("text") or "")
         compact_len = len(re.sub(r"[\s，。！？!?；;：:,、（）()[]【】{}\"'《》<>]+", "", text))
         if duration > duration_limit and compact_len <= compact_limit:
             return True
-    return False
-
-
-def _projection_entry_word_timings_mismatch_row_window(
-    entry: dict[str, Any],
-    *,
-    row_start: float,
-    row_end: float,
-    tolerance_sec: float = 0.35,
-) -> bool:
-    words = [
-        word
-        for word in list(entry.get("words") or entry.get("words_json") or [])
-        if isinstance(word, dict)
-    ]
-    if not words or row_end <= row_start:
-        return False
-    timed: list[tuple[float, float]] = []
-    for word in words:
-        try:
-            start = float(word.get("start", 0.0) or 0.0)
-            end = float(word.get("end", start) or start)
-        except (TypeError, ValueError):
-            continue
-        if end <= start:
-            continue
-        timed.append((start, end))
-    if not timed:
-        return False
-    word_start = min(start for start, _ in timed)
-    word_end = max(end for _, end in timed)
-    if word_end < row_start - tolerance_sec or word_start > row_end + tolerance_sec:
-        return True
-    if word_start < row_start - tolerance_sec:
-        return True
-    if word_end > row_end + tolerance_sec:
-        return True
     return False
 
 
@@ -3972,7 +3945,7 @@ def _subtitle_projection_entry_payload(entry: dict[str, Any]) -> dict[str, Any]:
         "text_norm": entry.get("text_norm"),
         "text_final": entry.get("text_final"),
     }
-    words = list(entry.get("words") or entry.get("words_json") or [])
+    words = drop_redundant_synthetic_word_payloads(list(entry.get("words") or entry.get("words_json") or []))
     if words:
         payload["words"] = words
     return payload
@@ -4086,6 +4059,7 @@ async def _load_source_subtitle_payloads_for_projection_validation(
     )
     transcript_rows = transcript_result.scalars().all()
     if transcript_rows:
+        sanitize_transcript_segment_word_rows(transcript_rows)
         latest_version = max(int(row.version or 1) for row in transcript_rows)
         transcript_payloads = [
             {
@@ -4098,7 +4072,7 @@ async def _load_source_subtitle_payloads_for_projection_validation(
                 "text_norm": str(row.text or ""),
                 "text_final": str(row.text or ""),
                 "transcript_text": str(row.text or ""),
-                "words": [dict(word) for word in list(row.words_json or []) if isinstance(word, dict)],
+                "words": drop_redundant_synthetic_word_payloads([dict(word) for word in list(row.words_json or []) if isinstance(word, dict)]),
                 "projection_source": "transcript_segment",
             }
             for index, row in enumerate(transcript_rows)
@@ -4254,6 +4228,7 @@ async def _load_subtitle_transcript_context(
         .order_by(TranscriptSegment.segment_index)
     )
     transcript_rows = list(transcript_result.scalars().all())
+    sanitize_transcript_segment_word_rows(transcript_rows)
     subtitle_items: list[SubtitleItem] = []
     if prefer_latest_projection:
         subtitle_dicts, _projection_data = await _load_latest_subtitle_payloads(
@@ -4309,6 +4284,7 @@ async def _load_content_profile_context(
         .order_by(TranscriptSegment.segment_index)
     )
     transcript_rows = list(transcript_result.scalars().all())
+    sanitize_transcript_segment_word_rows(transcript_rows)
     subtitle_dicts, _projection_data = await _load_latest_subtitle_payloads(
         session,
         job_id=job_id,
@@ -5367,6 +5343,23 @@ async def _load_latest_optional_artifact(
     return artifacts[0] if artifacts else None
 
 
+def _resolve_keep_segments_from_refine_plan(
+    refine_plan_payload: dict[str, Any] | None,
+    *,
+    editorial_timeline_id: str,
+    editorial_timeline_version: int,
+    fallback_segments: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        {"start": float(item.get("start", 0.0) or 0.0), "end": float(item.get("end", 0.0) or 0.0)}
+        for item in resolve_refine_keep_segments_for_timeline(
+            refine_plan_payload,
+            editorial_timeline_id=editorial_timeline_id,
+            editorial_timeline_version=editorial_timeline_version,
+            fallback_segments=fallback_segments,
+        )
+    ]
+
 def _serialize_glossary_terms(terms: list[GlossaryTerm]) -> list[dict[str, str | list[str] | None]]:
     return [
         {
@@ -6221,6 +6214,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             .order_by(TranscriptSegment.segment_index)
         )
         segments = seg_result.scalars().all()
+        sanitize_transcript_segment_word_rows(segments)
         transcript_fact_artifact = await _load_latest_optional_artifact(
             session,
             job_id=job.id,
@@ -6241,7 +6235,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
                 start_time=float(getattr(segment, "start_time", 0.0) or 0.0),
                 end_time=float(getattr(segment, "end_time", 0.0) or 0.0),
                 text=str(getattr(segment, "text", "") or ""),
-                words_json=copy.deepcopy(getattr(segment, "words_json", None) or []),
+                words_json=drop_redundant_synthetic_word_payloads(copy.deepcopy(getattr(segment, "words_json", None) or [])),
             )
             for index, segment in enumerate(segments)
         ]
@@ -7882,6 +7876,7 @@ async def run_edit_plan(job_id: str) -> dict:
             .order_by(TranscriptSegment.segment_index)
         )
         transcript_rows = transcript_result.scalars().all()
+        sanitize_transcript_segment_word_rows(transcript_rows)
         transcript_evidence_artifact = await _load_latest_optional_artifact(
             session,
             job_id=job.id,
@@ -8159,28 +8154,60 @@ async def run_edit_plan(job_id: str) -> dict:
             pass  # OTIO optional
         render_plan_dict["automatic_gate"] = automatic_gate
         await save_render_plan(job.id, render_plan_dict, session)
+        cut_analysis_payload = build_cut_analysis_payload(
+            editorial_analysis=decision.analysis,
+            source_name=str(job.source_name or ""),
+            job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
+            source_subtitles=edit_source_subtitles,
+            smart_cut_rules=default_smart_cut_rules_payload(),
+        )
+        refine_decision_plan_payload = build_refine_decision_plan_from_render_plan(
+            keep_segments=keep_segments,
+            source_duration_sec=float(duration or 0.0),
+            mode="auto_refine",
+            subtitle_fingerprint=subtitle_payload_fingerprint(edit_source_subtitles),
+            render_plan_data=render_plan_dict,
+            render_plan_version=int((render_plan_dict.get("version") or 1) or 1),
+            cut_analysis=cut_analysis_payload,
+            video_transform={},
+            smart_cut_rules=default_smart_cut_rules_payload(),
+            editorial_timeline_id=str(editorial_timeline.id),
+            editorial_timeline_version=int(editorial_timeline.version or 1),
+        )
         session.add(
             Artifact(
                 job_id=job.id,
                 step_id=step.id,
                 artifact_type="edit_review_bundle",
-                data_json={
-                    "schema_version": "edit_review_bundle_v1",
-                    "job_flow_mode": str(getattr(job, "job_flow_mode", "") or "auto"),
-                    "source_name": str(job.source_name or ""),
-                    "topic_fact_confirmation": (
-                        dict(content_profile.get("topic_fact_confirmation") or {})
-                        if isinstance(content_profile, dict)
-                        and isinstance(content_profile.get("topic_fact_confirmation"), dict)
-                        else {}
-                    ),
-                    "source_timeline_contract": source_timeline_contract,
-                    "subtitle_source_projection_validation": subtitle_source_projection_validation,
-                    "automatic_gate": automatic_gate,
-                    "edit_decision": decision.to_dict(),
-                    "full_subtitles": [dict(item) for item in subtitle_dicts],
-                    "edited_subtitles": [dict(item) for item in remapped_subtitles],
-                },
+                data_json=_build_edit_review_bundle_payload(
+                    job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
+                    source_name=str(job.source_name or ""),
+                    content_profile=content_profile,
+                    source_timeline_contract=source_timeline_contract,
+                    subtitle_source_projection_validation=subtitle_source_projection_validation,
+                    automatic_gate=automatic_gate,
+                    edit_decision=decision.to_dict(),
+                    full_subtitles=[dict(item) for item in subtitle_dicts],
+                    edited_subtitles=[dict(item) for item in remapped_subtitles],
+                    cut_analysis=cut_analysis_payload,
+                    refine_decision_plan=refine_decision_plan_payload,
+                ),
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=step.id,
+                artifact_type=ARTIFACT_TYPE_CUT_ANALYSIS,
+                data_json=cut_analysis_payload,
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=step.id,
+                artifact_type=ARTIFACT_TYPE_REFINE_DECISION_PLAN,
+                data_json=refine_decision_plan_payload,
             )
         )
 
@@ -8235,6 +8262,26 @@ async def run_render(job_id: str) -> dict:
         # Get timelines
         editorial_timeline = await _load_latest_timeline(session, job.id, "editorial")
         render_plan_timeline = await _load_latest_timeline(session, job.id, "render_plan")
+        refine_decision_plan_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=(ARTIFACT_TYPE_REFINE_DECISION_PLAN,),
+        )
+        refine_decision_plan_payload = (
+            refine_decision_plan_artifact.data_json
+            if refine_decision_plan_artifact and isinstance(refine_decision_plan_artifact.data_json, dict)
+            else None
+        )
+        cut_analysis_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=(ARTIFACT_TYPE_CUT_ANALYSIS,),
+        )
+        cut_analysis_payload = (
+            cut_analysis_artifact.data_json
+            if cut_analysis_artifact and isinstance(cut_analysis_artifact.data_json, dict)
+            else None
+        )
         automatic_gate = dict(render_plan_timeline.data_json.get("automatic_gate") or {})
         if bool(automatic_gate.get("blocking")):
             blocking_reasons = ", ".join(
@@ -8368,6 +8415,12 @@ async def run_render(job_id: str) -> dict:
                 if reusable_render_outputs
                 else None
             )
+            resolved_keep_segments = _resolve_keep_segments_from_refine_plan(
+                refine_decision_plan_payload,
+                editorial_timeline_id=str(editorial_timeline.id),
+                editorial_timeline_version=int(editorial_timeline.version or 1),
+                fallback_segments=list(editorial_timeline.data_json.get("segments", []) or []),
+            )
             if reusable_plain_path is not None and reusable_plain_path.exists():
                 await _refresh_render_progress(
                     detail="字幕微调：复用既有素版底片，跳过原片重切",
@@ -8387,16 +8440,14 @@ async def run_render(job_id: str) -> dict:
                     render_plan=plain_render_plan,
                     editorial_timeline=editorial_timeline.data_json,
                     output_path=tmp_plain_mp4,
+                    keep_segments=resolved_keep_segments,
                     subtitle_items=None,
                     debug_dir=debug_dir / "plain",
                 )
             await _copy_file_with_retry(tmp_plain_mp4, tmp_cover_plain_mp4)
             plain_duration = float((await _probe_with_retry(tmp_plain_mp4)).duration or 0.0)
             plain_variant_editorial_timeline = _build_full_length_variant_timeline(plain_duration)
-            keep_segments = [
-                s for s in editorial_timeline.data_json.get("segments", [])
-                if s.get("type") == "keep"
-            ]
+            keep_segments = resolved_keep_segments
             async with get_session_factory()() as projection_session:
                 remapped_subtitles = await _build_edited_subtitle_projection(
                     projection_session,
@@ -8862,6 +8913,8 @@ async def run_render(job_id: str) -> dict:
         render_plan_timeline_id=render_plan_timeline.id,
         keep_segments=keep_segments,
         editorial_analysis=(editorial_timeline.data_json or {}).get("analysis") or {},
+        cut_analysis=cut_analysis_payload,
+        refine_decision_plan=refine_decision_plan_payload,
         render_plan=render_plan_timeline.data_json,
         variants={
             "plain": _build_variant_timeline_entry(
@@ -9012,12 +9065,24 @@ async def run_platform_package(job_id: str) -> dict:
             clean_text=False,
         )
         editorial_timeline = await _load_latest_timeline(session, job.id, "editorial")
+        refine_decision_plan_artifact = await _load_latest_optional_artifact(
+            session,
+            job_id=job.id,
+            artifact_types=(ARTIFACT_TYPE_REFINE_DECISION_PLAN,),
+        )
+        refine_decision_plan_payload = (
+            refine_decision_plan_artifact.data_json
+            if refine_decision_plan_artifact and isinstance(refine_decision_plan_artifact.data_json, dict)
+            else None
+        )
         manual_editor_subtitles = _manual_editor_subtitle_items_from_editorial(editorial_timeline.data_json if editorial_timeline else None)
         if manual_editor_subtitles:
-            keep_segments = [
-                segment for segment in (editorial_timeline.data_json or {}).get("segments", [])
-                if isinstance(segment, dict) and segment.get("type") == "keep"
-            ]
+            keep_segments = _resolve_keep_segments_from_refine_plan(
+                refine_decision_plan_payload,
+                editorial_timeline_id=str(editorial_timeline.id),
+                editorial_timeline_version=int(editorial_timeline.version or 1),
+                fallback_segments=list((editorial_timeline.data_json or {}).get("segments", []) or []),
+            )
             subtitle_dicts = await _validated_subtitle_projection_for_timeline(
                 session,
                 job_id=job.id,
@@ -11166,21 +11231,29 @@ def _build_variant_timeline_bundle(
     render_plan_timeline_id: Any,
     keep_segments: list[dict[str, Any]],
     editorial_analysis: dict[str, Any] | None = None,
+    cut_analysis: dict[str, Any] | None = None,
+    refine_decision_plan: dict[str, Any] | None = None,
     render_plan: dict[str, Any],
     variants: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     cloned_editorial_analysis = _clone_json_like(editorial_analysis or {})
+    cloned_cut_analysis = _clone_json_like(cut_analysis or {})
+    cloned_refine_decision_plan = _clone_json_like(refine_decision_plan or {})
     bundle = {
         "timeline_rules": {
             "editorial_timeline_id": str(editorial_timeline_id or "").strip() or None,
             "render_plan_timeline_id": str(render_plan_timeline_id or "").strip() or None,
             "keep_segments": [dict(segment) for segment in keep_segments],
             "editorial_analysis": cloned_editorial_analysis,
+            "cut_analysis": cloned_cut_analysis,
+            "refine_decision_plan": cloned_refine_decision_plan,
             "timeline_analysis": _clone_json_like(render_plan.get("timeline_analysis") or {}),
             "editing_skill": _clone_json_like(render_plan.get("editing_skill") or {}),
             "section_choreography": _clone_json_like(render_plan.get("section_choreography") or {}),
             "diagnostics": _build_variant_timeline_diagnostics(
                 editorial_analysis=cloned_editorial_analysis,
+                cut_analysis=cloned_cut_analysis,
+                refine_decision_plan=cloned_refine_decision_plan,
                 timeline_analysis=render_plan.get("timeline_analysis") or {},
             ),
             "packaging": {
@@ -11201,14 +11274,16 @@ def _build_variant_timeline_bundle(
 def _build_variant_timeline_diagnostics(
     *,
     editorial_analysis: dict[str, Any] | None,
-    timeline_analysis: dict[str, Any] | None,
+    cut_analysis: dict[str, Any] | None,
+    refine_decision_plan: dict[str, Any] | None = None,
+    timeline_analysis: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     keep_energy_segments = [
         dict(item)
         for item in list((editorial_analysis or {}).get("keep_energy_segments") or [])
         if isinstance(item, dict)
     ]
-    accepted_cuts = [
+    accepted_cuts = cut_analysis_accepted_cuts(cut_analysis) or [
         dict(item)
         for item in list((editorial_analysis or {}).get("accepted_cuts") or [])
         if isinstance(item, dict)
@@ -11268,6 +11343,19 @@ def _build_variant_timeline_diagnostics(
     return {
         "keep_energy_summary": _clone_json_like((editorial_analysis or {}).get("keep_energy_summary") or {}),
         "cut_evidence_summary": _clone_json_like((editorial_analysis or {}).get("cut_evidence_summary") or {}),
+        "cut_analysis_summary": {
+            "candidate_count": int((cut_analysis or {}).get("candidate_count") or 0),
+            "accepted_cut_count": int((cut_analysis or {}).get("accepted_cut_count") or len(accepted_cuts)),
+            "rule_candidate_count": int((cut_analysis or {}).get("rule_candidate_count") or 0),
+            "manual_confirm_candidate_count": int((cut_analysis or {}).get("manual_confirm_candidate_count") or 0),
+        },
+        "refine_decision_summary": {
+            "mode": str(((refine_decision_plan or {}).get("mode")) or "").strip() or None,
+            "keep_segment_count": len(list(((refine_decision_plan or {}).get("keep_segments")) or [])),
+            "candidate_total": int((((refine_decision_plan or {}).get("candidate_summary")) or {}).get("total") or 0),
+            "candidate_auto_apply": int((((refine_decision_plan or {}).get("candidate_summary")) or {}).get("auto_apply") or 0),
+            "candidate_manual_confirm": int((((refine_decision_plan or {}).get("candidate_summary")) or {}).get("manual_confirm") or 0),
+        },
         "high_energy_keeps": high_energy_keeps[:8],
         "high_risk_cuts": high_risk_cuts[:8],
         "llm_cut_review": llm_cut_review,
@@ -11281,6 +11369,42 @@ def _build_variant_timeline_diagnostics(
                 else None
             ),
         },
+    }
+
+
+def _build_edit_review_bundle_payload(
+    *,
+    job_flow_mode: str,
+    source_name: str,
+    content_profile: dict[str, Any] | None,
+    source_timeline_contract: dict[str, Any] | None,
+    subtitle_source_projection_validation: dict[str, Any] | None,
+    automatic_gate: dict[str, Any] | None,
+    edit_decision: dict[str, Any] | None,
+    full_subtitles: list[dict[str, Any]],
+    edited_subtitles: list[dict[str, Any]],
+    cut_analysis: dict[str, Any] | None,
+    refine_decision_plan: dict[str, Any] | None,
+) -> dict[str, Any]:
+    topic_fact_confirmation = (
+        dict((content_profile or {}).get("topic_fact_confirmation") or {})
+        if isinstance(content_profile, dict)
+        and isinstance((content_profile or {}).get("topic_fact_confirmation"), dict)
+        else {}
+    )
+    return {
+        "schema_version": "edit_review_bundle_v1",
+        "job_flow_mode": str(job_flow_mode or "auto"),
+        "source_name": str(source_name or ""),
+        "topic_fact_confirmation": topic_fact_confirmation,
+        "source_timeline_contract": _clone_json_like(source_timeline_contract or {}),
+        "subtitle_source_projection_validation": _clone_json_like(subtitle_source_projection_validation or {}),
+        "automatic_gate": _clone_json_like(automatic_gate or {}),
+        "edit_decision": _clone_json_like(edit_decision or {}),
+        "cut_analysis": _clone_json_like(cut_analysis or {}),
+        "refine_decision_plan": _clone_json_like(refine_decision_plan or {}),
+        "full_subtitles": [dict(item) for item in list(full_subtitles or []) if isinstance(item, dict)],
+        "edited_subtitles": [dict(item) for item in list(edited_subtitles or []) if isinstance(item, dict)],
     }
 
 

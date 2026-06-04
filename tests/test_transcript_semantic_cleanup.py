@@ -4,7 +4,9 @@ from roughcut.pipeline.steps import (
     _build_transcript_first_canonical_layer,
     _filter_redundant_corrections_for_current_subtitles,
 )
-from roughcut.speech.transcribe import _normalize_transcript_result
+from roughcut.media.subtitle_spans import sanitize_transcript_segment_word_rows
+from roughcut.speech.subtitle_pipeline import build_transcript_fact_layer_from_result
+from roughcut.speech.transcribe import _normalize_segment_word_timings_for_text, _normalize_transcript_result
 
 
 def test_normalize_transcript_result_cleans_flashlight_cross_domain_drift() -> None:
@@ -167,6 +169,37 @@ def test_normalize_transcript_result_normalizes_flashlight_edc17_shorthand() -> 
     assert normalized.segments[0].text == "所以呢我的选择就是这个EDC17"
 
 
+def test_normalize_transcript_result_normalizes_flashlight_model_spellings() -> None:
+    result = TranscriptResult(
+        segments=[
+            TranscriptSegment(
+                index=0,
+                start=0.0,
+                end=3.0,
+                text="它算是定位相当高端的一款EC手电了",
+            ),
+            TranscriptSegment(
+                index=1,
+                start=3.0,
+                end=6.0,
+                text="这个我记得是那个UHD二零了",
+            ),
+        ],
+        language="zh-CN",
+        duration=6.0,
+        raw_payload={},
+    )
+
+    normalized = _normalize_transcript_result(
+        result,
+        glossary_terms=[],
+        review_memory={"terms": [{"term": "EDC17", "count": 10, "category_scope": "flashlight"}]},
+    )
+
+    assert normalized.segments[0].text == "它算是定位相当高端的一款EDC手电了"
+    assert normalized.segments[1].text == "这个我记得是那个UHD20了"
+
+
 def test_normalize_transcript_result_keeps_original_word_timings_when_model_alias_adds_ascii_units() -> None:
     raw = "所以呢我的选择就是这个幺七"
     result = TranscriptResult(
@@ -196,6 +229,92 @@ def test_normalize_transcript_result_keeps_original_word_timings_when_model_alia
     assert normalized.segments[0].text == "所以呢我的选择就是这个EDC17"
     assert "".join(word.word for word in normalized.segments[0].words) == raw
     assert all(word.end - word.start >= 0.01 for word in normalized.segments[0].words)
+
+
+def test_normalize_segment_word_timings_keeps_original_words_when_duplicate_unit_would_be_synthetic() -> None:
+    raw = "啊也是很轻松"
+    seg = TranscriptSegment(
+        index=0,
+        start=0.0,
+        end=2.0,
+        text="啊，啊也是很轻松",
+        words=[
+            WordTiming(word=char, start=index * 0.1, end=(index + 1) * 0.1)
+            for index, char in enumerate(raw)
+        ],
+    )
+
+    normalized_words = _normalize_segment_word_timings_for_text(
+        seg,
+        normalized_text="啊，啊也是很轻松",
+    )
+
+    assert "".join(word.word for word in normalized_words) == raw
+    assert all(word.end - word.start >= 0.01 for word in normalized_words)
+
+
+def test_build_transcript_fact_layer_drops_redundant_synthetic_duplicate_words() -> None:
+    result = TranscriptResult(
+        segments=[
+            TranscriptSegment(
+                index=0,
+                start=0.0,
+                end=2.0,
+                text="啊啊也是很轻松",
+                words=[
+                    WordTiming(
+                        word="啊",
+                        start=0.0,
+                        end=0.001,
+                        raw_payload={"_roughcut_asr_normalization": {"matched": False}},
+                    ),
+                    WordTiming(
+                        word="啊",
+                        start=0.0,
+                        end=0.4,
+                        raw_payload={"_roughcut_asr_normalization": {"matched": True}},
+                    ),
+                    WordTiming(word="也", start=0.4, end=0.7),
+                    WordTiming(word="是", start=0.7, end=1.0),
+                    WordTiming(word="很", start=1.0, end=1.4),
+                    WordTiming(word="轻", start=1.4, end=1.7),
+                    WordTiming(word="松", start=1.7, end=2.0),
+                ],
+            )
+        ],
+        language="zh-CN",
+        duration=2.0,
+        raw_payload={},
+    )
+
+    layer = build_transcript_fact_layer_from_result(result)
+    words = list(layer.segments[0].words)
+
+    assert [word.word for word in words] == ["啊", "也", "是", "很", "轻", "松"]
+
+
+def test_sanitize_transcript_segment_word_rows_rewrites_legacy_duplicate_words_json() -> None:
+    row = TranscriptSegment(
+        index=0,
+        start=0.0,
+        end=2.0,
+        text="啊啊也是很轻松",
+    )
+    row.words_json = [
+        {"word": "啊", "start": 0.0, "end": 0.001, "_roughcut_asr_normalization": {"matched": False}},
+        {"word": "啊", "start": 0.0, "end": 0.4, "_roughcut_asr_normalization": {"matched": True}},
+        {"word": "也", "start": 0.4, "end": 0.7},
+        {"word": "是", "start": 0.7, "end": 1.0},
+    ]
+
+    changed = sanitize_transcript_segment_word_rows([row])
+
+    assert changed == 1
+    assert row.words_json == [
+        {"word": "啊", "start": 0.0, "end": 0.4, "_roughcut_asr_normalization": {"matched": True}},
+        {"word": "也", "start": 0.4, "end": 0.7},
+        {"word": "是", "start": 0.7, "end": 1.0},
+    ]
 
 
 def test_transcript_first_canonical_layer_normalizes_flashlight_edc17_shorthand() -> None:

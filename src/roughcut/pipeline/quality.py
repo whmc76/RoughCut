@@ -9,7 +9,11 @@ from typing import Any, Sequence
 
 from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, SubtitleItem
 from roughcut.pipeline.rerun_actions import pick_recommended_rerun_steps
-from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
+from roughcut.media.variant_timeline_bundle import (
+    resolve_effective_variant_timeline_bundle,
+    variant_llm_cut_review,
+    variant_refine_decision_summary,
+)
 from roughcut.review.content_profile import (
     _content_understanding_detail_terms,
     _has_ingestible_product_subject_conflict,
@@ -499,7 +503,8 @@ def assess_job_quality(
                 auto_fix_step="render",
             )
         )
-    llm_cut_review = _resolve_variant_llm_cut_review(variant_bundle)
+    llm_cut_review = variant_llm_cut_review(variant_bundle)
+    refine_decision_summary = variant_refine_decision_summary(variant_bundle)
     if (
         llm_cut_review
         and not bool(llm_cut_review.get("reviewed"))
@@ -565,6 +570,7 @@ def assess_job_quality(
             "step_completion_ratio": round(step_completion_ratio, 3),
             "subtitle_sync": sync_check,
             "llm_cut_review": llm_cut_review,
+            "refine_decision_summary": refine_decision_summary,
             "identity_narrative_conflicts": _collect_identity_narrative_conflicts(profile),
             "entity_identity_gate": evaluate_profile_identity_gate(profile),
         },
@@ -860,18 +866,6 @@ def _collect_entity_catalog_signals(profile: dict[str, Any]) -> dict[str, Any]:
         "top_candidate": top_candidate,
     }
 
-
-def _resolve_variant_llm_cut_review(variant_bundle: dict[str, Any] | None) -> dict[str, Any]:
-    if not isinstance(variant_bundle, dict):
-        return {}
-    timeline_rules = variant_bundle.get("timeline_rules")
-    if not isinstance(timeline_rules, dict):
-        return {}
-    diagnostics = timeline_rules.get("diagnostics")
-    if not isinstance(diagnostics, dict):
-        return {}
-    llm_cut_review = diagnostics.get("llm_cut_review")
-    return dict(llm_cut_review) if isinstance(llm_cut_review, dict) else {}
 
 
 def _candidate_identity_alignment_score(profile: dict[str, Any], candidate: dict[str, Any]) -> int:

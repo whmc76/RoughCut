@@ -3117,6 +3117,40 @@ select.input option:focus {
   align-content: start;
 }
 
+.smart-copy-publication-cover {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background:
+    radial-gradient(circle at 24% 22%, rgba(72, 187, 168, 0.18), transparent 42%),
+    linear-gradient(145deg, rgba(17, 24, 39, 0.96), rgba(31, 41, 55, 0.86));
+  display: grid;
+  place-items: center;
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 0.86rem;
+  letter-spacing: 0.03em;
+}
+
+.smart-copy-publication-cover.compact {
+  aspect-ratio: 1.8;
+  border-radius: 10px;
+}
+
+.smart-copy-publication-cover img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.smart-copy-publication-cover span {
+  padding: 0 12px;
+  text-align: center;
+}
+
 .smart-copy-publication-history-layout {
   display: grid;
   grid-template-columns: minmax(0, 1.05fr) minmax(320px, 0.95fr);
@@ -3146,7 +3180,7 @@ select.input option:focus {
   display: grid;
   gap: 8px;
   align-content: start;
-  min-height: 116px;
+  min-height: 176px;
   padding: 12px;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -10713,6 +10747,14 @@ textarea.input {
   text-decoration-color: #9a5b00;
 }
 
+.manual-editor-transcript-token.cut-catchphrase,
+.manual-editor-transcript-punctuation.cut-catchphrase,
+.manual-editor-transcript-pause.cut-catchphrase {
+  background: rgba(217, 119, 6, 0.14);
+  color: #b45309;
+  text-decoration-color: #b45309;
+}
+
 .manual-editor-transcript-token.cut-repeated,
 .manual-editor-transcript-punctuation.cut-repeated,
 .manual-editor-transcript-pause.cut-repeated {
@@ -10859,6 +10901,46 @@ textarea.input {
   width: 100%;
 }
 
+.manual-editor-rule-suboptions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.manual-editor-rule-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid rgba(15, 118, 110, 0.14);
+  border-radius: 999px;
+  background: rgba(240, 253, 250, 0.86);
+  color: #16443f;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.manual-editor-rule-chip input {
+  margin: 0;
+}
+
+.manual-editor-rule-chip strong {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #16443f;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.manual-editor-rule-chip:has(input:disabled) {
+  opacity: 0.55;
+}
+
+.manual-editor-rule-reset {
+  justify-self: start;
+}
+
 @media (max-width: 1180px) {
   .manual-editor-rule-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -10928,6 +11010,11 @@ textarea.input {
 .manual-editor-rule-sample.rule-filler {
   background: rgba(245, 158, 11, 0.14);
   color: #9a5b00;
+}
+
+.manual-editor-rule-sample.rule-catchphrase {
+  background: rgba(217, 119, 6, 0.14);
+  color: #b45309;
 }
 
 .manual-editor-rule-sample.rule-repeated {
@@ -11031,6 +11118,10 @@ textarea.input {
   color: #0f172a;
   font-size: 13px;
   font-weight: 700;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+  line-height: 1.45;
 }
 
 .manual-editor-smart-suggestion-reason,

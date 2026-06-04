@@ -66,6 +66,25 @@ from roughcut.db.models import (
     TranscriptSegment,
 )
 from roughcut.db.session import get_session, get_session_factory
+from roughcut.edit.cut_analysis import (
+    ARTIFACT_TYPE_CUT_ANALYSIS,
+    CUT_ANALYSIS_SCHEMA_VERSION,
+    build_cut_analysis_payload,
+    cut_analysis_accepted_cuts,
+    cut_analysis_candidate_items,
+    cut_analysis_silence_segments,
+)
+from roughcut.edit.refine_decisions import (
+    ARTIFACT_TYPE_REFINE_DECISION_PLAN,
+    REFINE_DECISION_PLAN_SCHEMA_VERSION,
+    build_refine_decision_plan_from_render_plan,
+    build_refine_decision_plan_payload,
+    resolve_refine_keep_segments_for_timeline,
+)
+from roughcut.edit.smart_cut_rules import (
+    default_smart_cut_rules_payload,
+    normalize_smart_cut_rules_payload,
+)
 from roughcut.pipeline.celery_app import celery_app
 from roughcut.pipeline.job_rerun import (
     JobRerunPlan,
@@ -98,13 +117,26 @@ from roughcut.media.subtitle_projection_validation import (
     validate_projected_subtitles_against_source,
     validate_projected_subtitles_against_transcript,
 )
+from roughcut.media.variant_timeline_bundle import (
+    variant_cut_evidence_summary,
+    variant_high_energy_keeps,
+    variant_high_risk_cuts,
+    variant_llm_cut_review,
+    variant_refine_decision_summary,
+    variant_review_flags,
+    variant_timeline_diagnostics,
+)
 from roughcut.media.subtitle_spans import (
+    drop_redundant_synthetic_word_payloads,
     has_unsafe_unmatched_alnum_units,
+    sanitize_transcript_segment_word_rows,
     subtitle_display_unit_key,
     subtitle_display_units,
     subtitle_span_alignment_diagnostics,
     subtitle_span_token_payloads,
+    word_payloads_have_collapsed_timing,
 )
+from roughcut.publication_intelligence import generate_publication_scheme
 from roughcut.media.subtitle_fingerprint import subtitle_payload_fingerprint
 from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER
 from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER
@@ -328,6 +360,7 @@ class ManualEditorApplyIn(BaseModel):
     subtitle_overrides: list[ManualEditorSubtitleOverrideIn] = Field(default_factory=list)
     subtitle_replacements: list[ManualEditorSubtitleReplacementIn] = Field(default_factory=list)
     video_transform: ManualEditorVideoTransformIn | None = None
+    smart_cut_rules: dict[str, Any] | None = None
     video_summary: str | None = None
     base_timeline_id: str | None = None
     base_timeline_version: int | None = None
@@ -361,29 +394,19 @@ class ManualEditorSilenceOut(BaseModel):
     duration_sec: float
     source: str = "audio_vad"
 
-
-class ManualEditorSmartDeleteOut(BaseModel):
-    start: float
-    end: float
-    duration_sec: float
-    reason: str
-    source: str = "auto_edit_decision"
-    confidence: float | None = None
-    detail: str | None = None
-    evidence: list[str] = Field(default_factory=list)
-
-
 class ManualEditorRuleSegmentOut(BaseModel):
     start: float
     end: float
     duration_sec: float
-    kind: Literal["filler", "repeated", "pause", "smart_delete"]
+    kind: Literal["filler", "catchphrase", "repeated", "pause", "smart_delete"]
     reason: str
     source: str = "auto_edit_decision"
     confidence: float | None = None
     detail: str | None = None
     evidence: list[str] = Field(default_factory=list)
     auto_applied: bool = True
+    filler_mode: Literal["standalone", "continuous"] | None = None
+    source_text: str | None = None
 
 
 class ManualEditorWordOut(BaseModel):
@@ -437,12 +460,14 @@ class ManualEditorSessionOut(BaseModel):
     base_keep_segments: list[ManualEditorSegmentOut] = Field(default_factory=list)
     silence_segments: list[ManualEditorSilenceOut] = Field(default_factory=list)
     rule_segments: list[ManualEditorRuleSegmentOut] = Field(default_factory=list)
-    smart_delete_segments: list[ManualEditorSmartDeleteOut] = Field(default_factory=list)
+    cut_analysis: dict[str, Any] | None = None
+    refine_decision_plan: dict[str, Any] | None = None
     source_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
     projected_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
     subtitle_overrides: list[ManualEditorSubtitleOverrideIn] = Field(default_factory=list)
     video_transform: ManualEditorVideoTransformIn | None = None
     base_video_transform: ManualEditorVideoTransformIn | None = None
+    smart_cut_rules: dict[str, Any] | None = None
     draft_saved_at: str | None = None
     draft_note: str | None = None
     editable: bool = True
@@ -1642,18 +1667,12 @@ def _manual_editor_silence_payload(segment: dict[str, Any], *, source: str = "au
     )
 
 
-_MANUAL_EDITOR_SMART_DELETE_REASONS = {
-    "rollback_instruction",
-    "restart_retake",
-    "restart_cue",
-    "noise_subtitle",
-    "low_signal_subtitle",
-    "long_non_dialogue",
-    "timing_trim",
-    "micro_keep",
-    "micro_keep_bridge",
-    "gap_fill",
-}
+def _manual_editor_smart_cut_rules_payload(payload: Any) -> dict[str, Any] | None:
+    if payload is None:
+        return default_smart_cut_rules_payload()
+    normalized = normalize_smart_cut_rules_payload(payload)
+    return normalized or default_smart_cut_rules_payload()
+
 
 _MANUAL_EDITOR_FRONTEND_MANAGED_AUTO_CUT_REASONS = {
     "silence",
@@ -1673,6 +1692,7 @@ _MANUAL_EDITOR_FRONTEND_MANAGED_AUTO_CUT_REASONS = {
 
 _MANUAL_EDITOR_SMART_DELETE_REASON_LABELS = {
     "filler_word": "规则候选：口头填充音",
+    "catchphrase_phrase": "规则候选：口头禅",
     "repeated_speech": "规则候选：重复口误",
     "rollback_instruction": "口播指令回删前段",
     "restart_retake": "疑似重录废片",
@@ -1688,6 +1708,7 @@ _MANUAL_EDITOR_SMART_DELETE_REASON_LABELS = {
 
 _MANUAL_EDITOR_RULE_KIND_BY_REASON = {
     "filler_word": "filler",
+    "catchphrase_phrase": "catchphrase",
     "repeated_speech": "repeated",
     "silence": "pause",
     "rollback_instruction": "smart_delete",
@@ -1704,7 +1725,7 @@ _MANUAL_EDITOR_RULE_KIND_BY_REASON = {
 
 
 def _manual_editor_smart_delete_source(item: dict[str, Any]) -> tuple[str, float | None]:
-    if str(item.get("candidate_stage") or "").strip() == "manual_editor_full_transcript":
+    if str(item.get("candidate_stage") or "").strip() in {"manual_editor_full_transcript", "manual_editor_smart_cut_rules"}:
         try:
             return "manual_editor_rule_candidate", round(float(item.get("score", 0.0) or 0.0), 3)
         except (TypeError, ValueError):
@@ -1716,86 +1737,6 @@ def _manual_editor_smart_delete_source(item: dict[str, Any]) -> tuple[str, float
         except (TypeError, ValueError):
             return "llm_cut_review", None
     return "auto_edit_decision", None
-
-
-def _manual_editor_is_smart_delete_cut(item: dict[str, Any]) -> bool:
-    reason = str(item.get("reason") or "").strip()
-    llm_review = item.get("llm_review") if isinstance(item.get("llm_review"), dict) else {}
-    verdict = str(llm_review.get("verdict") or "").strip().lower()
-    if verdict == "keep":
-        return False
-    if verdict == "cut":
-        return True
-    evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
-    tags = {str(tag).strip() for tag in (evidence.get("tags") or []) if str(tag).strip()}
-    try:
-        retake_score = float(evidence.get("retake_score", 0.0) or 0.0)
-        removal_score = float(evidence.get("removal_score", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        retake_score = 0.0
-        removal_score = 0.0
-    if reason == "restart_retake":
-        signals = {str(signal).strip() for signal in list(item.get("signals") or []) if str(signal).strip()}
-        return "restart_cue_context" in tags or any("restart_cue" in signal for signal in signals)
-    if reason in _MANUAL_EDITOR_SMART_DELETE_REASONS:
-        return True
-    return retake_score >= 0.5 and removal_score >= 0.25 and "restart_cue_context" in tags
-
-
-def _manual_editor_smart_delete_payload(item: dict[str, Any]) -> ManualEditorSmartDeleteOut | None:
-    if not _manual_editor_is_smart_delete_cut(item):
-        return None
-    try:
-        start = max(0.0, float(item.get("start", 0.0) or 0.0))
-        end = max(start, float(item.get("end", start) or start))
-    except (TypeError, ValueError):
-        return None
-    if end <= start + 0.02:
-        return None
-    reason = str(item.get("reason") or "").strip() or "smart_delete"
-    source, confidence = _manual_editor_smart_delete_source(item)
-    llm_review = item.get("llm_review") if isinstance(item.get("llm_review"), dict) else {}
-    evidence_payload = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
-    evidence: list[str] = []
-    for text in list(llm_review.get("evidence") or []):
-        cleaned = str(text).strip()
-        if cleaned:
-            evidence.append(cleaned)
-    for key in ("previous_text", "next_text"):
-        cleaned = str(evidence_payload.get(key) or "").strip()
-        if cleaned:
-            evidence.append(cleaned)
-    detail = str(llm_review.get("reason") or "").strip() or _MANUAL_EDITOR_SMART_DELETE_REASON_LABELS.get(reason)
-    return ManualEditorSmartDeleteOut(
-        start=round(start, 3),
-        end=round(end, 3),
-        duration_sec=round(end - start, 3),
-        reason=reason,
-        source=source,
-        confidence=confidence,
-        detail=detail or None,
-        evidence=list(dict.fromkeys(evidence))[:4],
-    )
-
-
-def _manual_editor_smart_delete_segments(editorial_analysis: dict[str, Any] | None) -> list[ManualEditorSmartDeleteOut]:
-    accepted_cuts = [
-        item
-        for item in list((editorial_analysis or {}).get("accepted_cuts") or [])
-        if isinstance(item, dict)
-    ]
-    rule_candidates = [
-        item
-        for item in list((editorial_analysis or {}).get("manual_editor_rule_candidates") or [])
-        if isinstance(item, dict)
-    ]
-    segments = [
-        normalized
-        for item in [*accepted_cuts, *rule_candidates]
-        if (normalized := _manual_editor_smart_delete_payload(item)) is not None
-    ]
-    segments.sort(key=lambda item: (item.start, item.end))
-    return segments
 
 
 def _manual_editor_rule_segment_payload(item: dict[str, Any]) -> ManualEditorRuleSegmentOut | None:
@@ -1824,7 +1765,7 @@ def _manual_editor_rule_segment_payload(item: dict[str, Any]) -> ManualEditorRul
             evidence.append(cleaned)
     detail = str(llm_review.get("reason") or "").strip() or _MANUAL_EDITOR_SMART_DELETE_REASON_LABELS.get(reason)
     auto_applied = bool(item.get("auto_applied"))
-    if str(item.get("candidate_stage") or "").strip() == "manual_editor_full_transcript":
+    if str(item.get("candidate_stage") or "").strip() in {"manual_editor_full_transcript", "manual_editor_smart_cut_rules"}:
         auto_applied = False
     return ManualEditorRuleSegmentOut(
         start=round(start, 3),
@@ -1837,20 +1778,13 @@ def _manual_editor_rule_segment_payload(item: dict[str, Any]) -> ManualEditorRul
         detail=detail or None,
         evidence=list(dict.fromkeys(evidence))[:4],
         auto_applied=auto_applied,
+        filler_mode=str(item.get("filler_mode") or "").strip() or None,
+        source_text=str(item.get("source_text") or "").strip() or None,
     )
 
 
 def _manual_editor_rule_segments(editorial_analysis: dict[str, Any] | None) -> list[ManualEditorRuleSegmentOut]:
-    accepted_cuts = [
-        item
-        for item in list((editorial_analysis or {}).get("accepted_cuts") or [])
-        if isinstance(item, dict)
-    ]
-    rule_candidates = [
-        item
-        for item in list((editorial_analysis or {}).get("manual_editor_rule_candidates") or [])
-        if isinstance(item, dict)
-    ]
+    accepted_cuts, rule_candidates = cut_analysis_candidate_items(editorial_analysis)
     segments = [
         normalized
         for item in [*accepted_cuts, *rule_candidates]
@@ -1868,6 +1802,127 @@ def _manual_editor_rule_segments(editorial_analysis: dict[str, Any] | None) -> l
         seen.add(key)
         deduped.append(segment)
     return deduped
+
+
+def _manual_editor_cut_analysis_payload(
+    artifact_payload: dict[str, Any] | None,
+    editorial_analysis: dict[str, Any] | None,
+    *,
+    source_name: str,
+    job_flow_mode: str,
+    source_subtitles: list[dict[str, Any]] | None = None,
+    smart_cut_rules: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if isinstance(artifact_payload, dict) and str(artifact_payload.get("schema") or "").strip() == CUT_ANALYSIS_SCHEMA_VERSION:
+        return build_cut_analysis_payload(
+            editorial_analysis=artifact_payload,
+            source_name=source_name,
+            job_flow_mode=job_flow_mode,
+            source_subtitles=source_subtitles,
+            smart_cut_rules=smart_cut_rules,
+        )
+    return build_cut_analysis_payload(
+        editorial_analysis=editorial_analysis,
+        source_name=source_name,
+        job_flow_mode=job_flow_mode,
+        source_subtitles=source_subtitles,
+        smart_cut_rules=smart_cut_rules,
+    )
+
+
+async def _load_manual_editor_cut_analysis_payload(
+    session: AsyncSession,
+    *,
+    job: Job,
+    editorial_timeline_payload: dict[str, Any] | None,
+    source_subtitles: list[dict[str, Any]] | None = None,
+    smart_cut_rules: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    current_cut_analysis_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job.id,
+        artifact_types=(ARTIFACT_TYPE_CUT_ANALYSIS,),
+    )
+    editorial_analysis = (
+        editorial_timeline_payload.get("analysis")
+        if isinstance(editorial_timeline_payload, dict) and isinstance(editorial_timeline_payload.get("analysis"), dict)
+        else None
+    )
+    return _manual_editor_cut_analysis_payload(
+        current_cut_analysis_artifact.data_json
+        if current_cut_analysis_artifact and isinstance(current_cut_analysis_artifact.data_json, dict)
+        else None,
+        editorial_analysis,
+        source_name=str(job.source_name or ""),
+        job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
+        source_subtitles=source_subtitles,
+        smart_cut_rules=smart_cut_rules,
+    )
+
+
+def _manual_editor_refine_decision_plan_payload(
+    artifact_payload: dict[str, Any] | None,
+    *,
+    keep_segments: list[dict[str, Any]],
+    source_duration_sec: float,
+    subtitle_fingerprint: str | None,
+    render_plan_version: int | None,
+    cut_analysis: dict[str, Any] | None,
+    audio_defaults: dict[str, Any] | None,
+    video_transform: dict[str, Any] | None,
+    smart_cut_rules: dict[str, Any] | None,
+    mode: str,
+    note: str | None = None,
+    editorial_timeline_id: str | None = None,
+    editorial_timeline_version: int | None = None,
+) -> dict[str, Any]:
+    if isinstance(artifact_payload, dict) and str(artifact_payload.get("schema") or "").strip() == REFINE_DECISION_PLAN_SCHEMA_VERSION:
+        return artifact_payload
+    return build_refine_decision_plan_payload(
+        keep_segments=keep_segments,
+        source_duration_sec=source_duration_sec,
+        mode=mode,
+        subtitle_fingerprint=subtitle_fingerprint,
+        render_plan_version=render_plan_version,
+        cut_analysis=cut_analysis,
+        audio_defaults=audio_defaults,
+        video_transform=video_transform,
+        smart_cut_rules=smart_cut_rules,
+        note=note,
+        editorial_timeline_id=editorial_timeline_id,
+        editorial_timeline_version=editorial_timeline_version,
+    )
+
+
+def _manual_editor_build_refine_decision_plan_from_render_plan(
+    *,
+    keep_segments: list[dict[str, Any]],
+    source_duration_sec: float,
+    subtitle_fingerprint: str | None,
+    render_plan_data: dict[str, Any] | None,
+    render_plan_version: int | None,
+    cut_analysis: dict[str, Any] | None,
+    video_transform: dict[str, Any] | None,
+    smart_cut_rules: dict[str, Any] | None,
+    mode: str,
+    note: str | None = None,
+    editorial_timeline_id: str | None = None,
+    editorial_timeline_version: int | None = None,
+) -> dict[str, Any]:
+    return build_refine_decision_plan_from_render_plan(
+        keep_segments=keep_segments,
+        source_duration_sec=source_duration_sec,
+        mode=mode,
+        subtitle_fingerprint=subtitle_fingerprint,
+        render_plan_data=render_plan_data if isinstance(render_plan_data, dict) else {},
+        render_plan_version=render_plan_version,
+        cut_analysis=cut_analysis,
+        video_transform=video_transform,
+        smart_cut_rules=smart_cut_rules,
+        note=note,
+        editorial_timeline_id=editorial_timeline_id,
+        editorial_timeline_version=editorial_timeline_version,
+    )
 
 
 def _manual_editor_final_subtitle_text(item: dict[str, Any]) -> str:
@@ -2023,6 +2078,10 @@ def _manual_editor_projection_entries_use_canonical(entries: list[dict[str, Any]
     return any(str(item.get("projection_source") or "") == "canonical_transcript" for item in entries)
 
 
+def _manual_editor_drop_redundant_synthetic_words(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return drop_redundant_synthetic_word_payloads(words)
+
+
 def _manual_editor_word_payload(item: dict[str, Any], *, prefer_raw_text: bool = False) -> ManualEditorWordOut | None:
     try:
         start = max(0.0, float(item.get("start", 0.0) or 0.0))
@@ -2075,13 +2134,14 @@ async def _load_manual_editor_word_payloads(
     rows = result.scalars().all()
     if not rows:
         return []
+    sanitize_transcript_segment_word_rows(rows)
     latest_version = max(int(row.version or 1) for row in rows)
     words: list[dict[str, Any]] = []
     for row in rows:
         if int(row.version or 1) != latest_version:
             continue
         row_words: list[dict[str, Any]] = []
-        for word in list(row.words_json or []):
+        for word in _manual_editor_drop_redundant_synthetic_words(list(row.words_json or [])):
             if not isinstance(word, dict):
                 continue
             payload = _manual_editor_word_payload(word, prefer_raw_text=prefer_raw_text)
@@ -2159,36 +2219,16 @@ def _manual_editor_normalize_word_payloads_for_text(words: list[dict[str, Any]],
                 "source": raw_word.get("source") or "transcript_words",
             }
         )
-    if _manual_editor_word_payloads_have_collapsed_timing(normalized):
+    sanitized = drop_redundant_synthetic_word_payloads(normalized)
+    if len(sanitized) != len(normalized):
         return []
-    return normalized
+    if _manual_editor_word_payloads_have_collapsed_timing(sanitized):
+        return []
+    return sanitized
 
 
 def _manual_editor_word_payloads_have_collapsed_timing(words: list[dict[str, Any]]) -> bool:
-    timed: list[tuple[float, float]] = []
-    for word in words:
-        try:
-            start = float(word.get("start", 0.0) or 0.0)
-            end = float(word.get("end", start) or start)
-        except (TypeError, ValueError):
-            continue
-        if end <= start:
-            continue
-        timed.append((start, end))
-    if len(timed) < 4:
-        return False
-    tiny_count = sum(1 for start, end in timed if end <= start + 0.006)
-    duplicate_count = sum(
-        1
-        for previous, current in zip(timed, timed[1:])
-        if abs(previous[0] - current[0]) < 0.001 and abs(previous[1] - current[1]) < 0.001
-    )
-    if tiny_count / len(timed) > 0.25:
-        return True
-    if duplicate_count >= 2:
-        return True
-    span = max(end for _, end in timed) - min(start for start, _ in timed)
-    return len(timed) >= 8 and span < 0.12
+    return word_payloads_have_collapsed_timing(words)
 
 
 def _attach_manual_editor_words_to_subtitles(
@@ -2296,6 +2336,52 @@ def _manual_editor_word_belongs_to_range(word: dict[str, Any], *, start: float, 
     duration = max(word_end - word_start, 0.001)
     center = (word_start + word_end) / 2.0
     return overlap / duration >= 0.5 or start <= center < end
+
+
+def _manual_editor_projection_item_has_row_word_timing_mismatch(
+    item: dict[str, Any],
+    *,
+    tolerance_sec: float = 0.35,
+) -> bool:
+    words = [
+        word
+        for word in drop_redundant_synthetic_word_payloads(list(item.get("words") or item.get("words_json") or []))
+        if isinstance(word, dict)
+    ]
+    if not words:
+        return False
+    try:
+        row_start = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
+        row_end = float(item.get("end_time", item.get("end", row_start)) or row_start)
+    except (TypeError, ValueError):
+        return False
+    if row_end <= row_start:
+        return False
+    timed: list[tuple[float, float]] = []
+    for word in words:
+        try:
+            start = float(word.get("start", 0.0) or 0.0)
+            end = float(word.get("end", start) or start)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        timed.append((start, end))
+    if not timed:
+        return False
+    word_start = min(start for start, _ in timed)
+    word_end = max(end for _, end in timed)
+    return word_start < row_start - tolerance_sec or word_end > row_end + tolerance_sec
+
+
+def _manual_editor_sanitize_projection_item(item: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(item)
+    if not _manual_editor_projection_item_has_row_word_timing_mismatch(payload):
+        return payload
+    payload.pop("words", None)
+    payload.pop("words_json", None)
+    payload.pop("transcript_text", None)
+    return payload
 
 
 def _manual_editor_represented_words_for_subtitle(
@@ -3168,6 +3254,7 @@ def _manual_editor_transcript_source_rows(
         final_text = _manual_editor_apply_source_text_corrections(row.text, context_text=context_text)
         if not final_text:
             continue
+        row_words = _manual_editor_drop_redundant_synthetic_words(list(row.words_json or []))
         index = int(row.segment_index if row.segment_index is not None else fallback_index)
         rows.append(
             {
@@ -3181,7 +3268,7 @@ def _manual_editor_transcript_source_rows(
                 "text_final": final_text,
                 "words": [
                     dict(word)
-                    for word in list(row.words_json or [])
+                    for word in row_words
                     if isinstance(word, dict)
                 ],
                 "projection_source": "transcript_segment",
@@ -3245,15 +3332,24 @@ async def _load_manual_editor_source_subtitle_dicts(session: AsyncSession, *, jo
     )
     transcript_rows = list(transcript_result.scalars().all())
     if transcript_rows:
+        sanitize_transcript_segment_word_rows(transcript_rows)
         if not context_text:
             context_text = "\n".join([str(getattr(job, "source_name", "") or ""), *(row.text for row in transcript_rows)])
         transcript_source_rows = _manual_editor_transcript_source_rows(transcript_rows, context_text=context_text)
         if transcript_source_rows:
-            return _manual_editor_split_long_subtitle_rows(transcript_source_rows, reindex_fragments=True)
+            return _manual_editor_split_long_subtitle_rows(
+                transcript_source_rows,
+                reindex_fragments=True,
+                context_text=context_text,
+            )
 
     canonical_rows = _manual_editor_canonical_segment_source_rows(canonical_layer, context_text=context_text)
     if canonical_rows:
-        return _manual_editor_split_long_subtitle_rows(canonical_rows, reindex_fragments=True)
+        return _manual_editor_split_long_subtitle_rows(
+            canonical_rows,
+            reindex_fragments=True,
+            context_text=context_text,
+        )
 
     result = await session.execute(
         select(SubtitleItem)
@@ -3268,7 +3364,11 @@ async def _load_manual_editor_source_subtitle_dicts(session: AsyncSession, *, jo
         )
         context_text = "\n".join(part for part in context_parts if part)
     subtitle_item_rows = _manual_editor_subtitle_item_source_rows(subtitle_rows, context_text=context_text)
-    return _manual_editor_split_long_subtitle_rows(subtitle_item_rows, reindex_fragments=True)
+    return _manual_editor_split_long_subtitle_rows(
+        subtitle_item_rows,
+        reindex_fragments=True,
+        context_text=context_text,
+    )
 
 
 def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> ManualEditorSubtitleOut:
@@ -3437,13 +3537,39 @@ def _manual_editor_projection_should_use_source_fallback(
         transcript_segments=source_subtitles,
         keep_segments=keep_segments,
     )
-    return bool(validation.get("blocking"))
+    return _manual_editor_transcript_projection_blocking_is_significant(validation)
+
+
+def _manual_editor_transcript_projection_blocking_is_significant(validation: dict[str, Any] | None) -> bool:
+    payload = validation if isinstance(validation, dict) else {}
+    if not bool(payload.get("blocking")):
+        return False
+    kept_count = max(0, int(payload.get("kept_speech_unit_count") or 0))
+    blocking_count = max(0, int(payload.get("blocking_issue_count") or 0))
+    if blocking_count <= 0:
+        return False
+    blocking_examples = [
+        item
+        for item in list(payload.get("blocking_examples") or [])
+        if isinstance(item, dict)
+    ]
+    if any(
+        str(item.get("type") or "").strip() == "speech_segment"
+        or len(str(item.get("text") or "").strip()) >= 2
+        or float(item.get("duration_sec") or 0.0) >= 0.6
+        for item in blocking_examples
+    ):
+        return True
+    if kept_count <= 120:
+        return True
+    return (blocking_count / max(1, kept_count)) >= 0.03
 
 
 def _manual_editor_split_long_subtitle_rows(
     subtitles: list[dict[str, Any]],
     *,
     reindex_fragments: bool = False,
+    context_text: str = "",
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     next_index = max(
@@ -3458,6 +3584,22 @@ def _manual_editor_split_long_subtitle_rows(
         if not isinstance(item, dict):
             continue
         text = _manual_editor_final_subtitle_text(item)
+        raw_segmentation_text = normalize_source_transcript_text(
+            item.get("transcript_text")
+            or item.get("text_raw")
+            or item.get("text")
+            or text
+        )
+        segmentation_text = raw_segmentation_text or text
+        correction_context = "\n".join(
+            part
+            for part in (
+                str(context_text or "").strip(),
+                str(text or "").strip(),
+                str(segmentation_text or "").strip(),
+            )
+            if part
+        )
         try:
             start_time = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
             end_time = float(item.get("end_time", item.get("end", start_time)) or start_time)
@@ -3470,6 +3612,7 @@ def _manual_editor_split_long_subtitle_rows(
             if isinstance(word, dict) and str(word.get("word") or word.get("raw_text") or word.get("text") or "").strip()
         ]
         pieces: list[dict[str, Any]]
+        pieces_have_word_segmented_timings = False
         if timed_words:
             segmentation_result = segment_subtitles(
                 [
@@ -3477,7 +3620,7 @@ def _manual_editor_split_long_subtitle_rows(
                         segment_index=int(item.get("index", len(rows)) or len(rows)),
                         start_time=start_time,
                         end_time=end_time,
-                        text=text,
+                        text=segmentation_text,
                         words_json=timed_words,
                     )
                 ],
@@ -3489,40 +3632,72 @@ def _manual_editor_split_long_subtitle_rows(
                     "start_time": float(getattr(entry, "start", start_time) or start_time),
                     "end_time": float(getattr(entry, "end", end_time) or end_time),
                     "text": str(
-                        getattr(entry, "text_norm", None)
-                        or getattr(entry, "text_raw", None)
+                        getattr(entry, "text_raw", None)
+                        or getattr(entry, "text_norm", None)
+                        or ""
+                    ),
+                    "timing_text": str(
+                        getattr(entry, "text_raw", None)
+                        or getattr(entry, "text_norm", None)
                         or ""
                     ),
                 }
                 for entry in list(segmentation_result.entries or [])
                 if str(
-                    getattr(entry, "text_norm", None)
-                    or getattr(entry, "text_raw", None)
+                    getattr(entry, "text_raw", None)
+                    or getattr(entry, "text_norm", None)
                     or ""
                 ).strip()
             ]
+            pieces_have_word_segmented_timings = bool(pieces)
             if not pieces:
                 pieces = split_subtitle_display_item(
                     start_time=start_time,
                     end_time=end_time,
-                    text=text,
+                    text=segmentation_text,
                     max_duration_sec=6.0,
                     max_chars=32,
                 )
+                for piece in pieces:
+                    piece["timing_text"] = str(piece.get("text") or "")
+                pieces_have_word_segmented_timings = False
         else:
             pieces = split_subtitle_display_item(
                 start_time=start_time,
                 end_time=end_time,
-                text=text,
+                text=segmentation_text,
                 max_duration_sec=6.0,
                 max_chars=32,
             )
+            for piece in pieces:
+                piece["timing_text"] = str(piece.get("text") or "")
+        original_piece_timing_texts = [str(piece.get("timing_text") or piece.get("text") or "") for piece in pieces]
         pieces = _manual_editor_rebalance_split_leading_particles(pieces)
         pieces = _manual_editor_rebalance_split_dangling_boundaries(pieces)
+        rebalanced_piece_timing_texts = [str(piece.get("timing_text") or piece.get("text") or "") for piece in pieces]
+        split_boundary_rebalanced = rebalanced_piece_timing_texts != original_piece_timing_texts
+        for piece in pieces:
+            piece_text = str(piece.get("text") or "")
+            corrected_piece_text = _manual_editor_apply_source_text_corrections(
+                piece_text,
+                context_text=correction_context,
+            )
+            if corrected_piece_text:
+                piece["text"] = corrected_piece_text
         if len(pieces) <= 1:
             rows.append(_manual_editor_tighten_source_row_to_display_words(dict(item), fallback_text=text))
             continue
-        piece_timings = _manual_editor_split_piece_timings_from_words(item, pieces)
+        piece_timings = (
+            [None for _piece in pieces]
+            if pieces_have_word_segmented_timings and not split_boundary_rebalanced
+            else _manual_editor_split_piece_timings_from_words(
+                item,
+                [
+                    {"text": str(piece.get("timing_text") or piece.get("text") or "")}
+                    for piece in pieces
+                ],
+            )
+        )
         original_index = int(item.get("index")) if item.get("index") is not None else next_index
         next_index = max(next_index, original_index + 1)
         for fragment_index, piece in enumerate(pieces):
@@ -3597,6 +3772,10 @@ def _manual_editor_rebalance_split_leading_particles(pieces: list[dict[str, Any]
             continue
         rows[index - 1]["text"] = f"{previous_text}{moved}"
         rows[index]["text"] = remaining
+        previous_timing_text = str(rows[index - 1].get("timing_text") or previous_text)
+        current_timing_text = str(rows[index].get("timing_text") or current_text)
+        rows[index - 1]["timing_text"] = f"{previous_timing_text}{moved}"
+        rows[index]["timing_text"] = current_timing_text[match.end():]
     return rows
 
 
@@ -3614,6 +3793,10 @@ def _manual_editor_rebalance_split_dangling_boundaries(pieces: list[dict[str, An
                 continue
             rows[index - 1]["text"] = "".join([*previous_units, *current_units[:move_count]])
             rows[index]["text"] = "".join(current_units[move_count:])
+            previous_timing_units = subtitle_display_units(str(rows[index - 1].get("timing_text") or ""))
+            current_timing_units = subtitle_display_units(str(rows[index].get("timing_text") or ""))
+            rows[index - 1]["timing_text"] = "".join([*previous_timing_units, *current_timing_units[:move_count]])
+            rows[index]["timing_text"] = "".join(current_timing_units[move_count:])
             changed = True
         if not changed:
             break
@@ -3625,6 +3808,10 @@ def _manual_editor_rebalance_split_dangling_boundaries(pieces: list[dict[str, An
             continue
         rows[index - 1]["text"] = "".join(previous_units[:-move_count])
         rows[index]["text"] = "".join([*previous_units[-move_count:], *current_units])
+        previous_timing_units = subtitle_display_units(str(rows[index - 1].get("timing_text") or ""))
+        current_timing_units = subtitle_display_units(str(rows[index].get("timing_text") or ""))
+        rows[index - 1]["timing_text"] = "".join(previous_timing_units[:-move_count])
+        rows[index]["timing_text"] = "".join([*previous_timing_units[-move_count:], *current_timing_units])
     return rows
 
 
@@ -3638,6 +3825,27 @@ def _manual_editor_leading_units_to_move_for_split_boundary(previous_units: list
 
     last_unit = previous_units[-1]
     last_key = subtitle_display_unit_key(last_unit)
+
+    previous_text = "".join(previous_units)
+    current_text = "".join(current_units)
+    previous_compact = _manual_editor_compact_text_key(previous_text)
+    current_compact = _manual_editor_compact_text_key(current_text)
+
+    if previous_compact.endswith("E") and (current_text.startswith("C手电") or current_text.startswith("C电筒")):
+        return 3
+
+    model_tail_match = re.search(r"([A-Z]{2,6}\d?)$", previous_compact)
+    if model_tail_match and current_units:
+        leading_digit_units: list[str] = []
+        for unit in current_units[:2]:
+            if unit in _MANUAL_EDITOR_CN_DIGIT_UNITS:
+                leading_digit_units.append(unit)
+                continue
+            break
+        if leading_digit_units:
+            candidate = f"{model_tail_match.group(1)}{''.join(leading_digit_units)}"
+            if re.fullmatch(r"[A-Z]{2,6}\d{2,4}", candidate):
+                return len(leading_digit_units)
 
     if re.fullmatch(r"[a-z]", last_key, re.IGNORECASE) and current_units[0] in _MANUAL_EDITOR_CN_DIGIT_UNITS:
         count = 0
@@ -3713,6 +3921,7 @@ def _manual_editor_split_piece_timings_from_words(
     for piece in pieces:
         piece_units = [subtitle_display_unit_key(char) for char in subtitle_display_units(str(piece.get("text") or ""))]
         matched: list[dict[str, Any]] = []
+        matched_indexes: list[int] = []
         for key in piece_units:
             positions = unit_positions.get(str(key)) or []
             position_index = bisect.bisect_left(positions, cursor)
@@ -3720,17 +3929,49 @@ def _manual_editor_split_piece_timings_from_words(
                 continue
             match_index = positions[position_index]
             matched.append(word_units[match_index])
+            matched_indexes.append(match_index)
             cursor = match_index + 1
         if len(matched) / max(1, len(piece_units)) < 0.55:
             timings.append(None)
             continue
+        if matched_indexes:
+            matched_span = matched_indexes[-1] - matched_indexes[0] + 1
+            if matched_span > 0 and len(matched_indexes) / matched_span < 0.45:
+                timings.append(None)
+                continue
         start = min(float(unit["start"]) for unit in matched)
         end = max(float(unit["end"]) for unit in matched)
         if end <= start:
             timings.append(None)
             continue
+        if not _manual_editor_split_piece_timing_matches_expected_window(piece, start=start, end=end):
+            timings.append(None)
+            continue
         timings.append((round(start, 3), round(end, 3)))
     return timings
+
+
+def _manual_editor_split_piece_timing_matches_expected_window(
+    piece: dict[str, Any],
+    *,
+    start: float,
+    end: float,
+) -> bool:
+    try:
+        expected_start = float(piece.get("start_time", start) or start)
+        expected_end = float(piece.get("end_time", expected_start) or expected_start)
+    except (TypeError, ValueError):
+        return True
+    if expected_end <= expected_start:
+        return True
+    expected_duration = expected_end - expected_start
+    actual_duration = end - start
+    if actual_duration <= 0.0:
+        return False
+    tolerance = max(0.4, min(1.0, expected_duration * 0.35))
+    if start < expected_start - tolerance or end > expected_end + tolerance:
+        return False
+    return actual_duration <= max(expected_duration * 1.8, expected_duration + 1.2)
 
 
 def _manual_editor_tighten_source_row_to_display_words(
@@ -3878,12 +4119,39 @@ def _manual_keep_segments_from_editorial_payload(payload: dict[str, Any] | None)
     return healed
 
 
+def _manual_editor_base_keep_segment_dicts(
+    editorial_timeline_payload: dict[str, Any] | None,
+    *,
+    refine_plan_payload: dict[str, Any] | None,
+    editorial_timeline_id: str,
+    editorial_timeline_version: int,
+    source_duration_sec: float,
+) -> list[dict[str, float]]:
+    refine_resolved = resolve_refine_keep_segments_for_timeline(
+        refine_plan_payload,
+        editorial_timeline_id=editorial_timeline_id,
+        editorial_timeline_version=editorial_timeline_version,
+        fallback_segments=[],
+    )
+    if refine_resolved:
+        if source_duration_sec > 0.0:
+            try:
+                return _normalize_manual_keep_segments(refine_resolved, source_duration_sec=source_duration_sec)
+            except HTTPException:
+                pass
+        return [
+            {"start": round(max(0.0, float(item.get("start", 0.0) or 0.0)), 3), "end": round(max(0.0, float(item.get("end", 0.0) or 0.0)), 3)}
+            for item in refine_resolved
+            if float(item.get("end", 0.0) or 0.0) > float(item.get("start", 0.0) or 0.0)
+        ]
+    return _manual_keep_segments_from_editorial_payload(editorial_timeline_payload)
+
+
 def _manual_editor_frontend_managed_auto_cut_ranges(
-    editorial_analysis: dict[str, Any] | None,
+    analysis_payload: dict[str, Any] | None,
 ) -> list[dict[str, float]]:
     ranges: list[dict[str, float]] = []
-    accepted_cuts = list((editorial_analysis or {}).get("accepted_cuts") or [])
-    for item in accepted_cuts:
+    for item in cut_analysis_accepted_cuts(analysis_payload):
         if not isinstance(item, dict):
             continue
         reason = str(item.get("reason") or "").strip()
@@ -3936,13 +4204,13 @@ def _manual_editor_range_overlaps_any(
 def _manual_editor_restore_frontend_managed_auto_cuts(
     keep_segments: list[Any],
     *,
-    editorial_analysis: dict[str, Any] | None,
+    analysis_payload: dict[str, Any] | None,
     source_duration_sec: float,
 ) -> list[dict[str, float]]:
     if source_duration_sec <= 0.05:
         return _normalize_manual_keep_segments(keep_segments, source_duration_sec=source_duration_sec)
     normalized_keep_segments = _normalize_manual_keep_segments(keep_segments, source_duration_sec=source_duration_sec)
-    managed_ranges = _manual_editor_frontend_managed_auto_cut_ranges(editorial_analysis)
+    managed_ranges = _manual_editor_frontend_managed_auto_cut_ranges(analysis_payload)
     if not managed_ranges:
         return normalized_keep_segments
     managed_deleted_ranges = [
@@ -5018,12 +5286,28 @@ async def _build_manual_editor_session(
         raise HTTPException(status_code=404, detail="当前任务还没有可编辑时间线。")
     render_plan_timeline = await _load_latest_timeline_by_type(session, job_id=job.id, timeline_type="render_plan")
     media_meta_artifact = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
+    refine_decision_plan_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job.id,
+        artifact_types=(ARTIFACT_TYPE_REFINE_DECISION_PLAN,),
+    )
     media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
     source_duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
 
+    resolved_base_keep_segment_dicts = _manual_editor_base_keep_segment_dicts(
+        editorial_timeline.data_json if isinstance(editorial_timeline.data_json, dict) else None,
+        refine_plan_payload=(
+            refine_decision_plan_artifact.data_json
+            if refine_decision_plan_artifact and isinstance(refine_decision_plan_artifact.data_json, dict)
+            else None
+        ),
+        editorial_timeline_id=str(editorial_timeline.id),
+        editorial_timeline_version=int(editorial_timeline.version or 1),
+        source_duration_sec=source_duration_sec,
+    )
     raw_base_keep_segments = [
         _manual_editor_segment_payload(segment, index=index)
-        for index, segment in enumerate(_manual_keep_segments_from_editorial_payload(editorial_timeline.data_json or {}))
+        for index, segment in enumerate(resolved_base_keep_segment_dicts)
     ]
     if source_duration_sec <= 0.0:
         source_duration_sec = max((segment.end for segment in raw_base_keep_segments), default=0.0)
@@ -5043,34 +5327,10 @@ async def _build_manual_editor_session(
             ]
         )
         manual_projection_items = [
-            item
+            _manual_editor_sanitize_projection_item(item)
             for item in list(subtitle_projection.get("items") or [])
             if isinstance(item, dict)
         ]
-
-    editorial_analysis = (editorial_timeline.data_json or {}).get("analysis")
-    raw_silence_segments = list(editorial_analysis.get("silence_segments") or []) if isinstance(editorial_analysis, dict) else []
-    silence_segments = [
-        normalized
-        for item in raw_silence_segments
-        if isinstance(item, dict)
-        if (normalized := _manual_editor_silence_payload(item)) is not None
-    ]
-    rule_segments = _manual_editor_rule_segments(
-        editorial_analysis if isinstance(editorial_analysis, dict) else None
-    )
-    smart_delete_segments = _manual_editor_smart_delete_segments(
-        editorial_analysis if isinstance(editorial_analysis, dict) else None
-    )
-    restored_base_keep_segment_dicts = _manual_editor_restore_frontend_managed_auto_cuts(
-        raw_base_keep_segments,
-        editorial_analysis=editorial_analysis if isinstance(editorial_analysis, dict) else None,
-        source_duration_sec=source_duration_sec,
-    )
-    restored_base_keep_segments = [
-        _manual_editor_segment_payload(segment, index=index)
-        for index, segment in enumerate(restored_base_keep_segment_dicts)
-    ]
 
     raw_subtitle_dicts, _projection_data = await _load_latest_subtitle_payloads(
         session,
@@ -5079,6 +5339,37 @@ async def _build_manual_editor_session(
         fallback_to_items=False,
     )
     source_subtitle_dicts = await _load_manual_editor_aligned_source_subtitle_dicts(session, job=job)
+    current_smart_cut_rules = _manual_editor_smart_cut_rules_payload(
+        refine_decision_plan_artifact.data_json.get("smart_cut_rules")
+        if refine_decision_plan_artifact
+        and isinstance(refine_decision_plan_artifact.data_json, dict)
+        else None
+    )
+    cut_analysis_payload = await _load_manual_editor_cut_analysis_payload(
+        session,
+        job=job,
+        editorial_timeline_payload=editorial_timeline.data_json if isinstance(editorial_timeline.data_json, dict) else None,
+        source_subtitles=source_subtitle_dicts,
+        smart_cut_rules=current_smart_cut_rules,
+    )
+    raw_silence_segments = cut_analysis_silence_segments(cut_analysis_payload)
+    silence_segments = [
+        normalized
+        for item in raw_silence_segments
+        if isinstance(item, dict)
+        if (normalized := _manual_editor_silence_payload(item)) is not None
+    ]
+    rule_segments = _manual_editor_rule_segments(cut_analysis_payload)
+    restored_base_keep_segment_dicts = _manual_editor_restore_frontend_managed_auto_cuts(
+        raw_base_keep_segments,
+        analysis_payload=cut_analysis_payload,
+        source_duration_sec=source_duration_sec,
+    )
+    restored_base_keep_segments = [
+        _manual_editor_segment_payload(segment, index=index)
+        for index, segment in enumerate(restored_base_keep_segment_dicts)
+    ]
+
     subtitle_fingerprint = _manual_editor_subtitle_fingerprint(source_subtitle_dicts)
     timeline_subtitle_fingerprint = _manual_editor_subtitle_fingerprint(raw_subtitle_dicts or source_subtitle_dicts)
     latest_subtitle_created_at = await _manual_editor_latest_subtitle_revision_created_at(session, job_id=job.id)
@@ -5104,7 +5395,6 @@ async def _build_manual_editor_session(
         base_keep_segments = [
             _manual_editor_segment_payload({"start": 0.0, "end": source_duration_sec}, index=0)
         ]
-        smart_delete_segments = []
     else:
         base_keep_segments = raw_base_keep_segments
     if not _manual_editor_stored_projection_matches_subtitles(
@@ -5118,6 +5408,12 @@ async def _build_manual_editor_session(
 
     draft_saved_at: str | None = None
     draft_note: str | None = None
+    smart_cut_rules = _manual_editor_smart_cut_rules_payload(
+        refine_decision_plan_artifact.data_json.get("smart_cut_rules")
+        if refine_decision_plan_artifact
+        and isinstance(refine_decision_plan_artifact.data_json, dict)
+        else None
+    )
     base_video_summary = await _load_manual_editor_base_video_summary(session, job_id=job.id)
     video_summary = base_video_summary
     draft_artifact = await _load_latest_optional_artifact(
@@ -5151,7 +5447,7 @@ async def _build_manual_editor_session(
                 ) if raw_draft_keep_segments else []
                 normalized_draft_keep_segments = _manual_editor_restore_frontend_managed_auto_cuts(
                     normalized_draft_keep_segments,
-                    editorial_analysis=editorial_analysis if isinstance(editorial_analysis, dict) else None,
+                    analysis_payload=cut_analysis_payload,
                     source_duration_sec=source_duration_sec,
                 ) if normalized_draft_keep_segments else []
             except (HTTPException, TypeError, ValueError):
@@ -5178,9 +5474,31 @@ async def _build_manual_editor_session(
                 ]
             )
         video_transform = _manual_video_transform_payload(draft_payload.get("video_transform"))
+        smart_cut_rules = _manual_editor_smart_cut_rules_payload(draft_payload.get("smart_cut_rules")) or smart_cut_rules
         video_summary = _normalize_manual_video_summary(draft_payload.get("video_summary")) or base_video_summary
         draft_saved_at = str(draft_payload.get("saved_at") or "") or None
         draft_note = str(draft_payload.get("note") or "") or None
+
+    refine_decision_plan_payload = _manual_editor_refine_decision_plan_payload(
+        refine_decision_plan_artifact.data_json
+        if refine_decision_plan_artifact and isinstance(refine_decision_plan_artifact.data_json, dict)
+        else None,
+        keep_segments=[segment.model_dump(include={"start", "end"}) for segment in keep_segments],
+        source_duration_sec=source_duration_sec,
+        subtitle_fingerprint=subtitle_fingerprint,
+        render_plan_version=int(render_plan_timeline.version) if render_plan_timeline is not None else None,
+        cut_analysis=cut_analysis_payload,
+        audio_defaults={
+            **dict(render_plan_data.get("loudness") or {}),
+            **dict(render_plan_data.get("voice_processing") or {}),
+        },
+        video_transform=video_transform,
+        smart_cut_rules=smart_cut_rules,
+        mode="manual_refine" if draft_active else "auto_refine",
+        note=draft_note,
+        editorial_timeline_id=str(editorial_timeline.id),
+        editorial_timeline_version=int(editorial_timeline.version or 1),
+    )
 
     manual_projection_suspicious = _projection_has_suspicious_subtitle_timing(
         manual_projection_items,
@@ -5253,7 +5571,8 @@ async def _build_manual_editor_session(
         base_keep_segments=base_keep_segments,
         silence_segments=silence_segments,
         rule_segments=rule_segments,
-        smart_delete_segments=smart_delete_segments,
+        cut_analysis=cut_analysis_payload,
+        refine_decision_plan=refine_decision_plan_payload,
         source_subtitles=[
             _manual_editor_subtitle_payload(item, index=index)
             for index, item in enumerate(source_subtitle_dicts)
@@ -5265,6 +5584,7 @@ async def _build_manual_editor_session(
         subtitle_overrides=[ManualEditorSubtitleOverrideIn(**item) for item in subtitle_overrides],
         video_transform=ManualEditorVideoTransformIn(**video_transform),
         base_video_transform=ManualEditorVideoTransformIn(**base_video_transform),
+        smart_cut_rules=smart_cut_rules,
         draft_saved_at=draft_saved_at,
         draft_note=draft_note,
         editable=session_detail is None,
@@ -5461,6 +5781,7 @@ async def save_manual_editor_draft(
         else []
     )
     video_transform = _manual_video_transform_payload(request.video_transform)
+    smart_cut_rules = _manual_editor_smart_cut_rules_payload(request.smart_cut_rules)
     video_summary = _normalize_manual_video_summary(request.video_summary)
     saved_at = datetime.now(timezone.utc).isoformat()
     await _persist_manual_video_summary_evidence(
@@ -5497,9 +5818,44 @@ async def save_manual_editor_draft(
                 "subtitle_overrides": subtitle_override_payloads,
                 "subtitle_replacements": subtitle_replacement_payloads,
                 "video_transform": video_transform,
+                "smart_cut_rules": smart_cut_rules,
                 "video_summary": video_summary,
                 "note": str(request.note or "").strip() or None,
             },
+        )
+    )
+    current_cut_analysis_payload = await _load_manual_editor_cut_analysis_payload(
+        session,
+        job=job,
+        editorial_timeline_payload=editorial_timeline.data_json if isinstance(editorial_timeline.data_json, dict) else None,
+        source_subtitles=current_source_subtitles,
+        smart_cut_rules=smart_cut_rules,
+    )
+    session.add(
+        Artifact(
+            job_id=job.id,
+            artifact_type=ARTIFACT_TYPE_CUT_ANALYSIS,
+            data_json=current_cut_analysis_payload,
+        )
+    )
+    session.add(
+        Artifact(
+            job_id=job.id,
+            artifact_type=ARTIFACT_TYPE_REFINE_DECISION_PLAN,
+            data_json=_manual_editor_build_refine_decision_plan_from_render_plan(
+                keep_segments=keep_segments,
+                source_duration_sec=source_duration_sec,
+                mode="manual_refine",
+                subtitle_fingerprint=subtitle_fingerprint,
+                render_plan_data=render_plan_timeline.data_json if isinstance(render_plan_timeline.data_json, dict) else {},
+                render_plan_version=int(render_plan_timeline.version or 1) if render_plan_timeline is not None else None,
+                cut_analysis=current_cut_analysis_payload,
+                video_transform=video_transform,
+                smart_cut_rules=smart_cut_rules,
+                note=str(request.note or "").strip() or None,
+                editorial_timeline_id=str(editorial_timeline.id),
+                editorial_timeline_version=int(editorial_timeline.version or 1),
+            ),
         )
     )
     await session.commit()
@@ -5621,6 +5977,7 @@ async def apply_manual_editor_timeline(
     subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
     subtitle_replacement_payloads = _manual_subtitle_replacement_payloads(request.subtitle_replacements)
     video_transform = _manual_video_transform_payload(request.video_transform)
+    smart_cut_rules = _manual_editor_smart_cut_rules_payload(request.smart_cut_rules)
     video_summary = _normalize_manual_video_summary(request.video_summary)
     previous_render_plan = dict(render_plan_timeline.data_json or {})
     remapped_subtitles = _apply_manual_subtitle_overrides(
@@ -5760,6 +6117,22 @@ async def apply_manual_editor_timeline(
         manual_editorial_timeline.otio_data = None
     session.add(manual_editorial_timeline)
     await session.flush()
+    current_cut_analysis_payload = await _load_manual_editor_cut_analysis_payload(
+        session,
+        job=job,
+        editorial_timeline_payload=manual_editorial_timeline.data_json
+        if isinstance(manual_editorial_timeline.data_json, dict)
+        else None,
+        source_subtitles=source_subtitle_dicts,
+        smart_cut_rules=smart_cut_rules,
+    )
+    session.add(
+        Artifact(
+            job_id=job.id,
+            artifact_type=ARTIFACT_TYPE_CUT_ANALYSIS,
+            data_json=current_cut_analysis_payload,
+        )
+    )
 
     previous_video_transform = _manual_video_transform_from_render_plan(previous_render_plan)
     resolution_transform_changed = (
@@ -5841,6 +6214,26 @@ async def apply_manual_editor_timeline(
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
     manual_render_plan = await save_render_plan(job.id, rebuilt_render_plan, session)
+    session.add(
+        Artifact(
+            job_id=job.id,
+            artifact_type=ARTIFACT_TYPE_REFINE_DECISION_PLAN,
+            data_json=_manual_editor_build_refine_decision_plan_from_render_plan(
+                keep_segments=keep_segments,
+                source_duration_sec=source_duration_sec,
+                mode="manual_refine",
+                subtitle_fingerprint=subtitle_fingerprint,
+                render_plan_data=rebuilt_render_plan,
+                render_plan_version=int(manual_render_plan.version or 1),
+                cut_analysis=current_cut_analysis_payload,
+                video_transform=render_video_transform,
+                smart_cut_rules=smart_cut_rules,
+                note=str(request.note or "").strip() or None,
+                editorial_timeline_id=str(manual_editorial_timeline.id),
+                editorial_timeline_version=int(manual_editorial_timeline.version or 1),
+            ),
+        )
+    )
     manual_summary_updated_at = datetime.now(timezone.utc).isoformat()
     await _persist_manual_video_summary_evidence(
         session,
@@ -6442,11 +6835,21 @@ async def get_job_publication_plan(
         session=session,
     )
     existing_attempts = await list_publication_attempts(session, job_id=str(job_id))
+    platform_options = await _resolve_job_publication_platform_options(
+        job=job,
+        render_output=render_output,
+        packaging=packaging,
+        creator_profile=creator_profile,
+        existing_attempts=existing_attempts,
+        requested_platforms=None,
+        requested_platform_options=None,
+    )
     return build_publication_plan(
         job=job,
         render_output=render_output,
         platform_packaging=packaging,
         creator_profile=creator_profile,
+        platform_options=platform_options,
         existing_attempts=existing_attempts,
     )
 
@@ -6481,14 +6884,24 @@ async def publish_job_to_bound_platforms(
         creator_profile_id=payload.creator_profile_id,
         session=session,
     )
+    existing_attempts = await list_publication_attempts(session, job_id=str(job_id))
+    platform_options = await _resolve_job_publication_platform_options(
+        job=job,
+        render_output=render_output,
+        packaging=packaging,
+        creator_profile=creator_profile,
+        existing_attempts=existing_attempts,
+        requested_platforms=payload.platforms,
+        requested_platform_options=payload.platform_options,
+    )
     plan = build_publication_plan(
         job=job,
         render_output=render_output,
         platform_packaging=packaging,
         creator_profile=creator_profile,
         requested_platforms=payload.platforms,
-        platform_options=payload.platform_options,
-        existing_attempts=await list_publication_attempts(session, job_id=str(job_id)),
+        platform_options=platform_options,
+        existing_attempts=existing_attempts,
     )
     if not publication_plan_is_publishable(plan):
         return _build_job_publication_executor_gate_response(plan)
@@ -6517,6 +6930,75 @@ async def publish_job_to_bound_platforms(
     await session.commit()
     _dispatch_publication_worker_tick(len(result.get("created_attempts") or []))
     return result
+
+
+def _normalize_publish_platform_options_payload(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw_key, raw_value in value.items():
+        if not isinstance(raw_value, dict):
+            continue
+        key = str(raw_key or "").strip().lower().replace("_", "-")
+        if key:
+            normalized[key] = dict(raw_value)
+    return normalized
+
+
+def _derive_job_publication_folder_path(job: Job, render_output: RenderOutput | None) -> str:
+    candidates = [
+        str(getattr(job, "source_path", "") or "").strip(),
+        str(getattr(render_output, "output_path", "") or "").strip() if render_output is not None else "",
+        str(getattr(job, "output_dir", "") or "").strip(),
+    ]
+    for raw in candidates:
+        if not raw:
+            continue
+        try:
+            path = Path(raw).expanduser()
+        except Exception:
+            continue
+        if path.suffix:
+            return str(path.parent)
+        return str(path)
+    return ""
+
+
+async def _resolve_job_publication_platform_options(
+    *,
+    job: Job,
+    render_output: RenderOutput | None,
+    packaging: dict[str, Any] | None,
+    creator_profile: dict[str, Any] | None,
+    existing_attempts: list[dict[str, Any]],
+    requested_platforms: list[str] | None,
+    requested_platform_options: Any,
+) -> dict[str, dict[str, Any]]:
+    explicit_options = _normalize_publish_platform_options_payload(requested_platform_options)
+    if explicit_options:
+        return explicit_options
+    if not creator_profile:
+        return {}
+    base_plan = build_publication_plan(
+        job=job,
+        render_output=render_output,
+        platform_packaging=packaging,
+        creator_profile=creator_profile,
+        requested_platforms=requested_platforms,
+        platform_options=None,
+        existing_attempts=existing_attempts,
+    )
+    if not list(base_plan.get("targets") or []):
+        return {}
+    folder_path = _derive_job_publication_folder_path(job, render_output)
+    scheme = await generate_publication_scheme(
+        plan=base_plan,
+        creator_profile=creator_profile,
+        folder_path=folder_path,
+        browser="chrome",
+        force_probe=False,
+    )
+    return _normalize_publish_platform_options_payload(scheme.get("platform_options"))
 
 
 def _dispatch_publication_worker_tick(created_count: int) -> None:
@@ -8457,9 +8939,15 @@ def _iter_publication_cover_path_candidates(attempt: Any) -> list[str]:
     request_payload = getattr(attempt, "request_payload", None)
     if isinstance(request_payload, dict):
         add(request_payload.get("cover_path"))
+        for slot in request_payload.get("cover_slots") or []:
+            if isinstance(slot, dict):
+                add(slot.get("cover_path"))
         copy_material = request_payload.get("copy_material")
         if isinstance(copy_material, dict):
             add(copy_material.get("cover_path"))
+            for slot in copy_material.get("cover_slots") or []:
+                if isinstance(slot, dict):
+                    add(slot.get("cover_path"))
 
     response_payload = getattr(attempt, "response_payload", None)
     if isinstance(response_payload, dict):
@@ -9039,21 +9527,17 @@ def _resolve_job_quality_preview(artifacts: list[Artifact]) -> dict[str, Any]:
 
 def _resolve_job_timeline_diagnostics_preview(artifacts: list[Artifact]) -> dict[str, Any] | None:
     bundle = _resolve_effective_variant_bundle_from_artifacts(artifacts)
-    timeline_rules = bundle.get("timeline_rules") if isinstance(bundle, dict) else None
-    diagnostics = timeline_rules.get("diagnostics") if isinstance(timeline_rules, dict) else None
+    diagnostics = variant_timeline_diagnostics(bundle)
     if not isinstance(diagnostics, dict):
         return None
 
-    review_flags = diagnostics.get("review_flags") if isinstance(diagnostics.get("review_flags"), dict) else {}
-    llm_cut_review = diagnostics.get("llm_cut_review") if isinstance(diagnostics.get("llm_cut_review"), dict) else {}
-    high_risk_cuts = [item for item in (diagnostics.get("high_risk_cuts") or []) if isinstance(item, dict)]
-    high_energy_keeps = [item for item in (diagnostics.get("high_energy_keeps") or []) if isinstance(item, dict)]
+    review_flags = variant_review_flags(bundle)
+    llm_cut_review = variant_llm_cut_review(bundle)
+    refine_decision_summary = variant_refine_decision_summary(bundle)
+    high_risk_cuts = variant_high_risk_cuts(bundle)
+    high_energy_keeps = variant_high_energy_keeps(bundle)
     review_reasons = [str(item).strip() for item in (review_flags.get("review_reasons") or []) if str(item).strip()]
-    cut_evidence_summary = (
-        diagnostics.get("cut_evidence_summary")
-        if isinstance(diagnostics.get("cut_evidence_summary"), dict)
-        else {}
-    )
+    cut_evidence_summary = variant_cut_evidence_summary(bundle)
 
     preview = {
         "review_recommended": bool(review_flags.get("review_recommended")),
@@ -9067,6 +9551,10 @@ def _resolve_job_timeline_diagnostics_preview(artifacts: list[Artifact]) -> dict
         "llm_restored_cut_count": int(llm_cut_review.get("restored_cut_count") or 0),
         "llm_provider": str(llm_cut_review.get("provider") or "").strip() or None,
         "llm_summary": str(llm_cut_review.get("summary") or "").strip() or None,
+        "refine_mode": str(refine_decision_summary.get("mode") or "").strip() or None,
+        "refine_keep_segment_count": int(refine_decision_summary.get("keep_segment_count") or 0),
+        "refine_candidate_total": int(refine_decision_summary.get("candidate_total") or 0),
+        "refine_manual_confirm_count": int(refine_decision_summary.get("candidate_manual_confirm") or 0),
     }
     if any(
         (

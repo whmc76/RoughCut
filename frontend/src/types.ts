@@ -123,28 +123,19 @@ export type JobManualEditSilence = {
   source?: string;
 };
 
-export type JobManualEditSmartDelete = {
-  start: number;
-  end: number;
-  duration_sec: number;
-  reason: string;
-  source?: string;
-  confidence?: number | null;
-  detail?: string | null;
-  evidence?: string[];
-};
-
 export type JobManualEditRuleSegment = {
   start: number;
   end: number;
   duration_sec: number;
-  kind: "filler" | "repeated" | "pause" | "smart_delete";
+  kind: "filler" | "catchphrase" | "repeated" | "pause" | "smart_delete";
   reason: string;
   source?: string;
   confidence?: number | null;
   detail?: string | null;
   evidence?: string[];
   auto_applied?: boolean;
+  filler_mode?: "standalone" | "continuous" | null;
+  source_text?: string | null;
 };
 
 export type JobManualEditWord = {
@@ -210,12 +201,14 @@ export type JobManualEditSession = {
   base_keep_segments?: JobManualEditSegment[];
   silence_segments?: JobManualEditSilence[];
   rule_segments?: JobManualEditRuleSegment[];
-  smart_delete_segments?: JobManualEditSmartDelete[];
+  cut_analysis?: Record<string, unknown> | null;
+  refine_decision_plan?: Record<string, unknown> | null;
   source_subtitles: JobManualEditSubtitle[];
   projected_subtitles: JobManualEditSubtitle[];
   subtitle_overrides: JobManualEditSubtitleOverride[];
   video_transform?: JobManualVideoTransform | null;
   base_video_transform?: JobManualVideoTransform | null;
+  smart_cut_rules?: Record<string, unknown> | null;
   draft_saved_at?: string | null;
   draft_note?: string | null;
   editable: boolean;
@@ -297,6 +290,7 @@ export type JobManualEditApplyPayload = {
   subtitle_overrides?: JobManualEditSubtitleOverride[];
   subtitle_replacements?: JobManualSubtitleReplacement[];
   video_transform?: JobManualVideoTransform | null;
+  smart_cut_rules?: Record<string, unknown> | null;
   video_summary?: string | null;
   base_timeline_id?: string;
   base_timeline_version?: number;
@@ -1023,6 +1017,8 @@ export type PublicationAttempt = {
   error_message?: string | null;
   request_payload?: Record<string, unknown>;
   response_payload?: Record<string, unknown> | null;
+  cover_path?: string | null;
+  cover_slots?: Array<Record<string, unknown>>;
   runs?: PublicationAttemptRun[];
   created_at: string;
   updated_at: string;

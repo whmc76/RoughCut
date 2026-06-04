@@ -74,13 +74,114 @@ def has_unsafe_unmatched_alnum_units(
     return False
 
 
+def subtitle_word_payload_text(item: dict[str, Any]) -> str:
+    return str(item.get("word") or item.get("raw_text") or item.get("text") or "").strip()
+
+
+def _subtitle_word_normalization_payload(item: dict[str, Any]) -> dict[str, Any]:
+    nested = item.get("raw_payload") if isinstance(item.get("raw_payload"), dict) else None
+    if isinstance(nested, dict):
+        payload = nested.get("_roughcut_asr_normalization")
+        if isinstance(payload, dict):
+            return payload
+    top_level = item.get("_roughcut_asr_normalization")
+    return top_level if isinstance(top_level, dict) else {}
+
+
+def drop_redundant_synthetic_word_payloads(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(words) <= 1:
+        return [dict(word) for word in words if isinstance(word, dict)]
+    sanitized: list[dict[str, Any]] = []
+    entries = [dict(word) for word in words if isinstance(word, dict)]
+    for index, word in enumerate(entries):
+        text = subtitle_word_payload_text(word)
+        if not text:
+            continue
+        try:
+            start = float(word.get("start", 0.0) or 0.0)
+            end = float(word.get("end", start) or start)
+        except (TypeError, ValueError):
+            sanitized.append(word)
+            continue
+        duration = end - start
+        next_word = entries[index + 1] if index + 1 < len(entries) else None
+        if next_word is not None:
+            next_text = subtitle_word_payload_text(next_word)
+            try:
+                next_start = float(next_word.get("start", 0.0) or 0.0)
+                next_end = float(next_word.get("end", next_start) or next_start)
+            except (TypeError, ValueError):
+                next_start = next_end = 0.0
+            normalization = _subtitle_word_normalization_payload(word)
+            next_normalization = _subtitle_word_normalization_payload(next_word)
+            current_unmatched = bool(isinstance(normalization, dict) and normalization.get("matched") is False)
+            next_matched = not isinstance(next_normalization, dict) or next_normalization.get("matched") is not False
+            if (
+                current_unmatched
+                and duration <= 0.02
+                and text == next_text
+                and abs(start - next_start) <= 0.02
+                and (next_end - next_start) >= max(0.03, duration * 3.0)
+                and next_matched
+            ):
+                continue
+        sanitized.append(word)
+    return sanitized
+
+
+def word_payloads_have_collapsed_timing(words: list[dict[str, Any]]) -> bool:
+    timed: list[tuple[float, float]] = []
+    for word in words:
+        try:
+            start = float(word.get("start", 0.0) or 0.0)
+            end = float(word.get("end", start) or start)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        timed.append((start, end))
+    if len(timed) < 4:
+        return False
+    tiny_count = sum(1 for start, end in timed if end <= start + 0.006)
+    duplicate_count = sum(
+        1
+        for previous, current in zip(timed, timed[1:])
+        if abs(previous[0] - current[0]) < 0.001 and abs(previous[1] - current[1]) < 0.001
+    )
+    if tiny_count / len(timed) > 0.25:
+        return True
+    if duplicate_count >= 2:
+        return True
+    span = max(end for _, end in timed) - min(start for start, _ in timed)
+    return len(timed) >= 8 and span < 0.12
+
+
+def sanitize_transcript_segment_word_rows(rows: list[Any]) -> int:
+    changed = 0
+    for row in list(rows or []):
+        if isinstance(row, dict):
+            raw_words = list(row.get("words_json") or [])
+            sanitized = drop_redundant_synthetic_word_payloads(raw_words)
+            if sanitized != raw_words:
+                row["words_json"] = sanitized
+                changed += 1
+            continue
+        raw_words = list(getattr(row, "words_json", None) or [])
+        sanitized = drop_redundant_synthetic_word_payloads(raw_words)
+        if sanitized != raw_words:
+            setattr(row, "words_json", sanitized)
+            changed += 1
+    return changed
+
+
 def normalized_subtitle_words(item: dict[str, Any]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     seen: set[tuple[str, float, float]] = set()
-    for raw_word in list((item or {}).get("words") or (item or {}).get("words_json") or []):
+    raw_words = drop_redundant_synthetic_word_payloads(list((item or {}).get("words") or (item or {}).get("words_json") or []))
+    for raw_word in raw_words:
         if not isinstance(raw_word, dict):
             continue
-        text = str(raw_word.get("word") or raw_word.get("raw_text") or raw_word.get("text") or "").strip()
+        text = subtitle_word_payload_text(raw_word)
         if not text:
             continue
         try:

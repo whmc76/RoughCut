@@ -188,3 +188,45 @@ def test_comparison_target_in_summary_does_not_block_identity_narrative() -> Non
     )
 
     assert "identity_narrative_conflict" not in assessment["issue_codes"]
+
+
+def test_quality_assessment_exposes_refine_decision_summary_signal() -> None:
+    job = Job(
+        source_path="F:/clips/demo.mp4",
+        source_name="demo.mp4",
+        status="done",
+    )
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=[],
+        artifacts=[
+            Artifact(
+                artifact_type="variant_timeline_bundle",
+                data_json={
+                    "variants": {"plain": {"segments": []}},
+                    "timeline_rules": {
+                        "diagnostics": {
+                            "refine_decision_summary": {
+                                "mode": "auto_refine",
+                                "keep_segment_count": 9,
+                                "candidate_total": 6,
+                                "candidate_auto_apply": 4,
+                                "candidate_manual_confirm": 2,
+                            }
+                        }
+                    },
+                },
+            )
+        ],
+        subtitle_items=[_subtitle(0, "演示开场"), _subtitle(1, "继续说明")],
+        completion_candidate=True,
+    )
+
+    assert assessment["signals"]["refine_decision_summary"] == {
+        "mode": "auto_refine",
+        "keep_segment_count": 9,
+        "candidate_total": 6,
+        "candidate_auto_apply": 4,
+        "candidate_manual_confirm": 2,
+    }

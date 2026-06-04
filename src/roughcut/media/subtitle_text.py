@@ -61,6 +61,13 @@ _FLASHLIGHT_MODEL_ALIAS_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?<![A-Za-z0-9])(?:EDC)?(?:幺七|一七|么七)(?![A-Za-z0-9])", re.IGNORECASE), "EDC17"),
     (re.compile(r"(?<![A-Za-z0-9])(?:EDC)?(?:二三|两三)(?![A-Za-z0-9])", re.IGNORECASE), "EDC23"),
     (re.compile(r"(?<![A-Za-z0-9])(?:EDC)?三七(?![A-Za-z0-9])", re.IGNORECASE), "EDC37"),
+    (re.compile(r"(?<![A-Za-z0-9])UHD\s*(?:二零|二〇)(?![A-Za-z0-9])", re.IGNORECASE), "UHD20"),
+    (re.compile(r"(?<![A-Za-z0-9])E\s*C(?=\s*(?:手电|电筒))", re.IGNORECASE), "EDC"),
+    (re.compile(r"(?<![A-Za-z0-9])EC(?=\s*(?:手电|电筒))", re.IGNORECASE), "EDC"),
+)
+_FLASHLIGHT_MODEL_COMPARISON_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])(17|23|37)(\s*(?:跟|和|与|、|/|,|，|或者|或是|还是)\s*)(17|23|37)(?![A-Za-z0-9])",
+    re.IGNORECASE,
 )
 _NOC_CONTEXT_PATTERN = re.compile(r"(?<![A-Za-z0-9])NOC(?![A-Za-z0-9])", re.IGNORECASE)
 _NFC_TOKEN_PATTERN = re.compile(r"(?<![A-Za-z0-9])NFC(?![A-Za-z0-9])", re.IGNORECASE)
@@ -101,6 +108,10 @@ def normalize_flashlight_model_alias_text(text: object) -> str:
     normalized = str(text or "")
     for pattern, replacement in _FLASHLIGHT_MODEL_ALIAS_PATTERNS:
         normalized = pattern.sub(replacement, normalized)
+    normalized = _FLASHLIGHT_MODEL_COMPARISON_PATTERN.sub(
+        lambda match: f"EDC{match.group(1)}{match.group(2)}EDC{match.group(3)}",
+        normalized,
+    )
     return normalized
 
 
@@ -315,7 +326,11 @@ def _collapse_repeated_mixed_anchor_noise(text: str) -> str:
     )
     return re.sub(
         r"([A-Za-z0-9+#.-]{2,})([\u4e00-\u9fff]{1,2})?\1([\u4e00-\u9fff]{1,6})",
-        lambda match: f"{match.group(1)}{match.group(3)}",
+        lambda match: (
+            match.group(0)
+            if re.fullmatch(r"\d+(?:\.\d+)?", str(match.group(1) or ""))
+            else f"{match.group(1)}{match.group(3)}"
+        ),
         normalized,
     )
 

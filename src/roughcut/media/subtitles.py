@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from roughcut.media.subtitle_spans import (
+    drop_redundant_synthetic_word_payloads,
     normalize_subtitle_items_for_timeline_projection,
     split_text_by_timed_span_units,
 )
@@ -653,7 +654,8 @@ def _with_remapped_fragment_text(item: dict[str, Any], text: str) -> dict[str, A
 def _normalized_subtitle_word_payloads(item: dict[str, Any]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     seen: set[tuple[str, float, float]] = set()
-    for raw_word in list((item or {}).get("words") or (item or {}).get("words_json") or []):
+    raw_words = drop_redundant_synthetic_word_payloads(list((item or {}).get("words") or (item or {}).get("words_json") or []))
+    for raw_word in raw_words:
         if not isinstance(raw_word, dict):
             continue
         text = str(raw_word.get("word") or raw_word.get("raw_text") or raw_word.get("text") or "").strip()
@@ -1096,7 +1098,8 @@ def _find_subsequence(values: list[str], target: list[str]) -> int:
 
 def _normalized_subtitle_words(item: dict[str, Any]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
-    for raw_word in list((item or {}).get("words") or (item or {}).get("words_json") or []):
+    raw_words = drop_redundant_synthetic_word_payloads(list((item or {}).get("words") or (item or {}).get("words_json") or []))
+    for raw_word in raw_words:
         if not isinstance(raw_word, dict):
             continue
         text = str(raw_word.get("word") or raw_word.get("raw_text") or raw_word.get("text") or "").strip()

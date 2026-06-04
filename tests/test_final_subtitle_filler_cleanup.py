@@ -109,6 +109,7 @@ def test_normalize_source_transcript_text_preserves_real_spoken_fillers_and_inte
 
 def test_normalize_source_transcript_text_preserves_legitimate_repeated_digits() -> None:
     assert normalize_source_transcript_text("最高2500流明，日用1500流明") == "最高2500流明，日用1500流明"
+    assert normalize_source_transcript_text("峰值能达到10000流明啊") == "峰值能达到10000流明啊"
     assert normalize_editable_subtitle_text("这个8200给你的安全感更足") == "这个8200给你的安全感更足"
 
 

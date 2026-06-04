@@ -98,3 +98,32 @@ def test_score_platform_package_blocks_stale_publish_ready_true_when_preflight_i
     assert result["blocked_count"] == 1
     assert result["platform_scores"][0]["platform"] == "douyin"
     assert result["platform_scores"][0]["status"] == "blocked"
+
+
+def test_score_editing_prefers_variant_bundle_cut_analysis_and_refine_summary() -> None:
+    result = scorecard._score_editing_with_variant_bundle(
+        {"keep_ratio": 0.5, "quality_issue_codes": []},
+        {
+            "analysis": {
+                "accepted_cuts": [],
+                "llm_cut_review": {"reviewed": False, "candidate_count": 0},
+            }
+        },
+        {"editing_accents": {"transitions": {"boundary_indexes": [1, 2]}}},
+        {
+            "variants": {"plain": {"segments": []}},
+            "timeline_rules": {
+                "diagnostics": {
+                    "cut_analysis_summary": {"accepted_cut_count": 3},
+                    "llm_cut_review": {"reviewed": True, "candidate_count": 4},
+                    "refine_decision_summary": {"mode": "auto_refine", "candidate_total": 6},
+                }
+            },
+        },
+    )
+
+    assert result["status"] == "done"
+    assert "accepted_cuts=3" in result["summary"]
+    assert "llm_cut_review=yes" in result["summary"]
+    assert "refine_mode=auto_refine" in result["summary"]
+    assert "refine_candidates=6" in result["summary"]

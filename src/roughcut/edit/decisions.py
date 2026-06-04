@@ -9,7 +9,11 @@ from roughcut.edit.skills import apply_review_focus_overrides, resolve_editing_s
 from roughcut.edit.timeline_contract import audit_edit_decision_contract
 from roughcut.media.scene import SceneBoundary
 from roughcut.media.silence import SilenceSegment
-from roughcut.media.subtitle_spans import build_subtitle_span_alignment, subtitle_display_units
+from roughcut.media.subtitle_spans import (
+    build_subtitle_span_alignment,
+    drop_redundant_synthetic_word_payloads,
+    subtitle_display_units,
+)
 from roughcut.review.video_understanding import normalize_video_understanding_segment_hints
 
 
@@ -878,7 +882,7 @@ def _trusted_word_ranges_from_payload(
     transcript_word: bool,
 ) -> list[dict[str, float]]:
     ranges: list[dict[str, float]] = []
-    for word in list(item.get("words") or item.get("words_json") or []):
+    for word in drop_redundant_synthetic_word_payloads(list(item.get("words") or item.get("words_json") or [])):
         if not isinstance(word, dict):
             continue
         word_text = str(word.get("word") or word.get("raw_text") or "").strip()
@@ -1933,7 +1937,7 @@ def _normalize_transcript_segments(transcript_segments: list[dict[str, Any]]) ->
         if end <= start:
             continue
         words: list[dict[str, Any]] = []
-        for word in payload.get("words") or payload.get("words_json") or []:
+        for word in drop_redundant_synthetic_word_payloads(list(payload.get("words") or payload.get("words_json") or [])):
             if isinstance(word, dict):
                 word_start = _as_float(word.get("start"))
                 word_end = _as_float(word.get("end"), fallback=word_start)

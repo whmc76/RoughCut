@@ -27,7 +27,16 @@ from roughcut.db.models import Artifact, Job, JobStep, ReviewAction, SubtitleIte
 from roughcut.db.session import get_session_factory
 from roughcut.media.audio import extract_audio
 from roughcut.media.probe import probe
-from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
+from roughcut.media.variant_timeline_bundle import (
+    resolve_effective_variant_timeline_bundle,
+    variant_cut_evidence_summary,
+    variant_high_energy_keeps,
+    variant_high_risk_cuts,
+    variant_llm_cut_review,
+    variant_refine_decision_summary,
+    variant_review_flags,
+    variant_timeline_diagnostics,
+)
 from roughcut.packaging.library import list_packaging_assets, resolve_packaging_plan_for_job
 from roughcut.providers.factory import get_reasoning_provider, get_transcription_provider
 from roughcut.review.downstream_context import select_resolved_downstream_profile
@@ -2093,36 +2102,16 @@ def _build_final_review_message(
 
 
 def _build_final_review_diagnostics_lines(variant_timeline_bundle: dict[str, Any] | None) -> list[str]:
-    timeline_rules = (
-        variant_timeline_bundle.get("timeline_rules")
-        if isinstance(variant_timeline_bundle, dict)
-        else None
-    )
-    diagnostics = (
-        timeline_rules.get("diagnostics")
-        if isinstance(timeline_rules, dict)
-        else None
-    )
+    diagnostics = variant_timeline_diagnostics(variant_timeline_bundle)
     if not isinstance(diagnostics, dict):
         return []
 
-    review_flags = diagnostics.get("review_flags") if isinstance(diagnostics.get("review_flags"), dict) else {}
-    high_risk_cuts = [
-        item
-        for item in (diagnostics.get("high_risk_cuts") or [])
-        if isinstance(item, dict)
-    ]
-    llm_cut_review = diagnostics.get("llm_cut_review") if isinstance(diagnostics.get("llm_cut_review"), dict) else {}
-    high_energy_keeps = [
-        item
-        for item in (diagnostics.get("high_energy_keeps") or [])
-        if isinstance(item, dict)
-    ]
-    cut_evidence_summary = (
-        diagnostics.get("cut_evidence_summary")
-        if isinstance(diagnostics.get("cut_evidence_summary"), dict)
-        else {}
-    )
+    review_flags = variant_review_flags(variant_timeline_bundle)
+    high_risk_cuts = variant_high_risk_cuts(variant_timeline_bundle)
+    llm_cut_review = variant_llm_cut_review(variant_timeline_bundle)
+    refine_decision_summary = variant_refine_decision_summary(variant_timeline_bundle)
+    high_energy_keeps = variant_high_energy_keeps(variant_timeline_bundle)
+    cut_evidence_summary = variant_cut_evidence_summary(variant_timeline_bundle)
 
     lines: list[str] = []
     if review_flags.get("review_recommended"):
@@ -2155,6 +2144,16 @@ def _build_final_review_diagnostics_lines(variant_timeline_bundle: dict[str, Any
                 f"- 剪辑证据：{protected_visual} 个 cut 命中过展示保护，"
                 f"{high_protection} 个 cut 带高保护分。"
             )
+
+    refine_mode = str(refine_decision_summary.get("mode") or "").strip()
+    refine_candidate_total = int(refine_decision_summary.get("candidate_total") or 0)
+    refine_manual_confirm = int(refine_decision_summary.get("candidate_manual_confirm") or 0)
+    refine_keep_segment_count = int(refine_decision_summary.get("keep_segment_count") or 0)
+    if refine_mode or refine_candidate_total or refine_keep_segment_count:
+        lines.append(
+            f"- ͳһ�����޶��׶Σ�{refine_mode or 'manual_refine'}��keep �� {refine_keep_segment_count} ����ѡ "
+            f"{refine_candidate_total} �����˹�ȷ�� {refine_manual_confirm} ����"
+        )
 
     for item in high_risk_cuts[:2]:
         start = round(float(item.get("start", 0.0) or 0.0), 2)
@@ -2623,14 +2622,12 @@ def _pick_high_risk_cut_anchor(
     *,
     subtitle_items: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    diagnostics = _final_review_diagnostics_payload(variant_timeline_bundle)
-    if not diagnostics:
+    high_risk_cuts = variant_high_risk_cuts(variant_timeline_bundle)
+    if not high_risk_cuts:
         return None
     best: dict[str, Any] | None = None
     best_score: tuple[float, float] | None = None
-    for item in diagnostics.get("high_risk_cuts") or []:
-        if not isinstance(item, dict):
-            continue
+    for item in high_risk_cuts:
         start_sec = float(item.get("start", 0.0) or 0.0)
         end_sec = max(start_sec, float(item.get("end", start_sec) or start_sec))
         center = start_sec + max(0.0, end_sec - start_sec) * 0.5
@@ -2651,14 +2648,12 @@ def _pick_high_energy_hook_anchor(
     *,
     subtitle_items: list[dict[str, Any]],
 ) -> dict[str, Any] | None:
-    diagnostics = _final_review_diagnostics_payload(variant_timeline_bundle)
-    if not diagnostics:
+    high_energy_keeps = variant_high_energy_keeps(variant_timeline_bundle)
+    if not high_energy_keeps:
         return None
     best: dict[str, Any] | None = None
     best_score: tuple[float, float] | None = None
-    for item in diagnostics.get("high_energy_keeps") or []:
-        if not isinstance(item, dict):
-            continue
+    for item in high_energy_keeps:
         if str(item.get("section_role") or "").strip().lower() != "hook":
             continue
         start_sec = float(item.get("start", 0.0) or 0.0)
@@ -2677,31 +2672,21 @@ def _pick_high_energy_hook_anchor(
 
 
 def _final_review_diagnostics_payload(variant_timeline_bundle: dict[str, Any] | None) -> dict[str, Any] | None:
-    timeline_rules = (
-        variant_timeline_bundle.get("timeline_rules")
-        if isinstance(variant_timeline_bundle, dict)
-        else None
-    )
-    diagnostics = timeline_rules.get("diagnostics") if isinstance(timeline_rules, dict) else None
+    diagnostics = variant_timeline_diagnostics(variant_timeline_bundle)
     return diagnostics if isinstance(diagnostics, dict) else None
 
 
 def _final_review_has_high_risk_cuts(variant_timeline_bundle: dict[str, Any] | None) -> bool:
-    diagnostics = _final_review_diagnostics_payload(variant_timeline_bundle)
-    if not diagnostics:
-        return False
-    return any(isinstance(item, dict) for item in (diagnostics.get("high_risk_cuts") or []))
+    return bool(variant_high_risk_cuts(variant_timeline_bundle))
 
 
 def _final_review_edit_button_action(variant_timeline_bundle: dict[str, Any] | None) -> str:
-    diagnostics = _final_review_diagnostics_payload(variant_timeline_bundle)
-    if not diagnostics:
+    high_risk_cuts = variant_high_risk_cuts(variant_timeline_bundle)
+    if not high_risk_cuts:
         return "edit"
 
     roles: set[str] = set()
-    for item in diagnostics.get("high_risk_cuts") or []:
-        if not isinstance(item, dict):
-            continue
+    for item in high_risk_cuts:
         left_role = str(item.get("left_keep_role") or "").strip().lower()
         right_role = str(item.get("right_keep_role") or "").strip().lower()
         if left_role:

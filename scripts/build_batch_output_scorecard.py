@@ -14,6 +14,13 @@ from sqlalchemy import select
 
 from roughcut.db.models import Artifact, Timeline
 from roughcut.db.session import get_session_factory
+from roughcut.media.variant_timeline_bundle import (
+    variant_cut_analysis_summary,
+    resolve_effective_variant_timeline_bundle,
+    variant_llm_cut_review,
+    variant_refine_decision_summary,
+    variant_timeline_diagnostics,
+)
 from roughcut.publication_platform_matrix import (
     normalize_publication_platform_name,
     platform_manual_handoff_only,
@@ -472,6 +479,67 @@ def _score_editing(job: dict[str, Any], editorial: dict[str, Any], render_plan: 
     }
 
 
+def _score_editing_with_variant_bundle(
+    job: dict[str, Any],
+    editorial: dict[str, Any],
+    render_plan: dict[str, Any],
+    variant_bundle: dict[str, Any] | None,
+) -> dict[str, Any]:
+    resolved_bundle = resolve_effective_variant_timeline_bundle(variant_bundle) or {}
+    if not resolved_bundle:
+        return _score_editing(job, editorial, render_plan)
+
+    diagnostics = variant_timeline_diagnostics(resolved_bundle)
+    cut_analysis_summary = variant_cut_analysis_summary(resolved_bundle)
+    refine_decision_summary = variant_refine_decision_summary(resolved_bundle)
+    llm_cut_review = variant_llm_cut_review(resolved_bundle)
+    keep_ratio = _safe_float(job.get("keep_ratio")) or 0.0
+    accepted_cut_count = int(cut_analysis_summary.get("accepted_cut_count") or 0)
+    llm_reviewed = bool(llm_cut_review.get("reviewed"))
+    llm_error = str(llm_cut_review.get("error") or "").strip()
+    llm_candidate_count = int(llm_cut_review.get("candidate_count") or 0)
+    transitions = (((render_plan.get("editing_accents") or {}).get("transitions")) or {}) if isinstance(render_plan, dict) else {}
+    boundary_indexes = list(transitions.get("boundary_indexes") or []) if isinstance(transitions, dict) else []
+
+    score = 70.0
+    if keep_ratio > 0:
+        score += 10.0
+    if 0.35 <= keep_ratio <= 0.8:
+        score += 8.0
+    if accepted_cut_count:
+        score += min(8.0, accepted_cut_count)
+    if llm_reviewed:
+        score += 6.0
+    elif llm_error:
+        score -= 12.0
+    elif llm_candidate_count > 0:
+        score -= 6.0
+    if boundary_indexes:
+        score += min(6.0, len(boundary_indexes) * 2.0)
+    issue_codes = [str(code).strip() for code in list(job.get("quality_issue_codes") or []) if str(code).strip()]
+    if "edit_plan_llm_cut_review_timeout" in issue_codes:
+        score -= 8.0
+    if "subtitle_sync_issue" in issue_codes:
+        score -= 10.0
+    score = _round_score(score)
+    refine_mode = str(refine_decision_summary.get("mode") or "").strip()
+    refine_candidate_total = int(refine_decision_summary.get("candidate_total") or 0)
+    return {
+        "score": score,
+        "grade": _score_to_grade(score),
+        "status": "done",
+        "summary": (
+            f"保留比 {keep_ratio:.1%}，accepted_cuts={accepted_cut_count}，"
+            f"llm_cut_review={'yes' if llm_reviewed else 'no'}，"
+            f"transition_boundaries={len(boundary_indexes)}"
+            + (f"，refine_mode={refine_mode}" if refine_mode else "")
+            + (f"，refine_candidates={refine_candidate_total}" if refine_candidate_total else "")
+            + (f"，llm_error={llm_error}" if llm_error else "")
+            + (f"，llm_candidates={llm_candidate_count}" if llm_candidate_count else "")
+        ),
+    }
+
+
 def _build_stage_scores(job: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in list(job.get("live_stage_validations") or []):
@@ -572,7 +640,7 @@ async def build_scorecard(batch_report: dict[str, Any]) -> dict[str, Any]:
         tts_score = _score_tts(avatar_plan)
         ai_effects_score = _score_ai_effects(render_plan, render_outputs, variant_bundle)
         subtitle_effects_score = _score_subtitle_effects(render_plan)
-        editing_score = _score_editing(job, editorial, render_plan)
+        editing_score = _score_editing_with_variant_bundle(job, editorial, render_plan, variant_bundle)
         live_stage_scores = _build_stage_scores(job)
 
         scorecard_jobs.append(

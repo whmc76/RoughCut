@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from roughcut.db.models import Artifact, SubtitleItem
+from roughcut.media.subtitle_spans import drop_redundant_synthetic_word_payloads
 from roughcut.providers.transcription.base import TranscriptResult
 from roughcut.review.model_identity import model_numbers_conflict
 from roughcut.speech.alignment import tokenize_alignment_text
@@ -229,7 +230,7 @@ def build_transcript_fact_layer(transcript_segments: list[Any]) -> TranscriptFac
                 end=float(getattr(row, "end_time", 0.0) or 0.0),
                 text=str(getattr(row, "text", "") or ""),
                 speaker=getattr(row, "speaker", None),
-                raw_words=list(getattr(row, "words_json", None) or []),
+                raw_words=drop_redundant_synthetic_word_payloads(list(getattr(row, "words_json", None) or [])),
             )
             for index, row in enumerate(list(transcript_segments or []))
         )
@@ -282,11 +283,14 @@ def _build_transcript_fact_segment(
 
 
 def _build_transcript_fact_words(raw_words: list[Any]) -> list[TranscriptFactWord]:
-    words: list[TranscriptFactWord] = []
+    payloads: list[dict[str, Any]] = []
     for raw_word in list(raw_words or []):
         payload = _coerce_word_payload(raw_word)
         if payload is None:
             continue
+        payloads.append(payload)
+    words: list[TranscriptFactWord] = []
+    for payload in drop_redundant_synthetic_word_payloads(payloads):
         words.append(
             TranscriptFactWord(
                 word=str(payload["word"]),
@@ -978,7 +982,9 @@ def _extract_reference_words_for_timespan(
     segment_start = float(start)
     segment_end = float(end)
     for segment in list(reference_segments or []):
-        raw_words = list(getattr(segment, "words_json", None) or getattr(segment, "words", None) or [])
+        raw_words = drop_redundant_synthetic_word_payloads(
+            list(getattr(segment, "words_json", None) or getattr(segment, "words", None) or [])
+        )
         for source_index, raw_word in enumerate(raw_words):
             payload = _coerce_word_payload(raw_word)
             if payload is None:
@@ -1011,7 +1017,9 @@ def _build_segmentation_adapters_from_transcript_segments(transcript_segments: l
     for index, segment in enumerate(list(transcript_segments or [])):
         start = float(getattr(segment, "start_time", getattr(segment, "start", 0.0)) or 0.0)
         end = float(getattr(segment, "end_time", getattr(segment, "end", start)) or start)
-        raw_words = list(getattr(segment, "words_json", None) or getattr(segment, "words", None) or [])
+        raw_words = drop_redundant_synthetic_word_payloads(
+            list(getattr(segment, "words_json", None) or getattr(segment, "words", None) or [])
+        )
         words_json = [word.as_dict() for word in _build_transcript_fact_words(raw_words)]
         adapters.append(
             SimpleNamespace(

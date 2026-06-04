@@ -466,6 +466,7 @@ async def render_video(
     render_plan: dict,
     editorial_timeline: dict,
     output_path: Path,
+    keep_segments: list[dict[str, Any]] | None = None,
     subtitle_items: list[dict] | None = None,
     overlay_editing_accents: dict[str, Any] | None = None,
     progress_callback: Callable[[float], None] | None = None,
@@ -495,10 +496,10 @@ async def render_video(
     packaging_enabled = any(render_plan.get(key) for key in ("intro", "outro", "insert", "watermark", "music"))
     base_output_path = output_path if not packaging_enabled else output_path.with_name(f"{output_path.stem}.base{output_path.suffix}")
 
-    keep_segments = [
-        s for s in editorial_timeline.get("segments", [])
-        if s.get("type") == "keep"
-    ]
+    keep_segments = _resolve_render_keep_segments(
+        editorial_timeline,
+        explicit_keep_segments=keep_segments,
+    )
     if not keep_segments:
         raise ValueError("No keep segments in editorial timeline")
 
@@ -1605,6 +1606,33 @@ async def _apply_timed_overlays_to_video(
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg timed overlay render failed: {result.stderr[-2000:]}")
     return output_path
+
+
+def _resolve_render_keep_segments(
+    editorial_timeline: dict[str, Any] | None,
+    *,
+    explicit_keep_segments: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    explicit = [
+        {
+            "start": float(item.get("start", 0.0) or 0.0),
+            "end": float(item.get("end", 0.0) or 0.0),
+        }
+        for item in list(explicit_keep_segments or [])
+        if isinstance(item, dict) and float(item.get("end", 0.0) or 0.0) > float(item.get("start", 0.0) or 0.0)
+    ]
+    if explicit:
+        return explicit
+    return [
+        {
+            "start": float(item.get("start", 0.0) or 0.0),
+            "end": float(item.get("end", 0.0) or 0.0),
+        }
+        for item in list((editorial_timeline or {}).get("segments") or [])
+        if isinstance(item, dict)
+        and item.get("type") == "keep"
+        and float(item.get("end", 0.0) or 0.0) > float(item.get("start", 0.0) or 0.0)
+    ]
 
 
 async def _build_timed_overlay_filter_chain(

@@ -14,6 +14,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.db.models import FactClaim, SubtitleCorrection, SubtitleItem, TranscriptSegment
+from roughcut.media.subtitle_spans import drop_redundant_synthetic_word_payloads
 from roughcut.media.subtitle_text import normalize_editable_subtitle_text
 from roughcut.speech.alignment import tokenize_alignment_text
 
@@ -1213,7 +1214,7 @@ def _words_are_usable_for_segmentation(text: str, words: list[dict]) -> bool:
 
 
 def _words_for_segmentation(seg: TranscriptSegment) -> list[dict]:
-    raw_words = list(getattr(seg, "words_json", []) or [])
+    raw_words = drop_redundant_synthetic_word_payloads(list(getattr(seg, "words_json", []) or []))
     if not raw_words:
         return []
     if _words_are_usable_for_segmentation(getattr(seg, "text", ""), raw_words):
@@ -1330,7 +1331,7 @@ def _collect_segmentation_input_stats(segments: list[TranscriptSegment]) -> dict
         "text_only_segment_count": 0,
     }
     for seg in list(segments or []):
-        raw_words = list(getattr(seg, "words_json", []) or [])
+        raw_words = drop_redundant_synthetic_word_payloads(list(getattr(seg, "words_json", []) or []))
         if not raw_words:
             stats["text_only_segment_count"] += 1
             continue

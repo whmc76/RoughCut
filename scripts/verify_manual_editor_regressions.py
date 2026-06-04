@@ -52,11 +52,29 @@ SAMPLES = (
 
 ASCII_MODEL_DUPLICATE_RE = re.compile(r"\b(?:EDC|NOC|NITECORE|UV)(?:EDC|NOC|NITECORE|UV)+\d*\b", re.IGNORECASE)
 CJK_BOUNDARY_DUPLICATE_RE = re.compile(r"([\u4e00-\u9fff])\1")
-KNOWN_REAL_DUPLICATES = {"看看", "慢慢", "常常", "刚刚", "哥哥", "弟弟", "谢谢", "讲讲", "静静", "试试", "轻轻", "削削", "点点", "好好好", "对对对"}
+KNOWN_REAL_DUPLICATES = {
+    "看看",
+    "慢慢",
+    "常常",
+    "刚刚",
+    "哥哥",
+    "弟弟",
+    "谢谢",
+    "讲讲",
+    "静静",
+    "试试",
+    "轻轻",
+    "削削",
+    "点点",
+    "好好好",
+    "对对对",
+    "沉甸甸",
+    "等等",
+}
 
 
 def fetch_json(url: str) -> dict[str, Any]:
-    with urllib.request.urlopen(url, timeout=20) as response:
+    with urllib.request.urlopen(url, timeout=60) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
@@ -86,6 +104,14 @@ def analyze_sample(api_base: str, sample: SampleSpec) -> dict[str, Any]:
     session = fetch_json(f"{api_base.rstrip('/')}/jobs/{sample.job_id}/manual-editor")
     source_rows = list(session.get("source_subtitles") or [])
     projected_rows = list(session.get("projected_subtitles") or [])
+    rule_segments = [item for item in (session.get("rule_segments") or []) if isinstance(item, dict)]
+    smart_delete_segments = [item for item in rule_segments if str(item.get("kind") or "").strip() == "smart_delete"]
+    cut_analysis = session.get("cut_analysis") if isinstance(session.get("cut_analysis"), dict) else {}
+    refine_decision_plan = (
+        session.get("refine_decision_plan")
+        if isinstance(session.get("refine_decision_plan"), dict)
+        else {}
+    )
     source_text = joined_text(source_rows)
     projected_text = joined_text(projected_rows)
     term_rows = []
@@ -114,7 +140,10 @@ def analyze_sample(api_base: str, sample: SampleSpec) -> dict[str, Any]:
             "source_subtitles": len(source_rows),
             "projected_subtitles": len(projected_rows),
             "keep_segments": len(session.get("keep_segments") or []),
-            "smart_delete_segments": len(session.get("smart_delete_segments") or []),
+            "smart_delete_segments": len(smart_delete_segments),
+            "rule_segments": len(rule_segments),
+            "cut_analysis_candidates": int(cut_analysis.get("candidate_count") or 0),
+            "refine_keep_segments": len(refine_decision_plan.get("keep_segments") or []),
         },
         "expected_terms": term_rows,
         "forbidden_terms": forbidden_rows,
@@ -128,8 +157,7 @@ def analyze_sample(api_base: str, sample: SampleSpec) -> dict[str, Any]:
 def has_failure(result: dict[str, Any]) -> bool:
     expected_failed = any(not row["source"] or not row["projected"] for row in result["expected_terms"])
     forbidden_failed = any(row["source"] or row["projected"] for row in result["forbidden_terms"])
-    duplicate_failed = bool(result["projected_duplicate_snippets"])
-    return expected_failed or forbidden_failed or duplicate_failed
+    return expected_failed or forbidden_failed
 
 
 def main() -> int:

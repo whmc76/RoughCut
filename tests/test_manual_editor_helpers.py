@@ -36,13 +36,21 @@ from roughcut.api.jobs import (
     _manual_editor_projection_data_uses_canonical,
     _manual_editor_projection_entries_use_canonical,
     _manual_editor_apply_conflict_detail,
+    _manual_editor_sanitize_projection_item,
+    _manual_editor_transcript_projection_blocking_is_significant,
     _manual_editor_apply_source_text_corrections,
     _manual_editor_apply_transcript_hotword_corrections,
     _manual_editor_asset_path,
     _manual_editor_canonical_segment_source_rows,
     _manual_editor_change_plan,
+    _manual_editor_cut_analysis_payload,
     _manual_editor_prerequisite_detail,
     _manual_editor_preview_assets_response,
+    _manual_editor_base_keep_segment_dicts,
+    _manual_editor_build_refine_decision_plan_from_render_plan,
+    _load_manual_editor_cut_analysis_payload,
+    _manual_editor_restore_frontend_managed_auto_cuts,
+    _manual_editor_smart_cut_rules_payload,
     _manual_editor_normalize_word_payloads_for_text,
     _manual_editor_projected_subtitles_have_duplicate_source_overlap,
     _manual_editor_projection_baseline_rows,
@@ -53,8 +61,8 @@ from roughcut.api.jobs import (
     _manual_editor_subtitle_item_source_rows,
     _manual_editor_split_long_subtitle_rows,
     _manual_projection_has_source_text_mismatch,
-    _manual_editor_smart_delete_segments,
     _manual_keep_segments_from_editorial_payload,
+    _manual_editor_transcript_source_rows,
     _source_file_cache_get,
     _source_file_cache_set,
     _validate_manual_editor_base_revision,
@@ -62,6 +70,15 @@ from roughcut.api.jobs import (
     _normalize_manual_keep_segments,
 )
 from roughcut.edit.otio_export import export_to_otio
+from roughcut.edit.cut_analysis import build_cut_analysis_payload
+from roughcut.edit.refine_decisions import (
+    build_refine_decision_plan_from_render_plan,
+    build_refine_decision_plan_payload,
+    refine_plan_audio_defaults,
+    resolve_refine_keep_segments_for_timeline,
+)
+from roughcut.edit.smart_cut_rules import DEFAULT_SMART_CUT_CATCHPHRASES, DEFAULT_SMART_CUT_FILLERS
+from roughcut.media.render import _resolve_render_keep_segments
 from roughcut.media import manual_editor_assets as manual_editor_assets_module
 from roughcut.media import output as output_module
 from roughcut.media.manual_editor_assets import _fallback_asset_status, _generate_proxy_video, _generate_proxy_webm, _peak_from_pcm, _recommended_preview_gain, _silence_intervals_from_peaks, _thumbnail_timestamps, load_manual_editor_preview_assets, manual_editor_asset_dir
@@ -71,10 +88,13 @@ from roughcut.media.subtitle_projection_validation import (
 )
 from roughcut.pipeline.orchestrator import _artifact_types_for_quality_rerun
 from roughcut.pipeline.steps import (
+    _build_edit_review_bundle_payload,
     _build_edited_subtitle_projection,
+    _build_variant_timeline_bundle,
     _manual_editor_subtitle_items_from_editorial,
     _normalize_subtitle_event,
     _projection_has_suspicious_subtitle_timing,
+    _resolve_keep_segments_from_refine_plan,
     _subtitle_projection_entry_payload,
 )
 
@@ -433,59 +453,6 @@ def test_manual_editor_subtitle_payload_preserves_editable_canonical_body() -> N
     assert payload.text_final == "好，今天给大家介绍，嗯，狐蝠工业。"
 
 
-def test_manual_editor_smart_delete_segments_expose_auto_waste_cuts() -> None:
-    segments = _manual_editor_smart_delete_segments(
-        {
-            "accepted_cuts": [
-                {
-                    "start": 1.2345,
-                    "end": 3.5,
-                    "reason": "restart_retake",
-                    "llm_review": {
-                        "verdict": "cut",
-                        "confidence": 0.91,
-                        "reason": "前一句明确说重来，后一句是重录版本。",
-                        "evidence": ["重来提示", "后一句重复表达"],
-                    },
-                    "evidence": {"previous_text": "说错了重来", "next_text": "正式开始"},
-                },
-                {
-                    "start": 4.0,
-                    "end": 5.0,
-                    "reason": "silence",
-                    "llm_review": {"verdict": "keep", "confidence": 0.88},
-                },
-                {
-                    "start": 6.0,
-                    "end": 6.4,
-                    "reason": "silence",
-                    "llm_review": {"verdict": "cut", "confidence": 0.8},
-                },
-            ],
-            "manual_editor_rule_candidates": [
-                {
-                    "start": 7.0,
-                    "end": 7.2,
-                    "reason": "filler_word",
-                    "score": 0.86,
-                    "candidate_stage": "manual_editor_full_transcript",
-                    "auto_applied": False,
-                }
-            ],
-        }
-    )
-
-    assert len(segments) == 2
-    assert segments[0].start == 1.234
-    assert segments[0].end == 3.5
-    assert segments[0].source == "llm_cut_review"
-    assert segments[0].confidence == 0.91
-    assert segments[0].detail == "前一句明确说重来，后一句是重录版本。"
-    assert segments[1].start == 6.0
-    assert segments[1].end == 6.4
-    assert segments[1].source == "llm_cut_review"
-
-
 def test_manual_editor_rule_segments_expose_typed_full_transcript_candidates() -> None:
     segments = _manual_editor_rule_segments(
         {
@@ -539,6 +506,660 @@ def test_manual_editor_rule_segments_expose_typed_full_transcript_candidates() -
     assert segments[2].reason == "repeated_speech"
     assert segments[3].source == "llm_cut_review"
     assert segments[3].detail == "前一句明确重录，后一句更完整。"
+
+
+def test_manual_editor_segments_accept_cut_analysis_artifact_payload() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={
+            "accepted_cuts": [
+                {
+                    "start": 1.0,
+                    "end": 1.4,
+                    "reason": "silence",
+                }
+            ],
+            "manual_editor_rule_candidates": [
+                {
+                    "start": 2.0,
+                    "end": 2.18,
+                    "reason": "filler_word",
+                    "score": 0.93,
+                    "candidate_stage": "manual_editor_full_transcript",
+                    "auto_applied": False,
+                }
+            ],
+        },
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+    )
+
+    rule_segments = _manual_editor_rule_segments(payload)
+    assert payload["schema"] == "cut_analysis.v1"
+    assert [(item.kind, item.start, item.end) for item in rule_segments] == [
+        ("pause", 1.0, 1.4),
+        ("filler", 2.0, 2.18),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_load_manual_editor_cut_analysis_payload_prefers_artifact_and_reapplies_current_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_load_latest_optional_artifact(*args: object, **kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(
+            data_json={
+                "schema": "cut_analysis.v1",
+                "candidate_count": 1,
+                "rule_candidates": [
+                    {
+                        "start": 0.0,
+                        "end": 0.4,
+                        "reason": "filler_word",
+                        "candidate_stage": "manual_editor_smart_cut_rules",
+                        "source_text": "嗯",
+                        "filler_mode": "standalone",
+                    }
+                ],
+            }
+        )
+
+    monkeypatch.setattr(jobs_module, "_load_latest_optional_artifact", _fake_load_latest_optional_artifact)
+
+    payload = await _load_manual_editor_cut_analysis_payload(
+        SimpleNamespace(),
+        job=SimpleNamespace(id=uuid4(), source_name="demo.mp4", job_flow_mode="manual"),
+        editorial_timeline_payload={"analysis": {"accepted_cuts": [{"start": 2.0, "end": 3.0, "reason": "silence"}]}},
+        source_subtitles=[{"start_time": 0.0, "end_time": 1.0, "text_final": "嗯我们开始"}],
+        smart_cut_rules={
+            "fillerEnabled": True,
+            "fillerStandaloneEnabled": True,
+            "fillerContinuousEnabled": False,
+            "catchphraseEnabled": False,
+            "fillers": "嗯",
+            "catchphrases": "",
+        },
+    )
+
+    assert payload["schema"] == "cut_analysis.v1"
+    assert payload["source_name"] == "demo.mp4"
+    assert any(
+        item.get("reason") == "filler_word"
+        and item.get("source_text") == "嗯"
+        and item.get("candidate_stage") == "manual_editor_smart_cut_rules"
+        for item in (payload.get("rule_candidates") or [])
+        if isinstance(item, dict)
+    )
+
+
+def test_manual_editor_build_refine_decision_plan_from_render_plan_reuses_shared_contract() -> None:
+    payload = _manual_editor_build_refine_decision_plan_from_render_plan(
+        keep_segments=[{"start": 0.0, "end": 5.0}],
+        source_duration_sec=12.0,
+        subtitle_fingerprint="fp-1",
+        render_plan_data={"loudness": {"integrated_lufs": -16.0}},
+        render_plan_version=7,
+        cut_analysis={"candidate_count": 3, "auto_apply_candidate_count": 1, "manual_confirm_candidate_count": 2},
+        video_transform={"rotation_cw": 90},
+        smart_cut_rules={"pauseEnabled": True, "pauseThresholdSec": 0.8},
+        mode="manual_refine",
+        note="manual-note",
+        editorial_timeline_id="timeline-1",
+        editorial_timeline_version=4,
+    )
+
+    assert payload["schema"] == "refine_decision_plan.v1"
+    assert payload["mode"] == "manual_refine"
+    assert payload["keep_segments"] == [{"start": 0.0, "end": 5.0}]
+    assert payload["render_plan_version"] == 7
+    assert payload["smart_cut_rules"]["pauseEnabled"] is True
+    assert payload["video_transform"]["rotation_cw"] == 90
+    assert payload["candidate_summary"]["total"] == 3
+    assert payload["candidate_summary"]["auto_apply"] == 1
+    assert payload["candidate_summary"]["manual_confirm"] == 2
+
+
+def test_cut_analysis_payload_adds_backend_smart_cut_rule_candidates() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={},
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 1.0, "text_final": "嗯我们开始"},
+            {"start_time": 1.0, "end_time": 2.0, "text_final": "这个就是重点"},
+        ],
+        smart_cut_rules={
+            "fillerEnabled": True,
+            "fillerStandaloneEnabled": True,
+            "fillerContinuousEnabled": False,
+            "catchphraseEnabled": True,
+            "fillers": "嗯",
+            "catchphrases": "就是",
+        },
+    )
+
+    candidates = payload["rule_candidates"]
+    assert any(item["reason"] == "filler_word" and item["source_text"] == "嗯" and item["filler_mode"] == "standalone" for item in candidates)
+    assert any(item["reason"] == "catchphrase_phrase" and item["source_text"] == "就是" for item in candidates)
+
+
+def test_cut_analysis_payload_adds_backend_pause_rule_candidates() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={
+            "silence_segments": [
+                {"start": 2.0, "end": 3.1, "duration_sec": 1.1, "source": "audio_vad"},
+            ],
+        },
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[],
+        smart_cut_rules={
+            "pauseEnabled": True,
+            "pauseThresholdSec": 0.8,
+        },
+    )
+
+    candidates = payload["rule_candidates"]
+    assert any(
+        item["reason"] == "silence"
+        and item["candidate_stage"] == "manual_editor_smart_cut_rules"
+        and item["start"] == 2.0
+        and item["end"] == 3.1
+        for item in candidates
+    )
+
+
+def test_manual_editor_cut_analysis_payload_refreshes_schema_artifact_with_current_rules() -> None:
+    payload = _manual_editor_cut_analysis_payload(
+        {
+            "schema": "cut_analysis.v1",
+            "accepted_cuts": [],
+            "rule_candidates": [],
+            "silence_segments": [
+                {"start": 2.0, "end": 3.1, "duration_sec": 1.1, "source": "audio_vad"},
+            ],
+        },
+        None,
+        source_name="demo.mp4",
+        job_flow_mode="manual",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 1.0, "text_final": "嗯我们开始"},
+        ],
+        smart_cut_rules={
+            "fillerEnabled": True,
+            "fillerStandaloneEnabled": True,
+            "fillerContinuousEnabled": False,
+            "pauseEnabled": True,
+            "pauseThresholdSec": 0.8,
+            "fillers": "嗯",
+        },
+    )
+
+    assert any(item["reason"] == "filler_word" for item in payload["rule_candidates"])
+    assert any(item["reason"] == "silence" for item in payload["rule_candidates"])
+
+
+def test_manual_editor_cut_analysis_payload_drops_stale_backend_smart_cut_candidates() -> None:
+    payload = _manual_editor_cut_analysis_payload(
+        {
+            "schema": "cut_analysis.v1",
+            "accepted_cuts": [],
+            "rule_candidates": [
+                {
+                    "start": 0.0,
+                    "end": 0.12,
+                    "reason": "filler_word",
+                    "candidate_stage": "manual_editor_smart_cut_rules",
+                    "source_text": "嗯",
+                    "filler_mode": "standalone",
+                },
+                {
+                    "start": 2.0,
+                    "end": 2.3,
+                    "reason": "repeated_speech",
+                    "candidate_stage": "manual_editor_full_transcript",
+                },
+            ],
+            "silence_segments": [
+                {"start": 2.0, "end": 3.1, "duration_sec": 1.1, "source": "audio_vad"},
+            ],
+        },
+        None,
+        source_name="demo.mp4",
+        job_flow_mode="manual",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 1.0, "text_final": "嗯我们开始"},
+        ],
+        smart_cut_rules={
+            "fillerEnabled": False,
+            "pauseEnabled": False,
+        },
+    )
+
+    reasons = [item["reason"] for item in payload["rule_candidates"]]
+    stages = [item.get("candidate_stage") for item in payload["rule_candidates"]]
+    assert reasons == ["repeated_speech"]
+    assert stages == ["manual_editor_full_transcript"]
+
+
+def test_variant_timeline_bundle_carries_refine_decision_plan() -> None:
+    bundle = _build_variant_timeline_bundle(
+        editorial_timeline_id="timeline-1",
+        render_plan_timeline_id="timeline-2",
+        keep_segments=[{"start": 1.0, "end": 3.0}],
+        editorial_analysis={"accepted_cuts": [{"start": 3.0, "end": 4.0, "reason": "silence"}]},
+        cut_analysis={
+            "schema": "cut_analysis.v1",
+            "accepted_cuts": [{"start": 5.0, "end": 6.0, "reason": "restart_retake"}],
+            "candidate_count": 1,
+            "accepted_cut_count": 1,
+            "rule_candidate_count": 0,
+            "manual_confirm_candidate_count": 0,
+        },
+        refine_decision_plan={
+            "schema": "refine_decision_plan.v1",
+            "mode": "manual_refine",
+            "keep_segments": [{"start": 1.0, "end": 3.0}],
+            "candidate_summary": {"total": 2, "auto_apply": 1, "manual_confirm": 1},
+            "smart_cut_rules": {"pauseEnabled": True, "pauseThresholdSec": 0.8},
+        },
+        render_plan={"timeline_analysis": {"hook_end_sec": 2.5}},
+        variants={"plain": {"segments": []}},
+    )
+
+    assert bundle["timeline_rules"]["refine_decision_plan"] == {
+        "schema": "refine_decision_plan.v1",
+        "mode": "manual_refine",
+        "keep_segments": [{"start": 1.0, "end": 3.0}],
+        "candidate_summary": {"total": 2, "auto_apply": 1, "manual_confirm": 1},
+        "smart_cut_rules": {"pauseEnabled": True, "pauseThresholdSec": 0.8},
+    }
+    assert bundle["timeline_rules"]["cut_analysis"] == {
+        "schema": "cut_analysis.v1",
+        "accepted_cuts": [{"start": 5.0, "end": 6.0, "reason": "restart_retake"}],
+        "candidate_count": 1,
+        "accepted_cut_count": 1,
+        "rule_candidate_count": 0,
+        "manual_confirm_candidate_count": 0,
+    }
+    assert bundle["timeline_rules"]["diagnostics"]["high_risk_cuts"] == []
+    assert bundle["timeline_rules"]["diagnostics"]["cut_analysis_summary"] == {
+        "candidate_count": 1,
+        "accepted_cut_count": 1,
+        "rule_candidate_count": 0,
+        "manual_confirm_candidate_count": 0,
+    }
+    assert bundle["timeline_rules"]["diagnostics"]["refine_decision_summary"] == {
+        "mode": "manual_refine",
+        "keep_segment_count": 1,
+        "candidate_total": 2,
+        "candidate_auto_apply": 1,
+        "candidate_manual_confirm": 1,
+    }
+
+
+def test_edit_review_bundle_payload_carries_cut_analysis_and_refine_decision_plan() -> None:
+    payload = _build_edit_review_bundle_payload(
+        job_flow_mode="auto",
+        source_name="demo.mp4",
+        content_profile={"topic_fact_confirmation": {"status": "confirmed"}},
+        source_timeline_contract={"duration_sec": 12.0},
+        subtitle_source_projection_validation={"status": "ok"},
+        automatic_gate={"eligible": True},
+        edit_decision={"segments": [{"type": "keep", "start": 0.0, "end": 2.0}]},
+        full_subtitles=[{"text_final": "原始字幕"}],
+        edited_subtitles=[{"text_final": "输出字幕"}],
+        cut_analysis={"schema": "cut_analysis.v1", "candidate_count": 2},
+        refine_decision_plan={"schema": "refine_decision_plan.v1", "mode": "auto_refine"},
+    )
+
+    assert payload["topic_fact_confirmation"] == {"status": "confirmed"}
+    assert payload["cut_analysis"] == {"schema": "cut_analysis.v1", "candidate_count": 2}
+    assert payload["refine_decision_plan"] == {"schema": "refine_decision_plan.v1", "mode": "auto_refine"}
+    assert payload["full_subtitles"] == [{"text_final": "原始字幕"}]
+    assert payload["edited_subtitles"] == [{"text_final": "输出字幕"}]
+
+
+def test_manual_editor_restore_frontend_managed_auto_cuts_accepts_cut_analysis_payload() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={
+            "accepted_cuts": [
+                {"start": 1.0, "end": 1.3, "reason": "filler_word", "auto_applied": True},
+                {"start": 3.0, "end": 3.5, "reason": "silence", "auto_applied": True},
+            ],
+        },
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+    )
+
+    assert _manual_editor_restore_frontend_managed_auto_cuts(
+        [{"start": 0.0, "end": 1.0}, {"start": 1.3, "end": 5.0}],
+        analysis_payload=payload,
+        source_duration_sec=5.0,
+    ) == [{"start": 0.0, "end": 5.0}]
+
+
+def test_manual_editor_silence_payloads_can_come_from_cut_analysis_schema() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={
+            "silence_segments": [
+                {"start": 1.23456, "end": 2.5, "source": "preview_vad"},
+                {"start": 3.0, "end": 3.03, "source": "preview_vad"},
+            ],
+        },
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+    )
+
+    normalized = [
+        item
+        for item in [_manual_editor_silence_payload(segment) for segment in payload.get("silence_segments") or []]
+        if item is not None
+    ]
+
+    assert [(item.start, item.end, item.source) for item in normalized] == [(1.235, 2.5, "preview_vad")]
+
+
+def test_manual_editor_rule_segments_expose_backend_catchphrase_and_filler_mode() -> None:
+    segments = _manual_editor_rule_segments(
+        {
+            "accepted_cuts": [],
+            "rule_candidates": [
+                {
+                    "start": 1.0,
+                    "end": 1.2,
+                    "reason": "filler_word",
+                    "candidate_stage": "manual_editor_smart_cut_rules",
+                    "source_text": "嗯",
+                    "filler_mode": "standalone",
+                    "score": 0.92,
+                },
+                {
+                    "start": 2.0,
+                    "end": 2.4,
+                    "reason": "catchphrase_phrase",
+                    "candidate_stage": "manual_editor_smart_cut_rules",
+                    "source_text": "就是",
+                    "score": 0.74,
+                },
+            ],
+        }
+    )
+
+    assert [(item.kind, item.source_text, item.filler_mode) for item in segments] == [
+        ("filler", "嗯", "standalone"),
+        ("catchphrase", "就是", None),
+    ]
+
+
+def test_manual_editor_rule_segments_expose_backend_pause_candidates() -> None:
+    segments = _manual_editor_rule_segments(
+        {
+            "accepted_cuts": [],
+            "rule_candidates": [
+                {
+                    "start": 2.0,
+                    "end": 3.1,
+                    "reason": "silence",
+                    "candidate_stage": "manual_editor_smart_cut_rules",
+                    "score": 0.81,
+                },
+            ],
+        }
+    )
+
+    assert [(item.kind, item.start, item.end, item.source) for item in segments] == [
+        ("pause", 2.0, 3.1, "manual_editor_rule_candidate"),
+    ]
+
+
+def test_manual_editor_smart_cut_rules_payload_defaults_when_missing() -> None:
+    payload = _manual_editor_smart_cut_rules_payload(None)
+    assert payload is not None
+    assert payload["fillers"] == DEFAULT_SMART_CUT_FILLERS
+    assert payload["catchphrases"] == DEFAULT_SMART_CUT_CATCHPHRASES
+    assert payload["pauseThresholdSec"] == 0.8
+
+
+def test_refine_decision_plan_payload_summarizes_cut_analysis_candidates() -> None:
+    cut_analysis = build_cut_analysis_payload(
+        editorial_analysis={
+            "accepted_cuts": [{"start": 1.0, "end": 2.0, "reason": "silence", "auto_applied": True}],
+            "manual_editor_rule_candidates": [
+                {
+                    "start": 3.0,
+                    "end": 3.4,
+                    "reason": "filler_word",
+                    "candidate_stage": "manual_editor_full_transcript",
+                    "auto_applied": False,
+                }
+            ],
+        },
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+    )
+
+    payload = build_refine_decision_plan_payload(
+        keep_segments=[{"start": 0.0, "end": 8.0}],
+        source_duration_sec=8.0,
+        mode="auto_refine",
+        subtitle_fingerprint="abc",
+        render_plan_version=3,
+        cut_analysis=cut_analysis,
+        audio_defaults={"target_lufs": -16.0},
+        video_transform={"rotation_cw": 0},
+        smart_cut_rules={"fillerEnabled": True, "pauseThresholdSec": 0.8},
+    )
+
+    assert payload["schema"] == "refine_decision_plan.v1"
+    assert payload["candidate_summary"] == {
+        "total": 2,
+        "auto_apply": 1,
+        "manual_confirm": 1,
+        "analysis_schema": "cut_analysis.v1",
+    }
+    assert payload["keep_segments"] == [{"start": 0.0, "end": 8.0}]
+    assert payload["smart_cut_rules"]["fillerEnabled"] is True
+    assert payload["smart_cut_rules"]["pauseThresholdSec"] == 0.8
+    assert payload["smart_cut_rules"]["fillers"] == DEFAULT_SMART_CUT_FILLERS
+    assert payload["smart_cut_rules"]["catchphrases"] == DEFAULT_SMART_CUT_CATCHPHRASES
+
+
+def test_refine_plan_audio_defaults_merge_loudness_and_voice_processing() -> None:
+    assert refine_plan_audio_defaults(
+        {
+            "loudness": {"target_lufs": -16.0, "peak_limit": -2.0},
+            "voice_processing": {"noise_reduction": True},
+        }
+    ) == {
+        "target_lufs": -16.0,
+        "peak_limit": -2.0,
+        "noise_reduction": True,
+    }
+
+
+def test_refine_decision_plan_from_render_plan_reuses_shared_defaults() -> None:
+    cut_analysis = build_cut_analysis_payload(
+        editorial_analysis={
+            "accepted_cuts": [{"start": 1.0, "end": 2.0, "reason": "silence", "auto_applied": True}],
+        },
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+    )
+
+    payload = build_refine_decision_plan_from_render_plan(
+        keep_segments=[{"start": 0.0, "end": 8.0}],
+        source_duration_sec=8.0,
+        mode="manual_refine",
+        subtitle_fingerprint="abc",
+        render_plan_data={
+            "loudness": {"target_lufs": -16.0},
+            "voice_processing": {"noise_reduction": True},
+        },
+        render_plan_version=5,
+        cut_analysis=cut_analysis,
+        video_transform={"rotation_cw": 90},
+        note="review",
+    )
+
+    assert payload["audio_defaults"] == {"target_lufs": -16.0, "noise_reduction": True}
+    assert payload["video_transform"] == {"rotation_cw": 90}
+    assert payload["candidate_summary"]["total"] == 1
+    assert payload["render_plan_version"] == 5
+
+
+def test_refine_decision_plan_from_render_plan_defaults_smart_cut_rules() -> None:
+    payload = build_refine_decision_plan_from_render_plan(
+        keep_segments=[{"start": 0.0, "end": 8.0}],
+        source_duration_sec=8.0,
+        mode="auto_refine",
+        subtitle_fingerprint="abc",
+        render_plan_data={},
+        render_plan_version=2,
+        cut_analysis={},
+        video_transform={},
+        smart_cut_rules=None,
+    )
+
+    assert payload["smart_cut_rules"]["fillers"] == DEFAULT_SMART_CUT_FILLERS
+    assert payload["smart_cut_rules"]["catchphrases"] == DEFAULT_SMART_CUT_CATCHPHRASES
+
+
+def test_resolve_refine_keep_segments_for_timeline_prefers_matching_bound_plan() -> None:
+    payload = build_refine_decision_plan_from_render_plan(
+        keep_segments=[{"start": 1.0, "end": 3.0}],
+        source_duration_sec=8.0,
+        mode="auto_refine",
+        subtitle_fingerprint="abc",
+        render_plan_data={},
+        render_plan_version=2,
+        cut_analysis={},
+        video_transform={},
+        editorial_timeline_id="timeline-1",
+        editorial_timeline_version=4,
+    )
+
+    assert resolve_refine_keep_segments_for_timeline(
+        payload,
+        editorial_timeline_id="timeline-1",
+        editorial_timeline_version=4,
+        fallback_segments=[
+            {"type": "keep", "start": 0.0, "end": 2.0},
+            {"type": "remove", "start": 2.0, "end": 3.0},
+        ],
+    ) == [{"start": 1.0, "end": 3.0}]
+
+
+def test_resolve_keep_segments_from_refine_plan_prefers_matching_timeline_bound_plan() -> None:
+    payload = build_refine_decision_plan_from_render_plan(
+        keep_segments=[{"start": 1.0, "end": 3.0}],
+        source_duration_sec=8.0,
+        mode="auto_refine",
+        subtitle_fingerprint="abc",
+        render_plan_data={},
+        render_plan_version=2,
+        cut_analysis={},
+        video_transform={},
+        editorial_timeline_id="timeline-1",
+        editorial_timeline_version=4,
+    )
+
+    assert _resolve_keep_segments_from_refine_plan(
+        payload,
+        editorial_timeline_id="timeline-1",
+        editorial_timeline_version=4,
+        fallback_segments=[
+            {"type": "keep", "start": 0.0, "end": 2.0},
+            {"type": "remove", "start": 2.0, "end": 3.0},
+        ],
+    ) == [{"start": 1.0, "end": 3.0}]
+
+
+def test_resolve_keep_segments_from_refine_plan_falls_back_when_timeline_binding_mismatches() -> None:
+    payload = build_refine_decision_plan_from_render_plan(
+        keep_segments=[{"start": 1.0, "end": 3.0}],
+        source_duration_sec=8.0,
+        mode="auto_refine",
+        subtitle_fingerprint="abc",
+        render_plan_data={},
+        render_plan_version=2,
+        cut_analysis={},
+        video_transform={},
+        editorial_timeline_id="timeline-1",
+        editorial_timeline_version=4,
+    )
+
+    assert _resolve_keep_segments_from_refine_plan(
+        payload,
+        editorial_timeline_id="timeline-2",
+        editorial_timeline_version=5,
+        fallback_segments=[
+            {"type": "keep", "start": 0.0, "end": 2.0},
+            {"type": "remove", "start": 2.0, "end": 3.0},
+        ],
+    ) == [{"start": 0.0, "end": 2.0}]
+
+
+def test_resolve_render_keep_segments_prefers_explicit_refine_segments() -> None:
+    assert _resolve_render_keep_segments(
+        {
+            "segments": [
+                {"start": 0.0, "end": 1.0, "type": "keep"},
+                {"start": 1.0, "end": 2.0, "type": "remove"},
+            ]
+        },
+        explicit_keep_segments=[{"start": 3.0, "end": 4.5}],
+    ) == [{"start": 3.0, "end": 4.5}]
+
+
+def test_resolve_render_keep_segments_falls_back_to_editorial_timeline() -> None:
+    assert _resolve_render_keep_segments(
+        {
+            "segments": [
+                {"start": 0.0, "end": 1.0, "type": "keep"},
+                {"start": 1.0, "end": 2.0, "type": "remove"},
+                {"start": 2.0, "end": 5.0, "type": "keep"},
+            ]
+        },
+        explicit_keep_segments=None,
+    ) == [{"start": 0.0, "end": 1.0}, {"start": 2.0, "end": 5.0}]
+
+
+def test_manual_editor_base_keep_segment_dicts_prefers_refine_plan_segments() -> None:
+    refine_payload = build_refine_decision_plan_from_render_plan(
+        keep_segments=[{"start": 3.0, "end": 6.0}],
+        source_duration_sec=10.0,
+        mode="manual_refine",
+        subtitle_fingerprint="abc",
+        render_plan_data={},
+        render_plan_version=3,
+        cut_analysis={},
+        video_transform={},
+        editorial_timeline_id="timeline-1",
+        editorial_timeline_version=2,
+    )
+
+    assert _manual_editor_base_keep_segment_dicts(
+        {"segments": [{"type": "keep", "start": 0.0, "end": 10.0}]},
+        refine_plan_payload=refine_payload,
+        editorial_timeline_id="timeline-1",
+        editorial_timeline_version=2,
+        source_duration_sec=10.0,
+    ) == [{"start": 3.0, "end": 6.0}]
+
+
+def test_manual_editor_base_keep_segment_dicts_falls_back_to_editorial_heal() -> None:
+    assert _manual_editor_base_keep_segment_dicts(
+        {
+            "segments": [
+                {"type": "keep", "start": 0.0, "end": 1.0},
+                {"type": "keep", "start": 1.005, "end": 3.0},
+            ]
+        },
+        refine_plan_payload=None,
+        editorial_timeline_id="timeline-1",
+        editorial_timeline_version=2,
+        source_duration_sec=0.0,
+    ) == [{"start": 0.0, "end": 3.0}]
 
 
 def test_manual_editor_projection_baseline_prefers_latest_projected_subtitles() -> None:
@@ -1357,6 +1978,76 @@ def test_manual_editor_projection_falls_back_when_kept_asr_is_missing() -> None:
     ) is True
 
 
+def test_manual_editor_projection_ignores_sparse_boundary_token_misses_in_large_projection() -> None:
+    assert _manual_editor_transcript_projection_blocking_is_significant(
+        {
+            "blocking": True,
+            "blocking_issue_count": 41,
+            "kept_speech_unit_count": 2118,
+            "blocking_examples": [
+                {
+                    "type": "speech_token",
+                    "text": "我",
+                    "duration_sec": 0.125,
+                },
+                {
+                    "type": "speech_token",
+                    "text": "们",
+                    "duration_sec": 0.125,
+                },
+                {
+                    "type": "speech_token",
+                    "text": "但",
+                    "duration_sec": 0.055,
+                },
+            ],
+        }
+    ) is False
+
+    assert _manual_editor_transcript_projection_blocking_is_significant(
+        {
+            "blocking": True,
+            "blocking_issue_count": 1,
+            "kept_speech_unit_count": 2,
+            "blocking_examples": [
+                {
+                    "type": "speech_token",
+                    "text": "手电",
+                    "duration_sec": 0.35,
+                }
+            ],
+        }
+    ) is True
+
+
+def test_manual_editor_split_piece_timings_reject_sparse_cross_segment_matches() -> None:
+    item = {
+        "words": [
+            {"word": char, "start": offset * 0.1, "end": (offset + 1) * 0.1}
+            for offset, char in enumerate("开关啊去触发")
+        ]
+        + [
+            {"word": char, "start": 10.0 + offset * 0.1, "end": 10.1 + offset * 0.1}
+            for offset, char in enumerate("为什么我平时出门遛狗")
+        ]
+        + [
+            {"word": char, "start": 30.0 + offset * 0.1, "end": 30.1 + offset * 0.1}
+            for offset, char in enumerate("一个功能")
+        ],
+    }
+
+    assert jobs_module._manual_editor_split_piece_timings_from_words(
+        item,
+        [
+            {
+                "text": "开关啊去触发一个功能",
+                "start_time": 0.0,
+                "end_time": 2.0,
+            }
+        ],
+    ) == [None]
+
+
 def test_manual_editor_projection_falls_back_on_duplicate_source_alternatives() -> None:
     projected = [
         {"index": 70, "source_index": 41, "source_indexes": [41], "start_time": 100.0, "end_time": 101.2, "text_final": "那身份牌啊"},
@@ -1804,6 +2495,80 @@ def test_manual_editor_subtitle_payload_does_not_fabricate_alignment_tokens_for_
     assert all(token.end - token.start >= 0.01 for token in payload.alignment_tokens)
 
 
+def test_manual_editor_split_long_rows_keep_segment_subtitle_timings(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _unexpected_piece_timing_override(
+        item: dict[str, object],
+        pieces: list[dict[str, object]],
+    ) -> list[tuple[float, float] | None]:
+        raise AssertionError("word-segmented pieces should keep segment_subtitles timings")
+
+    monkeypatch.setattr(
+        jobs_module,
+        "_manual_editor_split_piece_timings_from_words",
+        _unexpected_piece_timing_override,
+    )
+
+    def _char_words(text: str, start: float, step: float) -> list[dict[str, float | str]]:
+        words: list[dict[str, float | str]] = []
+        cursor = 0
+        for char in text:
+            if char.isspace():
+                continue
+            char_start = start + cursor * step
+            words.append({"word": char, "start": char_start, "end": char_start + step})
+            cursor += 1
+        return words
+
+    text = "开关啊去触发一个功能，要不然就是打开就碰运气了。或者说呢，你提前先调整好，这是很重要的。"
+    item = {
+        "index": 5,
+        "start_time": 0.0,
+        "end_time": 15.0,
+        "text_final": text,
+        "text_norm": text,
+        "text_raw": text,
+        "words": _char_words("开关啊去触发一个功能要不然就是打开就碰运气了", 0.0, 0.12)
+        + _char_words("或者说呢你提前先调整好这是很重要的", 10.0, 0.12),
+    }
+
+    rows = _manual_editor_split_long_subtitle_rows([item])
+
+    assert len(rows) >= 2
+    assert rows[0]["start_time"] < 1.0
+    assert rows[0]["end_time"] < 5.0
+    assert rows[1]["start_time"] >= 9.0
+
+
+def test_manual_editor_split_long_rows_preserve_flashlight_model_aliases_per_piece() -> None:
+    context = "20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4"
+    raw_text = "长度呢也没有比这个二三或者三七长很多。37跟23的长度是一模一样的。"
+    corrected_text = _manual_editor_apply_source_text_corrections(raw_text, context_text=context)
+    words = [
+        {"word": char, "start": index * 0.12, "end": (index + 1) * 0.12}
+        for index, char in enumerate(raw_text)
+        if not char.isspace()
+    ]
+
+    rows = _manual_editor_split_long_subtitle_rows(
+        [
+            {
+                "index": 5,
+                "start_time": 0.0,
+                "end_time": 8.0,
+                "text_raw": raw_text,
+                "text_norm": corrected_text,
+                "text_final": corrected_text,
+                "words": words,
+            }
+        ],
+        context_text=context,
+    )
+
+    rendered = [str(row.get("text_final") or "") for row in rows]
+    assert any("EDC23或者EDC37" in text for text in rendered)
+    assert any("EDC37跟EDC23" in text for text in rendered)
+
+
 def test_manual_editor_subtitle_projection_drops_final_empty_fillers() -> None:
     cleaned = _clean_manual_editor_subtitle_projection(
         [
@@ -1988,6 +2753,25 @@ def test_manual_editor_source_text_correction_normalizes_flashlight_model_aliase
     assert _manual_editor_apply_source_text_corrections("为什么三七一直没换", context_text=context) == "为什么EDC37一直没换"
 
 
+def test_manual_editor_source_text_correction_normalizes_flashlight_numeric_comparisons() -> None:
+    context = "20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4"
+
+    assert (
+        _manual_editor_apply_source_text_corrections(
+            "37跟23的长度是一模一样的",
+            context_text=context,
+        )
+        == "EDC37跟EDC23的长度是一模一样的"
+    )
+
+
+def test_manual_editor_source_text_correction_normalizes_flashlight_model_spellings() -> None:
+    context = "20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4"
+
+    assert _manual_editor_apply_source_text_corrections("它算是定位相当高端的一款EC手电了", context_text=context) == "它算是定位相当高端的一款EDC手电了"
+    assert _manual_editor_apply_source_text_corrections("我记得是那个UHD二零了", context_text=context) == "我记得是那个UHD20了"
+
+
 def test_manual_editor_source_text_correction_normalizes_noc_sale_mishear() -> None:
     context = "20260212-134637 开箱NOC MT34 也叫S06mini 折刀，还有玩法展示.mp4 抢购 一刀难求"
 
@@ -2075,6 +2859,50 @@ def test_manual_editor_subtitle_items_can_serve_as_legacy_source_fallback() -> N
     ]
 
 
+def test_manual_editor_transcript_source_rows_drop_redundant_synthetic_duplicate_words() -> None:
+    rows = _manual_editor_transcript_source_rows(
+        [
+            SimpleNamespace(
+                version=1,
+                segment_index=11,
+                start_time=890.28,
+                end_time=894.04,
+                text="大拇指推这个快开桌啊，啊也是很轻松。",
+                words_json=[
+                    {"word": "大", "start": 890.28, "end": 890.36},
+                    {"word": "拇", "start": 890.36, "end": 890.44},
+                    {"word": "指", "start": 890.44, "end": 890.60},
+                    {"word": "推", "start": 890.60, "end": 890.84},
+                    {"word": "这", "start": 890.84, "end": 890.92},
+                    {"word": "个", "start": 890.92, "end": 891.00},
+                    {"word": "快", "start": 891.00, "end": 891.16},
+                    {"word": "开", "start": 891.16, "end": 891.24},
+                    {"word": "桌", "start": 891.32, "end": 891.48},
+                    {
+                        "word": "啊",
+                        "start": 891.48,
+                        "end": 891.481,
+                        "raw_text": None,
+                        "raw_payload": {"_roughcut_asr_normalization": {"matched": False}},
+                    },
+                    {
+                        "word": "啊",
+                        "start": 891.48,
+                        "end": 892.84,
+                        "raw_text": "啊",
+                        "raw_payload": {"_roughcut_asr_normalization": {"matched": True}},
+                    },
+                    {"word": "也", "start": 892.84, "end": 893.00},
+                    {"word": "是", "start": 893.00, "end": 893.16},
+                ],
+            )
+        ],
+        context_text="20260212-134637 开箱NOC MT34 也叫S06mini 折刀，还有玩法展示.mp4",
+    )
+
+    assert [word["word"] for word in rows[0]["words"]].count("啊") == 1
+
+
 def test_manual_editor_split_source_fragments_assign_unique_indexes_when_source_index_missing() -> None:
     rows = _manual_editor_split_long_subtitle_rows(
         [
@@ -2104,6 +2932,44 @@ def test_manual_editor_split_source_fragments_assign_unique_indexes_when_source_
 
     assert len(indexes) == len(set(indexes))
     assert indexes == sorted(indexes)
+
+
+def test_manual_editor_split_long_rows_rebalances_flashlight_ascii_model_boundaries() -> None:
+    context = "20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4"
+    raw_text = (
+        "这一千五你放到这儿，然后跟我们的EDC37简单对比一下吧，EDC37也是高档也是一千五啊。"
+        "这个其实还挺不错，因为大家知道EDC37在奈特科尔产品线算是定位相当高端的一款E C手电了，"
+        "它的灯珠也是规格相当高的，这个EDC17是什么灯珠啊？这个我记得是那个UHD二零了。"
+    )
+    words = [
+        {"word": char, "start": index * 0.12, "end": (index + 1) * 0.12}
+        for index, char in enumerate(raw_text)
+        if not char.isspace()
+    ]
+
+    rows = _manual_editor_split_long_subtitle_rows(
+        [
+            {
+                "index": 41,
+                "start_time": 0.0,
+                "end_time": 32.0,
+                "text_raw": raw_text,
+                "text_norm": raw_text,
+                "text_final": raw_text,
+                "transcript_text": raw_text,
+                "words": words,
+            }
+        ],
+        context_text=context,
+    )
+
+    rendered = [str(row.get("text_final") or "") for row in rows]
+    assert any("EDC37简单对比一下吧" in text for text in rendered)
+    assert any("一款EDC手电了" in text for text in rendered)
+    assert any("这个EDC17是什么灯珠啊" in text for text in rendered)
+    assert any("UHD20了" in text for text in rendered)
+    assert not any(text.endswith("EDC1") for text in rendered)
+    assert not any(text.startswith("7是什么灯珠") for text in rendered)
 
 
 def test_manual_editor_split_source_fragments_reorder_by_time_before_reindex(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2152,6 +3018,66 @@ def test_manual_editor_split_source_fragments_reorder_by_time_before_reindex(mon
     assert [row["index"] for row in rows] == [0, 1, 2]
     assert [row["source_index"] for row in rows] == [0, 1, 2]
     assert [row["source_indexes"] for row in rows] == [[0], [1], [2]]
+
+
+def test_manual_editor_split_source_fragments_preserve_spoken_text_raw_over_normalized_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        jobs_module,
+        "segment_subtitles",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            entries=[
+                SimpleNamespace(
+                    start=228.6,
+                    end=234.52,
+                    text_raw="呃，看啊，这个刃面",
+                    text_norm="呃，看啊，刃面。",
+                    words=(
+                        {"word": "呃，", "start": 228.6, "end": 229.0},
+                        {"word": "看啊，", "start": 229.72, "end": 230.12},
+                        {"word": "这个", "start": 230.12, "end": 230.44},
+                        {"word": "刃面", "start": 234.12, "end": 234.52},
+                    ),
+                ),
+                SimpleNamespace(
+                    start=234.6,
+                    end=240.441,
+                    text_raw="抛的是完美无缺啊！哇塞，真是太帅了。",
+                    text_norm="抛的是完美无缺啊！哇塞，真是太帅了。",
+                    words=(
+                        {"word": "抛的是", "start": 234.6, "end": 235.4},
+                        {"word": "完美无缺啊！", "start": 236.2, "end": 237.0},
+                    ),
+                ),
+            ]
+        ),
+    )
+
+    rows = _manual_editor_split_long_subtitle_rows(
+        [
+            {
+                "index": 3,
+                "start_time": 225.0,
+                "end_time": 240.441,
+                "text_raw": "也还行，因为它不太不算疼嘛。呃，看啊，这个刃面抛的是完美无缺啊！哇塞，真是太帅了。",
+                "text_final": "也还行，因为它不太不算疼嘛。呃，看啊，这个刃面抛的是完美无缺啊！哇塞，真是太帅了。",
+                "words": [
+                    {"word": "呃，", "start": 228.6, "end": 229.0},
+                    {"word": "看啊，", "start": 229.72, "end": 230.12},
+                    {"word": "这个", "start": 230.12, "end": 230.44},
+                    {"word": "刃面", "start": 234.12, "end": 234.52},
+                    {"word": "抛的是", "start": 234.6, "end": 235.4},
+                    {"word": "完美无缺啊！", "start": 236.2, "end": 237.0},
+                ],
+            }
+        ]
+    )
+
+    assert [row["text_final"] for row in rows] == [
+        "呃，看啊，这个刃面",
+        "抛的是完美无缺啊！哇塞，真是太帅了。",
+    ]
 
 
 def test_manual_editor_source_asr_words_reveal_fillers_hidden_by_canonical_text() -> None:
@@ -2540,46 +3466,49 @@ def test_manual_editor_rejects_short_subtitle_with_runaway_duration() -> None:
     )
 
 
-def test_manual_editor_rejects_projection_rows_with_source_timeline_words_on_output_rows() -> None:
-    assert _projection_has_suspicious_subtitle_timing(
-        [
-            {
-                "index": 236,
-                "start_time": 441.017,
-                "end_time": 441.617,
-                "text_final": "带37了",
-                "words": [
-                    {"word": "我", "start": 486.68, "end": 486.98},
-                    {"word": "直", "start": 487.06, "end": 487.10},
-                    {"word": "接", "start": 487.10, "end": 487.14},
-                    {"word": "带", "start": 487.14, "end": 487.42},
-                    {"word": "3", "start": 487.42, "end": 487.52},
-                    {"word": "7", "start": 487.52, "end": 487.70},
-                    {"word": "了", "start": 487.70, "end": 487.84},
-                ],
-            }
-        ],
-        split_profile={"max_chars": 30, "max_duration": 5.0},
+def test_manual_editor_sanitize_projection_item_drops_source_timeline_words_from_output_rows() -> None:
+    sanitized = _manual_editor_sanitize_projection_item(
+        {
+            "index": 236,
+            "start_time": 441.017,
+            "end_time": 441.617,
+            "text_final": "带37了",
+            "transcript_text": "我直接带EDC37了",
+            "words": [
+                {"word": "我", "start": 486.68, "end": 486.98},
+                {"word": "直", "start": 487.06, "end": 487.10},
+                {"word": "接", "start": 487.10, "end": 487.14},
+                {"word": "带", "start": 487.14, "end": 487.42},
+                {"word": "3", "start": 487.42, "end": 487.52},
+                {"word": "7", "start": 487.52, "end": 487.70},
+                {"word": "了", "start": 487.70, "end": 487.84},
+            ],
+        }
     )
 
-    assert not _projection_has_suspicious_subtitle_timing(
-        [
-            {
-                "index": 236,
-                "start_time": 440.457,
-                "end_time": 441.617,
-                "text_final": "我直接带EDC37了",
-                "words": [
-                    {"word": "我", "start": 440.457, "end": 440.757},
-                    {"word": "直接", "start": 440.837, "end": 441.297},
-                    {"word": "带", "start": 441.297, "end": 441.397},
-                    {"word": "EDC37", "start": 441.397, "end": 441.537},
-                    {"word": "了", "start": 441.537, "end": 441.617},
-                ],
-            }
-        ],
-        split_profile={"max_chars": 30, "max_duration": 5.0},
+    assert sanitized["text_final"] == "带37了"
+    assert "words" not in sanitized
+    assert "transcript_text" not in sanitized
+
+    preserved = _manual_editor_sanitize_projection_item(
+        {
+            "index": 236,
+            "start_time": 440.457,
+            "end_time": 441.617,
+            "text_final": "我直接带EDC37了",
+            "transcript_text": "我直接带EDC37了",
+            "words": [
+                {"word": "我", "start": 440.457, "end": 440.757},
+                {"word": "直接", "start": 440.837, "end": 441.297},
+                {"word": "带", "start": 441.297, "end": 441.397},
+                {"word": "EDC37", "start": 441.397, "end": 441.537},
+                {"word": "了", "start": 441.537, "end": 441.617},
+            ],
+        }
     )
+
+    assert "words" in preserved
+    assert preserved["transcript_text"] == "我直接带EDC37了"
 
 
 def test_manual_subtitle_rerun_preserves_reusable_render_artifacts() -> None:

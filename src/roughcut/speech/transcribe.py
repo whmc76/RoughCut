@@ -14,9 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from roughcut.db.models import Artifact, FactClaim, JobStep, SubtitleCorrection, SubtitleItem, TranscriptSegment
 from roughcut.config import get_settings
 from roughcut.media.subtitle_spans import (
+    drop_redundant_synthetic_word_payloads,
     has_unsafe_unmatched_alnum_units,
     subtitle_display_unit_key,
     subtitle_display_units,
+    word_payloads_have_collapsed_timing,
 )
 from roughcut.media.subtitle_text import normalize_flashlight_model_alias_text, normalize_source_transcript_text
 from roughcut.providers.factory import get_transcription_provider, resolve_transcription_provider_plan
@@ -514,6 +516,7 @@ async def persist_transcript_result(
 
     # Persist segments
     for seg in result.segments:
+        words_json = drop_redundant_synthetic_word_payloads([_serialize_word_timing(w) for w in seg.words])
         db_seg = TranscriptSegment(
             job_id=job_id,
             version=1,
@@ -522,7 +525,7 @@ async def persist_transcript_result(
             end_time=seg.end,
             speaker=seg.speaker,
             text=seg.text,
-            words_json=[_serialize_word_timing(w) for w in seg.words],
+            words_json=words_json,
         )
         session.add(db_seg)
 
@@ -736,6 +739,12 @@ def _normalize_segment_word_timings_for_text(
                 alignment=getattr(raw_word, "alignment", None),
             )
         )
+    serialized_normalized = [_serialize_word_timing(word) for word in normalized_words]
+    sanitized_normalized = drop_redundant_synthetic_word_payloads(serialized_normalized)
+    if len(sanitized_normalized) != len(serialized_normalized):
+        return list(seg.words or [])
+    if word_payloads_have_collapsed_timing(sanitized_normalized):
+        return list(seg.words or [])
     return normalized_words
 
 

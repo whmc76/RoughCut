@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  DEFAULT_SMART_CUT_CATCHPHRASES,
+  DEFAULT_SMART_CUT_FILLERS,
   applySmartCutRuleRangesToSegments,
   autoSmartCutRuleRanges,
   blockAutoSmartCutRangesForSmartDeleteReview,
@@ -19,9 +21,12 @@ import {
   intersectInferredPausesWithAudioSilence,
   normalizeAdjacentSubtitleTextOverlaps,
   normalizeReviewPauseRanges,
+  normalizeStoredSmartCutFillers,
   outputTimeToSourceTimeForSegments,
   outputTimeToSourceTime,
   projectedTranscriptMissesKeptSpeech,
+  parseSmartCutCatchphrases,
+  parseSmartCutFillers,
   projectedSubtitlesHaveDuplicateSourceOverlap,
   removeTranscriptSelectionTextFromSubtitleDrafts,
   remapSubtitles,
@@ -438,7 +443,7 @@ describe("manual editor timeline mapping", () => {
       nextSegments,
     );
 
-    expect(analysis.filler).toEqual([{ start: 10, end: 11, kind: "filler" }]);
+    expect(analysis.filler).toEqual([{ start: 10, end: 11, kind: "filler", fillerMode: "standalone", sourceText: "呃" }]);
     expect(nextSegments).toEqual([{ start: 11, end: 15 }]);
     expect(projection.remapped.map((subtitle) => subtitle.text_final)).toEqual(["没想到啊"]);
     expect(projection.remapped[0].start_time).toBeCloseTo(0, 3);
@@ -454,7 +459,7 @@ describe("manual editor timeline mapping", () => {
       ],
       rules,
       [{ start: 11, end: 13, duration_sec: 2, source: "word_timing" }],
-      [{ start: 10, end: 14, duration_sec: 4, reason: "timing_trim", source: "manual_editor_rule_candidate" }],
+      [{ start: 10, end: 14, duration_sec: 4, kind: "smart_delete", reason: "timing_trim", source: "manual_editor_rule_candidate" }],
     );
     const autoRanges = autoSmartCutRuleRanges(analysis, rules);
     const blockedAutoRanges = blockAutoSmartCutRangesForSmartDeleteReview(
@@ -485,7 +490,7 @@ describe("manual editor timeline mapping", () => {
       ],
       rules,
       [{ start: 11, end: 13, duration_sec: 2, source: "word_timing" }],
-      [{ start: 10, end: 14, duration_sec: 4, reason: "timing_trim", source: "manual_editor_rule_candidate" }],
+      [{ start: 10, end: 14, duration_sec: 4, kind: "smart_delete", reason: "timing_trim", source: "manual_editor_rule_candidate" }],
     );
     const confirmed = [{ start: 10, end: 14 }];
     const blockedAutoRanges = blockAutoSmartCutRangesForSmartDeleteReview(
@@ -918,7 +923,7 @@ describe("manual editor timeline mapping", () => {
     expect(transcript[0].text_final).toBe("另外一把呢，就是现在这个");
   });
 
-  it("reveals raw ASR fillers when cleaned ASR text only removed filler words", () => {
+  it("reveals raw ASR fillers only when word timings support them", () => {
     const transcript = buildSourceTranscriptSubtitlesForTimeline(
       {
         source_subtitles: [
@@ -928,6 +933,12 @@ describe("manual editor timeline mapping", () => {
             end_time: 1,
             text_raw: "嗯我们开始啊",
             text_final: "我们开始",
+            words: [
+              { word: "嗯", start: 0, end: 0.16 },
+              { word: "我们", start: 0.2, end: 0.54 },
+              { word: "开始", start: 0.54, end: 0.82 },
+              { word: "啊", start: 0.84, end: 0.98 },
+            ],
           },
         ],
         projected_subtitles: [],
@@ -937,6 +948,27 @@ describe("manual editor timeline mapping", () => {
     );
 
     expect(transcript[0].text_final).toBe("嗯我们开始啊");
+  });
+
+  it("suppresses filler-only transcript extras when there is no timing support for them", () => {
+    const transcript = buildSourceTranscriptSubtitlesForTimeline(
+      {
+        source_subtitles: [
+          {
+            index: 0,
+            start_time: 0,
+            end_time: 1,
+            text_final: "我们开始",
+            transcript_text: "嗯我们开始啊",
+          },
+        ],
+        projected_subtitles: [],
+      },
+      [],
+      {},
+    );
+
+    expect(transcript[0].text_final).toBe("我们开始");
   });
 
   it("keeps denoised ASR transcript words before cleaned subtitle text in the full transcript", () => {
@@ -960,7 +992,7 @@ describe("manual editor timeline mapping", () => {
     expect(transcript[0].text_final).toBe("很多兄弟一样饮恨耗尽了我这次的欧气啊我靠");
   });
 
-  it("keeps ASR filler words from transcript_text available for filler rules", () => {
+  it("keeps ASR filler words from transcript_text available for filler rules when timings support them", () => {
     const transcript = buildSourceTranscriptSubtitlesForTimeline(
       {
         source_subtitles: [
@@ -970,6 +1002,12 @@ describe("manual editor timeline mapping", () => {
             end_time: 1,
             text_final: "我们开始",
             transcript_text: "嗯嗯我们开始吧呀",
+            words: [
+              { word: "嗯嗯", start: 0, end: 0.2 },
+              { word: "我们", start: 0.24, end: 0.54 },
+              { word: "开始", start: 0.54, end: 0.78 },
+              { word: "吧呀", start: 0.8, end: 0.98 },
+            ],
           },
         ],
         projected_subtitles: [],
@@ -1283,12 +1321,126 @@ describe("manual editor timeline mapping", () => {
 
     expect(analysis.filler).toHaveLength(1);
     expect(autoSmartCutRuleRanges(analysis, { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯" })).toEqual([
-      { start: 0, end: 0.4, kind: "filler" },
+      { start: 0, end: 0.4, kind: "filler", fillerMode: "standalone", sourceText: "嗯" },
     ]);
   });
 
-  it("matches configured single-character particles such as ah in full transcript rules", () => {
-    const rules = { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "啊" };
+  it("ships a broader default filler set for common spoken particles", () => {
+    expect(DEFAULT_SMART_CUT_FILLERS).toContain("啊");
+    expect(DEFAULT_SMART_CUT_FILLERS).toContain("呢");
+    expect(DEFAULT_SMART_CUT_FILLERS).toContain("哦");
+    expect(DEFAULT_SMART_CUT_FILLERS).toContain("唉");
+  });
+
+  it("upgrades stale saved filler presets that still look like the old default set", () => {
+    expect(normalizeStoredSmartCutFillers("嗯，呃，额，呃呃，嗯嗯，哎")).toBe(DEFAULT_SMART_CUT_FILLERS);
+  });
+
+  it("keeps genuinely customized filler presets instead of overwriting them with the default set", () => {
+    expect(normalizeStoredSmartCutFillers("嗯，呃，打个比方")).toBe("嗯，呃，打个比方");
+  });
+
+  it("parses filler separators across english and chinese punctuation", () => {
+    expect(parseSmartCutFillers("嗯，呃、啊;吧；嘛 哦")).toEqual(["嗯", "呃", "啊", "吧", "嘛", "哦"]);
+  });
+
+  it("ships a default catchphrase set for common low-information spoken phrases", () => {
+    expect(DEFAULT_SMART_CUT_CATCHPHRASES).toContain("就是");
+    expect(DEFAULT_SMART_CUT_CATCHPHRASES).toContain("然后");
+    expect(DEFAULT_SMART_CUT_CATCHPHRASES).toContain("我觉得");
+  });
+
+  it("parses catchphrase separators across english and chinese punctuation", () => {
+    expect(parseSmartCutCatchphrases("就是，然后、其实;你知道 我觉得")).toEqual(["你知道", "我觉得", "就是", "然后", "其实"]);
+  });
+
+  it("matches filler rules against transcript source text when timings support the spoken filler", () => {
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 0,
+          start_time: 0,
+          end_time: 1.2,
+          text_final: "我们开始",
+          transcript_text: "嗯我们开始",
+          words: [
+            { word: "嗯", start: 0, end: 0.16 },
+            { word: "我们", start: 0.24, end: 0.56 },
+            { word: "开始", start: 0.56, end: 1.02 },
+          ],
+        },
+      ],
+      { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯" },
+      [],
+    );
+
+    expect(analysis.filler).toHaveLength(1);
+    expect(analysis.filler[0]).toEqual(expect.objectContaining({ kind: "filler", fillerMode: "standalone" }));
+  });
+
+  it("does not invent filler rule matches from unsupported transcript-only noise", () => {
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 0,
+          start_time: 0,
+          end_time: 1.2,
+          text_final: "我们开始",
+          transcript_text: "嗯我们开始",
+        },
+      ],
+      { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯" },
+      [],
+    );
+
+    expect(analysis.filler).toEqual([]);
+  });
+
+  it("matches standalone fillers and auto-cuts them by default", () => {
+    const rules = {
+      fillerEnabled: true,
+      fillerStandaloneEnabled: true,
+      fillerContinuousEnabled: false,
+      repeatedEnabled: false,
+      pauseEnabled: false,
+      smartDeleteEnabled: false,
+      pauseThresholdSec: 0.8,
+      fillers: "嗯,啊",
+    };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 0,
+          start_time: 0,
+          end_time: 2,
+          text_final: "嗯，今天我们开始",
+          words: [
+            { word: "嗯", start: 0, end: 0.22 },
+            { word: "今天", start: 0.36, end: 0.86 },
+            { word: "我们", start: 0.86, end: 1.24 },
+            { word: "开始", start: 1.24, end: 1.8 },
+          ],
+        },
+      ],
+      rules,
+      [],
+    );
+
+    expect(analysis.filler).toEqual([{ start: 0, end: 0.22, kind: "filler", fillerMode: "standalone", sourceText: "嗯" }]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([{ start: 0, end: 0.22, kind: "filler", fillerMode: "standalone", sourceText: "嗯" }]);
+  });
+
+  it("can detect continuous fillers inside a sentence without auto-cutting them when that mode is off", () => {
+    const rules = {
+      fillerEnabled: true,
+      fillerStandaloneEnabled: true,
+      fillerContinuousEnabled: false,
+      repeatedEnabled: false,
+      pauseEnabled: false,
+      smartDeleteEnabled: false,
+      pauseThresholdSec: 0.8,
+      fillers: "啊",
+    };
     const analysis = buildSmartCutRuleAnalysis(
       [
         {
@@ -1308,8 +1460,88 @@ describe("manual editor timeline mapping", () => {
       [],
     );
 
-    expect(analysis.filler).toEqual([{ start: 0.5, end: 0.7, kind: "filler" }]);
-    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([{ start: 0.5, end: 0.7, kind: "filler" }]);
+    expect(analysis.filler).toEqual([{ start: 0.5, end: 0.7, kind: "filler", fillerMode: "continuous", sourceText: "啊" }]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([]);
+    expect(autoSmartCutRuleRanges(analysis, { ...rules, fillerContinuousEnabled: true })).toEqual([
+      { start: 0.5, end: 0.7, kind: "filler", fillerMode: "continuous", sourceText: "啊" },
+    ]);
+  });
+
+  it("treats pause-separated fillers as standalone even when punctuation is missing", () => {
+    const rules = {
+      fillerEnabled: true,
+      fillerStandaloneEnabled: true,
+      fillerContinuousEnabled: false,
+      repeatedEnabled: false,
+      pauseEnabled: false,
+      smartDeleteEnabled: false,
+      pauseThresholdSec: 0.8,
+      fillers: "呃",
+    };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 0,
+          start_time: 0,
+          end_time: 2.2,
+          text_final: "这个呃我们开始",
+          transcript_text: "这个呃我们开始",
+          words: [
+            { word: "这个", start: 0, end: 0.45 },
+            { word: "呃", start: 0.72, end: 0.92 },
+            { word: "我们开始", start: 1.18, end: 2.0 },
+          ],
+        },
+      ],
+      rules,
+      [],
+    );
+
+    expect(analysis.filler).toEqual([{ start: 0.72, end: 0.92, kind: "filler", fillerMode: "standalone", sourceText: "呃" }]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([
+      { start: 0.72, end: 0.92, kind: "filler", fillerMode: "standalone", sourceText: "呃" },
+    ]);
+  });
+
+  it("matches configured catchphrases inside spoken sentences as an independent rule", () => {
+    const rules = {
+      fillerEnabled: false,
+      catchphraseEnabled: true,
+      repeatedEnabled: false,
+      pauseEnabled: false,
+      smartDeleteEnabled: false,
+      pauseThresholdSec: 0.8,
+      fillers: "嗯,呃",
+      catchphrases: "就是,你知道",
+    };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 0,
+          start_time: 0,
+          end_time: 2.4,
+          text_final: "这个功能就是很顺手你知道",
+          transcript_text: "这个功能就是很顺手你知道",
+          words: [
+            { word: "这个功能", start: 0, end: 0.5 },
+            { word: "就是", start: 0.5, end: 0.8 },
+            { word: "很顺手", start: 0.8, end: 1.4 },
+            { word: "你知道", start: 1.4, end: 1.9 },
+          ],
+        },
+      ],
+      rules,
+      [],
+    );
+
+    expect(analysis.catchphrase).toEqual([
+      { start: 0.5, end: 0.8, kind: "catchphrase", sourceText: "就是" },
+      { start: 1.4, end: 1.9, kind: "catchphrase", sourceText: "你知道" },
+    ]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([
+      { start: 0.5, end: 0.8, kind: "catchphrase", sourceText: "就是" },
+      { start: 1.4, end: 1.9, kind: "catchphrase", sourceText: "你知道" },
+    ]);
   });
 
   it("prefers backend filler rule ranges when cleaned transcript text no longer exposes the particle", () => {
@@ -1325,7 +1557,6 @@ describe("manual editor timeline mapping", () => {
         },
       ],
       rules,
-      [],
       [],
       [
         {
@@ -1405,6 +1636,59 @@ describe("manual editor timeline mapping", () => {
             { word: "经常会", start: 0.8, end: 1.2 },
             { word: "EDEDC", start: 1.2, end: 1.8 },
             { word: "用的啊", start: 1.8, end: 2.3 },
+          ],
+        },
+      ],
+      rules,
+      [],
+    );
+
+    expect(analysis.repeated).toEqual([]);
+  });
+
+  it("detects single-character stutter repeats when timing shows a real restart gap", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: true, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 27,
+          start_time: 113.8,
+          end_time: 120.52,
+          text_final: "所以呢我们总归啊是需需要有这么一个呃又轻便又易用",
+          words: [
+            { word: "所以呢", start: 113.8, end: 114.2 },
+            { word: "我们", start: 114.2, end: 114.52 },
+            { word: "总归啊是", start: 115.48, end: 116.04 },
+            { word: "需", start: 116.04, end: 116.28 },
+            { word: "需", start: 117.08, end: 117.16 },
+            { word: "要有这么一个", start: 117.16, end: 118.12 },
+            { word: "呃", start: 118.28, end: 118.6 },
+            { word: "又轻便又易用", start: 118.68, end: 120.52 },
+          ],
+        },
+      ],
+      rules,
+      [],
+    );
+
+    expect(analysis.repeated).toEqual([{ start: 117.08, end: 117.16, kind: "repeated" }]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([{ start: 117.08, end: 117.16, kind: "repeated" }]);
+  });
+
+  it("does not mark natural doubled words like 沉甸甸 as repeated speech", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: true, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 24,
+          start_time: 145.08,
+          end_time: 148.76,
+          text_final: "沉甸甸的好沉啊赶紧开",
+          words: [
+            { word: "沉", start: 145.08, end: 145.24 },
+            { word: "甸", start: 145.24, end: 145.4 },
+            { word: "甸", start: 145.4, end: 145.56 },
+            { word: "的好沉啊赶紧开", start: 145.56, end: 148.76 },
           ],
         },
       ],
@@ -1517,7 +1801,6 @@ describe("manual editor timeline mapping", () => {
       ],
       rules,
       [{ start: 8.37, end: 9.45, duration_sec: 1.08, source: "audio_vad" }],
-      [],
       [
         {
           start: 8.37,
@@ -1537,6 +1820,35 @@ describe("manual editor timeline mapping", () => {
     expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([
       expect.objectContaining({ start: 8.37, end: 9.3, kind: "pause" }),
     ]);
+  });
+
+  it("keeps backend short pause candidates below the threshold out of auto-cut pause ranges", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 0, end_time: 2, text_final: "前一句内容" },
+        { index: 1, start_time: 2.6, end_time: 4, text_final: "后一句内容" },
+      ],
+      rules,
+      [],
+      [
+        {
+          start: 2.1,
+          end: 2.5,
+          duration_sec: 0.4,
+          kind: "pause",
+          reason: "silence",
+          source: "manual_editor_rule_candidate",
+          auto_applied: false,
+        },
+      ],
+    );
+
+    expect(analysis.pauseCandidates).toEqual([
+      expect.objectContaining({ start: 2.1, end: 2.5, kind: "pause", reason: "silence" }),
+    ]);
+    expect(analysis.pause).toEqual([]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([]);
   });
 
   it("auto-cuts long VAD pauses between word timings inside a coarse subtitle row", () => {
@@ -1560,6 +1872,35 @@ describe("manual editor timeline mapping", () => {
 
     expect(analysis.pause).toEqual([{ start: 8.37, end: 9.3, kind: "pause" }]);
     expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([{ start: 8.37, end: 9.3, kind: "pause" }]);
+  });
+
+  it("does not auto-cut sparse short subtitle rows whose word timings leave a huge internal speech gap", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: true, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 40,
+          start_time: 229.72,
+          end_time: 234.52,
+          text_final: "看啊刃面",
+          text_raw: "呃，看啊，刃面。",
+          words: [
+            { word: "看", start: 229.72, end: 229.88 },
+            { word: "啊", start: 229.88, end: 230.12 },
+            { word: "刃", start: 234.12, end: 234.2 },
+            { word: "面", start: 234.2, end: 234.52 },
+          ],
+        },
+      ],
+      rules,
+      [
+        { start: 230.7, end: 231.15, duration_sec: 0.45, source: "audio_vad" },
+        { start: 232.14, end: 234.06, duration_sec: 1.92, source: "audio_vad" },
+      ],
+    );
+
+    expect(analysis.pause).toEqual([]);
+    expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([]);
   });
 
   it("cuts the silent part of a long mixed timing gap instead of dropping the whole gap because of an edge word", () => {
@@ -2440,7 +2781,7 @@ describe("manual editor timeline mapping", () => {
       [],
       rules,
       [],
-      [{ start: 12.3456, end: 14.9, duration_sec: 2.554, reason: "restart_retake", source: "llm_cut_review" }],
+      [{ start: 12.3456, end: 14.9, duration_sec: 2.554, kind: "smart_delete", reason: "restart_retake", source: "llm_cut_review" }],
     );
 
     expect(analysis.smartDelete).toEqual([expect.objectContaining({ start: 12.346, end: 14.9, kind: "smart_delete" })]);
@@ -2454,7 +2795,7 @@ describe("manual editor timeline mapping", () => {
       [],
       rules,
       [],
-      [{ start: 10, end: 12, duration_sec: 2, reason: "restart_retake", source: "llm_cut_review" }],
+      [{ start: 10, end: 12, duration_sec: 2, kind: "smart_delete", reason: "restart_retake", source: "llm_cut_review" }],
     );
 
     const nextSegments = applySmartCutRuleRangesToSegments(
@@ -2475,7 +2816,7 @@ describe("manual editor timeline mapping", () => {
       ],
       rules,
       [],
-      [{ start: 10, end: 12, duration_sec: 2, reason: "low_signal_subtitle", source: "llm_cut_review" }],
+      [{ start: 10, end: 12, duration_sec: 2, kind: "smart_delete", reason: "low_signal_subtitle", source: "llm_cut_review" }],
     );
 
     expect(analysis.smartDelete).toEqual([expect.objectContaining({ start: 10, end: 12, kind: "smart_delete", protected: true })]);
@@ -2491,7 +2832,7 @@ describe("manual editor timeline mapping", () => {
       ],
       rules,
       [],
-      [{ start: 10, end: 12, duration_sec: 2, reason: "low_signal_subtitle", source: "llm_cut_review" }],
+      [{ start: 10, end: 12, duration_sec: 2, kind: "smart_delete", reason: "low_signal_subtitle", source: "llm_cut_review" }],
     );
 
     const nextSegments = applySmartCutRuleRangesToSegments(
@@ -2504,23 +2845,208 @@ describe("manual editor timeline mapping", () => {
     expect(nextSegments).toEqual([{ start: 0, end: 20 }]);
   });
 
+  it("prefers backend authoritative repeated ranges over local transcript rescans when cut analysis is available", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: true, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 0, end_time: 2, text_final: "这个这个型号不错" },
+      ],
+      rules,
+      [],
+      [
+        { start: 0.62, end: 0.94, duration_sec: 0.32, kind: "repeated", reason: "repeated_speech", source: "manual_editor_rule_candidate" },
+      ],
+      { authoritativeKinds: ["repeated"] },
+    );
+
+    expect(analysis.repeated).toEqual([
+      expect.objectContaining({ start: 0.62, end: 0.94, kind: "repeated", reason: "repeated_speech" }),
+    ]);
+  });
+
+  it("accepts backend smart-cut filler and catchphrase rule segments", () => {
+    const rules = {
+      fillerEnabled: true,
+      fillerStandaloneEnabled: true,
+      fillerContinuousEnabled: false,
+      catchphraseEnabled: true,
+      repeatedEnabled: false,
+      pauseEnabled: false,
+      smartDeleteEnabled: false,
+      pauseThresholdSec: 0.8,
+      fillers: "嗯",
+      catchphrases: "就是",
+    };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 0, end_time: 1, text_final: "嗯我们开始" },
+        { index: 1, start_time: 1, end_time: 2, text_final: "这个就是重点" },
+      ],
+      rules,
+      [],
+      [
+        { start: 0.0, end: 0.12, duration_sec: 0.12, kind: "filler", reason: "filler_word", source: "manual_editor_rule_candidate", filler_mode: "standalone", source_text: "嗯" },
+        { start: 1.2, end: 1.45, duration_sec: 0.25, kind: "catchphrase", reason: "catchphrase_phrase", source: "manual_editor_rule_candidate", source_text: "就是" },
+      ],
+    );
+
+    expect(analysis.filler).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "filler", sourceText: "嗯", fillerMode: "standalone" }),
+    ]));
+    expect(analysis.catchphrase).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "catchphrase", sourceText: "就是" }),
+    ]));
+  });
+
+  it("prefers backend authoritative filler and catchphrase ranges when provided", () => {
+    const rules = {
+      fillerEnabled: true,
+      fillerStandaloneEnabled: true,
+      fillerContinuousEnabled: false,
+      catchphraseEnabled: true,
+      repeatedEnabled: false,
+      pauseEnabled: false,
+      smartDeleteEnabled: false,
+      pauseThresholdSec: 0.8,
+      fillers: "嗯",
+      catchphrases: "就是",
+    };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 0, end_time: 1, text_final: "嗯我们开始" },
+        { index: 1, start_time: 1, end_time: 2, text_final: "这个就是重点" },
+      ],
+      rules,
+      [],
+      [
+        { start: 0.0, end: 0.12, duration_sec: 0.12, kind: "filler", reason: "filler_word", source: "manual_editor_rule_candidate", filler_mode: "standalone", source_text: "嗯" },
+        { start: 1.28, end: 1.46, duration_sec: 0.18, kind: "catchphrase", reason: "catchphrase_phrase", source: "manual_editor_rule_candidate", source_text: "就是" },
+      ],
+      { authoritativeKinds: ["filler", "catchphrase"] },
+    );
+
+    expect(analysis.filler).toEqual([
+      expect.objectContaining({ start: 0, end: 0.12, kind: "filler", sourceText: "嗯", fillerMode: "standalone" }),
+    ]);
+    expect(analysis.catchphrase).toEqual([
+      expect.objectContaining({ start: 1.28, end: 1.46, kind: "catchphrase", sourceText: "就是" }),
+    ]);
+  });
+
+  it("does not fall back to local filler and catchphrase rescans when backend authoritative analysis is empty", () => {
+    const rules = {
+      fillerEnabled: true,
+      fillerStandaloneEnabled: true,
+      fillerContinuousEnabled: false,
+      catchphraseEnabled: true,
+      repeatedEnabled: false,
+      pauseEnabled: false,
+      smartDeleteEnabled: false,
+      pauseThresholdSec: 0.8,
+      fillers: "嗯",
+      catchphrases: "就是",
+    };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 0, end_time: 1, text_final: "嗯我们开始" },
+        { index: 1, start_time: 1, end_time: 2, text_final: "这个就是重点" },
+      ],
+      rules,
+      [],
+      [],
+      { authoritativeKinds: ["filler", "catchphrase"] },
+    );
+
+    expect(analysis.filler).toEqual([]);
+    expect(analysis.catchphrase).toEqual([]);
+  });
+
+  it("prefers backend authoritative pause ranges when provided", () => {
+    const rules = {
+      fillerEnabled: false,
+      repeatedEnabled: false,
+      pauseEnabled: true,
+      smartDeleteEnabled: false,
+      pauseThresholdSec: 0.8,
+      fillers: "嗯,呃",
+    };
+    const analysis = buildSmartCutRuleAnalysis(
+      [],
+      rules,
+      [{ start: 2, end: 3.1, duration_sec: 1.1, source: "audio_vad" }],
+      [
+        { start: 2, end: 3.1, duration_sec: 1.1, kind: "pause", reason: "silence", source: "manual_editor_rule_candidate" },
+      ],
+      { authoritativeKinds: ["pause"] },
+    );
+
+    expect(analysis.pauseCandidates).toEqual([
+      expect.objectContaining({ start: 2, end: 3.1, kind: "pause", reason: "silence" }),
+    ]);
+    expect(analysis.pause).toEqual([
+      expect.objectContaining({ start: 2, end: 3.1, kind: "pause", reason: "silence" }),
+    ]);
+  });
+
+  it("does not fall back to local pause rescans when backend authoritative pause analysis is empty", () => {
+    const rules = {
+      fillerEnabled: false,
+      repeatedEnabled: false,
+      pauseEnabled: true,
+      smartDeleteEnabled: false,
+      pauseThresholdSec: 0.8,
+      fillers: "嗯,呃",
+    };
+    const analysis = buildSmartCutRuleAnalysis(
+      [],
+      rules,
+      [{ start: 2, end: 3.1, duration_sec: 1.1, source: "audio_vad" }],
+      [],
+      { authoritativeKinds: ["pause"] },
+    );
+
+    expect(analysis.pauseCandidates).toEqual([]);
+    expect(analysis.pause).toEqual([]);
+  });
+
+  it("uses backend smart-delete rule segments as the primary source without duplicate smart-delete payloads", () => {
+    const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        { index: 0, start_time: 10, end_time: 12, text_final: "新兄弟EDC17光荣取代了" },
+      ],
+      rules,
+      [],
+      [
+        { start: 10, end: 12, duration_sec: 2, kind: "smart_delete", reason: "low_signal_subtitle", source: "llm_cut_review", detail: "低信息字幕废片" },
+      ],
+      { authoritativeKinds: ["smart_delete"] },
+    );
+
+    expect(analysis.smartDelete).toEqual([
+      expect.objectContaining({ start: 10, end: 12, kind: "smart_delete", reason: "low_signal_subtitle" }),
+    ]);
+  });
+
   it("builds rule previews from real matched source text", () => {
-    const rules = { fillerEnabled: true, repeatedEnabled: true, pauseEnabled: true, smartDeleteEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
+    const rules = { fillerEnabled: true, catchphraseEnabled: true, repeatedEnabled: true, pauseEnabled: true, smartDeleteEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃", catchphrases: "就是" };
     const subtitles = [
       { index: 0, start_time: 0, end_time: 1, text_final: "嗯我们开始" },
       { index: 1, start_time: 2, end_time: 3, text_final: "这个这个型号不错" },
+      { index: 2, start_time: 3, end_time: 4, text_final: "这个就是重点" },
     ];
     const analysis = buildSmartCutRuleAnalysis(
       subtitles,
       rules,
       [{ start: 1.1, end: 1.95, duration_sec: 0.85 }],
-      [{ start: 4, end: 5, duration_sec: 1, reason: "restart_retake", detail: "开头重说" }],
+      [{ start: 4, end: 5, duration_sec: 1, kind: "smart_delete", reason: "restart_retake", detail: "开头重说" }],
     );
 
     const previews = buildSmartCutRulePreviews(analysis, rules, subtitles);
 
-    expect(previews.map((preview) => preview.label)).toEqual(["语气词", "重复口误", "停顿", "智能删减"]);
+    expect(previews.map((preview) => preview.label)).toEqual(["语气词", "口头禅", "重复口误", "停顿", "智能删减"]);
     expect(previews.find((preview) => preview.kind === "filler")?.sampleText).toBe("嗯");
+    expect(previews.find((preview) => preview.kind === "catchphrase")?.sampleText).toBe("就是");
     expect(previews.find((preview) => preview.kind === "pause")?.sampleText).toBe("[0.8s]");
     expect(previews.find((preview) => preview.kind === "smart_delete")?.reason).toContain("开头重说");
   });
@@ -2537,8 +3063,8 @@ describe("manual editor timeline mapping", () => {
       rules,
       [],
       [
-        { start: 10.9, end: 12.1, duration_sec: 1.2, reason: "rollback_instruction", detail: "前面这段删掉重来" },
-        { start: 12.18, end: 12.5, duration_sec: 0.32, reason: "timing_trim", detail: "规则候选：节奏边界修剪" },
+        { start: 10.9, end: 12.1, duration_sec: 1.2, kind: "smart_delete", reason: "rollback_instruction", detail: "前面这段删掉重来" },
+        { start: 12.18, end: 12.5, duration_sec: 0.32, kind: "smart_delete", reason: "timing_trim", detail: "规则候选：节奏边界修剪" },
       ],
     );
 
@@ -2547,6 +3073,7 @@ describe("manual editor timeline mapping", () => {
     expect(suggestions).toHaveLength(1);
     expect(suggestions[0]?.sourceRanges).toEqual([{ start: 10.9, end: 12.1 }, { start: 12.18, end: 12.5 }]);
     expect(suggestions[0]?.reasonSummary).toContain("明确的剪辑口令");
+    expect(suggestions[0]?.detailSummary).toContain("前面这段删掉重来");
     expect(suggestions[0]?.detailSummary).toContain("句子边角修剪");
   });
 
