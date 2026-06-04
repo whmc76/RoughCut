@@ -965,6 +965,42 @@ def test_backend_smart_cut_candidates_include_low_signal_subtitle_waste() -> Non
     assert low_signal[0]["source_text"] == "然后呢"
 
 
+def test_backend_low_signal_candidates_mark_multimodal_review_when_visual_hint_overlaps() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={},
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 0.9, "text_final": "然后呢"},
+        ],
+        smart_cut_rules={"smartDeleteEnabled": True},
+        content_profile={
+            "video_understanding": {
+                "segment_understanding": [
+                    {
+                        "start": 0.0,
+                        "end": 1.0,
+                        "role": "detail_showcase",
+                        "keep_priority": "high",
+                        "confidence": 0.91,
+                    }
+                ]
+            }
+        },
+    )
+
+    low_signal = [
+        item
+        for item in payload.get("rule_candidates") or []
+        if str(item.get("reason") or "") == "low_signal_subtitle"
+    ]
+
+    assert len(low_signal) == 1
+    assert low_signal[0]["multimodal_review_required"] is True
+    assert low_signal[0]["multimodal_keep_priority"] == "high"
+    assert low_signal[0]["multimodal_roles"] == ["detail_showcase"]
+
+
 def test_manual_editor_smart_cut_rules_payload_defaults_when_missing() -> None:
     payload = _manual_editor_smart_cut_rules_payload(None)
     assert payload is not None

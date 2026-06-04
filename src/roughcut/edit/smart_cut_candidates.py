@@ -5,6 +5,7 @@ from typing import Any
 
 from roughcut.edit.low_signal_text import compact_subtitle_text, is_low_signal_subtitle_text, subtitle_signal_score
 from roughcut.edit.smart_cut_rules import normalize_smart_cut_rules_payload
+from roughcut.review.video_understanding import normalize_video_understanding_segment_hints
 
 
 _TERM_SPLIT_PATTERN = re.compile(r"[,，、;；\s]+")
@@ -12,6 +13,7 @@ _BOUNDARY_CHARS = set(" \t\r\n,，、.。!?！？；;：:\"'“”‘’()（）
 _WORD_BOUNDARY_GUARD_SEC = 0.16
 _VISUAL_SHOWCASE_TEXT_RE = re.compile(r"(看到|看一下|来看|镜头|画面|展示|演示|操作|实操|特写|细节|同框|对比|手电|刀|上手|打开|合上)")
 SMART_CUT_RULE_CANDIDATE_STAGE = "manual_editor_smart_cut_rules"
+_MULTIMODAL_REVIEW_POSITIVE_ROLES = {"comparison", "detail_showcase", "demo", "hook", "cta", "transition"}
 
 
 def _parse_term_list(value: Any) -> list[str]:
@@ -137,6 +139,78 @@ def _subtitles_sorted(subtitles: list[dict[str, Any]]) -> list[dict[str, Any]]:
             float(item.get("end_time", item.get("end", 0.0)) or 0.0),
         ),
     )
+
+
+def _multimodal_segment_hints(
+    subtitles: list[dict[str, Any]],
+    content_profile: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if not isinstance(content_profile, dict):
+        return []
+    video_understanding = content_profile.get("video_understanding")
+    if not isinstance(video_understanding, dict):
+        return []
+    duration = max((_subtitle_range(item)[1] for item in _subtitles_sorted(subtitles)), default=0.0)
+    return normalize_video_understanding_segment_hints(video_understanding, duration=duration)
+
+
+def _matched_multimodal_hints_for_range(
+    start: float,
+    end: float,
+    *,
+    multimodal_segment_hints: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    matched: list[dict[str, Any]] = []
+    for hint in list(multimodal_segment_hints or []):
+        if not isinstance(hint, dict):
+            continue
+        hint_start = float(hint.get("start", 0.0) or 0.0)
+        hint_end = float(hint.get("end", hint_start) or hint_start)
+        if hint_end <= start or hint_start >= end:
+            continue
+        matched.append(hint)
+    return matched
+
+
+def _multimodal_review_fields(
+    start: float,
+    end: float,
+    *,
+    multimodal_segment_hints: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    matched = _matched_multimodal_hints_for_range(
+        start,
+        end,
+        multimodal_segment_hints=multimodal_segment_hints,
+    )
+    if not matched:
+        return {}
+    roles: list[str] = []
+    strongest_priority_rank = -1
+    strongest_priority = ""
+    strongest_confidence = 0.0
+    review_required = False
+    for hint in matched:
+        role = str(hint.get("role") or "").strip().lower()
+        keep_priority = str(hint.get("keep_priority") or "").strip().lower()
+        confidence = round(float(hint.get("confidence", 0.0) or 0.0), 3)
+        if role and role not in roles:
+            roles.append(role)
+        rank = {"drop": 0, "low": 1, "medium": 2, "high": 3}.get(keep_priority, -1)
+        if rank > strongest_priority_rank:
+            strongest_priority_rank = rank
+            strongest_priority = keep_priority
+        strongest_confidence = max(strongest_confidence, confidence)
+        if role in _MULTIMODAL_REVIEW_POSITIVE_ROLES and keep_priority in {"medium", "high"}:
+            review_required = True
+    payload: dict[str, Any] = {
+        "multimodal_roles": roles[:4],
+        "multimodal_keep_priority": strongest_priority or None,
+        "multimodal_confidence": round(strongest_confidence, 3),
+    }
+    if review_required:
+        payload["multimodal_review_required"] = True
+    return payload
 
 
 def _meaningful_timed_ranges_for_pause(
@@ -349,9 +423,11 @@ def build_smart_cut_rule_candidates(
     rules = normalize_smart_cut_rules_payload(smart_cut_rules)
     filler_terms = _parse_term_list(rules.get("fillers")) if bool(rules.get("fillerEnabled")) else []
     catchphrase_terms = _parse_term_list(rules.get("catchphrases")) if bool(rules.get("catchphraseEnabled")) else []
+    normalized_subtitles = _subtitles_sorted(list(subtitles or []))
+    multimodal_segment_hints = _multimodal_segment_hints(normalized_subtitles, content_profile)
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[str, float, float, str, str]] = set()
-    for subtitle in list(subtitles or []):
+    for subtitle in normalized_subtitles:
         if not isinstance(subtitle, dict):
             continue
         text = _subtitle_text(subtitle)
@@ -425,6 +501,11 @@ def build_smart_cut_rule_candidates(
                             "auto_applied": False,
                             "score": 0.62,
                             "source_text": text,
+                            **_multimodal_review_fields(
+                                subtitle_start,
+                                subtitle_end,
+                                multimodal_segment_hints=multimodal_segment_hints,
+                            ),
                         }
                     )
     if bool(rules.get("pauseEnabled")):
@@ -432,7 +513,7 @@ def build_smart_cut_rule_candidates(
         for silence in list(silence_segments or []):
             if not isinstance(silence, dict):
                 continue
-            for start, end in _cuttable_pause_ranges(silence, list(subtitles or []), low_signal_terms):
+            for start, end in _cuttable_pause_ranges(silence, normalized_subtitles, low_signal_terms):
                 key = ("silence", start, end, "", "")
                 if key in seen:
                     continue
