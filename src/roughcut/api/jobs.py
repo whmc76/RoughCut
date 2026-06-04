@@ -72,6 +72,7 @@ from roughcut.edit.cut_analysis import (
     build_cut_analysis_payload,
     cut_analysis_accepted_cuts,
     cut_analysis_candidate_items,
+    cut_analysis_rule_candidates,
     cut_analysis_silence_segments,
 )
 from roughcut.edit.refine_decisions import (
@@ -129,6 +130,7 @@ from roughcut.media.variant_timeline_bundle import (
     variant_high_energy_keeps,
     variant_high_risk_cuts,
     variant_llm_cut_review,
+    variant_multimodal_trim_review_summary,
     variant_refine_decision_summary,
     variant_review_flags,
     variant_timeline_diagnostics,
@@ -412,7 +414,7 @@ class ManualEditorRuleSegmentOut(BaseModel):
     detail: str | None = None
     evidence: list[str] = Field(default_factory=list)
     auto_applied: bool = True
-    filler_mode: Literal["standalone", "continuous"] | None = None
+    filler_mode: Literal["standalone", "sentence_head", "sentence_tail", "continuous"] | None = None
     source_text: str | None = None
 
 
@@ -696,6 +698,152 @@ async def _load_latest_optional_artifact(
     if set(artifact_types).issuperset(_CONTENT_PROFILE_ARTIFACT_TYPES):
         return _select_preferred_content_profile_artifact(artifacts)
     return artifacts[0] if artifacts else None
+
+
+async def _load_manual_editor_preferred_downstream_profile(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+) -> tuple[Artifact | None, dict[str, Any]]:
+    result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id == job_id,
+            Artifact.artifact_type.in_(list(_DOWNSTREAM_PROFILE_ARTIFACT_TYPES)),
+        )
+        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+    )
+    artifacts = result.scalars().all()
+    artifact = _select_preferred_downstream_artifact(artifacts)
+    if artifact is None:
+        return None, {}
+    return artifact, resolve_downstream_profile(artifact.data_json if isinstance(artifact.data_json, dict) else {})
+
+
+def _manual_editor_projection_has_suspicious_subtitle_timing(
+    entries: list[dict[str, Any]],
+    *,
+    split_profile: dict[str, Any],
+) -> bool:
+    max_chars = int(split_profile.get("max_chars") or 30)
+    max_duration = float(split_profile.get("max_duration") or 5.0)
+    duration_limit = max(8.0, max_duration * 1.6)
+    compact_limit = max(8, int(max_chars * 0.45))
+    for entry in entries:
+        try:
+            start = float(entry.get("start_time", entry.get("start", 0.0)) or 0.0)
+            end = float(entry.get("end_time", entry.get("end", start)) or start)
+        except (TypeError, ValueError):
+            continue
+        duration = max(0.0, end - start)
+        text = str(entry.get("text_final") or entry.get("text_norm") or entry.get("text_raw") or entry.get("text") or "")
+        compact_len = len(re.sub(r"[\s，。！？!?；;：:,、（）()[]【】{}\"'《》<>]+", "", text))
+        if duration > duration_limit and compact_len <= compact_limit:
+            return True
+    return False
+
+
+def _manual_editor_subtitle_item_payload(item: SubtitleItem) -> dict[str, Any]:
+    return {
+        "index": item.item_index,
+        "start_time": item.start_time,
+        "end_time": item.end_time,
+        "text_raw": item.text_raw,
+        "text_norm": item.text_norm,
+        "text_final": item.text_final,
+    }
+
+
+def _manual_editor_subtitle_projection_entry_payload(entry: dict[str, Any]) -> dict[str, Any]:
+    payload = {
+        "index": int(entry.get("index", 0) or 0),
+        "start_time": entry.get("start_time", entry.get("start")),
+        "end_time": entry.get("end_time", entry.get("end")),
+        "text_raw": entry.get("text_raw"),
+        "text_norm": entry.get("text_norm"),
+        "text_final": entry.get("text_final"),
+    }
+    words = drop_redundant_synthetic_word_payloads(list(entry.get("words") or entry.get("words_json") or []))
+    if words:
+        payload["words"] = words
+    return payload
+
+
+async def _load_manual_editor_subtitle_items(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+) -> list[SubtitleItem]:
+    item_result = await session.execute(
+        select(SubtitleItem)
+        .where(SubtitleItem.job_id == job_id, SubtitleItem.version == 1)
+        .order_by(SubtitleItem.item_index)
+    )
+    return list(item_result.scalars().all())
+
+
+async def _load_manual_editor_latest_subtitle_projection_entries(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+    fallback_items: list[SubtitleItem] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    projection_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=(ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER,),
+    )
+    projection_data = projection_artifact.data_json if projection_artifact and isinstance(projection_artifact.data_json, dict) else {}
+    projection_entries = [
+        _manual_editor_subtitle_projection_entry_payload(entry)
+        for entry in list(projection_data.get("entries") or [])
+        if isinstance(entry, dict)
+    ]
+    if projection_entries:
+        return projection_entries, projection_data
+    return [_manual_editor_subtitle_item_payload(item) for item in list(fallback_items or [])], {}
+
+
+async def _load_manual_editor_latest_subtitle_payloads(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+    fallback_to_items: bool = True,
+    drop_empty: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    subtitle_dicts, projection_data = await _load_manual_editor_latest_subtitle_projection_entries(
+        session,
+        job_id=job_id,
+        fallback_items=None,
+    )
+    if subtitle_dicts:
+        cleaned_subtitles = clean_subtitle_payloads(subtitle_dicts, drop_empty=drop_empty)
+        split_profile = projection_data.get("split_profile") if isinstance(projection_data.get("split_profile"), dict) else {}
+        if not fallback_to_items or not _manual_editor_projection_has_suspicious_subtitle_timing(
+            cleaned_subtitles,
+            split_profile=split_profile,
+        ):
+            return cleaned_subtitles, projection_data
+    elif not fallback_to_items:
+        return [], projection_data
+    subtitle_items = await _load_manual_editor_subtitle_items(session, job_id=job_id) if fallback_to_items else []
+    if subtitle_items:
+        subtitle_item_projection_data = {
+            **dict(projection_data or {}),
+            "projection_kind": "subtitle_item_baseline",
+            "transcript_layer": "subtitle_item",
+        }
+        return (
+            clean_subtitle_payloads(
+                [_manual_editor_subtitle_item_payload(item) for item in subtitle_items],
+                drop_empty=drop_empty,
+            ),
+            subtitle_item_projection_data,
+        )
+    return clean_subtitle_payloads(
+        [_manual_editor_subtitle_item_payload(item) for item in subtitle_items],
+        drop_empty=drop_empty,
+    ), {}
 
 
 def _coerce_artifact_payload(artifact: Artifact | None) -> dict[str, Any]:
@@ -5179,6 +5327,67 @@ async def _load_latest_timeline_by_type(
     return result.scalars().first()
 
 
+def _manual_editor_is_synthetic_manual_timeline_payload(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    segments = [segment for segment in list(payload.get("segments") or []) if isinstance(segment, dict)]
+    if len(segments) < 2:
+        return False
+    reasons = {
+        str(segment.get("reason") or "").strip()
+        for segment in segments
+    }
+    return bool(reasons) and reasons.issubset({"manual_editor_keep", "manual_editor_removed"})
+
+
+def _manual_editor_should_recover_previous_editorial_baseline(
+    *,
+    latest_editorial_payload: dict[str, Any] | None,
+    cut_analysis_payload: dict[str, Any] | None,
+    refine_plan_payload: dict[str, Any] | None,
+) -> bool:
+    if not _manual_editor_is_synthetic_manual_timeline_payload(latest_editorial_payload):
+        return False
+    if cut_analysis_accepted_cuts(cut_analysis_payload):
+        return False
+    if not cut_analysis_rule_candidates(cut_analysis_payload):
+        return False
+    if str((refine_plan_payload or {}).get("mode") or "").strip() != "manual_refine":
+        return False
+    return True
+
+
+async def _load_manual_editor_recovered_baseline_timeline(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+    latest_editorial_timeline: Timeline,
+    cut_analysis_payload: dict[str, Any] | None,
+    refine_plan_payload: dict[str, Any] | None,
+) -> Timeline:
+    latest_payload = latest_editorial_timeline.data_json if isinstance(latest_editorial_timeline.data_json, dict) else None
+    if not _manual_editor_should_recover_previous_editorial_baseline(
+        latest_editorial_payload=latest_payload,
+        cut_analysis_payload=cut_analysis_payload,
+        refine_plan_payload=refine_plan_payload,
+    ):
+        return latest_editorial_timeline
+    result = await session.execute(
+        select(Timeline)
+        .where(
+            Timeline.job_id == job_id,
+            Timeline.timeline_type == "editorial",
+            Timeline.id != latest_editorial_timeline.id,
+        )
+        .order_by(Timeline.version.desc(), Timeline.created_at.desc(), Timeline.id.desc())
+    )
+    for candidate in result.scalars():
+        candidate_payload = candidate.data_json if isinstance(candidate.data_json, dict) else None
+        if not _manual_editor_is_synthetic_manual_timeline_payload(candidate_payload):
+            return candidate
+    return latest_editorial_timeline
+
+
 _MANUAL_EDITOR_REQUIRED_STEPS = tuple(
     step_name
     for step_name in PIPELINE_STEPS
@@ -5363,12 +5572,6 @@ async def _build_manual_editor_session(
     job: Job,
     session: AsyncSession,
 ) -> ManualEditorSessionOut:
-    from roughcut.pipeline.steps import (
-        _load_latest_subtitle_payloads,
-        _load_preferred_downstream_profile,
-        _projection_has_suspicious_subtitle_timing,
-    )
-
     editorial_timeline = await _load_latest_timeline_by_type(session, job_id=job.id, timeline_type="editorial")
     if editorial_timeline is None:
         raise HTTPException(status_code=404, detail="当前任务还没有可编辑时间线。")
@@ -5420,13 +5623,16 @@ async def _build_manual_editor_session(
             if isinstance(item, dict)
         ]
 
-    raw_subtitle_dicts, _projection_data = await _load_latest_subtitle_payloads(
+    raw_subtitle_dicts, _projection_data = await _load_manual_editor_latest_subtitle_payloads(
         session,
         job_id=job.id,
         drop_empty=False,
         fallback_to_items=False,
     )
-    _content_profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
+    _content_profile_artifact, content_profile = await _load_manual_editor_preferred_downstream_profile(
+        session,
+        job_id=job.id,
+    )
     source_subtitle_dicts = await _load_manual_editor_aligned_source_subtitle_dicts(session, job=job)
     current_smart_cut_rules = _manual_editor_smart_cut_rules_payload(
         refine_decision_plan_artifact.data_json.get("smart_cut_rules")
@@ -5442,6 +5648,52 @@ async def _build_manual_editor_session(
         smart_cut_rules=current_smart_cut_rules,
         content_profile=content_profile,
     )
+    baseline_editorial_timeline = await _load_manual_editor_recovered_baseline_timeline(
+        session,
+        job_id=job.id,
+        latest_editorial_timeline=editorial_timeline,
+        cut_analysis_payload=cut_analysis_payload,
+        refine_plan_payload=(
+            refine_decision_plan_artifact.data_json
+            if refine_decision_plan_artifact and isinstance(refine_decision_plan_artifact.data_json, dict)
+            else None
+        ),
+    )
+    baseline_editorial_payload = (
+        baseline_editorial_timeline.data_json
+        if isinstance(baseline_editorial_timeline.data_json, dict)
+        else None
+    )
+    if baseline_editorial_timeline.id != editorial_timeline.id:
+        resolved_base_keep_segment_dicts = _manual_editor_base_keep_segment_dicts(
+            baseline_editorial_payload,
+            refine_plan_payload=None,
+            editorial_timeline_id=str(baseline_editorial_timeline.id),
+            editorial_timeline_version=int(baseline_editorial_timeline.version or 1),
+            source_duration_sec=source_duration_sec,
+        )
+        raw_base_keep_segments = [
+            _manual_editor_segment_payload(segment, index=index)
+            for index, segment in enumerate(resolved_base_keep_segment_dicts)
+        ]
+        if source_duration_sec <= 0.0:
+            source_duration_sec = max((segment.end for segment in raw_base_keep_segments), default=0.0)
+        subtitle_projection = (baseline_editorial_payload or {}).get("subtitle_projection")
+        subtitle_overrides = []
+        manual_projection_items = []
+        if isinstance(subtitle_projection, dict):
+            subtitle_overrides = _manual_subtitle_override_payloads(
+                [
+                    item
+                    for item in list(subtitle_projection.get("overrides") or [])
+                    if isinstance(item, dict)
+                ]
+            )
+            manual_projection_items = [
+                _manual_editor_sanitize_projection_item(item)
+                for item in list(subtitle_projection.get("items") or [])
+                if isinstance(item, dict)
+            ]
     multimodal_trim_review_payload = await _load_manual_editor_multimodal_trim_review_payload(
         session,
         job=job,
@@ -5499,7 +5751,7 @@ async def _build_manual_editor_session(
     if not _manual_editor_stored_projection_matches_subtitles(
         subtitle_projection if isinstance(subtitle_projection, dict) else None,
         current_subtitle_fingerprint=subtitle_fingerprint,
-        projection_created_at=editorial_timeline.created_at,
+        projection_created_at=baseline_editorial_timeline.created_at,
         latest_subtitle_created_at=latest_subtitle_created_at,
     ):
         subtitle_overrides = []
@@ -5526,10 +5778,15 @@ async def _build_manual_editor_session(
         draft_created_at=draft_artifact.created_at if draft_artifact is not None else None,
         latest_subtitle_created_at=latest_subtitle_created_at,
     )
-    draft_active = timeline_subtitles_current and _manual_editor_draft_matches_base(
+    recovered_baseline_from_previous_editorial = baseline_editorial_timeline.id != editorial_timeline.id
+    draft_active = (
+        not recovered_baseline_from_previous_editorial
+        and timeline_subtitles_current
+        and _manual_editor_draft_matches_base(
         draft_payload,
         editorial_timeline=editorial_timeline,
         render_plan_timeline=render_plan_timeline,
+        )
     )
     if draft_active and draft_payload is not None:
         raw_draft_keep_segments = [
@@ -5599,7 +5856,7 @@ async def _build_manual_editor_session(
         editorial_timeline_version=int(editorial_timeline.version or 1),
     )
 
-    manual_projection_suspicious = _projection_has_suspicious_subtitle_timing(
+    manual_projection_suspicious = _manual_editor_projection_has_suspicious_subtitle_timing(
         manual_projection_items,
         split_profile={},
     )
@@ -5831,8 +6088,6 @@ async def save_manual_editor_draft(
     request: ManualEditorApplyIn,
     session: AsyncSession = Depends(get_session),
 ):
-    from roughcut.pipeline.steps import _load_preferred_downstream_profile
-
     job_result = await session.execute(
         select(Job)
         .options(selectinload(Job.steps))
@@ -5869,7 +6124,10 @@ async def save_manual_editor_draft(
         )
     keep_segments = _normalize_manual_keep_segments(request.keep_segments, source_duration_sec=source_duration_sec)
     current_source_subtitles = await _load_manual_editor_aligned_source_subtitle_dicts(session, job=job)
-    _content_profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
+    _content_profile_artifact, content_profile = await _load_manual_editor_preferred_downstream_profile(
+        session,
+        job_id=job.id,
+    )
     subtitle_fingerprint = _manual_editor_subtitle_fingerprint(current_source_subtitles)
     _validate_manual_editor_subtitle_revision(request, subtitle_fingerprint)
     request_subtitles_match = _manual_editor_request_subtitles_match_fingerprint(request, subtitle_fingerprint)
@@ -5943,6 +6201,10 @@ async def save_manual_editor_draft(
         ),
         source_path=_resolve_manual_editor_source_path(job),
         source_meta=_manual_editor_multimodal_review_source_meta(job=job, content_profile=content_profile),
+    )
+    current_cut_analysis_payload = apply_multimodal_trim_review_to_cut_analysis(
+        current_cut_analysis_payload,
+        reviewed_multimodal_trim_review_payload,
     )
     session.add(
         Artifact(
@@ -6018,7 +6280,6 @@ async def apply_manual_editor_timeline(
 ):
     from roughcut.pipeline.steps import (
         _job_creative_profile,
-        _load_preferred_downstream_profile,
         _plan_insert_asset_slot,
         _plan_music_entry,
     )
@@ -6113,7 +6374,10 @@ async def apply_manual_editor_timeline(
         previous_video_transform=_manual_video_transform_from_render_plan(previous_render_plan),
         next_video_transform=video_transform,
     )
-    _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
+    _profile_artifact, content_profile = await _load_manual_editor_preferred_downstream_profile(
+        session,
+        job_id=job.id,
+    )
     await _record_manual_subtitle_replacement_memory(
         session,
         job=job,
@@ -6255,6 +6519,10 @@ async def apply_manual_editor_timeline(
         ),
         source_path=_resolve_manual_editor_source_path(job),
         source_meta=_manual_editor_multimodal_review_source_meta(job=job, content_profile=content_profile),
+    )
+    current_cut_analysis_payload = apply_multimodal_trim_review_to_cut_analysis(
+        current_cut_analysis_payload,
+        reviewed_multimodal_trim_review_payload,
     )
     session.add(
         Artifact(
@@ -9670,6 +9938,7 @@ def _resolve_job_timeline_diagnostics_preview(artifacts: list[Artifact]) -> dict
 
     review_flags = variant_review_flags(bundle)
     llm_cut_review = variant_llm_cut_review(bundle)
+    multimodal_trim_review_summary = variant_multimodal_trim_review_summary(bundle)
     refine_decision_summary = variant_refine_decision_summary(bundle)
     high_risk_cuts = variant_high_risk_cuts(bundle)
     high_energy_keeps = variant_high_energy_keeps(bundle)
@@ -9688,6 +9957,12 @@ def _resolve_job_timeline_diagnostics_preview(artifacts: list[Artifact]) -> dict
         "llm_restored_cut_count": int(llm_cut_review.get("restored_cut_count") or 0),
         "llm_provider": str(llm_cut_review.get("provider") or "").strip() or None,
         "llm_summary": str(llm_cut_review.get("summary") or "").strip() or None,
+        "multimodal_candidate_count": int(multimodal_trim_review_summary.get("candidate_count") or 0),
+        "multimodal_accepted_count": int(multimodal_trim_review_summary.get("accepted_count") or 0),
+        "multimodal_rejected_count": int(multimodal_trim_review_summary.get("rejected_count") or 0),
+        "multimodal_pending_count": int(multimodal_trim_review_summary.get("pending_count") or 0),
+        "multimodal_auto_apply_cut_count": int(multimodal_trim_review_summary.get("auto_apply_cut_count") or 0),
+        "multimodal_error": str(multimodal_trim_review_summary.get("error") or "").strip() or None,
         "refine_mode": str(refine_decision_summary.get("mode") or "").strip() or None,
         "refine_keep_segment_count": int(refine_decision_summary.get("keep_segment_count") or 0),
         "refine_candidate_total": int(refine_decision_summary.get("candidate_total") or 0),
@@ -9702,8 +9977,13 @@ def _resolve_job_timeline_diagnostics_preview(artifacts: list[Artifact]) -> dict
             preview["high_protection_evidence_count"],
             preview["llm_reviewed"],
             preview["llm_restored_cut_count"],
+            preview["multimodal_candidate_count"],
+            preview["multimodal_accepted_count"],
+            preview["multimodal_pending_count"],
+            preview["multimodal_auto_apply_cut_count"],
             preview["review_reasons"],
             preview["llm_summary"],
+            preview["multimodal_error"],
         )
     ):
         return preview

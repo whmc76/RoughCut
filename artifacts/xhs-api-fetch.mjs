@@ -1,6 +1,0 @@
-const CDP='http://127.0.0.1:9222'; const tabs=await (await fetch(CDP+'/json/list')).json(); const tab=tabs.find(t=>t.type==='page'&&String(t.url).includes('creator.xiaohongshu.com'));
-class C{constructor(s){this.s=s;this.id=1;this.p=new Map();s.addEventListener('message',e=>{const m=JSON.parse(e.data);const p=this.p.get(m.id);if(!p)return;this.p.delete(m.id);m.error?p.reject(new Error(m.error.message)):p.resolve(m.result)})} static connect(u){return new Promise((res,rej)=>{const s=new WebSocket(u);s.addEventListener('open',()=>res(new C(s)),{once:true});s.addEventListener('error',()=>rej(new Error('ws')),{once:true})})} send(method,params={}){const id=this.id++;return new Promise((resolve,reject)=>{this.p.set(id,{resolve,reject});this.s.send(JSON.stringify({id,method,params}))})}}
-const c=await C.connect(tab.webSocketDebuggerUrl); await c.send('Runtime.enable');
-const urls=['https://edith.xiaohongshu.com/api/sns/v1/note/collection/pc/list_v2'];
-for (const url of urls){ const expr=`fetch(${JSON.stringify(url)},{credentials:'include'}).then(r=>r.text()).then(t=>t.slice(0,5000)).catch(e=>'ERR '+e.message)`; const r=await c.send('Runtime.evaluate',{expression:expr,returnByValue:true,awaitPromise:true,timeout:20000}); console.log('URL',url,'\n',r.result.value); }
-c.s.close();

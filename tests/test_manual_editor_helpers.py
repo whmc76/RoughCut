@@ -83,9 +83,16 @@ from roughcut.edit.refine_decisions import (
 from roughcut.edit.multimodal_trim_review import (
     apply_multimodal_trim_review_to_cut_analysis,
     build_multimodal_trim_review_payload,
+    multimodal_trim_review_auto_cut_candidates,
+    _extract_candidate_frame_times,
+    _resolve_multimodal_trim_review_timeout_seconds,
     review_multimodal_trim_review_payload,
 )
-from roughcut.edit.smart_cut_rules import DEFAULT_SMART_CUT_CATCHPHRASES, DEFAULT_SMART_CUT_FILLERS
+from roughcut.edit.smart_cut_rules import (
+    DEFAULT_SMART_CUT_CATCHPHRASES,
+    DEFAULT_SMART_CUT_FILLERS,
+    normalize_smart_cut_rules_payload,
+)
 from roughcut.media.render import _resolve_render_keep_segments
 from roughcut.media import manual_editor_assets as manual_editor_assets_module
 from roughcut.media import output as output_module
@@ -577,7 +584,7 @@ async def test_load_manual_editor_cut_analysis_payload_prefers_artifact_and_reap
         SimpleNamespace(),
         job=SimpleNamespace(id=uuid4(), source_name="demo.mp4", job_flow_mode="manual"),
         editorial_timeline_payload={"analysis": {"accepted_cuts": [{"start": 2.0, "end": 3.0, "reason": "silence"}]}},
-        source_subtitles=[{"start_time": 0.0, "end_time": 1.0, "text_final": "嗯我们开始"}],
+        source_subtitles=[{"start_time": 0.0, "end_time": 0.4, "text_final": "嗯"}],
         smart_cut_rules={
             "fillerEnabled": True,
             "fillerStandaloneEnabled": True,
@@ -667,7 +674,8 @@ def test_cut_analysis_payload_adds_backend_smart_cut_rule_candidates() -> None:
         smart_cut_rules={
             "fillerEnabled": True,
             "fillerStandaloneEnabled": True,
-            "fillerContinuousEnabled": False,
+            "fillerSentenceHeadEnabled": True,
+            "fillerSentenceTailEnabled": False,
             "catchphraseEnabled": True,
             "fillers": "嗯",
             "catchphrases": "就是",
@@ -675,8 +683,74 @@ def test_cut_analysis_payload_adds_backend_smart_cut_rule_candidates() -> None:
     )
 
     candidates = payload["rule_candidates"]
-    assert any(item["reason"] == "filler_word" and item["source_text"] == "嗯" and item["filler_mode"] == "standalone" for item in candidates)
+    assert any(item["reason"] == "filler_word" and item["source_text"] == "嗯" and item["filler_mode"] == "sentence_head" for item in candidates)
     assert any(item["reason"] == "catchphrase_phrase" and item["source_text"] == "就是" for item in candidates)
+
+
+def test_cut_analysis_payload_marks_sentence_tail_particles_without_treating_them_as_standalone() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={},
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 1.0, "text_final": "我们直接开箱吧"},
+        ],
+        smart_cut_rules={
+            "fillerEnabled": True,
+            "fillerStandaloneEnabled": True,
+            "fillerSentenceHeadEnabled": False,
+            "fillerSentenceTailEnabled": True,
+            "catchphraseEnabled": False,
+            "fillers": "吧",
+        },
+    )
+
+    candidates = payload["rule_candidates"]
+    assert any(
+        item["reason"] == "filler_word"
+        and item["source_text"] == "吧"
+        and item["filler_mode"] == "sentence_tail"
+        for item in candidates
+    )
+    assert not any(
+        item["reason"] == "filler_word"
+        and item["source_text"] == "吧"
+        and item["filler_mode"] == "standalone"
+        for item in candidates
+    )
+
+
+def test_cut_analysis_payload_detects_standalone_fillers_from_raw_source_text_when_final_text_is_cleaned() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={},
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text_raw": "啊，今天我们开始",
+                "text_norm": "啊，今天我们开始",
+                "text_final": "今天我们开始",
+            },
+        ],
+        smart_cut_rules={
+            "fillerEnabled": True,
+            "fillerStandaloneEnabled": True,
+            "fillerSentenceHeadEnabled": False,
+            "fillerSentenceTailEnabled": False,
+            "catchphraseEnabled": False,
+            "fillers": "啊",
+        },
+    )
+
+    candidates = payload["rule_candidates"]
+    assert any(
+        item["reason"] == "filler_word"
+        and item["source_text"] == "啊"
+        and item["filler_mode"] == "standalone"
+        for item in candidates
+    )
 
 
 def test_cut_analysis_payload_adds_backend_pause_rule_candidates() -> None:
@@ -719,7 +793,7 @@ def test_manual_editor_cut_analysis_payload_refreshes_schema_artifact_with_curre
         source_name="demo.mp4",
         job_flow_mode="manual",
         source_subtitles=[
-            {"start_time": 0.0, "end_time": 1.0, "text_final": "嗯我们开始"},
+            {"start_time": 0.0, "end_time": 0.4, "text_final": "嗯"},
         ],
         smart_cut_rules={
             "fillerEnabled": True,
@@ -831,6 +905,7 @@ def test_variant_timeline_bundle_carries_refine_decision_plan() -> None:
         "candidate_total": 2,
         "candidate_auto_apply": 1,
         "candidate_manual_confirm": 1,
+        "multimodal_auto_apply_cut_count": 0,
     }
 
 
@@ -951,7 +1026,7 @@ def test_manual_editor_rule_segments_expose_backend_pause_candidates() -> None:
     ]
 
 
-def test_backend_smart_cut_candidates_include_low_signal_subtitle_waste() -> None:
+def test_backend_smart_cut_candidates_skip_ultra_short_bridge_clauses() -> None:
     payload = build_cut_analysis_payload(
         editorial_analysis={},
         source_name="demo.mp4",
@@ -969,10 +1044,49 @@ def test_backend_smart_cut_candidates_include_low_signal_subtitle_waste() -> Non
         if str(item.get("reason") or "") == "low_signal_subtitle"
     ]
 
+    assert low_signal == []
+
+
+def test_backend_smart_cut_candidates_do_not_mark_short_actionable_clause_as_low_signal() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={},
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 1.0, "text_final": "解锁以后呢"},
+            {"start_time": 1.0, "end_time": 2.0, "text_final": "拿这个三"},
+        ],
+        smart_cut_rules={"smartDeleteEnabled": True},
+    )
+
+    low_signal = [
+        item
+        for item in payload.get("rule_candidates") or []
+        if str(item.get("reason") or "") == "low_signal_subtitle"
+    ]
+
+    assert low_signal == []
+
+
+def test_backend_smart_cut_candidates_keep_longer_low_signal_clause_reviewable() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={},
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 1.1, "text_final": "其实也就这样吧"},
+        ],
+        smart_cut_rules={"smartDeleteEnabled": True},
+    )
+
+    low_signal = [
+        item
+        for item in payload.get("rule_candidates") or []
+        if str(item.get("reason") or "") == "low_signal_subtitle"
+    ]
+
     assert len(low_signal) == 1
-    assert low_signal[0]["start"] == 0.0
-    assert low_signal[0]["end"] == 0.9
-    assert low_signal[0]["source_text"] == "然后呢"
+    assert low_signal[0]["source_text"] == "其实也就这样吧"
 
 
 def test_backend_low_signal_candidates_mark_multimodal_review_when_visual_hint_overlaps() -> None:
@@ -981,7 +1095,7 @@ def test_backend_low_signal_candidates_mark_multimodal_review_when_visual_hint_o
         source_name="demo.mp4",
         job_flow_mode="auto",
         source_subtitles=[
-            {"start_time": 0.0, "end_time": 0.9, "text_final": "然后呢"},
+            {"start_time": 0.0, "end_time": 1.1, "text_final": "其实也就这样吧"},
         ],
         smart_cut_rules={"smartDeleteEnabled": True},
         content_profile={
@@ -1017,7 +1131,7 @@ def test_multimodal_trim_review_payload_selects_review_required_candidates() -> 
         source_name="demo.mp4",
         job_flow_mode="auto",
         source_subtitles=[
-            {"start_time": 0.0, "end_time": 0.9, "text_final": "然后呢"},
+            {"start_time": 0.0, "end_time": 1.1, "text_final": "其实也就这样吧"},
             {"start_time": 1.0, "end_time": 2.0, "text_final": "EDC17亮度一千五流明"},
         ],
         smart_cut_rules={"smartDeleteEnabled": True},
@@ -1058,7 +1172,7 @@ def test_multimodal_trim_review_payload_includes_low_signal_candidates_without_v
         source_name="demo.mp4",
         job_flow_mode="auto",
         source_subtitles=[
-            {"start_time": 0.0, "end_time": 0.9, "text_final": "然后呢"},
+            {"start_time": 0.0, "end_time": 1.1, "text_final": "其实也就这样吧"},
             {"start_time": 1.0, "end_time": 2.0, "text_final": "EDC17亮度一千五流明"},
         ],
         smart_cut_rules={"smartDeleteEnabled": True},
@@ -1073,6 +1187,33 @@ def test_multimodal_trim_review_payload_includes_low_signal_candidates_without_v
     assert payload["candidate_count"] == 1
     assert payload["candidates"][0]["reason"] == "low_signal_subtitle"
     assert payload["candidates"][0]["review_trigger"] == "semantic_uncertainty"
+
+
+def test_extract_candidate_frame_times_uses_lighter_semantic_uncertainty_sampling() -> None:
+    semantic_times = _extract_candidate_frame_times(
+        10.0,
+        12.0,
+        candidate={"review_trigger": "semantic_uncertainty"},
+    )
+    visual_times = _extract_candidate_frame_times(
+        10.0,
+        12.0,
+        candidate={"review_trigger": "visual_protection"},
+    )
+
+    assert len(semantic_times) == 1
+    assert len(visual_times) == 3
+    assert semantic_times[0] >= 0.0
+    assert visual_times[-1] >= semantic_times[-1]
+
+
+def test_multimodal_trim_review_timeout_scales_with_frame_budget() -> None:
+    timeout = _resolve_multimodal_trim_review_timeout_seconds(
+        SimpleNamespace(multimodal_trim_review_timeout_sec=20),
+        candidate_count=3,
+        image_count=3,
+    )
+    assert timeout == 48.0
 
 
 @pytest.mark.asyncio
@@ -1149,6 +1290,196 @@ async def test_review_multimodal_trim_review_payload_applies_model_verdicts(
 
 
 @pytest.mark.asyncio
+async def test_review_multimodal_trim_review_payload_batches_uncached_candidates_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"fake")
+    frame_a = tmp_path / "frame-a.jpg"
+    frame_b = tmp_path / "frame-b.jpg"
+    frame_c = tmp_path / "frame-c.jpg"
+    frame_d = tmp_path / "frame-d.jpg"
+    for frame in (frame_a, frame_b, frame_c, frame_d):
+        frame.write_bytes(b"frame")
+
+    payload = {
+        "schema": "multimodal_trim_review.v1",
+        "source_name": "demo.mp4",
+        "job_flow_mode": "auto",
+        "reviewed": False,
+        "candidate_count": 2,
+        "pending_count": 2,
+        "accepted_count": 0,
+        "rejected_count": 0,
+        "candidates": [
+            {
+                "candidate_id": "low_signal_subtitle:0.000:0.900:然后呢",
+                "start": 0.0,
+                "end": 0.9,
+                "reason": "low_signal_subtitle",
+                "source_text": "然后呢",
+                "score": 0.83,
+                "review_trigger": "semantic_uncertainty",
+                "review_state": "pending",
+            },
+            {
+                "candidate_id": "timing_trim:1.000:2.000:这个边界",
+                "start": 1.0,
+                "end": 2.0,
+                "reason": "timing_trim",
+                "source_text": "这个边界",
+                "score": 0.66,
+                "review_trigger": "semantic_uncertainty",
+                "review_state": "pending",
+            },
+        ],
+    }
+
+    monkeypatch.setattr(
+        "roughcut.edit.multimodal_trim_review.get_settings",
+        lambda: SimpleNamespace(
+            multimodal_trim_review_enabled=True,
+            multimodal_trim_review_max_candidates=4,
+            multimodal_trim_review_timeout_sec=12,
+            multimodal_trim_review_min_confidence=0.72,
+            active_reasoning_provider="openai",
+            active_vision_model="gpt-5.5",
+            ffmpeg_timeout_sec=10,
+        ),
+    )
+    monkeypatch.setattr("roughcut.edit.multimodal_trim_review.llm_task_route", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr("roughcut.edit.multimodal_trim_review.track_usage_operation", lambda *args, **kwargs: nullcontext())
+
+    async def fake_extract_candidate_preview_frames(**kwargs):
+        source_text = str((kwargs.get("candidate") or {}).get("source_text") or "")
+        return [frame_a, frame_b] if source_text == "然后呢" else [frame_c, frame_d]
+
+    monkeypatch.setattr(
+        "roughcut.edit.multimodal_trim_review._extract_candidate_preview_frames",
+        fake_extract_candidate_preview_frames,
+    )
+    multimodal_calls: list[list[Path]] = []
+
+    async def fake_complete_with_images(prompt: str, image_paths: list[Path], **kwargs) -> str:
+        multimodal_calls.append(list(image_paths))
+        return (
+            '{"decisions":['
+            '{"candidate_id":"low_signal_subtitle:0.000:0.900:然后呢","verdict":"keep","confidence":0.91,"reason":"仍在展示","evidence":["细节"],"summary":"保留"},'
+            '{"candidate_id":"timing_trim:1.000:2.000:这个边界","verdict":"cut","confidence":0.88,"reason":"只是节奏修剪","evidence":["边界"],"summary":"可删"}'
+            '],"summary":"批量复核完成"}'
+        )
+
+    monkeypatch.setattr("roughcut.edit.multimodal_trim_review.complete_with_images", fake_complete_with_images)
+
+    reviewed = await review_multimodal_trim_review_payload(
+        payload,
+        source_path=source_path,
+        source_meta={"source_name": "demo.mp4", "subject_model": "EDC17"},
+    )
+
+    assert len(multimodal_calls) == 1
+    assert multimodal_calls[0] == [frame_a, frame_b, frame_c, frame_d]
+    assert reviewed["reviewed"] is True
+    assert reviewed["accepted_count"] == 1
+    assert reviewed["rejected_count"] == 1
+    assert reviewed["pending_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_review_multimodal_trim_review_payload_splits_batches_after_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"fake")
+    payload = {
+        "schema": "multimodal_trim_review.v1",
+        "source_name": "demo.mp4",
+        "job_flow_mode": "auto",
+        "reviewed": False,
+        "candidate_count": 2,
+        "pending_count": 2,
+        "accepted_count": 0,
+        "rejected_count": 0,
+        "candidates": [
+            {
+                "candidate_id": "low_signal_subtitle:0.000:0.900:然后呢",
+                "start": 0.0,
+                "end": 0.9,
+                "reason": "low_signal_subtitle",
+                "source_text": "然后呢",
+                "score": 0.83,
+                "review_trigger": "semantic_uncertainty",
+                "review_state": "pending",
+            },
+            {
+                "candidate_id": "timing_trim:1.000:2.000:这个边界",
+                "start": 1.0,
+                "end": 2.0,
+                "reason": "timing_trim",
+                "source_text": "这个边界",
+                "score": 0.66,
+                "review_trigger": "semantic_uncertainty",
+                "review_state": "pending",
+            },
+        ],
+    }
+
+    monkeypatch.setattr(
+        "roughcut.edit.multimodal_trim_review.get_settings",
+        lambda: SimpleNamespace(
+            multimodal_trim_review_enabled=True,
+            multimodal_trim_review_max_candidates=4,
+            multimodal_trim_review_timeout_sec=12,
+            multimodal_trim_review_min_confidence=0.72,
+            active_reasoning_provider="openai",
+            active_vision_model="gpt-5.5",
+            ffmpeg_timeout_sec=10,
+        ),
+    )
+    call_sizes: list[int] = []
+
+    async def fake_batch(**kwargs):
+        candidates = list(kwargs.get("candidates") or [])
+        call_sizes.append(len(candidates))
+        if len(candidates) > 1:
+            raise asyncio.TimeoutError()
+        candidate_id = str(candidates[0].get("candidate_id") or "")
+        verdict = "keep" if "low_signal_subtitle" in candidate_id else "cut"
+        confidence = 0.91 if verdict == "keep" else 0.88
+        return (
+            [
+                {
+                    "candidate_id": candidate_id,
+                    "verdict": verdict,
+                    "confidence": confidence,
+                    "reason": "split fallback verdict",
+                    "evidence": [],
+                    "summary": "done",
+                }
+            ],
+            {"summary": "split fallback batch"},
+        )
+
+    monkeypatch.setattr("roughcut.edit.multimodal_trim_review._review_multimodal_candidate_batch", fake_batch)
+
+    reviewed = await review_multimodal_trim_review_payload(
+        payload,
+        source_path=source_path,
+        source_meta={"source_name": "demo.mp4", "subject_model": "EDC17"},
+    )
+
+    assert call_sizes == [2, 1, 1]
+    assert reviewed["reviewed"] is True
+    assert reviewed.get("error") is None
+    assert len(reviewed["decisions"]) == 2
+    assert reviewed["rejected_count"] == 1
+    assert reviewed["accepted_count"] == 1
+    assert reviewed["pending_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_load_manual_editor_multimodal_trim_review_payload_prefers_matching_artifact(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1158,7 +1489,7 @@ async def test_load_manual_editor_multimodal_trim_review_payload_prefers_matchin
         source_name="demo.mp4",
         job_flow_mode="auto",
         source_subtitles=[
-            {"start_time": 0.0, "end_time": 0.9, "text_final": "然后呢"},
+            {"start_time": 0.0, "end_time": 1.1, "text_final": "其实也就这样吧"},
             {"start_time": 1.0, "end_time": 2.0, "text_final": "EDC17亮度一千五流明"},
         ],
         smart_cut_rules={"smartDeleteEnabled": True},
@@ -1166,7 +1497,7 @@ async def test_load_manual_editor_multimodal_trim_review_payload_prefers_matchin
     reviewed_artifact_payload = {
         **build_multimodal_trim_review_payload(cut_analysis, source_name="demo.mp4", job_flow_mode="auto"),
         "reviewed": True,
-        "decisions": [{"candidate_id": "low_signal_subtitle:0.000:0.900:然后呢", "verdict": "keep", "confidence": 0.9}],
+        "decisions": [{"candidate_id": "low_signal_subtitle:0.000:1.100:其实也就这样吧", "verdict": "keep", "confidence": 0.9}],
     }
 
     async def fake_load_latest_optional_artifact(*args, **kwargs):
@@ -1236,6 +1567,44 @@ def test_apply_multimodal_trim_review_to_cut_analysis_vetoes_keep_candidates() -
     assert result["rule_candidates"][0]["reason"] == "timing_trim"
     assert result["rule_candidates"][0]["multimodal_review"]["verdict"] == "cut"
     assert result["multimodal_trim_review_summary"]["vetoed_candidate_count"] == 1
+    assert result["multimodal_trim_review_summary"]["accepted_count"] == 0
+    assert result["multimodal_trim_review_summary"]["rejected_count"] == 0
+
+
+def test_multimodal_trim_review_auto_cut_candidates_filter_high_confidence_cut_verdicts() -> None:
+    cut_analysis = {
+        "rule_candidates": [
+            {
+                "start": 1.0,
+                "end": 2.0,
+                "reason": "low_signal_subtitle",
+                "multimodal_review": {"verdict": "cut", "confidence": 0.83},
+            },
+            {
+                "start": 3.0,
+                "end": 4.0,
+                "reason": "timing_trim",
+                "multimodal_review": {"verdict": "keep", "confidence": 0.91},
+            },
+            {
+                "start": 5.0,
+                "end": 6.0,
+                "reason": "timing_trim",
+                "multimodal_review": {"verdict": "cut", "confidence": 0.55},
+            },
+        ]
+    }
+
+    result = multimodal_trim_review_auto_cut_candidates(cut_analysis, min_confidence=0.72)
+
+    assert result == [
+        {
+            "start": 1.0,
+            "end": 2.0,
+            "reason": "low_signal_subtitle",
+            "multimodal_review": {"verdict": "cut", "confidence": 0.83},
+        }
+    ]
 
 
 def test_manual_editor_rule_segments_surface_multimodal_trim_review_source() -> None:
@@ -1272,6 +1641,60 @@ def test_manual_editor_smart_cut_rules_payload_defaults_when_missing() -> None:
     assert payload["fillers"] == DEFAULT_SMART_CUT_FILLERS
     assert payload["catchphrases"] == DEFAULT_SMART_CUT_CATCHPHRASES
     assert payload["pauseThresholdSec"] == 0.8
+    assert payload["fillerStandaloneEnabled"] is True
+    assert payload["fillerSentenceHeadEnabled"] is True
+    assert payload["fillerSentenceTailEnabled"] is False
+    assert payload["catchphraseEnabled"] is True
+
+
+def test_smart_cut_rules_payload_normalizes_legacy_and_expanded_default_fillers() -> None:
+    payload = normalize_smart_cut_rules_payload({
+        "fillers": "嗯,呃,额,啊,呀,呢,吧,嘛,哦,喔,哎,唉,诶,欸,呃呃,嗯嗯",
+    })
+
+    assert payload["fillers"] == DEFAULT_SMART_CUT_FILLERS
+    assert payload["fillerStandaloneEnabled"] is True
+    assert payload["fillerSentenceHeadEnabled"] is True
+    assert payload["fillerSentenceTailEnabled"] is False
+
+
+def test_smart_cut_rules_payload_upgrades_previous_narrow_defaults_to_current_defaults() -> None:
+    payload = normalize_smart_cut_rules_payload({
+        "fillerEnabled": True,
+        "fillerStandaloneEnabled": True,
+        "fillerSentenceHeadEnabled": False,
+        "fillerSentenceTailEnabled": False,
+        "catchphraseEnabled": False,
+        "repeatedEnabled": True,
+        "pauseEnabled": True,
+        "smartDeleteEnabled": True,
+        "pauseThresholdSec": 0.8,
+        "fillers": DEFAULT_SMART_CUT_FILLERS,
+        "catchphrases": DEFAULT_SMART_CUT_CATCHPHRASES,
+    })
+
+    assert payload["fillerSentenceHeadEnabled"] is True
+    assert payload["fillerSentenceTailEnabled"] is False
+    assert payload["catchphraseEnabled"] is True
+
+
+def test_smart_cut_rules_payload_upgrades_previous_legacy_default_shape_to_current_defaults() -> None:
+    payload = normalize_smart_cut_rules_payload({
+        "fillerEnabled": True,
+        "fillerStandaloneEnabled": True,
+        "fillerContinuousEnabled": False,
+        "catchphraseEnabled": False,
+        "repeatedEnabled": True,
+        "pauseEnabled": True,
+        "smartDeleteEnabled": True,
+        "pauseThresholdSec": 0.8,
+        "fillers": DEFAULT_SMART_CUT_FILLERS,
+        "catchphrases": DEFAULT_SMART_CUT_CATCHPHRASES,
+    })
+
+    assert payload["fillerSentenceHeadEnabled"] is True
+    assert payload["fillerSentenceTailEnabled"] is False
+    assert payload["catchphraseEnabled"] is True
 
 
 def test_refine_decision_plan_payload_summarizes_cut_analysis_candidates() -> None:
@@ -1309,6 +1732,7 @@ def test_refine_decision_plan_payload_summarizes_cut_analysis_candidates() -> No
         "total": 2,
         "auto_apply": 1,
         "manual_confirm": 1,
+        "multimodal_auto_apply": 0,
         "analysis_schema": "cut_analysis.v1",
     }
     assert payload["keep_segments"] == [{"start": 0.0, "end": 8.0}]
@@ -1316,6 +1740,59 @@ def test_refine_decision_plan_payload_summarizes_cut_analysis_candidates() -> No
     assert payload["smart_cut_rules"]["pauseThresholdSec"] == 0.8
     assert payload["smart_cut_rules"]["fillers"] == DEFAULT_SMART_CUT_FILLERS
     assert payload["smart_cut_rules"]["catchphrases"] == DEFAULT_SMART_CUT_CATCHPHRASES
+
+
+def test_refine_decision_plan_auto_refine_applies_high_confidence_multimodal_cuts() -> None:
+    payload = build_refine_decision_plan_payload(
+        keep_segments=[{"start": 0.0, "end": 10.0}],
+        source_duration_sec=10.0,
+        mode="auto_refine",
+        cut_analysis={
+            "schema": "cut_analysis.v1",
+            "candidate_count": 1,
+            "auto_apply_candidate_count": 0,
+            "manual_confirm_candidate_count": 1,
+            "rule_candidates": [
+                {
+                    "start": 2.0,
+                    "end": 4.0,
+                    "reason": "low_signal_subtitle",
+                    "multimodal_review": {"verdict": "cut", "confidence": 0.88},
+                }
+            ],
+            "multimodal_trim_review_summary": {"accepted_count": 1, "pending_count": 0},
+        },
+    )
+
+    assert payload["keep_segments"] == [{"start": 0.0, "end": 2.0}, {"start": 4.0, "end": 10.0}]
+    assert payload["candidate_summary"]["multimodal_auto_apply"] == 1
+    assert payload["multimodal_auto_apply_cut_count"] == 1
+    assert payload["multimodal_trim_review_summary"] == {"accepted_count": 1, "pending_count": 0}
+
+
+def test_refine_decision_plan_manual_refine_keeps_multimodal_cuts_as_suggestions_only() -> None:
+    payload = build_refine_decision_plan_payload(
+        keep_segments=[{"start": 0.0, "end": 10.0}],
+        source_duration_sec=10.0,
+        mode="manual_refine",
+        cut_analysis={
+            "schema": "cut_analysis.v1",
+            "candidate_count": 1,
+            "auto_apply_candidate_count": 0,
+            "manual_confirm_candidate_count": 1,
+            "rule_candidates": [
+                {
+                    "start": 2.0,
+                    "end": 4.0,
+                    "reason": "low_signal_subtitle",
+                    "multimodal_review": {"verdict": "cut", "confidence": 0.88},
+                }
+            ],
+        },
+    )
+
+    assert payload["keep_segments"] == [{"start": 0.0, "end": 10.0}]
+    assert payload["candidate_summary"]["multimodal_auto_apply"] == 0
 
 
 def test_refine_plan_audio_defaults_merge_loudness_and_voice_processing() -> None:

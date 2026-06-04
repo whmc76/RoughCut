@@ -93,9 +93,37 @@ artifacts/publication-preflight*.json
 artifacts/publication-real-release-gate*.json
 artifacts/publication-recovery-knowledge-base.json
 artifacts/publication-release-gate.json
+artifacts/publication-task-state/
 artifacts/publication_browser_agent_service.error.log
 artifacts/publication-visual-evidence/
+artifacts/*prepare-only/
 artifacts/*manual-handoff-cli-smoke/
 artifacts/*objective-smoke/
 artifacts/*.wav
 artifacts/*.mp4
+artifacts/youtube-maxace4-draft-recheck-*.json
+
+# Temporary Codex / browser probe scratch
+/.codex-temp-*.js
+/.codex_tmp_*.js
+artifacts/*probe*.json
+artifacts/*probe*.js
+artifacts/*probe*.mjs
+artifacts/*probe*.png
+artifacts/**/*probe*.json
+artifacts/**/*probe*.js
+artifacts/**/*probe*.mjs
+artifacts/**/*probe*.png
+artifacts/*reprobe*.json
+artifacts/**/*reprobe*.json
+artifacts/*-probe/
+artifacts/codex-playwright-runtime/
+artifacts/tmp_*.cjs
+artifacts/tmp_*.js
+artifacts/tmp_*.mjs
+artifacts/tmp_*.json
+
+# `artifacts/` is runtime/debug output only. Durable examples or fixtures
+# belong elsewhere in the repo so this directory can stay disposable.
+artifacts/**
+!artifacts/.gitkeep

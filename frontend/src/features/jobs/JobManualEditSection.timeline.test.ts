@@ -19,6 +19,7 @@ import {
   findSubtitleIndexNearOutputTime,
   buildSmartCutRulePreviews,
   intersectInferredPausesWithAudioSilence,
+  manualEditorAuthoritativeSmartCutKinds,
   normalizeAdjacentSubtitleTextOverlaps,
   normalizeReviewPauseRanges,
   normalizeStoredSmartCutFillers,
@@ -413,7 +414,17 @@ describe("manual editor timeline mapping", () => {
   });
 
   it("trims projected subtitle text when a leading filler is cut from the source timeline", () => {
-    const rules = { fillerEnabled: true, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "呃" };
+    const rules = {
+      fillerEnabled: true,
+      fillerStandaloneEnabled: true,
+      fillerSentenceHeadEnabled: true,
+      fillerSentenceTailEnabled: false,
+      repeatedEnabled: false,
+      pauseEnabled: false,
+      smartDeleteEnabled: false,
+      pauseThresholdSec: 0.8,
+      fillers: "呃",
+    };
     const analysis = buildSmartCutRuleAnalysis(
       [
         {
@@ -443,7 +454,7 @@ describe("manual editor timeline mapping", () => {
       nextSegments,
     );
 
-    expect(analysis.filler).toEqual([{ start: 10, end: 11, kind: "filler", fillerMode: "standalone", sourceText: "呃" }]);
+    expect(analysis.filler).toEqual([{ start: 10, end: 11, kind: "filler", fillerMode: "sentence_head", sourceText: "呃" }]);
     expect(nextSegments).toEqual([{ start: 11, end: 15 }]);
     expect(projection.remapped.map((subtitle) => subtitle.text_final)).toEqual(["没想到啊"]);
     expect(projection.remapped[0].start_time).toBeCloseTo(0, 3);
@@ -1325,15 +1336,17 @@ describe("manual editor timeline mapping", () => {
     ]);
   });
 
-  it("ships a broader default filler set for common spoken particles", () => {
+  it("ships a default filler set that still covers standalone particles", () => {
+    expect(DEFAULT_SMART_CUT_FILLERS).toContain("嗯");
+    expect(DEFAULT_SMART_CUT_FILLERS).toContain("呃");
+    expect(DEFAULT_SMART_CUT_FILLERS).toContain("额");
     expect(DEFAULT_SMART_CUT_FILLERS).toContain("啊");
-    expect(DEFAULT_SMART_CUT_FILLERS).toContain("呢");
-    expect(DEFAULT_SMART_CUT_FILLERS).toContain("哦");
-    expect(DEFAULT_SMART_CUT_FILLERS).toContain("唉");
+    expect(DEFAULT_SMART_CUT_FILLERS).toContain("吧");
   });
 
-  it("upgrades stale saved filler presets that still look like the old default set", () => {
-    expect(normalizeStoredSmartCutFillers("嗯，呃，额，呃呃，嗯嗯，哎")).toBe(DEFAULT_SMART_CUT_FILLERS);
+  it("normalizes both old default filler presets and the previous expanded preset back to the shared default", () => {
+    expect(normalizeStoredSmartCutFillers("嗯，呃，额，呃呃，嗯嗯")).toBe(DEFAULT_SMART_CUT_FILLERS);
+    expect(normalizeStoredSmartCutFillers("嗯，呃，额，啊，呀，呢，吧，嘛，哦，喔，哎，唉，诶，欸，呃呃，嗯嗯")).toBe(DEFAULT_SMART_CUT_FILLERS);
   });
 
   it("keeps genuinely customized filler presets instead of overwriting them with the default set", () => {
@@ -1375,7 +1388,7 @@ describe("manual editor timeline mapping", () => {
     );
 
     expect(analysis.filler).toHaveLength(1);
-    expect(analysis.filler[0]).toEqual(expect.objectContaining({ kind: "filler", fillerMode: "standalone" }));
+    expect(analysis.filler[0]).toEqual(expect.objectContaining({ kind: "filler", fillerMode: "sentence_head" }));
   });
 
   it("does not invent filler rule matches from unsupported transcript-only noise", () => {
@@ -1400,7 +1413,8 @@ describe("manual editor timeline mapping", () => {
     const rules = {
       fillerEnabled: true,
       fillerStandaloneEnabled: true,
-      fillerContinuousEnabled: false,
+      fillerSentenceHeadEnabled: false,
+      fillerSentenceTailEnabled: false,
       repeatedEnabled: false,
       pauseEnabled: false,
       smartDeleteEnabled: false,
@@ -1430,11 +1444,43 @@ describe("manual editor timeline mapping", () => {
     expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([{ start: 0, end: 0.22, kind: "filler", fillerMode: "standalone", sourceText: "嗯" }]);
   });
 
-  it("can detect continuous fillers inside a sentence without auto-cutting them when that mode is off", () => {
+  it("matches standalone fillers from raw source text even when final text has already been cleaned", () => {
     const rules = {
       fillerEnabled: true,
       fillerStandaloneEnabled: true,
-      fillerContinuousEnabled: false,
+      fillerSentenceHeadEnabled: false,
+      fillerSentenceTailEnabled: false,
+      repeatedEnabled: false,
+      pauseEnabled: false,
+      smartDeleteEnabled: false,
+      pauseThresholdSec: 0.8,
+      fillers: "啊",
+    };
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 0,
+          start_time: 0,
+          end_time: 1.2,
+          text_raw: "啊，今天我们开始",
+          text_norm: "啊，今天我们开始",
+          text_final: "今天我们开始",
+        },
+      ],
+      rules,
+      [],
+    );
+
+    expect(analysis.filler).toHaveLength(1);
+    expect(analysis.filler[0]).toEqual(expect.objectContaining({ kind: "filler", fillerMode: "standalone", sourceText: "啊" }));
+  });
+
+  it("classifies sentence-tail particles separately and keeps them off by default", () => {
+    const rules = {
+      fillerEnabled: true,
+      fillerStandaloneEnabled: true,
+      fillerSentenceHeadEnabled: false,
+      fillerSentenceTailEnabled: false,
       repeatedEnabled: false,
       pauseEnabled: false,
       smartDeleteEnabled: false,
@@ -1447,12 +1493,10 @@ describe("manual editor timeline mapping", () => {
           index: 0,
           start_time: 0,
           end_time: 2,
-          text_final: "小玩具啊这个也是",
+          text_final: "小玩具啊",
           words: [
             { word: "小玩具", start: 0, end: 0.5 },
             { word: "啊", start: 0.5, end: 0.7 },
-            { word: "这个", start: 0.7, end: 1.1 },
-            { word: "也是", start: 1.1, end: 1.6 },
           ],
         },
       ],
@@ -1460,10 +1504,10 @@ describe("manual editor timeline mapping", () => {
       [],
     );
 
-    expect(analysis.filler).toEqual([{ start: 0.5, end: 0.7, kind: "filler", fillerMode: "continuous", sourceText: "啊" }]);
+    expect(analysis.filler).toEqual([{ start: 0.5, end: 0.7, kind: "filler", fillerMode: "sentence_tail", sourceText: "啊" }]);
     expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([]);
-    expect(autoSmartCutRuleRanges(analysis, { ...rules, fillerContinuousEnabled: true })).toEqual([
-      { start: 0.5, end: 0.7, kind: "filler", fillerMode: "continuous", sourceText: "啊" },
+    expect(autoSmartCutRuleRanges(analysis, { ...rules, fillerSentenceTailEnabled: true })).toEqual([
+      { start: 0.5, end: 0.7, kind: "filler", fillerMode: "sentence_tail", sourceText: "啊" },
     ]);
   });
 
@@ -1471,7 +1515,8 @@ describe("manual editor timeline mapping", () => {
     const rules = {
       fillerEnabled: true,
       fillerStandaloneEnabled: true,
-      fillerContinuousEnabled: false,
+      fillerSentenceHeadEnabled: false,
+      fillerSentenceTailEnabled: false,
       repeatedEnabled: false,
       pauseEnabled: false,
       smartDeleteEnabled: false,
@@ -2845,6 +2890,11 @@ describe("manual editor timeline mapping", () => {
     expect(nextSegments).toEqual([{ start: 0, end: 20 }]);
   });
 
+  it("uses only smart-delete as the backend authoritative rule kind in manual refine mode", () => {
+    expect(manualEditorAuthoritativeSmartCutKinds(false)).toEqual([]);
+    expect(manualEditorAuthoritativeSmartCutKinds(true)).toEqual(["smart_delete"]);
+  });
+
   it("prefers backend authoritative repeated ranges over local transcript rescans when cut analysis is available", () => {
     const rules = { fillerEnabled: false, repeatedEnabled: true, pauseEnabled: false, smartDeleteEnabled: false, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
     const analysis = buildSmartCutRuleAnalysis(
@@ -2868,7 +2918,8 @@ describe("manual editor timeline mapping", () => {
     const rules = {
       fillerEnabled: true,
       fillerStandaloneEnabled: true,
-      fillerContinuousEnabled: false,
+      fillerSentenceHeadEnabled: false,
+      fillerSentenceTailEnabled: false,
       catchphraseEnabled: true,
       repeatedEnabled: false,
       pauseEnabled: false,
@@ -2902,7 +2953,8 @@ describe("manual editor timeline mapping", () => {
     const rules = {
       fillerEnabled: true,
       fillerStandaloneEnabled: true,
-      fillerContinuousEnabled: false,
+      fillerSentenceHeadEnabled: false,
+      fillerSentenceTailEnabled: false,
       catchphraseEnabled: true,
       repeatedEnabled: false,
       pauseEnabled: false,
@@ -2937,7 +2989,8 @@ describe("manual editor timeline mapping", () => {
     const rules = {
       fillerEnabled: true,
       fillerStandaloneEnabled: true,
-      fillerContinuousEnabled: false,
+      fillerSentenceHeadEnabled: false,
+      fillerSentenceTailEnabled: false,
       catchphraseEnabled: true,
       repeatedEnabled: false,
       pauseEnabled: false,
