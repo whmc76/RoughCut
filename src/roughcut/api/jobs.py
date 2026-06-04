@@ -83,6 +83,7 @@ from roughcut.edit.refine_decisions import (
 )
 from roughcut.edit.multimodal_trim_review import (
     ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW,
+    apply_multimodal_trim_review_to_cut_analysis,
     build_multimodal_trim_review_payload,
     multimodal_trim_review_matches_cut_analysis,
     review_multimodal_trim_review_payload,
@@ -1737,6 +1738,12 @@ def _manual_editor_smart_delete_source(item: dict[str, Any]) -> tuple[str, float
             return "manual_editor_rule_candidate", round(float(item.get("score", 0.0) or 0.0), 3)
         except (TypeError, ValueError):
             return "manual_editor_rule_candidate", None
+    multimodal_review = item.get("multimodal_review") if isinstance(item.get("multimodal_review"), dict) else {}
+    if str(multimodal_review.get("verdict") or "").strip().lower() == "cut":
+        try:
+            return "multimodal_trim_review", round(float(multimodal_review.get("confidence", 0.0) or 0.0), 3)
+        except (TypeError, ValueError):
+            return "multimodal_trim_review", None
     llm_review = item.get("llm_review") if isinstance(item.get("llm_review"), dict) else {}
     if str(llm_review.get("verdict") or "").strip().lower() == "cut":
         try:
@@ -1760,8 +1767,13 @@ def _manual_editor_rule_segment_payload(item: dict[str, Any]) -> ManualEditorRul
         return None
     source, confidence = _manual_editor_smart_delete_source(item)
     llm_review = item.get("llm_review") if isinstance(item.get("llm_review"), dict) else {}
+    multimodal_review = item.get("multimodal_review") if isinstance(item.get("multimodal_review"), dict) else {}
     evidence_payload = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
     evidence: list[str] = []
+    for text in list(multimodal_review.get("evidence") or []):
+        cleaned = str(text).strip()
+        if cleaned:
+            evidence.append(cleaned)
     for text in list(llm_review.get("evidence") or []):
         cleaned = str(text).strip()
         if cleaned:
@@ -1770,7 +1782,11 @@ def _manual_editor_rule_segment_payload(item: dict[str, Any]) -> ManualEditorRul
         cleaned = str(evidence_payload.get(key) or "").strip()
         if cleaned:
             evidence.append(cleaned)
-    detail = str(llm_review.get("reason") or "").strip() or _MANUAL_EDITOR_SMART_DELETE_REASON_LABELS.get(reason)
+    detail = (
+        str(multimodal_review.get("reason") or "").strip()
+        or str(llm_review.get("reason") or "").strip()
+        or _MANUAL_EDITOR_SMART_DELETE_REASON_LABELS.get(reason)
+    )
     auto_applied = bool(item.get("auto_applied"))
     if str(item.get("candidate_stage") or "").strip() in {"manual_editor_full_transcript", "manual_editor_smart_cut_rules"}:
         auto_applied = False
@@ -5430,6 +5446,10 @@ async def _build_manual_editor_session(
         session,
         job=job,
         cut_analysis_payload=cut_analysis_payload,
+    )
+    cut_analysis_payload = apply_multimodal_trim_review_to_cut_analysis(
+        cut_analysis_payload,
+        multimodal_trim_review_payload,
     )
     raw_silence_segments = cut_analysis_silence_segments(cut_analysis_payload)
     silence_segments = [
@@ -9719,7 +9739,10 @@ def _pending_step_standard_detail(step_name: str) -> str | None:
 
 
 def _manual_editor_waiting_detail() -> str:
-    return "智能辅助模式已完成剪辑预处理，等待用户打开手动调整并保存后再进入渲染。"
+    return (
+        "智能辅助模式已完成剪辑预处理。当前进度仅表示预处理完成度，尚未开始正式渲染；"
+        "请打开手动调整后点击“正式渲染/重新渲染”提交。"
+    )
 
 
 def _resolve_manual_editor_waiting_context(job: Job) -> dict[str, str | None]:

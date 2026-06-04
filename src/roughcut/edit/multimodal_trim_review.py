@@ -47,6 +47,20 @@ def multimodal_trim_review_candidate_ids(payload: dict[str, Any] | None) -> list
     return [str(item.get("candidate_id") or "").strip() for item in multimodal_trim_review_candidates(payload) if str(item.get("candidate_id") or "").strip()]
 
 
+def multimodal_trim_review_decisions(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    decisions = payload.get("decisions")
+    if not isinstance(decisions, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in decisions:
+        decision = _normalize_multimodal_review_decision(item, candidate_id=str((item or {}).get("candidate_id") or "").strip())
+        if decision is not None:
+            normalized.append(decision)
+    return normalized
+
+
 def multimodal_trim_review_matches_cut_analysis(
     payload: dict[str, Any] | None,
     cut_analysis: dict[str, Any] | None,
@@ -60,6 +74,55 @@ def multimodal_trim_review_matches_cut_analysis(
         job_flow_mode=job_flow_mode,
     )
     return multimodal_trim_review_candidate_ids(payload) == multimodal_trim_review_candidate_ids(pending)
+
+
+def apply_multimodal_trim_review_to_cut_analysis(
+    cut_analysis: dict[str, Any] | None,
+    review_payload: dict[str, Any] | None,
+    *,
+    min_confidence: float | None = None,
+) -> dict[str, Any]:
+    analysis = dict(cut_analysis or {}) if isinstance(cut_analysis, dict) else {}
+    decisions_by_id = {
+        str(item.get("candidate_id") or "").strip(): item
+        for item in multimodal_trim_review_decisions(review_payload)
+        if str(item.get("candidate_id") or "").strip()
+    }
+    if not decisions_by_id:
+        return analysis
+    threshold = (
+        float(min_confidence)
+        if min_confidence is not None
+        else float(getattr(get_settings(), "multimodal_trim_review_min_confidence", 0.72) or 0.72)
+    )
+    reviewed_candidates: list[dict[str, Any]] = []
+    vetoed_candidate_count = 0
+    for raw in list(analysis.get("rule_candidates") or []):
+        if not isinstance(raw, dict):
+            continue
+        item = dict(raw)
+        decision = decisions_by_id.get(_candidate_id(item))
+        if decision is not None:
+            item["multimodal_review"] = dict(decision)
+            verdict = str(decision.get("verdict") or "").strip().lower()
+            confidence = float(decision.get("confidence", 0.0) or 0.0)
+            if verdict == "keep" and confidence >= threshold:
+                vetoed_candidate_count += 1
+                continue
+        reviewed_candidates.append(item)
+    analysis["rule_candidates"] = reviewed_candidates
+    analysis["rule_candidate_count"] = len(reviewed_candidates)
+    analysis["candidate_count"] = int(len(list(analysis.get("accepted_cuts") or [])) + len(reviewed_candidates))
+    analysis["manual_confirm_candidate_count"] = max(
+        0,
+        int(analysis.get("candidate_count") or 0) - int(analysis.get("auto_apply_candidate_count") or 0),
+    )
+    analysis["multimodal_trim_review_summary"] = {
+        "reviewed": bool(review_payload and review_payload.get("reviewed")),
+        "decision_count": len(decisions_by_id),
+        "vetoed_candidate_count": vetoed_candidate_count,
+    }
+    return analysis
 
 
 def build_multimodal_trim_review_payload(

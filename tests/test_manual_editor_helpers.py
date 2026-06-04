@@ -81,6 +81,7 @@ from roughcut.edit.refine_decisions import (
     resolve_refine_keep_segments_for_timeline,
 )
 from roughcut.edit.multimodal_trim_review import (
+    apply_multimodal_trim_review_to_cut_analysis,
     build_multimodal_trim_review_payload,
     review_multimodal_trim_review_payload,
 )
@@ -1181,6 +1182,88 @@ async def test_load_manual_editor_multimodal_trim_review_payload_prefers_matchin
 
     assert payload["reviewed"] is True
     assert payload["decisions"][0]["verdict"] == "keep"
+
+
+def test_apply_multimodal_trim_review_to_cut_analysis_vetoes_keep_candidates() -> None:
+    cut_analysis = {
+        "schema": "cut_analysis.v1",
+        "accepted_cuts": [],
+        "rule_candidates": [
+            {
+                "start": 0.0,
+                "end": 0.9,
+                "reason": "low_signal_subtitle",
+                "source_text": "然后呢",
+                "score": 0.83,
+            },
+            {
+                "start": 1.0,
+                "end": 2.0,
+                "reason": "timing_trim",
+                "source_text": "这个边界",
+                "score": 0.61,
+            },
+        ],
+        "candidate_count": 2,
+        "rule_candidate_count": 2,
+        "auto_apply_candidate_count": 0,
+        "manual_confirm_candidate_count": 2,
+    }
+    review_payload = {
+        "schema": "multimodal_trim_review.v1",
+        "reviewed": True,
+        "decisions": [
+            {
+                "candidate_id": "low_signal_subtitle:0.000:0.900:然后呢",
+                "verdict": "keep",
+                "confidence": 0.91,
+                "reason": "仍在展示有效画面",
+            },
+            {
+                "candidate_id": "timing_trim:1.000:2.000:这个边界",
+                "verdict": "cut",
+                "confidence": 0.88,
+                "reason": "只是节奏修剪",
+                "evidence": ["边界过长"],
+            },
+        ],
+    }
+
+    result = apply_multimodal_trim_review_to_cut_analysis(cut_analysis, review_payload)
+
+    assert result["candidate_count"] == 1
+    assert result["rule_candidate_count"] == 1
+    assert result["rule_candidates"][0]["reason"] == "timing_trim"
+    assert result["rule_candidates"][0]["multimodal_review"]["verdict"] == "cut"
+    assert result["multimodal_trim_review_summary"]["vetoed_candidate_count"] == 1
+
+
+def test_manual_editor_rule_segments_surface_multimodal_trim_review_source() -> None:
+    payload = {
+        "accepted_cuts": [],
+        "rule_candidates": [
+            {
+                "start": 1.0,
+                "end": 2.0,
+                "reason": "timing_trim",
+                "source_text": "这个边界",
+                "multimodal_review": {
+                    "candidate_id": "timing_trim:1.000:2.000:这个边界",
+                    "verdict": "cut",
+                    "confidence": 0.88,
+                    "reason": "只是节奏修剪",
+                    "evidence": ["边界过长"],
+                },
+            }
+        ],
+    }
+
+    segments = _manual_editor_rule_segments(payload)
+
+    assert len(segments) == 1
+    assert segments[0].source == "multimodal_trim_review"
+    assert segments[0].confidence == 0.88
+    assert segments[0].detail == "只是节奏修剪"
 
 
 def test_manual_editor_smart_cut_rules_payload_defaults_when_missing() -> None:
