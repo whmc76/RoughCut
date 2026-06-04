@@ -67,3 +67,25 @@ def build_high_risk_cut_review_prompt(
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+
+
+def build_multimodal_trim_review_prompt(
+    *,
+    source_meta: dict[str, object] | None,
+    candidate: dict[str, object],
+) -> str:
+    return (
+        "你是短视频口播剪辑的多模态复核助手。"
+        "你会同时参考视频关键帧和候选删减文本，判断这段内容应该删除、保留还是保持不确定。"
+        "判断标准："
+        "1. 明显没有信息推进、只是拖沓铺垫、空泛重复、转手等待、无效展示，倾向 cut；"
+        "2. 含有真实参数、型号、功能结论、对比结论、关键展示动作，倾向 keep；"
+        "3. 画面如果明显在演示细节、对比、上手动作，即使文本弱，也不要轻易 cut；"
+        "4. 证据不足时输出 unsure，不要强判。"
+        "只输出 JSON，不要解释。"
+        "\n输出格式："
+        '{"verdict":"cut|keep|unsure","confidence":0.0,"reason":"","evidence":[],"summary":""}'
+        f"\n视频上下文：{source_meta or {}}"
+        f"\n候选片段：{candidate}"
+        "\n这些图片按时间顺序展示候选片段前后关键帧。"
+    )

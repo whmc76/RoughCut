@@ -84,6 +84,8 @@ from roughcut.edit.refine_decisions import (
 from roughcut.edit.multimodal_trim_review import (
     ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW,
     build_multimodal_trim_review_payload,
+    multimodal_trim_review_matches_cut_analysis,
+    review_multimodal_trim_review_payload,
 )
 from roughcut.edit.smart_cut_rules import (
     default_smart_cut_rules_payload,
@@ -1945,6 +1947,52 @@ def _manual_editor_multimodal_trim_review_payload(
         cut_analysis_payload,
         source_name=source_name,
         job_flow_mode=job_flow_mode,
+    )
+
+
+def _manual_editor_multimodal_review_source_meta(
+    *,
+    job: Job,
+    content_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    profile = dict(content_profile or {}) if isinstance(content_profile, dict) else {}
+    return {
+        "job_id": str(job.id),
+        "source_name": str(job.source_name or "").strip(),
+        "job_flow_mode": str(getattr(job, "job_flow_mode", "") or "auto"),
+        "subject_brand": str(profile.get("subject_brand") or "").strip(),
+        "subject_model": str(profile.get("subject_model") or "").strip(),
+        "subject_type": str(profile.get("subject_type") or "").strip(),
+    }
+
+
+async def _load_manual_editor_multimodal_trim_review_payload(
+    session: AsyncSession,
+    *,
+    job: Job,
+    cut_analysis_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    current_multimodal_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job.id,
+        artifact_types=(ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW,),
+    )
+    current_payload = (
+        current_multimodal_artifact.data_json
+        if current_multimodal_artifact and isinstance(current_multimodal_artifact.data_json, dict)
+        else None
+    )
+    if multimodal_trim_review_matches_cut_analysis(
+        current_payload,
+        cut_analysis_payload,
+        source_name=str(job.source_name or ""),
+        job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
+    ):
+        return dict(current_payload or {})
+    return _manual_editor_multimodal_trim_review_payload(
+        cut_analysis_payload=cut_analysis_payload,
+        source_name=str(job.source_name or ""),
+        job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
     )
 
 
@@ -5378,10 +5426,10 @@ async def _build_manual_editor_session(
         smart_cut_rules=current_smart_cut_rules,
         content_profile=content_profile,
     )
-    multimodal_trim_review_payload = _manual_editor_multimodal_trim_review_payload(
+    multimodal_trim_review_payload = await _load_manual_editor_multimodal_trim_review_payload(
+        session,
+        job=job,
         cut_analysis_payload=cut_analysis_payload,
-        source_name=str(job.source_name or ""),
-        job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
     )
     raw_silence_segments = cut_analysis_silence_segments(cut_analysis_payload)
     silence_segments = [
@@ -5867,6 +5915,15 @@ async def save_manual_editor_draft(
         smart_cut_rules=smart_cut_rules,
         content_profile=content_profile,
     )
+    reviewed_multimodal_trim_review_payload = await review_multimodal_trim_review_payload(
+        _manual_editor_multimodal_trim_review_payload(
+            cut_analysis_payload=current_cut_analysis_payload,
+            source_name=str(job.source_name or ""),
+            job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
+        ),
+        source_path=_resolve_manual_editor_source_path(job),
+        source_meta=_manual_editor_multimodal_review_source_meta(job=job, content_profile=content_profile),
+    )
     session.add(
         Artifact(
             job_id=job.id,
@@ -5878,11 +5935,7 @@ async def save_manual_editor_draft(
         Artifact(
             job_id=job.id,
             artifact_type=ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW,
-            data_json=_manual_editor_multimodal_trim_review_payload(
-                cut_analysis_payload=current_cut_analysis_payload,
-                source_name=str(job.source_name or ""),
-                job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
-            ),
+            data_json=reviewed_multimodal_trim_review_payload,
         )
     )
     session.add(
@@ -6174,6 +6227,15 @@ async def apply_manual_editor_timeline(
         smart_cut_rules=smart_cut_rules,
         content_profile=content_profile,
     )
+    reviewed_multimodal_trim_review_payload = await review_multimodal_trim_review_payload(
+        _manual_editor_multimodal_trim_review_payload(
+            cut_analysis_payload=current_cut_analysis_payload,
+            source_name=str(job.source_name or ""),
+            job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
+        ),
+        source_path=_resolve_manual_editor_source_path(job),
+        source_meta=_manual_editor_multimodal_review_source_meta(job=job, content_profile=content_profile),
+    )
     session.add(
         Artifact(
             job_id=job.id,
@@ -6185,11 +6247,7 @@ async def apply_manual_editor_timeline(
         Artifact(
             job_id=job.id,
             artifact_type=ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW,
-            data_json=_manual_editor_multimodal_trim_review_payload(
-                cut_analysis_payload=current_cut_analysis_payload,
-                source_name=str(job.source_name or ""),
-                job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
-            ),
+            data_json=reviewed_multimodal_trim_review_payload,
         )
     )
 

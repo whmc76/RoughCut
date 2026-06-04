@@ -65,6 +65,7 @@ from roughcut.edit.refine_decisions import (
 from roughcut.edit.multimodal_trim_review import (
     ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW,
     build_multimodal_trim_review_payload,
+    review_multimodal_trim_review_payload,
 )
 from roughcut.edit.smart_cut_rules import default_smart_cut_rules_payload
 from roughcut.edit.render_plan import (
@@ -8171,6 +8172,18 @@ async def run_edit_plan(job_id: str) -> dict:
             source_name=str(job.source_name or ""),
             job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
         )
+        reviewed_multimodal_trim_review_payload = await review_multimodal_trim_review_payload(
+            multimodal_trim_review_payload,
+            source_path=Path(job.source_path) if str(job.source_path or "").strip() else None,
+            source_meta={
+                "job_id": str(job.id),
+                "source_name": str(job.source_name or "").strip(),
+                "job_flow_mode": str(getattr(job, "job_flow_mode", "") or "auto"),
+                "subject_brand": str((content_profile or {}).get("subject_brand") or "").strip(),
+                "subject_model": str((content_profile or {}).get("subject_model") or "").strip(),
+                "subject_type": str((content_profile or {}).get("subject_type") or "").strip(),
+            },
+        )
         refine_decision_plan_payload = build_refine_decision_plan_from_render_plan(
             keep_segments=keep_segments,
             source_duration_sec=float(duration or 0.0),
@@ -8201,7 +8214,7 @@ async def run_edit_plan(job_id: str) -> dict:
                     edited_subtitles=[dict(item) for item in remapped_subtitles],
                     cut_analysis=cut_analysis_payload,
                     refine_decision_plan=refine_decision_plan_payload,
-                    multimodal_trim_review=multimodal_trim_review_payload,
+                    multimodal_trim_review=reviewed_multimodal_trim_review_payload,
                 ),
             )
         )
@@ -8218,7 +8231,7 @@ async def run_edit_plan(job_id: str) -> dict:
                 job_id=job.id,
                 step_id=step.id,
                 artifact_type=ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW,
-                data_json=multimodal_trim_review_payload,
+                data_json=reviewed_multimodal_trim_review_payload,
             )
         )
         session.add(

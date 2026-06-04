@@ -1,3 +1,5 @@
+import asyncio
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,6 +51,7 @@ from roughcut.api.jobs import (
     _manual_editor_base_keep_segment_dicts,
     _manual_editor_build_refine_decision_plan_from_render_plan,
     _load_manual_editor_cut_analysis_payload,
+    _load_manual_editor_multimodal_trim_review_payload,
     _manual_editor_restore_frontend_managed_auto_cuts,
     _manual_editor_smart_cut_rules_payload,
     _manual_editor_normalize_word_payloads_for_text,
@@ -77,7 +80,10 @@ from roughcut.edit.refine_decisions import (
     refine_plan_audio_defaults,
     resolve_refine_keep_segments_for_timeline,
 )
-from roughcut.edit.multimodal_trim_review import build_multimodal_trim_review_payload
+from roughcut.edit.multimodal_trim_review import (
+    build_multimodal_trim_review_payload,
+    review_multimodal_trim_review_payload,
+)
 from roughcut.edit.smart_cut_rules import DEFAULT_SMART_CUT_CATCHPHRASES, DEFAULT_SMART_CUT_FILLERS
 from roughcut.media.render import _resolve_render_keep_segments
 from roughcut.media import manual_editor_assets as manual_editor_assets_module
@@ -1066,6 +1072,115 @@ def test_multimodal_trim_review_payload_includes_low_signal_candidates_without_v
     assert payload["candidate_count"] == 1
     assert payload["candidates"][0]["reason"] == "low_signal_subtitle"
     assert payload["candidates"][0]["review_trigger"] == "semantic_uncertainty"
+
+
+@pytest.mark.asyncio
+async def test_review_multimodal_trim_review_payload_applies_model_verdicts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"fake")
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame")
+
+    payload = {
+        "schema": "multimodal_trim_review.v1",
+        "source_name": "demo.mp4",
+        "job_flow_mode": "auto",
+        "reviewed": False,
+        "candidate_count": 1,
+        "pending_count": 1,
+        "accepted_count": 0,
+        "rejected_count": 0,
+        "candidates": [
+            {
+                "candidate_id": "low_signal_subtitle:0.000:0.900:然后呢",
+                "start": 0.0,
+                "end": 0.9,
+                "reason": "low_signal_subtitle",
+                "source_text": "然后呢",
+                "score": 0.83,
+                "review_trigger": "semantic_uncertainty",
+                "review_state": "pending",
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "roughcut.edit.multimodal_trim_review.get_settings",
+        lambda: SimpleNamespace(
+            multimodal_trim_review_enabled=True,
+            multimodal_trim_review_max_candidates=4,
+            multimodal_trim_review_timeout_sec=12,
+            multimodal_trim_review_min_confidence=0.72,
+            active_reasoning_provider="openai",
+            active_vision_model="gpt-5.5",
+            ffmpeg_timeout_sec=10,
+        ),
+    )
+    monkeypatch.setattr("roughcut.edit.multimodal_trim_review.llm_task_route", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr("roughcut.edit.multimodal_trim_review.track_usage_operation", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(
+        "roughcut.edit.multimodal_trim_review._extract_candidate_preview_frames",
+        lambda **kwargs: asyncio.sleep(0, result=[frame_path]),
+    )
+
+    async def fake_complete_with_images(prompt: str, image_paths: list[Path], **kwargs) -> str:
+        assert image_paths == [frame_path]
+        return '{"verdict":"keep","confidence":0.91,"reason":"画面仍在展示关键细节","evidence":["细节展示"],"summary":"应保留"}'
+
+    monkeypatch.setattr("roughcut.edit.multimodal_trim_review.complete_with_images", fake_complete_with_images)
+
+    reviewed = await review_multimodal_trim_review_payload(
+        payload,
+        source_path=source_path,
+        source_meta={"source_name": "demo.mp4", "subject_model": "EDC17"},
+    )
+
+    assert reviewed["reviewed"] is True
+    assert reviewed["rejected_count"] == 1
+    assert reviewed["pending_count"] == 0
+    assert reviewed["candidates"][0]["review_state"] == "rejected"
+    assert reviewed["candidates"][0]["review"]["verdict"] == "keep"
+    assert reviewed["provider"] == "openai"
+    assert reviewed["model"] == "gpt-5.5"
+
+
+@pytest.mark.asyncio
+async def test_load_manual_editor_multimodal_trim_review_payload_prefers_matching_artifact(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = SimpleNamespace(id=uuid4(), source_name="demo.mp4", job_flow_mode="auto")
+    cut_analysis = build_cut_analysis_payload(
+        editorial_analysis={},
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 0.9, "text_final": "然后呢"},
+            {"start_time": 1.0, "end_time": 2.0, "text_final": "EDC17亮度一千五流明"},
+        ],
+        smart_cut_rules={"smartDeleteEnabled": True},
+    )
+    reviewed_artifact_payload = {
+        **build_multimodal_trim_review_payload(cut_analysis, source_name="demo.mp4", job_flow_mode="auto"),
+        "reviewed": True,
+        "decisions": [{"candidate_id": "low_signal_subtitle:0.000:0.900:然后呢", "verdict": "keep", "confidence": 0.9}],
+    }
+
+    async def fake_load_latest_optional_artifact(*args, **kwargs):
+        return SimpleNamespace(data_json=reviewed_artifact_payload)
+
+    monkeypatch.setattr(jobs_module, "_load_latest_optional_artifact", fake_load_latest_optional_artifact)
+
+    payload = await _load_manual_editor_multimodal_trim_review_payload(
+        None,
+        job=job,
+        cut_analysis_payload=cut_analysis,
+    )
+
+    assert payload["reviewed"] is True
+    assert payload["decisions"][0]["verdict"] == "keep"
 
 
 def test_manual_editor_smart_cut_rules_payload_defaults_when_missing() -> None:

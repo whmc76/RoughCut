@@ -618,6 +618,10 @@ class Settings(BaseSettings):
     edit_decision_llm_review_max_candidates: int = 6
     edit_decision_llm_review_timeout_sec: int = 30
     edit_decision_llm_review_min_confidence: float = 0.72
+    multimodal_trim_review_enabled: bool = True
+    multimodal_trim_review_max_candidates: int = 4
+    multimodal_trim_review_timeout_sec: int = 20
+    multimodal_trim_review_min_confidence: float = 0.72
     streamlined_asr_pipeline_enabled: bool = False
     subtitle_filler_cleanup_enabled: bool = True
     quality_auto_rerun_enabled: bool = True
