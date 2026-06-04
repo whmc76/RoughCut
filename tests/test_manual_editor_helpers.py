@@ -77,6 +77,7 @@ from roughcut.edit.refine_decisions import (
     refine_plan_audio_defaults,
     resolve_refine_keep_segments_for_timeline,
 )
+from roughcut.edit.multimodal_trim_review import build_multimodal_trim_review_payload
 from roughcut.edit.smart_cut_rules import DEFAULT_SMART_CUT_CATCHPHRASES, DEFAULT_SMART_CUT_FILLERS
 from roughcut.media.render import _resolve_render_keep_segments
 from roughcut.media import manual_editor_assets as manual_editor_assets_module
@@ -839,11 +840,13 @@ def test_edit_review_bundle_payload_carries_cut_analysis_and_refine_decision_pla
         edited_subtitles=[{"text_final": "输出字幕"}],
         cut_analysis={"schema": "cut_analysis.v1", "candidate_count": 2},
         refine_decision_plan={"schema": "refine_decision_plan.v1", "mode": "auto_refine"},
+        multimodal_trim_review={"schema": "multimodal_trim_review.v1", "candidate_count": 1},
     )
 
     assert payload["topic_fact_confirmation"] == {"status": "confirmed"}
     assert payload["cut_analysis"] == {"schema": "cut_analysis.v1", "candidate_count": 2}
     assert payload["refine_decision_plan"] == {"schema": "refine_decision_plan.v1", "mode": "auto_refine"}
+    assert payload["multimodal_trim_review"] == {"schema": "multimodal_trim_review.v1", "candidate_count": 1}
     assert payload["full_subtitles"] == [{"text_final": "原始字幕"}]
     assert payload["edited_subtitles"] == [{"text_final": "输出字幕"}]
 
@@ -999,6 +1002,46 @@ def test_backend_low_signal_candidates_mark_multimodal_review_when_visual_hint_o
     assert low_signal[0]["multimodal_review_required"] is True
     assert low_signal[0]["multimodal_keep_priority"] == "high"
     assert low_signal[0]["multimodal_roles"] == ["detail_showcase"]
+
+
+def test_multimodal_trim_review_payload_selects_review_required_candidates() -> None:
+    cut_analysis = build_cut_analysis_payload(
+        editorial_analysis={},
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 0.9, "text_final": "然后呢"},
+            {"start_time": 1.0, "end_time": 2.0, "text_final": "EDC17亮度一千五流明"},
+        ],
+        smart_cut_rules={"smartDeleteEnabled": True},
+        content_profile={
+            "video_understanding": {
+                "segment_understanding": [
+                    {
+                        "start": 0.0,
+                        "end": 1.0,
+                        "role": "detail_showcase",
+                        "keep_priority": "high",
+                        "confidence": 0.88,
+                    }
+                ]
+            }
+        },
+    )
+
+    payload = build_multimodal_trim_review_payload(
+        cut_analysis,
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+    )
+
+    assert payload["schema"] == "multimodal_trim_review.v1"
+    assert payload["candidate_count"] == 1
+    assert payload["pending_count"] == 1
+    assert payload["reviewed"] is False
+    assert payload["candidates"][0]["reason"] == "low_signal_subtitle"
+    assert payload["candidates"][0]["multimodal_keep_priority"] == "high"
+    assert payload["candidates"][0]["multimodal_roles"] == ["detail_showcase"]
 
 
 def test_manual_editor_smart_cut_rules_payload_defaults_when_missing() -> None:

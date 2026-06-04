@@ -81,6 +81,10 @@ from roughcut.edit.refine_decisions import (
     build_refine_decision_plan_payload,
     resolve_refine_keep_segments_for_timeline,
 )
+from roughcut.edit.multimodal_trim_review import (
+    ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW,
+    build_multimodal_trim_review_payload,
+)
 from roughcut.edit.smart_cut_rules import (
     default_smart_cut_rules_payload,
     normalize_smart_cut_rules_payload,
@@ -462,6 +466,7 @@ class ManualEditorSessionOut(BaseModel):
     rule_segments: list[ManualEditorRuleSegmentOut] = Field(default_factory=list)
     cut_analysis: dict[str, Any] | None = None
     refine_decision_plan: dict[str, Any] | None = None
+    multimodal_trim_review: dict[str, Any] | None = None
     source_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
     projected_subtitles: list[ManualEditorSubtitleOut] = Field(default_factory=list)
     subtitle_overrides: list[ManualEditorSubtitleOverrideIn] = Field(default_factory=list)
@@ -1927,6 +1932,19 @@ def _manual_editor_build_refine_decision_plan_from_render_plan(
         note=note,
         editorial_timeline_id=editorial_timeline_id,
         editorial_timeline_version=editorial_timeline_version,
+    )
+
+
+def _manual_editor_multimodal_trim_review_payload(
+    *,
+    cut_analysis_payload: dict[str, Any] | None,
+    source_name: str,
+    job_flow_mode: str,
+) -> dict[str, Any]:
+    return build_multimodal_trim_review_payload(
+        cut_analysis_payload,
+        source_name=source_name,
+        job_flow_mode=job_flow_mode,
     )
 
 
@@ -5360,6 +5378,11 @@ async def _build_manual_editor_session(
         smart_cut_rules=current_smart_cut_rules,
         content_profile=content_profile,
     )
+    multimodal_trim_review_payload = _manual_editor_multimodal_trim_review_payload(
+        cut_analysis_payload=cut_analysis_payload,
+        source_name=str(job.source_name or ""),
+        job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
+    )
     raw_silence_segments = cut_analysis_silence_segments(cut_analysis_payload)
     silence_segments = [
         normalized
@@ -5581,6 +5604,7 @@ async def _build_manual_editor_session(
         rule_segments=rule_segments,
         cut_analysis=cut_analysis_payload,
         refine_decision_plan=refine_decision_plan_payload,
+        multimodal_trim_review=multimodal_trim_review_payload,
         source_subtitles=[
             _manual_editor_subtitle_payload(item, index=index)
             for index, item in enumerate(source_subtitle_dicts)
@@ -5848,6 +5872,17 @@ async def save_manual_editor_draft(
             job_id=job.id,
             artifact_type=ARTIFACT_TYPE_CUT_ANALYSIS,
             data_json=current_cut_analysis_payload,
+        )
+    )
+    session.add(
+        Artifact(
+            job_id=job.id,
+            artifact_type=ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW,
+            data_json=_manual_editor_multimodal_trim_review_payload(
+                cut_analysis_payload=current_cut_analysis_payload,
+                source_name=str(job.source_name or ""),
+                job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
+            ),
         )
     )
     session.add(
@@ -6144,6 +6179,17 @@ async def apply_manual_editor_timeline(
             job_id=job.id,
             artifact_type=ARTIFACT_TYPE_CUT_ANALYSIS,
             data_json=current_cut_analysis_payload,
+        )
+    )
+    session.add(
+        Artifact(
+            job_id=job.id,
+            artifact_type=ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW,
+            data_json=_manual_editor_multimodal_trim_review_payload(
+                cut_analysis_payload=current_cut_analysis_payload,
+                source_name=str(job.source_name or ""),
+                job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
+            ),
         )
     )
 
