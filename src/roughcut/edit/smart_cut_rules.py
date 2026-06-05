@@ -55,10 +55,16 @@ _PREVIOUS_NARROW_SMART_CUT_RULES: dict[str, Any] = {
     "fillers": DEFAULT_SMART_CUT_FILLERS,
     "catchphrases": DEFAULT_SMART_CUT_CATCHPHRASES,
 }
-DEFAULT_SMART_CUT_RULES: dict[str, Any] = {
+_PREVIOUS_EXPANDED_SMART_CUT_RULES: dict[str, Any] = {
     **_PREVIOUS_NARROW_SMART_CUT_RULES,
     "fillerSentenceHeadEnabled": True,
+}
+_PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES: dict[str, Any] = {
+    **_PREVIOUS_EXPANDED_SMART_CUT_RULES,
     "catchphraseEnabled": True,
+}
+DEFAULT_SMART_CUT_RULES: dict[str, Any] = {
+    **_PREVIOUS_NARROW_SMART_CUT_RULES,
 }
 
 
@@ -172,29 +178,16 @@ def _looks_like_previous_legacy_default_rules(value: dict[str, Any]) -> bool:
 
 def normalize_smart_cut_rules_payload(payload: Any) -> dict[str, Any]:
     value = payload if isinstance(payload, dict) else {}
-    if _looks_like_previous_legacy_default_rules(value):
-        value = {
-            **value,
-            "fillerSentenceHeadEnabled": DEFAULT_SMART_CUT_RULES["fillerSentenceHeadEnabled"],
-            "fillerSentenceTailEnabled": DEFAULT_SMART_CUT_RULES["fillerSentenceTailEnabled"],
-            "catchphraseEnabled": DEFAULT_SMART_CUT_RULES["catchphraseEnabled"],
-        }
     merged = {
         **DEFAULT_SMART_CUT_RULES,
         **{str(key): item for key, item in value.items() if isinstance(key, str)},
     }
-    if _looks_like_previous_narrow_default_rules(merged):
-        merged = {
-            **merged,
-            "fillerSentenceHeadEnabled": DEFAULT_SMART_CUT_RULES["fillerSentenceHeadEnabled"],
-            "catchphraseEnabled": DEFAULT_SMART_CUT_RULES["catchphraseEnabled"],
-        }
     legacy_continuous_enabled = bool(merged.get("fillerContinuousEnabled"))
     try:
         pause_threshold_sec = float(merged.get("pauseThresholdSec", DEFAULT_SMART_CUT_RULES["pauseThresholdSec"]) or DEFAULT_SMART_CUT_RULES["pauseThresholdSec"])
     except (TypeError, ValueError):
         pause_threshold_sec = float(DEFAULT_SMART_CUT_RULES["pauseThresholdSec"])
-    return {
+    normalized = {
         "fillerEnabled": bool(merged.get("fillerEnabled")),
         "fillerStandaloneEnabled": bool(merged.get("fillerStandaloneEnabled")),
         "fillerSentenceHeadEnabled": bool(
@@ -215,3 +208,9 @@ def normalize_smart_cut_rules_payload(payload: Any) -> dict[str, Any]:
         "fillers": normalize_smart_cut_fillers_value(merged.get("fillers") or DEFAULT_SMART_CUT_FILLERS),
         "catchphrases": str(merged.get("catchphrases") or DEFAULT_SMART_CUT_CATCHPHRASES),
     }
+    if (
+        normalized == _PREVIOUS_EXPANDED_SMART_CUT_RULES
+        or normalized == _PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES
+    ):
+        return dict(DEFAULT_SMART_CUT_RULES)
+    return normalized

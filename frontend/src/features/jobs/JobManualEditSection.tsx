@@ -479,42 +479,17 @@ const PREVIOUS_NARROW_SMART_CUT_RULES: SmartCutRules = {
   fillers: DEFAULT_SMART_CUT_FILLERS,
   catchphrases: DEFAULT_SMART_CUT_CATCHPHRASES,
 };
-const DEFAULT_SMART_CUT_RULES: SmartCutRules = {
+const PREVIOUS_EXPANDED_SMART_CUT_RULES: SmartCutRules = {
   ...PREVIOUS_NARROW_SMART_CUT_RULES,
   fillerSentenceHeadEnabled: true,
+};
+const PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES: SmartCutRules = {
+  ...PREVIOUS_EXPANDED_SMART_CUT_RULES,
   catchphraseEnabled: true,
 };
-
-function looksLikePreviousLegacyNarrowSmartCutRules(value: Partial<SmartCutRules> | null | undefined) {
-  if (!value || typeof value !== "object") return false;
-  if ("fillerSentenceHeadEnabled" in value || "fillerSentenceTailEnabled" in value) return false;
-  const pauseThresholdSec = Number(value.pauseThresholdSec);
-  const normalizedPauseThresholdSec = Number.isFinite(pauseThresholdSec)
-    ? clamp(pauseThresholdSec, 0.1, 5)
-    : PREVIOUS_NARROW_SMART_CUT_RULES.pauseThresholdSec;
-  const normalizedFillers = normalizeSmartCutFillersValue(
-    typeof value.fillers === "string" && value.fillers.trim() ? value.fillers : DEFAULT_SMART_CUT_FILLERS,
-  );
-  const normalizedCatchphrases = normalizeSmartCutTermListValue(
-    typeof value.catchphrases === "string" && value.catchphrases.trim() ? value.catchphrases : DEFAULT_SMART_CUT_CATCHPHRASES,
-    DEFAULT_SMART_CUT_CATCHPHRASES,
-  );
-  const legacyContinuousEnabled = typeof (value as { fillerContinuousEnabled?: unknown }).fillerContinuousEnabled === "boolean"
-    ? Boolean((value as { fillerContinuousEnabled?: boolean }).fillerContinuousEnabled)
-    : false;
-  return (
-    (typeof value.fillerEnabled === "boolean" ? value.fillerEnabled : PREVIOUS_NARROW_SMART_CUT_RULES.fillerEnabled) === PREVIOUS_NARROW_SMART_CUT_RULES.fillerEnabled
-    && (typeof value.fillerStandaloneEnabled === "boolean" ? value.fillerStandaloneEnabled : PREVIOUS_NARROW_SMART_CUT_RULES.fillerStandaloneEnabled) === PREVIOUS_NARROW_SMART_CUT_RULES.fillerStandaloneEnabled
-    && (typeof value.catchphraseEnabled === "boolean" ? value.catchphraseEnabled : PREVIOUS_NARROW_SMART_CUT_RULES.catchphraseEnabled) === PREVIOUS_NARROW_SMART_CUT_RULES.catchphraseEnabled
-    && (typeof value.repeatedEnabled === "boolean" ? value.repeatedEnabled : PREVIOUS_NARROW_SMART_CUT_RULES.repeatedEnabled) === PREVIOUS_NARROW_SMART_CUT_RULES.repeatedEnabled
-    && (typeof value.pauseEnabled === "boolean" ? value.pauseEnabled : PREVIOUS_NARROW_SMART_CUT_RULES.pauseEnabled) === PREVIOUS_NARROW_SMART_CUT_RULES.pauseEnabled
-    && (typeof value.smartDeleteEnabled === "boolean" ? value.smartDeleteEnabled : PREVIOUS_NARROW_SMART_CUT_RULES.smartDeleteEnabled) === PREVIOUS_NARROW_SMART_CUT_RULES.smartDeleteEnabled
-    && normalizedPauseThresholdSec === PREVIOUS_NARROW_SMART_CUT_RULES.pauseThresholdSec
-    && normalizedFillers === PREVIOUS_NARROW_SMART_CUT_RULES.fillers
-    && normalizedCatchphrases === PREVIOUS_NARROW_SMART_CUT_RULES.catchphrases
-    && legacyContinuousEnabled === false
-  );
-}
+const DEFAULT_SMART_CUT_RULES: SmartCutRules = {
+  ...PREVIOUS_NARROW_SMART_CUT_RULES,
+};
 
 const SMART_CUT_AUDIO_SAFETY_SEC: Record<SmartCutRuleKind, number> = {
   filler: 0,
@@ -527,14 +502,6 @@ const SMART_CUT_PAUSE_CLUSTER_GAP_SEC = 0.8;
 const SMART_DELETE_PROTECTED_TERM_PATTERN = /(?:^|[^A-Za-z0-9])(?:EDC\s*\d{1,4}|NITE\s*CORE|NITECORE|NOC|MT\s*\d{1,4}|S\d{2}\s*mini|OLIGHT|FENIX|ACEBEAM|NEXTORCH|NEXTOOL)(?=$|[^A-Za-z0-9])/i;
 
 function normalizeSmartCutRules(value: Partial<SmartCutRules> | null | undefined): SmartCutRules {
-  if (looksLikePreviousLegacyNarrowSmartCutRules(value)) {
-    value = {
-      ...value,
-      fillerSentenceHeadEnabled: DEFAULT_SMART_CUT_RULES.fillerSentenceHeadEnabled,
-      fillerSentenceTailEnabled: DEFAULT_SMART_CUT_RULES.fillerSentenceTailEnabled,
-      catchphraseEnabled: DEFAULT_SMART_CUT_RULES.catchphraseEnabled,
-    };
-  }
   const pauseThresholdSec = Number(value?.pauseThresholdSec);
   const rawFillers = typeof value?.fillers === "string" && value.fillers.trim() ? value.fillers : DEFAULT_SMART_CUT_RULES.fillers;
   const rawCatchphrases = typeof value?.catchphrases === "string" && value.catchphrases.trim() ? value.catchphrases : DEFAULT_SMART_CUT_CATCHPHRASES;
@@ -561,17 +528,32 @@ function normalizeSmartCutRules(value: Partial<SmartCutRules> | null | undefined
     catchphrases: normalizeSmartCutTermListValue(rawCatchphrases, DEFAULT_SMART_CUT_CATCHPHRASES),
   };
   if (
-    normalized.fillerEnabled === PREVIOUS_NARROW_SMART_CUT_RULES.fillerEnabled
-    && normalized.fillerStandaloneEnabled === PREVIOUS_NARROW_SMART_CUT_RULES.fillerStandaloneEnabled
-    && normalized.fillerSentenceHeadEnabled === PREVIOUS_NARROW_SMART_CUT_RULES.fillerSentenceHeadEnabled
-    && normalized.fillerSentenceTailEnabled === PREVIOUS_NARROW_SMART_CUT_RULES.fillerSentenceTailEnabled
-    && normalized.catchphraseEnabled === PREVIOUS_NARROW_SMART_CUT_RULES.catchphraseEnabled
-    && normalized.repeatedEnabled === PREVIOUS_NARROW_SMART_CUT_RULES.repeatedEnabled
-    && normalized.pauseEnabled === PREVIOUS_NARROW_SMART_CUT_RULES.pauseEnabled
-    && normalized.smartDeleteEnabled === PREVIOUS_NARROW_SMART_CUT_RULES.smartDeleteEnabled
-    && normalized.pauseThresholdSec === PREVIOUS_NARROW_SMART_CUT_RULES.pauseThresholdSec
-    && normalized.fillers === PREVIOUS_NARROW_SMART_CUT_RULES.fillers
-    && normalized.catchphrases === PREVIOUS_NARROW_SMART_CUT_RULES.catchphrases
+    (
+      normalized.fillerEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.fillerEnabled
+      && normalized.fillerStandaloneEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.fillerStandaloneEnabled
+      && normalized.fillerSentenceHeadEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.fillerSentenceHeadEnabled
+      && normalized.fillerSentenceTailEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.fillerSentenceTailEnabled
+      && normalized.catchphraseEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.catchphraseEnabled
+      && normalized.repeatedEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.repeatedEnabled
+      && normalized.pauseEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.pauseEnabled
+      && normalized.smartDeleteEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.smartDeleteEnabled
+      && normalized.pauseThresholdSec === PREVIOUS_EXPANDED_SMART_CUT_RULES.pauseThresholdSec
+      && normalized.fillers === PREVIOUS_EXPANDED_SMART_CUT_RULES.fillers
+      && normalized.catchphrases === PREVIOUS_EXPANDED_SMART_CUT_RULES.catchphrases
+    )
+    || (
+      normalized.fillerEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.fillerEnabled
+      && normalized.fillerStandaloneEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.fillerStandaloneEnabled
+      && normalized.fillerSentenceHeadEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.fillerSentenceHeadEnabled
+      && normalized.fillerSentenceTailEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.fillerSentenceTailEnabled
+      && normalized.catchphraseEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.catchphraseEnabled
+      && normalized.repeatedEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.repeatedEnabled
+      && normalized.pauseEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.pauseEnabled
+      && normalized.smartDeleteEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.smartDeleteEnabled
+      && normalized.pauseThresholdSec === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.pauseThresholdSec
+      && normalized.fillers === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.fillers
+      && normalized.catchphrases === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.catchphrases
+    )
   ) {
     return { ...DEFAULT_SMART_CUT_RULES };
   }
@@ -592,6 +574,45 @@ function resolveInitialSmartCutRules(sessionRules?: unknown): SmartCutRules {
     return normalizeSmartCutRules(sessionRules);
   }
   return loadSmartCutRules();
+}
+
+function smartCutRulesEquivalentForKind(
+  kind: SmartCutRuleKind,
+  left: Partial<SmartCutRules> | null | undefined,
+  right: Partial<SmartCutRules> | null | undefined,
+) {
+  const normalizedLeft = normalizeSmartCutRules(left);
+  const normalizedRight = normalizeSmartCutRules(right);
+  switch (kind) {
+    case "filler":
+      return (
+        normalizedLeft.fillerEnabled === normalizedRight.fillerEnabled
+        && normalizedLeft.fillerStandaloneEnabled === normalizedRight.fillerStandaloneEnabled
+        && normalizedLeft.fillerSentenceHeadEnabled === normalizedRight.fillerSentenceHeadEnabled
+        && normalizedLeft.fillerSentenceTailEnabled === normalizedRight.fillerSentenceTailEnabled
+        && normalizedLeft.fillers === normalizedRight.fillers
+      );
+    case "catchphrase":
+      return (
+        normalizedLeft.catchphraseEnabled === normalizedRight.catchphraseEnabled
+        && normalizedLeft.catchphrases === normalizedRight.catchphrases
+      );
+    case "repeated":
+      return normalizedLeft.repeatedEnabled === normalizedRight.repeatedEnabled;
+    case "pause":
+      return (
+        normalizedLeft.pauseEnabled === normalizedRight.pauseEnabled
+        && normalizedLeft.pauseThresholdSec === normalizedRight.pauseThresholdSec
+        && normalizedLeft.fillerEnabled === normalizedRight.fillerEnabled
+        && normalizedLeft.catchphraseEnabled === normalizedRight.catchphraseEnabled
+        && normalizedLeft.fillers === normalizedRight.fillers
+        && normalizedLeft.catchphrases === normalizedRight.catchphrases
+      );
+    case "smart_delete":
+      return normalizedLeft.smartDeleteEnabled === normalizedRight.smartDeleteEnabled;
+    default:
+      return smartCutRulesSignature(normalizedLeft) === smartCutRulesSignature(normalizedRight);
+  }
 }
 
 function saveSmartCutRules(rules: SmartCutRules) {
@@ -754,10 +775,11 @@ function subtitleTranscriptSourceText(subtitle: JobManualEditSubtitle) {
   const suppressedReason = String(subtitle.display_suppressed_reason || "").trim();
   if (suppressedReason && suppressedReason !== "standalone_filler") return "";
   const finalText = subtitleText(subtitle);
+  const timingText = String(subtitle.timing_text || "").trim();
   const normText = String(subtitle.text_norm || "").trim();
   const rawText = String(subtitle.text_raw || "").trim();
   const transcriptText = String(subtitle.transcript_text || "").trim();
-  const baselineText = finalText || normText || rawText || transcriptText;
+  const baselineText = finalText || timingText || normText || rawText || transcriptText;
   if (transcriptText) {
     const preferredTranscriptText = preferDenoisedAsrTranscriptText(baselineText, transcriptText);
     if (transcriptTextAddsUnsupportedFillerNoise(subtitle, baselineText, preferredTranscriptText)) {
@@ -773,6 +795,14 @@ function subtitleTranscriptSourceText(subtitle: JobManualEditSubtitle) {
 
 function subtitleRuleSourceText(subtitle: JobManualEditSubtitle, kind: SmartCutRuleKind) {
   if (kind === "filler" || kind === "catchphrase") {
+    const explicitTimingText = String(subtitle.timing_text || "").trim();
+    if (explicitTimingText) {
+      return applyConservativeAsrWordCorrections(denoiseAsrTranscriptText(explicitTimingText));
+    }
+    const timingSupportedText = subtitleTimingSupportedRuleText(subtitle);
+    if (timingSupportedText) {
+      return timingSupportedText;
+    }
     const transcriptText = String(subtitle.transcript_text || "").trim();
     if (transcriptText) {
       return applyConservativeAsrWordCorrections(
@@ -910,6 +940,11 @@ function transcriptTimingPayloadTexts(subtitle: JobManualEditSubtitle) {
   const alignmentText = (subtitle.alignment_tokens || []).map((token) => String(token.text || "")).join("").trim();
   if (alignmentText) payloads.push(alignmentText);
   return payloads;
+}
+
+function subtitleTimingSupportedRuleText(subtitle: JobManualEditSubtitle) {
+  const timingText = transcriptTimingPayloadTexts(subtitle).find((payloadText) => compactTranscriptText(payloadText).length > 0);
+  return timingText ? applyConservativeAsrWordCorrections(denoiseAsrTranscriptText(timingText)) : "";
 }
 
 function transcriptTimingPayloadSupportsText(subtitle: JobManualEditSubtitle, candidateText: string) {
@@ -3596,8 +3631,8 @@ function shouldUseCanonicalAlignedTranscriptText(canonicalText: string, rawAlign
 
 function normalizeAlignedTranscriptTokens(tokens: TranscriptToken[], sourceIndex: number, tokenKeyScope: string, segments: KeepSegment[], canonicalText?: string) {
   const rawText = tokens.map((token) => token.text).join("");
-  const normalizedText = String(canonicalText || rawText).trim();
-  if (!normalizedText || normalizedText === rawText) return tokens;
+  const normalizedText = canonicalText != null ? String(canonicalText).trim() : rawText;
+  if (!normalizedText) return tokens;
 
   const timedChars: TimedTranscriptChar[] = [];
   tokens.forEach((token) => {
@@ -4027,6 +4062,25 @@ function smartCutRuleMatchForTranscriptToken(token: TranscriptToken, ranges: Sma
     return null;
   }
   return smartCutRuleMatchForSourceRange(token.start, token.end, eligibleRanges, []);
+}
+
+export function transcriptTokenSmartCutVisualState(
+  token: TranscriptToken,
+  transcriptCutRanges: KeepSegment[],
+  activeSmartCutRuleRanges: SmartCutRuleMatch[],
+) {
+  const cut = !token.kept || transcriptTokenRangesOverlap(token, transcriptCutRanges);
+  const cutMatch = cut ? smartCutRuleMatchForTranscriptToken(token, activeSmartCutRuleRanges) : null;
+  const suggestionMatch = cut ? null : smartCutRuleMatchForTranscriptToken(token, activeSmartCutRuleRanges);
+  const cutKind: SmartCutRuleKind | "manual" | null = cut ? (cutMatch?.kind ?? "manual") : null;
+  const suggestionKind: SmartCutRuleKind | null = suggestionMatch?.kind ?? null;
+  return {
+    cut,
+    cutMatch,
+    cutKind,
+    suggestionMatch,
+    suggestionKind,
+  };
 }
 
 export function removeTranscriptSelectionTextFromSubtitleDrafts(
@@ -4997,8 +5051,19 @@ export function buildSmartCutRuleAnalysis(
   );
 }
 
-export function manualEditorAuthoritativeSmartCutKinds(hasBackendAnalysis: boolean): SmartCutRuleKind[] {
-  return hasBackendAnalysis ? ["smart_delete"] : [];
+export function manualEditorAuthoritativeSmartCutKinds(
+  hasBackendAnalysis: boolean,
+  currentRules?: Partial<SmartCutRules> | null,
+  sessionRules?: Partial<SmartCutRules> | null,
+): SmartCutRuleKind[] {
+  if (!hasBackendAnalysis) return [];
+  const kinds: SmartCutRuleKind[] = ["smart_delete"];
+  for (const kind of ["filler", "catchphrase", "repeated", "pause"] as SmartCutRuleKind[]) {
+    if (smartCutRulesEquivalentForKind(kind, currentRules, sessionRules)) {
+      kinds.push(kind);
+    }
+  }
+  return kinds;
 }
 
 function textSnippet(value: string, maxChars = 18) {
@@ -5687,7 +5752,6 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
     [activePreviewOutputTime, projection.remapped],
   );
   const smartCutRuleSegments = session.rule_segments || [];
-
   const smartCutRuleAnalysis = useMemo(
     () => buildSmartCutRuleAnalysis(
       sourceTranscriptSubtitles,
@@ -5696,7 +5760,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
       smartCutRuleSegments,
       session.cut_analysis || session.refine_decision_plan
         ? {
-          authoritativeKinds: manualEditorAuthoritativeSmartCutKinds(true),
+          authoritativeKinds: manualEditorAuthoritativeSmartCutKinds(true, smartCutRules, session.smart_cut_rules),
         }
         : undefined,
     ),
@@ -5706,6 +5770,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
       sourceSilenceRanges,
       sourceTranscriptSubtitles,
       session.cut_analysis,
+      session.smart_cut_rules,
       session.refine_decision_plan,
     ],
   );
@@ -6909,19 +6974,6 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
     }
   };
 
-  const transcriptTokenIsCut = (token: TranscriptToken) => (
-    !token.kept
-    || transcriptTokenRangesOverlap(token, transcriptCutRanges)
-    || smartCutRuleMatchForTranscriptToken(token, activeSmartCutRuleRanges) != null
-  );
-
-  const smartCutClassificationForToken = (token: TranscriptToken, cut: boolean) => {
-    const match = smartCutRuleMatchForTranscriptToken(token, activeSmartCutRuleRanges);
-    if (match) return { match, kind: match.kind };
-    if (cut && token.kind === "pause") return { match: null, kind: "pause" as const };
-    return { match: null, kind: null };
-  };
-
   const smartDeleteSuggestionForToken = (token: TranscriptToken) => (
     smartCutRuleMatchForTranscriptToken(token, pendingSmartDeleteRanges)
   );
@@ -6932,7 +6984,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
     const nextSelection = transcriptSelectionFromTokenRange(transcriptTokens, tokenIndex, tokenIndex);
     setTranscriptSelection(nextSelection);
     setTranscriptSelectionPopover(transcriptSelectionPopoverPositionFromRect(transcriptTokenRefs.current.get(tokenIndex)?.getBoundingClientRect() ?? null));
-    if (!transcriptTokenIsCut(token)) {
+    if (!transcriptTokenSmartCutVisualState(token, transcriptCutRanges, activeSmartCutRuleRanges).cut) {
       jumpToSourceTime(transcriptPauseRangesForToken(token)[0]?.start ?? token.start);
     }
     if (token.subtitleIndex != null) {
@@ -8247,8 +8299,13 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
                       ? index >= transcriptSelection.startTokenIndex && index <= transcriptSelection.endTokenIndex
                       : false;
                     const active = index === activeTranscriptTokenIndex;
-                    const cut = transcriptTokenIsCut(token);
-                    const { match: smartCutMatch, kind: smartCutKind } = smartCutClassificationForToken(token, cut);
+                    const {
+                      cut,
+                      cutMatch: smartCutMatch,
+                      cutKind: smartCutKind,
+                      suggestionMatch: smartCutSuggestion,
+                      suggestionKind: smartCutSuggestionKind,
+                    } = transcriptTokenSmartCutVisualState(token, transcriptCutRanges, activeSmartCutRuleRanges);
                     const smartDeleteSuggestion = smartDeleteSuggestionForToken(token);
                     const cutKind = cut ? smartCutKind ?? "manual" : null;
                     const cutReason = cutKind && cutKind !== "manual"
@@ -8256,7 +8313,9 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
                       : cut ? manualCutReason() : null;
                     const suggestionReason = smartDeleteSuggestion
                       ? `${smartCutRuleLabel("smart_delete")}建议：${smartCutRuleReason("smart_delete", smartDeleteSuggestion)}`
-                      : null;
+                      : smartCutSuggestion && smartCutSuggestionKind
+                        ? `${smartCutRuleLabel(smartCutSuggestionKind)}建议：${smartCutRuleReason(smartCutSuggestionKind, smartCutSuggestion)}`
+                        : null;
                     const tokenTitle = cutReason
                       ? `${cutReason}${suggestionReason ? `；${suggestionReason}` : ""} ${formatSeconds(token.start)} - ${formatSeconds(token.end)}`
                       : suggestionReason
@@ -8288,7 +8347,15 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
                                 transcriptTokenRefs.current.delete(index);
                               }
                             }}
-                            className={classNames("manual-editor-transcript-pause", cut && "cut", cutKind && `cut-${cutKind}`, smartDeleteSuggestion && "suggested-smart_delete", active && "active", selected && "selected")}
+                            className={classNames(
+                              "manual-editor-transcript-pause",
+                              cut && "cut",
+                              cutKind && `cut-${cutKind}`,
+                              !cut && smartCutSuggestionKind && `suggested-${smartCutSuggestionKind}`,
+                              smartDeleteSuggestion && "suggested-smart_delete",
+                              active && "active",
+                              selected && "selected",
+                            )}
                             data-transcript-token-index={index}
                             onClick={() => selectTranscriptToken(index)}
                             title={cutReason || suggestionReason ? `停顿 · ${tokenTitle}` : `停顿 ${tokenTitle}`}
@@ -8319,6 +8386,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
                               token.inferredPunctuation && "inferred",
                               cut && "cut",
                               cutKind && `cut-${cutKind}`,
+                              !cut && smartCutSuggestionKind && `suggested-${smartCutSuggestionKind}`,
                               smartDeleteSuggestion && "suggested-smart_delete",
                               active && "active",
                               selected && "selected",
@@ -8343,7 +8411,15 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
                               transcriptTokenRefs.current.delete(index);
                             }
                           }}
-                          className={classNames("manual-editor-transcript-token", cut && "cut", cutKind && `cut-${cutKind}`, smartDeleteSuggestion && "suggested-smart_delete", active && "active", selected && "selected")}
+                          className={classNames(
+                            "manual-editor-transcript-token",
+                            cut && "cut",
+                            cutKind && `cut-${cutKind}`,
+                            !cut && smartCutSuggestionKind && `suggested-${smartCutSuggestionKind}`,
+                            smartDeleteSuggestion && "suggested-smart_delete",
+                            active && "active",
+                            selected && "selected",
+                          )}
                           data-transcript-token-index={index}
                           onClick={() => selectTranscriptToken(index)}
                           title={tokenTitle}

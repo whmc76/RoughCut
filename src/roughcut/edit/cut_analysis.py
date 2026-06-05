@@ -10,6 +10,12 @@ from roughcut.edit.smart_cut_candidates import (
 
 ARTIFACT_TYPE_CUT_ANALYSIS = "cut_analysis"
 CUT_ANALYSIS_SCHEMA_VERSION = "cut_analysis.v1"
+_SMART_CUT_RULE_REASONS = {
+    "filler_word",
+    "catchphrase_phrase",
+    "repeated_speech",
+    "silence",
+}
 
 
 def _dict_items(value: Any) -> list[dict[str, Any]]:
@@ -55,7 +61,13 @@ def build_cut_analysis_payload(
     rule_candidates = [
         item
         for item in rule_candidates
-        if str(item.get("candidate_stage") or "").strip() != SMART_CUT_RULE_CANDIDATE_STAGE
+        if (
+            str(item.get("candidate_stage") or "").strip() != SMART_CUT_RULE_CANDIDATE_STAGE
+            and not (
+                str(item.get("candidate_stage") or "").strip() == "manual_editor_full_transcript"
+                and str(item.get("reason") or "").strip() in _SMART_CUT_RULE_REASONS
+            )
+        )
     ]
     silence_segments = _dict_items(analysis.get("silence_segments"))
     smart_cut_rule_candidates = build_smart_cut_rule_candidates(

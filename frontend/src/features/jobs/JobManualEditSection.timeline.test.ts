@@ -39,6 +39,7 @@ import {
   sourceRangeOverlapsCutRanges,
   smartDeleteSuggestionRanges,
   smartCutRuleManagedRanges,
+  transcriptTokenSmartCutVisualState,
   subtitleAutoCorrectionSummary,
   transcriptCutRangesForSelection,
   wordTimingPauseIntervals,
@@ -1237,6 +1238,158 @@ describe("manual editor timeline mapping", () => {
     );
 
     expect(tokens.filter((token) => token.kind === "char").map((token) => token.text).join("")).toBe("NOC的，这个发售啊，嗯，太难了。");
+  });
+
+  it("splits backend alignment spans into per-character transcript tokens", () => {
+    const tokens = buildTranscriptTokens(
+      [
+        {
+          index: 12,
+          start_time: 30,
+          end_time: 31,
+          text_final: "我只能说是",
+          alignment_tokens: [
+            { text: "我只能", start: 30.0, end: 30.45 },
+            { text: "说是", start: 30.45, end: 30.8 },
+          ],
+        },
+      ],
+      [{ start: 30, end: 31 }],
+      [],
+    ).filter((token) => token.kind === "char");
+
+    expect(tokens.map((token) => token.text)).toEqual(["我", "只", "能", "说", "是"]);
+    expect(tokens).toHaveLength(5);
+    expect(tokens[0]?.start).toBe(30);
+    expect(tokens[4]?.end).toBe(30.8);
+  });
+
+  it("treats rule overlaps as suggestions instead of deleted transcript tokens", () => {
+    const [token] = buildTranscriptTokens(
+      [
+        {
+          index: 13,
+          start_time: 40,
+          end_time: 41,
+          text_final: "然后",
+          alignment_tokens: [{ text: "然后", start: 40, end: 40.4 }],
+        },
+      ],
+      [{ start: 40, end: 41 }],
+      [],
+    );
+
+    expect(token).toBeTruthy();
+    expect(transcriptTokenSmartCutVisualState(
+      token!,
+      [],
+      [{ start: 40, end: 40.4, kind: "catchphrase", sourceText: "然后" }],
+    )).toEqual(expect.objectContaining({
+      cut: false,
+      cutKind: null,
+      suggestionKind: "catchphrase",
+    }));
+  });
+
+  it("does not project hidden raw fillers onto visible transcript timing during local rule scans", () => {
+    const analysis = buildSmartCutRuleAnalysis(
+      [
+        {
+          index: 15,
+          start_time: 2.32,
+          end_time: 4.0,
+          text_raw: "啊，呃，今天我们直奔主题啊，呃，",
+          text_norm: "啊，呃，今天我们直奔主题啊，呃，",
+          text_final: "今天我们直奔主题啊",
+          words: [
+            { word: "今", start: 2.64, end: 2.76 },
+            { word: "天", start: 2.76, end: 2.88 },
+            { word: "我", start: 2.88, end: 3.0 },
+            { word: "们", start: 3.0, end: 3.12 },
+            { word: "直", start: 3.12, end: 3.24 },
+            { word: "奔", start: 3.24, end: 3.36 },
+            { word: "主", start: 3.36, end: 3.48 },
+            { word: "题", start: 3.48, end: 3.6 },
+            { word: "啊", start: 3.6, end: 3.78 },
+          ],
+        },
+      ],
+      {
+        fillerEnabled: true,
+        fillerStandaloneEnabled: true,
+        fillerSentenceHeadEnabled: true,
+        fillerSentenceTailEnabled: true,
+        fillers: "啊,呃",
+        catchphraseEnabled: false,
+        catchphrases: "",
+        repeatedEnabled: false,
+        pauseEnabled: false,
+        pauseThresholdSec: 0.8,
+        smartDeleteEnabled: false,
+      },
+    );
+
+    expect(analysis.filler.some((range) => range.sourceText === "呃")).toBe(false);
+    expect(analysis.filler.some((range) => range.sourceText === "啊" && range.start < 2.5)).toBe(false);
+    expect(analysis.filler.some((range) => range.sourceText === "啊" && range.fillerMode === "sentence_tail" && range.start >= 3.55)).toBe(true);
+  });
+
+  it("keeps backend authority scoped to the rule kinds whose settings still match the session", () => {
+    const sessionRules = {
+      fillerEnabled: true,
+      fillerStandaloneEnabled: true,
+      fillerSentenceHeadEnabled: false,
+      fillerSentenceTailEnabled: false,
+      fillers: "嗯，呃",
+      catchphraseEnabled: true,
+      catchphrases: "就是，然后",
+      repeatedEnabled: true,
+      pauseEnabled: true,
+      pauseThresholdSec: 0.8,
+      smartDeleteEnabled: true,
+    };
+    expect(manualEditorAuthoritativeSmartCutKinds(true, sessionRules, sessionRules)).toEqual([
+      "smart_delete",
+      "filler",
+      "catchphrase",
+      "repeated",
+      "pause",
+    ]);
+    expect(
+      manualEditorAuthoritativeSmartCutKinds(
+        true,
+        { ...sessionRules, fillerSentenceHeadEnabled: true },
+        sessionRules,
+      ),
+    ).toEqual(["smart_delete", "catchphrase", "repeated", "pause"]);
+    expect(manualEditorAuthoritativeSmartCutKinds(false, sessionRules, sessionRules)).toEqual([]);
+  });
+
+  it("keeps explicit cut state separate from suggestion attribution", () => {
+    const [token] = buildTranscriptTokens(
+      [
+        {
+          index: 14,
+          start_time: 50,
+          end_time: 51,
+          text_final: "呃",
+          alignment_tokens: [{ text: "呃", start: 50, end: 50.2 }],
+        },
+      ],
+      [],
+      [],
+    );
+
+    expect(token).toBeTruthy();
+    expect(transcriptTokenSmartCutVisualState(
+      token!,
+      [{ start: 50, end: 50.2 }],
+      [{ start: 50, end: 50.2, kind: "filler", sourceText: "呃", fillerMode: "standalone" }],
+    )).toEqual(expect.objectContaining({
+      cut: true,
+      cutKind: "filler",
+      suggestionKind: null,
+    }));
   });
 
   it("keeps full-text editing on source transcript even when projected subtitles look cleaner", () => {
@@ -2890,9 +3043,15 @@ describe("manual editor timeline mapping", () => {
     expect(nextSegments).toEqual([{ start: 0, end: 20 }]);
   });
 
-  it("uses only smart-delete as the backend authoritative rule kind in manual refine mode", () => {
+  it("uses only smart-delete as the authoritative fallback when the current rule set no longer matches the session", () => {
     expect(manualEditorAuthoritativeSmartCutKinds(false)).toEqual([]);
-    expect(manualEditorAuthoritativeSmartCutKinds(true)).toEqual(["smart_delete"]);
+    expect(
+      manualEditorAuthoritativeSmartCutKinds(
+        true,
+        { fillerSentenceHeadEnabled: true, catchphraseEnabled: true, fillers: "嗯", catchphrases: "就是" },
+        { fillerSentenceHeadEnabled: false, catchphraseEnabled: false, fillers: "呃", catchphrases: "然后" },
+      ),
+    ).toEqual(["smart_delete", "repeated"]);
   });
 
   it("prefers backend authoritative repeated ranges over local transcript rescans when cut analysis is available", () => {
