@@ -17,7 +17,7 @@ from threading import Lock
 import httpx
 import openai
 
-from roughcut.config import DEFAULT_MINIMAX_REASONING_MODEL, get_settings, uses_codex_auth_helper
+from roughcut.config import DEFAULT_MINIMAX_REASONING_MODEL, DEFAULT_ZHIPU_VISION_MODEL, get_settings, uses_codex_auth_helper
 from roughcut.host.codex_proxy import resolve_codex_proxy_token, resolve_codex_proxy_url
 from roughcut.providers.minimax_compat import resolve_minimax_anthropic_base_url
 from roughcut.providers.auth import resolve_credential
@@ -29,6 +29,8 @@ from roughcut.providers.openai_responses import (
     extract_response_usage,
 )
 from roughcut.providers.reasoning.base import extract_json_text
+from roughcut.providers.zhipu_compat import normalize_zhipu_base_url
+from roughcut.providers.zhipu_http import build_zhipu_headers, build_zhipu_request_context, post_zhipu_json
 from roughcut.usage import record_usage_event
 
 
@@ -38,12 +40,14 @@ _MULTIMODAL_MAX_CACHE_ENTRIES = 128
 _DEFAULT_OPENAI_MULTIMODAL_MODEL = "gpt-5.5"
 _MULTIMODAL_PROVIDER_DEFAULT_COOLDOWN_MS = {
     "minimax": 45_000,
+    "zhipu": 30_000,
     "openai": 15_000,
     "anthropic": 15_000,
 }
 _MULTIMODAL_PROVIDER_UNAVAILABLE_COOLDOWN_MS = {
     "ollama": 120_000,
     "minimax": 60_000,
+    "zhipu": 45_000,
     "openai": 30_000,
     "anthropic": 30_000,
 }
@@ -105,6 +109,8 @@ def _is_provider_compatible_multimodal_model(provider: str, model: str) -> bool:
         return normalized_model.startswith(("gpt-", "o1", "o3", "o4")) or "codex" in normalized_model
     if normalized_provider == "minimax":
         return normalized_model.startswith("minimax") or normalized_model.startswith("abab")
+    if normalized_provider == "zhipu":
+        return normalized_model.startswith("glm-") and "v" in normalized_model
     if normalized_provider == "anthropic":
         return normalized_model.startswith("claude")
     return True
@@ -116,11 +122,20 @@ def _default_multimodal_model_for_provider(provider: str) -> str:
         return _DEFAULT_OPENAI_MULTIMODAL_MODEL
     if normalized_provider == "minimax":
         return DEFAULT_MINIMAX_REASONING_MODEL
+    if normalized_provider == "zhipu":
+        return DEFAULT_ZHIPU_VISION_MODEL
     return ""
 
 
 def _has_minimax_multimodal_credentials(settings) -> bool:
     return bool(str(getattr(settings, "minimax_api_key", "") or "").strip())
+
+
+def _has_zhipu_multimodal_credentials(settings) -> bool:
+    auth_mode = str(getattr(settings, "zhipu_auth_mode", "") or "api_key").strip().lower()
+    if auth_mode == "helper":
+        return bool(str(getattr(settings, "zhipu_api_key_helper", "") or "").strip())
+    return bool(str(getattr(settings, "zhipu_api_key", "") or "").strip())
 
 
 def _can_attempt_multimodal_provider(provider: str, settings) -> bool:
@@ -129,6 +144,8 @@ def _can_attempt_multimodal_provider(provider: str, settings) -> bool:
         return not _openai_direct_api_unavailable(settings)
     if normalized == "minimax":
         return _has_minimax_multimodal_credentials(settings)
+    if normalized == "zhipu":
+        return _has_zhipu_multimodal_credentials(settings)
     return True
 
 
@@ -209,6 +226,13 @@ async def complete_with_images(
             else DEFAULT_MINIMAX_REASONING_MODEL
         )
         attempts.append(("minimax", minimax_model or DEFAULT_MINIMAX_REASONING_MODEL))
+    if not attempts and _has_zhipu_multimodal_credentials(settings):
+        zhipu_model = (
+            _active_multimodal_fallback_model(settings)
+            if fallback_provider == "zhipu"
+            else DEFAULT_ZHIPU_VISION_MODEL
+        )
+        attempts.append(("zhipu", zhipu_model or DEFAULT_ZHIPU_VISION_MODEL))
     configured_attempt_providers = {provider for provider, _model in attempts}
     if len(configured_attempt_providers) <= 1:
         for alternate_provider in ("openai", "anthropic"):
@@ -421,6 +445,18 @@ async def _complete_once_unthrottled(
 
     if provider == "minimax":
         return await _complete_minimax_anthropic_multimodal(
+            prompt=prompt,
+            image_paths=image_paths,
+            images_b64=images_b64,
+            json_mode=json_mode,
+            model=model,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            settings=settings,
+        )
+
+    if provider == "zhipu":
+        return await _complete_zhipu_multimodal(
             prompt=prompt,
             image_paths=image_paths,
             images_b64=images_b64,
@@ -652,6 +688,90 @@ async def _complete_minimax_anthropic_multimodal(
     return _finalize_text(text, json_mode=json_mode)
 
 
+async def _complete_zhipu_multimodal(
+    *,
+    prompt: str,
+    image_paths: list[Path],
+    images_b64: list[str],
+    json_mode: bool,
+    model: str,
+    max_tokens: int,
+    temperature: float,
+    settings,
+) -> str:
+    token = resolve_credential(
+        mode=settings.zhipu_auth_mode,
+        direct_value=settings.zhipu_api_key,
+        helper_command=settings.zhipu_api_key_helper,
+        provider_name="Zhipu",
+    )
+    payload: dict[str, object] = {
+        "model": model or DEFAULT_ZHIPU_VISION_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": _build_zhipu_multimodal_content(
+                    prompt=prompt,
+                    image_paths=image_paths,
+                    images_b64=images_b64,
+                ),
+            }
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        **build_zhipu_request_context(),
+    }
+    effort = str(getattr(settings, "active_reasoning_effort", "low") or "low").strip().lower()
+    enable_thinking = (not json_mode) and effort in {"medium", "high"} and int(max_tokens) >= 256
+    payload["thinking"] = {"type": "enabled" if enable_thinking else "disabled"}
+    if json_mode:
+        payload["messages"] = [
+            {
+                "role": "user",
+                "content": _build_zhipu_multimodal_content(
+                    prompt=f"{prompt}\n\nRespond with valid JSON only.",
+                    image_paths=image_paths,
+                    images_b64=images_b64,
+                ),
+            }
+        ]
+    data = await post_zhipu_json(
+        url=f"{normalize_zhipu_base_url(settings.zhipu_base_url)}/chat/completions",
+        headers=build_zhipu_headers(token),
+        json_payload=payload,
+        timeout_sec=120,
+        max_attempts=3,
+    )
+
+    _clear_provider_cooldown("zhipu")
+    choice = ((data.get("choices") or [{}])[0]) if isinstance(data, dict) else {}
+    message = choice.get("message") or {}
+    content = _extract_zhipu_message_content(message)
+    if not content and enable_thinking and str(message.get("reasoning_content") or "").strip():
+        payload["thinking"] = {"type": "disabled"}
+        data = await post_zhipu_json(
+            url=f"{normalize_zhipu_base_url(settings.zhipu_base_url)}/chat/completions",
+            headers=build_zhipu_headers(token),
+            json_payload=payload,
+            timeout_sec=120,
+            max_attempts=2,
+        )
+        choice = ((data.get("choices") or [{}])[0]) if isinstance(data, dict) else {}
+        message = choice.get("message") or {}
+        content = _extract_zhipu_message_content(message)
+    usage_data = data.get("usage", {}) or {}
+    await record_usage_event(
+        provider="zhipu",
+        model=str(data.get("model") or model or DEFAULT_ZHIPU_VISION_MODEL),
+        usage={
+            "prompt_tokens": int(usage_data.get("prompt_tokens", 0) or 0),
+            "completion_tokens": int(usage_data.get("completion_tokens", 0) or 0),
+        },
+        kind="multimodal",
+    )
+    return _finalize_text(content, json_mode=json_mode)
+
+
 def _build_minimax_multimodal_content(
     *,
     prompt: str,
@@ -707,6 +827,44 @@ def _resolve_codex_bridge_exec_url() -> str:
     if proxy_url.endswith("/v1/codex/exec"):
         return proxy_url
     return ""
+
+
+def _build_zhipu_multimodal_content(
+    *,
+    prompt: str,
+    image_paths: list[Path],
+    images_b64: list[str],
+) -> list[dict[str, object]]:
+    content: list[dict[str, object]] = []
+    for path, image in zip(image_paths, images_b64, strict=False):
+        content.append(
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{_guess_media_type(path)};base64,{image}",
+                },
+            }
+        )
+    content.append({"type": "text", "text": str(prompt or "").strip()})
+    return content
+
+
+def _extract_zhipu_message_content(message: object) -> str:
+    if not isinstance(message, dict):
+        return ""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content or "").strip()
+    chunks: list[str] = []
+    for item in content:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or item.get("content") or "").strip()
+        if text:
+            chunks.append(text)
+    return "\n".join(chunks).strip()
 
 
 async def _raise_for_multimodal_status(provider: str, response: httpx.Response) -> None:
@@ -945,6 +1103,16 @@ def _resolve_chat_api_endpoint(provider: str) -> tuple[str, str]:
         if not token:
             raise ValueError("MiniMax API credential is not configured")
         return settings.minimax_base_url.rstrip("/"), token
+    if provider == "zhipu":
+        return (
+            normalize_zhipu_base_url(settings.zhipu_base_url),
+            resolve_credential(
+                mode=settings.zhipu_auth_mode,
+                direct_value=settings.zhipu_api_key,
+                helper_command=settings.zhipu_api_key_helper,
+                provider_name="Zhipu",
+            ),
+        )
     raise ValueError(f"Unsupported chat API provider: {provider}")
 
 

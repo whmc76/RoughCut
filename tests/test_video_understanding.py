@@ -15,8 +15,9 @@ def test_build_video_understanding_payload_fuses_profile_and_visual_evidence() -
             "engagement_question": "你更在意 EDC17 的哪一项体验？",
             "search_queries": ["NITECORE EDC17 EDC37"],
             "visual_semantic_evidence": {
-                "provider": "minimax",
-                "mode": "native_multimodal",
+                "provider": "zhipu",
+                "model": "zai-mcp-server",
+                "mode": "llm_mcp_vision",
                 "status": "ready",
                 "visible_brands": ["NITECORE"],
                 "visible_models": ["EDC17"],
@@ -46,8 +47,9 @@ def test_build_video_understanding_payload_fuses_profile_and_visual_evidence() -
     )
 
     assert payload["schema_version"] == "video_understanding_v1"
-    assert payload["model"]["provider"] == "minimax"
-    assert payload["model"]["model"] == "MiniMax-M3"
+    assert payload["model"]["provider"] == "zhipu"
+    assert payload["model"]["model"] == "zai-mcp-server"
+    assert payload["model"]["mode"] == "llm_mcp_vision"
     assert payload["global_understanding"]["primary_subject"]["brand"] == "NITECORE"
     assert payload["global_understanding"]["secondary_subjects"][0]["model"] == "EDC37"
     assert payload["automation_hints"]["term_correction_bias"]["allowed_hotwords"][0] == "NITECORE"

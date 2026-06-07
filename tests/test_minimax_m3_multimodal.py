@@ -36,7 +36,7 @@ def test_minimax_anthropic_base_url_is_derived_from_legacy_openai_base_url() -> 
     )
 
 
-def test_visual_capability_no_longer_falls_back_to_mcp(monkeypatch) -> None:
+def test_visual_capability_uses_llm_mcp_mode_when_mcp_provider_is_declared(monkeypatch) -> None:
     from roughcut.review import content_understanding_capabilities as capabilities
 
     class DummySettings:
@@ -57,11 +57,14 @@ def test_visual_capability_no_longer_falls_back_to_mcp(monkeypatch) -> None:
     resolved = resolve_content_understanding_capabilities(
         reasoning_provider="minimax",
         visual_provider="",
+        visual_model="",
         visual_mcp_provider="legacy_mcp",
+        visual_mcp_model="legacy-mcp-server",
     )
 
     assert resolved["visual_understanding"] == {
-        "provider": "",
-        "mode": "unavailable",
-        "status": "unavailable",
+        "provider": "legacy_mcp",
+        "mode": "llm_mcp_vision",
+        "status": "ready",
+        "model": "legacy-mcp-server",
     }

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -13,11 +13,28 @@ class Message:
 
 
 @dataclass
+class ToolDefinition:
+    name: str
+    description: str
+    parameters: dict[str, Any]
+
+
+@dataclass
+class ToolCall:
+    id: str
+    name: str
+    arguments: dict[str, Any] | str
+    raw_arguments: str = ""
+    type: str = "function"
+
+
+@dataclass
 class ReasoningResponse:
     content: str
     usage: dict[str, int]
     model: str
     raw_content: str | None = None
+    tool_calls: list[ToolCall] = field(default_factory=list)
 
     def as_json(self) -> Any:
         import json
@@ -73,3 +90,15 @@ class ReasoningProvider(ABC):
         json_mode: bool = False,
     ) -> ReasoningResponse:
         """Complete a chat conversation."""
+
+    async def complete_with_tools(
+        self,
+        messages: list[Message],
+        *,
+        tools: list[ToolDefinition],
+        tool_choice: str = "auto",
+        temperature: float = 0.3,
+        max_tokens: int = 4096,
+        json_mode: bool = False,
+    ) -> ReasoningResponse:
+        raise NotImplementedError(f"{type(self).__name__} does not support tool calling")
