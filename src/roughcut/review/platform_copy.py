@@ -11,11 +11,14 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from roughcut.config import llm_task_route
+from roughcut.config import get_settings, llm_task_route
 from roughcut.llm_cache import digest_payload
 from roughcut.providers.factory import get_reasoning_provider, get_search_provider
 from roughcut.providers.reasoning.base import Message, extract_json_text
+from roughcut.publication_packaging import derive_publication_cover_slots
 from roughcut.review.content_profile_memory import merge_content_profile_creative_preferences
+from roughcut.review.copy_methodology import build_copy_methodology, build_copy_methodology_prompt
+from roughcut.review.intelligent_copy_templates import build_platform_description
 from roughcut.review.platform_body_quality import assess_platform_body
 from roughcut.review.platform_tag_quality import assess_platform_tags
 from roughcut.review.platform_title_quality import assess_platform_titles
@@ -244,6 +247,25 @@ def build_packaging_prompt_brief(
         "manual_review_applied": bool(str(profile.get("review_mode") or "").strip() == "manual_confirmed" or resolved_feedback),
         "resolved_review_user_feedback": resolved_feedback,
         "source_language": detect_subtitle_language(subtitle_items),
+        "available_context_sources": [
+            label
+            for label, value in (
+                ("source_name", source_name),
+                ("subject_identity", " ".join(
+                    part for part in (
+                        str(profile.get("subject_brand") or "").strip(),
+                        str(profile.get("subject_model") or "").strip(),
+                        str(profile.get("subject_type") or "").strip(),
+                    ) if part
+                )),
+                ("visible_text", str(profile.get("visible_text") or "").strip()),
+                ("video_theme", str(profile.get("video_theme") or "").strip()),
+                ("summary", str(profile.get("summary") or "").strip()),
+                ("hook_line", str(profile.get("hook_line") or "").strip()),
+                ("engagement_question", str(profile.get("engagement_question") or "").strip()),
+            )
+            if str(value or "").strip()
+        ],
         "transcript_excerpt": build_transcript_for_packaging(subtitle_items, max_chars=max_transcript_chars),
     }
 
@@ -437,70 +459,118 @@ async def generate_platform_packaging(
     source_language_instruction = _build_source_language_instruction(
         str(prompt_brief.get("source_language") or detect_subtitle_language(subtitle_items))
     )
-    prompt = (
-        "你是多平台视频包装官，负责把字幕整理成适合不同平台发布的标题、简介和标签。"
-        f"{_domain_prompt_voice_instruction(content_profile)}"
-        "要求：\n"
-        "1. 输出真实自然，不要像硬广，不编造事实。\n"
-        "2. 刀具、EDC、工具相关内容必须保守合规，避免危险导向表述。\n"
-        "3. 每个平台必须提供 3 个标题、1 段简介/正文、1 组标签，且各平台的简介/正文不能只是轻微同义改写。\n"
-        "4. 标题要有明确创作目标差异：流量入口、质感细节、决策判断。不要为了凑数输出同义标题。\n"
-        "5. 标签必须贴合产品、品类、场景、风格、视频类型。\n"
-        "6. 不要输出空字段。\n"
-        "7. 参数、功率、流明、毫瓦、射程、容量、价格、发布时间、升级倍率，只能写在“已核验事实”里出现过的信息。\n"
-        "8. 如果没有核验证据，改写成保守表达，只写到手体验、外观、做工、上手感受，不写具体参数。\n\n"
-        f"9. {source_language_instruction}\n"
-        "10. 如果给了作者信息，只能按平台策略选择最合适的 0 到 3 个字段自然带出，不要所有平台重复同一段自我介绍。\n"
-        "11. 平台简介策略必须明显区分：\n"
-        "- B站：先给核心判断，再说这期重点拆什么，可自然带作者专业身份或长期关注方向。\n"
-        "- 小红书：像真实分享笔记，带一点作者人设、审美/使用偏好、到手感受。\n"
-        "- 抖音：一句结果 + 一句记忆点，可带极短作者身份锚点，节奏要快。\n"
-        "- 快手：像当面讲实话，直给、不绕，可带接地气的人设表达。\n"
-        "- 视频号：稳妥可信，偏总结式，可带作者职业/内容定位增强可信度。\n"
-        "- 头条号：偏资讯/观点摘要，标题和正文要先把判断讲明白。\n"
-        "- YouTube：描述可更完整，适合补充结构、关键看点和检索关键词，但不能因此自动改成英文。\n"
-        "- X：没有独立视频标题，推文正文要短，像可直接发出的贴文。\n"
-        "12. 简介/正文允许适度加入 emoji 增强可读性和生动感：小红书、抖音、快手可用 1-3 个；B站、视频号、头条号、YouTube、X 控制在 0-2 个。emoji 必须服务于语义，不要堆砌，不要放在标题里。\n\n"
-        f"本次统一文案风格：{_copy_style_instruction(copy_style)}\n\n"
-        f"{fact_guardrail_text}\n\n"
-        f"{author_prompt_text}\n\n"
-        f"{creative_guidance_text}\n\n"
-        "默认平台偏置：\n"
-        f"- B站：{_platform_bias_instruction('B站')}\n"
-        f"- 小红书：{_platform_bias_instruction('小红书')}\n"
-        f"- 抖音：{_platform_bias_instruction('抖音')}\n"
-        f"- 快手：{_platform_bias_instruction('快手')}\n"
-        f"- 视频号：{_platform_bias_instruction('视频号')}\n"
-        f"- 头条号：{_platform_bias_instruction('头条号')}\n"
-        f"- YouTube：{_platform_bias_instruction('YouTube')}\n"
-        f"- X：{_platform_bias_instruction('X')}\n\n"
-        "请输出 JSON，格式如下：\n"
-        "{"
-        "\"highlights\":{"
-        "\"product\":\"\",\"video_type\":\"\",\"strongest_selling_point\":\"\","
-        "\"strongest_emotion\":\"\",\"title_hook\":\"\",\"engagement_question\":\"\""
-        "},"
-        "\"platforms\":{"
-        "\"bilibili\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]},"
-        "\"xiaohongshu\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]},"
-        "\"douyin\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]},"
-        "\"kuaishou\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]},"
-        "\"wechat_channels\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]},"
-        "\"toutiao\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]},"
-        "\"youtube\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]},"
-        "\"x\":{\"titles\":[\"\"],\"description\":\"\",\"tags\":[\"\"]}"
-        "}"
-        "}\n\n"
-        f"视频摘要上下文：{json.dumps(prompt_brief, ensure_ascii=False)}"
+    target_order = _resolve_target_platform_order(target_platforms)
+    target_keys = [key for key, _label, _body_label, _tag_label in target_order]
+    methodology_block = ""
+    copy_brief = prompt_brief.get("copy_brief") if isinstance(prompt_brief.get("copy_brief"), dict) else {}
+    if copy_brief:
+        methodology_parts = []
+        for platform_key in target_keys:
+            methodology_parts.append(
+                f"[{platform_key}]\n"
+                + build_copy_methodology_prompt(
+                    intent=str(copy_brief.get("intent") or "").strip(),
+                    platform_key=platform_key,
+                )
+            )
+        methodology_block = "\n\n".join(part for part in methodology_parts if part.strip())
+    methodology_text = f"共享爆款文案方法论：\n{methodology_block}\n\n" if methodology_block else ""
+    platform_bias_lines = "\n".join(
+        f"- {label}：{_platform_bias_instruction(label)}"
+        for _key, label, _body_label, _tag_label in target_order
     )
-    raw_response, repair_trace = await _generate_platform_packaging_with_repair(
-        prompt,
-        content_profile=content_profile,
-        fact_sheet=fact_sheet,
-        copy_style=copy_style,
-        author_profile=author_profile,
-        target_platforms=target_platforms,
-    )
+    fallback_used = False
+    if len(target_keys) == 1:
+        try:
+            raw_response, repair_trace = await _generate_single_platform_packaging_fast(
+                platform_key=target_keys[0],
+                prompt_brief=prompt_brief,
+                content_profile=content_profile,
+                fact_sheet=fact_sheet,
+                copy_style=copy_style,
+                methodology_text=methodology_text,
+            )
+        except RuntimeError as exc:
+            fallback_used = True
+            raw_response = _build_deterministic_platform_packaging(
+                prompt_brief=prompt_brief,
+                content_profile=content_profile,
+                copy_style=copy_style,
+                fact_sheet=fact_sheet,
+                target_platforms=target_platforms,
+            )
+            repair_trace = [
+                {
+                    "attempt": "fallback",
+                    "status": "deterministic_fallback",
+                    "reason": str(exc or "").strip() or exc.__class__.__name__,
+                }
+            ]
+    else:
+        prompt = (
+            "你是多平台视频包装官，负责把字幕整理成适合不同平台发布的标题、简介和标签。"
+            f"{_domain_prompt_voice_instruction(content_profile)}"
+            "要求：\n"
+            "1. 输出真实自然，不要像硬广，不编造事实。\n"
+            "1.1 不要写成说明文、提纲或运营复盘。禁止出现“方便参考/避免偏差/逐一展开/讲透/写进视频里/从几个维度对比”这类 AI 总结腔。\n"
+            "2. 刀具、EDC、工具相关内容必须保守合规，避免危险导向表述。\n"
+            "3. 每个平台必须提供 3 个标题、1 段简介/正文、1 组标签，且各平台的简介/正文不能只是轻微同义改写。\n"
+            "4. 标题要有明确创作目标差异：流量入口、质感细节、决策判断。不要为了凑数输出同义标题。\n"
+            "5. 标签必须贴合产品、品类、场景、风格、视频类型。\n"
+            "6. 不要输出空字段。\n"
+            "7. 参数、功率、流明、毫瓦、射程、容量、价格、发布时间、升级倍率，只能写在“已核验事实”里出现过的信息。\n"
+            "8. 如果没有核验证据，改写成保守表达，只写到手体验、外观、做工、上手感受，不写具体参数。\n\n"
+            f"9. {source_language_instruction}\n"
+            "10. 如果给了作者信息，只能按平台策略选择最合适的 0 到 3 个字段自然带出，不要所有平台重复同一段自我介绍。\n"
+            "11. 平台简介策略必须明显区分：\n"
+            "- B站：先给核心判断，再说这期重点拆什么，可自然带作者专业身份或长期关注方向。\n"
+            "- 小红书：像真实分享笔记，带一点作者人设、审美/使用偏好、到手感受。\n"
+            "- 抖音：一句结果 + 一句记忆点，可带极短作者身份锚点，节奏要快。\n"
+            "- 快手：像当面讲实话，直给、不绕，可带接地气的人设表达。\n"
+            "- 视频号：稳妥可信，偏总结式，可带作者职业/内容定位增强可信度。\n"
+            "- 头条号：偏资讯/观点摘要，标题和正文要先把判断讲明白。\n"
+            "- YouTube：描述可更完整，适合补充结构、关键看点和检索关键词，但不能因此自动改成英文。\n"
+            "- X：没有独立视频标题，推文正文要短，像可直接发出的贴文。\n"
+            "12. 简介/正文允许适度加入 emoji 增强可读性和生动感：小红书、抖音、快手可用 1-3 个；B站、视频号、头条号、YouTube、X 控制在 0-2 个。emoji 必须服务于语义，不要堆砌，不要放在标题里。\n\n"
+            "13. 多源上下文按可用即用原则工作：文件名、主体识别、可见文字、字幕节选、已核验事实、已有摘要/钩子只要存在都可综合使用；某个来源缺失不是阻塞。\n"
+            "14. 事实边界：字幕、文件名/可见文字、外部核验事实才算事实依据；摘要、hook、theme 这类创作提示只能帮助组织表达，不能拿来当新事实扩写。\n\n"
+            f"本次统一文案风格：{_copy_style_instruction(copy_style)}\n\n"
+            f"{fact_guardrail_text}\n\n"
+            f"{author_prompt_text}\n\n"
+            f"{creative_guidance_text}\n\n"
+            f"{methodology_text}"
+            "默认平台偏置：\n"
+            f"{platform_bias_lines}\n\n"
+            "请输出 JSON，格式如下：\n"
+            f"{_platform_packaging_schema_hint(target_keys)}\n\n"
+            f"视频摘要上下文：{json.dumps(prompt_brief, ensure_ascii=False)}"
+        )
+        try:
+            raw_response, repair_trace = await _generate_platform_packaging_with_repair(
+                prompt,
+                prompt_brief=prompt_brief,
+                content_profile=content_profile,
+                fact_sheet=fact_sheet,
+                copy_style=copy_style,
+                author_profile=author_profile,
+                target_platforms=target_platforms,
+            )
+        except RuntimeError as exc:
+            fallback_used = True
+            raw_response = _build_deterministic_platform_packaging(
+                prompt_brief=prompt_brief,
+                content_profile=content_profile,
+                copy_style=copy_style,
+                fact_sheet=fact_sheet,
+                target_platforms=target_platforms,
+            )
+            repair_trace = [
+                {
+                    "attempt": "fallback",
+                    "status": "deterministic_fallback",
+                    "reason": str(exc or "").strip() or exc.__class__.__name__,
+                }
+            ]
     packaging = normalize_platform_packaging(
         raw_response,
         content_profile=content_profile,
@@ -508,18 +578,302 @@ async def generate_platform_packaging(
         fact_sheet=fact_sheet,
         author_profile=author_profile,
     )
-    _assert_platform_packaging_publishable(
+    packaging = _apply_methodology_body_repairs(
         packaging,
+        prompt_brief=prompt_brief,
         content_profile=content_profile,
         fact_sheet=fact_sheet,
         target_platforms=target_platforms,
     )
+    packaging = _apply_methodology_title_repairs(
+        packaging,
+        content_profile=content_profile,
+        target_platforms=target_platforms,
+        copy_style=copy_style,
+    )
+    if not fallback_used:
+        _assert_platform_packaging_publishable(
+            packaging,
+            content_profile=content_profile,
+            fact_sheet=fact_sheet,
+            target_platforms=target_platforms,
+        )
     if target_platforms:
-        target_order = _resolve_target_platform_order(target_platforms)
-        packaging = _prune_packaging_platforms(packaging, platform_keys=[key for key, _label, _body_label, _tag_label in target_order])
+        packaging = _prune_packaging_platforms(packaging, platform_keys=target_keys)
     packaging["fact_sheet"] = fact_sheet
     packaging["generation_repair_trace"] = repair_trace
+    if fallback_used:
+        packaging["fallback_quality_assessment"] = _assess_platform_packaging_quality(
+            packaging,
+            content_profile=content_profile,
+            fact_sheet=fact_sheet,
+            target_platforms=target_platforms,
+        )
     return packaging
+
+
+def _build_deterministic_platform_packaging(
+    *,
+    prompt_brief: dict[str, Any],
+    content_profile: dict[str, Any] | None,
+    copy_style: str,
+    fact_sheet: dict[str, Any] | None,
+    target_platforms: list[str] | None = None,
+) -> dict[str, Any]:
+    copy_brief = prompt_brief.get("copy_brief") if isinstance(prompt_brief.get("copy_brief"), dict) else {}
+    topic_subject = str(copy_brief.get("topic_subject") or "").strip() or _preferred_subject_label(content_profile) or "这期内容"
+    summary = str(copy_brief.get("summary") or prompt_brief.get("summary") or "").strip()
+    question = str(copy_brief.get("question") or prompt_brief.get("engagement_question") or "").strip()
+    focus_points = [str(item).strip() for item in (copy_brief.get("focus_points") or []) if str(item).strip()]
+    focus_line = "、".join(focus_points[:3]) or "开箱细节和上手感受"
+    intent = str(copy_brief.get("intent") or "").strip()
+    highlights = {
+        "product": topic_subject,
+        "video_type": str(prompt_brief.get("video_theme") or "").strip() or "开箱上手",
+        "strongest_selling_point": focus_line,
+        "strongest_emotion": str(prompt_brief.get("hook_line") or "").strip() or "真实上手",
+        "title_hook": focus_points[0] if focus_points else focus_line,
+        "engagement_question": question,
+    }
+    platforms: dict[str, dict[str, Any]] = {}
+    for key, label, _body_label, _tag_label in _resolve_target_platform_order(target_platforms):
+        methodology = build_copy_methodology(intent=intent, platform_key=key)
+        titles = _build_deterministic_platform_titles(
+            label=label,
+            topic_subject=topic_subject,
+            methodology=methodology,
+            content_profile=content_profile,
+            copy_style=copy_style,
+        )
+        description = build_platform_description(
+            key,
+            summary=summary,
+            question=question,
+            focus_line=focus_line,
+            methodology=methodology,
+            topic_subject=topic_subject,
+        ).strip()
+        if not description:
+            description = build_fallback_description(
+                label=label,
+                content_profile=content_profile,
+                copy_style=copy_style,
+            ).strip()
+        tags = _build_deterministic_platform_tags(
+            content_profile=content_profile,
+            topic_subject=topic_subject,
+            video_theme=str(prompt_brief.get("video_theme") or "").strip(),
+            tag_limit=_platform_tag_limit(key),
+        )
+        platforms[key] = {
+            "titles": titles,
+            "description": description,
+            "tags": tags,
+        }
+    return {"highlights": highlights, "platforms": platforms, "fact_sheet": fact_sheet or {}}
+
+
+async def _generate_single_platform_packaging_fast(
+    *,
+    platform_key: str,
+    prompt_brief: dict[str, Any],
+    content_profile: dict[str, Any] | None,
+    fact_sheet: dict[str, Any] | None,
+    copy_style: str,
+    methodology_text: str,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    _key, label, _body_label, _tag_label = _resolve_target_platform_order([platform_key])[0]
+    fact_guardrail_text = _build_fact_guardrail_text(fact_sheet)
+    creative_guidance_text = _build_packaging_creative_guidance_text(content_profile)
+    source_language_instruction = _build_source_language_instruction(str(prompt_brief.get("source_language") or "zh"))
+    compact_context = _build_single_platform_fast_context(prompt_brief)
+    schema_hint = '{"titles":[""],"description":"","tags":[""]}'
+    prompt = (
+        f"你只为{label}生成一版发布文案，只输出合法 JSON。"
+        f"{_domain_prompt_voice_instruction(content_profile)}"
+        "\n要求："
+        "\n1. 只返回 titles、description、tags。"
+        "\n2. titles 必须给 3 个。"
+        "\n3. 不要 AI 总结腔，不要说明文，不要模板废话。"
+        "\n4. 只写视频里能确认的内容，不写参数猜测。"
+        f"\n5. {source_language_instruction}"
+        f"\n\n{fact_guardrail_text}\n\n{creative_guidance_text}\n\n"
+        f"平台偏置：{_platform_bias_instruction(label)}"
+        f"\n输出格式：{schema_hint}"
+        f"\n视频摘要上下文：{json.dumps(compact_context, ensure_ascii=False)}"
+    )
+    try:
+        with llm_task_route("copy", search_enabled=False):
+            with track_usage_operation("platform_package.generate_single_platform_fast"):
+                platform_payload = await _complete_json_with_same_model_repair(
+                    [
+                        Message(
+                            role="system",
+                            content=(
+                                "你是中文视频平台文案策划。"
+                                "只输出合法 JSON，不要解释，不要 Markdown，不要模板废话。"
+                            ),
+                        ),
+                        Message(role="user", content=prompt),
+                    ],
+                    temperature=0.35,
+                    max_tokens=_resolve_platform_packaging_generation_max_tokens([platform_key]),
+                    timeout=min(45, _resolve_platform_packaging_generation_timeout()),
+                    schema_hint=schema_hint,
+                )
+        if _single_platform_payload_missing_core_fields(platform_payload):
+            repair_prompt = (
+                f"你刚才给{label}返回了空字段。"
+                "这次必须填满 titles、description、tags。"
+                "titles 至少 3 个非空标题；description 必须是 1 段非空正文；tags 至少 2 个非空标签。"
+                "不要返回空字符串，不要返回空数组，不要解释。"
+                f"\n输出格式：{schema_hint}"
+                f"\n上一次空结果：{json.dumps(platform_payload, ensure_ascii=False)}"
+                f"\n视频摘要上下文：{json.dumps(compact_context, ensure_ascii=False)}"
+            )
+            with llm_task_route("copy", search_enabled=False):
+                with track_usage_operation("platform_package.generate_single_platform_fast_repair"):
+                    platform_payload = await _complete_json_with_same_model_repair(
+                        [
+                            Message(
+                                role="system",
+                                content="你是中文视频平台文案策划。只输出合法 JSON，且禁止空字段。",
+                            ),
+                            Message(role="user", content=repair_prompt),
+                        ],
+                        temperature=0.2,
+                        max_tokens=_resolve_platform_packaging_generation_max_tokens([platform_key]),
+                        timeout=20,
+                        schema_hint=schema_hint,
+                    )
+    except Exception as exc:
+        raise RuntimeError(_describe_platform_packaging_generation_error(exc, attempt=1, timeout_sec=min(45, _resolve_platform_packaging_generation_timeout()))) from exc
+    platform_payload = _sanitize_single_platform_fast_payload(platform_payload, platform_key=platform_key)
+    copy_brief = prompt_brief.get("copy_brief") if isinstance(prompt_brief.get("copy_brief"), dict) else {}
+    wrapped = {
+        "highlights": {
+            "product": str(copy_brief.get("topic_subject") or "").strip(),
+            "video_type": str(prompt_brief.get("video_theme") or "").strip(),
+            "strongest_selling_point": "、".join([str(item).strip() for item in (copy_brief.get("focus_points") or []) if str(item).strip()][:3]),
+            "strongest_emotion": str(prompt_brief.get("hook_line") or "").strip(),
+            "title_hook": str(next(iter([str(item).strip() for item in (copy_brief.get("focus_points") or []) if str(item).strip()]), "")).strip(),
+            "engagement_question": str(copy_brief.get("question") or "").strip(),
+        },
+        "platforms": {platform_key: platform_payload},
+    }
+    return wrapped, [{"attempt": 1, "status": "ok", "issues": [], "warnings": [], "repair_hints": []}]
+
+
+def _single_platform_payload_missing_core_fields(payload: dict[str, Any] | None) -> bool:
+    platform = payload if isinstance(payload, dict) else {}
+    titles = [str(item).strip() for item in (platform.get("titles") or []) if str(item).strip()]
+    description = str(platform.get("description") or "").strip()
+    tags = [str(item).strip() for item in (platform.get("tags") or []) if str(item).strip()]
+    return len(titles) < 3 or not description or len(tags) < 2
+
+
+def _build_single_platform_fast_context(prompt_brief: dict[str, Any]) -> dict[str, Any]:
+    copy_brief = prompt_brief.get("copy_brief") if isinstance(prompt_brief.get("copy_brief"), dict) else {}
+    transcript_excerpt = str(prompt_brief.get("transcript_excerpt") or "").strip()
+    return {
+        "source_name": str(prompt_brief.get("source_name") or "").strip(),
+        "subject_brand": str(prompt_brief.get("subject_brand") or "").strip(),
+        "subject_model": str(prompt_brief.get("subject_model") or "").strip(),
+        "subject_type": str(prompt_brief.get("subject_type") or "").strip(),
+        "video_theme": str(prompt_brief.get("video_theme") or "").strip(),
+        "summary": str(copy_brief.get("summary") or prompt_brief.get("summary") or "").strip(),
+        "focus_points": [str(item).strip() for item in (copy_brief.get("focus_points") or []) if str(item).strip()][:3],
+        "topic_subject": str(copy_brief.get("topic_subject") or "").strip(),
+        "transcript_excerpt": transcript_excerpt[:500],
+    }
+
+
+def _sanitize_single_platform_fast_payload(payload: dict[str, Any] | None, *, platform_key: str) -> dict[str, Any]:
+    platform = dict(payload or {}) if isinstance(payload, dict) else {}
+    titles = [str(item).strip() for item in (platform.get("titles") or []) if str(item).strip()]
+    tags = [str(item).strip().lstrip("#") for item in (platform.get("tags") or []) if str(item).strip()]
+    platform["titles"] = _dedupe_non_empty(titles)[:3]
+    description = str(platform.get("description") or "").strip()
+    description = description.replace("完全", "更").replace("绝对", "更")
+    platform["description"] = description
+    platform["tags"] = _dedupe_non_empty(tags)[: _platform_tag_limit(platform_key)]
+    return platform
+
+
+def _build_deterministic_platform_titles(
+    *,
+    label: str,
+    topic_subject: str,
+    methodology: dict[str, Any],
+    content_profile: dict[str, Any] | None,
+    copy_style: str,
+) -> list[str]:
+    subject = str(topic_subject or "").strip() or _preferred_subject_label(content_profile) or "这期内容"
+    archetype = str((methodology or {}).get("archetype") or "").strip()
+    compare_titles = []
+    if archetype == "双版本开箱对比":
+        compare_titles = [
+            f"{subject}双版本开箱，先看差别",
+            f"{subject}顶配和次顶配到底差在哪",
+            f"{subject}实拍对比，先看怎么选",
+        ]
+    fallback_titles = build_fallback_titles(label=label, content_profile=content_profile, copy_style=copy_style)
+    candidates = compare_titles + fallback_titles
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if not text:
+            continue
+        if subject not in text:
+            text = f"{subject}：{text}"
+        if text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+        if len(normalized) >= 3:
+            break
+    return normalized
+
+
+def _platform_tag_limit(platform_key: str) -> int:
+    if platform_key == "wechat_channels":
+        return 6
+    if platform_key == "xiaohongshu":
+        return 10
+    return 8
+
+
+def _build_deterministic_platform_tags(
+    *,
+    content_profile: dict[str, Any] | None,
+    topic_subject: str,
+    video_theme: str,
+    tag_limit: int,
+) -> list[str]:
+    profile = content_profile or {}
+    candidates = [
+        str(profile.get("subject_brand") or "").strip(),
+        str(profile.get("subject_model") or "").strip(),
+        str(profile.get("subject_type") or "").strip(),
+        topic_subject,
+    ]
+    theme_text = str(video_theme or "").strip()
+    if "开箱" in theme_text:
+        candidates.append("开箱")
+    if any(token in theme_text for token in ("对比", "双版本", "顶配", "次顶配")):
+        candidates.append("双版本对比")
+    if any(token in theme_text for token in ("上手", "体验")):
+        candidates.append("上手")
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        text = str(candidate or "").strip().lstrip("#")
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        normalized.append(text)
+    return normalized[: max(2, tag_limit)]
 
 
 async def _generate_claim_grounded_platform_packaging(
@@ -613,6 +967,7 @@ async def _generate_claim_grounded_platform_packaging(
 async def _generate_platform_packaging_with_repair(
     prompt: str,
     *,
+    prompt_brief: dict[str, Any] | None = None,
     content_profile: dict[str, Any] | None,
     fact_sheet: dict[str, Any] | None,
     copy_style: str,
@@ -624,7 +979,13 @@ async def _generate_platform_packaging_with_repair(
     last_issues: list[str] = []
     last_error = ""
     last_repair_hints: list[str] = []
+    schema_hint = _platform_packaging_schema_hint(target_platforms)
+    timeout_sec = _resolve_platform_packaging_generation_timeout()
+    max_tokens = _resolve_platform_packaging_generation_max_tokens(target_platforms)
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(1, int(timeout_sec))
     for attempt in range(1, 4):
+        attempt_timeout = max(1, math.ceil(deadline - loop.time()))
         attempt_prompt = prompt
         if attempt > 1:
             attempt_prompt = (
@@ -643,28 +1004,25 @@ async def _generate_platform_packaging_with_repair(
             )
         try:
             with llm_task_route("copy", search_enabled=False):
-                provider = get_reasoning_provider()
                 with track_usage_operation("platform_package.generate_packaging"):
-                    response = await asyncio.wait_for(
-                        provider.complete(
-                            [
-                                Message(
-                                    role="system",
-                                    content=(
-                                        "你是严谨的中文多平台视频包装策划。"
-                                        "最终文案必须像真人创作者发布，不能有模板腔、总结腔、AI味。"
-                                        "如果信息不足，写真实观感和视频画面，不要编参数。只输出 JSON。"
-                                    ),
+                    candidate = await _complete_json_with_same_model_repair(
+                        [
+                            Message(
+                                role="system",
+                                content=(
+                                    "你是严谨的中文多平台视频包装策划。"
+                                    "最终文案必须像真人创作者发布，不能有模板腔、总结腔、AI味。"
+                                    "不要写成技术说明、提纲或运营复盘，不要出现“方便参考、避免偏差、逐一展开、讲透、写进视频里”这类句式。"
+                                    "如果信息不足，写真实观感和视频画面，不要编参数。只输出 JSON。"
                                 ),
-                                Message(role="user", content=attempt_prompt),
-                            ],
-                            temperature=0.45 if attempt == 1 else 0.25,
-                            max_tokens=7000,
-                            json_mode=True,
-                        ),
-                        timeout=90,
+                            ),
+                            Message(role="user", content=attempt_prompt),
+                        ],
+                        temperature=0.45 if attempt == 1 else 0.25,
+                        max_tokens=max_tokens,
+                        timeout=attempt_timeout,
+                        schema_hint=schema_hint,
                     )
-            candidate = response.as_json()
             last_payload = candidate if isinstance(candidate, dict) else {}
             structural_issues = _validate_raw_platform_packaging(last_payload, target_platforms=target_platforms)
             if structural_issues:
@@ -681,6 +1039,19 @@ async def _generate_platform_packaging_with_repair(
                     copy_style=copy_style,
                     fact_sheet=fact_sheet,
                     author_profile=author_profile,
+                )
+                normalized_candidate = _apply_methodology_body_repairs(
+                    normalized_candidate,
+                    prompt_brief=prompt_brief,
+                    content_profile=content_profile,
+                    fact_sheet=fact_sheet,
+                    target_platforms=target_platforms,
+                )
+                normalized_candidate = _apply_methodology_title_repairs(
+                    normalized_candidate,
+                    content_profile=content_profile,
+                    target_platforms=target_platforms,
+                    copy_style=copy_style,
                 )
                 assessment = _assess_platform_packaging_quality(
                     normalized_candidate,
@@ -704,11 +1075,67 @@ async def _generate_platform_packaging_with_repair(
             if attempt == 3 and not structural_issues:
                 return last_payload, trace
         except Exception as exc:
-            last_error = str(exc)
+            last_error = _describe_platform_packaging_generation_error(
+                exc,
+                attempt=attempt,
+                timeout_sec=attempt_timeout,
+            )
             trace.append({"attempt": attempt, "status": "error", "error": last_error})
             last_issues = [last_error]
     detail = "；".join(last_issues or [last_error] or ["未知错误"])
     raise RuntimeError(f"文案生成经过修复重试后仍不合格，禁止发布：{detail}")
+
+
+def _resolve_platform_packaging_generation_timeout() -> int:
+    settings = get_settings()
+    provider = str(getattr(settings, "active_reasoning_provider", "") or "").strip().lower()
+    model = str(getattr(settings, "active_reasoning_model", "") or "").strip().lower()
+    if provider == "minimax" and model in {"minimax-m3", "minimax m3", "minimaxm3"}:
+        return 90
+    return 90
+
+
+def _resolve_platform_packaging_generation_max_tokens(target_platforms: list[str] | None) -> int:
+    target_count = len(_resolve_target_platform_order(target_platforms))
+    if target_count <= 1:
+        return 1200
+    if target_count <= 3:
+        return 2400
+    return 4000
+
+
+def _describe_platform_packaging_generation_error(
+    exc: Exception,
+    *,
+    attempt: int,
+    timeout_sec: int,
+) -> str:
+    if isinstance(exc, TimeoutError) or isinstance(exc, asyncio.TimeoutError):
+        return f"第 {attempt} 次文案包装生成超时（>{timeout_sec}s）"
+    message = str(exc or "").strip()
+    if message:
+        return message
+    return f"第 {attempt} 次文案包装生成失败：{exc.__class__.__name__}"
+
+
+def _platform_packaging_schema_hint(target_platforms: list[str] | None = None) -> str:
+    platforms: dict[str, dict[str, Any]] = {}
+    for key, _label, _body_label, _tag_label in _resolve_target_platform_order(target_platforms):
+        platforms[key] = {"titles": [""], "description": "", "tags": [""]}
+    return json.dumps(
+        {
+            "highlights": {
+                "product": "",
+                "video_type": "",
+                "strongest_selling_point": "",
+                "strongest_emotion": "",
+                "title_hook": "",
+                "engagement_question": "",
+            },
+            "platforms": platforms,
+        },
+        ensure_ascii=False,
+    )
 
 
 def _validate_raw_platform_packaging(raw: dict[str, Any], *, target_platforms: list[str] | None = None) -> list[str]:
@@ -1531,14 +1958,30 @@ async def _complete_json_with_same_model_repair(
     schema_hint: str,
 ) -> dict[str, Any]:
     provider = get_reasoning_provider()
-    response = await asyncio.wait_for(
-        provider.complete(
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            json_mode=True,
-        ),
-        timeout=timeout,
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(1, int(timeout))
+
+    async def _complete_with_budget(
+        request_messages: list[Message],
+        *,
+        request_temperature: float,
+        request_max_tokens: int,
+    ):
+        remaining = max(1, math.ceil(deadline - loop.time()))
+        return await asyncio.wait_for(
+            provider.complete(
+                request_messages,
+                temperature=request_temperature,
+                max_tokens=request_max_tokens,
+                json_mode=True,
+            ),
+            timeout=remaining,
+        )
+
+    response = await _complete_with_budget(
+        messages,
+        request_temperature=temperature,
+        request_max_tokens=max_tokens,
     )
     try:
         return _loads_jsonish_object(response.content)
@@ -1551,17 +1994,13 @@ async def _complete_json_with_same_model_repair(
             f"\n解析错误：{type(first_error).__name__}: {first_error}"
             f"\n上一次原文：{response.content}"
         )
-        repaired = await asyncio.wait_for(
-            provider.complete(
-                [
-                    Message(role="system", content="你是 JSON 修复器，只输出合法 JSON 对象。"),
-                    Message(role="user", content=repair_prompt),
-                ],
-                temperature=0.0,
-                max_tokens=max_tokens,
-                json_mode=True,
-            ),
-            timeout=timeout,
+        repaired = await _complete_with_budget(
+            [
+                Message(role="system", content="你是 JSON 修复器，只输出合法 JSON 对象。"),
+                Message(role="user", content=repair_prompt),
+            ],
+            request_temperature=0.0,
+            request_max_tokens=max_tokens,
         )
         try:
             return _loads_jsonish_object(repaired.content)
@@ -1573,17 +2012,13 @@ async def _complete_json_with_same_model_repair(
                 f"\n目标结构示例：{schema_hint}"
                 f"\n上一次原文：{repaired.content}"
             )
-            retry = await asyncio.wait_for(
-                provider.complete(
-                    [
-                        Message(role="system", content="你是 JSON 修复器，只输出合法 JSON 对象。"),
-                        Message(role="user", content=repair_retry_prompt),
-                    ],
-                    temperature=0.0,
-                    max_tokens=max_tokens,
-                    json_mode=True,
-                ),
-                timeout=timeout,
+            retry = await _complete_with_budget(
+                [
+                    Message(role="system", content="你是 JSON 修复器，只输出合法 JSON 对象。"),
+                    Message(role="user", content=repair_retry_prompt),
+                ],
+                request_temperature=0.0,
+                request_max_tokens=max_tokens,
             )
             return _loads_jsonish_object(retry.content)
 
@@ -1645,21 +2080,27 @@ def _build_platform_claim_evidence_pack(
                 }
             )
     return {
-        "version": "2026-05-26.claim-evidence-pack.v1",
+        "version": "2026-06-06.claim-evidence-pack.v2",
         "source_name": str(source_name or "").strip(),
         "subject_identity": _packaging_subject_identity(profile),
-        "prompt_brief": {
+        "source_hints": {
             key: prompt_brief.get(key)
             for key in (
                 "subject_brand",
                 "subject_model",
                 "subject_type",
                 "subject_domain",
+                "visible_text",
+            )
+            if prompt_brief.get(key)
+        },
+        "creative_brief": {
+            key: prompt_brief.get(key)
+            for key in (
                 "video_theme",
                 "summary",
                 "hook_line",
                 "engagement_question",
-                "visible_text",
             )
             if prompt_brief.get(key)
         },
@@ -1672,9 +2113,10 @@ def _build_platform_claim_evidence_pack(
 def _build_claim_ledger_prompt(evidence_pack: dict[str, Any]) -> str:
     return (
         "请基于证据包建立发布事实账本。"
-        "claim 必须是可以被字幕、内容画像或外部核验事实直接支持的最小事实。"
+        "claim 必须是可以被字幕、文件名/主体身份提示、可见文字或外部核验事实直接支持的最小事实。"
         "不要把情绪、营销话术、推断结论写成 confirmed claim。"
         "对没有直接证据的品类、结果、参数、失败经历、价格、版本差异，放入 disallowed_inferences。"
+        "creative_brief 只是创作提示，不是事实证据；不得把 summary、hook、theme 里的表述直接升级成 confirmed claim。"
         "注意：“质感拉满、手感绝了、新品、新兄弟”等主观种草/平台表达不等同于事实漂移；"
         "只有它们被写成具体参数、客观评测结论、未支持对比或供应事实时才需要限制。"
         "\n输出 JSON："
@@ -1748,9 +2190,14 @@ def _augment_claim_ledger_with_evidence_pack_claims(
         "disallowed_inferences": list(claim_ledger.get("disallowed_inferences") or []),
     }
     source_name = str(evidence_pack.get("source_name") or "")
-    prompt_brief = evidence_pack.get("prompt_brief") if isinstance(evidence_pack.get("prompt_brief"), dict) else {}
-    brief_text = json.dumps(prompt_brief, ensure_ascii=False)
-    evidence_text = f"{source_name}\n{brief_text}"
+    source_hints = evidence_pack.get("source_hints") if isinstance(evidence_pack.get("source_hints"), dict) else {}
+    transcript_blob = "\n".join(
+        str(item.get("text") or "").strip()
+        for item in (evidence_pack.get("transcript") or [])
+        if isinstance(item, dict) and str(item.get("text") or "").strip()
+    )
+    source_text = json.dumps(source_hints, ensure_ascii=False)
+    evidence_text = f"{source_name}\n{source_text}\n{transcript_blob}"
     existing_text = "\n".join(str(item.get("claim") or "") for item in augmented["claims"] if isinstance(item, dict))
     next_index = len(augmented["claims"]) + 1
     if re.search(r"对比|vs\.?|VS|versus|和.+比|与.+比", evidence_text) and "对比" not in existing_text:
@@ -2490,6 +2937,208 @@ def _quality_content_profile(content_profile: dict[str, Any] | None) -> dict[str
     return cleaned
 
 
+def _apply_methodology_body_repairs(
+    packaging: dict[str, Any],
+    *,
+    prompt_brief: dict[str, Any] | None,
+    content_profile: dict[str, Any] | None,
+    fact_sheet: dict[str, Any] | None,
+    target_platforms: list[str] | None,
+) -> dict[str, Any]:
+    repaired = {
+        **dict(packaging or {}),
+        "platforms": {key: dict(value or {}) for key, value in ((packaging or {}).get("platforms") or {}).items()},
+    }
+    copy_brief = dict((prompt_brief or {}).get("copy_brief") or {})
+    quality_profile = _quality_content_profile(content_profile)
+    for key, label, _body_label, _tag_label in _resolve_target_platform_order(target_platforms):
+        platform = repaired["platforms"].get(key)
+        if not isinstance(platform, dict):
+            continue
+        description = str(platform.get("description") or "").strip()
+        body_assessment = assess_platform_body(key, description, content_profile=quality_profile, fact_sheet=fact_sheet)
+        blocking = list(body_assessment.get("blocking_reasons") or [])
+        if not _should_repair_body_with_methodology(blocking):
+            continue
+        methodology = build_copy_methodology(
+            intent=str(copy_brief.get("intent") or "").strip(),
+            platform_key=key,
+        )
+        repaired_description = build_platform_description(
+            key,
+            summary=_methodology_summary(copy_brief=copy_brief, content_profile=content_profile),
+            question=_methodology_question(copy_brief=copy_brief, content_profile=content_profile),
+            focus_line=_methodology_focus_line(copy_brief=copy_brief),
+            methodology=methodology,
+            topic_subject=_methodology_topic_subject(copy_brief=copy_brief, content_profile=content_profile),
+        )
+        if repaired_description:
+            platform["description"] = repaired_description
+            platform["copy_methodology_repair"] = {
+                "applied": True,
+                "reason": blocking[:3],
+                "methodology_archetype": methodology.get("archetype") or "",
+                "platform_label": label,
+            }
+    return repaired
+
+
+def _apply_methodology_title_repairs(
+    packaging: dict[str, Any],
+    *,
+    content_profile: dict[str, Any] | None,
+    target_platforms: list[str] | None,
+    copy_style: str,
+) -> dict[str, Any]:
+    repaired = {
+        **dict(packaging or {}),
+        "platforms": {key: dict(value or {}) for key, value in ((packaging or {}).get("platforms") or {}).items()},
+    }
+    quality_profile = _quality_content_profile(content_profile)
+    for key, label, _body_label, _tag_label in _resolve_target_platform_order(target_platforms):
+        platform = repaired["platforms"].get(key)
+        if not isinstance(platform, dict):
+            continue
+        titles = [str(item).strip() for item in (platform.get("titles") or []) if str(item).strip()]
+        title_assessment = assess_platform_titles(key, titles, content_profile=quality_profile)
+        if not _should_repair_titles_with_methodology(title_assessment):
+            continue
+        platform["titles"] = _repair_titles_with_methodology(
+            key=key,
+            label=label,
+            titles=titles,
+            content_profile=content_profile,
+            copy_style=copy_style,
+        )
+        platform.setdefault("copy_methodology_repair", {})
+        platform["copy_methodology_repair"]["title_applied"] = True
+        platform["copy_methodology_repair"]["title_reason"] = list(title_assessment.get("blocking_reasons") or [])[:3] or list(title_assessment.get("warnings") or [])[:3]
+    return repaired
+
+
+def _should_repair_titles_with_methodology(title_assessment: dict[str, Any]) -> bool:
+    problems = list(title_assessment.get("blocking_reasons") or [])
+    warnings = list(title_assessment.get("warnings") or [])
+    tokens = (
+        "主体锚点",
+        "长度",
+        "平台常用表达",
+        "信息量偏弱",
+        "标题少于",
+    )
+    return any(token in reason for reason in [*problems, *warnings] for token in tokens)
+
+
+def _repair_titles_with_methodology(
+    *,
+    key: str,
+    label: str,
+    titles: list[str],
+    content_profile: dict[str, Any] | None,
+    copy_style: str,
+) -> list[str]:
+    anchor = _compact_product_label(content_profile, label=label) or _compact_subject_label(content_profile, label=label)
+    soft_limit = _platform_title_soft_limit(label)
+    fallback_pool = _anchored_compact_fallback_titles(
+        label=label,
+        anchor=anchor,
+        content_profile=content_profile,
+        copy_style=copy_style,
+    )
+    repaired: list[str] = []
+    for raw in titles:
+        title = str(raw or "").strip()
+        if anchor and not _contains_confirmed_product_anchor(title, content_profile):
+            if key == "kuaishou":
+                title = f"{anchor}{title}".strip()
+            else:
+                title = f"{anchor} {title}".strip()
+        if key == "kuaishou" and not any(token in title for token in ("给你们看", "真东西", "实话", "直说", "不整虚的")):
+            title = f"给你们看，{title}".strip("，")
+        if soft_limit and _text_display_units_ceiling(title) > soft_limit and fallback_pool:
+            title = fallback_pool.pop(0)
+        repaired.append(title)
+    repaired = _fit_titles_to_platform(repaired, label=label, content_profile=content_profile, copy_style=copy_style)
+    if len(repaired) < 3:
+        repaired = _fit_titles_to_platform(
+            repaired + fallback_pool,
+            label=label,
+            content_profile=content_profile,
+            copy_style=copy_style,
+        )
+    return repaired[:3]
+
+
+def _anchored_compact_fallback_titles(
+    *,
+    label: str,
+    anchor: str,
+    content_profile: dict[str, Any] | None,
+    copy_style: str,
+) -> list[str]:
+    titles = _build_compact_fallback_titles(label=label, content_profile=content_profile, copy_style=copy_style)
+    anchored: list[str] = []
+    soft_limit = _platform_title_soft_limit(label)
+    for raw in titles:
+        title = str(raw or "").strip()
+        if anchor and anchor not in title:
+            if label == "快手":
+                if any(token in title for token in ("给你们看", "真东西", "实话", "直说", "不整虚的")):
+                    title = f"{title}{anchor}".strip()
+                else:
+                    title = f"给你们看{anchor}".strip()
+            else:
+                title = f"{anchor} {title}".strip()
+        if soft_limit and _text_display_units_ceiling(title) > soft_limit:
+            title = _truncate_title(title, soft_limit)
+        if title:
+            anchored.append(title)
+    return anchored
+
+
+def _platform_title_soft_limit(label: str) -> int | None:
+    key = _platform_key_from_label(label)
+    rule = _TITLE_AUDIT_RULES.get(key) or {}
+    limit = rule.get("recommended_max_chars") or rule.get("display_max_chars") or rule.get("hard_max_chars")
+    return int(limit) if isinstance(limit, int) else None
+
+
+def _should_repair_body_with_methodology(blocking_reasons: list[str]) -> bool:
+    return any(
+        token in reason
+        for reason in (blocking_reasons or [])
+        for token in (
+            "AI 兜底",
+            "AI 说明文/提纲腔",
+            "正文空泛",
+            "正文缺少视频动作/体验细节",
+        )
+    )
+
+
+def _methodology_summary(*, copy_brief: dict[str, Any], content_profile: dict[str, Any] | None) -> str:
+    return str(copy_brief.get("summary") or (content_profile or {}).get("summary") or "").strip()
+
+
+def _methodology_question(*, copy_brief: dict[str, Any], content_profile: dict[str, Any] | None) -> str:
+    return str(copy_brief.get("question") or (content_profile or {}).get("engagement_question") or "").strip()
+
+
+def _methodology_focus_line(*, copy_brief: dict[str, Any]) -> str:
+    points = [str(item).strip() for item in (copy_brief.get("focus_points") or []) if str(item).strip()]
+    return "、".join(points[:3])
+
+
+def _methodology_topic_subject(*, copy_brief: dict[str, Any], content_profile: dict[str, Any] | None) -> str:
+    subject = str(copy_brief.get("topic_subject") or "").strip()
+    if subject:
+        return subject
+    profile = content_profile or {}
+    brand = str(profile.get("subject_brand") or "").strip()
+    model = str(profile.get("subject_model") or "").strip()
+    return "".join(part for part in (brand, model) if part).strip()
+
+
 def normalize_platform_packaging(
     raw: dict[str, Any],
     *,
@@ -2577,6 +3226,9 @@ def _normalize_platform_publication_metadata(platform_raw: dict[str, Any]) -> di
     cover_path = str(platform_raw.get("cover_path") or "").strip()
     if cover_path:
         normalized["cover_path"] = cover_path
+    cover_slots = derive_publication_cover_slots(platform_raw)
+    if cover_slots:
+        normalized["cover_slots"] = cover_slots
     declaration = str(platform_raw.get("declaration") or "").strip()
     if declaration:
         normalized["declaration"] = declaration

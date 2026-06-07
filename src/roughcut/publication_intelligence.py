@@ -13,7 +13,11 @@ from roughcut.providers.factory import get_reasoning_provider, get_search_provid
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.config import get_settings
 from roughcut.publication_probe import BROWSER_AGENT_INVENTORY_CONTRACT, probe_browser_agent_publication_inventory
-from roughcut.publication_platform_matrix import platform_supports_scheduled_publish
+from roughcut.publication_platform_matrix import (
+    platform_skips_explicit_tag_entry,
+    platform_skips_explicit_visibility_entry,
+    platform_supports_scheduled_publish,
+)
 from roughcut.publication import normalize_publication_platform, platform_label
 
 CACHE_PATH = Path("data/runtime/publication_intelligence/cache.json")
@@ -34,7 +38,11 @@ DEFAULT_TIME_SLOTS: dict[str, str] = {
 
 PROBE_VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
 
+FAS_NEW_PRODUCT_COLLECTION_NAME = "FAS新品"
 EDC_TOY_COLLECTION_NAME = "EDC潮玩桌搭"
+EDC_TOOL_COLLECTION_NAME = "EDC刀光火工具集"
+EDC_TOOL_COLLECTION_ALIASES = ["EDC刀光火工具合集"]
+TACTICAL_OUTDOOR_COLLECTION_NAME = "机能户外装备"
 PUBLICATION_POLICY_VERSION = "account-publication-policy-v1"
 
 BUILTIN_CREATOR_PUBLICATION_POLICIES: list[dict[str, Any]] = [
@@ -44,11 +52,68 @@ BUILTIN_CREATOR_PUBLICATION_POLICIES: list[dict[str, Any]] = [
         "creator_match": ["FAS", "F.A.S", "FAS机神圣殿"],
         "rules": [
             {
+                "id": "fas-own-brand-new-product-collection",
+                "type": "preferred_collection",
+                "platforms": ["*"],
+                "content_keywords_all": ["fas"],
+                "content_keywords_any": ["新品", "新款", "新品介绍", "开箱", "上手"],
+                "preferred_collection_name": FAS_NEW_PRODUCT_COLLECTION_NAME,
+                "requires_real_option": True,
+            },
+            {
+                "id": "fas-edc-tool-unboxing-collection",
+                "type": "preferred_collection",
+                "platforms": ["*"],
+                "content_keywords_any": [
+                    "刀",
+                    "折刀",
+                    "直刀",
+                    "手电",
+                    "工具",
+                    "多功能工具",
+                    "打火机",
+                    "flashlight",
+                    "knife",
+                    "gear",
+                ],
+                "preferred_collection_name": EDC_TOOL_COLLECTION_NAME,
+                "preferred_collection_aliases": EDC_TOOL_COLLECTION_ALIASES,
+                "requires_real_option": True,
+            },
+            {
                 "id": "fas-edc-toy-unboxing-collection",
                 "type": "preferred_collection",
                 "platforms": ["*"],
-                "content_pattern": "edc_toy_unboxing",
+                "content_keywords_any": [
+                    "减压玩具",
+                    "潮玩",
+                    "桌搭",
+                    "电子",
+                    "智能",
+                    "推牌",
+                    "音叉",
+                    "fidget",
+                    "toy",
+                ],
                 "preferred_collection_name": EDC_TOY_COLLECTION_NAME,
+                "requires_real_option": True,
+            },
+            {
+                "id": "fas-tactical-outdoor-collection",
+                "type": "preferred_collection",
+                "platforms": ["*"],
+                "content_keywords_any": [
+                    "机能包",
+                    "战术装备",
+                    "服饰",
+                    "户外装备",
+                    "战术",
+                    "背包",
+                    "胸包",
+                    "斜挎包",
+                    "功能服",
+                ],
+                "preferred_collection_name": TACTICAL_OUTDOOR_COLLECTION_NAME,
                 "requires_real_option": True,
             },
             {
@@ -87,7 +152,7 @@ PLATFORM_FIELD_HINTS: dict[str, dict[str, Any]] = {
     },
     "kuaishou": {
         "visibility_modes": ["scheduled", "draft", "private"],
-        "required_fields": ["标题", "视频", "简介"],
+        "required_fields": ["标题", "视频", "简介", "封面"],
         "supports_scheduled_publish": platform_supports_scheduled_publish("kuaishou"),
         "option_notes": "尚未取得真实合集入口数据；发布前必须由 browser-agent 做页面验证。",
     },
@@ -274,6 +339,11 @@ def _normalize_publication_rules(raw_rules: Any, *, source: str) -> list[dict[st
         }
         if preferred_collection:
             rule["preferred_collection_name"] = preferred_collection
+        preferred_collection_aliases = _clean_string_list(
+            raw.get("preferred_collection_aliases") or raw.get("collection_aliases") or raw.get("aliases")
+        )
+        if preferred_collection_aliases:
+            rule["preferred_collection_aliases"] = preferred_collection_aliases
         if preferred_category:
             rule["preferred_category_name"] = preferred_category
         category_path = _clean_string_list(raw.get("preferred_category_path") or raw.get("category_path"))
@@ -327,7 +397,9 @@ def _build_scheme_from_record(*, plan: dict[str, Any], record: dict[str, Any], f
     time_strategy = record.get("time_strategy") if isinstance(record.get("time_strategy"), dict) else {}
     platform_slots = time_strategy.get("platform_slots") if isinstance(time_strategy.get("platform_slots"), dict) else {}
     platform_capabilities = record.get("platforms") if isinstance(record.get("platforms"), dict) else {}
-    publication_policy = record.get("publication_policy") if isinstance(record.get("publication_policy"), dict) else _empty_publication_policy()
+    cached_publication_policy = record.get("publication_policy") if isinstance(record.get("publication_policy"), dict) else _empty_publication_policy()
+    current_publication_policy = _publication_policy_for_creator(None, plan)
+    publication_policy = _merge_publication_policies(current_publication_policy, cached_publication_policy)
     targets = [target for target in plan.get("targets") or [] if isinstance(target, dict)]
     platform_options: dict[str, dict[str, Any]] = {}
     items: list[dict[str, Any]] = []
@@ -376,7 +448,15 @@ def _build_scheme_from_record(*, plan: dict[str, Any], record: dict[str, Any], f
         if category_selection_plan:
             selected_options["category_selection_plan"] = category_selection_plan
         selected_options["collection_management"] = collection_management
-        live_publish_preflight = _build_live_publish_preflight(capability, supports_scheduled_publish=effective_scheduled_publish)
+        live_publish_preflight = _build_live_publish_preflight(
+            platform,
+            capability,
+            category=category,
+            collection_name=collection_name,
+            declaration=str(target.get("declaration") or ""),
+            collection_management=collection_management,
+            supports_scheduled_publish=effective_scheduled_publish,
+        )
         selected_options["live_publish_preflight"] = live_publish_preflight
         option["live_publish_preflight"] = live_publish_preflight
         if selected_options:
@@ -443,6 +523,37 @@ def _build_scheme_from_record(*, plan: dict[str, Any], record: dict[str, Any], f
             "没有真实来源的合集/栏目/分类不会自动填写；必须先完成真实平台摸底或在修改方案中明确指定。",
             "发布时 browser-agent 仍会验证页面和字段是否发生变化。",
         ],
+    }
+
+
+def _merge_publication_policies(primary: dict[str, Any] | None, fallback: dict[str, Any] | None) -> dict[str, Any]:
+    primary_rules = list(primary.get("rules") or []) if isinstance(primary, dict) else []
+    fallback_rules = list(fallback.get("rules") or []) if isinstance(fallback, dict) else []
+    merged_rules: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for rule in [*primary_rules, *fallback_rules]:
+        if not isinstance(rule, dict):
+            continue
+        rule_id = str(rule.get("id") or "").strip()
+        if rule_id and rule_id in seen_ids:
+            continue
+        if rule_id:
+            seen_ids.add(rule_id)
+        merged_rules.append(rule)
+    if not merged_rules:
+        return _empty_publication_policy()
+    sources: list[str] = []
+    for payload in (primary, fallback):
+        if not isinstance(payload, dict):
+            continue
+        for part in str(payload.get("source") or "").split("+"):
+            part = part.strip()
+            if part:
+                sources.append(part)
+    return {
+        "version": PUBLICATION_POLICY_VERSION,
+        "source": "+".join(dict.fromkeys(sources)) or "merged",
+        "rules": merged_rules,
     }
 
 
@@ -1021,11 +1132,14 @@ def _normalize_inventory_platform_options(value: Any) -> dict[str, Any]:
         "source": "browser_agent_inventory" if status in {"ok", "completed", "ready", "partial"} else "",
     }
     option_groups = normalized["option_groups"]
+    platform = _normalize_platform(value.get("platform") or value.get("route", {}).get("platform"))
     collections = _options_from_groups(option_groups, {"collection", "collections", "playlist", "playlists", "album", "albums", "合集", "栏目", "专辑"})
     collection_catalog = _merge_collection_catalog(
         _normalize_collection_catalog(value, fallback_names=collections),
         _collection_catalog_from_option_groups(option_groups),
     )
+    collections = _sanitize_collection_suggestions_for_platform(platform, collections)
+    collection_catalog = _sanitize_collection_catalog_for_platform(platform, collection_catalog)
     real_selectable_catalog_names = [
         str(entry.get("name") or "").strip()
         for entry in collection_catalog
@@ -1050,6 +1164,7 @@ def _normalize_inventory_platform_options(value: Any) -> dict[str, Any]:
     if selectable_catalog_names:
         collections = _merge_unique_strings(selectable_catalog_names, collections)
     categories = _options_from_groups(option_groups, {"category", "categories", "section", "sections", "partition", "分区", "分类"})
+    categories = _sanitize_category_options_for_platform(platform, categories)
     declarations = _options_from_groups(option_groups, {"declaration", "declarations", "statement", "statements", "声明", "原创声明", "内容类型声明"})
     group_chats = _options_from_groups(option_groups, {"group", "groups", "chat", "chats", "群聊"})
     if collections:
@@ -1369,6 +1484,8 @@ def _choose_real_collection_name(
     *,
     publication_policy: dict[str, Any] | None = None,
 ) -> str:
+    if _target_explicitly_skips_collection(target):
+        return ""
     suggestions = [str(item).strip() for item in capability.get("collection_suggestions") or [] if str(item).strip()]
     if not suggestions:
         return ""
@@ -1391,6 +1508,16 @@ def _build_collection_management_plan(
 ) -> dict[str, Any]:
     platform = _normalize_platform(target.get("platform")) or ""
     kind = _platform_collection_kind(platform)
+    if _target_explicitly_skips_collection(target):
+        return {
+            "kind": kind,
+            "status": "skipped_by_policy",
+            "target_collection_name": "",
+            "selected_collection_name": "",
+            "create_required": False,
+            "post_publish_association_required": False,
+            "reason": f"{platform_label(platform)} 已显式声明跳过{_collection_kind_label(kind)}选择。",
+        }
     if kind == "none":
         return {
             "kind": "none",
@@ -1403,7 +1530,8 @@ def _build_collection_management_plan(
         }
     suggestions = [str(item).strip() for item in capability.get("collection_suggestions") or [] if str(item).strip()]
     catalog = [item for item in (capability.get("collection_catalog") or []) if isinstance(item, dict)]
-    preferred = _preferred_collection_name_by_policy(publication_policy, target)
+    preferred_candidates = _preferred_collection_candidates_by_policy(publication_policy, target)
+    preferred = preferred_candidates[0] if preferred_candidates else ""
     selected = _choose_collection_by_policy(publication_policy, suggestions, target) if preferred else ""
     if not preferred:
         selected = _choose_real_collection_name(capability, target, publication_policy=publication_policy)
@@ -1421,7 +1549,7 @@ def _build_collection_management_plan(
             "post_publish_association_required": False,
             "reason": f"发布页可直接选择已有{_collection_kind_label(kind)}。",
         }
-    matched_catalog = _find_collection_catalog_entry(catalog, preferred)
+    matched_catalog = _find_collection_catalog_entry(catalog, preferred_candidates or preferred)
     if matched_catalog:
         selectable = bool(matched_catalog.get("selectable"))
         return {
@@ -1468,6 +1596,11 @@ def _collection_kind_label(kind: str) -> str:
 
 
 def _preferred_collection_name_by_policy(publication_policy: dict[str, Any] | None, target: dict[str, Any]) -> str:
+    candidates = _preferred_collection_candidates_by_policy(publication_policy, target)
+    return candidates[0] if candidates else ""
+
+
+def _preferred_collection_candidates_by_policy(publication_policy: dict[str, Any] | None, target: dict[str, Any]) -> list[str]:
     policy = publication_policy if isinstance(publication_policy, dict) else {}
     platform = _normalize_platform(target.get("platform")) or ""
     for rule in policy.get("rules") or []:
@@ -1477,24 +1610,26 @@ def _preferred_collection_name_by_policy(publication_policy: dict[str, Any] | No
             continue
         if not _publication_rule_applies_to_content(rule, target):
             continue
-        preferred_name = str(rule.get("preferred_collection_name") or "").strip()
-        if preferred_name:
-            return preferred_name
-    return ""
+        preferred_names = _preferred_collection_candidates(rule)
+        if preferred_names:
+            return preferred_names
+    return []
 
 
-def _find_collection_catalog_entry(catalog: list[dict[str, Any]], preferred_name: str) -> dict[str, Any]:
+def _find_collection_catalog_entry(catalog: list[dict[str, Any]], preferred_name: str | list[str]) -> dict[str, Any]:
     if not preferred_name:
         return {}
-    normalized_preferred = _normalize_collection_match_key(preferred_name)
-    for entry in catalog:
-        name = str(entry.get("name") or "").strip()
-        if name and _normalize_collection_match_key(name) == normalized_preferred:
-            return dict(entry)
-    for entry in catalog:
-        name = str(entry.get("name") or "").strip()
-        if name and normalized_preferred in _normalize_collection_match_key(name):
-            return dict(entry)
+    preferred_names = preferred_name if isinstance(preferred_name, list) else [preferred_name]
+    for preferred in preferred_names:
+        normalized_preferred = _normalize_collection_match_key(preferred)
+        for entry in catalog:
+            name = str(entry.get("name") or "").strip()
+            if name and _normalize_collection_match_key(name) == normalized_preferred:
+                return dict(entry)
+        for entry in catalog:
+            name = str(entry.get("name") or "").strip()
+            if name and normalized_preferred in _normalize_collection_match_key(name):
+                return dict(entry)
     return {}
 
 
@@ -1508,15 +1643,23 @@ def _choose_collection_by_policy(publication_policy: dict[str, Any] | None, sugg
             continue
         if not _publication_rule_applies_to_content(rule, target):
             continue
-        preferred_name = str(rule.get("preferred_collection_name") or "").strip()
-        if not preferred_name:
+        preferred_names = _preferred_collection_candidates(rule)
+        if not preferred_names:
             continue
-        matched = _find_collection_option(suggestions, preferred_name)
-        if matched:
-            return matched
+        for preferred_name in preferred_names:
+            matched = _find_collection_option(suggestions, preferred_name)
+            if matched:
+                return matched
         if not rule.get("requires_real_option", True):
-            return preferred_name
+            return preferred_names[0]
     return ""
+
+
+def _preferred_collection_candidates(rule: dict[str, Any]) -> list[str]:
+    primary = str(rule.get("preferred_collection_name") or "").strip()
+    aliases = _clean_string_list(rule.get("preferred_collection_aliases"))
+    values = [primary, *aliases]
+    return [value for value in values if value]
 
 
 def _publication_rule_applies_to_platform(rule: dict[str, Any], platform: str) -> bool:
@@ -1781,6 +1924,136 @@ def _surface_keys(items: Any) -> list[str]:
     return normalized
 
 
+def _target_explicitly_skips_collection(target: dict[str, Any]) -> bool:
+    if not isinstance(target, dict):
+        return False
+    overrides = target.get("platform_specific_overrides")
+    if not isinstance(overrides, dict):
+        return False
+    collection_policy = str(overrides.get("collection_policy") or "").strip().lower()
+    return bool(overrides.get("skip_collection_select")) or collection_policy == "skip"
+
+
+def _sanitize_collection_suggestions_for_platform(platform: str, suggestions: list[str]) -> list[str]:
+    if platform != "youtube":
+        return suggestions
+    return [item for item in suggestions if _is_probable_youtube_playlist_candidate(item)]
+
+
+def _sanitize_collection_catalog_for_platform(platform: str, catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if platform != "youtube":
+        return catalog
+    sanitized: list[dict[str, Any]] = []
+    for entry in catalog:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        source = str(entry.get("source") or "").strip()
+        if source == "publish_form" and not _is_probable_youtube_playlist_candidate(name):
+            continue
+        sanitized.append(entry)
+    return sanitized
+
+
+def _sanitize_category_options_for_platform(platform: str, categories: list[str]) -> list[str]:
+    if platform != "youtube":
+        return categories
+    return [item for item in categories if _is_probable_youtube_category_candidate(item)]
+
+
+def _is_probable_youtube_playlist_candidate(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lowered = text.casefold()
+    if lowered in {
+        "playlist",
+        "playlists",
+        "播放列表",
+        "上传视频",
+        "开始直播",
+        "发帖",
+        "新建播放列表",
+        "新建播客",
+    }:
+        return False
+    if re.fullmatch(r"(?:上传视频|开始直播|发帖|新建播放列表|新建播客)(?:\s+(?:上传视频|开始直播|发帖|新建播放列表|新建播客))+", text):
+        return False
+    if sum(1 for marker in ("上传视频", "开始直播", "发帖", "新建播放列表", "新建播客") if marker in text) >= 2:
+        return False
+    if re.search(r"观众|受众|儿童|coppa|字幕|语言|类别|分类|公开范围|视频链接|评论|通知|限制", text, re.IGNORECASE):
+        return False
+    return True
+
+
+def _is_probable_youtube_category_candidate(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    lowered = text.casefold()
+    if lowered in {
+        "category",
+        "categories",
+        "language",
+        "captions",
+        "subtitles",
+        "类别",
+        "分类",
+        "语言",
+        "字幕",
+        "内容检测",
+        "创收",
+        "信息中心",
+        "数据分析",
+        "社区",
+        "自定义",
+        "音频库",
+        "设置",
+        "发送反馈",
+        "内容",
+    }:
+        return False
+    if re.search(r"语言|字幕|caption|subtitle|内容检测|创收|信息中心|数据分析|社区|自定义|音频库|发送反馈", text, re.IGNORECASE):
+        return False
+    if re.search(r"(信息中心|内容|数据分析|社区|字幕|内容检测|创收|自定义|音频库|设置|发送反馈).+(信息中心|内容|数据分析|社区|字幕|内容检测|创收|自定义|音频库|设置|发送反馈)", text):
+        return False
+    return True
+
+
+def _should_relax_youtube_editor_lazy_surfaces(capability: dict[str, Any], missing: list[str]) -> bool:
+    if set(missing) - {"thumbnail", "audience"}:
+        return False
+    option_groups = [item for item in (capability.get("option_groups") or []) if isinstance(item, dict)]
+    field_groups = [item for item in (capability.get("field_groups") or []) if isinstance(item, dict)]
+    visible_keys = {
+        str(item.get("key") or "").strip()
+        for item in [*option_groups, *field_groups]
+        if str(item.get("key") or "").strip()
+    }
+    if {
+        "youtube_publish_settings",
+        "youtube_visibility",
+        "youtube_playlists",
+        "youtube_category_language",
+        "youtube_restrictions",
+    }.intersection(visible_keys):
+        return True
+    route = capability.get("route") if isinstance(capability.get("route"), dict) else {}
+    route_url = str(route.get("url") or "").strip().lower()
+    if "/video/" not in route_url or not route_url.endswith("/edit"):
+        return False
+    option_text = " ".join(
+        str(value).strip()
+        for group in option_groups
+        for value in (
+            [group.get("key"), group.get("label")]
+            + list(group.get("options") or [])
+        )
+        if str(value).strip()
+    ).lower()
+    return any(token in option_text for token in ("playlist", "visibility", "restrictions", "category", "language", "字幕", "类别", "公开"))
+
+
 def _capability_supports_effective_scheduled_publish(capability: dict[str, Any]) -> bool:
     if not capability.get("supports_scheduled_publish"):
         return False
@@ -1799,8 +2072,13 @@ def _capability_supports_effective_scheduled_publish(capability: dict[str, Any])
 
 
 def _build_live_publish_preflight(
+    platform: str,
     capability: dict[str, Any],
     *,
+    category: str = "",
+    collection_name: str = "",
+    declaration: str = "",
+    collection_management: dict[str, Any] | None = None,
     supports_scheduled_publish: bool | None = None,
 ) -> dict[str, Any]:
     coverage = capability.get("coverage") if isinstance(capability.get("coverage"), dict) else {}
@@ -1812,9 +2090,33 @@ def _build_live_publish_preflight(
         if supports_scheduled_publish is None
         else bool(supports_scheduled_publish)
     )
+    if platform_skips_explicit_tag_entry(platform):
+        required = [item for item in required if item != "topics"]
+        missing = [item for item in missing if item != "topics"]
+    if platform_skips_explicit_visibility_entry(platform):
+        required = [item for item in required if item != "visibility"]
+        missing = [item for item in missing if item != "visibility"]
     if not effective_scheduled_publish:
         required = [item for item in required if item != "schedule"]
         missing = [item for item in missing if item != "schedule"]
+    if not str(category or "").strip():
+        required = [item for item in required if item != "category"]
+        missing = [item for item in missing if item != "category"]
+    if not str(declaration or "").strip():
+        required = [item for item in required if item != "declaration"]
+        missing = [item for item in missing if item != "declaration"]
+    collection_status = (
+        str((collection_management or {}).get("status") or "").strip().lower()
+        if isinstance(collection_management, dict)
+        else ""
+    )
+    collection_surface_keys = {"collection", "playlist"} if platform == "youtube" else {"collection"}
+    collection_required = bool(str(collection_name or "").strip()) and collection_status == "select_existing"
+    if not collection_required:
+        required = [item for item in required if item not in collection_surface_keys]
+        missing = [item for item in missing if item not in collection_surface_keys]
+    if platform == "youtube" and missing and _should_relax_youtube_editor_lazy_surfaces(capability, missing):
+        missing = [item for item in missing if item not in {"thumbnail", "audience"}]
     weak: list[str] = []
     by_surface = evidence.get("by_surface") if isinstance(evidence.get("by_surface"), list) else []
     for item in by_surface:

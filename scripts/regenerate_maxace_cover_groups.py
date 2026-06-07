@@ -32,6 +32,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Force rerunning highlight/source selection instead of reusing the current verified source frame.",
     )
+    parser.add_argument(
+        "--creator-profile-name",
+        default="",
+        help="Optional creator profile display name to override the persisted creator style context during rerender.",
+    )
     return parser.parse_args()
 
 
@@ -41,6 +46,7 @@ async def _main() -> None:
         args.folder,
         platforms=args.platforms,
         refresh_cover_source=bool(args.refresh_source),
+        creator_profile_name=str(args.creator_profile_name or "").strip() or None,
     )
     payload = json.dumps(result, ensure_ascii=False, indent=2)
     try:

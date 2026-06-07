@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import json
+
 import pytest
 
 from roughcut.review import platform_copy
@@ -46,6 +49,35 @@ def test_platform_packaging_quality_gate_accepts_specific_creator_copy() -> None
     assert assessment["publish_ready"] is True
 
 
+def test_build_platform_claim_evidence_pack_keeps_creative_brief_out_of_hard_evidence() -> None:
+    prompt_brief = platform_copy.build_packaging_prompt_brief(
+        source_name="MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+        content_profile={
+            "subject_brand": "MAXACE",
+            "subject_model": "美杜莎4",
+            "subject_type": "EDC跳刀",
+            "summary": "这条摘要只是创作提示，不该当事实。",
+            "hook_line": "开箱先看双版本差异",
+            "visible_text": "MAXACE 美杜莎4",
+        },
+        subtitle_items=[{"text_final": "因为我之前没玩过直跳吧", "start_time": 0.0, "end_time": 1.0}],
+    )
+
+    evidence_pack = platform_copy._build_platform_claim_evidence_pack(
+        source_name="MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+        prompt_brief=prompt_brief,
+        fact_sheet={"verified_facts": [], "guardrail_summary": ""},
+        subtitle_items=[{"text_final": "因为我之前没玩过直跳吧", "start_time": 0.0, "end_time": 1.0}],
+        content_profile={"subject_brand": "MAXACE", "subject_model": "美杜莎4", "subject_type": "EDC跳刀"},
+    )
+
+    assert evidence_pack["source_hints"]["subject_type"] == "EDC跳刀"
+    assert "summary" not in evidence_pack["source_hints"]
+    assert evidence_pack["creative_brief"]["summary"] == "这条摘要只是创作提示，不该当事实。"
+    prompt = platform_copy._build_claim_ledger_prompt(evidence_pack)
+    assert "creative_brief 只是创作提示" in prompt
+
+
 def test_claim_grounded_is_the_only_supported_claim_strategy_name() -> None:
     assert "claim_grounded" in packaging_library.COPY_STYLE_OPTIONS
     assert "m27_claim_grounded" not in packaging_library.COPY_STYLE_OPTIONS
@@ -76,6 +108,227 @@ async def test_generate_platform_packaging_old_claim_style_name_no_longer_routes
     )
 
     assert "title_audit" in result
+
+
+@pytest.mark.asyncio
+async def test_generate_platform_packaging_with_repair_salvages_malformed_json(monkeypatch) -> None:
+    valid_payload = {
+        "highlights": {
+            "product": "MOT 风灵音叉",
+            "video_type": "开箱上手",
+            "strongest_selling_point": "声音、细节、做工",
+            "strongest_emotion": "真实上手",
+            "title_hook": "先看声音细节",
+            "engagement_question": "你会怎么选？",
+        },
+        "platforms": {
+            "bilibili": {
+                "titles": [
+                    "MOT 风灵音叉开箱先看声音细节",
+                    "MOT 风灵音叉上手后值不值",
+                    "MOT 风灵音叉这次做工怎么看",
+                ],
+                "description": "MOT 风灵音叉这次主要看开箱后的声音、握持和近景细节，上手那一下的质感比单看照片更直观。",
+                "tags": ["MOT风灵音叉", "音叉推牌", "EDC开箱"],
+            }
+        },
+    }
+    malformed_json = json.dumps(valid_payload, ensure_ascii=False).replace('"description"', '"description"', 1)[:-1]
+
+    class FakeResponse:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature=0.3, max_tokens=4096, json_mode=False):
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse(malformed_json)
+            return FakeResponse(json.dumps(valid_payload, ensure_ascii=False))
+
+    provider = FakeProvider()
+    monkeypatch.setattr(platform_copy, "get_reasoning_provider", lambda: provider)
+    monkeypatch.setattr(platform_copy, "normalize_platform_packaging", lambda payload, **_kwargs: payload)
+    monkeypatch.setattr(
+        platform_copy,
+        "_assess_platform_packaging_quality",
+        lambda *args, **kwargs: {
+            "publish_ready": True,
+            "blocking_reasons": [],
+            "warnings": [],
+            "repair_hints": [],
+        },
+    )
+
+    payload, trace = await platform_copy._generate_platform_packaging_with_repair(
+        "只返回 JSON。",
+        content_profile={"subject_model": "MOT 风灵音叉", "subject_type": "音叉推牌"},
+        fact_sheet={"status": "unverified"},
+        copy_style="attention_grabbing",
+        author_profile=None,
+        target_platforms=["bilibili"],
+    )
+
+    assert payload["platforms"]["bilibili"]["titles"][0] == "MOT 风灵音叉开箱先看声音细节"
+    assert trace == [{"attempt": 1, "status": "ok", "issues": [], "warnings": [], "repair_hints": []}]
+    assert provider.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_complete_json_with_same_model_repair_shares_one_timeout_budget(monkeypatch) -> None:
+    valid_payload = {
+        "highlights": {"product": "MOT 风灵音叉"},
+        "platforms": {"bilibili": {"titles": ["A", "B", "C"], "description": "desc", "tags": ["t1", "t2"]}},
+    }
+
+    class FakeResponse:
+        def __init__(self, content: str) -> None:
+            self.content = content
+
+    class FakeProvider:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature=0.3, max_tokens=4096, json_mode=False):
+            self.calls += 1
+            if self.calls == 1:
+                return FakeResponse("{")
+            return FakeResponse(json.dumps(valid_payload, ensure_ascii=False))
+
+    timeout_calls: list[int] = []
+    real_wait_for = asyncio.wait_for
+
+    async def fake_wait_for(awaitable, timeout=None):
+        timeout_calls.append(int(timeout or 0))
+        return await real_wait_for(awaitable, timeout=0.1)
+
+    monkeypatch.setattr(platform_copy, "get_reasoning_provider", lambda: FakeProvider())
+    monkeypatch.setattr(platform_copy.asyncio, "wait_for", fake_wait_for)
+
+    payload = await platform_copy._complete_json_with_same_model_repair(
+        [platform_copy.Message(role="user", content="只返回 JSON")],
+        temperature=0.3,
+        max_tokens=512,
+        timeout=30,
+        schema_hint='{"platforms":{"bilibili":{"titles":[""],"description":"","tags":[""]}}}',
+    )
+
+    assert payload["platforms"]["bilibili"]["titles"][0] == "A"
+    assert len(timeout_calls) == 2
+    assert timeout_calls[0] == 30
+    assert timeout_calls[1] <= timeout_calls[0]
+
+
+@pytest.mark.asyncio
+async def test_generate_platform_packaging_with_repair_shares_one_timeout_budget_across_attempts(monkeypatch) -> None:
+    captured_timeouts: list[int] = []
+
+    class FakeLoop:
+        def __init__(self) -> None:
+            self._times = iter([0.0, 0.0, 20.0, 29.0])
+
+        def time(self) -> float:
+            return next(self._times)
+
+    async def fake_complete(*_args, **kwargs):
+        captured_timeouts.append(int(kwargs["timeout"]))
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(platform_copy, "_resolve_platform_packaging_generation_timeout", lambda: 30)
+    monkeypatch.setattr(platform_copy.asyncio, "get_running_loop", lambda: FakeLoop())
+    monkeypatch.setattr(platform_copy, "_complete_json_with_same_model_repair", fake_complete)
+
+    with pytest.raises(RuntimeError, match="第 3 次文案包装生成超时（>1s）"):
+        await platform_copy._generate_platform_packaging_with_repair(
+            "只返回 JSON。",
+            content_profile={"subject_model": "MOT 风灵音叉", "subject_type": "音叉推牌"},
+            fact_sheet={"status": "unverified"},
+            copy_style="attention_grabbing",
+            author_profile=None,
+            target_platforms=["bilibili"],
+        )
+
+    assert captured_timeouts == [30, 10, 1]
+
+
+def test_resolve_platform_packaging_generation_timeout_uses_longer_window_for_minimax_m3(monkeypatch) -> None:
+    monkeypatch.setattr(
+        platform_copy,
+        "get_settings",
+        lambda: type("S", (), {"active_reasoning_provider": "minimax", "active_reasoning_model": "MiniMax-M3"})(),
+    )
+
+    assert platform_copy._resolve_platform_packaging_generation_timeout() == 90
+
+
+def test_resolve_platform_packaging_generation_max_tokens_scales_by_target_count() -> None:
+    assert platform_copy._resolve_platform_packaging_generation_max_tokens(["bilibili"]) == 1200
+    assert platform_copy._resolve_platform_packaging_generation_max_tokens(["bilibili", "douyin"]) == 2400
+    assert platform_copy._resolve_platform_packaging_generation_max_tokens(None) == 4000
+
+
+@pytest.mark.asyncio
+async def test_generate_platform_packaging_with_repair_reports_timeout_clearly(monkeypatch) -> None:
+    class TimeoutProvider:
+        async def complete(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(platform_copy, "get_reasoning_provider", lambda: TimeoutProvider())
+    monkeypatch.setattr(platform_copy, "get_settings", lambda: type("S", (), {"active_reasoning_provider": "minimax", "active_reasoning_model": "MiniMax-M3"})())
+
+    with pytest.raises(RuntimeError, match="第 3 次文案包装生成超时（>90s）"):
+        await platform_copy._generate_platform_packaging_with_repair(
+            "只返回 JSON。",
+            content_profile={"subject_model": "MOT 风灵音叉", "subject_type": "音叉推牌"},
+            fact_sheet={"status": "unverified"},
+            copy_style="attention_grabbing",
+            author_profile=None,
+            target_platforms=["bilibili"],
+        )
+
+
+@pytest.mark.asyncio
+async def test_generate_platform_packaging_falls_back_to_deterministic_copy_on_runtime_failure(monkeypatch) -> None:
+    async def fake_generate_single_platform_fast(*_args, **_kwargs):
+        raise RuntimeError("第 1 次文案包装生成超时（>1s）")
+
+    monkeypatch.setattr(platform_copy, "_generate_single_platform_packaging_fast", fake_generate_single_platform_fast)
+
+    result = await platform_copy.generate_platform_packaging(
+        source_name="MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+        content_profile={
+            "subject_brand": "MAXACE",
+            "subject_model": "美杜莎4",
+            "subject_type": "EDC跳刀",
+            "video_theme": "双版本开箱",
+            "summary": "这次把顶配和次顶配放在一起开箱。",
+        },
+        subtitle_items=[{"text_final": "这次把顶配和次顶配放在一起开箱", "start_time": 0.0, "end_time": 1.0}],
+        copy_style="attention_grabbing",
+        prompt_brief={
+            "source_language": "zh",
+            "transcript_excerpt": "这次把顶配和次顶配放在一起开箱",
+            "video_theme": "双版本开箱",
+            "copy_brief": {
+                "intent": "comparison_unboxing",
+                "topic_subject": "MAXACE美杜莎4",
+                "summary": "这次把顶配和次顶配放在一起开箱。",
+                "question": "",
+                "focus_points": ["版本差异", "外观细节", "上手感受"],
+            },
+        },
+        fact_sheet={"status": "unverified", "verified_facts": []},
+        target_platforms=["bilibili"],
+    )
+
+    bilibili = result["platforms"]["bilibili"]
+    assert len(bilibili["titles"]) >= 3
+    assert bilibili["description"]
+    assert len(bilibili["tags"]) >= 2
+    assert result["generation_repair_trace"][0]["status"] == "deterministic_fallback"
 
 
 def test_platform_packaging_quality_gate_rejects_ai_fallback_copy() -> None:

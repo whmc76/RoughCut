@@ -1001,11 +1001,24 @@ def _resolve_capability_matrix(evidence_bundle: dict[str, Any]) -> dict[str, Any
     candidate_hints = evidence_bundle.get("candidate_hints")
     nested_visual_hints = candidate_hints.get("visual_hints") if isinstance(candidate_hints, dict) else {}
     has_visual_inputs = bool(evidence_bundle.get("visual_semantic_evidence") or nested_visual_hints)
-    visual_provider = str(settings.active_reasoning_provider or settings.reasoning_provider or "").strip() if has_visual_inputs else ""
+    reasoning_provider = str(settings.active_reasoning_provider or settings.reasoning_provider or "").strip()
+    visual_provider = ""
+    visual_model = ""
+    visual_mcp_provider = ""
+    visual_mcp_model = ""
+    if has_visual_inputs:
+        if reasoning_provider.lower() == "zhipu":
+            visual_mcp_provider = "zhipu"
+            visual_mcp_model = "zai-mcp-server"
+        else:
+            visual_provider = reasoning_provider
+            visual_model = str(getattr(settings, "active_vision_model", "") or getattr(settings, "vision_model", "") or "").strip()
     return resolve_content_understanding_capabilities(
-        reasoning_provider=str(settings.active_reasoning_provider or settings.reasoning_provider or "").strip(),
+        reasoning_provider=reasoning_provider,
         visual_provider=visual_provider,
-        visual_mcp_provider="",
+        visual_model=visual_model,
+        visual_mcp_provider=visual_mcp_provider,
+        visual_mcp_model=visual_mcp_model,
     )
 
 

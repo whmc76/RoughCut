@@ -8,9 +8,9 @@ import time
 from pathlib import Path
 
 from roughcut.config import normalize_transcription_provider_name
-from roughcut.docker_gpu_guard import _probe_service_health
 from roughcut.config import get_settings
-from roughcut.docker_gpu_guard import adopt_running_idle_managed_gpu_services, hold_managed_gpu_services_async
+from roughcut.docker_gpu_guard import _probe_service_health
+from roughcut.docker_gpu_guard import adopt_running_idle_managed_gpu_services
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +33,6 @@ async def ensure_runtime_services_ready(*, force: bool = False, reason: str = ""
 
         await asyncio.to_thread(_ensure_core_compose_services_started)
         await asyncio.to_thread(adopt_running_idle_managed_gpu_services, reason=reason or "runtime_preflight_adopt")
-        await _ensure_managed_service_urls_ready(reason=reason or "runtime_preflight")
         _last_preflight_at = time.monotonic()
 
 
@@ -88,28 +87,6 @@ def _run_compose(compose_file: Path, *args: str) -> None:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()[-1000:]
         raise RuntimeError(f"docker compose {' '.join(args)} failed: {detail}")
-
-
-async def _ensure_managed_service_urls_ready(*, reason: str) -> None:
-    for url in _managed_service_urls():
-        try:
-            async with hold_managed_gpu_services_async(required_urls=[url], reason=reason):
-                pass
-        except Exception as exc:
-            logger.warning("runtime preflight failed to ensure managed service %s: %s", url, exc)
-
-
-def _managed_service_urls() -> list[str]:
-    urls = [str(target["url"] or "").strip() for target in _managed_service_targets()]
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for url in urls:
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        deduped.append(url)
-    return deduped
 
 
 def _managed_service_targets() -> list[dict[str, object]]:

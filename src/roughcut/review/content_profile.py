@@ -3960,8 +3960,26 @@ async def infer_content_profile(
                         initial_profile["visible_text"] = str(ocr_profile.get("visible_text") or "").strip()
             capabilities = resolve_content_understanding_capabilities(
                 reasoning_provider=str(settings.active_reasoning_provider or settings.reasoning_provider or "").strip(),
-                visual_provider=str(settings.active_reasoning_provider or settings.reasoning_provider or "").strip(),
-                visual_mcp_provider="",
+                visual_provider=(
+                    ""
+                    if str(settings.active_reasoning_provider or settings.reasoning_provider or "").strip().lower() == "zhipu"
+                    else str(settings.active_reasoning_provider or settings.reasoning_provider or "").strip()
+                ),
+                visual_model=(
+                    ""
+                    if str(settings.active_reasoning_provider or settings.reasoning_provider or "").strip().lower() == "zhipu"
+                    else str(getattr(settings, "active_vision_model", "") or getattr(settings, "vision_model", "") or "").strip()
+                ),
+                visual_mcp_provider=(
+                    "zhipu"
+                    if str(settings.active_reasoning_provider or settings.reasoning_provider or "").strip().lower() == "zhipu"
+                    else ""
+                ),
+                visual_mcp_model=(
+                    "zai-mcp-server"
+                    if str(settings.active_reasoning_provider or settings.reasoning_provider or "").strip().lower() == "zhipu"
+                    else ""
+                ),
             )
             visual_semantic_evidence = await infer_visual_semantic_evidence(frame_paths, capabilities)
             if visual_semantic_evidence:
@@ -5417,7 +5435,7 @@ async def _infer_visual_profile_hint_from_images(frame_paths: list[Path]) -> dic
         prompt = (
             "只看这组视频画面，不参考字幕。"
             "请判断画面里被重点展示或被手持操作的主体属于哪一类。"
-            "优先在这些类型中选择：EDC折刀、多功能工具钳、EDC手电、EDC机能包、软件界面、人物口播、食品饮品、游戏画面、其他产品。"
+            "优先在这些类型中选择：EDC跳刀、EDC折刀、多功能工具钳、EDC手电、EDC机能包、软件界面、人物口播、食品饮品、游戏画面、其他产品。"
             "如果画面里能直接看到型号、品牌字样，也提取出来。"
             "不要因为背景海报、桌垫、摆件或贴纸误判主体。"
             "输出 JSON："
@@ -6820,12 +6838,15 @@ def _seed_profile_from_text(
         brand = _MODEL_TO_BRAND[model]
 
     subject_type = ""
+    jump_knife_keywords = ("直跳", "跳刀", "OTF", "双动")
     knife_keywords = ("折刀", "刀片", "锁定机构", "推刀", "梯片", "锁片", "刀柄", "柄身", "开刃")
     plier_keywords = ("工具钳", "钳子", "尖嘴钳", "钢丝钳")
     flashlight_keywords = ("手电", "电筒", "筒身", "紫光", "UV", "流明", "泛光", "照射")
     bag_keywords = ("机能包", "机能双肩包", "双肩包", "副包", "小副包", "斜挎包", "胸包", "快取包", "分仓", "挂点", "收纳", "背负")
 
-    if brand == "LEATHERMAN" or model in {"ARC", "SURGE", "CHARGE"}:
+    if any(keyword.lower() in transcript.lower() for keyword in jump_knife_keywords):
+        subject_type = "EDC跳刀"
+    elif brand == "LEATHERMAN" or model in {"ARC", "SURGE", "CHARGE"}:
         subject_type = "多功能工具钳"
     elif brand == "REATE" or any(keyword in transcript for keyword in knife_keywords):
         subject_type = "EDC折刀"
@@ -7512,6 +7533,8 @@ def _subject_type_from_glossary_category(category: str) -> str:
     normalized = str(category or "").strip().lower()
     if "flashlight" in normalized:
         return "EDC手电"
+    if "jump_knife" in normalized or "otf" in normalized:
+        return "EDC跳刀"
     if "knife" in normalized:
         return "EDC折刀"
     if "bag" in normalized:
@@ -7523,8 +7546,12 @@ def _subject_type_from_glossary_category(category: str) -> str:
 
 def _subject_type_search_anchor(subject_type: str) -> str:
     normalized = _clean_line(subject_type)
-    if any(token in normalized for token in ("EDC", "折刀")):
+    if any(token in normalized for token in ("跳刀", "直跳")):
+        return "跳刀"
+    if "折刀" in normalized:
         return "折刀"
+    if "EDC" in normalized:
+        return "EDC"
     if "工具钳" in normalized:
         return "工具钳"
     if any(token in normalized for token in ("潮玩", "手办", "盲盒")):
@@ -7622,6 +7649,8 @@ def _is_generic_engagement_question(text: str) -> bool:
         "这视频主要在讲什么",
         "这条视频讲什么",
         "这个视频讲什么",
+        "这条视频你会怎么发",
+        "这个视频你会怎么发",
         "主要在讲什么",
         "你觉得这次到手值不值",
         "你觉得值不值",

@@ -298,6 +298,15 @@ def projection_has_source_text_mismatch(
         common_length = projection_text_common_subsequence_length(source_key, projected_key)
         missing_source_units = len(source_key) - common_length
         projected_extra_units = len(projected_key) - common_length
+        projected_coverage = common_length / max(1, len(projected_key))
+        # A projected row can legitimately be a finer-grained split of a coarser
+        # source row. If the projected text is already fully contained inside the
+        # source text, or is almost fully covered by it, keep the finer projection
+        # instead of collapsing back to the coarser source segmentation.
+        if projected_key in source_key:
+            continue
+        if projected_coverage >= 0.9 and projected_extra_units <= 1:
+            continue
         if (
             missing_source_units >= 2
             and missing_source_units >= projected_extra_units
@@ -308,9 +317,11 @@ def projection_has_source_text_mismatch(
         length_ratio = max(len(source_key), len(projected_key)) / max(1, min(len(source_key), len(projected_key)))
         if similarity < 0.32 and length_ratio >= 1.8:
             severe_mismatches += 1
-            if severe_mismatches >= 1:
-                return True
-    return checked >= 4 and severe_mismatches / checked >= 0.25
+    if checked == 0:
+        return False
+    if checked <= 3:
+        return severe_mismatches >= 1
+    return severe_mismatches / checked >= 0.25
 
 
 def projection_text_has_mechanical_duplicate_absent_from_source(projected_key: str, source_key: str) -> bool:

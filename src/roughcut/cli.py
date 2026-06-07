@@ -364,9 +364,12 @@ def worker(
     without_mingle: bool,
 ):
     """Start a Celery worker for the specified queue."""
-    from roughcut.pipeline.celery_app import celery_app
-
     queues = ["media_queue", "llm_queue", "agent_queue", "publication_queue"] if queue == "all" else [queue]
+    os.environ["ROUGHCUT_WORKER_QUEUES"] = ",".join(queues)
+    from roughcut.pipeline.celery_app import celery_app
+    from roughcut.pipeline.celery_app import schedule_publication_worker_bootstrap
+
+    schedule_publication_worker_bootstrap(celery_app)
     node_label = hostname or "auto"
     click.echo(
         f"Starting worker for queues: {queues} "

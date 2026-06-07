@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import asyncio
 import hashlib
 import json
@@ -32,17 +33,22 @@ from roughcut.publication import (
     _derive_receipt_binding_fallback_id,
     _is_platform_draft_reset_recoverable_status,
     normalize_publication_platform,
+    normalize_publication_browser_binding,
     list_publication_attempts,
     publication_plan_is_publishable,
     resolve_publication_local_media_path,
     run_publication_worker_once,
     submit_publication_attempts,
+    _sanitize_publication_target_category,
 )  # noqa: E402
 from roughcut.publication_duplicate_audit import build_duplicate_history_gate_report  # noqa: E402
+from roughcut.publication_intelligence import generate_publication_scheme  # noqa: E402
 from roughcut.publication_packaging import (  # noqa: E402
+    derive_publication_cover_slots,
     extract_publication_packaging_scope,
     load_json_payload,
     normalize_publication_packaging_payload,
+    publication_primary_cover_path,
     publication_packaging_entry_blocking_reasons,
     publication_packaging_entry_publish_ready,
     publication_packaging_payload_publish_ready,
@@ -63,6 +69,7 @@ STRICT_STABLE_REQUEST_CONTRACT_FIELD_KEYS = {
     "media_urls",
     "copy_material",
     "cover_path",
+    "cover_slots",
     "category",
     "declaration",
 }
@@ -74,6 +81,7 @@ RECOVERY_BOOL_OVERRIDE_KEYS = {
     "repair_only_current_page",
     "prepublish_only_current_page",
     "prepare_only_current_page",
+    "fresh_start_platform_tab",
     "verify_media_upload",
     "wait_for_publish_confirmation",
 }
@@ -666,6 +674,7 @@ PREPUBLICATION_DRAFT_CRITICAL_FIELDS = {
     "media_items_count",
     "copy_material",
     "cover_path",
+    "cover_slots",
     "category",
     "declaration",
 }
@@ -679,6 +688,7 @@ SUBMITTED_DRAFT_CRITICAL_FIELDS = {
     "media_items_count",
     "copy_material",
     "cover_path",
+    "cover_slots",
     "category",
     "declaration",
 }
@@ -686,6 +696,19 @@ SUBMITTED_DRAFT_CRITICAL_FIELDS = {
 
 def _normalize(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _normalize_platform_options_payload(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw_key, raw_value in value.items():
+        if not isinstance(raw_value, dict):
+            continue
+        key = _normalize(raw_key).lower().replace("_", "-")
+        if key:
+            normalized[key] = dict(raw_value)
+    return normalized
 
 
 def _is_release_in_progress_status(status: str) -> bool:
@@ -1627,6 +1650,17 @@ def _adaptive_recovery_overrides(
             "wait_for_publish_confirmation": True,
             "capture_response_timeout_ms": None,
         }, adaptive_reason
+    if publish_receipt_pending or pending_receipt_terminal:
+        adaptive_reason.append("submitted/receipt pending should stay on the current page and rebind receipt before any draft reset.")
+        return {
+            "recovery_mode": "receipt_rebind",
+            "clear_draft_context": False,
+            "force_publish_page_refresh": True,
+            "verification_only_current_page": True,
+            "verify_media_upload": True,
+            "wait_for_publish_confirmation": True,
+            "capture_response_timeout_ms": max(90000, 45000 + max(0, attempt_count - 1) * 12000),
+        }, adaptive_reason
     clear_draft_blocked = bool(summary_blocked_reasons)
     clear_draft_allowed = status in {"failed", "needs_human", "draft_created"} or not clear_draft_blocked
     has_submitted_snapshot_empty_gap = (
@@ -1798,6 +1832,13 @@ def _sanitize_recovery_overrides_for_summary(
             if _normalize(normalized.get("recovery_mode")) == "draft_reset":
                 normalized["recovery_mode"] = default_recovery_mode
             reasons.append("待回执场景忽略 discovery/history 的 clear_draft_context，保留现场仅刷新与等待。")
+    if publish_receipt_pending or pending_receipt_terminal:
+        normalized["recovery_mode"] = "receipt_rebind"
+        normalized["force_publish_page_refresh"] = True
+        normalized["verification_only_current_page"] = True
+        normalized["verify_media_upload"] = True
+        normalized["wait_for_publish_confirmation"] = True
+        reasons.append("submitted/receipt pending should switch to safe receipt_rebind on the current page instead of draft reset.")
     return normalized, reasons
 
 
@@ -2082,10 +2123,13 @@ def _coerce_platform_packaging_entry(
     declaration = _normalize(raw.get("declaration") or raw.get("content_declaration"))
     if not declaration:
         declaration = platform_default_declaration(platform) or platform_default_declaration(normalized_platform)
+    scheduled_publish_at = _normalize(raw.get("scheduled_publish_at"))
     visibility_override = _normalize(raw.get("visibility_or_publish_mode") or raw.get("visibility"))
     if not visibility_override:
         visibility_override = _normalize(raw.get("publish_mode"))
-    category = _normalize(raw.get("category"))
+    if not visibility_override and normalized_platform == "youtube":
+        visibility_override = "scheduled" if scheduled_publish_at else "public"
+    category = _sanitize_publication_target_category(normalized_platform, _normalize(raw.get("category")))
     if not collection:
         collection = _coerce_packaging_collection(raw.get("collection"))
     claim_refs = raw.get("claim_refs")
@@ -2094,6 +2138,8 @@ def _coerce_platform_packaging_entry(
     if not isinstance(claim_refs, (list, tuple, set)):
         claim_refs = []
     claim_refs = [str(item).strip() for item in claim_refs if str(item).strip()]
+    cover_slots = derive_publication_cover_slots(raw)
+    primary_cover_path = publication_primary_cover_path(raw)
     return {
         "titles": [platform_title]
         if not isinstance(raw.get("titles"), (list, tuple, set))
@@ -2103,11 +2149,12 @@ def _coerce_platform_packaging_entry(
         "collection": collection,
         "category": category or None,
         "declaration": declaration or None,
-        "cover_path": _normalize(raw.get("cover_path")),
+        "cover_path": _normalize(primary_cover_path or raw.get("cover_path")),
+        "cover_slots": cover_slots,
         "full_copy": _normalize(raw.get("full_copy")),
         "visibility_override": visibility_override,
         "visibility_or_publish_mode": visibility_override,
-        "scheduled_publish_at": _normalize(raw.get("scheduled_publish_at")),
+        "scheduled_publish_at": scheduled_publish_at,
         "platform_specific_overrides": dict(raw.get("platform_specific_overrides"))
         if isinstance(raw.get("platform_specific_overrides"), dict)
         else {},
@@ -2155,6 +2202,11 @@ def _expected_statuses(raw_statuses: str) -> set[str]:
     if not status_list:
         return {"published", "scheduled_pending"}
     return set(status_list)
+
+
+def _looks_like_browser_profile_target(value: Any) -> bool:
+    normalized = _normalize(value).lower()
+    return normalized.startswith("browser-profile:") or normalized.startswith("browser-agent:")
 
 
 def _collect_profile_requirements_violations(
@@ -2994,6 +3046,52 @@ def _build_partial_created_attempt_failures(
     return partial_failures
 
 
+def _build_active_attempt_receipt_rebind_targets(
+    plan: dict[str, Any],
+    skipped_targets: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    skipped_active_platforms = {
+        _normalize(item.get("platform")).lower().replace("_", "-")
+        for item in (skipped_targets or [])
+        if isinstance(item, dict) and _normalize(item.get("reason")).lower() == "active_attempt_exists"
+    }
+    if not skipped_active_platforms:
+        return []
+    targets = plan.get("targets") if isinstance(plan.get("targets"), list) else []
+    recovery_targets: list[dict[str, Any]] = []
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        platform = _normalize(target.get("platform")).lower().replace("_", "-")
+        if platform not in skipped_active_platforms:
+            continue
+        raw_overrides = target.get("platform_specific_overrides")
+        if not isinstance(raw_overrides, dict):
+            raw_overrides = {}
+        target_recovery = dict(target)
+        merged_overrides = _merge_recovery_target_platform_overrides(
+            raw_overrides,
+            {
+                "recovery_mode": "receipt_rebind",
+                "clear_draft_context": False,
+                "force_publish_page_refresh": True,
+                "verification_only_current_page": True,
+                "verify_media_upload": True,
+                "wait_for_publish_confirmation": True,
+            },
+            {},
+        )
+        merged_overrides["recovery_mode"] = "receipt_rebind"
+        merged_overrides["clear_draft_context"] = False
+        merged_overrides["force_publish_page_refresh"] = True
+        merged_overrides["verification_only_current_page"] = True
+        merged_overrides["verify_media_upload"] = True
+        merged_overrides["wait_for_publish_confirmation"] = True
+        target_recovery["platform_specific_overrides"] = merged_overrides
+        recovery_targets.append(target_recovery)
+    return recovery_targets
+
+
 CONTENT_PLAN_FILL_GAP_PENDING_FIELDS = {
     "title",
     "body",
@@ -3081,6 +3179,7 @@ NON_ECHOED_SNAPSHOT_BACKFILL_FIELDS = {
     "media_urls",
     "media_items_count",
     "cover_path",
+    "cover_slots",
     "copy_material",
 }
 
@@ -3201,6 +3300,7 @@ def _build_expected_signature_fields(
     scheduled_publish_at: str = "",
     declaration: str = "",
     cover_path: str = "",
+    cover_slots: list[dict[str, Any]] | None = None,
     media_path: str = "",
     category: str = "",
     collection: Any | None = None,
@@ -3216,6 +3316,7 @@ def _build_expected_signature_fields(
         "scheduled_publish_at": _normalize(scheduled_publish_at) or None,
         "declaration": _normalize(declaration) or None,
         "cover_path": _normalize(cover_path) or None,
+        "cover_slots": _normalize_comparable_value(cover_slots or []),
         "media_path": _normalize(media_path),
     }
     return {
@@ -3236,6 +3337,7 @@ def _build_expected_request_fields(
     scheduled_publish_at: str = "",
     declaration: str = "",
     cover_path: str = "",
+    cover_slots: list[dict[str, Any]] | None = None,
     media_path: str = "",
     adapter: str = "",
     category: str = "",
@@ -3245,6 +3347,31 @@ def _build_expected_request_fields(
     copy_material: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     normalized_override = _normalize_plan_contract_overrides(platform_specific_overrides)
+    topic_selection_plan = (
+        dict(normalized_override.get("topic_selection_plan"))
+        if isinstance(normalized_override.get("topic_selection_plan"), dict)
+        else {}
+    )
+    requested_native_topics = [
+        _normalize(item)
+        for item in (topic_selection_plan.get("requested_topics") or normalized_override.get("native_topics") or [])
+        if _normalize(item)
+    ]
+    normalized_collection = (
+        dict(collection)
+        if isinstance(collection, dict)
+        else _coerce_packaging_collection(collection)
+    )
+    collection_management = (
+        dict(normalized_override.get("collection_management"))
+        if isinstance(normalized_override.get("collection_management"), dict)
+        else {}
+    )
+    collection_management_target = _normalize(
+        collection_management.get("selected_collection_name")
+        or collection_management.get("target_collection_name")
+        or collection_management.get("collection_name")
+    )
     requires_local_media = not bool(normalized_override.get("x_share_link")) and bool(_normalize(media_path))
     expected_copy_material = dict(copy_material) if isinstance(copy_material, dict) else {}
     expected_copy_material.update({
@@ -3253,6 +3380,7 @@ def _build_expected_request_fields(
         "titles": [platform_title],
         "full_copy": _normalize(full_copy),
         "cover_path": _normalize(cover_path) or None,
+        "cover_slots": _normalize_comparable_value(cover_slots or []),
         "declaration": _normalize(declaration) or None,
         "primary_title": platform_title,
     })
@@ -3268,18 +3396,17 @@ def _build_expected_request_fields(
         "hashtags": [_normalize(item) for item in tags if _normalize(item)],
         "display_hashtags": [f"#{_normalize(item)}" for item in tags if _normalize(item)],
         "structured_tags": [_normalize(item) for item in tags if _normalize(item)],
-        "native_topics": [],
+        "native_topics": requested_native_topics,
         "category": _normalize(category) or None,
-        "collection": dict(collection) if isinstance(collection, dict) else _coerce_packaging_collection(collection),
+        "collection": normalized_collection,
         "cover_path": _normalize(cover_path) or None,
+        "cover_slots": _normalize_comparable_value(cover_slots or []),
         "copy_material": expected_copy_material,
         "visibility_or_publish_mode": _normalize(visibility_mode) or None,
         "scheduled_publish_at": _normalize(scheduled_publish_at) or None,
         "ui_control_semantics": {
             "schedule_publish": bool(_normalize(scheduled_publish_at)),
-            "collection_select": bool(
-                dict(collection) if isinstance(collection, dict) else _coerce_packaging_collection(collection)
-            ),
+            "collection_select": bool(normalized_collection or collection_management_target),
         },
         "platform_specific_overrides": normalized_override,
         "media_urls": [_normalize(media_path)] if requires_local_media else [],
@@ -3314,7 +3441,6 @@ def _normalize_plan_contract_overrides(payload: Any) -> dict[str, Any]:
         "operation_steps",
         "platform_warnings",
         "live_publish_preflight",
-        "collection_management",
         "clear_draft_context",
         "force_publish_page_refresh",
         "ignore_publish_ready_gate",
@@ -3412,6 +3538,7 @@ def _build_plan_contract_checks(
             failures.append(f"{normalized_platform} 计划预检：缺少请求字段基线。")
             continue
         actual_fields = _coerce_plan_contract_request_fields(target, media_path)
+        expected_fields = _enrich_plan_contract_expected_fields(expected_fields, actual_fields)
         request_field_mismatches = _build_field_differences(expected_fields, actual_fields, ignored_keys={"platform"})
         if request_field_mismatches:
             mismatch_fields = ", ".join(_normalize(_normalize_mismatch_field(item)) for item in request_field_mismatches[:4])
@@ -3429,6 +3556,86 @@ def _build_plan_contract_checks(
             }
         )
     return failures, checks
+
+
+def _enrich_plan_contract_expected_fields(
+    expected_fields: dict[str, Any],
+    actual_fields: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(expected_fields, dict) or not isinstance(actual_fields, dict):
+        return expected_fields if isinstance(expected_fields, dict) else {}
+    enriched = copy.deepcopy(expected_fields)
+
+    def _is_empty_contract_value(value: Any) -> bool:
+        return value in (None, "", [], {})
+
+    for key in ("category", "collection"):
+        if _is_empty_contract_value(enriched.get(key)) and not _is_empty_contract_value(actual_fields.get(key)):
+            enriched[key] = copy.deepcopy(actual_fields.get(key))
+
+    expected_overrides = enriched.get("platform_specific_overrides")
+    actual_overrides = actual_fields.get("platform_specific_overrides")
+    if isinstance(actual_overrides, dict) and actual_overrides:
+        merged_overrides = dict(expected_overrides) if isinstance(expected_overrides, dict) else {}
+        for key, value in actual_overrides.items():
+            if _normalize(key) and _is_empty_contract_value(merged_overrides.get(key)):
+                merged_overrides[key] = copy.deepcopy(value)
+        enriched["platform_specific_overrides"] = merged_overrides
+
+    expected_semantics = enriched.get("ui_control_semantics")
+    actual_semantics = actual_fields.get("ui_control_semantics")
+    if isinstance(actual_semantics, dict) and actual_semantics:
+        merged_semantics = dict(expected_semantics) if isinstance(expected_semantics, dict) else {}
+        for key, value in actual_semantics.items():
+            if _normalize(key) and _is_empty_contract_value(merged_semantics.get(key)) and value not in (None, "", [], {}):
+                merged_semantics[key] = copy.deepcopy(value)
+        enriched["ui_control_semantics"] = merged_semantics
+
+    expected_native_topics = [
+        _normalize(item)
+        for item in (enriched.get("native_topics") or [])
+        if _normalize(item)
+    ]
+    actual_native_topics = [
+        _normalize(item)
+        for item in (actual_fields.get("native_topics") or [])
+        if _normalize(item)
+    ]
+    if not expected_native_topics and actual_native_topics:
+        topic_selection_plan = (
+            dict((enriched.get("platform_specific_overrides") or {}).get("topic_selection_plan"))
+            if isinstance((enriched.get("platform_specific_overrides") or {}).get("topic_selection_plan"), dict)
+            else {}
+        )
+        requested_topics = [
+            _normalize(item)
+            for item in (topic_selection_plan.get("requested_topics") or [])
+            if _normalize(item)
+        ]
+        enriched["native_topics"] = requested_topics or actual_native_topics
+
+    recomputed_collection_select = bool(enriched.get("collection"))
+    enriched_overrides = enriched.get("platform_specific_overrides")
+    if isinstance(enriched_overrides, dict):
+        collection_management = (
+            dict(enriched_overrides.get("collection_management"))
+            if isinstance(enriched_overrides.get("collection_management"), dict)
+            else {}
+        )
+        recomputed_collection_select = recomputed_collection_select or bool(
+            _normalize(
+                collection_management.get("selected_collection_name")
+                or collection_management.get("target_collection_name")
+                or collection_management.get("collection_name")
+            )
+        )
+    merged_semantics = dict(enriched.get("ui_control_semantics") or {}) if isinstance(enriched.get("ui_control_semantics"), dict) else {}
+    merged_semantics["collection_select"] = bool(
+        merged_semantics.get("collection_select") or recomputed_collection_select
+    )
+    enriched["ui_control_semantics"] = merged_semantics
+
+    return enriched
 
 
 def _extract_request_payload_fields(payload: Any) -> dict[str, Any]:
@@ -3460,6 +3667,21 @@ def _extract_request_payload_fields(payload: Any) -> dict[str, Any]:
     ui_control_semantics = payload.get("ui_control_semantics")
     if not isinstance(ui_control_semantics, dict):
         ui_control_semantics = {}
+    copy_material = payload.get("copy_material")
+    if isinstance(copy_material, dict):
+        copy_material = dict(copy_material)
+        copy_material_cover_path = publication_primary_cover_path(copy_material)
+        copy_material_cover_slots = derive_publication_cover_slots(copy_material)
+        if not copy_material_cover_path:
+            copy_material_cover_path = publication_primary_cover_path(payload)
+        if not copy_material_cover_slots:
+            copy_material_cover_slots = derive_publication_cover_slots(payload)
+        if copy_material_cover_path:
+            copy_material["cover_path"] = copy_material_cover_path
+        if copy_material_cover_slots:
+            copy_material["cover_slots"] = _normalize_comparable_value(copy_material_cover_slots)
+    else:
+        copy_material = {}
     scheduled_publish_at = _normalize(payload.get("scheduled_publish_at")) or None
     collection = payload.get("collection") or None
     return {
@@ -3476,7 +3698,8 @@ def _extract_request_payload_fields(payload: Any) -> dict[str, Any]:
         "category": _normalize(payload.get("category")) or None,
         "collection": collection,
         "cover_path": _normalize(payload.get("cover_path")) or None,
-        "copy_material": payload.get("copy_material") or {},
+        "cover_slots": _normalize_comparable_value(derive_publication_cover_slots(payload)),
+        "copy_material": copy_material,
         "visibility_or_publish_mode": _normalize(payload.get("visibility_or_publish_mode")) or None,
         "scheduled_publish_at": scheduled_publish_at,
         "ui_control_semantics": {
@@ -3502,6 +3725,11 @@ def _build_field_differences(
     for key in sorted(keys):
         expected_value = expected_payload.get(key)
         actual_value = actual_payload.get(key)
+        if key == "cover_slots":
+            expected_missing = expected_value in (None, [], ())
+            actual_missing = actual_value in (None, [], ())
+            if expected_missing and actual_missing:
+                continue
         if key == "scheduled_publish_at" and _scheduled_publish_values_match(expected_value, actual_value):
             continue
         if _normalize_comparable_value(expected_value) != _normalize_comparable_value(actual_value):
@@ -3715,9 +3943,11 @@ def _build_expected_platform_manifest(
     x_link_share_mode: bool = False,
     platform_packaging: dict[str, dict[str, Any]] | None = None,
     platform_adapters: dict[str, str] | None = None,
+    effective_platform_options: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     manifest: dict[str, dict[str, Any]] = {}
     normalized_packaging = platform_packaging or {}
+    normalized_platform_options = _normalize_platform_options_payload(effective_platform_options)
     normalized_suffix = _normalize(content_suffix)
     source_title = _normalize(title) or _normalize(media_path) or "RoughCut发布素材"
     title_suffix = f"{source_title}{' [' + normalized_suffix + ']' if normalized_suffix else ''}"
@@ -3752,8 +3982,28 @@ def _build_expected_platform_manifest(
         category = _normalize(normalized_entry.get("category"))
         collection = normalized_entry.get("collection")
         cover_path = _normalize(normalized_entry.get("cover_path"))
+        cover_slots = derive_publication_cover_slots(normalized_entry)
         scheduled_publish_at = _normalize(normalized_entry.get("scheduled_publish_at"))
         visibility_value = _normalize(normalized_entry.get("visibility_or_publish_mode")) or normalized_visibility
+        option = normalized_platform_options.get(normalized_platform) if isinstance(normalized_platform_options.get(normalized_platform), dict) else {}
+        option_visibility = _normalize(option.get("visibility_or_publish_mode") or option.get("visibility"))
+        option_category = _sanitize_publication_target_category(
+            normalized_platform,
+            _normalize(option.get("category")),
+        )
+        option_collection = option.get("collection")
+        option_declaration = _normalize(option.get("declaration"))
+        option_schedule = _normalize(option.get("scheduled_publish_at"))
+        if option_visibility:
+            visibility_value = option_visibility
+        if option_category:
+            category = option_category
+        if option_collection is not None:
+            collection = option_collection
+        if option_declaration:
+            declaration = option_declaration
+        if option_schedule:
+            scheduled_publish_at = option_schedule
         platform_adapter = normalized_platform_adapters.get(
             normalized_platform,
             ("x_link_share" if platform == "x" and x_link_share_mode else "browser_agent"),
@@ -3763,6 +4013,9 @@ def _build_expected_platform_manifest(
             if isinstance(normalized_entry.get("platform_specific_overrides"), dict)
             else {}
         )
+        option_overrides = option.get("platform_specific_overrides")
+        if isinstance(option_overrides, dict) and option_overrides:
+            platform_overrides.update(option_overrides)
         if platform == "x" and x_link_share_mode and normalized_x_share_link:
             platform_overrides["x_share_link"] = normalized_x_share_link
         signature_payload = _build_expected_signature_fields(
@@ -3774,6 +4027,7 @@ def _build_expected_platform_manifest(
             scheduled_publish_at=scheduled_publish_at,
             declaration=declaration,
             cover_path=cover_path,
+            cover_slots=cover_slots,
             media_path=_normalize(media_path),
             category=category,
             collection=collection,
@@ -3787,6 +4041,7 @@ def _build_expected_platform_manifest(
             scheduled_publish_at=scheduled_publish_at,
             declaration=declaration,
             cover_path=cover_path,
+            cover_slots=cover_slots,
             media_path=_normalize(media_path),
             adapter=platform_adapter,
             category=category,
@@ -4396,6 +4651,7 @@ def _build_platform_packaging(
     description: str = "",
     media_path: str = "",
     platform_packaging: dict[str, dict[str, Any]] | None = None,
+    allow_prepare_without_publish_ready: bool = False,
 ) -> dict[str, Any]:
     platforms_payload: dict[str, dict[str, Any]] = {}
     normalized_packaging = platform_packaging or {}
@@ -4423,6 +4679,7 @@ def _build_platform_packaging(
             "description": platform_description,
             "tags": tags,
             "cover_path": normalized_entry.get("cover_path"),
+            "cover_slots": derive_publication_cover_slots(normalized_entry),
             "full_copy": normalized_entry.get("full_copy"),
             "copy_material": dict(normalized_entry.get("copy_material"))
             if isinstance(normalized_entry.get("copy_material"), dict)
@@ -4451,9 +4708,17 @@ def _build_platform_packaging(
             platform_payload["scheduled_publish_at"] = scheduled_publish_at
         platforms_payload[normalized_platform] = platform_payload
         if normalized_entry.get("publish_ready") is False:
-            platforms_payload[normalized_platform]["publish_ready"] = False
-            if _coerce_text_list(normalized_entry.get("blocking_reasons")):
-                platforms_payload[normalized_platform]["blocking_reasons"] = list(_coerce_text_list(normalized_entry.get("blocking_reasons")))
+            blocking_reasons = list(_coerce_text_list(normalized_entry.get("blocking_reasons")))
+            if allow_prepare_without_publish_ready:
+                platforms_payload[normalized_platform]["reported_publish_ready"] = False
+                if blocking_reasons:
+                    platforms_payload[normalized_platform]["reported_blocking_reasons"] = blocking_reasons
+                platform_payload.setdefault("platform_specific_overrides", {})
+                platform_payload["platform_specific_overrides"]["allow_prepare_without_publish_ready"] = True
+            else:
+                platforms_payload[normalized_platform]["publish_ready"] = False
+                if blocking_reasons:
+                    platforms_payload[normalized_platform]["blocking_reasons"] = blocking_reasons
     packaging = {
         "publish_ready": True,
         "platforms": platforms_payload,
@@ -4472,21 +4737,66 @@ def _build_platform_packaging(
     return packaging
 
 
+def _is_fresh_draft_prepare_mode(expected_statuses: set[str], visibility_mode: str = "") -> bool:
+    normalized_statuses = {_normalize(item).lower() for item in (expected_statuses or set()) if _normalize(item)}
+    normalized_visibility_mode = _normalize(visibility_mode).lower()
+    if normalized_visibility_mode != "draft":
+        return False
+    if not normalized_statuses:
+        return False
+    return normalized_statuses.issubset({"draft_created", "processing"}) and "draft_created" in normalized_statuses
+
+
+def _validate_authoritative_publication_browser_runtime(agent_ready: dict[str, Any]) -> list[str]:
+    if not isinstance(agent_ready, dict):
+        return ["browser-agent 运行态缺失，无法确认发布浏览器绑定。"]
+    health = agent_ready.get("health") if isinstance(agent_ready.get("health"), dict) else {}
+    binding = health.get("attached_profile_binding") if isinstance(health.get("attached_profile_binding"), dict) else {}
+    transport = health.get("browser_transport") if isinstance(health.get("browser_transport"), dict) else {}
+    failures: list[str] = []
+    if _normalize(binding.get("browser")).lower() != "chrome":
+        failures.append("当前发布运行态未绑定到 Google Chrome，拒绝继续发布测试。")
+    if _normalize(transport.get("transport")).lower() != "chrome_extension_bridge":
+        failures.append("当前发布运行态未走 chrome_extension_bridge，拒绝继续发布测试。")
+    if not _normalize(binding.get("profile_id")):
+        failures.append("当前发布运行态缺少 attached_profile_binding.profile_id，拒绝继续发布测试。")
+    return failures
+
+
+def _build_fresh_draft_prepare_live_check(agent_ready: dict[str, Any]) -> dict[str, Any]:
+    health = agent_ready.get("health") if isinstance(agent_ready, dict) and isinstance(agent_ready.get("health"), dict) else {}
+    transport = health.get("browser_transport") if isinstance(health.get("browser_transport"), dict) else {}
+    cdp_connected = (
+        _normalize(health.get("cdp_status")).lower() == "ok"
+        and _normalize(transport.get("transport")).lower() == "chrome_extension_bridge"
+    )
+    return {
+        "cdp": {
+            "connected": bool(cdp_connected),
+            "source": "browser_agent_healthz",
+        },
+        "platform_checks": {},
+    }
+
+
 def _build_platform_options(
     platforms: list[str],
     *,
     visibility_mode: str = "",
     x_share_link: str = "",
     platform_packaging: dict[str, dict[str, Any]] | None = None,
+    seed_platform_options: dict[str, dict[str, Any]] | None = None,
     stale_draft_platforms: set[str] | None = None,
     force_refresh_platforms: set[str] | None = None,
     platform_recovery_hints: dict[str, dict[str, Any]] | None = None,
     force_clear_stable_platforms: bool = False,
     allow_republish: bool = False,
+    fresh_draft_prepare_mode: bool = False,
 ) -> dict[str, Any]:
     normalized_visibility = _normalize(visibility_mode).lower()
     normalized_x_share_link = _normalize(x_share_link)
     normalized_packaging = platform_packaging or {}
+    normalized_seed_options = _normalize_platform_options_payload(seed_platform_options)
     stale_platform_set = {platform.strip().lower().replace("_", "-") for platform in (stale_draft_platforms or [])}
     refresh_platform_set = {platform.strip().lower().replace("_", "-") for platform in (force_refresh_platforms or [])}
     recovery_hint_map = {
@@ -4519,21 +4829,21 @@ def _build_platform_options(
             package_overrides = platform_entry.get("platform_specific_overrides")
             if isinstance(package_overrides, dict):
                 package_preflight = package_overrides.get("live_publish_preflight")
-        option: dict[str, Any] = {
-            "live_publish_preflight": (
+        option: dict[str, Any] = dict(normalized_seed_options.get(normalized_platform) or {})
+        if "live_publish_preflight" not in option:
+            option["live_publish_preflight"] = (
                 dict(package_preflight)
                 if isinstance(package_preflight, dict)
                 else {
                     "status": "passed",
                     "missing_required_surfaces": [],
-                    "summary": "真实发布前置门禁通过（复用链路测试）。",
+                    "summary": "��ʵ����ǰ���Ž�ͨ����������·���ԣ���",
                 }
-            ),
-        }
+            )
         platform_visibility = _normalize(platform_entry.get("visibility_override"))
         if not platform_visibility:
             platform_visibility = _normalize(platform_entry.get("visibility_or_publish_mode"))
-        platform_category = _normalize(platform_entry.get("category"))
+        platform_category = _sanitize_publication_target_category(normalized_platform, _normalize(platform_entry.get("category")))
         platform_collection = platform_entry.get("collection")
         platform_declaration = _normalize(platform_entry.get("declaration"))
         platform_schedule = _normalize(platform_entry.get("scheduled_publish_at"))
@@ -4541,25 +4851,53 @@ def _build_platform_options(
             option["visibility_or_publish_mode"] = platform_visibility
         if normalized_visibility:
             option["visibility_or_publish_mode"] = normalized_visibility
-        if platform_category:
+        option_category = _sanitize_publication_target_category(
+            normalized_platform,
+            _normalize(option.get("category")),
+        )
+        if platform_category and not option_category:
             option["category"] = platform_category
-        if platform_collection is not None:
+        elif option_category:
+            option["category"] = option_category
+        if (
+            platform_collection is not None
+            and not option.get("collection")
+            and not _normalize(option.get("collection_name"))
+        ):
             option["collection"] = platform_collection
-        if platform_declaration:
+        if platform_declaration and not _normalize(option.get("declaration")):
             option["declaration"] = platform_declaration
-        if platform_schedule:
+        if platform_schedule and not _normalize(option.get("scheduled_publish_at")):
             option["scheduled_publish_at"] = platform_schedule
         package_overrides = platform_entry.get("platform_specific_overrides")
+        if isinstance(option.get("platform_specific_overrides"), dict):
+            platform_overrides.update(option.get("platform_specific_overrides") or {})
         if isinstance(package_overrides, dict) and package_overrides:
-            platform_overrides.update(package_overrides)
+            for key, value in package_overrides.items():
+                if key not in platform_overrides:
+                    platform_overrides[key] = value
         if normalized_platform == "x" and normalized_x_share_link:
+            platform_overrides["x_share_link"] = normalized_x_share_link
             platform_overrides["x_share_link"] = normalized_x_share_link
         if allow_republish:
             platform_overrides["force_republish"] = True
             platform_overrides["allow_duplicate_publication"] = True
+        if fresh_draft_prepare_mode:
+            platform_overrides.update(
+                {
+                    "fresh_start_platform_tab": True,
+                    "clear_draft_context": False,
+                    "force_publish_page_refresh": False,
+                    "verification_only_current_page": False,
+                    "repair_only_current_page": False,
+                    "prepublish_only_current_page": False,
+                    "verify_media_upload": False,
+                    "wait_for_publish_confirmation": False,
+                }
+            )
         if platform_overrides:
             option["platform_specific_overrides"] = platform_overrides
-        hint_overrides = recovery_hint_map.get(normalized_platform)
+        hint_overrides = None if fresh_draft_prepare_mode else recovery_hint_map.get(normalized_platform)
         if isinstance(hint_overrides, dict) and hint_overrides:
             if "platform_specific_overrides" not in option:
                 option["platform_specific_overrides"] = {}
@@ -4572,6 +4910,37 @@ def _build_platform_options(
             )
         options[normalized_platform] = option
     return options
+
+
+async def _resolve_scheme_platform_options(
+    *,
+    job: Job,
+    render_output: Any,
+    platform_packaging: dict[str, dict[str, Any]],
+    creator_profile: dict[str, Any],
+    requested_platforms: list[str],
+    folder_path: str,
+    force_probe: bool = False,
+) -> dict[str, dict[str, Any]]:
+    base_plan = build_publication_plan(
+        job=job,
+        render_output=render_output,
+        platform_packaging=platform_packaging,
+        creator_profile=creator_profile,
+        requested_platforms=requested_platforms,
+        platform_options=None,
+        existing_attempts=[],
+    )
+    if not list(base_plan.get("targets") or []):
+        return {}
+    scheme = await generate_publication_scheme(
+        plan=base_plan,
+        creator_profile=creator_profile,
+        folder_path=str(folder_path or ""),
+        browser="chrome",
+        force_probe=bool(force_probe),
+    )
+    return _normalize_platform_options_payload(scheme.get("platform_options"))
 
 
 async def _collect_prepublish_draft_candidates(
@@ -4948,6 +5317,7 @@ def _build_creator_profile(
     *,
     publication_adapter: str,
     execution_mode: str,
+    attached_profile_binding: dict[str, Any] | None = None,
     allow_anonymous_profile: bool = False,
     platform_adapters: dict[str, str] | None = None,
     platform_execution_modes: dict[str, str] | None = None,
@@ -4955,6 +5325,10 @@ def _build_creator_profile(
     x_execution_mode: str | None = None,
 ) -> dict[str, Any]:
     credentials = []
+    normalized_profile_ids = [_normalize(item) for item in (profile_ids or []) if _normalize(item)]
+    shared_creator_profile_id = ""
+    if len(normalized_profile_ids) == 1 and not _looks_like_browser_profile_target(normalized_profile_ids[0]):
+        shared_creator_profile_id = normalized_profile_ids[0]
     normalized_adapter = _normalize_publication_adapter(publication_adapter)
     normalized_execution_mode = _normalize_publication_execution_mode(execution_mode)
     normalized_platform_adapters = {
@@ -4969,6 +5343,8 @@ def _build_creator_profile(
     }
     normalized_x_publication_adapter = _normalize_publication_adapter(x_publication_adapter or normalized_adapter)
     normalized_x_execution_mode = _normalize_publication_execution_mode(x_execution_mode or normalized_execution_mode)
+    normalized_attached_binding = normalize_publication_browser_binding(attached_profile_binding or {})
+    attached_binding_profile_id = str(normalized_attached_binding.get("profile_id") or "").strip()
     for index, platform in enumerate(platforms):
         if len(profile_ids) == 1:
             profile_id = profile_ids[0]
@@ -4981,6 +5357,13 @@ def _build_creator_profile(
                 profile_id = f"browser-agent:release-gate:{platform}"
             else:
                 profile_id = ""
+        browser_profile_id = profile_id if _looks_like_browser_profile_target(profile_id) else ""
+        browser_binding: dict[str, Any] = {}
+        if browser_profile_id:
+            if attached_binding_profile_id and attached_binding_profile_id == browser_profile_id:
+                browser_binding = dict(normalized_attached_binding)
+            else:
+                browser_binding = normalize_publication_browser_binding({"profile_id": browser_profile_id})
         platform_adapter = normalized_platform_adapters.get(platform, normalized_adapter)
         platform_execution_mode = normalized_platform_execution_modes.get(platform, normalized_execution_mode)
         if platform == "x" and x_publication_adapter:
@@ -4995,15 +5378,18 @@ def _build_creator_profile(
                 "platform": platform,
                 "account_label": f"{platform} release-gate",
                 "credential_ref": profile_id,
-                "browser_profile_id": profile_id,
+                "browser_profile_id": browser_profile_id,
+                "browser_binding": browser_binding,
                 "status": "logged_in",
                 "enabled": True,
                 "adapter": target_adapter,
                 "execution_mode": target_execution_mode,
             }
         )
+    if not shared_creator_profile_id and len(normalized_profile_ids) == 1 and _looks_like_browser_profile_target(normalized_profile_ids[0]):
+        shared_creator_profile_id = f"release-gate::{normalized_profile_ids[0]}"
     return {
-        "id": "release-gate-profile",
+        "id": shared_creator_profile_id or "release-gate-profile",
         "display_name": "Publication Real Release Gate",
         "creator_profile": {
             "publishing": {
@@ -5223,6 +5609,7 @@ def _evaluate_progress(
     auto_recover_codes: set[str] | None = None,
     recovery_quota_by_platform: dict[str, int] | None = None,
     max_recoveries_per_platform: int = 1,
+    fresh_draft_prepare_mode: bool = False,
 ) -> tuple[str, list[str], list[dict[str, Any]], bool, list[str], list[str]]:
     latest = _latest_attempt_per_platform(all_attempts)
     failures: list[str] = []
@@ -5293,7 +5680,7 @@ def _evaluate_progress(
         expected_adapter = _normalize(expected_entry.get("adapter"))
         expected_adapter = expected_adapter if expected_adapter else _normalize(attempt.get("adapter"))
         adapter = _normalize_publication_adapter(attempt.get("adapter"))
-        is_stable = _is_strict_verification_platform(platform)
+        is_stable = _is_strict_verification_platform(platform) and not fresh_draft_prepare_mode
         expected_request_fields = expected_entry.get("request_fields") if isinstance(expected_entry.get("request_fields"), dict) else {}
         request_contract_ready = bool(expected_request_fields) if is_stable else True
         actual_request_fields = _extract_request_payload_fields(request_payload)
@@ -5435,6 +5822,7 @@ def _evaluate_progress(
             "media_items_count",
             "copy_material",
             "cover_path",
+            "cover_slots",
             "category",
             "declaration",
         }
@@ -5602,6 +5990,7 @@ def _evaluate_progress(
         platform_ready[platform] = False
         platform_summaries.append(summary)
         is_x_link_share = platform == "x" and expected_adapter == "x_link_share"
+        require_public_url_for_success = False
         processing_snapshot_toleration = (
             _is_strict_verification_platform(platform)
             and status in {"processing", "submitted"}
@@ -5627,6 +6016,7 @@ def _evaluate_progress(
             "media_items_count",
             "copy_material",
             "cover_path",
+            "cover_slots",
             "category",
             "declaration",
         }
@@ -6012,7 +6402,9 @@ def _evaluate_progress(
             and not bound_receipt_verification_success
             and not verified_stop_before_final_publish_success
         ):
-            if (
+            if fresh_draft_prepare_mode and _is_release_in_progress_status(status):
+                pass
+            elif (
                 status == "submitted"
                 and (
                     "content_plan_fill_gaps_pending" in strict_contract_reasons
@@ -6046,6 +6438,7 @@ def _evaluate_progress(
         is_strict_ready_status = (
             bound_receipt_verification_success
             or verified_stop_before_final_publish_success
+            or (fresh_draft_prepare_mode and (_is_release_in_progress_status(status) or status == "draft_created"))
             or (status in expected_statuses and (not _is_release_in_progress_status(status) or status == "scheduled_pending"))
         )
         request_snapshot_plan_match_for_ready = bool(request_snapshot_plan_match)
@@ -6117,21 +6510,43 @@ def _build_publication_verification_payload(
     expected_platforms: list[str],
     expected_statuses: set[str],
     expected_platform_manifest: dict[str, dict[str, Any]],
+    fresh_draft_prepare_mode: bool = False,
 ) -> tuple[str, list[str], list[dict[str, Any]], list[dict[str, Any]]]:
     status, failures, platform_summaries, _, _, _ = _evaluate_progress(
         all_attempts,
         targets=expected_platforms,
         expected_statuses=expected_statuses,
         expected_platform_manifest=expected_platform_manifest,
+        fresh_draft_prepare_mode=fresh_draft_prepare_mode,
     )
     recommendations: list[dict[str, Any]] = []
     for summary in platform_summaries:
         platform = _normalize(summary.get("platform")).lower().replace("_", "-")
         if not platform:
             continue
-        is_stable = _is_strict_verification_platform(platform)
+        if (
+            fresh_draft_prepare_mode
+            and bool(summary.get("strict_contract_verified"))
+            and _normalize(summary.get("status")).lower() in {"draft_created", "processing"}
+        ):
+            continue
+        is_stable = _is_strict_verification_platform(platform) and not fresh_draft_prepare_mode
         recommendations.extend(_build_platform_recovery_recommendations(platform, summary, is_stable=is_stable))
     return status, failures, platform_summaries, recommendations
+
+
+def _use_single_attempt_execution_mode(*, fresh_draft_prepare_mode: bool) -> bool:
+    return bool(fresh_draft_prepare_mode)
+
+
+def _should_reinvoke_publication_worker(*, single_attempt_execution_mode: bool, worker_invocation_count: int) -> bool:
+    if not single_attempt_execution_mode:
+        return True
+    return worker_invocation_count <= 0
+
+
+def _should_attempt_recovery_submission(*, single_attempt_execution_mode: bool) -> bool:
+    return not single_attempt_execution_mode
 
 
 def _build_release_gate_recovery_index(
@@ -6614,6 +7029,7 @@ async def _run_real_publish_gate(
     content_suffix: str,
     platform_packaging: dict[str, dict[str, Any]] | None = None,
     platform_packaging_scope: dict[str, list[str]] | None = None,
+    folder_path: str = "",
     recovery_knowledge_base_path: str = DEFAULT_RECOVERY_KNOWLEDGE_BASE_PATH,
     worker_call_timeout: int = 60,
 ) -> dict[str, Any]:
@@ -6799,62 +7215,70 @@ async def _run_real_publish_gate(
             or [f"发布文案缺失：未提供以下平台的发布文案: {', '.join(missing_platform_packaging)}"],
             "job_id": None,
         }
-    duplicate_history_gate = await build_duplicate_history_gate_report(
-        material_payload=normalized_packaging,
-        media_path=media_path,
-        target_platforms=requested_platforms,
-        target_profile_ids=target_profile_ids,
-        allow_republish=allow_republish,
-        allow_material_creator_profile_fallback=bool(target_profile_ids),
-    )
-    if duplicate_history_gate.get("status") == "failed":
-        _persist_recovery_knowledge_base(recovery_knowledge_base_path, recovery_knowledge_base)
-        return {
-            "generated_at": _now(),
-            "status": "failed",
-            "plan_contract_checks": all_plan_contract_checks,
-            "recovery_knowledge_base": _summarize_recovery_knowledge_base(recovery_knowledge_base),
-            "expected_statuses": sorted(expected_statuses),
-            "visibility_mode": _normalize(visibility_mode) or "public",
-            "browser_agent_base_url": browser_agent_base_url,
-            "cdp_url": cdp_url,
-            "media_path": str(media_path),
-            "platforms": effective_platforms,
-            "requested_platforms": requested_platforms,
-            "deduped_platforms": deduped_platforms,
-            "stale_draft_platforms": sorted(stale_draft_platforms),
-            "stale_refresh_platforms": sorted(stale_refresh_platforms),
-            "prepublish_draft_signals": prepublish_draft_signals,
-            "prepublish_recovery_events": prepublish_recovery_events,
-            "post_x_status": post_x_status,
-            "target_profile_ids": target_profile_ids,
-            "agent_ready": {
-                "ready": True,
-                "code": "duplicate_history_gate_failed",
-                "message": "命中历史重复发布风险，真实发布在入口处被阻断。",
-            },
-            "live_check": {
-                "cdp": {"connected": False},
-                "platform_checks": {},
-            },
-"plan": _build_real_release_gate_plan_summary(
-                publish_ready=False,
-                note="duplicate_history_gate_failed",
-            ),
-            "publication_verification": _build_terminal_publication_verification(
-                note="duplicate_history_gate_failed",
-                plan_contract_checks=all_plan_contract_checks,
-                failures=list(duplicate_history_gate.get("failures") or []),
-                duplicate_history_gate=duplicate_history_gate,
-            ),
-            "duplicate_history_gate": duplicate_history_gate,
-            "recovery_events": [],
-            "recovery_signals": [],
-            "attempts": [],
-            "executions": [],
-            "failures": list(duplicate_history_gate.get("failures") or []),
-            "job_id": None,
-        }
+    fresh_draft_prepare_mode = _is_fresh_draft_prepare_mode(expected_statuses, visibility_mode)
+    duplicate_history_gate: dict[str, Any] = {
+        "status": "skipped" if fresh_draft_prepare_mode else "not_run",
+        "failures": [],
+        "groups": [],
+        "note": "fresh_draft_prepare_mode_skips_duplicate_history_gate" if fresh_draft_prepare_mode else "",
+    }
+    if not fresh_draft_prepare_mode:
+        duplicate_history_gate = await build_duplicate_history_gate_report(
+            material_payload=normalized_packaging,
+            media_path=media_path,
+            target_platforms=requested_platforms,
+            target_profile_ids=target_profile_ids,
+            allow_republish=allow_republish,
+            allow_material_creator_profile_fallback=bool(target_profile_ids),
+        )
+        if duplicate_history_gate.get("status") == "failed":
+            _persist_recovery_knowledge_base(recovery_knowledge_base_path, recovery_knowledge_base)
+            return {
+                "generated_at": _now(),
+                "status": "failed",
+                "plan_contract_checks": all_plan_contract_checks,
+                "recovery_knowledge_base": _summarize_recovery_knowledge_base(recovery_knowledge_base),
+                "expected_statuses": sorted(expected_statuses),
+                "visibility_mode": _normalize(visibility_mode) or "public",
+                "browser_agent_base_url": browser_agent_base_url,
+                "cdp_url": cdp_url,
+                "media_path": str(media_path),
+                "platforms": effective_platforms,
+                "requested_platforms": requested_platforms,
+                "deduped_platforms": deduped_platforms,
+                "stale_draft_platforms": sorted(stale_draft_platforms),
+                "stale_refresh_platforms": sorted(stale_refresh_platforms),
+                "prepublish_draft_signals": prepublish_draft_signals,
+                "prepublish_recovery_events": prepublish_recovery_events,
+                "post_x_status": post_x_status,
+                "target_profile_ids": target_profile_ids,
+                "agent_ready": {
+                    "ready": True,
+                    "code": "duplicate_history_gate_failed",
+                    "message": "命中历史重复发布风险，真实发布在入口处被阻断。",
+                },
+                "live_check": {
+                    "cdp": {"connected": False},
+                    "platform_checks": {},
+                },
+    "plan": _build_real_release_gate_plan_summary(
+                    publish_ready=False,
+                    note="duplicate_history_gate_failed",
+                ),
+                "publication_verification": _build_terminal_publication_verification(
+                    note="duplicate_history_gate_failed",
+                    plan_contract_checks=all_plan_contract_checks,
+                    failures=list(duplicate_history_gate.get("failures") or []),
+                    duplicate_history_gate=duplicate_history_gate,
+                ),
+                "duplicate_history_gate": duplicate_history_gate,
+                "recovery_events": [],
+                "recovery_signals": [],
+                "attempts": [],
+                "executions": [],
+                "failures": list(duplicate_history_gate.get("failures") or []),
+                "job_id": None,
+            }
     preflight_expected_signatures = {
         platform: _normalize(entry.get("content_signature"))
         for platform, entry in preflight_manifest.items()
@@ -6864,83 +7288,84 @@ async def _run_real_publish_gate(
     session_factory = get_session_factory()
 
     async with get_session_factory()() as dedupe_session:
-        prepublish_draft_signals = await _collect_prepublish_draft_candidates(
-            session=dedupe_session,
-            media_path=media_path,
-            platforms=effective_platforms,
-            expected_platform_manifest=preflight_manifest,
-            stale_active_ttl_seconds=stale_active_ttl_seconds,
-        )
-        for platform, signal in prepublish_draft_signals.items():
-            prepublish_signature, prepublish_kb_entry, attempt_count = _record_prepublish_recovery_signal(
-                recovery_knowledge_base,
-                platform=platform,
-                signal=signal,
+        if not fresh_draft_prepare_mode:
+            prepublish_draft_signals = await _collect_prepublish_draft_candidates(
+                session=dedupe_session,
+                media_path=media_path,
+                platforms=effective_platforms,
+                expected_platform_manifest=preflight_manifest,
+                stale_active_ttl_seconds=stale_active_ttl_seconds,
             )
-            signal["signature"] = prepublish_signature
-            signal["signature_text"] = _normalize(prepublish_kb_entry.get("signature_text"))
-            signal["history_count"] = int(attempt_count or 0)
-            signal["kb_count"] = int(prepublish_kb_entry.get("count") or 0)
-            adaptive_reasons: list[str] = []
-            if attempt_count > 1 and not bool(signal.get("force_publish_page_refresh")):
-                signal["force_publish_page_refresh"] = True
-                adaptive_reasons.append("prepublish_history_count>1")
-            if bool(signal.get("clear_draft_context")):
-                stale_draft_platforms.add(platform)
-            if bool(signal.get("force_publish_page_refresh")):
-                stale_refresh_platforms.add(platform)
-            prepublish_recovery_events.append(
-                {
-                    "timestamp": _now(),
-                    "platform": platform,
-                    "signature": prepublish_signature,
-                    "signature_text": _normalize(prepublish_kb_entry.get("signature_text")),
-                    "history_count": int(attempt_count or 0),
-                    "attempt_count": int(prepublish_kb_entry.get("count") or 0),
-                    "kb_entry_id": signal.get("signature") or prepublish_signature,
-                    "reasons": list(signal.get("reasons") or []),
-                    "error_code": _normalize(signal.get("error_code")),
-                    "status": _normalize(signal.get("status")),
-                    "snapshot_source": _normalize(signal.get("snapshot_source")),
-                    "snapshot_count": _to_non_negative_int(signal.get("snapshot_count") or 0),
-                    "clear_draft_context": bool(signal.get("clear_draft_context")),
-                    "force_publish_page_refresh": bool(signal.get("force_publish_page_refresh")),
-                    "verify_media_upload": bool(signal.get("verify_media_upload")),
-                    "wait_for_publish_confirmation": bool(signal.get("wait_for_publish_confirmation")),
-                    "capture_response_timeout_ms": _to_non_negative_int(signal.get("capture_response_timeout_ms")),
-                    "adaptive_reasons": adaptive_reasons,
-                }
+            for platform, signal in prepublish_draft_signals.items():
+                prepublish_signature, prepublish_kb_entry, attempt_count = _record_prepublish_recovery_signal(
+                    recovery_knowledge_base,
+                    platform=platform,
+                    signal=signal,
+                )
+                signal["signature"] = prepublish_signature
+                signal["signature_text"] = _normalize(prepublish_kb_entry.get("signature_text"))
+                signal["history_count"] = int(attempt_count or 0)
+                signal["kb_count"] = int(prepublish_kb_entry.get("count") or 0)
+                adaptive_reasons: list[str] = []
+                if attempt_count > 1 and not bool(signal.get("force_publish_page_refresh")):
+                    signal["force_publish_page_refresh"] = True
+                    adaptive_reasons.append("prepublish_history_count>1")
+                if bool(signal.get("clear_draft_context")):
+                    stale_draft_platforms.add(platform)
+                if bool(signal.get("force_publish_page_refresh")):
+                    stale_refresh_platforms.add(platform)
+                prepublish_recovery_events.append(
+                    {
+                        "timestamp": _now(),
+                        "platform": platform,
+                        "signature": prepublish_signature,
+                        "signature_text": _normalize(prepublish_kb_entry.get("signature_text")),
+                        "history_count": int(attempt_count or 0),
+                        "attempt_count": int(prepublish_kb_entry.get("count") or 0),
+                        "kb_entry_id": signal.get("signature") or prepublish_signature,
+                        "reasons": list(signal.get("reasons") or []),
+                        "error_code": _normalize(signal.get("error_code")),
+                        "status": _normalize(signal.get("status")),
+                        "snapshot_source": _normalize(signal.get("snapshot_source")),
+                        "snapshot_count": _to_non_negative_int(signal.get("snapshot_count") or 0),
+                        "clear_draft_context": bool(signal.get("clear_draft_context")),
+                        "force_publish_page_refresh": bool(signal.get("force_publish_page_refresh")),
+                        "verify_media_upload": bool(signal.get("verify_media_upload")),
+                        "wait_for_publish_confirmation": bool(signal.get("wait_for_publish_confirmation")),
+                        "capture_response_timeout_ms": _to_non_negative_int(signal.get("capture_response_timeout_ms")),
+                        "adaptive_reasons": adaptive_reasons,
+                    }
+                )
+            _stale_runtime_context_platforms, runtime_context_reasons = await _platforms_with_recent_failure_context(
+                session=dedupe_session,
+                media_path=media_path,
+                platforms=effective_platforms,
+                stale_active_ttl_seconds=stale_active_ttl_seconds,
             )
-        _stale_runtime_context_platforms, runtime_context_reasons = await _platforms_with_recent_failure_context(
-            session=dedupe_session,
-            media_path=media_path,
-            platforms=effective_platforms,
-            stale_active_ttl_seconds=stale_active_ttl_seconds,
-        )
-        stale_refresh_platforms.update(_stale_runtime_context_platforms)
-        for _platform, _reasons in sorted(runtime_context_reasons.items()):
-            runtime_flags = _runtime_context_recovery_flags(_reasons)
-            if bool(runtime_flags.get("clear_draft_context")):
-                stale_draft_platforms.add(_platform)
-            prepublish_recovery_events.append(
-                {
-                    "timestamp": _now(),
-                    "platform": _platform,
-                    "signature": "",
-                    "signature_text": "",
-                    "history_count": 0,
-                    "attempt_count": 0,
-                    "kb_entry_id": "",
-                    "reasons": [f"runtime_context:{item}" for item in sorted(set(_normalize(item) for item in _reasons if _normalize(item)))],
-                    "error_code": "",
-                    "status": "runtime_context",
-                    "snapshot_source": "runtime_db",
-                    "snapshot_count": 0,
-                    "clear_draft_context": bool(runtime_flags.get("clear_draft_context")),
-                    "force_publish_page_refresh": bool(runtime_flags.get("force_publish_page_refresh")),
-                    "adaptive_reasons": [f"runtime_context_detected:{_platform}"],
-                }
-            )
+            stale_refresh_platforms.update(_stale_runtime_context_platforms)
+            for _platform, _reasons in sorted(runtime_context_reasons.items()):
+                runtime_flags = _runtime_context_recovery_flags(_reasons)
+                if bool(runtime_flags.get("clear_draft_context")):
+                    stale_draft_platforms.add(_platform)
+                prepublish_recovery_events.append(
+                    {
+                        "timestamp": _now(),
+                        "platform": _platform,
+                        "signature": "",
+                        "signature_text": "",
+                        "history_count": 0,
+                        "attempt_count": 0,
+                        "kb_entry_id": "",
+                        "reasons": [f"runtime_context:{item}" for item in sorted(set(_normalize(item) for item in _reasons if _normalize(item)))],
+                        "error_code": "",
+                        "status": "runtime_context",
+                        "snapshot_source": "runtime_db",
+                        "snapshot_count": 0,
+                        "clear_draft_context": bool(runtime_flags.get("clear_draft_context")),
+                        "force_publish_page_refresh": bool(runtime_flags.get("force_publish_page_refresh")),
+                        "adaptive_reasons": [f"runtime_context_detected:{_platform}"],
+                    }
+                )
         prepublish_platform_recovery_hints: dict[str, dict[str, Any]] = {}
         for platform, signal in prepublish_draft_signals.items():
             platform_hint: dict[str, Any] = {
@@ -6954,7 +7379,7 @@ async def _run_real_publish_gate(
                 platform_hint["capture_response_timeout_ms"] = timeout
             if any(platform_hint.values()):
                 prepublish_platform_recovery_hints[platform] = {key: value for key, value in platform_hint.items() if _normalize(key) and value not in (0, "", False)}
-        if not allow_republish:
+        if not allow_republish and not fresh_draft_prepare_mode:
             dedupe_targets = [
                 _platform
                 for _platform in effective_platforms
@@ -7025,23 +7450,28 @@ async def _run_real_publish_gate(
         target_platforms=effective_platforms,
         target_profile_ids=target_profile_ids,
         request_timeout_sec=readiness_timeout,
+        require_live_publish=not fresh_draft_prepare_mode,
     )
 
-    live_check = await _run_checks(
-        browser_agent_base_url=browser_agent_base_url,
-        auth_token=auth_token,
-        cdp_url=cdp_url,
-        platforms=effective_platforms,
-        target_profile_ids=target_profile_ids,
-        request_timeout_sec=readiness_timeout,
-    )
+    if fresh_draft_prepare_mode:
+        live_check = _build_fresh_draft_prepare_live_check(agent_ready)
+    else:
+        live_check = await _run_checks(
+            browser_agent_base_url=browser_agent_base_url,
+            auth_token=auth_token,
+            cdp_url=cdp_url,
+            platforms=effective_platforms,
+            target_profile_ids=target_profile_ids,
+            request_timeout_sec=readiness_timeout,
+        )
 
     preflight_failures: list[str] = []
     if not bool(agent_ready.get("ready")):
         preflight_failures.append(f"browser-agent 未就绪: {agent_ready.get('code')} {agent_ready.get('message')}")
+    preflight_failures.extend(_validate_authoritative_publication_browser_runtime(agent_ready))
     if not bool(live_check.get("cdp", {}).get("connected")):
         preflight_failures.append("CDP 不可达")
-    if require_tabs:
+    if require_tabs and not fresh_draft_prepare_mode:
         platform_checks = live_check.get("cdp", {}).get("platform_checks") or {}
         missing = [platform for platform, item in platform_checks.items() if (item or {}).get("status") != "found"]
         if missing:
@@ -7116,6 +7546,55 @@ async def _run_real_publish_gate(
                 batch_execution_mode = "link_share" if use_x_adapter else execution_mode
                 x_effective_mode = normalized_x_mode if use_x_adapter else None
                 canonical_media_for_batch = _canonical_media_path(media_path) or _normalize(media_path)
+                platform_packaging = _build_platform_packaging(
+                    platforms_for_batch,
+                    content_suffix=content_suffix,
+                    media_path=media_path,
+                    platform_packaging=normalized_packaging,
+                    allow_prepare_without_publish_ready=fresh_draft_prepare_mode,
+                )
+                creator_profile = _build_creator_profile(
+                    platforms_for_batch,
+                    target_profile_ids,
+                    publication_adapter=batch_publication_adapter,
+                    execution_mode=batch_execution_mode,
+                    attached_profile_binding=agent_ready.get("attached_profile_binding") if isinstance(agent_ready, dict) else None,
+                    allow_anonymous_profile=allow_anonymous_profile,
+                    platform_adapters=platform_adapters,
+                    platform_execution_modes=normalized_platform_execution_modes,
+                    x_publication_adapter=batch_publication_adapter if use_x_adapter else None,
+                    x_execution_mode=x_effective_mode,
+                )
+                scheme_platform_options = {}
+                if not fresh_draft_prepare_mode:
+                    scheme_platform_options = await _resolve_scheme_platform_options(
+                        job=job,
+                        render_output=SimpleNamespace(output_path=str(media_path)),
+                        platform_packaging=platform_packaging,
+                        creator_profile=creator_profile,
+                        requested_platforms=platforms_for_batch,
+                        folder_path=folder_path,
+                        force_probe=bool(
+                            set(platforms_for_batch)
+                            & (
+                                set(stale_draft_platforms)
+                                | set(stale_refresh_platforms)
+                                | set(prepublish_platform_recovery_hints.keys())
+                            )
+                        ),
+                    )
+                effective_platform_options = _build_platform_options(
+                    platforms_for_batch,
+                    visibility_mode=visibility_mode,
+                    x_share_link=x_share_link,
+                    platform_packaging=normalized_packaging,
+                    seed_platform_options=scheme_platform_options,
+                    stale_draft_platforms=stale_draft_platforms,
+                    force_refresh_platforms=stale_refresh_platforms,
+                    platform_recovery_hints=prepublish_platform_recovery_hints,
+                    allow_republish=allow_republish,
+                    fresh_draft_prepare_mode=fresh_draft_prepare_mode,
+                )
                 batch_manifest = _build_expected_platform_manifest(
                     platforms_for_batch,
                     title=_normalize(Path(media_path).stem or "RoughCut发布素材"),
@@ -7125,42 +7604,18 @@ async def _run_real_publish_gate(
                     visibility_mode=visibility_mode,
                     x_share_link=x_share_link,
                     x_link_share_mode=use_x_adapter,
-                platform_packaging=normalized_packaging,
-                platform_adapters=platform_adapters,
-            )
-                all_expected_platform_manifests.append(batch_manifest)
-                platform_packaging = _build_platform_packaging(
-                    platforms_for_batch,
-                    content_suffix=content_suffix,
-                    media_path=media_path,
                     platform_packaging=normalized_packaging,
+                    platform_adapters=platform_adapters,
+                    effective_platform_options=effective_platform_options,
                 )
+                all_expected_platform_manifests.append(batch_manifest)
                 plan = build_publication_plan(
                     job=job,
                     render_output=SimpleNamespace(output_path=str(media_path)),
                     platform_packaging=platform_packaging,
-                    creator_profile=_build_creator_profile(
-                        platforms_for_batch,
-                        target_profile_ids,
-                        publication_adapter=batch_publication_adapter,
-                        execution_mode=batch_execution_mode,
-                        allow_anonymous_profile=allow_anonymous_profile,
-                        platform_adapters=platform_adapters,
-                        platform_execution_modes=normalized_platform_execution_modes,
-                        x_publication_adapter=batch_publication_adapter if use_x_adapter else None,
-                        x_execution_mode=x_effective_mode,
-                    ),
+                    creator_profile=creator_profile,
                     requested_platforms=platforms_for_batch,
-                    platform_options=_build_platform_options(
-                        platforms_for_batch,
-                        visibility_mode=visibility_mode,
-                        x_share_link=x_share_link,
-                        platform_packaging=normalized_packaging,
-                        stale_draft_platforms=stale_draft_platforms,
-                        force_refresh_platforms=stale_refresh_platforms,
-                        platform_recovery_hints=prepublish_platform_recovery_hints,
-                        allow_republish=allow_republish,
-                    ),
+                    platform_options=effective_platform_options,
                     existing_attempts=[],
                 )
                 if not publication_plan_is_publishable(plan):
@@ -7194,6 +7649,25 @@ async def _run_real_publish_gate(
                     item for item in (submit_result.get("skipped_targets") or [])
                     if isinstance(item, dict)
                 ]
+                active_rebind_targets = _build_active_attempt_receipt_rebind_targets(
+                    plan,
+                    skipped_targets,
+                )
+                if active_rebind_targets:
+                    active_rebind_plan = {**plan, "targets": active_rebind_targets}
+                    active_rebind_submit = await submit_publication_attempts(session, active_rebind_plan)
+                    active_rebind_created = [
+                        item for item in (active_rebind_submit.get("created_attempts") or [])
+                        if isinstance(item, dict)
+                    ]
+                    if active_rebind_created:
+                        created_attempts.extend(active_rebind_created)
+                    active_rebind_skipped = [
+                        item for item in (active_rebind_submit.get("skipped_targets") or [])
+                        if isinstance(item, dict)
+                    ]
+                    if active_rebind_skipped:
+                        skipped_targets.extend(active_rebind_skipped)
                 if not created_attempts:
                     return (
                         "failed",
@@ -7241,35 +7715,50 @@ async def _run_real_publish_gate(
                 if max_stagnant_rounds < 4:
                     max_stagnant_rounds = 4
                 worker_call_timeout_seconds = max(30, int(worker_call_timeout))
+                single_attempt_execution_mode = _use_single_attempt_execution_mode(
+                    fresh_draft_prepare_mode=fresh_draft_prepare_mode
+                )
+                worker_invocation_count = 0
 
                 start_ts = datetime.now(ZoneInfo("Asia/Shanghai")).timestamp()
                 deadline_ts = start_ts + max(30, int(max_wait_seconds))
                 while datetime.now(ZoneInfo("Asia/Shanghai")).timestamp() < deadline_ts:
                     worker_timed_out = False
-                    try:
-                        worker_result = await asyncio.wait_for(
-                            run_publication_worker_once(
-                                session,
-                                browser_agent_base_url=browser_agent_base_url,
-                                auth_token=auth_token,
-                                worker_id="publication-release-gate-real",
-                                limit=max(1, len(created_platforms_for_batch)),
-                                lease_seconds=max(60, int(timeout) * 5),
-                                request_timeout_sec=timeout,
-                                target_content_ids=[created_job_id],
-                            ),
-                            timeout=worker_call_timeout_seconds,
-                        )
-                    except asyncio.TimeoutError:
-                        worker_timed_out = True
-                        worker_timeout_msg = f"发布执行循环超时（{worker_call_timeout_seconds}s），平台={','.join(platforms_for_batch)}"
+                    if _should_reinvoke_publication_worker(
+                        single_attempt_execution_mode=single_attempt_execution_mode,
+                        worker_invocation_count=worker_invocation_count,
+                    ):
+                        try:
+                            worker_result = await asyncio.wait_for(
+                                run_publication_worker_once(
+                                    session,
+                                    browser_agent_base_url=browser_agent_base_url,
+                                    auth_token=auth_token,
+                                    worker_id="publication-release-gate-real",
+                                    limit=max(1, len(created_platforms_for_batch)),
+                                    lease_seconds=max(60, int(timeout) * 5),
+                                    request_timeout_sec=timeout,
+                                    target_content_ids=[created_job_id],
+                                ),
+                                timeout=worker_call_timeout_seconds,
+                            )
+                            worker_invocation_count += 1
+                        except asyncio.TimeoutError:
+                            worker_timed_out = True
+                            worker_timeout_msg = f"发布执行循环超时（{worker_call_timeout_seconds}s），平台={','.join(platforms_for_batch)}"
+                            worker_result = {
+                                "status": "timeout",
+                                "code": "worker_call_timeout",
+                                "message": f"发布执行循环超时（{worker_call_timeout_seconds}s）",
+                            }
+                            if auto_recover_codes and worker_timeout_msg not in recoverable_failures:
+                                recoverable_failures.append(worker_timeout_msg)
+                    else:
                         worker_result = {
-                            "status": "timeout",
-                            "code": "worker_call_timeout",
-                            "message": f"发布执行循环超时（{worker_call_timeout_seconds}s）",
+                            "status": "observe_only",
+                            "code": "single_attempt_observe_only",
+                            "message": "fresh-draft/current-page 模式只允许一次 worker 触发，后续仅观察当前 attempt。",
                         }
-                        if auto_recover_codes and worker_timeout_msg not in recoverable_failures:
-                            recoverable_failures.append(worker_timeout_msg)
                     await session.commit()
                     batch_attempts = await list_publication_attempts(session, job_id=created_job_id)
                     status, cycle_failures, platform_summaries, terminal_failed, recoverable_platforms, cycle_recoverable_failures = _evaluate_progress(
@@ -7363,7 +7852,13 @@ async def _run_real_publish_gate(
                         recoverable_failures.extend(cycle_recoverable_failures)
                     if terminal_failed or status == "passed":
                         break
-                    if auto_recover_codes and (recoverable_platforms or stagnant_platforms):
+                    if (
+                        _should_attempt_recovery_submission(
+                            single_attempt_execution_mode=single_attempt_execution_mode
+                        )
+                        and auto_recover_codes
+                        and (recoverable_platforms or stagnant_platforms)
+                    ):
                         recoverable_platform_set = set(recoverable_platforms) | stagnant_platforms
                         recovery_targets = []
                         recovery_rounds: dict[str, int] = {}
@@ -7647,6 +8142,7 @@ async def _run_real_publish_gate(
                     auto_recover_codes=auto_recover_codes,
                     recovery_quota_by_platform=recovery_quota_by_platform,
                     max_recoveries_per_platform=max_recoveries_per_platform,
+                    fresh_draft_prepare_mode=fresh_draft_prepare_mode,
                 )
                 failures.extend(final_failures)
                 if final_recoverable_failures:
@@ -7713,7 +8209,11 @@ async def _run_real_publish_gate(
                     all_created_attempts.extend(x_created_attempt_ids)
             if final_status == "passed" and post_x_status != "not_executed" and post_x_status != "passed":
                 all_failures.append("x post-check 未通过；主流程稳定平台发布通过不受影响。")
-            strict_verification_platforms = [platform for platform in effective_platforms if _is_strict_verification_platform(platform)]
+            strict_verification_platforms = (
+                list(effective_platforms)
+                if fresh_draft_prepare_mode
+                else [platform for platform in effective_platforms if _is_strict_verification_platform(platform)]
+            )
             if not strict_verification_platforms:
                 strict_verification_platforms = list(effective_platforms)
             all_expected_manifest: dict[str, dict[str, Any]] = {}
@@ -7724,12 +8224,16 @@ async def _run_real_publish_gate(
                 expected_platforms=strict_verification_platforms,
                 expected_statuses=expected_statuses,
                 expected_platform_manifest=all_expected_manifest,
+                fresh_draft_prepare_mode=fresh_draft_prepare_mode,
             )
             discovery_recommendations = await _build_release_gate_discovery_recommendations(final_platform_summaries)
             strict_contract_ready_platforms = [
                 _normalize(item.get("platform"))
                 for item in final_platform_summaries
-                if _is_strict_verification_platform(_normalize(item.get("platform")))
+                if (
+                    fresh_draft_prepare_mode
+                    or _is_strict_verification_platform(_normalize(item.get("platform")))
+                )
                 and bool(item.get("strict_contract_verified"))
             ]
             strict_contract_verified_platforms = [
@@ -7749,14 +8253,24 @@ async def _run_real_publish_gate(
             if final_status == "passed" and verification_status != "passed":
                 final_status = verification_status
 
+            strict_required_statuses = (
+                sorted(set(expected_statuses) | {"processing"})
+                if fresh_draft_prepare_mode
+                else sorted(STRICT_VERIFICATION_SUCCESS_STATUSES)
+            )
+            strict_rule_text = (
+                "fresh-draft 准备模式只要求进入平台新稿上传/编辑流；允许 draft_created 或 processing，不要求公开终态。"
+                if fresh_draft_prepare_mode
+                else "稳定平台需达到公开终态（published/scheduled_pending），计划字段与实际填充字段需逐项一致，且字段快照来源必须可信。"
+            )
             final_report = {
                 "generated_at": _now(),
                 "status": final_status,
                 "final_status": final_status,
                 "publication_verification": {
                     "strict_platforms": strict_verification_platforms,
-                    "strict_required_statuses": sorted(STRICT_VERIFICATION_SUCCESS_STATUSES),
-                    "strict_rule": "稳定平台需达到公开终态（published/scheduled_pending），计划字段与实际填充字段需逐项一致，且字段快照来源必须可信。",
+                    "strict_required_statuses": strict_required_statuses,
+                    "strict_rule": strict_rule_text,
                     "discovery_recommendations": discovery_recommendations,
                     "plan_contract_checks": all_plan_contract_checks,
                     "platform_manifest": all_expected_manifest,
@@ -7766,7 +8280,10 @@ async def _run_real_publish_gate(
                         _normalize(item.get("platform"))
                         for item in final_platform_summaries
                         if _normalize(item.get("platform"))
-                        and _is_strict_verification_platform(_normalize(item.get("platform")))
+                        and (
+                            fresh_draft_prepare_mode
+                            or _is_strict_verification_platform(_normalize(item.get("platform")))
+                        )
                         and bool(item.get("strict_contract_verified"))
                     ],
                     "strict_contract_verified_platforms": strict_contract_verified_platforms,
@@ -7989,6 +8506,16 @@ async def main() -> int:
         return 2
     platform_adapters = _parse_platform_adapter_overrides(args.platform_adapter or [])
     platform_execution_modes = _parse_platform_execution_mode_overrides(args.platform_execution_mode or [])
+    folder_path = ""
+    for raw_candidate in (_normalize(getattr(args, "material_json", "")), _normalize(args.platform_packaging)):
+        if not raw_candidate:
+            continue
+        try:
+            candidate_path = Path(raw_candidate).expanduser()
+            folder_path = str((candidate_path.parent if candidate_path.suffix else candidate_path).resolve())
+            break
+        except OSError:
+            continue
 
     report = await _run_real_publish_gate(
         browser_agent_base_url=browser_agent_base_url,
@@ -8014,6 +8541,7 @@ async def main() -> int:
         content_suffix=_suffix_for_release_gate(_normalize(args.content_suffix), media_path),
         platform_packaging=platform_packaging,
         platform_packaging_scope=platform_packaging_scope,
+        folder_path=folder_path,
         auto_recover_codes=_normalize_error_codes(args.auto_recover_codes) if args.auto_recover else set(),
         max_recoveries_per_platform=max(1, int(args.auto_recover_max_rounds or 1)),
         recovery_knowledge_base_path=_normalize(args.recovery_knowledge_base),

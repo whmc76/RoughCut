@@ -3,7 +3,11 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from roughcut.edit.low_signal_text import compact_subtitle_text, is_low_signal_subtitle_text, subtitle_signal_score
+from roughcut.edit.low_signal_text import (
+    compact_subtitle_text,
+    low_signal_subtitle_is_contextually_isolated,
+    subtitle_signal_score,
+)
 from roughcut.edit.smart_cut_rules import normalize_smart_cut_rules_payload
 from roughcut.review.video_understanding import normalize_video_understanding_segment_hints
 
@@ -12,6 +16,8 @@ _TERM_SPLIT_PATTERN = re.compile(r"[,，、;；\s]+")
 _BOUNDARY_CHARS = set(" \t\r\n,，、.。!?！？；;：:\"'“”‘’()（）[]【】<>《》")
 _WORD_BOUNDARY_GUARD_SEC = 0.16
 _VISUAL_SHOWCASE_TEXT_RE = re.compile(r"(看到|看一下|来看|镜头|画面|展示|演示|操作|实操|特写|细节|同框|对比|手电|刀|上手|打开|合上)")
+_HESITATION_FILLERS = {"嗯", "呃", "额", "呃呃", "嗯嗯"}
+_SINGLE_PARTICLE_FILLERS = {"啊", "呀", "呢", "吧", "嘛", "哦", "喔", "哎", "唉", "诶", "欸", "嗯", "呃", "额"}
 SMART_CUT_RULE_CANDIDATE_STAGE = "manual_editor_smart_cut_rules"
 _MULTIMODAL_REVIEW_POSITIVE_ROLES = {"comparison", "detail_showcase", "demo", "hook", "cta", "transition"}
 
@@ -28,6 +34,48 @@ def _subtitle_text(item: dict[str, Any]) -> str:
         if text:
             return text
     return ""
+
+
+def _subtitle_semantic_text(item: dict[str, Any]) -> str:
+    for key in ("text_final", "timing_text", "text_norm", "transcript_text", "text_raw"):
+        text = str(item.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _subtitle_spoken_rule_text(item: dict[str, Any]) -> str:
+    for key in ("transcript_text", "text_raw", "text_norm", "text_final"):
+        text = str(item.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _timed_chars(item: dict[str, Any]) -> list[dict[str, Any]]:
+    chars: list[dict[str, Any]] = []
+    for unit in _timed_units(item):
+        text = str(unit.get("text") or "")
+        tokens = list(text)
+        if not tokens:
+            continue
+        start = float(unit["start"])
+        end = float(unit["end"])
+        duration = max(0.001, end - start)
+        for index, char in enumerate(tokens):
+            chars.append(
+                {
+                    "text": char,
+                    "start": round(start + duration * (index / len(tokens)), 3),
+                    "end": round(start + duration * ((index + 1) / len(tokens)), 3),
+                }
+            )
+    return sorted(chars, key=lambda char: (float(char["start"]), float(char["end"])))
+
+
+def _subtitle_timing_supported_rule_text(item: dict[str, Any]) -> str:
+    timed_text = "".join(str(char.get("text") or "") for char in _timed_chars(item)).strip()
+    return timed_text
 
 
 def _subtitle_range(item: dict[str, Any]) -> tuple[float, float]:
@@ -66,6 +114,18 @@ def _char_range_to_time(item: dict[str, Any], text: str, start_char: int, end_ch
     start_time, end_time = _subtitle_range(item)
     if end_time <= start_time or not text:
         return None
+    timed_chars = _timed_chars(item)
+    text_chars = list(text)
+    if timed_chars and len(timed_chars) == len(text_chars):
+        clamped_start = min(max(0, start_char), len(text_chars))
+        clamped_end = min(max(clamped_start, end_char), len(text_chars))
+        if clamped_end > clamped_start:
+            start_token = timed_chars[clamped_start]
+            end_token = timed_chars[clamped_end - 1]
+            mapped_start = float(start_token["start"])
+            mapped_end = float(end_token["end"])
+            if mapped_end > mapped_start:
+                return round(mapped_start, 3), round(mapped_end, 3)
     total_units = max(1, len(text))
     clamped_start = min(max(0, start_char), len(text))
     clamped_end = min(max(clamped_start, end_char), len(text))
@@ -92,14 +152,25 @@ def _iter_term_matches(text: str, needle: str) -> list[tuple[int, int]]:
     return ranges
 
 
-def _classify_filler_mode(text: str, start_char: int, end_char: int) -> str:
+def _classify_filler_mode(text: str, start_char: int, end_char: int, term: str) -> str | None:
     previous = text[start_char - 1] if start_char > 0 else ""
     following = text[end_char] if end_char < len(text) else ""
     previous_boundary = start_char == 0 or previous in _BOUNDARY_CHARS
     following_boundary = end_char >= len(text) or following in _BOUNDARY_CHARS
-    if start_char == 0 or end_char >= len(text):
+    single_particle = term in _SINGLE_PARTICLE_FILLERS
+    hesitation = term in _HESITATION_FILLERS
+    if previous_boundary and following_boundary:
         return "standalone"
-    return "standalone" if previous_boundary and following_boundary else "continuous"
+    if start_char == 0:
+        return "sentence_head" if single_particle or hesitation else "standalone"
+    if end_char >= len(text):
+        return "sentence_tail" if single_particle or hesitation else "standalone"
+    if hesitation:
+        if previous_boundary:
+            return "sentence_head"
+        if following_boundary:
+            return "sentence_tail"
+    return None
 
 
 def _smart_cut_meaningful_text(text: str, fillers: list[str]) -> str:
@@ -427,21 +498,28 @@ def build_smart_cut_rule_candidates(
     multimodal_segment_hints = _multimodal_segment_hints(normalized_subtitles, content_profile)
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[str, float, float, str, str]] = set()
-    for subtitle in normalized_subtitles:
+    for subtitle_index, subtitle in enumerate(normalized_subtitles):
         if not isinstance(subtitle, dict):
             continue
-        text = _subtitle_text(subtitle)
+        text = _subtitle_timing_supported_rule_text(subtitle) or _subtitle_spoken_rule_text(subtitle)
         if not text:
             continue
+        semantic_text = _subtitle_semantic_text(subtitle) or text
+        previous_text = _subtitle_semantic_text(normalized_subtitles[subtitle_index - 1]) if subtitle_index > 0 else ""
+        next_text = _subtitle_semantic_text(normalized_subtitles[subtitle_index + 1]) if subtitle_index + 1 < len(normalized_subtitles) else ""
         for term in filler_terms:
             for start_char, end_char in _iter_term_matches(text, term):
                 timed = _char_range_to_time(subtitle, text, start_char, end_char)
                 if timed is None:
                     continue
-                mode = _classify_filler_mode(text, start_char, end_char)
+                mode = _classify_filler_mode(text, start_char, end_char, term)
+                if not mode:
+                    continue
                 if mode == "standalone" and not bool(rules.get("fillerStandaloneEnabled")):
                     continue
-                if mode == "continuous" and not bool(rules.get("fillerContinuousEnabled")):
+                if mode == "sentence_head" and not bool(rules.get("fillerSentenceHeadEnabled")):
+                    continue
+                if mode == "sentence_tail" and not bool(rules.get("fillerSentenceTailEnabled")):
                     continue
                 key = ("filler_word", timed[0], timed[1], term, mode)
                 if key in seen:
@@ -454,7 +532,7 @@ def build_smart_cut_rule_candidates(
                         "reason": "filler_word",
                         "candidate_stage": SMART_CUT_RULE_CANDIDATE_STAGE,
                         "auto_applied": False,
-                        "score": 0.92 if mode == "standalone" else 0.78,
+                        "score": 0.92 if mode == "standalone" else 0.72,
                         "source_text": term,
                         "filler_mode": mode,
                     }
@@ -482,14 +560,20 @@ def build_smart_cut_rule_candidates(
         if bool(rules.get("smartDeleteEnabled")):
             subtitle_start, subtitle_end = _subtitle_range(subtitle)
             duration = subtitle_end - subtitle_start
+            compact_text = compact_subtitle_text(semantic_text)
             if (
                 duration >= 0.18
                 and duration <= 4.5
-                and len(compact_subtitle_text(text)) >= 3
-                and is_low_signal_subtitle_text(text, content_profile=content_profile)
-                and subtitle_signal_score(text, content_profile=content_profile) <= 0.15
+                and len(compact_text) >= 5
+                and low_signal_subtitle_is_contextually_isolated(
+                    semantic_text,
+                    previous_text=previous_text,
+                    next_text=next_text,
+                    content_profile=content_profile,
+                )
+                and subtitle_signal_score(semantic_text, content_profile=content_profile) <= 0.15
             ):
-                key = ("low_signal_subtitle", subtitle_start, subtitle_end, text, "")
+                key = ("low_signal_subtitle", subtitle_start, subtitle_end, semantic_text, "")
                 if key not in seen:
                     seen.add(key)
                     candidates.append(
@@ -500,7 +584,7 @@ def build_smart_cut_rule_candidates(
                             "candidate_stage": SMART_CUT_RULE_CANDIDATE_STAGE,
                             "auto_applied": False,
                             "score": 0.62,
-                            "source_text": text,
+                            "source_text": semantic_text,
                             **_multimodal_review_fields(
                                 subtitle_start,
                                 subtitle_end,

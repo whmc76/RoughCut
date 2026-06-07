@@ -76,3 +76,16 @@ def test_soft_unverified_parameter_gets_warning_not_blocking() -> None:
     assert result["publish_ready"] is True
     assert result["blocking_reasons"] == []
     assert any("参数" in warning for warning in result["warnings"])
+
+
+def test_ai_explainer_tone_blocks_publish() -> None:
+    result = assess_platform_body(
+        "bilibili",
+        "这期把 MAXACE 美杜莎4 两个版本放在一起，逐一摆出来对比，避免单看一个版本产生偏差。"
+        "两个版本都上手把玩过，把真实握感写进视频里，方便纠结版本的朋友参考，本期一条视频讲透。",
+        content_profile={"subject_brand": "MAXACE", "subject_model": "美杜莎4", "subject_type": "EDC跳刀"},
+    )
+
+    assert result["publish_ready"] is False
+    assert any("说明文/提纲腔" in reason for reason in result["blocking_reasons"])
+    assert any("方便参考" in hint or "讲透" in hint for hint in result["repair_hints"])

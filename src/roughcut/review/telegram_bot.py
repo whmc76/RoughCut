@@ -33,6 +33,7 @@ from roughcut.media.variant_timeline_bundle import (
     variant_high_energy_keeps,
     variant_high_risk_cuts,
     variant_llm_cut_review,
+    variant_multimodal_trim_review_summary,
     variant_refine_decision_summary,
     variant_review_flags,
     variant_timeline_diagnostics,
@@ -2109,6 +2110,7 @@ def _build_final_review_diagnostics_lines(variant_timeline_bundle: dict[str, Any
     review_flags = variant_review_flags(variant_timeline_bundle)
     high_risk_cuts = variant_high_risk_cuts(variant_timeline_bundle)
     llm_cut_review = variant_llm_cut_review(variant_timeline_bundle)
+    multimodal_trim_review_summary = variant_multimodal_trim_review_summary(variant_timeline_bundle)
     refine_decision_summary = variant_refine_decision_summary(variant_timeline_bundle)
     high_energy_keeps = variant_high_energy_keeps(variant_timeline_bundle)
     cut_evidence_summary = variant_cut_evidence_summary(variant_timeline_bundle)
@@ -2144,15 +2146,27 @@ def _build_final_review_diagnostics_lines(variant_timeline_bundle: dict[str, Any
                 f"- 剪辑证据：{protected_visual} 个 cut 命中过展示保护，"
                 f"{high_protection} 个 cut 带高保护分。"
             )
+    if multimodal_trim_review_summary:
+        candidate_count = int(multimodal_trim_review_summary.get("candidate_count") or 0)
+        accepted_count = int(multimodal_trim_review_summary.get("accepted_count") or 0)
+        rejected_count = int(multimodal_trim_review_summary.get("rejected_count") or 0)
+        pending_count = int(multimodal_trim_review_summary.get("pending_count") or 0)
+        auto_apply_cut_count = int(multimodal_trim_review_summary.get("auto_apply_cut_count") or 0)
+        if candidate_count or accepted_count or rejected_count or pending_count or auto_apply_cut_count:
+            lines.append(
+                f"- 多模态复核：候选 {candidate_count} 个，可剪 {accepted_count} 个，保留 {rejected_count} 个，"
+                f"待定 {pending_count} 个，自动并入全自动精修 {auto_apply_cut_count} 个。"
+            )
 
     refine_mode = str(refine_decision_summary.get("mode") or "").strip()
     refine_candidate_total = int(refine_decision_summary.get("candidate_total") or 0)
     refine_manual_confirm = int(refine_decision_summary.get("candidate_manual_confirm") or 0)
     refine_keep_segment_count = int(refine_decision_summary.get("keep_segment_count") or 0)
+    refine_multimodal_auto_apply = int(refine_decision_summary.get("multimodal_auto_apply_cut_count") or 0)
     if refine_mode or refine_candidate_total or refine_keep_segment_count:
         lines.append(
             f"- ͳһ�����޶��׶Σ�{refine_mode or 'manual_refine'}��keep �� {refine_keep_segment_count} ����ѡ "
-            f"{refine_candidate_total} �����˹�ȷ�� {refine_manual_confirm} ����"
+            f"{refine_candidate_total} �����˹�ȷ�� {refine_manual_confirm} ������ģ̬�Զ����� {refine_multimodal_auto_apply} ����"
         )
 
     for item in high_risk_cuts[:2]:

@@ -20,7 +20,11 @@ import {
   taskHasContinueReadyMaterial,
   useIntelligentCopyWorkspace,
 } from "../features/intelligentCopy/useIntelligentCopyWorkspace";
-import { publicationAttemptReceiptId, publicationAttemptUrl } from "../features/publication/publicationAttempt";
+import {
+  publicationAttemptCoverPreviewUrl,
+  publicationAttemptReceiptId,
+  publicationAttemptUrl,
+} from "../features/publication/publicationAttempt";
 import { useI18n } from "../i18n";
 import { copyStylePresets } from "../stylePresets";
 import type { IntelligentCopyGenerateTask, IntelligentCopyPlatformMaterial, PublicationAttempt, PublicationSchemeItem } from "../types";
@@ -239,6 +243,7 @@ export function IntelligentCopyPage() {
               {workspace.copyFeedback ? <div className="notice top-gap">{workspace.copyFeedback}</div> : null}
               {workspace.inspect.error ? <div className="notice top-gap">{(workspace.inspect.error as Error).message}</div> : null}
               {workspace.generate.error ? <div className="notice top-gap">{(workspace.generate.error as Error).message}</div> : null}
+              {workspace.openFolder.error ? <div className="notice top-gap">{(workspace.openFolder.error as Error).message}</div> : null}
             </section>
 
             <section className="panel">
@@ -894,6 +899,7 @@ function PublicationPlatformProgressPanel({ targets, attempts, selectedPlatformI
           const latestRun = attempt?.runs?.[0];
           return (
             <article className="activity-card smart-copy-publication-progress-card" key={target.platform}>
+              <PublicationAttemptCover attempt={attempt} label={target.platform_label} compact />
               <div className="toolbar">
                 <div>
                   <strong>{target.platform_label}</strong>
@@ -1041,6 +1047,7 @@ function PublicationHistoryPanel({ attempts, selectedAttempt, selectedAttemptId,
       {selectedAttempt ? (
         <div className="smart-copy-publication-history-layout">
           <article className="activity-card smart-copy-publication-selected">
+            <PublicationAttemptCover attempt={selectedAttempt} label={selectedAttempt.platform_label || selectedAttempt.platform} />
             <div className="toolbar">
               <div>
                 <strong>{selectedAttempt.platform_label || selectedAttempt.platform}</strong>
@@ -1081,6 +1088,7 @@ function PublicationHistoryPanel({ attempts, selectedAttempt, selectedAttemptId,
                   className={`smart-copy-publication-attempt${attempt.id === selectedAttemptId ? " selected" : ""}`}
                   onClick={() => onSelect(attempt.id)}
                 >
+                  <PublicationAttemptCover attempt={attempt} label={attempt.platform_label || attempt.platform} compact />
                   <span className={`status-pill ${publicationStatusTone(attempt.status)}`}>
                     {publicationAttemptStatusLabel(attempt.status)}
                   </span>
@@ -1098,6 +1106,27 @@ function PublicationHistoryPanel({ attempts, selectedAttempt, selectedAttemptId,
         <EmptyState message={t("smartCopy.publish.historyEmpty")} />
       )}
     </section>
+  );
+}
+
+function PublicationAttemptCover({
+  attempt,
+  label,
+  compact = false,
+}: {
+  attempt: PublicationAttempt | null | undefined;
+  label: string;
+  compact?: boolean;
+}) {
+  const previewUrl = publicationAttemptCoverPreviewUrl(attempt);
+  return (
+    <div className={`smart-copy-publication-cover${compact ? " compact" : ""}`}>
+      {previewUrl ? (
+        <img src={previewUrl} alt={`${label} 封面`} loading="lazy" />
+      ) : (
+        <span>{compact ? "封面待同步" : "暂无封面"}</span>
+      )}
+    </div>
   );
 }
 

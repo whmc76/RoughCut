@@ -329,9 +329,11 @@ def _extract_attempt_summary(attempt: PublicationAttempt) -> dict[str, Any]:
     )
     return {
         "id": attempt.id,
+        "job_id": str(attempt.job_id) if getattr(attempt, "job_id", None) else "",
         "status": _normalize_text(attempt.status).lower(),
         "run_status": _normalize_text(attempt.run_status),
         "provider_status": _normalize_text(attempt.provider_status),
+        "provider_task_id": _normalize_text(getattr(attempt, "provider_task_id", "")),
         "platform": _normalize_text(attempt.platform).lower(),
         "creator_profile_id": _normalize_text(attempt.creator_profile_id),
         "account_label": _normalize_text(attempt.account_label),
@@ -353,6 +355,14 @@ def _extract_attempt_summary(attempt: PublicationAttempt) -> dict[str, Any]:
         "dedupe_signature": dedupe_signature,
         "logical_signature": logical_signature,
     }
+
+
+def _is_safe_retry_queue_duplicate(summary: dict[str, Any]) -> bool:
+    return (
+        summary.get("status") == "queued"
+        and summary.get("run_status") == "retry_scheduled"
+        and not summary.get("provider_task_id")
+    )
 
 
 @dataclass
@@ -417,11 +427,18 @@ def build_duplicate_groups(
         summaries = [_extract_attempt_summary(item) for item in ordered]
         success_count = sum(1 for item in summaries if item["status"] in PUBLICATION_SUCCESS_STATUSES)
         active_count = sum(1 for item in summaries if item["status"] in PUBLICATION_ACTIVE_STATUSES)
+        active_summaries = [item for item in summaries if item["status"] in PUBLICATION_ACTIVE_STATUSES]
         scheduled_variants = sorted({item["scheduled_publish_at"] for item in summaries if item["scheduled_publish_at"]})
         reasons: list[str] = []
         if success_count > 1:
             reasons.append("multiple_successful_publications")
-        if active_count > 1:
+        safe_retry_queue_duplicates = (
+            active_count > 1
+            and len(active_summaries) == active_count
+            and all(_is_safe_retry_queue_duplicate(item) for item in active_summaries)
+            and len({item.get("job_id") for item in active_summaries if item.get("job_id")}) == 1
+        )
+        if active_count > 1 and not safe_retry_queue_duplicates:
             reasons.append("multiple_active_attempts")
         if len(scheduled_variants) > 1 and len(summaries) > 1:
             reasons.append("multiple_schedule_variants_same_live_content")

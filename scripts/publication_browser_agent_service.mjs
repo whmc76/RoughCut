@@ -1,18 +1,43 @@
 import http from "node:http";
 import { createHash, randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+process.on("uncaughtException", (error) => {
+  try {
+    console.error("[fatal:uncaughtException]", error?.stack || error?.message || String(error || ""));
+  } catch {}
+});
+
+process.on("unhandledRejection", (reason) => {
+  try {
+    const message = reason && typeof reason === "object" && "stack" in reason
+      ? reason.stack
+      : reason && typeof reason === "object" && "message" in reason
+        ? reason.message
+        : String(reason || "");
+    console.error("[fatal:unhandledRejection]", message);
+  } catch {}
+});
 
 const CONTRACT = "browser_agent_publication_inventory_v1";
 const TASK_CONTRACT = "browser_agent_publication_v1";
 const TASK_LINK_SHARE_CONTRACT = "x_link_share_publication_v1";
 export const PUBLICATION_TASK_IDENTITY_CONTRACT = "publication_task_identity_v1";
 export const PUBLICATION_CREATOR_SESSION_CONTRACT = "publication_creator_session_probe_v1";
+export const PUBLICATION_SESSION_BINDING_CONTRACT = "publication_browser_session_binding_v1";
 const TASK_CONTRACTS = new Set([TASK_CONTRACT, TASK_LINK_SHARE_CONTRACT]);
 const PORT = Number(process.env.PUBLICATION_BROWSER_AGENT_PORT || 49310);
 const HOST = String(process.env.PUBLICATION_BROWSER_AGENT_HOST || "0.0.0.0");
-const CDP_URL = String(process.env.PUBLICATION_BROWSER_CDP_URL || "http://127.0.0.1:9222").replace(/\/$/, "");
+const BROWSER_TRANSPORT_KIND = "chrome_extension_bridge";
+const BRIDGE_VIRTUAL_CDP_URL = "bridge://chrome-extension";
+const BRIDGE_COMMAND_TIMEOUT_MS = Math.max(5_000, Number(process.env.PUBLICATION_BROWSER_BRIDGE_COMMAND_TIMEOUT_MS || 45_000));
+const BRIDGE_CLIENT_STALE_AFTER_MS = Math.max(15_000, Number(process.env.PUBLICATION_BROWSER_BRIDGE_CLIENT_STALE_AFTER_MS || 45_000));
+// MV3 background workers are prone to going idle when a localhost long-poll stays open
+// for too long. Keep bridge polling short so the unpacked extension keeps cycling.
+const BRIDGE_LONG_POLL_TIMEOUT_MS = Math.max(250, Number(process.env.PUBLICATION_BROWSER_BRIDGE_LONG_POLL_TIMEOUT_MS || 5_000));
 const _RECOVERY_EVIDENCE_MAX_LINES = 160;
 const ATTACHED_BROWSER = String(process.env.PUBLICATION_BROWSER || "chrome").trim().toLowerCase();
 const ATTACHED_USER_DATA_DIR = String(process.env.PUBLICATION_BROWSER_USER_DATA_DIR || "").trim();
@@ -32,13 +57,21 @@ const TASKS = new Map();
 const IS_MAIN = Boolean(process.argv[1]) && import.meta.url === pathToFileURL(process.argv[1]).href;
 const SERVICE_SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SERVICE_SCRIPT_PATH);
+const SERVICE_INSTANCE_ID = randomUUID();
+const SERVICE_STARTED_AT = new Date().toISOString();
 export const SERVICE_SCRIPT_SHA256 = createHash("sha256")
   .update(fs.readFileSync(SERVICE_SCRIPT_PATH))
   .digest("hex");
 const PUBLICATION_PLATFORM_MATRIX_PATH = path.resolve(SCRIPT_DIR, "../src/roughcut/publication_platform_matrix.json");
+const BRIDGE_EXTENSION_MANIFEST_PATH = path.resolve(SCRIPT_DIR, "../browser/publication-bridge-extension/manifest.json");
 const VISUAL_EVIDENCE_DIR = path.resolve(
   process.env.PUBLICATION_VISUAL_EVIDENCE_DIR || path.resolve(SCRIPT_DIR, "../artifacts/publication-visual-evidence"),
 );
+const PUBLICATION_TASK_STATE_DIR = path.resolve(
+  process.env.PUBLICATION_TASK_STATE_DIR || path.resolve(SCRIPT_DIR, "../artifacts/publication-task-state"),
+);
+const NATIVE_FILE_CHOOSER_SCRIPT_PATH = path.resolve(SCRIPT_DIR, "./select_file_in_dialog.ps1");
+const NATIVE_SCREEN_CLICK_SCRIPT_PATH = path.resolve(SCRIPT_DIR, "./click_screen_point.ps1");
 const PUBLICATION_PLATFORM_MATRIX = JSON.parse(fs.readFileSync(PUBLICATION_PLATFORM_MATRIX_PATH, "utf8"));
 const PUBLICATION_PLATFORM_CAPABILITIES = PUBLICATION_PLATFORM_MATRIX.platforms && typeof PUBLICATION_PLATFORM_MATRIX.platforms === "object"
   ? PUBLICATION_PLATFORM_MATRIX.platforms
@@ -53,11 +86,179 @@ const COMPOSITE_COVER_POLICY_SKIP_VALUES = new Set(
     ? PUBLICATION_PLATFORM_MATRIX.cover_policy_skip_values.map((item) => String(item || "").trim().toLowerCase()).filter(Boolean)
     : [],
 );
+const BRIDGE_CLIENTS = new Map();
+const BRIDGE_PENDING_COMMANDS = [];
+const BRIDGE_PENDING_RESPONSES = new Map();
+const BRIDGE_EVENT_HANDLERS = new Map();
+
+function ensurePublicationTaskStateDir() {
+  fs.mkdirSync(PUBLICATION_TASK_STATE_DIR, { recursive: true });
+}
+
+function publicationTaskStatePath(taskId) {
+  return path.join(PUBLICATION_TASK_STATE_DIR, `${encodeURIComponent(String(taskId || "").trim())}.json`);
+}
+
+function persistSerializedPublicationTask(serializedTask) {
+  if (!serializedTask || typeof serializedTask !== "object") return;
+  const taskId = String(serializedTask.task_id || serializedTask.id || "").trim();
+  if (!taskId) return;
+  ensurePublicationTaskStateDir();
+  const artifact = {
+    stored_at: new Date().toISOString(),
+    service_instance_id: SERVICE_INSTANCE_ID,
+    service_started_at: SERVICE_STARTED_AT,
+    pid: process.pid,
+    task: serializedTask,
+  };
+  const targetPath = publicationTaskStatePath(taskId);
+  const tempPath = `${targetPath}.${process.pid}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(artifact, null, 2), "utf8");
+  fs.renameSync(tempPath, targetPath);
+}
+
+function loadPersistedPublicationTask(taskIdLike) {
+  const taskId = String(taskIdLike || "").trim();
+  if (!taskId) return null;
+  try {
+    const raw = fs.readFileSync(publicationTaskStatePath(taskId), "utf8");
+    const payload = JSON.parse(raw);
+    return payload && payload.task && typeof payload.task === "object" ? payload.task : null;
+  } catch {
+    return null;
+  }
+}
+
+function readBridgeExtensionDevState() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(BRIDGE_EXTENSION_MANIFEST_PATH, "utf8"));
+    return {
+      target_extension_version: String(raw?.version || "").trim(),
+      target_extension_name: String(raw?.name || "").trim(),
+    };
+  } catch {
+    return {
+      target_extension_version: "",
+      target_extension_name: "",
+    };
+  }
+}
+
+function persistPublicationTask(task) {
+  if (!task || typeof task !== "object") return;
+  persistSerializedPublicationTask(serializeTask(task));
+}
 
 function compositePlatformCapabilities(platform) {
   const normalizedPlatform = normalizePlatform(platform);
   const entry = PUBLICATION_PLATFORM_CAPABILITIES[normalizedPlatform];
   return entry && typeof entry === "object" ? entry : {};
+}
+
+function compositePlatformPublishScheme(platform) {
+  const rawScheme = compositePlatformCapabilities(platform).publish_scheme;
+  return rawScheme && typeof rawScheme === "object" ? rawScheme : {};
+}
+
+function compositePlatformPublishEntryUrl(platform) {
+  return String(compositePlatformPublishScheme(platform).entry_url || "").trim();
+}
+
+function compositePlatformCoverProjectMode(platform) {
+  return String(compositePlatformPublishScheme(platform).cover_project_mode || "").trim();
+}
+
+function compositePlatformStopWhenCurrentPageAlreadyCorrect(platform) {
+  return Boolean(compositePlatformPublishScheme(platform).stop_when_current_page_already_correct);
+}
+
+function compositePlatformUploadProcessingBlocksFinalPublishOnly(platform) {
+  return Boolean(compositePlatformPublishScheme(platform).upload_processing_blocks_final_publish_only);
+}
+
+function compositePlatformPublishProjects(platform) {
+  const rawProjects = compositePlatformPublishScheme(platform).projects;
+  if (!Array.isArray(rawProjects)) return [];
+  return rawProjects
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      key: String(item.key || "").trim(),
+      label: String(item.label || "").trim(),
+      result_key: String(item.result_key || "").trim(),
+    }))
+    .filter((item) => item.key || item.label || item.result_key);
+}
+
+function compositePlatformCompletionRequirements(platform) {
+  const rawRequirements = compositePlatformPublishScheme(platform).completion_requirements;
+  return rawRequirements && typeof rawRequirements === "object" ? rawRequirements : {};
+}
+
+export function isKuaishouPageAlreadyPublishReady(fields = {}, completionRequirements = compositePlatformCompletionRequirements("kuaishou")) {
+  const fieldMap = fields && typeof fields === "object" ? fields : {};
+  const requirements = completionRequirements && typeof completionRequirements === "object" ? completionRequirements : {};
+  const bodyReady = requirements.body_with_embedded_tags !== true || fieldMap.body?.verified === true;
+  const coverReady = !requirements.main_cover_slot || fieldMap.cover?.verified === true;
+  const collectionReady = requirements.collection_strategy_required !== true || fieldMap.collection?.verified === true;
+  const scheduleReady = requirements.schedule_required !== true || fieldMap.schedule?.verified === true;
+  const uploadReady = requirements.video_attached !== true
+    || fieldMap.upload_ready?.verified === true
+    || (
+      compositePlatformStopWhenCurrentPageAlreadyCorrect("kuaishou")
+      && compositePlatformUploadProcessingBlocksFinalPublishOnly("kuaishou")
+    );
+  return Boolean(bodyReady && coverReady && collectionReady && scheduleReady && uploadReady);
+}
+
+export function isBilibiliPageAlreadyPublishReady(fields = {}, completionRequirements = compositePlatformCompletionRequirements("bilibili")) {
+  const fieldMap = fields && typeof fields === "object" ? fields : {};
+  const requirements = completionRequirements && typeof completionRequirements === "object" ? completionRequirements : {};
+  const titleReady = requirements.title_required !== true || fieldMap.title?.verified === true;
+  const declarationReady = requirements.declaration_required !== true || fieldMap.declaration?.verified === true;
+  const categoryReady = requirements.category_required !== true || fieldMap.category?.verified === true;
+  const tagsReady = requirements.tags_required !== true || fieldMap.tags?.verified === true;
+  const bodyReady = requirements.body_required !== true || fieldMap.body?.verified === true;
+  const coverReady = !requirements.main_cover_slot || fieldMap.cover?.verified === true;
+  const collectionReady = requirements.collection_strategy_required !== true || fieldMap.collection?.verified === true;
+  const batchDynamicReady = requirements.batch_dynamic_policy_required !== true || fieldMap.batch_dynamic_policy?.verified === true;
+  const scheduleReady = requirements.schedule_required !== true || fieldMap.schedule?.verified === true;
+  const draftReady = fieldMap.draft_state?.verified !== false;
+  return Boolean(
+    titleReady
+    && declarationReady
+    && categoryReady
+    && tagsReady
+    && bodyReady
+    && coverReady
+    && collectionReady
+    && batchDynamicReady
+    && scheduleReady
+    && draftReady
+  );
+}
+
+export function shouldFallbackToFullPrepareDuringRepair(platform, framework = null) {
+  if (!framework || typeof framework !== "object") return false;
+  if (typeof framework.repair === "function") return false;
+  const normalizedPlatform = normalizePlatform(platform);
+  if (!normalizedPlatform) return false;
+  return false;
+}
+
+function compositePlatformOperationSteps(platform) {
+  const projectLabels = compositePlatformPublishProjects(platform)
+    .map((item) => String(item.label || "").trim())
+    .filter(Boolean);
+  if (projectLabels.length) {
+    return projectLabels.map((label, index) => ({ index: index + 1, label }));
+  }
+  return (PLATFORM_STEPS[platform] || [
+    "打开平台创作/发布页",
+    "上传视频和封面",
+    "填写标题、正文、标签",
+    "选择平台真实可见的合集、分类、声明和定时设置",
+    "发布前再次验证页面和字段变化",
+  ]).map((label, index) => ({ index: index + 1, label }));
 }
 
 function compositePlatformDefaultDeclaration(platform) {
@@ -74,10 +275,37 @@ function compositePlatformSkipsExplicitTagEntry(platform) {
   return Boolean(compositePlatformCapabilities(platform).skip_explicit_tag_entry);
 }
 
+function compositePlatformSkipsExplicitVisibilityEntry(platform) {
+  return Boolean(compositePlatformCapabilities(platform).skip_explicit_visibility_entry);
+}
+
 function compositePlatformMinimumScheduleLeadMinutes(platform) {
   const rawValue = compositePlatformCapabilities(platform).minimum_schedule_lead_minutes;
   const value = Number.parseInt(String(rawValue ?? ""), 10);
   return Number.isFinite(value) ? Math.max(0, value) : 0;
+}
+
+function compositePlatformRequiredCoverSlots(platform) {
+  const rawSlots = compositePlatformCapabilities(platform).required_cover_slots;
+  if (!Array.isArray(rawSlots)) return [];
+  return rawSlots
+    .filter((item) => item && typeof item === "object")
+    .map((item) => {
+      const targetSize = item.target_size && typeof item.target_size === "object"
+        ? item.target_size
+        : {};
+      const width = Number.parseInt(String(targetSize.width ?? targetSize.w ?? ""), 10);
+      const height = Number.parseInt(String(targetSize.height ?? targetSize.h ?? ""), 10);
+      return {
+        slot: String(item.slot || item.key || item.name || "").trim(),
+        label: String(item.label || "").trim(),
+        matrix_key: String(item.matrix_key || item.group_key || "").trim(),
+        target_size: Number.isFinite(width) && width > 0 && Number.isFinite(height) && height > 0
+          ? { width, height }
+          : null,
+      };
+    })
+    .filter((item) => item.slot || item.matrix_key || item.label);
 }
 
 function sanitizeVisualEvidenceSegment(value, fallback = "unknown", maxLength = 48) {
@@ -237,11 +465,15 @@ export function applyCompositeSafeRuntimePolicyDefaults(platform, content = {}) 
   const normalizedPlatform = normalizePlatform(platform);
   const source = content && typeof content === "object" ? content : {};
   const recoveryContext = _extract_publication_recovery_context(source);
+  const sourceOverrides = source.platform_specific_overrides && typeof source.platform_specific_overrides === "object"
+    ? source.platform_specific_overrides
+    : {};
   const safeRuntimeMode = Boolean(
     recoveryContext.verification_only_current_page
     || recoveryContext.repair_only_current_page
     || recoveryContext.prepublish_only_current_page
     || recoveryContext.prepare_only_current_page
+    || sourceOverrides.stop_before_final_publish
   );
   if (!safeRuntimeMode) {
     return source;
@@ -250,10 +482,24 @@ export function applyCompositeSafeRuntimePolicyDefaults(platform, content = {}) 
     ? { ...source.platform_specific_overrides }
     : {};
   const normalized = { ...source, platform_specific_overrides: overrides };
-  const explicitCollectionName = String(source.collection || source.collection_name || "").trim();
+  const collectionManagement = overrides.collection_management && typeof overrides.collection_management === "object"
+    ? overrides.collection_management
+    : {};
+  const explicitCollectionName = String(
+    (source.collection && typeof source.collection === "object" ? source.collection.name : source.collection)
+    || source.collection_name
+    || collectionManagement.selected_collection_name
+    || collectionManagement.target_collection_name
+    || collectionManagement.collection_name
+    || "",
+  ).trim();
   const explicitCollectionPolicy = String(overrides.collection_policy || source.collection_policy || "").trim();
   const explicitCollectionSkip = Boolean(overrides.skip_collection_select || source.skip_collection_select)
     || COMPOSITE_COLLECTION_POLICY_SKIP_VALUES.has(explicitCollectionPolicy.toLowerCase());
+  if (explicitCollectionName && explicitCollectionSkip) {
+    delete overrides.skip_collection_select;
+    if (COMPOSITE_COLLECTION_POLICY_SKIP_VALUES.has(explicitCollectionPolicy.toLowerCase())) delete overrides.collection_policy;
+  }
   if (
     compositePlatformCapabilities(normalizedPlatform).requires_explicit_collection_policy
     && !explicitCollectionName
@@ -279,9 +525,503 @@ export function applyCompositeSafeRuntimePolicyDefaults(platform, content = {}) 
   return normalized;
 }
 
+export function deriveBilibiliUploadSurfaceState(bodyText = "", lines = [], mediaPath = "") {
+  const normalizedLines = Array.isArray(lines)
+    ? lines.map((line) => String(line || "").trim()).filter(Boolean)
+    : [];
+  const text = String(bodyText || normalizedLines.join(" ")).replace(/\s+/g, " ").trim();
+  const mediaPathText = String(mediaPath || "").trim();
+  const mediaName = mediaPathText
+    ? mediaPathText.split(/[\\/]/).filter(Boolean).pop() || mediaPathText
+    : "";
+  const mediaStem = mediaName.replace(/\.[^.]+$/, "");
+  const mediaNamePresent = Boolean(
+    mediaName && (
+      text.includes(mediaName)
+      || (mediaStem && text.includes(mediaStem))
+    ),
+  );
+  const concreteProgress = /已上传：|当前速度：|剩余时间：|上传过程中请不要删除\/移动文件|处理中\s*\d+%|检测中\s*\d+%|检测中99%|\b\d{1,3}%\b/.test(text);
+  const uploadCardMarkers = /取消上传|上传完成|更换视频|已经上传：/.test(text) || concreteProgress;
+  const fieldSignals = [
+    /标题/.test(text),
+    /简介/.test(text),
+    /创作声明/.test(text),
+    /分区|请选择分区/.test(text),
+    /标签/.test(text),
+    /定时发布/.test(text),
+    /存草稿|立即投稿/.test(text),
+    /封面设置|\*?\s*封面|设置封面/.test(text),
+    /加入合集|请选择合集/.test(text),
+  ].filter(Boolean).length;
+  const fieldShell = fieldSignals >= 4;
+  const readySurface = /更换视频|上传完成|已经上传：/.test(text)
+    && /标题|简介|分区|标签|创作声明|定时发布|立即投稿|存草稿/.test(text)
+    && !concreteProgress;
+  const mediaAttached = readySurface || mediaNamePresent || (fieldShell && uploadCardMarkers);
+  const uploadPromptSurface = /拖拽视频到此|点击上传|上传视频\s+视频大小|选择文件|Select files/.test(text);
+  return {
+    media_name_present: mediaNamePresent,
+    concrete_progress: concreteProgress,
+    upload_card_markers: uploadCardMarkers,
+    field_shell: fieldShell,
+    ready_surface: readySurface,
+    media_attached: mediaAttached,
+    upload_prompt_surface: uploadPromptSurface,
+  };
+}
+
+export function selectBilibiliBatchDynamicDecisionCandidate(candidates = [], overlayTexts = []) {
+  const overlayHaystack = [...(Array.isArray(overlayTexts) ? overlayTexts : [])]
+    .map((value) => String(value || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join(" ");
+  if (!/批量上传将生成多条动态|打扰粉丝|不生成动态|加入合集并使用/i.test(overlayHaystack)) return null;
+  const normalized = (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => ({
+      label: String(candidate?.label || candidate?.text || "").replace(/\s+/g, " ").trim(),
+      visible: candidate?.visible !== false,
+      clickable: candidate?.clickable !== false,
+      area: Number(candidate?.area || 0),
+      source: candidate,
+    }))
+    .filter((candidate) => candidate.visible && candidate.clickable && candidate.label);
+  const choose = (pattern) => normalized
+    .filter((candidate) => pattern.test(candidate.label))
+    .sort((left, right) => {
+      const leftArea = Number.isFinite(left.area) && left.area > 0 ? left.area : Number.MAX_SAFE_INTEGER;
+      const rightArea = Number.isFinite(right.area) && right.area > 0 ? right.area : Number.MAX_SAFE_INTEGER;
+      return leftArea - rightArea;
+    })[0];
+  return choose(/^不生成动态$/)?.source
+    || choose(/不生成动态/)?.source
+    || choose(/继续|确认|知道了/)?.source
+    || null;
+}
+
+export function selectOnboardingGuideDismissCandidate(candidates = [], overlayTexts = []) {
+  const overlayHaystack = [...(Array.isArray(overlayTexts) ? overlayTexts : [])]
+    .map((value) => String(value || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join(" ");
+  if (!/(?:^|\s)\d+\s*\/\s*\d+(?:\s|$)|作品信息|便捷填写作品关键信息|新手引导|操作引导|创作助手|下一步/.test(overlayHaystack)) return null;
+  const normalized = (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => ({
+      label: String(candidate?.label || candidate?.text || "").replace(/\s+/g, " ").trim(),
+      className: String(candidate?.className || "").replace(/\s+/g, " ").trim(),
+      ariaLabel: String(candidate?.ariaLabel || "").replace(/\s+/g, " ").trim(),
+      title: String(candidate?.title || "").replace(/\s+/g, " ").trim(),
+      visible: candidate?.visible !== false,
+      clickable: candidate?.clickable !== false,
+      area: Number(candidate?.area || 0),
+      source: candidate,
+    }))
+    .filter((candidate) => candidate.visible && candidate.clickable);
+  const score = (candidate) => {
+    const label = candidate.label;
+    const meta = `${candidate.className} ${candidate.ariaLabel} ${candidate.title}`.toLowerCase();
+    if (["×", "x", "X", "✕", "关闭"].includes(label)) return 1000;
+    if (/close|关闭|dismiss|cancel/.test(meta)) return 900;
+    if (/我知道了|知道了|跳过|关闭/.test(label)) return 800;
+    if (/稍后再说|以后再说|暂不/.test(label)) return 700;
+    if (/下一步|继续|确认|确定|完成/.test(label)) return 100;
+    return 0;
+  };
+  return normalized
+    .sort((left, right) => {
+      const scoreGap = score(right) - score(left);
+      if (scoreGap) return scoreGap;
+      const leftArea = Number.isFinite(left.area) && left.area > 0 ? left.area : Number.MAX_SAFE_INTEGER;
+      const rightArea = Number.isFinite(right.area) && right.area > 0 ? right.area : Number.MAX_SAFE_INTEGER;
+      return leftArea - rightArea;
+    })
+    .find((candidate) => score(candidate) > 0)?.source || null;
+}
+
+export function deriveKuaishouCoverUploadModalState(surfaceText = "") {
+  const text = String(surfaceText || "").replace(/\s+/g, " ").trim();
+  const hasUploadTitle = /上传封面|封面截取/.test(text);
+  const hasRatioChoices = /原始比例|3:4|4:3|1:1|9:16/.test(text);
+  const hasUploadEntry = /上传图片|拖拽图片到此或点击上传/.test(text);
+  const hasConfirm = /确认|完成/.test(text);
+  const divertedToEditor = /模板编辑|视频编辑|编辑画布/.test(text) && !hasUploadEntry;
+  return {
+    open: hasUploadTitle && hasRatioChoices && hasUploadEntry,
+    hasUploadTitle,
+    hasRatioChoices,
+    hasUploadEntry,
+    hasConfirm,
+    divertedToEditor,
+  };
+}
+
+export function deriveKuaishouVisibilityState(lines = [], inputFields = []) {
+  const normalizedLines = Array.isArray(lines)
+    ? lines.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const visibleText = normalizedLines.join(" ");
+  const normalize = (value = "") => {
+    const text = String(value || "").trim().toLowerCase();
+    if (!text) return "";
+    if (/所有人可见|公开|public|everyone/.test(text)) return "public";
+    if (/好友可见|friends/.test(text)) return "friends";
+    if (/仅自己可见|私密|only me|private/.test(text)) return "private";
+    if (/不公开|unlisted/.test(text)) return "unlisted";
+    return "";
+  };
+  const checked = Array.isArray(inputFields)
+    ? inputFields.find((item) => item && item.checked && /查看权限|谁可以看|可见性|公开|好友可见|仅自己可见|public|private|unlisted/i.test(`${item.label || ""} ${item.value || ""}`))
+    : null;
+  const checkedValue = normalize(checked ? ([checked.label, checked.value].filter(Boolean).join(" ")) : "");
+  if (checkedValue) {
+    return { actual: checkedValue, configured: true, options_visible: true };
+  }
+  const optionsVisible =
+    /查看权限/.test(visibleText)
+    && /所有人可见/.test(visibleText)
+    && /好友可见/.test(visibleText)
+    && /仅自己可见/.test(visibleText);
+  if (optionsVisible) {
+    return { actual: "", configured: false, options_visible: true };
+  }
+  const compactValue = normalize(
+    normalizedLines.find((line) => /^(所有人可见|好友可见|仅自己可见|公开|私密)$/.test(line)) || "",
+  );
+  return { actual: compactValue, configured: Boolean(compactValue), options_visible: false };
+}
+
+export function normalizeCompositeVisibilityMode(value = "") {
+  const text = String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+  if (!text) return "";
+  if (["public", "everyone", "all", "open"].includes(text) || /所有人可见|公开可见|公开/.test(text)) return "public";
+  if (["friends", "friend"].includes(text) || /好友可见/.test(text)) return "friends";
+  if (["private", "only_me", "only me", "self"].includes(text) || /仅自己可见|私密/.test(text)) return "private";
+  if (["unlisted"].includes(text) || /不公开|unlisted/.test(text)) return "unlisted";
+  return "";
+}
+
+export function selectKuaishouVisibilityOptionCandidate(candidates = [], expectedMode = "") {
+  const normalizedExpected = String(expectedMode || "").trim().toLowerCase();
+  if (!normalizedExpected) return null;
+  const expectedLabel = normalizedExpected === "public"
+    ? "所有人可见"
+    : normalizedExpected === "friends"
+      ? "好友可见"
+      : normalizedExpected === "private"
+        ? "仅自己可见"
+        : normalizedExpected === "unlisted"
+          ? "不公开"
+          : "";
+  if (!expectedLabel) return null;
+  const normalized = (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => ({
+      label: String(candidate?.label || candidate?.text || "").replace(/\s+/g, " ").trim(),
+      rootText: String(candidate?.rootText || "").replace(/\s+/g, " ").trim(),
+      area: Number(candidate?.area || 0),
+      visible: candidate?.visible !== false,
+      clickable: candidate?.clickable !== false,
+      source: candidate,
+    }))
+    .filter((candidate) => candidate.visible && candidate.clickable && candidate.label);
+  const score = (candidate) => {
+    let value = 0;
+    if (candidate.label === expectedLabel) value += 300;
+    else if (candidate.label.includes(expectedLabel)) value += 240;
+    if (/查看权限|谁可以看|可见性/.test(candidate.rootText)) value += 80;
+    if (/所有人可见|好友可见|仅自己可见/.test(candidate.rootText)) value += 40;
+    if (/作者声明|合集|发布时间|地点|智能推荐封面|PK封面|编辑画布|模板编辑|发布/.test(candidate.rootText)) value -= 220;
+    return value;
+  };
+  return normalized
+    .sort((left, right) => {
+      const scoreGap = score(right) - score(left);
+      if (scoreGap) return scoreGap;
+      const leftArea = Number.isFinite(left.area) && left.area > 0 ? left.area : Number.MAX_SAFE_INTEGER;
+      const rightArea = Number.isFinite(right.area) && right.area > 0 ? right.area : Number.MAX_SAFE_INTEGER;
+      return leftArea - rightArea;
+    })
+    .find((candidate) => score(candidate) > 0)?.source || null;
+}
+
+export function isKuaishouCustomCoverPreviewEvidence(coverSurface = {}, expectedCoverPath = "") {
+  const pkToggleChecked = Boolean(coverSurface?.pk_toggle_checked);
+  if (pkToggleChecked) return false;
+  const expectedCoverBase = String(expectedCoverPath || "").split(/[\\/]/).pop() || "";
+  const defaultSlotSurface = Array.isArray(coverSurface?.slot_surfaces)
+    ? coverSurface.slot_surfaces.find((item) => /默认封面/.test(String(item?.label || "")))
+    : null;
+  const scopedSurface = defaultSlotSurface || coverSurface;
+  const imageSources = Array.isArray(scopedSurface?.image_sources)
+    ? scopedSurface.image_sources.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  if (!imageSources.length) return false;
+  if (expectedCoverBase && imageSources.some((src) => src.includes(expectedCoverBase))) return true;
+  return imageSources.some((src) => /^blob:/i.test(src));
+}
+
+function kuaishouCoverSlotContainsExpected(slotSurface = {}, expectedCoverPath = "") {
+  const expectedCoverBase = String(expectedCoverPath || "").split(/[\\/]/).pop() || "";
+  if (!expectedCoverBase) return false;
+  const imageSources = Array.isArray(slotSurface?.image_sources)
+    ? slotSurface.image_sources.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const backgroundSources = Array.isArray(slotSurface?.background_sources)
+    ? slotSurface.background_sources.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  return imageSources.some((src) => src.includes(expectedCoverBase))
+    || backgroundSources.some((src) => src.includes(expectedCoverBase));
+}
+
+export function shouldSkipKuaishouCoverMutation(coverSurface = {}, expectedCoverPath = "") {
+  const defaultSurface = Array.isArray(coverSurface?.slot_surfaces)
+    ? coverSurface.slot_surfaces.find((item) => /默认封面/.test(String(item?.label || "")))
+    : null;
+  const pkSurface = Array.isArray(coverSurface?.slot_surfaces)
+    ? coverSurface.slot_surfaces.find((item) => /PK封面/.test(String(item?.label || "")))
+    : null;
+  return Boolean(
+    kuaishouCoverSlotContainsExpected(defaultSurface, expectedCoverPath)
+    && !kuaishouCoverSlotContainsExpected(pkSurface, expectedCoverPath),
+  );
+}
+
+export function isKuaishouCollectionAlreadyCorrect(rowText = "", expectedCollectionName = "") {
+  const normalizedRow = String(rowText || "").replace(/\s+/g, " ").trim();
+  const normalizedExpected = String(expectedCollectionName || "").replace(/\s+/g, " ").trim();
+  if (!normalizedExpected) return false;
+  return normalizedRow.includes(normalizedExpected);
+}
+
+function kuaishouSlotSourceSnapshot(slotSurface = {}) {
+  const imageSources = Array.isArray(slotSurface?.image_sources)
+    ? slotSurface.image_sources.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const backgroundSources = Array.isArray(slotSurface?.background_sources)
+    ? slotSurface.background_sources.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  return {
+    images: imageSources,
+    backgrounds: backgroundSources,
+  };
+}
+
+function kuaishouSlotSourcesChanged(beforeSlot = {}, afterSlot = {}) {
+  const before = kuaishouSlotSourceSnapshot(beforeSlot);
+  const after = kuaishouSlotSourceSnapshot(afterSlot);
+  return JSON.stringify(before) !== JSON.stringify(after);
+}
+
+function lastActionByKind(actions = [], kind = "") {
+  if (!Array.isArray(actions) || !kind) return null;
+  for (let index = actions.length - 1; index >= 0; index -= 1) {
+    const item = actions[index];
+    if (item?.kind === kind) return item;
+  }
+  return null;
+}
+
+async function readKuaishouCoverSurface(client) {
+  return evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const allVisibleNodes = [...document.querySelectorAll("section,div,aside,button,[role=button],span,label")]
+      .filter(visible);
+    const anchor = allVisibleNodes.find((el) => /预览封面|编辑画布|封面设置|默认封面|PK封面/.test(clean(el.innerText || el.textContent || "")));
+    const roots = [];
+    let cursor = anchor;
+    for (let depth = 0; cursor && depth < 6; depth += 1) {
+      cursor = cursor.parentElement;
+      if (cursor && visible(cursor)) roots.push(cursor);
+    }
+    const root = roots
+      .map((el) => ({ el, text: clean(el.innerText || el.textContent || ""), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
+      .filter((item) => item.area > 4000 && /预览封面|编辑画布|重新上传|智能推荐封面|PK封面|默认封面/.test(item.text))
+      .sort((left, right) => left.area - right.area)[0]?.el || anchor?.parentElement || anchor || null;
+    if (!root) return null;
+    const findSlotContainer = (marker) => {
+      let current = marker;
+      for (let depth = 0; current && current !== root && depth < 6; depth += 1) {
+        const hasImage = [...current.querySelectorAll("img")].some(visible);
+        const hasBackground = [...current.querySelectorAll("*")].some((el) => {
+          if (!visible(el)) return false;
+          const backgroundImage = String(getComputedStyle(el).backgroundImage || "");
+          return backgroundImage && backgroundImage !== "none";
+        });
+        if (hasImage || hasBackground) return current;
+        current = current.parentElement;
+      }
+      return marker.parentElement || marker;
+    };
+    const collectSlotSurface = (labelRegex) => {
+      const marker = [...root.querySelectorAll("*")]
+        .filter(visible)
+        .find((el) => labelRegex.test(clean(el.innerText || el.textContent || "")));
+      if (!marker) return null;
+      const container = findSlotContainer(marker);
+      const imageSources = [...container.querySelectorAll("img")]
+        .filter(visible)
+        .map((img) => String(img.currentSrc || img.src || "").trim())
+        .filter(Boolean)
+        .slice(0, 10);
+      const backgroundSources = [...container.querySelectorAll("*")]
+        .filter(visible)
+        .map((el) => String(getComputedStyle(el).backgroundImage || ""))
+        .filter((src) => src && src !== "none")
+        .slice(0, 10);
+      return {
+        label: clean(marker.innerText || marker.textContent || ""),
+        text: clean(container.innerText || container.textContent || "").slice(0, 240),
+        image_sources: imageSources,
+        background_sources: backgroundSources,
+      };
+    };
+    const pkToggleNode = [...root.querySelectorAll("input[type=checkbox],[role=switch],button,[aria-checked]")]
+      .filter(visible)
+      .find((el) => /PK封面/.test(clean((el.closest("*")?.innerText || "") + " " + (el.getAttribute("aria-label") || "") + " " + (el.getAttribute("title") || ""))));
+    const pkToggleChecked = (() => {
+      if (!pkToggleNode) return false;
+      if (pkToggleNode instanceof HTMLInputElement) return Boolean(pkToggleNode.checked);
+      const ariaChecked = String(pkToggleNode.getAttribute("aria-checked") || "").trim().toLowerCase();
+      if (ariaChecked === "true") return true;
+      const className = String(pkToggleNode.className || "");
+      return /checked|active|on/.test(className);
+    })();
+    return {
+      text: clean(root.innerText || root.textContent || "").slice(0, 600),
+      pk_toggle_checked: pkToggleChecked,
+      slot_surfaces: [
+        collectSlotSurface(/默认封面/),
+        collectSlotSurface(/PK封面/),
+      ].filter(Boolean),
+    };
+  })()`, 10000);
+}
+
+export function selectKuaishouCoverProjectCandidate(candidates = [], surfaceTexts = []) {
+  const surfaceHaystack = [...(Array.isArray(surfaceTexts) ? surfaceTexts : [])]
+    .map((value) => String(value || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join(" ");
+  const normalized = (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => ({
+      label: String(candidate?.label || candidate?.text || "").replace(/\s+/g, " ").trim(),
+      rootText: String(candidate?.rootText || "").replace(/\s+/g, " ").trim(),
+      className: String(candidate?.className || "").replace(/\s+/g, " ").trim(),
+      visible: candidate?.visible !== false,
+      clickable: candidate?.clickable !== false,
+      area: Number(candidate?.area || 0),
+      source: candidate,
+    }))
+    .filter((candidate) => candidate.visible && candidate.clickable && candidate.label)
+    .filter((candidate) => !/PK封面/.test(`${candidate.label} ${candidate.rootText}`));
+  const score = (candidate) => {
+    const label = candidate.label;
+    const rootText = candidate.rootText;
+    let value = 0;
+    if (/^(封面设置|设置封面)$/.test(label)) value += 220;
+    else if (/^(重新上传|更换封面|上传封面)$/.test(label)) value += 190;
+    else if (/封面/.test(label)) value += 40;
+    if (/上传封面|封面设置|重新上传|更换封面/.test(rootText)) value += 30;
+    if (/编辑画布|模板编辑|视频编辑|去优化封面|智能推荐封面|PK封面/.test(label)) value -= 240;
+    if (/编辑画布|模板编辑|视频编辑/.test(rootText) && !/封面设置|重新上传|更换封面/.test(label)) value -= 180;
+    if (/去编辑|确认|完成|发布|立即发布/.test(label)) value -= 200;
+    if (/upload|cover/.test(candidate.className.toLowerCase()) && /上传封面|封面设置/.test(label)) value += 10;
+    if (!/封面/.test(surfaceHaystack) && !/上传封面|封面设置|重新上传|更换封面/.test(label)) value -= 40;
+    return value;
+  };
+  return normalized
+    .sort((left, right) => {
+      const scoreGap = score(right) - score(left);
+      if (scoreGap) return scoreGap;
+      const leftArea = Number.isFinite(left.area) && left.area > 0 ? left.area : Number.MAX_SAFE_INTEGER;
+      const rightArea = Number.isFinite(right.area) && right.area > 0 ? right.area : Number.MAX_SAFE_INTEGER;
+      return leftArea - rightArea;
+    })
+    .find((candidate) => score(candidate) > 0)?.source || null;
+}
+
+export function selectKuaishouCoverSurfaceCandidate(candidates = []) {
+  const normalized = (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => ({
+      text: String(candidate?.text || candidate?.label || "").replace(/\s+/g, " ").trim(),
+      area: Number(candidate?.area || 0),
+      source: candidate,
+    }))
+    .filter((candidate) => candidate.text && candidate.area > 0)
+    .filter((candidate) => !/PK封面/.test(candidate.text) || /封面设置|默认封面|重新上传|更换封面/.test(candidate.text));
+  const score = (candidate) => {
+    const text = candidate.text;
+    let value = 0;
+    if (/封面设置/.test(text)) value += 260;
+    if (/默认封面|重新上传|更换封面/.test(text)) value += 120;
+    if (/智能推荐封面/.test(text)) value += 20;
+    if (/PK封面/.test(text)) value -= 30;
+    if (/编辑画布|模板编辑|视频编辑|去优化封面/.test(text)) value -= 180;
+    return value;
+  };
+  return normalized
+    .sort((left, right) => {
+      const scoreGap = score(right) - score(left);
+      if (scoreGap) return scoreGap;
+      return (Number(right.area) || 0) - (Number(left.area) || 0);
+    })
+    .find((candidate) => score(candidate) > 0)?.source || null;
+}
+
 export function detectCompositePublicationSignals(platform, bodyText = "", lines = []) {
   const text = String(bodyText || "");
   const normalizedLines = Array.isArray(lines) ? lines.map((line) => String(line || "").trim()).filter(Boolean) : [];
+  const deriveBilibiliSurface = (surfaceText, surfaceLines, mediaPath = "") => {
+    if (typeof deriveBilibiliUploadSurfaceState === "function") {
+      return deriveBilibiliUploadSurfaceState(surfaceText, surfaceLines, mediaPath);
+    }
+    const inlineLines = Array.isArray(surfaceLines) ? surfaceLines.map((line) => String(line || "").trim()).filter(Boolean) : [];
+    const inlineText = String(surfaceText || inlineLines.join(" ")).replace(/\s+/g, " ").trim();
+    const mediaPathText = String(mediaPath || "").trim();
+    const mediaName = mediaPathText
+      ? mediaPathText.split(/[\\/]/).filter(Boolean).pop() || mediaPathText
+      : "";
+    const mediaStem = mediaName.replace(/\.[^.]+$/, "");
+    const mediaNamePresent = Boolean(
+      mediaName && (
+        inlineText.includes(mediaName)
+        || (mediaStem && inlineText.includes(mediaStem))
+      ),
+    );
+    const concreteProgress = /已上传：|当前速度：|剩余时间：|上传过程中请不要删除\/移动文件|处理中\s*\d+%|检测中\s*\d+%|检测中99%|\b\d{1,3}%\b/.test(inlineText);
+    const uploadCardMarkers = /取消上传|上传完成|更换视频|已经上传：/.test(inlineText) || concreteProgress;
+    const fieldSignals = [
+      /标题/.test(inlineText),
+      /简介/.test(inlineText),
+      /创作声明/.test(inlineText),
+      /分区|请选择分区/.test(inlineText),
+      /标签/.test(inlineText),
+      /定时发布/.test(inlineText),
+      /存草稿|立即投稿/.test(inlineText),
+      /封面设置|\*?\s*封面|设置封面/.test(inlineText),
+      /加入合集|请选择合集/.test(inlineText),
+    ].filter(Boolean).length;
+    const fieldShell = fieldSignals >= 4;
+    const readySurface = /更换视频|上传完成|已经上传：/.test(inlineText)
+      && /标题|简介|分区|标签|创作声明|定时发布|立即投稿|存草稿/.test(inlineText)
+      && !concreteProgress;
+    const mediaAttached = readySurface || mediaNamePresent || (fieldShell && uploadCardMarkers);
+    const uploadPromptSurface = /拖拽视频到此|点击上传|上传视频\s+视频大小|选择文件|Select files/.test(inlineText);
+    return {
+      media_name_present: mediaNamePresent,
+      concrete_progress: concreteProgress,
+      upload_card_markers: uploadCardMarkers,
+      field_shell: fieldShell,
+      ready_surface: readySurface,
+      media_attached: mediaAttached,
+      upload_prompt_surface: uploadPromptSurface,
+    };
+  };
   const matchLines = (pattern) => normalizedLines.filter((line) => pattern.test(line)).slice(0, 12);
   const uploadFailedPattern = /上传失败|Upload failed|文件里没有有效的视频|无效的视频|视频文件无效|上传出错|上传异常|处理失败|刷新后重试|网络异常/i;
   const uploadBusyPattern = /上传中|正在上传|视频处理中|处理中\s*\d+%|检测中\s*\d+%|检测中99%|已上传：|当前速度：|剩余时间：|\b\d{1,3}%\b/i;
@@ -299,13 +1039,17 @@ export function detectCompositePublicationSignals(platform, bodyText = "", lines
   const douyinConcreteUploadProgress =
     platform === "douyin"
     && /已上传：|当前速度：|剩余时间：|\b\d{1,3}%\b|正在上传|视频处理中|处理中\s*\d+%/.test(text);
-  const bilibiliEditorSurface =
-    platform === "bilibili"
-    && /更换视频|上传完成|已经上传：/.test(text)
-    && /标题|简介|分区|标签|创作声明|定时发布|立即投稿|存草稿/.test(text);
-  const bilibiliConcreteUploadProgress =
-    platform === "bilibili"
-    && uploadBusyConcretePattern.test(text);
+  const bilibiliSurface = platform === "bilibili"
+    ? deriveBilibiliSurface(text, normalizedLines, "")
+    : null;
+  const bilibiliEditorSurface = Boolean(bilibiliSurface?.ready_surface);
+  const toutiaoEditorSurface =
+    platform === "toutiao"
+    && /基本信息|标题|话题|封面|视频简介|高级设置|作品声明|谁可以看|存草稿|定时发布|发布/.test(text);
+  const douyinEditorSurfaceWithUploadEntry =
+    platform === "douyin"
+    && /作品描述|#添加话题|设置封面|添加合集|自主声明|谁可以看|发布时间|定时发布/.test(text);
+  const bilibiliConcreteUploadProgress = Boolean(bilibiliSurface?.concrete_progress);
   const uploadBusy = uploadBusyPattern.test(text)
     && !(
       douyinStaticUploadReminder
@@ -316,7 +1060,12 @@ export function detectCompositePublicationSignals(platform, bodyText = "", lines
       bilibiliEditorSurface
       && !bilibiliConcreteUploadProgress
     );
-  const uploadPromptOnly = uploadPromptOnlyPattern.test(text);
+  const uploadPromptOnly = uploadPromptOnlyPattern.test(text)
+    && !uploadBusy
+    && !bilibiliEditorSurface
+    && !(platform === "bilibili" && bilibiliSurface?.media_attached)
+    && !toutiaoEditorSurface
+    && !douyinEditorSurfaceWithUploadEntry;
   const blockers = [];
   if (uploadFailed) {
     blockers.push({
@@ -342,10 +1091,81 @@ export function detectCompositePublicationSignals(platform, bodyText = "", lines
 
 export function shouldAcceptCompositeUploadReadyState(platform, state = {}, readyStreak = 0, waitedMs = 0) {
   const snapshot = state && typeof state === "object" ? state : {};
-  if (!snapshot.ready || snapshot.failed || snapshot.busy || snapshot.uploadPromptOnly) return false;
+  if (snapshot.failed || snapshot.uploadPromptOnly) return false;
+  const processingEditorSurface = platform === "douyin"
+    ? Boolean(snapshot.busy && snapshot.mediaPresent && snapshot.douyinReadySurface)
+    : Boolean(
+      snapshot.busy
+      && snapshot.mediaPresent
+      && snapshot.fieldShell
+      && (
+        snapshot.kuaishouReadySurface
+        || snapshot.douyinReadySurface
+        || snapshot.youtubeEditorSurface
+        || snapshot.bilibiliMediaAttached
+        || snapshot.readySurface
+      ),
+    );
+  if (!snapshot.ready) return processingEditorSurface;
+  if (snapshot.busy && !processingEditorSurface) return false;
   if (platform === "douyin") {
-    return readyStreak >= 2 && waitedMs >= 2500;
+    return Boolean(snapshot.douyinReadySurface) && readyStreak >= 2 && waitedMs >= 2500;
   }
+  return true;
+}
+
+export function shouldAllowCompositeFieldPreparation(platform, uploadReadiness = {}) {
+  const readiness = uploadReadiness && typeof uploadReadiness === "object" ? uploadReadiness : {};
+  if (Boolean(readiness.ready)) return true;
+  if (Boolean(readiness.failed)) return false;
+  const snapshot = readiness.last && typeof readiness.last === "object" ? readiness.last : {};
+  if (snapshot.failed || snapshot.uploadPromptOnly) return false;
+  if (platform === "douyin") {
+    return Boolean(snapshot.mediaPresent && snapshot.douyinReadySurface && !snapshot.busy);
+  }
+  const processingBlocksFinalPublishOnly = compositePlatformUploadProcessingBlocksFinalPublishOnly(platform);
+  return Boolean(
+    snapshot.mediaPresent
+    && snapshot.fieldShell
+    && (
+      snapshot.kuaishouReadySurface
+      || snapshot.douyinReadySurface
+      || snapshot.youtubeEditorSurface
+      || snapshot.bilibiliMediaAttached
+      || snapshot.readySurface
+    )
+    && (
+      !snapshot.busy
+      || processingBlocksFinalPublishOnly
+      || platform !== "kuaishou"
+    ),
+  );
+}
+
+export function shouldWaitForCompositeUploadReadyBeforeFieldPreparation(platform, uploadReadiness = {}, options = {}) {
+  const readiness = uploadReadiness && typeof uploadReadiness === "object" ? uploadReadiness : {};
+  if (Boolean(readiness.ready) || Boolean(readiness.failed)) return false;
+  if (options?.verifyMediaUpload === false) return false;
+  const snapshot = readiness.last && typeof readiness.last === "object" ? readiness.last : {};
+  const normalizedPlatform = normalizePlatform(platform);
+  if (
+    ["bilibili", "xiaohongshu"].includes(normalizedPlatform)
+    && Boolean(snapshot.mediaPresent)
+    && (
+      Boolean(snapshot.fieldShell)
+      || Boolean(snapshot.bilibiliMediaAttached)
+      || Boolean(snapshot.readySurface)
+    )
+  ) {
+    return false;
+  }
+  return !shouldAllowCompositeFieldPreparation(platform, readiness);
+}
+
+export function shouldDeferGenericPostUploadIntegrityUntilPlatformAdapter(platform) {
+  // Dedicated platform workflows should finish their own project steps
+  // (for example Bilibili cover/collection/schedule) before generic
+  // post-upload integrity is allowed to gate the run.
   return true;
 }
 
@@ -416,15 +1236,7 @@ export function buildPendingUploadMaterialIntegrity(platform, readiness = {}, ro
 }
 
 export function shouldDeferYouTubeDraftResumeReupload(readiness = {}) {
-  const state = readiness && typeof readiness === "object" ? readiness : {};
-  const last = state.last && typeof state.last === "object" ? state.last : {};
-  if (String(last.platform || "").trim() !== "youtube") return false;
-  if (state.ready || state.failed || last.busy) return false;
-  if (!last.mediaPresent || last.uploadPromptOnly) return false;
-  if (!last.youtubeUploadRoute || !last.youtubeChannelContentList || !last.youtubeDraftResumeAvailable) return false;
-  const fileInputCount = Number(last.fileInputCount || 0);
-  const totalFileInputCount = Number(last.totalFileInputCount || 0);
-  return fileInputCount === 0 && totalFileInputCount > 0;
+  return false;
 }
 
 export function normalizeYouTubeDraftResumeHintText(value = "") {
@@ -571,9 +1383,9 @@ export function buildCompositeUploadPendingProcessingEnvelope({
       recoveryOverrides: {
         recovery_mode: "prepublish_resume",
         clear_draft_context: false,
-        force_publish_page_refresh: true,
-        verify_media_upload: true,
-        wait_for_publish_confirmation: true,
+        force_publish_page_refresh: false,
+        verify_media_upload: false,
+        wait_for_publish_confirmation: false,
         prepublish_only_current_page: Boolean(prepublishOnlyCurrentPage),
         prepare_only_current_page: Boolean(prepareOnlyCurrentPage),
       },
@@ -642,15 +1454,7 @@ export function deriveCompositeUploadReadinessFailureState(platform, readiness =
 }
 
 export function shouldDeferYoutubeDraftResumeReupload(readiness = {}) {
-  const state = readiness && typeof readiness === "object" ? readiness : {};
-  const last = state.last && typeof state.last === "object" ? state.last : {};
-  if (String(last.platform || "").trim() !== "youtube") return false;
-  if (state.ready || state.failed || last.busy) return false;
-  if (!last.mediaPresent || last.uploadPromptOnly) return false;
-  if (!last.youtubeUploadRoute || !last.youtubeChannelContentList || !last.youtubeDraftResumeAvailable) return false;
-  if (Number(last.fileInputCount || 0) !== 0) return false;
-  if (Number(last.totalFileInputCount || 0) <= 0) return false;
-  return true;
+  return false;
 }
 
 export function deriveCompositeMediaUploadFailureDisposition(platform, upload = {}, options = {}) {
@@ -737,6 +1541,25 @@ export function resolveDouyinDeclarationOption(declaration = "") {
   return "无需添加自主声明";
 }
 
+export function resolveXiaohongshuDeclarationOption(declaration = "") {
+  const text = String(declaration || "").trim();
+  if (!text) return "";
+  if (/AI|人工智能|生成/i.test(text)) return "内容由AI生成";
+  if (/营销|推广|广告/i.test(text)) return "内容含营销推广信息";
+  if (/转载|转发|引用/i.test(text)) return "内容为转载信息";
+  if (/虚构|演绎|娱乐/i.test(text)) return "虚构演绎，仅供娱乐";
+  if (/^内容为个人观点或见解$|^个人观点或见解$/.test(text)) return "内容为个人观点或见解";
+  if (/原创声明|原创|观点|见解|测评|评测/i.test(text)) return "";
+  return text;
+}
+
+export function shouldEnableXiaohongshuOriginalDeclaration(declaration = "") {
+  const text = String(declaration || "").trim();
+  if (!text) return false;
+  if (/AI|人工智能|生成|营销|推广|广告|转载|转发|引用|虚构|演绎|娱乐/i.test(text)) return false;
+  return /原创声明|原创|观点|见解|测评|评测/i.test(text);
+}
+
 export function extractCompositeDeclarationText(content = {}) {
   return String(
     content?.declaration
@@ -752,6 +1575,8 @@ export function expectedCompositeDeclaration(content = {}, platform = "") {
   return String(
     platform === "douyin"
       ? resolveDouyinDeclarationOption(rawDeclaration || compositePlatformDefaultDeclaration(platform))
+      : platform === "xiaohongshu"
+        ? resolveXiaohongshuDeclarationOption(rawDeclaration || compositePlatformDefaultDeclaration(platform))
       : rawDeclaration || compositePlatformDefaultDeclaration(platform),
   ).trim();
 }
@@ -778,8 +1603,13 @@ export function verifyCompositeDeclarationField(
   }
   if (platform === "xiaohongshu") {
     if (declarationMissingPrompt) return false;
-    if (!expected) return /原创声明|声明原创|原创/.test(text) || !hasTitleOrBody;
+    const requireOriginalDeclaration = Boolean(options?.xiaohongshuRequireOriginalDeclaration);
+    const originalDeclarationEnabled = Boolean(options?.xiaohongshuOriginalDeclarationEnabled);
+    const placeholderVisible = /添加内容类型声明|请选择内容类型声明|请选择声明类型/.test(text) || /添加内容类型声明|请选择内容类型声明|请选择声明类型/.test(actual);
+    if (!expected) return requireOriginalDeclaration ? originalDeclarationEnabled : (!placeholderVisible || !hasTitleOrBody);
+    if (requireOriginalDeclaration && !originalDeclarationEnabled) return false;
     if (actual && (actual === expected || actual.includes(expected) || expected.includes(actual))) return true;
+    if (placeholderVisible) return false;
     return text.includes(expected);
   }
   return platform === "bilibili"
@@ -801,8 +1631,10 @@ export function deriveXiaohongshuSelectedCollectionActual(expectedCollection = "
 export function deriveXiaohongshuDeclarationActual(expectedDeclaration = "", textHaystack = "") {
   const expected = String(expectedDeclaration || "").replace(/\s+/g, " ").trim();
   const text = String(textHaystack || "").replace(/\s+/g, " ").trim();
+  if (/添加内容类型声明|请选择内容类型声明|请选择声明类型/.test(text)) return "";
+  if (/原创声明|原创|观点|见解|测评|评测/i.test(expected) && !/^内容为个人观点或见解$|^个人观点或见解$/.test(expected)) return "";
+  if (!expected) return "";
   if (expected && text.includes(expected)) return expected;
-  if (!expected && /原创声明|声明原创|原创/.test(text)) return "原创声明";
   return "";
 }
 
@@ -819,10 +1651,681 @@ export function deriveXiaohongshuCoverActual(
   const backgroundList = Array.isArray(backgroundSources) ? backgroundSources : [];
   if (expectedCoverBase && imageList.some((src) => String(src || "").includes(expectedCoverBase))) return expectedCoverBase;
   if (expectedCoverBase && backgroundList.some((src) => String(src || "").includes(expectedCoverBase))) return expectedCoverBase;
-  if (customCoverPreview && (/封面效果评估通过|重新设置封面|上传成功/.test(String(textHaystack || "")) || expectedCoverBase)) {
-    return expectedCoverBase || "custom_cover_preview";
-  }
+  if (customCoverPreview) return expectedCoverBase || "custom_cover_preview";
   return "";
+}
+
+function ensureMutablePlatformOverrides(content) {
+  if (!content || typeof content !== "object") return {};
+  if (!content.platform_specific_overrides || typeof content.platform_specific_overrides !== "object") {
+    content.platform_specific_overrides = {};
+  }
+  return content.platform_specific_overrides;
+}
+
+async function setXiaohongshuNativeTopic(client, topicText, allowedTopics = []) {
+  const expected = String(topicText || "").replace(/^#/, "").trim();
+  const allowed = Array.isArray(allowedTopics)
+    ? allowedTopics.map((item) => String(item || "").replace(/^#/, "").trim()).filter(Boolean)
+    : [];
+  if (!expected) {
+    return {
+      inserted: false,
+      selected: false,
+      skipped: true,
+      reason: "missing_expected_topic",
+      expected: "",
+      chosen_label: "",
+      candidates: [],
+      confirmed_topics: allowed,
+      inserted_by_topic_button: false,
+      topic_field_label: "",
+      topic_field_role: "",
+      editor_value: "",
+      body_has_topic: false,
+      removed_topics: [],
+    };
+  }
+  const buildTopicQuerySource = JSON.stringify(`(${buildXiaohongshuTopicSearchQuery.toString()})`);
+  const selectTopicFieldSource = JSON.stringify(`(${selectXiaohongshuTopicSearchFieldCandidate.toString()})`);
+  const extractInsertedLabelsSource = JSON.stringify(`(${extractXiaohongshuInsertedTopicLabels.toString()})`);
+  const extractVerificationLabelsSource = JSON.stringify(`(${extractXiaohongshuTopicVerificationLabels.toString()})`);
+  return evaluateWithClient(client, `(async () => {
+    const expected = ${JSON.stringify(expected)};
+    const allowedTopics = Array.isArray(${JSON.stringify(allowed)}) ? ${JSON.stringify(allowed)} : [];
+    const buildTopicQuery = (0, eval)(${buildTopicQuerySource});
+    const selectTopicField = (0, eval)(${selectTopicFieldSource});
+    const extractInsertedLabels = (0, eval)(${extractInsertedLabelsSource});
+    const extractVerificationLabels = (0, eval)(${extractVerificationLabelsSource});
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const normalizeTopic = (value) => clean(value)
+      .replace(/^\\[话题\\]/, "")
+      .replace(/^#/, "")
+      .replace(/#$/, "")
+      .replace(/\\s+\\d[\\d.]*[万亿]?(?:人)?浏览.*$/u, "")
+      .replace(/\\s+浏览.*$/u, "")
+      .trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const click = (el) => {
+      if (!el || !visible(el)) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const init = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        el.dispatchEvent(new MouseEvent(type, init));
+      }
+      if (typeof el.click === "function") el.click();
+      return true;
+    };
+    const findEditor = () => [...document.querySelectorAll(".ProseMirror,[contenteditable=true],div[role=textbox],textarea")]
+      .filter(visible)
+      .find((el) => /正文|描述|笔记/.test(clean(el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.innerText || el.textContent || "")))
+      || [...document.querySelectorAll(".ProseMirror,[contenteditable=true],div[role=textbox],textarea")].filter(visible)[0]
+      || null;
+    const collectInsertedTopicEntries = () => [...document.querySelectorAll(".tiptap-topic,[data-type=topic],[class*=topic]")]
+      .filter(visible)
+      .map((el) => ({
+        el,
+        text: clean(el.innerText || el.textContent || ""),
+        normalized: normalizeTopic(el.innerText || el.textContent || ""),
+        context: clean(el.closest("[role=listbox],[class*=topic],[class*=editor],[class*=content]")?.innerText || ""),
+        source: "chip",
+      }))
+      .filter((item) => item.normalized);
+    const extractEditorHashtags = (editor) => Array.from(new Set(
+      Array.from(String(editor?.innerText || editor?.textContent || editor?.value || "").matchAll(/#([^\\s#@，。！？、；：,.!?/]{1,24})/gu))
+        .map((match) => normalizeTopic(match[1]))
+        .filter(Boolean),
+    ));
+    const hasVisibleTopicMenu = () => [...document.querySelectorAll("[role=listbox],[role=dialog],[role=menu],[class*=topic],[class*=search],[class*=popover],[class*=dropdown],[class*=menu],[class*=recommend]")]
+      .filter(visible)
+      .some((el) => /话题|添加话题|搜索话题|浏览|推荐|热词/.test(clean(el.innerText || el.textContent || "") + " " + clean(typeof el.className === "string" ? el.className : "")));
+    const setFieldQuery = async (field, query) => {
+      if (!field || !query) return false;
+      field.scrollIntoView({ block: "center", inline: "center" });
+      field.focus();
+      if (field.tagName === "INPUT" || field.tagName === "TEXTAREA") {
+        field.value = "";
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        for (const char of Array.from(query)) {
+          field.value = String(field.value || "") + char;
+          field.dispatchEvent(new InputEvent("input", { bubbles: true, data: char, inputType: "insertText" }));
+          await sleep(40);
+        }
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      }
+      if (field.isContentEditable || field.getAttribute("contenteditable") === "true" || field.getAttribute("role") === "textbox") {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(field);
+        range.collapse(false);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        try {
+          document.execCommand("selectAll", false);
+          document.execCommand("delete", false);
+        } catch {}
+        for (const char of Array.from(query)) {
+          try {
+            document.execCommand("insertText", false, char);
+          } catch {
+            field.textContent = String(field.textContent || "") + char;
+          }
+          field.dispatchEvent(new InputEvent("input", { bubbles: true, data: char, inputType: "insertText" }));
+          await sleep(40);
+        }
+        return true;
+      }
+      return false;
+    };
+    const typeEditorFragment = async (editor, fragment) => {
+      if (!editor || !fragment) return false;
+      editor.scrollIntoView({ block: "center", inline: "center" });
+      editor.focus();
+      if (editor.isContentEditable || editor.getAttribute("contenteditable") === "true" || editor.getAttribute("role") === "textbox") {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        range.collapse(false);
+        selection?.removeAllRanges();
+        selection?.addRange(range);
+        for (const char of Array.from(fragment)) {
+          try {
+            document.execCommand("insertText", false, char);
+          } catch {
+            editor.textContent = String(editor.textContent || "") + char;
+          }
+          editor.dispatchEvent(new InputEvent("input", { bubbles: true, data: char, inputType: "insertText" }));
+          await sleep(40);
+        }
+        return true;
+      }
+      if (editor.tagName === "INPUT" || editor.tagName === "TEXTAREA") {
+        for (const char of Array.from(fragment)) {
+          editor.value = String(editor.value || "") + char;
+          editor.dispatchEvent(new InputEvent("input", { bubbles: true, data: char, inputType: "insertText" }));
+          await sleep(40);
+        }
+        editor.dispatchEvent(new Event("change", { bubbles: true }));
+        return true;
+      }
+      return false;
+    };
+    const rollbackTypedQuery = (editor, fragments = []) => {
+      if (!editor) return false;
+      const parts = (Array.isArray(fragments) ? fragments : [fragments]).map((item) => String(item || "")).filter(Boolean);
+      if (!parts.length) return false;
+      const strip = (value) => {
+        let next = String(value || "");
+        for (const part of parts) {
+          const position = next.lastIndexOf(part);
+          if (position >= 0) next = next.slice(0, position) + next.slice(position + part.length);
+        }
+        next = next.replace(/(^|\\s)#$|#$/u, "").replace(/\\s{2,}/g, " ").trimEnd();
+        return next;
+      };
+      if (editor.isContentEditable || editor.getAttribute("contenteditable") === "true" || editor.getAttribute("role") === "textbox") {
+        try {
+          document.execCommand("undo");
+        } catch {}
+        const text = String(editor.innerText || editor.textContent || "");
+        const stripped = strip(text);
+        if (stripped !== text) {
+          editor.textContent = stripped;
+          editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+        }
+        return true;
+      }
+      const current = String(editor.value || "");
+      const stripped = strip(current);
+      if (stripped === current) return false;
+      editor.value = stripped;
+      editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+      editor.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    };
+    const collectConfirmedInsertedTopics = (expectedList = []) => extractInsertedLabels(
+      collectInsertedTopicEntries().map((item) => ({
+        text: item.text,
+        context: item.context || "已选话题",
+        source: item.source,
+      })),
+      expectedList,
+    );
+    const waitForConfirmedInsertedTopics = async (expectedList = [], timeoutMs = 2400) => {
+      const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+      let last = collectConfirmedInsertedTopics(expectedList);
+      while (Date.now() < deadline) {
+        if (last.length) return last;
+        await sleep(160);
+        last = collectConfirmedInsertedTopics(expectedList);
+      }
+      return last;
+    };
+    const topicButton = [...document.querySelectorAll("button,[role=button],div,span")]
+      .filter(visible)
+      .find((el) => {
+        const text = clean(el.innerText || el.textContent || "");
+        return text === "话题" || text === "# 话题" || /添加话题/.test(text);
+      }) || null;
+    const insertedByTopicButton = click(topicButton);
+    if (insertedByTopicButton) await sleep(320);
+    const candidateNodes = [...document.querySelectorAll("input,textarea,[contenteditable=true],[role=textbox],[role=searchbox],[role=combobox]")]
+      .filter(visible);
+    const candidates = candidateNodes.map((el, index) => {
+      const root = el.closest("[role=dialog],[role=listbox],[class*=topic],[class*=search],[class*=popover],[class*=dropdown]") || el.parentElement || el;
+      return {
+        index,
+        tag: String(el.tagName || "").toLowerCase(),
+        type: String(el.getAttribute("type") || "").toLowerCase(),
+        role: String(el.getAttribute("role") || "").toLowerCase(),
+        label: clean(
+          el.getAttribute("aria-label")
+          || el.getAttribute("placeholder")
+          || root?.getAttribute?.("aria-label")
+          || root?.innerText
+          || ""
+        ).slice(0, 160),
+        current: clean(el.value ?? el.innerText ?? el.textContent ?? ""),
+        root_area: Number((root?.getBoundingClientRect?.().width || 0) * (root?.getBoundingClientRect?.().height || 0)),
+        isContentEditable: Boolean(el.isContentEditable || el.getAttribute("contenteditable") === "true"),
+      };
+    });
+    const chosenField = selectTopicField(candidates);
+    const fieldNode = chosenField ? candidateNodes[Number(chosenField.index)] : null;
+    const query = buildTopicQuery(expected);
+    const editor = findEditor();
+    const editorValueBefore = clean(editor?.innerText || editor?.textContent || editor?.value || "");
+    const prefersEditorFlow = Boolean(editor);
+    const inputTarget = prefersEditorFlow ? editor : fieldNode;
+    if (!inputTarget) {
+      return {
+        inserted: false,
+        selected: false,
+        skipped: false,
+        reason: "topic_menu_not_triggered",
+        expected,
+        chosen_label: "",
+        candidates: [],
+        confirmed_topics: allowedTopics,
+        inserted_by_topic_button: insertedByTopicButton,
+        topic_field_label: "",
+        topic_field_role: "",
+        editor_value: editorValueBefore,
+        body_has_topic: false,
+        removed_topics: [],
+      };
+    }
+    const typedFragment = prefersEditorFlow
+      ? ((editorValueBefore ? " " : "") + query)
+      : query;
+    const inserted = prefersEditorFlow
+      ? await typeEditorFragment(inputTarget, typedFragment)
+      : await setFieldQuery(inputTarget, typedFragment);
+    if (inserted) await sleep(700);
+    const overlayCandidates = [...document.querySelectorAll("[role=option],[role=button],li,button,div,span,a")]
+      .filter(visible)
+      .map((el) => {
+        const text = clean(el.innerText || el.textContent || "");
+        if (!text || text.length > 120) return null;
+        const contextRoot = el.closest("[role=listbox],[role=dialog],[class*=topic],[class*=search],[class*=popover],[class*=dropdown],[class*=menu]") || el.parentElement;
+        const context = clean(contextRoot?.innerText || "");
+        const normalized = normalizeTopic(text);
+        if (!normalized) return null;
+        let score = 0;
+        if (normalized === expected) score += 1000;
+        else if (normalized.includes(expected) || expected.includes(normalized)) score += 200;
+        if (/浏览/.test(text)) score += 40;
+        if (/推荐|热词|更多|活动话题/.test(context) && normalized !== expected) score -= 900;
+        return {
+          el,
+          text,
+          context,
+          normalized,
+          score,
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => right.score - left.score || left.text.length - right.text.length);
+    const menuTriggered = hasVisibleTopicMenu() || overlayCandidates.some((item) => item.normalized === expected || item.score >= 900);
+    if (!menuTriggered) {
+      return {
+        inserted,
+        selected: false,
+        skipped: false,
+        reason: "topic_menu_not_triggered",
+        expected,
+        chosen_label: "",
+        candidates: overlayCandidates.slice(0, 8).map((item) => item.text),
+        confirmed_topics: allowedTopics,
+        inserted_by_topic_button: insertedByTopicButton,
+        topic_field_label: String(chosenField?.label || ""),
+        topic_field_role: String(chosenField?.role || ""),
+        editor_value: clean(editor?.innerText || editor?.textContent || editor?.value || ""),
+        body_has_topic: extractEditorHashtags(editor).includes(expected),
+        removed_topics: [],
+      };
+    }
+    const chosen = overlayCandidates.find((item) => item.normalized === expected)
+      || overlayCandidates.find((item) => item.score >= 900)
+      || null;
+    const selected = click(chosen?.el || null);
+    if (selected) await sleep(220);
+    const bodyTopics = extractEditorHashtags(editor);
+    const confirmedTopics = selected
+      ? await waitForConfirmedInsertedTopics([expected, ...allowedTopics], 2400)
+      : collectConfirmedInsertedTopics([expected, ...allowedTopics]);
+    const selectedExact = confirmedTopics.includes(expected);
+    const confirmedAfterSelection = collectConfirmedInsertedTopics([expected, ...allowedTopics]);
+    return {
+      inserted,
+      selected: selectedExact,
+      skipped: false,
+      reason: selectedExact ? "" : (menuTriggered ? "native_topic_not_inserted" : "topic_menu_not_triggered"),
+      expected,
+      chosen_label: chosen?.text || "",
+      candidates: overlayCandidates.slice(0, 8).map((item) => item.text),
+      confirmed_topics: confirmedAfterSelection,
+      inserted_by_topic_button: insertedByTopicButton,
+      topic_field_label: String(chosenField?.label || ""),
+      topic_field_role: String(chosenField?.role || ""),
+      editor_value: clean(editor?.innerText || editor?.textContent || editor?.value || ""),
+      body_has_topic: bodyTopics.includes(expected),
+      removed_topics: [],
+    };
+  })()`, 60000);
+}
+
+/*
+async function __disabled_setXiaohongshuNativeTopic_impl(client, topicText, allowedTopics = []) {
+  const expectedTopic = JSON.stringify(String(topicText || "").replace(/^#/, "").trim());
+  const allowedTopicsJson = JSON.stringify(Array.isArray(allowedTopics) ? allowedTopics : []);
+  return evaluateWithClient(client, `(async () => {
+    const expected = ${expectedTopic};
+    const allowedTopics = Array.isArray(${allowedTopicsJson}) ? ${allowedTopicsJson} : [];
+    const buildTopicQuery = (value) => {
+      const text = String(value || "").trim();
+      if (!text) return "";
+      return text.startsWith("#") ? text : "#" + text;
+    };
+    const selectTopicField = (candidates = []) => {
+      const list = Array.isArray(candidates) ? candidates : [];
+      const scored = list
+        .map((candidate) => {
+          const tag = String(candidate?.tag || "").toLowerCase();
+          const type = String(candidate?.type || "").toLowerCase();
+          const role = String(candidate?.role || "").toLowerCase();
+          const label = String(candidate?.label || "").toLowerCase();
+          const current = String(candidate?.current || "").toLowerCase();
+          const rootArea = Number(candidate?.root_area || 0);
+          const contentEditable = Boolean(candidate?.isContentEditable);
+          let score = 0;
+          if (tag === "input") score += 160;
+          if (tag === "textarea") score += 140;
+          if (role === "searchbox" || role === "combobox") score += 120;
+          if (type === "search") score += 40;
+          if (/话题|topic|搜索/.test(label)) score += 120;
+          if (/正文|描述|笔记/.test(label)) score -= 220;
+          if (/上传|视频|封面/.test(label)) score -= 260;
+          if (contentEditable) score -= 180;
+          if (current) score -= 20;
+          if (rootArea > 0 && rootArea < 80000) score += 40;
+          return { ...candidate, score };
+        })
+        .sort((left, right) => right.score - left.score);
+      return scored[0] || null;
+    };
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const normalizeTopic = (value) => {
+      const text = clean(value).replace(/\[话题\]/g, "");
+      const trimmed = text.replace(/\s+\d[\d.]*[万亿]?(?:人)?浏览.*$/u, "").replace(/\s+浏览.*$/u, "").trim();
+      const hashMatch = trimmed.match(/^#?([^#\s]+)#?/u);
+      return clean(hashMatch ? hashMatch[1] : trimmed).replace(/^\#+/, "").replace(/\#+$/, "");
+    };
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const click = (el) => {
+      if (!el || !visible(el)) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+      if (typeof el.click === "function") el.click();
+      return true;
+    };
+    const insertedTopics = () => [...document.querySelectorAll(".tiptap-topic,[data-type=topic],[class*=topic]")].filter(visible).map((el) => ({
+      el,
+      raw: clean(el.innerText || el.textContent || ""),
+      normalized: normalizeTopic(el.innerText || el.textContent || ""),
+    })).filter((item) => item.normalized);
+    const extractEditorTopics = (editor) => Array.from(new Set(
+      Array.from(String(editor?.innerText || editor?.textContent || editor?.value || "").matchAll(/#([^\s#@，。！？、；：,.!?/]{1,24})/gu))
+        .map((match) => normalizeTopic(match[1]))
+        .filter(Boolean),
+    ));
+    const removeUnexpectedTopics = (allowedTopics = []) => {
+      const allowed = new Set((Array.isArray(allowedTopics) ? allowedTopics : [allowedTopics]).map((item) => normalizeTopic(item)).filter(Boolean));
+      const removed = [];
+      for (const item of insertedTopics()) {
+        if (allowed.has(item.normalized)) continue;
+        removed.push(item.raw);
+        item.el.remove();
+      }
+      if (removed.length) {
+        const editorNode = document.querySelector(".ProseMirror,[contenteditable=true],div[role=textbox],textarea");
+        editorNode?.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+      }
+      return removed;
+    };
+    const rollbackTypedQuery = (editor, query) => {
+      if (!editor || !query) return false;
+      if (editor.isContentEditable || editor.getAttribute("contenteditable") === "true" || editor.classList.contains("ProseMirror")) {
+        try {
+          document.execCommand("undo");
+        } catch {}
+        const text = String(editor.innerText || editor.textContent || "");
+        if (text.includes(query)) {
+          const walker = document.createTreeWalker(editor, NodeFilter.SHOW_TEXT);
+          const nodes = [];
+          while (walker.nextNode()) nodes.push(walker.currentNode);
+          for (let index = nodes.length - 1; index >= 0; index -= 1) {
+            const node = nodes[index];
+            const value = String(node.nodeValue || "");
+            const position = value.lastIndexOf(query);
+            if (position >= 0) {
+              node.nodeValue = value.slice(0, position) + value.slice(position + query.length);
+              editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+              return true;
+            }
+          }
+        }
+        return !String(editor.innerText || editor.textContent || "").includes(query);
+      }
+      const next = String(editor.value || "");
+      if (!next.includes(query)) return false;
+      editor.value = next.replace(query, "").replace(/\\s{2,}/g, " ").trim();
+      editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "deleteContentBackward" }));
+      editor.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    };
+    const moveCaretToEnd = (editor) => {
+      if (!editor) return false;
+      editor.scrollIntoView({ block: "center", inline: "center" });
+      editor.focus();
+      if (!(editor.isContentEditable || editor.getAttribute("contenteditable") === "true" || editor.classList.contains("ProseMirror"))) {
+        try {
+          const length = String(editor.value || "").length;
+          editor.setSelectionRange(length, length);
+        } catch {}
+        return true;
+      }
+      const selection = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(editor);
+      range.collapse(false);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      return true;
+    };
+    const typeEditorFragment = (editor, fragment) => {
+      if (!editor || !fragment) return false;
+      moveCaretToEnd(editor);
+      if (editor.isContentEditable || editor.getAttribute("contenteditable") === "true" || editor.classList.contains("ProseMirror")) {
+        const inserted = document.execCommand("insertText", false, fragment);
+        if (!inserted) {
+          const selection = window.getSelection();
+          const range = selection?.rangeCount ? selection.getRangeAt(0) : document.createRange();
+          range.collapse(false);
+          range.insertNode(document.createTextNode(fragment));
+          range.collapse(false);
+          selection?.removeAllRanges();
+          selection?.addRange(range);
+        }
+      } else {
+        const proto = editor.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+        const currentValue = String(editor.value || "");
+        const next = currentValue + fragment;
+        if (setter) setter.call(editor, next);
+        else editor.value = next;
+      }
+      editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: fragment }));
+      editor.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, key: fragment, code: "Unidentified" }));
+      editor.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, key: fragment, code: "Unidentified" }));
+      return true;
+    };
+    const editor = [...document.querySelectorAll(".ProseMirror,[contenteditable=true],div[role=textbox],textarea")]
+      .filter(visible)
+      .find((el) => /1000|笔记|正文|描述/.test(clean([el.getAttribute("placeholder"), el.getAttribute("aria-label"), el.parentElement?.innerText].join(" "))))
+      || [...document.querySelectorAll(".ProseMirror,[contenteditable=true],div[role=textbox],textarea")].filter(visible)[0]
+      || null;
+    if (!editor || !expected) return { inserted: false, selected: false, reason: editor ? "empty_topic" : "editor_missing" };
+    removeUnexpectedTopics(allowedTopics.concat(expected));
+    const alreadyPresent = insertedTopics().find((item) => item.normalized === expected);
+    if (alreadyPresent) {
+      return {
+        inserted: true,
+        selected: true,
+        already_present: true,
+        expected,
+        chosen_label: alreadyPresent.raw,
+        candidates: [],
+        confirmed_topics: insertedTopics().map((item) => item.normalized),
+      };
+    }
+    const topicButton = [...document.querySelectorAll("button,[role=button],div,span")]
+      .filter(visible)
+      .find((el) => clean(el.innerText || el.textContent || "") === "话题");
+    const query = buildTopicQuery(expected);
+    moveCaretToEnd(editor);
+    const beforeRawText = String(editor.value || editor.innerText || editor.textContent || "");
+    const beforeText = clean(beforeRawText);
+    let insertedByTopicButton = false;
+    if (topicButton) {
+      insertedByTopicButton = click(topicButton);
+      await sleep(180);
+    }
+    const topicFieldCandidates = [...document.querySelectorAll("input,textarea,[contenteditable=true],[role=searchbox],[role=combobox],[role=textbox]")]
+      .filter(visible)
+      .map((el) => {
+        const root = el.closest("[role=dialog],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel],section,form,div")
+          || el.parentElement
+          || el;
+        return {
+          node: el,
+          tag: String(el.tagName || "").toLowerCase(),
+          type: String(el.getAttribute("type") || "").toLowerCase(),
+          role: String(el.getAttribute("role") || "").toLowerCase(),
+          label: clean([
+            el.getAttribute("placeholder"),
+            el.getAttribute("aria-label"),
+            el.getAttribute("title"),
+            el.closest("label,section,div,form")?.innerText,
+          ].join(" ")),
+          current: clean(el.value || el.innerText || el.textContent || ""),
+          root_area: root?.getBoundingClientRect ? (root.getBoundingClientRect().width * root.getBoundingClientRect().height) : 0,
+          isContentEditable: Boolean(el.isContentEditable || el.getAttribute("contenteditable") === "true"),
+        };
+      });
+    const chosenTopicField = selectTopicField(topicFieldCandidates);
+    const topicField = chosenTopicField
+      ? topicFieldCandidates.find((candidate) => candidate.tag === chosenTopicField.tag && candidate.role === chosenTopicField.role && candidate.label === chosenTopicField.label && candidate.current === chosenTopicField.current)?.node
+      : null;
+    const inputTarget = topicField || editor;
+    const afterTopicButtonRawText = String(inputTarget?.value || inputTarget?.innerText || inputTarget?.textContent || "");
+    const afterTopicButtonText = clean(afterTopicButtonRawText);
+    const topicButtonInsertedHash = insertedByTopicButton
+      && (
+        /#$/.test(afterTopicButtonRawText)
+        || afterTopicButtonRawText.includes(String(beforeRawText) + "#")
+      );
+    const tailHasHash = topicButtonInsertedHash || /#$/.test(afterTopicButtonText) || /#$/.test(beforeText) || afterTopicButtonText.endsWith(query);
+    const fragments = [];
+    if (!tailHasHash) fragments.push("#");
+    fragments.push(...expected.split(""));
+    for (const fragment of fragments) {
+      typeEditorFragment(inputTarget, fragment);
+      await sleep(fragment === "#" ? 220 : 90);
+    }
+    await sleep(420);
+    const editorRect = editor.getBoundingClientRect();
+    const candidateRoots = [...document.querySelectorAll("[role=listbox],[role=menu],[role=dialog],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel],.recommend-topic-wrapper,.topic-container")]
+      .filter(visible)
+      .filter((root) => /话题|推荐|搜索|浏览|topic|recommend|suggest|dropdown|popover|panel/i.test(clean(root.innerText || root.textContent || "") + " " + clean(typeof root.className === "string" ? root.className : "")));
+    const scopeRoots = candidateRoots.length ? candidateRoots : [...document.querySelectorAll("section,div,form")].filter(visible).filter((root) => /话题|添加话题/.test(clean(root.innerText || root.textContent || ""))).slice(0, 6);
+    const candidates = scopeRoots.flatMap((root) => [...root.querySelectorAll("button,[role=button],[role=option],div,span,label,p,a,li")])
+      .filter(visible)
+      .filter((el) => !editor.contains(el) && !el.closest(".note-view-container,.note-preview,.preview-container"))
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const text = clean(el.innerText || el.textContent || "");
+        const cls = clean(typeof el.className === "string" ? el.className : "");
+        const normalized = normalizeTopic(text);
+        const context = clean(el.closest("[role=listbox],[role=menu],[role=dialog],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel],.recommend-topic-wrapper,.topic-container")?.innerText || "");
+        const distance = Math.hypot(rect.left - editorRect.left, rect.top - editorRect.bottom);
+        const exact = normalized === expected;
+        let score = 0;
+        if (exact) score += 1200;
+        else score -= 1200;
+        if (/^#.+#?$/.test(text) || /\\[话题\\]/.test(text)) score += 120;
+        if (/浏览/.test(text)) score += 40;
+        if (/topic|tag|select|dropdown|menu|option|recommend/i.test(cls)) score += 18;
+        if (/话题|推荐|搜索|浏览/.test(context)) score += 25;
+        if (/recommend-topic-wrapper/.test(cls) && !exact) score -= 240;
+        if (text.length > 32) score -= 700;
+        if (distance < 420) score += Math.max(0, 180 - distance);
+        return { el, text, normalized, cls, context, score, distance, area: rect.width * rect.height };
+      })
+      .filter((item) => item.score > 0 && item.area > 0 && item.area < 200000 && item.text.length <= 32 && item.normalized === expected)
+      .sort((left, right) => right.score - left.score || left.distance - right.distance || left.area - right.area);
+    const chosen = candidates[0] || null;
+    const clicked = click(chosen?.el || null);
+    if (!clicked) rollbackTypedQuery(inputTarget, query);
+    await sleep(260);
+    const confirmedTopics = Array.from(new Set([
+      ...insertedTopics().map((item) => item.normalized),
+      ...extractEditorTopics(editor),
+    ]));
+    const selected = confirmedTopics.includes(expected);
+    const textAfter = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    return {
+      inserted: true,
+      selected,
+      expected,
+      chosen_label: chosen?.text || "",
+      candidates: candidates.slice(0, 8).map((item) => item.text),
+      confirmed_topics: confirmedTopics,
+      inserted_by_topic_button: insertedByTopicButton,
+      topic_field_label: clean(chosenTopicField?.label || ""),
+      topic_field_role: clean(chosenTopicField?.role || ""),
+      editor_value: clean(editor.value || editor.innerText || editor.textContent || "").slice(0, 240),
+      body_has_topic: selected || textAfter.includes(query) || textAfter.includes(expected),
+    };
+  })()`, 60000);
+}
+
+*/
+async function setXiaohongshuStructuredTopics(client, content) {
+  const actions = [];
+  const topics = expectedNativeTopics(content).slice(0, 10);
+  if (!topics.length) return actions;
+  const confirmedTags = [];
+  for (const topic of topics) {
+    const normalizedTopic = String(topic || "").replace(/^#/, "").trim();
+    const topicAction = { kind: "xiaohongshu_topic_select_native", ...(await setXiaohongshuNativeTopic(client, normalizedTopic, confirmedTags.slice())) };
+    actions.push(topicAction);
+    try {
+      console.info(
+        `[xhs-topic] expected=${normalizedTopic} selected=${Boolean(topicAction.selected)} reason=${String(topicAction.reason || "")} chosen=${String(topicAction.chosen_label || "")} field=${String(topicAction.topic_field_label || "")} body=${Boolean(topicAction.body_has_topic)} confirmed=${JSON.stringify(Array.isArray(topicAction.confirmed_topics) ? topicAction.confirmed_topics : [])} removed=${JSON.stringify(Array.isArray(topicAction.removed_topics) ? topicAction.removed_topics : [])}`,
+      );
+    } catch {}
+    const lastAction = actions.at(-1) || {};
+    const confirmedTopics = Array.isArray(lastAction.confirmed_topics) ? lastAction.confirmed_topics : [];
+    if (lastAction.selected || confirmedTopics.includes(normalizedTopic)) confirmedTags.push(normalizedTopic);
+    await sleep(450);
+  }
+  const overrides = ensureMutablePlatformOverrides(content);
+  overrides.xiaohongshu_topics_attempted = topics.slice();
+  overrides.xiaohongshu_confirmed_topics = confirmedTags.slice();
+  actions.push({
+    kind: "xiaohongshu_topics_summary",
+    expected: topics.slice(),
+    confirmed: confirmedTags.slice(),
+    verified: confirmedTags.length === topics.length,
+  });
+  return actions;
 }
 
 function normalizeProfilePath(value) {
@@ -849,6 +2352,265 @@ const ATTACHED_PROFILE_ID = buildBrowserProfileId(
   ATTACHED_PROFILE_DIRECTORY,
 );
 
+function attachedProfileBinding() {
+  if (!ATTACHED_PROFILE_ID) return null;
+  return {
+    browser: ATTACHED_BROWSER,
+    user_data_dir: normalizeProfilePath(ATTACHED_USER_DATA_DIR),
+    profile_directory: ATTACHED_PROFILE_DIRECTORY,
+    profile_id: ATTACHED_PROFILE_ID,
+  };
+}
+
+function normalizeExpectedSessionBinding(value, platform = "") {
+  const payload = value && typeof value === "object" ? value : {};
+  const normalizedPlatform = normalizePlatform(payload.platform || platform);
+  const browserBinding = payload.browser_binding && typeof payload.browser_binding === "object"
+    ? {
+        browser: String(payload.browser_binding.browser || "").trim().toLowerCase() || null,
+        user_data_dir: normalizeProfilePath(payload.browser_binding.user_data_dir || payload.browser_binding.browser_user_data_dir),
+        profile_directory: String(
+          payload.browser_binding.profile_directory || payload.browser_binding.browser_profile_directory || "",
+        ).trim() || null,
+        profile_name: String(payload.browser_binding.profile_name || "").trim() || null,
+        profile_email: String(payload.browser_binding.profile_email || "").trim() || null,
+        profile_id: String(payload.browser_binding.profile_id || payload.browser_binding.browser_profile_id || "").trim() || null,
+      }
+    : {};
+  const browserProfileId = String(
+    payload.browser_profile_id
+    || payload.profile_id
+    || browserBinding.profile_id
+    || "",
+  ).trim();
+  const allowedProfileIds = Array.from(
+    new Set(
+      [
+        browserProfileId,
+        browserBinding.profile_id || "",
+        ...(
+          Array.isArray(payload.allowed_profile_ids)
+            ? payload.allowed_profile_ids
+            : Array.isArray(payload.target_profile_ids)
+              ? payload.target_profile_ids
+              : []
+        ).map((item) => String(item || "").trim()),
+      ].filter(Boolean),
+    ),
+  );
+  const allowedRouteContexts = Array.from(
+    new Set(
+      (Array.isArray(payload.allowed_route_contexts) ? payload.allowed_route_contexts : [])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean),
+    ),
+  );
+  const normalized = {
+    contract: PUBLICATION_SESSION_BINDING_CONTRACT,
+    platform: normalizedPlatform || null,
+    creator_profile_id: String(payload.creator_profile_id || "").trim() || null,
+    browser_profile_id: browserProfileId || null,
+    credential_ref: String(payload.credential_ref || "").trim() || null,
+    account_label: String(payload.account_label || "").trim() || null,
+    allowed_profile_ids: allowedProfileIds,
+    allowed_route_contexts: allowedRouteContexts,
+  };
+  if (Object.keys(browserBinding).length > 0) {
+    normalized.browser_binding = browserBinding;
+  }
+  if (
+    !normalized.platform
+    && !normalized.creator_profile_id
+    && !normalized.browser_profile_id
+    && !normalized.credential_ref
+    && !normalized.account_label
+    && !normalized.allowed_profile_ids.length
+    && !normalized.allowed_route_contexts.length
+    && !normalized.browser_binding
+  ) {
+    return {};
+  }
+  return normalized;
+}
+
+function routeMatchesAllowedContext(context, routeUrl, platform) {
+  const normalizedContext = String(context || "").trim().toLowerCase();
+  if (!normalizedContext) return false;
+  if (!routeUrl) return false;
+  if (normalizedContext === "publish_route") {
+    return isCompositePublishRouteContext(platform, routeUrl);
+  }
+  if (normalizedContext.startsWith("url:")) {
+    const prefix = normalizedContext.slice(4).trim();
+    return Boolean(prefix) && routeUrl.toLowerCase().startsWith(prefix);
+  }
+  if (normalizedContext.startsWith("domain:")) {
+    const domain = normalizedContext.slice(7).trim();
+    try {
+      return Boolean(domain) && new URL(routeUrl).hostname.toLowerCase() === domain;
+    } catch {
+      return false;
+    }
+  }
+  return routeUrl.toLowerCase().includes(normalizedContext);
+}
+
+export function validateExpectedSessionBinding(binding, {
+  platform = "",
+  route = null,
+  attachedBinding = null,
+} = {}) {
+  const normalized = normalizeExpectedSessionBinding(binding, platform);
+  const attached = attachedBinding === undefined || attachedBinding === null
+    ? attachedProfileBinding()
+    : (attachedBinding && typeof attachedBinding === "object" ? attachedBinding : null);
+  if (!Object.keys(normalized).length) {
+    return {
+      ok: true,
+      code: "",
+      status: "unbound_ok",
+      verification_reason: "",
+      expected_binding: {},
+      attached_profile_binding: attached,
+    };
+  }
+  const attachedProfileId = String(attached?.profile_id || "").trim();
+  const expectedProfileIds = new Set(
+    [
+      normalized.browser_profile_id || "",
+      ...(Array.isArray(normalized.allowed_profile_ids) ? normalized.allowed_profile_ids : []),
+    ].filter(Boolean),
+  );
+  if (expectedProfileIds.size > 0 && !attachedProfileId) {
+    return {
+      ok: false,
+      code: `${normalizePlatform(platform || normalized.platform || "unknown")}_session_binding_unbound`,
+      status: "binding_missing",
+      verification_reason: "session_binding_missing",
+      message: "当前 browser-agent 未绑定受控浏览器 profile，已阻止使用未绑定会话执行页面验证。",
+      expected_binding: normalized,
+      attached_profile_binding: attached,
+    };
+  }
+  if (expectedProfileIds.size > 0 && !expectedProfileIds.has(attachedProfileId)) {
+    return {
+      ok: false,
+      code: `${normalizePlatform(platform || normalized.platform || "unknown")}_session_binding_mismatch`,
+      status: "binding_mismatch",
+      verification_reason: "session_binding_mismatch",
+      message: "当前 browser-agent 附着的浏览器 profile 与已绑定 creator session 不一致，已阻止继续验证。",
+      expected_binding: normalized,
+      attached_profile_binding: attached,
+    };
+  }
+  const expectedBrowser = String(normalized.browser_binding?.browser || "").trim().toLowerCase();
+  const attachedBrowser = String(attached?.browser || "").trim().toLowerCase();
+  if (expectedBrowser && attachedBrowser && expectedBrowser !== attachedBrowser) {
+    return {
+      ok: false,
+      code: `${normalizePlatform(platform || normalized.platform || "unknown")}_session_binding_browser_mismatch`,
+      status: "binding_mismatch",
+      verification_reason: "session_binding_mismatch",
+      message: "当前 browser-agent 附着的浏览器类型与 creator session 绑定不一致，已阻止继续验证。",
+      expected_binding: normalized,
+      attached_profile_binding: attached,
+    };
+  }
+  const expectedUserDataDir = normalizeProfilePath(normalized.browser_binding?.user_data_dir || "");
+  const expectedProfileDirectory = String(normalized.browser_binding?.profile_directory || "").trim().toLowerCase();
+  const attachedUserDataDir = normalizeProfilePath(attached?.user_data_dir || "");
+  const attachedProfileDirectory = String(attached?.profile_directory || "").trim().toLowerCase();
+  if (expectedUserDataDir && attachedUserDataDir && expectedUserDataDir !== attachedUserDataDir) {
+    return {
+      ok: false,
+      code: `${normalizePlatform(platform || normalized.platform || "unknown")}_session_binding_userdata_mismatch`,
+      status: "binding_mismatch",
+      verification_reason: "session_binding_mismatch",
+      message: "当前 browser-agent 附着的 user_data_dir 与 creator session 绑定不一致，已阻止继续验证。",
+      expected_binding: normalized,
+      attached_profile_binding: attached,
+    };
+  }
+  if (expectedProfileDirectory && attachedProfileDirectory && expectedProfileDirectory !== attachedProfileDirectory) {
+    return {
+      ok: false,
+      code: `${normalizePlatform(platform || normalized.platform || "unknown")}_session_binding_profile_directory_mismatch`,
+      status: "binding_mismatch",
+      verification_reason: "session_binding_mismatch",
+      message: "当前 browser-agent 附着的 profile_directory 与 creator session 绑定不一致，已阻止继续验证。",
+      expected_binding: normalized,
+      attached_profile_binding: attached,
+    };
+  }
+  const allowedRouteContexts = Array.isArray(normalized.allowed_route_contexts) ? normalized.allowed_route_contexts : [];
+  if (route && allowedRouteContexts.length > 0) {
+    const routeUrl = String(route.url || route.route_url || "").trim();
+    if (!allowedRouteContexts.some((item) => routeMatchesAllowedContext(item, routeUrl, platform || normalized.platform || ""))) {
+      return {
+        ok: false,
+        code: `${normalizePlatform(platform || normalized.platform || "unknown")}_session_route_context_mismatch`,
+        status: "binding_mismatch",
+        verification_reason: "session_route_context_mismatch",
+        message: "当前页面路由不在 creator session 允许的上下文范围内，已阻止继续验证。",
+        expected_binding: normalized,
+        attached_profile_binding: attached,
+      };
+    }
+  }
+  return {
+    ok: true,
+    code: "",
+    status: "verified",
+    verification_reason: "",
+    expected_binding: normalized,
+    attached_profile_binding: attached,
+  };
+}
+
+function extractTaskSessionBinding(payload = {}, content = {}) {
+  const rawPayload = payload && typeof payload === "object" ? payload : {};
+  const rawContent = content && typeof content === "object" ? content : {};
+  const metadata = rawContent.metadata && typeof rawContent.metadata === "object" ? rawContent.metadata : {};
+  return normalizeExpectedSessionBinding(
+    rawPayload.session_binding
+    || metadata.session_binding
+    || {
+      platform: rawPayload.platform || metadata.platform || "",
+      browser_profile_id: rawPayload.profile_id || metadata.browser_profile_id || "",
+      credential_ref: metadata.credential_ref || "",
+      account_label: metadata.account_label || "",
+      creator_profile_id: metadata.creator_profile_id || "",
+      browser_binding: metadata.browser_binding || {},
+    },
+    rawPayload.platform || metadata.platform || "",
+  );
+}
+
+function buildTaskSessionBindingFailure(task, validation) {
+  const normalizedValidation = validation && typeof validation === "object" ? validation : {};
+  task.status = "needs_human";
+  task.updated_at = new Date().toISOString();
+  task.result = {
+    verification_reason: String(normalizedValidation.verification_reason || "session_binding_mismatch"),
+    session_binding: normalizedValidation.expected_binding || {},
+    attached_profile_binding: normalizedValidation.attached_profile_binding || null,
+  };
+  task.error = {
+    code: String(normalizedValidation.code || "session_binding_invalid"),
+    message: String(normalizedValidation.message || "browser-agent session binding validation failed"),
+    details: {
+      platform: task.platform,
+      task_id: task.task_id,
+      profile_id: task.profile_id,
+      session_binding: normalizedValidation.expected_binding || {},
+      attached_profile_binding: normalizedValidation.attached_profile_binding || null,
+      session_binding_status: String(normalizedValidation.status || ""),
+    },
+  };
+  persistPublicationTask(task);
+  return task;
+}
+
 const PLATFORM_DOMAINS = {
   douyin: ["creator.douyin.com", "creator-micro.douyin.com"],
   xiaohongshu: ["creator.xiaohongshu.com"],
@@ -861,7 +2623,7 @@ const PLATFORM_DOMAINS = {
 };
 
 const PLATFORM_PUBLISH_ENTRY_URLS = {
-  douyin: "https://creator.douyin.com/creator-micro/content/post/video",
+  douyin: "https://creator.douyin.com/creator-micro/content/upload",
   xiaohongshu: "https://creator.xiaohongshu.com/publish",
   bilibili: "https://member.bilibili.com/platform/upload/video",
   kuaishou: "https://cp.kuaishou.com/article/publish/video",
@@ -870,6 +2632,51 @@ const PLATFORM_PUBLISH_ENTRY_URLS = {
   youtube: "https://studio.youtube.com/",
   x: "https://twitter.com/compose/tweet",
 };
+
+const PLATFORM_FRESH_ENTRY_URLS = {
+  douyin: "https://creator.douyin.com/creator-micro/content/upload",
+};
+
+function currentPageMatchesAuthoritativeFreshEntry(platform, route = {}) {
+  const normalizedPlatform = String(platform || "").trim().toLowerCase().replace(/_/g, "-");
+  const freshEntryUrl = String(PLATFORM_FRESH_ENTRY_URLS[normalizedPlatform] || "").trim().toLowerCase();
+  const routeUrl = String(route?.url || "").trim().toLowerCase();
+  const routeText = String(route?.text || "").replace(/\s+/g, " ").trim();
+  const routeTitle = String(route?.title || "").trim();
+  if (!freshEntryUrl) return true;
+  if (!routeUrl.startsWith(freshEntryUrl)) return false;
+  if (normalizedPlatform === "douyin") {
+    return isDouyinUploadEntrySurface({ url: routeUrl, text: routeText, title: routeTitle }, {
+      allow_loading_shell: true,
+    });
+  }
+  return true;
+}
+
+export function currentPageMatchesPrepareOnlyExecutionContext(platform, route = {}, snapshot = {}, mediaPath = "", actions = []) {
+  if (currentPageMatchesAuthoritativeFreshEntry(platform, route)) return true;
+  const normalizedPlatform = String(platform || "").trim().toLowerCase().replace(/_/g, "-");
+  if (normalizedPlatform !== "douyin") return false;
+  const routeUrl = String(route?.url || snapshot?.url || "").trim().toLowerCase();
+  if (!/creator\.douyin\.com\/creator-micro\/content\/post\/video/i.test(routeUrl)) return false;
+  if (/creator\.douyin\.com\/creator-micro\/content\/manage/i.test(routeUrl)) return false;
+  const actionList = Array.isArray(actions) ? actions : [];
+  const normalizedFromUploadEntry = actionList.some((item) => String(item?.kind || "").trim() === "prepare_only_current_page_normalize_to_upload_entry");
+  const uploadStartedInAttempt = actionList.some((item) => String(item?.kind || "").trim() === "media_upload" && item?.uploaded);
+  const uploadProgressInEditor = shouldTreatMediaUploadAsInProgress(
+    normalizedPlatform,
+    { uploaded: false, reason: "upload_not_applied" },
+    snapshot,
+    mediaPath,
+  );
+  const currentMediaState = canReuseCurrentPageMediaForPrepublish(normalizedPlatform, snapshot, mediaPath, {
+    requiresLocalMedia: true,
+  });
+  return Boolean(
+    (normalizedFromUploadEntry || uploadStartedInAttempt)
+    && (uploadProgressInEditor || currentMediaState?.media_attached || currentMediaState?.reusable)
+  );
+}
 
 const PLATFORM_RECEIPT_ENTRY_URLS = {
   douyin: "https://creator.douyin.com/creator-micro/content/manage?enter_from=publish",
@@ -883,14 +2690,20 @@ export function isCompositePublishRouteContext(platform, route = {}) {
   const lowerUrl = url.toLowerCase();
   const text = String(route?.text || "").replace(/\s+/g, " ").trim();
   const fileInputs = Array.isArray(route?.file_inputs) ? route.file_inputs : [];
+  const isDouyinUploadEntrySurfaceLocal = (candidate = {}) => {
+    const candidateUrl = String(candidate?.url || "").trim().toLowerCase();
+    const candidateText = String(candidate?.text || "").replace(/\s+/g, " ").trim();
+    if (!candidateUrl.includes("/creator-micro/content/upload")) return false;
+    return /点击上传|上传视频|拖拽视频到此|直接将视频文件拖入此区域|视频大小和格式|继续编辑|放弃|不用了|未发布的视频/.test(candidateText);
+  };
   if (!url && !text) return false;
   if (normalizedPlatform === "douyin") {
     if (/creator\.douyin\.com\/creator-micro\/content\/manage/i.test(url)) return false;
     const loginSurfaceHints = /扫码登录|验证码登录|登录\/注册|我是创作者|我是mcn机构|创作者登录|抖音创作者中心是抖音创作者的一站式服务平台/i.test(text);
     if (loginSurfaceHints) return false;
+    if (isDouyinUploadEntrySurfaceLocal({ url, text })) return true;
     const publishSurfaceReady =
-      (/作品描述|设置封面|自主声明|添加合集|谁可以看|发布时间|定时发布/.test(text)
-        && !/作品管理|全部作品|已发布|审核中|未通过|共\s*\d+\s*个作品/.test(text))
+      /作品描述|设置封面|自主声明|添加合集|谁可以看|发布时间|定时发布/.test(text)
       || fileInputs.some((input) => /video|mp4/i.test(String(input?.accept || "")));
     return publishSurfaceReady;
   }
@@ -910,12 +2723,15 @@ export function isCompositePublishRouteContext(platform, route = {}) {
   if (normalizedPlatform === "xiaohongshu") {
     if (/creator\.xiaohongshu\.com\/(?:new\/note-manager|publish\/success)/i.test(url)) return false;
     const publishUrlReady = /creator\.xiaohongshu\.com\/publish(?:\/publish)?/i.test(url);
-    const publishSurfaceReady = isXiaohongshuPublishEditorSurfaceReady({
-      url,
-      lines: text ? text.split(/\s+/) : [],
-      headings: [],
-      fileInputs,
-    }) || isXiaohongshuVideoUploadEntrySurface(url, text);
+    const normalizedText = text.replace(/\s+/g, " ").trim();
+    const hasVideoInput = fileInputs.some((input) => /video|mp4/i.test(String(input?.accept || "")));
+    const publishSurfaceReady = (
+      /标题|话题|内容设置|添加章节|加入合集|原创声明|添加内容类型声明|公开可见|定时发布|笔记预览/.test(normalizedText)
+      && /视频文件|设置封面|封面预览/.test(normalizedText)
+    ) || (
+      hasVideoInput
+      && /拖拽视频到此|点击上传|上传视频|发布笔记/.test(normalizedText)
+    );
     return publishUrlReady || publishSurfaceReady;
   }
   if (normalizedPlatform === "x") {
@@ -924,15 +2740,51 @@ export function isCompositePublishRouteContext(platform, route = {}) {
   if (normalizedPlatform === "youtube") {
     const youtubeEditorUrlReady = /studio\.youtube\.com\/video\/[A-Za-z0-9_-]+\/edit/i.test(url);
     const youtubeUploadUrlReady = /studio\.youtube\.com\/channel\/[^/?#]+\/(?:videos\/)?upload/i.test(url);
+    const youtubeUploadResumeRoute = hasYoutubeUploadResumeVideoId(url);
+    const youtubeUploadDialogRoute = hasYoutubeUploadDialogQuery(url);
+    const youtubeChannelContentList = /频道内容|每页行数|发布日期|第\s*\d+\s*-\s*\d+\s*条|观看次数|评论数/.test(text);
+    const videoCapableFileInputCount = fileInputs.filter((input) => /video|mp4/i.test(String(input?.accept || ""))).length;
     const youtubeEditorSurfaceReady =
       (/视频详细信息|Video details/i.test(text) && /标题（必填）|说明|缩略图|播放列表|观众|视频链接/.test(text))
-      || fileInputs.some((input) => /video|mp4/i.test(String(input?.accept || "")));
-    const youtubeUploadSurfaceReady =
-      (/上传视频|Select files|选择文件|将要上传的视频文件拖放到此处|频道内容/.test(text)
-        && !/糟糕，出了点问题|something went wrong/i.test(text));
-    return youtubeEditorUrlReady || youtubeUploadUrlReady || youtubeEditorSurfaceReady || youtubeUploadSurfaceReady;
+      || videoCapableFileInputCount > 0;
+    const youtubeUploadSurfaceReady = shouldTreatYouTubeUploadSurfaceAsStable({
+      uploadResumeRoute: youtubeUploadResumeRoute,
+      channelContentList: youtubeChannelContentList,
+      uploadDialogSurface: youtubeUploadDialogRoute
+        || /上传视频|Upload videos|Select files|选择文件|将要上传的视频文件拖放到此处/.test(text),
+      visibleFileInputCount: fileInputs.length,
+      videoCapableFileInputCount,
+    });
+    if (/糟糕，出了点问题|something went wrong/i.test(text)) return false;
+    return youtubeEditorUrlReady || (youtubeUploadUrlReady && youtubeUploadSurfaceReady) || youtubeEditorSurfaceReady;
   }
   return /upload|publish|compose|post|studio|creator/.test(lowerUrl);
+}
+
+export function isPlatformPublishRouteBootstrapReady(platform, route = {}, options = {}) {
+  const normalizedPlatform = normalizePlatform(platform);
+  const url = String(route?.url || "").trim();
+  const title = String(route?.title || "").trim();
+  const text = String(route?.text || "").replace(/\s+/g, " ").trim();
+  const fileInputs = Array.isArray(route?.file_inputs) ? route.file_inputs : [];
+  if (isCompositePublishRouteContext(normalizedPlatform, {
+    url,
+    text,
+    file_inputs: fileInputs,
+  })) {
+    return true;
+  }
+  if (!options || !options.allow_loading_shell) return false;
+  if (normalizedPlatform === "douyin") {
+    if (isDouyinUploadEntrySurface({ url, text })) return true;
+    if (!/creator\.douyin\.com\/creator-micro\/content\/post\/video/i.test(url)) return false;
+    if (/creator\.douyin\.com\/creator-micro\/content\/manage/i.test(url)) return false;
+    const loginSurfaceHints = /扫码登录|验证码登录|登录\/注册|我是创作者|我是mcn机构|创作者登录|抖音创作者中心是抖音创作者的一站式服务平台/i.test(text);
+    if (loginSurfaceHints) return false;
+    const shellLike = !text || /加载中，请稍候|加载中|请稍候|Loading/i.test(text);
+    return shellLike && /抖音创作者中心/i.test(title || url);
+  }
+  return false;
 }
 
 function _normalize_recovery_mode(value) {
@@ -993,23 +2845,48 @@ function _extract_publication_recovery_context(value) {
   );
   const mergedOverrides = { ...recoveryOverrides, ...nextPlatformOverrides };
   const mode = _normalize_recovery_mode(recoveryOverrides.recovery_mode || stateOverrides.recovery_mode || directStateOverrides.recovery_mode);
-  return {
-    clear_draft_context: Boolean(mergedOverrides.clear_draft_context) || ["draft_reset", "clear_draft"].includes(mode),
-    force_publish_page_refresh: Boolean(mergedOverrides.force_publish_page_refresh),
-    verification_only_current_page: _coerceRecoveryBool(
+  const prepareOnlyCurrentPage = _coerceRecoveryBool(
+    mergedOverrides.prepare_only_current_page,
+    false,
+  );
+  const freshStartPlatformTab = _coerceRecoveryBool(
+    mergedOverrides.fresh_start_platform_tab,
+    false,
+  );
+  const verificationOnlyCurrentPage = prepareOnlyCurrentPage
+    ? false
+    : _coerceRecoveryBool(
       mergedOverrides.verification_only_current_page,
       false,
-    ),
-    repair_only_current_page: _coerceRecoveryBool(
+    );
+  const repairOnlyCurrentPage = prepareOnlyCurrentPage
+    ? false
+    : _coerceRecoveryBool(
       mergedOverrides.repair_only_current_page,
       false,
-    ),
-    prepublish_only_current_page: _coerceRecoveryBool(
+    );
+  const prepublishOnlyCurrentPage = prepareOnlyCurrentPage
+    ? false
+    : _coerceRecoveryBool(
       mergedOverrides.prepublish_only_current_page,
       false,
-    ),
-    prepare_only_current_page: _coerceRecoveryBool(
-      mergedOverrides.prepare_only_current_page,
+    );
+  const clearDraftContext = prepareOnlyCurrentPage
+    ? false
+    : (Boolean(mergedOverrides.clear_draft_context) || ["draft_reset", "clear_draft"].includes(mode));
+  const forcePublishPageRefresh = prepareOnlyCurrentPage
+    ? false
+    : Boolean(mergedOverrides.force_publish_page_refresh);
+  return {
+    clear_draft_context: clearDraftContext,
+    force_publish_page_refresh: forcePublishPageRefresh,
+    verification_only_current_page: verificationOnlyCurrentPage,
+    repair_only_current_page: repairOnlyCurrentPage,
+    prepublish_only_current_page: prepublishOnlyCurrentPage,
+    prepare_only_current_page: prepareOnlyCurrentPage,
+    fresh_start_platform_tab: freshStartPlatformTab,
+    stop_before_final_publish: _coerceRecoveryBool(
+      mergedOverrides.stop_before_final_publish,
       false,
     ),
     verify_media_upload: _coerceRecoveryBool(
@@ -1039,13 +2916,14 @@ export function derivePublicationTaskPreparationPolicy(content) {
   const recoveryContext = _extract_publication_recovery_context(content);
   const forceClearDraft = Boolean(recoveryContext.clear_draft_context);
   const forcePublishPageRefresh = Boolean(recoveryContext.force_publish_page_refresh);
+  const freshStartPlatformTab = Boolean(recoveryContext.fresh_start_platform_tab);
   const verificationOnlyCurrentPage = Boolean(recoveryContext.verification_only_current_page);
   const repairOnlyCurrentPage = Boolean(recoveryContext.repair_only_current_page);
   const prepublishOnlyCurrentPage = Boolean(recoveryContext.prepublish_only_current_page);
   const prepareOnlyCurrentPage = Boolean(recoveryContext.prepare_only_current_page);
-  const currentPageOnlyMode = verificationOnlyCurrentPage || repairOnlyCurrentPage;
-  const stopBeforeFinalPublish = prepublishOnlyCurrentPage || prepareOnlyCurrentPage;
-  const currentPageSafeMode = currentPageOnlyMode || stopBeforeFinalPublish;
+  const currentPageOnlyMode = verificationOnlyCurrentPage || repairOnlyCurrentPage || prepublishOnlyCurrentPage || prepareOnlyCurrentPage;
+  const stopBeforeFinalPublish = Boolean(recoveryContext.stop_before_final_publish) || prepublishOnlyCurrentPage || prepareOnlyCurrentPage;
+  const currentPageSafeMode = currentPageOnlyMode;
   return {
     recoveryContext,
     forceClearDraft,
@@ -1054,6 +2932,8 @@ export function derivePublicationTaskPreparationPolicy(content) {
     repairOnlyCurrentPage,
     prepublishOnlyCurrentPage,
     prepareOnlyCurrentPage,
+    freshStartPlatformTab,
+    currentPageOnlyMode,
     stopBeforeFinalPublish,
     forceMediaUpload: Boolean(!currentPageSafeMode && (forceClearDraft || forcePublishPageRefresh)),
     clearIfStaleDraft: !forceClearDraft && !currentPageSafeMode,
@@ -1071,6 +2951,7 @@ export function buildPreparationBootstrapRecoveryOverrides(preparationPolicy = {
     repair_only_current_page: policy.repairOnlyCurrentPage,
     prepublish_only_current_page: policy.prepublishOnlyCurrentPage,
     prepare_only_current_page: policy.prepareOnlyCurrentPage,
+    fresh_start_platform_tab: Boolean(policy.freshStartPlatformTab),
     verify_media_upload: recoveryContext.verify_media_upload,
     wait_for_publish_confirmation: recoveryContext.wait_for_publish_confirmation,
     force_publish_page_refresh: Boolean(policy.forcePublishPageRefresh),
@@ -1123,6 +3004,15 @@ export function buildPreparationBootstrapTimeoutOutcome({
 export function shouldApplyCompositeDraftPolicyBlockers(preparationPolicy = {}) {
   const policy = preparationPolicy && typeof preparationPolicy === "object" ? preparationPolicy : {};
   const recoveryMode = _normalize_recovery_mode(policy?.recoveryContext?.recovery_mode);
+  if (
+    Boolean(
+      policy.repairOnlyCurrentPage
+      || policy.prepublishOnlyCurrentPage
+      || policy.prepareOnlyCurrentPage
+    )
+  ) {
+    return false;
+  }
   if (Boolean(policy.verificationOnlyCurrentPage) && recoveryMode === "receipt_rebind") {
     return false;
   }
@@ -1179,6 +3069,7 @@ export function reconcileTimedOutPublicationTask(taskLike, outcomeLike) {
   task.error = outcome.error || null;
   task.timeout_pending = false;
   task.updated_at = new Date().toISOString();
+  persistPublicationTask(task);
   schedulePublicationTaskReconcileCallback(task);
   return true;
 }
@@ -1313,7 +3204,7 @@ export function shouldBlockOnMediaUploadFailure(upload) {
 
 export function shouldTreatMediaUploadAsInProgress(platform, upload, snapshot, mediaPath = "") {
   if (upload && upload.uploaded) return true;
-  if (!upload || String(upload.reason || "") !== "no_video_file_input") return false;
+  if (!upload || !["no_video_file_input", "upload_not_applied", "native_file_chooser_failed"].includes(String(upload.reason || ""))) return false;
   const lines = Array.isArray(snapshot?.lines) ? snapshot.lines : [];
   const text = lines.join(" ");
   const signals = detectCompositePublicationSignals(platform, text, lines);
@@ -1425,6 +3316,7 @@ export function _build_publication_recovery_hint({
     "repair_only_current_page",
     "prepublish_only_current_page",
     "prepare_only_current_page",
+    "fresh_start_platform_tab",
     "verify_media_upload",
     "wait_for_publish_confirmation",
   ]) {
@@ -1588,6 +3480,10 @@ const DRAFT_RESUME_DISMISS_TEXTS = [
   "取消",
 ];
 
+export function shouldInspectHiddenVideoInputsForDraftClear(platform = "") {
+  return normalizePlatform(platform) === "bilibili";
+}
+
 function _platformDraftClearGroups(platform) {
   const normalized = normalizePlatform(platform);
   const groups = PLATFORM_DRAFT_CLEAR_TEXTS[normalized] || [];
@@ -1666,12 +3562,16 @@ const BILIBILI_SECTION_TERMS = [
   "生活经验",
 ];
 
-function jsonResponse(res, statusCode, payload) {
+function jsonResponse(res, statusCode, payload, extraHeaders = {}) {
   const body = JSON.stringify(payload);
   res.writeHead(statusCode, {
     "Content-Type": "application/json; charset=utf-8",
     "Content-Length": Buffer.byteLength(body),
-  });
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    ...extraHeaders,
+});
   res.end(body);
 }
 
@@ -1715,27 +3615,183 @@ export function coerceTaskContentWithRecoveryPayload(payload = {}) {
   return content;
 }
 
-async function fetchJson(url) {
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`${url} returned ${response.status}`);
-  return response.json();
+function bridgeNow() {
+  return Date.now();
 }
 
-async function fetchJsonWithMethod(url, method = "GET") {
-  const response = await fetch(url, { method });
-  if (!response.ok) {
-    throw new Error(`${url} returned ${response.status}`);
+function normalizeBridgeClientId(value) {
+  return String(value || "").trim();
+}
+
+function bridgeClientSnapshot(clientId, client = {}) {
+  return {
+    client_id: clientId,
+    connected_at: String(client.connected_at || ""),
+    last_seen_at: String(client.last_seen_at || ""),
+    extension_version: String(client.extension_version || ""),
+    profile_label: String(client.profile_label || ""),
+    capabilities: client.capabilities && typeof client.capabilities === "object" ? { ...client.capabilities } : {},
+    transport: BROWSER_TRANSPORT_KIND,
+  };
+}
+
+function upsertBridgeClient(clientId, payload = {}) {
+  const normalizedClientId = normalizeBridgeClientId(clientId);
+  if (!normalizedClientId) throw new Error("bridge_client_id_missing");
+  const current = BRIDGE_CLIENTS.get(normalizedClientId) || {};
+  const connectedAt = current.connected_at || new Date().toISOString();
+  const next = {
+    ...current,
+    connected_at: connectedAt,
+    last_seen_at: new Date().toISOString(),
+    extension_version: String(payload.extension_version || current.extension_version || "").trim(),
+    profile_label: String(payload.profile_label || current.profile_label || "").trim(),
+    capabilities: payload.capabilities && typeof payload.capabilities === "object"
+      ? { ...payload.capabilities }
+      : current.capabilities && typeof current.capabilities === "object"
+        ? { ...current.capabilities }
+        : {},
+  };
+  BRIDGE_CLIENTS.set(normalizedClientId, next);
+  return bridgeClientSnapshot(normalizedClientId, next);
+}
+
+function isBridgeClientAlive(client = {}) {
+  const lastSeen = Date.parse(String(client.last_seen_at || ""));
+  return Number.isFinite(lastSeen) && bridgeNow() - lastSeen <= BRIDGE_CLIENT_STALE_AFTER_MS;
+}
+
+function activeBridgeClients() {
+  return [...BRIDGE_CLIENTS.entries()]
+    .filter(([, client]) => isBridgeClientAlive(client))
+    .sort((left, right) => Date.parse(String(right[1]?.last_seen_at || 0)) - Date.parse(String(left[1]?.last_seen_at || 0)));
+}
+
+function selectBridgeClientId(requestedClientId = "") {
+  const normalizedRequested = normalizeBridgeClientId(requestedClientId);
+  if (normalizedRequested) {
+    const direct = BRIDGE_CLIENTS.get(normalizedRequested);
+    if (direct && isBridgeClientAlive(direct)) return normalizedRequested;
+    return "";
   }
-  return response.json();
+  return activeBridgeClients()[0]?.[0] || "";
+}
+
+function bridgeTargetDescriptor() {
+  const clientId = selectBridgeClientId();
+  const client = clientId ? BRIDGE_CLIENTS.get(clientId) : null;
+  return {
+    transport: BROWSER_TRANSPORT_KIND,
+    bridge_client_id: clientId || "",
+    profile_label: String(client?.profile_label || ""),
+    extension_version: String(client?.extension_version || ""),
+    endpoint: BRIDGE_VIRTUAL_CDP_URL,
+  };
+}
+
+async function waitForBridgeCommand(clientId) {
+  const targetClientId = selectBridgeClientId(clientId);
+  if (!targetClientId) return null;
+  const pendingIndex = BRIDGE_PENDING_COMMANDS.findIndex((entry) => !entry.client_id || entry.client_id === targetClientId);
+  if (pendingIndex >= 0) {
+    const [command] = BRIDGE_PENDING_COMMANDS.splice(pendingIndex, 1);
+    return command;
+  }
+  return null;
+}
+
+async function sendBridgeCommand(type, payload = {}, options = {}) {
+  const clientId = selectBridgeClientId(options.client_id);
+  if (!clientId) {
+    throw new Error("chrome_extension_bridge_unavailable");
+  }
+  const requestId = randomUUID();
+  const timeoutMs = Math.max(1_000, Number(options.timeout_ms || BRIDGE_COMMAND_TIMEOUT_MS));
+  const command = {
+    request_id: requestId,
+    client_id: clientId,
+    type: String(type || "").trim(),
+    payload: payload && typeof payload === "object" ? payload : {},
+  };
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      BRIDGE_PENDING_RESPONSES.delete(requestId);
+      console.warn(`[bridge:timeout] client=${clientId} type=${type} request=${requestId} timeout_ms=${timeoutMs}`);
+      reject(new Error(`${type} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    BRIDGE_PENDING_RESPONSES.set(requestId, {
+      resolve: (result) => {
+        clearTimeout(timer);
+        resolve(result);
+      },
+      reject: (error) => {
+        clearTimeout(timer);
+        reject(error instanceof Error ? error : new Error(String(error || "bridge_request_failed")));
+      },
+    });
+    BRIDGE_PENDING_COMMANDS.push(command);
+    console.log(`[bridge:enqueue] client=${clientId} type=${type} request=${requestId}`);
+  });
+}
+
+function normalizeBridgeTab(rawTab = {}) {
+  const tabId = Number(rawTab.id ?? rawTab.tab_id);
+  if (!Number.isInteger(tabId) || tabId <= 0) {
+    throw new Error("bridge_tab_id_invalid");
+  }
+  return {
+    id: String(tabId),
+    type: "page",
+    title: String(rawTab.title || ""),
+    url: String(rawTab.url || ""),
+    active: rawTab.active === true,
+    webSocketDebuggerUrl: `bridge://tab/${tabId}`,
+  };
+}
+
+function bridgeEventKey(tabId, method) {
+  return `${String(tabId || "").trim()}:${String(method || "").trim()}`;
+}
+
+function subscribeBridgeEvent(tabId, method, handler) {
+  const key = bridgeEventKey(tabId, method);
+  const handlers = BRIDGE_EVENT_HANDLERS.get(key) || new Set();
+  const first = handlers.size === 0;
+  handlers.add(handler);
+  BRIDGE_EVENT_HANDLERS.set(key, handlers);
+  if (first) {
+    sendBridgeCommand("subscribe_events", { tab_id: Number(tabId), method: String(method || "").trim() }).catch(() => {});
+  }
+  return () => {
+    const nextHandlers = BRIDGE_EVENT_HANDLERS.get(key);
+    if (!nextHandlers) return;
+    nextHandlers.delete(handler);
+    if (nextHandlers.size === 0) {
+      BRIDGE_EVENT_HANDLERS.delete(key);
+      sendBridgeCommand("unsubscribe_events", { tab_id: Number(tabId), method: String(method || "").trim() }).catch(() => {});
+    }
+  };
+}
+
+function dispatchBridgeEvent(tabId, method, params = {}) {
+  const handlers = BRIDGE_EVENT_HANDLERS.get(bridgeEventKey(tabId, method));
+  if (!handlers || handlers.size === 0) return;
+  for (const handler of [...handlers]) {
+    try {
+      handler(params);
+    } catch {}
+  }
 }
 
 async function listCdpTabs() {
-  return fetchJson(`${CDP_URL}/json/list`);
+  const tabs = await sendBridgeCommand("list_tabs");
+  return Array.isArray(tabs) ? tabs.map((item) => normalizeBridgeTab(item)) : [];
 }
 
 async function createCdpTab(targetUrl) {
-  const encoded = encodeURIComponent(String(targetUrl || "about:blank"));
-  const created = await fetchJsonWithMethod(`${CDP_URL}/json/new?${encoded}`, "PUT");
+  const created = normalizeBridgeTab(
+    await sendBridgeCommand("create_tab", { url: String(targetUrl || "about:blank") }),
+  );
   if (!created || !created.webSocketDebuggerUrl) {
     throw new Error(`创建 CDP Tab 失败：${targetUrl}`);
   }
@@ -1745,31 +3801,85 @@ async function createCdpTab(targetUrl) {
 async function closeCdpTab(tabId) {
   const normalizedTabId = String(tabId || "").trim();
   if (!normalizedTabId) return { closed: false, reason: "missing_tab_id" };
-  await fetchJson(`${CDP_URL}/json/close/${encodeURIComponent(normalizedTabId)}`);
+  await sendBridgeCommand("close_tab", { tab_id: Number(normalizedTabId) });
   return { closed: true, tab_id: normalizedTabId };
+}
+
+async function selectPreferredKuaishouTab(tabs = [], mediaPath = "") {
+  const candidates = findPlatformTabs(tabs, "kuaishou").slice(0, 6);
+  if (candidates.length <= 1) return candidates[0] || null;
+  const mediaName = mediaPath ? path.win32.basename(String(mediaPath)) : "";
+  const mediaStem = mediaName ? mediaName.replace(/\.[^.]+$/, "") : "";
+  const scored = [];
+  for (const tab of candidates) {
+    try {
+      const snapshot = await evaluatePage(tab, `(() => {
+        const text = String(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "").replace(/\\s+/g, " ").trim();
+        return { url: location.href, title: document.title || "", text };
+      })()`);
+      const text = String(snapshot?.text || "");
+      let bonus = 0;
+      if (/作品描述|封面设置|加入合集|发布时间|发布设置/.test(text)) bonus += 400;
+      if (/上传中|检测中\\s*\\d+%|预览效果|重新上传/.test(text)) bonus += 120;
+      if (mediaName && (text.includes(mediaName) || (mediaStem && text.includes(mediaStem)))) bonus += 80;
+      if (/拖拽视频到此或点击上传/.test(text) && !/作品描述|封面设置|加入合集|发布时间/.test(text)) bonus -= 300;
+      scored.push({ tab, score: platformTabScore(tab, PLATFORM_DOMAINS.kuaishou || [], "kuaishou") + bonus });
+    } catch {
+      scored.push({ tab, score: platformTabScore(tab, PLATFORM_DOMAINS.kuaishou || [], "kuaishou") });
+    }
+  }
+  scored.sort((left, right) => right.score - left.score);
+  return scored[0]?.tab || candidates[0] || null;
 }
 
 async function resolvePlatformTab(platform, options = {}) {
   const normalized = normalizePlatform(platform);
   const actions = [];
+  console.log(`[resolve-tab] start platform=${normalized}`);
   const forceFreshTab = Boolean(options.force_fresh_tab);
+  const mediaPath = String(options.media_path || "").trim();
   const tabSelection = options.tab_selection && typeof options.tab_selection === "object"
     ? options.tab_selection
     : {};
+  const lockActiveTab = Boolean(tabSelection.lock_active_tab);
   const allowTabAutocreate = ALLOW_PUBLICATION_TAB_AUTOCREATE || Boolean(tabSelection.allow_safe_autocreate);
+  const explicitFreshStartPlatformTab = Boolean(tabSelection.fresh_start_platform_tab);
   const receiptEntryUrl = tabSelection.prefer_receipt_surface
     ? String(PLATFORM_RECEIPT_ENTRY_URLS[normalized] || "").trim()
     : "";
   let tabs = await listCdpTabs();
+  console.log(`[resolve-tab] tabs=${Array.isArray(tabs) ? tabs.length : 0} platform=${normalized}`);
   const entryUrl = receiptEntryUrl || resolvePlatformPublishEntryUrl(normalized, tabs, tabSelection);
-  let tab = findPlatformTab(tabs, normalized, tabSelection);
+  let tab = normalized === "kuaishou"
+    ? await selectPreferredKuaishouTab(tabs, mediaPath)
+    : findPlatformTab(tabs, normalized, tabSelection);
+  console.log(`[resolve-tab] initial_match=${Boolean(tab)} platform=${normalized} entry=${entryUrl}`);
 
-  if (forceFreshTab && entryUrl) {
-    if (allowTabAutocreate) {
+  if (lockActiveTab && !tab) {
+    return {
+      tab: null,
+      error: {
+        code: "platform_active_tab_not_ready",
+        message: (
+          `当前任务已锁定活动标签页；当前前台页面不是 ${normalized} 可执行发布页，`
+          + "拒绝自动切页、开页或重选其他标签页。请先手动切到目标创作发布页后再继续。"
+        ),
+        details: {
+          platform: normalized,
+          entry_url: entryUrl,
+          lock_active_tab: true,
+        },
+      },
+      actions,
+    };
+  }
+
+  if ((forceFreshTab || explicitFreshStartPlatformTab) && entryUrl) {
+    if (allowTabAutocreate || explicitFreshStartPlatformTab) {
       try {
         const opened = await createCdpTab(entryUrl);
         actions.push({
-          kind: "platform_tab_reauthed",
+          kind: explicitFreshStartPlatformTab ? "platform_tab_fresh_started" : "platform_tab_reauthed",
           platform: normalized,
           requested_url: entryUrl,
           created_tab_id: String(opened?.id || "").trim(),
@@ -1778,7 +3888,7 @@ async function resolvePlatformTab(platform, options = {}) {
         tab = opened;
       } catch (error) {
         actions.push({
-          kind: "platform_tab_reauthed_failed",
+          kind: explicitFreshStartPlatformTab ? "platform_tab_fresh_start_failed" : "platform_tab_reauthed_failed",
           platform: normalized,
           error: String(error?.message || error),
         });
@@ -1787,11 +3897,38 @@ async function resolvePlatformTab(platform, options = {}) {
       const fallbackTab = findPlatformDomainFallbackTab(tabs, normalized);
       if (fallbackTab) {
         tab = fallbackTab;
+        if (entryUrl && shouldBootstrapGenericPublishRoute(normalized, { url: String(fallbackTab?.url || "").trim() })) {
+          const routeAcquisition = await navigateExistingTabToUrl(fallbackTab, entryUrl, {
+            verify: (snapshot) => !shouldBootstrapGenericPublishRoute(normalized, snapshot),
+            reason: "publish_surface_route_acquisition",
+          }).catch((error) => ({
+            ok: false,
+            verified: false,
+            changed: false,
+            url: String(fallbackTab?.url || "").trim(),
+            title: String(fallbackTab?.title || "").trim(),
+            error: String(error?.message || error || ""),
+          }));
+          actions.push({
+            kind: "platform_tab_route_acquired_existing_domain",
+            platform: normalized,
+            tab_id: String(fallbackTab?.id || "").trim(),
+            requested_url: entryUrl,
+            ...routeAcquisition,
+          });
+          if (routeAcquisition?.verified) {
+            tab = {
+              ...fallbackTab,
+              url: String(routeAcquisition?.url || fallbackTab?.url || ""),
+              title: String(routeAcquisition?.title || fallbackTab?.title || ""),
+            };
+          }
+        }
         actions.push({
           kind: "platform_tab_domain_fallback",
           platform: normalized,
-          tab_id: String(fallbackTab?.id || "").trim(),
-          tab_url: String(fallbackTab?.url || "").trim(),
+          tab_id: String(tab?.id || fallbackTab?.id || "").trim(),
+          tab_url: String(tab?.url || fallbackTab?.url || "").trim(),
           reason: "autocreate_disabled_reuse_existing_domain_tab",
         });
       } else {
@@ -1826,14 +3963,42 @@ async function resolvePlatformTab(platform, options = {}) {
     if (!allowTabAutocreate) {
       const fallbackTab = findPlatformDomainFallbackTab(tabs, normalized);
       if (fallbackTab) {
+        let effectiveFallbackTab = fallbackTab;
+        if (entryUrl && shouldBootstrapGenericPublishRoute(normalized, { url: String(fallbackTab?.url || "").trim() })) {
+          const routeAcquisition = await navigateExistingTabToUrl(fallbackTab, entryUrl, {
+            verify: (snapshot) => !shouldBootstrapGenericPublishRoute(normalized, snapshot),
+            reason: "publish_surface_route_acquisition",
+          }).catch((error) => ({
+            ok: false,
+            verified: false,
+            changed: false,
+            url: String(fallbackTab?.url || "").trim(),
+            title: String(fallbackTab?.title || "").trim(),
+            error: String(error?.message || error || ""),
+          }));
+          actions.push({
+            kind: "platform_tab_route_acquired_existing_domain",
+            platform: normalized,
+            tab_id: String(fallbackTab?.id || "").trim(),
+            requested_url: entryUrl,
+            ...routeAcquisition,
+          });
+          if (routeAcquisition?.verified) {
+            effectiveFallbackTab = {
+              ...fallbackTab,
+              url: String(routeAcquisition?.url || fallbackTab?.url || ""),
+              title: String(routeAcquisition?.title || fallbackTab?.title || ""),
+            };
+          }
+        }
         actions.push({
           kind: "platform_tab_domain_fallback",
           platform: normalized,
-          tab_id: String(fallbackTab?.id || "").trim(),
-          tab_url: String(fallbackTab?.url || "").trim(),
+          tab_id: String(effectiveFallbackTab?.id || fallbackTab?.id || "").trim(),
+          tab_url: String(effectiveFallbackTab?.url || fallbackTab?.url || "").trim(),
           reason: "autocreate_disabled_reuse_existing_domain_tab",
         });
-        return { tab: fallbackTab, actions };
+        return { tab: effectiveFallbackTab, actions };
       }
       return {
         tab: null,
@@ -1859,7 +4024,9 @@ async function resolvePlatformTab(platform, options = {}) {
     for (let i = 0; i < 12; i += 1) {
       await sleep(600);
       tabs = await listCdpTabs();
-      tab = findPlatformTab(tabs, normalized, tabSelection);
+      tab = normalized === "kuaishou"
+        ? await selectPreferredKuaishouTab(tabs, mediaPath)
+        : findPlatformTab(tabs, normalized, tabSelection);
       if (tab) break;
     }
   }
@@ -1910,28 +4077,39 @@ export function derivePlatformTabSelectionPolicy(platform, recoveryContext = {})
   const normalizedPlatform = normalizePlatform(platform);
   const context = recoveryContext && typeof recoveryContext === "object" ? recoveryContext : {};
   const recoveryMode = _normalize_recovery_mode(context.recovery_mode);
-  const stopBeforeFinalPublish = Boolean(
-    context.prepublish_only_current_page || context.prepare_only_current_page,
-  );
-  const allowSafeAutocreate = Boolean(
+  const linearCurrentPageMode = Boolean(
     context.verification_only_current_page
     || context.repair_only_current_page
     || context.prepublish_only_current_page
     || context.prepare_only_current_page
-    || recoveryMode === "receipt_rebind"
+  );
+  const receiptRebindCurrentPageMode = Boolean(
+    (normalizedPlatform === "douyin" || normalizedPlatform === "xiaohongshu" || normalizedPlatform === "toutiao")
+    && Boolean(context.verification_only_current_page)
+    && recoveryMode === "receipt_rebind"
+  );
+  const freshStartPlatformTab = Boolean(
+    context.fresh_start_platform_tab
+    || (linearCurrentPageMode && !receiptRebindCurrentPageMode)
+  );
+  const lockActiveTab = Boolean(!freshStartPlatformTab && linearCurrentPageMode);
+  const stopBeforeFinalPublish = Boolean(
+    context.prepublish_only_current_page || context.prepare_only_current_page,
+  );
+  const allowSafeAutocreate = Boolean(
+    freshStartPlatformTab
+    || (!lockActiveTab && recoveryMode === "receipt_rebind")
   );
   return {
+    lock_active_tab: lockActiveTab,
+    fresh_start_platform_tab: freshStartPlatformTab,
     prefer_receipt_surface: Boolean(
-      (normalizedPlatform === "douyin" || normalizedPlatform === "xiaohongshu" || normalizedPlatform === "toutiao")
-      && context.verification_only_current_page
-      && recoveryMode === "receipt_rebind"
+      receiptRebindCurrentPageMode
     ),
     prefer_stable_upload_surface: Boolean(
       normalizedPlatform === "youtube" && stopBeforeFinalPublish,
     ),
-    prefer_draft_list_surface: Boolean(
-      normalizedPlatform === "youtube" && stopBeforeFinalPublish,
-    ),
+    prefer_draft_list_surface: false,
     allow_safe_autocreate: allowSafeAutocreate,
   };
 }
@@ -1963,7 +4141,7 @@ export function shouldBootstrapGenericPublishRoute(platform, route = {}) {
   if (currentUrl) {
     if (
       normalizedPlatform === "douyin"
-      && !/creator\.douyin\.com\/creator-micro\/content\/post\/video/i.test(currentUrl)
+      && !/creator\.douyin\.com\/creator-micro\/content\/(?:post\/video|upload)/i.test(currentUrl)
     ) {
       return true;
     }
@@ -2006,11 +4184,23 @@ export function shouldEnforcePlatformPublishRoute(platform, recoveryContext = {}
   const normalizedPlatform = normalizePlatform(platform);
   const context = recoveryContext && typeof recoveryContext === "object" ? recoveryContext : {};
   const recoveryMode = _normalize_recovery_mode(context.recovery_mode);
+  const currentPageOnlyMode = Boolean(
+    context.verification_only_current_page
+    || context.repair_only_current_page
+    || context.prepublish_only_current_page
+    || context.prepare_only_current_page,
+  );
   if (
     (normalizedPlatform === "douyin" || normalizedPlatform === "xiaohongshu" || normalizedPlatform === "toutiao")
     && Boolean(context.verification_only_current_page)
     && recoveryMode === "receipt_rebind"
   ) {
+    return false;
+  }
+  if (normalizedPlatform === "douyin" && currentPageOnlyMode) {
+    return false;
+  }
+  if (normalizedPlatform === "xiaohongshu" && currentPageOnlyMode) {
     return false;
   }
   return true;
@@ -2047,21 +4237,15 @@ export function deriveNavigationJavaScriptDialogHandling(dialog = {}, options = 
   };
 }
 
-async function navigateExistingTabToUrl(tab, targetUrl, options = {}) {
-  if (!tab?.webSocketDebuggerUrl) {
-    return {
-      navigated: false,
-      verified: false,
-      url: String(tab?.url || ""),
-      reason: "tab_has_no_websocket",
-    };
-  }
+export async function navigateClientToUrlWithDialogHandling(client, currentUrl, targetUrl, options = {}) {
   const verify = typeof options.verify === "function"
     ? options.verify
     : ((snapshot) => String(snapshot?.url || "").startsWith(String(targetUrl || "")));
   const waitTimeoutMs = Number.isFinite(options.timeout_ms) ? Number(options.timeout_ms) : 18000;
-  const currentUrl = String(tab?.url || "");
-  const client = await CdpClient.connect(tab.webSocketDebuggerUrl);
+  const sleepFn = typeof options.sleep_fn === "function" ? options.sleep_fn : sleep;
+  const snapshotFn = typeof options.snapshot_fn === "function"
+    ? options.snapshot_fn
+    : ((activeClient) => routeBootstrapSnapshot(activeClient).catch(() => null));
   const handledDialogs = [];
   let removeDialogHandler = () => {};
   try {
@@ -2086,8 +4270,8 @@ async function navigateExistingTabToUrl(tab, targetUrl, options = {}) {
     let current = null;
     const startedAt = Date.now();
     while (Date.now() - startedAt < waitTimeoutMs) {
-      await sleep(1500);
-      current = await pageSnapshot(client).catch(() => null);
+      await sleepFn(1500);
+      current = await snapshotFn(client);
       if (current && verify(current)) {
         return {
           navigated: true,
@@ -2115,6 +4299,29 @@ async function navigateExistingTabToUrl(tab, targetUrl, options = {}) {
     try {
       removeDialogHandler?.();
     } catch {}
+  }
+}
+
+async function navigateExistingTabToUrl(tab, targetUrl, options = {}) {
+  if (!tab?.webSocketDebuggerUrl) {
+    return {
+      navigated: false,
+      verified: false,
+      url: String(tab?.url || ""),
+      reason: "tab_has_no_websocket",
+    };
+  }
+  const verify = typeof options.verify === "function"
+    ? options.verify
+    : ((snapshot) => String(snapshot?.url || "").startsWith(String(targetUrl || "")));
+  const currentUrl = String(tab?.url || "");
+  const client = await CdpClient.connect(tab.webSocketDebuggerUrl);
+  try {
+    return await navigateClientToUrlWithDialogHandling(client, currentUrl, targetUrl, {
+      ...options,
+      verify,
+    });
+  } finally {
     client.close();
   }
 }
@@ -2143,25 +4350,33 @@ export function buildYouTubeStudioContentListUrl(channelId = "") {
 export function resolvePlatformPublishEntryUrl(platform, tabs = [], options = {}) {
   const normalized = normalizePlatform(platform);
   if (normalized !== "youtube") {
-    return String(PLATFORM_PUBLISH_ENTRY_URLS[normalized] || "").trim();
+    return compositePlatformPublishEntryUrl(normalized) || String(PLATFORM_PUBLISH_ENTRY_URLS[normalized] || "").trim();
   }
   const youtubeTabs = Array.isArray(tabs) ? tabs : [];
   const validChannelId = youtubeTabs
     .map((tab) => extractYouTubeStudioChannelId(tab?.url || ""))
     .find((channelId) => channelId.length >= 6);
-  if (options && options.prefer_draft_list_surface) {
-    return buildYouTubeStudioContentListUrl(validChannelId);
-  }
   return buildYouTubeStudioUploadEntryUrl(validChannelId);
 }
 
 export function findPlatformTabs(tabs, platform, options = {}) {
-  const domains = PLATFORM_DOMAINS[platform] || [];
-  return (tabs || [])
+  const normalizedPlatform = normalizePlatform(platform);
+  const domains = PLATFORM_DOMAINS[normalizedPlatform] || [];
+  const requireActiveTab = Boolean(options.lock_active_tab);
+  const allTabs = Array.isArray(tabs) ? tabs : [];
+  const scoreTabs = (tabList) => (tabList || [])
     .map((tab) => ({ tab, score: platformTabScore(tab, domains, platform, options) }))
     .filter((item) => item.score > 0)
     .sort((left, right) => right.score - left.score)
     .map((item) => item.tab);
+  if (!requireActiveTab) {
+    return scoreTabs(allTabs);
+  }
+  const activeMatches = scoreTabs(allTabs.filter((tab) => tab?.active === true));
+  if (activeMatches.length) {
+    return activeMatches;
+  }
+  return [];
 }
 
 export function findPlatformDomainFallbackTab(tabs, platform) {
@@ -2245,19 +4460,9 @@ export function platformTabScore(tab, domains, platform = "", options = {}) {
     const contentListRoute = /\/channel\/[^/?#]+\/videos\/?$/.test(pathname);
     const uploadListRoute = /\/channel\/[^/?#]+\/videos\/upload/.test(pathname);
     const editorRoute = /\/video\/[a-z0-9_-]+\/edit/.test(pathname);
-    if (options.prefer_draft_list_surface) {
-      if (contentListRoute) score += 150;
-      if (uploadListRoute) {
-        if (hasYoutubeUploadResumeVideoId(parsed.href)) score += 165;
-        else if (hasYoutubeUploadDialogQuery(parsed.href)) score += 45;
-        else score += 30;
-      }
-      if (editorRoute) score += 35;
-    } else {
-      if (uploadListRoute) score += options.prefer_stable_upload_surface ? 140 : 90;
-      if (editorRoute) score += options.prefer_stable_upload_surface ? 25 : 80;
-      if (/\/channel\/.+\/videos/.test(pathname)) score -= 20;
-    }
+    if (uploadListRoute) score += options.prefer_stable_upload_surface ? 140 : 90;
+    if (editorRoute) score += options.prefer_stable_upload_surface ? 25 : 80;
+    if (contentListRoute) score -= 20;
   }
   if (platform === "x") {
     if (/\/compose\/tweet/.test(pathname)) score += 90;
@@ -2380,6 +4585,48 @@ function withAsyncStepTimeout(promise, timeoutMs, code, message, details = {}) {
   ]);
 }
 
+class BridgeCdpClient {
+  constructor(tabId) {
+    this.tabId = Number(tabId);
+  }
+
+  static canHandle(url) {
+    return String(url || "").trim().startsWith("bridge://tab/");
+  }
+
+  static connect(url) {
+    const matched = /^bridge:\/\/tab\/(\d+)$/u.exec(String(url || "").trim());
+    if (!matched) {
+      return Promise.reject(new Error("bridge_tab_url_invalid"));
+    }
+    return Promise.resolve(new BridgeCdpClient(Number(matched[1])));
+  }
+
+  send(method, params = {}) {
+    return sendBridgeCommand("cdp_send", {
+      tab_id: this.tabId,
+      method: String(method || "").trim(),
+      params: params && typeof params === "object" ? params : {},
+    }, {
+      timeout_ms: Math.max(5_000, Number(params.timeout || 30_000) + 5_000),
+    });
+  }
+
+  on(method, handler) {
+    return subscribeBridgeEvent(this.tabId, method, handler);
+  }
+
+  off(method, handler) {
+    if (typeof handler !== "function") return;
+    const unsubscribe = subscribeBridgeEvent(this.tabId, method, handler);
+    unsubscribe();
+  }
+
+  close() {
+    // Bridge-backed clients are logical views over a tab-scoped debugger session.
+  }
+}
+
 class CdpClient {
   constructor(socket) {
     this.socket = socket;
@@ -2412,6 +4659,9 @@ class CdpClient {
   }
 
   static connect(url, timeoutMs = 10000) {
+    if (BridgeCdpClient.canHandle(url)) {
+      return BridgeCdpClient.connect(url, timeoutMs);
+    }
     return new Promise((resolve, reject) => {
       const socket = new WebSocket(url);
       let settled = false;
@@ -2576,6 +4826,38 @@ const PAGE_SNAPSHOT_EXPRESSION = `(() => {
   return { url: location.href, title: document.title, lines, headings, elements, overlayTexts, fileInputs };
 })()`;
 
+const ROUTE_BOOTSTRAP_SNAPSHOT_EXPRESSION = `(() => {
+  const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+  const body = document.scrollingElement || document.documentElement || document.body;
+  const rawText = body ? String(body.innerText || body.textContent || "") : "";
+  const lines = rawText.split(/[\\n\\r]+| {2,}/)
+    .map((line) => clean(line))
+    .filter(Boolean)
+    .slice(0, 240);
+  const headings = [...document.querySelectorAll("h1,h2,h3,h4,[role=heading]")]
+    .map((el) => clean(el.innerText || el.textContent || ""))
+    .filter(Boolean)
+    .slice(0, 60);
+  const fileInputs = [...document.querySelectorAll("input[type=file]")]
+    .slice(0, 40)
+    .map((el, index) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return {
+        index,
+        accept: el.getAttribute("accept") || "",
+        multiple: Boolean(el.multiple),
+        visible: rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none",
+      };
+    });
+  return { url: location.href, title: document.title, lines, headings, fileInputs };
+})()`;
+
+async function routeBootstrapSnapshot(client, options = {}) {
+  const timeout = Number.isFinite(options?.timeout_ms) ? Number(options.timeout_ms) : 5000;
+  return evaluateWithClient(client, ROUTE_BOOTSTRAP_SNAPSHOT_EXPRESSION, timeout);
+}
+
 async function pageSnapshot(client, options = {}) {
   const snapshot = await evaluateWithClient(client, PAGE_SNAPSHOT_EXPRESSION, 12000);
   if (options?.captureVisualEvidence) {
@@ -2603,12 +4885,88 @@ export function isXiaohongshuVideoUploadEntrySurface(routeUrl = "", text = "") {
     && /上传视频|点击上传|拖拽视频到此或点击上传|将视频拖拽到|视频大小|最大20GB|推荐使用mp4|上传图文|写长文|发播客/.test(textHaystack);
 }
 
+export function selectXiaohongshuPublishEntryCandidate(candidates = []) {
+  if (!Array.isArray(candidates) || candidates.length === 0) return null;
+  const normalized = candidates
+    .map((item) => ({
+      label: String(item?.label || item?.text || "").replace(/\s+/g, " ").trim(),
+      area: Number(item?.area || 0),
+      clickable: item?.clickable !== false,
+      exactText: item?.exactText !== false,
+      source: item,
+    }))
+    .filter((item) => item.clickable && item.label);
+  const exact = normalized
+    .filter((item) => item.label === "发布笔记")
+    .sort((left, right) => {
+      const leftArea = Number.isFinite(left.area) && left.area > 0 ? left.area : Number.MAX_SAFE_INTEGER;
+      const rightArea = Number.isFinite(right.area) && right.area > 0 ? right.area : Number.MAX_SAFE_INTEGER;
+      return leftArea - rightArea;
+    });
+  if (exact.length > 0) return exact[0].source;
+  return normalized.find((item) => item.label.startsWith("发布笔记"))?.source
+    || normalized.find((item) => item.label.includes("发布笔记"))?.source
+    || null;
+}
+
+async function clickXiaohongshuPublishEntry(client) {
+  const expression = `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const roots = [];
+    const visitRoot = (root) => {
+      if (!root || roots.includes(root)) return;
+      roots.push(root);
+      for (const el of [...root.querySelectorAll("*")]) {
+        if (el.shadowRoot) visitRoot(el.shadowRoot);
+        if (el.tagName === "IFRAME") {
+          try {
+            if (el.contentDocument) visitRoot(el.contentDocument);
+          } catch {}
+        }
+      }
+    };
+    visitRoot(document);
+    const selector = "button,[role=button],a,label,[class*=button],[class*=btn],[class*=publish]";
+    const candidates = roots.flatMap((root) => {
+      try {
+        return [...root.querySelectorAll(selector)];
+      } catch {
+        return [];
+      }
+    }).filter(visible).map((el) => {
+      const rect = el.getBoundingClientRect();
+      const label = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title"));
+      return { el, label, area: rect.width * rect.height };
+    }).filter((item) => item.label && item.area > 0 && item.area < 90000);
+    const exact = candidates
+      .filter((item) => item.label === "发布笔记")
+      .sort((left, right) => left.area - right.area);
+    const item = exact[0] || candidates.find((candidate) => candidate.label.startsWith("发布笔记")) || null;
+    if (!item) return { clicked: false };
+    item.el.scrollIntoView({ block: "center", inline: "center" });
+    const rect = item.el.getBoundingClientRect();
+    const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      item.el.dispatchEvent(new MouseEvent(type, eventInit));
+    }
+    if (typeof item.el.click === "function") item.el.click();
+    return { clicked: true, label: item.label, clicked_label: item.label };
+  })()`;
+  return evaluateWithClient(client, expression, 10000);
+}
+
 async function ensureXiaohongshuPublishRoute(client, tab, options = {}) {
   const forcePublishRefresh = Boolean(options.force_publish_page_refresh);
-  const entryUrl = PLATFORM_PUBLISH_ENTRY_URLS.xiaohongshu;
+  const entryUrl = compositePlatformPublishEntryUrl("xiaohongshu") || PLATFORM_PUBLISH_ENTRY_URLS.xiaohongshu;
   const noteManagerUrl = "https://creator.xiaohongshu.com/new/note-manager";
   const currentUrl = String(tab?.url || "");
   await client.send("Page.enable").catch(() => {});
+  console.log(`[xhs-route] step=start force_refresh=${forcePublishRefresh} current=${currentUrl}`);
 
   const waitForEditorSurface = async (timeoutMs = 18000) => {
     let current = null;
@@ -2625,6 +4983,7 @@ async function ensureXiaohongshuPublishRoute(client, tab, options = {}) {
 
   if (!forcePublishRefresh) {
     const current = await pageSnapshot(client).catch(() => null);
+    console.log(`[xhs-route] step=current_snapshot verified=${Boolean(current && isXiaohongshuPublishEditorSurfaceReady(current))} url=${String(current?.url || currentUrl)}`);
     return {
       navigated: false,
       reason: "not_required",
@@ -2633,8 +4992,15 @@ async function ensureXiaohongshuPublishRoute(client, tab, options = {}) {
     };
   }
 
-  await client.send("Page.navigate", { url: entryUrl });
+  await navigateClientToUrlWithDialogHandling(client, currentUrl, entryUrl, {
+    timeout_ms: 9000,
+    reason: "forced_publish_page_refresh",
+    javascript_dialog_policy: "navigation_route_switch",
+    verify: (snapshot) => isXiaohongshuPublishEditorSurfaceReady(snapshot),
+  });
+  console.log(`[xhs-route] step=direct_nav_done target=${entryUrl}`);
   const directAttempt = await waitForEditorSurface(9000);
+  console.log(`[xhs-route] step=direct_wait_done verified=${Boolean(directAttempt.verified)} url=${String(directAttempt.snapshot?.url || entryUrl)}`);
   if (directAttempt.verified) {
     return {
       navigated: true,
@@ -2646,7 +5012,17 @@ async function ensureXiaohongshuPublishRoute(client, tab, options = {}) {
     };
   }
 
-  await client.send("Page.navigate", { url: noteManagerUrl });
+  await navigateClientToUrlWithDialogHandling(client, currentUrl, noteManagerUrl, {
+    timeout_ms: 12000,
+    reason: "xiaohongshu_note_manager_bootstrap",
+    javascript_dialog_policy: "navigation_route_switch",
+    verify: (snapshot) => {
+      const managerUrl = String(snapshot?.url || "");
+      const managerText = [...(snapshot?.lines || []), ...(snapshot?.headings || [])].join(" ");
+      return /creator\.xiaohongshu\.com\/new\/note-manager/i.test(managerUrl) && /发布笔记|笔记管理/.test(managerText);
+    },
+  });
+  console.log(`[xhs-route] step=note_manager_nav_done target=${noteManagerUrl}`);
   let managerSnapshot = null;
   const managerStartedAt = Date.now();
   while (Date.now() - managerStartedAt < 12000) {
@@ -2658,11 +5034,13 @@ async function ensureXiaohongshuPublishRoute(client, tab, options = {}) {
       break;
     }
   }
+  console.log(`[xhs-route] step=note_manager_wait_done url=${String(managerSnapshot?.url || "")}`);
 
-  const publishEntry = await clickByText(client, ["发布笔记"]);
-  const publishEntryFallback = !publishEntry.clicked ? await clickLooseText(client, ["发布笔记"]) : null;
-  const clickResult = publishEntry.clicked ? publishEntry : (publishEntryFallback || publishEntry);
+  const publishEntry = await clickXiaohongshuPublishEntry(client);
+  const clickResult = publishEntry.clicked ? publishEntry : publishEntry;
+  console.log(`[xhs-route] step=publish_entry_clicked clicked=${Boolean(clickResult?.clicked)} label=${String(clickResult?.clicked_label || clickResult?.label || "")}`);
   const fallbackAttempt = await waitForEditorSurface(15000);
+  console.log(`[xhs-route] step=fallback_wait_done verified=${Boolean(fallbackAttempt.verified)} url=${String(fallbackAttempt.snapshot?.url || managerSnapshot?.url || noteManagerUrl)}`);
   return {
     navigated: true,
     from: currentUrl,
@@ -2675,22 +5053,41 @@ async function ensureXiaohongshuPublishRoute(client, tab, options = {}) {
 }
 
 async function ensurePlatformPublishRoute(client, tab, platform, options = {}) {
+  const normalizedPlatform = normalizePlatform(platform);
   const forcePublishRefresh = Boolean(options.force_publish_page_refresh);
   const entryUrl = platform === "youtube"
     ? resolvePlatformPublishEntryUrl("youtube", [tab], {
       prefer_draft_list_surface: Boolean(options.prefer_draft_list_surface),
     })
-    : PLATFORM_PUBLISH_ENTRY_URLS[platform];
+    : (compositePlatformPublishEntryUrl(platform) || PLATFORM_PUBLISH_ENTRY_URLS[platform]);
+  const freshEntryUrl = forcePublishRefresh && normalizedPlatform === "douyin"
+    ? (PLATFORM_FRESH_ENTRY_URLS.douyin || entryUrl)
+    : entryUrl;
 
   if (platform === "xiaohongshu") {
     return ensureXiaohongshuPublishRoute(client, tab, options);
   }
 
   const currentUrl = String(tab?.url || "");
-  const current = await pageSnapshot(client).catch(() => null);
+  const current = await routeBootstrapSnapshot(client).catch(() => null);
   const currentText = current
     ? [...(current.lines || []), ...(current.headings || [])].join(" ")
     : "";
+  const verifyRouteBootstrapSnapshot = (snapshot) => isPlatformPublishRouteBootstrapReady(platform, {
+    url: snapshot?.url || "",
+    title: snapshot?.title || "",
+    text: [...(snapshot?.lines || []), ...(snapshot?.headings || [])].join(" "),
+    file_inputs: snapshot?.fileInputs || [],
+  }, {
+    allow_loading_shell: normalizedPlatform === "douyin",
+  });
+  const verifyDouyinFreshEntrySnapshot = (snapshot) => isDouyinUploadEntrySurface({
+    url: snapshot?.url || "",
+    title: snapshot?.title || "",
+    text: [...(snapshot?.lines || []), ...(snapshot?.headings || [])].join(" "),
+  }, {
+    allow_loading_shell: true,
+  });
 
   if (forcePublishRefresh && entryUrl) {
     if (platform === "youtube") {
@@ -2708,37 +5105,36 @@ async function ensurePlatformPublishRoute(client, tab, platform, options = {}) {
           reason: "youtube_preserve_upload_resume_route",
         };
       }
-    }
-    await client.send("Page.enable").catch(() => {});
-    await client.send("Page.navigate", { url: entryUrl });
-    let current = null;
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < 18000) {
-      await sleep(1500);
-      current = await pageSnapshot(client).catch(() => null);
-      if (current && isCompositePublishRouteContext(platform, {
-        url: current.url || "",
-        text: [...(current.lines || []), ...(current.headings || [])].join(" "),
-        file_inputs: current.fileInputs || [],
-      })) {
+      const createFlow = await forceYouTubeCreateUploadFlow(client).catch(() => ({ clicked: false, actions: [], state: null }));
+      if (createFlow.clicked && createFlow.state?.step && createFlow.state.step !== "upload_entry") {
         return {
           navigated: true,
           from: currentUrl,
-          to: current.url || currentUrl || entryUrl,
-          url: current.url || currentUrl || entryUrl,
+          to: createFlow.state.url || entryUrl,
+          url: createFlow.state.url || entryUrl,
+          title: String(createFlow.state?.title || tab?.title || ""),
           verified: true,
-          reason: "forced_publish_page_refresh",
+          reason: "youtube_create_upload_flow",
+          actions: createFlow.actions,
         };
       }
+      return navigateExistingTabToUrl(tab, entryUrl, {
+        timeout_ms: 18000,
+        reason: "forced_publish_page_refresh",
+        javascript_dialog_policy: "navigation_route_switch",
+        verify: verifyRouteBootstrapSnapshot,
+        snapshot_fn: (activeClient) => routeBootstrapSnapshot(activeClient).catch(() => null),
+      });
     }
-    return {
-      navigated: true,
-      from: currentUrl,
-      to: entryUrl,
-      url: current?.url || entryUrl,
-      verified: false,
-      reason: "forced_publish_page_refresh_not_verified",
-    };
+    return navigateClientToUrlWithDialogHandling(client, currentUrl, freshEntryUrl, {
+      timeout_ms: 18000,
+      reason: "forced_publish_page_refresh",
+      javascript_dialog_policy: "navigation_route_switch",
+      verify: normalizedPlatform === "douyin" && freshEntryUrl !== entryUrl
+        ? verifyDouyinFreshEntrySnapshot
+        : verifyRouteBootstrapSnapshot,
+      snapshot_fn: (activeClient) => routeBootstrapSnapshot(activeClient).catch(() => null),
+    });
   }
 
   if (
@@ -2749,37 +5145,28 @@ async function ensurePlatformPublishRoute(client, tab, platform, options = {}) {
       file_inputs: current?.fileInputs || [],
     })
   ) {
-    await client.send("Page.enable").catch(() => {});
-    await client.send("Page.navigate", { url: entryUrl });
-    let refreshed = null;
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < 18000) {
-      await sleep(1500);
-      refreshed = await pageSnapshot(client).catch(() => null);
-      if (refreshed && isCompositePublishRouteContext(platform, {
-        url: refreshed.url || "",
-        text: [...(refreshed.lines || []), ...(refreshed.headings || [])].join(" "),
-        file_inputs: refreshed.fileInputs || [],
-      })) {
+    if (platform === "youtube") {
+      const createFlow = await forceYouTubeCreateUploadFlow(client).catch(() => ({ clicked: false, actions: [], state: null }));
+      if (createFlow.clicked) {
         return {
           navigated: true,
           from: current?.url || currentUrl,
-          to: refreshed.url || entryUrl,
-          url: refreshed.url || entryUrl,
-          title: String(refreshed?.title || tab?.title || ""),
-          verified: true,
-          reason: "generic_publish_route_bootstrap",
+          to: createFlow.state?.url || entryUrl,
+          url: createFlow.state?.url || entryUrl,
+          title: String(createFlow.state?.title || tab?.title || ""),
+          verified: Boolean(createFlow.state?.step),
+          reason: "youtube_create_upload_flow",
+          actions: createFlow.actions,
         };
       }
     }
-    return {
-      navigated: true,
-      from: current?.url || currentUrl,
-      to: entryUrl,
-      url: refreshed?.url || entryUrl,
-      verified: false,
-      reason: "generic_publish_route_bootstrap_not_verified",
-    };
+    return navigateClientToUrlWithDialogHandling(client, current?.url || currentUrl, entryUrl, {
+      timeout_ms: 18000,
+      reason: "generic_publish_route_bootstrap",
+      javascript_dialog_policy: "navigation_route_switch",
+      verify: verifyRouteBootstrapSnapshot,
+      snapshot_fn: (activeClient) => routeBootstrapSnapshot(activeClient).catch(() => null),
+    });
   }
 
   if (platform !== "toutiao") return { navigated: false, reason: "not_required" };
@@ -2788,21 +5175,17 @@ async function ensurePlatformPublishRoute(client, tab, platform, options = {}) {
     return { navigated: false, reason: "already_video_publish_route", url: current?.url || currentUrl, verified: hasVideoInput };
   }
   const targetUrl = "https://mp.toutiao.com/profile_v4/xigua/upload-video?index=0";
-  await client.send("Page.enable").catch(() => {});
-  await client.send("Page.navigate", { url: targetUrl });
-  let toutiaoCurrent = null;
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < 18000) {
-    await sleep(1500);
-    toutiaoCurrent = await pageSnapshot(client).catch(() => null);
-    const url = String(toutiaoCurrent?.url || "");
-    const text = [...(toutiaoCurrent?.lines || []), ...(toutiaoCurrent?.headings || [])].join(" ");
-    const hasVideoInput = (toutiaoCurrent?.fileInputs || []).some((input) => /video|mp4/i.test(input.accept || ""));
-    if (/mp\.toutiao\.com\/profile_v4\/xigua\/upload-video/i.test(url) && (hasVideoInput || /点击上传|发布视频/.test(text))) {
-      return { navigated: true, from: currentUrl, to: targetUrl, url, verified: true };
-    }
-  }
-  return { navigated: true, from: currentUrl, to: targetUrl, url: toutiaoCurrent?.url || "", verified: false, reason: "toutiao_video_publish_route_not_verified" };
+  return navigateClientToUrlWithDialogHandling(client, currentUrl, targetUrl, {
+    timeout_ms: 18000,
+    reason: "toutiao_video_publish_route",
+    javascript_dialog_policy: "navigation_route_switch",
+    verify: (snapshot) => {
+      const url = String(snapshot?.url || "");
+      const text = [...(snapshot?.lines || []), ...(snapshot?.headings || [])].join(" ");
+      const hasVideoInput = (snapshot?.fileInputs || []).some((input) => /video|mp4/i.test(input.accept || ""));
+      return /mp\.toutiao\.com\/profile_v4\/xigua\/upload-video/i.test(url) && (hasVideoInput || /点击上传|发布视频/.test(text));
+    },
+  });
 }
 
 async function clearInPageDraftState(client, platform, options = {}) {
@@ -2812,6 +5195,8 @@ async function clearInPageDraftState(client, platform, options = {}) {
   const clearTextGroups = _platformDraftClearGroups(platform);
   const clearIfStaleDraft = Boolean(options.clearIfStaleDraft);
   const forceClearDraft = Boolean(options.forceClearDraft);
+  const skipButtonClicks = Boolean(options.skipButtonClicks);
+  const includeHiddenVideoInputs = shouldInspectHiddenVideoInputsForDraftClear(platform);
   const actions = [];
   const before = await pageSnapshot(client).catch(() => ({}));
   const beforeText = [...(before.lines || []), ...(before.headings || [])].map((line) => String(line || "").trim()).join(" ");
@@ -2819,21 +5204,23 @@ async function clearInPageDraftState(client, platform, options = {}) {
   const beforeDraftHint = /草稿|草稿箱|编辑失败|上传失败|Upload failed|Upload Failed|上传中|视频处理中|请重试|Upload error|publish failed|need retry|重新上传/i.test(beforeText);
   const inputInspect = await evaluateWithClient(client, `(() => {
     const allInputs = [...document.querySelectorAll("input[type=file]")]
-      .filter((input) => {
-        const style = getComputedStyle(input);
-        const rect = input.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && !input.disabled && input.getAttribute("aria-disabled") !== "true";
-      });
+      .filter((input) => !input.disabled && input.getAttribute("aria-disabled") !== "true");
+    const visible = (input) => {
+      const style = getComputedStyle(input);
+      const rect = input.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
     const candidateInputs = allInputs.filter((input) => {
       const accept = String(input.getAttribute("accept") || "").toLowerCase();
-      return /video|mp4|media|octet|application|mpeg|quicktime/i.test(accept) || !/image|audio/i.test(accept) || !accept;
+      const videoLike = /video|mp4|media|octet|application|mpeg|quicktime/i.test(accept) || !/image|audio/i.test(accept) || !accept;
+      return videoLike && (${JSON.stringify(includeHiddenVideoInputs)} || visible(input));
     });
     const results = [];
     for (const input of candidateInputs) {
       const hasFiles = input.files && input.files.length > 0;
       results.push({
         accept: String(input.getAttribute("accept") || ""),
-        visible: true,
+        visible: Boolean(visible(input)),
         has_files: Boolean(hasFiles),
         has_value: Boolean(input.value || input.getAttribute("value")),
       });
@@ -2861,6 +5248,32 @@ async function clearInPageDraftState(client, platform, options = {}) {
     before_input_media_hint: Boolean(inputInspect.has_media_hint),
     clear_if_stale: clearIfStaleDraft,
   });
+  if (
+    String(platform || "").trim() === "youtube"
+    && shouldReuseYouTubeEditorSurfaceForDraftReset(before, mediaPath)
+  ) {
+    actions.push({
+      kind: "draft_clear_skipped",
+      reason: "youtube_editor_surface_reusable",
+      reusable_editor_surface: true,
+    });
+    return {
+      platform,
+      attempted: false,
+      skipped: true,
+      stale_detected: staleDraftDetected,
+      cleared: false,
+      before_media_hint: beforeMediaHint,
+      after_media_hint: beforeMediaHint,
+      before_draft_hint: beforeDraftHint,
+      after_draft_hint: beforeDraftHint,
+      input_inspect: inputInspect,
+      actions,
+      before_url: before.url || "",
+      after_url: before.url || "",
+      reason: "youtube_editor_surface_reusable",
+    };
+  }
   if (!forceClearDraft && clearIfStaleDraft && !staleDraftDetected) {
     return {
       platform,
@@ -2886,10 +5299,11 @@ async function clearInPageDraftState(client, platform, options = {}) {
       const style = getComputedStyle(el);
       return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
     };
-    const allInputs = [...document.querySelectorAll("input[type=file]")].filter(visible);
+    const allInputs = [...document.querySelectorAll("input[type=file]")].filter((input) => !input.disabled && input.getAttribute("aria-disabled") !== "true");
     const candidateInputs = allInputs.filter((input) => {
       const accept = String(input.getAttribute("accept") || "").toLowerCase();
-      return /video|mp4|media|octet|application|mpeg|quicktime/i.test(accept) || !/image|audio/i.test(accept) || !accept;
+      const videoLike = /video|mp4|media|octet|application|mpeg|quicktime/i.test(accept) || !/image|audio/i.test(accept) || !accept;
+      return videoLike && (${JSON.stringify(includeHiddenVideoInputs)} || visible(input));
     });
     const clearEvents = (input) => {
       const hadValue = clean(input.value || input.getAttribute("value") || "");
@@ -2923,9 +5337,10 @@ async function clearInPageDraftState(client, platform, options = {}) {
   actions.push({ kind: "draft_clear_file_inputs", ...inputClearResult });
 
   let clearButtonClicked = false;
-  for (const texts of clearTextGroups) {
-    if (!Array.isArray(texts) || texts.length === 0) continue;
-    const clickResult = await evaluateWithClient(client, `(() => {
+  if (!skipButtonClicks) {
+    for (const texts of clearTextGroups) {
+      if (!Array.isArray(texts) || texts.length === 0) continue;
+      const clickResult = await evaluateWithClient(client, `(() => {
       const texts = ${JSON.stringify(texts)};
       const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
       const visible = (el) => {
@@ -2988,11 +5403,12 @@ async function clearInPageDraftState(client, platform, options = {}) {
       }
       return { clicked: true, label: target.label, text: target.text, matched: target.match, context: target.context, area: target.rect.width * target.rect.height };
     })()`, 12000).catch((error) => ({ clicked: false, reason: "click_error", error: String(error?.message || error) }));
-    actions.push({ kind: "draft_clear_click", ...clickResult, texts: texts.slice(0, 8) });
-    if (clickResult.clicked) {
-      clearButtonClicked = true;
-      await sleep(1200);
-      break;
+      actions.push({ kind: "draft_clear_click", ...clickResult, texts: texts.slice(0, 8) });
+      if (clickResult.clicked) {
+        clearButtonClicked = true;
+        await sleep(1200);
+        break;
+      }
     }
   }
 
@@ -3019,11 +5435,38 @@ async function clearInPageDraftState(client, platform, options = {}) {
 }
 
 async function resolveCurrentPageDraftResumePrompt(client, platform) {
-  const before = await pageSnapshot(client).catch(() => ({}));
-  const beforeText = [...(before.lines || []), ...(before.headings || [])]
+  const snapshotText = (snapshot = {}) => [...(snapshot.lines || []), ...(snapshot.headings || []), ...(snapshot.overlayTexts || [])]
     .map((line) => String(line || "").trim())
     .filter(Boolean)
     .join(" ");
+  const before = await pageSnapshot(client).catch(() => ({}));
+  const beforeText = snapshotText(before);
+  const youtubeRecentUploadsOverlay = String(platform || "").trim() === "youtube"
+    ? await inspectYouTubeRecentUploadsOverlay(client).catch(() => ({ present: false, text: "" }))
+    : { present: false, text: "" };
+  if (String(platform || "").trim() === "youtube" && youtubeRecentUploadsOverlay.present) {
+    const dismissResult = await dismissYouTubeRecentUploadsOverlay(client).catch(() => ({ clicked: false, dismissed: false, prompt_still_open: true }));
+    const after = await pageSnapshot(client).catch(() => ({}));
+    const afterText = snapshotText(after);
+    const afterDisposition = deriveCurrentPageDraftResumeDisposition(platform, afterText);
+    const afterOverlay = await inspectYouTubeRecentUploadsOverlay(client).catch(() => ({ present: false, text: "" }));
+    return {
+      attempted: Boolean(dismissResult.clicked),
+      resumed: !afterDisposition.present && !afterOverlay.present,
+      discarded: !afterDisposition.present && !afterOverlay.present,
+      prompt_present: true,
+      prompt_still_open: afterDisposition.present || afterOverlay.present,
+      preferred_action: "dismiss",
+      reason: "youtube_recent_uploads_overlay",
+      before_url: before.url || "",
+      after_url: after.url || before.url || "",
+      clicked_label: dismissResult.clicked_label || dismissResult.label || "",
+      dismiss_method: String(dismissResult.method || (dismissResult.clicked_label === "Escape" ? "escape" : "button")).trim() || "button",
+      dialog_text: youtubeRecentUploadsOverlay.text,
+      before_lines: (before.lines || []).slice(0, 40),
+      after_lines: (after.lines || []).slice(0, 40),
+    };
+  }
   if (
     String(platform || "").trim() === "youtube"
     && shouldPreserveYouTubeUploadResumeRoute(String(before.url || ""), beforeText)
@@ -3042,42 +5485,21 @@ async function resolveCurrentPageDraftResumePrompt(client, platform) {
     String(platform || "").trim() === "youtube"
     && hasYoutubeUploadResumeVideoId(String(before.url || ""))
   ) {
-    const routeCandidate = await resolveYouTubeDraftEditorRoute(client).catch(() => ({}));
-    const editorTarget = String(routeCandidate?.edit_url || "").trim();
-    if (editorTarget && editorTarget !== String(before.url || "").trim()) {
-      await evaluateWithClient(client, `(() => {
-        location.href = ${JSON.stringify(editorTarget)};
-        return { navigated: true, target: ${JSON.stringify(editorTarget)} };
-      })()`, 10000).catch(() => null);
-      await sleep(2600);
-      const afterEditorBootstrap = await pageSnapshot(client).catch(() => ({}));
-      const afterEditorBootstrapText = [...(afterEditorBootstrap.lines || []), ...(afterEditorBootstrap.headings || [])]
-        .map((line) => String(line || "").trim())
-        .filter(Boolean)
-        .join(" ");
-      const editorAdvanced =
-        /\/video\/[A-Za-z0-9_-]+\/edit\b/i.test(String(afterEditorBootstrap.url || ""))
-        || /视频详细信息|Video details/i.test(afterEditorBootstrapText)
-        || /标题（必填）|说明|缩略图|播放列表/.test(afterEditorBootstrapText);
-      if (editorAdvanced || shouldPreserveYouTubeUploadResumeRoute(String(afterEditorBootstrap.url || ""), afterEditorBootstrapText)) {
-        return {
-          attempted: true,
-          resumed: true,
-          prompt_present: false,
-          reason: "youtube_upload_resume_editor_bootstrap",
-          before_url: before.url || "",
-          after_url: afterEditorBootstrap.url || before.url || "",
-          route_bootstrap_target: editorTarget,
-          route_bootstrap_changed: true,
-          upload_dialog_surface: shouldPreserveYouTubeUploadResumeRoute(String(afterEditorBootstrap.url || ""), afterEditorBootstrapText),
-          after_lines: (afterEditorBootstrap.lines || []).slice(0, 40),
-        };
-      }
-    }
+    return {
+      attempted: false,
+      resumed: false,
+      discarded: true,
+      prompt_present: false,
+      reason: "youtube_existing_resume_route_ignored",
+      before_url: before.url || "",
+      after_url: before.url || "",
+      upload_dialog_surface: true,
+    };
   }
   if (
     String(platform || "").trim() === "youtube"
     && /\/video\/[A-Za-z0-9_-]+\/edit\b/i.test(String(before.url || ""))
+    && !hasYouTubeRecentUploadsOverlay(before.overlayTexts || [], [...(before.lines || []), ...(before.headings || [])])
   ) {
     return {
       attempted: false,
@@ -3099,100 +5521,46 @@ async function resolveCurrentPageDraftResumePrompt(client, platform) {
       after_url: before.url || "",
     };
   }
-  if (String(platform || "").trim() === "youtube" && disposition.reason === "uploaded_draft_row") {
-    let resume = await clickYouTubeDraftResumeEntry(client, "").catch(() => ({ clicked: false }));
-    if (!resume.clicked) resume = await clickByText(client, [disposition.resume_label]);
-    if (!resume.clicked) resume = await clickLooseText(client, [disposition.resume_label]);
+  if (String(platform || "").trim() === "youtube" && disposition.reason === "youtube_recent_uploads_overlay") {
+    await client.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }).catch(() => {});
+    await client.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }).catch(() => {});
     await sleep(1200);
     const after = await pageSnapshot(client).catch(() => ({}));
-    const afterText = [...(after.lines || []), ...(after.headings || [])]
-      .map((line) => String(line || "").trim())
-      .filter(Boolean)
-      .join(" ");
+    const afterText = snapshotText(after);
     const afterDisposition = deriveCurrentPageDraftResumeDisposition(platform, afterText);
-    const youtubeUploadDialogResumed = shouldPreserveYouTubeUploadResumeRoute(String(after.url || ""), afterText);
-    const editorAdvanced =
-      /\/video\/[A-Za-z0-9_-]+\/edit\b/i.test(String(after.url || ""))
-      || /视频详细信息|Video details/i.test(afterText)
-      || /标题（必填）|说明|缩略图|播放列表/.test(afterText);
-    const attemptResult = {
+    return {
       attempted: true,
-      resumed: Boolean(resume.clicked) && (!afterDisposition.present || youtubeUploadDialogResumed || editorAdvanced),
+      resumed: !afterDisposition.present,
+      discarded: !afterDisposition.present,
       prompt_present: true,
       prompt_still_open: afterDisposition.present,
+      preferred_action: "dismiss",
       reason: disposition.reason,
-      resume_label: disposition.resume_label,
       before_url: before.url || "",
       after_url: after.url || before.url || "",
-      clicked_label: resume.clicked_label || resume.label || "",
-      upload_dialog_surface: youtubeUploadDialogResumed,
+      clicked_label: "Escape",
       before_lines: (before.lines || []).slice(0, 40),
       after_lines: (after.lines || []).slice(0, 40),
     };
-    if (attemptResult.resumed) return attemptResult;
-    const directResumeTarget = deriveYouTubeDraftResumeFallbackTarget(resume, String(after.url || before.url || ""));
-    if (directResumeTarget.target) {
-      await evaluateWithClient(client, `(() => {
-        location.href = ${JSON.stringify(directResumeTarget.target)};
-        return { navigated: true, target: ${JSON.stringify(directResumeTarget.target)} };
-      })()`, 10000).catch(() => null);
-      await sleep(2600);
-      const afterDirectResume = await pageSnapshot(client).catch(() => ({}));
-      const afterDirectResumeText = [...(afterDirectResume.lines || []), ...(afterDirectResume.headings || [])]
-        .map((line) => String(line || "").trim())
-        .filter(Boolean)
-        .join(" ");
-      const afterDirectDisposition = deriveCurrentPageDraftResumeDisposition(platform, afterDirectResumeText);
-      const youtubeUploadDialogDirect = shouldPreserveYouTubeUploadResumeRoute(String(afterDirectResume.url || ""), afterDirectResumeText);
-      const editorAdvancedDirect =
-        /\/video\/[A-Za-z0-9_-]+\/edit\b/i.test(String(afterDirectResume.url || ""))
-        || /视频详细信息|Video details/i.test(afterDirectResumeText)
-        || /标题（必填）|说明|缩略图|播放列表/.test(afterDirectResumeText);
-      if (youtubeUploadDialogDirect || editorAdvancedDirect) {
-        return {
-          ...attemptResult,
-          resumed: true,
-          prompt_still_open: afterDirectDisposition.present,
-          after_url: afterDirectResume.url || attemptResult.after_url || before.url || "",
-          upload_dialog_surface: youtubeUploadDialogDirect,
-          direct_resume_target: directResumeTarget.target,
-          direct_resume_reason: directResumeTarget.reason,
-          after_lines: (afterDirectResume.lines || []).slice(0, 40),
-        };
-      }
-    }
-    const routeBootstrap = await ensureYoutubeUploadEditor(client, "").catch(() => ({ matched: false, changed: false }));
-    if (!routeBootstrap?.changed) return attemptResult;
-    await sleep(2600);
-    const afterBootstrap = await pageSnapshot(client).catch(() => ({}));
-    const afterBootstrapText = [...(afterBootstrap.lines || []), ...(afterBootstrap.headings || [])]
-      .map((line) => String(line || "").trim())
-      .filter(Boolean)
-      .join(" ");
-    const afterBootstrapDisposition = deriveCurrentPageDraftResumeDisposition(platform, afterBootstrapText);
-    const youtubeUploadDialogBootstrap = shouldPreserveYouTubeUploadResumeRoute(String(afterBootstrap.url || ""), afterBootstrapText);
-    const editorAdvancedBootstrap =
-      /\/video\/[A-Za-z0-9_-]+\/edit\b/i.test(String(afterBootstrap.url || ""))
-      || /视频详细信息|Video details/i.test(afterBootstrapText)
-      || /标题（必填）|说明|缩略图|播放列表/.test(afterBootstrapText);
+  }
+  if (String(platform || "").trim() === "youtube" && disposition.reason === "uploaded_draft_row_ignored") {
     return {
-      ...attemptResult,
-      resumed: youtubeUploadDialogBootstrap || editorAdvancedBootstrap,
-      prompt_still_open: afterBootstrapDisposition.present,
-      after_url: afterBootstrap.url || attemptResult.after_url || before.url || "",
-      upload_dialog_surface: youtubeUploadDialogBootstrap,
-      route_bootstrap_target: String(routeBootstrap?.target || ""),
-      route_bootstrap_changed: true,
-      after_lines: (afterBootstrap.lines || []).slice(0, 40),
+      attempted: false,
+      resumed: false,
+      discarded: true,
+      prompt_present: false,
+      prompt_still_open: false,
+      reason: disposition.reason,
+      before_url: before.url || "",
+      after_url: before.url || "",
+      before_lines: (before.lines || []).slice(0, 40),
+      after_lines: (before.lines || []).slice(0, 40),
     };
   }
   let clickResult = await clickDraftResumePromptAction(client, disposition);
   await sleep(1200);
   const after = await pageSnapshot(client).catch(() => ({}));
-  const afterText = [...(after.lines || []), ...(after.headings || [])]
-    .map((line) => String(line || "").trim())
-    .filter(Boolean)
-    .join(" ");
+  const afterText = snapshotText(after);
   const afterDisposition = deriveCurrentPageDraftResumeDisposition(platform, afterText);
   const youtubeUploadDialogResumed =
     String(platform || "").trim() === "youtube"
@@ -3254,14 +5622,167 @@ async function setOriginNotificationPermission(client, tab) {
     });
     return { handled: true, kind: "notification_permission", origin, setting: "denied" };
   } catch (error) {
-    return { handled: false, kind: "notification_permission", origin, reason: error.message };
+    try {
+      const fallback = await sendBridgeCommand("set_origin_notification_permission", {
+        origin,
+        setting: "block",
+      });
+      return {
+        handled: Boolean(fallback?.handled),
+        kind: "notification_permission",
+        origin,
+        setting: String(fallback?.setting || "block"),
+        via: "chrome_content_settings",
+      };
+    } catch (fallbackError) {
+      return {
+        handled: false,
+        kind: "notification_permission",
+        origin,
+        reason: `${error.message}; fallback=${String(fallbackError?.message || fallbackError || "")}`.trim(),
+      };
+    }
   }
+}
+
+async function dismissBilibiliUnexpectedEvents(client, stage = "unspecified") {
+  return evaluateWithClient(client, `(async () => {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const click = (el) => {
+      if (!el) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        el.dispatchEvent(new MouseEvent(type, eventInit));
+      }
+      if (typeof el.click === "function") el.click();
+      return true;
+    };
+    const actions = [];
+    const overlays = [...document.querySelectorAll("[role=dialog],[aria-modal=true],.modal,.dialog,.popover,[class*=modal i],[class*=dialog i],[class*=popover i]")]
+      .filter(visible);
+    const overlayTexts = overlays.map((el) => clean(el.innerText || el.textContent || "")).filter(Boolean);
+    const notifyGuide = overlays.find((el) => /开启后视频上传完成第一时间通知|上传完成第一时间通知/.test(clean(el.innerText || el.textContent || "")));
+    if (notifyGuide) {
+      const knows = [...notifyGuide.querySelectorAll("button,[role=button],span,div,a")]
+        .filter(visible)
+        .find((el) => /^(知道了|我知道了|暂不|稍后再说|关闭)$/.test(clean(el.innerText || el.textContent || "")));
+      if (knows) {
+        actions.push({
+          kind: "bilibili_unexpected_notify_guide",
+          stage: ${JSON.stringify(stage)},
+          label: clean(knows.innerText || knows.textContent || ""),
+          clicked: click(knows),
+        });
+        await sleep(500);
+      }
+    }
+    const genericHints = ["知道了", "我知道了", "暂不", "稍后再说", "关闭"];
+    for (const label of genericHints) {
+      const candidate = [...document.querySelectorAll("button,[role=button],span,div,a")]
+        .filter(visible)
+        .find((el) => clean(el.innerText || el.textContent || "") === label);
+      if (!candidate) continue;
+      const context = clean(candidate.closest("[role=dialog],[aria-modal=true],.modal,.dialog,.popover,[class*=modal i],[class*=dialog i],[class*=popover i]")?.innerText || "");
+      if (!/上传完成|通知|知道了|教程|引导|提示/.test(context)) continue;
+      actions.push({
+        kind: "bilibili_unexpected_overlay_dismissed",
+        stage: ${JSON.stringify(stage)},
+        label,
+        clicked: click(candidate),
+        context: context.slice(0, 240),
+      });
+      await sleep(350);
+      break;
+    }
+    return { actions, overlay_texts: overlayTexts.slice(0, 6) };
+  })()`, 10000).catch(() => ({ actions: [] }));
 }
 
 async function dismissInterruptions(client, tab, platform, stage = "unspecified") {
   const actions = [];
   const permission = await setOriginNotificationPermission(client, tab);
   if (permission.handled) actions.push({ ...permission, stage });
+  if (["bilibili", "kuaishou", "douyin"].includes(String(platform || "").trim())) {
+    const draftResume = await resolveCurrentPageDraftResumePrompt(client, platform).catch(() => ({
+      attempted: false,
+      resumed: false,
+      discarded: false,
+      prompt_present: false,
+      prompt_still_open: false,
+      preferred_action: "",
+      reason: "",
+    }));
+    if (draftResume?.attempted || draftResume?.prompt_present) {
+      actions.push({
+        kind: "draft_resume_prompt_interruption",
+        platform,
+        stage,
+        ...draftResume,
+      });
+      await sleep(900);
+    }
+  }
+  if (platform === "bilibili") {
+    const bilibiliUnexpected = await dismissBilibiliUnexpectedEvents(client, stage).catch(() => ({ actions: [] }));
+    actions.push(...(bilibiliUnexpected.actions || []));
+    const batchDynamicDecision = await evaluateWithClient(client, `(() => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const visible = (el) => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+      };
+      const overlays = [...document.querySelectorAll("[role=dialog],[aria-modal=true],.modal,.dialog,.popover,[class*=modal i],[class*=dialog i],[class*=popover i]")]
+        .filter(visible);
+      const overlayTexts = overlays.map((overlay) => clean(overlay.innerText || overlay.textContent || "")).filter(Boolean);
+      const candidates = overlays.flatMap((overlay) => [...overlay.querySelectorAll("button,[role=button],a,span,div,input[type=button],input[type=submit]")])
+        .filter(visible)
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          return {
+            el,
+            label: clean(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || el.getAttribute("title")),
+            area: rect.width * rect.height,
+            visible: true,
+            clickable: true,
+          };
+        });
+      const chosen = (${selectBilibiliBatchDynamicDecisionCandidate.toString()})(candidates, overlayTexts);
+      if (!chosen?.el) {
+        return { clicked: false, overlay_texts: overlayTexts.slice(0, 4) };
+      }
+      chosen.el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = chosen.el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        chosen.el.dispatchEvent(new MouseEvent(type, eventInit));
+      }
+      if (typeof chosen.el.click === "function") chosen.el.click();
+      return {
+        clicked: true,
+        label: clean(chosen.label),
+        overlay_texts: overlayTexts.slice(0, 4),
+      };
+    })()`, 10000).catch(() => ({ clicked: false }));
+    if (batchDynamicDecision.clicked) {
+      actions.push({
+        kind: "bilibili_batch_dynamic_decision",
+        decision: "use_no_dynamic",
+        label: batchDynamicDecision.label || "",
+        stage,
+        overlay_texts: batchDynamicDecision.overlay_texts || [],
+      });
+      await sleep(900);
+    }
+  }
 
   const expression = `(() => {
     const safeTexts = ${JSON.stringify(SAFE_DISMISS_TEXTS)};
@@ -3339,7 +5860,16 @@ async function dismissInterruptions(client, tab, platform, stage = "unspecified"
       .map((el) => {
         const rect = el.getBoundingClientRect();
         const label = labelOf(el);
-        return { el, label, area: rect.width * rect.height };
+        return {
+          el,
+          label,
+          area: rect.width * rect.height,
+          className: classOf(el),
+          ariaLabel: clean(el.getAttribute("aria-label")),
+          title: clean(el.getAttribute("title")),
+          visible: true,
+          clickable: true,
+        };
       })
       .filter((item) => item.area > 0 && item.area < 180000)
       .sort((left, right) => {
@@ -3348,6 +5878,23 @@ async function dismissInterruptions(client, tab, platform, stage = "unspecified"
         return leftClose - rightClose || left.area - right.area;
       });
     const clicked = [];
+    const overlayTexts = overlays.map((overlay) => clean(overlay.innerText || overlay.textContent || "")).filter(Boolean);
+    const onboardingChosen = (${selectOnboardingGuideDismissCandidate.toString()})(candidates, overlayTexts);
+    if (onboardingChosen?.el) {
+      onboardingChosen.el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = onboardingChosen.el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        onboardingChosen.el.dispatchEvent(new MouseEvent(type, eventInit));
+      }
+      clicked.push({
+        kind: "onboarding_guide_dismissed",
+        label: onboardingChosen.label || clean(onboardingChosen.el.getAttribute("aria-label")) || clean(onboardingChosen.el.getAttribute("title")) || "icon_close",
+        platform,
+        stage,
+      });
+      return { clicked };
+    }
     for (const item of candidates) {
       const label = item.label;
       if (!isSafeLabel(label) && !looksLikeCloseIcon(item.el, label)) continue;
@@ -3370,7 +5917,262 @@ async function dismissInterruptions(client, tab, platform, stage = "unspecified"
   })()`;
   const domResult = await evaluateWithClient(client, expression, 10000);
   actions.push(...(domResult.clicked || []));
+  if (!(domResult.clicked || []).length && String(platform || "").trim() === "youtube") {
+    const overlay = await inspectYouTubeRecentUploadsOverlay(client).catch(() => ({ present: false, text: "" }));
+    if (overlay.present) {
+      const dismissResult = await dismissYouTubeRecentUploadsOverlay(client).catch(() => ({ clicked: false, dismissed: false, prompt_still_open: true }));
+      actions.push({
+        kind: "youtube_recent_uploads_overlay_dismissed",
+        platform,
+        stage,
+        method: String(dismissResult.method || (dismissResult.clicked_label === "Escape" ? "escape" : "button")).trim() || "button",
+        clicked_label: dismissResult.clicked_label || dismissResult.label || "",
+        dismissed: Boolean(dismissResult.dismissed),
+        prompt_still_open: Boolean(dismissResult.prompt_still_open),
+        dialog_text: overlay.text,
+      });
+    }
+  }
   return actions;
+}
+
+export function shouldResetBilibiliUploadModuleAfterDiscard(promptResult = {}) {
+  return Boolean(
+    promptResult
+    && promptResult.prompt_present
+    && promptResult.discarded
+    && String(promptResult.clicked_label || "").trim() === "不用了",
+  );
+}
+
+export function bilibiliDraftStorageKeysToClear() {
+  return [
+    "bili_videoup_record",
+  ];
+}
+
+export function isBilibiliUploadQueueCardCandidate(text = "", expectedTitle = "") {
+  const normalizedText = String(text || "").replace(/\s+/g, " ").trim();
+  if (!normalizedText) return false;
+  if (/^(视频投稿|短剧投稿|专栏投稿|互动视频投稿|贴纸投稿|视频素材投稿)$/.test(normalizedText)) return false;
+  if (/点击上传或将视频拖拽到此区域|上传视频|视频大小|视频格式|视频分辨率/.test(normalizedText)) return false;
+  if (/上传中|等待上传|上传完成|上传失败|当前速度|剩余时间|更换视频|已上传/.test(normalizedText)) return true;
+  const expected = String(expectedTitle || "").replace(/\s+/g, " ").trim();
+  return Boolean(expected && normalizedText.includes(expected));
+}
+
+export function isBilibiliFreshUploadEntrySnapshot(snapshot = {}, mediaPath = "", expectedTitle = "") {
+  const url = String(snapshot?.url || "").trim();
+  const lines = Array.isArray(snapshot?.lines) ? snapshot.lines.map((line) => String(line || "").trim()).filter(Boolean) : [];
+  const headings = Array.isArray(snapshot?.headings) ? snapshot.headings.map((line) => String(line || "").trim()).filter(Boolean) : [];
+  const text = [...lines, ...headings].join(" ").replace(/\s+/g, " ").trim();
+  const surface = deriveBilibiliUploadSurfaceState(text, lines, mediaPath);
+  const disposition = deriveCurrentPageDraftResumeDisposition("bilibili", text);
+  const mediaState = canReuseCurrentPageMediaForPrepublish("bilibili", snapshot, mediaPath, {
+    requiresLocalMedia: Boolean(String(mediaPath || "").trim()),
+    expectedTitle: String(expectedTitle || "").trim(),
+    allowDraftTitleMismatchReuse: false,
+  });
+  const hasVideoInput = (snapshot?.fileInputs || []).some((input) => /video|mp4/i.test(String(input?.accept || "")));
+  const cleanUploadPrompt = surface.upload_prompt_surface || (hasVideoInput && !surface.field_shell && !surface.media_attached);
+  const staleReason = String(mediaState?.reason || "").trim();
+  const staleMismatch = staleReason === "bilibili_existing_draft_title_mismatch";
+  const readyButWrongEditor = surface.field_shell && staleMismatch;
+  const promptBlocked = Boolean(disposition.present && disposition.preferred_action === "discard");
+  return {
+    fresh: /member\.bilibili\.com\/platform\/upload\/video/i.test(url)
+      && cleanUploadPrompt
+      && !promptBlocked
+      && !staleMismatch
+      && !readyButWrongEditor,
+    prompt_blocked: promptBlocked,
+    stale_mismatch: staleMismatch,
+    has_video_input: hasVideoInput,
+    surface,
+    media_state: mediaState,
+  };
+}
+
+export function shouldPersistBilibiliDirtyEditorBeforeRouteReset(surface = {}, freshness = {}) {
+  return Boolean(
+    surface
+    && freshness
+    && surface.field_shell
+    && !surface.upload_prompt_surface
+    && !freshness.fresh
+    && !freshness.prompt_blocked,
+  );
+}
+
+async function clearBilibiliUploadLocalDraftState(client) {
+  const keys = bilibiliDraftStorageKeysToClear();
+  return evaluateWithClient(client, `(() => {
+    const keys = ${JSON.stringify(keys)};
+    const removed = [];
+    const before = {};
+    for (const key of keys) {
+      const current = localStorage.getItem(key);
+      before[key] = current ? String(current).slice(0, 200) : "";
+      if (current !== null) {
+        localStorage.removeItem(key);
+        removed.push(key);
+      }
+    }
+    return { cleared: removed.length > 0, removed, before };
+  })()`, 12000).catch((error) => ({
+    cleared: false,
+    removed: [],
+    error: String(error?.message || error),
+  }));
+}
+
+async function resetBilibiliFreshUploadEntry(client, options = {}) {
+  const mediaPath = String(options.mediaPath || "").trim();
+  const expectedTitle = String(options.expectedTitle || "").trim();
+  const actions = [];
+  let snapshot = options.snapshot && typeof options.snapshot === "object"
+    ? options.snapshot
+    : await pageSnapshot(client).catch(() => ({}));
+  const currentUrl = String(snapshot?.url || "").trim();
+  const currentText = [...(snapshot?.lines || []), ...(snapshot?.headings || [])].join(" ").replace(/\s+/g, " ").trim();
+  const currentSurface = deriveBilibiliUploadSurfaceState(currentText, snapshot?.lines || [], mediaPath);
+  const currentMediaState = canReuseCurrentPageMediaForPrepublish("bilibili", snapshot, mediaPath, {
+    requiresLocalMedia: Boolean(mediaPath),
+    expectedTitle,
+    allowDraftTitleMismatchReuse: false,
+  });
+  const shouldClearQueue = Boolean(options.clearQueue)
+    || String(currentMediaState?.reason || "").trim() === "bilibili_existing_draft_title_mismatch"
+    || Boolean(currentSurface.field_shell && !currentSurface.concrete_progress);
+  if (shouldClearQueue) {
+    const queueReset = await normalizeBilibiliUploadQueue(client, expectedTitle, {
+      clearAll: true,
+      inspectOnly: false,
+    }).catch((error) => ({ removed: 0, clear_all: true, error: String(error?.message || error), reason: "bilibili_queue_reset_failed" }));
+    actions.push({ kind: "bilibili_fresh_upload_queue_reset", ...queueReset });
+  }
+  const storageReset = await clearBilibiliUploadLocalDraftState(client).catch((error) => ({
+    cleared: false,
+    removed: [],
+    error: String(error?.message || error),
+    reason: "bilibili_storage_reset_failed",
+  }));
+  actions.push({ kind: "bilibili_fresh_upload_storage_reset", ...storageReset });
+  await sleep(900);
+  snapshot = await pageSnapshot(client).catch(() => snapshot);
+  let freshness = isBilibiliFreshUploadEntrySnapshot(snapshot, mediaPath, expectedTitle);
+  if (freshness.fresh) {
+    return {
+      reset: true,
+      snapshot,
+      freshness,
+      actions,
+    };
+  }
+  const postResetText = [...(snapshot?.lines || []), ...(snapshot?.headings || [])].join(" ").replace(/\s+/g, " ").trim();
+  const postResetSurface = deriveBilibiliUploadSurfaceState(postResetText, snapshot?.lines || [], mediaPath);
+  const dirtyEditorBeforeUnloadRisk = shouldPersistBilibiliDirtyEditorBeforeRouteReset(postResetSurface, freshness);
+  if (dirtyEditorBeforeUnloadRisk) {
+    const saveDraftAttempt = await clickByText(client, ["存草稿", "保存草稿"]).catch(() => ({ clicked: false, reason: "click_failed" }));
+    actions.push({ kind: "bilibili_fresh_upload_save_draft_before_route_reset", ...saveDraftAttempt });
+    if (saveDraftAttempt?.clicked) {
+      await sleep(1800);
+      snapshot = await pageSnapshot(client).catch(() => snapshot);
+      freshness = isBilibiliFreshUploadEntrySnapshot(snapshot, mediaPath, expectedTitle);
+    } else {
+      actions.push({
+        kind: "bilibili_fresh_upload_navigation_skipped_due_dirty_editor",
+        reason: "dirty_editor_beforeunload_risk",
+        route_url: String(snapshot?.url || ""),
+      });
+      return {
+        reset: false,
+        snapshot,
+        freshness,
+        actions,
+      };
+    }
+  }
+  const bilibiliEntryUrl = compositePlatformPublishEntryUrl("bilibili") || PLATFORM_PUBLISH_ENTRY_URLS.bilibili;
+  const routeReset = await navigateClientToUrlWithDialogHandling(
+    client,
+    currentUrl,
+    bilibiliEntryUrl,
+    {
+      timeout_ms: 18000,
+      reason: "bilibili_fresh_upload_route_reset",
+      javascript_dialog_policy: "navigation_route_switch",
+      verify: (routeSnapshot) => {
+        const freshness = isBilibiliFreshUploadEntrySnapshot(routeSnapshot, mediaPath, expectedTitle);
+        return freshness.fresh || freshness.prompt_blocked;
+      },
+      snapshot_fn: (activeClient) => routeBootstrapSnapshot(activeClient).catch(() => null),
+    },
+  ).catch((error) => ({ navigated: false, reason: "bilibili_fresh_upload_route_reset_failed", error: String(error?.message || error) }));
+  actions.push({ kind: "bilibili_fresh_upload_route_reset", ...routeReset });
+  await sleep(900);
+  snapshot = await pageSnapshot(client).catch(() => snapshot);
+  freshness = isBilibiliFreshUploadEntrySnapshot(snapshot, mediaPath, expectedTitle);
+  if (freshness.prompt_blocked) {
+    const prompt = await resolveCurrentPageDraftResumePrompt(client, "bilibili").catch(() => null);
+    if (prompt) actions.push({ kind: "bilibili_fresh_upload_resume_prompt", ...prompt });
+    if (prompt?.prompt_present && !prompt?.prompt_still_open) {
+      const postDiscardClear = await clearInPageDraftState(client, "bilibili", {
+        mediaPath,
+        forceClearDraft: true,
+        skipButtonClicks: true,
+      }).catch(() => null);
+      if (postDiscardClear) actions.push({ kind: "bilibili_fresh_upload_post_discard_clear", ...postDiscardClear });
+      const postDiscardStorageReset = await clearBilibiliUploadLocalDraftState(client).catch(() => null);
+      if (postDiscardStorageReset) actions.push({ kind: "bilibili_fresh_upload_post_discard_storage_reset", ...postDiscardStorageReset });
+      if (shouldResetBilibiliUploadModuleAfterDiscard(prompt)) {
+        const postDiscardRouteReset = await navigateClientToUrlWithDialogHandling(
+          client,
+          String(snapshot?.url || bilibiliEntryUrl),
+          bilibiliEntryUrl,
+          {
+            timeout_ms: 18000,
+            reason: "bilibili_fresh_upload_post_discard_route_reset",
+            javascript_dialog_policy: "navigation_route_switch",
+            verify: (routeSnapshot) => isBilibiliFreshUploadEntrySnapshot(routeSnapshot, mediaPath, expectedTitle).fresh,
+            snapshot_fn: (activeClient) => routeBootstrapSnapshot(activeClient).catch(() => null),
+          },
+        ).catch((error) => ({ navigated: false, reason: "bilibili_fresh_upload_post_discard_route_reset_failed", error: String(error?.message || error) }));
+        actions.push({ kind: "bilibili_fresh_upload_post_discard_route_reset", ...postDiscardRouteReset });
+        await sleep(900);
+        snapshot = await pageSnapshot(client).catch(() => snapshot);
+        freshness = isBilibiliFreshUploadEntrySnapshot(snapshot, mediaPath, expectedTitle);
+      }
+    }
+  }
+  return {
+    reset: Boolean(isBilibiliFreshUploadEntrySnapshot(snapshot, mediaPath, expectedTitle).fresh),
+    snapshot,
+    freshness: isBilibiliFreshUploadEntrySnapshot(snapshot, mediaPath, expectedTitle),
+    actions,
+  };
+}
+
+async function inspectBilibiliUploadLocalDraftState(client) {
+  return evaluateWithClient(client, `(() => {
+    const raw = localStorage.getItem("bili_videoup_record");
+    let parsed = null;
+    try {
+      parsed = raw ? JSON.parse(raw) : null;
+    } catch {}
+    const data = Array.isArray(parsed?.data) ? parsed.data : [];
+    return {
+      present: Boolean(raw),
+      draft_count: data.length,
+      titles: data.map((item) => String(item?.title || "").trim()).filter(Boolean),
+      raw_preview: raw ? String(raw).slice(0, 500) : "",
+    };
+  })()`, 12000).catch((error) => ({
+    present: false,
+    draft_count: 0,
+    titles: [],
+    error: String(error?.message || error),
+  }));
 }
 
 function mergedSnapshot(snapshots) {
@@ -3472,24 +6274,22 @@ export function compositeRequiresLocalMedia(platform, content = {}) {
 
 export function canReuseCurrentPageMediaForPrepublish(platform, snapshot = {}, mediaPath = "", options = {}) {
   if (options?.requiresLocalMedia === false) {
-    return { reusable: true, reason: "local_media_not_required" };
-  }
-  if (mediaPath && pageAlreadyHasMedia(snapshot, mediaPath)) {
-    return { reusable: true, reason: "media_path_match" };
+    return { reusable: true, media_attached: false, reason: "local_media_not_required" };
   }
   const normalizedLines = Array.isArray(snapshot?.lines) ? snapshot.lines.map((line) => String(line || "").trim()).filter(Boolean) : [];
   const text = [...normalizedLines, ...((snapshot?.elements || []).map((element) => String(element?.text || "").trim()).filter(Boolean))]
     .join(" ")
     .replace(/\s+/g, " ")
     .trim();
+  const matchedMediaPath = Boolean(mediaPath && pageAlreadyHasMedia(snapshot, mediaPath));
   const mediaName = mediaPath ? path.win32.basename(String(mediaPath)) : "";
   const mediaStem = mediaName.replace(/\.[^.]+$/, "");
   const signals = detectCompositePublicationSignals(platform, text, normalizedLines);
   if (signals.upload_failed) {
-    return { reusable: false, reason: "upload_failed" };
+    return { reusable: false, media_attached: false, reason: "upload_failed" };
   }
   if (platform === "youtube" && shouldPreserveYouTubeUploadResumeRoute(String(snapshot?.url || ""), text)) {
-    return { reusable: true, reason: "youtube_upload_resume_surface" };
+    return { reusable: true, media_attached: true, reason: "youtube_upload_resume_surface" };
   }
   if (
     platform === "youtube"
@@ -3497,26 +6297,57 @@ export function canReuseCurrentPageMediaForPrepublish(platform, snapshot = {}, m
     && /草稿|Draft/i.test(text)
     && /编辑草稿|Edit draft/i.test(text)
   ) {
-    return { reusable: true, reason: "youtube_uploaded_draft_row" };
+    return { reusable: false, media_attached: false, reason: "youtube_uploaded_draft_row_ignored" };
   }
   if (platform === "douyin") {
     const douyinReadySurface = /预览视频|预览封面\/标题|重新上传|极速上传成功/.test(text)
       && /作品描述|发布时间|发布设置/.test(text);
     if (douyinReadySurface) {
-      return { reusable: true, reason: "douyin_ready_surface" };
+      return { reusable: true, media_attached: true, reason: "douyin_ready_surface" };
     }
   }
   if (platform === "bilibili") {
-    const bilibiliEditorSurface = /更换视频|上传完成|已经上传：|当前速度：|剩余时间：/.test(text)
-      && /标题|简介|分区|标签|创作声明|定时发布|立即投稿|存草稿/.test(text);
-    if (bilibiliEditorSurface) {
-      return { reusable: true, reason: "bilibili_editor_surface" };
+    const bilibiliSurface = deriveBilibiliUploadSurfaceState(text, normalizedLines, mediaPath);
+    const expectedTitle = String(options?.expectedTitle || "").replace(/\s+/g, " ").trim();
+    const allowDraftTitleMismatchReuse = Boolean(options?.allowDraftTitleMismatchReuse);
+    const titleSignals = [expectedTitle]
+      .filter(Boolean)
+      .map((value) => value.toLowerCase());
+    const titleMatched = !titleSignals.length
+      || titleSignals.some((value) => text.toLowerCase().includes(value));
+    const hasAttachedDraftTitle = /上传完成|更换视频|标题|简介|创作声明|标签|定时发布|立即投稿|存草稿/.test(text);
+    if (
+      (bilibiliSurface.ready_surface || bilibiliSurface.media_attached)
+      && hasAttachedDraftTitle
+      && !titleMatched
+      && !allowDraftTitleMismatchReuse
+    ) {
+      return { reusable: false, media_attached: true, reason: "bilibili_existing_draft_title_mismatch" };
+    }
+    if ((bilibiliSurface.ready_surface || bilibiliSurface.media_attached) && matchedMediaPath) {
+      return { reusable: true, media_attached: true, reason: "media_path_match" };
+    }
+    if (bilibiliSurface.ready_surface) {
+      return { reusable: true, media_attached: true, reason: "bilibili_editor_surface" };
+    }
+    if (bilibiliSurface.media_attached) {
+      return { reusable: true, media_attached: true, reason: "bilibili_upload_attached_pending" };
     }
   }
-  if (signals.upload_prompt_only) {
-    return { reusable: false, reason: "upload_prompt_only" };
+  if (platform === "kuaishou") {
+    const kuaishouEditorSurface = /作品描述|发布设置|查看权限|发布时间|封面设置/.test(text);
+    const kuaishouAttachedUpload = /上传中|重新上传|检测中\d+%|预览效果/.test(text);
+    if (kuaishouEditorSurface && kuaishouAttachedUpload) {
+      return { reusable: true, media_attached: true, reason: "kuaishou_editor_surface" };
+    }
   }
-  return { reusable: false, reason: "media_presence_unconfirmed" };
+  if (matchedMediaPath) {
+    return { reusable: true, media_attached: true, reason: "media_path_match" };
+  }
+  if (signals.upload_prompt_only) {
+    return { reusable: false, media_attached: false, reason: "upload_prompt_only" };
+  }
+  return { reusable: false, media_attached: false, reason: "media_presence_unconfirmed" };
 }
 
 export function deriveCompositeCurrentPageMediaPendingDisposition(platform, mediaPath = "", mediaState = {}) {
@@ -3543,7 +6374,17 @@ export function deriveCompositeCurrentPageMediaPendingDisposition(platform, medi
       media_reuse_reason: reason,
     };
   }
-  if (reason === "upload_prompt_only" || reason === "media_presence_unconfirmed") {
+  if (reason === "bilibili_existing_draft_title_mismatch") {
+    return {
+      pending: false,
+      status: "needs_human",
+      code: `${normalizedPlatform}_prepublish_only_wrong_draft_reused`,
+      wait_for_upload_ready: false,
+      remaining: ["draft_state"],
+      media_reuse_reason: reason,
+    };
+  }
+  if (reason === "upload_prompt_only" || reason === "media_presence_unconfirmed" || reason === "bilibili_upload_attached_pending") {
     return {
       pending: true,
       status: "processing",
@@ -3603,10 +6444,35 @@ export function shouldAttemptMediaBootstrap({
   return Boolean(forceMediaUpload || (!prepublishOnlyCurrentPage && !pageHasMedia));
 }
 
+export function shouldContinueStopBeforeUploadBootstrap({
+  stopBeforeFinalPublish = false,
+  currentPageOnlyMode = false,
+  prepareOnlyCurrentPage = false,
+  requiresLocalMedia = false,
+  hasMediaPath = false,
+} = {}) {
+  if (!stopBeforeFinalPublish || !requiresLocalMedia || !hasMediaPath) return false;
+  if (prepareOnlyCurrentPage) return true;
+  return !currentPageOnlyMode;
+}
+
 export function deriveCurrentPageDraftResumeDisposition(platform, text = "") {
   const normalizedPlatform = String(platform || "").trim().toLowerCase().replace(/_/g, "-");
   const haystack = String(text || "").replace(/\s+/g, " ").trim();
   if (!haystack) return { present: false, resume_label: "", discard_label: "", preferred_action: "", reason: "" };
+  if (
+    normalizedPlatform === "youtube"
+    && /你最近上传的视频|最近上传的视频|Recently uploaded videos/i.test(haystack)
+    && /添加说明|上传|发布日期|视频详细信息/i.test(haystack)
+  ) {
+    return {
+      present: true,
+      resume_label: "",
+      discard_label: "",
+      preferred_action: "dismiss",
+      reason: "youtube_recent_uploads_overlay",
+    };
+  }
   if (
     normalizedPlatform === "youtube"
     && /频道内容|channel content/i.test(haystack)
@@ -3614,11 +6480,11 @@ export function deriveCurrentPageDraftResumeDisposition(platform, text = "") {
     && /编辑草稿|edit draft/i.test(haystack)
   ) {
     return {
-      present: true,
+      present: false,
       resume_label: /编辑草稿/.test(haystack) ? "编辑草稿" : "Edit draft",
       discard_label: "",
-      preferred_action: "resume",
-      reason: "uploaded_draft_row",
+      preferred_action: "",
+      reason: "uploaded_draft_row_ignored",
     };
   }
   const resumePromptPattern = /还有上次未发布的视频|上次未发布的(?:视频|作品)|未发布的视频[,，。 ]*是否继续编辑|继续编辑放弃|本地浏览器存在\s*\d+\s*个未提交的(?:视频|作品)|未提交的(?:视频|作品)/;
@@ -3626,7 +6492,7 @@ export function deriveCurrentPageDraftResumeDisposition(platform, text = "") {
   if (!resumePromptPattern.test(haystack) || !hasResumeAction) {
     return { present: false, resume_label: "", discard_label: "", preferred_action: "", reason: "" };
   }
-  if (!["bilibili", "kuaishou"].includes(normalizedPlatform)) {
+  if (!["bilibili", "kuaishou", "douyin"].includes(normalizedPlatform)) {
     return { present: false, resume_label: "", discard_label: "", preferred_action: "", reason: "" };
   }
   const discardLabel = /不用了/.test(haystack)
@@ -3645,6 +6511,63 @@ export function deriveCurrentPageDraftResumeDisposition(platform, text = "") {
     preferred_action: "discard",
     reason: "existing_unpublished_draft_prompt",
   };
+}
+
+function isDouyinUploadEntryRoute(url = "") {
+  const value = String(url || "").trim().toLowerCase();
+  return value.includes("/creator-micro/content/upload");
+}
+
+function isDouyinUploadEntrySurface(route = {}, options = {}) {
+  const url = String(route?.url || "").trim();
+  const text = String(route?.text || "").replace(/\s+/g, " ").trim();
+  const title = String(route?.title || "").trim();
+  if (!isDouyinUploadEntryRoute(url)) return false;
+  if (/点击上传|上传视频|拖拽视频到此|直接将视频文件拖入此区域|视频大小和格式|继续编辑|放弃|不用了|未发布的视频/.test(text)) {
+    return true;
+  }
+  if (options?.allow_loading_shell) {
+    const shellLike = !text || /加载中，请稍候|加载中|请稍候|Loading/i.test(text);
+    return shellLike && /抖音创作者中心/i.test(title || url);
+  }
+  return false;
+}
+
+export function shouldBypassDraftResumeAtAuthoritativeUploadEntry(platform, route = {}) {
+  const normalizedPlatform = String(platform || "").trim().toLowerCase().replace(/_/g, "-");
+  const url = String(route?.url || "").trim();
+  const lines = [
+    ...(Array.isArray(route?.lines) ? route.lines : []),
+    ...(Array.isArray(route?.headings) ? route.headings : []),
+  ].map((line) => String(line || "").trim()).filter(Boolean);
+  const text = String(route?.text || lines.join(" ")).replace(/\s+/g, " ").trim();
+  if (!url || !text) return false;
+  if (normalizedPlatform === "douyin") {
+    const hasResumePrompt = /继续编辑|放弃|不用了|未发布的视频|上次未发布/.test(text);
+    return isDouyinUploadEntrySurface({ url, text }) && !hasResumePrompt;
+  }
+  if (normalizedPlatform === "bilibili") {
+    const surface = deriveBilibiliUploadSurfaceState(text, lines, "");
+    return /member\.bilibili\.com\/platform\/upload\/video/i.test(url)
+      && Boolean(surface.upload_prompt_surface)
+      && !Boolean(surface.field_shell);
+  }
+  if (normalizedPlatform === "kuaishou") {
+    return /cp\.kuaishou\.com\/article\/publish\/video/i.test(url)
+      && /点击上传|上传视频|拖拽|发布视频/.test(text)
+      && !/作品描述|发布时间|封面设置|发布设置/.test(text);
+  }
+  if (normalizedPlatform === "xiaohongshu") {
+    return /creator\.xiaohongshu\.com\/publish/i.test(url)
+      && /上传视频|拖拽|添加视频|选择视频/.test(text)
+      && !/标题|正文|话题|封面|定时发布/.test(text);
+  }
+  if (normalizedPlatform === "toutiao") {
+    return /mp\.toutiao\.com\/profile_v4\/xigua\/upload-video/i.test(url)
+      && /点击上传|上传视频|拖拽|发布视频/.test(text)
+      && !/标题|简介|封面|定时发布/.test(text);
+  }
+  return false;
 }
 
 async function clickDraftResumePromptAction(client, disposition) {
@@ -3779,13 +6702,13 @@ export function deriveYouTubeStudioReceiptBinding(integrity = {}, finalPublish =
 }
 
 export function deriveYouTubeDraftResumeFallbackTarget(resume = {}, currentUrl = "") {
-  const current = String(currentUrl || "").trim();
+  const currentUrlValue = String(currentUrl || "").trim();
   const uploadResumeUrl = String(resume?.upload_resume_url || "").trim();
   const editUrl = String(resume?.edit_url || "").trim();
-  if (uploadResumeUrl && uploadResumeUrl !== current) {
+  if (uploadResumeUrl && uploadResumeUrl !== currentUrlValue) {
     return { target: uploadResumeUrl, reason: "upload_resume_url" };
   }
-  if (editUrl && editUrl !== current) {
+  if (editUrl && editUrl !== currentUrlValue) {
     return { target: editUrl, reason: "edit_url" };
   }
   return { target: "", reason: "" };
@@ -3805,11 +6728,11 @@ export function shouldAttemptYouTubeDraftResumeFallbackRoute(readiness = {}, res
 }
 
 export function buildYouTubeUploadResumeUrl(currentHref = "", videoId = "") {
-  const current = String(currentHref || "").trim();
+  const currentHrefValue = String(currentHref || "").trim();
   const normalizedVideoId = String(videoId || "").trim();
   if (!normalizedVideoId) return "";
   try {
-    const parsed = new URL(current);
+    const parsed = new URL(currentHrefValue);
     if (!/studio\.youtube\.com$/i.test(parsed.hostname)) return "";
     if (!/\/channel\/[^/?#]+\/(?:videos\/)?upload\b/i.test(parsed.pathname)) return "";
     parsed.searchParams.set("d", "ud");
@@ -3955,8 +6878,13 @@ async function clickYouTubeDraftResumeEntry(client, titleHints = []) {
 
 async function stabilizeCurrentPageMediaStateForPrepublish(client, platform, snapshot, mediaPath, options = {}) {
   const requiresLocalMedia = options?.requiresLocalMedia !== false;
+  const allowDraftTitleMismatchReuse = Boolean(options?.allowDraftTitleMismatchReuse);
   let currentSnapshot = snapshot;
-  let mediaState = canReuseCurrentPageMediaForPrepublish(platform, currentSnapshot, mediaPath, { requiresLocalMedia });
+  let mediaState = canReuseCurrentPageMediaForPrepublish(platform, currentSnapshot, mediaPath, {
+    requiresLocalMedia,
+    expectedTitle: String(options?.expectedTitle || "").trim(),
+    allowDraftTitleMismatchReuse,
+  });
   if (!requiresLocalMedia || !String(mediaPath || "").trim()) {
     return { snapshot: currentSnapshot, mediaState, waited_ms: 0 };
   }
@@ -3968,7 +6896,11 @@ async function stabilizeCurrentPageMediaStateForPrepublish(client, platform, sna
   while (Date.now() - startedAt < waitMs) {
     await sleep(1200);
     currentSnapshot = await pageSnapshot(client).catch(() => currentSnapshot);
-    mediaState = canReuseCurrentPageMediaForPrepublish(platform, currentSnapshot, mediaPath, { requiresLocalMedia });
+    mediaState = canReuseCurrentPageMediaForPrepublish(platform, currentSnapshot, mediaPath, {
+      requiresLocalMedia,
+      expectedTitle: String(options?.expectedTitle || "").trim(),
+      allowDraftTitleMismatchReuse,
+    });
     if (mediaState.reusable || !["upload_prompt_only", "media_presence_unconfirmed"].includes(String(mediaState.reason || "").trim())) {
       break;
     }
@@ -3985,6 +6917,8 @@ export function deriveCompositeCurrentPageRouteDisposition(platform, snapshot = 
   const routeText = `${routeTitle} ${bodyText}`.replace(/\s+/g, " ").trim();
   const authPatterns = /请先登录|登录已过期|登录失效|未登录|session|账户已退出|need.?to.?log.?in|sign.?in|log.?in|扫码登录|验证码登录|登录\/注册|我是创作者|我是mcn机构|创作者登录/i;
   const routeErrorPatterns = /糟糕，出了点问题|something went wrong|an error occurred|出了点问题|upload unavailable|暂时无法上传/i;
+  const loadingSurface = /加载中，请稍候|加载中|请稍候|Loading/i.test(routeText)
+    && (lines.length <= 16 || bodyText.length <= 160);
   const loggedInCreatorHomeSignals =
     normalizedPlatform === "youtube"
     && /studio\.youtube\.com/i.test(routeUrl)
@@ -3998,6 +6932,30 @@ export function deriveCompositeCurrentPageRouteDisposition(platform, snapshot = 
       status: "needs_human",
       code: `${normalizedPlatform}_route_auth_required`,
       verification_reason: "auth_required",
+    };
+  }
+  const routeUrlLooksLikePublishEntry =
+    (normalizedPlatform === "douyin" && /creator\.douyin\.com\/creator-micro\/content\/post\/video/i.test(routeUrl))
+    || (normalizedPlatform === "toutiao" && /mp\.toutiao\.com\/profile_v4\/xigua\/upload-video/i.test(routeUrl))
+    || (normalizedPlatform === "xiaohongshu" && /creator\.xiaohongshu\.com\/publish(?:\/publish)?/i.test(routeUrl))
+    || (normalizedPlatform === "bilibili" && /member\.bilibili\.com\/platform\/upload\/video/i.test(routeUrl))
+    || (normalizedPlatform === "kuaishou" && /cp\.kuaishou\.com\/article\/publish\/video/i.test(routeUrl))
+    || (normalizedPlatform === "wechat-channels" && /channels\.weixin\.qq\.com\/platform\/post\/create/i.test(routeUrl))
+    || (normalizedPlatform === "youtube" && /studio\.youtube\.com\/channel\/[^/?#]+\/(?:videos\/)?upload/i.test(routeUrl));
+  if (loadingSurface && routeUrlLooksLikePublishEntry) {
+    return {
+      blocked: true,
+      status: "processing",
+      code: `${normalizedPlatform}_prepublish_only_route_not_ready`,
+      verification_reason: "publish_route_loading",
+    };
+  }
+  if (routeErrorPatterns.test(bodyText) && routeUrlLooksLikePublishEntry) {
+    return {
+      blocked: true,
+      status: "needs_human",
+      code: `${normalizedPlatform}_prepublish_only_route_not_ready`,
+      verification_reason: "publish_route_error_surface",
     };
   }
   const routeReady = isCompositePublishRouteContext(normalizedPlatform, {
@@ -4031,6 +6989,28 @@ export function deriveCompositeCurrentPageRouteDisposition(platform, snapshot = 
 
 export async function probeCreatorSession(platform, options = {}) {
   const normalizedPlatform = normalizePlatform(platform);
+  const sessionBinding = normalizeExpectedSessionBinding(
+    options.session_binding || options.sessionBinding || {
+      platform: normalizedPlatform,
+      browser_profile_id: options.profile_id || options.profileId || "",
+      allowed_profile_ids: Array.isArray(options.target_profile_ids) ? options.target_profile_ids : [],
+    },
+    normalizedPlatform,
+  );
+  const bindingValidation = validateExpectedSessionBinding(sessionBinding, { platform: normalizedPlatform });
+  if (!bindingValidation.ok) {
+    return {
+      platform: normalizedPlatform,
+      ready: false,
+      status: bindingValidation.status,
+      code: bindingValidation.code,
+      message: bindingValidation.message,
+      verification_reason: bindingValidation.verification_reason,
+      route: { url: "" },
+      session_binding: bindingValidation.expected_binding,
+      attached_profile_binding: bindingValidation.attached_profile_binding,
+    };
+  }
   const tabs = await listCdpTabs();
   const entryUrl = resolvePlatformPublishEntryUrl(normalizedPlatform, tabs, options);
   if (!entryUrl) {
@@ -4068,6 +7048,13 @@ export async function probeCreatorSession(platform, options = {}) {
         && disposition.verification_reason !== "auth_required"
       ) {
         const bootstrap = await ensureYoutubeUploadEditor(sessionClient, "").catch(() => ({ matched: false, changed: false }));
+        if (bootstrap?.reason === "control_driven_create_upload_required") {
+          const createFlow = await forceYouTubeCreateUploadFlow(sessionClient).catch(() => ({ clicked: false, actions: [], state: null }));
+          if (createFlow?.clicked) {
+            await sleep(2200);
+            continue;
+          }
+        }
         if (bootstrap?.changed) {
           await sleep(2200);
           continue;
@@ -4106,6 +7093,24 @@ export async function probeCreatorSession(platform, options = {}) {
       title: String(snapshot?.title || ""),
     };
     const visualEvidence = normalizeVisualEvidence(snapshot?.visual_evidence);
+    const routeBindingValidation = validateExpectedSessionBinding(sessionBinding, {
+      platform: normalizedPlatform,
+      route,
+    });
+    if (!routeBindingValidation.ok) {
+      return {
+        platform: normalizedPlatform,
+        ready: false,
+        status: routeBindingValidation.status,
+        code: routeBindingValidation.code,
+        message: routeBindingValidation.message,
+        verification_reason: routeBindingValidation.verification_reason,
+        route,
+        visual_evidence: visualEvidence,
+        session_binding: routeBindingValidation.expected_binding,
+        attached_profile_binding: routeBindingValidation.attached_profile_binding,
+      };
+    }
     if (disposition.verification_reason === "auth_required") {
       return {
         platform: normalizedPlatform,
@@ -4162,10 +7167,24 @@ export function shouldBootstrapStopBeforeRouteRecovery(platform, disposition = {
   const code = String(disposition?.code || "").trim();
   const verificationReason = String(disposition?.verification_reason || "").trim().toLowerCase();
   if (!disposition?.blocked) return false;
+  if (verificationReason === "publish_route_loading") return true;
   if (normalizedPlatform === "youtube" && (verificationReason === "publish_route_error_surface" || code === "youtube_prepublish_only_route_not_ready")) {
     return true;
   }
   return false;
+}
+
+async function dispatchTrustedMouseClick(client, point = null) {
+  const target = point && Number.isFinite(point.x) && Number.isFinite(point.y)
+    ? { x: Number(point.x), y: Number(point.y) }
+    : null;
+  if (!target) {
+    return { clicked: false, reason: "invalid_click_point" };
+  }
+  await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none" }).catch(() => {});
+  await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", clickCount: 1 }).catch(() => {});
+  await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", clickCount: 1 }).catch(() => {});
+  return { clicked: true, point: target };
 }
 
 export function buildStopBeforeFinalPublishRecoveryOverrides({
@@ -4261,6 +7280,285 @@ async function clickByText(client, texts) {
       }
     }
     return { clicked: false };
+  })()`;
+  return evaluateWithClient(client, expression, 10000);
+}
+
+function _semanticActionTextMatches(pattern, text) {
+  return Boolean(pattern && text && pattern.test(text));
+}
+
+export function selectPreferredSemanticActionCandidate(candidates = [], hints = [], options = {}) {
+  const normalizedHints = (Array.isArray(hints) ? hints : [])
+    .map((item) => String(item || "").trim().toLowerCase())
+    .filter(Boolean);
+  const intent = String(options?.intent || "").trim().toLowerCase();
+  const mediaBootstrapIntent = intent === "media_upload_entry";
+  const imageUploadIntent = intent === "image_upload_entry";
+  const normalized = (Array.isArray(candidates) ? candidates : []).map((candidate) => {
+    const label = String(candidate?.label || candidate?.text || "").trim().toLowerCase();
+    const role = String(candidate?.role || "").trim().toLowerCase();
+    const tag = String(candidate?.tag || "").trim().toLowerCase();
+    const className = String(candidate?.className || "").trim().toLowerCase();
+    const visible = candidate?.visible !== false;
+    const clickable = candidate?.clickable !== false;
+    const area = Number(candidate?.area || 0);
+    let score = 0;
+    if (visible) score += 20;
+    if (clickable) score += 10;
+    if (["button", "a", "label"].includes(tag)) score += 5;
+    if (/button|menuitem/.test(role)) score += 5;
+    if (area > 0 && area < 180000) score += 1;
+    for (const hint of normalizedHints) {
+      if (label === hint) score += 20;
+      else if (label.startsWith(hint)) score += 15;
+      else if (label.includes(hint)) score += 10;
+    }
+    if (/cover|封面|image|图片/.test(label) && !normalizedHints.some((hint) => /cover|封面|image|图片/.test(hint))) score -= 12;
+    if (/upload|上传|select files|选择文件|发布|next|下一步|完成|confirm|确认|保存/.test(label)) score += 6;
+    if (/cover|image/.test(className) && !normalizedHints.some((hint) => /cover|封面|image|图片/.test(hint))) score -= 4;
+    if (mediaBootstrapIntent) {
+      const uploadSemantic = /upload|上传|选择文件|选择视频|select files|select file|upload video|upload videos|from computer|从电脑中选择|点击上传|拖拽视频/;
+      const terminalSemantic = /(^|[^a-z])(发布|提交|确认|完成|保存|下一步|发表|post|publish|submit|save|next|continue)([^a-z]|$)/;
+      const managementSemantic = /管理|编辑作品|设置权限|置顶|删除|数据中心|作品管理|合集管理/;
+      const destructiveSemantic = /取消上传|取消|移除|删除|清空|关闭|cancel|remove|delete|discard/;
+      const uploadStateSemantic = /上传中|检测中|处理中|重新上传|uploading|processing|retry upload|re-upload/;
+      const hasUploadSemantic = _semanticActionTextMatches(uploadSemantic, label) || _semanticActionTextMatches(uploadSemantic, className);
+      const hasTerminalSemantic = _semanticActionTextMatches(terminalSemantic, label);
+      const hasManagementSemantic = _semanticActionTextMatches(managementSemantic, label);
+      const hasDestructiveSemantic = _semanticActionTextMatches(destructiveSemantic, label);
+      const hasUploadStateSemantic = _semanticActionTextMatches(uploadStateSemantic, label);
+      if (hasUploadSemantic) score += 30;
+      else score -= 35;
+      if (hasTerminalSemantic) score -= 80;
+      if (hasManagementSemantic) score -= 60;
+      if (hasDestructiveSemantic) score -= 120;
+      if (hasUploadStateSemantic) score -= 140;
+    }
+    if (imageUploadIntent) {
+      const imageUploadSemantic = /上传图片|上传封面|本地上传|select files|select file|upload image|upload cover|choose image|choose file|图片/;
+      const terminalSemantic = /(^|[^a-z])(发布|提交|确认|完成|保存|下一步|post|publish|submit|save|next|continue)([^a-z]|$)/;
+      const videoSemantic = /上传视频|选择视频|video/;
+      const decorativeSemantic = /预览封面|预览作品|智能推荐封面|pk封面|去优化封面/;
+      const hasImageUploadSemantic = _semanticActionTextMatches(imageUploadSemantic, label) || _semanticActionTextMatches(imageUploadSemantic, className);
+      const hasTerminalSemantic = _semanticActionTextMatches(terminalSemantic, label);
+      const hasVideoSemantic = _semanticActionTextMatches(videoSemantic, label);
+      const hasDecorativeSemantic = _semanticActionTextMatches(decorativeSemantic, label);
+      if (hasImageUploadSemantic) score += 35;
+      else score -= 30;
+      if (hasTerminalSemantic) score -= 90;
+      if (hasVideoSemantic) score -= 60;
+      if (hasDecorativeSemantic) score -= 40;
+    }
+    return { ...candidate, score, _label: label };
+  }).sort((left, right) => right.score - left.score || Number(right.clickable) - Number(left.clickable) || Number(left.area || 0) - Number(right.area || 0));
+  return { chosen: normalized[0] && normalized[0].score > 0 ? normalized[0] : null, candidates: normalized };
+}
+
+async function inspectSemanticActionCandidates(client) {
+  const expression = `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      const doc = el.ownerDocument || document;
+      const win = doc.defaultView || window;
+      const rect = el.getBoundingClientRect();
+      const style = win.getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const roots = [];
+    const visitRoot = (root) => {
+      if (!root || roots.includes(root)) return;
+      roots.push(root);
+      for (const el of [...root.querySelectorAll("*")]) {
+        if (el.shadowRoot) visitRoot(el.shadowRoot);
+        if (el.tagName === "IFRAME") {
+          try {
+            if (el.contentDocument) visitRoot(el.contentDocument);
+          } catch {}
+        }
+      }
+    };
+    visitRoot(document);
+    const queryAll = (selector) => roots.flatMap((root) => {
+      try {
+        return [...root.querySelectorAll(selector)];
+      } catch {
+        return [];
+      }
+    });
+    return queryAll("button,[role=button],[role=menuitem],a,input[type=button],input[type=submit],label,li,span,div,p,[class*=button],[class*=menu],[class*=select],[class*=dropdown],[class*=option],[class*=item],tp-yt-paper-item,ytcp-dropdown-trigger")
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const label = clean(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("placeholder"));
+        const clickable = Boolean(el.closest("[role=dialog],[role=menu],[class*=modal],[class*=popover],[class*=dropdown],[class*=select],[class*=collection],[class*=menu]")) || ["BUTTON", "A", "LABEL", "LI"].includes(el.tagName) || /button|menuitem/.test(String(el.getAttribute("role") || ""));
+        return {
+          label,
+          tag: String(el.tagName || "").toLowerCase(),
+          role: String(el.getAttribute("role") || ""),
+          className: clean(typeof el.className === "string" ? el.className : ""),
+          area: rect.width * rect.height,
+          centerX: rect.left + (rect.width / 2),
+          centerY: rect.top + (rect.height / 2),
+          rectLeft: rect.left,
+          rectTop: rect.top,
+          rectWidth: rect.width,
+          rectHeight: rect.height,
+          clickable,
+          visible: true,
+        };
+      })
+      .filter((item) => item.label && item.label.length <= 220 && item.area > 0 && item.area < 280000)
+      .slice(0, 800);
+  })()`;
+  return evaluateWithClient(client, expression, 10000);
+}
+
+async function inspectViewportScreenContext(client) {
+  const expression = `(() => ({
+    screenX: Number(window.screenX ?? window.screenLeft ?? 0),
+    screenY: Number(window.screenY ?? window.screenTop ?? 0),
+    outerWidth: Number(window.outerWidth || 0),
+    outerHeight: Number(window.outerHeight || 0),
+    innerWidth: Number(window.innerWidth || 0),
+    innerHeight: Number(window.innerHeight || 0),
+    devicePixelRatio: Number(window.devicePixelRatio || 1),
+    pageXOffset: Number(window.pageXOffset || 0),
+    pageYOffset: Number(window.pageYOffset || 0),
+    visualViewportOffsetLeft: Number(window.visualViewport?.offsetLeft || 0),
+    visualViewportOffsetTop: Number(window.visualViewport?.offsetTop || 0),
+  }))()`;
+  return evaluateWithClient(client, expression, 10000);
+}
+
+export function deriveNativeScreenClickPoint(candidate = {}, viewport = {}) {
+  const centerX = Number(candidate?.centerX);
+  const centerY = Number(candidate?.centerY);
+  if (!Number.isFinite(centerX) || !Number.isFinite(centerY)) {
+    return null;
+  }
+  const screenX = Number(viewport?.screenX || 0);
+  const screenY = Number(viewport?.screenY || 0);
+  const outerWidth = Number(viewport?.outerWidth || 0);
+  const outerHeight = Number(viewport?.outerHeight || 0);
+  const innerWidth = Number(viewport?.innerWidth || 0);
+  const innerHeight = Number(viewport?.innerHeight || 0);
+  const dpr = Number(viewport?.devicePixelRatio || 1);
+  const viewportOffsetLeft = Number(viewport?.visualViewportOffsetLeft || 0);
+  const viewportOffsetTop = Number(viewport?.visualViewportOffsetTop || 0);
+  const horizontalChrome = Math.max(0, outerWidth - innerWidth);
+  const verticalChrome = Math.max(0, outerHeight - innerHeight);
+  const clientLeft = screenX + (horizontalChrome / 2);
+  const clientTop = screenY + verticalChrome;
+  return {
+    x: Math.max(0, (clientLeft + viewportOffsetLeft + centerX) * dpr),
+    y: Math.max(0, (clientTop + viewportOffsetTop + centerY) * dpr),
+    devicePixelRatio: dpr,
+  };
+}
+
+async function clickNativeScreenPoint(point = {}) {
+  if (process.platform !== "win32") {
+    return { clicked: false, reason: "native_screen_click_windows_only" };
+  }
+  const x = Number(point?.x);
+  const y = Number(point?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return { clicked: false, reason: "native_screen_click_invalid_point" };
+  }
+  if (!fs.existsSync(NATIVE_SCREEN_CLICK_SCRIPT_PATH)) {
+    return { clicked: false, reason: "native_screen_click_script_missing" };
+  }
+  return await new Promise((resolve) => {
+    const args = [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      NATIVE_SCREEN_CLICK_SCRIPT_PATH,
+      "-X",
+      String(x),
+      "-Y",
+      String(y),
+    ];
+    const child = spawn("powershell", args, {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk) => {
+      stdout += String(chunk || "");
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += String(chunk || "");
+    });
+    child.on("error", (error) => {
+      resolve({
+        clicked: false,
+        reason: "native_screen_click_spawn_failed",
+        error: String(error?.message || error || "spawn_failed"),
+      });
+    });
+    child.on("close", (code) => {
+      const output = String(stdout || "").trim();
+      let parsed = null;
+      if (output) {
+        try {
+          parsed = JSON.parse(output);
+        } catch {}
+      }
+      if (code === 0) {
+        resolve({
+          clicked: true,
+          reason: "native_screen_click_applied",
+          output: parsed || output || null,
+        });
+        return;
+      }
+      resolve({
+        clicked: false,
+        reason: "native_screen_click_failed",
+        exit_code: code,
+        output: parsed || output || null,
+        error: String(stderr || "").trim() || null,
+      });
+    });
+  });
+}
+
+async function clickSemanticActionByHints(client, hints, options = {}) {
+  const inspected = await inspectSemanticActionCandidates(client).catch(() => []);
+  const ranked = selectPreferredSemanticActionCandidate(inspected, hints, options);
+  if (!ranked.chosen) {
+    return { clicked: false, reason: "action_not_found", candidates: (ranked.candidates || []).slice(0, 12).map((item) => item.label) };
+  }
+  const expression = `(() => {
+    const chosenLabel = ${JSON.stringify(String(ranked.chosen.label || ranked.chosen.text || ""))};
+    const chosenTag = ${JSON.stringify(String(ranked.chosen.tag || ""))};
+    const chosenClassName = ${JSON.stringify(String(ranked.chosen.className || ""))};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const all = [...document.querySelectorAll("button,[role=button],[role=menuitem],a,input[type=button],input[type=submit],label,li,span,div,p,[class*=button],[class*=menu],[class*=select],[class*=dropdown],[class*=option],[class*=item],tp-yt-paper-item,ytcp-dropdown-trigger")].filter(visible);
+    const target = all.find((el) => {
+      const label = clean(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("placeholder"));
+      const tag = String(el.tagName || "").toLowerCase();
+      const className = clean(typeof el.className === "string" ? el.className : "");
+      return label === chosenLabel && tag === chosenTag && className === chosenClassName;
+    }) || all.find((el) => clean(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("placeholder")) === chosenLabel);
+    if (!target) return { clicked: false, reason: "action_not_found_at_apply_time" };
+    target.scrollIntoView({ block: "center", inline: "center" });
+    const rect = target.getBoundingClientRect();
+    const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+    for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+      target.dispatchEvent(new MouseEvent(type, eventInit));
+    }
+    if (typeof target.click === "function") target.click();
+    return { clicked: true, label: chosenLabel, tag: chosenTag };
   })()`;
   return evaluateWithClient(client, expression, 10000);
 }
@@ -4378,7 +7676,333 @@ export function shouldPreserveYouTubeEditorRouteForBootstrap(href = "", bodyText
   const text = String(bodyText || "").replace(/\s+/g, " ").trim();
   if (!/studio\.youtube\.com\/video\/[A-Za-z0-9_-]+\/edit\b/i.test(normalizedHref)) return false;
   if (!text) return true;
-  return !/糟糕，出了点问题|something went wrong|an error occurred|upload unavailable/i.test(text);
+  if (/糟糕，出了点问题|something went wrong|an error occurred|upload unavailable/i.test(text)) return false;
+  if (isYouTubeEditorReadinessSurface(normalizedHref, text)) return true;
+  if (/编辑草稿|继续上传|上传已中断|处理中，画质最高可为高清|草稿\b|upload interrupted/i.test(text)) return false;
+  return isYouTubeEditorReadinessSurface(normalizedHref, text);
+}
+
+export function shouldReuseYouTubeEditorSurfaceForDraftReset(snapshot = {}, mediaPath = "") {
+  const href = String(snapshot?.url || snapshot?.href || "").trim();
+  if (!/studio\.youtube\.com\/video\/[A-Za-z0-9_-]+\/edit\b/i.test(href)) return false;
+  const text = [
+    ...(Array.isArray(snapshot?.lines) ? snapshot.lines : []),
+    ...(Array.isArray(snapshot?.headings) ? snapshot.headings : []),
+    ...(Array.isArray(snapshot?.overlayTexts) ? snapshot.overlayTexts : []),
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join(" ");
+  if (!isYouTubeEditorReadinessSurface(href, text)) return false;
+  const normalizedMediaPath = String(mediaPath || "").trim();
+  if (!normalizedMediaPath) return true;
+  const mediaName = path.win32.basename(normalizedMediaPath);
+  const mediaStem = mediaName ? mediaName.replace(/\.[^.]+$/, "") : "";
+  return Boolean(
+    (mediaName && text.includes(mediaName))
+    || (mediaStem && text.includes(mediaStem)),
+  );
+}
+
+export function deriveYouTubeUploadEditorBootstrapPlan(surface = {}, titleHint = "") {
+  const href = String(surface?.href || surface?.current || surface?.url || "").trim();
+  const text = String(surface?.bodyText || surface?.text || "")
+    .replace(/\s+/g, " ")
+    .trim();
+  const createControlSurface = Boolean(surface?.createControlSurface)
+    || (/youtube\.com/i.test(href) && /创建|Create/.test(text) && /上传视频|Upload videos/.test(text));
+  if (shouldPreserveYouTubeEditorRouteForBootstrap(href, text)) {
+    return {
+      matched: true,
+      current: href,
+      changed: false,
+      reason: "editor_surface_ready",
+      editorReady: true,
+    };
+  }
+
+  const channel = extractYouTubeStudioChannelId(href);
+  if (!channel) {
+    if (createControlSurface) {
+      return {
+        matched: true,
+        current: href,
+        changed: false,
+        reason: "control_driven_create_upload_required",
+        fallbackTarget: String(PLATFORM_PUBLISH_ENTRY_URLS.youtube || "").trim(),
+      };
+    }
+    return { matched: false, current: href, reason: "missing_channel_id" };
+  }
+
+  const uploadDialogSurface = Boolean(surface?.uploadDialogSurface)
+    || /上传视频|Upload videos|Select files|拖拽|选择文件|立即投稿|Create/.test(text);
+  const uploadDialogRoute = Boolean(surface?.uploadDialogRoute) || hasYoutubeUploadDialogQuery(href);
+  const uploadResumeRoute = Boolean(surface?.uploadResumeRoute) || hasYoutubeUploadResumeVideoId(href);
+  const channelContentList = Boolean(surface?.channelContentList)
+    || /频道内容|每页行数|第\s*\d+\s*-\s*\d+\s*条|添加说明|编辑草稿|草稿|发布日期/.test(text);
+  const totalFileInputs = Math.max(
+    0,
+    Number(surface?.totalFileInputCount ?? surface?.totalFileInputs ?? 0) || 0,
+  );
+  const visibleFileInputs = Math.max(
+    0,
+    Number(surface?.visibleFileInputCount ?? surface?.fileInputs ?? 0) || 0,
+  );
+  const videoCapableFileInputs = Math.max(
+    0,
+    Number(surface?.videoCapableFileInputCount ?? surface?.videoCapableFileInputs ?? 0) || 0,
+  );
+  const draftRows = Array.isArray(surface?.draftRows) ? surface.draftRows : [];
+  const selectedDraft = selectYouTubeDraftResumeCandidate(draftRows, titleHint);
+  const draftWatchHref = String(selectedDraft?.watchHref || selectedDraft?.watch_href || "").trim();
+  const draftTitleHref = String(selectedDraft?.titleHref || selectedDraft?.title_href || "").trim();
+  const draftVideoId = String(
+    selectedDraft?.videoId
+    || selectedDraft?.video_id
+    || extractYouTubeDraftVideoId(draftWatchHref, draftTitleHref || href),
+  ).trim();
+  const contentListUrl = buildYouTubeStudioContentListUrl(channel);
+  const uploadEntryUrl = buildYouTubeStudioUploadEntryUrl(channel);
+  const uploadUrls = [
+    uploadEntryUrl,
+    `https://studio.youtube.com/channel/${channel}/upload`,
+  ].filter((value, index, items) => value && items.indexOf(value) === index);
+  const uniqueTargets = (...lists) => lists
+    .flatMap((list) => Array.isArray(list) ? list : [list])
+    .map((value) => String(value || "").trim())
+    .filter((value, index, items) => value && items.indexOf(value) === index);
+  const uploadResumeTarget = buildYouTubeUploadResumeUrl(uploadEntryUrl, draftVideoId);
+  const baseState = {
+    matched: true,
+    channel,
+    current: href,
+    uploadDialogSurface,
+    uploadDialogRoute,
+    uploadResumeRoute,
+    fileInputs: visibleFileInputs,
+    totalFileInputs,
+    videoCapableFileInputs,
+    uploadUrls,
+    channelContentList,
+    draftVideoId,
+    draftWatchHref,
+    draftTitleHref,
+    selectedDraftText: String(selectedDraft?.text || "").trim(),
+  };
+  const onContentList = href.startsWith(contentListUrl);
+  const alreadyOnUpload = uploadUrls.some((item) => href.startsWith(item));
+
+  const hasUploadSurface = shouldTreatYouTubeUploadSurfaceAsStable({
+    uploadResumeRoute,
+    channelContentList,
+    uploadDialogSurface: uploadDialogRoute || uploadDialogSurface,
+    visibleFileInputCount: visibleFileInputs,
+    videoCapableFileInputCount: videoCapableFileInputs,
+  });
+  if (alreadyOnUpload && hasUploadSurface) {
+    return {
+      ...baseState,
+      changed: false,
+      reason: "upload_surface_ready",
+    };
+  }
+
+  if (createControlSurface || onContentList || alreadyOnUpload) {
+    return {
+      ...baseState,
+      changed: false,
+      target: "",
+      fallbackTarget: uploadEntryUrl,
+      targets: uniqueTargets(uploadEntryUrl, uploadUrls),
+      reason: "control_driven_create_upload_required",
+    };
+  }
+
+  return {
+    ...baseState,
+    changed: true,
+    targets: uniqueTargets(uploadEntryUrl, uploadUrls),
+    target: uploadEntryUrl,
+    fallbackTarget: uploadEntryUrl,
+    reason: "bootstrap_via_upload_entry",
+  };
+}
+
+export function hasYouTubeRecentUploadsOverlay(overlayTexts = [], lines = []) {
+  const haystack = [...(Array.isArray(overlayTexts) ? overlayTexts : []), ...(Array.isArray(lines) ? lines : [])]
+    .map((value) => String(value || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join(" ");
+  if (!haystack) return false;
+  return /你最近上传的视频|最近上传的视频|Recently uploaded videos/i.test(haystack)
+    && /添加说明|上传|发布日期|编辑草稿|视频详细信息/i.test(haystack);
+}
+
+export function normalizeYouTubeVisibilityOrPublishMode(value = "", scheduledPublishAt = "") {
+  const text = String(value || "").trim();
+  const scheduled = Boolean(String(scheduledPublishAt || "").trim());
+  if (!text) return scheduled ? "schedule" : "public";
+  const lowered = text.toLowerCase();
+  if (/(schedule|scheduled)/.test(lowered) || /安排时间|预约|定时/.test(text)) return "schedule";
+  if (/unlisted/.test(lowered) || /不公开/.test(text)) return "unlisted";
+  if (/private/.test(lowered) || /私享|私密/.test(text)) return "private";
+  if (/public/.test(lowered) || /公开/.test(text)) return "public";
+  return lowered;
+}
+
+export function deriveYouTubeUploadWizardStep(href = "", bodyText = "") {
+  const normalizedHref = String(href || "").trim();
+  const text = String(bodyText || "").replace(/\s+/g, " ").trim();
+  if (isYouTubeEditorReadinessSurface(normalizedHref, text) || (/详细信息/.test(text) && /标题（必填）|说明|缩略图|播放列表|观众/.test(text))) {
+    return "details";
+  }
+  if (/视频元素/.test(text) && /添加字幕|添加片尾画面|添加卡片/.test(text)) return "video_elements";
+  if (/检查/.test(text) && /检查完毕|发现任何问题|无发现任何问题|版权|限制/.test(text)) return "checks";
+  if (/公开范围/.test(text) && /私享|不公开列出|公开|安排时间|保存或发布|发布之前/.test(text)) return "visibility";
+  if (hasYoutubeUploadDialogQuery(normalizedHref) || /上传视频|Upload videos|Select files|拖拽视频|选择文件/.test(text)) return "upload_entry";
+  return "";
+}
+
+export function findYouTubeRecentUploadsOverlayCandidate(dialogRecords = []) {
+  const records = Array.isArray(dialogRecords) ? dialogRecords : [];
+  for (const record of records) {
+    const text = String(
+      record?.text
+      || record?.label
+      || record?.ariaLabel
+      || record?.title
+      || record?.context
+      || "",
+    ).replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    if (hasYouTubeRecentUploadsOverlay([text], [])) {
+      return {
+        present: true,
+        text,
+        role: String(record?.role || "").trim(),
+        ariaModal: Boolean(record?.ariaModal),
+      };
+    }
+  }
+  return {
+    present: false,
+    text: "",
+    role: "",
+    ariaModal: false,
+  };
+}
+
+async function inspectYouTubeRecentUploadsOverlay(client) {
+  const expression = `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none";
+    };
+    const selectors = [
+      "[role=dialog]",
+      "[aria-modal=true]",
+      "ytcp-popup-container *",
+      "tp-yt-paper-dialog",
+      "[class*=dialog i]",
+      "[class*=popover i]",
+      "[class*=popup i]",
+      "[class*=modal i]",
+    ];
+    const seen = new Set();
+    const records = [];
+    for (const selector of selectors) {
+      for (const el of [...document.querySelectorAll(selector)]) {
+        if (!visible(el) || seen.has(el)) continue;
+        seen.add(el);
+        const text = clean(el.innerText || el.textContent || "");
+        if (!text || text.length < 8) continue;
+        records.push({
+          text,
+          role: clean(el.getAttribute("role") || ""),
+          ariaLabel: clean(el.getAttribute("aria-label") || ""),
+          title: clean(el.getAttribute("title") || ""),
+          ariaModal: String(el.getAttribute("aria-modal") || "").toLowerCase() === "true",
+        });
+      }
+    }
+    return { records: records.slice(0, 20) };
+  })()`;
+  const result = await evaluateWithClient(client, expression, 12000).catch(() => ({ records: [] }));
+  const bodyText = await evaluateWithClient(
+    client,
+    `(() => String(document.body ? document.body.innerText || "" : "").replace(/\\s+/g, " ").trim().slice(0, 12000))()`,
+    12000,
+  ).catch(() => "");
+  const candidate = findYouTubeRecentUploadsOverlayCandidate([
+    ...(Array.isArray(result?.records) ? result.records : []),
+    { text: bodyText, role: "document", ariaModal: false },
+  ]);
+  return {
+    ...candidate,
+    records: Array.isArray(result?.records) ? result.records.slice(0, 6) : [],
+    body_text: String(bodyText || "").slice(0, 2000),
+  };
+}
+
+async function dismissYouTubeRecentUploadsOverlay(client) {
+  let clickResult = await evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && !el.disabled;
+    };
+    const clickable = [...document.querySelectorAll("button,[role=button],a,[aria-label],[title]")].filter(visible);
+    const candidates = clickable.map((el) => {
+      const rect = el.getBoundingClientRect();
+      const label = clean(el.innerText || el.getAttribute("aria-label") || el.getAttribute("title") || "");
+      const contextParts = [];
+      let cursor = el;
+      for (let index = 0; index < 6 && cursor; index += 1) {
+        contextParts.push(clean(cursor.innerText || cursor.textContent || ""));
+        cursor = cursor.parentElement;
+      }
+      const context = clean(contextParts.join(" "));
+      return { el, label, context, area: rect.width * rect.height };
+    }).filter((item) => /^(关闭|close|关闭此窗口)$/i.test(item.label) && /你最近上传的视频|最近上传的视频|Recently uploaded videos/i.test(item.context))
+      .sort((left, right) => left.area - right.area);
+    if (!candidates.length) return { clicked: false };
+    const target = candidates[0];
+    target.el.scrollIntoView({ block: "center", inline: "center" });
+    target.el.click();
+    return { clicked: true, clicked_label: target.label, method: "overlay_close_button" };
+  })()`, 12000).catch(() => ({ clicked: false }));
+  if (!clickResult.clicked) {
+    clickResult = await evaluateWithClient(client, `(() => {
+      const centerX = Math.max(8, Math.floor(window.innerWidth * 0.12));
+      const centerY = Math.max(8, Math.floor(window.innerHeight * 0.18));
+      const target = document.elementFromPoint(centerX, centerY);
+      if (!target) return { clicked: false };
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: centerX, clientY: centerY };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        target.dispatchEvent(new MouseEvent(type, eventInit));
+      }
+      return { clicked: true, clicked_label: "backdrop", method: "overlay_backdrop_click" };
+    })()`, 12000).catch(() => ({ clicked: false }));
+  }
+  if (!clickResult.clicked) {
+    await client.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }).catch(() => {});
+    await client.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }).catch(() => {});
+    clickResult = { clicked: true, clicked_label: "Escape", method: "escape" };
+  }
+  await sleep(1200);
+  const after = await inspectYouTubeRecentUploadsOverlay(client).catch(() => ({ present: false, text: "" }));
+  return {
+    ...clickResult,
+    dismissed: !after.present,
+    prompt_still_open: after.present,
+    remaining_dialog_text: after.text,
+  };
 }
 
 async function clickFinalPublishByText(client, texts) {
@@ -4900,64 +8524,545 @@ async function dismissCompositeFinalizeInterruptions(client, platform) {
   return [];
 }
 
-async function setFirstVideoFileInput(client, mediaPath) {
+async function describeFileInputCandidate(client, nodeId) {
+  const description = await client.send("DOM.describeNode", { nodeId });
+  const attrs = description.node?.attributes || [];
+  const attrMap = {};
+  for (let index = 0; index < attrs.length; index += 2) attrMap[attrs[index]] = attrs[index + 1] || "";
+  const backendNodeId = Number(description.node?.backendNodeId || 0) || null;
+  let runtime = {};
+  try {
+    const resolved = await client.send("DOM.resolveNode", { nodeId });
+    const objectId = resolved.object?.objectId;
+    if (objectId) {
+      const evaluated = await client.send("Runtime.callFunctionOn", {
+        objectId,
+        awaitPromise: true,
+        returnByValue: true,
+        functionDeclaration: `function() {
+          const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+          const visible = (() => {
+            const rect = this.getBoundingClientRect();
+            const style = getComputedStyle(this);
+            return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+          })();
+          const labels = [];
+          if (this.labels && this.labels.length) {
+            for (const label of this.labels) labels.push(label.innerText || label.textContent || "");
+          }
+          let parent = this.parentElement;
+          for (let depth = 0; depth < 3 && parent; depth += 1, parent = parent.parentElement) {
+            labels.push(parent.innerText || parent.textContent || "");
+          }
+          const root =
+            this.closest(".bcc-upload-wrapper,.upload-queue,.task-list-content-item,.task,.cover-content,.cover-main,[role=dialog],.bcc-dialog,.bcc-dialog__wrap,[class*=dialog],[class*=modal],[class*=popup]") ||
+            this.parentElement ||
+            this;
+          return {
+            visible,
+            disabled: Boolean(this.disabled),
+            filesLength: Number(this.files?.length || 0),
+            value: clean(this.value || ""),
+            labelText: clean(labels.filter(Boolean).join(" ")).slice(0, 500),
+            className: clean(this.className || ""),
+            id: clean(this.id || ""),
+            name: clean(this.name || ""),
+            parentClassName: clean(this.parentElement?.className || ""),
+            rootClassName: clean(root?.className || ""),
+            rootText: clean(root?.innerText || root?.textContent || "").slice(0, 500),
+          };
+        }`,
+      });
+      runtime = evaluated?.result?.value && typeof evaluated.result.value === "object" ? evaluated.result.value : {};
+    }
+  } catch {}
+  return { nodeId, backendNodeId, attrMap, runtime };
+}
+
+async function refreshFileInputCandidate(client, candidate) {
+  const backendNodeId = Number(candidate?.backendNodeId || 0) || null;
+  if (backendNodeId) {
+    try {
+      const pushed = await client.send("DOM.pushNodesByBackendIdsToFrontend", { backendNodeIds: [backendNodeId] });
+      const refreshedNodeId = Array.isArray(pushed?.nodeIds) ? pushed.nodeIds[0] : null;
+      if (refreshedNodeId) {
+        return await describeFileInputCandidate(client, refreshedNodeId);
+      }
+    } catch {}
+  }
+  if (candidate?.nodeId) {
+    return await describeFileInputCandidate(client, candidate.nodeId);
+  }
+  return candidate;
+}
+
+export function selectPreferredVideoFileInput(candidates = []) {
+  const normalized = (Array.isArray(candidates) ? candidates : []).map((candidate) => {
+    const attrMap = candidate?.attrMap && typeof candidate.attrMap === "object" ? candidate.attrMap : {};
+    const runtime = candidate?.runtime && typeof candidate.runtime === "object" ? candidate.runtime : {};
+    const accept = String(attrMap.accept || "").toLowerCase();
+    const labelText = String(runtime.labelText || "").toLowerCase();
+    const className = String(runtime.className || "").toLowerCase();
+    const parentClassName = String(runtime.parentClassName || "").toLowerCase();
+    const rootClassName = String(runtime.rootClassName || "").toLowerCase();
+    const rootText = String(runtime.rootText || "").toLowerCase();
+    const name = String(runtime.name || "").toLowerCase();
+    const id = String(runtime.id || "").toLowerCase();
+    const imageOnlyAccept = Boolean(accept) && /image/i.test(accept) && !/video|mp4|\*/i.test(accept);
+    let score = 0;
+    if (runtime.visible) score += 30;
+    if (!runtime.disabled) score += 10;
+    if (/video|mp4|\*/i.test(accept)) score += 25;
+    if (/image/i.test(accept)) score -= 20;
+    if (/upload|上传|视频|select files|choose file|发布/.test(labelText)) score += 18;
+    if (/cover|封面|image|图片/.test(labelText)) score -= 20;
+    if (/upload|上传|video|media/.test(className)) score += 6;
+    if (/cover|image/.test(className)) score -= 8;
+    if (/upload|video|media/.test(name) || /upload|video|media/.test(id)) score += 4;
+    if (/点击上传|上传视频|拖拽到此区域|选择视频|选择文件|从电脑中选择/.test(rootText)) score += 28;
+    if (/封面|上传封面|图片/.test(rootText)) score -= 18;
+    if (/bcc-upload-wrapper|upload-wrapper/.test(parentClassName) || /bcc-upload-wrapper|upload-wrapper/.test(rootClassName)) score += 22;
+    if (/添加视频|添加分p|等待上传/.test(rootText)) score -= 28;
+    if ((name === "buploader" || id === "buploader") && !rootText) score -= 26;
+    return { ...candidate, attrMap, runtime, score, imageOnlyAccept };
+  }).filter((candidate) => !candidate.imageOnlyAccept);
+  normalized.sort((left, right) => right.score - left.score || Number(Boolean(right.runtime?.visible)) - Number(Boolean(left.runtime?.visible)));
+  return normalized;
+}
+
+export function findLoadedVideoFileInputForMedia(candidates = [], mediaPath = "") {
+  const expectedName = mediaPath ? path.win32.basename(String(mediaPath)).toLowerCase() : "";
+  for (const candidate of Array.isArray(candidates) ? candidates : []) {
+    const runtime = candidate?.runtime && typeof candidate.runtime === "object" ? candidate.runtime : {};
+    const filesLength = Number(runtime.filesLength || 0);
+    if (filesLength <= 0) continue;
+    const value = String(runtime.value || "").trim().toLowerCase();
+    if (!expectedName) return candidate;
+    if (value.includes(expectedName)) return candidate;
+  }
+  return null;
+}
+
+function platformUsesSingleVideoUploadPath(platform = "") {
+  return String(platform || "").trim().toLowerCase() === "bilibili";
+}
+
+export function filterSinglePathVideoInputs(platform = "", candidates = []) {
+  const normalizedPlatform = String(platform || "").trim().toLowerCase();
+  const list = Array.isArray(candidates) ? candidates : [];
+  if (normalizedPlatform !== "bilibili") return list;
+  const canonical = list.filter((candidate) => {
+    const runtime = candidate?.runtime && typeof candidate.runtime === "object" ? candidate.runtime : {};
+    const rootClassName = String(runtime.rootClassName || "").toLowerCase();
+    const parentClassName = String(runtime.parentClassName || "").toLowerCase();
+    const rootText = String(runtime.rootText || "");
+    const name = String(runtime.name || candidate?.attrMap?.name || "").toLowerCase();
+    if (name === "buploader") return false;
+    if (/bcc-upload-wrapper/.test(rootClassName) || /bcc-upload-wrapper/.test(parentClassName)) return true;
+    if (/点击上传或将视频拖拽到此区域\s*上传视频/.test(rootText)) return true;
+    return false;
+  });
+  return canonical.length ? canonical : list;
+}
+
+export function collapseBilibiliQueueCardEntries(cards = []) {
+  const list = Array.isArray(cards) ? cards : [];
+  const normalizeTitle = (value) => String(value || "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[\s，,。.!！?？:：·•、（）()\-_\/]+/g, "")
+    .toLowerCase();
+  const scoreCard = (card) => {
+    const text = String(card?.text || "");
+    let score = 0;
+    if (card?.selected) score += 80;
+    if (card?.uploaded) score += 60;
+    if (card?.waiting) score += 40;
+    if (/当前速度|剩余时间|更换视频|已上传/.test(text)) score += 220;
+    if (/添加视频|添加分P/.test(text)) score -= 180;
+    score += Math.min(text.length, 120);
+    return score;
+  };
+  const grouped = new Map();
+  for (const card of list) {
+    const titleKey = normalizeTitle(card?.title || card?.text || "");
+    const key = titleKey || `__card_${grouped.size}`;
+    const existing = grouped.get(key);
+    if (!existing || scoreCard(card) > scoreCard(existing)) grouped.set(key, card);
+  }
+  return [...grouped.values()];
+}
+
+async function setFirstVideoFileInput(client, mediaPath, options = {}) {
+  const normalizedPlatform = String(options.platform || "").trim().toLowerCase();
+  const singlePathMode = platformUsesSingleVideoUploadPath(normalizedPlatform);
   if (!mediaPath) return { uploaded: false, reason: "missing_media_path" };
+  if (singlePathMode) {
+    const initialSnapshot = await pageSnapshot(client).catch(() => null);
+    const initialUploadSurface = deriveBilibiliUploadSurfaceState(
+      String((initialSnapshot?.lines || []).join(" ") || initialSnapshot?.bodyText || ""),
+      initialSnapshot?.lines || [],
+      mediaPath,
+    );
+    if (initialUploadSurface.media_attached || initialUploadSurface.concrete_progress || initialUploadSurface.upload_card_markers) {
+      return {
+        uploaded: true,
+        skipped: true,
+        reason: "bilibili_upload_surface_already_attached_precheck",
+        upload_surface: initialUploadSurface,
+      };
+    }
+  }
   const documentResult = await client.send("DOM.getDocument", { depth: -1, pierce: true });
   const rootNodeId = documentResult.root.nodeId;
   const queryResult = await client.send("DOM.querySelectorAll", { nodeId: rootNodeId, selector: "input[type=file]" });
   const nodeIds = queryResult.nodeIds || [];
   const described = [];
-  for (const nodeId of nodeIds) {
-    const description = await client.send("DOM.describeNode", { nodeId });
-    const attrs = description.node?.attributes || [];
-    const attrMap = {};
-    for (let index = 0; index < attrs.length; index += 2) attrMap[attrs[index]] = attrs[index + 1] || "";
-    described.push({ nodeId, attrMap });
+  for (const nodeId of nodeIds) described.push(await describeFileInputCandidate(client, nodeId));
+  const allCandidates = filterSinglePathVideoInputs(normalizedPlatform, selectPreferredVideoFileInput(described));
+  const loadedExistingInput = findLoadedVideoFileInputForMedia(allCandidates, mediaPath);
+  if (loadedExistingInput) {
+    return {
+      uploaded: true,
+      skipped: true,
+      reason: "file_input_already_loaded",
+      input: loadedExistingInput.attrMap,
+      runtime: loadedExistingInput.runtime,
+      fileInputCount: described.length,
+    };
   }
-  const preferred =
-    described.find((item) => /video|mp4|\*/i.test(item.attrMap.accept || "")) ||
-    described.find((item) => !/image/i.test(item.attrMap.accept || "") && !String(item.attrMap.accept || "").trim()) ||
-    null;
-  if (!preferred) {
+  const candidates = singlePathMode ? allCandidates.slice(0, 1) : allCandidates;
+  if (!candidates.length) {
     return {
       uploaded: false,
       reason: described.length ? "no_video_file_input" : "no_file_input",
-      fileInputs: described.map((item) => item.attrMap),
+      fileInputs: described.map((item) => ({ ...item.attrMap, ...item.runtime })),
     };
   }
-  await client.send("DOM.setFileInputFiles", { nodeId: preferred.nodeId, files: [mediaPath] });
-  await dispatchFileInputEvents(client, preferred.nodeId);
-  return { uploaded: true, input: preferred.attrMap, fileInputCount: described.length };
+  const failures = [];
+  for (const preferred of candidates) {
+    try {
+      const setPayload = preferred.backendNodeId
+        ? { backendNodeId: preferred.backendNodeId, files: [mediaPath] }
+        : { nodeId: preferred.nodeId, files: [mediaPath] };
+      await client.send("DOM.setFileInputFiles", setPayload);
+      await sleep(normalizedPlatform === "bilibili" ? 900 : 600);
+      const verified = await refreshFileInputCandidate(client, preferred);
+      const filesLength = Number(verified.runtime?.filesLength || 0);
+      if (filesLength > 0) {
+        return {
+          uploaded: true,
+          input: preferred.attrMap,
+          runtime: verified.runtime,
+          fileInputCount: described.length,
+        };
+      }
+      if (normalizedPlatform === "bilibili") {
+        await dispatchFileInputEvents(client, preferred.nodeId, {
+          eventTypes: ["change"],
+        });
+        await sleep(700);
+        const verifiedAfterDispatch = await refreshFileInputCandidate(client, preferred);
+        const filesLengthAfterDispatch = Number(verifiedAfterDispatch.runtime?.filesLength || 0);
+        if (filesLengthAfterDispatch > 0) {
+          return {
+            uploaded: true,
+            input: preferred.attrMap,
+            runtime: verifiedAfterDispatch.runtime,
+            fileInputCount: described.length,
+          };
+        }
+      }
+      const refreshedDocument = await client.send("DOM.getDocument", { depth: -1, pierce: true });
+      const refreshedQuery = await client.send("DOM.querySelectorAll", { nodeId: refreshedDocument.root.nodeId, selector: "input[type=file]" });
+      const refreshedDescribed = [];
+      for (const refreshedNodeId of (refreshedQuery.nodeIds || [])) {
+        refreshedDescribed.push(await describeFileInputCandidate(client, refreshedNodeId));
+      }
+      const refreshedAllCandidates = filterSinglePathVideoInputs(normalizedPlatform, selectPreferredVideoFileInput(refreshedDescribed));
+      const loadedAfterAttempt = findLoadedVideoFileInputForMedia(refreshedAllCandidates, mediaPath);
+      if (loadedAfterAttempt) {
+        return {
+          uploaded: true,
+          skipped: true,
+          reason: "file_input_already_loaded_after_attempt",
+          input: loadedAfterAttempt.attrMap,
+          runtime: loadedAfterAttempt.runtime,
+          fileInputCount: refreshedDescribed.length,
+        };
+      }
+      if (singlePathMode) {
+        const refreshedSnapshot = await pageSnapshot(client).catch(() => null);
+        const uploadSurface = deriveBilibiliUploadSurfaceState(
+          String((refreshedSnapshot?.lines || []).join(" ") || refreshedSnapshot?.bodyText || ""),
+          refreshedSnapshot?.lines || [],
+          mediaPath,
+        );
+        if (uploadSurface.media_attached || uploadSurface.concrete_progress || uploadSurface.upload_card_markers) {
+          return {
+            uploaded: true,
+            skipped: true,
+            reason: "bilibili_single_upload_surface_attached_after_attempt",
+            input: preferred.attrMap,
+            runtime: verified.runtime,
+            upload_surface: uploadSurface,
+            fileInputCount: refreshedDescribed.length,
+          };
+        }
+      }
+      failures.push({
+        nodeId: preferred.nodeId,
+        backendNodeId: preferred.backendNodeId,
+        reason: "upload_not_applied",
+        input: preferred.attrMap,
+        runtime: verified.runtime,
+      });
+    } catch (error) {
+      failures.push({
+        nodeId: preferred.nodeId,
+        backendNodeId: preferred.backendNodeId,
+        reason: String(error?.message || error || "upload_failed"),
+        input: preferred.attrMap,
+        runtime: preferred.runtime,
+      });
+    }
+  }
+  return {
+    uploaded: false,
+    reason: "upload_not_applied",
+    fileInputs: allCandidates.map((item) => ({ ...item.attrMap, ...item.runtime, score: item.score })),
+    attempts: failures,
+  };
 }
 
-async function dispatchFileInputEvents(client, nodeId) {
+async function dispatchFileInputEvents(client, nodeId, options = {}) {
   try {
     const resolved = await client.send("DOM.resolveNode", { nodeId });
     const objectId = resolved.object?.objectId;
     if (!objectId) return { dispatched: false, reason: "missing_object_id" };
+    const requestedEventTypes = Array.isArray(options?.eventTypes)
+      ? options.eventTypes.map((value) => String(value || "").trim()).filter(Boolean)
+      : [];
+    const eventTypes = requestedEventTypes.length ? requestedEventTypes : ["input", "change"];
     await client.send("Runtime.callFunctionOn", {
       objectId,
       awaitPromise: true,
-      functionDeclaration: `function() {
-        this.dispatchEvent(new Event("input", { bubbles: true }));
-        this.dispatchEvent(new Event("change", { bubbles: true }));
+      functionDeclaration: `function(eventTypes) {
+        const normalized = Array.isArray(eventTypes)
+          ? eventTypes.map((value) => String(value || "").trim()).filter(Boolean)
+          : [];
+        for (const type of normalized) {
+          this.dispatchEvent(new Event(type, { bubbles: true }));
+        }
         return true;
       }`,
+      arguments: [{ value: eventTypes }],
     });
-    return { dispatched: true };
+    return { dispatched: true, event_types: eventTypes };
   } catch (error) {
     return { dispatched: false, reason: error.message };
   }
 }
 
-async function setTextFieldByHints(client, hints, value, { multiline = false, requireHintMatch = false } = {}) {
-  const textValue = String(value || "").trim();
-  if (!textValue) return { filled: false, reason: "empty_value" };
+export function shouldAttemptNativeFileChooserFallback(upload = {}) {
+  if (!upload || upload.uploaded) return false;
+  const reason = String(upload.reason || "").trim().toLowerCase();
+  return reason === "upload_not_applied" || reason === "no_video_file_input" || reason === "no_file_input";
+}
+
+async function completeNativeFileChooserSelection(mediaPath, { timeoutMs = 15000 } = {}) {
+  if (process.platform !== "win32") {
+    return { handled: false, reason: "native_file_chooser_windows_only" };
+  }
+  if (!mediaPath) {
+    return { handled: false, reason: "missing_media_path" };
+  }
+  if (!fs.existsSync(mediaPath)) {
+    return { handled: false, reason: "missing_media_file" };
+  }
+  if (!fs.existsSync(NATIVE_FILE_CHOOSER_SCRIPT_PATH)) {
+    return { handled: false, reason: "native_file_chooser_script_missing" };
+  }
+  return await new Promise((resolve) => {
+    const args = [
+      "-NoProfile",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-File",
+      NATIVE_FILE_CHOOSER_SCRIPT_PATH,
+      "-FilePath",
+      mediaPath,
+      "-TimeoutSeconds",
+      String(Math.max(3, Math.ceil(timeoutMs / 1000))),
+    ];
+    const child = spawn("powershell", args, {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.on("data", (chunk) => {
+      stdout += String(chunk || "");
+    });
+    child.stderr?.on("data", (chunk) => {
+      stderr += String(chunk || "");
+    });
+    child.on("error", (error) => {
+      resolve({
+        handled: false,
+        reason: "native_file_chooser_spawn_failed",
+        error: String(error?.message || error || "spawn_failed"),
+      });
+    });
+    child.on("close", (code) => {
+      const output = String(stdout || "").trim();
+      let parsed = null;
+      if (output) {
+        try {
+          parsed = JSON.parse(output);
+        } catch {}
+      }
+      if (code === 0) {
+        resolve({
+          handled: true,
+          reason: "native_file_chooser_submitted",
+          output: parsed || output || null,
+        });
+        return;
+      }
+      resolve({
+        handled: false,
+        reason: "native_file_chooser_failed",
+        exit_code: code,
+        output: parsed || output || null,
+        error: String(stderr || "").trim() || null,
+      });
+    });
+  });
+}
+
+async function tryNativeMediaUploadFallback(client, {
+  mediaPath,
+  uploadEntryHints = [],
+  platform = "",
+} = {}) {
+  if (!mediaPath) return { uploaded: false, reason: "missing_media_path" };
+  await client.send("Page.bringToFront").catch(() => {});
+  await sleep(400);
+  const inspected = await inspectSemanticActionCandidates(client).catch(() => []);
+  const ranked = selectPreferredSemanticActionCandidate(inspected, uploadEntryHints, { intent: "media_upload_entry" });
+  const entryCandidate = ranked?.chosen || null;
+  const viewport = await inspectViewportScreenContext(client).catch(() => null);
+  const nativePoint = deriveNativeScreenClickPoint(entryCandidate, viewport || {});
+  let entryAction = { clicked: false, reason: "native_screen_click_not_attempted" };
+  if (nativePoint) {
+    entryAction = await clickNativeScreenPoint(nativePoint);
+  }
+  if (!entryAction?.clicked) {
+    entryAction = await clickSemanticActionByHints(client, uploadEntryHints, { intent: "media_upload_entry" }).catch(() => ({ clicked: false }));
+  }
+  await sleep(700);
+  const chooser = await completeNativeFileChooserSelection(mediaPath, { timeoutMs: 15000 });
+  if (!entryAction?.clicked || !chooser.handled) {
+    return {
+      uploaded: false,
+      reason: chooser.reason || "native_file_chooser_not_applied",
+      entryAction,
+      chooser,
+      nativePoint,
+      entryCandidate,
+    };
+  }
+  await sleep(1200);
+  const snapshot = await pageSnapshot(client).catch(() => null);
+  const uploadInProgress = shouldTreatMediaUploadAsInProgress(platform, {
+    uploaded: false,
+    reason: "native_file_chooser_submitted",
+  }, snapshot, mediaPath);
+  return {
+    uploaded: uploadInProgress,
+    reason: uploadInProgress ? "native_file_chooser_upload_in_progress" : "native_file_chooser_not_applied",
+    entryAction,
+    chooser,
+    nativePoint,
+    entryCandidate,
+    snapshot,
+  };
+}
+
+async function tryYouTubeSelectFilesNativeUpload(client, mediaPath) {
+  const actions = [];
+  let entryAction = await clickByText(client, ["选择文件", "Select files"]);
+  actions.push({ kind: "youtube_select_files_entry", ...entryAction });
+  if (!entryAction.clicked) {
+    entryAction = await clickLooseText(client, ["选择文件", "Select files"]);
+    actions.push({ kind: "youtube_select_files_entry_loose", ...entryAction });
+  }
+  if (!entryAction.clicked) {
+    return {
+      uploaded: false,
+      reason: "youtube_select_files_not_clicked",
+      actions,
+    };
+  }
+  await sleep(700);
+  const chooser = await completeNativeFileChooserSelection(mediaPath, { timeoutMs: 15000 });
+  actions.push({ kind: "youtube_select_files_native_dialog", ...chooser });
+  if (!chooser.handled) {
+    return {
+      uploaded: false,
+      reason: chooser.reason || "native_file_chooser_not_applied",
+      actions,
+    };
+  }
+  await sleep(1200);
+  const snapshot = await pageSnapshot(client).catch(() => null);
+  const uploadInProgress = shouldTreatMediaUploadAsInProgress("youtube", {
+    uploaded: false,
+    reason: "native_file_chooser_submitted",
+  }, snapshot, mediaPath);
+  return {
+    uploaded: uploadInProgress,
+    reason: uploadInProgress ? "youtube_select_files_native_upload_in_progress" : "youtube_select_files_native_upload_not_applied",
+    actions,
+    chooser,
+    snapshot,
+  };
+}
+
+export function selectPreferredSemanticTextField(candidates = [], hints = [], { multiline = false, requireHintMatch = false } = {}) {
+  const normalizedHints = (Array.isArray(hints) ? hints : [])
+    .map((item) => String(item || "").trim().toLowerCase())
+    .filter(Boolean);
+  const normalized = (Array.isArray(candidates) ? candidates : []).map((candidate) => {
+    const label = String(candidate?.label || "").trim().toLowerCase();
+    const current = String(candidate?.current || "").trim().toLowerCase();
+    const tag = String(candidate?.tag || "").trim().toLowerCase();
+    const visible = candidate?.visible !== false;
+    let score = 0;
+    if (visible) score += 20;
+    if (multiline && tag === "textarea") score += 4;
+    if (!multiline && tag === "input") score += 4;
+    if (!current) score += 2;
+    for (const hint of normalizedHints) {
+      if (label.includes(hint)) score += 12;
+      if (current.includes(hint)) score += 2;
+    }
+    return { ...candidate, score, _label: label, _current: current, _tag: tag };
+  }).sort((left, right) => right.score - left.score);
+  const chosen = normalized[0] || null;
+  const hasHintMatch = chosen
+    ? normalizedHints.some((hint) => chosen._label.includes(hint) || chosen._current.includes(hint))
+    : false;
+  if (!chosen || chosen.score <= 0 || (requireHintMatch && !hasHintMatch)) {
+    return { chosen: null, candidates: normalized };
+  }
+  return { chosen, candidates: normalized };
+}
+
+async function inspectSemanticTextFields(client, { multiline = false } = {}) {
   const expression = `(() => {
-    const hints = ${JSON.stringify(hints)};
-    const value = ${JSON.stringify(textValue)};
     const multiline = ${JSON.stringify(Boolean(multiline))};
-    const requireHintMatch = ${JSON.stringify(Boolean(requireHintMatch))};
     const clean = (raw) => String(raw || "").replace(/\\s+/g, " ").trim();
     const visible = (el) => {
       const doc = el.ownerDocument || document;
@@ -4999,37 +9104,99 @@ async function setTextFieldByHints(client, hints, value, { multiline = false, re
         }
       }
       let parent = el.parentElement;
-      for (let index = 0; index < 3 && parent; index += 1, parent = parent.parentElement) {
-        labels.push(parent.innerText || "");
+      for (let index = 0; index < 4 && parent; index += 1, parent = parent.parentElement) {
+        labels.push(parent.innerText || parent.textContent || "");
       }
       return clean([el.getAttribute("aria-label"), el.getAttribute("placeholder"), el.getAttribute("title"), ...labels].filter(Boolean).join(" "));
     };
     const selector = multiline
       ? "textarea,[contenteditable=true],[role=textbox]"
       : "input:not([type]),input[type=text],textarea,[contenteditable=true],[role=textbox]";
-    const candidates = queryAll(selector).filter(visible).map((el) => ({
-      el,
+    return queryAll(selector).map((el) => ({
+      visible: visible(el),
       label: labelFor(el),
       current: clean(el.value || el.innerText || el.textContent),
-    }));
-    const score = (item) => {
-      let value = 0;
-      for (const hint of hints) {
-        if (!hint) continue;
-        if (item.label.includes(hint)) value += 10;
-        if (item.current.includes(hint)) value += 2;
-      }
-      if (multiline && item.el.tagName === "TEXTAREA") value += 2;
-      if (!multiline && item.el.tagName === "INPUT") value += 2;
-      if (!item.current) value += 1;
-      return value;
+      tag: String(el.tagName || "").toLowerCase(),
+    })).slice(0, 200);
+  })()`;
+  return evaluateWithClient(client, expression, 10000);
+}
+
+async function setTextFieldByHints(client, hints, value, { multiline = false, requireHintMatch = false } = {}) {
+  const textValue = String(value || "").trim();
+  if (!textValue) return { filled: false, reason: "empty_value" };
+  const inspected = await inspectSemanticTextFields(client, { multiline }).catch(() => []);
+  const ranked = selectPreferredSemanticTextField(inspected, hints, { multiline, requireHintMatch });
+  if (!ranked.chosen) {
+    return {
+      filled: false,
+      reason: "field_not_found",
+      candidates: (ranked.candidates || []).slice(0, 10).map((item) => item.label),
     };
-    const hasHintMatch = (item) => hints.some((hint) => hint && (item.label.includes(hint) || item.current.includes(hint)));
-    const chosen = candidates.sort((left, right) => score(right) - score(left))[0];
-    if (!chosen || score(chosen) <= 0 || (requireHintMatch && !hasHintMatch(chosen))) {
-      return { filled: false, reason: "field_not_found", candidates: candidates.slice(0, 10).map((item) => item.label) };
-    }
-    const el = chosen.el;
+  }
+  const expression = `(() => {
+    const value = ${JSON.stringify(textValue)};
+    const chosenLabel = ${JSON.stringify(String(ranked.chosen.label || ""))};
+    const chosenCurrent = ${JSON.stringify(String(ranked.chosen.current || ""))};
+    const chosenTag = ${JSON.stringify(String(ranked.chosen.tag || ""))};
+    const multiline = ${JSON.stringify(Boolean(multiline))};
+    const clean = (raw) => String(raw || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      const doc = el.ownerDocument || document;
+      const win = doc.defaultView || window;
+      const rect = el.getBoundingClientRect();
+      const style = win.getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.visibility !== "hidden" && style.display !== "none" && !el.disabled && !el.readOnly && el.getAttribute("readonly") === null && el.getAttribute("aria-disabled") !== "true";
+    };
+    const roots = [];
+    const visitRoot = (root) => {
+      if (!root || roots.includes(root)) return;
+      roots.push(root);
+      for (const el of [...root.querySelectorAll("*")]) {
+        if (el.shadowRoot) visitRoot(el.shadowRoot);
+        if (el.tagName === "IFRAME") {
+          try {
+            if (el.contentDocument) visitRoot(el.contentDocument);
+          } catch {}
+        }
+      }
+    };
+    visitRoot(document);
+    const queryAll = (selector) => roots.flatMap((root) => {
+      try {
+        return [...root.querySelectorAll(selector)];
+      } catch {
+        return [];
+      }
+    });
+    const labelFor = (el) => {
+      const id = el.getAttribute("id");
+      const labelledBy = el.getAttribute("aria-labelledby");
+      const labels = [];
+      if (id) labels.push(...queryAll(\`label[for="\${CSS.escape(id)}"]\`).map((label) => label.innerText));
+      if (labelledBy) {
+        for (const part of labelledBy.split(/\\s+/)) {
+          const node = document.getElementById(part);
+          if (node) labels.push(node.innerText || node.textContent || "");
+        }
+      }
+      let parent = el.parentElement;
+      for (let index = 0; index < 4 && parent; index += 1, parent = parent.parentElement) {
+        labels.push(parent.innerText || parent.textContent || "");
+      }
+      return clean([el.getAttribute("aria-label"), el.getAttribute("placeholder"), el.getAttribute("title"), ...labels].filter(Boolean).join(" "));
+    };
+    const selector = multiline
+      ? "textarea,[contenteditable=true],[role=textbox]"
+      : "input:not([type]),input[type=text],textarea,[contenteditable=true],[role=textbox]";
+    const candidates = queryAll(selector).filter(visible);
+    const el = candidates.find((candidate) => {
+      const label = labelFor(candidate);
+      const current = clean(candidate.value || candidate.innerText || candidate.textContent);
+      const tag = String(candidate.tagName || "").toLowerCase();
+      return label === chosenLabel && current === chosenCurrent && tag === chosenTag;
+    }) || candidates[0];
+    if (!el) return { filled: false, reason: "field_not_found_at_apply_time" };
     el.scrollIntoView({ block: "center", inline: "center" });
     el.focus();
     if (el.isContentEditable || el.getAttribute("contenteditable") === "true") {
@@ -5043,7 +9210,7 @@ async function setTextFieldByHints(client, hints, value, { multiline = false, re
     for (const type of ["input", "change", "blur"]) {
       el.dispatchEvent(new Event(type, { bubbles: true }));
     }
-    return { filled: true, label: chosen.label, tag: el.tagName.toLowerCase() };
+    return { filled: true, label: labelFor(el), tag: el.tagName.toLowerCase() };
   })()`;
   return evaluateWithClient(client, expression, 10000);
 }
@@ -5459,12 +9626,65 @@ function parseChinaLocalSchedule(value) {
   const text = String(value || "").trim();
   if (!text) return { timestamp: 0, display: "" };
   const normalized = text.replace(" ", "T");
+  const hasExplicitSeconds = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})?$/i.test(normalized);
   const withSeconds = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(normalized) ? `${normalized}:00` : normalized;
   const zoned = /(?:Z|[+-]\d{2}:\d{2})$/i.test(withSeconds) ? withSeconds : `${withSeconds}+08:00`;
   const date = new Date(zoned);
-  if (Number.isNaN(date.getTime())) return { timestamp: 0, display: text.replace("T", " ").slice(0, 16) };
-  const display = normalized.replace("T", " ").slice(0, 16);
-  return { timestamp: Math.floor(date.getTime() / 1000), display };
+  const displayWithSeconds = withSeconds.replace("T", " ").slice(0, 19);
+  const display = displayWithSeconds.slice(0, 16);
+  const dateText = displayWithSeconds.slice(0, 10);
+  const timeWithSeconds = displayWithSeconds.slice(11, 19);
+  const time = timeWithSeconds.slice(0, 5);
+  const second = timeWithSeconds.slice(6, 8) || "00";
+  if (Number.isNaN(date.getTime())) {
+    return { timestamp: 0, display, displayWithSeconds, date: dateText, time, timeWithSeconds, second, hasExplicitSeconds };
+  }
+  return {
+    timestamp: Math.floor(date.getTime() / 1000),
+    display,
+    displayWithSeconds,
+    date: dateText,
+    time,
+    timeWithSeconds,
+    second,
+    hasExplicitSeconds,
+  };
+}
+
+export function matchesKuaishouScheduleEvidence(text, expected = {}) {
+  const haystack = String(text || "").replace(/\s+/g, " ").trim();
+  const display = String(expected.display || "").trim();
+  const displayWithSeconds = String(expected.displayWithSeconds || "").trim();
+  if (!display && !displayWithSeconds) return false;
+  const date = String(expected.date || display.slice(0, 10) || displayWithSeconds.slice(0, 10)).trim();
+  const time = String(expected.time || display.slice(11, 16) || displayWithSeconds.slice(11, 16)).trim();
+  const second = String(expected.second || displayWithSeconds.slice(17, 19) || "00").trim().padStart(2, "0");
+  const timeWithSeconds = String(expected.timeWithSeconds || (time ? `${time}:${second}` : "")).trim();
+  const requireExactSeconds = Boolean(expected.requireExactSeconds || expected.hasExplicitSeconds);
+  const scheduleShort = date ? date.slice(5) : "";
+  const month = String(Number(date.slice(5, 7) || "0"));
+  const day = String(Number(date.slice(8, 10) || "0"));
+  const dateLabels = [
+    date,
+    scheduleShort,
+    month && day ? `${month}月${day}日` : "",
+    date ? `${date.slice(5, 7)}月${date.slice(8, 10)}日` : "",
+  ].filter(Boolean);
+  const containsPair = (dateValue, timeValue) => Boolean(dateValue && timeValue && haystack.includes(dateValue) && haystack.includes(timeValue));
+
+  if (requireExactSeconds) {
+    return (
+      (displayWithSeconds && haystack.includes(displayWithSeconds))
+      || dateLabels.some((label) => containsPair(label, timeWithSeconds))
+    );
+  }
+
+  return (
+    (display && haystack.includes(display))
+    || (displayWithSeconds && haystack.includes(displayWithSeconds))
+    || dateLabels.some((label) => containsPair(label, time))
+    || dateLabels.some((label) => containsPair(label, timeWithSeconds))
+  );
 }
 
 function formatChinaLocalTimestamp(timestampMs) {
@@ -5530,8 +9750,633 @@ function expectedCollectionName(content) {
   return String(content.collection?.name || content.collection_name || content.playlist_name || content.playlist?.name || "").trim();
 }
 
+function coerceExpectedTopicNames(value) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(
+    value
+      .map((item) => String(item || "").trim().replace(/^#+/, ""))
+      .filter(Boolean),
+  )).slice(0, 20);
+}
+
+export function expectedNativeTopics(content = {}) {
+  const directTopics = coerceExpectedTopicNames(content?.native_topics);
+  if (directTopics.length) return directTopics;
+  const overrides = content?.platform_specific_overrides && typeof content.platform_specific_overrides === "object"
+    ? content.platform_specific_overrides
+    : {};
+  const overrideTopics = coerceExpectedTopicNames(overrides.native_topics);
+  if (overrideTopics.length) return overrideTopics;
+  const topicSelectionPlan = overrides.topic_selection_plan && typeof overrides.topic_selection_plan === "object"
+    ? overrides.topic_selection_plan
+    : {};
+  return coerceExpectedTopicNames(topicSelectionPlan.requested_topics);
+}
+
+export function selectDouyinTopicSuggestionCandidate(candidates = [], expectedTopic = "") {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const expected = clean(expectedTopic).replace(/^#/, "");
+  if (!expected) return null;
+  const textDisallowedPattern = /搜索话题|输入话题|作品描述|官方活动|关联热点|输入热点词|预览|发布设置|发布时间|合集|封面|作者声明/;
+  const contextDisallowedPattern = /作品描述|官方活动|关联热点|输入热点词|预览|发布设置|发布时间|合集|封面|作者声明/;
+  const ranked = candidates
+    .map((candidate) => {
+      const text = clean(candidate?.text || candidate?.label || "");
+      const normalizedText = text.replace(/^#/, "");
+      const context = clean(candidate?.context || "");
+      const className = clean(candidate?.className || candidate?.class_name || "");
+      const area = Number(candidate?.area || 0);
+      let score = 0;
+      if (!text || !normalizedText) return null;
+      if (normalizedText === expected) score += 520;
+      else if (text === `#${expected}`) score += 500;
+      else if (normalizedText.includes(expected)) score += 180;
+      else return null;
+      if (candidate?.inLayer) score += 180;
+      if (candidate?.isButtonLike) score += 90;
+      if (candidate?.isSearchResult) score += 70;
+      if (text.length <= Math.max(expected.length + 8, 18)) score += 100;
+      else if (text.length <= 40) score += 40;
+      else score -= 220;
+      if (context && context.length <= 160) score += 40;
+      if (area > 0 && area <= 120000) score += 30;
+      if (area > 180000) score -= 120;
+      if (/热度|话题|搜索|推荐|添加/.test(context)) score += 30;
+      if (/option|item|chip|tag|topic|recommend|suggest/i.test(className)) score += 40;
+      if (textDisallowedPattern.test(text)) score -= 420;
+      if (contextDisallowedPattern.test(context)) score -= 260;
+      return {
+        ...candidate,
+        text,
+        context,
+        className,
+        area,
+        score,
+      };
+    })
+    .filter((item) => item && item.score > 0)
+    .sort((left, right) => right.score - left.score || left.area - right.area || left.text.length - right.text.length);
+  return ranked[0] || null;
+}
+
+export function selectDouyinTopicSearchFieldCandidate(candidates = []) {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const positivePattern = /搜索话题|话题搜索|输入话题|添加话题|#添加话题|#话题|@好友/;
+  const disallowedPattern = /官方活动|关联热点|输入热点词|合集|封面|作者声明|发布时间|公开|好友可见|仅自己可见|保存权限|允许|不允许|定时发布|立即发布|发布设置/;
+  const normalized = (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => {
+      const tag = clean(candidate?.tag || candidate?.field_tag || "").toLowerCase();
+      const fieldType = clean(candidate?.type || candidate?.field_type || "").toLowerCase();
+      const role = clean(candidate?.role || "").toLowerCase();
+      const label = clean(candidate?.label || "");
+      const current = clean(candidate?.current || candidate?.value || "");
+      const rootArea = Number(candidate?.root_area || 0);
+      const hasPositiveSemantic = positivePattern.test(label) || positivePattern.test(current);
+      const editable = Boolean(
+        candidate?.isContentEditable
+        || tag === "input"
+        || tag === "textarea"
+        || role === "textbox"
+        || role === "combobox"
+      );
+      let score = 0;
+      if (!editable) return null;
+      if (!hasPositiveSemantic) return null;
+      if (tag === "input") score += 240;
+      else if (tag === "textarea") score += 200;
+      else score += 120;
+      if (role === "textbox" || role === "combobox") score += 80;
+      if (/搜索话题|话题搜索|输入话题/.test(label)) score += 220;
+      else if (/添加话题/.test(label)) score += 120;
+      else if (/推荐/.test(label)) score -= 40;
+      if (!current) score += 70;
+      if (rootArea > 0 && rootArea <= 120000) score += 50;
+      else if (rootArea > 260000) score -= 60;
+      if (disallowedPattern.test(label)) score -= 720;
+      if (disallowedPattern.test(current)) score -= 720;
+      if (/作品描述/.test(label) && !positivePattern.test(label)) score -= 720;
+      return {
+        ...candidate,
+        tag,
+        role,
+        label,
+        current,
+        root_area: rootArea,
+        score,
+      };
+    })
+    .filter((item) => item && item.score > 0)
+    .sort((left, right) => right.score - left.score || left.root_area - right.root_area || left.label.length - right.label.length);
+  return normalized[0] || null;
+}
+
+export function buildXiaohongshuTopicSearchQuery(topic = "") {
+  const normalized = String(topic || "").replace(/\s+/g, " ").trim().replace(/^#/, "");
+  return normalized ? "#" + normalized : "";
+}
+
+export function extractXiaohongshuInsertedTopicLabels(entries = [], expectedTopics = []) {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const normalize = (value) => clean(value)
+    .replace(/^\[话题\]/, "")
+    .replace(/^#/, "")
+    .replace(/#$/, "")
+    .replace(/\s+\d[\d.]*[万亿]?(?:人)?浏览.*$/u, "")
+    .replace(/\s+浏览.*$/u, "")
+    .trim();
+  const expected = new Set(
+    (Array.isArray(expectedTopics) ? expectedTopics : [expectedTopics])
+      .map((item) => normalize(item))
+      .filter(Boolean),
+  );
+  const labels = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const text = clean(entry?.text || entry?.label || "");
+    const context = clean(entry?.context || "");
+    const source = clean(entry?.source || "");
+    if (!text) continue;
+    const chipLike = source === "chip" || /已选话题|topic/.test(context);
+    if (!chipLike) continue;
+    const matches = Array.from(text.matchAll(/#([^\s#@，。！？、；：,.!?/]{1,24})/gu));
+    if (matches.length) {
+      for (const match of matches) {
+        const normalized = normalize(match[1]);
+        if (!normalized) continue;
+        const recommendedOnly = /活动话题|添加话题|推荐|热词|浏览|活动详情|更多/.test(context) && !expected.has(normalized);
+        if (recommendedOnly) continue;
+        labels.push(normalized);
+      }
+      continue;
+    }
+    const normalized = normalize(text);
+    if (!normalized) continue;
+    const recommendedOnly = /活动话题|添加话题|推荐|热词|浏览|活动详情|更多/.test(context) && !expected.has(normalized);
+    if (recommendedOnly) continue;
+    labels.push(normalized);
+  }
+  return Array.from(new Set(labels));
+}
+
+export function extractXiaohongshuTopicVerificationLabels(entries = [], expectedTopics = []) {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const normalize = (value) => clean(value)
+    .replace(/^\[话题\]/, "")
+    .replace(/^#/, "")
+    .replace(/#$/, "")
+    .replace(/\s+\d[\d.]*[万亿]?(?:人)?浏览.*$/u, "")
+    .replace(/\s+浏览.*$/u, "")
+    .trim();
+  const expected = new Set(
+    (Array.isArray(expectedTopics) ? expectedTopics : [expectedTopics])
+      .map((item) => normalize(item))
+      .filter(Boolean),
+  );
+  const labels = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const text = clean(entry?.text || entry?.label || "");
+    const context = clean(entry?.context || "");
+    const source = clean(entry?.source || "");
+    if (!text) continue;
+    const matches = Array.from(text.matchAll(/#([^\s#@，。！？、；：,.!?/]{1,24})/gu));
+    for (const match of matches) {
+      const normalized = normalize(match[1]);
+      if (!normalized) continue;
+      const recommendedOnly = /活动话题|添加话题|推荐|热词|浏览|活动详情|更多/.test(context)
+        && source !== "body"
+        && !expected.has(normalized);
+      if (recommendedOnly) continue;
+      labels.push(normalized);
+    }
+  }
+  return Array.from(new Set(labels));
+}
+
+export function selectXiaohongshuTopicSearchFieldCandidate(candidates = []) {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const normalized = (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => {
+      const tag = clean(candidate?.tag || candidate?.field_tag || "").toLowerCase();
+      const fieldType = clean(candidate?.type || candidate?.field_type || "").toLowerCase();
+      const role = clean(candidate?.role || "").toLowerCase();
+      const label = clean(candidate?.label || "");
+      const current = clean(candidate?.current || candidate?.value || "");
+      const rootArea = Number(candidate?.root_area || 0);
+      const hasTopicSemantic = /搜索话题|输入话题|搜索更多话题|添加话题|话题/.test(label) || role === "searchbox" || role === "combobox";
+      const editable = Boolean(
+        candidate?.isContentEditable
+        || (tag === "input" && (!fieldType || ["text", "search", "tel", "url", "email", "number"].includes(fieldType)))
+        || tag === "textarea"
+        || role === "textbox"
+        || role === "combobox"
+        || role === "searchbox"
+      );
+      let score = 0;
+      if (!editable) return null;
+      if (tag === "input" && fieldType === "file") return null;
+      if (tag === "input") score += 260;
+      else if (tag === "textarea") score += 180;
+      else score += 120;
+      if (role === "searchbox" || role === "combobox") score += 110;
+      else if (role === "textbox") score += 70;
+      if (/搜索话题|输入话题|搜索更多话题/.test(label)) score += 260;
+      else if (/添加话题|话题/.test(label)) score += 140;
+      else if (!hasTopicSemantic && tag === "input") score -= 520;
+      if (/正文|描述|笔记|标题|合集|封面|声明|预览|发布|内容设置/.test(label)) score -= 420;
+      if (/推荐|热词|浏览/.test(label)) score -= 120;
+      if (!current) score += 90;
+      else if (current === "#") score += 60;
+      else if (current.length > 24) score -= 90;
+      if (rootArea > 0 && rootArea <= 120000) score += 50;
+      else if (rootArea > 260000) score -= 70;
+      return {
+        ...candidate,
+        tag,
+        type: fieldType,
+        role,
+        label,
+        current,
+        root_area: rootArea,
+        score,
+      };
+    })
+    .filter((item) => item && item.score > 0)
+    .sort((left, right) => right.score - left.score || left.root_area - right.root_area || left.label.length - right.label.length);
+  return normalized[0] || null;
+}
+
+export function selectXiaohongshuOriginalDeclarationControlCandidate(candidates = []) {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const normalized = (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => {
+      const text = clean(candidate?.text || candidate?.label || "");
+      const className = clean(candidate?.className || candidate?.class_name || "");
+      const role = clean(candidate?.role || "").toLowerCase();
+      const tag = clean(candidate?.tag || "").toLowerCase();
+      const disabled = candidate?.disabled === true;
+      let score = 0;
+      if (!text && !className) return null;
+      if (/PK封面|设置封面|智能推荐封面|主封面|封面预览/.test(text)) return null;
+      if (/pk-cover|cover-plugin|cover-preview|cover-setting/i.test(className)) return null;
+      if (/原创声明/.test(text)) score += 400;
+      if (/custom-switch-wrapper|custom-switch-card|original-wrapper/.test(className)) score += 220;
+      if (/custom-switch-switch|d-switch-simulator|d-switch/.test(className)) score += 160;
+      if (role === "switch") score += 180;
+      if (tag === "input" && /checkbox/.test(clean(candidate?.type || "").toLowerCase())) score += 60;
+      if (disabled) score -= 120;
+      return {
+        ...candidate,
+        text,
+        className,
+        role,
+        tag,
+        disabled,
+        score,
+      };
+    })
+    .filter((item) => item && item.score > 0)
+    .sort((left, right) => right.score - left.score || Number(left.disabled) - Number(right.disabled));
+  return normalized[0] || null;
+}
+
+export function selectDouyinRichTextBodyCandidate(candidates = []) {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  return (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => {
+      const tag = clean(candidate?.tag || "").toLowerCase();
+      const text = clean(candidate?.text || "");
+      const className = clean(candidate?.className || candidate?.class_name || "");
+      const area = Number(candidate?.area || 0);
+      const editable = Boolean(candidate?.isContentEditable || tag === "textarea" || candidate?.role === "textbox");
+      if (!editable) return null;
+      let score = 0;
+      if (/zone-container|editor-kit-container|editor-comp-publish|notranslate/.test(className)) score += 420;
+      if (/publish-mention-wrapper/.test(className)) score -= 520;
+      if (/官方活动|设置封面|添加合集|发布时间|发布设置|预览视频/.test(text)) score -= 420;
+      if (/作品描述|#添加话题|@好友|\d+\s*\/\s*1000/.test(text)) score += 90;
+      if (area > 0 && area <= 180000) score += 40;
+      else if (area > 260000) score -= 60;
+      if (tag === "div") score += 40;
+      if (text.length <= 400) score += 20;
+      return {
+        ...candidate,
+        tag,
+        text,
+        className,
+        area,
+        score,
+      };
+    })
+    .filter((item) => item && item.score > 0)
+    .sort((left, right) => right.score - left.score || left.area - right.area || left.text.length - right.text.length)[0] || null;
+}
+
+export function resolveDouyinRichTextTargets(candidates = [], expected = {}) {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const pickBodyCandidate = (bodyCandidates = []) => (Array.isArray(bodyCandidates) ? bodyCandidates : [])
+    .map((candidate) => {
+      const tag = clean(candidate?.tag || "").toLowerCase();
+      const text = clean(candidate?.text || "");
+      const className = clean(candidate?.className || candidate?.class_name || "");
+      const area = Number(candidate?.area || 0);
+      const editable = Boolean(candidate?.isContentEditable || tag === "textarea" || candidate?.role === "textbox");
+      if (!editable) return null;
+      let score = 0;
+      if (/zone-container|editor-kit-container|editor-comp-publish|notranslate/.test(className)) score += 420;
+      if (/publish-mention-wrapper/.test(className)) score -= 520;
+      if (/官方活动|设置封面|添加合集|发布时间|发布设置|预览视频/.test(text)) score -= 420;
+      if (/作品描述|#添加话题|@好友|\d+\s*\/\s*1000/.test(text)) score += 90;
+      if (area > 0 && area <= 180000) score += 40;
+      else if (area > 260000) score -= 60;
+      if (tag === "div") score += 40;
+      if (text.length <= 400) score += 20;
+      return {
+        ...candidate,
+        tag,
+        text,
+        className,
+        area,
+        score,
+      };
+    })
+    .filter((item) => item && item.score > 0)
+    .sort((left, right) => right.score - left.score || left.area - right.area || left.text.length - right.text.length)[0] || null;
+  const normalized = (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => {
+      const tag = clean(candidate?.tag || "").toLowerCase();
+      const text = clean(candidate?.text || "");
+      const className = clean(candidate?.className || candidate?.class_name || "");
+      const role = clean(candidate?.role || "").toLowerCase();
+      const area = Number(candidate?.area || 0);
+      const isContentEditable = Boolean(candidate?.isContentEditable || tag === "textarea" || role === "textbox");
+      return {
+        ...candidate,
+        tag,
+        text,
+        className,
+        role,
+        area,
+        isContentEditable,
+      };
+    })
+    .filter((candidate) => candidate.area > 1000);
+  const titleTarget = normalized.find((candidate) => (
+    candidate.tag === "input"
+    && /标题|title|作品标题|填写作品标题/.test(candidate.text)
+  )) || null;
+  const bodySeed = String(expected?.body || expected?.title || "").trim();
+  const bodyCandidates = normalized.filter((candidate) => {
+    if (!candidate.isContentEditable) return false;
+    if (titleTarget?.el && candidate.el === titleTarget.el) return false;
+    if (candidate.tag === "input") return false;
+    if (/官方活动|设置封面|添加合集|发布时间|发布设置|预览视频|添加音乐|重新上传/.test(candidate.text)) return false;
+    if (bodySeed && candidate.text && candidate.text.includes(bodySeed)) return true;
+    return /作品描述|#添加话题|@好友|\d+\s*\/\s*1000/.test(candidate.text) || candidate.tag === "textarea" || candidate.role === "textbox";
+  });
+  const bodyTarget = pickBodyCandidate(bodyCandidates);
+  return { titleTarget, bodyTarget };
+}
+
+export function extractDouyinTopicVerificationLabels(entries = [], expectedTopics = []) {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const normalize = (value) => clean(value).replace(/^#/, "");
+  const helperTopicPattern = /^(?:添加话题|话题|搜索话题|输入话题|@好友)$/;
+  const expected = new Set(
+    (Array.isArray(expectedTopics) ? expectedTopics : [expectedTopics])
+      .map((item) => normalize(item))
+      .filter(Boolean),
+  );
+  const textDisallowedPattern = /^#?添加话题$|搜索话题|输入话题|官方活动|关联热点|输入地理位置|输入热点词|预览|合集|封面|作者声明|发布时间/;
+  const contextDisallowedPattern = /官方活动|关联热点|输入地理位置|输入热点词|预览|合集|封面|作者声明|发布时间|热度|万|亿/;
+  const labels = [];
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const text = clean(entry?.text || entry?.label || "");
+    const context = clean(entry?.context || "");
+    const source = clean(entry?.source || "");
+    const matches = Array.from(text.matchAll(/#([^\s#@，。！？、；：,.!?/]{1,24})/gu));
+    for (const match of matches) {
+      const normalized = normalize(match[1]);
+      if (!normalized) continue;
+      if (helperTopicPattern.test(normalized)) continue;
+      const recommendedOnly = source !== "body"
+        && /官方活动|关联热点|输入地理位置|输入热点词|热度|推荐|更多|浏览|万|亿|话题广场|热点|活动/.test(context)
+        && !expected.has(normalized);
+      if (recommendedOnly) continue;
+      labels.push(normalized);
+    }
+    if (matches.length) continue;
+    if (!/^#/.test(text)) continue;
+    if (!/^#[^\s#@/]{1,24}$/u.test(text)) continue;
+    if (text.length > 32) continue;
+    if (textDisallowedPattern.test(text) || contextDisallowedPattern.test(context)) continue;
+    const normalized = normalize(text);
+    if (!normalized) continue;
+    if (helperTopicPattern.test(normalized)) continue;
+    labels.push(normalized);
+  }
+  return Array.from(new Set(labels));
+}
+
+function compositeTitleDisplayUnits(text = "") {
+  let total = 0;
+  for (const char of String(text || "")) {
+    total += (char.codePointAt(0) || 0) < 128 ? 0.5 : 1;
+  }
+  return Math.ceil(total);
+}
+
+function truncateCompositeTitleToDisplayUnits(text = "", maxChars = 0) {
+  const limit = Number(maxChars);
+  if (!Number.isFinite(limit) || limit <= 0) return "";
+  const sanitized = String(text || "").replace(/\s+/g, " ").trim().replace(/[，。；：!！?？]+$/g, "");
+  if (!sanitized || compositeTitleDisplayUnits(sanitized) <= limit) return sanitized;
+  let total = 0;
+  const chars = [];
+  for (const char of sanitized) {
+    const nextTotal = total + ((char.codePointAt(0) || 0) < 128 ? 0.5 : 1);
+    if (Math.ceil(nextTotal) > limit) break;
+    chars.push(char);
+    total = nextTotal;
+  }
+  return chars.join("").replace(/[，。；：!！?？]+$/g, "").trim();
+}
+
+export function normalizeCompositeTitleForPlatform(platform, title) {
+  const normalizedTitle = String(title || "").replace(/\s+/g, " ").trim();
+  if (!normalizedTitle) return "";
+  if (normalizePlatform(platform) === "xiaohongshu") {
+    return Array.from(normalizedTitle).slice(0, 20).join("").replace(/[，。；：!！?？]+$/g, "").trim();
+  }
+  return normalizedTitle;
+}
+
+function expectedCollectionNameForPlatform(platform, content = {}) {
+  const normalizedPlatform = normalizePlatform(platform);
+  const baseName = expectedCollectionName(content);
+  const overrides = content?.platform_specific_overrides && typeof content.platform_specific_overrides === "object"
+    ? content.platform_specific_overrides
+    : {};
+  const collectionManagement = overrides.collection_management && typeof overrides.collection_management === "object"
+    ? overrides.collection_management
+    : {};
+  const overrideName = String(
+    collectionManagement.selected_collection_name
+    || collectionManagement.target_collection_name
+    || collectionManagement.collection_name
+    || "",
+  ).trim();
+  if (normalizedPlatform === "kuaishou" || normalizedPlatform === "xiaohongshu") return overrideName || baseName;
+  return baseName || overrideName;
+}
+
 function expectedCoverPath(content) {
   return String(content.cover_path || content.copy_material?.cover_path || content.thumbnail_path || content.thumbnail?.local_path || "").trim();
+}
+
+function expectedCoverSlots(content) {
+  const normalizeSlots = (value) => {
+    if (Array.isArray(value)) return value;
+    if (value && typeof value === "object") return [value];
+    return [];
+  };
+  const rawSlots = normalizeSlots(content?.cover_slots).length
+    ? normalizeSlots(content?.cover_slots)
+    : normalizeSlots(content?.copy_material?.cover_slots);
+  return rawSlots
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      slot: String(item.slot || item.key || item.name || "").trim(),
+      label: String(item.label || "").trim(),
+      cover_path: String(item.cover_path || item.path || item.output_path || "").trim(),
+      matrix_key: String(item.matrix_key || item.group_key || "").trim(),
+      target_size: item.target_size && typeof item.target_size === "object" ? item.target_size : null,
+    }))
+    .filter((item) => item.cover_path);
+}
+
+function normalizeBilibiliCoverSlotKey(value = "") {
+  const normalized = String(value || "").replace(/\s+/g, "").toLowerCase();
+  if (!normalized) return "";
+  if (
+    normalized.includes("landscape_4_3")
+    || normalized.includes("horizontal_4_3")
+    || normalized.includes("首页推荐封面（4:3）")
+    || normalized.includes("首页推荐封面(4:3)")
+    || normalized.includes("首页推荐封面4:3")
+    || normalized.includes("4:3横版母版")
+    || normalized.includes("4:3 横版母版")
+  ) return "landscape_4_3";
+  if (
+    normalized.includes("landscape_16_9")
+    || normalized.includes("horizontal_16_9")
+    || normalized.includes("个人空间封面（16:9）")
+    || normalized.includes("个人空间封面(16:9)")
+    || normalized.includes("个人空间封面16:9")
+    || normalized.includes("16:9横版母版")
+    || normalized.includes("16:9 横版母版")
+  ) return "landscape_16_9";
+  return normalized;
+}
+
+function normalizeBilibiliExpectedCoverSlots(expectedCoverSlots = [], expectedCoverPath = "") {
+  const slots = (Array.isArray(expectedCoverSlots) ? expectedCoverSlots : [])
+    .map((item) => {
+      const coverPath = String(item?.cover_path || "").trim();
+      const slot = normalizeBilibiliCoverSlotKey(item?.slot || item?.matrix_key || item?.label || "");
+      return {
+        slot,
+        label: String(item?.label || item?.slot || item?.matrix_key || "").trim(),
+        expected_path: coverPath,
+        expected_base: coverPath.split(/[\\/]/).pop() || "",
+      };
+    })
+    .filter((item) => item.expected_path && item.slot);
+  if (slots.length) return slots;
+  const fallbackPath = String(expectedCoverPath || "").trim();
+  if (!fallbackPath) return [];
+  return [{
+    slot: "primary",
+    label: "封面",
+    expected_path: fallbackPath,
+    expected_base: fallbackPath.split(/[\\/]/).pop() || "",
+  }];
+}
+
+function normalizeCompositeCoverSlotKey(value = "") {
+  const normalized = String(value || "").replace(/\s+/g, "").toLowerCase();
+  if (!normalized) return "";
+  if (normalized.includes("portrait_9_16") || normalized.includes("vertical_9_16") || normalized.includes("竖封面9:16") || normalized.includes("竖版9:16")) return "portrait_9_16";
+  if (normalized.includes("portrait_3_4") || normalized.includes("vertical_3_4") || normalized.includes("竖封面3:4") || normalized.includes("竖版3:4")) return "portrait_3_4";
+  if (normalized.includes("landscape_16_9") || normalized.includes("horizontal_16_9") || normalized.includes("横封面16:9") || normalized.includes("横版16:9")) return "landscape_16_9";
+  if (normalized.includes("landscape_4_3") || normalized.includes("horizontal_4_3") || normalized.includes("横封面4:3") || normalized.includes("横版4:3")) return "landscape_4_3";
+  return normalized;
+}
+
+function resolveExpectedCoverSlotsForPlatform(platform, content) {
+  const explicitSlots = expectedCoverSlots(content);
+  const requiredSlots = compositePlatformRequiredCoverSlots(platform);
+  if (!requiredSlots.length) return explicitSlots;
+  const explicitCoverPath = expectedCoverPath(content);
+  const explicitByMatrix = new Map(
+    explicitSlots
+      .filter((item) => item.matrix_key)
+      .map((item) => [String(item.matrix_key).trim(), item]),
+  );
+  const explicitBySlot = new Map(
+    explicitSlots
+      .filter((item) => item.slot)
+      .map((item) => [String(item.slot).trim(), item]),
+  );
+  const resolved = [];
+  const seen = new Set();
+  for (const spec of requiredSlots) {
+    const existing = explicitByMatrix.get(spec.matrix_key) || explicitBySlot.get(spec.slot);
+    const coverPath = String(
+      existing?.cover_path
+      || (requiredSlots.length === 1 ? explicitCoverPath : "")
+      || "",
+    ).trim();
+    const signature = JSON.stringify({
+      slot: spec.slot,
+      matrix_key: spec.matrix_key,
+      cover_path: coverPath,
+    });
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    resolved.push({
+      slot: spec.slot || String(existing?.slot || "").trim(),
+      label: spec.label || String(existing?.label || "").trim(),
+      matrix_key: spec.matrix_key || String(existing?.matrix_key || "").trim(),
+      target_size: spec.target_size || existing?.target_size || null,
+      cover_path: coverPath,
+    });
+  }
+  return resolved;
+}
+
+function preferredKuaishouCoverRatioTexts(content = {}) {
+  const primarySlot = resolveExpectedCoverSlotsForPlatform("kuaishou", content)
+    .find((item) => String(item?.cover_path || "").trim());
+  const normalized = normalizeCompositeCoverSlotKey(primarySlot?.slot || primarySlot?.matrix_key || primarySlot?.label || "");
+  if (normalized === "portrait_9_16") return ["9:16"];
+  if (normalized === "landscape_4_3") return ["4:3", "3:4"];
+  if (normalized === "portrait_3_4") return ["3:4", "4:3"];
+  return ["4:3", "3:4"];
+}
+
+function preferredXiaohongshuCoverRatioTexts(content = {}) {
+  const primarySlot = resolveExpectedCoverSlotsForPlatform("xiaohongshu", content)
+    .find((item) => String(item?.cover_path || "").trim());
+  const normalized = normalizeCompositeCoverSlotKey(primarySlot?.slot || primarySlot?.matrix_key || primarySlot?.label || "");
+  if (normalized === "portrait_3_4") return ["3:4", "4:3"];
+  if (normalized === "landscape_4_3") return ["4:3", "3:4"];
+  return ["3:4", "4:3"];
+}
+
+export function expectedPrimaryCoverPathForPlatform(platform, content) {
+  const slotPath = resolveExpectedCoverSlotsForPlatform(platform, content)
+    .map((item) => String(item?.cover_path || "").trim())
+    .find(Boolean);
+  return slotPath || expectedCoverPath(content);
 }
 
 export function deriveCompositeCollectionPolicyState(platform, content = {}) {
@@ -5542,8 +10387,8 @@ export function deriveCompositeCollectionPolicyState(platform, content = {}) {
   const collectionManagement = overrides.collection_management && typeof overrides.collection_management === "object"
     ? overrides.collection_management
     : {};
-  let explicitCollectionName = expectedCollectionName(content);
-  if (!explicitCollectionName) {
+  let explicitCollectionName = expectedCollectionNameForPlatform(normalizedPlatform, content);
+  if (!explicitCollectionName && normalizedPlatform !== "kuaishou") {
     explicitCollectionName = String(
       collectionManagement.target_collection_name
       || collectionManagement.collection_name
@@ -5555,8 +10400,10 @@ export function deriveCompositeCollectionPolicyState(platform, content = {}) {
     || content.collection_policy
     || "",
   ).trim().toLowerCase();
-  const explicitCollectionSkip = Boolean(overrides.skip_collection_select || content.skip_collection_select)
-    || COMPOSITE_COLLECTION_POLICY_SKIP_VALUES.has(collectionPolicy);
+  const explicitCollectionSkip = !explicitCollectionName && (
+    Boolean(overrides.skip_collection_select || content.skip_collection_select)
+    || COMPOSITE_COLLECTION_POLICY_SKIP_VALUES.has(collectionPolicy)
+  );
   const required = Boolean(compositePlatformCapabilities(normalizedPlatform).requires_explicit_collection_policy);
   return {
     platform: normalizedPlatform,
@@ -5579,6 +10426,11 @@ export function deriveCompositeCoverPolicyState(platform, content = {}) {
     || "",
   ).trim().toLowerCase();
   const explicitCoverPath = expectedCoverPath(content);
+  const requiredCoverSlots = resolveExpectedCoverSlotsForPlatform(normalizedPlatform, content);
+  const missingRequiredCoverSlots = requiredCoverSlots
+    .filter((item) => !String(item.cover_path || "").trim())
+    .map((item) => item.slot || item.matrix_key || item.label)
+    .filter(Boolean);
   const explicitCoverSkip = Boolean(overrides.skip_cover_upload || content.skip_cover_upload)
     || COMPOSITE_COVER_POLICY_SKIP_VALUES.has(coverPolicy);
   const required = Boolean(compositePlatformCapabilities(normalizedPlatform).requires_custom_cover_policy);
@@ -5587,8 +10439,126 @@ export function deriveCompositeCoverPolicyState(platform, content = {}) {
     required,
     cover_policy: coverPolicy,
     explicit_cover_path: explicitCoverPath,
+    required_cover_slots: requiredCoverSlots,
+    missing_required_cover_slots: missingRequiredCoverSlots,
     explicit_cover_skip: explicitCoverSkip,
-    ready: !required || Boolean(explicitCoverPath) || explicitCoverSkip,
+    ready: !required || explicitCoverSkip || (
+      requiredCoverSlots.length
+        ? missingRequiredCoverSlots.length === 0
+        : Boolean(explicitCoverPath)
+    ),
+  };
+}
+
+export function selectDouyinCoverSlotSurfaceCandidate(candidates = [], aliases = []) {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const normalizedAliases = Array.from(new Set((aliases || []).map((item) => clean(item)).filter(Boolean)));
+  const genericPagePattern = /高清发布|基础信息|作品描述|官方活动|发布设置|预览视频|预览封面|添加合集|自主声明|扩展信息|发文助手/;
+  const ranked = candidates
+    .map((candidate) => {
+      const text = clean(candidate?.text || "");
+      const actionLabels = Array.isArray(candidate?.action_labels)
+        ? candidate.action_labels.map((item) => clean(item)).filter(Boolean)
+        : [];
+      const area = Number(candidate?.area || 0);
+      const className = clean(candidate?.className || candidate?.class_name || "");
+      let score = 0;
+      if (!text || !normalizedAliases.some((alias) => text.includes(alias))) return null;
+      score += 400;
+      if (normalizedAliases.includes(text)) score += 280;
+      if (text.length <= 220) score += 220;
+      else if (text.length <= 420) score += 80;
+      else score -= 280;
+      if (area >= 1200 && area <= 120000) score += 160;
+      else if (area > 280000) score -= 260;
+      if (actionLabels.length) score += Math.min(actionLabels.length, 3) * 90;
+      if (actionLabels.some((label) => label === "编辑封面")) score += 260;
+      if (/cover|upload|slot|item|card|recommend/i.test(className)) score += 80;
+      if (/covercontrol/i.test(className)) score += 260;
+      if (/wrapper|content-upload-new/i.test(className)) score -= 220;
+      if (/Ai智能推荐封面|智能参考|生成参考图|AI生成封面/.test(text)) score -= 420;
+      if (genericPagePattern.test(text)) score -= 180;
+      return {
+        ...candidate,
+        text,
+        action_labels: actionLabels,
+        area,
+        score,
+      };
+    })
+    .filter((item) => item && item.score > 0)
+    .sort((left, right) => right.score - left.score || left.text.length - right.text.length || left.area - right.area);
+  return ranked[0] || null;
+}
+
+export function selectDouyinCoverSlotEntryTarget(candidates = [], aliases = []) {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const normalizedAliases = Array.from(new Set((aliases || []).map((item) => clean(item)).filter(Boolean)));
+  const ranked = (Array.isArray(candidates) ? candidates : [])
+    .map((candidate) => {
+      const text = clean(candidate?.text || "");
+      const className = clean(candidate?.className || candidate?.class_name || "").toLowerCase();
+      const area = Number(candidate?.area || 0);
+      const onclick = Boolean(candidate?.onclick);
+      let score = 0;
+      if (!text || !normalizedAliases.some((alias) => text.includes(alias))) return null;
+      score += 320;
+      if (/cover-jg3t4p/.test(className)) score += 420;
+      if (/covercontrol-cjlzqc/.test(className)) score += 140;
+      if (/filter-k_cjvj|title-wa45xd|cover-tip-ykbvmu|controlcontainer-psv7_j/.test(className)) score -= 260;
+      if (onclick) score += 180;
+      if (text === "选择封面") score += 120;
+      if (text.length <= 40) score += 80;
+      else if (text.length > 120) score -= 160;
+      if (area >= 3000 && area <= 40000) score += 120;
+      else if (area > 120000) score -= 120;
+      return {
+        ...candidate,
+        text,
+        className,
+        area,
+        score,
+      };
+    })
+    .filter((item) => item && item.score > 0)
+    .sort((left, right) => right.score - left.score || left.area - right.area);
+  return ranked[0] || null;
+}
+
+export function classifyDouyinCoverUploadInputRoot({
+  localRootText = "",
+  localRootClass = "",
+  mainRootText = "",
+  mainRootClass = "",
+  sideRootText = "",
+  sideRootClass = "",
+  dialogText = "",
+} = {}) {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
+  const localText = clean(localRootText);
+  const localClass = clean(localRootClass).toLowerCase();
+  const mainText = clean(mainRootText);
+  const mainClass = clean(mainRootClass).toLowerCase();
+  const refText = clean(sideRootText);
+  const refClass = clean(sideRootClass).toLowerCase();
+  const dialog = clean(dialogText);
+  const referencePattern = /生成参考图|智能参考|ai生成封面|参考图/;
+  const uploadPattern = /上传封面|点击上传文件或拖拽文件到这里|封面检测|横封面预览|竖封面预览|设置横封面|设置竖封面/;
+  const primaryClasses = /main-dakood|selectarea-bciyqd|container-qvqwfq|upload-bvm5ff/;
+  const referenceClasses = /container-kge14y|container-xnz3eo|list-ldrppp/;
+  const primaryUpload = (
+    primaryClasses.test(`${localClass} ${mainClass}`)
+    || (uploadPattern.test(mainText || localText) && !referencePattern.test(`${mainText} ${localText}`))
+  );
+  const referenceUpload = (
+    referenceClasses.test(`${localClass} ${refClass}`)
+    || referencePattern.test(`${localText} ${refText}`)
+  );
+  return {
+    primary_upload: Boolean(primaryUpload),
+    reference_upload: Boolean(referenceUpload),
+    upload_surface_text: clean([localText, mainText, dialog].filter(Boolean).join(" ")).slice(0, 320),
+    reference_surface_text: clean([localText, refText].filter(Boolean).join(" ")).slice(0, 220),
   };
 }
 
@@ -5610,8 +10580,10 @@ export function deriveCompositeDraftPolicyBlockers(platform, content = {}, nowMs
     blockers.push({
       field: "cover",
       code: `${coverPolicy.platform || platform}_cover_policy_missing`,
-      message: "支持自定义封面的平台必须提供 cover_path，或显式声明跳过自定义封面后才能正式发布。",
-      details: "missing_cover_policy",
+      message: coverPolicy.required_cover_slots?.length
+        ? `支持自定义封面的平台必须提供所需封面槽位：${coverPolicy.required_cover_slots.map((item) => item.label || item.slot || item.matrix_key).filter(Boolean).join("、")}，或显式声明跳过自定义封面后才能正式发布。`
+        : "支持自定义封面的平台必须提供 cover_path，或显式声明跳过自定义封面后才能正式发布。",
+      details: coverPolicy.required_cover_slots?.length ? "missing_required_cover_slots" : "missing_cover_policy",
       cover_policy: coverPolicy,
     });
   }
@@ -5660,6 +10632,16 @@ export function extractCompositeBodyForAudit(platform, value) {
     }
     text = text.replace(/\s+(?:#[^\s#@]+(?:\s+#[^\s#@]+)*)\s*$/u, "").trim();
   }
+  if (platform === "kuaishou") {
+    text = text.replace(/^.*?作品描述\s*/u, "");
+    for (const marker of ["活动推荐", "封面设置", "添加章节", "作者服务", "加入合集", "发布时间", "发布设置", "预览作品", "创作助手"]) {
+      const index = text.indexOf(marker);
+      if (index >= 0) {
+        text = text.slice(0, index).trim();
+        break;
+      }
+    }
+  }
   return text;
 }
 
@@ -5682,6 +10664,16 @@ export function verifyCompositeBodyField(platform, expectedBody, actualBody, { t
         }
       }
       text = text.replace(/(?:\s*#[^\s#@]+(?:\s+#[^\s#@]+)*)\s*$/u, "").trim();
+    }
+    if (currentPlatform === "kuaishou") {
+      text = text.replace(/^.*?作品描述\s*/u, "");
+      for (const marker of ["活动推荐", "封面设置", "添加章节", "作者服务", "加入合集", "发布时间", "发布设置", "预览作品", "创作助手"]) {
+        const index = text.indexOf(marker);
+        if (index >= 0) {
+          text = text.slice(0, index).trim();
+          break;
+        }
+      }
     }
     return text.replace(/\s+/g, " ").trim().toLowerCase();
   };
@@ -5710,6 +10702,7 @@ export function verifyCompositeBodyField(platform, expectedBody, actualBody, { t
     const squashedActual = squash(actual);
     if (!squashedActual) return false;
     if (squashedActual === squashedExpected) return true;
+    if (squashedActual.includes(squashedExpected)) return true;
     if (squashedExpected.includes(squashedActual)) return squashedActual.length >= Math.min(24, squashedExpected.length);
     if (squashedActual.startsWith(squashedExpected)) {
       const trailing = squashedActual.slice(squashedExpected.length);
@@ -5729,13 +10722,14 @@ export function verifyCompositeBodyField(platform, expectedBody, actualBody, { t
 }
 
 export function extractDouyinSelectedCollectionEvidence(lines = [], expectedCollection = "", inputFields = []) {
+  const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
   const normalizedLines = (Array.isArray(lines) ? lines : [])
-    .map((item) => String(item || "").replace(/\s+/g, " ").trim())
+    .map((item) => clean(item))
     .filter(Boolean);
   const normalizedFields = (Array.isArray(inputFields) ? inputFields : [])
     .map((item) => ({
-      label: String(item?.label || "").replace(/\s+/g, " ").trim(),
-      value: String(item?.value || "").replace(/\s+/g, " ").trim(),
+      label: clean(item?.label || ""),
+      value: clean(item?.value || ""),
     }))
     .filter((item) => item.label || item.value);
   const placeholderPattern = /^(?:添加合集|请选择合集|加入合集|选择合集|合集)$/;
@@ -5749,6 +10743,34 @@ export function extractDouyinSelectedCollectionEvidence(lines = [], expectedColl
       placeholder_visible: false,
       source: "input_field",
     };
+  }
+  const expectedNeedle = String(expectedCollection || "").replace(/\s+/g, " ").trim();
+  const inlineCollectionMatch = normalizedLines.find((line) => {
+    const segmentMatch = line.match(/(?:添加合集|合集)\s*[·:：]?\s*([^#@]{1,120})/u);
+    if (!segmentMatch) return false;
+    const segment = clean(segmentMatch[0] || "");
+    return (expectedNeedle && segment.includes(expectedNeedle)) || /合集\s*[·:：]?\s*[^\s]+/.test(segment);
+  });
+  if (inlineCollectionMatch) {
+    const segment = clean((inlineCollectionMatch.match(/(?:添加合集|合集)\s*[·:：]?\s*([^#@]{1,120})/u) || [])[0] || inlineCollectionMatch);
+    const actual = expectedNeedle && segment.includes(expectedNeedle)
+      ? expectedNeedle
+      : (
+        segment.match(/合集\s*[·:：]?\s*([^\s]+(?:\s*[^\s]+){0,3})/)?.[1]
+        || ""
+      )
+        .replace(/共\d+个作品.*$/u, "")
+        .replace(/第\d+集.*$/u, "")
+        .replace(/不选择合集.*$/u, "")
+        .trim();
+    if (actual && !placeholderPattern.test(actual)) {
+      return {
+        actual,
+        matched: !expectedCollection || actual.includes(expectedCollection),
+        placeholder_visible: false,
+        source: "inline_line",
+      };
+    }
   }
   for (let index = 0; index < normalizedLines.length; index += 1) {
     const line = normalizedLines[index];
@@ -5776,54 +10798,262 @@ export function extractDouyinSelectedCollectionEvidence(lines = [], expectedColl
 export function isDouyinCustomCoverReady({
   textHaystack = "",
   expectedCoverPath = "",
+  expectedCoverSlots = [],
   coverActual = "",
   imageSources = [],
   backgroundSources = [],
+  slotSurfaces = [],
 } = {}) {
   return deriveDouyinCoverState({
     textHaystack,
     expectedCoverPath,
+    expectedCoverSlots,
     coverActual,
     imageSources,
     backgroundSources,
+    slotSurfaces,
   }).custom_cover_ready;
+}
+
+function normalizeDouyinCoverSlotKey(value = "") {
+  const normalized = String(value || "").replace(/\s+/g, "").toLowerCase();
+  if (!normalized) return "";
+  if (normalized.includes("horizontal_4_3") || normalized.includes("landscape_4_3") || normalized.includes("横封面4:3") || normalized.includes("横版4:3")) return "horizontal_4_3";
+  if (normalized.includes("vertical_3_4") || normalized.includes("portrait_3_4") || normalized.includes("竖封面3:4") || normalized.includes("竖版3:4")) return "vertical_3_4";
+  return normalized;
+}
+
+function normalizeDouyinExpectedCoverSlots(expectedCoverSlots = [], expectedCoverPath = "") {
+  const slots = (Array.isArray(expectedCoverSlots) ? expectedCoverSlots : [])
+    .map((item) => {
+      const coverPath = String(item?.cover_path || "").trim();
+      const slot = normalizeDouyinCoverSlotKey(item?.slot || item?.matrix_key || item?.label || "");
+      return {
+        slot,
+        label: String(item?.label || item?.slot || item?.matrix_key || "").trim(),
+        expected_path: coverPath,
+        expected_base: coverPath.split(/[\\/]/).pop() || "",
+      };
+    })
+    .filter((item) => item.expected_path);
+  if (slots.length) return slots;
+  const fallbackPath = String(expectedCoverPath || "").trim();
+  if (!fallbackPath) return [];
+  return [{
+    slot: "primary",
+    label: "设置封面",
+    expected_path: fallbackPath,
+    expected_base: fallbackPath.split(/[\\/]/).pop() || "",
+  }];
+}
+
+function normalizeDouyinSlotSurfaceCollection(slotSurfaces = []) {
+  return (Array.isArray(slotSurfaces) ? slotSurfaces : [])
+    .map((item) => ({
+      slot: normalizeDouyinCoverSlotKey(item?.slot || item?.label || ""),
+      label: String(item?.label || "").replace(/\s+/g, " ").trim(),
+      text: String(item?.text || item?.scope_text || "").replace(/\s+/g, " ").trim(),
+      image_sources: Array.isArray(item?.image_sources) ? item.image_sources.map((src) => String(src || "")) : [],
+      background_sources: Array.isArray(item?.background_sources) ? item.background_sources.map((src) => String(src || "")) : [],
+      action_labels: Array.isArray(item?.action_labels) ? item.action_labels.map((label) => String(label || "").replace(/\s+/g, " ").trim()).filter(Boolean) : [],
+      visible: item?.visible !== false,
+    }))
+    .filter((item) => item.slot || item.label || item.text || item.image_sources.length || item.background_sources.length);
 }
 
 export function deriveDouyinCoverState({
   textHaystack = "",
   expectedCoverPath = "",
+  expectedCoverSlots = [],
   coverActual = "",
   imageSources = [],
   backgroundSources = [],
+  slotSurfaces = [],
   modalOpen = false,
 } = {}) {
+  const normalizeCoverSlotKey = (value = "") => {
+    const normalized = String(value || "").replace(/\s+/g, "").toLowerCase();
+    if (!normalized) return "";
+    if (normalized.includes("horizontal_4_3") || normalized.includes("landscape_4_3") || normalized.includes("横封面4:3") || normalized.includes("横版4:3")) return "horizontal_4_3";
+    if (normalized.includes("vertical_3_4") || normalized.includes("portrait_3_4") || normalized.includes("竖封面3:4") || normalized.includes("竖版3:4")) return "vertical_3_4";
+    return normalized;
+  };
+  const normalizeExpectedCoverSlotsLocal = (slots = [], fallbackCoverPath = "") => {
+    const normalizedSlots = (Array.isArray(slots) ? slots : [])
+      .map((item) => {
+        const coverPath = String(item?.cover_path || "").trim();
+        const slot = normalizeCoverSlotKey(item?.slot || item?.matrix_key || item?.label || "");
+        return {
+          slot,
+          label: String(item?.label || item?.slot || item?.matrix_key || "").trim(),
+          expected_path: coverPath,
+          expected_base: coverPath.split(/[\\/]/).pop() || "",
+        };
+      })
+      .filter((item) => item.expected_path);
+    if (normalizedSlots.length) return normalizedSlots;
+    const normalizedFallbackPath = String(fallbackCoverPath || "").trim();
+    if (!normalizedFallbackPath) return [];
+    return [{
+      slot: "primary",
+      label: "设置封面",
+      expected_path: normalizedFallbackPath,
+      expected_base: normalizedFallbackPath.split(/[\\/]/).pop() || "",
+    }];
+  };
+  const normalizeSlotSurfaceCollectionLocal = (surfaces = []) => (
+    (Array.isArray(surfaces) ? surfaces : [])
+      .map((item) => ({
+        slot: normalizeCoverSlotKey(item?.slot || item?.label || ""),
+        label: String(item?.label || "").replace(/\s+/g, " ").trim(),
+        text: String(item?.text || item?.scope_text || "").replace(/\s+/g, " ").trim(),
+        image_sources: Array.isArray(item?.image_sources) ? item.image_sources.map((src) => String(src || "")) : [],
+        background_sources: Array.isArray(item?.background_sources) ? item.background_sources.map((src) => String(src || "")) : [],
+        action_labels: Array.isArray(item?.action_labels) ? item.action_labels.map((label) => String(label || "").replace(/\s+/g, " ").trim()).filter(Boolean) : [],
+        visible: item?.visible !== false,
+      }))
+      .filter((item) => item.slot || item.label || item.text || item.image_sources.length || item.background_sources.length)
+  );
   const haystack = String(textHaystack || "").replace(/\s+/g, " ").trim();
-  const expectedBase = String(expectedCoverPath || "").split(/[\\/]/).pop() || "";
   const actual = String(coverActual || "").trim();
   const normalizedImages = (Array.isArray(imageSources) ? imageSources : []).map((item) => String(item || ""));
   const normalizedBackgrounds = (Array.isArray(backgroundSources) ? backgroundSources : []).map((item) => String(item || ""));
-  const hasLocalPreview = normalizedImages.some((src) => /^blob:|^data:image\//.test(src) || (expectedBase && src.includes(expectedBase)))
-    || normalizedBackgrounds.some((src) => src.includes("blob:") || src.includes("data:image/") || (expectedBase && src.includes(expectedBase)));
+  const expectedSlots = normalizeExpectedCoverSlotsLocal(expectedCoverSlots, expectedCoverPath);
+  const normalizedSlotSurfaces = normalizeSlotSurfaceCollectionLocal(slotSurfaces);
   const explicitUploadSuccess = /重新上传|更换封面|封面已上传|上传封面成功|自定义封面|修改封面/.test(haystack);
   const aiOnlySurface = /ai智能推荐封面|智能推荐封面|默认截取第一帧/.test(haystack) && !explicitUploadSuccess;
   const generatingAiCover = /ai智能推荐封面生成中/.test(haystack);
   const dualCoverMissingWarning = /横\/竖双封面缺失|建议同时设置横版和竖版的封面/.test(haystack);
-  const customCoverReady = !expectedBase
-    || (actual && actual.includes(expectedBase))
-    || (hasLocalPreview && explicitUploadSuccess && !aiOnlySurface && !dualCoverMissingWarning);
-  const saved = Boolean(customCoverReady && !modalOpen && !generatingAiCover && !aiOnlySurface && !dualCoverMissingWarning);
+  const slotStates = expectedSlots.map((slot) => {
+    const slotSurface = normalizedSlotSurfaces.find((item) => item.slot === slot.slot)
+      || normalizedSlotSurfaces.find((item) => item.label && slot.label && item.label.includes(slot.label))
+      || null;
+    const slotText = [haystack, slotSurface?.text || "", ...(slotSurface?.action_labels || [])].filter(Boolean).join(" ");
+    const slotSurfaceImages = Array.isArray(slotSurface?.image_sources) ? slotSurface.image_sources : [];
+    const slotSurfaceBackgrounds = Array.isArray(slotSurface?.background_sources) ? slotSurface.background_sources : [];
+    const slotImages = [...normalizedImages, ...slotSurfaceImages];
+    const slotBackgrounds = [...normalizedBackgrounds, ...slotSurfaceBackgrounds];
+    const expectedBase = slot.expected_base;
+    const surfaceHasVisualCover = Boolean(
+      slotSurface
+      && (
+        slotSurfaceImages.some((src) => /^blob:|^data:image\/|^https?:\/\//.test(src) || (expectedBase && src.includes(expectedBase)))
+        || slotSurfaceBackgrounds.some((src) => src.includes("blob:") || src.includes("data:image/") || src.includes("http") || (expectedBase && src.includes(expectedBase)))
+      )
+    );
+    const hasLocalPreview = slotImages.some((src) => /^blob:|^data:image\//.test(src) || (expectedBase && src.includes(expectedBase)))
+      || slotBackgrounds.some((src) => src.includes("blob:") || src.includes("data:image/") || (expectedBase && src.includes(expectedBase)));
+    const slotExplicitUploadSuccess = /重新上传|更换封面|封面已上传|上传封面成功|自定义封面|修改封面/.test(slotText)
+      || Boolean((slotSurface?.action_labels || []).some((label) => /重新上传|更换封面|修改封面/.test(label)));
+    const slotAiOnlySurface = /ai智能推荐封面|智能推荐封面|默认截取第一帧/.test(slotText) && !slotExplicitUploadSuccess && !surfaceHasVisualCover;
+    const slotBlockedByGlobalDualWarning = Boolean(
+      dualCoverMissingWarning
+      && expectedSlots.length <= 1
+    );
+    const slotCustomCoverReady = !expectedBase
+      || (actual && actual.includes(expectedBase))
+      || surfaceHasVisualCover
+      || (hasLocalPreview && slotExplicitUploadSuccess && !slotAiOnlySurface && !slotBlockedByGlobalDualWarning);
+    const slotSaved = Boolean(
+      slotCustomCoverReady
+      && !modalOpen
+      && !generatingAiCover
+      && !slotAiOnlySurface
+      && !slotBlockedByGlobalDualWarning
+      && (surfaceHasVisualCover || (hasLocalPreview && slotExplicitUploadSuccess))
+    );
+    return {
+      slot: slot.slot,
+      label: slot.label,
+      expected_path: slot.expected_path,
+      expected_base: expectedBase,
+      actual: actual && expectedBase && actual.includes(expectedBase) ? actual : "",
+      surface_has_visual_cover: surfaceHasVisualCover,
+      has_local_preview: hasLocalPreview,
+      explicit_upload_success: slotExplicitUploadSuccess,
+      ai_only_surface: slotAiOnlySurface,
+      custom_cover_ready: Boolean(slotCustomCoverReady),
+      saved: slotSaved,
+      surface_detected: Boolean(slotSurface),
+      action_labels: slotSurface?.action_labels || [],
+    };
+  });
+  const allSlotReady = slotStates.every((item) => item.custom_cover_ready);
+  const allSlotSaved = slotStates.every((item) => item.saved);
+  const effectiveDualCoverMissingWarning = Boolean(
+    dualCoverMissingWarning
+    && !(expectedSlots.length > 1 && slotStates.every((item) => (item.surface_has_visual_cover || (item.has_local_preview && item.explicit_upload_success)) && !item.ai_only_surface))
+  );
+  const fallbackExpectedBase = expectedSlots[0]?.expected_base || "";
+  const fallbackHasLocalPreview = normalizedImages.some((src) => /^blob:|^data:image\//.test(src) || (fallbackExpectedBase && src.includes(fallbackExpectedBase)))
+    || normalizedBackgrounds.some((src) => src.includes("blob:") || src.includes("data:image/") || (fallbackExpectedBase && src.includes(fallbackExpectedBase)));
+  const customCoverReady = slotStates.length
+    ? allSlotReady
+    : (!fallbackExpectedBase
+      || (actual && actual.includes(fallbackExpectedBase))
+      || (fallbackHasLocalPreview && explicitUploadSuccess && !aiOnlySurface && !effectiveDualCoverMissingWarning));
+  const saved = slotStates.length
+    ? Boolean(allSlotSaved && !modalOpen && !generatingAiCover && !aiOnlySurface && !effectiveDualCoverMissingWarning)
+    : Boolean(customCoverReady && !modalOpen && !generatingAiCover && !aiOnlySurface && !effectiveDualCoverMissingWarning);
   return {
-    expected_base: expectedBase,
+    expected_base: fallbackExpectedBase,
     custom_cover_ready: Boolean(customCoverReady),
     saved,
     actual,
-    has_local_preview: hasLocalPreview,
+    has_local_preview: slotStates.length ? slotStates.every((item) => item.has_local_preview) : fallbackHasLocalPreview,
     explicit_upload_success: explicitUploadSuccess,
     ai_only_surface: aiOnlySurface,
     generating_ai_cover: generatingAiCover,
     dual_cover_missing_warning: dualCoverMissingWarning,
+    effective_dual_cover_missing_warning: effectiveDualCoverMissingWarning,
     modal_open: Boolean(modalOpen),
+    required_slots: expectedSlots.map((item) => ({ slot: item.slot, label: item.label, expected_path: item.expected_path, expected_base: item.expected_base })),
+    slots: slotStates,
+    all_required_slots_ready: slotStates.length ? allSlotReady : Boolean(customCoverReady),
+    all_required_slots_saved: slotStates.length ? allSlotSaved : Boolean(saved),
   };
+}
+
+export function isDouyinCoverEditorModalText(value = "") {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (!text) return false;
+  const editorSignals = /设置横封面|设置竖封面|上传封面|点击上传文件或拖拽文件到这里|横封面预览|竖封面预览|设置两张封面将获得更多曝光和推荐|取消保存|封面检测/.test(text);
+  if (!editorSignals) return false;
+  const pageShellSignals = /高清发布|基础信息|作品描述|发布设置|预览视频|预览封面\/标题|添加合集|自主声明|扩展信息|发文助手/.test(text);
+  return !pageShellSignals || /设置横封面|设置竖封面|点击上传文件或拖拽文件到这里|横封面预览|竖封面预览|取消保存/.test(text);
+}
+
+export function isDouyinFormalCompositeCoverEditorState(stateLike = {}) {
+  const state = stateLike && typeof stateLike === "object" ? stateLike : {};
+  const rootText = String(state.root_text || "").replace(/\s+/g, " ").trim();
+  if (!isDouyinCoverEditorModalText(rootText)) return false;
+  return /设置横封面|设置竖封面|点击上传文件或拖拽文件到这里|横封面预览|竖封面预览/.test(rootText);
+}
+
+export function buildDouyinCompositeCoverEditorPlan(slots = []) {
+  const normalized = (Array.isArray(slots) ? slots : [])
+    .map((item) => ({
+      ...item,
+      slot: normalizeDouyinCoverSlotKey(item?.slot || item?.label || item?.matrix_key || ""),
+      label: String(item?.label || item?.slot || item?.matrix_key || "").trim(),
+      cover_path: String(item?.cover_path || "").trim(),
+    }))
+    .filter((item) => item.slot && item.cover_path);
+  const deduped = [];
+  const seen = new Set();
+  for (const item of normalized) {
+    if (seen.has(item.slot)) continue;
+    seen.add(item.slot);
+    deduped.push(item);
+  }
+  const preferredOrder = ["vertical_3_4", "horizontal_4_3"];
+  return deduped.sort((left, right) => {
+    const leftIndex = preferredOrder.indexOf(left.slot);
+    const rightIndex = preferredOrder.indexOf(right.slot);
+    const normalizedLeft = leftIndex >= 0 ? leftIndex : preferredOrder.length + 1;
+    const normalizedRight = rightIndex >= 0 ? rightIndex : preferredOrder.length + 1;
+    return normalizedLeft - normalizedRight;
+  });
 }
 
 export function selectDouyinCoverConfirmCandidate(candidates = []) {
@@ -5856,6 +11086,151 @@ export function selectDouyinCoverConfirmCandidate(candidates = []) {
     .filter((item) => item.score > 0)
     .sort((left, right) => right.score - left.score || (right.y || 0) - (left.y || 0) || (right.x || 0) - (left.x || 0));
   return ranked[0] || null;
+}
+
+function isDouyinCoverEditorOpen(snapshot = {}) {
+  return Boolean(snapshot?.modal_open || snapshot?.editor_open);
+}
+
+async function inspectDouyinCoverEditorState(client) {
+  return evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const textOf = (el) => clean(el?.innerText || el?.textContent || el?.value || el?.getAttribute?.("aria-label") || el?.getAttribute?.("title") || "");
+    const collectInteractive = (root) => {
+      if (!root) return [];
+      return [root, ...root.querySelectorAll("button,[role=button],input[type=button],input[type=submit],span,div,label,a")]
+        .filter(visible)
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          return {
+            label: textOf(el),
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2,
+            width: rect.width,
+            height: rect.height,
+          };
+        })
+        .filter((item) => item.label && item.label.length <= 80);
+    };
+    const scoreEditorRoot = (text, area) => {
+      let score = 0;
+      if (/上传封面/.test(text)) score += 180;
+      if (/完成|保存|应用|确定/.test(text)) score += 120;
+      if (/横封面预览|竖封面预览|设置横封面|设置竖封面/.test(text)) score += 220;
+      if (/点击上传文件或拖拽文件到这里|封面检测/.test(text)) score += 140;
+      if (/高清发布|基础信息|作品描述|发布设置|预览视频|预览封面/.test(text)) score -= 220;
+      if (area >= 20000 && area <= 1200000) score += 120;
+      else if (area > 1800000) score -= 120;
+      if (text.length >= 20 && text.length <= 1200) score += 60;
+      return score;
+    };
+    const editorRoots = [...document.querySelectorAll("[role=dialog],[aria-modal=true],section,div,aside,[class*=modal],[class*=dialog],[class*=popover],[class*=drawer],[class*=panel],[class*=editor]")]
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const text = textOf(el);
+        return {
+          el,
+          text,
+          area: rect.width * rect.height,
+          score: scoreEditorRoot(text, rect.width * rect.height),
+          buttons: collectInteractive(el),
+        };
+      })
+      .filter((item) => item.buttons.length > 0 && item.score > 0 && /设置横封面|设置竖封面|上传封面|封面检测|横封面预览|竖封面预览|设置封面/.test(item.text))
+      .sort((left, right) => right.score - left.score || left.area - right.area);
+    const root = editorRoots[0]?.el || null;
+    const rootText = editorRoots[0]?.text || "";
+    const allText = textOf(document.scrollingElement || document.documentElement || document.body);
+    const spinnerVisible = root
+      ? [...root.querySelectorAll("[class*=spin],[class*=loading],[class*=loader],svg,[role=progressbar]")]
+        .filter(visible)
+        .some((el) => {
+          const text = textOf(el);
+          const cls = clean(el.getAttribute("class") || "");
+          return /spin|loading|loader|progress/i.test(cls) || /上传中|处理中|生成中/.test(text);
+        })
+      : false;
+    const uploadButton = editorRoots
+      .flatMap((item) => item.buttons.map((button) => ({ ...button, root_text: item.text.slice(0, 220) })))
+      .filter((item) => /上传封面|重新上传|上传图片/.test(item.label))
+      .sort((left, right) => left.width * left.height - right.width * right.height)[0] || null;
+    const confirmButton = editorRoots
+      .flatMap((item) => item.buttons.map((button) => ({ ...button, root_text: item.text.slice(0, 220) })))
+      .filter((item) => /完成|保存|应用|确定/.test(item.label))
+      .sort((left, right) => right.y - left.y || right.x - left.x)[0] || null;
+    const previewImages = root
+      ? [...root.querySelectorAll("img,[style*=background-image]")]
+        .filter(visible)
+        .map((el) => {
+          const src = clean(el.getAttribute("src") || "");
+          const style = clean(el.getAttribute("style") || "");
+          const match = style.match(/background-image\\s*:\\s*url\\(([^)]+)\\)/i);
+          return src || (match ? String(match[1] || "").replace(/^['"]|['"]$/g, "").trim() : "");
+        })
+        .filter(Boolean)
+      : [];
+    const editorOpen = Boolean(root);
+    return {
+      editor_open: editorOpen,
+      modal_open: editorOpen,
+      spinner_visible: spinnerVisible,
+      upload_button_visible: Boolean(uploadButton),
+      upload_button: uploadButton,
+      confirm_button_visible: Boolean(confirmButton),
+      confirm_button: confirmButton,
+      preview_image_count: previewImages.length,
+      has_blob_preview: previewImages.some((src) => /^blob:|^data:image\\//.test(src)),
+      root_text: rootText.slice(0, 1200),
+      body_text: allText.slice(0, 1600),
+    };
+  })()`, 14000);
+}
+
+export function isDouyinCoverEditorImmediateEditable(stateLike) {
+  const state = stateLike && typeof stateLike === "object" ? stateLike : {};
+  const previewReady = Boolean(state.has_blob_preview || Number(state.preview_image_count || 0) > 0);
+  return Boolean(state.editor_open && state.confirm_button_visible && (previewReady || state.upload_button_visible));
+}
+
+async function waitForDouyinCoverEditorUploadReady(client, { timeoutMs = 12000 } = {}) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 12000);
+  let last = {};
+  while (Date.now() < deadline) {
+    last = await inspectDouyinCoverEditorState(client).catch(() => ({}));
+    if (!isDouyinCoverEditorOpen(last)) {
+      return { ready: false, reason: "editor_closed_before_upload_ready", ...last };
+    }
+    const previewReady = Boolean(last?.has_blob_preview || Number(last?.preview_image_count || 0) > 0);
+    const immediateEditable = isDouyinCoverEditorImmediateEditable(last);
+    if (immediateEditable) {
+      return { ready: true, preview_ready: previewReady, immediate_editable: true, ...last };
+    }
+    if (previewReady && !last?.spinner_visible) {
+      return { ready: true, preview_ready: true, immediate_editable: false, ...last };
+    }
+    await sleep(600);
+  }
+  return { ready: false, reason: "cover_upload_preview_timeout", ...last };
+}
+
+async function waitForDouyinCoverEditorClose(client, { timeoutMs = 10000 } = {}) {
+  const deadline = Date.now() + Math.max(1000, Number(timeoutMs) || 10000);
+  let last = {};
+  while (Date.now() < deadline) {
+    last = await inspectDouyinCoverEditorState(client).catch(() => ({}));
+    if (!isDouyinCoverEditorOpen(last)) {
+      return { closed: true, ...last };
+    }
+    await sleep(500);
+  }
+  return { closed: false, reason: "cover_editor_close_timeout", ...last };
 }
 
 export function extractDouyinManageCardEvidence(value, expected = {}) {
@@ -5951,26 +11326,10 @@ export function extractDouyinManageCardCandidates(lines = [], expected = {}) {
       .map((item) => String(item || "").replace(/\s+/g, " ").trim())
       .filter((item) => item && !/^(高清发布|首页|活动管理|内容管理|作品管理|合集管理)/.test(item))
     : normalizedLines;
-  const titleIndexes = normalizedLines
+  const searchableLines = candidateLines.length > 1 ? candidateLines : normalizedLines;
+  const titleIndexes = searchableLines
     .map((line, index) => (titleMatches(line, expectedTitle) ? index : -1))
     .filter((index) => index >= 0);
-  const segmentedTitleIndexes = candidateLines
-    .map((line, index) => (titleMatches(line, expectedTitle) ? index : -1))
-    .filter((index) => index >= 0);
-  if (!titleIndexes.length && segmentedTitleIndexes.length) {
-    return segmentedTitleIndexes
-      .map((start) => {
-        const rawLines = [candidateLines[start]];
-        const candidate = extractDouyinManageCardEvidence(rawLines.join(" "), expected);
-        if (!candidate.matched) return null;
-        return {
-          ...candidate,
-          raw_lines: rawLines,
-          line_start: start,
-        };
-      })
-      .filter(Boolean);
-  }
   if (!titleIndexes.length) {
     const fallback = extractDouyinManageCardEvidence(normalizedLines.join(" "), expected);
     return fallback.matched ? [{ ...fallback, raw_lines: normalizedLines.slice(0, 12), line_start: 0 }] : [];
@@ -5978,10 +11337,12 @@ export function extractDouyinManageCardCandidates(lines = [], expected = {}) {
   const candidates = [];
   for (let idx = 0; idx < titleIndexes.length; idx += 1) {
     const start = titleIndexes[idx];
-    const endExclusive = idx + 1 < titleIndexes.length
+    const endExclusive = candidateLines.length > 1
+      ? start + 1
+      : idx + 1 < titleIndexes.length
       ? titleIndexes[idx + 1]
-      : Math.min(normalizedLines.length, start + 12);
-    const rawLines = normalizedLines.slice(start, endExclusive);
+      : Math.min(searchableLines.length, start + 12);
+    const rawLines = searchableLines.slice(start, endExclusive);
     const candidate = extractDouyinManageCardEvidence(rawLines.join(" "), expected);
     if (candidate.matched) {
       candidates.push({
@@ -5992,6 +11353,19 @@ export function extractDouyinManageCardCandidates(lines = [], expected = {}) {
     }
   }
   return candidates;
+}
+
+function _isStructurallyValidDouyinManageCardCandidate(candidate = {}) {
+  const text = String(candidate?.text || "").replace(/\s+/g, " ").trim();
+  if (!text) return false;
+  const actionBlockMatches = text.match(/(?:继续编辑|编辑作品)\s+设置权限\s+作品置顶\s+删除作品/gu) || [];
+  const publishedAtMatches = text.match(/\d{4}年\d{2}月\d{2}日\s*\d{2}:\d{2}/gu) || [];
+  const durationMatches = text.match(/\b\d{2}:\d{2}\b/gu) || [];
+  const managementShellNoise = /高清发布|首页|活动管理|内容管理|作品管理|合集管理|互动管理|数据中心|变现中心|创作中心|通知|网址|抖音/u.test(text);
+  if (managementShellNoise && (actionBlockMatches.length > 1 || publishedAtMatches.length > 1 || durationMatches.length > 2)) {
+    return false;
+  }
+  return true;
 }
 
 export function selectBestDouyinManageCardEvidence(lines = [], expected = {}) {
@@ -6009,6 +11383,7 @@ export function selectBestDouyinManageCardEvidence(lines = [], expected = {}) {
     : [];
   const best = candidates
     .map((candidate) => {
+      const structurallyValid = _isStructurallyValidDouyinManageCardCandidate(candidate);
       const tagChecks = expectedTags.map((tag) => ({ tag, present: candidate.tags.includes(tag) }));
       const tagPresentCount = tagChecks.filter((item) => item.present).length;
       const tagVerified = expectedTags.length > 0 && tagPresentCount === expectedTags.length;
@@ -6027,6 +11402,7 @@ export function selectBestDouyinManageCardEvidence(lines = [], expected = {}) {
       ].reduce((sum, value) => sum + value, 0);
       return {
         ...candidate,
+        structurally_valid: structurallyValid,
         body_verified: bodyVerified,
         schedule_verified: scheduleVerified,
         published_at_verified: publishedAtVerified,
@@ -6035,7 +11411,11 @@ export function selectBestDouyinManageCardEvidence(lines = [], expected = {}) {
         score,
       };
     })
+    .filter((candidate) => candidate.structurally_valid !== false)
     .sort((left, right) => right.score - left.score || left.line_start - right.line_start)[0];
+  if (!best) {
+    return { matched: false, candidates };
+  }
   return {
     ...best,
     matched: Boolean(best.matched),
@@ -6141,6 +11521,16 @@ function _isToutiaoPublishedAtLine(line) {
     || /^\d{2}-\d{2}\s+\d{2}:\d{2}$/.test(String(line || "").trim());
 }
 
+function _isToutiaoManageNoiseLine(line) {
+  const text = String(line || "").replace(/\s+/g, " ").trim();
+  if (!text) return true;
+  if (_isToutiaoPublishedAtLine(text) || /^\d{2}:\d{2}$/.test(text)) return true;
+  if (/^(已发布|审核中|未通过|仅我可见|草稿)$/i.test(text)) return true;
+  if (/^(查看数据|查看评论|修改|更多|删除作品|删除)$/i.test(text)) return true;
+  if (/^(展现\s*\d+播放\s*\d+点赞\s*\d+评论\s*\d+|播放\s*\d+|点赞\s*\d+|评论\s*\d+)$/i.test(text)) return true;
+  return false;
+}
+
 export function extractToutiaoManageCandidates(lines = [], expected = {}) {
   const normalizedLines = (Array.isArray(lines) ? lines : String(lines || "").split(/[\n\r]+/))
     .map((item) => String(item || "").replace(/\s+/g, " ").trim())
@@ -6150,10 +11540,13 @@ export function extractToutiaoManageCandidates(lines = [], expected = {}) {
   for (let index = 0; index < normalizedLines.length; index += 1) {
     const publishedAt = normalizedLines[index];
     if (!_isToutiaoPublishedAtLine(publishedAt)) continue;
-    const titleIndex = index - 1;
+    let titleIndex = index - 1;
+    while (titleIndex >= 0 && _isToutiaoManageNoiseLine(normalizedLines[titleIndex])) {
+      titleIndex -= 1;
+    }
     if (titleIndex < 0) continue;
     const title = normalizedLines[titleIndex];
-    if (!title || _isToutiaoPublishedAtLine(title) || /^\d{2}:\d{2}$/.test(title)) continue;
+    if (!title || _isToutiaoManageNoiseLine(title)) continue;
     const beforeLines = normalizedLines.slice(Math.max(0, titleIndex - 1), titleIndex);
     const afterLines = normalizedLines.slice(index + 1, Math.min(normalizedLines.length, index + 6));
     candidates.push({
@@ -6245,7 +11638,519 @@ export function selectBestToutiaoManageEvidence(lines = [], expected = {}) {
   return { matched: false, candidates };
 }
 
-async function setImageFileInputByAccept(client, imagePath) {
+async function setImageFileInputByAccept(client, imagePath, options = {}) {
+  const expectedPath = String(imagePath || "").trim();
+  if (!expectedPath) return { uploaded: false, reason: "missing_image_path" };
+  const documentResult = await client.send("DOM.getDocument", { depth: -1, pierce: true });
+  const rootNodeId = documentResult.root.nodeId;
+  const queryResult = await client.send("DOM.querySelectorAll", { nodeId: rootNodeId, selector: "input[type=file]" });
+  const preferVisible = options?.preferVisible !== false;
+  const preferDialog = options?.preferDialog !== false;
+  const contextTexts = (Array.isArray(options?.contextTexts) ? options.contextTexts : [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  const preferRootTexts = (Array.isArray(options?.preferRootTexts) ? options.preferRootTexts : [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  const avoidRootTexts = (Array.isArray(options?.avoidRootTexts) ? options.avoidRootTexts : [])
+    .map((item) => String(item || "").trim())
+    .filter(Boolean);
+  const targetPoint = options?.targetPoint && Number.isFinite(options.targetPoint.x) && Number.isFinite(options.targetPoint.y)
+    ? { x: Number(options.targetPoint.x), y: Number(options.targetPoint.y) }
+    : null;
+  const described = [];
+  for (const nodeId of queryResult.nodeIds || []) {
+    const description = await client.send("DOM.describeNode", { nodeId });
+    const attrs = description.node?.attributes || [];
+    const attrMap = {};
+    for (let index = 0; index < attrs.length; index += 2) attrMap[attrs[index]] = attrs[index + 1] || "";
+    let inspection = {};
+    try {
+      const resolved = await client.send("DOM.resolveNode", { nodeId });
+      const objectId = resolved?.object?.objectId;
+      if (objectId) {
+        const result = await client.send("Runtime.callFunctionOn", {
+          objectId,
+          functionDeclaration: `function(contextTexts) {
+            const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+            const visible = (el) => {
+              const rect = el.getBoundingClientRect();
+              const style = getComputedStyle(el);
+              return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+            };
+            const host = this;
+            const rect = host.getBoundingClientRect();
+            const localRoot =
+              host.closest("[class*=default-cover],[class*=pk-cover],[class*=cover],[class*=thumbnail],[class*=upload],[class*=canvas]") ||
+              host.parentElement ||
+              host;
+            const mainRoot =
+              host.closest(".main-DAkOod,.selectArea-BCIYQD,.container-qVqwfQ,[class*=main],[class*=selectArea]") ||
+              null;
+            const sideRoot =
+              host.closest(".container-kgE14y,.container-Xnz3EO,.list-Ldrppp,[class*=reference],[class*=recommend]") ||
+              null;
+            const dialogRoot =
+              host.closest("[role=dialog],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer]") ||
+              null;
+            const localRootText = clean(localRoot?.innerText || localRoot?.textContent || "");
+            const mainRootText = clean(mainRoot?.innerText || mainRoot?.textContent || "");
+            const sideRootText = clean(sideRoot?.innerText || sideRoot?.textContent || "");
+            const dialogText = clean(dialogRoot?.innerText || dialogRoot?.textContent || "");
+            const rootText = clean((localRootText + " " + mainRootText + " " + sideRootText + " " + dialogText).trim());
+            const contextMatched = Array.isArray(contextTexts)
+              ? contextTexts.some((item) => item && rootText.includes(String(item)))
+              : false;
+            return {
+              visible: visible(host),
+              inDialog: Boolean(dialogRoot),
+              inCoverRegion: Boolean(localRoot && localRoot !== host.parentElement),
+              area: Math.max(0, rect.width * rect.height),
+              rect: { width: rect.width, height: rect.height },
+              rootRect: localRoot ? (() => {
+                const rootRect = localRoot.getBoundingClientRect();
+                return {
+                  left: rootRect.left,
+                  top: rootRect.top,
+                  width: rootRect.width,
+                  height: rootRect.height,
+                  centerX: rootRect.left + rootRect.width / 2,
+                  centerY: rootRect.top + rootRect.height / 2,
+                };
+              })() : null,
+              localRootText: localRootText.slice(0, 240),
+              localRootClass: clean(typeof localRoot?.className === "string" ? localRoot.className : "").slice(0, 180),
+              mainRootText: mainRootText.slice(0, 240),
+              mainRootClass: clean(typeof mainRoot?.className === "string" ? mainRoot.className : "").slice(0, 180),
+              sideRootText: sideRootText.slice(0, 180),
+              sideRootClass: clean(typeof sideRoot?.className === "string" ? sideRoot.className : "").slice(0, 180),
+              dialogText: dialogText.slice(0, 240),
+              rootText: rootText.slice(0, 240),
+              contextMatched,
+            };
+          }`,
+          arguments: [{ value: contextTexts }],
+          returnByValue: true,
+        });
+        inspection = result?.result?.value || {};
+        if (objectId) await client.send("Runtime.releaseObject", { objectId }).catch(() => {});
+      }
+    } catch {}
+    described.push({ nodeId, attrMap, inspection });
+  }
+  const ranked = described
+    .map((item) => {
+      const accept = String(item.attrMap.accept || "");
+      const imageAccept = /image|png|jpe?g|webp/i.test(accept);
+      const videoAccept = /video|mp4/i.test(accept);
+      const visible = Boolean(item.inspection?.visible);
+      const inDialog = Boolean(item.inspection?.inDialog);
+      const inCoverRegion = Boolean(item.inspection?.inCoverRegion);
+      const contextMatched = Boolean(item.inspection?.contextMatched);
+      const localRootText = String(item.inspection?.localRootText || "");
+      const localRootClass = String(item.inspection?.localRootClass || "");
+      const mainRootText = String(item.inspection?.mainRootText || "");
+      const mainRootClass = String(item.inspection?.mainRootClass || "");
+      const sideRootText = String(item.inspection?.sideRootText || "");
+      const sideRootClass = String(item.inspection?.sideRootClass || "");
+      const rootRect = item.inspection?.rootRect || null;
+      const douyinCoverUploadRoot = classifyDouyinCoverUploadInputRoot({
+        localRootText,
+        localRootClass,
+        mainRootText,
+        mainRootClass,
+        sideRootText,
+        sideRootClass,
+        dialogText: String(item.inspection?.dialogText || ""),
+      });
+      const referenceRoot = Boolean(douyinCoverUploadRoot.reference_upload);
+      const strongCoverUploadRoot = Boolean(douyinCoverUploadRoot.primary_upload)
+        || /上传封面|封面检测|横封面预览|竖封面预览|设置横封面|设置竖封面/.test(localRootText);
+      const distanceToTarget = targetPoint && rootRect
+        ? Math.hypot(Number(rootRect.centerX || 0) - targetPoint.x, Number(rootRect.centerY || 0) - targetPoint.y)
+        : Number.POSITIVE_INFINITY;
+      let score = 0;
+      if (imageAccept) score += 100;
+      else if (!videoAccept) score += 40;
+      if (preferVisible && visible) score += 35;
+      if (preferDialog && inDialog) score += 25;
+      if (inCoverRegion) score += 20;
+      if (contextMatched) score += 12;
+      if (strongCoverUploadRoot) score += 180;
+      if (referenceRoot) score -= 420;
+      if (preferRootTexts.some((needle) => needle && localRootText.includes(needle))) score += 180;
+      if (avoidRootTexts.some((needle) => needle && localRootText.includes(needle))) score -= 420;
+      if (Number.isFinite(distanceToTarget)) score += Math.max(0, 220 - Math.min(distanceToTarget, 220));
+      if (videoAccept) score -= 80;
+      return {
+        ...item,
+        imageAccept,
+        videoAccept,
+        visible,
+        inDialog,
+        inCoverRegion,
+        contextMatched,
+        localRootText,
+        localRootClass,
+        mainRootText,
+        mainRootClass,
+        sideRootText,
+        sideRootClass,
+        referenceRoot,
+        strongCoverUploadRoot,
+        upload_surface_text: douyinCoverUploadRoot.upload_surface_text,
+        distanceToTarget,
+        score,
+      };
+    })
+    .filter((item) => !avoidRootTexts.some((needle) => needle && item.localRootText.includes(needle)))
+    .sort((left, right) =>
+      right.score - left.score
+      || Number(right.visible) - Number(left.visible)
+      || Number(right.inDialog) - Number(left.inDialog)
+      || Number(right.inCoverRegion) - Number(left.inCoverRegion)
+      || Number(right.contextMatched) - Number(left.contextMatched)
+      || ((Number.isFinite(left.distanceToTarget) ? left.distanceToTarget : Number.MAX_SAFE_INTEGER) - (Number.isFinite(right.distanceToTarget) ? right.distanceToTarget : Number.MAX_SAFE_INTEGER))
+      || (Number(right.inspection?.area || 0) - Number(left.inspection?.area || 0))
+    );
+  const preferred = ranked[0];
+  if (!preferred) return { uploaded: false, reason: "no_image_file_input", fileInputs: described.map((item) => item.attrMap) };
+  await client.send("DOM.setFileInputFiles", { nodeId: preferred.nodeId, files: [expectedPath] });
+  await dispatchFileInputEvents(client, preferred.nodeId);
+  return {
+    uploaded: true,
+    expected_path: expectedPath,
+    input: preferred.attrMap,
+    fileInputCount: described.length,
+    preferred_visible: preferred.visible,
+    preferred_in_dialog: preferred.inDialog,
+    preferred_in_cover_region: preferred.inCoverRegion,
+    preferred_context_matched: preferred.contextMatched,
+    preferred_distance_to_target: Number.isFinite(preferred.distanceToTarget) ? preferred.distanceToTarget : null,
+    preferred_local_root_text: String(preferred.localRootText || "").slice(0, 240),
+    preferred_local_root_class: String(preferred.localRootClass || "").slice(0, 180),
+    preferred_main_root_text: String(preferred.mainRootText || "").slice(0, 240),
+    preferred_main_root_class: String(preferred.mainRootClass || "").slice(0, 180),
+    preferred_root_text: String(preferred.inspection?.rootText || "").slice(0, 240),
+    preferred_upload_surface_text: String(preferred.upload_surface_text || "").slice(0, 320),
+  };
+}
+
+async function openKuaishouCoverEditor(client) {
+  const inspectSurface = async () => evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const textOf = (el) => clean(el?.innerText || el?.textContent || el?.value || el?.getAttribute?.("aria-label") || el?.getAttribute?.("title") || "");
+    const modal = [...document.querySelectorAll("[role=dialog],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer]")]
+      .filter(visible)
+      .map((el) => ({ el, text: textOf(el), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
+      .find((item) => (${deriveKuaishouCoverUploadModalState.toString()})(item.text).open);
+    const imageInputs = [...document.querySelectorAll("input[type=file]")]
+      .map((el, index) => ({
+        index,
+        visible: visible(el),
+        accept: String(el.getAttribute("accept") || el.accept || ""),
+        inDialog: Boolean(el.closest("[role=dialog],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer]")),
+      }))
+      .filter((item) => /image|png|jpe?g|webp/i.test(item.accept));
+    const click = (el) => {
+      if (!el || !visible(el)) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+      if (typeof el.click === "function") el.click();
+      return true;
+    };
+    const coverSectionCandidates = [...document.querySelectorAll("section,div,aside,main")]
+      .filter(visible)
+      .map((el) => ({ el, text: textOf(el), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
+      .filter((item) => item.area > 2000 && /封面设置|智能推荐封面|PK封面|编辑画布|预览封面|默认封面|重新上传/.test(item.text));
+    const coverSection = (${selectKuaishouCoverSurfaceCandidate.toString()})(coverSectionCandidates) || null;
+    const headingNode = [...document.querySelectorAll("div,span,p,h1,h2,h3,h4,label,strong")]
+      .filter(visible)
+      .find((el) => clean(el.innerText || el.textContent || "") === "封面设置");
+    const coverHeadingBlock = (() => {
+      if (!headingNode) return null;
+      let cursor = headingNode.parentElement;
+      let best = null;
+      for (let depth = 0; cursor && depth < 6; depth += 1, cursor = cursor.parentElement) {
+        if (!visible(cursor)) continue;
+        const text = textOf(cursor);
+        if (!/封面设置/.test(text)) continue;
+        const rect = cursor.getBoundingClientRect();
+        const area = rect.width * rect.height;
+        if (!best || area < best.area) best = { el: cursor, text, area };
+      }
+      return best;
+    })();
+    const resolveClickableCard = (seed, boundaryEl) => {
+      if (!seed) return null;
+      const hasMedia = (el) => {
+        if (!el || !visible(el)) return false;
+        const style = getComputedStyle(el);
+        return Boolean(el.querySelector("img,canvas,video,[style*='background-image']")) || /url\\(/i.test(String(style.backgroundImage || ""));
+      };
+      let cursor = seed;
+      let best = null;
+      for (let depth = 0; cursor && depth < 6; depth += 1, cursor = cursor.parentElement) {
+        if (!visible(cursor)) continue;
+        const rect = cursor.getBoundingClientRect();
+        if (rect.width < 140 || rect.height < 100) continue;
+        const text = textOf(cursor);
+        const media = hasMedia(cursor);
+        const pointerish = /pointer/.test(String(getComputedStyle(cursor).cursor || "")) || typeof cursor.onclick === "function" || cursor.getAttribute("role") === "button";
+        const score = (media ? 200 : 0) + (pointerish ? 80 : 0) + (/封面设置|默认封面|重新上传|更换封面/.test(text) ? 40 : 0);
+        const isDefaultCard = Boolean(cursor.closest?.("[class*=default-cover]")) || /默认封面/.test(text);
+        const isPkCard = Boolean(cursor.closest?.("[class*=pk-cover]")) || /PK封面/.test(text);
+        const candidate = {
+          el: cursor,
+          text,
+          rootText: text.slice(0, 240),
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          left: rect.left,
+          top: rect.top,
+          area: rect.width * rect.height,
+          hasMedia: media,
+          isDefaultCard,
+          isPkCard,
+          score,
+        };
+        if (!best || candidate.score > best.score || (candidate.score === best.score && candidate.area < best.area)) best = candidate;
+        if (cursor === boundaryEl) break;
+      }
+      return best;
+    };
+    const primaryCoverCards = coverHeadingBlock?.el
+      ? [...coverHeadingBlock.el.querySelectorAll("div,section,figure,article,button,[role=button],label,a,span,img,canvas")]
+        .filter(visible)
+        .map((el) => {
+          const text = textOf(el);
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          const media = Boolean(el.querySelector?.("img,canvas,video,[style*='background-image']")) || /url\\(/i.test(String(style.backgroundImage || "")) || /IMG|CANVAS|VIDEO/.test(String(el.tagName || ""));
+          if (!media && !/封面设置|默认封面|重新上传|更换封面/.test(text)) return null;
+          if (rect.width < 8 || rect.height < 8) return null;
+          return resolveClickableCard(el, coverHeadingBlock.el);
+        })
+        .filter(Boolean)
+        .filter((item) => !item.isPkCard)
+        .filter((item, index, items) => items.findIndex((other) => Math.abs(Number(other.left || 0) - Number(item.left || 0)) < 4 && Math.abs(Number(other.top || 0) - Number(item.top || 0)) < 4 && Math.abs(Number(other.area || 0) - Number(item.area || 0)) < 20) === index)
+        .sort((left, right) => {
+          const score = (item) => {
+            let value = 0;
+            if (item.isDefaultCard) value += 420;
+            if (item.isPkCard) value -= 600;
+            if (/封面设置/.test(item.rootText || item.text)) value += 280;
+            if (/默认封面|重新上传|更换封面/.test(item.rootText || item.text)) value += 140;
+            if (/智能推荐封面/.test(item.rootText || item.text)) value -= 240;
+            if (/PK封面|编辑画布|模板编辑|视频编辑/.test(item.rootText || item.text)) value -= 260;
+            if (item.hasMedia) value += 60;
+            return value;
+          };
+          const gap = score(right) - score(left);
+          if (gap) return gap;
+          if (left.left !== right.left) return left.left - right.left;
+          if (left.top !== right.top) return left.top - right.top;
+          return Number(right.area || 0) - Number(left.area || 0);
+        })
+      : [];
+    const controls = [...document.querySelectorAll("button,[role=button],a,label,span,div")]
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const text = textOf(el);
+        if (!text || text.length > 80) return null;
+        const root = el.closest("[class*=cover],[class*=canvas],[class*=preview]") || coverSection?.el || el.parentElement || el;
+        const rootText = textOf(root);
+        const inCoverSection = Boolean(coverSection?.el && (coverSection.el === el || coverSection.el.contains(el)));
+        return {
+          el,
+          root,
+          text,
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          area: rect.width * rect.height,
+          className: String(el.className || ""),
+          inCoverSection,
+          rootText: rootText.slice(0, 200),
+        };
+      })
+      .filter(Boolean);
+    const cardCandidates = coverSection?.el
+      ? [...coverSection.el.querySelectorAll("div,section,figure,article,button,[role=button],label,a,span")]
+        .filter(visible)
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          const text = textOf(el);
+          const style = getComputedStyle(el);
+          const hasMedia = Boolean(el.querySelector("img,canvas,video,[style*='background-image']")) || /url\\(/i.test(String(style.backgroundImage || ""));
+          const rootText = text.slice(0, 240);
+          if (rect.width < 120 || rect.height < 80) return null;
+          if (!hasMedia && !/封面设置|默认封面|重新上传|更换封面/.test(rootText)) return null;
+          const isDefaultCard = Boolean(el.closest?.("[class*=default-cover]")) || /默认封面/.test(rootText);
+          const isPkCard = Boolean(el.closest?.("[class*=pk-cover]")) || /PK封面/.test(rootText);
+          return {
+            el,
+            text,
+            rootText,
+            area: rect.width * rect.height,
+            x: rect.left + rect.width / 2,
+            y: rect.top + rect.height / 2,
+            hasMedia,
+            isDefaultCard,
+            isPkCard,
+          };
+        })
+        .filter(Boolean)
+        .filter((item) => !item.isPkCard)
+        .sort((left, right) => {
+          const score = (item) => {
+            let value = 0;
+            if (item.isDefaultCard) value += 420;
+            if (item.isPkCard) value -= 600;
+            if (/封面设置/.test(item.rootText)) value += 240;
+            if (/默认封面|重新上传|更换封面/.test(item.rootText)) value += 120;
+            if (/智能推荐封面/.test(item.rootText) && !/封面设置/.test(item.rootText)) value -= 200;
+            if (/编辑画布|模板编辑|视频编辑|PK封面/.test(item.rootText)) value -= 160;
+            if (item.hasMedia) value += 40;
+            return value;
+          };
+          const scoreGap = score(right) - score(left);
+          if (scoreGap) return scoreGap;
+          const leftX = Number(left.x || 0);
+          const rightX = Number(right.x || 0);
+          if (leftX !== rightX) return leftX - rightX;
+          return Number(right.area || 0) - Number(left.area || 0);
+        })
+      : [];
+    const chosen = (${selectKuaishouCoverProjectCandidate.toString()})(controls, [String(coverSection?.text || ""), String(coverHeadingBlock?.text || "")]);
+    const chosenCard = cardCandidates[0] || primaryCoverCards[0] || null;
+    const target = chosen || chosenCard || null;
+    const clicked = target ? click(target.root || target.el) : false;
+    return {
+      modal_open: Boolean(modal),
+      modal_state: (${deriveKuaishouCoverUploadModalState.toString()})(String(modal?.text || "")),
+      modal_text: String(modal?.text || "").slice(0, 240),
+      image_inputs: imageInputs.slice(0, 8),
+      clicked_target: clicked ? {
+        label: String(target?.text || target?.label || "").slice(0, 120),
+        rootText: String(target?.rootText || "").slice(0, 240),
+      } : null,
+      cover_section_text: String(coverSection?.text || "").slice(0, 240),
+      cover_heading_text: String(coverHeadingBlock?.text || "").slice(0, 240),
+      cover_section_coords: coverSection ? {
+        x: coverSection.el.getBoundingClientRect().left + coverSection.el.getBoundingClientRect().width / 2,
+        y: coverSection.el.getBoundingClientRect().top + coverSection.el.getBoundingClientRect().height / 2,
+      } : null,
+      cover_section_area: Number(coverSection?.area || 0),
+      primary_cover_cards: primaryCoverCards.slice(0, 4).map((item) => ({
+        text: String(item.text || "").slice(0, 160),
+        x: Number(item.x || 0),
+        y: Number(item.y || 0),
+        left: Number(item.left || 0),
+        top: Number(item.top || 0),
+        area: Number(item.area || 0),
+        hasMedia: Boolean(item.hasMedia),
+        isDefaultCard: Boolean(item.isDefaultCard),
+        isPkCard: Boolean(item.isPkCard),
+      })),
+      candidate_controls: controls.slice(0, 12).map((item) => ({
+        text: String(item.text || "").slice(0, 120),
+        rootText: String(item.rootText || "").slice(0, 200),
+        x: Number(item.x || 0),
+        y: Number(item.y || 0),
+        area: Number(item.area || 0),
+        className: String(item.className || ""),
+        inCoverSection: Boolean(item.inCoverSection),
+      })),
+      card_candidates: cardCandidates.slice(0, 6).map((item) => ({ text: String(item.text || "").slice(0, 120), rootText: String(item.rootText || "").slice(0, 160), x: item.x, y: item.y, area: item.area, isDefaultCard: Boolean(item.isDefaultCard), isPkCard: Boolean(item.isPkCard) })),
+      chosen_control: chosen ? {
+        text: String(chosen.text || "").slice(0, 120),
+        rootText: String(chosen.rootText || "").slice(0, 200),
+        x: Number(chosen.x || 0),
+        y: Number(chosen.y || 0),
+        area: Number(chosen.area || 0),
+        className: String(chosen.className || ""),
+        inCoverSection: Boolean(chosen.inCoverSection),
+      } : null,
+      chosen_card: chosenCard ? { text: String(chosenCard.text || "").slice(0, 120), rootText: String(chosenCard.rootText || "").slice(0, 160), x: chosenCard.x, y: chosenCard.y, area: chosenCard.area, hasMedia: Boolean(chosenCard.hasMedia), isDefaultCard: Boolean(chosenCard.isDefaultCard), isPkCard: Boolean(chosenCard.isPkCard) } : null,
+    };
+  })()`, 10000);
+
+  const initial = await inspectSurface();
+  if (initial.modal_open || initial.image_inputs.some((item) => item.inDialog)) {
+    return { opened: true, already_open: true, ...initial };
+  }
+  if (!initial.clicked_target) return { opened: false, reason: "cover_editor_entry_not_found", ...initial };
+  if (initial.chosen_card?.x && initial.chosen_card?.y) {
+    await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: initial.chosen_card.x, y: initial.chosen_card.y, button: "none" }).catch(() => {});
+    await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: initial.chosen_card.x, y: initial.chosen_card.y, button: "left", clickCount: 1 }).catch(() => {});
+    await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: initial.chosen_card.x, y: initial.chosen_card.y, button: "left", clickCount: 1 }).catch(() => {});
+  }
+  await sleep(1200);
+  const after = await inspectSurface();
+  return {
+    opened: Boolean(after.modal_state?.open || after.image_inputs.some((item) => item.inDialog)),
+    entry: initial.clicked_target,
+    ...after,
+  };
+}
+
+async function clickKuaishouCoverUploadEntry(client) {
+  return evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const click = (el) => {
+      if (!el || !visible(el)) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+      if (typeof el.click === "function") el.click();
+      return true;
+    };
+    const dialogs = [...document.querySelectorAll("[role=dialog],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer]")]
+      .filter(visible)
+      .map((el) => ({ el, text: clean(el.innerText || el.textContent || ""), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
+      .filter((item) => (${deriveKuaishouCoverUploadModalState.toString()})(item.text).open)
+      .sort((left, right) => right.area - left.area);
+    const dialog = dialogs[0];
+    if (!dialog) return { clicked: false, reason: "cover_upload_modal_not_open" };
+    const candidates = [...dialog.el.querySelectorAll("button,[role=button],a,label,span,div")]
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const label = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "");
+        let score = 0;
+        if (label === "上传图片") score += 200;
+        else if (label.includes("上传图片")) score += 120;
+        if (/上传封面|上传图片|拖拽图片到此/.test(clean((el.closest("*")?.innerText || "") + " " + label))) score += 40;
+        if (/去编辑|确认|取消|关闭|原始比例|4:3|3:4|1:1|9:16/.test(label)) score -= 120;
+        const root = el.closest("[class*=default-cover],[class*=pk-cover],[class*=cover],[class*=upload],[class*=canvas]") || el.parentElement || el;
+        const rootText = clean(root?.innerText || root?.textContent || "");
+        return score > 0 ? { el, label, rootText: rootText.slice(0, 240), score, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
+      })
+      .filter(Boolean)
+      .sort((left, right) => right.score - left.score);
+    const target = candidates[0];
+    if (!target) return { clicked: false, reason: "cover_upload_entry_not_found" };
+    return { clicked: click(target.el), label: target.label, x: target.x, y: target.y, rootText: target.rootText };
+  })()`, 10000);
+}
+
+async function setKuaishouMainCoverUploadInput(client, imagePath) {
   const expectedPath = String(imagePath || "").trim();
   if (!expectedPath) return { uploaded: false, reason: "missing_image_path" };
   const documentResult = await client.send("DOM.getDocument", { depth: -1, pierce: true });
@@ -6257,15 +12162,275 @@ async function setImageFileInputByAccept(client, imagePath) {
     const attrs = description.node?.attributes || [];
     const attrMap = {};
     for (let index = 0; index < attrs.length; index += 2) attrMap[attrs[index]] = attrs[index + 1] || "";
-    described.push({ nodeId, attrMap });
+    let inspection = {};
+    try {
+      const resolved = await client.send("DOM.resolveNode", { nodeId });
+      const objectId = resolved?.object?.objectId;
+      if (objectId) {
+        const result = await client.send("Runtime.callFunctionOn", {
+          objectId,
+          functionDeclaration: `function() {
+            const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+            const visible = (el) => {
+              if (!el) return false;
+              const rect = el.getBoundingClientRect();
+              const style = getComputedStyle(el);
+              return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+            };
+            const host = this;
+            const dialog = host.closest("[role=dialog],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer]");
+            const uploadRoot = host.closest("[class*='_cropper-upload-upload_']");
+            const dialogText = clean(dialog?.innerText || dialog?.textContent || "");
+            const uploadRootText = clean(uploadRoot?.innerText || uploadRoot?.textContent || "");
+            const uploadRootClass = clean(typeof uploadRoot?.className === "string" ? uploadRoot.className : "");
+            return {
+              visible: visible(host),
+              inDialog: Boolean(dialog),
+              dialogText: dialogText.slice(0, 240),
+              uploadRootText: uploadRootText.slice(0, 240),
+              uploadRootClass,
+              exactMainCoverUploadZone: Boolean(uploadRoot)
+                && /上传图片|拖拽图片到此或点击上传/.test(uploadRootText)
+                && /上传封面/.test(dialogText)
+                && !/PK封面/.test(uploadRootText),
+            };
+          }`,
+          returnByValue: true,
+        });
+        inspection = result?.result?.value || {};
+        await client.send("Runtime.releaseObject", { objectId }).catch(() => {});
+      }
+    } catch {}
+    described.push({ nodeId, attrMap, inspection });
   }
-  const preferred =
-    described.find((item) => /image|png|jpe?g|webp/i.test(item.attrMap.accept || "")) ||
-    described.find((item) => !/video|mp4/i.test(item.attrMap.accept || ""));
-  if (!preferred) return { uploaded: false, reason: "no_image_file_input", fileInputs: described.map((item) => item.attrMap) };
+  const preferred = described
+    .map((item) => ({
+      ...item,
+      accept: String(item.attrMap.accept || ""),
+    }))
+    .filter((item) => /image|png|jpe?g|webp/i.test(item.accept))
+    .sort((left, right) => {
+      const score = (item) => {
+        let value = 0;
+        if (item.inspection?.exactMainCoverUploadZone) value += 1000;
+        if (item.inspection?.visible) value += 100;
+        if (item.inspection?.inDialog) value += 80;
+        if (/_cropper-upload-upload_/.test(String(item.inspection?.uploadRootClass || ""))) value += 240;
+        if (/上传图片|拖拽图片到此或点击上传/.test(String(item.inspection?.uploadRootText || ""))) value += 180;
+        if (/上传封面/.test(String(item.inspection?.dialogText || ""))) value += 120;
+        if (/PK封面/.test(String(item.inspection?.uploadRootText || "") + " " + String(item.inspection?.dialogText || ""))) value -= 800;
+        return value;
+      };
+      return score(right) - score(left);
+    })[0];
+  if (!preferred) {
+    return {
+      uploaded: false,
+      reason: "kuaishou_main_cover_upload_input_missing",
+      fileInputs: described.map((item) => ({
+        accept: item.attrMap.accept || "",
+        visible: Boolean(item.inspection?.visible),
+        inDialog: Boolean(item.inspection?.inDialog),
+        uploadRootClass: String(item.inspection?.uploadRootClass || ""),
+        uploadRootText: String(item.inspection?.uploadRootText || ""),
+        dialogText: String(item.inspection?.dialogText || ""),
+      })),
+    };
+  }
   await client.send("DOM.setFileInputFiles", { nodeId: preferred.nodeId, files: [expectedPath] });
   await dispatchFileInputEvents(client, preferred.nodeId);
-  return { uploaded: true, expected_path: expectedPath, input: preferred.attrMap, fileInputCount: described.length };
+  return {
+    uploaded: true,
+    expected_path: expectedPath,
+    input: preferred.attrMap,
+    preferred_visible: Boolean(preferred.inspection?.visible),
+    preferred_in_dialog: Boolean(preferred.inspection?.inDialog),
+    preferred_upload_root_class: String(preferred.inspection?.uploadRootClass || ""),
+    preferred_upload_root_text: String(preferred.inspection?.uploadRootText || ""),
+    preferred_dialog_text: String(preferred.inspection?.dialogText || ""),
+    exact_main_cover_upload_zone: Boolean(preferred.inspection?.exactMainCoverUploadZone),
+  };
+}
+
+async function clickKuaishouCoverDialogTab(client, expectedLabel) {
+  const labelText = String(expectedLabel || "").trim();
+  const target = await evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const dialogs = [...document.querySelectorAll("[role=dialog],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer]")]
+      .filter(visible)
+      .map((el) => ({ el, text: clean(el.innerText || el.textContent || ""), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
+      .filter((item) => (${deriveKuaishouCoverUploadModalState.toString()})(item.text).open)
+      .sort((left, right) => right.area - left.area);
+    const dialog = dialogs[0];
+    if (!dialog) return { found: false, reason: "cover_upload_modal_not_open" };
+    const candidates = [...dialog.el.querySelectorAll("div,span,button,[role=button],a,label")]
+      .filter(visible)
+      .map((el) => {
+        const label = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "");
+        if (label !== ${JSON.stringify(labelText)}) return null;
+        const rect = el.getBoundingClientRect();
+        return {
+          label,
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          className: String(el.className || ""),
+        };
+      })
+      .filter(Boolean);
+    return candidates[0] ? { found: true, ...candidates[0] } : { found: false, reason: "cover_upload_tab_not_found" };
+  })()`, 10000);
+  if (!target.found) return target;
+  await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none" }).catch(() => {});
+  await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", clickCount: 1 }).catch(() => {});
+  await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", clickCount: 1 }).catch(() => {});
+  return { clicked: true, label: target.label };
+}
+
+async function clickKuaishouCoverRatio(client, expectedLabels = []) {
+  const labels = (Array.isArray(expectedLabels) ? expectedLabels : [expectedLabels]).map((item) => String(item || "").trim()).filter(Boolean);
+  const target = await evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const dialogs = [...document.querySelectorAll("[role=dialog],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer]")]
+      .filter(visible)
+      .map((el) => ({ el, text: clean(el.innerText || el.textContent || ""), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
+      .filter((item) => (${deriveKuaishouCoverUploadModalState.toString()})(item.text).open)
+      .sort((left, right) => right.area - left.area);
+    const dialog = dialogs[0];
+    if (!dialog) return { found: false, reason: "cover_upload_modal_not_open" };
+    const candidates = [...dialog.el.querySelectorAll("div,span,button,[role=button],a,label")]
+      .filter(visible)
+      .map((el) => {
+        const label = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "");
+        if (!${JSON.stringify(labels)}.some((item) => item && (label === item || label.startsWith(item + " ") || label.includes(item + " 推荐")))) return null;
+        const rect = el.getBoundingClientRect();
+        return { label, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, className: String(el.className || "") };
+      })
+      .filter(Boolean)
+      .sort((left, right) => left.x - right.x || left.y - right.y);
+    return candidates[0] ? { found: true, ...candidates[0] } : { found: false, reason: "cover_ratio_not_found", labels: ${JSON.stringify(labels)} };
+  })()`, 10000);
+  if (!target.found) return target;
+  await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none" }).catch(() => {});
+  await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", clickCount: 1 }).catch(() => {});
+  await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", clickCount: 1 }).catch(() => {});
+  return { clicked: true, label: target.label };
+}
+
+async function clickXiaohongshuCoverRatio(client, expectedLabels = []) {
+  const labels = (Array.isArray(expectedLabels) ? expectedLabels : [expectedLabels]).map((item) => String(item || "").trim()).filter(Boolean);
+  const target = await evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const dialogs = [...document.querySelectorAll("[role=dialog],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer],.d-modal,.d-modal-content")]
+      .filter(visible)
+      .map((el) => ({ el, text: clean(el.innerText || el.textContent || ""), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
+      .filter((item) => /设置封面|上传图片|封面比例/.test(item.text))
+      .sort((left, right) => right.area - left.area);
+    const dialog = dialogs[0];
+    if (!dialog) return { found: false, reason: "cover_upload_modal_not_open" };
+    const candidates = [...dialog.el.querySelectorAll("div,span,button,[role=button],a,label")]
+      .filter(visible)
+      .map((el) => {
+        const label = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "");
+        if (!${JSON.stringify(labels)}.some((item) => item && (label === item || label.startsWith(item + " ") || label.includes(item)))) return null;
+        const rect = el.getBoundingClientRect();
+        const className = String(el.className || "");
+        let score = 0;
+        if (${JSON.stringify(labels)}[0] && label === ${JSON.stringify(labels)}[0]) score += 120;
+        if (/active|selected|checked|current/i.test(className)) score += 40;
+        if (/封面比例/.test(clean(el.parentElement?.innerText || ""))) score += 20;
+        return { label, score, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+      })
+      .filter(Boolean)
+      .sort((left, right) => right.score - left.score || left.x - right.x || left.y - right.y);
+    return candidates[0] ? { found: true, ...candidates[0] } : { found: false, reason: "cover_ratio_not_found", labels: ${JSON.stringify(labels)} };
+  })()`, 10000);
+  if (!target.found) return target;
+  await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none" }).catch(() => {});
+  await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", clickCount: 1 }).catch(() => {});
+  await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", clickCount: 1 }).catch(() => {});
+  return { clicked: true, label: target.label };
+}
+
+async function clickKuaishouCoverConfirm(client) {
+  const target = await evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const dialogs = [...document.querySelectorAll("[role=dialog],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer]")]
+      .filter(visible)
+      .map((el) => ({ el, text: clean(el.innerText || el.textContent || ""), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
+      .filter((item) => (${deriveKuaishouCoverUploadModalState.toString()})(item.text).open)
+      .sort((left, right) => right.area - left.area);
+    for (const dialog of dialogs) {
+      const button = [...dialog.el.querySelectorAll("button,[role=button],a,label,span,div")]
+        .filter(visible)
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          const label = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "");
+          let score = 0;
+          if (label === "完成") score += 120;
+          else if (label === "确定" || label === "确认") score += 100;
+          else if (label.includes("完成")) score += 60;
+          else if (label.includes("确定") || label.includes("确认")) score += 40;
+          if (/去编辑|编辑画布|模板编辑|取消|关闭/.test(label)) score -= 140;
+          return score > 0 ? { label, score, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 } : null;
+        })
+        .filter(Boolean)
+        .sort((left, right) => right.score - left.score)[0];
+      if (button) return { found: true, label: button.label, x: button.x, y: button.y, dialog_text: dialog.text.slice(0, 240) };
+    }
+    return { found: false, dialogs: dialogs.map((item) => item.text.slice(0, 200)) };
+  })()`, 10000);
+  if (!target.found) return target;
+  await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none" }).catch(() => {});
+  await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", clickCount: 1 }).catch(() => {});
+  await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", clickCount: 1 }).catch(() => {});
+  await sleep(1800);
+  const after = await evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const modalTexts = [...document.querySelectorAll("[role=dialog],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer]")]
+      .filter(visible)
+      .map((el) => clean(el.innerText || el.textContent || ""));
+    const modalState = modalTexts
+      .map((text) => (${deriveKuaishouCoverUploadModalState.toString()})(text))
+      .find((state) => state.open || state.divertedToEditor) || { open: false, divertedToEditor: false };
+    const pageText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    return {
+      modal_open: modalState.open,
+      modal_diverted_to_editor: modalState.divertedToEditor,
+      page_has_cover_signal: /重新上传|预览封面|封面应用成功|重新设置封面/.test(pageText),
+      page_has_cover_success: /封面应用成功|重新设置封面/.test(pageText),
+    };
+  })()`, 10000);
+  return { clicked: true, label: target.label, dialog_text: target.dialog_text, ...after };
 }
 
 async function openXiaohongshuCoverEditor(client) {
@@ -6294,11 +12459,10 @@ async function openXiaohongshuCoverEditor(client) {
       return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
     };
     const card =
-      document.querySelector(".publish-page-content-cover .default.column") ||
-      [...document.querySelectorAll("div,span")]
+      [...document.querySelectorAll("button,[role=button],div,span")]
         .filter(visible)
-        .find((el) => /修改封面|智能推荐封面|默认截取第一帧/.test(clean(el.innerText || el.textContent))) ||
-      document.querySelector(".publish-page-content-cover");
+        .find((el) => /^(设置封面|修改封面)$/.test(clean(el.innerText || el.textContent))) ||
+      document.querySelector(".publish-page-content-cover .default.column");
     if (!visible(card)) return { found: false };
     card.scrollIntoView({ block: "center", inline: "center" });
     const rect = card.getBoundingClientRect();
@@ -6323,10 +12487,10 @@ async function openXiaohongshuCoverEditor(client) {
       return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
     };
     const operator =
-      document.querySelector(".publish-page-content-cover .operator") ||
       [...document.querySelectorAll("button,[role=button],div,span")]
         .filter(visible)
-        .find((el) => /修改封面/.test(clean(el.innerText || el.textContent)));
+        .find((el) => /^(设置封面|修改封面)$/.test(clean(el.innerText || el.textContent))) ||
+      document.querySelector(".publish-page-content-cover .operator");
     const target = visible(operator) ? operator : document.querySelector(".publish-page-content-cover .default.column");
     if (!visible(target)) return { found: false };
     const rect = target.getBoundingClientRect();
@@ -6382,15 +12546,21 @@ async function clickXiaohongshuCoverConfirm(client) {
       .filter((item) => /设置封面|上传图片|封面比例/.test(item.text))
       .sort((left, right) => left.area - right.area);
     for (const dialog of dialogs) {
-      const button = [...dialog.el.querySelectorAll("button,[role=button]")]
+      const button = [...dialog.el.querySelectorAll("button,[role=button],div,span")]
         .filter(visible)
         .map((el) => {
           const rect = el.getBoundingClientRect();
           const className = clean(typeof el.className === "string" ? el.className : "");
-          return { el, label: clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title")), className, area: rect.width * rect.height, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+          const label = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title"));
+          let score = 0;
+          if (/^(确定|完成|保存)$/.test(label)) score += 600;
+          else if (/^(取消|关闭)$/.test(label)) score += 220;
+          if (/close|cancel|confirm|save|primary|btn/i.test(className)) score += 40;
+          if (label === "取消" && /试试其他封面|详情|上传图片|推荐/.test(dialog.text)) score += 80;
+          return { el, label, className, score, area: rect.width * rect.height, x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
         })
-        .filter((item) => item.label === "确定" && !/disabled/.test(item.className))
-        .sort((left, right) => left.area - right.area || right.y - left.y)[0];
+        .filter((item) => item.label && !/disabled/.test(item.className) && item.area > 0)
+        .sort((left, right) => right.score - left.score || left.area - right.area || right.y - left.y)[0];
       if (!button) continue;
       return { found: true, label: button.label, x: button.x, y: button.y };
     }
@@ -6453,101 +12623,152 @@ async function clearXiaohongshuStaleCoverLayers(client) {
   })()`, 10000);
 }
 
-async function waitForCompositeUploadReady(client, platform, timeoutMs = 120000, mediaPath = "", onPoll = null, options = {}) {
-  const startedAt = Date.now();
+async function readCompositeUploadReadinessSnapshot(client, platform, mediaPath = "") {
   const mediaName = mediaPath ? path.win32.basename(String(mediaPath)) : "";
   const mediaStem = mediaName.replace(/\.[^.]+$/, "");
-  let last = null;
-  let readyStreak = 0;
-  while (Date.now() - startedAt < timeoutMs) {
-    last = await evaluateWithClient(client, `(() => {
-      const expected = ${JSON.stringify({ mediaName, mediaStem })};
-      const isYouTubeEditorSurface = ${isYouTubeEditorReadinessSurface.toString()};
-      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-      const text = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
-      const href = String(location.href || "");
-      const failed = /上传失败|Upload failed|刷新后重试|网络异常/.test(text);
-      const uploadProgressSignal = /已上传：|当前速度：|剩余时间：|处理中\\s*\\d+%|检测中\\s*\\d+%|检测中99%|\\b\\d{1,3}%\\b/.test(text);
-      const genericUploadBusySignal = /上传中|正在上传|视频处理中/.test(text);
-      const kuaishouReadySurface =
-        ${JSON.stringify(platform)} === "kuaishou" &&
-        /重新上传/.test(text) &&
-        /预览作品|预览封面|编辑画布|封面设置/.test(text) &&
-        /作品描述|发布时间|发布设置/.test(text) &&
-        !/上传失败/.test(text);
-      const douyinReadySurface =
-        ${JSON.stringify(platform)} === "douyin" &&
-        (text.includes("预览视频") || text.includes("预览封面/标题") || text.includes("预览封面")) &&
-        text.includes("重新上传") &&
-        (text.includes("作品描述") || text.includes("发布时间") || text.includes("发布设置") || text.includes("谁可以看")) &&
-        !/上传失败|已上传：|当前速度：|剩余时间：|\\b\\d{1,3}%\\b/.test(text);
-      const bilibiliReadySurface =
-        ${JSON.stringify(platform)} === "bilibili" &&
-        /更换视频|上传完成|已经上传：/.test(text) &&
-        /标题|简介|分区|标签|创作声明|定时发布|立即投稿|存草稿/.test(text);
-      const bilibiliConcreteUploadProgress =
-        ${JSON.stringify(platform)} === "bilibili" &&
-        /已上传：|当前速度：|剩余时间：|处理中\\s*\\d+%|检测中\\s*\\d+%|检测中99%|\\b\\d{1,3}%\\b/.test(text);
-      const mediaPresent =
+  return await evaluateWithClient(client, `(() => {
+    const expected = ${JSON.stringify({ mediaName, mediaStem })};
+    const isYouTubeEditorSurface = ${isYouTubeEditorReadinessSurface.toString()};
+    const deriveBilibiliSurfaceState = ${deriveBilibiliUploadSurfaceState.toString()};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const text = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    const href = String(location.href || "");
+    const failed = /上传失败|Upload failed|刷新后重试|网络异常/.test(text);
+    const uploadProgressSignal = /已上传：|当前速度：|剩余时间：|处理中\\s*\\d+%|检测中\\s*\\d+%|检测中99%|\\b\\d{1,3}%\\b/.test(text);
+    const genericUploadBusySignal = /上传中|正在上传|视频处理中/.test(text);
+    const fieldSignals = [
+      /作品描述|标题|简介|说明|正文|description|Details/i.test(text),
+      /封面设置|设置封面|上传封面|更换封面|上传图片|缩略图|Thumbnail/i.test(text),
+      /加入合集|选择合集|合集|播放列表|Playlist/i.test(text),
+      /作者声明|原创声明|创作声明|自主声明/i.test(text),
+      /发布时间|定时发布|立即发布|发布设置|Schedule/i.test(text),
+      /查看权限|谁可以看|公开可见|所有人可见|好友可见|仅自己可见|Visibility/i.test(text),
+      /标签|话题|Tags?/i.test(text),
+    ].filter(Boolean).length;
+    const fieldShell = fieldSignals >= 3;
+    const genericReadySurface =
+      fieldShell &&
+      /封面设置|设置封面|上传封面|加入合集|作者声明|原创声明|添加内容类型声明|发布时间|发布设置|查看权限|谁可以看|标签|话题|立即发布|定时发布|发布/.test(text);
+    const kuaishouReadySurface =
+      ${JSON.stringify(platform)} === "kuaishou" &&
+      (
+        (
+          /重新上传/.test(text) &&
+          /预览作品|预览封面|编辑画布|封面设置/.test(text) &&
+          /作品描述|发布时间|发布设置/.test(text)
+        ) ||
+        (/发布视频/.test(text) && /作品描述/.test(text) && /封面设置/.test(text))
+      ) &&
+      !/上传失败/.test(text);
+    const douyinReadySurface =
+      ${JSON.stringify(platform)} === "douyin" &&
+      (text.includes("预览视频") || text.includes("预览封面/标题") || text.includes("预览封面")) &&
+      text.includes("重新上传") &&
+      (text.includes("作品描述") || text.includes("发布时间") || text.includes("发布设置") || text.includes("谁可以看")) &&
+      !/上传失败|已上传：|当前速度：|剩余时间：|\\b\\d{1,3}%\\b/.test(text);
+    const douyinUploadEntrySurface =
+      ${JSON.stringify(platform)} === "douyin" &&
+      /点击上传|直接将视频文件拖入此区域/.test(text) &&
+      !text.includes("重新上传");
+    const douyinMediaAttached =
+      ${JSON.stringify(platform)} === "douyin" &&
+      (
+        douyinReadySurface ||
+        text.includes(expected.mediaName) ||
+        text.includes(expected.mediaStem) ||
+        /重新上传|极速上传成功|上传成功|已上传：|当前速度：|剩余时间：|\\b\\d{1,3}%\\b/.test(text)
+      );
+    const bilibiliReadySurface =
+      ${JSON.stringify(platform)} === "bilibili" &&
+      deriveBilibiliSurfaceState(text, [], expected.mediaName).ready_surface;
+    const bilibiliConcreteUploadProgress =
+      ${JSON.stringify(platform)} === "bilibili" &&
+      deriveBilibiliSurfaceState(text, [], expected.mediaName).concrete_progress;
+    const bilibiliMediaAttached =
+      ${JSON.stringify(platform)} === "bilibili" &&
+      deriveBilibiliSurfaceState(text, [], expected.mediaName).media_attached;
+    const mediaPresent = ${JSON.stringify(platform)} === "douyin"
+      ? (!expected.mediaName || douyinMediaAttached)
+      : (
         !expected.mediaName ||
         text.includes(expected.mediaName) ||
         text.includes(expected.mediaStem) ||
+        genericReadySurface ||
         kuaishouReadySurface ||
         douyinReadySurface ||
-        bilibiliReadySurface;
-      const uploadPromptOnly = /拖拽视频到此|点击上传|上传视频\\s+视频大小|选择文件|Select files/.test(text) && !mediaPresent;
-      const busy = !failed && (
-        uploadProgressSignal ||
-        (
-          genericUploadBusySignal &&
-          !douyinReadySurface &&
-          !kuaishouReadySurface &&
-          !(bilibiliReadySurface && !bilibiliConcreteUploadProgress)
-        )
+        bilibiliReadySurface ||
+        bilibiliMediaAttached
       );
-      const fileInputCount = [...document.querySelectorAll("input[type=file]")].filter((input) => {
-        const rect = input.getBoundingClientRect();
-        const style = getComputedStyle(input);
-        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-      }).length;
-      const totalFileInputCount = [...document.querySelectorAll("input[type=file]")].length;
-      const youtubeUploadRoute = /studio\\.youtube\\.com\\/channel\\/[^/?#]+\\/(videos\\/)?upload/.test(href);
-      const youtubeUploadDialogRoute = ${hasYoutubeUploadDialogQuery.toString()}(href);
-      const youtubeUploadDialogSurface = /上传视频|Upload videos|Select files|拖拽|点击上传|选择文件/.test(text);
-      const youtubeEditorSurface = isYouTubeEditorSurface(href, text);
-      const youtubeChannelContentList = !youtubeEditorSurface && (/频道内容/.test(text) || /每页行数|发布日期|第\\s*\\d+\\s*-\\s*\\d+\\s*条/.test(text));
-      const youtubeDraftResumeAvailable = !youtubeEditorSurface && mediaPresent && /编辑草稿|Edit draft/.test(text) && /草稿|Draft/.test(text);
-      const youtubeHasEditorSurface = youtubeUploadDialogSurface || fileInputCount > 0 || youtubeEditorSurface;
-      const youtubeReady = youtubeEditorSurface
-        ? mediaPresent && !busy
-        : (!youtubeUploadRoute || youtubeChannelContentList ? false : mediaPresent && !uploadPromptOnly && youtubeHasEditorSurface && !busy);
-      const ready = ${JSON.stringify(platform)} === "youtube"
-        ? youtubeReady
-        : mediaPresent && !uploadPromptOnly && (/上传成功|上传完成|检测完成|发布|定时发布|立即发布|封面应用成功|极速上传成功/.test(text) || kuaishouReadySurface || douyinReadySurface) && !busy;
-      const lines = text.split(/[\\n\\r]+| {2,}/).map(clean).filter((line) => /上传|处理|检测|发布|%/.test(line)).slice(0, 50);
-      return {
-        platform: ${JSON.stringify(platform)},
-        href,
-        ready,
-        busy,
-        failed,
-        mediaPresent,
-        uploadPromptOnly,
-        fileInputCount,
-        totalFileInputCount,
-        youtubeUploadRoute,
-        youtubeUploadDialogRoute,
-        youtubeUploadDialogSurface,
-        youtubeEditorSurface,
-        youtubeChannelContentList,
-        youtubeDraftResumeAvailable,
-        youtubeHasEditorSurface,
-        kuaishouReadySurface,
-        douyinReadySurface,
-        expected,
-        lines,
-      };
-    })()`, 10000);
+    const uploadPromptOnly = (
+      /拖拽视频到此|点击上传|上传视频\\s+视频大小|选择文件|Select files/.test(text)
+      || douyinUploadEntrySurface
+    ) && !mediaPresent;
+    const busy = !failed && (
+      uploadProgressSignal ||
+      (
+        genericUploadBusySignal &&
+        !douyinReadySurface &&
+        !kuaishouReadySurface &&
+        !(bilibiliReadySurface && !bilibiliConcreteUploadProgress)
+      )
+    );
+    const fileInputCount = [...document.querySelectorAll("input[type=file]")].filter((input) => {
+      const rect = input.getBoundingClientRect();
+      const style = getComputedStyle(input);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    }).length;
+    const totalFileInputCount = [...document.querySelectorAll("input[type=file]")].length;
+    const youtubeUploadRoute = /studio\\.youtube\\.com\\/channel\\/[^/?#]+\\/(videos\\/)?upload/.test(href);
+    const youtubeUploadDialogRoute = ${hasYoutubeUploadDialogQuery.toString()}(href);
+    const youtubeUploadDialogSurface = /上传视频|Upload videos|Select files|拖拽|点击上传|选择文件/.test(text);
+    const youtubeEditorSurface = isYouTubeEditorSurface(href, text);
+    const youtubeChannelContentList = !youtubeEditorSurface && (/频道内容/.test(text) || /每页行数|发布日期|第\\s*\\d+\\s*-\\s*\\d+\\s*条/.test(text));
+    const youtubeDraftResumeAvailable = !youtubeEditorSurface && mediaPresent && /编辑草稿|Edit draft/.test(text) && /草稿|Draft/.test(text);
+    const youtubeHasEditorSurface = youtubeUploadDialogSurface || fileInputCount > 0 || youtubeEditorSurface;
+    const youtubeReady = youtubeEditorSurface
+      ? mediaPresent && !busy
+      : (!youtubeUploadRoute || youtubeChannelContentList ? false : mediaPresent && !uploadPromptOnly && youtubeHasEditorSurface && !busy);
+    const ready = ${JSON.stringify(platform)} === "youtube"
+      ? youtubeReady
+      : mediaPresent && !uploadPromptOnly && (/上传成功|上传完成|检测完成|发布|定时发布|立即发布|封面应用成功|极速上传成功/.test(text) || kuaishouReadySurface || douyinReadySurface || bilibiliReadySurface || genericReadySurface) && !busy;
+    const lines = text.split(/[\\n\\r]+| {2,}/).map(clean).filter((line) => /上传|处理|检测|发布|%/.test(line)).slice(0, 50);
+    return {
+      platform: ${JSON.stringify(platform)},
+      href,
+      ready,
+      busy,
+      failed,
+      mediaPresent,
+      uploadPromptOnly,
+      fileInputCount,
+      totalFileInputCount,
+      youtubeUploadRoute,
+      youtubeUploadDialogRoute,
+      youtubeUploadDialogSurface,
+      youtubeEditorSurface,
+      youtubeChannelContentList,
+      youtubeDraftResumeAvailable,
+      youtubeHasEditorSurface,
+      bilibiliMediaAttached,
+      bilibiliReadySurface,
+      kuaishouReadySurface,
+      douyinReadySurface,
+      douyinUploadEntrySurface,
+      douyinMediaAttached,
+      fieldShell,
+      readySurface: genericReadySurface || kuaishouReadySurface || douyinReadySurface || bilibiliReadySurface,
+      expected,
+      lines,
+    };
+  })()`, 10000);
+}
+
+async function waitForCompositeUploadReady(client, platform, timeoutMs = 120000, mediaPath = "", onPoll = null, options = {}) {
+  const startedAt = Date.now();
+  let last = null;
+  let readyStreak = 0;
+  while (Date.now() - startedAt < timeoutMs) {
+    last = await readCompositeUploadReadinessSnapshot(client, platform, mediaPath);
     readyStreak = last.ready ? readyStreak + 1 : 0;
     if (typeof onPoll === "function") {
       onPoll({
@@ -6559,15 +12780,6 @@ async function waitForCompositeUploadReady(client, platform, timeoutMs = 120000,
       });
     }
     const waitedMs = Date.now() - startedAt;
-    if (String(platform || "").trim() === "youtube" && last.youtubeDraftResumeAvailable) {
-      return {
-        ready: false,
-        failed: false,
-        waited_ms: waitedMs,
-        ready_streak: readyStreak,
-        last,
-      };
-    }
     const failureState = deriveCompositeUploadReadinessFailureState(
       platform,
       {
@@ -6587,12 +12799,42 @@ async function waitForCompositeUploadReady(client, platform, timeoutMs = 120000,
         last,
       };
     }
+    if (shouldAllowCompositeFieldPreparation(platform, { ready: false, failed: false, waited_ms: waitedMs, ready_streak: readyStreak, last })) {
+      return { ready: false, failed: false, waited_ms: waitedMs, ready_streak: readyStreak, last };
+    }
     if (shouldAcceptCompositeUploadReadyState(platform, last, readyStreak, Date.now() - startedAt)) {
       return { ready: true, waited_ms: Date.now() - startedAt, ready_streak: readyStreak, last };
     }
     await sleep(5000);
   }
   return { ready: false, waited_ms: Date.now() - startedAt, ready_streak: readyStreak, last };
+}
+
+export function shouldBootstrapCompositeUploadFromCleanEntry(readiness = {}) {
+  const state = readiness && typeof readiness === "object" ? readiness : {};
+  const last = state.last && typeof state.last === "object" ? state.last : {};
+  if (Boolean(state.ready) || Boolean(state.failed)) return false;
+  if (Boolean(last.busy) || Boolean(last.failed) || Boolean(last.mediaPresent)) return false;
+  if (Boolean(last.uploadPromptOnly)) return true;
+  return Number(last.fileInputCount || 0) > 0;
+}
+
+export function shouldAwaitCompositeUploadEntryHydration(platform, readiness = {}) {
+  const normalizedPlatform = normalizePlatform(platform);
+  const state = readiness && typeof readiness === "object" ? readiness : {};
+  const last = state.last && typeof state.last === "object" ? state.last : {};
+  if (Boolean(state.ready) || Boolean(state.failed)) return false;
+  if (Boolean(last.busy) || Boolean(last.failed) || Boolean(last.mediaPresent)) return false;
+  if (shouldBootstrapCompositeUploadFromCleanEntry(state)) return false;
+  const href = String(last.href || "").trim();
+  const linesText = Array.isArray(last.lines)
+    ? last.lines.map((line) => String(line || "").trim()).filter(Boolean).join(" ")
+    : "";
+  if (normalizedPlatform === "douyin") {
+    if (!isDouyinUploadEntryRoute(href)) return false;
+    return !linesText || /加载中，请稍候|加载中|请稍候|Loading/i.test(linesText);
+  }
+  return false;
 }
 
 export function expectedMediaPath(content) {
@@ -6618,35 +12860,24 @@ function compositeUploadReadinessTimeoutMs(platform, captureResponseTimeoutMs = 
   return Math.max(uploadTimeout, captureTimeout);
 }
 
-async function ensureYoutubeUploadEditor(client, titleHint = "") {
-  const route = await evaluateWithClient(client, `(() => {
-    const extractYouTubeDraftVideoId = ${extractYouTubeDraftVideoId.toString()};
-    const selectDraftResumeCandidate = ${selectYouTubeDraftResumeCandidate.toString()};
-    const buildUploadResumeUrl = ${buildYouTubeUploadResumeUrl.toString()};
-    const buildContentListUrl = ${buildYouTubeStudioContentListUrl.toString()};
-    const shouldTreatUploadSurfaceAsStable = ${shouldTreatYouTubeUploadSurfaceAsStable.toString()};
-    const titleHint = ${JSON.stringify(String(titleHint || "").trim())};
+async function inspectYouTubeUploadEditorBootstrapSurface(client) {
+  return evaluateWithClient(client, `(() => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-    const href = String(location.href || "");
-    const match = href.match(/https:\\/\\/studio\\.youtube\\.com\\/channel\\/([^/?#]+)/);
-    if (!match) return { matched: false, current: href, reason: "missing_channel_id" };
-    const channel = match[1];
-    const text = clean((document.scrollingElement || document.documentElement || document.body)?.innerText || "");
-    const uploadDialogSurface = /上传视频|Upload videos|Select files|拖拽|选择文件|立即投稿|Create/.test(text);
-    const allFileInputs = [...document.querySelectorAll("input[type=file]")];
-    const visibleInputs = allFileInputs.filter((input) => {
-      const rect = input.getBoundingClientRect();
-      const style = getComputedStyle(input);
+    const visible = (el) => {
+      if (!el || typeof el.getBoundingClientRect !== "function") return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
       return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-    });
+    };
+    const href = String(location.href || "");
+    const text = clean((document.scrollingElement || document.documentElement || document.body)?.innerText || "");
+    const allFileInputs = [...document.querySelectorAll("input[type=file]")];
+    const visibleInputs = allFileInputs.filter(visible);
     const videoCapableInputs = allFileInputs.filter((input) => {
       const accept = String(input.getAttribute("accept") || input.accept || "").trim().toLowerCase();
       if (!accept) return true;
       return /video|mp4|mov|mkv|webm|avi|mpeg|quicktime/.test(accept);
     });
-    const uploadDialogRoute = ${hasYoutubeUploadDialogQuery.toString()}(href);
-    const uploadResumeRoute = ${hasYoutubeUploadResumeVideoId.toString()}(href);
-    const channelContentList = /频道内容|每页行数|第\\s*\\d+\\s*-\\s*\\d+\\s*条|添加说明|编辑草稿|草稿|发布日期/.test(text);
     const draftRows = [...document.querySelectorAll("ytcp-video-row,[role=row]")]
       .map((row) => {
         const watchAnchor = row.querySelector("a#anchor-watch-on-yt,a[href*='watch?v=']");
@@ -6659,106 +12890,329 @@ async function ensureYoutubeUploadEditor(client, titleHint = "") {
       })
       .filter((row) => /草稿|Draft/i.test(row.text) && /编辑草稿|Edit draft/i.test(row.text))
       .slice(0, 24);
-    const selectedDraft = selectDraftResumeCandidate(draftRows, titleHint);
-    const draftWatchHref = String(selectedDraft?.watchHref || "").trim();
-    const draftTitleHref = String(selectedDraft?.titleHref || "").trim();
-    const draftVideoId = extractYouTubeDraftVideoId(draftWatchHref, draftTitleHref || href);
-    const uploadResumeTarget = buildUploadResumeUrl(href, draftVideoId);
-    const contentListUrl = buildContentListUrl(channel);
-    const uploadUrls = [
-      "https://studio.youtube.com/channel/" + channel + "/videos/upload",
-      "https://studio.youtube.com/channel/" + channel + "/upload",
-    ];
-    const onContentList = href.startsWith(contentListUrl);
-    const alreadyOnUpload = uploadUrls.some((item) => href.startsWith(item));
-    if (onContentList && channelContentList) {
-      return {
-        matched: true,
-        channel,
-        current: href,
-        changed: false,
-        uploadDialogSurface,
-        uploadDialogRoute,
-        uploadResumeRoute,
-        fileInputs: visibleInputs.length,
-        totalFileInputs: allFileInputs.length,
-        videoCapableFileInputs: videoCapableInputs.length,
-        uploadUrls: [contentListUrl, ...uploadUrls],
-        channelContentList,
-        draftVideoId,
-        draftWatchHref,
-        draftTitleHref,
-        selectedDraftText: String(selectedDraft?.text || ""),
-      };
-    }
-    if (alreadyOnUpload && channelContentList && !uploadResumeRoute && uploadResumeTarget && uploadResumeTarget !== href) {
-      return {
-        matched: true,
-        channel,
-        current: href,
-        changed: true,
-        targets: [uploadResumeTarget, contentListUrl, ...uploadUrls],
-        target: uploadResumeTarget,
-        fallbackTarget: contentListUrl,
-        uploadDialogSurface,
-        uploadDialogRoute,
-        uploadResumeRoute,
-        fileInputs: visibleInputs.length,
-        totalFileInputs: allFileInputs.length,
-        uploadUrls,
-        channelContentList,
-        draftVideoId,
-        draftWatchHref,
-        draftTitleHref,
-        selectedDraftText: String(selectedDraft?.text || ""),
-      };
-    }
-    const hasUploadSurface = shouldTreatUploadSurfaceAsStable({
-      uploadResumeRoute,
-      channelContentList,
-      uploadDialogSurface: uploadDialogRoute || uploadDialogSurface,
-      visibleFileInputCount: visibleInputs.length,
-      videoCapableFileInputCount: videoCapableInputs.length,
-    });
-    if (alreadyOnUpload && hasUploadSurface) {
-      return {
-        matched: true,
-        channel,
-        current: href,
-        changed: false,
-        uploadDialogSurface,
-        uploadDialogRoute,
-        uploadResumeRoute,
-        fileInputs: visibleInputs.length,
-        totalFileInputs: allFileInputs.length,
-        videoCapableFileInputs: videoCapableInputs.length,
-        uploadUrls,
-        channelContentList,
-        draftVideoId,
-        draftWatchHref,
-        draftTitleHref,
-        selectedDraftText: String(selectedDraft?.text || ""),
-      };
-    }
     return {
-      matched: true,
-      channel,
-      current: href,
-      changed: true,
-      targets: [contentListUrl, ...uploadUrls],
-      target: contentListUrl,
-      fallbackTarget: uploadUrls[0],
-      uploadDialogSurface,
-      uploadDialogRoute,
-      fileInputs: visibleInputs.length,
-      totalFileInputs: allFileInputs.length,
-      videoCapableFileInputs: videoCapableInputs.length,
-      channelContentList,
+      href,
+      bodyText: text,
+      createControlSurface: /youtube\\.com/i.test(href) && /创建|Create/.test(text) && /上传视频|Upload videos/.test(text),
+      uploadDialogSurface: /上传视频|Upload videos|Select files|拖拽|选择文件|立即投稿|Create/.test(text),
+      uploadDialogRoute: ${hasYoutubeUploadDialogQuery.toString()}(href),
+      uploadResumeRoute: ${hasYoutubeUploadResumeVideoId.toString()}(href),
+      channelContentList: /频道内容|每页行数|第\\s*\\d+\\s*-\\s*\\d+\\s*条|添加说明|编辑草稿|草稿|发布日期/.test(text),
+      visibleFileInputCount: visibleInputs.length,
+      totalFileInputCount: allFileInputs.length,
+      videoCapableFileInputCount: videoCapableInputs.length,
+      draftRows,
     };
   })()`, 10000);
-  if (!route.matched || !route.changed) return route;
-  await evaluateWithClient(client, `(() => { location.href = ${JSON.stringify(route.target)}; return { navigated: true, target: ${JSON.stringify(route.target)} }; })()`, 10000);
-  return route;
+}
+
+async function inspectYouTubeUploadWizardState(client) {
+  const snapshot = await pageSnapshot(client).catch(() => ({}));
+  const text = String(
+    [
+      ...(Array.isArray(snapshot?.headings) ? snapshot.headings : []),
+      ...(Array.isArray(snapshot?.lines) ? snapshot.lines : []),
+    ].join(" ") || snapshot?.text || "",
+  ).replace(/\s+/g, " ").trim();
+  return {
+    url: String(snapshot?.url || "").trim(),
+    title: String(snapshot?.title || "").trim(),
+    text,
+    step: deriveYouTubeUploadWizardStep(snapshot?.url || "", text),
+  };
+}
+
+function resolveYouTubeSubtitleAssetPath(content = {}) {
+  const subtitles = content?.subtitles && typeof content.subtitles === "object" ? content.subtitles : {};
+  const subtitleFiles = Array.isArray(content?.subtitle_files) ? content.subtitle_files : [];
+  const subtitleEntries = Array.isArray(subtitles?.files) ? subtitles.files : [];
+  const candidates = [
+    content?.subtitle_path,
+    content?.subtitle_file,
+    content?.subtitle_local_path,
+    content?.caption_path,
+    content?.captions_path,
+    subtitles?.path,
+    subtitles?.local_path,
+    subtitles?.subtitle_path,
+    subtitleFiles[0],
+    subtitleEntries.find((item) => item && typeof item === "object" && item.local_path)?.local_path,
+  ];
+  return String(candidates.find((value) => String(value || "").trim()) || "").trim();
+}
+
+async function setFirstGenericFileInput(client, filePath, acceptPattern = null) {
+  const normalizedPath = String(filePath || "").trim();
+  if (!normalizedPath) return { uploaded: false, reason: "missing_file_path" };
+  const documentResult = await client.send("DOM.getDocument", { depth: -1, pierce: true });
+  const rootNodeId = documentResult.root.nodeId;
+  const queryResult = await client.send("DOM.querySelectorAll", { nodeId: rootNodeId, selector: "input[type=file]" });
+  const described = [];
+  for (const nodeId of queryResult.nodeIds || []) described.push(await describeFileInputCandidate(client, nodeId));
+  const pattern = acceptPattern instanceof RegExp ? acceptPattern : null;
+  const candidates = described
+    .filter((item) => {
+      const accept = String(item?.attrMap?.accept || "").toLowerCase();
+      if (!pattern) return true;
+      if (!accept) return true;
+      return pattern.test(accept) || (!/image|video/.test(accept) && /text|application|subtitle|caption|srt|vtt/.test(accept));
+    })
+    .sort((left, right) => {
+      const score = (item) => {
+        let value = 0;
+        if (item.runtime?.visible) value += 200;
+        if (pattern && pattern.test(String(item?.attrMap?.accept || "").toLowerCase())) value += 120;
+        if (!/image|video/.test(String(item?.attrMap?.accept || "").toLowerCase())) value += 40;
+        return value;
+      };
+      return score(right) - score(left);
+    });
+  const preferred = candidates[0];
+  if (!preferred) {
+    return {
+      uploaded: false,
+      reason: described.length ? "no_matching_file_input" : "no_file_input",
+      fileInputs: described.map((item) => ({ ...item.attrMap, ...item.runtime })),
+    };
+  }
+  const setPayload = preferred.backendNodeId
+    ? { backendNodeId: preferred.backendNodeId, files: [normalizedPath] }
+    : { nodeId: preferred.nodeId, files: [normalizedPath] };
+  await client.send("DOM.setFileInputFiles", setPayload);
+  await dispatchFileInputEvents(client, preferred.nodeId, { eventTypes: ["input", "change"] });
+  await sleep(600);
+  const verified = await refreshFileInputCandidate(client, preferred);
+  return {
+    uploaded: Number(verified.runtime?.filesLength || 0) > 0,
+    input: preferred.attrMap,
+    runtime: verified.runtime,
+    fileInputCount: described.length,
+    reason: Number(verified.runtime?.filesLength || 0) > 0 ? "file_input_loaded" : "file_input_not_loaded",
+  };
+}
+
+async function forceYouTubeCreateUploadFlow(client) {
+  const actions = [];
+  actions.push({ kind: "youtube_create_entry_exact", ...(await activateYouTubeCreateButton(client)) });
+  if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_create_entry_semantic", ...(await clickSemanticActionByHints(client, ["创建", "CREATE"], { intent: "media_upload_entry" })) });
+  if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_create_entry", ...(await clickByText(client, ["创建", "CREATE"])) });
+  if (actions.some((action) => /youtube_create_entry/.test(String(action?.kind || "")) && action?.clicked)) {
+    await sleep(900);
+  }
+  actions.push({ kind: "youtube_upload_entry_exact", ...(await activateYouTubeVisibleUploadEntry(client)) });
+  if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_upload_entry_semantic", ...(await clickSemanticActionByHints(client, ["上传视频", "Upload videos"], { intent: "media_upload_entry" })) });
+  if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_upload_entry", ...(await clickByText(client, ["上传视频", "Upload videos"])) });
+  if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_upload_entry_loose", ...(await clickLooseText(client, ["上传视频", "Upload videos"])) });
+  if (!actions.some((action) => /youtube_upload_entry/.test(String(action?.kind || "")) && action?.clicked)) {
+    actions.push({ kind: "youtube_upload_entry_hidden", ...(await activateYoutubeHiddenUploadEntry(client)) });
+  }
+  await sleep(1600);
+  const state = await inspectYouTubeUploadWizardState(client);
+  return {
+    clicked: actions.some((action) => action?.clicked),
+    actions,
+    state,
+  };
+}
+
+async function maybeUploadYouTubeSubtitles(client, content) {
+  const subtitlePath = resolveYouTubeSubtitleAssetPath(content);
+  if (!subtitlePath) return { attempted: false, skipped: true, reason: "subtitle_asset_missing" };
+  const actions = [];
+  actions.push({ kind: "youtube_subtitle_add_entry", ...(await clickByText(client, ["添加字幕", "Add subtitles", "添加"])) });
+  if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_subtitle_add_entry_loose", ...(await clickLooseText(client, ["添加字幕", "Add subtitles", "添加"])) });
+  if (actions.some((action) => /youtube_subtitle_add_entry/.test(String(action?.kind || "")) && action?.clicked)) {
+    await sleep(1200);
+  }
+  const upload = await setFirstGenericFileInput(client, subtitlePath, /srt|vtt|text|caption|subtitle|application/);
+  actions.push({ kind: "youtube_subtitle_upload", ...upload, subtitle_path: subtitlePath });
+  return {
+    attempted: true,
+    uploaded: Boolean(upload.uploaded),
+    subtitle_path: subtitlePath,
+    actions,
+  };
+}
+
+async function ensureYouTubeAudienceSelection(client, content = {}) {
+  const explicitMadeForKids = [
+    content?.made_for_kids,
+    content?.is_made_for_kids,
+    content?.audience_made_for_kids,
+    content?.platform_specific_overrides?.made_for_kids,
+  ].find((value) => typeof value === "boolean");
+  const expectMadeForKids = explicitMadeForKids === true;
+  const expectation = expectMadeForKids ? "made_for_kids" : "not_for_kids";
+  const result = await evaluateWithClient(client, `(async () => {
+    const expectMadeForKids = ${expectMadeForKids ? "true" : "false"};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el || typeof el.getBoundingClientRect !== "function") return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const click = (el) => {
+      if (!el) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      try { if (typeof el.click === "function") el.click(); } catch {}
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        try { el.dispatchEvent(new MouseEvent(type, eventInit)); } catch {}
+      }
+      return true;
+    };
+    const bodyText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    const audienceRoot = document.querySelector("ytkc-made-for-kids-select")
+      || [...document.querySelectorAll("div,section,ytcp-video-metadata-editor-basics")].find((el) => /面向儿童|made for kids/i.test(clean(el.innerText || el.textContent || "")));
+    if (audienceRoot && typeof audienceRoot.scrollIntoView === "function") {
+      audienceRoot.scrollIntoView({ block: "center", inline: "nearest" });
+    }
+    const radioButtons = [...document.querySelectorAll("tp-yt-paper-radio-button[role=radio], [role=radio]")];
+    const matchesExpectation = (text) => expectMadeForKids
+      ? /是，内容是面向儿童的|yes[,，].*made for kids/i.test(text)
+      : /不，内容不是面向儿童的|no[,，].*not made for kids/i.test(text);
+    const target = radioButtons.find((el) => matchesExpectation(clean(el.innerText || el.textContent || el.getAttribute("aria-label") || "")));
+    if (!target) {
+      return {
+        selected: false,
+        matched: false,
+        reason: "audience_option_missing",
+        body_text: bodyText.slice(0, 2000),
+      };
+    }
+    const beforeChecked = String(target.getAttribute("aria-checked") || "").toLowerCase() === "true";
+    if (!beforeChecked) click(target);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const afterChecked = String(target.getAttribute("aria-checked") || "").toLowerCase() === "true";
+    const refreshedBodyText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    const confirmation = expectMadeForKids
+      ? /已设置为面向儿童/.test(refreshedBodyText)
+      : /已设置为非面向儿童/.test(refreshedBodyText);
+    return {
+      selected: afterChecked || confirmation,
+      matched: true,
+      already_selected: beforeChecked,
+      clicked: !beforeChecked,
+      label: clean(target.innerText || target.textContent || target.getAttribute("aria-label") || ""),
+      confirmation,
+      aria_checked: String(target.getAttribute("aria-checked") || ""),
+      body_text: refreshedBodyText.slice(0, 2000),
+    };
+  })()`, 18000).catch((error) => ({
+    selected: false,
+    matched: false,
+    reason: "audience_selection_error",
+    message: String(error?.message || error || ""),
+  }));
+  return {
+    expected: expectation,
+    ...result,
+  };
+}
+
+async function advanceYouTubeUploadWizard(client, content, targetStep = "visibility") {
+  const actions = [];
+  const orderedSteps = ["details", "video_elements", "checks", "visibility"];
+  const targetIndex = orderedSteps.indexOf(targetStep);
+  for (let hop = 0; hop < 6; hop += 1) {
+    const state = await inspectYouTubeUploadWizardState(client);
+    actions.push({ kind: "youtube_wizard_state", step: state.step, url: state.url, title: state.title });
+    const currentIndex = orderedSteps.indexOf(state.step);
+    if (currentIndex >= 0 && targetIndex >= 0 && currentIndex >= targetIndex) return actions;
+    if (!state.step || state.step === "upload_entry") {
+      actions.push({ kind: "youtube_wizard_blocked", blocked: true, reason: state.step || "unknown_step", url: state.url });
+      return actions;
+    }
+    if (state.step === "details") {
+      actions.push({ kind: "youtube_audience_selection", ...(await ensureYouTubeAudienceSelection(client, content)) });
+    }
+    if (state.step === "video_elements") {
+      const subtitle = await maybeUploadYouTubeSubtitles(client, content);
+      actions.push({ kind: "youtube_subtitle_stage", ...subtitle });
+      if (Array.isArray(subtitle.actions)) actions.push(...subtitle.actions);
+    }
+    const continueAction = await clickByText(client, ["继续", "Next"]);
+    actions.push({ kind: `youtube_wizard_continue_${state.step}`, ...continueAction });
+    if (!continueAction.clicked) {
+      const looseAction = await clickLooseText(client, ["继续", "Next"]);
+      actions.push({ kind: `youtube_wizard_continue_${state.step}_loose`, ...looseAction });
+      if (!looseAction.clicked) {
+        actions.push({ kind: "youtube_wizard_continue_blocked", blocked: true, step: state.step, url: state.url });
+        return actions;
+      }
+    }
+    await sleep(1800);
+  }
+  return actions;
+}
+
+async function setYouTubeVisibilityAndSchedule(client, content) {
+  const actions = [];
+  const visibilityMode = normalizeYouTubeVisibilityOrPublishMode(
+    content?.visibility_or_publish_mode,
+    content?.scheduled_publish_at,
+  );
+  if (visibilityMode === "schedule") {
+    actions.push({ kind: "youtube_visibility_public_seed", ...(await clickByText(client, ["公开", "Public"])) });
+    if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_visibility_public_seed_loose", ...(await clickLooseText(client, ["公开", "Public"])) });
+    actions.push({ kind: "youtube_schedule_entry", ...(await clickByText(client, ["安排时间", "Schedule", "安排", "时间"])) });
+    if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_schedule_entry_loose", ...(await clickLooseText(client, ["安排时间", "Schedule", "安排", "时间"])) });
+    await sleep(900);
+    actions.push({ kind: "youtube_schedule_set", ...(await setCompositeSchedule(client, "youtube", content)) });
+    return actions;
+  }
+  if (visibilityMode === "unlisted") {
+    actions.push({ kind: "youtube_visibility_unlisted", ...(await clickByText(client, ["不公开列出", "Unlisted"])) });
+    if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_visibility_unlisted_loose", ...(await clickLooseText(client, ["不公开列出", "Unlisted"])) });
+    return actions;
+  }
+  if (visibilityMode === "private") {
+    actions.push({ kind: "youtube_visibility_private", ...(await clickByText(client, ["私享", "Private"])) });
+    if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_visibility_private_loose", ...(await clickLooseText(client, ["私享", "Private"])) });
+    return actions;
+  }
+  actions.push({ kind: "youtube_visibility_public", ...(await clickByText(client, ["公开", "Public"])) });
+  if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_visibility_public_loose", ...(await clickLooseText(client, ["公开", "Public"])) });
+  return actions;
+}
+
+async function ensureYoutubeUploadEditor(client, titleHint = "") {
+  const navigations = [];
+  let lastRoute = { matched: false, current: "", changed: false, reason: "route_probe_unavailable" };
+  for (let hop = 0; hop < 3; hop += 1) {
+    const surface = await inspectYouTubeUploadEditorBootstrapSurface(client);
+    lastRoute = deriveYouTubeUploadEditorBootstrapPlan(surface, titleHint);
+    if (lastRoute.reason === "control_driven_create_upload_required") {
+      return {
+        ...lastRoute,
+        changed: false,
+        navigations,
+      };
+    }
+    if (!lastRoute.matched || !lastRoute.changed || !lastRoute.target || lastRoute.target === lastRoute.current) {
+      return {
+        ...lastRoute,
+        changed: navigations.length > 0 || Boolean(lastRoute.changed),
+        navigations,
+      };
+    }
+    navigations.push({
+      hop: hop + 1,
+      from: String(lastRoute.current || surface?.href || ""),
+      to: String(lastRoute.target || ""),
+      reason: String(lastRoute.reason || ""),
+    });
+    await evaluateWithClient(client, `(() => { location.href = ${JSON.stringify(lastRoute.target)}; return { navigated: true, target: ${JSON.stringify(lastRoute.target)} }; })()`, 10000);
+    await sleep(1800);
+  }
+  return {
+    ...lastRoute,
+    changed: navigations.length > 0 || Boolean(lastRoute.changed),
+    navigations,
+    reason: navigations.length > 0 ? "bootstrap_hop_limit_reached" : String(lastRoute.reason || ""),
+  };
 }
 
 export async function activateYoutubeHiddenUploadEntry(client) {
@@ -6790,21 +13244,162 @@ export async function activateYoutubeHiddenUploadEntry(client) {
   })()`, 10000);
 }
 
+export async function activateYouTubeCreateButton(client) {
+  return evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el || typeof el.getBoundingClientRect !== "function") return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden"
+        && el.getAttribute("aria-disabled") !== "true" && !el.disabled;
+    };
+    const click = (el) => {
+      if (!el) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      try { if (typeof el.click === "function") el.click(); } catch {}
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        try { el.dispatchEvent(new MouseEvent(type, eventInit)); } catch {}
+      }
+      return true;
+    };
+    const selectors = [
+      "ytcp-button.ytcpAppHeaderCreateIcon button[aria-label='创建']",
+      "ytcp-button.ytcpAppHeaderCreateIcon button",
+      "button[aria-label='创建']",
+    ];
+    const target = selectors
+      .flatMap((selector) => [...document.querySelectorAll(selector)])
+      .find(visible)
+      || [...document.querySelectorAll("button,[role=button],ytcp-button,a")]
+        .find((el) => visible(el) && /创建|Create/i.test(clean(el.innerText || el.textContent || el.getAttribute("aria-label") || "")));
+    if (!target) return { clicked: false, reason: "youtube_create_button_not_found" };
+    click(target);
+    return {
+      clicked: true,
+      label: clean(target.innerText || target.textContent || target.getAttribute("aria-label") || ""),
+      selector_hint: target.matches("button[aria-label='创建']") ? "button[aria-label='创建']" : String(target.tagName || "").toLowerCase(),
+    };
+  })()`, 10000);
+}
+
+export async function activateYouTubeVisibleUploadEntry(client) {
+  return evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el || typeof el.getBoundingClientRect !== "function") return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const click = (el) => {
+      if (!el) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      try { if (typeof el.click === "function") el.click(); } catch {}
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        try { el.dispatchEvent(new MouseEvent(type, eventInit)); } catch {}
+      }
+      return true;
+    };
+    const target = [...document.querySelectorAll("tp-yt-paper-item[test-id='upload'][role='menuitem'], [test-id='upload'][role='menuitem']")]
+      .find(visible);
+    if (!target) return { clicked: false, reason: "youtube_upload_menuitem_not_found" };
+    click(target);
+    click(target.querySelector("yt-formatted-string, .text-content, tp-yt-paper-item-body, div, span"));
+    return {
+      clicked: true,
+      label: clean(target.innerText || target.textContent || target.getAttribute("aria-label") || ""),
+      test_id: String(target.getAttribute("test-id") || ""),
+    };
+  })()`, 10000);
+}
+
 async function uploadYoutubeVideoForComposite(client, mediaPath) {
   const mediaName = mediaPath ? path.win32.basename(String(mediaPath)) : "";
   const mediaStem = mediaName.replace(/\.[^.]+$/, "");
   const route = await ensureYoutubeUploadEditor(client, mediaStem);
   if (route.changed) await sleep(2600);
-  const firstUpload = await setFirstVideoFileInput(client, mediaPath);
+  let firstUpload = { uploaded: false, reason: "upload_entry_not_prepared" };
+  const routeRequiresCreateFlow = route?.reason === "control_driven_create_upload_required";
+  let createFlow = { clicked: false, actions: [], state: null };
+  if (routeRequiresCreateFlow) {
+    createFlow = await forceYouTubeCreateUploadFlow(client).catch(() => ({ clicked: false, actions: [], state: null }));
+    if (createFlow.clicked) await sleep(1800);
+  }
+  firstUpload = await setFirstVideoFileInput(client, mediaPath, { platform: "youtube" });
   if (firstUpload.uploaded) return firstUpload;
+  if (shouldAttemptNativeFileChooserFallback(firstUpload)) {
+    const nativeFallbackUpload = await tryYouTubeSelectFilesNativeUpload(client, mediaPath);
+    if (nativeFallbackUpload.uploaded) {
+      return {
+        ...nativeFallbackUpload,
+        create_flow: createFlow,
+      };
+    }
+  }
+  const currentWizardState = await inspectYouTubeUploadWizardState(client).catch(() => ({ step: "" }));
+  const alreadyInsideUploadSurface = ["upload_entry", "details", "video_elements", "checks", "visibility"].includes(String(currentWizardState?.step || ""));
+  if (!createFlow.clicked && !alreadyInsideUploadSurface) {
+    createFlow = await forceYouTubeCreateUploadFlow(client).catch(() => ({ clicked: false, actions: [], state: null }));
+  }
+  if (createFlow.clicked) {
+    await sleep(1800);
+    const secondUpload = await setFirstVideoFileInput(client, mediaPath, { platform: "youtube" });
+    if (secondUpload.uploaded) {
+      return {
+        ...secondUpload,
+        create_flow: createFlow,
+      };
+    }
+    if (shouldAttemptNativeFileChooserFallback(secondUpload)) {
+      const nativeFallbackUpload = await tryYouTubeSelectFilesNativeUpload(client, mediaPath);
+      if (nativeFallbackUpload.uploaded) {
+        return {
+          ...nativeFallbackUpload,
+          create_flow: createFlow,
+        };
+      }
+    }
+  }
   if (route.fallbackTarget) {
     await evaluateWithClient(client, `(() => { location.href = ${JSON.stringify(route.fallbackTarget)}; return { navigated: true, target: ${JSON.stringify(route.fallbackTarget)} }; })()`, 10000);
     await sleep(3000);
-    const fallbackUpload = await setFirstVideoFileInput(client, mediaPath);
-    if (fallbackUpload.uploaded) return fallbackUpload;
+    const fallbackUpload = await setFirstVideoFileInput(client, mediaPath, { platform: "youtube" });
+    if (fallbackUpload.uploaded) {
+      return {
+        ...fallbackUpload,
+        create_flow: createFlow,
+      };
+    }
+    if (shouldAttemptNativeFileChooserFallback(fallbackUpload)) {
+      const nativeFallbackUpload = await tryYouTubeSelectFilesNativeUpload(client, mediaPath);
+      if (nativeFallbackUpload.uploaded) {
+        return {
+          ...nativeFallbackUpload,
+          create_flow: createFlow,
+        };
+      }
+    }
   }
   await sleep(3000);
-  return await setFirstVideoFileInput(client, mediaPath);
+  const finalUpload = await setFirstVideoFileInput(client, mediaPath, { platform: "youtube" });
+  if (!finalUpload.uploaded && shouldAttemptNativeFileChooserFallback(finalUpload)) {
+    const nativeFallbackUpload = await tryYouTubeSelectFilesNativeUpload(client, mediaPath);
+    if (nativeFallbackUpload.uploaded) {
+      return {
+        ...nativeFallbackUpload,
+        create_flow: createFlow,
+      };
+    }
+  }
+  return {
+    ...finalUpload,
+    create_flow: createFlow,
+  };
 }
 
 async function ensureXCompose(client) {
@@ -6872,7 +13467,7 @@ async function ensureXCompose(client) {
   })()`, 10000);
   if (final.compose_ready) return { ...state, ...final, method: "after_interaction" };
   await evaluateWithClient(client, `(() => {
-    location.href = ${JSON.stringify(PLATFORM_PUBLISH_ENTRY_URLS.x)};
+    location.href = ${JSON.stringify(compositePlatformPublishEntryUrl("x") || PLATFORM_PUBLISH_ENTRY_URLS.x)};
     return { navigated: true, url: location.href };
   })()`, 10000);
   await sleep(1500);
@@ -6886,9 +13481,50 @@ async function ensureXCompose(client) {
 async function ensureCompositeUploadReady(client, platform, content, timeoutMs = 120000, onPoll = null, options = {}) {
   const actions = [];
   const mediaPath = expectedMediaPath(content);
-  let readiness = await waitForCompositeUploadReady(client, platform, timeoutMs, mediaPath, onPoll, options);
-  actions.push({ kind: `${platform}_upload_ready_wait`, ...readiness });
-  if (readiness.ready) return { actions, readiness };
+  const reuploadTexts = ["重新上传", "刷新", "重试", "选择视频", "点击上传", "上传视频", "发布视频", "发表视频", "Upload videos", "Create"];
+  let readiness = {
+    ready: false,
+    failed: false,
+    waited_ms: 0,
+    ready_streak: 0,
+    last: await readCompositeUploadReadinessSnapshot(client, platform, mediaPath),
+  };
+  actions.push({ kind: `${platform}_upload_initial_snapshot`, ...readiness });
+  if (shouldAwaitCompositeUploadEntryHydration(platform, readiness)) {
+    const hydrationStartedAt = Date.now();
+    while (Date.now() - hydrationStartedAt < 15000 && shouldAwaitCompositeUploadEntryHydration(platform, readiness)) {
+      await sleep(1000);
+      readiness = {
+        ...readiness,
+        last: await readCompositeUploadReadinessSnapshot(client, platform, mediaPath),
+      };
+    }
+    actions.push({
+      kind: `${platform}_upload_entry_hydration_wait`,
+      waited_ms: Date.now() - hydrationStartedAt,
+      bootstrap_ready: shouldBootstrapCompositeUploadFromCleanEntry(readiness),
+      ...readiness,
+    });
+  }
+  if (shouldBootstrapCompositeUploadFromCleanEntry(readiness)) {
+    actions.push({ kind: `${platform}_upload_bootstrap_entry`, reason: "clean_upload_entry_detected" });
+    actions.push({ kind: `${platform}_upload_reupload_entry`, ...(await clickByText(client, reuploadTexts)) });
+    await sleep(1200);
+    const bootstrapUpload = await setFirstVideoFileInput(client, mediaPath, { platform });
+    actions.push({ kind: `${platform}_upload_bootstrap`, ...bootstrapUpload });
+    if (bootstrapUpload.uploaded) {
+      await sleep(16000);
+      readiness = await waitForCompositeUploadReady(client, platform, timeoutMs, mediaPath, onPoll, {
+        ...options,
+        syntheticUploadExpected: true,
+      });
+      actions.push({ kind: `${platform}_upload_ready_after_bootstrap`, ...readiness });
+    }
+  } else {
+    readiness = await waitForCompositeUploadReady(client, platform, timeoutMs, mediaPath, onPoll, options);
+    actions.push({ kind: `${platform}_upload_ready_wait`, ...readiness });
+  }
+  if (readiness.ready || shouldAllowCompositeFieldPreparation(platform, readiness)) return { actions, readiness };
   if (readiness.last?.busy) {
     actions.push({ kind: `${platform}_upload_reupload_skipped`, skipped: true, reason: "upload_still_in_progress" });
     return { actions, readiness };
@@ -6900,69 +13536,20 @@ async function ensureCompositeUploadReady(client, platform, content, timeoutMs =
       Array.isArray(readiness.last?.lines) ? readiness.last.lines.join(" ") : "",
     );
     if (youtubeResumeDisposition.present) {
-      const titleHints = [];
-      if (String(content?.title || "").trim()) titleHints.push(String(content.title).trim());
-      if (String(mediaPath || "").trim()) titleHints.push(path.win32.basename(String(mediaPath || "")).replace(/\.[^.]+$/, ""));
-      let resume = await clickYouTubeDraftResumeEntry(client, titleHints);
-      if (!resume.clicked) resume = await clickByText(client, [youtubeResumeDisposition.resume_label]);
-      if (!resume.clicked) resume = await clickLooseText(client, [youtubeResumeDisposition.resume_label]);
-      actions.push({ kind: "youtube_draft_resume", ...resume, reason: youtubeResumeDisposition.reason });
-      if (resume.clicked) {
-        await sleep(2200);
-        readiness = await waitForCompositeUploadReady(client, platform, timeoutMs, mediaPath, onPoll, options);
-        actions.push({ kind: `${platform}_upload_ready_wait_after_draft_resume`, ...readiness });
-        if (readiness.ready || readiness.failed || readiness.last?.busy) return { actions, readiness };
-        for (let fallbackAttempt = 0; fallbackAttempt < 2; fallbackAttempt += 1) {
-          if (!shouldAttemptYouTubeDraftResumeFallbackRoute(readiness, resume)) break;
-          const fallback = deriveYouTubeDraftResumeFallbackTarget(resume, String(readiness.last?.href || ""));
-          if (!fallback.target) break;
-          actions.push({
-            kind: fallbackAttempt === 0 ? "youtube_draft_resume_direct_route" : "youtube_draft_resume_secondary_route",
-            target: fallback.target,
-            reason: fallback.reason,
-          });
-          await evaluateWithClient(client, `(() => {
-            location.href = ${JSON.stringify(fallback.target)};
-            return { navigated: true, target: ${JSON.stringify(fallback.target)} };
-          })()`, 10000).catch(() => null);
-          await sleep(2600);
-          readiness = await waitForCompositeUploadReady(client, platform, timeoutMs, mediaPath, onPoll, options);
-          actions.push({
-            kind: fallbackAttempt === 0
-              ? `${platform}_upload_ready_wait_after_draft_resume_route`
-              : `${platform}_upload_ready_wait_after_draft_resume_secondary_route`,
-            ...readiness,
-          });
-          if (readiness.ready || readiness.failed || readiness.last?.busy) return { actions, readiness };
-        }
-        if (shouldFailYouTubeDraftResumeAsInert(readinessBeforeResume, readiness, resume)) {
-          readiness = {
-            ...readiness,
-            failed: true,
-            failure_reason: "upload_not_applied",
-            pending_reason: "draft_resume_inert",
-          };
-          actions.push({
-            kind: "youtube_draft_resume_inert",
-            failed: true,
-            reason: "draft_resume_inert",
-            target_id: resume.target_id || "",
-            label: resume.label || "",
-          });
-          return { actions, readiness };
-        }
-        if (shouldDeferYouTubeDraftResumeReupload(readiness)) {
-          readiness = {
-            ...readiness,
-            pending_reason: "draft_resume_pending",
-          };
-          actions.push({
-            kind: "youtube_upload_reupload_skipped",
-            skipped: true,
-            reason: "draft_resume_pending",
-          });
-          return { actions, readiness };
-        }
+      actions.push({
+        kind: "youtube_draft_resume_skipped",
+        skipped: true,
+        reason: "youtube_always_create_new_video",
+        resume_label: youtubeResumeDisposition.resume_label,
+      });
+      if (shouldFailYouTubeDraftResumeAsInert(readinessBeforeResume, readiness, { clicked: false })) {
+        readiness = {
+          ...readiness,
+          failed: true,
+          failure_reason: "upload_not_applied",
+          pending_reason: "draft_resume_inert",
+        };
+        return { actions, readiness };
       }
     }
   }
@@ -6976,10 +13563,9 @@ async function ensureCompositeUploadReady(client, platform, content, timeoutMs =
     return { actions, readiness };
   }
 
-  const reuploadTexts = ["重新上传", "刷新", "重试", "选择视频", "点击上传", "上传视频", "发布视频", "发表视频", "Upload videos", "Create"];
   actions.push({ kind: `${platform}_upload_reupload_entry`, ...(await clickByText(client, reuploadTexts)) });
   await sleep(1200);
-  const upload = await setFirstVideoFileInput(client, mediaPath);
+  const upload = await setFirstVideoFileInput(client, mediaPath, { platform });
   actions.push({ kind: `${platform}_upload_reupload`, ...upload });
   if (upload.uploaded) {
     await sleep(16000);
@@ -6996,22 +13582,51 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
   const rawTitle = String(content.title || "").trim();
   const rawBody = String(content.body || "").trim();
   const tags = expectedTags(content, platform === "youtube" ? 15 : 10);
+  const skipExplicitTagEntry = compositePlatformSkipsExplicitTagEntry(platform);
+  const skipExplicitVisibilityEntry = compositePlatformSkipsExplicitVisibilityEntry(platform);
   const title = platform === "x" ? "" : rawTitle;
-  const body = ["xiaohongshu", "kuaishou", "toutiao", "wechat-channels", "x"].includes(platform) && tags.length
+  const body = ["kuaishou", "toutiao", "wechat-channels", "x"].includes(platform) && tags.length
     ? `${platform === "kuaishou" && rawTitle ? `${rawTitle}\n` : ""}${rawBody}\n${tags.map((tag) => `#${tag}`).join(" ")}`
     : rawBody;
-  const collection = expectedCollectionName(content);
+  const collection = expectedCollectionNameForPlatform(platform, content);
   const coverPath = platform === "x" ? "" : expectedCoverPath(content);
+  const coverSlots = resolveExpectedCoverSlotsForPlatform(platform, content);
   const declaration = expectedCompositeDeclaration(content, platform);
+  const xiaohongshuRequireOriginalDeclaration = platform === "xiaohongshu"
+    ? shouldEnableXiaohongshuOriginalDeclaration(extractCompositeDeclarationText(content) || compositePlatformDefaultDeclaration(platform))
+    : false;
   const schedule = parseChinaLocalSchedule(content.scheduled_publish_at || "");
+  const visibilityMode = normalizeCompositeVisibilityMode(
+    content.visibility || content.visibility_mode || content.visibility_or_publish_mode || content.publish_mode || "",
+  );
   const result = await evaluateWithClient(client, `(() => {
     const platform = ${JSON.stringify(platform)};
-    const expected = ${JSON.stringify({ title, body, tags, collection, coverPath, declaration, scheduleDisplay: schedule.display })};
+    const expected = ${JSON.stringify({
+      title,
+      body,
+      tags,
+      native_topics: expectedNativeTopics(content),
+      collection,
+      coverPath,
+      coverSlots,
+      declaration,
+      xiaohongshuRequireOriginalDeclaration,
+      scheduleDisplay: schedule.display,
+      scheduleDisplayWithSeconds: schedule.displayWithSeconds,
+      scheduleHasExplicitSeconds: platform === "kuaishou" && schedule.hasExplicitSeconds,
+      visibility_mode: visibilityMode,
+      skipExplicitTagEntry,
+      skipExplicitVisibilityEntry,
+      platform_overrides: typeof content?.platform_specific_overrides === "object" && content?.platform_specific_overrides !== null
+        ? content.platform_specific_overrides
+        : {},
+    })};
     const extractBody = ${extractCompositeBodyForAudit.toString()};
     const extractDouyinCollection = ${extractDouyinSelectedCollectionEvidence.toString()};
     const verifyBody = ${verifyCompositeBodyField.toString()};
     const verifyDeclaration = ${verifyCompositeDeclarationField.toString()};
     const detectSignals = ${detectCompositePublicationSignals.toString()};
+    const matchesKuaishouSchedule = ${matchesKuaishouScheduleEvidence.toString()};
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const bodyText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
     const lines = bodyText.split(/[\\n\\r]+| {2,}/).map(clean).filter(Boolean);
@@ -7054,6 +13669,74 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       .map((el) => String(getComputedStyle(el).backgroundImage || ""))
       .filter((src) => src && src !== "none")
       .slice(0, 80);
+    const slotSurfaces = platform === "douyin"
+      ? (() => {
+          const slotDefinitions = [
+            { slot: "horizontal_4_3", label: "横封面4:3", aliases: ["横封面4:3", "横封面 4:3", "横版4:3", "横版封面4:3"] },
+            { slot: "vertical_3_4", label: "竖封面3:4", aliases: ["竖封面3:4", "竖封面 3:4", "竖版3:4", "竖版封面3:4"] },
+          ];
+          const allVisibleNodes = [...document.querySelectorAll("div,span,label,p,button,a,strong,section")].filter(visible);
+          const collectScopedSources = (root) => {
+            const scopedImages = [...root.querySelectorAll("img")]
+              .filter(visible)
+              .map((img) => String(img.currentSrc || img.src || ""))
+              .filter(Boolean)
+              .slice(0, 20);
+            const scopedBackgrounds = [...root.querySelectorAll("*")]
+              .filter(visible)
+              .map((el) => String(getComputedStyle(el).backgroundImage || ""))
+              .filter((src) => src && src !== "none")
+              .slice(0, 20);
+            const actionLabels = [...root.querySelectorAll("button,[role=button],input[type=button],input[type=submit],span,div,label,a")]
+              .filter(visible)
+              .map((el) => clean(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || el.getAttribute("title")))
+              .filter(Boolean)
+              .filter((label) => /选择封面|修改封面|更换封面|重新上传|上传封面|设置封面|上传图片/.test(label))
+              .slice(0, 20);
+            return { scopedImages, scopedBackgrounds, actionLabels };
+          };
+          const resolveSlotSurface = (definition) => {
+            const labelNode = allVisibleNodes.find((el) => {
+              const text = clean(el.innerText || el.textContent || "");
+              return definition.aliases.some((alias) => text.includes(alias));
+            });
+            if (!labelNode) return null;
+            const candidateRoots = [];
+            let cursor = labelNode;
+            for (let depth = 0; cursor && depth < 5; depth += 1) {
+              cursor = cursor.parentElement;
+              if (!cursor || !visible(cursor)) continue;
+              candidateRoots.push(cursor);
+            }
+            const structuralRoot = labelNode.closest("[class*=cover],[class*=upload],[class*=card],[class*=item],[class*=slot],[class*=recommend]");
+            if (structuralRoot && visible(structuralRoot)) candidateRoots.push(structuralRoot);
+            const bestRoot = candidateRoots
+              .map((root) => {
+                const rect = root.getBoundingClientRect();
+                const text = clean(root.innerText || root.textContent || "");
+                return { root, text, area: rect.width * rect.height };
+              })
+              .filter((item) => item.text && item.area > 0)
+              .sort((left, right) => {
+                const leftScore = (definition.aliases.some((alias) => left.text.includes(alias)) ? 100000 : 0) + Math.min(left.area, 400000);
+                const rightScore = (definition.aliases.some((alias) => right.text.includes(alias)) ? 100000 : 0) + Math.min(right.area, 400000);
+                return rightScore - leftScore;
+              })[0] || null;
+            const root = bestRoot?.root || labelNode.parentElement || labelNode;
+            const scoped = collectScopedSources(root);
+            return {
+              slot: definition.slot,
+              label: definition.label,
+              text: clean(root.innerText || root.textContent || "").slice(0, 600),
+              image_sources: scoped.scopedImages,
+              background_sources: scoped.scopedBackgrounds,
+              action_labels: scoped.actionLabels,
+              visible: true,
+            };
+          };
+          return slotDefinitions.map(resolveSlotSurface).filter(Boolean);
+        })()
+      : [];
     const textLikeInputTypes = new Set(["", "text", "search", "url", "tel", "email", "number", "date", "time", "datetime-local"]);
     const labeledControlHint = /标题|title|正文|简介|描述|说明|作品描述|作品简介|内容|合集|播放列表|栏目|分类|分区|系列|专辑|发布时间|定时|预约|日期|时间|原创|声明|封面|缩略图|话题|标签/i;
     const inputFields = [...document.querySelectorAll("input,textarea,[contenteditable=true],div[role=textbox]")]
@@ -7099,6 +13782,39 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
           .filter((el) => el.getBoundingClientRect().width * el.getBoundingClientRect().height > 500)
       : [];
     const titleFieldActual = (() => {
+      if (platform === "douyin") {
+        const readDraftValue = (el) => {
+          if (!el) return "";
+          if (el.isContentEditable || el.getAttribute("contenteditable") === "true") {
+            return ${normalizeRichTextDraftValue.toString()}(el.innerText || el.textContent || "");
+          }
+          return ${normalizeRichTextDraftValue.toString()}(el.value || "");
+        };
+        const douyinEditables = [...document.querySelectorAll("textarea,input[type=text],input:not([type]),[contenteditable=true],div[role=textbox]")]
+          .filter((el) => {
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+          })
+          .map((el) => ({
+            el,
+            tag: String(el.tagName || "").toLowerCase(),
+            role: clean(el.getAttribute("role") || "").toLowerCase(),
+            text: clean([el.placeholder, el.getAttribute("aria-label"), el.getAttribute("data-testid"), el.value, el.innerText, el.closest("label")?.innerText, el.parentElement?.innerText].join(" ")),
+            className: clean(typeof el.className === "string" ? el.className : ""),
+            area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+            isContentEditable: Boolean(el.isContentEditable || el.getAttribute("contenteditable") === "true"),
+          }))
+          .filter((item) => item.area > 1000)
+          .sort((left, right) => right.area - left.area);
+        const douyinTargets = ${resolveDouyinRichTextTargets.toString()}(
+          douyinEditables,
+          { title: expected.title, body: expected.body || expected.title },
+        );
+        if (douyinTargets?.titleTarget?.el) {
+          return readDraftValue(douyinTargets.titleTarget.el);
+        }
+      }
       if (platform === "youtube") {
         const youtubeTitleCandidate = textFields.find((item) => /标题（必填）|添加一个可描述你视频的标题|add a title|title/i.test(item.label));
         if (youtubeTitleCandidate) return youtubeTitleCandidate.value;
@@ -7124,6 +13840,39 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
           return extractBody(platform, youtubeBodyCandidate.value || youtubeBodyCandidate.label);
         }
       }
+      if (platform === "douyin") {
+        const readDraftValue = (el) => {
+          if (!el) return "";
+          if (el.isContentEditable || el.getAttribute("contenteditable") === "true") {
+            return ${normalizeRichTextDraftValue.toString()}(el.innerText || el.textContent || "");
+          }
+          return ${normalizeRichTextDraftValue.toString()}(el.value || "");
+        };
+        const douyinEditables = [...document.querySelectorAll("textarea,input[type=text],[contenteditable=true],div[role=textbox]")]
+          .filter((el) => {
+            const rect = el.getBoundingClientRect();
+            const style = getComputedStyle(el);
+            return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+          })
+          .map((el) => ({
+            el,
+            tag: String(el.tagName || "").toLowerCase(),
+            role: clean(el.getAttribute("role") || "").toLowerCase(),
+            text: clean([el.placeholder, el.getAttribute("aria-label"), el.getAttribute("data-testid"), el.value, el.innerText, el.closest("label")?.innerText, el.parentElement?.innerText].join(" ")),
+            className: clean(typeof el.className === "string" ? el.className : ""),
+            area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+            isContentEditable: Boolean(el.isContentEditable || el.getAttribute("contenteditable") === "true"),
+          }))
+          .filter((item) => item.area > 1000)
+          .sort((left, right) => right.area - left.area);
+        const douyinTargets = ${resolveDouyinRichTextTargets.toString()}(
+          douyinEditables,
+          { title: expected.title, body: expected.body || expected.title },
+        );
+        if (douyinTargets?.bodyTarget?.el) {
+          return extractBody(platform, readDraftValue(douyinTargets.bodyTarget.el));
+        }
+      }
       const byLabel = findInputValue(["正文", "简介", "描述", "说明", "作品描述", "作品简介", "正文内容", "内容"], { textLikeOnly: true });
       const needle = expected.body ? expected.body.slice(0, 180) : "";
       const byNeedle = needle ? textFields.map((item) => item.value).find((value) => value.includes(needle) || needle.includes(value)) : "";
@@ -7146,6 +13895,8 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       if (!needle) return "";
       return inputs.find((value) => value.includes(needle) || needle.includes(value)) || "";
     })();
+    const kuaishouCollectionPlaceholderVisible =
+      platform === "kuaishou" && /加入合集/.test(textHaystack) && /选择要加入到的合集/.test(textHaystack);
     const declarationActual = (() => {
       const byLabel = findInputValue(["创作声明", "声明", "原创", "版权", "内容声明", "author declaration"]);
       if (byLabel) return byLabel;
@@ -7154,11 +13905,111 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       }
       return "";
     })();
+    const xiaohongshuOriginalDeclarationEvidence = platform !== "xiaohongshu"
+      ? null
+      : (() => {
+          const normalizeSwitchState = (el) => {
+            if (!el) return false;
+            if (typeof el.checked === "boolean") return Boolean(el.checked);
+            const ariaChecked = String(el.getAttribute("aria-checked") || "").toLowerCase();
+            if (ariaChecked === "true") return true;
+            if (ariaChecked === "false") return false;
+            const cls = clean(typeof el.className === "string" ? el.className : "");
+            return /(checked|active|open|on|selected)/i.test(cls) && !/(disabled|off)/i.test(cls);
+          };
+          const resolveOriginalSwitch = (root) => {
+            if (!root) return { switchControl: null, checkboxInput: null };
+            const switchCandidates = [
+              ...root.querySelectorAll("[role=switch],.d-switch-simulator,.custom-switch-switch,[aria-checked],input[type=checkbox],.d-switch,[class*=switch]"),
+            ].filter(visible);
+            const switchControl = switchCandidates.find((el) => /switch|checkbox/i.test(String(el.getAttribute("role") || "") + " " + String(el.className || "")))
+              || switchCandidates[0]
+              || null;
+            const checkboxInput = switchCandidates.find((el) => String(el.tagName || "").toLowerCase() === "input" && String(el.type || "").toLowerCase() === "checkbox")
+              || root.querySelector("input[type=checkbox]")
+              || null;
+            return { switchControl, checkboxInput };
+          };
+          const labels = [...document.querySelectorAll("div,span,label,button,[role=button],p")]
+            .filter(visible)
+            .filter((el) => clean(el.innerText || el.textContent || "") === "原创声明");
+          let row = null;
+          let switchControl = null;
+          let checkboxInput = null;
+          let labelNode = labels[0] || null;
+          for (const label of labels) {
+            let current = label;
+            for (let depth = 0; depth < 6 && current; depth += 1, current = current.parentElement) {
+              const resolved = resolveOriginalSwitch(current);
+              if (resolved.switchControl || resolved.checkboxInput) {
+                row = current;
+                labelNode = label;
+                switchControl = resolved.switchControl;
+                checkboxInput = resolved.checkboxInput;
+                break;
+              }
+            }
+            if (switchControl || checkboxInput) break;
+          }
+          if (!row) {
+            row = labels[0] || [...document.querySelectorAll("div,section,label,button,[role=button],p")]
+              .filter(visible)
+              .find((el) => /原创声明/.test(clean(el.innerText || el.textContent || "")))
+              || null;
+            const resolved = resolveOriginalSwitch(row);
+            switchControl = resolved.switchControl;
+            checkboxInput = resolved.checkboxInput;
+          }
+          const control = checkboxInput || switchControl;
+          const className = clean(typeof control?.className === "string" ? control.className : "");
+          const enabled = normalizeSwitchState(control);
+          return {
+            visible: Boolean(row),
+            enabled,
+            label_text: clean(labelNode?.innerText || labelNode?.textContent || ""),
+            row_text: clean(row?.innerText || row?.textContent || ""),
+            switch_class: className,
+          };
+        })();
+    const normalizeVisibilityValue = (value = "") => {
+      const text = String(value || "").trim().toLowerCase();
+      if (!text) return "";
+      if (/所有人可见|公开|public|everyone/.test(text)) return "public";
+      if (/好友可见|friends/.test(text)) return "friends";
+      if (/仅自己可见|私密|only me|private/.test(text)) return "private";
+      if (/不公开|unlisted/.test(text)) return "unlisted";
+      if (/scheduled|定时/.test(text)) return "scheduled";
+      return text;
+    };
+    const kuaishouVisibilityState = platform === "kuaishou"
+      ? ${deriveKuaishouVisibilityState.toString()}(lines, inputFields)
+      : null;
+    const visibilityActual = (() => {
+      if (platform === "kuaishou") {
+        return String(kuaishouVisibilityState?.actual || "").trim();
+      }
+      const checked = inputFields.find((item) => item.checked && /查看权限|谁可以看|可见性|公开|好友可见|仅自己可见|public|private|unlisted/i.test(String(item.label || "") + " " + String(item.value || "")));
+      if (checked) return normalizeVisibilityValue(checked.value || checked.label);
+      const byLabel = findInputValue(["查看权限", "谁可以看", "可见性", "visibility", "公开范围"]);
+      const normalizedByLabel = normalizeVisibilityValue(byLabel);
+      if (normalizedByLabel) return normalizedByLabel;
+      if (platform === "kuaishou") {
+        const allVisible = /查看权限/.test(textHaystack) && /所有人可见/.test(textHaystack) && /好友可见/.test(textHaystack) && /仅自己可见/.test(textHaystack);
+        if (allVisible) return "";
+        if (/查看权限/.test(textHaystack) && /所有人可见/.test(textHaystack)) return "public";
+      }
+      return "";
+    })();
+    const kuaishouVisibilityOptionsVisible =
+      platform === "kuaishou"
+      ? Boolean(kuaishouVisibilityState?.options_visible)
+      : /查看权限/.test(textHaystack) && /所有人可见/.test(textHaystack) && /好友可见/.test(textHaystack) && /仅自己可见/.test(textHaystack);
     let douyinScheduleDateValue = "";
     let douyinScheduleTimeValue = "";
     let douyinCheckedScheduled = false;
     const scheduleActual = (() => {
       const scheduleNeedle = expected.scheduleDisplay || "";
+      const scheduleNeedleWithSeconds = expected.scheduleDisplayWithSeconds || "";
       if (!scheduleNeedle) return "";
       if (platform === "douyin") {
         douyinScheduleDateValue = textFields
@@ -7172,6 +14023,21 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
         if (douyinCheckedScheduled && douyinScheduleDateValue && scheduleNeedle.startsWith(douyinScheduleDateValue)) return scheduleNeedle;
         if (douyinCheckedScheduled) return scheduleNeedle;
       }
+      if (platform === "kuaishou") {
+        const baseExpected = {
+          display: scheduleNeedle,
+          displayWithSeconds: scheduleNeedleWithSeconds,
+          requireExactSeconds: false,
+          hasExplicitSeconds: Boolean(expected.scheduleHasExplicitSeconds),
+        };
+        if (matchesKuaishouSchedule(textHaystack, { ...baseExpected, requireExactSeconds: Boolean(expected.scheduleHasExplicitSeconds) })) {
+          return scheduleNeedleWithSeconds || scheduleNeedle;
+        }
+        if (matchesKuaishouSchedule(textHaystack, baseExpected)) {
+          return scheduleNeedle;
+        }
+        return "";
+      }
       const scheduleDate = scheduleNeedle.slice(0, 10);
       const scheduleTime = scheduleNeedle.slice(11, 16);
       if (textHaystack.includes(scheduleNeedle)) return scheduleNeedle;
@@ -7183,7 +14049,124 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       backgroundSources.some((src) => src.includes("blob:") || src.includes("data:image/")) ||
       /封面效果评估通过/.test(textHaystack)
     );
+    const kuaishouCoverSurface = platform === "kuaishou"
+      ? (() => {
+          const allVisibleNodes = [...document.querySelectorAll("section,div,aside,button,[role=button],span,label")]
+            .filter(visible);
+          const anchor = allVisibleNodes.find((el) => /预览封面|编辑画布|封面设置/.test(clean(el.innerText || el.textContent || "")));
+          const roots = [];
+          let cursor = anchor;
+          for (let depth = 0; cursor && depth < 6; depth += 1) {
+            cursor = cursor.parentElement;
+            if (cursor && visible(cursor)) roots.push(cursor);
+          }
+          const root = roots
+            .map((el) => ({ el, text: clean(el.innerText || el.textContent || ""), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
+            .filter((item) => item.area > 4000 && /预览封面|编辑画布|重新上传|智能推荐封面|PK封面/.test(item.text))
+            .sort((left, right) => left.area - right.area)[0]?.el || anchor?.parentElement || anchor || null;
+          if (!root) return null;
+          const scopedImages = [...root.querySelectorAll("img")]
+            .filter(visible)
+            .map((img) => String(img.currentSrc || img.src || "").trim())
+            .filter(Boolean)
+            .slice(0, 20);
+          const scopedBackgrounds = [...root.querySelectorAll("*")]
+            .filter(visible)
+            .map((el) => String(getComputedStyle(el).backgroundImage || ""))
+            .filter((src) => src && src !== "none")
+            .slice(0, 20);
+          const findSlotContainer = (marker) => {
+            let current = marker;
+            for (let depth = 0; current && current !== root && depth < 6; depth += 1) {
+              const hasImage = [...current.querySelectorAll("img")].some(visible);
+              const hasBackground = [...current.querySelectorAll("*")].some((el) => {
+                if (!visible(el)) return false;
+                const backgroundImage = String(getComputedStyle(el).backgroundImage || "");
+                return backgroundImage && backgroundImage !== "none";
+              });
+              if (hasImage || hasBackground) return current;
+              current = current.parentElement;
+            }
+            return marker.parentElement || marker;
+          };
+          const collectSlotSurface = (labelRegex) => {
+            const marker = [...root.querySelectorAll("*")]
+              .filter(visible)
+              .find((el) => labelRegex.test(clean(el.innerText || el.textContent || "")));
+            if (!marker) return null;
+            const container = findSlotContainer(marker);
+            const imageSources = [...container.querySelectorAll("img")]
+              .filter(visible)
+              .map((img) => String(img.currentSrc || img.src || "").trim())
+              .filter(Boolean)
+              .slice(0, 10);
+            const backgroundSources = [...container.querySelectorAll("*")]
+              .filter(visible)
+              .map((el) => String(getComputedStyle(el).backgroundImage || ""))
+              .filter((src) => src && src !== "none")
+              .slice(0, 10);
+            return {
+              label: clean(marker.innerText || marker.textContent || ""),
+              text: clean(container.innerText || container.textContent || "").slice(0, 240),
+              image_sources: imageSources,
+              background_sources: backgroundSources,
+            };
+          };
+          const pkToggleNode = [...root.querySelectorAll("input[type=checkbox],[role=switch],button,[aria-checked]")]
+            .filter(visible)
+            .find((el) => /PK封面/.test(clean((el.closest("*")?.innerText || "") + " " + (el.getAttribute("aria-label") || "") + " " + (el.getAttribute("title") || ""))));
+          const pkToggleChecked = (() => {
+            if (!pkToggleNode) return false;
+            if (pkToggleNode instanceof HTMLInputElement) return Boolean(pkToggleNode.checked);
+            const ariaChecked = String(pkToggleNode.getAttribute("aria-checked") || "").trim().toLowerCase();
+            if (ariaChecked === "true") return true;
+            const className = String(pkToggleNode.className || "");
+            return /checked|active|on/.test(className);
+          })();
+          const slotSurfaces = [
+            collectSlotSurface(/默认封面/),
+            collectSlotSurface(/PK封面/),
+          ].filter(Boolean);
+          const actionLabels = [...root.querySelectorAll("button,[role=button],a,label,span,div")]
+            .filter(visible)
+            .map((el) => clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || ""))
+            .filter(Boolean)
+            .filter((label) => /编辑画布|重新上传|上传图片|完成|确定|封面设置|预览封面/.test(label))
+            .slice(0, 20);
+          return {
+            text: clean(root.innerText || root.textContent || "").slice(0, 600),
+            image_sources: scopedImages,
+            background_sources: scopedBackgrounds,
+            slot_surfaces: slotSurfaces,
+            pk_toggle_checked: pkToggleChecked,
+            action_labels: actionLabels,
+          };
+        })()
+      : null;
+    const kuaishouCustomCoverPreview = platform === "kuaishou"
+      ? ${isKuaishouCustomCoverPreviewEvidence.toString()}(kuaishouCoverSurface, expected.coverPath)
+      : false;
     const coverActual = (() => {
+      if (platform === "kuaishou") {
+        const expectedCoverBase = expected.coverPath ? expected.coverPath.split(/[\\\\/]/).pop() : "";
+        const defaultSlotSurface = Array.isArray(kuaishouCoverSurface?.slot_surfaces)
+          ? kuaishouCoverSurface.slot_surfaces.find((item) => /默认封面/.test(String(item?.label || "")))
+          : null;
+        const scopedImageSources = Array.isArray(defaultSlotSurface?.image_sources)
+          ? defaultSlotSurface.image_sources
+          : Array.isArray(kuaishouCoverSurface?.image_sources)
+            ? kuaishouCoverSurface.image_sources
+            : [];
+        const scopedBackgroundSources = Array.isArray(defaultSlotSurface?.background_sources)
+          ? defaultSlotSurface.background_sources
+          : Array.isArray(kuaishouCoverSurface?.background_sources)
+            ? kuaishouCoverSurface.background_sources
+            : [];
+        if (expectedCoverBase && scopedImageSources.some((src) => String(src || "").includes(expectedCoverBase))) return expectedCoverBase;
+        if (expectedCoverBase && scopedBackgroundSources.some((src) => String(src || "").includes(expectedCoverBase))) return expectedCoverBase;
+        if (kuaishouCustomCoverPreview) return expectedCoverBase || "custom_cover_preview";
+        return "";
+      }
       const byLabel = findInputValue(["封面", "缩略图", "thumbnail", "封面图片", "cover"]);
       if (byLabel) return byLabel;
       const expectedCoverBase = expected.coverPath ? expected.coverPath.split(/[\\\\/]/).pop() : "";
@@ -7217,7 +14200,13 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       && (bodyText.length <= 120 || (lines.length > 0 && lines.length <= 12));
     const editorSurfaceMissing = routeReady
       && ${shouldTreatCompositeEditorSurfaceAsNotReady.toString()}(platform, routeUrl, hasInputFields, signals);
-    const verification_state = authRequired || !routeReady || editorSurfaceMissing || (!hasInputFields && (signals.upload_prompt_only || loadingSurface))
+    const kuaishouScheduleOverlayOpen =
+      platform === "kuaishou"
+      && /根据你的粉丝观看高峰期/.test(textHaystack)
+      && /一键设置/.test(textHaystack)
+      && /确定/.test(textHaystack)
+      && /发布时间|定时发布/.test(textHaystack);
+    const verification_state = authRequired || !routeReady || editorSurfaceMissing || (!hasInputFields && loadingSurface) || kuaishouScheduleOverlayOpen
       ? (authRequired ? "auth_required" : "not_ready")
       : "ready";
     const tagHaystack = platform === "x"
@@ -7225,7 +14214,74 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       : platform === "youtube"
         ? clean([textHaystack, rawTextContentHaystack].join(" "))
         : textHaystack;
-    const tagChecks = expected.tags.map((tag) => ({ tag, present: tagHaystack.includes(tag) || tagHaystack.includes("#" + tag) }));
+    const xiaohongshuConfirmedTopics = platform === "xiaohongshu"
+      ? Array.from(new Set(
+        (Array.isArray(expected.platform_overrides?.xiaohongshu_confirmed_topics) ? expected.platform_overrides.xiaohongshu_confirmed_topics : [])
+          .map((item) => String(item || "").replace(/^#/, "").trim())
+          .filter(Boolean),
+      ))
+      : [];
+    const expectedTags = Array.isArray(expected.tags) ? expected.tags : [];
+    const expectedNativeTopics = Array.isArray(expected.native_topics) ? expected.native_topics : [];
+    const extractHashTopics = (entries = []) => Array.from(new Set(
+      entries
+        .flatMap((entry) => Array.from(String(entry || "").matchAll(/#([^\s#]+)/g)).map((match) => clean(match[1])))
+        .filter(Boolean),
+    ));
+    const nativeTopicEvidenceLines = platform === "douyin"
+      ? []
+      : platform === "xiaohongshu"
+        ? [
+            bodyActual,
+            ...lines.filter((line) => /#/.test(line) && !/活动话题|添加话题|活动详情|更多/.test(line)),
+          ]
+        : [];
+    const douyinTopicEntries = platform === "douyin"
+      ? [
+          { text: bodyActual, context: "body", source: "body" },
+          ...[...document.querySelectorAll("button,[role=button],span,div,label,a")]
+        .filter(visible)
+        .map((el) => ({
+          text: clean(el.innerText || el.textContent || ""),
+          context: clean((el.closest("section,form,[role=dialog],[role=listbox],[role=menu],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel]")?.innerText || el.parentElement?.innerText || "")).slice(0, 220),
+          source: "chip",
+        }))
+        .filter((item) => /^#/.test(item.text))
+        .slice(0, 120),
+        ]
+      : [];
+    const xiaohongshuTopicEntries = platform === "xiaohongshu"
+      ? [
+          { text: bodyActual, context: "body", source: "body" },
+          ...[...document.querySelectorAll("button,[role=button],span,div,label,a,p")]
+            .filter(visible)
+            .map((el) => ({
+              text: clean(el.innerText || el.textContent || ""),
+              context: clean((el.closest("section,form,[role=dialog],[role=listbox],[role=menu],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel]")?.innerText || el.parentElement?.innerText || "")).slice(0, 220),
+              source: "chip",
+            }))
+            .filter((item) => /#/.test(item.text))
+            .slice(0, 120),
+        ]
+      : [];
+    const actualNativeTopics = platform === "douyin"
+      ? ${extractDouyinTopicVerificationLabels.toString()}(douyinTopicEntries, expectedNativeTopics)
+      : platform === "xiaohongshu"
+        ? ${extractXiaohongshuTopicVerificationLabels.toString()}(xiaohongshuTopicEntries, expectedNativeTopics)
+        : extractHashTopics(nativeTopicEvidenceLines);
+    const tagChecks = expectedTags.map((tag) => {
+      const normalizedTag = String(tag || "").replace(/^#/, "").trim();
+      const present = platform === "xiaohongshu"
+        ? actualNativeTopics.includes(normalizedTag) || xiaohongshuConfirmedTopics.includes(normalizedTag)
+        : platform === "douyin"
+          ? actualNativeTopics.includes(normalizedTag)
+          : tagHaystack.includes(normalizedTag) || tagHaystack.includes("#" + normalizedTag);
+      return { tag: normalizedTag, present };
+    });
+    const nativeTopicChecks = expectedNativeTopics.map((topic) => {
+      const normalizedTopic = String(topic || "").replace(/^#/, "").trim();
+      return { topic: normalizedTopic, present: actualNativeTopics.includes(normalizedTopic) };
+    });
     const scheduleDate = expected.scheduleDisplay ? expected.scheduleDisplay.slice(0, 10) : "";
     const scheduleTime = expected.scheduleDisplay ? expected.scheduleDisplay.slice(11, 16) : "";
     const youtubeScheduled = platform === "youtube" && /已安排好视频发布时间|已排定时间|已排定|Scheduled|公开范围 已排定时间/.test(textHaystack);
@@ -7237,7 +14293,16 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       platform === "douyin"
       && douyinCheckedScheduled
       && (!scheduleDate || !douyinScheduleDateValue || douyinScheduleDateValue === scheduleDate);
+    const kuaishouSchedulePresent =
+      platform === "kuaishou"
+      && matchesKuaishouSchedule(textHaystack, {
+        display: expected.scheduleDisplay,
+        displayWithSeconds: expected.scheduleDisplayWithSeconds,
+        requireExactSeconds: Boolean(expected.scheduleHasExplicitSeconds),
+        hasExplicitSeconds: Boolean(expected.scheduleHasExplicitSeconds),
+      });
     const schedulePresent = !expected.scheduleDisplay || youtubeScheduled || (
+      kuaishouSchedulePresent ||
       textHaystack.includes(expected.scheduleDisplay) ||
       douyinCollapsedSchedulePresent ||
       (scheduleDate && scheduleTime && textHaystack.includes(scheduleDate) && textHaystack.includes(scheduleTime)) ||
@@ -7258,7 +14323,7 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       )) ||
       (platform === "xiaohongshu" && String(location.href || "").includes("/publish/success") && /发布成功/.test(textHaystack));
     const receiptFieldBypass = receiptLike && platform !== "youtube";
-    const tagVerified = tagChecks.every((item) => item.present);
+    const tagVerified = expected.skipExplicitTagEntry ? true : tagChecks.every((item) => item.present);
     const bodyVerified = receiptFieldBypass || verifyBody(platform, expected.body, bodyActual, { tagVerified, textHaystack });
     const coverBasename = expected.coverPath ? expected.coverPath.split(/[\\\\/]/).pop() : "";
     const youtubeAutoThumbnail = platform === "youtube" && imageSources.some((src) => /i\\.ytimg\\.com|mqdefault|hqdefault|vi_webp/.test(src));
@@ -7277,14 +14342,19 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       ? ${deriveDouyinCoverState.toString()}({
         textHaystack,
         expectedCoverPath: expected.coverPath,
+        expectedCoverSlots: expected.coverSlots,
         coverActual,
         imageSources,
         backgroundSources,
+        slotSurfaces,
         modalOpen,
       })
       : null;
     const douyinCustomCoverReady = Boolean(douyinCoverState?.custom_cover_ready);
     const douyinCustomCoverSaved = Boolean(douyinCoverState?.saved);
+    const douyinEffectiveDualCoverWarning = Boolean(douyinCoverState?.effective_dual_cover_missing_warning);
+    const requiredCoverSlots = Array.isArray(expected.coverSlots) ? expected.coverSlots.filter((item) => item && item.cover_path) : [];
+    const multipleCoverSlotsRequired = requiredCoverSlots.length > 1;
     const uploadBusy = signals.upload_busy;
     const uploadFailed = signals.upload_failed;
     if (
@@ -7299,14 +14369,23 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
     }
     const coverRequiredWarning = /该视频需要上传一个封面|需要上传.{0,24}封面|请上传.{0,24}封面/.test(textHaystack);
     const platformCoverSuccess =
-      platform === "kuaishou" ? /封面应用成功|重新设置封面|封面设置/.test(textHaystack)
+      platform === "kuaishou" ? kuaishouCustomCoverPreview
       : platform === "xiaohongshu" ? /重新设置封面|上传成功|封面预览|封面效果评估通过/.test(textHaystack) && xiaohongshuCustomCoverPreview && !/封面上传中/.test(textHaystack)
       : platform === "toutiao" ? /上传成功|修改封面|重新上传封面|封面已上传/.test(textHaystack)
       : platform === "douyin" ? douyinCustomCoverSaved
       : imageSources.length > 0;
-    const coverPresent = !expected.coverPath
+    const douyinAllRequiredCoverSlotsReady = !multipleCoverSlotsRequired
+      ? douyinCustomCoverSaved
+      : Boolean(douyinCoverState?.all_required_slots_saved) && !douyinEffectiveDualCoverWarning;
+    const coverPresent = !expected.coverPath && !requiredCoverSlots.length
       ? true
-      : !coverRequiredWarning && (textHaystack.includes(coverBasename) || (platform !== "youtube" && platformCoverSuccess) || (platform === "youtube" && youtubeCustomThumbnailPreview && !youtubeThumbnailUploading));
+      : platform === "douyin"
+        ? !coverRequiredWarning && douyinAllRequiredCoverSlotsReady
+      : !coverRequiredWarning && (
+        (platform === "youtube" && textHaystack.includes(coverBasename))
+        || (platform !== "youtube" && platformCoverSuccess)
+        || (platform === "youtube" && youtubeCustomThumbnailPreview && !youtubeThumbnailUploading && !youtubeAutoThumbnail)
+      );
     const declarationMissingPrompt = /发布前请添加创作声明|请先添加创作声明|发布前需添加创作声明|根据相关法律法规要求/.test(textHaystack);
     const declarationPresent = verifyDeclaration(
       platform,
@@ -7316,6 +14395,8 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       {
         declarationMissingPrompt,
         hasTitleOrBody: Boolean(expected.body || expected.title),
+        xiaohongshuRequireOriginalDeclaration: Boolean(expected.xiaohongshuRequireOriginalDeclaration),
+        xiaohongshuOriginalDeclarationEnabled: Boolean(xiaohongshuOriginalDeclarationEvidence?.enabled),
       },
     );
     const platformExtras = {
@@ -7330,9 +14411,13 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       youtube_remote_auto_thumbnail: youtubeAutoThumbnail,
       youtube_thumbnail_state: youtubeThumbnailState,
       xiaohongshu_custom_cover_preview: xiaohongshuCustomCoverPreview,
+      xiaohongshu_original_declaration: xiaohongshuOriginalDeclarationEvidence,
+      kuaishou_custom_cover_preview: kuaishouCustomCoverPreview,
+      kuaishou_cover_surface: kuaishouCoverSurface,
       douyin_custom_cover_ready: douyinCustomCoverReady,
       douyin_custom_cover_saved: douyinCustomCoverSaved,
       douyin_cover_state: douyinCoverState,
+      douyin_slot_surfaces: Array.isArray(slotSurfaces) ? slotSurfaces : [],
       douyin_collection_actual: collectionActual,
       douyin_collection_placeholder_visible: douyinCollectionEvidence.placeholder_visible,
       douyin_collection_source: douyinCollectionEvidence.source,
@@ -7348,27 +14433,79 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
     const fields = {
       title: { expected: expected.title, actual: titleFieldActual, verified: receiptFieldBypass || !expected.title || textHaystack.includes(expected.title) },
       body: { expected: expected.body, actual: bodyActual, verified: bodyVerified },
-      tags: { expected: expected.tags, actual: tagChecks.filter((item) => item.present).map((item) => item.tag), actual_checks: tagChecks, verified: receiptFieldBypass || tagVerified },
+      tags: {
+        expected: expectedTags,
+        actual: tagChecks.filter((item) => item.present).map((item) => item.tag),
+        actual_checks: tagChecks,
+        verified: receiptFieldBypass || expected.skipExplicitTagEntry || tagVerified,
+      },
+      native_topics: {
+        expected: expectedNativeTopics,
+        actual: actualNativeTopics,
+        actual_checks: nativeTopicChecks,
+        required: expectedNativeTopics.length > 0,
+        verified: receiptFieldBypass || !expectedNativeTopics.length || nativeTopicChecks.every((item) => item.present),
+      },
       collection: {
         expected: expected.collection,
         actual: collectionActual,
+        configured: platform === "kuaishou" ? !kuaishouCollectionPlaceholderVisible && Boolean(collectionActual) : Boolean(collectionActual),
         verified:
           receiptFieldBypass
           || !expected.collection
           || platform === "x"
           || (platform === "xiaohongshu" ? Boolean(collectionActual) : false)
-          || (platform === "kuaishou" && /加入合集|选择要加入到的合集/.test(textHaystack))
+          || (platform === "kuaishou" && !kuaishouCollectionPlaceholderVisible && Boolean(collectionActual))
           || (platform === "douyin" ? douyinCollectionEvidence.matched : textHaystack.includes(expected.collection)),
       },
-      schedule: { expected: expected.scheduleDisplay, actual: scheduleActual, verified: receiptFieldBypass || schedulePresent },
+      schedule: {
+        expected: expected.scheduleDisplay,
+        actual: scheduleActual,
+        configured: Boolean(scheduleActual),
+        verified: receiptFieldBypass || schedulePresent,
+      },
       upload_ready: { actual: receiptFieldBypass || !uploadBusy ? "ready" : "not_ready", verified: receiptFieldBypass || (!uploadBusy && !uploadFailed && !signals.upload_prompt_only && signals.blockers.length === 0) },
-      declaration: { expected: expected.declaration, actual: declarationActual, verified: receiptFieldBypass || !expected.declaration || declarationPresent },
+      declaration: {
+        expected: expected.declaration || (expected.xiaohongshuRequireOriginalDeclaration ? "原创声明" : ""),
+        actual: declarationActual || (xiaohongshuOriginalDeclarationEvidence?.enabled ? "原创声明" : ""),
+        verified: receiptFieldBypass || (
+          platform === "xiaohongshu"
+            ? (
+                (Boolean(expected.declaration) || Boolean(expected.xiaohongshuRequireOriginalDeclaration))
+                  ? declarationPresent
+                  : true
+              )
+            : !expected.declaration || declarationPresent
+        ),
+      },
+      visibility: {
+        expected: expected.visibility_mode || "",
+        actual: visibilityActual,
+        configured: expected.skipExplicitVisibilityEntry
+          ? true
+          : platform === "kuaishou"
+          ? Boolean(kuaishouVisibilityState?.configured)
+          : Boolean(visibilityActual) && !(platform === "kuaishou" && kuaishouVisibilityOptionsVisible && !visibilityActual),
+        verified:
+          receiptFieldBypass
+          || expected.skipExplicitVisibilityEntry
+          || !expected.visibility_mode
+          || normalizeVisibilityValue(expected.visibility_mode) === visibilityActual,
+      },
       draft_state: { expected: "editor_clean", actual: draftResidualWarning ? "residual_artifacts" : "clean", verified: !draftResidualWarning },
       cover: {
         expected_path: expected.coverPath,
+        expected_slots: requiredCoverSlots,
         actual: coverActual,
-        uploaded: Boolean(coverActual) || Boolean(douyinCustomCoverReady),
-        cover_uploaded: Boolean(coverActual) || Boolean(douyinCustomCoverReady),
+        uploaded: platform === "douyin"
+          ? Boolean(douyinAllRequiredCoverSlotsReady)
+          : (Boolean(coverActual) || Boolean(douyinCustomCoverReady)),
+        configured: platform === "douyin"
+          ? Boolean(douyinAllRequiredCoverSlotsReady)
+          : (Boolean(coverActual) || Boolean(douyinCustomCoverReady)),
+        cover_uploaded: platform === "douyin"
+          ? Boolean(douyinAllRequiredCoverSlotsReady)
+          : (Boolean(coverActual) || Boolean(douyinCustomCoverReady)),
         verified: receiptFieldBypass || coverPresent || platform === "x",
         cover_required_warning: coverRequiredWarning,
         youtube_auto_thumbnail: youtubeAutoThumbnail,
@@ -7377,6 +14514,24 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
         youtube_thumbnail_state: youtubeThumbnailState,
       },
     };
+    if (platform === "xiaohongshu") {
+      fields.tags.actual = actualNativeTopics.length ? actualNativeTopics.slice() : xiaohongshuConfirmedTopics.slice();
+      fields.tags.actual_checks = tagChecks;
+      fields.tags.verified = receiptFieldBypass || fields.native_topics.verified;
+      if (expected.declaration) {
+        fields.declaration.verified = receiptFieldBypass || declarationPresent;
+      }
+      if (expected.coverPath || (Array.isArray(requiredCoverSlots) && requiredCoverSlots.length)) {
+        fields.cover.uploaded = Boolean(coverActual || xiaohongshuCustomCoverPreview);
+        fields.cover.configured = fields.cover.uploaded;
+        fields.cover.cover_uploaded = fields.cover.uploaded;
+        fields.cover.verified = receiptFieldBypass || fields.cover.uploaded;
+      }
+    } else if (platform === "douyin") {
+      fields.tags.actual = actualNativeTopics.slice();
+      fields.tags.actual_checks = nativeTopicChecks.slice();
+      fields.tags.verified = receiptFieldBypass || fields.native_topics.verified || expectedNativeTopics.length === 0;
+    }
     const failures = Object.entries(fields).filter(([, value]) => value && value.verified === false).map(([key]) => key);
     const xiaohongshuVideoUploadEntry =
       platform === "xiaohongshu"
@@ -7384,11 +14539,13 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
     const verification_reason = verification_state === "auth_required"
       ? "auth_required"
       : verification_state === "not_ready"
-        ? (loadingSurface
+        ? (kuaishouScheduleOverlayOpen
+          ? "schedule_overlay_open"
+          : (loadingSurface
           ? "publish_route_loading"
           : (xiaohongshuVideoUploadEntry
             ? "publish_media_entry"
-            : (routeReady ? "publish_route_not_ready" : "publish_route_url_mismatch")))
+            : (routeReady ? "publish_route_not_ready" : "publish_route_url_mismatch"))))
         : "ok";
     platformExtras.receipt_like = receiptLike;
     return {
@@ -7398,7 +14555,16 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       failures: verification_state === "ready" ? failures : [],
       verification_state,
       verification_reason,
-      route_ready_state: { route_ready: routeReady, auth_required: authRequired, text_ready: Boolean(verification_by_text[platform]), input_ready: hasInputFields, file_inputs_visible: fileInputs.length, body_text_length: bodyText.length, loading_surface: loadingSurface },
+      route_ready_state: {
+        route_ready: routeReady,
+        auth_required: authRequired,
+        text_ready: Boolean(verification_by_text[platform]),
+        input_ready: hasInputFields,
+        file_inputs_visible: fileInputs.length,
+        body_text_length: bodyText.length,
+        loading_surface: loadingSurface,
+        schedule_overlay_open: kuaishouScheduleOverlayOpen,
+      },
       draft_state_warning: draftResidualWarning,
       platform_extras: platformExtras,
     };
@@ -7457,7 +14623,7 @@ async function prepareGenericCompositeDraft(client, platform, content) {
       actions.push(await setTextFieldByHints(client, ["标签", "tag", "Tags"], tag, { multiline: false }));
     }
   }
-  const collection = expectedCollectionName(content);
+  const collection = expectedCollectionNameForPlatform(platform, content);
   if (collection) {
     actions.push({ kind: "collection_entry", ...(await clickByText(client, ["播放列表", "选择", "加入合集", "选择合集", "合集", "创建合集"])) });
     await sleep(1000);
@@ -7490,7 +14656,7 @@ export function platformBodyWithTags(platform, content) {
     ? content.platform_specific_overrides
     : {};
   const xShareLink = String(override.x_share_link || override.x_share_url || "").trim();
-  const taggedBody = !["douyin", "xiaohongshu", "kuaishou", "toutiao", "wechat-channels", "x"].includes(platform) || !tags.length
+  const taggedBody = !["kuaishou", "toutiao", "wechat-channels", "x"].includes(platform) || !tags.length
     ? body
     : `${platform === "kuaishou" && title ? `${title}\n` : ""}${body}\n${tags.map((tag) => `#${tag}`).join(" ")}`;
   if (platform === "x" && xShareLink) return `${taggedBody ? `${taggedBody}\n` : ""}${xShareLink}`.trim();
@@ -7522,35 +14688,101 @@ export function richTextDraftValueMatches(actual, expected) {
   return normalize(actual) === normalizedExpected;
 }
 
-async function uploadCompositeCover(client, platform, coverPath) {
+async function uploadCompositeCover(client, platform, content, coverPath = "") {
   const actions = [];
-  if (!coverPath) return actions;
+  const resolvedCoverPath = String(coverPath || expectedPrimaryCoverPathForPlatform(platform, content) || "").trim();
+  if (!resolvedCoverPath) return actions;
+  const coverProjectMode = compositePlatformCoverProjectMode(platform);
+  const mainCoverOnly = coverProjectMode === "main_cover_only";
+  let beforeKuaishouSurface = null;
+  if (platform === "kuaishou") {
+    const currentSurface = await readKuaishouCoverSurface(client);
+    beforeKuaishouSurface = currentSurface;
+    if (currentSurface && shouldSkipKuaishouCoverMutation(currentSurface, resolvedCoverPath)) {
+      actions.push({ kind: "kuaishou_cover_already_correct", uploaded: true, skipped: true });
+      return actions;
+    }
+  }
   const entryTexts = platform === "youtube"
     ? ["上传文件", "缩略图", "Thumbnail", "Upload file"]
     : ["设置封面", "封面设置", "上传封面", "更换封面", "选择封面"];
-  actions.push({ kind: `${platform}_cover_entry`, ...(await clickByText(client, entryTexts)) });
-  if (!actions.at(-1)?.clicked) actions.push({ kind: `${platform}_cover_entry_loose`, ...(await clickLooseText(client, entryTexts)) });
-  await sleep(1400);
-  if (platform === "xiaohongshu") {
-    actions.push({ kind: "xiaohongshu_cover_editor_open", ...(await openXiaohongshuCoverEditor(client)) });
-    await sleep(700);
-    actions.push({ kind: "xiaohongshu_cover_ratio", ...(await clickByText(client, ["3:4"])) });
-    await sleep(500);
-    actions.push({ kind: "xiaohongshu_cover_upload_entry", ...(await clickByText(client, ["上传图片", "+ 上传图片", "上传封面"])) });
-    if (!actions.at(-1)?.clicked) actions.push({ kind: "xiaohongshu_cover_upload_entry_loose", ...(await clickLooseText(client, ["上传图片", "+ 上传图片", "上传封面"])) });
+  if (platform === "kuaishou") {
+    actions.push({ kind: "kuaishou_cover_editor_open", ...(await openKuaishouCoverEditor(client)) });
+    if (!actions.at(-1)?.opened) return actions;
     await sleep(900);
+  } else if (platform !== "xiaohongshu") {
+    actions.push({ kind: `${platform}_cover_entry_semantic`, ...(await clickSemanticActionByHints(client, entryTexts)) });
+    if (!actions.at(-1)?.clicked) actions.push({ kind: `${platform}_cover_entry`, ...(await clickByText(client, entryTexts)) });
+    if (!actions.at(-1)?.clicked) actions.push({ kind: `${platform}_cover_entry_loose`, ...(await clickLooseText(client, entryTexts)) });
+    await sleep(1400);
+  }
+  if (platform === "xiaohongshu") {
+    const ratioTexts = preferredXiaohongshuCoverRatioTexts(content);
+    actions.push({ kind: "xiaohongshu_cover_editor_open", ...(await openXiaohongshuCoverEditor(client)) });
+    if (!actions.at(-1)?.opened) {
+      actions.push({ kind: "xiaohongshu_cover_editor_blocked", blocked: true, reason: "cover_editor_not_open" });
+      return actions;
+    }
+    await sleep(700);
+    actions.push({ kind: "xiaohongshu_cover_ratio_precise", ...(await clickXiaohongshuCoverRatio(client, ratioTexts)) });
+    if (!actions.at(-1)?.clicked) actions.push({ kind: "xiaohongshu_cover_ratio", ...(await clickByText(client, ratioTexts)) });
+    if (!actions.at(-1)?.clicked) actions.push({ kind: "xiaohongshu_cover_ratio_loose", ...(await clickLooseText(client, ratioTexts)) });
+    await sleep(500);
+    actions.push({
+      kind: "xiaohongshu_cover_upload_entry_skipped",
+      skipped: true,
+      reason: "background_only_dom_file_input_required",
+    });
   }
   if (platform === "toutiao") {
-    actions.push({ kind: "toutiao_cover_local_upload", ...(await clickByText(client, ["本地上传", "上传图片", "上传封面"])) });
+    actions.push({ kind: "toutiao_cover_local_upload_semantic", ...(await clickSemanticActionByHints(client, ["本地上传", "上传图片", "上传封面"])) });
+    if (!actions.at(-1)?.clicked) actions.push({ kind: "toutiao_cover_local_upload", ...(await clickByText(client, ["本地上传", "上传图片", "上传封面"])) });
     if (!actions.at(-1)?.clicked) actions.push({ kind: "toutiao_cover_local_upload_loose", ...(await clickLooseText(client, ["本地上传", "上传图片", "上传封面"])) });
     await sleep(800);
   }
-  actions.push({ kind: `${platform}_cover_upload`, ...(await setImageFileInputByAccept(client, coverPath)) });
+  if (platform === "kuaishou") {
+    const ratioTexts = preferredKuaishouCoverRatioTexts(content);
+    actions.push({ kind: "kuaishou_cover_upload_tab", ...(await clickKuaishouCoverDialogTab(client, "上传封面")) });
+    await sleep(350);
+    actions.push({ kind: "kuaishou_cover_ratio_precise", ...(await clickKuaishouCoverRatio(client, ratioTexts)) });
+    if (!actions.at(-1)?.clicked) actions.push({ kind: "kuaishou_cover_ratio_preferred", ...(await clickByText(client, ratioTexts)) });
+    if (!actions.at(-1)?.clicked) actions.push({ kind: "kuaishou_cover_ratio_preferred_loose", ...(await clickLooseText(client, ratioTexts)) });
+    await sleep(400);
+  }
+  actions.push({
+    kind: `${platform}_cover_upload`,
+    ...(platform === "kuaishou"
+      ? await setKuaishouMainCoverUploadInput(client, resolvedCoverPath)
+      : await setImageFileInputByAccept(
+        client,
+        resolvedCoverPath,
+        platform === "xiaohongshu"
+          ? {
+              preferDialog: true,
+              preferVisible: false,
+              preferRootTexts: ["上传图片", "设置封面", "封面比例"],
+              contextTexts: ["上传图片", "设置封面", "封面比例"],
+            }
+          : {},
+      )),
+  });
+  if (platform === "xiaohongshu" && actions.at(-1)?.uploaded !== true) {
+    actions.push({
+      kind: "xiaohongshu_cover_upload_blocked",
+      blocked: true,
+      reason: "background_only_dom_cover_input_missing",
+      upload: actions.at(-1),
+    });
+    return actions;
+  }
   await sleep(3500);
   if (platform === "xiaohongshu") {
     actions.push({ kind: "xiaohongshu_cover_confirm", ...(await clickXiaohongshuCoverConfirm(client)) });
-    if (!actions.at(-1)?.clicked) actions.push({ kind: "xiaohongshu_cover_confirm_fallback", ...(await clickByText(client, ["确定"])) });
     await sleep(1600);
+    if (actions.at(-1)?.modal_open || actions.at(-2)?.modal_open) {
+      actions.push({ kind: "xiaohongshu_cover_confirm_retry", ...(await clickXiaohongshuCoverConfirm(client)) });
+      await sleep(1200);
+    }
   }
   if (platform === "toutiao") {
     actions.push({ kind: "toutiao_cover_next", ...(await clickByText(client, ["下一步"])) });
@@ -7561,17 +14793,128 @@ async function uploadCompositeCover(client, platform, coverPath) {
     if (!actions.at(-1)?.clicked) actions.push({ kind: "toutiao_cover_completion_confirm_fallback", ...(await clickVisibleDialogConfirm(client, ["确定", "确认", "完成"])) });
     if (actions.at(-1)?.clicked) await sleep(1800);
   }
+  if (platform === "kuaishou") {
+    actions.push({ kind: "kuaishou_cover_confirm", ...(await clickKuaishouCoverConfirm(client)) });
+    if (actions.at(-1)?.clicked) await sleep(1200);
+    const finalSurface = await readKuaishouCoverSurface(client);
+    const beforeDefaultSurface = Array.isArray(beforeKuaishouSurface?.slot_surfaces)
+      ? beforeKuaishouSurface.slot_surfaces.find((item) => /默认封面/.test(String(item?.label || "")))
+      : null;
+    const defaultSurface = Array.isArray(finalSurface?.slot_surfaces)
+      ? finalSurface.slot_surfaces.find((item) => /默认封面/.test(String(item?.label || "")))
+      : null;
+    const pkSurface = Array.isArray(finalSurface?.slot_surfaces)
+      ? finalSurface.slot_surfaces.find((item) => /PK封面/.test(String(item?.label || "")))
+      : null;
+    const defaultChanged = kuaishouSlotSourcesChanged(beforeDefaultSurface, defaultSurface);
+    const defaultHasExpected = kuaishouCoverSlotContainsExpected(defaultSurface, resolvedCoverPath);
+    const defaultLooksCustom = isKuaishouCustomCoverPreviewEvidence({ ...finalSurface, slot_surfaces: [defaultSurface].filter(Boolean) }, resolvedCoverPath);
+    const defaultOk = Boolean(defaultHasExpected || (defaultLooksCustom && defaultChanged));
+    const pkHasExpected = kuaishouCoverSlotContainsExpected(pkSurface, resolvedCoverPath);
+    const pkPathAllowed = !mainCoverOnly || !pkHasExpected;
+    actions.push({
+      kind: "kuaishou_cover_slot_verification",
+      verified: Boolean(defaultOk && pkPathAllowed),
+      default_ok: Boolean(defaultOk),
+      default_changed: Boolean(defaultChanged),
+      default_has_expected: Boolean(defaultHasExpected),
+      default_looks_custom: Boolean(defaultLooksCustom),
+      pk_has_expected: Boolean(pkHasExpected),
+      cover_project_mode: coverProjectMode || "unspecified",
+      pk_toggle_checked: Boolean(finalSurface?.pk_toggle_checked),
+      before_default_sources: kuaishouSlotSourceSnapshot(beforeDefaultSurface),
+      after_default_sources: kuaishouSlotSourceSnapshot(defaultSurface),
+    });
+  }
   return actions;
 }
 
 async function readDouyinCoverSurface(client) {
   return evaluateWithClient(client, `(() => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const pickSurface = ${selectDouyinCoverSlotSurfaceCandidate.toString()};
     const visible = (el) => {
       if (!el) return false;
       const rect = el.getBoundingClientRect();
       const style = getComputedStyle(el);
       return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const slotDefinitions = [
+      { slot: "horizontal_4_3", label: "横封面4:3", aliases: ["横封面4:3", "横封面 4:3", "横版4:3", "横版封面4:3"] },
+      { slot: "vertical_3_4", label: "竖封面3:4", aliases: ["竖封面3:4", "竖封面 3:4", "竖版3:4", "竖版封面3:4"] },
+    ];
+    const allVisibleNodes = [...document.querySelectorAll("div,span,label,p,button,a,strong,section")].filter(visible);
+    const collectScopedSources = (root) => {
+      const imageSources = [...root.querySelectorAll("img")]
+        .map((el) => String(el.getAttribute("src") || el.currentSrc || "").trim())
+        .filter(Boolean)
+        .slice(0, 20);
+      const backgroundSources = [...root.querySelectorAll("[style*=background-image]")]
+        .map((el) => {
+          const style = String(el.getAttribute("style") || "");
+          const match = style.match(/background-image\\s*:\\s*url\\(([^)]+)\\)/i);
+          return match ? String(match[1] || "").replace(/^['"]|['"]$/g, "").trim() : "";
+        })
+        .filter(Boolean)
+        .slice(0, 20);
+      const actionLabels = [...root.querySelectorAll("button,[role=button],input[type=button],input[type=submit],span,div,label,a")]
+        .filter(visible)
+        .map((el) => clean(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || el.getAttribute("title")))
+        .filter(Boolean)
+        .filter((label) => /选择封面|修改封面|更换封面|重新上传|上传封面|设置封面|上传图片/.test(label))
+        .slice(0, 20);
+      return { imageSources, backgroundSources, actionLabels };
+    };
+    const resolveSlotSurface = (definition) => {
+      const labelNode = allVisibleNodes
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          const text = clean(el.innerText || el.textContent || "");
+          let score = 0;
+          if (!text || !definition.aliases.some((alias) => text.includes(alias))) return null;
+          if (definition.aliases.includes(text)) score += 420;
+          else if (text.length <= 40) score += 220;
+          else if (text.length <= 120) score += 80;
+          else score -= 260;
+          return { el, text, area: rect.width * rect.height, score };
+        })
+        .filter((item) => item && item.score > 0)
+        .sort((left, right) => right.score - left.score || left.text.length - right.text.length || left.area - right.area)[0]?.el;
+      if (!labelNode) return null;
+      const candidateRoots = [];
+      let cursor = labelNode;
+      for (let depth = 0; cursor && depth < 5; depth += 1) {
+        cursor = cursor.parentElement;
+        if (!cursor || !visible(cursor)) continue;
+        candidateRoots.push(cursor);
+      }
+      const structuralRoot = labelNode.closest("[class*=cover],[class*=upload],[class*=card],[class*=item],[class*=slot],[class*=recommend]");
+      if (structuralRoot && visible(structuralRoot)) candidateRoots.push(structuralRoot);
+      const bestRoot = pickSurface(candidateRoots
+        .map((root) => {
+          const rect = root.getBoundingClientRect();
+          const text = clean(root.innerText || root.textContent || "");
+          const scoped = collectScopedSources(root);
+          return {
+            root,
+            text,
+            area: rect.width * rect.height,
+            className: clean(typeof root.className === "string" ? root.className : ""),
+            action_labels: scoped.actionLabels,
+          };
+        })
+        .filter((item) => item.text && item.area > 0), definition.aliases);
+      const root = bestRoot?.root || labelNode.parentElement || labelNode;
+      const scoped = collectScopedSources(root);
+      return {
+        slot: definition.slot,
+        label: definition.label,
+        text: clean(root.innerText || root.textContent || "").slice(0, 600),
+        image_sources: scoped.imageSources,
+        background_sources: scoped.backgroundSources,
+        action_labels: scoped.actionLabels,
+        visible: true,
+      };
     };
     const bodyText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
     const relevantLines = bodyText
@@ -7611,7 +14954,10 @@ async function readDouyinCoverSurface(client) {
       .slice(0, 20);
     const modalOpen = [...document.querySelectorAll("[role=dialog],[class*=modal],[class*=dialog],[class*=popover]")]
       .filter(visible)
-      .some((el) => /设置封面|上传图片|封面比例|预览封面|预览视频/.test(clean(el.innerText || el.textContent)));
+      .some((el) => ${isDouyinCoverEditorModalText.toString()}(clean(el.innerText || el.textContent)));
+    const slotSurfaces = slotDefinitions
+      .map(resolveSlotSurface)
+      .filter(Boolean);
     return {
       lines: relevantLines,
       body_text: bodyText.slice(0, 4000),
@@ -7620,6 +14966,7 @@ async function readDouyinCoverSurface(client) {
       background_sources: backgroundSources,
       cover_actual: coverInputs.find((item) => item.value)?.value || "",
       modal_open: modalOpen,
+      slot_surfaces: slotSurfaces,
     };
   })()`, 12000);
 }
@@ -7633,25 +14980,30 @@ async function clickDouyinCoverConfirm(client) {
       const style = getComputedStyle(el);
       return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
     };
+    const collectInteractiveCandidates = (root, selector = "button,[role=button],input[type=button],input[type=submit],span,div") => {
+      if (!root) return [];
+      const elements = [root, ...root.querySelectorAll(selector)];
+      return elements
+        .filter(visible)
+        .map((btn) => {
+          const btnRect = btn.getBoundingClientRect();
+          return {
+            label: clean(btn.innerText || btn.textContent || btn.value || btn.getAttribute("aria-label") || btn.getAttribute("title")),
+            className: clean(typeof btn.className === "string" ? btn.className : ""),
+            x: btnRect.left + btnRect.width / 2,
+            y: btnRect.top + btnRect.height / 2,
+            width: btnRect.width,
+            height: btnRect.height,
+          };
+        })
+        .filter((item) => item.label && item.label.length <= 80);
+    };
     const dialogs = [...document.querySelectorAll("[role=dialog],[aria-modal=true],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer]")]
       .filter(visible)
       .map((el) => {
         const rect = el.getBoundingClientRect();
         const text = clean(el.innerText || el.textContent);
-        const buttons = [...el.querySelectorAll("button,[role=button],input[type=button],input[type=submit]")]
-          .filter(visible)
-          .map((btn) => {
-            const btnRect = btn.getBoundingClientRect();
-            return {
-              label: clean(btn.innerText || btn.value || btn.getAttribute("aria-label") || btn.getAttribute("title")),
-              className: clean(typeof btn.className === "string" ? btn.className : ""),
-              x: btnRect.left + btnRect.width / 2,
-              y: btnRect.top + btnRect.height / 2,
-              width: btnRect.width,
-              height: btnRect.height,
-            };
-          })
-          .filter((item) => item.label && item.label.length <= 80);
+        const buttons = collectInteractiveCandidates(el, "button,[role=button],input[type=button],input[type=submit]");
         return {
           text,
           x: rect.left,
@@ -7661,11 +15013,29 @@ async function clickDouyinCoverConfirm(client) {
           buttons,
         };
       })
-      .filter((item) => item.buttons.length > 0 && /设置封面|取消保存|重新上传|上传图片|封面/.test(item.text))
+      .filter((item) => item.buttons.length > 0 && ${isDouyinCoverEditorModalText.toString()}(item.text))
+      .sort((left, right) => (left.width * left.height) - (right.width * right.height));
+    const editorRoots = [...document.querySelectorAll("section,div,aside,[role=dialog],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer],[class*=panel],[class*=editor]")]
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const text = clean(el.innerText || el.textContent || "");
+        const buttons = collectInteractiveCandidates(el);
+        return {
+          text,
+          x: rect.left,
+          y: rect.top,
+          width: rect.width,
+          height: rect.height,
+          buttons,
+        };
+      })
+      .filter((item) => item.buttons.length > 0 && /设置横封面|设置竖封面|上传封面|封面检测|横封面预览|竖封面预览|设置两张封面将获得更多曝光和推荐/.test(item.text))
       .sort((left, right) => (left.width * left.height) - (right.width * right.height));
     return {
       dialogs,
-      visible_buttons: dialogs.flatMap((dialog) => dialog.buttons.map((button) => ({
+      editor_roots: editorRoots,
+      visible_buttons: [...dialogs, ...editorRoots].flatMap((dialog) => dialog.buttons.map((button) => ({
         ...button,
         dialog_text: dialog.text.slice(0, 240),
       }))),
@@ -7676,6 +15046,12 @@ async function clickDouyinCoverConfirm(client) {
     return {
       clicked: false,
       dialogs: (snapshot?.dialogs || []).map((item) => String(item?.text || "").slice(0, 220)),
+      editor_roots: (snapshot?.editor_roots || []).map((item) => ({
+        text: String(item?.text || "").slice(0, 240),
+        width: Number(item?.width || 0),
+        height: Number(item?.height || 0),
+        buttons: Array.isArray(item?.buttons) ? item.buttons.slice(0, 12) : [],
+      })),
       candidates: (snapshot?.visible_buttons || []).slice(0, 20),
     };
   }
@@ -7693,7 +15069,7 @@ async function clickDouyinCoverConfirm(client) {
     };
     const modalOpen = [...document.querySelectorAll("[role=dialog],[aria-modal=true],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer]")]
       .filter(visible)
-      .some((el) => /设置封面|取消保存|重新上传|上传图片|封面/.test(clean(el.innerText || el.textContent)));
+      .some((el) => ${isDouyinCoverEditorModalText.toString()}(clean(el.innerText || el.textContent)));
     return {
       modal_open: modalOpen,
       body_text: clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "").slice(0, 1200),
@@ -7709,35 +15085,431 @@ async function clickDouyinCoverConfirm(client) {
   };
 }
 
-async function setDouyinCompositeCover(client, coverPath) {
+async function resolveDouyinOptionalVerticalCoverPrompt(client) {
+  const preferred = await clickByText(client, ["设置竖封面"]);
+  if (preferred?.clicked) {
+    await sleep(900);
+    return {
+      prompt_present: true,
+      clicked: true,
+      clicked_label: String(preferred?.clicked_label || preferred?.label || preferred?.text || "设置竖封面"),
+      action: "set_vertical_cover",
+    };
+  }
+  const bodyText = await evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    return clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "").slice(0, 2400);
+  })()`, 8000).catch(() => "");
+  const promptPresent = /设置竖封面获取更多流量|设置竖封面/.test(String(bodyText || ""));
+  return {
+    prompt_present: promptPresent,
+    clicked: false,
+    clicked_label: "",
+    action: promptPresent ? "prompt_visible_not_clicked" : "not_present",
+    body_text: String(bodyText || "").slice(0, 600),
+  };
+}
+
+async function clickActionNearLabeledSurface(client, labelTexts = [], actionTexts = []) {
+  return evaluateWithClient(client, `(async () => {
+    const labels = ${JSON.stringify(labelTexts)};
+    const actions = ${JSON.stringify(actionTexts)};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && style.pointerEvents !== "none";
+    };
+    const click = (el) => {
+      if (!el) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+      return true;
+    };
+    const allNodes = [...document.querySelectorAll("button,[role=button],input[type=button],input[type=submit],span,div,label,a")].filter(visible);
+    const labelNeedles = labels.map((item) => clean(item)).filter(Boolean);
+    const actionNeedles = actions.map((item) => clean(item)).filter(Boolean);
+    const labelNodes = allNodes
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const text = clean(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || el.getAttribute("title"));
+        let score = 0;
+        if (!text || !labelNeedles.some((needle) => text.includes(needle))) return null;
+        if (labelNeedles.includes(text)) score += 420;
+        else if (text.length <= 40) score += 220;
+        else if (text.length <= 120) score += 80;
+        else score -= 260;
+        return { el, text, area: rect.width * rect.height, score };
+      })
+      .filter((item) => item && item.score > 0)
+      .sort((left, right) => right.score - left.score || left.text.length - right.text.length || left.area - right.area);
+    const structuralRoots = [...document.querySelectorAll("[class*=cover],[class*=upload],[class*=card],[class*=item],[class*=slot],[class*=recommend]")]
+      .filter(visible)
+      .map((el) => ({ el, text: clean(el.innerText || el.textContent || "") }))
+      .filter((item) => item.text && item.text.length <= 320 && labelNeedles.some((needle) => item.text.includes(needle)));
+    const chooseAction = (root) => {
+      const rootText = clean(root.innerText || root.textContent || "");
+      const rootRect = root.getBoundingClientRect();
+      const candidates = [...root.querySelectorAll("button,[role=button],input[type=button],input[type=submit],span,div,label,a")]
+        .filter(visible)
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          return {
+            el,
+            text: clean(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || el.getAttribute("title")),
+            area: rect.width * rect.height,
+          };
+        })
+        .filter((item) => item.text && actionNeedles.some((needle) => item.text.includes(needle)))
+        .sort((left, right) => left.area - right.area);
+      if (!candidates.length) return null;
+      let scopeScore = 0;
+      if (rootText.length <= 220) scopeScore += 220;
+      else if (rootText.length <= 420) scopeScore += 80;
+      else scopeScore -= 260;
+      const rootArea = rootRect.width * rootRect.height;
+      if (rootArea >= 1200 && rootArea <= 120000) scopeScore += 160;
+      else if (rootArea > 280000) scopeScore -= 260;
+      if (/高清发布|基础信息|作品描述|官方活动|发布设置|预览视频|预览封面|发文助手/.test(rootText)) scopeScore -= 220;
+      return scopeScore > 0 ? { ...candidates[0], scopeScore, rootArea, rootText } : null;
+    };
+    for (const labelNode of labelNodes) {
+      const roots = [];
+      const seenRoots = new Set();
+      let cursor = labelNode.el;
+      for (let depth = 0; cursor && depth < 5; depth += 1) {
+        cursor = cursor.parentElement;
+        if (!cursor || !visible(cursor) || seenRoots.has(cursor)) continue;
+        roots.push(cursor);
+        seenRoots.add(cursor);
+      }
+      const structuralRoot = labelNode.el.closest("[class*=cover],[class*=upload],[class*=card],[class*=item],[class*=slot],[class*=recommend]");
+      if (structuralRoot && !seenRoots.has(structuralRoot)) {
+        roots.push(structuralRoot);
+        seenRoots.add(structuralRoot);
+      }
+      const rankedRoots = roots
+        .map((root) => ({ root, target: chooseAction(root) }))
+        .filter((item) => item.target)
+        .sort((left, right) => right.target.scopeScore - left.target.scopeScore || left.target.rootArea - right.target.rootArea);
+      for (const item of rankedRoots) {
+        const target = item.target;
+        const clicked = click(target.el);
+        return {
+          clicked,
+          label_text: labelNode.text,
+          action_text: target.text,
+          scope_text: target.rootText.slice(0, 240),
+        };
+      }
+    }
+    for (const rootCandidate of structuralRoots) {
+      const target = chooseAction(rootCandidate.el);
+      if (!target) continue;
+      const clicked = click(target.el);
+      return {
+        clicked,
+        label_text: rootCandidate.text.slice(0, 120),
+        action_text: target.text,
+        scope_text: rootCandidate.text.slice(0, 240),
+      };
+    }
+    const fallback = allNodes
+      .map((el) => ({ el, text: clean(el.innerText || el.textContent || el.value || el.getAttribute("aria-label") || el.getAttribute("title")) }))
+      .find((item) => item.text && actionNeedles.some((needle) => item.text.includes(needle)));
+    if (fallback) {
+      const clicked = click(fallback.el);
+      return { clicked, label_text: "", action_text: fallback.text, scope_text: "" };
+    }
+    return { clicked: false, label_text: "", action_text: "", scope_text: "" };
+  })()`, 16000);
+}
+
+async function clickDouyinCoverSlotEditor(client, aliases = []) {
+  return evaluateWithClient(client, `(() => {
+    const labels = ${JSON.stringify(aliases)};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && style.pointerEvents !== "none";
+    };
+    const click = (el) => {
+      if (!el) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+      if (typeof el.click === "function") el.click();
+      return { x, y, width: rect.width, height: rect.height };
+    };
+    const normalizedAliases = Array.from(new Set((Array.isArray(labels) ? labels : []).map((item) => clean(item)).filter(Boolean)));
+    const candidates = [...document.querySelectorAll("div.coverControl-CjlzqC")]
+      .filter(visible)
+      .flatMap((slotRoot) => {
+        const slotText = clean(slotRoot.innerText || slotRoot.textContent || "");
+        if (!normalizedAliases.some((alias) => slotText.includes(alias))) return [];
+        return [slotRoot, ...slotRoot.querySelectorAll("button,[role=button],span,div,label,a")]
+          .filter(visible)
+          .map((el) => {
+            const rect = el.getBoundingClientRect();
+            return {
+              el,
+              text: clean(el.innerText || el.textContent || el.getAttribute("aria-label") || ""),
+              className: clean(typeof el.className === "string" ? el.className : ""),
+              area: rect.width * rect.height,
+              onclick: typeof el.onclick === "function",
+              slot_text: slotText,
+            };
+          });
+      });
+    const hit = ${selectDouyinCoverSlotEntryTarget.toString()}(candidates, ["选择封面", ...normalizedAliases]);
+    if (!hit) return { clicked: false, reason: "douyin_cover_slot_editor_not_found" };
+    const clicked = click(hit.el);
+    return {
+      clicked: Boolean(clicked),
+      reason: clicked ? "clicked_covercontrol_slot_editor" : "covercontrol_click_failed",
+      scope_text: hit.slot_text || hit.text,
+      action_text: hit.text,
+      point: clicked || null,
+    };
+  })()`, 16000);
+}
+
+async function clickDouyinCoverEditorSwitch(client, targetSlot) {
+  const targetKey = normalizeDouyinCoverSlotKey(targetSlot);
+  const expectedLabel = targetKey === "horizontal_4_3"
+    ? "设置横封面"
+    : targetKey === "vertical_3_4"
+      ? "设置竖封面"
+      : "";
+  if (!expectedLabel) return { clicked: false, reason: "unsupported_douyin_cover_editor_slot", target_slot: targetKey };
+  return evaluateWithClient(client, `(() => {
+    const expectedLabel = ${JSON.stringify(expectedLabel)};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && style.pointerEvents !== "none";
+    };
+    const click = (el) => {
+      if (!el) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, button: 0 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+      if (typeof el.click === "function") el.click();
+      return { x, y, width: rect.width, height: rect.height };
+    };
+    const roots = [...document.querySelectorAll("[role=dialog],[aria-modal=true],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer],[class*=panel],[class*=editor],section,div,aside")]
+      .filter(visible)
+      .map((el) => ({
+        el,
+        text: clean(el.innerText || el.textContent || ""),
+        area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+      }))
+      .filter((item) => ${isDouyinCoverEditorModalText.toString()}(item.text))
+      .sort((left, right) => right.area - left.area);
+    const root = roots[0]?.el || null;
+    if (!root) return { clicked: false, reason: "formal_douyin_cover_editor_not_open", target_label: expectedLabel };
+    const candidates = [root, ...root.querySelectorAll("button,[role=button],a,label,span,div")]
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const text = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "");
+        let score = 0;
+        if (text === expectedLabel) score += 500;
+        else if (text.includes(expectedLabel)) score += 260;
+        if (/tab|switch|button|btn|title/i.test(String(el.className || ""))) score += 40;
+        return score > 0 ? { el, text, score, area: rect.width * rect.height } : null;
+      })
+      .filter(Boolean)
+      .sort((left, right) => right.score - left.score || left.area - right.area);
+    const hit = candidates[0];
+    if (!hit) return { clicked: false, reason: "douyin_cover_editor_switch_missing", target_label: expectedLabel };
+    const point = click(hit.el);
+    return {
+      clicked: Boolean(point),
+      reason: point ? "clicked_douyin_cover_editor_switch" : "douyin_cover_editor_switch_click_failed",
+      target_label: expectedLabel,
+      action_text: hit.text,
+      point: point || null,
+    };
+  })()`, 16000);
+}
+
+async function setDouyinCompositeCover(client, content) {
   const actions = [];
-  if (!coverPath) return actions;
-  actions.push({ kind: "douyin_cover_entry", ...(await clickByText(client, ["设置封面", "修改封面", "更换封面", "上传封面", "选择封面"])) });
-  if (!actions.at(-1)?.clicked) actions.push({ kind: "douyin_cover_entry_loose", ...(await clickLooseText(client, ["设置封面", "修改封面", "更换封面", "上传封面", "选择封面"])) });
-  await sleep(1200);
+  const coverSlots = resolveExpectedCoverSlotsForPlatform("douyin", content).filter((item) => String(item.cover_path || "").trim());
+  const fallbackCoverPath = expectedCoverPath(content);
+  const uploadPlan = coverSlots.length
+    ? coverSlots
+    : (fallbackCoverPath ? [{ slot: "primary", label: "设置封面", matrix_key: "", target_size: null, cover_path: fallbackCoverPath }] : []);
+  if (!uploadPlan.length) return actions;
+  const editorPlan = buildDouyinCompositeCoverEditorPlan(uploadPlan);
+  actions.push({
+    kind: "douyin_cover_editor_plan",
+    plan: editorPlan.map((item) => ({ slot: item.slot, label: item.label, cover_path: item.cover_path })),
+  });
   const before = await readDouyinCoverSurface(client).catch(() => ({}));
-  actions.push({ kind: "douyin_cover_surface_before", ...before });
-  const upload = await setImageFileInputByAccept(client, coverPath);
-  actions.push({ kind: "douyin_cover_upload", ...upload });
-  await sleep(3500);
-  const confirm = await clickDouyinCoverConfirm(client);
-  actions.push({ kind: "douyin_cover_confirm", ...confirm });
+  actions.push({
+    kind: "douyin_cover_surface_before",
+    ...before,
+  });
+
+  const preExistingEditor = await inspectDouyinCoverEditorState(client).catch(() => ({}));
+  let editorReady = isDouyinFormalCompositeCoverEditorState(preExistingEditor);
+  if (!editorReady && preExistingEditor?.editor_open) {
+    const dismissActions = await dismissInterruptions(client, null, "douyin", "douyin_cover_unexpected_preexisting_editor_branch").catch(() => []);
+    actions.push({
+      kind: "douyin_cover_unexpected_editor_branch_before_entry",
+      blocked: true,
+      reason: "non_formal_cover_editor_rejected",
+      root_text: String(preExistingEditor?.root_text || "").slice(0, 400),
+      dismiss_actions: Array.isArray(dismissActions) ? dismissActions : [],
+    });
+    await sleep(900);
+  }
+
+  if (!editorReady) {
+    const initialSlot = editorPlan[0];
+    const entry = await clickDouyinCoverSlotEditor(client, [initialSlot.label, initialSlot.slot]).catch(() => ({ clicked: false }));
+    actions.push({ kind: "douyin_cover_entry", slot: initialSlot.slot, slot_label: initialSlot.label, ...entry });
+    if (!entry?.clicked) {
+      actions.push({
+        kind: "douyin_cover_entry_missing",
+        slot: initialSlot.slot,
+        slot_label: initialSlot.label,
+        clicked: false,
+        reason: "cover_slot_entry_not_found",
+      });
+      return actions;
+    }
+    await sleep(1200);
+  }
+
+  const openedEditor = await inspectDouyinCoverEditorState(client).catch(() => ({}));
+  const formalOpenedEditor = isDouyinFormalCompositeCoverEditorState(openedEditor);
+  actions.push({
+    kind: "douyin_cover_editor_open_state",
+    formal_editor_state: formalOpenedEditor,
+    immediate_editable: isDouyinCoverEditorImmediateEditable(openedEditor),
+    ...openedEditor,
+  });
+  if (!formalOpenedEditor) {
+    actions.push({
+      kind: "douyin_cover_entry_missing",
+      clicked: false,
+      reason: "formal_douyin_cover_editor_not_open",
+      root_text: String(openedEditor?.root_text || "").slice(0, 400),
+    });
+    return actions;
+  }
+
+  let uploadedCount = 0;
+  for (let index = 0; index < editorPlan.length; index += 1) {
+    const slot = editorPlan[index];
+    if (index > 0) {
+      const switchAction = await clickDouyinCoverEditorSwitch(client, slot.slot).catch(() => ({ clicked: false, reason: "douyin_cover_editor_switch_error" }));
+      actions.push({ kind: "douyin_cover_editor_switch", slot: slot.slot, slot_label: slot.label, ...switchAction });
+      if (!switchAction?.clicked) continue;
+      await sleep(900);
+    }
+    const upload = await setImageFileInputByAccept(client, slot.cover_path, {
+      preferDialog: true,
+      preferVisible: false,
+      contextTexts: [slot.label, slot.slot, "上传封面", "设置横封面", "设置竖封面", "封面检测"],
+      preferRootTexts: [slot.label, "上传封面", "设置横封面", "设置竖封面", "横封面预览", "竖封面预览"],
+      avoidRootTexts: ["生成参考图", "智能参考", "AI生成封面", "参考图", "为你推荐"],
+    });
+    actions.push({ kind: "douyin_cover_upload", slot: slot.slot, slot_label: slot.label, expected_path: slot.cover_path, ...upload });
+    await sleep(500);
+    const immediateEditorState = await inspectDouyinCoverEditorState(client).catch(() => ({}));
+    const formalEditorState = isDouyinFormalCompositeCoverEditorState(immediateEditorState);
+    const immediateEditable = isDouyinCoverEditorImmediateEditable(immediateEditorState);
+    actions.push({
+      kind: "douyin_cover_editor_state_after_upload",
+      slot: slot.slot,
+      slot_label: slot.label,
+      formal_editor_state: formalEditorState,
+      immediate_editable: immediateEditable,
+      ...immediateEditorState,
+    });
+    if (immediateEditorState?.editor_open && !formalEditorState) {
+      const dismissActions = await dismissInterruptions(client, null, "douyin", "douyin_cover_unexpected_editor_branch").catch(() => []);
+      actions.push({
+        kind: "douyin_cover_unexpected_editor_branch",
+        slot: slot.slot,
+        slot_label: slot.label,
+        blocked: true,
+        reason: "non_formal_cover_editor_rejected",
+        root_text: String(immediateEditorState?.root_text || "").slice(0, 400),
+        dismiss_actions: Array.isArray(dismissActions) ? dismissActions : [],
+      });
+      continue;
+    }
+    const uploadReady = await waitForDouyinCoverEditorUploadReady(client, { timeoutMs: 14000 }).catch(() => ({ ready: false }));
+    actions.push({ kind: "douyin_cover_upload_ready", slot: slot.slot, slot_label: slot.label, ...uploadReady });
+    if (!uploadReady?.ready) continue;
+    uploadedCount += 1;
+  }
+
+  actions.push({
+    kind: "douyin_cover_editor_upload_progress",
+    uploaded_count: uploadedCount,
+    required_count: editorPlan.length,
+    ready_for_confirm: uploadedCount === editorPlan.length,
+  });
+  if (uploadedCount === editorPlan.length) {
+    const confirm = await clickDouyinCoverConfirm(client);
+    actions.push({ kind: "douyin_cover_confirm", ...confirm });
+    const closed = await waitForDouyinCoverEditorClose(client, { timeoutMs: 12000 }).catch(() => ({ closed: false }));
+    actions.push({ kind: "douyin_cover_editor_close", ...closed });
+    await sleep(closed?.closed ? 900 : 1600);
+  }
   const after = await readDouyinCoverSurface(client).catch(() => ({}));
   const coverState = deriveDouyinCoverState({
     textHaystack: [after.body_text, ...(after.lines || [])].filter(Boolean).join(" "),
-    expectedCoverPath: coverPath,
+    expectedCoverPath: fallbackCoverPath || String(uploadPlan[0]?.cover_path || ""),
+    expectedCoverSlots: uploadPlan.map((item) => ({
+      slot: item.slot,
+      label: item.label,
+      cover_path: item.cover_path,
+      matrix_key: item.matrix_key,
+    })),
     coverActual: after.cover_actual,
     imageSources: after.image_sources,
     backgroundSources: after.background_sources,
+    slotSurfaces: after.slot_surfaces,
     modalOpen: Boolean(after.modal_open),
   });
-  actions.push({ kind: "douyin_cover_surface_after", ready: coverState.custom_cover_ready, saved: coverState.saved, expected_path: coverPath, cover_state: coverState, ...after });
+  actions.push({
+    kind: "douyin_cover_surface_after",
+    ready: coverState.custom_cover_ready,
+    saved: coverState.saved,
+    expected_slots: uploadPlan.map((item) => ({ slot: item.slot, label: item.label, expected_path: item.cover_path })),
+    slot_states: coverState.slots,
+    cover_state: coverState,
+    ...after,
+  });
   return actions;
 }
 
 async function selectCompositeCollection(client, platform, content) {
-  const collection = expectedCollectionName(content);
+  const collection = expectedCollectionNameForPlatform(platform, content);
   if (!collection) return [];
+  if (platform === "kuaishou") {
+    return await selectKuaishouCollection(client, collection);
+  }
   const actions = [];
   const entryTexts = platform === "youtube"
     ? ["播放列表", "Playlist", "选择"]
@@ -7747,6 +15519,281 @@ async function selectCompositeCollection(client, platform, content) {
   actions.push({ kind: `${platform}_collection_select`, ...(await clickByText(client, [collection])) });
   if (!actions.at(-1)?.clicked) actions.push({ kind: `${platform}_collection_select_loose`, ...(await clickLooseText(client, [collection])) });
   await sleep(800);
+  return actions;
+}
+
+async function selectKuaishouCollection(client, collectionName) {
+  const actions = [];
+  const target = String(collectionName || "").trim();
+  if (!target) return actions;
+  const before = await evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const rows = [...document.querySelectorAll("div,label,section,form")]
+      .filter(visible)
+      .map((el) => ({ text: clean(el.innerText || el.textContent || ""), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
+      .filter((item) => item.area > 800 && /加入合集/.test(item.text))
+      .sort((a, b) => a.area - b.area);
+    const rowText = rows[0]?.text || "";
+    return {
+      actual: rowText.includes(${JSON.stringify(target)}) ? ${JSON.stringify(target)} : "",
+      configured: rowText.includes(${JSON.stringify(target)}),
+      row_text: rowText.slice(0, 240),
+    };
+  })()`, 12000);
+  if (isKuaishouCollectionAlreadyCorrect(before?.row_text || "", target)) {
+    actions.push({ kind: "kuaishou_collection_already_correct", expected: target, ...before, verified: true, skipped: true });
+    return actions;
+  }
+  const directEntry = await clickByText(client, ["选择要加入到的合集", "加入合集"]);
+  actions.push({ kind: "kuaishou_collection_entry", ...directEntry });
+  if (!actions.at(-1)?.clicked) {
+  const entry = await evaluateWithClient(client, `(() => {
+    const target = ${JSON.stringify(target)};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const click = (el) => {
+      if (!el || !visible(el)) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+      if (typeof el.click === "function") el.click();
+      return true;
+    };
+    const rows = [...document.querySelectorAll("div,label,section,form")]
+      .filter(visible)
+      .map((el) => ({ el, text: clean(el.innerText || el.textContent || ""), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
+      .filter((item) => item.area > 800 && /加入合集/.test(item.text))
+      .sort((a, b) => a.area - b.area);
+    const row = rows[0] || null;
+    if (!row) return { clicked: false, reason: "collection_row_missing" };
+    const controls = [...row.el.querySelectorAll("input,button,[role=button],div,span,svg,i")]
+      .filter(visible)
+      .map((el) => ({
+        el,
+        text: clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("placeholder") || ""),
+        cls: clean(typeof el.className === "string" ? el.className : ""),
+        area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+      }))
+      .sort((a, b) => {
+        const score = (item) => {
+          let value = 0;
+          if (/选择要加入到的合集|请选择|加入合集/.test(item.text)) value += 300;
+          if (/select|input|dropdown|picker|arrow|suffix|caret/i.test(item.cls)) value += 120;
+          if (item.area > 6000) value += 40;
+          return value;
+        };
+        return score(b) - score(a) || a.area - b.area;
+      });
+    const chosen = controls[0]?.el || row.el;
+    const clicked = click(chosen);
+    return {
+      clicked,
+      label: clean(controls[0]?.text || row.text).slice(0, 120),
+      row_text: row.text.slice(0, 240),
+    };
+  })()`, 15000);
+    actions.push({ kind: "kuaishou_collection_entry_fallback", ...entry });
+  }
+  await sleep(900);
+  const selection = await evaluateWithClient(client, `(() => {
+    const target = ${JSON.stringify(target)};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const click = (el) => {
+      if (!el || !visible(el)) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+      if (typeof el.click === "function") el.click();
+      return true;
+    };
+    const roots = [...document.querySelectorAll("[role=listbox],[role=dialog],[role=menu],.el-select-dropdown,.el-popper,.ant-select-dropdown,.ant-picker-dropdown,.dropdown,.select-dropdown,.menu,.popup")]
+      .filter(visible)
+      .filter((el) => {
+        const text = clean(el.innerText || el.textContent || "");
+        const meta = clean((el.getAttribute("class") || "") + " " + (el.getAttribute("role") || "") + " " + (el.getAttribute("aria-label") || ""));
+        return text.includes(target) || /合集|select|dropdown|listbox|menu|option|popup/i.test(meta);
+      });
+    const scopeRoots = roots.length ? roots : [];
+    const candidates = scopeRoots.flatMap((root) =>
+      [...root.querySelectorAll("li,div,span,button,[role=option],[role=menuitem],label")].filter(visible).map((el) => ({
+        el,
+        text: clean(el.innerText || el.textContent || ""),
+        cls: clean(typeof el.className === "string" ? el.className : ""),
+        area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+      })),
+    ).filter((item) => item.text && item.text.length <= 80);
+    const option = candidates
+      .map((item) => {
+        let score = 0;
+        if (item.text === target) score += 400;
+        else if (item.text.includes(target)) score += 260;
+        if (/option|item|select|dropdown|menu|list/i.test(item.cls)) score += 60;
+        if (/加入合集|选择要加入到的合集|发布时间|作者声明|封面设置|发布设置|去领取|活动推荐|智能推荐封面/.test(item.text)) score -= 240;
+        return { ...item, score };
+      })
+      .filter((item) => item.score > 0)
+      .sort((a, b) => b.score - a.score || a.area - b.area)[0] || null;
+    const clicked = option ? click(option.el) : false;
+    return {
+      clicked,
+      label: clean(option?.text || ""),
+      candidates: candidates.map((item) => item.text).filter(Boolean).slice(0, 60),
+      roots: roots.map((item) => clean(item.innerText || item.textContent || "").slice(0, 160)).slice(0, 12),
+    };
+  })()`, 15000);
+  actions.push({ kind: "kuaishou_collection_select", ...selection });
+  await sleep(800);
+  const after = await evaluateWithClient(client, `(() => {
+    const target = ${JSON.stringify(target)};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const rows = [...document.querySelectorAll("div,label,section,form")]
+      .filter(visible)
+      .map((el) => ({ text: clean(el.innerText || el.textContent || ""), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
+      .filter((item) => item.area > 800 && /加入合集/.test(item.text))
+      .sort((a, b) => a.area - b.area);
+    const rowText = rows[0]?.text || "";
+    return {
+      actual: rowText.includes(target) ? target : "",
+      configured: rowText.includes(target),
+      row_text: rowText.slice(0, 240),
+    };
+  })()`, 12000);
+  actions.push({ kind: "kuaishou_collection_verify", ...after, expected: target, verified: Boolean(after?.configured) });
+  return actions;
+}
+
+async function setKuaishouVisibility(client, content) {
+  const expectedMode = normalizeCompositeVisibilityMode(
+    content?.visibility || content?.visibility_mode || content?.visibility_or_publish_mode || content?.publish_mode || "",
+  );
+  if (!expectedMode) return [];
+  const actions = [];
+  const result = await evaluateWithClient(client, `(async () => {
+    const expectedMode = ${JSON.stringify(expectedMode)};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && el.getAttribute("aria-hidden") !== "true";
+    };
+    const click = (el) => {
+      if (!el || !visible(el)) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+      if (typeof el.click === "function") el.click();
+      return true;
+    };
+    const linesAfter = () => clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "")
+      .split(/[\\n\\r]+| {2,}/)
+      .map(clean)
+      .filter(Boolean)
+      .slice(0, 400);
+    const inputFieldsAfter = () => [...document.querySelectorAll("input,select,textarea,[role=radio],[role=checkbox],[aria-checked]")]
+      .map((el) => ({
+        label: clean([
+          el.getAttribute("aria-label"),
+          el.getAttribute("title"),
+          el.closest("label,[role=radio],[role=checkbox],[role=switch]")?.innerText,
+          el.parentElement?.innerText,
+        ].filter(Boolean).join(" ")),
+        value: clean(el.value || el.innerText || el.textContent || ""),
+        checked: typeof el.checked === "boolean" ? Boolean(el.checked) : String(el.getAttribute("aria-checked") || "").toLowerCase() === "true",
+      }))
+      .filter((item) => item.label || item.value || item.checked)
+      .slice(0, 80);
+    const optionText = expectedMode === "public" ? "所有人可见" : expectedMode === "friends" ? "好友可见" : "仅自己可见";
+    const allBlocks = [...document.querySelectorAll("section,div,fieldset,form,main,label")]
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const text = clean(el.innerText || el.textContent || "");
+        return { el, text, area: rect.width * rect.height };
+      })
+      .filter((item) => item.area > 800 && item.text);
+    const triggerCandidates = allBlocks
+      .filter((item) => /查看权限/.test(item.text))
+      .map((item) => {
+        let score = 0;
+        if (/查看权限/.test(item.text)) score += 240;
+        if (/所有人可见|好友可见|仅自己可见/.test(item.text)) score += 120;
+        if (/发布时间|加入合集|作者声明|封面设置|PK封面|智能推荐封面|编辑画布|模板编辑|发布/.test(item.text)) score -= 220;
+        return { ...item, score };
+      })
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || left.area - right.area);
+    const trigger = triggerCandidates[0] || null;
+    const triggerClicked = trigger ? click(trigger.el) : false;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const allCandidates = [...document.querySelectorAll("label,button,[role=button],[role=radio],[role=option],span,div,li,input")]
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const label = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "");
+        const root = el.closest("label,[role=radio],[role=option],button,[role=button],li,div") || el;
+        const rootText = clean(root.innerText || root.textContent || "");
+        const checked = Boolean(el.checked) || String(el.getAttribute("aria-checked") || "").toLowerCase() === "true";
+        return {
+          el,
+          root,
+          label,
+          rootText,
+          area: rect.width * rect.height,
+          visible: true,
+          clickable: true,
+          checked,
+        };
+      })
+      .filter((item) => item.label || item.rootText);
+    const pick = ${selectKuaishouVisibilityOptionCandidate.toString()}(allCandidates, expectedMode);
+    const selected = pick?.checked ? true : click(pick?.root || pick?.el);
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    const lines = linesAfter();
+    const inputFields = inputFieldsAfter();
+    const visibility = ${deriveKuaishouVisibilityState.toString()}(lines, inputFields);
+    return {
+      opened: Boolean(trigger),
+      trigger_clicked: triggerClicked,
+      selected,
+      expected: expectedMode,
+      selected_label: pick?.label || "",
+      trigger_text: clean(trigger?.text || "").slice(0, 240),
+      actual: visibility.actual || "",
+      verified: visibility.actual === expectedMode,
+      configured: visibility.configured,
+      options_visible: visibility.options_visible,
+      lines: lines.filter((line) => /查看权限|所有人可见|好友可见|仅自己可见/.test(line)).slice(0, 40),
+      input_fields: inputFields.filter((item) => /查看权限|所有人可见|好友可见|仅自己可见/.test(String(item.label || "") + " " + String(item.value || ""))).slice(0, 20),
+    };
+  })()`, 20000);
+  actions.push({ kind: "kuaishou_visibility_set", ...result });
   return actions;
 }
 
@@ -7814,6 +15861,232 @@ async function readDouyinCollectionSurface(client) {
       .slice(0, 40);
     return { lines, input_fields: inputFields };
   })()`, 12000);
+}
+
+async function setDouyinCompositeTopics(client, content) {
+  const expectedTopics = expectedNativeTopics(content);
+  if (!expectedTopics.length) return [];
+  const actions = [];
+  for (const topic of expectedTopics) {
+    const insertion = await evaluateWithClient(client, `(async () => {
+      const expected = ${JSON.stringify(topic)};
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const normalizeTopic = (value) => clean(value)
+        .replace(/^#/, "")
+        .replace(/#$/, "")
+        .replace(/\\s+/g, "")
+        .trim();
+      const selectTopicField = ${selectDouyinTopicSearchFieldCandidate.toString()};
+      const pickCandidate = ${selectDouyinTopicSuggestionCandidate.toString()};
+      const visible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && style.pointerEvents !== "none";
+      };
+      const click = (el) => {
+        if (!el || !visible(el)) return false;
+        el.scrollIntoView({ block: "center", inline: "center" });
+        const rect = el.getBoundingClientRect();
+        const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+        for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+        if (typeof el.click === "function") el.click();
+        return true;
+      };
+      const typeIntoField = async (field, value) => {
+        if (!field || !value) return false;
+        field.scrollIntoView({ block: "center", inline: "center" });
+        field.focus();
+        if (field.tagName === "INPUT" || field.tagName === "TEXTAREA") {
+          field.value = "";
+          field.dispatchEvent(new Event("input", { bubbles: true }));
+          for (const char of Array.from(value)) {
+            field.value = String(field.value || "") + char;
+            field.dispatchEvent(new InputEvent("input", { bubbles: true, data: char, inputType: "insertText" }));
+            await new Promise((resolve) => setTimeout(resolve, 60));
+          }
+          field.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
+        }
+        if (field.isContentEditable || field.getAttribute("contenteditable") === "true" || field.getAttribute("role") === "textbox" || field.getAttribute("role") === "combobox" || field.getAttribute("role") === "searchbox") {
+          try {
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(field);
+            range.collapse(false);
+            selection?.removeAllRanges();
+            selection?.addRange(range);
+          } catch {}
+          try {
+            field.textContent = "";
+          } catch {}
+          for (const char of Array.from(value)) {
+            try {
+              document.execCommand("insertText", false, char);
+            } catch {
+              field.textContent = String(field.textContent || "") + char;
+            }
+            field.dispatchEvent(new InputEvent("input", { bubbles: true, data: char, inputType: "insertText" }));
+            await new Promise((resolve) => setTimeout(resolve, 60));
+          }
+          field.dispatchEvent(new Event("change", { bubbles: true }));
+          return true;
+        }
+        return false;
+      };
+      const topicButton = [...document.querySelectorAll("button,[role=button],div,span,label,a")]
+        .filter(visible)
+        .find((el) => {
+          const text = clean(el.innerText || el.textContent || "");
+          return text === "话题" || text === "# 话题" || /添加话题/.test(text);
+        }) || null;
+      const openedByTopicButton = click(topicButton);
+      if (openedByTopicButton) await new Promise((resolve) => setTimeout(resolve, 300));
+      const candidateNodes = [...document.querySelectorAll("input,textarea,[contenteditable=true],[role=textbox],[role=searchbox],[role=combobox]")]
+        .filter(visible);
+      const candidates = candidateNodes.map((el, index) => {
+        const root = el.closest("[role=dialog],[role=listbox],[class*=topic],[class*=search],[class*=popover],[class*=dropdown],[class*=menu]") || el.parentElement || el;
+        return {
+          index,
+          tag: String(el.tagName || "").toLowerCase(),
+          type: String(el.getAttribute("type") || "").toLowerCase(),
+          role: clean(el.getAttribute("role") || "").toLowerCase(),
+          label: clean(
+            el.getAttribute("aria-label")
+            || el.getAttribute("placeholder")
+            || root?.getAttribute?.("aria-label")
+            || root?.innerText
+            || ""
+          ).slice(0, 160),
+          current: clean(el.value ?? el.innerText ?? el.textContent ?? ""),
+          root_area: Number((root?.getBoundingClientRect?.().width || 0) * (root?.getBoundingClientRect?.().height || 0)),
+          isContentEditable: Boolean(el.isContentEditable || el.getAttribute("contenteditable") === "true"),
+        };
+      });
+      const chosenField = selectTopicField(candidates);
+      const field = chosenField ? candidateNodes[Number(chosenField.index)] : null;
+      if (!field) {
+        return { inserted: false, clicked: false, reason: "douyin_topic_editor_missing", candidate_count: 0 };
+      }
+      const inserted = await typeIntoField(field, "#" + expected);
+      await new Promise((resolve) => setTimeout(resolve, 550));
+      const candidateRoots = [...document.querySelectorAll("[role=dialog],[role=listbox],[role=menu],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel],section,div,form")]
+        .filter(visible)
+        .filter((el) => /话题|添加话题|搜索|热度|推荐|@好友/.test(clean(el.innerText || el.textContent || "")) || /topic|suggest|recommend|dropdown|popover|popup|panel/i.test(clean(el.className || "")))
+        .slice(0, 10);
+      const suggestionCandidates = candidateRoots.flatMap((root) =>
+        [...root.querySelectorAll("button,[role=button],[role=option],a,span,div,label")]
+          .filter(visible)
+          .map((el) => {
+            const rect = el.getBoundingClientRect();
+            const text = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title"));
+            const context = clean((el.closest("[role=dialog],[role=listbox],[role=menu],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel]")?.innerText || root.innerText || "")).slice(0, 220);
+            return {
+              el,
+              text,
+              context,
+              area: rect.width * rect.height,
+              inLayer: Boolean(el.closest("[role=dialog],[role=listbox],[role=menu],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel]")),
+              isButtonLike: /^(button|a|label)$/i.test(el.tagName) || el.getAttribute("role") === "button" || el.getAttribute("role") === "option",
+              isSearchResult: /热度|推荐|搜索/.test(context),
+              className: clean(typeof el.className === "string" ? el.className : ""),
+            };
+          }),
+      );
+      const chosen = pickCandidate(suggestionCandidates, expected);
+      const clicked = click(chosen?.el);
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      return {
+        inserted,
+        clicked,
+        text: clean(chosen?.text || ""),
+        label: clean(chosen?.text || ""),
+        context: clean(chosen?.context || ""),
+        in_layer: Boolean(chosen?.inLayer),
+        candidate_count: suggestionCandidates.length,
+        loose: false,
+        topic_field_label: clean(chosenField?.label || ""),
+        topic_field_role: clean(chosenField?.role || ""),
+        topic_field_current: clean(field?.value ?? field?.innerText ?? field?.textContent ?? ""),
+        opened_by_topic_button: openedByTopicButton,
+      };
+    })()`, 22000).catch((error) => ({
+      inserted: false,
+      clicked: false,
+      reason: "douyin_topic_insert_error",
+      message: String(error?.message || error || ""),
+      candidate_count: 0,
+      loose: false,
+    }));
+    actions.push({ kind: "douyin_topic_select", topic, ...insertion });
+    await sleep(350);
+  }
+  const verification = await evaluateWithClient(client, `(async () => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const extractLabels = ${extractDouyinTopicVerificationLabels.toString()};
+    const resolveTargets = ${resolveDouyinRichTextTargets.toString()};
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && el.getAttribute("aria-hidden") !== "true";
+    };
+    const editables = [...document.querySelectorAll("textarea,input[type=text],[contenteditable=true],div[role=textbox],div[data-testid=tweetTextarea_0]")]
+      .filter(visible)
+      .map((el) => ({
+        el,
+        text: clean([el.placeholder, el.getAttribute("aria-label"), el.getAttribute("data-testid"), el.value, el.innerText, el.closest("label")?.innerText, el.parentElement?.innerText].join(" ")),
+        area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+        className: clean(typeof el.className === "string" ? el.className : ""),
+        role: clean(el.getAttribute("role") || "").toLowerCase(),
+        isContentEditable: Boolean(el.isContentEditable || el.getAttribute("contenteditable") === "true"),
+        tag: String(el.tagName || "").toLowerCase(),
+      }))
+      .filter((item) => item.area > 1000)
+      .sort((left, right) => right.area - left.area);
+    const targets = resolveTargets(editables, { body: "", title: "" });
+    const bodyTarget = targets?.bodyTarget?.el || null;
+    const lines = String(document.body?.innerText || "")
+      .split(/[\\n\\r]+/)
+      .map(clean)
+      .filter(Boolean)
+      .slice(0, 240);
+    const topicEntries = [];
+    if (bodyTarget) {
+      topicEntries.push({
+        text: clean(bodyTarget.innerText || bodyTarget.textContent || bodyTarget.value || ""),
+        context: "body",
+        source: "body",
+      });
+      const localRoot = bodyTarget.closest("section,form,[class*=publish],[class*=editor],[class*=zone]") || bodyTarget.parentElement;
+      if (localRoot) {
+        topicEntries.push(...[...localRoot.querySelectorAll("button,[role=button],span,div,label,a")]
+          .filter(visible)
+          .map((el) => ({
+            text: clean(el.innerText || el.textContent || ""),
+            context: clean((el.closest("[role=dialog],[role=listbox],[role=menu],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel]")?.innerText || localRoot.innerText || "")).slice(0, 220),
+            source: "local",
+          }))
+          .filter((item) => /^#/.test(item.text))
+          .slice(0, 80));
+      }
+    }
+    return {
+      lines: lines.filter((line) => /添加话题|官方活动|^#/.test(line)).slice(0, 120),
+      actual_topics: extractLabels(topicEntries),
+    };
+  })()`, 15000).catch(() => ({ lines: [], actual_topics: [] }));
+  const actualTopics = Array.isArray(verification.actual_topics) ? verification.actual_topics : [];
+  const matchedTopics = expectedTopics.filter((topic) => actualTopics.includes(topic));
+  actions.push({
+    kind: "douyin_topic_state",
+    expected: expectedTopics,
+    actual: actualTopics,
+    matched_topics: matchedTopics,
+    verified: matchedTopics.length === expectedTopics.length,
+    lines: Array.isArray(verification.lines) ? verification.lines : [],
+  });
+  return actions;
 }
 
 async function setDouyinCompositeCollection(client, content) {
@@ -7915,6 +16188,29 @@ async function setDouyinCompositeCollection(client, content) {
 async function setCompositeSchedule(client, platform, content) {
   if (!content.scheduled_publish_at) return [];
   const actions = [];
+  if (platform === "kuaishou") {
+    const current = await evaluateWithClient(client, `(() => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      return {
+        text: clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "").slice(0, 4000),
+      };
+    })()`, 12000).catch(() => ({ text: "" }));
+    const expected = {
+      scheduledPublishAt: String(content.scheduled_publish_at || "").trim(),
+      hasExplicitSeconds: /:\d{2}$/.test(String(content.scheduled_publish_at || "").trim()),
+      requireExactSeconds: /:\d{2}$/.test(String(content.scheduled_publish_at || "").trim()),
+    };
+    if (matchesKuaishouScheduleEvidence(String(current?.text || ""), expected)) {
+      actions.push({
+        kind: "kuaishou_schedule_already_correct",
+        set: true,
+        skipped: true,
+        expected: expected.scheduledPublishAt,
+        verified: true,
+      });
+      return actions;
+    }
+  }
   if (!["xiaohongshu"].includes(platform)) {
     actions.push({ kind: `${platform}_schedule_entry`, ...(await clickByText(client, ["定时发布", "发布时间", "预约", "公开范围", "已排定时间", "安排时间", "Schedule"])) });
     await sleep(900);
@@ -7931,7 +16227,7 @@ async function prepareYoutubeCompositeDraft(client, platform, content) {
   const actions = [];
   const title = String(content.title || "").trim();
   const body = String(content.body || "").trim();
-  const coverPath = expectedCoverPath(content);
+  const coverPath = expectedPrimaryCoverPathForPlatform(platform, content);
   const mediaPath = expectedMediaPath(content);
   actions.push({ kind: "youtube_upload_editor", ...(await ensureYoutubeUploadEditor(client, title || body || path.win32.basename(String(mediaPath || "")).replace(/\.[^.]+$/, ""))) });
   await sleep(900);
@@ -7948,33 +16244,26 @@ async function prepareYoutubeCompositeDraft(client, platform, content) {
   }
   let mediaUpload = { uploaded: false, skipped: false, reason: "no_video_file_input" };
   let postResumeSnapshot = await pageSnapshot(client).catch(() => null);
-  let postResumeMediaState = canReuseCurrentPageMediaForPrepublish(platform, postResumeSnapshot, mediaPath, { requiresLocalMedia: true });
+  let postResumeMediaState = canReuseCurrentPageMediaForPrepublish(platform, postResumeSnapshot, mediaPath, {
+    requiresLocalMedia: true,
+    expectedTitle: String(content?.title || "").trim(),
+  });
   if (postResumeMediaState.reusable) {
     mediaUpload = { uploaded: true, skipped: true, reason: "media_already_present", media_reuse_reason: postResumeMediaState.reason };
   } else {
-    const uploadMenuTexts = ["创建", "CREATE", "上传视频", "Upload videos"];
-    actions.push({ kind: "youtube_upload_menu_open", ...(await clickByText(client, uploadMenuTexts)) });
-    if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_upload_menu_open_loose", ...(await clickLooseText(client, uploadMenuTexts)) });
-    await sleep(900);
-    const uploadEntryTexts = ["上传视频", "Upload videos", "发布视频", "发表视频", "立即投稿", "Create"];
-    actions.push({ kind: "youtube_upload_entry", ...(await clickByText(client, uploadEntryTexts)) });
-    if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_upload_entry_loose", ...(await clickLooseText(client, uploadEntryTexts)) });
-    if (!actions.some((action) => /^youtube_upload_entry/.test(String(action?.kind || "")) && action?.clicked)) {
-      actions.push({ kind: "youtube_upload_entry_hidden", ...(await activateYoutubeHiddenUploadEntry(client)) });
-    }
-    await sleep(1800);
     mediaUpload = await uploadYoutubeVideoForComposite(client, mediaPath);
   }
   actions.push({ kind: "youtube_media_upload", ...mediaUpload });
+  if (mediaUpload?.create_flow?.actions?.length) actions.push(...mediaUpload.create_flow.actions);
   const uploadReadiness = await ensureCompositeUploadReady(client, platform, content, compositeUploadTimeoutMs(platform));
   actions.push(...uploadReadiness.actions);
-  if (!uploadReadiness.readiness?.ready) {
+  if (!shouldAllowCompositeFieldPreparation(platform, uploadReadiness.readiness)) {
     const blocker = buildCompositeUploadReadinessBlockerAction(platform, uploadReadiness.readiness);
     actions.push(blocker);
     return actions;
   }
   actions.push({ kind: "youtube_rich_text", ...(await setPlatformRichText(client, platform, title, body)) });
-  actions.push(...(await uploadCompositeCover(client, platform, coverPath)));
+  actions.push(...(await uploadCompositeCover(client, platform, content, coverPath)));
   if (compositePlatformSkipsExplicitTagEntry(platform)) {
     actions.push({ kind: "youtube_tag_entry_skipped", skipped: true, reason: "platform_soft_tag_policy" });
   } else {
@@ -7982,8 +16271,9 @@ async function prepareYoutubeCompositeDraft(client, platform, content) {
     actions.push({ kind: "youtube_tags", ...(await setYouTubeTags(client, expectedTags(content, 15))) });
   }
   actions.push(...(await selectCompositeCollection(client, platform, content)));
-  actions.push({ kind: "youtube_not_for_kids", ...(await clickByText(client, ["不，内容不是面向儿童的", "否，并非面向儿童", "No, it's not made for kids"])) });
-  actions.push(...(await setCompositeSchedule(client, platform, content)));
+  actions.push({ kind: "youtube_not_for_kids", ...(await ensureYouTubeAudienceSelection(client, content)) });
+  actions.push(...(await advanceYouTubeUploadWizard(client, content, "visibility")));
+  actions.push(...(await setYouTubeVisibilityAndSchedule(client, content)));
   return actions;
 }
 
@@ -7991,43 +16281,13 @@ async function setDouyinOriginalDeclaration(client, content) {
   const actions = [];
   actions.push({ kind: "douyin_original_declaration_entry", ...(await clickByText(client, ["自主声明", "原创", "声明"])) });
   const targetOption = expectedCompositeDeclaration(content, "douyin");
-  const selection = await evaluateWithClient(client, `(async () => {
+  const probe = await evaluateWithClient(client, `(() => {
     const expected = ${JSON.stringify(targetOption)};
-    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const visible = (el) => {
       const rect = el.getBoundingClientRect();
       const style = getComputedStyle(el);
       return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && el.getAttribute("aria-hidden") !== "true";
-    };
-    const click = (el) => {
-      if (!el) return false;
-      el.scrollIntoView({ block: "center", inline: "center" });
-      const rect = el.getBoundingClientRect();
-      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
-      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
-      return true;
-    };
-    const looksSelected = (el) => {
-      if (!el) return false;
-      const selfChecked = String(el.getAttribute("aria-checked") || "").toLowerCase() === "true";
-      const selfPressed = String(el.getAttribute("aria-pressed") || "").toLowerCase() === "true";
-      const selfSelected = String(el.getAttribute("aria-selected") || "").toLowerCase() === "true";
-      const selfClass = clean(String(el.className || ""));
-      const hasSelectedClass = /checked|selected|active/.test(selfClass);
-      const descendantChecked = [...el.querySelectorAll("input,[role=radio],[role=checkbox],[aria-checked],[aria-selected]")]
-        .some((node) =>
-          (typeof node.checked === "boolean" && Boolean(node.checked))
-          || String(node.getAttribute("aria-checked") || "").toLowerCase() === "true"
-          || String(node.getAttribute("aria-selected") || "").toLowerCase() === "true"
-        );
-      return selfChecked || selfPressed || selfSelected || hasSelectedClass || descendantChecked;
-    };
-    const isDisabled = (el) => {
-      if (!el) return true;
-      return Boolean(el.disabled)
-        || String(el.getAttribute("aria-disabled") || "").toLowerCase() === "true"
-        || /disabled/.test(clean(String(el.className || "")));
     };
     const allVisibleText = () => clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
     const splitLines = (text) => text.split(/[\\n\\r]+| {2,}/).map(clean).filter(Boolean);
@@ -8047,13 +16307,78 @@ async function setDouyinOriginalDeclaration(client, content) {
     };
     const modalPattern = /请选择声明类型|无需添加自主声明|内容由AI生成|内容为个人观点或见解|内容为转载信息|内容含营销推广信息|虚构演绎，仅供娱乐/;
     const bodyText = allVisibleText();
-    if (!modalPattern.test(bodyText)) {
-      return { opened: false, selected: false, confirmed: false, target_option: expected, visible_text: [] };
-    }
+    return {
+      opened: modalPattern.test(bodyText),
+      target_option: expected,
+      declaration_actual: findDeclarationFormActual(bodyText),
+      placeholder_visible: /请选择自主声明|请选择声明类型/.test(bodyText),
+      visible_text: bodyText.split(/[\\n\\r]+| {2,}/).map(clean).filter((line) => /声明|AI|营销|转载|娱乐|取消|确定/.test(line)).slice(0, 40),
+    };
+  })()`, 12000).catch((error) => ({
+    opened: false,
+    target_option: targetOption,
+    declaration_actual: "",
+    placeholder_visible: false,
+    visible_text: [],
+    reason: "douyin_declaration_probe_error",
+    message: String(error?.message || error || ""),
+  }));
+  if (!probe.opened) {
+    actions.push({
+      kind: "douyin_original_declaration",
+      ...probe,
+      selected: false,
+      selected_label: "",
+      selected_state: false,
+      confirm_enabled: false,
+      confirmed: false,
+      closed: false,
+      saved: Boolean(
+        probe.declaration_actual
+        && (probe.declaration_actual === targetOption || probe.declaration_actual.includes(targetOption) || targetOption.includes(probe.declaration_actual))
+        && !probe.placeholder_visible
+      ),
+    });
+    return actions;
+  }
+  const selection = await evaluateWithClient(client, `(async () => {
+    const expected = ${JSON.stringify(targetOption)};
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && el.getAttribute("aria-hidden") !== "true";
+    };
+    const click = (el) => {
+      if (!el || !visible(el)) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+      if (typeof el.click === "function") el.click();
+      return true;
+    };
+    const looksSelected = (el) => {
+      if (!el) return false;
+      const selfChecked = String(el.getAttribute("aria-checked") || "").toLowerCase() === "true";
+      const selfPressed = String(el.getAttribute("aria-pressed") || "").toLowerCase() === "true";
+      const selfSelected = String(el.getAttribute("aria-selected") || "").toLowerCase() === "true";
+      const selfClass = clean(String(el.className || ""));
+      const hasSelectedClass = /checked|selected|active/.test(selfClass);
+      const descendantChecked = [...el.querySelectorAll("input,[role=radio],[role=checkbox],[aria-checked],[aria-selected]")]
+        .some((node) =>
+          (typeof node.checked === "boolean" && Boolean(node.checked))
+          || String(node.getAttribute("aria-checked") || "").toLowerCase() === "true"
+          || String(node.getAttribute("aria-selected") || "").toLowerCase() === "true"
+        );
+      return selfChecked || selfPressed || selfSelected || hasSelectedClass || descendantChecked;
+    };
+    const modalPattern = /请选择声明类型|无需添加自主声明|内容由AI生成|内容为个人观点或见解|内容为转载信息|内容含营销推广信息|虚构演绎，仅供娱乐/;
     const modalRoot = [...document.querySelectorAll("[role=dialog],[aria-modal=true],[class*=modal i],[class*=dialog i]")]
       .filter(visible)
       .find((el) => modalPattern.test(clean(el.innerText || el.textContent || ""))) || document.body;
-    const collect = (root) => [...root.querySelectorAll("label,button,[role=button],[role=radio],span,div")]
+    const candidates = [...modalRoot.querySelectorAll("label,button,[role=button],[role=radio],span,div")]
       .filter(visible)
       .map((el) => ({
         el,
@@ -8061,54 +16386,114 @@ async function setDouyinOriginalDeclaration(client, content) {
         area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
       }))
       .filter((item) => item.text && item.text.length <= 120);
-    let candidates = collect(modalRoot);
     const option = candidates
-      .map((item) => {
-        const target = item.el.closest("label,[role=radio],button,[role=button],li,div") || item.el;
-        return {
-          ...item,
-          target,
-          selected_before: looksSelected(target),
-        };
-      })
+      .map((item) => ({
+        ...item,
+        target: item.el.closest("label,[role=radio],button,[role=button],li,div") || item.el,
+      }))
       .filter((item) => item.text === expected || item.text.includes(expected))
       .sort((left, right) => left.area - right.area)[0];
     const selected = click(option?.target);
-    if (selected) await sleep(500);
-    const selectedState = looksSelected(option?.target);
-    candidates = collect(modalRoot);
-    const confirm = candidates
+    if (selected) await sleep(350);
+    return {
+      selected,
+      selected_label: option?.text || "",
+      selected_state: looksSelected(option?.target),
+    };
+  })()`, 10000).catch((error) => ({
+    selected: false,
+    selected_label: "",
+    selected_state: false,
+    reason: "douyin_declaration_select_error",
+    message: String(error?.message || error || ""),
+  }));
+  const confirm = await evaluateWithClient(client, `(async () => {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && el.getAttribute("aria-hidden") !== "true";
+    };
+    const click = (el) => {
+      if (!el || !visible(el)) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+      if (typeof el.click === "function") el.click();
+      return true;
+    };
+    const isDisabled = (el) => {
+      if (!el) return true;
+      return Boolean(el.disabled)
+        || String(el.getAttribute("aria-disabled") || "").toLowerCase() === "true"
+        || /disabled/.test(clean(String(el.className || "")));
+    };
+    const modalPattern = /请选择声明类型|无需添加自主声明|内容由AI生成|内容为个人观点或见解|内容为转载信息|内容含营销推广信息|虚构演绎，仅供娱乐/;
+    const modalRoot = [...document.querySelectorAll("[role=dialog],[aria-modal=true],[class*=modal i],[class*=dialog i]")]
+      .filter(visible)
+      .find((el) => modalPattern.test(clean(el.innerText || el.textContent || ""))) || document.body;
+    const confirm = [...modalRoot.querySelectorAll("button,[role=button],span,div")]
+      .filter(visible)
+      .map((el) => ({ el, text: clean(el.innerText || el.textContent), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
       .filter((item) => item.text === "确定")
       .filter((item) => !isDisabled(item.el))
       .sort((left, right) => left.area - right.area)[0];
-    const confirmEnabled = Boolean(confirm?.el) && !isDisabled(confirm?.el);
+    const confirm_enabled = Boolean(confirm?.el);
     const confirmed = click(confirm?.el);
-    if (confirmed) await sleep(800);
-    const afterText = allVisibleText();
-    const declarationActual = findDeclarationFormActual(afterText);
-    const placeholderVisible = /请选择自主声明|请选择声明类型/.test(afterText);
-    const saved = Boolean(
-      !modalPattern.test(afterText)
-      && declarationActual
-      && (declarationActual === expected || declarationActual.includes(expected) || expected.includes(declarationActual))
-      && !placeholderVisible
-    );
+    if (confirmed) await sleep(700);
+    return { confirm_enabled, confirmed };
+  })()`, 10000).catch((error) => ({
+    confirm_enabled: false,
+    confirmed: false,
+    reason: "douyin_declaration_confirm_error",
+    message: String(error?.message || error || ""),
+  }));
+  const after = await evaluateWithClient(client, `(() => {
+    const expected = ${JSON.stringify(targetOption)};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const splitLines = (text) => text.split(/[\\n\\r]+| {2,}/).map(clean).filter(Boolean);
+    const findDeclarationFormActual = (text) => {
+      const lines = splitLines(text);
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index];
+        if (!/自主声明|创作声明|声明类型/.test(line)) continue;
+        const windowLines = lines.slice(index, index + 3);
+        const matchedExpected = windowLines.find((item) => item === expected || item.includes(expected) || expected.includes(item));
+        if (matchedExpected) return matchedExpected;
+        if (windowLines.some((item) => /请选择自主声明|请选择声明类型/.test(item))) return "";
+      }
+      const anywhereExpected = lines.find((item) => item === expected || item.includes(expected) || expected.includes(item));
+      if (anywhereExpected) return anywhereExpected;
+      return "";
+    };
+    const modalPattern = /请选择声明类型|无需添加自主声明|内容由AI生成|内容为个人观点或见解|内容为转载信息|内容含营销推广信息|虚构演绎，仅供娱乐/;
+    const bodyText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    const declarationActual = findDeclarationFormActual(bodyText);
+    const placeholderVisible = /请选择自主声明|请选择声明类型/.test(bodyText);
     return {
-      opened: true,
-      target_option: expected,
-      selected,
-      selected_label: option?.text || "",
-      selected_state: selectedState,
-      confirm_enabled: confirmEnabled,
-      confirmed,
-      closed: !modalPattern.test(afterText),
+      closed: !modalPattern.test(bodyText),
       declaration_actual: declarationActual,
       placeholder_visible: placeholderVisible,
-      saved,
-      visible_text: afterText.split(/[\\n\\r]+| {2,}/).map(clean).filter((line) => /声明|AI|营销|转载|娱乐|取消|确定/.test(line)).slice(0, 40),
+      saved: Boolean(
+        !modalPattern.test(bodyText)
+        && declarationActual
+        && (declarationActual === expected || declarationActual.includes(expected) || expected.includes(declarationActual))
+        && !placeholderVisible
+      ),
+      visible_text: bodyText.split(/[\\n\\r]+| {2,}/).map(clean).filter((line) => /声明|AI|营销|转载|娱乐|取消|确定/.test(line)).slice(0, 40),
     };
-  })()`, 20000);
-  actions.push({ kind: "douyin_original_declaration", ...selection });
+  })()`, 12000).catch((error) => ({
+    closed: false,
+    declaration_actual: "",
+    placeholder_visible: false,
+    saved: false,
+    visible_text: [],
+    reason: "douyin_declaration_after_error",
+    message: String(error?.message || error || ""),
+  }));
+  actions.push({ kind: "douyin_original_declaration", target_option: targetOption, opened: true, ...selection, ...confirm, ...after });
   return actions;
 }
 
@@ -8120,8 +16505,11 @@ async function repairDouyinCompositeDraft(client, platform, content, repairableF
     const body = platformBodyWithTags(platform, content);
     actions.push({ kind: "douyin_rich_text_repair", ...(await setPlatformRichText(client, platform, title, body)) });
   }
+  if (plan.topics) {
+    actions.push(...(await setDouyinCompositeTopics(client, content)));
+  }
   if (plan.cover) {
-    actions.push(...(await setDouyinCompositeCover(client, expectedCoverPath(content))));
+    actions.push(...(await setDouyinCompositeCover(client, content)));
   }
   if (plan.collection) {
     actions.push(...(await setDouyinCompositeCollection(client, content)));
@@ -8135,41 +16523,690 @@ async function repairDouyinCompositeDraft(client, platform, content, repairableF
   return actions;
 }
 
+export function buildDouyinPrepareProjectExecutionPlan(platform = "douyin") {
+  const projects = compositePlatformPublishProjects(platform)
+    .map((item) => String(item?.key || "").trim())
+    .filter(Boolean);
+  const plan = [];
+  let richTextInserted = false;
+  let coverInserted = false;
+  for (const key of projects) {
+    if (key === "media_upload") continue;
+    if ((key === "title" || key === "body")) {
+      if (!richTextInserted) {
+        plan.push({ kind: "rich_text", project_keys: projects.filter((item) => item === "title" || item === "body") });
+        richTextInserted = true;
+      }
+      continue;
+    }
+    if (key === "cover_upload" || key === "cover_upload_4_3" || key === "cover_upload_3_4") {
+      if (!coverInserted) {
+        plan.push({
+          kind: "cover",
+          project_keys: projects.filter((item) => item === "cover_upload" || item === "cover_upload_4_3" || item === "cover_upload_3_4"),
+        });
+        coverInserted = true;
+      }
+      continue;
+    }
+    if (key === "tags") {
+      plan.push({ kind: "topics", project_keys: [key] });
+      continue;
+    }
+    if (key === "collection") {
+      plan.push({ kind: "collection", project_keys: [key] });
+      continue;
+    }
+    if (key === "declaration") {
+      plan.push({ kind: "declaration", project_keys: [key] });
+      continue;
+    }
+    if (key === "visibility") {
+      plan.push({ kind: "visibility", project_keys: [key] });
+      continue;
+    }
+    if (key === "schedule") {
+      plan.push({ kind: "schedule", project_keys: [key] });
+    }
+  }
+  return plan;
+}
+
+function deriveDouyinPrepareProjectAvailabilityFromIntegrity(integrity = {}) {
+  const fields = integrity && typeof integrity.fields === "object" ? integrity.fields : {};
+  const extras = integrity && typeof integrity.platform_extras === "object" ? integrity.platform_extras : {};
+  const relevantLines = Array.isArray(extras.relevant_lines) ? extras.relevant_lines : [];
+  const slotSurfaces = Array.isArray(extras.douyin_slot_surfaces) ? extras.douyin_slot_surfaces : [];
+  const textHaystack = String(
+    [
+      ...relevantLines,
+      fields?.title?.actual,
+      fields?.body?.actual,
+      fields?.collection?.actual,
+      fields?.declaration?.actual,
+      fields?.schedule?.actual,
+      fields?.visibility?.actual,
+    ].filter(Boolean).join(" "),
+  );
+  const has = (pattern) => pattern.test(textHaystack);
+  return {
+    rich_text: Boolean(fields?.title || fields?.body) || has(/作品描述|作品简介|描述|标题/),
+    cover: slotSurfaces.length > 0 || has(/设置封面|选择封面|预览封面|预览视频|修改封面/),
+    topics: has(/添加话题|官方活动|#添加话题|话题/),
+    collection: Boolean(fields?.collection) || has(/合集|请选择合集|添加合集|加入合集/),
+    declaration: Boolean(fields?.declaration) || has(/自主声明|无需添加自主声明|请选择声明类型|声明/),
+    visibility: Boolean(fields?.visibility) || has(/谁可以看|公开可见|所有人可见|查看权限/),
+    schedule: Boolean(fields?.schedule) || has(/发布时间|定时发布|立即发布|预约发布/),
+  };
+}
+
+export function filterDouyinPrepareProjectExecutionPlan(executionPlan = [], availability = {}) {
+  const normalizedAvailability = availability && typeof availability === "object" ? availability : {};
+  return executionPlan.map((step) => {
+    const kind = String(step?.kind || "").trim();
+    const actionable = normalizedAvailability[kind] !== false;
+    return {
+      ...step,
+      actionable,
+      blocked_reason: actionable ? "" : "editor_control_not_available",
+    };
+  });
+}
+
+async function setDouyinCompositeVisibility(client, platform, content) {
+  const expectedVisibility = compositePlatformSkipsExplicitVisibilityEntry(platform)
+    ? ""
+    : normalizeCompositeVisibilityMode(
+      content?.visibility || content?.visibility_mode || content?.visibility_or_publish_mode || content?.publish_mode || "",
+    );
+  if (!expectedVisibility) {
+    return [{
+      kind: "douyin_visibility",
+      skipped: true,
+      reason: "no_explicit_visibility_contract",
+      expected: "",
+      verified: true,
+    }];
+  }
+  const after = await readCompositeMaterialIntegrity(client, platform, content).catch(() => null);
+  const visibilityField = after?.fields?.visibility && typeof after.fields.visibility === "object"
+    ? after.fields.visibility
+    : null;
+  const actualVisibility = String(visibilityField?.actual || "").trim();
+  if (visibilityField?.verified === true || actualVisibility === expectedVisibility) {
+    return [{
+      kind: "douyin_visibility",
+      expected: expectedVisibility,
+      actual: actualVisibility,
+      verified: true,
+      configured: true,
+      skipped: true,
+      reason: "visibility_already_matches",
+    }];
+  }
+  return [{
+    kind: "douyin_visibility",
+    expected: expectedVisibility,
+    actual: actualVisibility,
+    verified: false,
+    configured: Boolean(actualVisibility),
+    blocked: true,
+    reason: "explicit_visibility_contract_unimplemented",
+  }];
+}
+
 async function prepareDouyinCompositeDraft(client, platform, content) {
   const actions = [];
   const title = String(content.title || "").trim();
   const body = platformBodyWithTags(platform, content);
   const uploadReadiness = await ensureCompositeUploadReady(client, platform, content, compositeUploadTimeoutMs(platform));
   actions.push(...uploadReadiness.actions);
-  if (!uploadReadiness.readiness?.ready) {
+  if (!shouldAllowCompositeFieldPreparation(platform, uploadReadiness.readiness)) {
     const blocker = buildCompositeUploadReadinessBlockerAction(platform, uploadReadiness.readiness);
     actions.push(blocker);
     return actions;
   }
-  actions.push({ kind: "douyin_rich_text", ...(await setPlatformRichText(client, platform, title, body)) });
-  actions.push(...(await setDouyinCompositeCover(client, expectedCoverPath(content))));
-  actions.push(...(await setDouyinCompositeCollection(client, content)));
-  actions.push(...(await setDouyinOriginalDeclaration(client, content)));
-  actions.push(...(await setCompositeSchedule(client, platform, content)));
+  const editorIntegrity = await readCompositeMaterialIntegrity(client, platform, content).catch(() => null);
+  const projectAvailability = deriveDouyinPrepareProjectAvailabilityFromIntegrity(editorIntegrity || {});
+  actions.push({
+    kind: "douyin_editor_inventory",
+    available_projects: projectAvailability,
+    fields: editorIntegrity?.fields || {},
+    relevant_lines: editorIntegrity?.platform_extras?.relevant_lines || [],
+  });
+  const executionPlan = filterDouyinPrepareProjectExecutionPlan(
+    buildDouyinPrepareProjectExecutionPlan(platform),
+    projectAvailability,
+  );
+  actions.push({
+    kind: "douyin_prepare_project_plan",
+    projects: compositePlatformPublishProjects(platform).map((item) => item.key),
+    execution_plan: executionPlan,
+  });
+  for (const step of executionPlan) {
+    if (step.actionable === false) {
+      actions.push({
+        kind: `douyin_${step.kind}_project_skipped`,
+        project_keys: step.project_keys,
+        skipped: true,
+        reason: step.blocked_reason || "editor_control_not_available",
+      });
+      continue;
+    }
+    console.log(`[douyin-prepare] step=${step.kind}:start`);
+    if (step.kind === "rich_text") {
+      actions.push({ kind: "douyin_rich_text", project_keys: step.project_keys, ...(await setPlatformRichText(client, platform, title, body)) });
+    } else if (step.kind === "cover") {
+      const coverActions = await setDouyinCompositeCover(client, content);
+      actions.push({ kind: "douyin_cover_project", project_keys: step.project_keys, attempted: true });
+      actions.push(...coverActions);
+    } else if (step.kind === "topics") {
+      const topicActions = await setDouyinCompositeTopics(client, content);
+      actions.push({ kind: "douyin_topics_project", project_keys: step.project_keys, attempted: true });
+      actions.push(...topicActions);
+    } else if (step.kind === "collection") {
+      const collectionActions = await setDouyinCompositeCollection(client, content);
+      actions.push({ kind: "douyin_collection_project", project_keys: step.project_keys, attempted: true });
+      actions.push(...collectionActions);
+    } else if (step.kind === "declaration") {
+      const declarationActions = await setDouyinOriginalDeclaration(client, content);
+      actions.push({ kind: "douyin_declaration_project", project_keys: step.project_keys, attempted: true });
+      actions.push(...declarationActions);
+    } else if (step.kind === "visibility") {
+      actions.push(...(await setDouyinCompositeVisibility(client, platform, content)));
+    } else if (step.kind === "schedule") {
+      const scheduleActions = await setCompositeSchedule(client, platform, content);
+      actions.push({ kind: "douyin_schedule_project", project_keys: step.project_keys, attempted: true });
+      actions.push(...scheduleActions);
+    }
+    console.log(`[douyin-prepare] step=${step.kind}:done`);
+  }
+  return actions;
+}
+
+async function setXiaohongshuOriginalDeclaration(client, content) {
+  const actions = [];
+  const rawDeclaration = extractCompositeDeclarationText(content);
+  const expectedDeclaration = expectedCompositeDeclaration(content, "xiaohongshu");
+  const requireOriginalDeclaration = shouldEnableXiaohongshuOriginalDeclaration(rawDeclaration || compositePlatformDefaultDeclaration("xiaohongshu"));
+  const selectDeclarationControlSource = JSON.stringify(`(${selectXiaohongshuOriginalDeclarationControlCandidate.toString()})`);
+  const coverModalState = await evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const modalText = [...document.querySelectorAll("[role=dialog],[class*=modal],.d-modal,.d-modal-content")]
+      .filter(visible)
+      .map((el) => clean(el.innerText || el.textContent || ""))
+      .find((text) => /设置封面|上传图片|封面比例/.test(text)) || "";
+    return { open: Boolean(modalText), modal_text: modalText.slice(0, 240) };
+  })()`, 10000).catch(() => ({ open: false, modal_text: "" }));
+  if (coverModalState.open) {
+    actions.push({ kind: "xiaohongshu_original_declaration_cover_modal_open", ...coverModalState });
+    actions.push({ kind: "xiaohongshu_original_declaration_cover_modal_confirm_retry", ...(await clickXiaohongshuCoverConfirm(client)) });
+    await sleep(1000);
+  }
+  const selection = await evaluateWithClient(client, `(async () => {
+    const expected = ${JSON.stringify(expectedDeclaration)};
+    const requireOriginal = ${JSON.stringify(requireOriginalDeclaration)};
+    const selectDeclarationControl = (0, eval)(${selectDeclarationControlSource});
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const click = (el) => {
+      if (!el || !visible(el)) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+      if (typeof el.click === "function") el.click();
+      return true;
+    };
+    const normalizeSwitchState = (el) => {
+      if (!el) return false;
+      if (typeof el.checked === "boolean") return Boolean(el.checked);
+      const ariaChecked = String(el.getAttribute("aria-checked") || "").toLowerCase();
+      if (ariaChecked === "true") return true;
+      if (ariaChecked === "false") return false;
+      const cls = clean(typeof el.className === "string" ? el.className : "");
+      return /(checked|active|open|on|selected)/i.test(cls) && !/(disabled|off)/i.test(cls);
+    };
+    const resolveOriginalRow = (seedNode = null) => {
+      const roots = [];
+      const pushCandidate = (node) => {
+        if (!node || roots.includes(node)) return;
+        roots.push(node);
+      };
+      const isSwitchLike = (node) => {
+        if (!node) return false;
+        const cls = clean(typeof node.className === "string" ? node.className : "");
+        const role = clean(node.getAttribute?.("role") || "").toLowerCase();
+        const type = clean(node.getAttribute?.("type") || "").toLowerCase();
+        return /custom-switch-switch|d-switch-simulator|d-switch|switch/.test(cls)
+          || role === "switch"
+          || type === "checkbox";
+      };
+      const labelNodes = [...document.querySelectorAll(".original-wrapper,.custom-switch-wrapper,.custom-switch-card,div,section,label,span,p,button,[role=button]")]
+        .filter(visible)
+        .filter((el) => /原创声明/.test(clean(el.innerText || el.textContent || "")) && !/PK封面|设置封面/.test(clean(el.innerText || el.textContent || "")));
+      if (seedNode) pushCandidate(seedNode);
+      for (const labelNode of labelNodes) {
+        pushCandidate(labelNode);
+        let cursor = labelNode;
+        for (let depth = 0; cursor && depth < 6; depth += 1) {
+          cursor = cursor.parentElement;
+          if (!cursor || !visible(cursor)) continue;
+          pushCandidate(cursor);
+        }
+      }
+      const scored = roots
+        .map((node) => {
+          const text = clean(node.innerText || node.textContent || "");
+          if (!/原创声明/.test(text)) return null;
+          const switchDescendants = [...node.querySelectorAll(".custom-switch-switch,.d-disabled-compatible-wrapper,[role=switch],.d-switch-simulator,[aria-checked],input[type=checkbox],.d-switch,[class*=switch]")]
+            .filter((el) => isSwitchLike(el));
+          const visibleSwitch = switchDescendants.find(visible) || null;
+          const rect = node.getBoundingClientRect();
+          let score = 0;
+          if (text === "原创声明") score += 500;
+          else if (/^原创声明\b/.test(text)) score += 320;
+          else score += 120;
+          if (visibleSwitch) score += 260;
+          if (/original-wrapper|custom-switch-wrapper|custom-switch-card/.test(clean(typeof node.className === "string" ? node.className : ""))) score += 180;
+          if (rect.width > 140 && rect.height > 24) score += 80;
+          return {
+            node,
+            text,
+            score,
+            hasVisibleSwitch: Boolean(visibleSwitch),
+            width: rect.width,
+            height: rect.height,
+          };
+        })
+        .filter((item) => item && item.score > 0)
+        .sort((left, right) => right.score - left.score || Number(right.hasVisibleSwitch) - Number(left.hasVisibleSwitch) || right.width - left.width || right.height - left.height);
+      return scored[0]?.node || seedNode || labelNodes[0] || null;
+    };
+    const resolveOriginalSwitch = (root) => {
+      if (!root) return { switchControl: null, checkboxInput: null };
+      const switchCandidates = [...root.querySelectorAll(".d-switch-simulator,.d-switch,.custom-switch-switch,.d-disabled-compatible-wrapper,[role=switch],[aria-checked],input[type=checkbox],[class*=switch]")]
+        .filter((el) => !/pk-cover|cover-plugin|cover-preview/i.test(clean(typeof el.className === "string" ? el.className : "")));
+      const switchControl = switchCandidates
+        .filter(visible)
+        .find((el) => /d-switch-simulator|d-switch\b|custom-switch-switch|disabled-compatible-wrapper/i.test(clean(typeof el.className === "string" ? el.className : "")))
+        || switchCandidates
+          .filter(visible)
+          .find((el) => /switch|checkbox/i.test(String(el.getAttribute("role") || "") + " " + String(el.className || "")))
+        || null;
+      const checkboxInput = switchCandidates.find((el) => String(el.tagName || "").toLowerCase() === "input" && String(el.type || "").toLowerCase() === "checkbox")
+        || root.querySelector("input[type=checkbox]")
+        || null;
+      return { switchControl, checkboxInput };
+    };
+    const resolveOriginalControls = () => {
+      const candidates = [...document.querySelectorAll(".original-wrapper,.custom-switch-wrapper,.custom-switch-card,.custom-switch-switch,.d-switch,.d-switch-simulator,div,span,label,button,[role=button],p")]
+        .filter(visible)
+        .map((el) => ({
+          node: el,
+          text: clean(el.innerText || el.textContent || ""),
+          className: clean(typeof el.className === "string" ? el.className : ""),
+          role: clean(el.getAttribute("role") || ""),
+          tag: String(el.tagName || "").toLowerCase(),
+          type: String(el.getAttribute("type") || "").toLowerCase(),
+          disabled: Boolean(el.disabled || el.getAttribute("aria-disabled") === "true" || el.closest(".disabled")),
+        }));
+      const chosen = selectDeclarationControl(candidates);
+      const baseNode = chosen?.node || null;
+      const row = resolveOriginalRow(
+        baseNode?.closest?.(".original-wrapper,.custom-switch-wrapper,.custom-switch-card")
+        || baseNode?.closest?.("div,section,label")
+        || baseNode
+        || null,
+      );
+      return { row, labelNode: row || baseNode, ...resolveOriginalSwitch(row || baseNode) };
+    };
+    const resolveOriginalDeclared = () => {
+      const { row, switchControl, checkboxInput } = resolveOriginalControls();
+      const rowText = clean(row?.innerText || row?.textContent || "");
+      return {
+        original_visible: Boolean(row),
+        original_text: rowText,
+        original_enabled: normalizeSwitchState(checkboxInput) || normalizeSwitchState(switchControl),
+      };
+    };
+    const ensureOriginalModalAccepted = async () => {
+      const modal = [...document.querySelectorAll("[role=dialog],[aria-modal=true],[class*=modal],[class*=dialog]")]
+        .filter(visible)
+        .find((root) => /原创声明|原创笔记|声明原创|原创声明须知/.test(clean(root.innerText || root.textContent || "")));
+      if (!modal) return { modal_open: false, checkbox_clicked: false, confirm_clicked: false };
+      const checkbox = [...modal.querySelectorAll("input[type=checkbox],[role=checkbox],[aria-checked],.d-checkbox,.checkbox,label,span,div")].filter(visible).find((el) => {
+        const text = clean(el.innerText || el.textContent || "");
+        const cls = clean(typeof el.className === "string" ? el.className : "");
+        return /我已阅读并同意|原创声明须知/.test(text) || /checkbox/.test(cls);
+      }) || null;
+      let checkboxClicked = false;
+      if (checkbox && !normalizeSwitchState(checkbox)) checkboxClicked = click(checkbox.closest("label") || checkbox);
+      await sleep(120);
+      const confirmButton = [...modal.querySelectorAll("button,[role=button],div,span")].filter(visible).find((el) => {
+        const text = clean(el.innerText || el.textContent || "");
+        return text === "声明原创" || text === "确认";
+      }) || null;
+      const confirmClicked = click(confirmButton);
+      await sleep(500);
+      return { modal_open: true, checkbox_clicked: checkboxClicked, confirm_clicked: confirmClicked };
+    };
+    const nodes = [...document.querySelectorAll("div,span,label,button,[role=button],p")].filter(visible);
+    const { row: originalRow, switchControl } = resolveOriginalControls();
+    const before = resolveOriginalDeclared();
+    let openedOriginal = false;
+    let originalModal = { modal_open: false, checkbox_clicked: false, confirm_clicked: false };
+    if (requireOriginal && !before.original_enabled) {
+      openedOriginal = click(switchControl) || click(originalRow);
+      await sleep(240);
+      originalModal = await ensureOriginalModalAccepted();
+      await sleep(400);
+      const afterFirstPass = resolveOriginalDeclared();
+      if (!afterFirstPass.original_enabled && !originalModal.modal_open) {
+        openedOriginal = click(switchControl?.closest?.("label,button,div,span") || null) || click(originalRow) || openedOriginal;
+        await sleep(240);
+        originalModal = await ensureOriginalModalAccepted();
+        await sleep(400);
+      }
+    }
+    const afterOriginal = resolveOriginalDeclared();
+    const selectWrapper = expected ? [...document.querySelectorAll("[tabindex],div,span")].filter(visible).find((el) => {
+      const text = clean(el.innerText || el.textContent || "");
+      const cls = clean(typeof el.className === "string" ? el.className : "");
+      return text === "添加内容类型声明" && (/select-wrapper|elect-wrapper|custom-select/i.test(cls) || el.getAttribute("tabindex"));
+    }) || nodes.find((el) => clean(el.innerText || el.textContent || "") === "添加内容类型声明") : null;
+    const openedSelect = expected ? click(selectWrapper) : false;
+    if (expected) await sleep(500);
+    const optionRoots = expected ? [...document.querySelectorAll("[role=dialog],[aria-modal=true],[class*=modal],[class*=dialog],[class*=popover],[class*=drawer],[class*=select],[class*=dropdown],[class*=menu]")]
+      .filter(visible)
+      .filter((root) => /内容为个人观点或见解|内容由AI生成|内容含营销推广信息|内容为转载信息|虚构演绎，仅供娱乐|声明类型|内容类型声明/.test(clean(root.innerText || root.textContent || ""))) : [];
+    const candidates = optionRoots.flatMap((root) => [...root.querySelectorAll("li,div,span,button,[role=option],[role=button],label")])
+      .filter(visible)
+      .map((el) => {
+        const text = clean(el.innerText || el.textContent || "");
+        const rect = el.getBoundingClientRect();
+        let score = 0;
+        if (expected && text === expected) score += 400;
+        else if (expected && text.includes(expected)) score += 300;
+        else if (expected === "内容为个人观点或见解" && /观点|见解/.test(text)) score += 260;
+        if (/内容由AI生成|内容含营销推广信息|内容为转载信息|虚构演绎，仅供娱乐|内容为个人观点或见解/.test(text)) score += 40;
+        return { el, text, score, area: rect.width * rect.height };
+      })
+      .filter((item) => item.text && item.text.length <= 80 && item.area > 0 && item.area < 120000)
+      .sort((left, right) => right.score - left.score || left.area - right.area);
+    const chosen = candidates[0] || null;
+    const selected = expected ? click(chosen?.el || null) : false;
+    if (expected) await sleep(400);
+    const bodyText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    return {
+      require_original: requireOriginal,
+      original_before: before.original_enabled,
+      opened_original: openedOriginal,
+      original_modal_open: originalModal.modal_open,
+      original_modal_checkbox_clicked: originalModal.checkbox_clicked,
+      original_modal_confirm_clicked: originalModal.confirm_clicked,
+      original_after: afterOriginal.original_enabled,
+      row_text: clean(originalRow?.innerText || originalRow?.textContent || ""),
+      switch_class: clean(typeof switchControl?.className === "string" ? switchControl.className : ""),
+      switch_role: clean(switchControl?.getAttribute?.("role") || ""),
+      switch_target: switchControl ? (() => {
+        const rect = switchControl.getBoundingClientRect();
+        return {
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          width: rect.width,
+          height: rect.height,
+        };
+      })() : null,
+      opened_select: openedSelect,
+      selected,
+      expected,
+      chosen_label: chosen?.text || "",
+      options: candidates.slice(0, 8).map((item) => item.text),
+      placeholder_visible: /添加内容类型声明|请选择内容类型声明|请选择声明类型/.test(bodyText),
+      body_contains_expected: expected ? bodyText.includes(expected) : false,
+    };
+  })()`, 60000);
+  actions.push({ kind: "xiaohongshu_original_declaration_select_native", ...selection });
+  if (requireOriginalDeclaration && !selection?.original_after && Number.isFinite(selection?.switch_target?.x) && Number.isFinite(selection?.switch_target?.y)) {
+    const trustedSwitchClick = await dispatchTrustedMouseClick(client, selection.switch_target).catch((error) => ({
+      clicked: false,
+      reason: String(error?.message || error || "trusted_switch_click_failed"),
+    }));
+    actions.push({ kind: "xiaohongshu_original_declaration_trusted_switch_click", ...trustedSwitchClick });
+    await sleep(250);
+    const trustedModal = await evaluateWithClient(client, `(async () => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const visible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+      };
+      const click = (el) => {
+        if (!el || !visible(el)) return false;
+        el.scrollIntoView({ block: "center", inline: "center" });
+        const rect = el.getBoundingClientRect();
+        const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+        for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+        if (typeof el.click === "function") el.click();
+        return true;
+      };
+      const normalizeChecked = (el) => {
+        if (!el) return false;
+        if (typeof el.checked === "boolean") return Boolean(el.checked);
+        const ariaChecked = String(el.getAttribute("aria-checked") || "").toLowerCase();
+        if (ariaChecked === "true") return true;
+        if (ariaChecked === "false") return false;
+        const cls = clean(typeof el.className === "string" ? el.className : "");
+        return /(checked|active|open|on|selected)/i.test(cls) && !/(disabled|off|unchecked)/i.test(cls);
+      };
+      const modal = [...document.querySelectorAll("[role=dialog],[aria-modal=true],[class*=modal],[class*=dialog]")]
+        .filter(visible)
+        .find((root) => /原创声明|原创笔记|声明原创|原创声明须知/.test(clean(root.innerText || root.textContent || "")));
+      if (!modal) return { modal_open: false, checkbox_clicked: false, confirm_clicked: false };
+      const pointOf = (el) => {
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        return {
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+          width: rect.width,
+          height: rect.height,
+        };
+      };
+      const checkbox = [...modal.querySelectorAll(".d-checkbox,.d-checkbox-main-label,input[type=checkbox],[role=checkbox],[aria-checked],label,span,div")].filter(visible).find((el) => {
+        const text = clean(el.innerText || el.textContent || "");
+        const cls = clean(typeof el.className === "string" ? el.className : "");
+        return /我已阅读并同意|原创声明须知/.test(text) || /checkbox/.test(cls);
+      }) || null;
+      const confirmButton = [...modal.querySelectorAll("button,[role=button],div,span")].filter(visible).find((el) => {
+        const text = clean(el.innerText || el.textContent || "");
+        return text === "声明原创" || text === "确认";
+      }) || null;
+      return {
+        modal_open: true,
+        checkbox_target: pointOf(checkbox?.closest?.(".d-checkbox,.d-checkbox-main-label,label") || checkbox),
+        confirm_target: pointOf(confirmButton?.closest?.("button,[role=button],.d-button") || confirmButton),
+      };
+    })()`, 30000).catch((error) => ({
+      modal_open: false,
+      error: String(error?.message || error || "trusted_modal_accept_failed"),
+    }));
+    actions.push({ kind: "xiaohongshu_original_declaration_trusted_modal", ...trustedModal });
+    if (Number.isFinite(trustedModal?.checkbox_target?.x) && Number.isFinite(trustedModal?.checkbox_target?.y)) {
+      const trustedCheckboxClick = await dispatchTrustedMouseClick(client, trustedModal.checkbox_target).catch((error) => ({
+        clicked: false,
+        reason: String(error?.message || error || "trusted_checkbox_click_failed"),
+      }));
+      actions.push({ kind: "xiaohongshu_original_declaration_trusted_checkbox_click", ...trustedCheckboxClick });
+      await sleep(350);
+    }
+    const trustedConfirmTarget = await evaluateWithClient(client, `(() => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!el) return false;
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+      };
+      const pointOf = (el) => {
+        if (!el) return null;
+        const rect = el.getBoundingClientRect();
+        return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, width: rect.width, height: rect.height };
+      };
+      const modal = [...document.querySelectorAll("[role=dialog],[aria-modal=true],[class*=modal],[class*=dialog]")]
+        .filter(visible)
+        .find((root) => /原创声明|原创笔记|声明原创|原创声明须知/.test(clean(root.innerText || root.textContent || "")));
+      if (!modal) return { modal_open: false, confirm_target: null };
+      const confirmButton = [...modal.querySelectorAll("button,[role=button],div,span")]
+        .filter(visible)
+        .find((el) => {
+          const text = clean(el.innerText || el.textContent || "");
+          return text === "声明原创" || text === "确认";
+        }) || null;
+      return { modal_open: true, confirm_target: pointOf(confirmButton?.closest?.("button,[role=button],.d-button") || confirmButton) };
+    })()`, 30000).catch((error) => ({
+      modal_open: false,
+      error: String(error?.message || error || "trusted_confirm_target_failed"),
+      confirm_target: null,
+    }));
+    actions.push({ kind: "xiaohongshu_original_declaration_trusted_confirm_target", ...trustedConfirmTarget });
+    if (Number.isFinite(trustedConfirmTarget?.confirm_target?.x) && Number.isFinite(trustedConfirmTarget?.confirm_target?.y)) {
+      const trustedConfirmClick = await dispatchTrustedMouseClick(client, trustedConfirmTarget.confirm_target).catch((error) => ({
+        clicked: false,
+        reason: String(error?.message || error || "trusted_confirm_click_failed"),
+      }));
+      actions.push({ kind: "xiaohongshu_original_declaration_trusted_confirm_click", ...trustedConfirmClick });
+      await sleep(350);
+    }
+    await sleep(350);
+  }
+  const declarationState = await evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const text = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    const visible = (el) => {
+      if (!el) return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const resolveOriginalSwitch = (root) => {
+      if (!root) return null;
+      return root.querySelector(".custom-switch-switch,.d-disabled-compatible-wrapper,[role=switch],[aria-checked],.d-switch-simulator,.d-switch,input[type=checkbox],[class*=switch]")
+        || null;
+    };
+    const originalRoot = [...document.querySelectorAll(".original-wrapper,.custom-switch-wrapper,.custom-switch-card,div,section,label")]
+      .filter(visible)
+      .find((el) => /原创声明/.test(clean(el.innerText || el.textContent || "")) && !/PK封面|设置封面/.test(clean(el.innerText || el.textContent || "")));
+    const originalRow = originalRoot?.closest?.(".original-wrapper,.custom-switch-wrapper,.custom-switch-card") || originalRoot || null;
+    const switchControl = resolveOriginalSwitch(originalRow);
+    const originalEnabled = (() => {
+      if (!switchControl) return false;
+      if (typeof switchControl.checked === "boolean") return Boolean(switchControl.checked);
+      const ariaChecked = String(switchControl.getAttribute("aria-checked") || "").toLowerCase();
+      if (ariaChecked === "true") return true;
+      if (ariaChecked === "false") return false;
+      const cls = clean(typeof switchControl.className === "string" ? switchControl.className : "");
+      return /(checked|active|open|on|selected)/i.test(cls) && !/(disabled|off)/i.test(cls);
+    })();
+    return {
+      placeholder_visible: /添加内容类型声明|请选择内容类型声明|请选择声明类型/.test(text),
+      actual: ${deriveXiaohongshuDeclarationActual.toString()}(${JSON.stringify(expectedDeclaration)}, text),
+      original_enabled: originalEnabled,
+      text_lines: text.split(/[\\n\\r]+| {2,}/).map(clean).filter((line) => /原创|声明|AI|营销|虚构|转载/.test(line)).slice(0, 30),
+    };
+  })()`, 30000);
+  const saved = (!requireOriginalDeclaration || declarationState.original_enabled) && (!expectedDeclaration || (!declarationState.placeholder_visible && Boolean(declarationState.actual)));
+  try {
+    console.info(
+      `[xhs-declaration] required=${Boolean(requireOriginalDeclaration)} before=${Boolean(selection?.original_before)} opened=${Boolean(selection?.opened_original)} modal=${Boolean(selection?.original_modal_open)} modal_confirm=${Boolean(selection?.original_modal_confirm_clicked)} after=${Boolean(declarationState.original_enabled)} actual=${String(declarationState.actual || "")} placeholder=${Boolean(declarationState.placeholder_visible)} saved=${Boolean(saved)}`,
+    );
+  } catch {}
+  actions.push({ kind: "xiaohongshu_original_declaration", ...declarationState, saved });
+  if (requireOriginalDeclaration && !declarationState.original_enabled) {
+    actions.push({
+      kind: "xiaohongshu_original_declaration_blocked",
+      blocked: true,
+      reason: "original_switch_not_enabled",
+      expected_declaration: expectedDeclaration,
+      require_original: true,
+      declaration_state: declarationState,
+      selection,
+    });
+  }
+  return actions;
+}
+
+async function repairXiaohongshuCompositeDraft(client, platform, content, repairableFields = []) {
+  const plan = buildCompositeRepairExecutionPlan(platform, repairableFields);
+  const actions = [];
+  if (plan.rich_text) {
+    const title = normalizeCompositeTitleForPlatform(platform, content.title);
+    const body = platformBodyWithTags(platform, content);
+    actions.push({ kind: "xiaohongshu_rich_text_repair", ...(await setPlatformRichText(client, platform, title, body)) });
+    if (plan.fields.includes("tags")) {
+      actions.push(...(await setXiaohongshuStructuredTopics(client, content)));
+    }
+  }
+  if (plan.cover) {
+    actions.push(...(await uploadCompositeCover(client, platform, content)));
+  }
+  if (plan.collection) {
+    actions.push(...(await selectCompositeCollection(client, platform, content)));
+  }
+  if (plan.declaration) {
+    actions.push(...(await setXiaohongshuOriginalDeclaration(client, content)));
+  }
+  if (plan.schedule) {
+    actions.push(...(await setCompositeSchedule(client, platform, content)));
+  }
   return actions;
 }
 
 async function prepareXiaohongshuCompositeDraft(client, platform, content) {
   const actions = [];
-  const title = String(content.title || "").trim();
+  const title = normalizeCompositeTitleForPlatform(platform, content.title);
   const body = platformBodyWithTags(platform, content);
   const uploadReadiness = await ensureCompositeUploadReady(client, platform, content, compositeUploadTimeoutMs(platform));
   actions.push(...uploadReadiness.actions);
-  if (!uploadReadiness.readiness?.ready) {
+  if (!shouldAllowCompositeFieldPreparation(platform, uploadReadiness.readiness)) {
     const blocker = buildCompositeUploadReadinessBlockerAction(platform, uploadReadiness.readiness);
     actions.push(blocker);
     return actions;
   }
+  console.log("[xhs-prepare] step=rich_text:start");
   actions.push({ kind: "xiaohongshu_rich_text", ...(await setPlatformRichText(client, platform, title, body)) });
-  actions.push(...(await uploadCompositeCover(client, platform, expectedCoverPath(content))));
+  console.log("[xhs-prepare] step=rich_text:done");
+  console.log("[xhs-prepare] step=cover:start");
+  const coverActions = await uploadCompositeCover(client, platform, content);
+  actions.push(...coverActions);
+  console.log("[xhs-prepare] step=cover:done");
+  console.log("[xhs-prepare] step=topics:start");
+  actions.push(...(await setXiaohongshuStructuredTopics(client, content)));
+  console.log("[xhs-prepare] step=topics:done");
+  console.log("[xhs-prepare] step=collection:start");
   actions.push(...(await selectCompositeCollection(client, platform, content)));
-  actions.push({ kind: "xiaohongshu_original_declaration", ...(await clickByText(client, ["原创声明", "声明原创", "原创"])) });
+  console.log("[xhs-prepare] step=collection:done");
+  console.log("[xhs-prepare] step=declaration:start");
+  actions.push(...(await setXiaohongshuOriginalDeclaration(client, content)));
+  console.log("[xhs-prepare] step=declaration:done");
+  console.log("[xhs-prepare] step=schedule:start");
   actions.push(...(await setCompositeSchedule(client, platform, content)));
+  console.log("[xhs-prepare] step=schedule:done");
   return actions;
 }
 
@@ -8179,15 +17216,47 @@ async function prepareKuaishouCompositeDraft(client, platform, content) {
   const body = platformBodyWithTags(platform, content);
   const uploadReadiness = await ensureCompositeUploadReady(client, platform, content, compositeUploadTimeoutMs(platform));
   actions.push(...uploadReadiness.actions);
-  if (!uploadReadiness.readiness?.ready) {
+  if (!shouldAllowCompositeFieldPreparation(platform, uploadReadiness.readiness)) {
     const blocker = buildCompositeUploadReadinessBlockerAction(platform, uploadReadiness.readiness);
     actions.push(blocker);
     return actions;
   }
+  const initialIntegrity = await readCompositeMaterialIntegrity(client, platform, content).catch(() => null);
+  const initialChecklist = initialIntegrity?.fields && typeof initialIntegrity.fields === "object"
+    ? initialIntegrity.fields
+    : {};
+  const completionRequirements = compositePlatformCompletionRequirements(platform);
+  if (
+    compositePlatformStopWhenCurrentPageAlreadyCorrect(platform)
+    && isKuaishouPageAlreadyPublishReady(initialChecklist, completionRequirements)
+  ) {
+    actions.push({
+      kind: "kuaishou_page_already_publish_ready",
+      verified: true,
+      completion_requirements: completionRequirements,
+      fields: {
+        body: initialChecklist.body || null,
+        cover: initialChecklist.cover || null,
+        collection: initialChecklist.collection || null,
+        schedule: initialChecklist.schedule || null,
+        upload_ready: initialChecklist.upload_ready || null,
+      },
+    });
+    return actions;
+  }
   actions.push({ kind: "kuaishou_rich_text", ...(await setPlatformRichText(client, platform, title, body)) });
-  actions.push(...(await uploadCompositeCover(client, platform, expectedCoverPath(content))));
+  actions.push(...(await uploadCompositeCover(client, platform, content)));
+  const coverVerification = lastActionByKind(actions, "kuaishou_cover_slot_verification");
+  if (coverVerification && !coverVerification.verified) {
+    actions.push({
+      kind: "kuaishou_cover_project_blocked",
+      blocked: true,
+      reason: "main_cover_slot_not_replaced",
+      details: coverVerification,
+    });
+    return actions;
+  }
   actions.push(...(await selectCompositeCollection(client, platform, content)));
-  actions.push({ kind: "kuaishou_original_declaration", ...(await clickByText(client, ["作者声明", "原创", "声明"])) });
   actions.push(...(await setCompositeSchedule(client, platform, content)));
   return actions;
 }
@@ -8198,13 +17267,13 @@ async function prepareToutiaoCompositeDraft(client, platform, content) {
   const body = platformBodyWithTags(platform, content);
   const uploadReadiness = await ensureCompositeUploadReady(client, platform, content, compositeUploadTimeoutMs(platform));
   actions.push(...uploadReadiness.actions);
-  if (!uploadReadiness.readiness?.ready) {
+  if (!shouldAllowCompositeFieldPreparation(platform, uploadReadiness.readiness)) {
     const blocker = buildCompositeUploadReadinessBlockerAction(platform, uploadReadiness.readiness);
     actions.push(blocker);
     return actions;
   }
   actions.push({ kind: "toutiao_rich_text", ...(await setPlatformRichText(client, platform, title, body)) });
-  actions.push(...(await uploadCompositeCover(client, platform, expectedCoverPath(content))));
+  actions.push(...(await uploadCompositeCover(client, platform, content)));
   for (const tag of expectedTags(content, 10)) {
     actions.push({ kind: "toutiao_tag", ...(await setTextFieldByHints(client, ["话题", "标签", "tag", "Tags"], tag, { multiline: false })) });
   }
@@ -8218,7 +17287,7 @@ async function prepareWechatChannelsCompositeDraft(client, platform, content) {
   const actions = [];
   const title = String(content.title || "").trim();
   actions.push({ kind: "wechat_channels_rich_text", ...(await setPlatformRichText(client, platform, title, platformBodyWithTags(platform, content))) });
-  actions.push(...(await uploadCompositeCover(client, platform, expectedCoverPath(content))));
+  actions.push(...(await uploadCompositeCover(client, platform, content)));
   actions.push(...(await selectCompositeCollection(client, platform, content)));
   actions.push({ kind: "wechat_channels_original_declaration", ...(await clickByText(client, ["声明原创", "原创", "声明"])) });
   actions.push(...(await setCompositeSchedule(client, platform, content)));
@@ -8237,7 +17306,7 @@ async function prepareXCompositeDraft(client, platform, content) {
 const PLATFORM_COMPOSITE_FRAMEWORKS = {
   douyin: { id: "douyin_creator_composite_v1", prepare: prepareDouyinCompositeDraft, repair: repairDouyinCompositeDraft },
   youtube: { id: "youtube_studio_composite_v1", prepare: prepareYoutubeCompositeDraft },
-  xiaohongshu: { id: "xiaohongshu_creator_composite_v1", prepare: prepareXiaohongshuCompositeDraft },
+  xiaohongshu: { id: "xiaohongshu_creator_composite_v1", prepare: prepareXiaohongshuCompositeDraft, repair: repairXiaohongshuCompositeDraft },
   kuaishou: { id: "kuaishou_creator_composite_v1", prepare: prepareKuaishouCompositeDraft },
   toutiao: { id: "toutiao_xigua_composite_v1", prepare: prepareToutiaoCompositeDraft },
   "wechat-channels": { id: "wechat_channels_composite_v1", prepare: prepareWechatChannelsCompositeDraft },
@@ -8255,7 +17324,7 @@ function dedicatedCompositeFrameworkId(platform) {
 
 function buildPublicationAuditChecklist(fields = {}) {
   const checklist = {};
-  for (const key of ["cover", "title", "body", "tags", "collection", "schedule", "upload_ready", "declaration", "receipt", "draft_state"]) {
+  for (const key of ["cover", "title", "body", "tags", "native_topics", "collection", "schedule", "upload_ready", "declaration", "visibility", "receipt", "draft_state"]) {
     if (!fields[key]) continue;
     checklist[key] = {
       verified: fields[key].verified !== false,
@@ -8357,6 +17426,34 @@ function _coerceSnapshotFieldExpected(field, fallback = "") {
   return fallback;
 }
 
+function _isVerifiedSnapshotField(field) {
+  return Boolean(
+    field
+    && typeof field === "object"
+    && field.verified !== false
+    && field.configured !== false
+  );
+}
+
+function _coerceVerifiedSnapshotFieldValue(field, fallback = "") {
+  if (!field || typeof field !== "object") return fallback;
+  if (field.actual !== undefined && field.actual !== null && field.actual !== "") {
+    return field.actual;
+  }
+  if (field.value !== undefined && field.value !== null && field.value !== "") {
+    return field.value;
+  }
+  if (_isVerifiedSnapshotField(field)) {
+    if (field.expected !== undefined && field.expected !== null && field.expected !== "") {
+      return field.expected;
+    }
+    if (field.expected_path !== undefined && field.expected_path !== null && field.expected_path !== "") {
+      return field.expected_path;
+    }
+  }
+  return "";
+}
+
 function _coerceSnapshotTags(field, fallback = []) {
   const direct = field?.actual;
   if (Array.isArray(direct)) {
@@ -8371,7 +17468,39 @@ function _coerceSnapshotTags(field, fallback = []) {
   return Array.from(new Set(_coerceList(fallback)));
 }
 
-function buildPublicationFieldSnapshotFromAudit(platform, content, publicationAudit = {}, route = {}, options = {}) {
+function _coerceVerifiedSnapshotTags(field, fallback = []) {
+  const direct = _coerceSnapshotTags(field, []);
+  if (direct.length) return direct;
+  if (_isVerifiedSnapshotField(field)) {
+    return Array.from(new Set(_coerceList(fallback)));
+  }
+  return [];
+}
+
+function _coerceSnapshotTopicNames(field, fallback = []) {
+  const direct = field?.actual;
+  if (Array.isArray(direct)) {
+    return Array.from(new Set(_coerceList(direct).map((item) => _coerceText(item).replace(/^#/, "")).filter(Boolean)));
+  }
+  if (Array.isArray(field?.actual_checks)) {
+    const topicValues = field.actual_checks
+      .filter((item) => item && typeof item === "object" && item.present !== false)
+      .map((item) => _coerceText(item.topic || item.tag || item.value || "").replace(/^#/, ""));
+    if (topicValues.length) return Array.from(new Set(topicValues.filter(Boolean)));
+  }
+  return Array.from(new Set(_coerceList(fallback).map((item) => _coerceText(item).replace(/^#/, "")).filter(Boolean)));
+}
+
+function _coerceVerifiedSnapshotTopicNames(field, fallback = []) {
+  const direct = _coerceSnapshotTopicNames(field, []);
+  if (direct.length) return direct;
+  if (_isVerifiedSnapshotField(field)) {
+    return Array.from(new Set(_coerceList(fallback).map((item) => _coerceText(item).replace(/^#/, "")).filter(Boolean)));
+  }
+  return [];
+}
+
+export function buildPublicationFieldSnapshotFromAudit(platform, content, publicationAudit = {}, route = {}, options = {}) {
   const checklist = publicationAudit?.checklist && typeof publicationAudit.checklist === "object"
     ? publicationAudit.checklist
     : {};
@@ -8392,28 +17521,28 @@ function buildPublicationFieldSnapshotFromAudit(platform, content, publicationAu
   const rawTagsExpected = _coerceList(
     _coerceSnapshotFieldExpected(checklist?.tags, _coerceList(content?.hashtags).concat(_coerceList(content?.structured_tags))),
   );
-  const tagsActual = _coerceSnapshotTags(checklist?.tags, rawTagsExpected);
-  const collectionExpected = _coerceText(_coerceSnapshotFieldExpected(checklist?.collection, expectedCollectionName(content)));
+  const tagsActual = _coerceVerifiedSnapshotTags(checklist?.tags, rawTagsExpected);
+  const nativeTopicsActual = _coerceVerifiedSnapshotTopicNames(checklist?.native_topics, expectedNativeTopics(content));
   return {
     platform,
     adapter: _coerceText(content?.adapter || content?.publication_adapter || content?.target_adapter || "browser_agent"),
-    title: _coerceText(_coerceSnapshotFieldValue(checklist?.title, content?.title || "")),
-    body: _coerceText(_coerceSnapshotFieldValue(checklist?.body, content?.body || "")),
-    declaration: _coerceText(_coerceSnapshotFieldValue(checklist?.declaration, content?.declaration || "")),
-    hashtags: tagsActual.length ? tagsActual : rawTagsExpected,
-    display_hashtags: (tagsActual.length ? tagsActual : rawTagsExpected)
+    title: _coerceText(_coerceVerifiedSnapshotFieldValue(checklist?.title)),
+    body: _coerceText(_coerceVerifiedSnapshotFieldValue(checklist?.body)),
+    declaration: _coerceText(_coerceVerifiedSnapshotFieldValue(checklist?.declaration)),
+    hashtags: tagsActual,
+    display_hashtags: tagsActual
       .map((item) => (_coerceText(item).startsWith("#") ? _coerceText(item) : `#${_coerceText(item)}`)),
-    structured_tags: tagsActual.length ? tagsActual : rawTagsExpected,
-    native_topics: _coerceList(content?.native_topics),
+    structured_tags: tagsActual,
+    native_topics: nativeTopicsActual,
     category: _coerceText(content?.category || content?.category_name || ""),
-    collection: _coerceText(_coerceSnapshotFieldValue(checklist?.collection, collectionExpected)),
-    cover_path: _coerceText(_coerceSnapshotFieldValue(checklist?.cover, expectedCoverPath(content))),
+    collection: _coerceText(_coerceVerifiedSnapshotFieldValue(checklist?.collection)),
+    cover_path: _coerceText(_coerceVerifiedSnapshotFieldValue(checklist?.cover)),
     copy_material: typeof content?.copy_material === "object" && content?.copy_material !== null ? content.copy_material : {},
-    visibility_or_publish_mode: _coerceText(content?.visibility_or_publish_mode || content?.visibility_mode || ""),
-    scheduled_publish_at: _coerceText(_coerceSnapshotFieldValue(checklist?.schedule, content?.scheduled_publish_at || "")),
+    visibility_or_publish_mode: _coerceText(_coerceVerifiedSnapshotFieldValue(checklist?.visibility)),
+    scheduled_publish_at: _coerceText(_coerceVerifiedSnapshotFieldValue(checklist?.schedule)),
     ui_control_semantics: {
-      schedule_publish: Boolean(_coerceSnapshotFieldValue(checklist?.schedule, content?.scheduled_publish_at)),
-      collection_select: Boolean(_coerceSnapshotFieldValue(checklist?.collection, collectionExpected)),
+      schedule_publish: Boolean(_coerceVerifiedSnapshotFieldValue(checklist?.schedule)),
+      collection_select: Boolean(_coerceVerifiedSnapshotFieldValue(checklist?.collection)),
     },
     platform_specific_overrides: typeof content?.platform_specific_overrides === "object" && content?.platform_specific_overrides !== null
       ? content.platform_specific_overrides
@@ -8421,8 +17550,8 @@ function buildPublicationFieldSnapshotFromAudit(platform, content, publicationAu
     repair_evidence: repairEvidence,
     media_urls: declaredMediaUrls,
     media_items_count: Number(declaredMediaCount),
-    upload_ready: _coerceText(_coerceSnapshotFieldValue(checklist?.upload_ready, content?.upload_ready || "")),
-    draft_state: _coerceText(_coerceSnapshotFieldValue(checklist?.draft_state, "")),
+    upload_ready: _coerceText(_coerceVerifiedSnapshotFieldValue(checklist?.upload_ready)),
+    draft_state: _coerceText(_coerceVerifiedSnapshotFieldValue(checklist?.draft_state)),
     route: {
       url: _coerceText(route?.url || publicationAudit?.platform_extras?.route?.url || ""),
       title: _coerceText(route?.title || publicationAudit?.platform_extras?.route?.title || ""),
@@ -8448,7 +17577,7 @@ function _deriveRequiredReuploadFromCompositeAudit(platform, content, fields = {
     if (normalized) requiredReupload.add(normalized);
   };
 
-  for (const field of ["draft_state", "upload_ready", "cover", "title", "body", "tags", "collection", "schedule", "declaration"]) {
+  for (const field of ["draft_state", "upload_ready", "cover", "title", "body", "tags", "native_topics", "collection", "schedule", "declaration"]) {
     const entry = fields[field];
     if (entry && entry.required === false) {
       continue;
@@ -8512,11 +17641,24 @@ export function classifyCompositeScheduleInputHint(hint = "", value = "") {
 export function _buildCompositeExpectedContentSnapshot(content, platform) {
   const title = String(platform === "x" ? "" : content.title || "").trim();
   const bodyBase = String(platform === "x" ? platformBodyWithTags(platform, content) : content.body || "").trim();
-  const tags = expectedTags(content, platform === "youtube" ? 15 : 10).slice(0, 40);
-  const collection = expectedCollectionName(content);
-  const coverPath = expectedCoverPath(content);
+  const expectedTagList = expectedTags(content, platform === "youtube" ? 15 : 10).slice(0, 40);
+  const nativeTopics = expectedNativeTopics(content);
+  const tags = (
+    compositePlatformSkipsExplicitTagEntry(platform)
+    && !compositePlatformSoftVerificationFields(platform).has("tags")
+  )
+    ? []
+    : expectedTagList;
+  const collection = expectedCollectionNameForPlatform(platform, content);
+  const coverPath = expectedPrimaryCoverPathForPlatform(platform, content);
+  const coverSlots = resolveExpectedCoverSlotsForPlatform(platform, content);
   const declaration = expectedCompositeDeclaration(content, platform);
   const scheduledAt = String(content.scheduled_publish_at || "").trim();
+  const visibilityMode = compositePlatformSkipsExplicitVisibilityEntry(platform)
+    ? ""
+    : normalizeCompositeVisibilityMode(
+      content.visibility || content.visibility_mode || content.visibility_or_publish_mode || content.publish_mode || "",
+    );
   const platformExtras = content.platform_specific_overrides && typeof content.platform_specific_overrides === "object"
     ? content.platform_specific_overrides
     : {};
@@ -8526,10 +17668,13 @@ export function _buildCompositeExpectedContentSnapshot(content, platform) {
     title,
     body: String(bodyBase || (platform === "x" && xShareLink ? xShareLink : "")).trim(),
     tags,
+    native_topics: nativeTopics,
     collection,
     declaration,
     schedule_display: parseChinaLocalSchedule(scheduledAt).display,
+    visibility_mode: visibilityMode,
     cover_path: coverPath,
+    cover_slots: coverSlots,
     expected_share_link: xShareLink,
   };
 }
@@ -8563,9 +17708,11 @@ export function deriveCompositeFinalPrePublishVisualVerification(
   pushRequiredField("title", Boolean(expected.title));
   pushRequiredField("body", Boolean(expected.body));
   pushRequiredField("tags", Array.isArray(expected.tags) && expected.tags.length > 0);
+  pushRequiredField("native_topics", Array.isArray(expected.native_topics) && expected.native_topics.length > 0);
   pushRequiredField("collection", Boolean(expected.collection));
   pushRequiredField("schedule", Boolean(expected.schedule_display));
   pushRequiredField("declaration", Boolean(expected.declaration));
+  pushRequiredField("visibility", Boolean(expected.visibility_mode));
   pushRequiredField("cover", Boolean(expected.cover_path) && platform !== "x");
   pushRequiredField("upload_ready", true);
   pushRequiredField("draft_state", true);
@@ -8574,7 +17721,8 @@ export function deriveCompositeFinalPrePublishVisualVerification(
     const entry = checklist[fieldName];
     if (!entry || typeof entry !== "object") return true;
     if (entry.required === false) return false;
-    return entry.verified === false;
+    if (entry.verified === false) return true;
+    return entry.configured === false;
   });
   const draftStateActual = String(checklist?.draft_state?.actual || publicationFieldSnapshot?.draft_state || "").trim();
   const uploadReadyActual = String(checklist?.upload_ready?.actual || publicationFieldSnapshot?.upload_ready || "").trim();
@@ -8641,6 +17789,7 @@ function _buildCompositeActualContentSnapshot(fields = {}) {
     tags: _actualTagsFromCompositeFields(field("tags")),
     collection: String(field("collection").actual || "").trim(),
     schedule: String(field("schedule").actual || "").trim(),
+    visibility: String(field("visibility").actual || "").trim(),
     cover_path_present: Boolean(field("cover").uploaded || field("cover").verified),
     declaration_present: Boolean(field("declaration").verified),
     upload_ready: Boolean(field("upload_ready").verified),
@@ -8674,9 +17823,12 @@ function _evaluateCompositePlanContentMatch(platform, content, fields = {}) {
   const normalizedActualBody = _normalizeCompositeAuditText(actual.body);
   const expectedTags = Array.from(new Set((expected.tags || []).map((item) => _normalizeCompositeAuditText(item)).filter(Boolean)));
   const actualTags = new Set((actual.tags || []).map((item) => _normalizeCompositeAuditText(item)).filter(Boolean));
+  const expectedNativeTopics = Array.from(new Set((expected.native_topics || []).map((item) => _normalizeCompositeAuditText(item)).filter(Boolean)));
+  const actualNativeTopics = new Set((actual.native_topics || []).map((item) => _normalizeCompositeAuditText(item)).filter(Boolean));
   const titleExpected = normalizedExpectedTitle.length > 0;
   const bodyExpected = normalizedExpectedBody.length > 0;
   const tagVerified = expectedTags.every((tag) => actualTags.has(tag));
+  const nativeTopicsMatch = expectedNativeTopics.every((topic) => actualNativeTopics.has(topic));
   const bodyMatches = platform === "x"
     ? true
     : !bodyExpected || verifyCompositeBodyField(platform, expected.body, actual.body, { tagVerified });
@@ -8685,7 +17837,11 @@ function _evaluateCompositePlanContentMatch(platform, content, fields = {}) {
     && Boolean(normalizedActualTitle)
     && (normalizedActualTitle.includes(normalizedExpectedTitle) || normalizedExpectedTitle.includes(normalizedActualTitle))
   );
-  const tagsMatch = platform === "x" ? true : tagVerified;
+  const tagsMatch = platform === "x"
+    ? true
+    : platform === "douyin"
+      ? true
+      : tagVerified;
   const collectionMatch = !expected.collection || _collectionHasExpectedTagOrText(actual.collection, expected.collection);
   const scheduleMatch = !expected.schedule_display || Boolean(actual.schedule);
   const coverMatch = !expected.cover_path || actual.cover_path_present;
@@ -8702,6 +17858,7 @@ function _evaluateCompositePlanContentMatch(platform, content, fields = {}) {
   if (!titleMatches && titleExpected) recordMissing("title");
   if (!bodyMatches && bodyExpected) recordMissing("body");
   if (!tagsMatch) recordMissing("tags", `tags:${expected.tags.join(",")}`);
+  if (!nativeTopicsMatch) recordMissing("native_topics", `native_topics:${expected.native_topics.join(",")}`);
   if (!collectionMatch && expected.collection) recordMissing("collection");
   if (!scheduleMatch && expected.schedule_display) recordMissing("schedule");
   if (!coverMatch && expected.cover_path) recordMissing("cover");
@@ -8716,6 +17873,7 @@ function _evaluateCompositePlanContentMatch(platform, content, fields = {}) {
       title: titleMatches,
       body: bodyMatches,
       tags: tagsMatch,
+      native_topics: nativeTopicsMatch,
       collection: collectionMatch,
       schedule: scheduleMatch,
       cover: coverMatch,
@@ -8971,6 +18129,7 @@ export function shouldWaitForVerificationOnlyMaterialIntegrity(integrity = {}) {
   const loadingSurface = Boolean(routeReadyState.loading_surface);
   const inputReady = Boolean(routeReadyState.input_ready);
   if (reason === "publish_route_loading") return true;
+  if (reason === "schedule_overlay_open") return true;
   if (reason === "publish_route_not_ready" && routeReady && (!inputReady || loadingSurface)) return true;
   return false;
 }
@@ -9142,7 +18301,30 @@ export function normalizeCompositePostPublishIntegrity(platform, finalIntegrity 
         created_at: expectedCreatedAt,
       },
     );
-    if (manageCard.matched) {
+    const requiredCoverPath = String(
+      content?.cover_path
+      || content?.coverPath
+      || preFields?.cover?.expected_path
+      || preFields?.cover?.expected
+      || "",
+    ).trim();
+    const requiredCollection = String(content?.collection || preFields?.collection?.expected || "").trim();
+    const requiredSchedule = String(expectedSchedule || "").trim();
+    const postPublishCoverSatisfied = !requiredCoverPath || (
+      finalIntegrity?.platform_extras?.douyin_custom_cover_saved === true
+      || finalIntegrity?.fields?.cover?.cover_uploaded === true
+      || finalIntegrity?.fields?.cover?.uploaded === true
+    );
+    const postPublishCollectionSatisfied = !requiredCollection || String(finalIntegrity?.platform_extras?.douyin_collection_actual || "").trim() === requiredCollection;
+    const postPublishScheduleSatisfied = !requiredSchedule || (
+      String(finalIntegrity?.platform_extras?.douyin_schedule_time_value || "").trim().length > 0
+      || String(manageCard?.schedule || "").trim() === requiredSchedule
+    );
+    const receiptBindingConsistencyFailures = [];
+    if (!postPublishCoverSatisfied) receiptBindingConsistencyFailures.push("cover_missing");
+    if (!postPublishCollectionSatisfied) receiptBindingConsistencyFailures.push("collection_missing");
+    if (!postPublishScheduleSatisfied) receiptBindingConsistencyFailures.push("schedule_missing");
+    if (manageCard.matched && receiptBindingConsistencyFailures.length === 0) {
       const tagChecks = Array.isArray(manageCard.tag_checks)
         ? manageCard.tag_checks
         : expectedTagValues.map((tag) => ({ tag, present: manageCard.tags.includes(tag) }));
@@ -9173,6 +18355,7 @@ export function normalizeCompositePostPublishIntegrity(platform, finalIntegrity 
         douyin_manage_card: manageCard,
         receipt_target_bound: true,
         receipt_binding_source: "douyin_manage_card",
+        receipt_binding_consistency_failures: [],
       };
       normalized.verification_state = "ready";
       normalized.verification_reason = "receipt_bound";
@@ -9189,7 +18372,8 @@ export function normalizeCompositePostPublishIntegrity(platform, finalIntegrity 
         ...normalized.platform_extras,
         douyin_manage_card: manageCard,
         receipt_target_bound: false,
-        receipt_binding_source: "unbound_manage_receipt",
+        receipt_binding_source: manageCard.matched ? "douyin_manage_card_incomplete" : "unbound_manage_receipt",
+        receipt_binding_consistency_failures: receiptBindingConsistencyFailures,
       };
     }
     normalized.platform_extras = {
@@ -9371,6 +18555,7 @@ export function normalizeCompositePostPublishIntegrity(platform, finalIntegrity 
 export function buildCompositePublicationAudit(platform, content, integrity, finalPublish = {}, route = {}) {
   const fields = { ...(integrity?.fields || {}) };
   const softVerificationFields = compositePlatformSoftVerificationFields(platform);
+  const requiredNativeTopics = expectedNativeTopics(content);
   const douyinBoundManageReceipt = Boolean(
     platform === "douyin"
     && integrity?.platform_extras?.post_publish_surface === "douyin_content_manage_receipt"
@@ -9425,6 +18610,14 @@ export function buildCompositePublicationAudit(platform, content, integrity, fin
   } else if (xPublishedByReceiptRoute || hasXShareLink || xReceiptLike) {
     if (fields.body) fields.body.verified = true;
     if (fields.tags) fields.tags.verified = true;
+  }
+  if (requiredNativeTopics.length) {
+    fields.native_topics = {
+      ...(fields.native_topics && typeof fields.native_topics === "object" ? fields.native_topics : {}),
+      expected: Array.isArray(fields.native_topics?.expected) ? fields.native_topics.expected : requiredNativeTopics,
+      required: true,
+      verified: fields.native_topics?.verified !== false,
+    };
   }
   const receiptRequired = Boolean(
     finalPublish && typeof finalPublish === "object" && (
@@ -9535,6 +18728,25 @@ const COMPOSITE_PREPUBLISH_WAIT_ONLY_FIELDS = new Set([
 ]);
 
 export function deriveCompositePrePublishRepairPlan(audit = {}, integrity = {}, options = {}) {
+  if (options?.disable_auto_repair) {
+    const requiredUnverified = Array.isArray(audit?.required_unverified)
+      ? audit.required_unverified.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    const integrityFailures = Array.isArray(integrity?.failures)
+      ? integrity.failures.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    return {
+      shouldRepair: false,
+      disabled_by_policy: true,
+      reason: "linear_execution_mode",
+      allow_repair_with_blocking: false,
+      safe_blocking_only: false,
+      repairable_fields: [],
+      blocking_fields: [],
+      required_unverified: requiredUnverified,
+      integrity_failures: integrityFailures,
+    };
+  }
   const requiredUnverified = Array.isArray(audit?.required_unverified)
     ? audit.required_unverified.map((item) => String(item || "").trim()).filter(Boolean)
     : [];
@@ -9570,15 +18782,21 @@ export function deriveCompositePrePublishRepairPlan(audit = {}, integrity = {}, 
 }
 
 export function buildCompositeRepairExecutionPlan(platform, repairableFields = []) {
+  const normalizedPlatform = String(platform || "").trim().toLowerCase().replace(/_/g, "-");
   const normalizedFields = Array.from(new Set(
     (Array.isArray(repairableFields) ? repairableFields : [])
       .map((item) => String(item || "").trim())
       .filter(Boolean),
   ));
+  const separateNativeTopicRepairPlatforms = new Set(["douyin", "xiaohongshu"]);
+  const useSeparateNativeTopicRepair = separateNativeTopicRepairPlatforms.has(normalizedPlatform);
+  const topicRepairRequested = normalizedFields.some((field) => ["tags", "native_topics"].includes(field));
   return {
-    platform: String(platform || "").trim().toLowerCase().replace(/_/g, "-"),
+    platform: normalizedPlatform,
     fields: normalizedFields,
-    rich_text: normalizedFields.some((field) => ["title", "body", "tags"].includes(field)),
+    rich_text: normalizedFields.some((field) => ["title", "body"].includes(field))
+      || (!useSeparateNativeTopicRepair && topicRepairRequested),
+    topics: useSeparateNativeTopicRepair && topicRepairRequested,
     cover: normalizedFields.includes("cover"),
     collection: normalizedFields.includes("collection"),
     declaration: normalizedFields.includes("declaration"),
@@ -9674,6 +18892,8 @@ export function buildBilibiliPublicationAudit(content, platformVerifier, finalPu
     schedule: { expected: String(content.scheduled_publish_at || "").trim(), verified: !scheduled || !hasFailure("schedule") },
     upload_ready: { verified: !hasFailure("upload_ready") },
     declaration: { verified: !hasFailure("declaration") },
+    category: { expected: inferBilibiliCategory(content), verified: !hasFailure("category") },
+    batch_dynamic_policy: { expected: "不生成动态", verified: !hasFailure("batch_dynamic_policy") },
     receipt: {
       expected: stopBeforeFinalPublish ? "stop_before_final_publish" : (scheduled ? "scheduled publish receipt" : "publish receipt"),
       verified: stopBeforeFinalPublish || Boolean(finalPublish.success_like),
@@ -9792,65 +19012,21 @@ async function setGenericScheduleControls(client, platform, scheduledPublishAt) 
     })()`, 12000);
   }
   if (platform === "kuaishou") {
-    const expected = { display: schedule.display, date: schedule.display.slice(0, 10), time: schedule.display.slice(11, 16), inputValue: `${schedule.display}:00` };
+    const expected = {
+      display: schedule.display,
+      displayWithSeconds: schedule.displayWithSeconds || `${schedule.display}:00`,
+      date: schedule.date || schedule.display.slice(0, 10),
+      time: schedule.time || schedule.display.slice(11, 16),
+      timeWithSeconds: schedule.timeWithSeconds || `${schedule.time || schedule.display.slice(11, 16)}:${schedule.second || "00"}`,
+      second: schedule.second || "00",
+      inputValue: schedule.displayWithSeconds || `${schedule.display}:00`,
+      hasExplicitSeconds: Boolean(schedule.hasExplicitSeconds),
+      requireExactSeconds: Boolean(schedule.hasExplicitSeconds),
+    };
     const actions = [];
     actions.push({ clicked: "kuaishou_schedule_entry", ...(await clickByText(client, ["定时发布", "发布时间", "预约"])) });
     await sleep(700);
-    const target = await evaluateWithClient(client, `(() => {
-      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-      const visible = (el) => {
-        const rect = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
-      };
-      const input = [...document.querySelectorAll("input[placeholder*=选择日期时间],.ant-picker input,input")]
-        .filter(visible)
-        .find((el) => /选择日期时间|\\d{4}-\\d{2}-\\d{2}|日期|时间/.test(clean([el.placeholder, el.value, el.parentElement?.innerText].join(" "))));
-      if (!input) return { found: false };
-      input.scrollIntoView({ block: "center", inline: "center" });
-      const rect = input.getBoundingClientRect();
-      return { found: true, value: input.value || "", x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-    })()`, 10000);
-    actions.push({ set: "kuaishou_datetime_target", ...target });
-    if (target?.found) {
-      await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: target.x, y: target.y, button: "none" }).catch(() => {});
-      await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: target.x, y: target.y, button: "left", clickCount: 1 }).catch(() => {});
-      await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: target.x, y: target.y, button: "left", clickCount: 1 }).catch(() => {});
-      await sleep(250);
-      await client.send("Input.dispatchKeyEvent", { type: "keyDown", modifiers: 2, key: "a", code: "KeyA", windowsVirtualKeyCode: 65 }).catch(() => {});
-      await client.send("Input.dispatchKeyEvent", { type: "keyUp", modifiers: 2, key: "a", code: "KeyA", windowsVirtualKeyCode: 65 }).catch(() => {});
-      await client.send("Input.insertText", { text: expected.inputValue }).catch(() => {});
-      await client.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }).catch(() => {});
-      await client.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 }).catch(() => {});
-      await sleep(500);
-      await client.send("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }).catch(() => {});
-      await client.send("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 }).catch(() => {});
-      await sleep(1000);
-    }
-    const after = await evaluateWithClient(client, `(() => {
-      const expected = ${JSON.stringify(expected)};
-      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-      const visible = (el) => {
-        const rect = el.getBoundingClientRect();
-        const style = getComputedStyle(el);
-        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-      };
-      const inputs = [...document.querySelectorAll("input,textarea,[contenteditable=true]")]
-        .filter(visible)
-        .map((el) => clean(el.value || el.innerText || el.textContent || el.getAttribute("placeholder")))
-        .filter(Boolean);
-      const text = clean([((document.scrollingElement || document.documentElement || document.body)?.innerText) || "", ...inputs].join(" "));
-      const set = text.includes(expected.display) || (text.includes(expected.date) && text.includes(expected.time));
-      return {
-        set,
-        input_values: inputs.slice(0, 40),
-        relevant_text: text.split(/[\\n\\r]+| {2,}/).map(clean).filter((line) => /定时|发布时间|预约|确定|2026|10:30|20:00|21:00/.test(line)).slice(0, 80),
-      };
-    })()`, 10000);
-    return { set: Boolean(after.set), expected, body_after_had_schedule: Boolean(after.set), actions, ...after };
-    return evaluateWithClient(client, `(async () => {
-      const expected = ${JSON.stringify({ display: schedule.display, date: schedule.display.slice(0, 10), time: schedule.display.slice(11, 16) })};
-      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const quickSet = await evaluateWithClient(client, `(() => {
       const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
       const visible = (el) => {
         const rect = el.getBoundingClientRect();
@@ -9865,74 +19041,167 @@ async function setGenericScheduleControls(client, platform, scheduledPublishAt) 
         for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
         return true;
       };
-      const setInput = (el, value) => {
+      const expected = ${JSON.stringify({ time: schedule.display.slice(11, 16) })};
+      const quickSetButton = [...document.querySelectorAll("button,[role=button],span,div")]
+        .filter(visible)
+        .map((el) => ({
+          el,
+          text: clean(el.innerText || el.textContent || ""),
+          context: clean([el.parentElement?.innerText || "", el.closest("div,section")?.innerText || ""].join(" ")),
+        }))
+        .find((item) => item.text === "一键设置" && (!expected.time || item.context.includes(expected.time)));
+      if (!quickSetButton) return { clicked: false };
+      return { clicked: click(quickSetButton.el), label: quickSetButton.text };
+    })()`, 10000);
+    if (quickSet?.clicked) {
+      actions.push({ clicked: "kuaishou_schedule_quick_set", ...quickSet });
+      await sleep(400);
+      const confirm = await clickByText(client, ["确定"]);
+      actions.push({ clicked: "kuaishou_schedule_confirm", ...confirm });
+      await sleep(1000);
+    }
+    const overlayDismiss = await evaluateWithClient(client, `(() => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const visible = (el) => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+      };
+      const click = (el) => {
         if (!el) return false;
-        el.focus();
-        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-        if (setter) setter.call(el, value);
-        else el.value = value;
-        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
-        el.dispatchEvent(new Event("change", { bubbles: true }));
+        el.scrollIntoView({ block: "center", inline: "center" });
+        const rect = el.getBoundingClientRect();
+        const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+        for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
         return true;
       };
-      const actions = [];
-      const buttons = [...document.querySelectorAll("button,[role=button],label,span,div")]
+      const bodyText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+      const overlayOpen = /根据你的粉丝观看高峰期/.test(bodyText) && /一键设置/.test(bodyText) && /确定/.test(bodyText) && /发布时间|定时发布/.test(bodyText);
+      const confirmButton = [...document.querySelectorAll("button,[role=button],span,div")]
         .filter(visible)
-        .map((el) => ({ el, text: clean(el.innerText || el.textContent), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
-        .filter((item) => /定时发布|发布时间|预约/.test(item.text) && item.text.length <= 80)
-        .sort((left, right) => left.area - right.area);
-      if (buttons[0]) {
-        actions.push({ clicked: "kuaishou_schedule_entry", label: buttons[0].text, ok: click(buttons[0].el) });
-        await sleep(700);
+        .map((el) => ({ el, text: clean(el.innerText || el.textContent || "") }))
+        .find((item) => item.text === "确定");
+      let confirmClicked = false;
+      if (overlayOpen && confirmButton) {
+        confirmClicked = click(confirmButton.el);
       }
-      const dateInputs = [...document.querySelectorAll(".ant-picker input,input[placeholder*=日期],input[placeholder*=时间]")]
-        .filter(visible)
-        .map((el) => ({ el, hint: clean([el.placeholder, el.value, el.parentElement?.innerText].join(" ")) }));
-      for (const item of dateInputs) {
-        if (/日期|date|年|月|日/i.test(item.hint)) actions.push({ set: "date_input", hint: item.hint, ok: setInput(item.el, expected.date) });
-        else if (/时间|time|时|分/i.test(item.hint)) actions.push({ set: "time_input", hint: item.hint, ok: setInput(item.el, expected.time) });
-      }
-      await sleep(300);
-      const dropdowns = [...document.querySelectorAll(".ant-picker-dropdown,.ant-picker-panel-container,.ant-picker-datetime-panel")]
-        .filter(visible);
-      const scoped = (selector) => dropdowns.flatMap((root) => {
-        try { return [...root.querySelectorAll(selector)]; } catch { return []; }
-      }).filter(visible);
-      const day = expected.date.slice(8, 10);
-      const dayTarget = scoped(".ant-picker-cell-in-view,td")
-        .map((el) => ({ el, text: clean(el.innerText || el.textContent), title: clean(el.getAttribute("title") || el.getAttribute("aria-label") || "") }))
-        .find((item) => item.title.includes(expected.date) || item.text === String(Number(day)) || item.text === day);
-      if (dayTarget) {
-        actions.push({ clicked: "kuaishou_day", label: dayTarget.title || dayTarget.text, ok: click(dayTarget.el) });
-        await sleep(200);
-      }
-      const [hourRaw, minuteRaw] = expected.time.split(":");
-      for (const [kind, wanted] of [["hour", String(Number(hourRaw))], ["minute", minuteRaw]]) {
-        const cells = scoped(".ant-picker-time-panel-cell-inner")
-          .map((el) => ({ el, text: clean(el.innerText || el.textContent), column: clean(el.closest(".ant-picker-time-panel-column")?.innerText || "") }));
-        const target = cells.find((item) => item.text === wanted || item.text === wanted.padStart(2, "0"));
-        if (target) {
-          actions.push({ clicked: "kuaishou_" + kind, label: target.text, ok: click(target.el) });
-          await sleep(200);
-        }
-      }
-      const okButton = scoped(".ant-picker-ok button,button,[role=button]")
-        .map((el) => ({ el, text: clean(el.innerText || el.textContent), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
-        .filter((item) => item.text === "确定" || /^OK$/i.test(item.text))
-        .sort((left, right) => left.area - right.area)[0];
-      if (okButton) {
-        actions.push({ clicked: "kuaishou_picker_ok", label: okButton.text, ok: click(okButton.el) });
-        await sleep(500);
-      }
-      const text = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
-      return {
-        set: text.includes(expected.display) || (text.includes(expected.date) && text.includes(expected.time)),
-        expected,
-        body_after_had_schedule: text.includes(expected.display) || (text.includes(expected.date) && text.includes(expected.time)),
-        actions,
-        relevant_text: text.split(/[\\n\\r]+| {2,}/).map(clean).filter((line) => /定时|发布时间|预约|确定|2026|20:00|21:00|11:30/.test(line)).slice(0, 60),
+      return { overlay_open: overlayOpen, confirm_clicked: confirmClicked };
+    })()`, 10000);
+    actions.push({ kind: "kuaishou_schedule_overlay_dismiss", ...overlayDismiss });
+    if (overlayDismiss?.overlay_open) {
+      await sleep(500);
+      await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: 48, y: 48, button: "none" }).catch(() => {});
+      await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: 48, y: 48, button: "left", clickCount: 1 }).catch(() => {});
+      await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: 48, y: 48, button: "left", clickCount: 1 }).catch(() => {});
+      await sleep(500);
+    }
+    let after = await evaluateWithClient(client, `(() => {
+      const expected = ${JSON.stringify(expected)};
+      const matchesKuaishouSchedule = ${matchesKuaishouScheduleEvidence.toString()};
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const visible = (el) => {
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
       };
-    })()`, 12000);
+      const inputs = [...document.querySelectorAll("input,textarea,[contenteditable=true]")]
+        .filter(visible)
+        .map((el) => clean(el.value || el.innerText || el.textContent || el.getAttribute("placeholder")))
+        .filter(Boolean);
+      const text = clean([((document.scrollingElement || document.documentElement || document.body)?.innerText) || "", ...inputs].join(" "));
+      const set = matchesKuaishouSchedule(text, expected);
+      const overlayOpen = /根据你的粉丝观看高峰期/.test(text) && /一键设置/.test(text) && /确定/.test(text) && /发布时间|定时发布/.test(text);
+      return {
+        set,
+        overlay_open: overlayOpen,
+        input_values: inputs.slice(0, 40),
+        relevant_text: text.split(/[\\n\\r]+| {2,}/).map(clean).filter((line) => /定时|发布时间|预约|确定|2026|10:30|20:00|21:00/.test(line)).slice(0, 80),
+      };
+    })()`, 10000);
+    if (!after?.set) {
+      const pickerFallback = await evaluateWithClient(client, `(() => {
+        const expected = ${JSON.stringify(expected)};
+        const matchesKuaishouSchedule = ${matchesKuaishouScheduleEvidence.toString()};
+        const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+        const visible = (el) => {
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+        };
+        const click = (el) => {
+          if (!el || !visible(el)) return false;
+          el.scrollIntoView({ block: "center", inline: "center" });
+          const rect = el.getBoundingClientRect();
+          const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+          for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+          if (typeof el.click === "function") el.click();
+          return true;
+        };
+        const roots = [...document.querySelectorAll(".ant-picker-dropdown,.ant-picker-panel-container,.ant-picker-datetime-panel,.ant-picker-panel,[role=dialog],[class*=picker]")]
+          .filter(visible)
+          .filter((el) => /确定|\\d{4}|\\d{2}:\\d{2}|定时发布|发布时间|预约/.test(clean(el.innerText || el.textContent || "")));
+        const scope = roots.length ? roots : [document.body];
+        const gather = (selector) => scope.flatMap((root) => {
+          try { return [...root.querySelectorAll(selector)]; } catch { return []; }
+        }).filter(visible);
+        const actions = [];
+        const day = String(Number(String(expected.date || "").slice(8, 10) || "0"));
+        const hour = String(Number(expected.time.split(":")[0] || "0"));
+        const minute = String(Number(expected.time.split(":")[1] || "0")).padStart(2, "0");
+        const second = String(Number(expected.second || "0")).padStart(2, "0");
+        const allCandidates = gather("button,td,li,span,div");
+        const matchByTexts = (texts) => allCandidates
+          .map((el) => ({ el, text: clean(el.innerText || el.textContent || ""), title: clean(el.getAttribute("title") || el.getAttribute("aria-label") || "") }))
+          .find((item) => texts.some((text) => item.text === text || item.title.includes(text)));
+        const dayTarget = matchByTexts([day, String(Number(day)).padStart(2, "0"), expected.date]);
+        if (dayTarget) actions.push({ clicked: "kuaishou_day", label: dayTarget.text || dayTarget.title, ok: click(dayTarget.el) });
+        const columnTargets = [
+          { kind: "hour", texts: [hour, hour.padStart(2, "0")] },
+          { kind: "minute", texts: [minute, String(Number(minute))] },
+          { kind: "second", texts: [second, String(Number(second))] },
+        ];
+        for (const column of columnTargets) {
+          const target = matchByTexts(column.texts);
+          if (target) actions.push({ clicked: "kuaishou_" + column.kind, label: target.text || target.title, ok: click(target.el) });
+        }
+        const confirm = allCandidates
+          .map((el) => ({ el, text: clean(el.innerText || el.textContent || "") }))
+          .find((item) => item.text === "确定");
+        if (confirm) actions.push({ clicked: "kuaishou_picker_ok", label: confirm.text, ok: click(confirm.el) });
+        const pageText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+        return {
+          set: matchesKuaishouSchedule(pageText, expected),
+          actions,
+          relevant_text: pageText.split(/[\\n\\r]+| {2,}/).map(clean).filter((line) => /定时|发布时间|预约|确定|2026|20:00|21:00|00:00/.test(line)).slice(0, 80),
+        };
+      })()`, 12000);
+      if (Array.isArray(pickerFallback?.actions)) actions.push(...pickerFallback.actions);
+      await sleep(700);
+      after = await evaluateWithClient(client, `(() => {
+        const expected = ${JSON.stringify(expected)};
+        const matchesKuaishouSchedule = ${matchesKuaishouScheduleEvidence.toString()};
+        const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+        const visible = (el) => {
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+        };
+        const inputs = [...document.querySelectorAll("input,textarea,[contenteditable=true]")]
+          .filter(visible)
+          .map((el) => clean(el.value || el.innerText || el.textContent || el.getAttribute("placeholder")))
+          .filter(Boolean);
+        const text = clean([((document.scrollingElement || document.documentElement || document.body)?.innerText) || "", ...inputs].join(" "));
+        const set = matchesKuaishouSchedule(text, expected);
+        const overlayOpen = /根据你的粉丝观看高峰期/.test(text) && /一键设置/.test(text) && /确定/.test(text) && /发布时间|定时发布/.test(text);
+        return {
+          set,
+          overlay_open: overlayOpen,
+          input_values: inputs.slice(0, 40),
+          relevant_text: text.split(/[\\n\\r]+| {2,}/).map(clean).filter((line) => /定时|发布时间|预约|确定|2026|10:30|20:00|21:00|00:00/.test(line)).slice(0, 80),
+        };
+      })()`, 10000);
+    }
+    return { set: Boolean(after.set), expected, body_after_had_schedule: Boolean(after.set), actions, ...after };
   }
   if (platform === "toutiao") {
     return evaluateWithClient(client, `(async () => {
@@ -10243,7 +19512,7 @@ async function setGenericScheduleControls(client, platform, scheduledPublishAt) 
 }
 
 async function setPlatformRichText(client, platform, title, body) {
-  const titleValue = String(title || "").trim();
+  const titleValue = normalizeCompositeTitleForPlatform(platform, title);
   const bodyValue = String(body || "").trim();
   if (!titleValue && !bodyValue) return { filled: false, reason: "empty_value" };
   if (platform === "toutiao") {
@@ -10304,45 +19573,69 @@ async function setPlatformRichText(client, platform, title, body) {
       const style = getComputedStyle(el);
       return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
     };
+    const applyContentEditableValue = (el, value) => {
+      el.replaceChildren();
+      for (const [index, line] of String(value || "").split(/\\n/).entries()) {
+        if (index) el.appendChild(document.createElement("br"));
+        el.appendChild(document.createTextNode(line));
+      }
+    };
     const setEditable = (el, value) => {
       if (!el || !value) return false;
       el.scrollIntoView({ block: "center", inline: "center" });
       el.focus();
       if (el.isContentEditable || el.getAttribute("contenteditable") === "true") {
-        try {
-          const selection = window.getSelection();
-          const range = document.createRange();
-          range.selectNodeContents(el);
-          selection.removeAllRanges();
-          selection.addRange(range);
-          document.execCommand("insertText", false, value);
-        } catch {
-          el.textContent = value;
-        }
-        if (!draftMatches(el.innerText || el.textContent, value)) {
-          el.replaceChildren();
-          for (const [index, line] of value.split(/\\n/).entries()) {
-            if (index) el.appendChild(document.createElement("br"));
-            el.appendChild(document.createTextNode(line));
+        if (platform === "douyin") {
+          try {
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            selection.deleteFromDocument();
+          } catch {}
+          try { el.innerHTML = ""; } catch {}
+          try { el.textContent = ""; } catch {}
+          applyContentEditableValue(el, value);
+        } else {
+          try {
+            const selection = window.getSelection();
+            const range = document.createRange();
+            range.selectNodeContents(el);
+            selection.removeAllRanges();
+            selection.addRange(range);
+            document.execCommand("insertText", false, value);
+          } catch {
+            el.textContent = value;
+          }
+          if (!draftMatches(el.innerText || el.textContent, value)) {
+            applyContentEditableValue(el, value);
           }
         }
         el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
         if (!draftMatches(el.innerText || el.textContent, value)) {
           try {
-            el.textContent = "";
-            for (const [index, line] of value.split(/\\n/).entries()) {
-              if (index) el.appendChild(document.createElement("br"));
-              el.appendChild(document.createTextNode(line));
-            }
+            applyContentEditableValue(el, value);
             el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertReplacementText", data: value }));
           } catch {}
         }
       } else {
-        const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-        const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
-        if (setter) setter.call(el, value);
-        else el.value = value;
-        el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: value }));
+        const assignInputValue = (nextValue, inputType = "insertText", data = nextValue) => {
+          const proto = el.tagName === "TEXTAREA" ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+          const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set;
+          if (setter) setter.call(el, nextValue);
+          else el.value = nextValue;
+          el.dispatchEvent(new InputEvent("input", { bubbles: true, inputType, data }));
+        };
+        if (platform === "douyin") {
+          assignInputValue("", "deleteContentBackward", "");
+          for (const char of Array.from(String(value || ""))) {
+            const current = String(el.value || "");
+            assignInputValue(current + char, "insertText", char);
+          }
+        } else {
+          assignInputValue(value, "insertText", value);
+        }
       }
       el.dispatchEvent(new Event("change", { bubbles: true }));
       el.dispatchEvent(new Event("blur", { bubbles: true }));
@@ -10356,6 +19649,9 @@ async function setPlatformRichText(client, platform, title, body) {
         el,
         text: clean([el.placeholder, el.getAttribute("aria-label"), el.getAttribute("data-testid"), el.value, el.innerText, el.closest("label")?.innerText, el.parentElement?.innerText].join(" ")),
         area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+        className: clean(typeof el.className === "string" ? el.className : ""),
+        role: clean(el.getAttribute("role") || "").toLowerCase(),
+        isContentEditable: Boolean(el.isContentEditable || el.getAttribute("contenteditable") === "true"),
       }))
       .filter((item) => item.area > 1000)
       .sort((left, right) => right.area - left.area);
@@ -10374,20 +19670,63 @@ async function setPlatformRichText(client, platform, title, body) {
     const titlePatterns = platform === "youtube"
       ? [/标题（必填）|添加一个可描述你视频的标题|add a title|title/i]
       : [/标题|title/i];
+    const douyinTargets = platform === "douyin"
+      ? ${resolveDouyinRichTextTargets.toString()}(editables, { title: expected.title, body: expected.body || expected.title })
+      : null;
     const titleTarget = expected.title
       ? (
-        platform === "youtube"
-          ? editables.find((item) => titlePatterns.some((pattern) => pattern.test(item.text)))
-          : editables.find((item) => titlePatterns.some((pattern) => pattern.test(item.text)) && item.el.tagName === "INPUT")
+        platform === "douyin"
+          ? (
+            douyinTargets?.titleTarget
+            || editables.find((item) => item.el.tagName === "INPUT" && titlePatterns.some((pattern) => pattern.test(item.text)))
+            || editables.find((item) => item.el.tagName === "INPUT" && /填写作品标题|作品标题|标题|0\\\/30|30/.test(item.text))
+          )
+          : platform === "youtube"
+            ? editables.find((item) => titlePatterns.some((pattern) => pattern.test(item.text)))
+            : editables.find((item) => titlePatterns.some((pattern) => pattern.test(item.text)) && item.el.tagName === "INPUT")
       )
         || (platform === "toutiao" ? editables.find((item) => item.el.tagName === "INPUT" && /1～30|1-30|30 个字符|标题/.test(item.text)) : null)
         || (platform === "xiaohongshu" ? editables.find((item) => item.el.tagName === "INPUT" && /标题|更多赞/.test(item.text)) : null)
       : null;
-    if (titleTarget) actions.push({ field: "title", ok: setEditable(titleTarget.el, expected.title), hint: titleTarget.text.slice(0, 120) });
+    const readDraftValue = (el) => {
+      if (!el) return "";
+      if (el.isContentEditable || el.getAttribute("contenteditable") === "true") {
+        return normalizeDraft(el.innerText || el.textContent || "");
+      }
+      return normalizeDraft(el.value || "");
+    };
+    if (titleTarget) {
+      const currentTitle = readDraftValue(titleTarget.el);
+      actions.push(
+        draftMatches(currentTitle, expected.title)
+          ? {
+            field: "title",
+            ok: true,
+            skipped: true,
+            already_matched: true,
+            hint: titleTarget.text.slice(0, 120),
+          }
+          : { field: "title", ok: setEditable(titleTarget.el, expected.title), hint: titleTarget.text.slice(0, 120) },
+      );
+    }
     const bodyCandidates = platform === "xiaohongshu"
       ? editables.filter((item) => item.el.tagName !== "INPUT" || item.el.isContentEditable || item.el.getAttribute("contenteditable") === "true")
       : editables;
+    const kuaishouBodyTarget = platform === "kuaishou"
+      ? bodyCandidates
+        .filter((item) => (
+          item.el.tagName === "TEXTAREA"
+          || item.el.isContentEditable
+          || item.el.getAttribute("contenteditable") === "true"
+          || (item.el.tagName === "DIV" && item.el.getAttribute("role") === "textbox")
+        ))
+        .filter((item) => /作品描述|描述|智能文案/.test(item.text))
+        .sort((left, right) => right.area - left.area)[0]
+      : null;
+    const douyinBodyTarget = platform === "douyin" ? douyinTargets?.bodyTarget : null;
     const bodyTarget =
+      douyinBodyTarget ||
+      kuaishouBodyTarget ||
       bodyCandidates.find((item) => bodyPatterns.some((pattern) => pattern.test(item.text))) ||
       bodyCandidates.find((item) => (
         item.el.isContentEditable
@@ -10395,17 +19734,40 @@ async function setPlatformRichText(client, platform, title, body) {
         || item.el.tagName === "TEXTAREA"
       ) && !titlePatterns.some((pattern) => pattern.test(item.text))) ||
       bodyCandidates[0];
-    if (bodyTarget) actions.push({ field: "body", ok: setEditable(bodyTarget.el, expected.body || expected.title), hint: bodyTarget.text.slice(0, 120), tag: bodyTarget.el.tagName.toLowerCase() });
+    if (bodyTarget) {
+      const expectedBody = expected.body || expected.title;
+      const currentBody = readDraftValue(bodyTarget.el);
+      const bodyAlreadyMatched = platform === "douyin"
+        ? ${verifyCompositeBodyField.toString()}("douyin", expectedBody, currentBody)
+        : draftMatches(currentBody, expectedBody);
+      actions.push(
+        bodyAlreadyMatched
+          ? {
+            field: "body",
+            ok: true,
+            skipped: true,
+            already_matched: true,
+            hint: bodyTarget.text.slice(0, 120),
+            tag: bodyTarget.el.tagName.toLowerCase(),
+          }
+          : { field: "body", ok: setEditable(bodyTarget.el, expectedBody), hint: bodyTarget.text.slice(0, 120), tag: bodyTarget.el.tagName.toLowerCase() },
+      );
+    }
     if (platform === "xiaohongshu" && titleTarget) actions.push({ field: "title_reassert", ok: setEditable(titleTarget.el, expected.title), hint: titleTarget.text.slice(0, 120) });
-    const text = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    const titleAction = actions.find((item) => item.field === "title" || item.field === "title_reassert");
+    const bodyAction = actions.find((item) => item.field === "body");
+    const actualTitle = titleTarget ? readDraftValue(titleTarget.el) : "";
+    const actualBody = bodyTarget ? readDraftValue(bodyTarget.el) : "";
     return {
       filled: actions.some((item) => item.ok),
       actions,
-      verified_body: !expected.body || text.includes(expected.body.slice(0, Math.min(20, expected.body.length))),
-      verified_title: !expected.title || text.includes(expected.title),
-      candidates: editables.slice(0, 12).map((item) => ({ text: item.text.slice(0, 120), area: item.area, tag: item.el.tagName.toLowerCase() })),
+      verified_body: !expected.body || draftMatches(actualBody, expected.body || expected.title),
+      verified_title: !expected.title || draftMatches(actualTitle, expected.title),
+      actual_body: actualBody,
+      actual_title: actualTitle,
+      candidates: editables.slice(0, 12).map((item) => ({ text: item.text.slice(0, 120), area: item.area, tag: item.el.tagName.toLowerCase(), className: item.className.slice(0, 120) })),
     };
-  })()`, 30000);
+  })()`, platform === "xiaohongshu" ? 60000 : 30000);
 }
 
 async function finalizeGenericCompositePublish(
@@ -10528,7 +19890,7 @@ async function finalizeGenericCompositePublish(
     };
   }
   const publishTexts = platform === "youtube"
-    ? (scheduled ? ["安排时间", "预约", "Schedule"] : ["发布", "Publish"])
+    ? (scheduled ? ["安排时间", "Schedule", "发布", "保存"] : ["发布", "Publish", "保存"])
     : platform === "x"
       ? (scheduled ? ["Schedule", "Confirm", "发布", "Post"] : ["发布", "Post"])
       : platform === "wechat-channels"
@@ -10735,6 +20097,7 @@ async function runCompositePlatformAdapter(
   const stopBeforeFinalPublish = Boolean(recoveryOptions.stop_before_final_publish);
   const prepublishOnlyCurrentPage = Boolean(recoveryOptions.prepublish_only_current_page);
   const prepareOnlyCurrentPage = Boolean(recoveryOptions.prepare_only_current_page);
+  const linearCurrentPageMode = prepareOnlyCurrentPage && !prepublishOnlyCurrentPage;
   const framework = PLATFORM_COMPOSITE_FRAMEWORKS[platform] || (COMPOSITE_PUBLISH_PLATFORMS.has(platform) ? null : { id: "generic_composite_fallback_v1", prepare: prepareGenericCompositeDraft });
   if (!framework) {
     return {
@@ -10983,7 +20346,9 @@ async function runCompositePlatformAdapter(
     effectiveRoute,
     { repair_actions: [] },
   );
-  const prePublishRepairPlan = deriveCompositePrePublishRepairPlan(effectiveAudit, effectiveIntegrity);
+  const prePublishRepairPlan = deriveCompositePrePublishRepairPlan(effectiveAudit, effectiveIntegrity, {
+    disable_auto_repair: linearCurrentPageMode,
+  });
   let prePublishRepairAttempt = null;
   if (prePublishRepairPlan.shouldRepair) {
     reportTaskProgress({
@@ -10999,58 +20364,79 @@ async function runCompositePlatformAdapter(
       visual_evidence: effectiveSnapshot?.visual_evidence || undefined,
       visible_lines: (effectiveSnapshot.lines || []).slice(0, 120),
     });
-    const repairExecutor = typeof framework.repair === "function"
-      ? () => framework.repair(client, platform, content, prePublishRepairPlan.repairable_fields)
-      : () => framework.prepare(client, platform, content);
-    const repairActions = await runCompositePhase(
-      platform,
-      `repair_pre_publish_${framework.id}`,
-      repairExecutor,
-    );
-    if (!Array.isArray(repairActions)) {
-      throw new TypeError("composite_repair_actions_invalid");
-    }
-    actions.push(...repairActions);
-    await sleep(1200);
-    effectiveIntegrity = await runCompositePhase(platform, "pre_publish_material_integrity_reverify", () => readCompositeMaterialIntegrity(client, platform, content));
-    effectiveSnapshot = await runCompositePhase(
-      platform,
-      "pre_publish_page_snapshot_reverify",
-      () => pageSnapshot(client, {
-        captureVisualEvidence: true,
+    if (typeof framework.repair !== "function" && !shouldFallbackToFullPrepareDuringRepair(platform, framework)) {
+      const skippedRepair = {
+        kind: `${platform}_repair_skipped_no_field_scoped_repair`,
+        skipped: true,
+        blocked: true,
+        framework_id: framework.id,
+        repairable_fields: prePublishRepairPlan.repairable_fields,
+        reason: "field_scoped_repair_not_implemented",
+      };
+      actions.push(skippedRepair);
+      prePublishRepairAttempt = {
+        attempted: false,
+        skipped: true,
+        reason: "field_scoped_repair_not_implemented",
+        repairable_fields: prePublishRepairPlan.repairable_fields,
+        before_required_unverified: prePublishRepairPlan.required_unverified,
+        after_required_unverified: Array.isArray(effectiveAudit?.required_unverified) ? effectiveAudit.required_unverified : [],
+        actions: [skippedRepair],
+      };
+    } else {
+      const repairExecutor = typeof framework.repair === "function"
+        ? () => framework.repair(client, platform, content, prePublishRepairPlan.repairable_fields)
+        : () => framework.prepare(client, platform, content);
+      const repairActions = await runCompositePhase(
         platform,
-        visualEvidencePhase: "pre_publish_page_snapshot_reverify",
-      }),
-    );
-    effectiveRoute = { url: effectiveSnapshot.url || tab.url || "", title: effectiveSnapshot.title || tab.title || "" };
-    effectiveAudit = buildCompositePublicationAudit(platform, content, effectiveIntegrity, {}, effectiveRoute);
-    effectiveFieldSnapshot = buildPublicationFieldSnapshotFromAudit(
-      platform,
-      content,
-      effectiveAudit,
-      effectiveRoute,
-      { repair_actions: repairActions },
-    );
-    prePublishRepairAttempt = {
-      attempted: true,
-      repairable_fields: prePublishRepairPlan.repairable_fields,
-      before_required_unverified: prePublishRepairPlan.required_unverified,
-      after_required_unverified: Array.isArray(effectiveAudit?.required_unverified) ? effectiveAudit.required_unverified : [],
-      actions: repairActions,
-    };
-    reportTaskProgress({
-      phase: "pre_publish_reverify",
-      route: {
-        url: String(effectiveRoute.url || ""),
-        title: String(effectiveRoute.title || ""),
-        path: "",
-      },
-      material_integrity: effectiveIntegrity,
-      publication_audit: effectiveAudit,
-      publication_field_snapshot: effectiveFieldSnapshot,
-      visual_evidence: effectiveSnapshot?.visual_evidence || undefined,
-      visible_lines: (effectiveSnapshot.lines || []).slice(0, 120),
-    });
+        `repair_pre_publish_${framework.id}`,
+        repairExecutor,
+      );
+      if (!Array.isArray(repairActions)) {
+        throw new TypeError("composite_repair_actions_invalid");
+      }
+      actions.push(...repairActions);
+      await sleep(1200);
+      effectiveIntegrity = await runCompositePhase(platform, "pre_publish_material_integrity_reverify", () => readCompositeMaterialIntegrity(client, platform, content));
+      effectiveSnapshot = await runCompositePhase(
+        platform,
+        "pre_publish_page_snapshot_reverify",
+        () => pageSnapshot(client, {
+          captureVisualEvidence: true,
+          platform,
+          visualEvidencePhase: "pre_publish_page_snapshot_reverify",
+        }),
+      );
+      effectiveRoute = { url: effectiveSnapshot.url || tab.url || "", title: effectiveSnapshot.title || tab.title || "" };
+      effectiveAudit = buildCompositePublicationAudit(platform, content, effectiveIntegrity, {}, effectiveRoute);
+      effectiveFieldSnapshot = buildPublicationFieldSnapshotFromAudit(
+        platform,
+        content,
+        effectiveAudit,
+        effectiveRoute,
+        { repair_actions: repairActions },
+      );
+      prePublishRepairAttempt = {
+        attempted: true,
+        repairable_fields: prePublishRepairPlan.repairable_fields,
+        before_required_unverified: prePublishRepairPlan.required_unverified,
+        after_required_unverified: Array.isArray(effectiveAudit?.required_unverified) ? effectiveAudit.required_unverified : [],
+        actions: repairActions,
+      };
+      reportTaskProgress({
+        phase: "pre_publish_reverify",
+        route: {
+          url: String(effectiveRoute.url || ""),
+          title: String(effectiveRoute.title || ""),
+          path: "",
+        },
+        material_integrity: effectiveIntegrity,
+        publication_audit: effectiveAudit,
+        publication_field_snapshot: effectiveFieldSnapshot,
+        visual_evidence: effectiveSnapshot?.visual_evidence || undefined,
+        visible_lines: (effectiveSnapshot.lines || []).slice(0, 120),
+      });
+    }
   }
   reportTaskProgress({
     phase: "pre_publish_ready",
@@ -11445,7 +20831,7 @@ async function setBilibiliDraftFields(client, content) {
   const title = String(content.title || "").trim();
   const body = String(content.body || "").trim();
   const tags = Array.from(new Set([...(content.hashtags || []), ...(content.structured_tags || [])].map((item) => String(item || "").trim()).filter(Boolean))).slice(0, 10);
-  const collection = String(content.collection?.name || content.collection_name || "").trim();
+  const collection = expectedCollectionNameForPlatform("bilibili", content);
   const scheduledPublishAt = String(content.scheduled_publish_at || "").trim();
   const schedule = parseChinaLocalSchedule(scheduledPublishAt);
   const category = inferBilibiliCategory(content);
@@ -11612,35 +20998,100 @@ async function setBilibiliDraftFields(client, content) {
     }
 
     if (expected.collection) {
-      const collectionSelectCandidates = () => [...document.querySelectorAll(".video-season-select .season-select")]
+      const allCollectionScopes = [...document.querySelectorAll(".video-season-select, .video-season, [class*=video-season]")]
         .filter(visible)
-        .map((el) => ({
-          el,
-          text: clean(el.innerText || el.textContent),
-          inDialog: Boolean(el.closest(".bcc-dialog, .bcc-dialog__wrap, .batch-add-season, .batch-fill")),
-          inForm: Boolean(el.closest(".form, .form-item")),
-        }));
+        .map((el) => {
+          const text = clean(el.innerText || el.textContent);
+          let score = 0;
+          if (text.includes(expected.collection)) score += 700;
+          if (text === "请选择合集" || /加入合集|选择合集|请选择合集/.test(text)) score += 520;
+          return { el, text, score };
+        })
+        .sort((left, right) => right.score - left.score);
+      const collectionScope = allCollectionScopes[0]?.el || document;
+      const collectionSelectCandidates = () => [...collectionScope.querySelectorAll(".season-select,.season-enter,.season-enter-text-default,[class*=season][class*=select],[class*=season][class*=enter]")]
+        .filter(visible)
+        .map((el) => {
+          const text = clean(el.innerText || el.textContent);
+          let score = 0;
+          if (text.includes(expected.collection)) score += 600;
+          if (text === "请选择合集" || /加入合集|选择合集|请选择合集/.test(text)) score += 320;
+          if (el.closest(".video-season-select, .video-season, [class*=video-season]")) score += 220;
+          return { el, text, score };
+        })
+        .filter((item) => item.score > 0)
+        .sort((left, right) => right.score - left.score);
       const collectionTextsBefore = collectionSelectCandidates().map((item) => item.text).filter(Boolean);
-      const collectionSelect =
-        collectionSelectCandidates().find((item) => item.text.includes(expected.collection))?.el ||
-        collectionSelectCandidates().find((item) => item.inForm && !item.inDialog)?.el ||
-        collectionSelectCandidates().find((item) => !item.inDialog)?.el ||
-        collectionSelectCandidates()[0]?.el;
+      const collectionSelect = collectionSelectCandidates()[0]?.el;
       const before = clean(collectionSelect?.innerText || "");
-      if (collectionSelect && !collectionTextsBefore.some((text) => text.includes(expected.collection))) {
-        click(collectionSelect);
-        await sleep(600);
-        const option = [...document.querySelectorAll(".bcc-option, .season-list .season-item, .video-season-select [class*=option], [class*=season] [class*=item]")]
-          .filter(visible)
-          .find((el) => clean(el.innerText || el.textContent).includes(expected.collection));
-        if (option) {
-          click(option);
-          await sleep(500);
+      const collectionVmCandidates = [
+        collectionScope?.__vue__,
+        collectionScope?.querySelector(".season-select, .video-season-select")?.__vue__,
+        ...[...document.querySelectorAll(".video-season-select, .video-season, [class*=video-season]")]
+          .map((el) => el?.__vue__ || el?.querySelector(".season-select, .video-season-select")?.__vue__)
+          .filter(Boolean),
+      ].filter(Boolean);
+      let matchedVm = null;
+      let vmMatchedSeason = null;
+      for (const vm of collectionVmCandidates) {
+        const vmSeasonList = Array.isArray(vm?.seasonList)
+          ? vm.seasonList
+          : (Array.isArray(vm?._watchers?.[2]?.value) ? vm._watchers[2].value : []);
+        const foundSeason = vmSeasonList.find((item) => clean(item?.name || item?.title || item?.label) === expected.collection);
+        if (foundSeason && typeof vm.selectSeason === "function") {
+          matchedVm = vm;
+          vmMatchedSeason = foundSeason;
+          break;
+        }
+      }
+      if (!collectionTextsBefore.some((text) => text.includes(expected.collection))) {
+        let selectedByVm = false;
+        if (matchedVm && vmMatchedSeason && typeof matchedVm.selectSeason === "function") {
+          try {
+            matchedVm.selectSeason(vmMatchedSeason);
+            selectedByVm = true;
+            await sleep(900);
+          } catch {}
+        }
+        if (!selectedByVm && collectionSelect) {
+          click(collectionSelect);
+          await sleep(900);
+          const visibleOptionRoots = [...document.querySelectorAll(".bcc-select-dropdown, .season-list, [role=listbox], [role=menu], [class*=dropdown], [class*=popup]")]
+            .filter((el) => visible(el) && !el.closest(".bcc-dialog, .bcc-dialog__wrap, .batch-add-season, .batch-fill, [class*=dialog], [class*=modal]"));
+          const optionPool = (visibleOptionRoots.length ? visibleOptionRoots : [document]).flatMap((root) =>
+            [...root.querySelectorAll(".bcc-option, .season-item, [class*=season][class*=item], [role=option], li, button, span, div")]
+              .filter(visible)
+              .map((el) => {
+                const text = clean(el.innerText || el.textContent);
+                let score = 0;
+                if (text === expected.collection) score += 800;
+                else if (text.includes(expected.collection)) score += 520;
+                if (root !== document) score += 140;
+                if (/确定|取消|请选择合集|加入合集|选择合集|创作声明|定时发布|分区|标签|更多设置/.test(text)) score -= 320;
+                return { el, text, score };
+              }),
+          )
+            .filter((item) => item.score > 0)
+            .sort((left, right) => right.score - left.score);
+          const option = optionPool[0];
+          if (option) {
+            click(option.el);
+            await sleep(900);
+          }
         }
       }
       const collectionTextsAfter = collectionSelectCandidates().map((item) => item.text).filter(Boolean);
       const selectedCollection = collectionTextsAfter.find((text) => text.includes(expected.collection)) || collectionTextsAfter.find((text) => !/请选择合集/.test(text)) || collectionTextsAfter[0] || "";
-      actions.push({ field: "collection", expected: expected.collection, before, candidates_before: collectionTextsBefore, actual: selectedCollection, candidates_after: collectionTextsAfter, selected: selectedCollection.includes(expected.collection) });
+      actions.push({
+        field: "collection",
+        expected: expected.collection,
+        before,
+        candidates_before: collectionTextsBefore,
+        actual: selectedCollection,
+        candidates_after: collectionTextsAfter,
+        selected: selectedCollection.includes(expected.collection),
+        vm_matched_season: vmMatchedSeason ? { id: vmMatchedSeason.id || vmMatchedSeason.seasonId || "", name: clean(vmMatchedSeason.name || vmMatchedSeason.title || vmMatchedSeason.label) } : null,
+      });
     }
 
     if (expected.scheduledPublishAt) {
@@ -11687,7 +21138,7 @@ async function setBilibiliDraftFields(client, content) {
     if (expected.title && actual.title !== expected.title) failures.push("title");
     if (expected.declaration && actual.declaration !== expected.declaration) failures.push("declaration");
     if (expected.category && !actual.category.includes(expected.category)) failures.push("category");
-    if (expected.body && actual.description !== expected.body) failures.push("description");
+    if (expected.body && clean(actual.description) !== clean(expected.body)) failures.push("description");
     for (const tag of expected.tags) if (!actual.tags.includes(tag)) failures.push(\`tag:\${tag}\`);
     if (expected.collection && !actual.collection.includes(expected.collection)) failures.push("collection");
     if (expected.scheduledDisplay && !actual.scheduleText.includes(expected.scheduledDisplay)) failures.push("schedule");
@@ -11697,9 +21148,61 @@ async function setBilibiliDraftFields(client, content) {
   return evaluateWithClient(client, expression, 120000);
 }
 
-async function setBilibiliCoverImage(client, coverPath) {
+async function setBilibiliCoverImage(client, expectedCoverSlots = [], coverPath = "") {
   const expectedCoverPath = String(coverPath || "").trim();
-  if (!expectedCoverPath) return { field: "cover", uploaded: false, reason: "missing_cover_path" };
+  const normalizedExpectedSlots = normalizeBilibiliExpectedCoverSlots(expectedCoverSlots, expectedCoverPath);
+  if (!normalizedExpectedSlots.length) return { field: "cover", uploaded: false, reason: "missing_cover_path", expected_slots: [] };
+  const slotUploadPlan = [
+    { slot: "landscape_4_3", slot_label: "首页推荐封面（4:3）" },
+    { slot: "landscape_16_9", slot_label: "个人空间封面（16:9）" },
+  ].map((spec) => {
+    const hit = normalizedExpectedSlots.find((item) => item.slot === spec.slot)
+      || normalizedExpectedSlots.find((item) => String(item.label || "").includes(spec.slot_label));
+    return {
+      ...spec,
+      expected_path: String(hit?.expected_path || "").trim(),
+      expected_base: String(hit?.expected_base || "").trim(),
+    };
+  });
+  const missingSlot = slotUploadPlan.find((item) => !item.expected_path);
+  if (missingSlot) {
+    return {
+      field: "cover",
+      uploaded: false,
+      reason: "cover_slot_expected_path_missing",
+      target_slot: missingSlot.slot_label,
+      expected_slots: slotUploadPlan,
+    };
+  }
+  const dismissBilibiliCoverInterruption = async () => evaluateWithClient(client, `(async () => {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled;
+    };
+    const click = (el) => {
+      if (!el) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+      return true;
+    };
+    const actions = [];
+    const labels = ["知道了", "我知道了", "暂不", "稍后再说", "关闭"];
+    for (const label of labels) {
+      const candidate = [...document.querySelectorAll("button,[role=button],span,div")]
+        .filter(visible)
+        .find((el) => clean(el.innerText || el.textContent || "") === label);
+      if (candidate) {
+        actions.push({ label, clicked: click(candidate) });
+        await sleep(350);
+      }
+    }
+    return { actions };
+  })()`, 10000).catch(() => ({ actions: [] }));
   const openEditor = await evaluateWithClient(client, `(async () => {
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
@@ -11714,40 +21217,416 @@ async function setBilibiliCoverImage(client, coverPath) {
       const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
       for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
     };
-    const cover = document.querySelector(".cover");
+    const bodyTextBefore = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    if (/封面制作/.test(bodyTextBefore) && /上传封面|首页推荐封面|个人空间封面/.test(bodyTextBefore)) {
+      return {
+        opened: true,
+        attempts: 0,
+        target: { text: "already_open", className: "" },
+        image_inputs: [],
+        before_image_input_count: [...document.querySelectorAll('input[type=file]')].filter((el) => /image|png|jpe?g/i.test(String(el.accept || ""))).length,
+        after_image_input_count: [...document.querySelectorAll('input[type=file]')].filter((el) => /image|png|jpe?g/i.test(String(el.accept || ""))).length,
+        default_first_frame_before: /系统默认选中第一帧为视频封面/.test(bodyTextBefore),
+      };
+    }
+    const coverSection = [...document.querySelectorAll("section,div,article")]
+      .filter(visible)
+      .map((el) => ({ el, text: clean(el.innerText || el.textContent || "") }))
+      .find((item) => /封面设置/.test(item.text) && /标题|创作声明|分区/.test(item.text))?.el || null;
+    const scoreCoverEntry = (el) => {
+      if (!el || !visible(el)) return -Infinity;
+      const rect = el.getBoundingClientRect();
+      if (rect.width < 8 || rect.height < 8) return -Infinity;
+      const text = clean(el.innerText || el.textContent || "");
+      const className = String(el.className || "");
+      const style = getComputedStyle(el);
+      const pointerish = /pointer/.test(String(style.cursor || "")) || typeof el.onclick === "function" || el.getAttribute("role") === "button" || el.tagName === "BUTTON";
+      const media = Boolean(el.querySelector?.("img,canvas,video,[style*='background-image']")) || /IMG|CANVAS|VIDEO/.test(String(el.tagName || "")) || /url\\(/i.test(String(style.backgroundImage || ""));
+      const inCoverSection = Boolean(coverSection && (coverSection === el || coverSection.contains(el)));
+      let score = 0;
+      if (text === "封面设置") score += 1200;
+      if (/设置封面|封面设置|更换封面/.test(text)) score += 420;
+      if (/cover-main|cover-img|cover-item|cover-empty|edit-text/.test(className)) score += 140;
+      if (/智能推荐封面|编辑画布|模板编辑|PK封面|上传视频/.test(text)) score -= 480;
+      if (inCoverSection) score += 260;
+      if (pointerish) score += 120;
+      if (media) score += 80;
+      score -= Math.min(rect.width * rect.height, 400000) / 1200;
+      return score;
+    };
+    const exactCoverSetting = [...document.querySelectorAll("button,[role=button],label,span,div,a")]
+      .filter(visible)
+      .map((el) => ({ el, score: scoreCoverEntry(el), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
+      .filter((item) => clean(item.el.innerText || item.el.textContent || "") === "封面设置" && item.score > 0)
+      .sort((left, right) => right.score - left.score || left.area - right.area)[0]?.el || null;
+    const cover = exactCoverSetting
+      || coverSection?.querySelector?.("button,[role=button],label,span,div,a")
+      || document.querySelector(".cover-content .cover-main, .cover-main, .cover-content .cover");
+    const beforeDialogImageInputCount = [...document.querySelectorAll('input[type=file]')]
+      .filter((el) => /image|png|jpe?g/i.test(String(el.accept || "")) && el.closest('[role=dialog],.bcc-dialog,.bcc-dialog__wrap,[class*=dialog],[class*=modal],[class*=popup]'))
+      .length;
     const scrollables = [document.scrollingElement, ...document.querySelectorAll("*")].filter((el) => el && el.scrollHeight > el.clientHeight + 20);
     for (const scroller of scrollables) {
       try { scroller.scrollTop = Math.max(0, (cover?.offsetTop || 450) - 120); } catch {}
     }
     cover?.scrollIntoView({ block: "center", inline: "center" });
     await sleep(400);
-    const candidates = [...document.querySelectorAll(".edit-text,.cover-img,.cover-main,.cover-item")]
+    const target = exactCoverSetting || cover || [...document.querySelectorAll("button,[role=button],label,a,.cover,.cover-main,.cover-img,.cover-item,.edit-text")]
       .filter(visible)
-      .map((el) => ({ el, text: clean(el.innerText || el.textContent), className: String(el.className || "") }));
-    const target = candidates.find((item) => item.text === "封面设置") || candidates.find((item) => /cover-img|cover-main/.test(item.className));
-    if (!target) return { opened: false, reason: "cover_setting_entry_not_found", candidates: candidates.map((item) => ({ text: item.text, className: item.className })).slice(0, 20) };
-    click(target.el);
-    await sleep(1500);
-    return { opened: /封面制作|上传封面|4:3封面预览|首页推荐封面/.test(clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "")), target: { text: target.text, className: target.className } };
+      .map((el) => {
+        const text = clean(el.innerText || el.textContent);
+        const className = String(el.className || "");
+        const rect = el.getBoundingClientRect();
+        return { el, text, className, score: scoreCoverEntry(el), area: rect.width * rect.height };
+      })
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || left.area - right.area)[0]?.el;
+    if (!target) return { opened: false, reason: "cover_setting_entry_not_found" };
+    const findBestHitTarget = (seed) => {
+      if (!seed || !visible(seed)) return null;
+      seed.scrollIntoView({ block: "center", inline: "center" });
+      const rect = seed.getBoundingClientRect();
+      const probePoints = [
+        [rect.left + rect.width / 2, rect.top + rect.height / 2],
+        [rect.left + rect.width / 2, rect.top + Math.min(rect.height * 0.35, rect.height - 2)],
+        [rect.left + rect.width / 2, rect.bottom - Math.min(rect.height * 0.2, rect.height - 2)],
+        [rect.left + Math.min(rect.width * 0.2, rect.width - 2), rect.top + rect.height / 2],
+        [rect.right - Math.min(rect.width * 0.2, rect.width - 2), rect.top + rect.height / 2],
+      ];
+      const seen = new Set();
+      const hits = [];
+      const pushHit = (el, source) => {
+        let cursor = el;
+        for (let depth = 0; cursor && depth < 6; depth += 1, cursor = cursor.parentElement) {
+          if (!visible(cursor)) continue;
+          const key = [source, depth, cursor.tagName, String(cursor.className || ""), clean(cursor.innerText || cursor.textContent || "")].join(":");
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const score = scoreCoverEntry(cursor);
+          if (score <= 0) continue;
+          const hitRect = cursor.getBoundingClientRect();
+          hits.push({
+            el: cursor,
+            score,
+            area: hitRect.width * hitRect.height,
+            source,
+            text: clean(cursor.innerText || cursor.textContent || ""),
+            className: String(cursor.className || ""),
+          });
+          if (coverSection && cursor === coverSection) break;
+        }
+      };
+      for (const [x, y] of probePoints) {
+        const top = document.elementFromPoint(x, y);
+        if (top) pushHit(top, "point");
+      }
+      pushHit(seed, "seed");
+      return hits.sort((left, right) => right.score - left.score || left.area - right.area)[0] || null;
+    };
+    const hover = (el) => {
+      if (!el || !visible(el)) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerover", "mouseover", "pointerenter", "mouseenter", "pointermove", "mousemove"]) {
+        try { el.dispatchEvent(new MouseEvent(type, eventInit)); } catch {}
+      }
+      return true;
+    };
+    hover(coverSection || target);
+    await sleep(250);
+    const bestHit = findBestHitTarget(target) || findBestHitTarget(coverSection) || null;
+    const clickableTarget = (bestHit?.el || target).closest("button,[role=button],label,a,.cover,.cover-main,.cover-img,.cover-item,.edit-text") || bestHit?.el || target;
+    let opened = false;
+    let attempt = 0;
+    let bodyText = "";
+    let modalRoots = [];
+    let imageInputs = [];
+    const clickableRect = clickableTarget.getBoundingClientRect();
+    const targetCenter = {
+      x: clickableRect.left + clickableRect.width / 2,
+      y: clickableRect.top + clickableRect.height / 2,
+      width: clickableRect.width,
+      height: clickableRect.height,
+    };
+    while (!opened && attempt < 3) {
+      click(clickableTarget);
+      await sleep(1200);
+      bodyText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+      modalRoots = [...document.querySelectorAll('[role=dialog],.bcc-dialog,.bcc-dialog__wrap,[class*=dialog],[class*=modal],[class*=popup]')]
+        .filter(visible)
+        .map((el) => clean(el.innerText || el.textContent || ""))
+        .filter((text) => /封面制作|上传封面|首页推荐封面|个人空间封面|两个比例的封面都会被展示|完成|确定/.test(text));
+      imageInputs = [...document.querySelectorAll('input[type=file]')]
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          const accept = String(el.accept || "");
+          const inDialog = Boolean(el.closest('[role=dialog],.bcc-dialog,.bcc-dialog__wrap,[class*=dialog],[class*=modal],[class*=popup]'));
+          return { accept, inDialog, visible: rect.width > 0 && rect.height > 0 };
+        })
+        .filter((item) => /image|png|jpe?g/i.test(item.accept));
+      opened = modalRoots.length > 0
+        || /封面制作|首页推荐封面|个人空间封面|两个比例的封面都会被展示/.test(bodyText)
+        || imageInputs.some((item) => item.inDialog);
+      attempt += 1;
+    }
+    const afterImageInputCount = imageInputs.length;
+    opened = opened || modalRoots.length > 0
+      || /封面制作|首页推荐封面|个人空间封面|两个比例的封面都会被展示/.test(bodyText)
+      || imageInputs.some((item) => item.inDialog);
+    return {
+      opened,
+      attempts: attempt,
+      target: { text: clean(clickableTarget.innerText || clickableTarget.textContent || ""), className: String(clickableTarget.className || "") },
+      target_probe: bestHit ? { source: bestHit.source, text: bestHit.text, className: bestHit.className, score: bestHit.score, area: bestHit.area } : null,
+      target_center: targetCenter,
+      modal_roots: modalRoots.slice(0, 4),
+      image_inputs: imageInputs,
+      before_image_input_count: beforeDialogImageInputCount,
+      after_image_input_count: afterImageInputCount,
+      default_first_frame_before: /系统默认选中第一帧为视频封面/.test(bodyText),
+    };
   })()`, 20000);
+  if (!openEditor.opened && Number.isFinite(openEditor?.target_center?.x) && Number.isFinite(openEditor?.target_center?.y)) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: openEditor.target_center.x, y: openEditor.target_center.y, button: "none" }).catch(() => {});
+      await sleep(180);
+      await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: openEditor.target_center.x, y: openEditor.target_center.y, button: "left", clickCount: 1 }).catch(() => {});
+      await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: openEditor.target_center.x, y: openEditor.target_center.y, button: "left", clickCount: 1 }).catch(() => {});
+      await sleep(1200);
+      const realClickProbe = await evaluateWithClient(client, `(() => {
+        const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+        const visible = (el) => {
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+        };
+        const bodyText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+        const modalRoots = [...document.querySelectorAll('[role=dialog],.bcc-dialog,.bcc-dialog__wrap,[class*=dialog],[class*=modal],[class*=popup]')]
+          .filter(visible)
+          .map((el) => clean(el.innerText || el.textContent || ""))
+          .filter((text) => /封面制作|上传封面|首页推荐封面|个人空间封面|两个比例的封面都会被展示|完成|确定/.test(text));
+        const imageInputs = [...document.querySelectorAll('input[type=file]')]
+          .map((el) => {
+            const rect = el.getBoundingClientRect();
+            const accept = String(el.accept || "");
+            const inDialog = Boolean(el.closest('[role=dialog],.bcc-dialog,.bcc-dialog__wrap,[class*=dialog],[class*=modal],[class*=popup]'));
+            return { accept, inDialog, visible: rect.width > 0 && rect.height > 0 };
+          })
+          .filter((item) => /image|png|jpe?g/i.test(item.accept));
+        return {
+          opened: modalRoots.length > 0
+            || /封面制作|首页推荐封面|个人空间封面|两个比例的封面都会被展示/.test(bodyText)
+            || imageInputs.some((item) => item.inDialog),
+          modal_roots: modalRoots.slice(0, 4),
+          image_inputs: imageInputs,
+        };
+      })()`, 10000).catch(() => ({ opened: false, modal_roots: [], image_inputs: [] }));
+      if (realClickProbe?.opened) {
+        openEditor.opened = true;
+        openEditor.real_click_fallback = { attempted: true, attempts: attempt + 1, opened: true };
+        openEditor.modal_roots = Array.isArray(realClickProbe.modal_roots) ? realClickProbe.modal_roots : openEditor.modal_roots;
+        openEditor.image_inputs = Array.isArray(realClickProbe.image_inputs) ? realClickProbe.image_inputs : openEditor.image_inputs;
+        break;
+      }
+    }
+  }
   if (!openEditor.opened) return { field: "cover", uploaded: false, ...openEditor };
 
-  const documentResult = await client.send("DOM.getDocument", { depth: -1, pierce: true });
-  const queryResult = await client.send("DOM.querySelectorAll", { nodeId: documentResult.root.nodeId, selector: "input[type=file]" });
-  const inputs = [];
-  for (const nodeId of queryResult.nodeIds || []) {
-    const description = await client.send("DOM.describeNode", { nodeId });
-    const attrs = description.node?.attributes || [];
+  const interruptionDismiss = await dismissBilibiliCoverInterruption();
+
+  const prepareBilibiliCoverSlotUpload = async (slotLabel) => evaluateWithClient(client, `(async () => {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const targetSlotLabel = ${JSON.stringify(slotLabel)};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled;
+    };
+    const click = (el) => {
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+    };
+    const dialog = document.querySelector('[role=dialog],.bcc-dialog,.bcc-dialog__wrap,[class*=dialog],[class*=modal],[class*=popup]');
+    const scope = dialog || document;
+    const ensureDualRatioSync = async () => {
+      const syncLabel = [...scope.querySelectorAll("label,button,[role=button],[role=checkbox],span,div")]
+        .filter(visible)
+        .find((el) => clean(el.innerText || el.textContent || "") === "双比例同步改动");
+      if (!syncLabel) return { found: false, enabled: false, clicked: false };
+      const control = syncLabel.closest('label,button,[role=checkbox],.bcc-checkbox,.bcc-switch,[class*=checkbox],[class*=switch]') || syncLabel;
+      const checkbox = control.matches?.('input[type=checkbox]') ? control : control.querySelector?.('input[type=checkbox]');
+      const ariaChecked = String(control.getAttribute?.("aria-checked") || syncLabel.getAttribute?.("aria-checked") || "").toLowerCase();
+      const className = (String(control.className || "") + " " + String(syncLabel.className || "")).toLowerCase();
+      const enabledBefore = Boolean(checkbox?.checked) || ariaChecked === "true" || /checked|selected|active|enabled|on/.test(className);
+      let clicked = false;
+      if (!enabledBefore) {
+        click(control);
+        clicked = true;
+        await sleep(500);
+      }
+      const enabledAfter = Boolean(checkbox?.checked)
+        || String(control.getAttribute?.("aria-checked") || syncLabel.getAttribute?.("aria-checked") || "").toLowerCase() === "true"
+        || /checked|selected|active|enabled|on/.test((String(control.className || "") + " " + String(syncLabel.className || "")).toLowerCase());
+      return {
+        found: true,
+        enabled: enabledBefore || enabledAfter,
+        enabled_before: enabledBefore,
+        clicked,
+      };
+    };
+    const dualRatioSync = await ensureDualRatioSync();
+    const slotCandidates = [...scope.querySelectorAll("button,[role=button],label,span,div")]
+      .filter(visible)
+      .map((el) => {
+        const text = clean(el.innerText || el.textContent || "");
+        if (text !== targetSlotLabel) return null;
+        const rect = el.getBoundingClientRect();
+        return {
+          el,
+          text,
+          rect,
+          area: rect.width * rect.height,
+          className: String(el.className || ""),
+        };
+      })
+      .filter(Boolean)
+      .sort((left, right) => left.area - right.area);
+    const slotTarget = slotCandidates[0] || null;
+    if (!slotTarget) {
+      return { found: false, reason: "cover_slot_not_found", target_slot: targetSlotLabel, dual_ratio_sync: dualRatioSync };
+    }
+    click(slotTarget.el);
+    await sleep(700);
+    const slotRect = slotTarget.el.getBoundingClientRect();
+    const uploadAreaCandidates = [...scope.querySelectorAll("button,[role=button],label,div,span")]
+      .filter(visible)
+      .map((el) => {
+        const text = clean(el.innerText || el.textContent || "");
+        const root = el.closest('[role=dialog],.bcc-dialog,.bcc-dialog__wrap,[class*=dialog],[class*=modal],[class*=popup]') || el.parentElement || el;
+        const rootText = clean(root?.innerText || root?.textContent || "");
+        const rect = (root || el).getBoundingClientRect();
+        const verticalGap = rect.top - slotRect.bottom;
+        let score = 0;
+        if (text === "上传封面") score += 900;
+        if (/上传封面/.test(text)) score += 500;
+        if (/拖拽图片到此或点击上传/.test(rootText)) score += 520;
+        if (/封面制作|首页推荐封面|个人空间封面|两个比例的封面都会被展示/.test(rootText)) score += 220;
+        if (verticalGap > -40) score += Math.max(0, 320 - Math.min(verticalGap, 320));
+        if (/模板|贴纸|滤镜|文字/.test(text)) score -= 320;
+        return { el, text, root, rootText, rect, score, verticalGap };
+      })
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score || Math.abs(left.verticalGap) - Math.abs(right.verticalGap));
+    const uploadEntry = uploadAreaCandidates[0] || null;
+    const scoreInput = (el) => {
+      const accept = String(el.accept || "");
+      const lowerAccept = accept.toLowerCase();
+      const name = String(el.getAttribute("name") || "").trim().toLowerCase();
+      const root = el.closest('[role=dialog],.bcc-dialog,.bcc-dialog__wrap,[class*=dialog],[class*=modal],[class*=popup]') || el.parentElement || el;
+      const rootText = clean(root?.innerText || root?.textContent || "");
+      const inDialog = Boolean(dialog && dialog.contains(el));
+      const looksLikeVideo = /mp4|mov|mkv|flv|avi|webm|video/i.test(lowerAccept) || name === "buploader";
+      const looksLikeImage = /image|png|jpe?g|bmp|gif|webp/i.test(lowerAccept);
+      const belongsToUploadArea = Boolean(uploadEntry?.root && (uploadEntry.root === root || uploadEntry.root.contains(el) || root.contains(uploadEntry.root)));
+      if (looksLikeVideo) return { el, accept, name, visible: visible(el), inDialog, rootText, score: -1000, rejected: "video_input" };
+      if (!inDialog && !belongsToUploadArea) return { el, accept, name, visible: visible(el), inDialog, rootText, score: -1000, rejected: "outside_slot_upload_area" };
+      if (!looksLikeImage) return { el, accept, name, visible: visible(el), inDialog, rootText, score: -1000, rejected: "not_cover_image_input" };
+      let score = 0;
+      if (looksLikeImage) score += 500;
+      if (inDialog) score += 260;
+      if (belongsToUploadArea) score += 1200;
+      if (/上传封面|拖拽图片到此或点击上传/.test(rootText)) score += 320;
+      return { el, accept, name, visible: visible(el), inDialog, rootText, score };
+    };
+    if (uploadEntry) {
+      click(uploadEntry.el.closest("button,[role=button],label,div,span") || uploadEntry.el);
+      await sleep(900);
+    }
+    const inputs = [...document.querySelectorAll('input[type=file]')]
+      .map((el) => scoreInput(el))
+      .filter((item) => item.score > 0)
+      .sort((left, right) => right.score - left.score);
+    const best = inputs[0] || null;
+    document.querySelectorAll('input[data-roughcut-bilibili-cover-input]').forEach((el) => el.removeAttribute('data-roughcut-bilibili-cover-input'));
+    if (best?.el) best.el.setAttribute('data-roughcut-bilibili-cover-input', '1');
+    return {
+      found: Boolean(best?.el),
+      target_slot: targetSlotLabel,
+      dual_ratio_sync: dualRatioSync,
+      slot_target: { text: slotTarget.text, className: slotTarget.className },
+      upload_entry: uploadEntry ? { text: uploadEntry.text, rootText: uploadEntry.rootText, vertical_gap: uploadEntry.verticalGap } : null,
+      candidates: inputs.slice(0, 8).map((item) => ({
+        accept: item.accept,
+        name: item.name,
+        visible: item.visible,
+        inDialog: item.inDialog,
+        score: item.score,
+        rootText: item.rootText,
+      })),
+    };
+  })()`, 20000);
+  const slotUploads = [];
+  for (const slotSpec of slotUploadPlan) {
+    const slotLabel = slotSpec.slot_label;
+    const markedInput = await prepareBilibiliCoverSlotUpload(slotLabel);
+    if (!markedInput?.found) {
+      return {
+        field: "cover",
+        uploaded: false,
+        opened: true,
+        reason: "cover_slot_image_input_not_found",
+        target_slot: slotLabel,
+        marked_input: markedInput,
+        slot_uploads: slotUploads,
+        expected_slots: slotUploadPlan,
+      };
+    }
+    const documentResult = await client.send("DOM.getDocument", { depth: -1, pierce: true });
+    const markedQuery = await client.send("DOM.querySelector", { nodeId: documentResult.root.nodeId, selector: 'input[data-roughcut-bilibili-cover-input="1"]' });
+    if (!markedQuery?.nodeId) {
+      return {
+        field: "cover",
+        uploaded: false,
+        opened: true,
+        reason: "cover_image_input_not_found",
+        target_slot: slotLabel,
+        marked_input: markedInput,
+        slot_uploads: slotUploads,
+        expected_slots: slotUploadPlan,
+      };
+    }
+    const markedDescription = await client.send("DOM.describeNode", { nodeId: markedQuery.nodeId });
+    const backendNodeId = markedDescription?.node?.backendNodeId;
+    const attrs = markedDescription?.node?.attributes || [];
     const attrMap = {};
     for (let index = 0; index < attrs.length; index += 2) attrMap[attrs[index]] = attrs[index + 1] || "";
-    inputs.push({ nodeId, attrMap });
+    await client.send("DOM.setFileInputFiles", backendNodeId ? { backendNodeId, files: [slotSpec.expected_path] } : { nodeId: markedQuery.nodeId, files: [slotSpec.expected_path] });
+    await dispatchFileInputEvents(client, markedQuery.nodeId);
+    await sleep(4000);
+    const uploadProbe = await evaluateWithClient(client, `(async () => {
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      await sleep(300);
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const body = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+      return {
+        body_excerpt: body.slice(0, 500),
+        editor_open: /封面制作|首页推荐封面|个人空间封面|4:3封面预览|16:9封面预览/.test(body),
+        sync_prompt_visible: /检测到个人空间封面（16:9）未修改|是否将【4:3封面】的改动同步到【16:9封面】/.test(body),
+      };
+    })()`, 10000).catch(() => ({ editor_open: false, sync_prompt_visible: false }));
+    slotUploads.push({
+      slot: slotSpec.slot,
+      slot_label: slotLabel,
+      expected_path: slotSpec.expected_path,
+      marked_input: markedInput,
+      image_input: attrMap,
+      upload_probe: uploadProbe,
+    });
   }
-  const imageInput = inputs.find((item) => /image|png|jpe?g/i.test(item.attrMap.accept || ""));
-  if (!imageInput) {
-    return { field: "cover", uploaded: false, opened: true, reason: "cover_image_input_not_found", fileInputs: inputs.map((item) => item.attrMap) };
-  }
-  await client.send("DOM.setFileInputFiles", { nodeId: imageInput.nodeId, files: [expectedCoverPath] });
-  await sleep(4000);
   const closeEditor = await evaluateWithClient(client, `(async () => {
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
@@ -11762,28 +21641,188 @@ async function setBilibiliCoverImage(client, coverPath) {
       const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
       for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
     };
-    const buttons = [...document.querySelectorAll("button,[role=button],.bcc-button,span,div")].filter(visible);
-    const done = buttons.find((el) => clean(el.innerText || el.textContent || el.value) === "完成")
-      || buttons.find((el) => clean(el.innerText || el.textContent || el.value) === "确定");
+    const buttons = () => [...document.querySelectorAll("button,[role=button],.bcc-button,span,div")].filter(visible);
+    const buttonByText = (...labels) => {
+      const seen = buttons();
+      for (const label of labels) {
+        const match = seen.find((el) => clean(el.innerText || el.textContent || el.value) === label);
+        if (match) return match;
+      }
+      return null;
+    };
+    const bodyBefore = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    let syncPromptHandled = false;
+    let syncPromptChoice = "";
+    if (/检测到个人空间封面（16:9）未修改/.test(bodyBefore) || /是否将【4:3封面】的改动同步到【16:9封面】/.test(bodyBefore)) {
+      const syncConfirm = buttonByText("确认同步", "同步");
+      if (syncConfirm) {
+        syncPromptChoice = clean(syncConfirm.innerText || syncConfirm.textContent || syncConfirm.value);
+        click(syncConfirm);
+        syncPromptHandled = true;
+        await sleep(1800);
+      }
+    }
+    let done = buttonByText("完成", "确定");
     if (done) {
       click(done);
       await sleep(2500);
+      done = buttonByText("完成", "确定");
+      if (done && /检测到个人空间封面（16:9）未修改|是否将【4:3封面】的改动同步到【16:9封面】/.test(clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || ""))) {
+        click(done);
+        await sleep(1200);
+      }
     }
     const body = ((document.scrollingElement || document.documentElement || document.body)?.innerText) || "";
+    const pageCoverText = clean(document.querySelector(".cover-content")?.innerText || document.querySelector(".cover-main")?.innerText || document.querySelector(".cover")?.innerText || "");
     return {
       clicked_done: Boolean(done),
+      sync_prompt_handled: syncPromptHandled,
+      sync_prompt_choice: syncPromptChoice,
       editor_still_open: /封面制作|上传封面|4:3封面预览|首页推荐封面/.test(body),
-      page_cover_text: clean(document.querySelector(".cover")?.innerText || ""),
+      page_cover_text: pageCoverText,
+      default_first_frame_after: /系统默认选中第一帧为视频封面/.test(pageCoverText) || /系统默认选中第一帧为视频封面/.test(body),
     };
   })()`, 20000);
   return {
     field: "cover",
     expected_path: expectedCoverPath,
-    uploaded: Boolean(closeEditor.clicked_done && !closeEditor.editor_still_open),
+    expected_slots: slotUploadPlan,
+    uploaded: Boolean(
+      !closeEditor.editor_still_open
+      && slotUploads.length === slotUploadPlan.length
+      && slotUploads.every((item) => item?.upload_probe?.editor_open)
+    ),
     opened: true,
-    image_input: imageInput.attrMap,
+    interruptions: interruptionDismiss.actions || [],
+    slot_uploads: slotUploads,
     ...closeEditor,
   };
+}
+
+async function normalizeBilibiliUploadQueue(client, expectedTitle = "", options = {}) {
+  return evaluateWithClient(client, `(async () => {
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const click = (el) => {
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
+    };
+    const expected = clean(${JSON.stringify(expectedTitle)});
+    const clearAll = ${JSON.stringify(Boolean(options?.clearAll))};
+    const inspectOnly = ${JSON.stringify(Boolean(options?.inspectOnly))};
+    const normalizeTitle = (value) => clean(value).replace(/[\\s，,。.!！?？:：·•、（）()\\-_/]+/g, "").toLowerCase();
+    const expectedNormalized = normalizeTitle(expected);
+    const looksLikeQueueCard = (value) => {
+      const normalizedText = clean(value);
+      if (!normalizedText) return false;
+      if (/^(视频投稿|短剧投稿|专栏投稿|互动视频投稿|贴纸投稿|视频素材投稿)$/.test(normalizedText)) return false;
+      if (/点击上传或将视频拖拽到此区域|上传视频|视频大小|视频格式|视频分辨率/.test(normalizedText)) return false;
+      if (/上传中|等待上传|上传完成|上传失败|当前速度|剩余时间|更换视频|已上传/.test(normalizedText)) return true;
+      return Boolean(expected && normalizedText.includes(expected));
+    };
+    const titleSimilarity = (value) => {
+      const normalized = normalizeTitle(value);
+      if (!normalized || !expectedNormalized) return 0;
+      if (normalized === expectedNormalized) return 1000;
+      let score = 0;
+      if (normalized.includes(expectedNormalized)) score += 700;
+      if (expectedNormalized.includes(normalized)) score += 500;
+      let overlap = 0;
+      for (const ch of normalized) if (expectedNormalized.includes(ch)) overlap += 1;
+      score += overlap;
+      return score;
+    };
+    const cardRoots = new Set();
+    const queueHosts = [...document.querySelectorAll(".upload-queue, .task-list-content, [class*=upload-queue], [class*=task-list-content]")]
+      .filter(visible)
+      .filter((el) => looksLikeQueueCard(clean(el.innerText || el.textContent || "")));
+    const hostContains = (el) => queueHosts.some((host) => host.contains(el));
+    const directCards = [...document.querySelectorAll(".upload-queue .task, .task-list-content-item, .task-list-content .task, .upload-item, [class*=task-list][class*=item], [class*=upload][class*=item], [class*=queue][class*=item]")]
+      .filter(visible)
+      .filter((el) => hostContains(el) || looksLikeQueueCard(clean(el.innerText || el.textContent || "")));
+    const isNestedCard = (el, pool) => pool.some((candidate) => candidate !== el && candidate.contains(el));
+    for (const card of directCards) {
+      if (!isNestedCard(card, directCards)) cardRoots.add(card);
+    }
+    const descendantCandidates = queueHosts.flatMap((host) => [...host.querySelectorAll(".task-list-content-item, .task, .upload-item, [class*=task-list][class*=item], [class*=upload][class*=item], [class*=queue][class*=item]")]);
+    for (const node of descendantCandidates) {
+      const card = node.closest(".task-list-content-item, .task, .upload-item, [class*=task-list][class*=item], [class*=upload][class*=item], [class*=queue][class*=item]");
+      if (!card || !visible(card) || !(hostContains(card) || looksLikeQueueCard(clean(card.innerText || card.textContent || "")))) continue;
+      const outerCard = [...card.parentElement?.querySelectorAll?.(".task-list-content-item, .upload-item, [class*=task-list][class*=item], [class*=upload][class*=item], [class*=queue][class*=item]") || []]
+        .find((candidate) => candidate !== card && candidate.contains(card) && visible(candidate));
+      cardRoots.add(outerCard || card);
+    }
+    const cards = [...cardRoots]
+      .map((el) => {
+        const text = clean(el.innerText || el.textContent || "");
+        const title = clean(el.getAttribute("title") || el.querySelector(".task-title-text")?.textContent || text.split("上传")[0] || "");
+        const remove = el.querySelector(".task-delete,.close,.icon-close,[class*=close],[class*=delete],.task-close,[aria-label*=删除],[aria-label*=移除]");
+        const selected = /task-selected|selected/.test(String(el.className || ""));
+        const uploaded = /上传完成/.test(text);
+        const waiting = /等待上传|上传中/.test(text);
+        return { el, text, title, selected, uploaded, waiting, removable: Boolean(remove), remove, similarity: titleSimilarity(title || text) };
+      })
+      .filter((item) => looksLikeQueueCard(item.text) || looksLikeQueueCard(item.title));
+    const normalizedCards = collapseBilibiliQueueCardEntries(cards);
+    if (normalizedCards.length <= 1 && !clearAll) {
+      return {
+        removed: 0,
+        total: normalizedCards.length,
+        raw_total: cards.length,
+        titles: normalizedCards.map((item) => item.text),
+        clear_all: clearAll,
+        inspect_only: inspectOnly,
+      };
+    }
+    const keeper = [...normalizedCards].sort((left, right) => {
+      if (left.similarity !== right.similarity) return right.similarity - left.similarity;
+      if (left.selected !== right.selected) return Number(right.selected) - Number(left.selected);
+      if (left.uploaded !== right.uploaded) return Number(right.uploaded) - Number(left.uploaded);
+      return right.text.length - left.text.length;
+    })[0];
+    if (inspectOnly) {
+      return {
+        removed: 0,
+        total: normalizedCards.length,
+        raw_total: cards.length,
+        kept: keeper?.title || keeper?.text || "",
+        titles: normalizedCards.map((item) => item.title || item.text),
+        expected,
+        clear_all: clearAll,
+        inspect_only: inspectOnly,
+        would_remove: Math.max(0, normalizedCards.length - 1),
+      };
+    }
+    let removed = 0;
+    for (const item of normalizedCards) {
+      if (!clearAll && item === keeper) continue;
+      click(item.el);
+      await sleep(350);
+      const activeCard = item.el.matches(".task") ? item.el : item.el.querySelector(".task") || item.el;
+      const removeButton = activeCard.querySelector(".task-delete,.close,.icon-close,[class*=close],[class*=delete],.task-close,[aria-label*=删除],[aria-label*=移除]")
+        || item.remove;
+      if (!removeButton) continue;
+      click(removeButton);
+      await sleep(500);
+      removed += 1;
+    }
+    return {
+      removed,
+      total: normalizedCards.length,
+      raw_total: cards.length,
+      kept: keeper?.title || keeper?.text || "",
+      titles: normalizedCards.map((item) => item.title || item.text),
+      expected,
+      clear_all: clearAll,
+    };
+  })()`, 20000);
 }
 
 async function handleBilibiliSecondConfirmation(client) {
@@ -12036,11 +22075,16 @@ async function preparePublicationTask(task) {
   const repairOnlyCurrentPage = Boolean(preparationPolicy.repairOnlyCurrentPage);
   const prepublishOnlyCurrentPage = Boolean(preparationPolicy.prepublishOnlyCurrentPage);
   const prepareOnlyCurrentPage = Boolean(preparationPolicy.prepareOnlyCurrentPage);
-  const currentPageOnlyMode = verificationOnlyCurrentPage || repairOnlyCurrentPage;
+  const freshStartPlatformTab = Boolean(recoveryContext.fresh_start_platform_tab);
+  const currentPageOnlyMode = verificationOnlyCurrentPage || repairOnlyCurrentPage || prepublishOnlyCurrentPage || prepareOnlyCurrentPage;
   const stopBeforeFinalPublish = Boolean(preparationPolicy.stopBeforeFinalPublish);
-  const currentPageSafeMode = currentPageOnlyMode || stopBeforeFinalPublish;
-  const waitForPublishConfirmation = Boolean(recoveryContext.wait_for_publish_confirmation);
-  const verifyMediaUpload = recoveryContext.verify_media_upload !== false;
+  const currentPageSafeMode = currentPageOnlyMode;
+  const waitForPublishConfirmation = currentPageSafeMode
+    ? false
+    : Boolean(recoveryContext.wait_for_publish_confirmation);
+  const verifyMediaUpload = currentPageSafeMode
+    ? false
+    : recoveryContext.verify_media_upload !== false;
   const captureResponseTimeoutMs = _coerceRecoveryTimeoutMs(recoveryContext.capture_response_timeout_ms, 65000);
   const uploadReadinessTimeoutMs = compositeUploadReadinessTimeoutMs(platform, captureResponseTimeoutMs);
   const mediaPath = expectedMediaPath(content);
@@ -12056,8 +22100,9 @@ async function preparePublicationTask(task) {
   try {
     resolution = await withAsyncStepTimeout(
       resolvePlatformTab(platform, {
-        force_fresh_tab: forceMediaUpload,
+        force_fresh_tab: freshStartPlatformTab || forceMediaUpload,
         tab_selection: tabSelectionPolicy,
+        media_path: mediaPath,
       }),
       15000,
       "platform_tab_resolution_timeout",
@@ -12111,6 +22156,21 @@ async function preparePublicationTask(task) {
     },
     actions,
   });
+  reportTaskProgress({
+    phase: "platform_tab_connecting",
+    route: {
+      url: String(tab?.url || ""),
+      title: String(tab?.title || ""),
+      path: "",
+    },
+    actions: [
+      ...actions,
+      {
+        kind: "platform_tab_connecting",
+        ws_url: String(tab?.webSocketDebuggerUrl || ""),
+      },
+    ],
+  });
   let client;
   try {
     client = await CdpClient.connect(tab.webSocketDebuggerUrl, 10000);
@@ -12153,7 +22213,83 @@ async function preparePublicationTask(task) {
     title: String(tab?.title || ""),
   };
   try {
-  const shouldEnforcePublishRoute = shouldEnforcePlatformPublishRoute(platform, recoveryContext);
+  const connectedRouteSnapshot = await routeBootstrapSnapshot(client).catch(() => null);
+  const bypassDraftResumeAtConnectedUploadEntry = shouldBypassDraftResumeAtAuthoritativeUploadEntry(platform, {
+    url: String(connectedRouteSnapshot?.url || tab?.url || ""),
+    lines: connectedRouteSnapshot?.lines || [],
+    headings: connectedRouteSnapshot?.headings || [],
+    text: [...(connectedRouteSnapshot?.lines || []), ...(connectedRouteSnapshot?.headings || [])].join(" "),
+  });
+  const directStartAtConnectedUploadEntry = currentPageOnlyMode && bypassDraftResumeAtConnectedUploadEntry;
+  const preRouteDraftResumePromptAction = (
+    !currentPageSafeMode
+    && platform === "douyin"
+    && isDouyinUploadEntryRoute(String(tab?.url || ""))
+    && !directStartAtConnectedUploadEntry
+  )
+    ? await resolveCurrentPageDraftResumePrompt(client, platform).catch((error) => ({
+        attempted: false,
+        resumed: false,
+        discarded: false,
+        prompt_present: true,
+        prompt_still_open: true,
+        preferred_action: "discard",
+        reason: "draft_resume_prompt_error",
+        error: String(error?.message || error),
+      }))
+    : null;
+  if (preRouteDraftResumePromptAction?.attempted || preRouteDraftResumePromptAction?.prompt_present) {
+    actions.push({ kind: "draft_resume_prompt_pre_route", ...preRouteDraftResumePromptAction });
+    currentRouteHint = {
+      url: String(preRouteDraftResumePromptAction?.after_url || preRouteDraftResumePromptAction?.before_url || currentRouteHint.url || ""),
+      title: String(tab?.title || currentRouteHint.title || ""),
+    };
+  }
+  if (shouldBlockOnDraftResumePromptFailure(preparationPolicy, preRouteDraftResumePromptAction)) {
+    const promptSnapshot = await pageSnapshot(client, {
+      captureVisualEvidence: true,
+      platform,
+      visualEvidencePhase: "draft_resume_prompt_pre_route_blocked",
+    }).catch(() => null);
+    return {
+      status: "needs_human",
+      result: _attach_publication_content_signature({
+        platform,
+        route: {
+          url: String(promptSnapshot?.url || currentRouteHint.url || tab?.url || ""),
+          title: String(promptSnapshot?.title || currentRouteHint.title || tab?.title || ""),
+        },
+        actions,
+        visual_evidence: promptSnapshot?.visual_evidence || undefined,
+        ..._build_publication_recovery_hint({
+          platform,
+          code: "draft_resume_prompt_not_declined",
+          reason: "检测到上次未发布/未提交视频提示，但未能确认点击放弃/不用了，已停止避免复用脏稿。",
+          route: {
+            url: String(promptSnapshot?.url || currentRouteHint.url || tab?.url || ""),
+            title: String(promptSnapshot?.title || currentRouteHint.title || tab?.title || ""),
+          },
+          actionHistory: actions,
+          visibleLines: (promptSnapshot?.lines || preRouteDraftResumePromptAction?.after_lines || preRouteDraftResumePromptAction?.before_lines || []).slice(0, 80),
+          clearDraftContext: true,
+          forceRefresh: true,
+          blockers: [{
+            code: "draft_resume_prompt_not_declined",
+            message: "必须先放弃/不用上次未完成视频，再开始本次抖音发布。",
+            details: String(preRouteDraftResumePromptAction?.error || preRouteDraftResumePromptAction?.clicked_label || preRouteDraftResumePromptAction?.reason || ""),
+          }],
+        }).recovery,
+      }, content),
+      error: {
+        code: "draft_resume_prompt_not_declined",
+        message: "检测到旧的未完成视频提示，但未能确认放弃，已阻止继续发布。",
+        details: preRouteDraftResumePromptAction,
+      },
+    };
+  }
+  const shouldEnforcePublishRoute = directStartAtConnectedUploadEntry
+    ? false
+    : shouldEnforcePlatformPublishRoute(platform, recoveryContext);
   reportTaskProgress({
     phase: "route_bootstrap_pending",
     route: {
@@ -12208,6 +22344,14 @@ async function preparePublicationTask(task) {
     url: String(routeAction.url || tab.url || ""),
     title: String(tab?.title || ""),
   };
+  const postRouteSnapshot = await routeBootstrapSnapshot(client).catch(() => null);
+  const bypassDraftResumeAtUploadEntry = shouldBypassDraftResumeAtAuthoritativeUploadEntry(platform, {
+    url: String(postRouteSnapshot?.url || currentRouteHint.url || tab?.url || ""),
+    lines: postRouteSnapshot?.lines || [],
+    headings: postRouteSnapshot?.headings || [],
+    text: [...(postRouteSnapshot?.lines || []), ...(postRouteSnapshot?.headings || [])].join(" "),
+  });
+  const directStartAtUploadEntry = currentPageOnlyMode && bypassDraftResumeAtUploadEntry;
   reportTaskProgress({
     phase: "route_ready",
     route: {
@@ -12216,6 +22360,7 @@ async function preparePublicationTask(task) {
       path: "",
     },
   });
+  interruptions.push(...(await dismissInterruptions(client, tab, platform, "after_route_bootstrap")));
   if (platform === "toutiao" && routeAction.verified === false) {
       return {
         status: "needs_human",
@@ -12249,7 +22394,7 @@ async function preparePublicationTask(task) {
         },
       };
   }
-  const draftResumePromptAction = !currentPageSafeMode
+  const draftResumePromptAction = !currentPageSafeMode && !directStartAtUploadEntry
     ? await resolveCurrentPageDraftResumePrompt(client, platform).catch((error) => ({
         attempted: false,
         resumed: false,
@@ -12406,24 +22551,81 @@ async function preparePublicationTask(task) {
       reason: String(clearAction?.error || "draft_clear_not_completed"),
     });
   }
-  if (currentPageSafeMode) {
-    const resumeAction = await resolveCurrentPageDraftResumePrompt(client, platform).catch((error) => ({
-      attempted: false,
-      resumed: false,
-      prompt_present: false,
-      reason: "draft_resume_prompt_error",
-      error: String(error?.message || error),
-    }));
-    if (resumeAction.attempted || resumeAction.reason === "draft_resume_prompt_error") {
-      actions.push({ kind: "draft_resume_prompt", ...resumeAction });
-    }
+  if (currentPageSafeMode && directStartAtUploadEntry) {
+    actions.push({
+      kind: "direct_upload_start",
+      platform,
+      current_page_only: true,
+      direct_upload_entry: true,
+      route_url: String(postRouteSnapshot?.url || currentRouteHint.url || tab?.url || ""),
+    });
   }
+  const prepareOnlyCurrentRouteContext = {
+    url: String(postRouteSnapshot?.url || currentRouteHint.url || tab?.url || ""),
+    text: [...(postRouteSnapshot?.lines || []), ...(postRouteSnapshot?.headings || [])].join(" "),
+    file_inputs: Array.isArray(postRouteSnapshot?.file_inputs) ? postRouteSnapshot.file_inputs : [],
+  };
   interruptions.push(...(await dismissInterruptions(client, tab, platform, "task_start")));
   let snapshot = await pageSnapshot(client, {
     captureVisualEvidence: true,
     platform,
     visualEvidencePhase: "editor_snapshot_ready",
   });
+  const currentPageRouteContext = {
+    url: String(snapshot?.url || tab?.url || ""),
+    title: String(snapshot?.title || tab?.title || ""),
+    text: [...(snapshot?.lines || []), ...(snapshot?.headings || [])].join(" "),
+    file_inputs: Array.isArray(snapshot?.file_inputs) ? snapshot.file_inputs : [],
+  };
+  const currentPageFreshUploadEntry = currentPageMatchesAuthoritativeFreshEntry(platform, currentPageRouteContext);
+  const currentPagePrepareOnlyExecutionContext = currentPageMatchesPrepareOnlyExecutionContext(
+    platform,
+    currentPageRouteContext,
+    snapshot,
+    mediaPath,
+    actions,
+  );
+  if (prepareOnlyCurrentPage && !currentPagePrepareOnlyExecutionContext) {
+    return {
+      status: "needs_human",
+      result: _attach_publication_content_signature({
+        platform,
+        route: {
+          url: String(snapshot?.url || tab?.url || ""),
+          title: String(snapshot?.title || tab?.title || ""),
+        },
+        actions,
+        visual_evidence: snapshot?.visual_evidence || undefined,
+        ..._build_publication_recovery_hint({
+          platform,
+          code: `${platform}_prepare_only_requires_fresh_upload_entry`,
+          reason: "prepare_only_current_page 只允许从平台上传壳开始，或处于本轮 fresh upload 已进入的编辑态；当前页面不满足该条件。",
+          route: {
+            url: String(snapshot?.url || tab?.url || ""),
+            title: String(snapshot?.title || tab?.title || ""),
+          },
+          actionHistory: actions,
+          visibleLines: (snapshot?.lines || []).slice(0, 120),
+          clearDraftContext: false,
+          forceRefresh: false,
+          blockers: [{
+            code: `${platform}_prepare_only_requires_fresh_upload_entry`,
+            message: "当前页既不是平台上传壳，也不是本轮 fresh upload 进入的合法编辑态，已停止，避免在已污染编辑页重复执行。",
+            details: String(snapshot?.url || tab?.url || ""),
+          }],
+        }).recovery,
+      }, content),
+      error: {
+        code: `${platform}_prepare_only_requires_fresh_upload_entry`,
+        message: "prepare-only 当前页不是允许的新上传起点，且不属于本轮 fresh upload 已进入的编辑态。",
+        details: {
+          route_url: String(snapshot?.url || tab?.url || ""),
+        },
+      },
+    };
+  }
+  const effectivePrepareOnlyCurrentPage = prepareOnlyCurrentPage && currentPagePrepareOnlyExecutionContext;
+  const effectiveRepairOnlyCurrentPage = repairOnlyCurrentPage && !prepareOnlyCurrentPage;
   reportTaskProgress({
     phase: "editor_snapshot_ready",
     route: {
@@ -12436,6 +22638,46 @@ async function preparePublicationTask(task) {
     actions,
   });
   if (currentPageOnlyMode) {
+    if (effectivePrepareOnlyCurrentPage) {
+      const framework = PLATFORM_COMPOSITE_FRAMEWORKS[platform];
+      if (framework && typeof framework.prepare === "function") {
+        reportTaskProgress({
+          phase: "prepare_only_current_page_attempt",
+          route: {
+            url: String(snapshot?.url || tab.url || ""),
+            title: String(snapshot?.title || tab.title || ""),
+            path: "",
+          },
+          visible_lines: (snapshot?.lines || []).slice(0, 120),
+          actions,
+        });
+        const prepareActions = await runCompositePhase(
+          platform,
+          `prepare_only_current_page_${framework.id}`,
+          () => framework.prepare(client, platform, content),
+        );
+        if (!Array.isArray(prepareActions)) {
+          throw new TypeError("composite_prepare_actions_invalid");
+        }
+        actions.push(...prepareActions);
+        await sleep(1200);
+        snapshot = await pageSnapshot(client, {
+          captureVisualEvidence: true,
+          platform,
+          visualEvidencePhase: "prepare_only_current_page_revisit",
+        }).catch(() => snapshot);
+        reportTaskProgress({
+          phase: "prepare_only_current_page_revisit",
+          route: {
+            url: String(snapshot?.url || tab.url || ""),
+            title: String(snapshot?.title || tab.title || ""),
+            path: "",
+          },
+          visible_lines: (snapshot?.lines || []).slice(0, 120),
+          actions,
+        });
+      }
+    }
     const verificationWait = await runCompositePhase(
       platform,
       "verification_only_material_integrity_wait",
@@ -12563,7 +22805,7 @@ async function preparePublicationTask(task) {
       );
     }
     let repairAttempt = null;
-    if (repairOnlyCurrentPage && !publicationAudit.verified) {
+    if (effectiveRepairOnlyCurrentPage && !publicationAudit.verified) {
       const repairPlan = deriveCompositePrePublishRepairPlan(publicationAudit, integrity, {
         allowRepairWithBlocking: true,
       });
@@ -12583,50 +22825,71 @@ async function preparePublicationTask(task) {
         });
         const framework = PLATFORM_COMPOSITE_FRAMEWORKS[platform];
         if (framework) {
-          const repairExecutor = typeof framework.repair === "function"
-            ? () => framework.repair(client, platform, content, repairPlan.repairable_fields)
-            : () => framework.prepare(client, platform, content);
-          const repairActions = await runCompositePhase(
-            platform,
-            `repair_only_current_page_${framework.id}`,
-            repairExecutor,
-          );
-          if (!Array.isArray(repairActions)) {
-            throw new TypeError("composite_repair_actions_invalid");
+          if (typeof framework.repair !== "function" && !shouldFallbackToFullPrepareDuringRepair(platform, framework)) {
+            const skippedRepair = {
+              kind: `${platform}_repair_skipped_no_field_scoped_repair`,
+              skipped: true,
+              blocked: true,
+              framework_id: framework.id,
+              repairable_fields: repairPlan.repairable_fields,
+              reason: "field_scoped_repair_not_implemented",
+            };
+            actions.push(skippedRepair);
+            repairAttempt = {
+              attempted: false,
+              skipped: true,
+              reason: "field_scoped_repair_not_implemented",
+              repairable_fields: repairPlan.repairable_fields,
+              before_required_unverified: repairPlan.required_unverified,
+              after_required_unverified: Array.isArray(publicationAudit?.required_unverified) ? publicationAudit.required_unverified : [],
+              actions: [skippedRepair],
+            };
+          } else {
+            const repairExecutor = typeof framework.repair === "function"
+              ? () => framework.repair(client, platform, content, repairPlan.repairable_fields)
+              : () => framework.prepare(client, platform, content);
+            const repairActions = await runCompositePhase(
+              platform,
+              `repair_only_current_page_${framework.id}`,
+              repairExecutor,
+            );
+            if (!Array.isArray(repairActions)) {
+              throw new TypeError("composite_repair_actions_invalid");
+            }
+            actions.push(...repairActions);
+            await sleep(1200);
+            integrity = await runCompositePhase(platform, "repair_only_current_page_material_integrity_reverify", () => readCompositeMaterialIntegrity(client, platform, content));
+            snapshot = await pageSnapshot(client).catch(() => snapshot);
+            const reverifyRoute = { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" };
+            publicationAudit = buildCompositePublicationAudit(platform, content, integrity, verificationFinalPublish, reverifyRoute);
+            publicationFieldSnapshot = buildPublicationFieldSnapshotFromAudit(
+              platform,
+              content,
+              publicationAudit,
+              reverifyRoute,
+              { repair_actions: repairActions },
+            );
+            repairAttempt = {
+              attempted: true,
+              repairable_fields: repairPlan.repairable_fields,
+              before_required_unverified: repairPlan.required_unverified,
+              after_required_unverified: Array.isArray(publicationAudit?.required_unverified) ? publicationAudit.required_unverified : [],
+              actions: repairActions,
+            };
+            reportTaskProgress({
+              phase: "repair_only_current_page_reverify",
+              route: {
+                url: String(reverifyRoute.url || ""),
+                title: String(reverifyRoute.title || ""),
+                path: "",
+              },
+              material_integrity: integrity,
+              publication_audit: publicationAudit,
+              publication_field_snapshot: publicationFieldSnapshot,
+              visible_lines: integrity?.platform_extras?.relevant_lines || (snapshot?.lines || []).slice(0, 120),
+              actions,
+            });
           }
-          actions.push(...repairActions);
-          await sleep(1200);
-          integrity = await runCompositePhase(platform, "repair_only_current_page_material_integrity_reverify", () => readCompositeMaterialIntegrity(client, platform, content));
-          snapshot = await pageSnapshot(client).catch(() => snapshot);
-          const reverifyRoute = { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" };
-          publicationAudit = buildCompositePublicationAudit(platform, content, integrity, verificationFinalPublish, reverifyRoute);
-          publicationFieldSnapshot = buildPublicationFieldSnapshotFromAudit(
-            platform,
-            content,
-            publicationAudit,
-            reverifyRoute,
-            { repair_actions: repairActions },
-          );
-          repairAttempt = {
-            attempted: true,
-            repairable_fields: repairPlan.repairable_fields,
-            before_required_unverified: repairPlan.required_unverified,
-            after_required_unverified: Array.isArray(publicationAudit?.required_unverified) ? publicationAudit.required_unverified : [],
-            actions: repairActions,
-          };
-          reportTaskProgress({
-            phase: "repair_only_current_page_reverify",
-            route: {
-              url: String(reverifyRoute.url || ""),
-              title: String(reverifyRoute.title || ""),
-              path: "",
-            },
-            material_integrity: integrity,
-            publication_audit: publicationAudit,
-            publication_field_snapshot: publicationFieldSnapshot,
-            visible_lines: integrity?.platform_extras?.relevant_lines || (snapshot?.lines || []).slice(0, 120),
-            actions,
-          });
         }
       }
     }
@@ -12643,7 +22906,7 @@ async function preparePublicationTask(task) {
           {
             final_publish: {
               ...verificationFinalPublish,
-              repair_only_current_page: repairOnlyCurrentPage,
+              repair_only_current_page: effectiveRepairOnlyCurrentPage,
               pre_publish_repair: repairAttempt || undefined,
             },
             actions,
@@ -12673,7 +22936,7 @@ async function preparePublicationTask(task) {
         material_integrity: integrity,
         final_publish: {
           ...verificationFinalPublish,
-          repair_only_current_page: repairOnlyCurrentPage,
+          repair_only_current_page: effectiveRepairOnlyCurrentPage,
           pre_publish_repair: repairAttempt || undefined,
         },
         actions: actions.slice(0, 120),
@@ -12684,7 +22947,10 @@ async function preparePublicationTask(task) {
   }
   const requiresLocalMedia = compositeRequiresLocalMedia(platform, content);
   if (stopBeforeFinalPublish && !currentPageOnlyMode && requiresLocalMedia && mediaPath) {
-    const stabilized = await stabilizeCurrentPageMediaStateForPrepublish(client, platform, snapshot, mediaPath, { requiresLocalMedia });
+    const stabilized = await stabilizeCurrentPageMediaStateForPrepublish(client, platform, snapshot, mediaPath, {
+      requiresLocalMedia,
+      expectedTitle: String(content?.title || "").trim(),
+    });
     snapshot = stabilized.snapshot || snapshot;
     if (stabilized.waited_ms > 0) {
       actions.push({
@@ -12696,7 +22962,11 @@ async function preparePublicationTask(task) {
     }
   }
   const stopBeforeCurrentMediaState = stopBeforeFinalPublish
-    ? canReuseCurrentPageMediaForPrepublish(platform, snapshot, mediaPath, { requiresLocalMedia })
+    ? canReuseCurrentPageMediaForPrepublish(platform, snapshot, mediaPath, {
+      requiresLocalMedia,
+      expectedTitle: String(content?.title || "").trim(),
+      allowDraftTitleMismatchReuse: currentPageOnlyMode,
+    })
     : { reusable: Boolean(mediaPath && pageAlreadyHasMedia(snapshot, mediaPath)), reason: mediaPath ? "media_path_match" : "missing_media_path" };
   if (stopBeforeFinalPublish && shouldBootstrapStopBeforeMediaRouteRecovery(platform, snapshot, stopBeforeCurrentMediaState)) {
     if (platform === "youtube") {
@@ -12716,7 +22986,11 @@ async function preparePublicationTask(task) {
     }
   }
   const refreshedStopBeforeCurrentMediaState = stopBeforeFinalPublish
-    ? canReuseCurrentPageMediaForPrepublish(platform, snapshot, mediaPath, { requiresLocalMedia })
+    ? canReuseCurrentPageMediaForPrepublish(platform, snapshot, mediaPath, {
+      requiresLocalMedia,
+      expectedTitle: String(content?.title || "").trim(),
+      allowDraftTitleMismatchReuse: currentPageOnlyMode,
+    })
     : stopBeforeCurrentMediaState;
   let stopBeforeRouteDisposition = stopBeforeFinalPublish
     ? deriveCompositeCurrentPageRouteDisposition(platform, snapshot)
@@ -12736,6 +23010,10 @@ async function preparePublicationTask(task) {
         await sleep(2600);
         snapshot = await pageSnapshot(client).catch(() => snapshot);
       }
+      stopBeforeRouteDisposition = deriveCompositeCurrentPageRouteDisposition(platform, snapshot);
+    } else {
+      await sleep(2600);
+      snapshot = await pageSnapshot(client).catch(() => snapshot);
       stopBeforeRouteDisposition = deriveCompositeCurrentPageRouteDisposition(platform, snapshot);
     }
   }
@@ -12794,20 +23072,55 @@ async function preparePublicationTask(task) {
       },
     };
   }
-  const mediaAlreadyPresent = Boolean(stopBeforeFinalPublish ? refreshedStopBeforeCurrentMediaState.reusable : (mediaPath && pageAlreadyHasMedia(snapshot, mediaPath)));
+  let currentPageMediaState = stopBeforeFinalPublish
+    ? refreshedStopBeforeCurrentMediaState
+    : canReuseCurrentPageMediaForPrepublish(platform, snapshot, mediaPath, {
+      requiresLocalMedia,
+      expectedTitle: String(content?.title || "").trim(),
+      allowDraftTitleMismatchReuse: currentPageOnlyMode,
+    });
+  if (prepareOnlyCurrentPage) {
+    currentPageMediaState = {
+      ...(currentPageMediaState && typeof currentPageMediaState === "object" ? currentPageMediaState : {}),
+      reusable: false,
+      media_attached: false,
+      reason: "prepare_only_current_page_force_fresh_upload",
+    };
+  }
+  let mediaAlreadyPresent = Boolean(
+    currentPageMediaState?.reusable
+    || currentPageMediaState?.media_attached
+    || (mediaPath && pageAlreadyHasMedia(snapshot, mediaPath)),
+  );
+  if (prepareOnlyCurrentPage) {
+    mediaAlreadyPresent = false;
+  }
   const stopBeforeUploadBootstrap = shouldBootstrapStopBeforeMediaUpload(
     platform,
     mediaPath,
-    refreshedStopBeforeCurrentMediaState,
+    currentPageMediaState,
     {
       stopBeforeFinalPublish,
       requiresLocalMedia,
       verifyMediaUpload,
     },
   );
+  const shouldContinueStandardStopBeforeUpload = shouldContinueStopBeforeUploadBootstrap({
+    stopBeforeFinalPublish,
+    currentPageOnlyMode,
+    prepareOnlyCurrentPage,
+    requiresLocalMedia,
+    hasMediaPath: Boolean(String(mediaPath || "").trim()),
+  });
   if (stopBeforeFinalPublish && !refreshedStopBeforeCurrentMediaState.reusable && !stopBeforeUploadBootstrap) {
       const mediaPendingDisposition = deriveCompositeCurrentPageMediaPendingDisposition(platform, mediaPath, refreshedStopBeforeCurrentMediaState);
       if (mediaPendingDisposition.pending) {
+        if (shouldContinueStandardStopBeforeUpload) {
+          actions.push({
+            kind: "stop_before_media_upload_bootstrap_continued",
+            reason: mediaPendingDisposition.media_reuse_reason || refreshedStopBeforeCurrentMediaState.reason || "upload_prompt_only",
+          });
+        } else {
         return {
           status: "processing",
           result: _attach_publication_content_signature({
@@ -12865,53 +23178,116 @@ async function preparePublicationTask(task) {
             },
           },
         };
+        }
       }
-      return {
-        status: "needs_human",
-        result: _attach_publication_content_signature({
-          platform,
-          route: { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" },
-          actions,
-          final_publish: {
-            pre_publish_pending: false,
-            wait_for_upload_ready: false,
-            prepublish_only_current_page: prepublishOnlyCurrentPage,
-            prepare_only_current_page: prepareOnlyCurrentPage,
-            stop_before_final_publish: true,
-          },
-          ..._build_publication_recovery_hint({
+      if (!shouldContinueStandardStopBeforeUpload) {
+        return {
+          status: "needs_human",
+          result: _attach_publication_content_signature({
             platform,
-            code: `${platform}_prepublish_only_media_missing`,
-            reason: "安全预发布验证模式未确认当前页面已挂载目标媒体，已阻断以避免自动补上传或误触发布。",
             route: { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" },
-            actionHistory: actions.slice(0, 80),
-            visibleLines: (snapshot?.lines || []).slice(0, 120),
-            clearDraftContext: false,
-            forceRefresh: true,
-            blockers: [{
+            actions,
+            final_publish: {
+              pre_publish_pending: false,
+              wait_for_upload_ready: false,
+              prepublish_only_current_page: prepublishOnlyCurrentPage,
+              prepare_only_current_page: prepareOnlyCurrentPage,
+              stop_before_final_publish: true,
+            },
+            ..._build_publication_recovery_hint({
+              platform,
               code: `${platform}_prepublish_only_media_missing`,
-              message: "当前页面未确认目标媒体已存在，安全预发布验证模式不会自动补上传。",
-              details: JSON.stringify({ media_path: mediaPath || "", media_reuse_reason: refreshedStopBeforeCurrentMediaState.reason || "", media_already_present: mediaAlreadyPresent }),
-            }],
-            recoveryOverrides: buildStopBeforeFinalPublishRecoveryOverrides({
-              prepublishOnlyCurrentPage,
-              prepareOnlyCurrentPage,
-            }),
-          }).recovery,
-          interruptions,
-        }, content),
-        error: {
-          code: `${platform}_prepublish_only_media_missing`,
-          message: "安全预发布验证模式未检测到当前页面已有目标媒体，已阻断。",
-          details: {
-            media_path: mediaPath || "",
-            media_already_present: mediaAlreadyPresent,
-            media_reuse_reason: stopBeforeCurrentMediaState.reason || "",
+              reason: "安全预发布验证模式未确认当前页面已挂载目标媒体，已阻断以避免自动补上传或误触发布。",
+              route: { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" },
+              actionHistory: actions.slice(0, 80),
+              visibleLines: (snapshot?.lines || []).slice(0, 120),
+              clearDraftContext: false,
+              forceRefresh: true,
+              blockers: [{
+                code: `${platform}_prepublish_only_media_missing`,
+                message: "当前页面未确认目标媒体已存在，安全预发布验证模式不会自动补上传。",
+                details: JSON.stringify({ media_path: mediaPath || "", media_reuse_reason: refreshedStopBeforeCurrentMediaState.reason || "", media_already_present: mediaAlreadyPresent }),
+              }],
+              recoveryOverrides: buildStopBeforeFinalPublishRecoveryOverrides({
+                prepublishOnlyCurrentPage,
+                prepareOnlyCurrentPage,
+              }),
+            }).recovery,
+            interruptions,
+          }, content),
+          error: {
+            code: `${platform}_prepublish_only_media_missing`,
+            message: "安全预发布验证模式未检测到当前页面已有目标媒体，已阻断。",
+            details: {
+              media_path: mediaPath || "",
+              media_already_present: mediaAlreadyPresent,
+              media_reuse_reason: stopBeforeCurrentMediaState.reason || "",
+            },
           },
-        },
-      };
+        };
+      }
   }
-  if (shouldAttemptMediaBootstrap({
+  if (
+    platform === "bilibili"
+    && !currentPageOnlyMode
+    && String(currentPageMediaState?.reason || "").trim() === "bilibili_existing_draft_title_mismatch"
+  ) {
+    const staleDraftReset = await resetBilibiliFreshUploadEntry(client, {
+      snapshot,
+      mediaPath,
+      expectedTitle: String(content?.title || "").trim(),
+    }).catch((error) => ({
+      reset: false,
+      actions: [{ kind: "bilibili_fresh_upload_reset_failed", error: String(error?.message || error) }],
+      snapshot,
+      freshness: { fresh: false, prompt_blocked: false, stale_mismatch: true },
+    }));
+    actions.push(...(Array.isArray(staleDraftReset?.actions) ? staleDraftReset.actions : []));
+    if (staleDraftReset?.snapshot && typeof staleDraftReset.snapshot === "object") {
+      snapshot = staleDraftReset.snapshot;
+    }
+    currentPageMediaState = canReuseCurrentPageMediaForPrepublish(platform, snapshot, mediaPath, {
+      requiresLocalMedia,
+      expectedTitle: String(content?.title || "").trim(),
+      allowDraftTitleMismatchReuse: currentPageOnlyMode,
+    });
+    mediaAlreadyPresent = Boolean(
+      currentPageMediaState?.reusable
+      || currentPageMediaState?.media_attached
+      || (mediaPath && pageAlreadyHasMedia(snapshot, mediaPath)),
+    );
+  }
+  const bilibiliMediaReuseReason = String(currentPageMediaState?.reason || "").trim();
+  const skipRedundantBilibiliMediaBootstrap =
+    platform === "bilibili"
+    && Boolean(currentPageMediaState?.media_attached || currentPageMediaState?.reusable || mediaAlreadyPresent)
+    && ![
+      "bilibili_existing_draft_title_mismatch",
+      "upload_prompt_only",
+      "media_presence_unconfirmed",
+    ].includes(bilibiliMediaReuseReason);
+  if (skipRedundantBilibiliMediaBootstrap) {
+    actions.push({
+      kind: "bilibili_media_upload_reuse",
+      skipped: true,
+      reason: String(currentPageMediaState?.reason || "bilibili_media_already_attached"),
+      media_already_present: mediaAlreadyPresent,
+    });
+  }
+  let bilibiliUploadSurfaceAfterAttach = platform === "bilibili"
+    ? deriveBilibiliUploadSurfaceState(
+      String((snapshot?.lines || []).join(" ") || snapshot?.bodyText || ""),
+      snapshot?.lines || [],
+      mediaPath,
+    )
+    : null;
+  let skipBilibiliUploadReadinessWait =
+    platform === "bilibili"
+    && Boolean(
+      bilibiliUploadSurfaceAfterAttach?.field_shell
+      && (bilibiliUploadSurfaceAfterAttach?.media_attached || bilibiliUploadSurfaceAfterAttach?.ready_surface || bilibiliUploadSurfaceAfterAttach?.concrete_progress),
+    );
+  if (!skipRedundantBilibiliMediaBootstrap && shouldAttemptMediaBootstrap({
     stopBeforeFinalPublish,
     prepublishOnlyCurrentPage,
     forceMediaUpload,
@@ -12920,31 +23296,325 @@ async function preparePublicationTask(task) {
     pageHasMedia: pageAlreadyHasMedia(snapshot, mediaPath),
     hasMediaPath: Boolean(mediaPath),
   })) {
-      if (platform === "youtube") {
-        actions.push(await clickByText(client, ["创建", "上传视频", "Upload videos", "CREATE"]));
-        await sleep(2200);
-      }
-      if (platform === "youtube") {
-        actions.push({ kind: `${platform}_upload_entry`, ...(await clickByText(client, ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择", "Upload videos", "Select files", "发表视频"])) });
-        if (!actions.at(-1)?.clicked) actions.push({ kind: `${platform}_upload_entry_loose`, ...(await clickLooseText(client, ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择", "Upload videos", "Select files", "发表视频"])) });
-        if (!actions.some((action) => /^youtube_upload_entry/.test(String(action?.kind || "")) && action?.clicked)) {
-          actions.push({ kind: "youtube_upload_entry_hidden", ...(await activateYoutubeHiddenUploadEntry(client)) });
+      if (platform === "bilibili") {
+        const preUploadQueueState = await normalizeBilibiliUploadQueue(
+          client,
+          String(content?.title || "").trim(),
+          {
+            clearAll: false,
+            inspectOnly: true,
+          },
+        ).catch(() => null);
+        if (preUploadQueueState) {
+          actions.push({ kind: "bilibili_upload_queue_preflight", ...preUploadQueueState });
+          const dirtyQueueDetected =
+            Number(preUploadQueueState.total || 0) > 0
+            && !Boolean(currentPageMediaState?.media_attached || currentPageMediaState?.reusable || pageAlreadyHasMedia(snapshot, mediaPath));
+          if (dirtyQueueDetected) {
+            const bilibiliLocalDraftReset = await clearBilibiliUploadLocalDraftState(client).catch(() => null);
+            if (bilibiliLocalDraftReset) {
+              actions.push({ kind: "bilibili_upload_entry_preflight_storage_reset", ...bilibiliLocalDraftReset });
+            }
+            const bilibiliEntryUrl = compositePlatformPublishEntryUrl("bilibili") || PLATFORM_PUBLISH_ENTRY_URLS.bilibili;
+            const routeReset = await navigateClientToUrlWithDialogHandling(
+              client,
+              String(snapshot?.url || tab?.url || ""),
+              bilibiliEntryUrl,
+              {
+                timeout_ms: 18000,
+                reason: "bilibili_preflight_fresh_upload_reset",
+                javascript_dialog_policy: "navigation_route_switch",
+                verify: (routeSnapshot) => {
+                  const url = String(routeSnapshot?.url || "");
+                  const text = [...(routeSnapshot?.lines || []), ...(routeSnapshot?.headings || [])].join(" ");
+                  return /member\.bilibili\.com\/platform\/upload\/video/i.test(url)
+                    && /上传视频|点击上传|拖拽到此区域/.test(text);
+                },
+              },
+            ).catch((error) => ({ navigated: false, reason: "bilibili_preflight_fresh_upload_reset_failed", error: String(error?.message || error) }));
+            actions.push({ kind: "bilibili_upload_entry_preflight_route_reset", ...routeReset });
+            await sleep(900);
+            snapshot = await pageSnapshot(client).catch(() => snapshot);
+            currentPageMediaState = canReuseCurrentPageMediaForPrepublish(platform, snapshot, mediaPath, {
+              requiresLocalMedia,
+              expectedTitle: String(content?.title || "").trim(),
+              allowDraftTitleMismatchReuse: currentPageOnlyMode,
+            });
+          }
         }
+        const refreshedBilibiliReuseReason = String(currentPageMediaState?.reason || "").trim();
+        const bilibiliMediaReadyAfterPreflight =
+          Boolean(currentPageMediaState?.media_attached || currentPageMediaState?.reusable || pageAlreadyHasMedia(snapshot, mediaPath))
+          && ![
+            "bilibili_existing_draft_title_mismatch",
+            "upload_prompt_only",
+            "media_presence_unconfirmed",
+          ].includes(refreshedBilibiliReuseReason);
+        if (bilibiliMediaReadyAfterPreflight) {
+          actions.push({
+            kind: "bilibili_media_upload_reuse_after_preflight",
+            skipped: true,
+            reason: refreshedBilibiliReuseReason || "bilibili_media_already_attached",
+          });
+        } else {
+        const uploadDraftResumePrompt = await resolveCurrentPageDraftResumePrompt(client, platform).catch(() => null);
+        if (uploadDraftResumePrompt?.prompt_present && uploadDraftResumePrompt?.preferred_action === "discard") {
+          actions.push({ kind: "bilibili_upload_entry_draft_resume_prompt", ...uploadDraftResumePrompt });
+          if (uploadDraftResumePrompt.prompt_still_open) {
+            snapshot = await pageSnapshot(client).catch(() => snapshot);
+            reportTaskProgress({
+              phase: "draft_resume_prompt_blocked",
+              route: {
+                url: String(snapshot?.url || tab?.url || ""),
+                title: String(snapshot?.title || tab?.title || ""),
+                path: "",
+              },
+              visible_lines: (snapshot?.lines || []).slice(0, 120),
+              actions,
+            });
+            return {
+              status: "needs_human",
+              result: buildCompositeUploadPendingProcessingEnvelope({
+                platform,
+                route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
+                actions,
+                material_integrity: buildPendingUploadMaterialIntegrity(
+                  platform,
+                  { ready: false, failed: false, pending_reason: "draft_resume_prompt_not_declined", last: snapshot || {} },
+                  { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
+                ),
+                code: "bilibili_draft_resume_prompt_not_declined",
+                reason: "检测到本地未提交视频提示且未能确认放弃，已停止，避免复用脏稿。",
+                blockerMessage: "B站必须先点击“不用了”丢弃旧本地未提交稿。",
+                blockerDetails: `clicked_label=${String(uploadDraftResumePrompt?.clicked_label || "")}`,
+                prepublishOnlyCurrentPage,
+                prepareOnlyCurrentPage,
+                stopBeforeFinalPublish,
+                interruptions,
+                content,
+              }),
+              error: {
+                code: "bilibili_draft_resume_prompt_not_declined",
+                message: "B站旧本地未提交稿未被丢弃，已停止当前上传。",
+                details: uploadDraftResumePrompt,
+              },
+            };
+          }
+          const postDiscardClear = await clearInPageDraftState(client, platform, {
+            mediaPath,
+            forceClearDraft: true,
+            skipButtonClicks: true,
+          }).catch(() => null);
+          if (postDiscardClear) {
+            actions.push({ kind: "bilibili_upload_entry_post_discard_clear", ...postDiscardClear });
+          }
+          const bilibiliLocalDraftReset = await clearBilibiliUploadLocalDraftState(client).catch(() => null);
+          if (bilibiliLocalDraftReset) {
+            actions.push({ kind: "bilibili_upload_entry_post_discard_storage_reset", ...bilibiliLocalDraftReset });
+          }
+          if (shouldResetBilibiliUploadModuleAfterDiscard(uploadDraftResumePrompt)) {
+            const bilibiliEntryUrl = compositePlatformPublishEntryUrl("bilibili") || PLATFORM_PUBLISH_ENTRY_URLS.bilibili;
+            const resetResult = await navigateClientToUrlWithDialogHandling(
+              client,
+              String(snapshot?.url || tab?.url || ""),
+              bilibiliEntryUrl,
+              {
+                timeout_ms: 18000,
+                reason: "bilibili_post_discard_route_reset",
+                javascript_dialog_policy: "navigation_route_switch",
+                verify: (routeSnapshot) => {
+                  const url = String(routeSnapshot?.url || "");
+                  const text = [...(routeSnapshot?.lines || []), ...(routeSnapshot?.headings || [])].join(" ");
+                  const hasVideoInput = (routeSnapshot?.fileInputs || []).some((input) => /video|mp4/i.test(input.accept || ""));
+                  return /member\.bilibili\.com\/platform\/upload\/video/i.test(url)
+                    && (hasVideoInput || /点击上传|上传视频/.test(text))
+                    && !/本地浏览器存在\s*\d+\s*个未提交的(?:视频|作品)/.test(text);
+                },
+                snapshot_fn: (activeClient) => routeBootstrapSnapshot(activeClient).catch(() => null),
+              },
+            ).catch((error) => ({ navigated: false, reason: "bilibili_post_discard_route_reset_failed", error: String(error?.message || error) }));
+            actions.push({ kind: "bilibili_upload_entry_post_discard_refresh", ...resetResult });
+          }
+          await sleep(900);
+          snapshot = await pageSnapshot(client).catch(() => snapshot);
+        }
+        }
+      }
+      const skipUploadAfterPreflight = platform === "bilibili"
+        && actions.some((action) => action?.kind === "bilibili_media_upload_reuse_after_preflight" && action?.skipped);
+      if (platform === "bilibili" && !skipUploadAfterPreflight) {
+        const localDraftState = await inspectBilibiliUploadLocalDraftState(client).catch(() => null);
+        if (localDraftState) {
+          actions.push({ kind: "bilibili_local_draft_state_pre_upload", ...localDraftState });
+        }
+        const preclearSurface = deriveBilibiliUploadSurfaceState(
+          String((snapshot?.lines || []).join(" ") || snapshot?.bodyText || ""),
+          snapshot?.lines || [],
+          mediaPath,
+        );
+        const shouldPreclearLocalDraft =
+          Boolean(localDraftState?.draft_count > 0)
+          && !preclearSurface.concrete_progress
+          && !preclearSurface.media_attached;
+        if (shouldPreclearLocalDraft) {
+          const clearedDraftState = await clearBilibiliUploadLocalDraftState(client).catch(() => null);
+          if (clearedDraftState) {
+            actions.push({ kind: "bilibili_local_draft_state_pre_upload_clear", ...clearedDraftState });
+          }
+          const bilibiliEntryUrl = compositePlatformPublishEntryUrl("bilibili") || PLATFORM_PUBLISH_ENTRY_URLS.bilibili;
+          const resetResult = await navigateClientToUrlWithDialogHandling(
+            client,
+            String(snapshot?.url || tab?.url || ""),
+            bilibiliEntryUrl,
+            {
+              timeout_ms: 18000,
+              reason: "bilibili_pre_upload_local_draft_reset",
+              javascript_dialog_policy: "navigation_route_switch",
+              verify: (routeSnapshot) => {
+                const url = String(routeSnapshot?.url || "");
+                const text = [...(routeSnapshot?.lines || []), ...(routeSnapshot?.headings || [])].join(" ");
+                const hasVideoInput = (routeSnapshot?.fileInputs || []).some((input) => /video|mp4/i.test(input.accept || ""));
+                return /member\.bilibili\.com\/platform\/upload\/video/i.test(url)
+                  && (hasVideoInput || /点击上传|上传视频/.test(text))
+                  && !/本地浏览器存在\s*\d+\s*个未提交的(?:视频|作品)/.test(text);
+              },
+              snapshot_fn: (activeClient) => routeBootstrapSnapshot(activeClient).catch(() => null),
+            },
+          ).catch((error) => ({ navigated: false, reason: "bilibili_pre_upload_local_draft_reset_failed", error: String(error?.message || error) }));
+          actions.push({ kind: "bilibili_pre_upload_local_draft_route_reset", ...resetResult });
+          await sleep(900);
+          snapshot = await pageSnapshot(client).catch(() => snapshot);
+        }
+      }
+      if (platform === "youtube") {
+        const createFlow = await forceYouTubeCreateUploadFlow(client).catch((error) => ({
+          clicked: false,
+          actions: [{ kind: "youtube_create_flow_error", reason: String(error?.message || error || "") }],
+          state: null,
+        }));
+        actions.push({ kind: "youtube_create_flow_preflight", clicked: Boolean(createFlow.clicked), state: createFlow.state || null });
+        if (Array.isArray(createFlow.actions)) actions.push(...createFlow.actions);
+        await sleep(2200);
+      }
+      if (!skipUploadAfterPreflight && platform === "youtube") {
         await sleep(1600);
-      } else if (platform === "kuaishou" || platform === "wechat-channels") {
-        actions.push({ kind: `${platform}_upload_entry`, ...(await clickByText(client, ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择", "Upload videos", "Select files", "发表视频"])) });
+      } else if (!skipUploadAfterPreflight && (platform === "kuaishou" || platform === "wechat-channels")) {
+        actions.push({ kind: `${platform}_upload_entry_semantic`, ...(await clickSemanticActionByHints(client, ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择", "Upload videos", "Select files"], { intent: "media_upload_entry" })) });
+        if (!actions.at(-1)?.clicked) actions.push({ kind: `${platform}_upload_entry`, ...(await clickByText(client, ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择", "Upload videos", "Select files", "发表视频"])) });
         if (!actions.at(-1)?.clicked) actions.push({ kind: `${platform}_upload_entry_loose`, ...(await clickLooseText(client, ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择", "Upload videos", "Select files", "发表视频"])) });
         await sleep(1600);
       }
-      let upload = await setFirstVideoFileInput(client, mediaPath);
+      let upload = skipUploadAfterPreflight
+        ? { uploaded: true, skipped: true, reason: "bilibili_media_already_attached_after_preflight" }
+        : await setFirstVideoFileInput(client, mediaPath, { platform });
       if (!upload.uploaded) {
-        actions.push(await clickByText(client, ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择", "Upload videos", "Select files", "发布视频"]));
-        await sleep(2200);
-        upload = await setFirstVideoFileInput(client, mediaPath);
+        snapshot = await pageSnapshot(client).catch(() => snapshot);
+        const firstAttemptUploadInProgress = shouldTreatMediaUploadAsInProgress(platform, upload, snapshot, mediaPath);
+        const allowGenericRetryUploadPath = platform !== "bilibili";
+        if (!firstAttemptUploadInProgress && allowGenericRetryUploadPath) {
+          if (platform === "youtube") {
+            const createFlow = await forceYouTubeCreateUploadFlow(client).catch((error) => ({
+              clicked: false,
+              actions: [{ kind: "youtube_create_flow_error", reason: String(error?.message || error || "") }],
+              state: null,
+            }));
+            actions.push({ kind: "youtube_create_flow_retry", clicked: Boolean(createFlow.clicked), state: createFlow.state || null });
+            if (Array.isArray(createFlow.actions)) actions.push(...createFlow.actions);
+          } else {
+            actions.push({ kind: `${platform}_upload_retry_entry_semantic`, ...(await clickSemanticActionByHints(client, ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择", "Upload videos", "Select files"], { intent: "media_upload_entry" })) });
+            if (!actions.at(-1)?.clicked) actions.push(await clickByText(client, ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择", "Upload videos", "Select files"]));
+          }
+          await sleep(2200);
+          upload = await setFirstVideoFileInput(client, mediaPath, { platform });
+        }
+        if (!upload.uploaded && allowGenericRetryUploadPath && shouldAttemptNativeFileChooserFallback(upload)) {
+          const nativeFallbackUpload = await tryNativeMediaUploadFallback(client, {
+            mediaPath,
+            uploadEntryHints: ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择", "Upload videos", "Select files"],
+            platform,
+          });
+          if (nativeFallbackUpload.entryAction) {
+            actions.push({ kind: `${platform}_upload_entry_native_dialog`, ...nativeFallbackUpload.entryAction });
+          }
+          if (nativeFallbackUpload.chooser) {
+            actions.push({ kind: `${platform}_upload_native_dialog`, ...nativeFallbackUpload.chooser });
+          }
+          upload = nativeFallbackUpload;
+        }
       }
       actions.push({ kind: "media_upload", ...upload });
       snapshot = await pageSnapshot(client).catch(() => snapshot);
       const uploadInProgress = shouldTreatMediaUploadAsInProgress(platform, upload, snapshot, mediaPath);
+      bilibiliUploadSurfaceAfterAttach = platform === "bilibili"
+        ? deriveBilibiliUploadSurfaceState(
+          String((snapshot?.lines || []).join(" ") || snapshot?.bodyText || ""),
+          snapshot?.lines || [],
+          mediaPath,
+        )
+        : null;
+      skipBilibiliUploadReadinessWait =
+        platform === "bilibili"
+        && Boolean(
+          bilibiliUploadSurfaceAfterAttach?.field_shell
+          && (bilibiliUploadSurfaceAfterAttach?.media_attached || bilibiliUploadSurfaceAfterAttach?.ready_surface || bilibiliUploadSurfaceAfterAttach?.concrete_progress),
+        );
+      if (platform === "bilibili" && (upload.uploaded || uploadInProgress)) {
+        const postUploadQueueState = await normalizeBilibiliUploadQueue(
+          client,
+          String(content?.title || "").trim(),
+          { inspectOnly: true },
+        ).catch(() => null);
+        if (postUploadQueueState) {
+          actions.push({ kind: "bilibili_upload_queue_post_upload", ...postUploadQueueState });
+          if (Number(postUploadQueueState.total || 0) > 1) {
+            snapshot = await pageSnapshot(client).catch(() => snapshot);
+            reportTaskProgress({
+              phase: "duplicate_upload_detected",
+              route: {
+                url: String(snapshot?.url || tab?.url || ""),
+                title: String(snapshot?.title || tab?.title || ""),
+                path: "",
+              },
+              visible_lines: (snapshot?.lines || []).slice(0, 120),
+              actions,
+            });
+            return {
+              status: "needs_human",
+              result: buildCompositeUploadPendingProcessingEnvelope({
+                platform,
+                route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
+                actions,
+                material_integrity: buildPendingUploadMaterialIntegrity(
+                  platform,
+                  { ready: false, failed: true, pending_reason: "duplicate_upload_detected", last: snapshot || {} },
+                  { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
+                ),
+                code: "bilibili_duplicate_upload_detected",
+                reason: "B站上传队列出现多个视频卡片，已停止，避免在错误稿件上继续执行封面、合集和定时。",
+                blockerMessage: "B站主上传路径仍在触发双重上传。",
+                blockerDetails: `queue_total=${Number(postUploadQueueState.total || 0)} kept=${String(postUploadQueueState.kept || "")}`,
+                prepublishOnlyCurrentPage,
+                prepareOnlyCurrentPage,
+                stopBeforeFinalPublish,
+                interruptions,
+                content,
+              }),
+              error: {
+                code: "bilibili_duplicate_upload_detected",
+                message: "B站上传队列出现多个视频卡片，已停止当前主线。",
+                details: postUploadQueueState,
+              },
+            };
+          }
+        }
+      }
+      if (uploadInProgress) {
+        const interruptionActions = await dismissInterruptions(client, tab, platform, "post_upload_in_progress").catch(() => []);
+        if (Array.isArray(interruptionActions) && interruptionActions.length) {
+          actions.push(...interruptionActions);
+          snapshot = await pageSnapshot(client).catch(() => snapshot);
+        }
+      }
       reportTaskProgress({
         phase: upload.uploaded ? "media_uploaded" : (uploadInProgress ? "media_upload_in_progress" : "media_upload_failed"),
         route: {
@@ -12992,7 +23662,20 @@ async function preparePublicationTask(task) {
           },
         };
       }
-      if ((upload.uploaded || uploadInProgress) && verifyMediaUpload) {
+      bilibiliUploadSurfaceAfterAttach = platform === "bilibili"
+        ? deriveBilibiliUploadSurfaceState(
+          String((snapshot?.lines || []).join(" ") || snapshot?.bodyText || ""),
+          snapshot?.lines || [],
+          mediaPath,
+        )
+        : null;
+      skipBilibiliUploadReadinessWait =
+        platform === "bilibili"
+        && Boolean(
+          bilibiliUploadSurfaceAfterAttach?.field_shell
+          && (bilibiliUploadSurfaceAfterAttach?.media_attached || bilibiliUploadSurfaceAfterAttach?.ready_surface || bilibiliUploadSurfaceAfterAttach?.concrete_progress),
+        );
+      if ((upload.uploaded || uploadInProgress) && verifyMediaUpload && !skipBilibiliUploadReadinessWait) {
         reportTaskProgress({
           phase: "post_upload_readiness_wait",
           route: {
@@ -13105,95 +23788,38 @@ async function preparePublicationTask(task) {
               },
             };
           }
-          snapshot = await pageSnapshot(client);
-          const pendingUploadIntegrity = buildPendingUploadMaterialIntegrity(
-            platform,
-            readiness,
-            {
-              url: String(snapshot?.url || tab?.url || ""),
-              title: String(snapshot?.title || tab?.title || ""),
-            },
-          );
-          reportTaskProgress({
-            phase: "post_upload_readiness_pending",
-            route: {
-              url: String(snapshot?.url || tab?.url || ""),
-              title: String(snapshot?.title || tab?.title || ""),
-              path: "",
-            },
-            material_integrity: pendingUploadIntegrity,
-            visible_lines: (snapshot?.lines || []).slice(0, 120),
-            actions,
-          });
-          return {
-            status: "processing",
-            result: buildCompositeUploadPendingProcessingEnvelope({
+          if (shouldWaitForCompositeUploadReadyBeforeFieldPreparation(platform, readiness, { verifyMediaUpload })) {
+            snapshot = await pageSnapshot(client);
+            const pendingUploadIntegrity = buildPendingUploadMaterialIntegrity(
               platform,
-              route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
-              actions,
+              readiness,
+              {
+                url: String(snapshot?.url || tab?.url || ""),
+                title: String(snapshot?.title || tab?.title || ""),
+              },
+            );
+            reportTaskProgress({
+              phase: "post_upload_readiness_pending",
+              route: {
+                url: String(snapshot?.url || tab?.url || ""),
+                title: String(snapshot?.title || tab?.title || ""),
+                path: "",
+              },
               material_integrity: pendingUploadIntegrity,
-              code: `${platform}_pre_publish_upload_pending`,
-              reason: "媒体上传已开始，继续保留现场等待平台进入可编辑上传态。",
-              blockerMessage: `预发布等待上传完成：${pendingUploadIntegrity.verification_reason || "upload_ready"}`,
-              blockerDetails: `verification_reason=${pendingUploadIntegrity.verification_reason || "upload_not_ready"}`,
-              prepublishOnlyCurrentPage,
-              prepareOnlyCurrentPage,
-              stopBeforeFinalPublish,
-              interruptions,
-              content,
-            }),
-            error: null,
-          };
-        }
-        reportTaskProgress({
-          phase: "post_upload_material_integrity_wait",
-          route: {
-            url: String(tab?.url || ""),
-            title: String(tab?.title || ""),
-            path: "",
-          },
-          actions,
-        });
-        const postUploadIntegrity = await runCompositePhase(
-          platform,
-          "post_upload_material_integrity",
-          () => readCompositeMaterialIntegrity(client, platform, content),
-        );
-        actions.push({ kind: "post_upload_material_integrity", ...postUploadIntegrity });
-        snapshot = await pageSnapshot(client);
-        reportTaskProgress({
-          phase: "post_upload_integrity",
-          route: {
-            url: String(snapshot?.url || tab.url || ""),
-            title: String(snapshot?.title || tab.title || ""),
-            path: "",
-          },
-          material_integrity: postUploadIntegrity,
-          visible_lines: (snapshot?.lines || []).slice(0, 120),
-          actions,
-        });
-        if (
-          waitForPublishConfirmation
-          && postUploadIntegrity
-          && postUploadIntegrity.verification_state !== "ready"
-        ) {
-          const uploadIntegrityDisposition = deriveCompositePostUploadIntegrityDisposition(
-            platform,
-            postUploadIntegrity,
-            null,
-          );
-          if (uploadIntegrityDisposition.status === "processing") {
+              visible_lines: (snapshot?.lines || []).slice(0, 120),
+              actions,
+            });
             return {
               status: "processing",
               result: buildCompositeUploadPendingProcessingEnvelope({
                 platform,
-                route: { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" },
+                route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
                 actions,
-                material_integrity: postUploadIntegrity,
-                code: uploadIntegrityDisposition.code,
-                reason: "预发布字段已修复，仅剩上传就绪等待态，继续保留现场自动等待。",
-                blockerMessage: `预发布等待上传完成：${uploadIntegrityDisposition.remaining.join(",") || "upload_ready"}`,
-                blockerDetails: `post_upload_wait_only=${uploadIntegrityDisposition.remaining.join(",") || "upload_ready"}`,
+                material_integrity: pendingUploadIntegrity,
+                code: `${platform}_pre_publish_upload_pending`,
+                reason: "媒体上传已开始，继续保留现场等待平台进入可编辑上传态。",
+                blockerMessage: `预发布等待上传完成：${pendingUploadIntegrity.verification_reason || "upload_ready"}`,
+                blockerDetails: `verification_reason=${pendingUploadIntegrity.verification_reason || "upload_not_ready"}`,
                 prepublishOnlyCurrentPage,
                 prepareOnlyCurrentPage,
                 stopBeforeFinalPublish,
@@ -13203,47 +23829,168 @@ async function preparePublicationTask(task) {
               error: null,
             };
           }
-          return {
-            status: "needs_human",
-            result: _attach_publication_content_signature({
-              platform,
-              route: { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" },
-              actions,
-              ..._build_publication_recovery_hint({
-                platform,
-                code: uploadIntegrityDisposition.code,
-                reason: "上传后复核未进入可编辑状态。",
-                route: { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" },
-                actionHistory: actions.slice(0, 80),
-                visibleLines: (snapshot?.lines || []).slice(0, 120),
-                clearDraftContext: uploadIntegrityDisposition.clear_draft_context,
-                forceRefresh: uploadIntegrityDisposition.force_publish_page_refresh,
-                blockers: [{
-                  code: uploadIntegrityDisposition.code,
-                  message: "上传后读回不是就绪态，建议重置草稿后重试。",
-                  details: `verification_state=${postUploadIntegrity.verification_state || "unknown"} failures=${JSON.stringify(postUploadIntegrity.failures || [])}`,
-                }],
-              }).recovery,
-              interruptions,
-            }, content),
-            error: {
-              code: uploadIntegrityDisposition.code,
-              message: `已上传素材，但发布页未回到可编辑上传态（verification_state=${postUploadIntegrity.verification_state || "unknown"}）。`,
-              details: {
-                verification_state: postUploadIntegrity.verification_state || "unknown",
-                failures: postUploadIntegrity.failures || [],
-                visibility: postUploadIntegrity.verification_state || "",
-              },
+        }
+        if (!shouldDeferGenericPostUploadIntegrityUntilPlatformAdapter(platform)) {
+          reportTaskProgress({
+            phase: "post_upload_material_integrity_wait",
+            route: {
+              url: String(tab?.url || ""),
+              title: String(tab?.title || ""),
+              path: "",
             },
-          };
+            actions,
+          });
+          const postUploadIntegrity = await runCompositePhase(
+            platform,
+            "post_upload_material_integrity",
+            () => readCompositeMaterialIntegrity(client, platform, content),
+          );
+          actions.push({ kind: "post_upload_material_integrity", ...postUploadIntegrity });
+          snapshot = await pageSnapshot(client);
+          reportTaskProgress({
+            phase: "post_upload_integrity",
+            route: {
+              url: String(snapshot?.url || tab.url || ""),
+              title: String(snapshot?.title || tab.title || ""),
+              path: "",
+            },
+            material_integrity: postUploadIntegrity,
+            visible_lines: (snapshot?.lines || []).slice(0, 120),
+            actions,
+          });
+          if (
+            waitForPublishConfirmation
+            && postUploadIntegrity
+            && postUploadIntegrity.verification_state !== "ready"
+          ) {
+            const uploadIntegrityDisposition = deriveCompositePostUploadIntegrityDisposition(
+              platform,
+              postUploadIntegrity,
+              null,
+            );
+            if (uploadIntegrityDisposition.status === "processing") {
+              return {
+                status: "processing",
+                result: buildCompositeUploadPendingProcessingEnvelope({
+                  platform,
+                  route: { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" },
+                  actions,
+                  material_integrity: postUploadIntegrity,
+                  code: uploadIntegrityDisposition.code,
+                  reason: "预发布字段已修复，仅剩上传就绪等待态，继续保留现场自动等待。",
+                  blockerMessage: `预发布等待上传完成：${uploadIntegrityDisposition.remaining.join(",") || "upload_ready"}`,
+                  blockerDetails: `post_upload_wait_only=${uploadIntegrityDisposition.remaining.join(",") || "upload_ready"}`,
+                  prepublishOnlyCurrentPage,
+                  prepareOnlyCurrentPage,
+                  stopBeforeFinalPublish,
+                  interruptions,
+                  content,
+                }),
+                error: null,
+              };
+            }
+            return {
+              status: "needs_human",
+              result: _attach_publication_content_signature({
+                platform,
+                route: { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" },
+                actions,
+                ..._build_publication_recovery_hint({
+                  platform,
+                  code: uploadIntegrityDisposition.code,
+                  reason: "上传后复核未进入可编辑状态。",
+                  route: { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" },
+                  actionHistory: actions.slice(0, 80),
+                  visibleLines: (snapshot?.lines || []).slice(0, 120),
+                  clearDraftContext: uploadIntegrityDisposition.clear_draft_context,
+                  forceRefresh: uploadIntegrityDisposition.force_publish_page_refresh,
+                  blockers: [{
+                    code: uploadIntegrityDisposition.code,
+                    message: "上传后读回不是就绪态，建议重置草稿后重试。",
+                    details: `verification_state=${postUploadIntegrity.verification_state || "unknown"} failures=${JSON.stringify(postUploadIntegrity.failures || [])}`,
+                  }],
+                }).recovery,
+                interruptions,
+              }, content),
+              error: {
+                code: uploadIntegrityDisposition.code,
+                message: `已上传素材，但发布页未回到可编辑上传态（verification_state=${postUploadIntegrity.verification_state || "unknown"}）。`,
+                details: {
+                  verification_state: postUploadIntegrity.verification_state || "unknown",
+                  failures: postUploadIntegrity.failures || [],
+                  visibility: postUploadIntegrity.verification_state || "",
+                },
+              },
+            };
+          }
         }
       } else {
         await sleep(16000);
       }
     } else {
-      actions.push({ kind: "media_upload", uploaded: Boolean(mediaPath), skipped: true, reason: mediaPath ? "media_already_present" : "missing_media_path" });
+      if (String(currentPageMediaState?.reason || "").trim() === "bilibili_existing_draft_title_mismatch") {
+        return {
+          status: "needs_human",
+          result: _attach_publication_content_signature({
+            platform,
+            route: { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" },
+            actions: [
+              ...actions,
+              {
+                kind: "media_upload",
+                uploaded: false,
+                skipped: true,
+                reason: "bilibili_existing_draft_title_mismatch",
+                media_reuse_reason: String(currentPageMediaState?.reason || "").trim(),
+              },
+            ],
+            final_publish: {
+              pre_publish_pending: false,
+              wait_for_upload_ready: false,
+              prepublish_only_current_page: prepublishOnlyCurrentPage,
+              prepare_only_current_page: prepareOnlyCurrentPage,
+              stop_before_final_publish: stopBeforeFinalPublish,
+            },
+            material_integrity: {
+              verification_state: "wrong_draft_reused",
+              verification_reason: "bilibili_existing_draft_title_mismatch",
+            },
+            ..._build_publication_recovery_hint({
+              platform,
+              code: "bilibili_existing_draft_title_mismatch",
+              reason: "B站当前发布页复用了不属于本次内容的旧稿件，已阻断以避免重复上传或填错稿。",
+              route: { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" },
+              actionHistory: actions.slice(0, 80),
+              visibleLines: (snapshot?.lines || []).slice(0, 120),
+              clearDraftContext: true,
+              forceRefresh: true,
+              blockers: [{
+                code: "bilibili_existing_draft_title_mismatch",
+                message: "当前 B 站发布页看起来复用了旧稿件标题，不会继续在该页上传或填字段。",
+                details: JSON.stringify({ expected_title: String(content?.title || "").trim(), route_url: snapshot?.url || tab.url || "" }),
+              }],
+            }).recovery,
+          }, content),
+          error: {
+            code: "bilibili_existing_draft_title_mismatch",
+            message: "B站当前发布页复用了错误旧稿件，已阻断。",
+            details: {
+              expected_title: String(content?.title || "").trim(),
+              route_url: snapshot?.url || tab.url || "",
+            },
+          },
+        };
+      }
+      const attachedMediaPending = Boolean(currentPageMediaState?.media_attached && !currentPageMediaState?.reusable);
+      actions.push({
+        kind: "media_upload",
+        uploaded: Boolean(mediaPath),
+        skipped: true,
+        reason: attachedMediaPending ? "media_already_attached_pending" : (mediaPath ? "media_already_present" : "missing_media_path"),
+        media_reuse_reason: currentPageMediaState?.reason || "",
+      });
       reportTaskProgress({
-        phase: "media_already_present",
+        phase: attachedMediaPending ? "media_already_attached_pending" : "media_already_present",
         route: {
           url: String(snapshot?.url || tab.url || ""),
           title: String(snapshot?.title || tab.title || ""),
@@ -13252,16 +23999,218 @@ async function preparePublicationTask(task) {
         visible_lines: (snapshot?.lines || []).slice(0, 120),
         actions,
       });
+      if (attachedMediaPending && verifyMediaUpload) {
+        const readinessResult = normalizeCompositeUploadReadyResult(
+          await runCompositePhase(platform, "post_upload_readiness", () =>
+            ensureCompositeUploadReady(
+              client,
+              platform,
+              content,
+              uploadReadinessTimeoutMs,
+              (state) => reportTaskProgress({
+                phase: "post_upload_readiness_poll",
+                route: {
+                  url: String(tab?.url || ""),
+                  title: String(tab?.title || ""),
+                  path: "",
+                },
+                visible_lines: Array.isArray(state?.last?.lines) ? state.last.lines : [],
+                material_integrity: {
+                  upload_readiness: {
+                    ready: Boolean(state?.ready),
+                    failed: Boolean(state?.failed),
+                    waited_ms: Number(state?.waited_ms || 0),
+                    busy: Boolean(state?.last?.busy),
+                    media_present: Boolean(state?.last?.mediaPresent),
+                    upload_prompt_only: Boolean(state?.last?.uploadPromptOnly),
+                    file_input_count: Number(state?.last?.fileInputCount || 0),
+                    last_lines: Array.isArray(state?.last?.lines) ? state.last.lines.slice(0, 50) : [],
+                  },
+                },
+                actions,
+              }),
+              {
+                syntheticUploadExpected: false,
+              },
+            )),
+        );
+        const readiness = readinessResult.readiness;
+        actions.push(...readinessResult.actions);
+        if (!readiness.ready) {
+          if (readiness.failed) {
+            const uploadFailureCode = `${platform}_media_upload_failed`;
+            const uploadFailureReason = String(readiness.failure_reason || "upload_failed").trim() || "upload_failed";
+            return {
+              status: "needs_human",
+              result: _attach_publication_content_signature({
+                platform,
+                route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
+                actions,
+                publication_audit: {},
+                publication_field_snapshot: {},
+                final_publish: {
+                  pre_publish_pending: false,
+                  wait_for_upload_ready: false,
+                  prepublish_only_current_page: prepublishOnlyCurrentPage,
+                  prepare_only_current_page: prepareOnlyCurrentPage,
+                  stop_before_final_publish: stopBeforeFinalPublish,
+                },
+                material_integrity: buildPendingUploadMaterialIntegrity(
+                  platform,
+                  readiness,
+                  {
+                    url: String(snapshot?.url || tab?.url || ""),
+                    title: String(snapshot?.title || tab?.title || ""),
+                  },
+                ),
+                ..._build_publication_recovery_hint({
+                  platform,
+                  code: uploadFailureCode,
+                  reason: "页面已挂载目标媒体，但平台未回到可编辑上传态，已阻断后续字段填充与发布。",
+                  route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
+                  actionHistory: actions.slice(0, 80),
+                  visibleLines: (snapshot?.lines || []).slice(0, 120),
+                  clearDraftContext: stopBeforeFinalPublish ? false : true,
+                  forceRefresh: true,
+                  blockers: [{
+                    code: uploadFailureCode,
+                    message: "检测到已有上传卡片，但页面未进入可继续编辑的状态。",
+                    details: JSON.stringify({
+                      failure_reason: uploadFailureReason,
+                      media_path: mediaPath || "",
+                      route_url: String(snapshot?.url || tab?.url || ""),
+                    }),
+                  }],
+                }).recovery,
+                interruptions,
+              }, content),
+              error: {
+                code: uploadFailureCode,
+                message: `媒体上传未生效：${uploadFailureReason}`,
+                details: {
+                  failure_reason: uploadFailureReason,
+                  route_url: String(snapshot?.url || tab?.url || ""),
+                },
+              },
+            };
+          }
+          if (shouldWaitForCompositeUploadReadyBeforeFieldPreparation(platform, readiness, { verifyMediaUpload })) {
+            snapshot = await pageSnapshot(client);
+            const pendingUploadIntegrity = buildPendingUploadMaterialIntegrity(
+              platform,
+              readiness,
+              {
+                url: String(snapshot?.url || tab?.url || ""),
+                title: String(snapshot?.title || tab?.title || ""),
+              },
+            );
+            reportTaskProgress({
+              phase: "post_upload_readiness_pending",
+              route: {
+                url: String(snapshot?.url || tab?.url || ""),
+                title: String(snapshot?.title || tab?.title || ""),
+                path: "",
+              },
+              material_integrity: pendingUploadIntegrity,
+              visible_lines: (snapshot?.lines || []).slice(0, 120),
+              actions,
+            });
+            return {
+              status: "processing",
+              result: buildCompositeUploadPendingProcessingEnvelope({
+                platform,
+                route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
+                actions,
+                material_integrity: pendingUploadIntegrity,
+                code: `${platform}_pre_publish_upload_pending`,
+                reason: "页面已挂载目标媒体，继续保留现场等待平台进入可编辑上传态。",
+                blockerMessage: `预发布等待上传完成：${pendingUploadIntegrity.verification_reason || "upload_ready"}`,
+                blockerDetails: `verification_reason=${pendingUploadIntegrity.verification_reason || "upload_not_ready"}`,
+                prepublishOnlyCurrentPage,
+                prepareOnlyCurrentPage,
+                stopBeforeFinalPublish,
+                interruptions,
+                content,
+              }),
+              error: null,
+            };
+          }
+        }
+      } else if (skipBilibiliUploadReadinessWait) {
+        actions.push({
+          kind: "bilibili_skip_upload_readiness_wait",
+          skipped: true,
+          reason: "bilibili_editor_surface_ready_during_upload",
+          upload_surface: bilibiliUploadSurfaceAfterAttach,
+        });
+      }
     }
     interruptions.push(...(await dismissInterruptions(client, tab, platform, "after_upload")));
     let platformVerifier = null;
     let bilibiliCoverAction = null;
     if (platform === "bilibili") {
-      const coverAction = await setBilibiliCoverImage(client, content.cover_path || content.copy_material?.cover_path || "");
-      bilibiliCoverAction = coverAction;
-      actions.push(coverAction);
-      platformVerifier = await setBilibiliDraftFields(client, content);
-      actions.push(platformVerifier);
+      const queueNormalization = await normalizeBilibiliUploadQueue(client, String(content?.title || "").trim()).catch(() => null);
+      if (queueNormalization) {
+        actions.push({ kind: "bilibili_upload_queue_normalized", ...queueNormalization });
+        if (Number(queueNormalization.removed || 0) > 0) {
+          await sleep(900);
+          snapshot = await pageSnapshot(client).catch(() => snapshot);
+        }
+      }
+      const initialIntegrity = await readCompositeMaterialIntegrity(client, platform, content).catch(() => null);
+      const initialChecklist = initialIntegrity?.fields && typeof initialIntegrity.fields === "object"
+        ? initialIntegrity.fields
+        : {};
+      const completionRequirements = compositePlatformCompletionRequirements(platform);
+      if (isBilibiliPageAlreadyPublishReady(initialChecklist, completionRequirements)) {
+        actions.push({
+          kind: "bilibili_page_already_publish_ready",
+          verified: true,
+          completion_requirements: completionRequirements,
+          fields: {
+            title: initialChecklist.title || null,
+            declaration: initialChecklist.declaration || null,
+            category: initialChecklist.category || null,
+            tags: initialChecklist.tags || null,
+            body: initialChecklist.body || null,
+            cover: initialChecklist.cover || null,
+            collection: initialChecklist.collection || null,
+            batch_dynamic_policy: initialChecklist.batch_dynamic_policy || null,
+            schedule: initialChecklist.schedule || null,
+            upload_ready: initialChecklist.upload_ready || null,
+          },
+        });
+        bilibiliCoverAction = {
+          field: "cover",
+          uploaded: Boolean(initialChecklist.cover?.verified),
+          skipped_because_already_correct: true,
+        };
+        platformVerifier = {
+          actual: {
+            blockers: [],
+          },
+          verified: true,
+          failures: [],
+          skipped_because_page_already_correct: true,
+        };
+      } else {
+      const uploadSurfaceBeforeFields = deriveBilibiliUploadSurfaceState(
+        String((snapshot?.lines || []).join(" ") || snapshot?.bodyText || ""),
+        snapshot?.lines || [],
+        mediaPath,
+      );
+      actions.push({ kind: "bilibili_upload_surface_before_fields", ...uploadSurfaceBeforeFields });
+      const bilibiliExpectedCoverSlots = resolveExpectedCoverSlotsForPlatform(platform, content);
+      const bilibiliPrimaryCoverPath = expectedPrimaryCoverPathForPlatform(platform, content)
+          || content.cover_path
+          || content.copy_material?.cover_path
+          || "";
+        const coverAction = await setBilibiliCoverImage(client, bilibiliExpectedCoverSlots, bilibiliPrimaryCoverPath);
+        bilibiliCoverAction = coverAction;
+        actions.push(coverAction);
+        platformVerifier = await setBilibiliDraftFields(client, content);
+        actions.push(platformVerifier);
+      }
     } else {
       reportTaskProgress({
         phase: "dispatch_platform_adapter",
@@ -13586,6 +24535,7 @@ function serializeTask(task) {
     publication_content_signature: identity.publication_content_signature || null,
     publication_plan_signature: identity.publication_plan_signature || null,
     recovery_mode: identity.recovery_mode || null,
+    session_binding: task.session_binding || null,
     status: task.status,
     created_at: task.created_at,
     updated_at: task.updated_at,
@@ -13652,6 +24602,7 @@ function updatePublicationTaskProgress(task, patch = {}) {
     ...mergePublicationTaskProgress(current, patch),
     updated_at: new Date().toISOString(),
   };
+  persistPublicationTask(task);
 }
 
 export function buildPublicationTaskTimeoutEvidence(task) {
@@ -13700,10 +24651,12 @@ function startPublicationTask(payload) {
   const taskId = String(payload.task_id || payload.id || randomUUID()).trim();
   const taskContent = coerceTaskContentWithRecoveryPayload(payload);
   const taskIdentity = extractPublicationTaskIdentity(payload, taskContent);
+  const sessionBinding = extractTaskSessionBinding(payload, taskContent);
   const task = {
     task_id: taskId,
     platform: normalizePlatform(payload.platform),
     profile_id: String(payload.profile_id || ""),
+    session_binding: sessionBinding,
     content: taskContent,
     identity: taskIdentity,
     reconcile_callback_url: String(payload.reconcile_callback_url || "").trim(),
@@ -13719,9 +24672,18 @@ function startPublicationTask(payload) {
     timeout_pending: false,
   };
   TASKS.set(taskId, task);
+  persistPublicationTask(task);
+  console.log(`[task:start] id=${taskId} platform=${task.platform} instance=${SERVICE_INSTANCE_ID} pid=${process.pid}`);
+  const bindingValidation = validateExpectedSessionBinding(sessionBinding, {
+    platform: task.platform,
+  });
+  if (!bindingValidation.ok) {
+    return buildTaskSessionBindingFailure(task, bindingValidation);
+  }
   queueMicrotask(async () => {
     task.status = "processing";
     task.updated_at = new Date().toISOString();
+    persistPublicationTask(task);
     try {
       const executionTimeout = derivePublicationTaskExecutionTimeoutMs(task);
       const executionPromise = (async () => {
@@ -13746,6 +24708,7 @@ function startPublicationTask(payload) {
           };
           task.timeout_pending = false;
           task.updated_at = new Date().toISOString();
+          persistPublicationTask(task);
         });
       const timedResult = await Promise.race([
         executionPromise,
@@ -13797,12 +24760,14 @@ function startPublicationTask(payload) {
             timeout_ms: executionTimeout,
           },
         };
+        persistPublicationTask(task);
       } else {
         const outcome = timedResult || {};
         task.timeout_pending = false;
         task.status = outcome.status || "needs_human";
         task.result = outcome.result || {};
         task.error = outcome.error || null;
+        persistPublicationTask(task);
       }
     } catch (error) {
       task.status = "failed";
@@ -13814,8 +24779,10 @@ function startPublicationTask(payload) {
           phase: error.publicationPhase || "unknown",
         },
       };
+      persistPublicationTask(task);
     } finally {
       task.updated_at = new Date().toISOString();
+      persistPublicationTask(task);
       schedulePublicationTaskReconcileCallback(task);
     }
   });
@@ -13842,10 +24809,16 @@ async function probeTabInventory(tab, platform, payload) {
   const contentSample = payload.content_sample && typeof payload.content_sample === "object" ? payload.content_sample : {};
   const mediaPath = String(contentSample.media_path || "").trim();
   const recoveryContext = _extract_publication_recovery_context(contentSample);
-  const allowDraftUpload = String(payload.mode || "").includes("draft_upload") && mediaPath;
+  const requestedDraftUpload = String(payload.mode || "").includes("draft_upload") && mediaPath;
+  const allowDraftUpload = Boolean(requestedDraftUpload && !platformUsesSingleVideoUploadPath(platform));
   const summaryOnly = Boolean(payload.summary_only);
   const forceUploadRefresh = Boolean(allowDraftUpload && (recoveryContext.clear_draft_context || recoveryContext.force_publish_page_refresh));
-  let upload = { uploaded: false, reason: allowDraftUpload ? "not_attempted" : "upload_probe_not_requested" };
+  let upload = {
+    uploaded: false,
+    reason: allowDraftUpload
+      ? "not_attempted"
+      : (requestedDraftUpload ? "probe_draft_upload_disabled_for_single_path_platform" : "upload_probe_not_requested"),
+  };
   try {
     interruptions.push(...(await dismissInterruptions(client, tab, platform, "before_probe")));
     if (summaryOnly) {
@@ -13858,7 +24831,7 @@ async function probeTabInventory(tab, platform, payload) {
       ) {
         const routeAction = await ensurePlatformPublishRoute(client, tab, platform, {
           force_publish_page_refresh: true,
-          prefer_draft_list_surface: platform === "youtube",
+          prefer_draft_list_surface: false,
         }).catch((error) => ({
           navigated: false,
           verified: false,
@@ -13868,6 +24841,7 @@ async function probeTabInventory(tab, platform, payload) {
         actions.push({ kind: "probe_summary_route_bootstrap", ...routeAction });
         if (routeAction?.navigated || routeAction?.verified) {
           await sleep(1600);
+          interruptions.push(...(await dismissInterruptions(client, tab, platform, "after_probe_route_bootstrap")));
           summarySnapshot = await pageSnapshot(client);
         }
       }
@@ -13907,7 +24881,13 @@ async function probeTabInventory(tab, platform, payload) {
     }
     if (platform === "youtube" && allowDraftUpload) {
       interruptions.push(...(await dismissInterruptions(client, tab, platform, "before_youtube_create")));
-      actions.push(await clickByText(client, ["创建", "上传视频", "Upload videos", "CREATE"]));
+      const createFlow = await forceYouTubeCreateUploadFlow(client).catch((error) => ({
+        clicked: false,
+        actions: [{ kind: "youtube_create_flow_error", reason: String(error?.message || error || "") }],
+        state: null,
+      }));
+      actions.push({ kind: "youtube_create_flow_probe", clicked: Boolean(createFlow.clicked), state: createFlow.state || null });
+      if (Array.isArray(createFlow.actions)) actions.push(...createFlow.actions);
       await sleep(2500);
       interruptions.push(...(await dismissInterruptions(client, tab, platform, "after_youtube_create")));
     }
@@ -13943,13 +24923,24 @@ async function probeTabInventory(tab, platform, payload) {
     }
     if (allowDraftUpload && (forceUploadRefresh || !pageAlreadyHasMedia(current, mediaPath))) {
       interruptions.push(...(await dismissInterruptions(client, tab, platform, "before_file_upload")));
-      upload = await setFirstVideoFileInput(client, mediaPath);
-      if (!upload.uploaded) {
+      upload = await setFirstVideoFileInput(client, mediaPath, { platform });
+      const allowSecondaryUploadEntry = platform !== "bilibili";
+      if (!upload.uploaded && allowSecondaryUploadEntry) {
         interruptions.push(...(await dismissInterruptions(client, tab, platform, "before_upload_button")));
-        actions.push(await clickByText(client, ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择", "Upload videos", "Select files", "发布视频"]));
+        if (platform === "youtube") {
+          const createFlow = await forceYouTubeCreateUploadFlow(client).catch((error) => ({
+            clicked: false,
+            actions: [{ kind: "youtube_create_flow_error", reason: String(error?.message || error || "") }],
+            state: null,
+          }));
+          actions.push({ kind: "youtube_create_flow_secondary", clicked: Boolean(createFlow.clicked), state: createFlow.state || null });
+          if (Array.isArray(createFlow.actions)) actions.push(...createFlow.actions);
+        } else {
+          actions.push(await clickByText(client, ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择", "Upload videos", "Select files", "发布视频"]));
+        }
         await sleep(2500);
         interruptions.push(...(await dismissInterruptions(client, tab, platform, "after_upload_button")));
-        upload = await setFirstVideoFileInput(client, mediaPath);
+        upload = await setFirstVideoFileInput(client, mediaPath, { platform });
       }
       await sleep(upload.uploaded ? 18000 : 3000);
       interruptions.push(...(await dismissInterruptions(client, tab, platform, "after_file_upload")));
@@ -14275,7 +25266,7 @@ function buildInventory(platform, tab, snapshot, probeMeta = {}) {
   const routeReadiness = deriveProbeInventoryRouteReadiness(platform, snapshot);
   const effectiveCoverage = routeReadiness.reason === "publish_route_upload_prompt"
     ? { ...coverage, missing_required_surfaces: [] }
-    : coverage;
+    : relaxYouTubeEditorLazySurfaceCoverage(platform, coverage, snapshot, optionGroups, fieldGroups);
   const evidence = buildInventoryEvidence(platform, {
     dom: domOptionGroups,
     controls: domControlGroups,
@@ -14284,13 +25275,7 @@ function buildInventory(platform, tab, snapshot, probeMeta = {}) {
     fieldGroups,
     lines,
   });
-  const operationSteps = (PLATFORM_STEPS[platform] || [
-    "打开平台创作/发布页",
-    "上传视频和封面",
-    "填写标题、正文、标签",
-    "选择平台真实可见的合集、分类、声明和定时设置",
-    "发布前再次验证页面和字段变化",
-  ]).map((label, index) => ({ index: index + 1, label }));
+  const operationSteps = compositePlatformOperationSteps(platform);
 
   if (platform === "youtube" && lines.some((line) => /功能受限|已停用评论|已停用通知|COPPA|儿童/.test(line))) {
     warnings.push("YouTube 页面显示功能受限/COPPA/评论或通知限制，发布方案必须保留并处理该限制。");
@@ -14350,7 +25335,7 @@ export function buildLightweightProbeInventorySummary(platform, tab, snapshot, p
   const routeReadiness = deriveProbeInventoryRouteReadiness(platform, snapshot);
   const effectiveCoverage = routeReadiness.reason === "publish_route_upload_prompt"
     ? { ...coverage, missing_required_surfaces: [] }
-    : coverage;
+    : relaxYouTubeEditorLazySurfaceCoverage(platform, coverage, snapshot, domOptionGroups, fieldGroups);
   const warnings = [];
   if (routeReadiness.blocked) {
     warnings.push(
@@ -14381,7 +25366,7 @@ export function buildLightweightProbeInventorySummary(platform, tab, snapshot, p
     route_readiness: routeReadiness,
     coverage: effectiveCoverage,
     warnings: warnings.slice(0, 20),
-    operation_steps: (PLATFORM_STEPS[platform] || []).slice(0, 20).map((label, index) => ({ index: index + 1, label })),
+    operation_steps: compositePlatformOperationSteps(platform).slice(0, 20),
     visual_evidence: normalizeVisualEvidence(snapshot?.visual_evidence),
     probe_meta: {
       summary_only: true,
@@ -14564,11 +25549,7 @@ const PLATFORM_REQUIRED_SURFACES = {
   ],
   kuaishou: [
     { key: "cover", label: "封面", pattern: /封面|cover/i },
-    { key: "topics", label: "标签/话题", pattern: /标签|话题|#|tag/i },
-    { key: "category", label: "作品分类", pattern: /作品分类|分类/i },
     { key: "collection", label: "合集/合集目录", pattern: /合集|collection/i },
-    { key: "declaration", label: "作者服务/声明", pattern: /作者服务|声明|原创|权益/i },
-    { key: "visibility", label: "查看权限", pattern: /所有人可见|好友可见|仅自己可见|查看权限/i },
     { key: "schedule", label: "发布时间", pattern: /定时发布|立即发布|发布时间/i },
   ],
   youtube: [
@@ -14632,6 +25613,59 @@ function buildProbeCoverage(platform, optionGroups, lines, fieldGroups) {
   };
 }
 
+function relaxYouTubeEditorLazySurfaceCoverage(platform, coverage, snapshot = {}, optionGroups = [], fieldGroups = []) {
+  if (normalizePlatform(platform) !== "youtube" || !coverage || typeof coverage !== "object") {
+    return coverage;
+  }
+  const routeUrl = String(snapshot?.url || "").trim();
+  const lineText = Array.isArray(snapshot?.lines)
+    ? snapshot.lines.map((line) => String(line || "").trim()).filter(Boolean).join("\n")
+    : String(snapshot?.text || "").trim();
+  if (!isYouTubeEditorReadinessSurface(routeUrl, lineText)) {
+    return coverage;
+  }
+  const visibleKeys = new Set([
+    ...((optionGroups || []).map((group) => String(group?.key || "").trim()).filter(Boolean)),
+    ...((fieldGroups || []).map((group) => String(group?.key || "").trim()).filter(Boolean)),
+  ]);
+  const hasEditorSettingsContext =
+    visibleKeys.has("youtube_publish_settings")
+    || visibleKeys.has("youtube_visibility")
+    || visibleKeys.has("youtube_playlists")
+    || visibleKeys.has("youtube_category_language")
+    || visibleKeys.has("youtube_restrictions")
+    || /视频详细信息|说明|播放列表|公开范围|限制|字幕|语言|类别|playlist|visibility|restrictions|subtitles/i.test(lineText);
+  if (!hasEditorSettingsContext) {
+    return coverage;
+  }
+  const downgradeableMissing = new Set(["thumbnail", "audience"]);
+  const missingKeys = new Set(
+    (coverage.missing_required_surfaces || [])
+      .map((surface) => String(surface?.key || "").trim())
+      .filter(Boolean),
+  );
+  if (!missingKeys.size || [...missingKeys].some((key) => !downgradeableMissing.has(key))) {
+    return coverage;
+  }
+  const requiredSurfaces = (coverage.required_surfaces || []).map((surface) => {
+    const key = String(surface?.key || "").trim();
+    if (!downgradeableMissing.has(key) || surface?.status !== "missing") {
+      return surface;
+    }
+    return {
+      ...surface,
+      status: "surface_seen_without_options",
+      inferred_from: "youtube_editor_lazy_surface",
+    };
+  });
+  return {
+    ...coverage,
+    required_surfaces: requiredSurfaces,
+    missing_required_surfaces: requiredSurfaces.filter((surface) => surface.status === "missing"),
+    partial_required_surfaces: requiredSurfaces.filter((surface) => surface.status === "surface_seen_without_options"),
+  };
+}
+
 export function deriveProbeInventoryRouteReadiness(platform, snapshot = {}) {
   const normalizedPlatform = normalizePlatform(platform);
   const lines = Array.isArray(snapshot?.lines) ? snapshot.lines.map((line) => String(line || "").trim()).filter(Boolean) : [];
@@ -14651,6 +25685,11 @@ export function deriveProbeInventoryRouteReadiness(platform, snapshot = {}) {
   const xiaohongshuVideoUploadEntry = normalizedPlatform === "xiaohongshu"
     && isXiaohongshuVideoUploadEntrySurface(routeUrl, bodyText);
   const draftResume = deriveCurrentPageDraftResumeDisposition(normalizedPlatform, bodyText);
+  const youtubeEditorSurfaceActive = normalizedPlatform === "youtube"
+    && isYouTubeEditorReadinessSurface(routeUrl, bodyText);
+  const youtubeEditorSurfaceWithPassiveDraftBanner = normalizedPlatform === "youtube"
+    && youtubeEditorSurfaceActive
+    && ["uploaded_draft_row", "youtube_recent_uploads_overlay"].includes(String(draftResume.reason || "").trim());
   const routeReady = isCompositePublishRouteContext(normalizedPlatform, {
     url: routeUrl,
     text: bodyText,
@@ -14679,7 +25718,7 @@ export function deriveProbeInventoryRouteReadiness(platform, snapshot = {}) {
       loading_surface: true,
     };
   }
-  if (draftResume.present) {
+  if (draftResume.present && !youtubeEditorSurfaceWithPassiveDraftBanner) {
     return {
       blocked: true,
       status: "route_not_ready",
@@ -14766,8 +25805,12 @@ function buildOptionGroups(platform, elements, lines) {
   const selectOptions = elements.flatMap((element) => element.options || []);
   add("select_options", "页面 select 控件选项", selectOptions);
   if (platform !== "douyin") {
-    add("collections", "合集/栏目/播放列表", contextOptions(lines, /合集|栏目|专辑|播放列表|playlist|album/i));
-    add("categories", "分类/分区", contextOptions(lines, /分类|分区|品类|category|section|partition/i));
+    if (platform === "youtube") {
+      add("collections", "合集/栏目/播放列表", extractYouTubePlaylistOptions(lines));
+    } else {
+      add("collections", "合集/栏目/播放列表", contextOptions(lines, /合集|栏目|专辑|播放列表|playlist|album/i));
+      add("categories", "分类/分区", contextOptions(lines, /分类|分区|品类|category|section|partition/i));
+    }
   }
   if (platform !== "xiaohongshu" && platform !== "douyin") {
     add("declarations", "声明/权益/内容类型", contextOptions(lines, /声明|原创|权益|AI|合成|广告|营销|儿童|COPPA|declaration|statement|rights/i));
@@ -14858,7 +25901,7 @@ function buildOptionGroups(platform, elements, lines) {
     add("douyin_official_activities", "抖音官方活动", officialActivities);
   }
   if (platform === "youtube") {
-    add("youtube_playlists", "YouTube播放列表", contextOptions(lines, /播放列表|playlist/i));
+    add("youtube_playlists", "YouTube播放列表", extractYouTubePlaylistOptions(lines));
     add("youtube_audience", "YouTube受众/COPPA", contextOptions(lines, /儿童|面向儿童|COPPA|audience|kids/i));
     add("youtube_visibility", "YouTube公开范围", contextOptions(lines, /公开|私享|不公开|visibility|public|private|unlisted/i));
     add("youtube_restrictions", "YouTube限制/通知评论", lines.filter((line) => /功能受限|停用评论|停用通知|评论|通知|限制/i.test(line)));
@@ -15037,6 +26080,41 @@ function contextOptions(lines, pattern) {
   return options;
 }
 
+function extractYouTubePlaylistOptions(lines) {
+  const blockedExact = new Set([
+    "playlist",
+    "playlists",
+    "播放列表",
+    "上传视频",
+    "开始直播",
+    "发帖",
+    "新建播放列表",
+    "新建播客",
+  ]);
+  const blockedMarkers = ["上传视频", "开始直播", "发帖", "新建播放列表", "新建播客"];
+  const options = [];
+  const isNoise = (raw) => {
+    const option = String(raw || "").trim();
+    if (!option) return true;
+    if (blockedExact.has(option.toLowerCase()) || blockedExact.has(option)) return true;
+    if (/观众|受众|儿童|coppa|字幕|语言|类别|分类|公开范围|视频链接|评论|通知|限制/i.test(option)) return true;
+    const markerMatches = blockedMarkers.filter((marker) => option.includes(marker)).length;
+    return markerMatches >= 2;
+  };
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = String(lines[index] || "").trim();
+    if (!/播放列表|playlist/i.test(line) || isNoise(line)) continue;
+    if (!/^(播放列表|playlist)\b/i.test(line) && !/^播放列表[:：]/i.test(line)) continue;
+    for (const nearby of lines.slice(index + 1, index + 8)) {
+      const option = String(nearby || "").trim();
+      if (!option || isNoise(option)) continue;
+      if (/保存|取消|确定|下一步|上一步|上传|公开范围|观众|受众/i.test(option) && option.length < 12) continue;
+      options.push(option);
+    }
+  }
+  return unique(options);
+}
+
 function unique(values) {
   const seen = new Set();
   const output = [];
@@ -15096,7 +26174,7 @@ async function handleProbe(payload) {
       contract: CONTRACT,
       status: "unavailable",
       code: "cdp_unavailable",
-      message: `无法连接浏览器 CDP：${error.message}。请用 --remote-debugging-port=9222 启动已登录浏览器，或设置 PUBLICATION_BROWSER_CDP_URL。`,
+      message: `无法连接真实 Chrome 发布会话：${error.message}。请在目标 Chrome profile 中安装并启用 publication bridge 扩展，然后保持该浏览器窗口处于已登录状态。`,
       generated_at: new Date().toISOString(),
       platforms: Object.fromEntries(
         requestedPlatforms.map((platform) => [
@@ -15237,21 +26315,19 @@ function sidecarOptionGroupsForMerge(platform, tab, groups) {
 
 export function buildPublicationHealthPayload({ cdpStatus = "ok", cdpError = "", creatorSessions = {} } = {}) {
   const normalizedCreatorSessions = creatorSessions && typeof creatorSessions === "object" ? creatorSessions : {};
+  const bridgeTarget = bridgeTargetDescriptor();
   return {
     status: "ok",
     contract: CONTRACT,
-    cdp_url: CDP_URL,
+    service_instance_id: SERVICE_INSTANCE_ID,
+    service_started_at: SERVICE_STARTED_AT,
+    pid: process.pid,
+    cdp_url: bridgeTarget.endpoint,
     cdp_status: cdpStatus,
     cdp_error: cdpError,
+    browser_transport: bridgeTarget,
     service_script_sha256: SERVICE_SCRIPT_SHA256,
-    attached_profile_binding: ATTACHED_PROFILE_ID
-      ? {
-          browser: ATTACHED_BROWSER,
-          user_data_dir: normalizeProfilePath(ATTACHED_USER_DATA_DIR),
-          profile_directory: ATTACHED_PROFILE_DIRECTORY,
-          profile_id: ATTACHED_PROFILE_ID,
-        }
-      : null,
+    attached_profile_binding: attachedProfileBinding(),
     capabilities: {
       inventory_probe: true,
       publication_tasks: true,
@@ -15260,6 +26336,7 @@ export function buildPublicationHealthPayload({ cdpStatus = "ok", cdpError = "",
       task_identity_contract: PUBLICATION_TASK_IDENTITY_CONTRACT,
       creator_session_probe: true,
       creator_session_contract: PUBLICATION_CREATOR_SESSION_CONTRACT,
+      creator_session_binding_contract: PUBLICATION_SESSION_BINDING_CONTRACT,
       live_publish: LIVE_PUBLISH_ENABLED && FINAL_PUBLISH_EXECUTOR_IMPLEMENTED,
       final_publish_executor: FINAL_PUBLISH_EXECUTOR_IMPLEMENTED,
       final_publish_platforms: [...FINAL_PUBLISH_PLATFORMS],
@@ -15271,6 +26348,9 @@ export function buildPublicationHealthPayload({ cdpStatus = "ok", cdpError = "",
       auto_create_platform_tabs: Boolean(ALLOW_PUBLICATION_TAB_AUTOCREATE),
       profile_binding_mode: ATTACHED_PROFILE_ID ? "persistent_profile" : "cdp_only",
       reusable_profile_ids: ATTACHED_PROFILE_ID ? [ATTACHED_PROFILE_ID] : [],
+      session_binding_enforced: true,
+      browser_transport_kind: BROWSER_TRANSPORT_KIND,
+      browser_extension_bridge: true,
     },
     creator_sessions: normalizedCreatorSessions,
   };
@@ -15279,6 +26359,74 @@ export function buildPublicationHealthPayload({ cdpStatus = "ok", cdpError = "",
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
+    if (req.method === "OPTIONS") {
+      jsonResponse(res, 200, { ok: true });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/bridge/hello") {
+      const payload = await readRequestJson(req);
+      const client = upsertBridgeClient(payload.client_id, payload);
+      console.log(`[bridge:hello] client=${client.client_id} version=${client.extension_version || ""}`);
+      jsonResponse(res, 200, {
+        ok: true,
+        transport: BROWSER_TRANSPORT_KIND,
+        client,
+      });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/bridge/next") {
+      const clientId = normalizeBridgeClientId(url.searchParams.get("client_id") || "");
+      if (!clientId) {
+        jsonResponse(res, 400, { ok: false, error: "bridge_client_id_missing" });
+        return;
+      }
+      upsertBridgeClient(clientId, {});
+      const timeoutMs = Math.max(250, Number(url.searchParams.get("timeout_ms") || BRIDGE_LONG_POLL_TIMEOUT_MS));
+      const command = await waitForBridgeCommand(clientId);
+      console.log(
+        command
+          ? `[bridge:next] client=${clientId} request=${String(command.request_id || "")} type=${String(command.type || "")}`
+          : `[bridge:next] client=${clientId} idle timeout_ms=${timeoutMs}`,
+      );
+      jsonResponse(res, 200, { ok: true, command });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/bridge/result") {
+      const payload = await readRequestJson(req);
+      const clientId = normalizeBridgeClientId(payload.client_id);
+      if (clientId) upsertBridgeClient(clientId, payload);
+      const requestId = String(payload.request_id || "").trim();
+      const pending = requestId ? BRIDGE_PENDING_RESPONSES.get(requestId) : null;
+      if (!pending) {
+        jsonResponse(res, 404, { ok: false, error: "bridge_request_not_found" });
+        return;
+      }
+      BRIDGE_PENDING_RESPONSES.delete(requestId);
+      console.log(
+        payload.ok === false
+          ? `[bridge:result] client=${clientId} request=${requestId} error=${String(payload.error || "")}`
+          : `[bridge:result] client=${clientId} request=${requestId} ok`,
+      );
+      if (payload.ok === false) pending.reject(new Error(String(payload.error || "bridge_command_failed")));
+      else pending.resolve(payload.result);
+      jsonResponse(res, 200, { ok: true });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/bridge/event") {
+      const payload = await readRequestJson(req);
+      const clientId = normalizeBridgeClientId(payload.client_id);
+      if (clientId) upsertBridgeClient(clientId, payload);
+      dispatchBridgeEvent(payload.tab_id, payload.method, payload.params && typeof payload.params === "object" ? payload.params : {});
+      jsonResponse(res, 200, { ok: true });
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/bridge/dev-state") {
+      jsonResponse(res, 200, {
+        ok: true,
+        ...readBridgeExtensionDevState(),
+      });
+      return;
+    }
     if (req.method === "GET" && url.pathname === "/healthz") {
       let cdpStatus = "ok";
       let cdpError = "";
@@ -15290,10 +26438,30 @@ const server = http.createServer(async (req, res) => {
           .split(",")
           .map(normalizePlatform)
           .filter(Boolean);
+        const targetProfileIds = String(url.searchParams.get("target_profile_ids") || "")
+          .split(",")
+          .map((item) => String(item || "").trim())
+          .filter(Boolean);
+        let requestedSessionBindings = {};
+        const rawSessionBindings = String(url.searchParams.get("session_bindings") || "").trim();
+        if (rawSessionBindings) {
+          try {
+            const parsed = JSON.parse(rawSessionBindings);
+            requestedSessionBindings = parsed && typeof parsed === "object" ? parsed : {};
+          } catch {
+            requestedSessionBindings = {};
+          }
+        }
         if (shouldCheckSession && requestedPlatforms.length) {
           creatorSessions = Object.fromEntries(
             await Promise.all(
-              requestedPlatforms.map(async (platform) => [platform, await probeCreatorSession(platform)]),
+              requestedPlatforms.map(async (platform) => [
+                platform,
+                await probeCreatorSession(platform, {
+                  target_profile_ids: targetProfileIds,
+                  session_binding: requestedSessionBindings[platform],
+                }),
+              ]),
             ),
           );
         }
@@ -15327,6 +26495,13 @@ const server = http.createServer(async (req, res) => {
       const taskId = decodeURIComponent(url.pathname.slice("/tasks/".length));
       const task = TASKS.get(taskId);
       if (!task) {
+        const persistedTask = loadPersistedPublicationTask(taskId);
+        if (persistedTask) {
+          console.log(`[task:restore] id=${taskId} instance=${SERVICE_INSTANCE_ID} pid=${process.pid}`);
+          jsonResponse(res, 200, { task: persistedTask, restored_from_disk: true });
+          return;
+        }
+        console.warn(`[task:missing] id=${taskId} instance=${SERVICE_INSTANCE_ID} pid=${process.pid}`);
         jsonResponse(res, 404, { status: "not_found", message: `task ${taskId} not found` });
         return;
       }
@@ -15342,6 +26517,6 @@ const server = http.createServer(async (req, res) => {
 if (IS_MAIN) {
   server.listen(PORT, HOST, () => {
     console.log(`publication browser-agent inventory service listening on http://${HOST}:${PORT}`);
-    console.log(`CDP target: ${CDP_URL}`);
+    console.log(`browser transport: ${BROWSER_TRANSPORT_KIND} (${BRIDGE_VIRTUAL_CDP_URL})`);
   });
 }

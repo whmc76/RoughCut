@@ -230,3 +230,42 @@ def test_quality_assessment_exposes_refine_decision_summary_signal() -> None:
         "candidate_auto_apply": 4,
         "candidate_manual_confirm": 2,
     }
+
+
+def test_quality_assessment_flags_multimodal_trim_review_timeout() -> None:
+    job = Job(
+        source_path="F:/clips/demo.mp4",
+        source_name="demo.mp4",
+        status="done",
+    )
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=[],
+        artifacts=[
+            Artifact(
+                artifact_type="variant_timeline_bundle",
+                data_json={
+                    "variants": {"plain": {"segments": []}},
+                    "timeline_rules": {
+                        "diagnostics": {
+                            "multimodal_trim_review_summary": {
+                                "candidate_count": 3,
+                                "pending_count": 3,
+                                "error": "multimodal_trim_review_timeout",
+                            }
+                        }
+                    },
+                },
+            )
+        ],
+        subtitle_items=[_subtitle(0, "演示开场"), _subtitle(1, "继续说明")],
+        completion_candidate=True,
+    )
+
+    assert "multimodal_trim_review_timeout" in assessment["issue_codes"]
+    assert assessment["signals"]["multimodal_trim_review_summary"] == {
+        "candidate_count": 3,
+        "pending_count": 3,
+        "error": "multimodal_trim_review_timeout",
+    }

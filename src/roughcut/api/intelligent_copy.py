@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
-import subprocess
+import traceback
 import uuid
 from datetime import datetime, timezone
 from types import SimpleNamespace
@@ -41,6 +42,14 @@ from roughcut.config import get_settings
 from roughcut.host.codex_proxy import resolve_codex_proxy_sibling_url, resolve_codex_proxy_token
 from roughcut.db.models import Job, RenderOutput
 from roughcut.db.session import get_session
+from roughcut.host.file_manager import can_open_in_file_manager, describe_file_manager_target, open_in_file_manager
+from roughcut.intelligent_copy_layout import (
+    resolve_smart_copy_material_json_path,
+    resolve_smart_copy_platform_packaging_json_path,
+    smart_copy_cover_dir,
+)
+from roughcut.media.probe import probe as probe_media
+from roughcut.media.probe import publication_upload_compatibility
 from roughcut.pipeline.celery_app import celery_app
 from roughcut.publication import (
     active_publication_credentials,
@@ -66,6 +75,7 @@ from roughcut.review.intelligent_copy import (
 )
 
 router = APIRouter(prefix="/intelligent-copy", tags=["intelligent-copy"])
+logger = logging.getLogger(__name__)
 _GENERATION_TASKS: dict[str, asyncio.Task] = {}
 _GENERATION_TASK_STORE_LOCK = RLock()
 _GENERATION_TASK_STORE_PATH = Path("data/intelligent_copy/generation_tasks.json")
@@ -148,6 +158,17 @@ def _material_contract_status(result_contract: dict[str, Any]) -> str:
 
 
 def _derive_generation_task_terminal_patch(result: dict[str, Any]) -> dict[str, Any]:
+    material_generation_contract = (
+        result.get("material_generation_contract")
+        if isinstance(result.get("material_generation_contract"), dict)
+        else {}
+    )
+    generation_contract_status = str(material_generation_contract.get("status") or "").strip().lower()
+    generation_ready = (
+        bool(material_generation_contract.get("generation_ready"))
+        if material_generation_contract
+        else bool(result.get("material_generation_ready"))
+    )
     material_contract = result.get("material_contract") if isinstance(result.get("material_contract"), dict) else {}
     contract_status = _material_contract_status(material_contract)
     contract_present = bool(material_contract)
@@ -189,6 +210,16 @@ def _derive_generation_task_terminal_patch(result: dict[str, Any]) -> dict[str, 
             else bool(result.get("publish_ready"))
         )
     )
+    if generation_ready and generation_contract_status in {"", "passed", "completed"} and not publish_ready and not manual_handoff_ready:
+        message = "物料生成完成，但一键发布仍有阻断项。"
+        if blocking_reasons:
+            message = f"{message} 当前阻断：{'；'.join(blocking_reasons[:3])}。"
+        return {
+            "status": "completed",
+            "stage": "completed",
+            "message": message,
+            "error": None,
+        }
     if publish_ready:
         return {
             "status": "completed",
@@ -420,13 +451,21 @@ async def get_intelligent_publish_plan(body: IntelligentPublishIn, session: Asyn
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     existing_attempts = await _list_existing_intelligent_publish_attempts(session, plan_inputs["job"])
+    platform_options = await _resolve_intelligent_publish_platform_options(
+        requested_platform_options=body.platform_options,
+        plan_inputs=plan_inputs,
+        requested_platforms=body.platforms,
+        existing_attempts=existing_attempts,
+        folder_path=body.folder_path,
+    )
     return build_publication_plan(
         job=plan_inputs["job"],
         render_output=plan_inputs["render_output"],
+        source_media_path=plan_inputs.get("source_video_path"),
         platform_packaging=plan_inputs["packaging"],
         creator_profile=plan_inputs["creator_profile"],
         requested_platforms=body.platforms,
-        platform_options=body.platform_options,
+        platform_options=platform_options,
         existing_attempts=existing_attempts,
     )
 
@@ -481,14 +520,23 @@ async def publish_intelligent_folder(body: IntelligentPublishIn, session: AsyncS
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    existing_attempts = await list_publication_attempts(session, job_id=str(plan_inputs["job"].id))
+    platform_options = await _resolve_intelligent_publish_platform_options(
+        requested_platform_options=body.platform_options,
+        plan_inputs=plan_inputs,
+        requested_platforms=body.platforms,
+        existing_attempts=existing_attempts,
+        folder_path=body.folder_path,
+    )
     plan = build_publication_plan(
         job=plan_inputs["job"],
         render_output=plan_inputs["render_output"],
+        source_media_path=plan_inputs.get("source_video_path"),
         platform_packaging=plan_inputs["packaging"],
         creator_profile=plan_inputs["creator_profile"],
         requested_platforms=body.platforms,
-        platform_options=body.platform_options,
-        existing_attempts=await list_publication_attempts(session, job_id=str(plan_inputs["job"].id)),
+        platform_options=platform_options,
+        existing_attempts=existing_attempts,
     )
     if not publication_plan_is_publishable(plan):
         return _build_publication_executor_gate_response(plan)
@@ -519,25 +567,63 @@ async def publish_intelligent_folder(body: IntelligentPublishIn, session: AsyncS
     return result
 
 
+def _normalize_publish_platform_options_payload(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict):
+        return {}
+    normalized: dict[str, dict[str, Any]] = {}
+    for raw_key, raw_value in value.items():
+        if not isinstance(raw_value, dict):
+            continue
+        key = str(raw_key or "").strip().lower().replace("_", "-")
+        if key:
+            normalized[key] = dict(raw_value)
+    return normalized
+
+
+async def _resolve_intelligent_publish_platform_options(
+    *,
+    requested_platform_options: Any,
+    plan_inputs: dict[str, Any],
+    requested_platforms: list[str] | None,
+    existing_attempts: list[dict[str, Any]],
+    folder_path: str,
+) -> dict[str, dict[str, Any]]:
+    explicit_options = _normalize_publish_platform_options_payload(requested_platform_options)
+    if explicit_options:
+        return explicit_options
+    base_plan = build_publication_plan(
+        job=plan_inputs["job"],
+        render_output=plan_inputs["render_output"],
+        source_media_path=plan_inputs.get("source_video_path"),
+        platform_packaging=plan_inputs["packaging"],
+        creator_profile=plan_inputs["creator_profile"],
+        requested_platforms=requested_platforms,
+        platform_options=None,
+        existing_attempts=existing_attempts,
+    )
+    if not list(base_plan.get("targets") or []):
+        return {}
+    scheme = await generate_publication_scheme(
+        plan=base_plan,
+        creator_profile=plan_inputs["creator_profile"],
+        folder_path=str(folder_path or ""),
+        browser="chrome",
+        force_probe=False,
+    )
+    return _normalize_publish_platform_options_payload(scheme.get("platform_options"))
+
+
 @router.post("/open-folder", response_model=OpenFolderOut)
 def open_folder(body: IntelligentCopyInspectIn):
-    target_path = Path(str(body.folder_path or "").strip()).expanduser()
-    if not target_path.exists():
+    target_path = str(body.folder_path or "").strip()
+    if not can_open_in_file_manager(target_path):
         raise HTTPException(status_code=404, detail="目录不存在。")
     try:
-        _open_in_file_manager(target_path)
+        open_in_file_manager(target_path)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"打开文件夹失败：{exc}") from exc
-    kind = "file" if target_path.is_file() else "folder"
-    return OpenFolderOut(path=str(target_path.resolve()), kind=kind)
-
-
-def _open_in_file_manager(target_path: Path) -> None:
-    resolved = target_path.resolve()
-    if resolved.is_file():
-        subprocess.Popen(["explorer", "/select,", str(resolved)])
-        return
-    subprocess.Popen(["explorer", str(resolved)])
+    resolved_path, kind = describe_file_manager_target(target_path)
+    return OpenFolderOut(path=resolved_path, kind=kind)
 
 
 def _now_iso() -> str:
@@ -662,7 +748,18 @@ def _list_codex_imagegen_requests(material_dir: Path) -> list[dict[str, Any]]:
     if not material_dir.exists() or not material_dir.is_dir():
         return []
     requests: list[dict[str, Any]] = []
-    for path in sorted(material_dir.glob("*.codex-imagegen.json")):
+    request_paths: list[Path] = []
+    seen: set[Path] = set()
+    for search_dir in (smart_copy_cover_dir(material_dir), material_dir):
+        if not search_dir.exists() or not search_dir.is_dir():
+            continue
+        for path in sorted(search_dir.glob("*.codex-imagegen.json")):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            request_paths.append(path)
+    for path in request_paths:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except Exception as exc:
@@ -890,6 +987,8 @@ async def _run_generation_task(
             },
         )
     except Exception as exc:
+        logger.exception("Intelligent copy generation task failed", extra={"task_id": task_id, "folder_path": folder_path})
+        traceback.print_exc()
         _mark_generation_task_failed(task_id, str(exc))
     finally:
         _GENERATION_TASKS.pop(task_id, None)
@@ -1054,27 +1153,30 @@ async def _load_intelligent_publish_inputs(
     processing_folder = Path(str(inspection.get("material_dir") or "")).parent
     if not str(processing_folder) or str(processing_folder) == ".":
         processing_folder = Path(str(inspection["folder_path"]))
+    publish_video_path = await _resolve_publish_source_media_path(video_path=video_path)
     packaging = _load_intelligent_copy_packaging(processing_folder)
     if packaging is None and task_snapshot is not None:
         packaging = _load_intelligent_copy_packaging_from_task_snapshot(task_snapshot)
     creator_profile = _resolve_intelligent_publish_creator_profile(creator_profile_id)
     if materialize_job:
-        job = await _get_or_create_intelligent_publish_job(session, video_path=video_path, folder_path=processing_folder)
-        render_output = await _get_or_create_intelligent_publish_render_output(session, job=job, video_path=video_path)
+        job = await _get_or_create_intelligent_publish_job(session, video_path=publish_video_path, folder_path=processing_folder)
+        render_output = await _get_or_create_intelligent_publish_render_output(session, job=job, video_path=publish_video_path)
     else:
-        job = await _find_existing_intelligent_publish_job(session, video_path=video_path)
+        job = await _find_existing_intelligent_publish_job(session, video_path=publish_video_path)
         if job is None:
             job = SimpleNamespace(
-                id=uuid.uuid5(uuid.NAMESPACE_URL, f"roughcut:intelligent-publish:{_stable_publish_path(video_path)}"),
+                id=uuid.uuid5(uuid.NAMESPACE_URL, f"roughcut:intelligent-publish:{_stable_publish_path(publish_video_path)}"),
                 status="done",
-                source_name=video_path.name,
+                source_name=publish_video_path.name,
             )
-        render_output = SimpleNamespace(output_path=_stable_publish_path(video_path))
+        render_output = SimpleNamespace(output_path=_stable_publish_path(publish_video_path))
     return {
         "job": job,
         "render_output": render_output,
         "packaging": packaging,
         "creator_profile": creator_profile,
+        "publish_video_path": str(publish_video_path),
+        "source_video_path": str(video_path),
     }
 
 
@@ -1098,6 +1200,18 @@ def _stable_publish_path(path: Path) -> str:
     except OSError:
         pass
     return str(path)
+
+
+async def _resolve_publish_source_media_path(*, video_path: Path) -> Path:
+    source_path = video_path.expanduser()
+    source_meta = await probe_media(source_path)
+    compatibility = publication_upload_compatibility(source_meta)
+    if not bool(compatibility.get("compatible")):
+        raise RuntimeError(
+            "成片视频不满足发布兼容要求，已停止自动生成 publication runtime 副本："
+            + "；".join(str(item).strip() for item in (compatibility.get("reasons") or []) if str(item).strip())
+        )
+    return source_path.resolve()
 
 
 def _find_generation_task_snapshot(folder_path: str) -> dict[str, Any] | None:
@@ -1162,8 +1276,8 @@ def _load_intelligent_copy_packaging_from_task_snapshot(task: dict[str, Any]) ->
 def _load_intelligent_copy_packaging(folder_path: Path) -> dict[str, Any] | None:
     material_dir = folder_path / "smart-copy"
     packaging, _sources = load_publication_packaging_payload(
-        material_json=str(material_dir / "smart-copy.json"),
-        platform_packaging=str(material_dir / "platform-packaging.json"),
+        material_json=str(resolve_smart_copy_material_json_path(material_dir)),
+        platform_packaging=str(resolve_smart_copy_platform_packaging_json_path(material_dir)),
     )
     return packaging
 

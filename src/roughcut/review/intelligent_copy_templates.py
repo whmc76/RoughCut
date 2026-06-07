@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -10,6 +11,10 @@ class PlatformDescriptionTone:
 
 
 PLATFORM_DESCRIPTION_TONES: dict[str, PlatformDescriptionTone] = {
+    "bilibili": PlatformDescriptionTone(
+        prefix="这期主要看{focus_line}。",
+        suffix="",
+    ),
     "xiaohongshu": PlatformDescriptionTone(
         prefix="这期我会重点看{focus_line}。",
         suffix="如果你也在看同类内容，最关心的是哪一点？",
@@ -77,10 +82,34 @@ INTENT_TITLE_TEMPLATES: dict[str, tuple[str, ...]] = {
 }
 
 
-def build_platform_description(platform_key: str, *, summary: str, question: str, focus_line: str) -> str:
+def build_platform_description(
+    platform_key: str,
+    *,
+    summary: str,
+    question: str,
+    focus_line: str,
+    methodology: dict[str, Any] | None = None,
+    topic_subject: str = "",
+) -> str:
     tone = PLATFORM_DESCRIPTION_TONES.get(platform_key) or PLATFORM_DESCRIPTION_TONES["default"]
+    archetype = str((methodology or {}).get("archetype") or "").strip()
+    subject = str(topic_subject or "").strip()
+    summary_text = str(summary or "").strip()
+    focus_text = str(focus_line or "").strip()
+    if archetype == "双版本开箱对比":
+        first = summary_text or (f"这期把{subject}的两个版本放在一起开箱。" if subject else "")
+        second = f"先看{focus_text}。" if focus_text else ""
+        return " ".join(part for part in (first, second) if part).strip()
+    if archetype == "单主体开箱上手":
+        first = summary_text or (f"这次到手开箱的是{subject}。" if subject else "")
+        second = f"重点看{focus_text}。" if focus_text else ""
+        return " ".join(part for part in (first, second) if part).strip()
+    if archetype == "教程演示":
+        first = summary_text or (f"这条主要讲{subject}怎么处理。" if subject else "")
+        second = f"重点放在{focus_text}。" if focus_text else ""
+        return " ".join(part for part in (first, second) if part).strip()
     body_parts = [
-        str(summary or "").strip(),
+        summary_text,
         tone.prefix.format(focus_line=focus_line).strip() if focus_line else "",
         tone.suffix.format(question=question).strip() if question else "",
     ]

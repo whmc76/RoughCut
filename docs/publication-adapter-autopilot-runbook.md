@@ -48,6 +48,45 @@
 
 ### 0. 启动 browser-agent 与 profile
 
+## 浏览器权威合同（必须遵守）
+
+发布链路唯一允许的浏览器执行面如下：
+
+- 浏览器/profile 必须由当前任务绑定的创作者卡片 / publication credential 决定，不能写死系统默认浏览器，也不能写死某个全局 profile。
+- 对当前 FAS 测试任务，这个绑定当前解析为：
+  - 浏览器：`Google Chrome`
+  - 用户数据目录：`C:\Users\28687\AppData\Local\Google\Chrome\User Data`
+  - Profile：`Profile 2`
+  - RoughCut 复用 profile id：`browser-profile:chrome:21104fd69d72ad7267c2`
+- browser-agent 入口：`http://127.0.0.1:49310`
+- browser transport：`bridge://chrome-extension`
+- 执行扩展：`RoughCut Publication Bridge`
+- 扩展实现方式：Chrome extension `background.js` 通过 `chrome.debugger` 暴露真实已登录 Chrome 会话给 `publication-browser-agent`
+
+发布链路只允许通过下面这条调用链触发页面操作：
+
+1. `scripts/start_publication_browser_session.ps1`
+2. `pnpm dev:publication-browser-agent`
+3. `scripts/run_publication_preflight.py`
+4. `scripts/run_publication_release_gate.py`
+5. `scripts/run_publication_real_release_gate.py`
+6. `publication-browser-agent -> /tasks | /probes -> bridge://chrome-extension -> creator-card-bound Chrome profile`
+
+明确禁止：
+
+- 使用 Codex 的 Chrome 插件直接 `openTabs/new/goto` 来做发布摸底
+- 使用 in-app Browser / Edge / 默认系统浏览器做发布页摸底
+- 把 Edge 中打开的页面、无授权页面、未绑定当前任务创作者卡片浏览器 binding 的页面当成发布链路证据
+- 在没有 `attached_profile_binding` 匹配当前任务创作者卡片绑定的情况下继续跑发布测试
+
+判定标准：
+
+- `GET /healthz` 必须显示：
+  - `attached_profile_binding.browser = chrome`
+  - `attached_profile_binding` 与当前任务创作者卡片解析出的 browser binding 一致
+  - `browser_transport.transport = chrome_extension_bridge`
+- 不满足上述条件时，整次发布摸底/测试结果无效，必须直接停止，不得写入平台结论。
+
 先启动 CDP + `publication-browser-agent` 并固定 profile（请按你本地真实 profile 替换路径）。
 
 发布链路不要再手写一整条 Chrome 启动命令。`User Data`、`Profile 2` 这类带空格参数如果拆开，Chrome 会把多出来的 `Data`、`2` 当成 URL，直接多开 `data/`、`0.0.0.2` 之类的废标签页，既污染会话也浪费资源。统一改用：

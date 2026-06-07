@@ -18,6 +18,7 @@ import openai
 
 from roughcut.config import get_settings
 from roughcut.host.codex_proxy import resolve_codex_proxy_sibling_url, resolve_codex_proxy_token
+from roughcut.intelligent_copy_layout import SMART_COPY_COVER_DIRNAME
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import extract_json_text
 from roughcut.providers.auth import resolve_credential
@@ -68,6 +69,7 @@ def resolve_codex_imagegen_runner_config(settings: Any | None = None) -> dict[st
 async def generate_edited_cover_image(
     *,
     source_image_path: Path,
+    reference_image_paths: list[Path] | None = None,
     output_path: Path,
     prompt: str,
     width: int,
@@ -100,6 +102,7 @@ async def generate_edited_cover_image(
             }
         metadata = _write_codex_imagegen_request(
             source_image_path=source_image_path,
+            reference_image_paths=reference_image_paths,
             request_path=request_path,
             output_path=final_path,
             prompt=prompt,
@@ -171,6 +174,7 @@ async def generate_edited_cover_image(
 def _write_codex_imagegen_request(
     *,
     source_image_path: Path,
+    reference_image_paths: list[Path] | None = None,
     request_path: Path | None,
     output_path: Path,
     prompt: str,
@@ -181,9 +185,12 @@ def _write_codex_imagegen_request(
 ) -> dict[str, Any]:
     request_file = request_path or output_path.with_suffix(".codex-imagegen.json")
     request_file.parent.mkdir(parents=True, exist_ok=True)
-    reference_path = request_file.with_name(f"{request_file.stem}-reference{source_image_path.suffix or '.jpg'}")
-    if source_image_path.exists():
-        shutil.copy2(source_image_path, reference_path)
+    copied_reference_paths = _copy_codex_reference_images(
+        request_file=request_file,
+        source_image_path=source_image_path,
+        reference_image_paths=reference_image_paths,
+    )
+    reference_path = copied_reference_paths[0]
     runner_config = resolve_codex_imagegen_runner_config()
     size = resolve_image_generation_size(width, height)
     payload = {
@@ -191,6 +198,15 @@ def _write_codex_imagegen_request(
         "backend": "codex_builtin",
         "created_at": datetime.now(UTC).isoformat(),
         "source_image_path": str(reference_path),
+        "reference_image_paths": [str(path) for path in copied_reference_paths],
+        "reference_pack_contract": {
+            "same_product_multi_angle": len(copied_reference_paths) > 1,
+            "primary_reference_index": 1,
+            "reference_count": len(copied_reference_paths),
+            "majority_view_policy": "prefer_majority_hero_angle"
+            if len(copied_reference_paths) > 1
+            else "single_reference_only",
+        },
         "output_path": str(output_path),
         "prompt": prompt,
         "cover_hard_contract": dict(hard_contract or {}),
@@ -222,7 +238,8 @@ def _write_codex_imagegen_request(
             ],
         }),
         "instructions": (
-            "Use Codex built-in image_gen/edit mode with source_image_path as the edit target/reference. "
+            "Use Codex built-in image_gen/edit mode with source_image_path as the primary hero-angle anchor from the same-product reference pack. "
+            "When reference_image_paths is present, treat the full ordered set as the allowed same-product multi-angle reference pack. "
             "Treat codex_runner.model as the Codex execution agent model only, not as the underlying image model. "
             "Do not use the OpenAI Images API fallback unless explicitly requested. "
             "Pass the prompt as the concise final-cover brief; let the image model render the complete publishable cover with integrated typography and effects. "
@@ -237,9 +254,62 @@ def _write_codex_imagegen_request(
         "codex_runner": runner_config,
         "request_path": str(request_file),
         "source_image_path": str(reference_path),
+        "reference_image_paths": [str(path) for path in copied_reference_paths],
         "output_path": str(output_path),
         "size": size,
     }
+
+
+def _copy_codex_reference_images(
+    *,
+    request_file: Path,
+    source_image_path: Path,
+    reference_image_paths: list[Path] | None = None,
+) -> list[Path]:
+    candidate_paths: list[Path] = []
+    for candidate in [source_image_path, *(reference_image_paths or [])]:
+        if candidate is None:
+            continue
+        path = Path(candidate)
+        if not path.exists():
+            continue
+        resolved = path.resolve()
+        if resolved in candidate_paths:
+            continue
+        candidate_paths.append(resolved)
+    if not candidate_paths:
+        raise FileNotFoundError(f"Codex imagegen source image missing: {source_image_path}")
+
+    copied_paths: list[Path] = []
+    for index, candidate in enumerate(candidate_paths, start=1):
+        if _should_reuse_shared_codex_reference_path(request_file=request_file, candidate=candidate):
+            copied_paths.append(candidate)
+            continue
+        if index == 1:
+            reference_path = request_file.with_name(
+                f"{request_file.stem}-reference{candidate.suffix or '.jpg'}"
+            )
+        else:
+            reference_path = request_file.with_name(
+                f"{request_file.stem}-reference-{index}{candidate.suffix or '.jpg'}"
+            )
+        shutil.copy2(candidate, reference_path)
+        copied_paths.append(reference_path)
+    return copied_paths
+
+
+def _should_reuse_shared_codex_reference_path(*, request_file: Path, candidate: Path) -> bool:
+    try:
+        request_parent = request_file.parent.resolve()
+        candidate_path = candidate.resolve()
+    except OSError:
+        return False
+    if candidate_path.parent != request_parent:
+        return False
+    if request_parent.name != SMART_COPY_COVER_DIRNAME:
+        return False
+    name = candidate_path.name
+    return name.startswith("00-highlight-reference-") or name == "00-highlight-cover-source.jpg"
 
 
 def _codex_imagegen_request_completed(
@@ -257,6 +327,8 @@ def _codex_imagegen_request_completed(
     except Exception:
         return False
     if str(payload.get("status") or "").strip().lower() != "completed":
+        return False
+    if not bool(payload.get("generated_by_codex_bridge")):
         return False
     recorded_output = str(payload.get("output_path") or "").strip()
     if recorded_output and Path(recorded_output) != output_path:
@@ -284,17 +356,27 @@ def mark_codex_imagegen_request_completed(
     output_path: Path,
     result_path: Path | None = None,
     recorded_output_path: str | None = None,
+    session_id: str | None = None,
+    timed_out: bool | None = None,
 ) -> dict[str, Any]:
     if not request_path.exists():
         raise FileNotFoundError(f"Codex imagegen request not found: {request_path}")
     if not output_path.exists():
         raise FileNotFoundError(f"Codex imagegen output not found: {output_path}")
     payload = json.loads(request_path.read_text(encoding="utf-8"))
+    completed_at = datetime.now(UTC).isoformat()
     payload["status"] = "completed"
-    payload["completed_at"] = datetime.now(UTC).isoformat()
+    payload["completed_at"] = completed_at
+    payload["last_attempted_at"] = completed_at
     payload["output_path"] = str(recorded_output_path or output_path)
+    payload["auto_completion_error"] = ""
+    payload["generated_by_codex_bridge"] = True
     if result_path is not None:
         payload["result_path"] = str(result_path)
+    if session_id:
+        payload["session_id"] = str(session_id).strip()
+    if timed_out is not None:
+        payload["timed_out"] = bool(timed_out)
     request_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
 

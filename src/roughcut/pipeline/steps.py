@@ -19,6 +19,7 @@ import time
 import uuid
 from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -64,6 +65,7 @@ from roughcut.edit.refine_decisions import (
 )
 from roughcut.edit.multimodal_trim_review import (
     ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW,
+    apply_multimodal_trim_review_to_cut_analysis,
     build_multimodal_trim_review_payload,
     review_multimodal_trim_review_payload,
 )
@@ -210,6 +212,7 @@ from roughcut.speech.postprocess import (
     analyze_subtitle_segmentation,
     generate_subtitle_window_candidates,
     normalize_display_text,
+    normalize_projection_display_text,
     resegment_subtitle_window_from_cuts,
     save_subtitle_items,
     score_subtitle_entries,
@@ -224,6 +227,8 @@ from roughcut.speech.subtitle_pipeline import (
     build_subtitle_architecture_artifacts,
     build_subtitle_projection_layer,
     build_transcript_fact_layer,
+    canonical_transcript_data_is_current,
+    subtitle_projection_data_is_current,
 )
 from roughcut.speech.transcribe import persist_empty_transcript_result, transcribe_audio
 from roughcut.storage.s3 import get_storage, job_key
@@ -1176,8 +1181,8 @@ def _resolve_subtitle_split_profile(*, width: int | None, height: int | None) ->
         }
     return {
         "orientation": "landscape",
-        "max_chars": 18,
-        "max_duration": 3.4,
+        "max_chars": 20,
+        "max_duration": 3.8,
     }
 
 
@@ -2505,7 +2510,7 @@ def _build_projection_entries_from_subtitle_items(
                 start=float(getattr(item, "start_time", 0.0) or 0.0),
                 end=float(getattr(item, "end_time", 0.0) or 0.0),
                 text_raw=display_text,
-                text_norm=normalize_display_text(display_text),
+                text_norm=normalize_projection_display_text(display_text),
                 words=(),
             )
         )
@@ -2516,8 +2521,9 @@ def _build_projection_items_from_entries(entries: list[SubtitleEntry]) -> list[S
     projection_items: list[SimpleNamespace] = []
     for index, entry in enumerate(list(entries or [])):
         raw_text = str(getattr(entry, "text_raw", "") or "")
-        normalized_text = str(getattr(entry, "text_norm", "") or raw_text)
-        display_norm = normalize_display_text(normalized_text)
+        normalized_text = str(getattr(entry, "text_norm", "") or "")
+        display_source = _projection_display_source_text(raw_text, normalized_text)
+        display_norm = normalize_projection_display_text(display_source)
         projection_items.append(
             SimpleNamespace(
                 item_index=int(getattr(entry, "index", index) or index),
@@ -2530,6 +2536,45 @@ def _build_projection_items_from_entries(entries: list[SubtitleEntry]) -> list[S
             )
         )
     return projection_items
+
+
+def _projection_display_source_text(raw_text: str, normalized_text: str) -> str:
+    raw_value = str(raw_text or "").strip()
+    normalized_value = str(normalized_text or "").strip()
+    if not raw_value:
+        return normalized_value
+    if not normalized_value:
+        return raw_value
+
+    raw_compact = _projection_compact_text(raw_value)
+    normalized_compact = _projection_compact_text(normalized_value)
+    if not raw_compact or not normalized_compact:
+        return normalized_value or raw_value
+    if raw_compact == normalized_compact:
+        return normalized_value
+    if _projection_normalized_text_drops_content(raw_compact, normalized_compact):
+        return raw_value
+    return normalized_value
+
+
+def _projection_normalized_text_drops_content(raw_compact: str, normalized_compact: str) -> bool:
+    if not raw_compact or not normalized_compact:
+        return False
+    if len(raw_compact) <= len(normalized_compact):
+        return False
+    if normalized_compact in raw_compact and len(raw_compact) - len(normalized_compact) >= 2:
+        return True
+    prefix_len = 0
+    for left_char, right_char in zip(raw_compact, normalized_compact):
+        if left_char != right_char:
+            break
+        prefix_len += 1
+    raw_remaining = raw_compact[prefix_len:]
+    normalized_remaining = normalized_compact[prefix_len:]
+    while raw_remaining and normalized_remaining and raw_remaining[-1] == normalized_remaining[-1]:
+        raw_remaining = raw_remaining[:-1]
+        normalized_remaining = normalized_remaining[:-1]
+    return len(raw_remaining) >= 2 and len(normalized_remaining) == 0
 
 
 def _build_segmentation_segments_from_canonical_layer(canonical_transcript_layer: Any) -> list[SimpleNamespace]:
@@ -2583,7 +2628,11 @@ async def _build_canonical_refresh_projection(
     projection_data: dict[str, Any] | None,
 ) -> tuple[Any, dict[str, Any], dict[str, Any]]:
     effective_projection_data = dict(projection_data or {})
-    split_profile = dict(effective_projection_data.get("split_profile") or {})
+    split_profile = (
+        dict(effective_projection_data.get("split_profile") or {})
+        if subtitle_projection_data_is_current(effective_projection_data)
+        else {}
+    )
     if not split_profile:
         media_meta = await _load_latest_optional_artifact(session, job_id=job_id, artifact_types=("media_meta",))
         media_meta_json = media_meta.data_json if media_meta and isinstance(media_meta.data_json, dict) else {}
@@ -2637,59 +2686,22 @@ async def _build_canonical_refresh_projection(
         source_name=source_name,
         content_profile={},
     )
-    display_boundary_hybrid_entries = _build_display_boundary_hybrid_projection_entries(
-        canonical_entries=projection_entries,
-        display_entries=existing_entries,
-        split_profile=split_profile,
+    candidate_pool = _build_projection_candidate_pool(
+        canonical_projection_items=canonical_projection_items,
+        projection_analysis=projection_analysis,
+        canonical_quality_report=canonical_quality_report,
+        hybrid_projection_items=hybrid_projection_items,
+        hybrid_projection_analysis=hybrid_projection_analysis,
+        hybrid_quality_report=hybrid_quality_report,
+        existing_projection_items=existing_projection_items,
+        existing_projection_analysis=existing_projection_analysis,
+        existing_quality_report=existing_quality_report,
     )
-    display_boundary_hybrid_items = _build_projection_items_from_entries(display_boundary_hybrid_entries)
-    display_boundary_hybrid_analysis = analyze_subtitle_segmentation(display_boundary_hybrid_entries)
-    display_boundary_hybrid_quality_report = build_subtitle_quality_report_from_items(
-        subtitle_items=display_boundary_hybrid_items,
-        source_name=source_name,
-        content_profile={},
-    )
-    candidate_pool = [
-        {
-            "basis": "canonical_refresh",
-            "transcript_layer": "canonical_transcript",
-            "items": canonical_projection_items,
-            "analysis": projection_analysis,
-            "quality_report": canonical_quality_report,
-        },
-        {
-            "basis": "canonical_local_hybrid",
-            "transcript_layer": "canonical_transcript",
-            "items": hybrid_projection_items,
-            "analysis": hybrid_projection_analysis,
-            "quality_report": hybrid_quality_report,
-        },
-        {
-            "basis": "canonical_display_boundary_hybrid",
-            "transcript_layer": "canonical_transcript",
-            "items": display_boundary_hybrid_items,
-            "analysis": display_boundary_hybrid_analysis,
-            "quality_report": display_boundary_hybrid_quality_report,
-        },
-        {
-            "basis": "display_baseline_preserved",
-            "transcript_layer": "subtitle_item",
-            "items": existing_projection_items,
-            "analysis": existing_projection_analysis,
-            "quality_report": existing_quality_report,
-        },
-    ]
     selected_candidate, correction_score_report = _select_projection_candidate(
         candidates=candidate_pool,
         reference_items=canonical_projection_items,
         canonical_transcript_layer=canonical_transcript_layer,
     )
-    if canonical_projection_items:
-        selected_candidate = next(
-            candidate
-            for candidate in candidate_pool
-            if str(candidate["basis"]) == "canonical_refresh"
-        )
     projection_items = list(selected_candidate["items"])
     projection_analysis = selected_candidate["analysis"]
     subtitle_quality_report = dict(selected_candidate["quality_report"] or {})
@@ -2776,8 +2788,8 @@ def _build_local_hybrid_projection_entries(
     max_chars = int(split_profile.get("max_chars") or 30)
     max_duration = float(split_profile.get("max_duration") or 5.0)
     for _round in range(4):
-        analysis = analyze_subtitle_segmentation(refined_entries).as_dict()
-        windows = [dict(item) for item in list(analysis.get("sample_low_confidence_windows") or []) if isinstance(item, dict)]
+        analysis = analyze_subtitle_segmentation(refined_entries)
+        windows = [dict(item) for item in list(analysis.low_confidence_windows or ()) if isinstance(item, dict)]
         if not windows:
             break
         changed = False
@@ -2799,7 +2811,80 @@ def _build_local_hybrid_projection_entries(
             changed = True
         if not changed:
             break
-    return refined_entries
+    return _merge_material_split_projection_entries(refined_entries)
+
+
+def _build_projection_candidate_pool(
+    *,
+    canonical_projection_items: list[SimpleNamespace],
+    projection_analysis: Any,
+    canonical_quality_report: dict[str, Any],
+    hybrid_projection_items: list[SimpleNamespace],
+    hybrid_projection_analysis: Any,
+    hybrid_quality_report: dict[str, Any],
+    existing_projection_items: list[SimpleNamespace],
+    existing_projection_analysis: Any,
+    existing_quality_report: dict[str, Any],
+) -> list[dict[str, Any]]:
+    # Once canonical transcript segmentation is available, the current canonical
+    # segmentation stage is the only segmentation authority. Historical display
+    # boundaries may still exist for compatibility/fallback, but they must not
+    # participate in candidate selection or they will reintroduce a second
+    # segmentation stage into the automatic pipeline.
+    candidate_pool = [
+        {
+            "basis": "canonical_refresh",
+            "transcript_layer": "canonical_transcript",
+            "items": canonical_projection_items,
+            "analysis": projection_analysis,
+            "quality_report": canonical_quality_report,
+        },
+    ]
+    if (
+        not canonical_projection_items
+        or _projection_items_preserve_segmentation_shape(
+            canonical_projection_items,
+            hybrid_projection_items,
+        )
+    ):
+        candidate_pool.append(
+            {
+                "basis": "canonical_local_hybrid",
+                "transcript_layer": "canonical_transcript",
+                "items": hybrid_projection_items,
+                "analysis": hybrid_projection_analysis,
+                "quality_report": hybrid_quality_report,
+            }
+        )
+    if not canonical_projection_items:
+        candidate_pool.append(
+            {
+                "basis": "display_baseline_preserved",
+                "transcript_layer": "subtitle_item",
+                "items": existing_projection_items,
+                "analysis": existing_projection_analysis,
+                "quality_report": existing_quality_report,
+            }
+        )
+    return candidate_pool
+
+
+def _projection_items_preserve_segmentation_shape(
+    baseline_items: list[Any],
+    candidate_items: list[Any],
+    *,
+    boundary_slack: float = 0.06,
+) -> bool:
+    if not baseline_items:
+        return not candidate_items
+    if len(baseline_items) != len(candidate_items):
+        return False
+    for baseline_item, candidate_item in zip(baseline_items, candidate_items):
+        if abs(_projection_item_start(baseline_item) - _projection_item_start(candidate_item)) > boundary_slack:
+            return False
+        if abs(_projection_item_end(baseline_item) - _projection_item_end(candidate_item)) > boundary_slack:
+            return False
+    return True
 
 
 def _best_local_projection_window_candidate(
@@ -2830,6 +2915,8 @@ def _best_local_projection_window_candidate(
     ):
         if len(candidate) > len(window_entries):
             continue
+        if _entries_split_projection_material_tokens(candidate):
+            continue
         candidate_quality = build_subtitle_quality_report_from_items(
             subtitle_items=_build_projection_items_from_entries(candidate),
             source_name="",
@@ -2846,6 +2933,61 @@ def _best_local_projection_window_candidate(
             best_rank = candidate_rank
             best_score = candidate_score
     return best_candidate if best_rank > current_rank else None
+
+
+def _entries_split_projection_material_tokens(entries: list[SubtitleEntry]) -> bool:
+    ordered = list(entries or [])
+    for left, right in zip(ordered, ordered[1:]):
+        if _projection_boundary_splits_material_token(
+            _projection_item_text(left),
+            _projection_item_text(right),
+        ):
+            return True
+    return False
+
+
+def _merge_material_split_projection_entries(entries: list[SubtitleEntry]) -> list[SubtitleEntry]:
+    ordered = _reindex_subtitle_entries(list(entries or []))
+    if not ordered:
+        return ordered
+    merged: list[SubtitleEntry] = []
+    index = 0
+    while index < len(ordered):
+        current = ordered[index]
+        if (
+            index + 1 < len(ordered)
+            and _projection_boundary_splits_material_token(
+                _projection_item_text(current),
+                _projection_item_text(ordered[index + 1]),
+            )
+        ):
+            merged.append(_merge_projection_entries(current, ordered[index + 1], len(merged)))
+            index += 2
+            continue
+        merged.append(current)
+        index += 1
+    return _reindex_subtitle_entries(merged)
+
+
+def _projection_boundary_splits_material_token(left_text: str, right_text: str) -> bool:
+    left_compact = _projection_compact_text(left_text)
+    right_compact = _projection_compact_text(right_text)
+    if not left_compact or not right_compact:
+        return False
+    joined_text = normalize_projection_display_text(f"{left_text}{right_text}")
+    joined_compact = _projection_compact_text(joined_text)
+    if not joined_compact:
+        return False
+    material_tokens = set(_projection_material_tokens(joined_text))
+    material_tokens.update(_projection_material_tokens(joined_compact))
+    for token in material_tokens:
+        token_compact = _projection_compact_text(token)
+        if not token_compact or token_compact not in joined_compact:
+            continue
+        if token_compact in left_compact or token_compact in right_compact:
+            continue
+        return True
+    return False
 
 
 def _build_display_boundary_hybrid_projection_entries(
@@ -2881,7 +3023,7 @@ def _build_display_boundary_hybrid_projection_entries(
                 start=float(group[0].start),
                 end=float(group[-1].end),
                 text_raw=text,
-                text_norm=normalize_display_text(text),
+                text_norm=normalize_projection_display_text(text),
                 words=words,
             )
         )
@@ -2942,7 +3084,7 @@ def _join_projection_entry_texts(entries: list[SubtitleEntry]) -> str:
     if not parts:
         return ""
     text = "".join(parts)
-    return normalize_display_text(text)
+    return normalize_projection_display_text(text)
 
 
 def _merge_short_display_boundary_entries(
@@ -2955,11 +3097,11 @@ def _merge_short_display_boundary_entries(
     soft_limit = max(max_chars, int(max_chars * 1.8))
     while index < len(entries):
         current = entries[index]
-        current_text = normalize_display_text(current.text_raw)
+        current_text = normalize_projection_display_text(current.text_raw)
         if (
             _is_short_display_boundary_entry(current_text)
             and index + 1 < len(entries)
-            and len(current_text + normalize_display_text(entries[index + 1].text_raw)) <= soft_limit
+            and len(current_text + normalize_projection_display_text(entries[index + 1].text_raw)) <= soft_limit
         ):
             merged.append(_merge_projection_entries(current, entries[index + 1], len(merged)))
             index += 2
@@ -2967,7 +3109,7 @@ def _merge_short_display_boundary_entries(
         if (
             _is_short_display_boundary_entry(current_text)
             and merged
-            and len(normalize_display_text(merged[-1].text_raw) + current_text) <= soft_limit
+            and len(normalize_projection_display_text(merged[-1].text_raw) + current_text) <= soft_limit
         ):
             merged[-1] = _merge_projection_entries(merged[-1], current, len(merged) - 1)
             index += 1
@@ -2978,7 +3120,7 @@ def _merge_short_display_boundary_entries(
 
 
 def _is_short_display_boundary_entry(text: str) -> bool:
-    compact = re.sub(r"[，。！？；：,.!?;:\s]+", "", normalize_display_text(text))
+    compact = re.sub(r"[，。！？；：,.!?;:\s]+", "", normalize_projection_display_text(text))
     return 0 < len(compact) <= 4
 
 
@@ -2989,7 +3131,7 @@ def _merge_projection_entries(left: SubtitleEntry, right: SubtitleEntry, index: 
         start=float(left.start),
         end=float(right.end),
         text_raw=text,
-        text_norm=normalize_display_text(text),
+        text_norm=normalize_projection_display_text(text),
         words=tuple(left.words or ()) + tuple(right.words or ()),
     )
 
@@ -3008,6 +3150,7 @@ def _select_projection_candidate(
             reference_items=reference_items,
             candidate_items=list(candidate.get("items") or []),
             display_quality_report=dict(candidate.get("quality_report") or {}),
+            segmentation_analysis=candidate.get("analysis"),
         )
         assessed_candidates.append({**candidate, "assessment": assessment})
     selected = max(
@@ -3028,14 +3171,19 @@ def _select_projection_candidate(
     return selected, report
 
 
-def _projection_candidate_rank(assessment: dict[str, Any]) -> tuple[float, float, float, int, int, int, int]:
+def _projection_candidate_rank(assessment: dict[str, Any]) -> tuple[float, int, int, int, int, int, float, float, int, int]:
     metrics = dict(assessment.get("metrics") or {})
+    fragment_total = int(metrics.get("fragment_start_count") or 0) + int(metrics.get("fragment_end_count") or 0)
     return (
         float(assessment.get("content_fidelity_score") or 0.0),
-        float(assessment.get("score") or 0.0),
-        float(assessment.get("display_quality_score") or 0.0),
         -int(metrics.get("missing_material_token_count") or 0),
         -int(metrics.get("unsupported_material_token_count") or 0),
+        -int(metrics.get("low_confidence_window_count") or 0),
+        -int(metrics.get("suspicious_boundary_count") or 0),
+        -fragment_total,
+        float(assessment.get("segmentation_quality_score") or 0.0),
+        float(assessment.get("score") or 0.0),
+        float(assessment.get("display_quality_score") or 0.0),
         -int(metrics.get("short_fragment_count") or 0),
         -int(metrics.get("subtitle_count") or 0),
     )
@@ -3047,15 +3195,34 @@ def _build_projection_correction_assessment(
     reference_items: list[Any],
     candidate_items: list[Any],
     display_quality_report: dict[str, Any],
+    segmentation_analysis: Any = None,
 ) -> dict[str, Any]:
     missing_examples = _find_local_material_token_drift(reference_items, candidate_items)
-    unsupported_examples = _find_local_material_token_drift(candidate_items, reference_items)
+    # Allow small local boundary shifts to reassign material tokens between adjacent rows
+    # without treating the candidate as content drift. Missing tokens remain strict.
+    unsupported_examples = _find_local_material_token_drift(
+        candidate_items,
+        reference_items,
+        boundary_slack=0.45,
+    )
     missing_count = len(missing_examples)
     unsupported_count = len(unsupported_examples)
     display_metrics = dict(display_quality_report.get("metrics") or {})
+    segmentation_metrics = _projection_segmentation_analysis_metrics(segmentation_analysis)
     display_score = float(display_quality_report.get("score") or 0.0)
     content_score = max(0.0, round(100.0 - min(70.0, missing_count * 14.0) - min(30.0, unsupported_count * 6.0), 2))
-    score = round(content_score * 0.72 + display_score * 0.28, 2)
+    segmentation_score = max(
+        0.0,
+        round(
+            100.0
+            - min(36.0, float(segmentation_metrics.get("fragment_start_count") or 0) * 6.0)
+            - min(36.0, float(segmentation_metrics.get("fragment_end_count") or 0) * 6.0)
+            - min(18.0, float(segmentation_metrics.get("suspicious_boundary_count") or 0) * 6.0)
+            - min(24.0, float(segmentation_metrics.get("low_confidence_window_count") or 0) * 8.0),
+            2,
+        ),
+    )
+    score = round(content_score * 0.62 + display_score * 0.2 + segmentation_score * 0.18, 2)
     issue_codes: list[str] = []
     if missing_count:
         issue_codes.append("projection_missing_material_tokens")
@@ -3066,6 +3233,7 @@ def _build_projection_correction_assessment(
         "score": score,
         "content_fidelity_score": content_score,
         "display_quality_score": round(display_score, 2),
+        "segmentation_quality_score": segmentation_score,
         "blocking": bool(missing_count),
         "issue_codes": issue_codes,
         "metrics": {
@@ -3074,25 +3242,55 @@ def _build_projection_correction_assessment(
             "generic_word_split_count": int(display_metrics.get("generic_word_split_count") or 0),
             "missing_material_token_count": missing_count,
             "unsupported_material_token_count": unsupported_count,
+            "fragment_start_count": int(segmentation_metrics.get("fragment_start_count") or 0),
+            "fragment_end_count": int(segmentation_metrics.get("fragment_end_count") or 0),
+            "suspicious_boundary_count": int(segmentation_metrics.get("suspicious_boundary_count") or 0),
+            "low_confidence_window_count": int(segmentation_metrics.get("low_confidence_window_count") or 0),
         },
         "missing_material_examples": missing_examples[:8],
         "unsupported_material_examples": unsupported_examples[:8],
     }
 
 
-def _find_local_material_token_drift(reference_items: list[Any], candidate_items: list[Any]) -> list[dict[str, Any]]:
+def _projection_segmentation_analysis_metrics(analysis: Any) -> dict[str, int]:
+    if hasattr(analysis, "as_dict"):
+        analysis = analysis.as_dict()
+    if not isinstance(analysis, dict):
+        return {
+            "fragment_start_count": 0,
+            "fragment_end_count": 0,
+            "suspicious_boundary_count": 0,
+            "low_confidence_window_count": 0,
+        }
+    return {
+        "fragment_start_count": int(analysis.get("fragment_start_count") or 0),
+        "fragment_end_count": int(analysis.get("fragment_end_count") or 0),
+        "suspicious_boundary_count": int(analysis.get("suspicious_boundary_count") or 0),
+        "low_confidence_window_count": int(analysis.get("low_confidence_window_count") or 0),
+    }
+
+
+def _find_local_material_token_drift(
+    reference_items: list[Any],
+    candidate_items: list[Any],
+    *,
+    boundary_slack: float = 0.0,
+) -> list[dict[str, Any]]:
     examples: list[dict[str, Any]] = []
     for reference_item in list(reference_items or []):
         reference_text = _projection_item_text(reference_item)
         reference_tokens = _projection_material_tokens(reference_text)
         if not reference_tokens:
             continue
-        candidate_text = _projection_overlapping_text(reference_item, candidate_items)
-        candidate_compact = _projection_compact_text(candidate_text)
+        candidate_text = _projection_overlapping_text(
+            reference_item,
+            candidate_items,
+            boundary_slack=boundary_slack,
+        )
         missing_tokens = [
             token
             for token in sorted(reference_tokens)
-            if _projection_compact_text(token) not in candidate_compact
+            if not _projection_text_supports_material_token(candidate_text, token)
         ]
         if not missing_tokens:
             continue
@@ -3108,9 +3306,47 @@ def _find_local_material_token_drift(reference_items: list[Any], candidate_items
     return examples
 
 
-def _projection_overlapping_text(reference_item: Any, candidate_items: list[Any]) -> str:
-    reference_start = _projection_item_start(reference_item)
-    reference_end = _projection_item_end(reference_item)
+def _projection_text_supports_material_token(text: str, token: str) -> bool:
+    token_compact = _projection_compact_text(token)
+    candidate_compact = _projection_compact_text(text)
+    if token_compact and token_compact in candidate_compact:
+        return True
+
+    normalized_token = re.sub(r"\s+", "", normalize_projection_display_text(str(token or "")))
+    numeric_match = _NUMERIC_UNIT_MATERIAL_TOKEN_RE.fullmatch(normalized_token)
+    if not numeric_match:
+        return False
+    try:
+        target_value = Decimal(str(numeric_match.group("number") or "0"))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    unit = str(numeric_match.group("unit") or "")
+    normalized_text = normalize_projection_display_text(str(text or ""))
+    for unit_match in re.finditer(re.escape(unit), normalized_text, re.IGNORECASE):
+        prefix = normalized_text[max(0, unit_match.start() - 32) : unit_match.start()]
+        sequence_match = _NUMERIC_CHUNK_SEQUENCE_SUFFIX_RE.search(prefix)
+        if not sequence_match:
+            continue
+        chunks = re.findall(r"\d+(?:\.\d+)?", sequence_match.group(1))
+        if len(chunks) < 2:
+            continue
+        try:
+            total = sum(Decimal(chunk) for chunk in chunks)
+        except (InvalidOperation, TypeError, ValueError):
+            continue
+        if total == target_value:
+            return True
+    return False
+
+
+def _projection_overlapping_text(
+    reference_item: Any,
+    candidate_items: list[Any],
+    *,
+    boundary_slack: float = 0.0,
+) -> str:
+    reference_start = _projection_item_start(reference_item) - max(0.0, boundary_slack)
+    reference_end = _projection_item_end(reference_item) + max(0.0, boundary_slack)
     reference_duration = max(reference_end - reference_start, 0.001)
     overlapping: list[Any] = []
     for candidate_item in list(candidate_items or []):
@@ -3127,7 +3363,7 @@ def _projection_overlapping_text(reference_item: Any, candidate_items: list[Any]
 
 
 def _projection_item_text(item: Any) -> str:
-    return normalize_display_text(
+    return normalize_projection_display_text(
         str(
             getattr(item, "text_final", None)
             or getattr(item, "text_norm", None)
@@ -3146,7 +3382,7 @@ def _projection_item_end(item: Any) -> float:
 
 
 def _projection_compact_text(text: str) -> str:
-    return re.sub(r"\s+", "", normalize_display_text(str(text or ""))).upper()
+    return re.sub(r"[\W_]+", "", normalize_projection_display_text(str(text or "")), flags=re.UNICODE).upper()
 
 
 _MATERIAL_PROJECTION_TOKEN_RE = re.compile(
@@ -3156,6 +3392,16 @@ _MATERIAL_PROJECTION_TOKEN_RE = re.compile(
     r"|奈特科尔"
     r"|\d+(?:\.\d+)?(?:毫安|流明|档|挡|米|克|分钟|秒钟?|小时|瓦|W|mAh|lm)"
     r")",
+    re.IGNORECASE,
+)
+
+_NUMERIC_UNIT_MATERIAL_TOKEN_RE = re.compile(
+    r"^(?P<number>\d+(?:\.\d+)?)(?P<unit>毫安|流明|档|挡|米|克|分钟|秒钟?|小时|瓦|W|mAh|lm)$",
+    re.IGNORECASE,
+)
+
+_NUMERIC_CHUNK_SEQUENCE_SUFFIX_RE = re.compile(
+    r"(\d+(?:\.\d+)?(?:[^\dA-Za-z\u4e00-\u9fff]{0,4}\d+(?:\.\d+)?)+)\s*$",
     re.IGNORECASE,
 )
 
@@ -3187,12 +3433,12 @@ def _projection_material_text(items: list[Any]) -> str:
             or ""
         )
         if text.strip():
-            parts.append(normalize_display_text(text))
+            parts.append(normalize_projection_display_text(text))
     return "\n".join(parts)
 
 
 def _projection_material_tokens(text: str) -> set[str]:
-    normalized = normalize_display_text(str(text or ""))
+    normalized = normalize_projection_display_text(str(text or ""))
     return {
         match.group(0).strip()
         for match in _MATERIAL_PROJECTION_TOKEN_RE.finditer(normalized)
@@ -3292,7 +3538,7 @@ async def _persist_projection_layer_to_subtitle_items(
     persisted_count = 0
     for index, entry in enumerate(entries):
         text_raw = str(getattr(entry, "text_raw", "") or "")
-        text_norm = str(getattr(entry, "text_norm", "") or normalize_display_text(text_raw))
+        text_norm = str(getattr(entry, "text_norm", "") or normalize_projection_display_text(text_raw))
         text_final = str(getattr(entry, "text_final", "") or text_norm)
         if not text_final.strip():
             continue
@@ -3304,8 +3550,8 @@ async def _persist_projection_layer_to_subtitle_items(
                 start_time=float(getattr(entry, "start", 0.0) or 0.0),
                 end_time=float(getattr(entry, "end", 0.0) or 0.0),
                 text_raw=text_raw or text_final,
-                text_norm=normalize_display_text(text_norm or text_final),
-                text_final=normalize_display_text(text_final),
+                text_norm=normalize_projection_display_text(text_norm or text_final),
+                text_final=normalize_projection_display_text(text_final),
             )
         )
         persisted_count += 1
@@ -3574,7 +3820,11 @@ def _resolve_keep_segment_bounds(segment: dict[str, Any]) -> tuple[float, float]
 
 
 def _resolve_projection_split_profile(projection_data: dict[str, Any] | None, media_meta_json: dict[str, Any] | None) -> dict[str, Any]:
-    split_profile = dict((projection_data or {}).get("split_profile") or {})
+    split_profile = (
+        dict((projection_data or {}).get("split_profile") or {})
+        if subtitle_projection_data_is_current(projection_data)
+        else {}
+    )
     if split_profile:
         return split_profile
     media_meta = media_meta_json or {}
@@ -3978,6 +4228,143 @@ async def _load_latest_subtitle_projection_entries(
     return [_subtitle_item_payload(item) for item in list(fallback_items or [])], {}
 
 
+def _canonical_transcript_layer_namespace(canonical_layer: dict[str, Any] | None) -> SimpleNamespace:
+    raw_segments = list((canonical_layer or {}).get("segments") or [])
+    segments: list[SimpleNamespace] = []
+    for index, segment in enumerate(raw_segments):
+        if not isinstance(segment, dict):
+            continue
+        words = []
+        for raw_word in list(segment.get("words") or []):
+            if not isinstance(raw_word, dict):
+                continue
+            word = str(raw_word.get("word") or "").strip()
+            if not word:
+                continue
+            words.append(
+                SimpleNamespace(
+                    word=word,
+                    start=float(raw_word.get("start", 0.0) or 0.0),
+                    end=float(raw_word.get("end", 0.0) or 0.0),
+                    alignment=dict(raw_word.get("alignment") or {}),
+                )
+            )
+        segments.append(
+            SimpleNamespace(
+                index=int(segment.get("index", index) or index),
+                start=float(segment.get("start", segment.get("start_time", 0.0)) or 0.0),
+                end=float(segment.get("end", segment.get("end_time", 0.0)) or 0.0),
+                text_raw=str(segment.get("text_raw") or segment.get("text") or ""),
+                text_canonical=str(
+                    segment.get("text_canonical") or segment.get("text") or segment.get("text_raw") or ""
+                ),
+                accepted_corrections=tuple(segment.get("accepted_corrections") or ()),
+                pending_corrections=tuple(segment.get("pending_corrections") or ()),
+                words=tuple(words),
+            )
+        )
+    return SimpleNamespace(
+        segments=tuple(segments),
+        source_basis=str((canonical_layer or {}).get("source_basis") or "canonical_transcript"),
+        correction_metrics=dict((canonical_layer or {}).get("correction_metrics") or {}),
+        alignment_engine_version=str((canonical_layer or {}).get("alignment_engine_version") or ""),
+    )
+
+
+async def _rebuild_current_subtitle_projection_entries(
+    session,
+    *,
+    job_id: uuid.UUID,
+    projection_data: dict[str, Any] | None,
+    drop_empty: bool,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    canonical_layer = await _load_latest_current_canonical_transcript_data(
+        session,
+        job_id=job_id,
+    )
+    if not list(canonical_layer.get("segments") or []):
+        return [], dict(projection_data or {})
+    subtitle_items = await _load_subtitle_items(session, job_id=job_id)
+    if not subtitle_items:
+        return [], dict(projection_data or {})
+    job_source_result = await session.execute(select(Job.source_name).where(Job.id == job_id))
+    source_name = str(job_source_result.scalar_one_or_none() or "")
+    refreshed_projection_layer, _subtitle_quality_report, _correction_score_report = await _build_canonical_refresh_projection(
+        session,
+        job_id=job_id,
+        source_name=source_name,
+        subtitle_items=subtitle_items,
+        canonical_transcript_layer=_canonical_transcript_layer_namespace(canonical_layer),
+        projection_data=projection_data,
+    )
+    refreshed_projection_data = (
+        refreshed_projection_layer.as_dict() if hasattr(refreshed_projection_layer, "as_dict") else {}
+    )
+    refreshed_entries = [
+        _subtitle_projection_entry_payload(entry)
+        for entry in list(refreshed_projection_data.get("entries") or [])
+        if isinstance(entry, dict)
+    ]
+    return clean_subtitle_payloads(refreshed_entries, drop_empty=drop_empty), refreshed_projection_data
+
+
+async def _load_latest_current_canonical_transcript_data(
+    session,
+    *,
+    job_id: uuid.UUID,
+) -> dict[str, Any]:
+    canonical_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=(ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,),
+    )
+    canonical_layer = (
+        canonical_artifact.data_json
+        if canonical_artifact is not None and isinstance(canonical_artifact.data_json, dict)
+        else {}
+    )
+    if list(canonical_layer.get("segments") or []) and canonical_transcript_data_is_current(canonical_layer):
+        return dict(canonical_layer)
+
+    subtitle_items = await _load_subtitle_items(session, job_id=job_id)
+    transcript_result = await session.execute(
+        select(TranscriptSegment)
+        .where(TranscriptSegment.job_id == job_id, TranscriptSegment.version == 1)
+        .order_by(TranscriptSegment.segment_index)
+    )
+    transcript_rows = list(transcript_result.scalars().all())
+    sanitize_transcript_segment_word_rows(transcript_rows)
+    corrections = await _load_subtitle_corrections(session, job_id=job_id)
+    job = await session.get(Job, job_id)
+    content_profile = await _load_current_content_profile(session, job_id=job_id)
+    subtitle_dicts = [
+        {
+            "text_raw": item.text_raw,
+            "text_norm": item.text_norm,
+            "text_final": item.text_final,
+        }
+        for item in subtitle_items
+    ]
+    subject_domain = _infer_subject_domain_for_memory(
+        workflow_template=getattr(job, "workflow_template", None),
+        subtitle_items=subtitle_dicts,
+        content_profile=content_profile or {},
+        source_name=getattr(job, "source_name", None),
+    )
+    category_scope = _resolve_subtitle_semantic_cleanup_scope(
+        job=job,
+        content_profile=content_profile,
+        review_memory={"terms": [{"category_scope": subject_domain or ""}]},
+    )
+    rebuilt_layer = _build_transcript_first_canonical_layer(
+        transcript_rows=transcript_rows,
+        subtitle_items=subtitle_items,
+        corrections=corrections,
+        category_scope=category_scope,
+    )
+    return rebuilt_layer.as_dict() if hasattr(rebuilt_layer, "as_dict") else {}
+
+
 async def _load_latest_subtitle_payloads(
     session,
     *,
@@ -3991,6 +4378,24 @@ async def _load_latest_subtitle_payloads(
         fallback_items=None,
     )
     if subtitle_dicts:
+        if not subtitle_projection_data_is_current(projection_data):
+            rebuilt_subtitles, rebuilt_projection_data = await _rebuild_current_subtitle_projection_entries(
+                session,
+                job_id=job_id,
+                projection_data=projection_data,
+                drop_empty=drop_empty,
+            )
+            if rebuilt_subtitles:
+                rebuilt_split_profile = (
+                    rebuilt_projection_data.get("split_profile")
+                    if isinstance(rebuilt_projection_data.get("split_profile"), dict)
+                    else {}
+                )
+                if not fallback_to_items or not _projection_has_suspicious_subtitle_timing(
+                    rebuilt_subtitles,
+                    split_profile=rebuilt_split_profile,
+                ):
+                    return rebuilt_subtitles, rebuilt_projection_data
         cleaned_subtitles = clean_subtitle_payloads(subtitle_dicts, drop_empty=drop_empty)
         split_profile = projection_data.get("split_profile") if isinstance(projection_data.get("split_profile"), dict) else {}
         if not fallback_to_items or not _projection_has_suspicious_subtitle_timing(cleaned_subtitles, split_profile=split_profile):
@@ -4025,12 +4430,10 @@ async def _load_source_subtitle_payloads_for_projection_validation(
     *,
     job_id: uuid.UUID,
 ) -> list[dict[str, Any]]:
-    canonical_artifact = await _load_latest_optional_artifact(
+    canonical_layer = await _load_latest_current_canonical_transcript_data(
         session,
         job_id=job_id,
-        artifact_types=(ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,),
     )
-    canonical_layer = canonical_artifact.data_json if canonical_artifact and isinstance(canonical_artifact.data_json, dict) else {}
     canonical_segments = [
         segment
         for segment in list(canonical_layer.get("segments") or [])
@@ -4251,12 +4654,8 @@ async def _load_subtitle_transcript_context(
         job_id=job_id,
         artifact_types=("transcript_evidence",),
     )
-    canonical_transcript_artifact = (
-        await _load_latest_optional_artifact(
-            session,
-            job_id=job_id,
-            artifact_types=(ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,),
-        )
+    canonical_transcript_data = (
+        await _load_latest_current_canonical_transcript_data(session, job_id=job_id)
         if include_canonical
         else None
     )
@@ -4267,7 +4666,7 @@ async def _load_subtitle_transcript_context(
     )
     transcript_context = _build_transcript_context_payload(
         transcript_rows,
-        canonical_transcript_artifact.data_json if canonical_transcript_artifact is not None else None,
+        canonical_transcript_data,
         transcript_fact_artifact.data_json if transcript_fact_artifact is not None else None,
         transcript_evidence_artifact.data_json if transcript_evidence_artifact is not None else None,
     )
@@ -4300,10 +4699,9 @@ async def _load_content_profile_context(
         job_id=job_id,
         artifact_types=("transcript_evidence",),
     )
-    canonical_transcript_artifact = await _load_latest_optional_artifact(
+    canonical_transcript_data = await _load_latest_current_canonical_transcript_data(
         session,
         job_id=job_id,
-        artifact_types=(ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,),
     )
     transcript_fact_artifact = await _load_latest_optional_artifact(
         session,
@@ -4312,7 +4710,7 @@ async def _load_content_profile_context(
     )
     transcript_context = _build_transcript_context_payload(
         transcript_rows,
-        canonical_transcript_artifact.data_json if canonical_transcript_artifact is not None else None,
+        canonical_transcript_data,
         transcript_fact_artifact.data_json if transcript_fact_artifact is not None else None,
         transcript_evidence_artifact.data_json if transcript_evidence_artifact is not None else None,
     )
@@ -8184,6 +8582,10 @@ async def run_edit_plan(job_id: str) -> dict:
                 "subject_type": str((content_profile or {}).get("subject_type") or "").strip(),
             },
         )
+        cut_analysis_payload = apply_multimodal_trim_review_to_cut_analysis(
+            cut_analysis_payload,
+            reviewed_multimodal_trim_review_payload,
+        )
         refine_decision_plan_payload = build_refine_decision_plan_from_render_plan(
             keep_segments=keep_segments,
             source_duration_sec=float(duration or 0.0),
@@ -8387,6 +8789,7 @@ async def run_render(job_id: str) -> dict:
         session.add(render_output)
         await session.flush()
         render_output_id = render_output.id
+        render_step_id = step.id
 
         await session.commit()
 
@@ -8402,14 +8805,59 @@ async def run_render(job_id: str) -> dict:
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        render_heartbeat: asyncio.Task[None] | None = None
+        render_heartbeat_stop = threading.Event()
+        render_heartbeat_thread: threading.Thread | None = None
+        render_heartbeat_state = {
+            "detail": "",
+            "progress": 0.0,
+        }
 
-        async def _refresh_render_progress(*, detail: str, progress: float) -> asyncio.Task[None] | None:
-            nonlocal render_heartbeat
-            if render_heartbeat is not None:
-                render_heartbeat.cancel()
-                with suppress(asyncio.CancelledError):
-                    await render_heartbeat
+        def _ensure_render_blocking_heartbeat(*, detail: str, progress: float) -> None:
+            nonlocal render_heartbeat_thread
+            render_heartbeat_state["detail"] = detail
+            render_heartbeat_state["progress"] = progress
+            if render_step_id is None:
+                return
+            if render_heartbeat_thread is not None and render_heartbeat_thread.is_alive():
+                return
+
+            interval_sec = max(5.0, float(getattr(get_settings(), "step_heartbeat_interval_sec", 20) or 20))
+
+            try:
+                still_running = _write_blocking_step_heartbeat(
+                    step_id=render_step_id,
+                    detail=str(render_heartbeat_state["detail"]),
+                    progress=float(render_heartbeat_state["progress"]),
+                )
+            except Exception:
+                logger.debug("Initial render blocking heartbeat failed step_id=%s", render_step_id, exc_info=True)
+                still_running = True
+
+            if not still_running:
+                return
+
+            def _heartbeat_loop() -> None:
+                while not render_heartbeat_stop.wait(interval_sec):
+                    try:
+                        still_running_inner = _write_blocking_step_heartbeat(
+                            step_id=render_step_id,
+                            detail=str(render_heartbeat_state["detail"]),
+                            progress=float(render_heartbeat_state["progress"]),
+                        )
+                    except Exception:
+                        logger.debug("Render blocking heartbeat failed step_id=%s", render_step_id, exc_info=True)
+                        continue
+                    if not still_running_inner:
+                        return
+
+            render_heartbeat_thread = threading.Thread(
+                target=_heartbeat_loop,
+                name=f"roughcut-render-heartbeat-{render_step_id}",
+                daemon=True,
+            )
+            render_heartbeat_thread.start()
+
+        async def _refresh_render_progress(*, detail: str, progress: float) -> None:
             async with get_session_factory()() as progress_session:
                 step_result = await progress_session.execute(
                     select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
@@ -8421,15 +8869,10 @@ async def run_render(job_id: str) -> dict:
                 if render_output_ref:
                     render_output_ref.progress = progress
                     await progress_session.commit()
-                render_heartbeat = _spawn_step_heartbeat(
-                    step_id=render_step.id if render_step else None,
-                    detail=detail,
-                    progress=progress,
-                )
-            return render_heartbeat
+            _ensure_render_blocking_heartbeat(detail=detail, progress=progress)
 
         try:
-            render_heartbeat = await _refresh_render_progress(
+            await _refresh_render_progress(
                 detail=(
                     "先渲染素版，再生成包装版"
                     if (has_packaging or has_editing_accents)
@@ -8576,7 +9019,7 @@ async def run_render(job_id: str) -> dict:
                     "detail": "等待渲染阶段处理数字人口播。",
                 }
                 try:
-                    render_heartbeat = await _refresh_render_progress(
+                    await _refresh_render_progress(
                         detail="素版已完成，等待数字人口播全轨插槽",
                         progress=0.42,
                     )
@@ -8695,7 +9138,7 @@ async def run_render(job_id: str) -> dict:
                         "reason": "avatar_segment_render_failed",
                         "detail": f"数字人片段渲染失败，已自动回退普通成片：{exc}",
                     }
-            packaging_heartbeat = await _refresh_render_progress(
+            await _refresh_render_progress(
                 detail="素版已完成，开始生成包装版",
                 progress=0.55,
             )
@@ -8735,10 +9178,6 @@ async def run_render(job_id: str) -> dict:
                 overlay_editing_accents=final_overlay_accents,
                 debug_dir=debug_dir / "packaged",
             )
-            if packaging_heartbeat is not None:
-                packaging_heartbeat.cancel()
-                with suppress(asyncio.CancelledError):
-                    await packaging_heartbeat
             plain_meta = await _probe_with_retry(tmp_plain_mp4)
             packaged_meta = await _probe_with_retry(tmp_packaged_mp4)
             ai_effect_meta = await _probe_with_retry(tmp_ai_effect_mp4)
@@ -8912,10 +9351,9 @@ async def run_render(job_id: str) -> dict:
                     await failure_session.commit()
             raise
         finally:
-            if render_heartbeat is not None:
-                render_heartbeat.cancel()
-                with suppress(asyncio.CancelledError):
-                    await render_heartbeat
+            render_heartbeat_stop.set()
+            if render_heartbeat_thread is not None:
+                render_heartbeat_thread.join(timeout=1.0)
 
     # Update render output
     local_paths = {
@@ -11361,6 +11799,13 @@ def _build_variant_timeline_diagnostics(
         if isinstance(raw_llm_cut_review, dict)
         else {}
     )
+    multimodal_trim_review_summary = dict((cut_analysis or {}).get("multimodal_trim_review_summary") or {})
+    refine_candidate_summary = dict((refine_decision_plan or {}).get("candidate_summary") or {})
+    multimodal_trim_review_summary["auto_apply_cut_count"] = int(
+        (refine_decision_plan or {}).get("multimodal_auto_apply_cut_count")
+        or refine_candidate_summary.get("multimodal_auto_apply")
+        or 0
+    )
     review_reasons: list[str] = []
     if high_risk_cuts:
         review_reasons.append("存在贴近高能量保留段的 cut，建议复核边界。")
@@ -11384,13 +11829,15 @@ def _build_variant_timeline_diagnostics(
         "refine_decision_summary": {
             "mode": str(((refine_decision_plan or {}).get("mode")) or "").strip() or None,
             "keep_segment_count": len(list(((refine_decision_plan or {}).get("keep_segments")) or [])),
-            "candidate_total": int((((refine_decision_plan or {}).get("candidate_summary")) or {}).get("total") or 0),
-            "candidate_auto_apply": int((((refine_decision_plan or {}).get("candidate_summary")) or {}).get("auto_apply") or 0),
-            "candidate_manual_confirm": int((((refine_decision_plan or {}).get("candidate_summary")) or {}).get("manual_confirm") or 0),
+            "candidate_total": int(refine_candidate_summary.get("total") or 0),
+            "candidate_auto_apply": int(refine_candidate_summary.get("auto_apply") or 0),
+            "candidate_manual_confirm": int(refine_candidate_summary.get("manual_confirm") or 0),
+            "multimodal_auto_apply_cut_count": int(refine_candidate_summary.get("multimodal_auto_apply") or 0),
         },
         "high_energy_keeps": high_energy_keeps[:8],
         "high_risk_cuts": high_risk_cuts[:8],
         "llm_cut_review": llm_cut_review,
+        "multimodal_trim_review_summary": multimodal_trim_review_summary,
         "review_flags": {
             "review_recommended": bool(high_risk_cuts),
             "review_reasons": review_reasons,

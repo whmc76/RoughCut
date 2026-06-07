@@ -4,10 +4,16 @@ import json
 from pathlib import Path
 from typing import Any
 
+from roughcut.intelligent_copy_layout import (
+    resolve_smart_copy_material_json_path,
+    resolve_smart_copy_platform_packaging_json_path,
+    smart_copy_material_root,
+)
 from roughcut.publication_platform_matrix import (
     publication_collection_policy_skip_values,
     normalize_publication_platform_name,
     platform_requires_explicit_collection_policy,
+    platform_required_cover_slots,
     platform_manual_handoff_only,
     platform_manual_publish_entry_url,
 )
@@ -24,18 +30,20 @@ def resolve_publication_packaging_input_paths(
 ) -> tuple[Path | None, Path | None]:
     material_json_path = Path(str(material_json or "").strip()) if str(material_json or "").strip() else None
     if material_json_path and not material_json_path.is_file():
-        material_json_path = None
+        nested = resolve_smart_copy_material_json_path(smart_copy_material_root(material_json_path))
+        material_json_path = nested if nested.is_file() else None
 
     packaging_path = Path(str(platform_packaging or "").strip()) if str(platform_packaging or "").strip() else None
     if packaging_path and not packaging_path.is_file():
-        packaging_path = None
+        nested = resolve_smart_copy_platform_packaging_json_path(smart_copy_material_root(packaging_path))
+        packaging_path = nested if nested.is_file() else None
 
     if packaging_path is None and material_json_path is not None:
-        sibling = material_json_path.with_name("platform-packaging.json")
+        sibling = resolve_smart_copy_platform_packaging_json_path(smart_copy_material_root(material_json_path))
         if sibling.is_file():
             packaging_path = sibling
     if material_json_path is None and packaging_path is not None:
-        sibling = packaging_path.with_name("smart-copy.json")
+        sibling = resolve_smart_copy_material_json_path(smart_copy_material_root(packaging_path))
         if sibling.is_file():
             material_json_path = sibling
         else:
@@ -63,6 +71,310 @@ def _normalize_requested_publication_packaging_platforms(platforms: list[str] | 
     return normalized
 
 
+def _normalize_cover_size(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, dict):
+        return None
+    try:
+        width = int(value.get("width") or value.get("w") or 0)
+        height = int(value.get("height") or value.get("h") or 0)
+    except (TypeError, ValueError):
+        return None
+    if width <= 0 or height <= 0:
+        return None
+    return {"width": width, "height": height}
+
+
+def _normalize_cover_slot_entry(value: Any, *, index: int = 0) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    slot = (
+        str(value.get("slot") or value.get("key") or value.get("name") or value.get("slot_key") or "").strip()
+        or f"slot_{index + 1}"
+    )
+    cover_path = str(
+        value.get("cover_path")
+        or value.get("path")
+        or value.get("output_path")
+        or value.get("file")
+        or ""
+    ).strip()
+    target_size = _normalize_cover_size(
+        value.get("target_size")
+        or value.get("cover_size")
+        or value.get("size")
+    )
+    label = str(value.get("label") or value.get("title") or "").strip()
+    source = str(value.get("source") or "").strip()
+    matrix_key = str(
+        value.get("matrix_key")
+        or value.get("group_key")
+        or value.get("cover_group_key")
+        or ""
+    ).strip()
+    members = [
+        normalize_publication_packaging_platform_key(item)
+        for item in (value.get("members") or value.get("platforms") or [])
+        if normalize_publication_packaging_platform_key(item)
+    ]
+    upload_required = value.get("upload_required")
+    optional = value.get("optional")
+    normalized: dict[str, Any] = {"slot": slot}
+    if cover_path:
+        normalized["cover_path"] = cover_path
+    if label:
+        normalized["label"] = label
+    if source:
+        normalized["source"] = source
+    if target_size:
+        normalized["target_size"] = target_size
+    if matrix_key:
+        normalized["matrix_key"] = matrix_key
+    if members:
+        normalized["members"] = members
+    if isinstance(upload_required, bool):
+        normalized["upload_required"] = upload_required
+    if isinstance(optional, bool):
+        normalized["optional"] = optional
+    if len(normalized) == 1 and "cover_path" not in normalized and "target_size" not in normalized:
+        return None
+    return normalized
+
+
+def normalize_publication_cover_slots(
+    raw_slots: Any,
+    *,
+    cover_path: str = "",
+    target_size: dict[str, Any] | None = None,
+    slot: str = "primary",
+    label: str = "",
+    source: str = "",
+    matrix_key: str = "",
+    members: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw_slots if isinstance(raw_slots, list) else []):
+        slot_entry = _normalize_cover_slot_entry(item, index=index)
+        if not slot_entry:
+            continue
+        signature = json.dumps(slot_entry, ensure_ascii=False, sort_keys=True)
+        if signature in seen:
+            continue
+        seen.add(signature)
+        normalized.append(slot_entry)
+    fallback_size = _normalize_cover_size(target_size)
+    fallback_cover_path = str(cover_path or "").strip()
+    if not normalized and (fallback_cover_path or fallback_size):
+        fallback_slot: dict[str, Any] = {"slot": str(slot or "primary").strip() or "primary"}
+        if fallback_cover_path:
+            fallback_slot["cover_path"] = fallback_cover_path
+        if fallback_size:
+            fallback_slot["target_size"] = fallback_size
+        if label:
+            fallback_slot["label"] = str(label).strip()
+        if source:
+            fallback_slot["source"] = str(source).strip()
+        if matrix_key:
+            fallback_slot["matrix_key"] = str(matrix_key).strip()
+        normalized_members = [
+            normalize_publication_packaging_platform_key(item)
+            for item in (members or [])
+            if normalize_publication_packaging_platform_key(item)
+        ]
+        if normalized_members:
+            fallback_slot["members"] = normalized_members
+        normalized.append(fallback_slot)
+    return normalized
+
+
+def _normalize_cover_matrix_slot_entry(matrix_key: str, value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    cover_path = str(
+        value.get("cover_path")
+        or value.get("path")
+        or value.get("output_path")
+        or value.get("file")
+        or ""
+    ).strip()
+    cover_size = value.get("target_size")
+    if not isinstance(cover_size, dict):
+        raw_size = value.get("cover_size")
+        if isinstance(raw_size, (list, tuple)) and len(raw_size) >= 2:
+            cover_size = {"width": raw_size[0], "height": raw_size[1]}
+        else:
+            cover_size = raw_size
+    target_size = _normalize_cover_size(cover_size)
+    if not cover_path and not target_size:
+        return None
+    normalized: dict[str, Any] = {"slot": str(matrix_key or "").strip() or "primary"}
+    if cover_path:
+        normalized["cover_path"] = cover_path
+    if target_size:
+        normalized["target_size"] = target_size
+    label = str(value.get("label") or "").strip()
+    if label:
+        normalized["label"] = label
+    matrix_key_value = str(matrix_key or value.get("matrix_key") or value.get("group_key") or "").strip()
+    if matrix_key_value:
+        normalized["matrix_key"] = matrix_key_value
+    members = [
+        normalize_publication_packaging_platform_key(item)
+        for item in (value.get("members") or value.get("platforms") or [])
+        if normalize_publication_packaging_platform_key(item)
+    ]
+    if members:
+        normalized["members"] = members
+    return normalized
+
+
+def _project_required_cover_slots_from_cover_matrix(
+    *,
+    platform: str,
+    explicit_slots: list[dict[str, Any]],
+    cover_matrix: dict[str, Any],
+    cover_path: str,
+    target_size: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    required_specs = platform_required_cover_slots(platform)
+    if not required_specs:
+        return explicit_slots
+
+    explicit_by_slot: dict[str, dict[str, Any]] = {}
+    explicit_by_matrix_key: dict[str, dict[str, Any]] = {}
+    for item in explicit_slots:
+        slot_key = str(item.get("slot") or "").strip()
+        matrix_key = str(item.get("matrix_key") or "").strip()
+        if slot_key:
+            explicit_by_slot.setdefault(slot_key, item)
+        if matrix_key:
+            explicit_by_matrix_key.setdefault(matrix_key, item)
+
+    has_explicit_required_mapping = any(
+        str(spec.get("slot") or "").strip() in explicit_by_slot
+        or str(spec.get("matrix_key") or "").strip() in explicit_by_matrix_key
+        for spec in required_specs
+    )
+    if explicit_slots and not cover_matrix and not has_explicit_required_mapping:
+        return explicit_slots
+
+    projected: list[dict[str, Any]] = []
+    for index, spec in enumerate(required_specs):
+        slot_key = str(spec.get("slot") or "").strip()
+        matrix_key = str(spec.get("matrix_key") or "").strip()
+        source_slot = explicit_by_slot.get(slot_key) or explicit_by_matrix_key.get(matrix_key)
+        if source_slot is None and matrix_key:
+            source_slot = _normalize_cover_matrix_slot_entry(matrix_key, cover_matrix.get(matrix_key))
+        if source_slot is None and len(required_specs) == 1 and (cover_path or target_size):
+            source_slot = {}
+        if source_slot is None:
+            continue
+        normalized_slot: dict[str, Any] = {
+            "slot": slot_key or str(source_slot.get("slot") or "").strip() or f"slot_{index + 1}",
+        }
+        resolved_cover_path = str(source_slot.get("cover_path") or cover_path or "").strip()
+        if resolved_cover_path:
+            normalized_slot["cover_path"] = resolved_cover_path
+        resolved_target_size = _normalize_cover_size(source_slot.get("target_size")) or target_size
+        if resolved_target_size:
+            normalized_slot["target_size"] = resolved_target_size
+        label = str(spec.get("label") or source_slot.get("label") or "").strip()
+        if label:
+            normalized_slot["label"] = label
+        matrix_key_value = matrix_key or str(source_slot.get("matrix_key") or "").strip()
+        if matrix_key_value:
+            normalized_slot["matrix_key"] = matrix_key_value
+        members = [
+            normalize_publication_packaging_platform_key(item)
+            for item in (source_slot.get("members") or [])
+            if normalize_publication_packaging_platform_key(item)
+        ]
+        if members:
+            normalized_slot["members"] = members
+        projected.append(normalized_slot)
+    return projected or explicit_slots
+
+
+def derive_publication_cover_slots(entry: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(entry, dict):
+        return []
+    cover_generation = entry.get("cover_generation") if isinstance(entry.get("cover_generation"), dict) else {}
+    constraints = entry.get("constraints") if isinstance(entry.get("constraints"), dict) else {}
+    copy_material = entry.get("copy_material") if isinstance(entry.get("copy_material"), dict) else {}
+    cover_matrix = entry.get("cover_matrix") if isinstance(entry.get("cover_matrix"), dict) else {}
+    cover_group = cover_generation.get("cover_group") if isinstance(cover_generation.get("cover_group"), dict) else {}
+    group_generation = (
+        cover_generation.get("group_generation")
+        if isinstance(cover_generation.get("group_generation"), dict)
+        else {}
+    )
+    if not cover_group and isinstance(group_generation.get("cover_group"), dict):
+        cover_group = group_generation.get("cover_group") or {}
+    members = [
+        normalize_publication_packaging_platform_key(item)
+        for item in (
+            cover_group.get("members")
+            or copy_material.get("cover_slot_members")
+            or copy_material.get("cover_group_members")
+            or []
+        )
+        if normalize_publication_packaging_platform_key(item)
+    ]
+    normalized_slots = normalize_publication_cover_slots(
+        entry.get("cover_slots") if isinstance(entry.get("cover_slots"), list) else copy_material.get("cover_slots"),
+        cover_path=str(entry.get("cover_path") or copy_material.get("cover_path") or "").strip(),
+        target_size=(
+            cover_generation.get("target_size")
+            if isinstance(cover_generation.get("target_size"), dict)
+            else constraints.get("cover_size")
+            if isinstance(constraints.get("cover_size"), dict)
+            else copy_material.get("target_size")
+            if isinstance(copy_material.get("target_size"), dict)
+            else copy_material.get("cover_size")
+            if isinstance(copy_material.get("cover_size"), dict)
+            else None
+        ),
+        slot=str(copy_material.get("cover_slot") or entry.get("cover_slot") or "primary").strip() or "primary",
+        label=str(copy_material.get("cover_slot_label") or entry.get("label") or "").strip(),
+        source=str(cover_generation.get("source") or copy_material.get("cover_slot_source") or "").strip(),
+        matrix_key=str(
+            cover_group.get("key")
+            or copy_material.get("cover_matrix_key")
+            or copy_material.get("cover_group_key")
+            or ""
+        ).strip(),
+        members=members,
+    )
+    return _project_required_cover_slots_from_cover_matrix(
+        platform=normalize_publication_packaging_platform_key(entry.get("platform") or entry.get("key")),
+        explicit_slots=normalized_slots,
+        cover_matrix=cover_matrix,
+        cover_path=str(entry.get("cover_path") or copy_material.get("cover_path") or "").strip(),
+        target_size=(
+            cover_generation.get("target_size")
+            if isinstance(cover_generation.get("target_size"), dict)
+            else constraints.get("cover_size")
+            if isinstance(constraints.get("cover_size"), dict)
+            else copy_material.get("target_size")
+            if isinstance(copy_material.get("target_size"), dict)
+            else copy_material.get("cover_size")
+            if isinstance(copy_material.get("cover_size"), dict)
+            else None
+        ),
+    )
+
+
+def publication_primary_cover_path(entry: dict[str, Any] | None) -> str:
+    slots = derive_publication_cover_slots(entry)
+    for slot in slots:
+        path = str(slot.get("cover_path") or "").strip()
+        if path:
+            return path
+    if isinstance(entry, dict):
+        return str(entry.get("cover_path") or "").strip()
+    return ""
+
+
 def normalize_publication_packaging_payload(
     payload: dict[str, Any],
     *,
@@ -70,6 +382,7 @@ def normalize_publication_packaging_payload(
 ) -> dict[str, Any] | None:
     raw_platforms = payload.get("platforms")
     if isinstance(raw_platforms, dict):
+        shared_cover_matrix = payload.get("cover_matrix") if isinstance(payload.get("cover_matrix"), dict) else {}
         normalized_platforms: dict[str, dict[str, Any]] = {}
         for raw_platform, raw_entry in raw_platforms.items():
             if not isinstance(raw_entry, dict):
@@ -82,6 +395,12 @@ def normalize_publication_packaging_payload(
             entry.setdefault("key", platform)
             entry.setdefault("manual_handoff_only", platform_manual_handoff_only(platform))
             entry.setdefault("manual_publish_entry_url", platform_manual_publish_entry_url(platform))
+            if shared_cover_matrix and not isinstance(entry.get("cover_matrix"), dict):
+                entry["cover_matrix"] = dict(shared_cover_matrix)
+            entry["cover_slots"] = derive_publication_cover_slots(entry)
+            primary_cover_path = publication_primary_cover_path(entry)
+            if primary_cover_path:
+                entry["cover_path"] = primary_cover_path
             entry["blocking_reasons"] = publication_packaging_entry_blocking_reasons(entry)
             entry["publish_ready"] = publication_packaging_entry_publish_ready(entry)
             normalized_platforms[platform] = entry
@@ -95,6 +414,7 @@ def normalize_publication_packaging_payload(
         return packaging
 
     platforms: dict[str, dict[str, Any]] = {}
+    shared_cover_matrix = payload.get("cover_matrix") if isinstance(payload.get("cover_matrix"), dict) else {}
     material_contract = payload.get("material_contract") if isinstance(payload.get("material_contract"), dict) else {}
     contract_platforms = material_contract.get("platforms") if isinstance(material_contract.get("platforms"), dict) else {}
     for item in raw_platforms if isinstance(raw_platforms, list) else []:
@@ -104,23 +424,7 @@ def normalize_publication_packaging_payload(
         if not key:
             continue
         contract_entry = contract_platforms.get(key) if isinstance(contract_platforms.get(key), dict) else {}
-        entry = {
-            "titles": [str(title).strip() for title in (item.get("titles") or []) if str(title).strip()],
-            "primary_title": str(item.get("primary_title") or "").strip(),
-            "description": str(item.get("body") or "").strip(),
-            "body": str(item.get("body") or "").strip(),
-            "tags": [str(tag).strip().lstrip("#") for tag in (item.get("tags") or []) if str(tag).strip()],
-            "cover_path": str(item.get("cover_path") or "").strip(),
-            "cover_generation": dict(item.get("cover_generation") or {}) if isinstance(item.get("cover_generation"), dict) else {},
-            "declaration": str(item.get("declaration") or "").strip(),
-            "category": str(item.get("category") or "").strip(),
-            "collection_name": str(item.get("collection_name") or "").strip(),
-            "collection": dict(item.get("collection") or {}) if isinstance(item.get("collection"), dict) else {},
-            "visibility_or_publish_mode": str(item.get("visibility_or_publish_mode") or "").strip(),
-            "scheduled_publish_at": str(item.get("scheduled_publish_at") or "").strip(),
-            "copy_material": dict(item.get("copy_material") or {}) if isinstance(item.get("copy_material"), dict) else {},
-            "live_publish_preflight": dict(item.get("live_publish_preflight") or {}) if isinstance(item.get("live_publish_preflight"), dict) else {},
-            "platform_specific_overrides": dict(item.get("platform_specific_overrides") or {}) if isinstance(item.get("platform_specific_overrides"), dict) else {},
+        entry: dict[str, Any] = {
             "manual_handoff_only": bool(contract_entry.get("manual_handoff_only")) or platform_manual_handoff_only(key),
             "manual_publish_entry_url": str(contract_entry.get("manual_publish_entry_url") or "").strip()
             or platform_manual_publish_entry_url(key),
@@ -132,6 +436,53 @@ def normalize_publication_packaging_payload(
                 if str(reason).strip()
             ],
         }
+        titles = [str(title).strip() for title in (item.get("titles") or []) if str(title).strip()]
+        tags = [str(tag).strip().lstrip("#") for tag in (item.get("tags") or []) if str(tag).strip()]
+        primary_title = str(item.get("primary_title") or "").strip()
+        body = str(item.get("body") or "").strip()
+        cover_path = str(item.get("cover_path") or "").strip()
+        declaration = str(item.get("declaration") or "").strip()
+        category = str(item.get("category") or "").strip()
+        collection_name = str(item.get("collection_name") or "").strip()
+        visibility_or_publish_mode = str(item.get("visibility_or_publish_mode") or "").strip()
+        scheduled_publish_at = str(item.get("scheduled_publish_at") or "").strip()
+        if titles:
+            entry["titles"] = titles
+        if primary_title:
+            entry["primary_title"] = primary_title
+        if body:
+            entry["description"] = body
+            entry["body"] = body
+        if tags:
+            entry["tags"] = tags
+        if cover_path:
+            entry["cover_path"] = cover_path
+        if isinstance(item.get("cover_generation"), dict) and item.get("cover_generation"):
+            entry["cover_generation"] = dict(item.get("cover_generation") or {})
+        if declaration:
+            entry["declaration"] = declaration
+        if category:
+            entry["category"] = category
+        if collection_name:
+            entry["collection_name"] = collection_name
+        if isinstance(item.get("collection"), dict) and item.get("collection"):
+            entry["collection"] = dict(item.get("collection") or {})
+        if visibility_or_publish_mode:
+            entry["visibility_or_publish_mode"] = visibility_or_publish_mode
+        if scheduled_publish_at:
+            entry["scheduled_publish_at"] = scheduled_publish_at
+        if isinstance(item.get("copy_material"), dict) and item.get("copy_material"):
+            entry["copy_material"] = dict(item.get("copy_material") or {})
+        if isinstance(item.get("live_publish_preflight"), dict) and item.get("live_publish_preflight"):
+            entry["live_publish_preflight"] = dict(item.get("live_publish_preflight") or {})
+        if isinstance(item.get("platform_specific_overrides"), dict) and item.get("platform_specific_overrides"):
+            entry["platform_specific_overrides"] = dict(item.get("platform_specific_overrides") or {})
+        if shared_cover_matrix:
+            entry["cover_matrix"] = dict(shared_cover_matrix)
+        entry["cover_slots"] = derive_publication_cover_slots(entry)
+        primary_cover_path = publication_primary_cover_path(entry)
+        if primary_cover_path:
+            entry["cover_path"] = primary_cover_path
         entry["blocking_reasons"] = publication_packaging_entry_blocking_reasons(entry)
         entry["publish_ready"] = publication_packaging_entry_publish_ready(entry)
         platforms[key] = entry
@@ -167,7 +518,7 @@ def load_publication_packaging_payload(
     normalized_packaging = (
         normalize_publication_packaging_payload(
             packaging_payload,
-            material_dir=str(packaging_path.parent) if packaging_path is not None else "",
+            material_dir=str(smart_copy_material_root(packaging_path)) if packaging_path is not None else "",
         )
         if isinstance(packaging_payload, dict)
         else None
@@ -175,7 +526,7 @@ def load_publication_packaging_payload(
     normalized_material_packaging = (
         normalize_publication_packaging_payload(
             smart_copy_payload,
-            material_dir=str(material_json_path.parent) if material_json_path is not None else "",
+            material_dir=str(smart_copy_material_root(material_json_path)) if material_json_path is not None else "",
         )
         if isinstance(smart_copy_payload, dict)
         else None
@@ -379,6 +730,9 @@ def publication_packaging_entry_blocking_reasons(entry: dict[str, Any]) -> list[
         for item in ((entry.get("blocking_reasons") or []) or (preflight.get("blocking_reasons") or []))
         if str(item).strip()
     ]
+    manual_handoff_only = bool(entry.get("manual_handoff_only")) or platform_manual_handoff_only(platform)
+    if manual_handoff_only:
+        return list(dict.fromkeys(blocking_reasons))
     metadata_contract_fields = (
         "declaration",
         "category",

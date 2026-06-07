@@ -51,6 +51,7 @@ from roughcut.config_profiles import (
 )
 from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
 from roughcut.creative.modes import build_mode_catalog
+from roughcut.providers.zhipu_tools import get_mcp_server_catalog as get_zhipu_mcp_server_catalog
 from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_transcription_dialect
 
 router = APIRouter(prefix="/config", tags=["config"])
@@ -60,6 +61,7 @@ _SECRET_OVERRIDE_KEYS = {
     "anthropic_api_key",
     "minimax_api_key",
     "minimax_coding_plan_api_key",
+    "zhipu_api_key",
     "ollama_api_key",
     "avatar_api_key",
     "voice_clone_api_key",
@@ -150,6 +152,7 @@ class ConfigOut(BaseModel):
     anthropic_api_key_set: bool
     minimax_api_key_set: bool
     minimax_coding_plan_api_key_set: bool
+    zhipu_api_key_set: bool
     # Security
     max_upload_size_mb: int
     max_video_duration_sec: int
@@ -220,6 +223,11 @@ class RuntimeEnvironmentOut(BaseModel):
     anthropic_api_key_helper: str
     minimax_base_url: str
     minimax_api_host: str
+    zhipu_base_url: str
+    zhipu_coding_base_url: str
+    zhipu_mcp_http_base_url: str
+    zhipu_auth_mode: str
+    zhipu_api_key_helper: str
     ollama_base_url: str
     avatar_api_base_url: str
     avatar_training_api_base_url: str
@@ -258,6 +266,33 @@ class ProviderCheckOut(BaseModel):
     status: str
     detail: str | None = None
     models: list[str] = Field(default_factory=list)
+
+
+class ZhipuMCPServerOut(BaseModel):
+    name: str
+    transport: str
+    description: str
+    url: str = ""
+    headers: dict[str, str] = Field(default_factory=dict)
+    command: str = ""
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    tools: list[str] = Field(default_factory=list)
+
+
+class ZhipuMCPConfigOut(BaseModel):
+    servers: dict[str, ZhipuMCPServerOut]
+
+
+def _redact_secret_map(values: dict[str, str]) -> dict[str, str]:
+    redacted: dict[str, str] = {}
+    for key, value in (values or {}).items():
+        normalized_key = str(key or "").strip().lower()
+        if normalized_key in {"authorization", "z_ai_api_key"}:
+            redacted[str(key)] = "[secure]"
+        else:
+            redacted[str(key)] = str(value or "")
+    return redacted
 
 
 def _sanitize_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
@@ -711,6 +746,7 @@ def get_config():
         anthropic_api_key_set=bool(s.anthropic_api_key),
         minimax_api_key_set=bool(s.minimax_api_key),
         minimax_coding_plan_api_key_set=bool(s.minimax_coding_plan_api_key),
+        zhipu_api_key_set=bool(s.zhipu_api_key or s.zhipu_api_key_helper),
         max_upload_size_mb=s.max_upload_size_mb,
         max_video_duration_sec=s.max_video_duration_sec,
         ffmpeg_timeout_sec=s.ffmpeg_timeout_sec,
@@ -782,6 +818,11 @@ def get_runtime_environment():
         anthropic_api_key_helper=s.anthropic_api_key_helper,
         minimax_base_url=s.minimax_base_url,
         minimax_api_host=s.minimax_api_host,
+        zhipu_base_url=s.zhipu_base_url,
+        zhipu_coding_base_url=s.zhipu_coding_base_url,
+        zhipu_mcp_http_base_url=s.zhipu_mcp_http_base_url,
+        zhipu_auth_mode=s.zhipu_auth_mode,
+        zhipu_api_key_helper=s.zhipu_api_key_helper,
         ollama_base_url=s.ollama_base_url,
         avatar_api_base_url=s.avatar_api_base_url,
         avatar_training_api_base_url=s.avatar_training_api_base_url,
@@ -808,6 +849,18 @@ def get_provider_check(provider: str):
         return ProviderCheckOut(**build_provider_check_payload(provider=provider))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/zhipu-mcp", response_model=ZhipuMCPConfigOut)
+def get_zhipu_mcp_config():
+    catalog = get_zhipu_mcp_server_catalog()
+    sanitized: dict[str, ZhipuMCPServerOut] = {}
+    for name, payload in catalog.items():
+        item = dict(payload)
+        item["headers"] = _redact_secret_map(dict(item.get("headers") or {}))
+        item["env"] = _redact_secret_map(dict(item.get("env") or {}))
+        sanitized[name] = ZhipuMCPServerOut(**item)
+    return ZhipuMCPConfigOut(servers=sanitized)
 
 
 @router.get("/model-catalog", response_model=ModelCatalogOut)

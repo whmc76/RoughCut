@@ -139,6 +139,7 @@ def _evaluate_packaging_preflight(
     platforms: list[str],
     material_json: str = "",
     platform_packaging: str = "",
+    enforce_gate: bool = True,
 ) -> dict[str, Any]:
     packaging, sources = load_publication_packaging_payload(
         material_json=material_json,
@@ -154,6 +155,8 @@ def _evaluate_packaging_preflight(
         return {
             "checked": bool(_normalize(material_json) or _normalize(platform_packaging)),
             "status": "missing" if (_normalize(material_json) or _normalize(platform_packaging)) else "skipped",
+            "gate_enforced": bool(enforce_gate),
+            "reported_failures": [],
             "material_json_path": sources.get("material_json_path", ""),
             "platform_packaging_path": sources.get("platform_packaging_path", ""),
             "source": sources.get("source", ""),
@@ -233,18 +236,24 @@ def _evaluate_packaging_preflight(
             "message": "发布物料合同就绪。",
         }
 
-    status = "failed" if failures else "passed"
+    reported_failures = list(failures)
+    effective_failures = list(failures) if enforce_gate else []
+    status = "failed" if effective_failures else "passed"
     if not failures and manual_handoff_targets and len(manual_handoff_targets) == len(platform_checks):
         status = "manual_handoff"
+    elif reported_failures and not enforce_gate:
+        status = "report_only"
     return {
         "checked": True,
         "status": status,
+        "gate_enforced": bool(enforce_gate),
+        "reported_failures": reported_failures,
         "material_json_path": sources.get("material_json_path", ""),
         "platform_packaging_path": sources.get("platform_packaging_path", ""),
         "source": sources.get("source", ""),
         "platform_checks": platform_checks,
         "manual_handoff_targets": manual_handoff_targets,
-        "failures": failures,
+        "failures": effective_failures,
     }
 
 
@@ -336,6 +345,72 @@ def _fetch_cdp_tabs_payload_via_urllib(cdp_url: str) -> Any:
     return json.loads(payload)
 
 
+def _should_fallback_to_browser_agent_probe_tabs(agent_ready: dict[str, Any]) -> bool:
+    health = agent_ready.get("health") if isinstance(agent_ready.get("health"), dict) else {}
+    capabilities = health.get("capabilities") if isinstance(health.get("capabilities"), dict) else {}
+    transport_kind = _normalize(
+        capabilities.get("browser_transport_kind")
+        or (health.get("browser_transport") or {}).get("transport")
+    ).lower()
+    cdp_status = _normalize(health.get("cdp_status")).lower()
+    return transport_kind == "chrome_extension_bridge" and cdp_status in {"ok", "ready"}
+
+
+def _derive_tabs_from_probe_inventory(probe_inventory: dict[str, Any]) -> list[dict[str, Any]]:
+    probe_platforms = probe_inventory.get("platforms") if isinstance(probe_inventory.get("platforms"), dict) else {}
+    tabs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for platform, entry in probe_platforms.items():
+        if not isinstance(entry, dict):
+            continue
+        route = entry.get("route") if isinstance(entry.get("route"), dict) else {}
+        url = _normalize(route.get("url"))
+        title = _normalize(route.get("title"))
+        if not url:
+            continue
+        key = f"{platform}:{url}:{title}"
+        if key in seen:
+            continue
+        seen.add(key)
+        tabs.append(
+            {
+                "id": f"probe:{_normalize_platform(platform)}",
+                "url": url,
+                "title": title,
+                "type": "page",
+            }
+        )
+    return tabs
+
+
+def _derive_tabs_from_creator_sessions(agent_ready: dict[str, Any], *, platforms: list[str]) -> list[dict[str, Any]]:
+    health = agent_ready.get("health") if isinstance(agent_ready.get("health"), dict) else {}
+    creator_sessions = health.get("creator_sessions") if isinstance(health.get("creator_sessions"), dict) else {}
+    tabs: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_platform in platforms:
+        platform = _normalize_platform(raw_platform)
+        entry = creator_sessions.get(platform) if isinstance(creator_sessions.get(platform), dict) else {}
+        route = entry.get("route") if isinstance(entry.get("route"), dict) else {}
+        url = _normalize(route.get("url"))
+        title = _normalize(route.get("title"))
+        if not url:
+            continue
+        key = f"{platform}:{url}:{title}"
+        if key in seen:
+            continue
+        seen.add(key)
+        tabs.append(
+            {
+                "id": f"session:{platform}",
+                "url": url,
+                "title": title,
+                "type": "page",
+            }
+        )
+    return tabs
+
+
 def _collect_probe_inventory_gate_failures(
     *,
     platforms: list[str],
@@ -401,11 +476,13 @@ async def _run_checks(
     request_timeout_sec: int,
     material_json: str = "",
     platform_packaging: str = "",
+    packaging_gate_enforced: bool = True,
 ) -> dict[str, Any]:
     packaging_preflight = _evaluate_packaging_preflight(
         platforms=platforms,
         material_json=material_json,
         platform_packaging=platform_packaging,
+        enforce_gate=packaging_gate_enforced,
     )
     live_publish_platforms = _derive_live_publish_platforms(
         requested_platforms=platforms,
@@ -419,22 +496,8 @@ async def _run_checks(
         request_timeout_sec=request_timeout_sec,
     )
     cdp_connected = False
+    all_tabs: list[dict[str, Any]] = []
     async with httpx.AsyncClient(timeout=request_timeout_sec) as client:
-        cdp_tabs_payload = await _fetch_cdp_tabs_payload(client, cdp_url)
-        if isinstance(cdp_tabs_payload, dict):
-            cdp_tabs = cdp_tabs_payload.get("tabs", cdp_tabs_payload.get("value"))
-        else:
-            cdp_tabs = cdp_tabs_payload
-        if not isinstance(cdp_tabs, list):
-            # CDP json/list returns raw list in normal mode; keep compatibility
-            cdp_tabs = cdp_tabs_payload if isinstance(cdp_tabs_payload, list) else []
-
-        if isinstance(cdp_tabs, list):
-            all_tabs = list(cdp_tabs)
-            cdp_connected = True
-        else:
-            all_tabs = []
-
         probe_inventory: dict[str, Any] = {
             "checked": False,
             "status": "skipped",
@@ -466,6 +529,32 @@ async def _run_checks(
                     "platforms": {},
                     "failures": [f"browser-agent probe inventory 拉取失败：{exc}"],
                 }
+
+        cdp_fetch_error: Exception | None = None
+        try:
+            cdp_tabs_payload = await _fetch_cdp_tabs_payload(client, cdp_url)
+            if isinstance(cdp_tabs_payload, dict):
+                cdp_tabs = cdp_tabs_payload.get("tabs", cdp_tabs_payload.get("value"))
+            else:
+                cdp_tabs = cdp_tabs_payload
+            if not isinstance(cdp_tabs, list):
+                cdp_tabs = cdp_tabs_payload if isinstance(cdp_tabs_payload, list) else []
+            if isinstance(cdp_tabs, list):
+                all_tabs = list(cdp_tabs)
+                cdp_connected = True
+        except Exception as exc:
+            cdp_fetch_error = exc
+
+        if not cdp_connected and _should_fallback_to_browser_agent_probe_tabs(agent_ready):
+            derived_tabs = _derive_tabs_from_probe_inventory(probe_inventory)
+            if not derived_tabs:
+                derived_tabs = _derive_tabs_from_creator_sessions(agent_ready, platforms=live_publish_platforms or platforms)
+            if derived_tabs:
+                all_tabs = derived_tabs
+                cdp_connected = True
+            elif cdp_fetch_error is not None:
+                probe_inventory.setdefault("failures", [])
+                probe_inventory["failures"].append(f"bridge transport 未返回可用 route 证据：{cdp_fetch_error}")
 
     platform_checks = {}
     for raw_platform in platforms:
@@ -520,6 +609,7 @@ async def _run_checks(
 
     failures: list[str] = []
     failures.extend([str(item).strip() for item in (packaging_preflight.get("failures") or []) if str(item).strip()])
+    failures.extend([str(item).strip() for item in (probe_inventory.get("failures") or []) if str(item).strip()])
     probe_gate_failures, probe_gate_metadata = _collect_probe_inventory_gate_failures(
         platforms=platforms,
         probe_inventory=probe_inventory,
@@ -589,10 +679,12 @@ def _print_summary(result: dict[str, Any]) -> None:
     if packaging.get("checked"):
         print(
             "packaging:"
-            f" {packaging.get('status')} source={packaging.get('source') or 'unknown'}"
-            f" material={packaging.get('material_json_path') or '-'}"
-            f" packaging={packaging.get('platform_packaging_path') or '-'}"
+                f" {packaging.get('status')} source={packaging.get('source') or 'unknown'}"
+                f" material={packaging.get('material_json_path') or '-'}"
+                f" packaging={packaging.get('platform_packaging_path') or '-'}"
         )
+        if packaging.get("status") == "report_only":
+            print("  - packaging gate: report_only (摸底模式，不阻断页面探测)")
         for platform, item in (packaging.get("platform_checks") or {}).items():
             print(f"  - {platform}: {item.get('status')} -> {item.get('message')}")
 
@@ -619,6 +711,11 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default="", help="optional json output path")
     parser.add_argument("--material-json", default="", help="可选：smart-copy.json 路径；用于启用物料合同预检。")
     parser.add_argument("--platform-packaging", default="", help="可选：platform-packaging.json 路径；优先于 sibling 推导。")
+    parser.add_argument(
+        "--probe-only",
+        action="store_true",
+        help="仅做页面/会话摸底，不让 packaging publish_ready/collection_policy 门禁阻断整体 preflight 结果。",
+    )
     parser.add_argument(
         "--require-tabs",
         action="store_true",
@@ -742,6 +839,15 @@ def _build_preflight_recommendations(result: dict[str, Any], *, requested_platfo
             operations=["restore_browser_agent", "restore_cdp_session", "rerun_preflight"],
             auto_remediable=False,
         )
+    probe_inventory = result.get("probe_inventory") if isinstance(result.get("probe_inventory"), dict) else {}
+    if bool(probe_inventory.get("checked")) and _normalize(probe_inventory.get("status")).lower() == "probe_failed":
+        _append_preflight_recommendation(
+            recommendations,
+            seen,
+            issue="probe_inventory_failed",
+            operations=["inspect_probe_visual_evidence", "restore_browser_agent", "rerun_preflight"],
+            auto_remediable=True,
+        )
 
     for failure in [str(item).strip() for item in (result.get("failures") or []) if str(item).strip()]:
         lowered = failure.lower()
@@ -831,6 +937,7 @@ def _build_preflight_mitigation(
     suggestion_map = {
         "profile_requirement_failed": "检测到 profile 绑定缺失，请显式指定 --target-profile-id 后重跑 preflight。",
         "browser_session_not_ready": "检测到 browser-agent/CDP 会话未就绪，请先恢复浏览器会话后再重跑 preflight。",
+        "probe_inventory_failed": "检测到 browser-agent 页面探测失败，请先恢复探测链路或检查当前页面状态后再重跑 preflight。",
         "missing_publish_tab": "检测到目标平台发布页标签缺失，请先打开对应发布页后再重跑 preflight。",
         "platform_scope_mismatch": "检测到目标平台超出本期物料合同覆盖范围，请重生成该平台物料或缩小发布平台范围后再发。",
         "probe_gate_blocked": "检测到实际发布页缺少关键参数面，请结合截图证据修复 live_publish_preflight 或页面能力后再重跑 preflight。",
@@ -881,7 +988,10 @@ def _build_preflight_publication_verification(
         if isinstance(item, dict) and isinstance(item.get("visual_evidence"), dict) and item.get("visual_evidence")
     }
     summary_status = "passed"
-    if failures:
+    probe_inventory_status = _normalize((probe_inventory or {}).get("status")).lower()
+    agent_ready_flag = bool((result.get("agent_ready") or {}).get("ready"))
+    cdp_connected_flag = bool((result.get("cdp") or {}).get("connected"))
+    if failures or not agent_ready_flag or not cdp_connected_flag or probe_inventory_status == "probe_failed":
         summary_status = "failed"
     elif packaging.get("status") == "manual_handoff":
         summary_status = "manual_handoff"
@@ -932,6 +1042,7 @@ async def main() -> int:
         request_timeout_sec=max(3, int(args.timeout or 12)),
         material_json=_normalize(getattr(args, "material_json", "")),
         platform_packaging=_normalize(getattr(args, "platform_packaging", "")),
+        packaging_gate_enforced=not bool(getattr(args, "probe_only", False)),
     )
     publication_verification = _build_preflight_publication_verification(
         result,
@@ -967,7 +1078,11 @@ async def main() -> int:
     if not result.get("cdp", {}).get("connected"):
         return 3
     packaging = result.get("packaging") if isinstance(result.get("packaging"), dict) else {}
-    if packaging.get("checked") and (packaging.get("failures") or []):
+    if (
+        packaging.get("checked")
+        and bool(packaging.get("gate_enforced", True))
+        and (packaging.get("failures") or [])
+    ):
         return 5
     if result.get("failures"):
         return 6

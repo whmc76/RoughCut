@@ -42,6 +42,11 @@ def build_service_status_payload() -> dict[str, Any]:
             base_url=settings.minimax_base_url,
             configured=bool(str(settings.minimax_api_key or "").strip()),
         ),
+        "zhipu": _credential_status(
+            name="zhipu",
+            base_url=settings.zhipu_base_url,
+            configured=bool(str(settings.zhipu_api_key or "").strip() or str(settings.zhipu_api_key_helper or "").strip()),
+        ),
     }
     return {
         "checked_at": checked_at,
@@ -67,6 +72,8 @@ def build_provider_check_payload(*, provider: str) -> dict[str, Any]:
         return _check_openai_provider(settings=settings, checked_at=checked_at)
     if normalized_provider == "minimax":
         return _check_minimax_provider(settings=settings, checked_at=checked_at)
+    if normalized_provider == "zhipu":
+        return _check_zhipu_provider(settings=settings, checked_at=checked_at)
     if normalized_provider == "anthropic":
         return _check_anthropic_provider(settings=settings, checked_at=checked_at)
     raise ValueError(f"Unsupported provider: {normalized_provider}")
@@ -128,6 +135,8 @@ def _fetch_models(*, provider: str, kind: str) -> list[str]:
         return sorted(models)
     if provider == "minimax":
         return sorted(_fetch_chat_api_models(provider="minimax"))
+    if provider == "zhipu":
+        return sorted(_fetch_chat_api_models(provider="zhipu"))
     if provider == "anthropic":
         return sorted(_fetch_anthropic_models())
     raise ValueError(f"Unsupported provider: {provider}")
@@ -158,6 +167,14 @@ def _fetch_chat_api_models(*, provider: str) -> list[str]:
         token = str(settings.minimax_api_key or "").strip()
         if not token:
             raise ValueError("MiniMax API credential is not configured")
+    elif provider == "zhipu":
+        base_url = settings.zhipu_base_url.rstrip("/")
+        token = resolve_credential(
+            mode=settings.zhipu_auth_mode,
+            direct_value=settings.zhipu_api_key,
+            helper_command=settings.zhipu_api_key_helper,
+            provider_name="Zhipu",
+        )
     else:
         raise ValueError(f"Unsupported chat API provider: {provider}")
 
@@ -323,6 +340,38 @@ def _check_minimax_provider(*, settings: Any, checked_at: str) -> dict[str, Any]
     except Exception as exc:
         return {
             "provider": "minimax",
+            "base_url": base_url,
+            "checked_at": checked_at,
+            "status": "error",
+            "detail": str(exc),
+            "models": [],
+        }
+
+
+def _check_zhipu_provider(*, settings: Any, checked_at: str) -> dict[str, Any]:
+    base_url = str(settings.zhipu_base_url or "").strip()
+    if not base_url:
+        return {
+            "provider": "zhipu",
+            "base_url": "",
+            "checked_at": checked_at,
+            "status": "not_configured",
+            "detail": "base_url is empty",
+            "models": [],
+        }
+    try:
+        models = _fetch_chat_api_models(provider="zhipu")
+        return {
+            "provider": "zhipu",
+            "base_url": base_url,
+            "checked_at": checked_at,
+            "status": "ok",
+            "detail": "ok",
+            "models": models,
+        }
+    except Exception as exc:
+        return {
+            "provider": "zhipu",
             "base_url": base_url,
             "checked_at": checked_at,
             "status": "error",

@@ -10,6 +10,7 @@ from typing import Any, Sequence
 from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, SubtitleItem
 from roughcut.pipeline.rerun_actions import pick_recommended_rerun_steps
 from roughcut.media.variant_timeline_bundle import (
+    variant_multimodal_trim_review_summary,
     resolve_effective_variant_timeline_bundle,
     variant_llm_cut_review,
     variant_refine_decision_summary,
@@ -504,6 +505,7 @@ def assess_job_quality(
             )
         )
     llm_cut_review = variant_llm_cut_review(variant_bundle)
+    multimodal_trim_review_summary = variant_multimodal_trim_review_summary(variant_bundle)
     refine_decision_summary = variant_refine_decision_summary(variant_bundle)
     if (
         llm_cut_review
@@ -515,6 +517,31 @@ def assess_job_quality(
                 "edit_plan_llm_cut_review_timeout",
                 "edit_plan 的高风险 cut LLM 复核超时，当前已回退到确定性证据剪辑结果",
                 2.0,
+                auto_fix_step="edit_plan",
+            )
+        )
+    if (
+        multimodal_trim_review_summary
+        and str(multimodal_trim_review_summary.get("error") or "").strip() == "multimodal_trim_review_timeout"
+    ):
+        issues.append(
+            QualityIssue(
+                "multimodal_trim_review_timeout",
+                "多模态废片复核超时，当前已回退到文本/规则候选。",
+                3.0,
+                auto_fix_step="edit_plan",
+            )
+        )
+    elif (
+        multimodal_trim_review_summary
+        and int(multimodal_trim_review_summary.get("candidate_count") or 0) > 0
+        and int(multimodal_trim_review_summary.get("pending_count") or 0) > 0
+    ):
+        issues.append(
+            QualityIssue(
+                "multimodal_trim_review_incomplete",
+                "仍有废片候选未完成多模态复核，自动精修存在剩余不确定性。",
+                1.5,
                 auto_fix_step="edit_plan",
             )
         )
@@ -570,6 +597,7 @@ def assess_job_quality(
             "step_completion_ratio": round(step_completion_ratio, 3),
             "subtitle_sync": sync_check,
             "llm_cut_review": llm_cut_review,
+            "multimodal_trim_review_summary": multimodal_trim_review_summary,
             "refine_decision_summary": refine_decision_summary,
             "identity_narrative_conflicts": _collect_identity_narrative_conflicts(profile),
             "entity_identity_gate": evaluate_profile_identity_gate(profile),

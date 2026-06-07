@@ -13,6 +13,7 @@ import {
   buildPreparationBootstrapTimeoutOutcome,
   buildPendingUploadMaterialIntegrity,
   buildCompositePublicationAudit,
+  buildPublicationFieldSnapshotFromAudit,
   collectRepairEvidenceFlags,
   coerceTaskContentWithRecoveryPayload,
   extractPublicationTaskIdentity,
@@ -26,6 +27,11 @@ import {
   canReuseCurrentPageMediaForPrepublish,
   compositeRequiresLocalMedia,
   deriveDouyinCoverState,
+  buildDouyinCompositeCoverEditorPlan,
+  buildDouyinPrepareProjectExecutionPlan,
+  filterDouyinPrepareProjectExecutionPlan,
+  isDouyinFormalCompositeCoverEditorState,
+  isDouyinCoverEditorModalText,
   deriveXiaohongshuCoverActual,
   deriveXiaohongshuDeclarationActual,
   deriveXiaohongshuSelectedCollectionActual,
@@ -57,6 +63,8 @@ import {
   derivePublicationTaskTimeoutStatus,
   deriveCompositePrePublishRepairPlan,
   derivePlatformTabSelectionPolicy,
+  classifyDouyinCoverUploadInputRoot,
+  extractDouyinTopicVerificationLabels,
   extractYouTubeStudioChannelId,
   buildYouTubeStudioContentListUrl,
   buildYouTubeStudioUploadEntryUrl,
@@ -71,10 +79,30 @@ import {
   shouldBootstrapStopBeforeMediaRouteRecovery,
   shouldTreatYouTubeUploadSurfaceAsStable,
   isPlatformReceiptSurfaceUrl,
+  isPlatformPublishRouteBootstrapReady,
   shouldAcquireReceiptSurfaceRoute,
   shouldAttemptMediaBootstrap,
-  shouldEnforcePlatformPublishRoute,
+  shouldContinueStopBeforeUploadBootstrap,
+    shouldEnforcePlatformPublishRoute,
+    shouldAllowCompositeFieldPreparation,
+    shouldBootstrapCompositeUploadFromCleanEntry,
+    shouldAwaitCompositeUploadEntryHydration,
+    shouldWaitForCompositeUploadReadyBeforeFieldPreparation,
+  currentPageMatchesPrepareOnlyExecutionContext,
+  resolveDouyinRichTextTargets,
+  findPlatformTabs,
   expectedMediaPath,
+  expectedPrimaryCoverPathForPlatform,
+  filterSinglePathVideoInputs,
+  selectDouyinCoverSlotSurfaceCandidate,
+  selectDouyinCoverSlotEntryTarget,
+  buildXiaohongshuTopicSearchQuery,
+  extractXiaohongshuInsertedTopicLabels,
+  extractXiaohongshuTopicVerificationLabels,
+  selectDouyinTopicSearchFieldCandidate,
+  selectXiaohongshuTopicSearchFieldCandidate,
+  selectXiaohongshuOriginalDeclarationControlCandidate,
+  selectDouyinTopicSuggestionCandidate,
   expectedCompositeDeclaration,
   extractCompositeDeclarationText,
   activateYoutubeHiddenUploadEntry,
@@ -87,10 +115,12 @@ import {
   extractToutiaoManageCandidates,
   extractDouyinSelectedCollectionEvidence,
   extractCompositeBodyForAudit,
+  isDouyinCoverEditorImmediateEditable,
   isDouyinCustomCoverReady,
   mergePublicationTaskProgress,
   normalizeCompositeUploadReadyResult,
   normalizeRichTextDraftValue,
+  normalizeYouTubeVisibilityOrPublishMode,
   normalizeYouTubeTagValue,
   normalizeCompositeBodyForAudit,
   normalizeCompositePostPublishIntegrity,
@@ -101,6 +131,8 @@ import {
   shouldDispatchPublicationTaskReconcileCallback,
   richTextDraftValueMatches,
   resolveDouyinDeclarationOption,
+  resolveXiaohongshuDeclarationOption,
+  shouldEnableXiaohongshuOriginalDeclaration,
   selectDouyinCoverConfirmCandidate,
   selectBestDouyinManageCardEvidence,
   selectBestXiaohongshuNoteManagerEvidence,
@@ -108,10 +140,19 @@ import {
   selectYouTubeDraftResumeEntryCandidate,
   selectYouTubeMetadataExpandCandidate,
   selectYouTubeTagInputCandidate,
+  shouldInspectHiddenVideoInputsForDraftClear,
+  shouldResetBilibiliUploadModuleAfterDiscard,
+  bilibiliDraftStorageKeysToClear,
+  isBilibiliFreshUploadEntrySnapshot,
+  shouldPersistBilibiliDirtyEditorBeforeRouteReset,
+  shouldBypassDraftResumeAtAuthoritativeUploadEntry,
+  isBilibiliUploadQueueCardCandidate,
   extractYouTubeDraftVideoId,
   matchesYouTubeDraftResumeHint,
   selectYouTubeDraftResumeCandidate,
   deriveYouTubeDraftResumeFallbackTarget,
+  deriveYouTubeUploadEditorBootstrapPlan,
+  deriveYouTubeUploadWizardStep,
   shouldAttemptYouTubeDraftResumeFallbackRoute,
   buildYouTubeUploadResumeUrl,
   buildYouTubeStudioEditorUrl,
@@ -121,11 +162,13 @@ import {
   shouldAcceptCompositeUploadReadyState,
   shouldAcceptCollapsedDouyinScheduleEvidence,
   shouldBlockOnMediaUploadFailure,
+  shouldFallbackToFullPrepareDuringRepair,
   shouldFailYouTubeDraftResumeAsInert,
   shouldDeferYouTubeDraftResumeReupload,
   shouldTreatCompositeUploadReadinessBlockerAsPending,
   hasYoutubeUploadResumeVideoId,
   shouldPreserveYouTubeUploadResumeRoute,
+  shouldDeferGenericPostUploadIntegrityUntilPlatformAdapter,
   shouldTreatCompositeEditorSurfaceAsNotReady,
   shouldTreatMediaUploadAsInProgress,
   shouldWaitForVerificationOnlyMaterialIntegrity,
@@ -161,6 +204,100 @@ test("buildPendingUploadMaterialIntegrity marks upload_in_progress without conte
   assert.equal(integrity.fields.upload_ready.verified, false);
   assert.equal(integrity.upload_readiness.busy, true);
   assert.equal(integrity.platform_extras.route.url, "https://creator.douyin.com/creator-micro/content/post/video");
+});
+
+test("shouldFallbackToFullPrepareDuringRepair stays fail-closed when framework has no scoped repair", () => {
+  assert.equal(
+    shouldFallbackToFullPrepareDuringRepair("xiaohongshu", { id: "xiaohongshu_creator_composite_v1", prepare() {} }),
+    false,
+  );
+});
+
+test("shouldFallbackToFullPrepareDuringRepair stays false when scoped repair exists", () => {
+  assert.equal(
+    shouldFallbackToFullPrepareDuringRepair("douyin", { id: "douyin_creator_composite_v1", prepare() {}, repair() {} }),
+    false,
+  );
+});
+
+test("deriveCompositePrePublishRepairPlan disables auto repair in linear execution mode", () => {
+  const plan = deriveCompositePrePublishRepairPlan(
+    { required_unverified: ["body", "tags", "collection"] },
+    { failures: ["body", "tags"] },
+    { disable_auto_repair: true },
+  );
+
+  assert.equal(plan.shouldRepair, false);
+  assert.equal(plan.disabled_by_policy, true);
+  assert.equal(plan.reason, "linear_execution_mode");
+  assert.deepEqual(plan.required_unverified, ["body", "tags", "collection"]);
+  assert.deepEqual(plan.integrity_failures, ["body", "tags"]);
+});
+
+test("extractDouyinTopicVerificationLabels prefers inserted body topics over recommended chips", () => {
+  const actual = extractDouyinTopicVerificationLabels(
+    [
+      { text: "美杜莎4顶配vs次顶配\n#EDC", context: "body", source: "body" },
+      { text: "#EDC", context: "推荐 热度 23.5亿", source: "chip" },
+      { text: "#海淘开箱", context: "推荐 热度 12亿", source: "chip" },
+    ],
+    ["EDC"],
+  );
+
+  assert.deepEqual(actual, ["EDC"]);
+});
+
+test("selectDouyinTopicSearchFieldCandidate rejects generic visibility control and prefers topic field", () => {
+  const field = selectDouyinTopicSearchFieldCandidate([
+    {
+      tag: "input",
+      role: "",
+      label: "公开",
+      current: "",
+      root_area: 12000,
+      isContentEditable: false,
+    },
+    {
+      tag: "div",
+      role: "textbox",
+      label: "作品描述 #添加话题 @好友",
+      current: "",
+      root_area: 18000,
+      isContentEditable: true,
+    },
+  ]);
+
+  assert.equal(field?.label, "作品描述 #添加话题 @好友");
+});
+
+test("selectDouyinTopicSearchFieldCandidate fails closed when no topic semantic field exists", () => {
+  const field = selectDouyinTopicSearchFieldCandidate([
+    {
+      tag: "input",
+      role: "",
+      label: "公开",
+      current: "",
+      root_area: 12000,
+      isContentEditable: false,
+    },
+    {
+      tag: "input",
+      role: "",
+      label: "立即发布",
+      current: "",
+      root_area: 12000,
+      isContentEditable: false,
+    },
+  ]);
+
+  assert.equal(field, null);
+});
+
+test("verifyCompositeBodyField accepts flattened douyin body with equivalent content", () => {
+  const expected = "美杜莎4顶配和次顶配一起到的，拆开对比一下📦\n外观、细节做工、弹射手感、收回紧实度都过了一遍\n两把放一起一比，差别肉眼可见\n跳刀玩家可以参考下";
+  const actual = "美杜莎4顶配和次顶配一起到的，拆开对比一下📦 外观、细节做工、弹射手感、收回紧实度都过了一遍 两把放一起一比，差别肉眼可见 跳刀玩家可以参考下";
+
+  assert.equal(verifyCompositeBodyField("douyin", expected, actual), true);
 });
 
 test("buildCompactProbeInventorySummary preserves visual evidence while trimming heavy inventory fields", () => {
@@ -237,6 +374,34 @@ test("deriveProbeInventoryRouteReadiness marks bilibili loading shell as route_n
   assert.equal(readiness.blocked, true);
   assert.equal(readiness.status, "route_not_ready");
   assert.equal(readiness.reason, "publish_route_loading");
+});
+
+test("filterSinglePathVideoInputs keeps bilibili canonical upload wrapper and excludes buploader fallback", () => {
+  const candidates = [
+    {
+      attrMap: { name: "buploader", accept: "video/*" },
+      runtime: {
+        name: "buploader",
+        rootClassName: "some-other-wrapper",
+        parentClassName: "misc-parent",
+        rootText: "添加视频",
+      },
+    },
+    {
+      attrMap: { name: "video", accept: "video/*" },
+      runtime: {
+        name: "video",
+        rootClassName: "bcc-upload-wrapper",
+        parentClassName: "bcc-upload-wrapper",
+        rootText: "点击上传或将视频拖拽到此区域 上传视频",
+      },
+    },
+  ];
+
+  const filtered = filterSinglePathVideoInputs("bilibili", candidates);
+
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0].runtime.name, "video");
 });
 
 test("deriveProbeInventoryRouteReadiness treats bilibili draft-resume prompt as route_not_ready", () => {
@@ -656,6 +821,18 @@ test("isCompositePublishRouteContext keeps douyin loading-only publish surface f
       text: "高清发布 抖音 加载中，请稍候...",
       file_inputs: [],
     }),
+    true,
+  );
+});
+
+test("isCompositePublishRouteContext stays self-contained when stringified for douyin upload entry", () => {
+  const routeFn = eval(`(${isCompositePublishRouteContext.toString()})`);
+  assert.equal(
+    routeFn("douyin", {
+      url: "https://creator.douyin.com/creator-micro/content/upload",
+      text: "发布视频 点击上传 或直接将视频文件拖入此区域 你还有上次未发布的视频 是否继续编辑 继续编辑 放弃",
+      file_inputs: [{ accept: "video/mp4" }],
+    }),
     false,
   );
 });
@@ -716,6 +893,28 @@ test("buildBilibiliPublicationAudit treats stop-before safe mode as receipt-comp
   assert.deepEqual(audit.required_unverified, []);
 });
 
+test("expectedPrimaryCoverPathForPlatform prefers bilibili 4:3 slot over 16:9 slot", () => {
+  const path = expectedPrimaryCoverPathForPlatform("bilibili", {
+    cover_path: "E:/covers/fallback.jpg",
+    cover_slots: [
+      {
+        slot: "landscape_16_9",
+        matrix_key: "landscape_16_9",
+        label: "个人空间封面（16:9）",
+        cover_path: "E:/covers/bilibili-16-9.jpg",
+      },
+      {
+        slot: "landscape_4_3",
+        matrix_key: "landscape_4_3",
+        label: "首页推荐封面（4:3）",
+        cover_path: "E:/covers/bilibili-4-3.jpg",
+      },
+    ],
+  });
+
+  assert.equal(path, "E:/covers/bilibili-4-3.jpg");
+});
+
 test("coerceTaskContentWithRecoveryPayload maps top-level recovery overrides into publication recovery state", () => {
   const content = coerceTaskContentWithRecoveryPayload({
     content: {
@@ -770,10 +969,14 @@ test("buildPublicationHealthPayload exposes task identity contract and service f
   assert.equal(payload.status, "ok");
   assert.equal(payload.service_script_sha256, SERVICE_SCRIPT_SHA256);
   assert.match(String(payload.service_script_sha256 || ""), /^[0-9a-f]{64}$/);
+  assert.equal(payload.cdp_url, "bridge://chrome-extension");
+  assert.equal(payload.browser_transport.transport, "chrome_extension_bridge");
   assert.equal(payload.capabilities.task_identity_echo, true);
   assert.equal(payload.capabilities.task_identity_contract, PUBLICATION_TASK_IDENTITY_CONTRACT);
   assert.equal(payload.capabilities.creator_session_probe, true);
   assert.equal(payload.capabilities.creator_session_contract, PUBLICATION_CREATOR_SESSION_CONTRACT);
+  assert.equal(payload.capabilities.browser_transport_kind, "chrome_extension_bridge");
+  assert.equal(payload.capabilities.browser_extension_bridge, true);
 });
 
 test("buildPublicationHealthPayload preserves creator session probe results", () => {
@@ -842,6 +1045,86 @@ test("buildCompositePublicationAudit marks draft_state and upload_ready as reupl
   assert.ok(audit.required_reupload.includes("upload_ready"));
   assert.ok(audit.required_reupload.includes("draft_state"));
   assert.ok(audit.notes.includes("required_reupload"));
+});
+
+test("buildPublicationFieldSnapshotFromAudit fails closed for unverified youtube fields", () => {
+  const snapshot = buildPublicationFieldSnapshotFromAudit(
+    "youtube",
+    {
+      adapter: "browser_agent",
+      title: "标题",
+      body: "正文",
+      hashtags: ["标签A"],
+      structured_tags: ["标签A"],
+      copy_material: {},
+      visibility_or_publish_mode: "draft",
+      scheduled_publish_at: "2026-06-04T21:00:00+08:00",
+      platform_specific_overrides: {},
+    },
+    {
+      checklist: {
+        title: { expected: "标题", verified: false },
+        body: { expected: "正文", verified: false },
+        tags: { expected: ["标签A"], verified: false },
+        collection: { expected: "播放列表A", verified: false },
+        cover: { expected_path: "E:/cover.jpg", verified: false },
+        schedule: { expected: "2026-06-04 21:00", verified: false },
+        visibility: { expected: "draft", verified: false },
+        upload_ready: { actual: "not_ready", verified: false },
+        draft_state: { actual: "residual_artifacts", verified: false },
+      },
+    },
+    { url: "https://studio.youtube.com/video/demo/edit", title: "Video details" },
+  );
+
+  assert.equal(snapshot.title, "");
+  assert.equal(snapshot.body, "");
+  assert.deepEqual(snapshot.hashtags, []);
+  assert.equal(snapshot.collection, "");
+  assert.equal(snapshot.cover_path, "");
+  assert.equal(snapshot.visibility_or_publish_mode, "");
+  assert.equal(snapshot.scheduled_publish_at, "");
+  assert.equal(snapshot.ui_control_semantics.schedule_publish, false);
+  assert.equal(snapshot.upload_ready, "not_ready");
+  assert.equal(snapshot.draft_state, "residual_artifacts");
+});
+
+test("buildPublicationFieldSnapshotFromAudit keeps verified youtube field values", () => {
+  const snapshot = buildPublicationFieldSnapshotFromAudit(
+    "youtube",
+    {
+      adapter: "browser_agent",
+      hashtags: ["标签A"],
+      structured_tags: ["标签A"],
+      copy_material: {},
+      platform_specific_overrides: {},
+    },
+    {
+      checklist: {
+        title: { actual: "标题", verified: true },
+        body: { actual: "正文", verified: true },
+        tags: { actual: ["标签A"], verified: true },
+        collection: { actual: "播放列表A", verified: true },
+        cover: { expected_path: "E:/cover.jpg", verified: true },
+        schedule: { actual: "2026-06-04T21:00:00+08:00", verified: true },
+        visibility: { actual: "schedule", verified: true },
+        upload_ready: { actual: "ready", verified: true },
+        draft_state: { actual: "clean", verified: true },
+      },
+    },
+    { url: "https://studio.youtube.com/video/demo/edit", title: "Video details" },
+  );
+
+  assert.equal(snapshot.title, "标题");
+  assert.equal(snapshot.body, "正文");
+  assert.deepEqual(snapshot.hashtags, ["标签A"]);
+  assert.equal(snapshot.collection, "播放列表A");
+  assert.equal(snapshot.cover_path, "E:/cover.jpg");
+  assert.equal(snapshot.visibility_or_publish_mode, "schedule");
+  assert.equal(snapshot.scheduled_publish_at, "2026-06-04T21:00:00+08:00");
+  assert.equal(snapshot.ui_control_semantics.schedule_publish, true);
+  assert.equal(snapshot.upload_ready, "ready");
+  assert.equal(snapshot.draft_state, "clean");
 });
 
 test("deriveCompositePrePublishRepairPlan retries repairable field failures before publish", () => {
@@ -932,10 +1215,63 @@ test("buildCompositeRepairExecutionPlan groups rich text fields and preserves ta
   assert.equal(plan.platform, "douyin");
   assert.deepEqual(plan.fields, ["title", "tags", "declaration", "schedule"]);
   assert.equal(plan.rich_text, true);
+  assert.equal(plan.topics, true);
   assert.equal(plan.cover, false);
   assert.equal(plan.collection, false);
   assert.equal(plan.declaration, true);
   assert.equal(plan.schedule, true);
+});
+
+test("buildCompositeRepairExecutionPlan does not route douyin tags through rich text repair alone", () => {
+  const plan = buildCompositeRepairExecutionPlan("douyin", ["tags"]);
+
+  assert.equal(plan.platform, "douyin");
+  assert.equal(plan.rich_text, false);
+  assert.equal(plan.topics, true);
+  assert.equal(plan.cover, false);
+  assert.equal(plan.collection, false);
+});
+
+test("resolveDouyinRichTextTargets prefers the canonical editor field over the outer wrapper", () => {
+  const expectedBody = "EDC跳刀的成片素材，后续文案需要围绕画面、字幕和已核验事实重新创作。";
+  const titleEl = { tagName: "INPUT" };
+  const wrapperEl = { tagName: "DIV" };
+  const editorEl = { tagName: "DIV" };
+  const result = resolveDouyinRichTextTargets([
+    {
+      el: titleEl,
+      tag: "input",
+      text: "填写作品标题 为作品获得更多流量 MAXACE美杜莎4开箱先看细节 16/30",
+      className: "semi-input semi-input-default",
+      area: 14910,
+      role: "",
+      isContentEditable: false,
+    },
+    {
+      el: wrapperEl,
+      tag: "div",
+      text: `${expectedBody} ${expectedBody} #EDC 设置封面 添加合集 发布时间 立即发布`,
+      className: "zone-container editor-kit-container editor editor-comp-publish notranslate chrome window chrome88",
+      area: 96096,
+      role: "textbox",
+      isContentEditable: true,
+    },
+    {
+      el: editorEl,
+      tag: "div",
+      text: `作品描述 ${expectedBody} #添加话题 @好友 71/1000`,
+      className: "public-DraftEditor-content",
+      area: 18800,
+      role: "textbox",
+      isContentEditable: true,
+    },
+  ], {
+    title: "MAXACE美杜莎4开箱先看细节",
+    body: expectedBody,
+  });
+
+  assert.equal(result.titleTarget?.el, titleEl);
+  assert.equal(result.bodyTarget?.el, editorEl);
 });
 
 test("repair-only current-page live path can clear declaration while keeping structural upload blocker", () => {
@@ -1169,15 +1505,107 @@ test("deriveXiaohongshuSelectedCollectionActual returns selected collection from
   );
 });
 
-test("deriveXiaohongshuDeclarationActual requires expected declaration text to be visible", () => {
+test("deriveXiaohongshuDeclarationActual only reports explicit content-type declarations", () => {
+  assert.equal(
+    deriveXiaohongshuDeclarationActual("内容由AI生成", "加入合集 EDC潮玩桌搭 内容由AI生成 公开可见"),
+    "内容由AI生成",
+  );
   assert.equal(
     deriveXiaohongshuDeclarationActual("原创声明", "加入合集 EDC潮玩桌搭 原创声明 公开可见"),
-    "原创声明",
-  );
-  assert.equal(
-    deriveXiaohongshuDeclarationActual("原创声明", "加入合集 EDC潮玩桌搭 公开可见"),
     "",
   );
+});
+
+test("isPlatformPublishRouteBootstrapReady accepts douyin upload entry surface for fresh-start bootstrap", () => {
+  assert.equal(
+    isPlatformPublishRouteBootstrapReady("douyin", {
+      url: "https://creator.douyin.com/creator-micro/content/upload",
+      title: "抖音创作者中心",
+      text: "还有上次未发布的视频，是否继续编辑？ 继续编辑 放弃 点击上传或直接将视频文件拖入此区域",
+      file_inputs: [],
+    }, {
+      allow_loading_shell: true,
+    }),
+    true,
+  );
+});
+
+test("isCompositePublishRouteContext rejects youtube content-list upload skeleton until editor or upload surface appears", () => {
+  assert.equal(
+    isCompositePublishRouteContext("youtube", {
+      url: "https://studio.youtube.com/channel/UC123/videos/upload?filter=%5B%5D",
+      text: "频道内容 编辑草稿 草稿 发布日期 观看次数 评论数",
+      file_inputs: [],
+    }),
+    false,
+  );
+  assert.equal(
+    isCompositePublishRouteContext("youtube", {
+      url: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&udvid=eaTu-rtsyiw",
+      text: "上传视频 Select files",
+      file_inputs: [],
+    }),
+    true,
+  );
+});
+
+test("verifyCompositeDeclarationField requires xiaohongshu original switch when generic original declaration is requested", () => {
+  assert.equal(
+    verifyCompositeDeclarationField(
+      "xiaohongshu",
+      "",
+      "",
+      "原创声明 添加内容类型声明 公开可见",
+      {
+        declarationMissingPrompt: false,
+        hasTitleOrBody: true,
+        xiaohongshuRequireOriginalDeclaration: true,
+        xiaohongshuOriginalDeclarationEnabled: false,
+      },
+    ),
+    false,
+  );
+  assert.equal(
+    verifyCompositeDeclarationField(
+      "xiaohongshu",
+      "",
+      "",
+      "原创声明 添加内容类型声明 公开可见",
+      {
+        declarationMissingPrompt: false,
+        hasTitleOrBody: true,
+        xiaohongshuRequireOriginalDeclaration: true,
+        xiaohongshuOriginalDeclarationEnabled: true,
+      },
+    ),
+    true,
+  );
+});
+
+test("resolveXiaohongshuDeclarationOption keeps generic original declaration separate from content type", () => {
+  assert.equal(resolveXiaohongshuDeclarationOption("原创声明"), "");
+  assert.equal(resolveXiaohongshuDeclarationOption("测评"), "");
+  assert.equal(resolveXiaohongshuDeclarationOption("内容为个人观点或见解"), "内容为个人观点或见解");
+  assert.equal(resolveXiaohongshuDeclarationOption("内容含AI生成"), "内容由AI生成");
+});
+
+test("shouldEnableXiaohongshuOriginalDeclaration only enables the original switch for generic original content", () => {
+  assert.equal(shouldEnableXiaohongshuOriginalDeclaration("原创声明"), true);
+  assert.equal(shouldEnableXiaohongshuOriginalDeclaration("测评"), true);
+  assert.equal(shouldEnableXiaohongshuOriginalDeclaration("内容由AI生成"), false);
+});
+
+test("expectedCompositeDeclaration keeps xiaohongshu original-switch intent out of content-type declaration", () => {
+  assert.equal(
+    expectedCompositeDeclaration({ declaration: "原创声明" }, "xiaohongshu"),
+    "",
+  );
+});
+
+test("shouldDeferGenericPostUploadIntegrityUntilPlatformAdapter only keeps bilibili on the generic path", () => {
+  assert.equal(shouldDeferGenericPostUploadIntegrityUntilPlatformAdapter("bilibili"), false);
+  assert.equal(shouldDeferGenericPostUploadIntegrityUntilPlatformAdapter("xiaohongshu"), true);
+  assert.equal(shouldDeferGenericPostUploadIntegrityUntilPlatformAdapter("douyin"), true);
 });
 
 test("deriveXiaohongshuCoverActual emits concrete evidence when custom cover preview is visible", () => {
@@ -1247,6 +1675,19 @@ test("applyCompositeSafeRuntimePolicyDefaults auto-fills cover and collection po
   assert.equal(normalized.platform_specific_overrides.skip_collection_select, true);
   assert.equal(normalized.platform_specific_overrides.cover_policy, "platform_default");
   assert.equal(normalized.platform_specific_overrides.skip_cover_upload, true);
+});
+
+test("applyCompositeSafeRuntimePolicyDefaults treats stop-before-final-publish as safe runtime mode", () => {
+  const normalized = applyCompositeSafeRuntimePolicyDefaults("bilibili", {
+    title: "测试标题",
+    platform_specific_overrides: {
+      stop_before_final_publish: true,
+    },
+  });
+
+  assert.equal(normalized.platform_specific_overrides.stop_before_final_publish, true);
+  assert.equal(normalized.platform_specific_overrides.collection_policy, "skip");
+  assert.equal(normalized.platform_specific_overrides.skip_collection_select, true);
 });
 
 test("deriveCompositeDraftPolicyBlockers respects safe runtime auto-defaults for youtube", () => {
@@ -1473,7 +1914,7 @@ test("deriveCompositeUploadReadinessFailureState treats youtube hidden upload di
   assert.equal(failure.reason, "upload_not_applied");
 });
 
-test("shouldDeferYouTubeDraftResumeReupload detects youtube draft rows that should stay pending", () => {
+test("shouldDeferYouTubeDraftResumeReupload stays disabled for youtube draft rows", () => {
   assert.equal(
     shouldDeferYouTubeDraftResumeReupload({
       ready: false,
@@ -1681,6 +2122,77 @@ test("deriveYouTubeDraftResumeFallbackTarget prefers upload resume url before ed
       target: "https://studio.youtube.com/video/eaTu-rtsyiw/edit",
       reason: "edit_url",
     },
+  );
+});
+
+test("deriveYouTubeUploadEditorBootstrapPlan requires control-driven upload flow from content list", () => {
+  const plan = deriveYouTubeUploadEditorBootstrapPlan({
+    href: "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos",
+    bodyText: "频道内容 MAXACE 美杜莎4 顶配次顶配开箱 编辑草稿 草稿 发布日期",
+    channelContentList: true,
+    draftRows: [
+      {
+        text: "MAXACE 美杜莎4 顶配次顶配开箱 编辑草稿 草稿",
+        watchHref: "https://www.youtube.com/watch?v=eaTu-rtsyiw",
+        titleHref: "https://studio.youtube.com/video/eaTu-rtsyiw/edit",
+        videoId: "eaTu-rtsyiw",
+      },
+    ],
+  }, "MAXACE 美杜莎4 顶配次顶配开箱");
+
+  assert.equal(plan.changed, false);
+  assert.equal(plan.reason, "control_driven_create_upload_required");
+  assert.equal(plan.fallbackTarget, "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos/upload");
+});
+
+test("deriveYouTubeUploadEditorBootstrapPlan supports youtube web channel page via create control", () => {
+  const plan = deriveYouTubeUploadEditorBootstrapPlan({
+    href: "https://www.youtube.com/@FAS_EDC/videos",
+    bodyText: "FAS机神圣殿x潮玩EDC 创建 上传视频 开始直播 发帖 我的频道",
+    createControlSurface: true,
+  }, "MAXACE 美杜莎4 顶配次顶配开箱");
+
+  assert.equal(plan.matched, true);
+  assert.equal(plan.changed, false);
+  assert.equal(plan.reason, "control_driven_create_upload_required");
+  assert.equal(plan.fallbackTarget, "https://studio.youtube.com/");
+});
+
+test("normalizeYouTubeVisibilityOrPublishMode defaults youtube to public and scheduled publish to schedule", () => {
+  assert.equal(normalizeYouTubeVisibilityOrPublishMode("", ""), "public");
+  assert.equal(normalizeYouTubeVisibilityOrPublishMode("", "2026-06-05T21:00:00+08:00"), "schedule");
+  assert.equal(normalizeYouTubeVisibilityOrPublishMode("公开", ""), "public");
+  assert.equal(normalizeYouTubeVisibilityOrPublishMode("不公开列出", ""), "unlisted");
+});
+
+test("deriveYouTubeUploadWizardStep recognizes the four-step upload wizard", () => {
+  assert.equal(
+    deriveYouTubeUploadWizardStep(
+      "https://studio.youtube.com/video/demo/edit",
+      "详细信息 标题（必填） 说明 缩略图 播放列表 观众 视频链接",
+    ),
+    "details",
+  );
+  assert.equal(
+    deriveYouTubeUploadWizardStep(
+      "https://studio.youtube.com/video/demo/edit",
+      "视频元素 添加字幕 添加片尾画面 添加卡片",
+    ),
+    "video_elements",
+  );
+  assert.equal(
+    deriveYouTubeUploadWizardStep(
+      "https://studio.youtube.com/video/demo/edit",
+      "检查 检查完毕 未发现任何问题",
+    ),
+    "checks",
+  );
+  assert.equal(
+    deriveYouTubeUploadWizardStep(
+      "https://studio.youtube.com/video/demo/edit",
+      "公开范围 私享 不公开列出 公开 安排时间 保存或发布",
+    ),
+    "visibility",
   );
 });
 
@@ -1923,6 +2435,36 @@ test("shouldPreserveYouTubeEditorRouteForBootstrap keeps youtube editor route un
     ),
     false,
   );
+  assert.equal(
+    shouldPreserveYouTubeEditorRouteForBootstrap(
+      "https://studio.youtube.com/video/eaTu-rtsyiw/edit",
+      "你最近上传的视频 编辑草稿 视频详细信息 标题（必填） 说明 缩略图 播放列表 观众 视频链接",
+    ),
+    false,
+  );
+});
+
+test("deriveProbeInventoryRouteReadiness keeps youtube editor surface ready even when draft row text is present", () => {
+  const readiness = deriveProbeInventoryRouteReadiness("youtube", {
+    url: "https://studio.youtube.com/video/eaTu-rtsyiw/edit",
+    title: "视频详细信息 - YouTube Studio",
+    lines: [
+      "你最近上传的视频",
+      "编辑草稿",
+      "视频详细信息",
+      "标题（必填）",
+      "说明",
+      "缩略图",
+      "播放列表",
+      "观众",
+      "视频链接",
+    ],
+    elements: [{ tag: "textarea", role: "textbox" }],
+  });
+
+  assert.equal(readiness.blocked, false);
+  assert.equal(readiness.status, "ready");
+  assert.equal(readiness.reason, "");
 });
 
 test("normalizeYouTubeTagValue strips hash and collapses whitespace", () => {
@@ -2675,6 +3217,21 @@ test("shouldEnforcePlatformPublishRoute preserves xiaohongshu note manager route
     }),
     false,
   );
+  assert.equal(
+    shouldEnforcePlatformPublishRoute("xiaohongshu", {
+      repair_only_current_page: true,
+      recovery_mode: "prepublish_resume",
+      force_publish_page_refresh: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldEnforcePlatformPublishRoute("xiaohongshu", {
+      prepare_only_current_page: true,
+      recovery_mode: "auto_recover",
+    }),
+    false,
+  );
 });
 
 test("shouldEnforcePlatformPublishRoute preserves toutiao manage route during receipt rebind verification", () => {
@@ -2835,6 +3392,211 @@ test("isXiaohongshuPublishEditorSurfaceReady rejects publish skeleton and accept
   );
 });
 
+test("shouldAllowCompositeFieldPreparation accepts xiaohongshu editor shell while upload still processes", () => {
+  assert.equal(
+    shouldAllowCompositeFieldPreparation("xiaohongshu", {
+      ready: false,
+      failed: false,
+      last: {
+        mediaPresent: true,
+        fieldShell: true,
+        readySurface: true,
+        busy: true,
+        uploadPromptOnly: false,
+      },
+    }),
+    true,
+  );
+});
+
+test("shouldAllowCompositeFieldPreparation rejects douyin upload shell before real editor readiness", () => {
+  assert.equal(
+    shouldAllowCompositeFieldPreparation("douyin", {
+      ready: false,
+      failed: false,
+      last: {
+        mediaPresent: true,
+        fieldShell: true,
+        readySurface: true,
+        douyinReadySurface: false,
+        busy: false,
+        uploadPromptOnly: false,
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    shouldAllowCompositeFieldPreparation("douyin", {
+      ready: false,
+      failed: false,
+      last: {
+        mediaPresent: true,
+        fieldShell: true,
+        readySurface: true,
+        douyinReadySurface: true,
+        busy: false,
+        uploadPromptOnly: false,
+      },
+    }),
+    true,
+  );
+});
+
+test("shouldBootstrapCompositeUploadFromCleanEntry starts upload on prompt-only entry", () => {
+  assert.equal(
+    shouldBootstrapCompositeUploadFromCleanEntry({
+      ready: false,
+      failed: false,
+      last: {
+        busy: false,
+        mediaPresent: false,
+        uploadPromptOnly: true,
+        fileInputCount: 1,
+      },
+    }),
+    true,
+  );
+});
+
+test("shouldBootstrapCompositeUploadFromCleanEntry still starts upload on douyin upload shell with dirty field chrome", () => {
+  assert.equal(
+    shouldBootstrapCompositeUploadFromCleanEntry({
+      ready: false,
+      failed: false,
+      last: {
+        busy: false,
+        mediaPresent: false,
+        uploadPromptOnly: true,
+        fieldShell: true,
+        douyinUploadEntrySurface: true,
+        douyinReadySurface: false,
+        fileInputCount: 1,
+      },
+    }),
+    true,
+  );
+});
+
+test("shouldBootstrapCompositeUploadFromCleanEntry stays off once media is already present", () => {
+  assert.equal(
+    shouldBootstrapCompositeUploadFromCleanEntry({
+      ready: false,
+      failed: false,
+      last: {
+        busy: false,
+        mediaPresent: true,
+        uploadPromptOnly: false,
+        fileInputCount: 1,
+      },
+    }),
+    false,
+  );
+});
+
+test("shouldAwaitCompositeUploadEntryHydration waits on douyin loading upload shell before bootstrap", () => {
+  assert.equal(
+    shouldAwaitCompositeUploadEntryHydration("douyin", {
+      ready: false,
+      failed: false,
+      last: {
+        href: "https://creator.douyin.com/creator-micro/content/upload",
+        busy: false,
+        failed: false,
+        mediaPresent: false,
+        uploadPromptOnly: false,
+        fileInputCount: 0,
+        lines: ["加载中，请稍候..."],
+      },
+    }),
+    true,
+  );
+});
+
+test("shouldAwaitCompositeUploadEntryHydration stops waiting once douyin upload prompt is ready", () => {
+  assert.equal(
+    shouldAwaitCompositeUploadEntryHydration("douyin", {
+      ready: false,
+      failed: false,
+      last: {
+        href: "https://creator.douyin.com/creator-micro/content/upload",
+        busy: false,
+        failed: false,
+        mediaPresent: false,
+        uploadPromptOnly: true,
+        fileInputCount: 1,
+        lines: ["点击上传 或直接将视频文件拖入此区域"],
+      },
+    }),
+    false,
+  );
+});
+
+test("shouldWaitForCompositeUploadReadyBeforeFieldPreparation skips bilibili wait once editor shell appears during upload", () => {
+  assert.equal(
+    shouldWaitForCompositeUploadReadyBeforeFieldPreparation("bilibili", {
+      ready: false,
+      failed: false,
+      last: {
+        mediaPresent: true,
+        fieldShell: true,
+        bilibiliMediaAttached: true,
+        readySurface: false,
+        busy: true,
+        uploadPromptOnly: false,
+      },
+    }),
+    false,
+  );
+});
+
+test("shouldWaitForCompositeUploadReadyBeforeFieldPreparation skips xiaohongshu wait once editor shell appears during upload", () => {
+  assert.equal(
+    shouldWaitForCompositeUploadReadyBeforeFieldPreparation("xiaohongshu", {
+      ready: false,
+      failed: false,
+      last: {
+        mediaPresent: true,
+        fieldShell: true,
+        readySurface: true,
+        busy: true,
+        uploadPromptOnly: false,
+      },
+    }),
+    false,
+  );
+});
+
+test("canReuseCurrentPageMediaForPrepublish reuses bilibili page whenever matching media is already attached", () => {
+  const mediaPath = String.raw`E:\WorkSpace\RoughCut\MAXACE 美杜莎4 顶配次顶配开箱.mp4`;
+  const state = canReuseCurrentPageMediaForPrepublish(
+    "bilibili",
+    {
+      url: "https://member.bilibili.com/platform/upload/video/frame",
+      lines: [
+        "发布视频",
+        "MAXACE 美杜莎4 顶配次顶配开箱",
+        "已上传： 136.5MB/761.1MB",
+        "当前速度： 6.5MB/s",
+        "剩余时间： 1.6分钟",
+        "标题",
+        "简介",
+        "创作声明",
+        "分区",
+        "标签",
+        "封面设置",
+        "加入合集",
+        "定时发布",
+      ],
+      elements: [],
+    },
+    mediaPath,
+    { requiresLocalMedia: true, expectedTitle: "MAXACE美杜莎4双版本开箱，顶配和次顶配到底差在哪" },
+  );
+  assert.equal(state.reusable, true);
+  assert.equal(state.media_attached, true);
+  assert.equal(state.reason, "bilibili_upload_attached_pending");
+});
+
 test("isXiaohongshuVideoUploadEntrySurface recognizes video upload entry", () => {
   assert.equal(
     isXiaohongshuVideoUploadEntrySurface(
@@ -2886,10 +3648,12 @@ test("derivePlatformTabSelectionPolicy prefers receipt surface for xiaohongshu r
       recovery_mode: "receipt_rebind",
     }),
     {
+      lock_active_tab: true,
+      fresh_start_platform_tab: false,
       prefer_receipt_surface: true,
       prefer_stable_upload_surface: false,
       prefer_draft_list_surface: false,
-      allow_safe_autocreate: true,
+      allow_safe_autocreate: false,
     },
   );
 });
@@ -2901,7 +3665,25 @@ test("derivePlatformTabSelectionPolicy prefers receipt surface for toutiao recei
       recovery_mode: "receipt_rebind",
     }),
     {
+      lock_active_tab: true,
+      fresh_start_platform_tab: false,
       prefer_receipt_surface: true,
+      prefer_stable_upload_surface: false,
+      prefer_draft_list_surface: false,
+      allow_safe_autocreate: false,
+    },
+  );
+});
+
+test("derivePlatformTabSelectionPolicy defaults stop-before-final-publish modes to fresh-start tab", () => {
+  assert.deepEqual(
+    derivePlatformTabSelectionPolicy("wechat-channels", {
+      prepare_only_current_page: true,
+    }),
+    {
+      lock_active_tab: false,
+      fresh_start_platform_tab: true,
+      prefer_receipt_surface: false,
       prefer_stable_upload_surface: false,
       prefer_draft_list_surface: false,
       allow_safe_autocreate: true,
@@ -2909,18 +3691,49 @@ test("derivePlatformTabSelectionPolicy prefers receipt surface for toutiao recei
   );
 });
 
-test("derivePlatformTabSelectionPolicy enables safe autocreate for stop-before-final-publish modes", () => {
-  assert.deepEqual(
-    derivePlatformTabSelectionPolicy("wechat-channels", {
-      prepare_only_current_page: true,
-    }),
+test("derivePlatformTabSelectionPolicy enables fresh-start tab mode for linear prepare runs", () => {
+  const policy = derivePlatformTabSelectionPolicy("douyin", {
+    prepare_only_current_page: true,
+  });
+
+  assert.equal(policy.lock_active_tab, false);
+  assert.equal(policy.fresh_start_platform_tab, true);
+  assert.equal(policy.allow_safe_autocreate, true);
+  assert.equal(policy.prefer_receipt_surface, false);
+});
+
+test("derivePlatformTabSelectionPolicy defaults douyin verification-only linear runs to fresh-start tab outside receipt rebind", () => {
+  const policy = derivePlatformTabSelectionPolicy("douyin", {
+    verification_only_current_page: true,
+    recovery_mode: "auto_recover",
+  });
+
+  assert.equal(policy.lock_active_tab, false);
+  assert.equal(policy.fresh_start_platform_tab, true);
+  assert.equal(policy.prefer_receipt_surface, false);
+  assert.equal(policy.allow_safe_autocreate, true);
+});
+
+test("findPlatformTabs falls back to a unique exact upload entry when active flag is missing", () => {
+  const tabs = [
     {
-      prefer_receipt_surface: false,
-      prefer_stable_upload_surface: false,
-      prefer_draft_list_surface: false,
-      allow_safe_autocreate: true,
+      id: "11",
+      type: "page",
+      title: "抖音创作者中心",
+      url: "https://creator.douyin.com/creator-micro/content/upload",
+      active: false,
     },
-  );
+    {
+      id: "12",
+      type: "page",
+      title: "抖音创作者中心",
+      url: "https://creator.douyin.com/creator-micro/content/manage?enter_from=publish",
+      active: false,
+    },
+  ];
+  const matches = findPlatformTabs(tabs, "douyin", { lock_active_tab: true });
+  assert.equal(matches.length, 1);
+  assert.equal(matches[0].url, "https://creator.douyin.com/creator-micro/content/upload");
 });
 
 test("_buildVerificationOnlyRouteNotReadyFailure blocks unstable publish page before field mismatch diagnosis", () => {
@@ -3025,6 +3838,216 @@ test("extractDouyinSelectedCollectionEvidence accepts collection selected in lab
   assert.equal(evidence.source, "input_field");
 });
 
+test("extractDouyinSelectedCollectionEvidence accepts inline collection line from douyin preview surface", () => {
+  const evidence = extractDouyinSelectedCollectionEvidence(
+    ["高清发布 添加合集 合集 EDC刀光火工具集 共1个作品 第2集 自主声明 无需添加自主声明", "合集 · EDC刀光火工具集"],
+    "EDC刀光火工具集",
+    [],
+  );
+
+  assert.equal(evidence.actual, "EDC刀光火工具集");
+  assert.equal(evidence.matched, true);
+  assert.equal(evidence.source, "inline_line");
+});
+
+test("selectDouyinTopicSuggestionCandidate prefers short layered topic chip over body hashtag text", () => {
+  const chosen = selectDouyinTopicSuggestionCandidate([
+    {
+      text: "等了好久的MAXACE美杜莎4终于到货，两个版本都拿下，给大家看看有啥区别。#EDC折刀 #MAXACE美杜莎4 #开箱",
+      context: "作品描述 作品描述 作品描述",
+      area: 48000,
+      inLayer: false,
+      isButtonLike: false,
+      className: "editor-body",
+    },
+    {
+      text: "#EDC折刀",
+      context: "添加话题 推荐话题 热度",
+      area: 2800,
+      inLayer: true,
+      isButtonLike: true,
+      isSearchResult: true,
+      className: "topic-option-chip",
+    },
+  ], "EDC折刀");
+
+  assert.equal(chosen?.text, "#EDC折刀");
+  assert.equal(chosen?.inLayer, true);
+});
+
+test("extractDouyinTopicVerificationLabels ignores hot-list suggestions and helper controls", () => {
+  const labels = extractDouyinTopicVerificationLabels([
+    { text: "#EDC折刀", context: "添加话题 @好友" },
+    { text: "#MAXACE美杜莎4", context: "添加话题 @好友" },
+    { text: "#等了好久", context: "推荐话题 热度 2.5亿" },
+    { text: "#情侣手表 #耳机套 #微单", context: "添加话题 @好友 推荐" },
+    { text: "#添加话题 @好友 355 / 1000", context: "添加话题 @好友" },
+    { text: "#添加话题", context: "添加话题 @好友" },
+  ]);
+
+  assert.deepEqual(labels, ["EDC折刀", "MAXACE美杜莎4"]);
+});
+
+test("selectDouyinTopicSearchFieldCandidate rejects recommendation container and prefers editable search input", () => {
+  const chosen = selectDouyinTopicSearchFieldCandidate([
+    {
+      tag: "div",
+      role: "",
+      label: "推荐 #情侣手表 #耳机套",
+      current: "",
+      root_area: 44000,
+      isContentEditable: false,
+    },
+    {
+      tag: "input",
+      role: "combobox",
+      label: "搜索话题 添加话题 推荐",
+      current: "",
+      root_area: 42000,
+      isContentEditable: false,
+    },
+  ]);
+
+  assert.equal(chosen?.tag, "input");
+  assert.equal(chosen?.role, "combobox");
+});
+
+test("buildXiaohongshuTopicSearchQuery prefixes native topic text with hash", () => {
+  assert.equal(buildXiaohongshuTopicSearchQuery("折刀"), "#折刀");
+  assert.equal(buildXiaohongshuTopicSearchQuery("#刀具开箱"), "#刀具开箱");
+});
+
+test("extractXiaohongshuTopicVerificationLabels keeps body hashtags and rejects recommendation-only hot topics", () => {
+  const labels = extractXiaohongshuTopicVerificationLabels([
+    { text: "适合喜欢EDC又追求一点品质感的玩家～ #EDC折刀 #MAXACE美杜莎4 #刀具开箱", context: "body", source: "body" },
+    { text: "#猴哥业务都发展到冰岛了", context: "添加话题 推荐 5.1亿浏览", source: "chip" },
+    { text: "#折刀收藏", context: "已选话题", source: "chip" },
+  ], ["EDC折刀", "MAXACE美杜莎4", "折刀收藏", "刀具开箱"]);
+
+  assert.deepEqual(labels, ["EDC折刀", "MAXACE美杜莎4", "刀具开箱", "折刀收藏"]);
+});
+
+test("extractXiaohongshuInsertedTopicLabels ignores plain body hashtags and keeps only inserted native topics", () => {
+  const labels = extractXiaohongshuInsertedTopicLabels([
+    { text: "适合喜欢EDC又追求一点品质感的玩家～ #EDC折刀 #MAXACE美杜莎4 #刀具开箱", context: "body", source: "body" },
+    { text: "#猴哥业务都发展到冰岛了", context: "添加话题 推荐 5.1亿浏览", source: "chip" },
+    { text: "#折刀收藏", context: "已选话题", source: "chip" },
+    { text: "#刀具开箱", context: "已选话题", source: "chip" },
+  ], ["EDC折刀", "MAXACE美杜莎4", "折刀收藏", "刀具开箱"]);
+
+  assert.deepEqual(labels, ["折刀收藏", "刀具开箱"]);
+});
+
+test("selectXiaohongshuTopicSearchFieldCandidate rejects body editor and prefers topic search input", () => {
+  const chosen = selectXiaohongshuTopicSearchFieldCandidate([
+    {
+      tag: "input",
+      type: "file",
+      role: "",
+      label: "拖拽视频到此或点击上传 上传视频",
+      current: "",
+      root_area: 36000,
+      isContentEditable: false,
+    },
+    {
+      tag: "div",
+      role: "textbox",
+      label: "正文 笔记描述 1000字",
+      current: "终于等到的新货",
+      root_area: 180000,
+      isContentEditable: true,
+    },
+    {
+      tag: "input",
+      role: "searchbox",
+      label: "添加话题 搜索话题",
+      current: "",
+      root_area: 42000,
+      isContentEditable: false,
+    },
+  ]);
+
+  assert.equal(chosen?.tag, "input");
+  assert.equal(chosen?.role, "searchbox");
+});
+
+test("selectXiaohongshuTopicSearchFieldCandidate returns null when only body editor and generic title input exist", () => {
+  const chosen = selectXiaohongshuTopicSearchFieldCandidate([
+    {
+      tag: "input",
+      type: "text",
+      role: "",
+      label: "填写标题会有更多赞哦",
+      current: "",
+      root_area: 38000,
+      isContentEditable: false,
+    },
+    {
+      tag: "div",
+      role: "textbox",
+      label: "正文 笔记描述 1000字",
+      current: "#刀具开箱",
+      root_area: 160000,
+      isContentEditable: true,
+    },
+  ]);
+
+  assert.equal(chosen, null);
+});
+
+test("selectXiaohongshuTopicSearchFieldCandidate rejects generic title input when no topic search field exists", () => {
+  const chosen = selectXiaohongshuTopicSearchFieldCandidate([
+    {
+      tag: "input",
+      type: "text",
+      role: "",
+      label: "填写标题会有更多赞哦",
+      current: "",
+      root_area: 38000,
+      isContentEditable: false,
+    },
+    {
+      tag: "div",
+      role: "textbox",
+      label: "正文 笔记描述 1000字",
+      current: "#",
+      root_area: 160000,
+      isContentEditable: true,
+    },
+  ]);
+
+  assert.equal(chosen, null);
+});
+
+test("selectXiaohongshuOriginalDeclarationControlCandidate prefers original wrapper and rejects pk cover controls", () => {
+  const chosen = selectXiaohongshuOriginalDeclarationControlCandidate([
+    {
+      tag: "div",
+      className: "pk-cover-switch d-switch",
+      text: "PK封面",
+      role: "",
+      disabled: false,
+    },
+    {
+      tag: "div",
+      className: "custom-switch-card",
+      text: "原创声明",
+      role: "",
+      disabled: false,
+    },
+    {
+      tag: "div",
+      className: "custom-switch-switch",
+      text: "",
+      role: "",
+      disabled: false,
+    },
+  ]);
+
+  assert.equal(chosen?.className, "custom-switch-card");
+  assert.equal(chosen?.text, "原创声明");
+});
+
 test("isDouyinCustomCoverReady rejects ai-recommended-only cover surface", () => {
   const ready = isDouyinCustomCoverReady({
     textHaystack: "设置封面 横封面4:3 竖封面3:4 Ai智能推荐封面生成中...",
@@ -3037,6 +4060,61 @@ test("isDouyinCustomCoverReady rejects ai-recommended-only cover surface", () =>
   });
 
   assert.equal(ready, false);
+});
+
+test("classifyDouyinCoverUploadInputRoot rejects reference rail and accepts main upload surface", () => {
+  const reference = classifyDouyinCoverUploadInputRoot({
+    localRootText: "",
+    localRootClass: "semi-upload",
+    sideRootText: "生成参考图 智能参考",
+    sideRootClass: "container-kgE14y container-Xnz3EO list-Ldrppp",
+    dialogText: "设置竖封面 AI生成封面 上传封面",
+  });
+  const primary = classifyDouyinCoverUploadInputRoot({
+    localRootText: "点击上传文件或拖拽文件到这里",
+    localRootClass: "semi-upload upload-BvM5FF",
+    mainRootText: "上传封面 点击上传文件或拖拽文件到这里",
+    mainRootClass: "main-DAkOod selectArea-BCIYQD container-qVqwfQ",
+    dialogText: "设置竖封面 上传封面 竖封面预览（3:4）",
+  });
+
+  assert.equal(reference.reference_upload, true);
+  assert.equal(reference.primary_upload, false);
+  assert.equal(primary.primary_upload, true);
+  assert.equal(primary.reference_upload, false);
+});
+
+test("selectDouyinCoverSlotSurfaceCandidate prefers coverControl slot over ai recommendation rail", () => {
+  const chosen = selectDouyinCoverSlotSurfaceCandidate([
+    {
+      text: "横封面4:3 编辑封面",
+      area: 23520,
+      className: "coverControl-CjlzqC",
+      action_labels: ["编辑封面"],
+    },
+    {
+      text: "横封面4:3 Ai智能推荐封面 生成参考图 智能参考 AI生成封面",
+      area: 168000,
+      className: "recommendContainer-xwwJ2i",
+      action_labels: [],
+    },
+  ], ["横封面4:3"]);
+
+  assert.equal(chosen?.className, "coverControl-CjlzqC");
+  assert.deepEqual(chosen?.action_labels, ["编辑封面"]);
+});
+
+test("isDouyinCoverEditorImmediateEditable accepts uploaded cover editor even while ai area is still spinning", () => {
+  const editable = isDouyinCoverEditorImmediateEditable({
+    editor_open: true,
+    confirm_button_visible: true,
+    upload_button_visible: true,
+    preview_image_count: 3,
+    has_blob_preview: false,
+    spinner_visible: true,
+  });
+
+  assert.equal(editable, true);
 });
 
 test("deriveDouyinCoverState requires saved state after editor modal closes", () => {
@@ -3069,6 +4147,220 @@ test("deriveDouyinCoverState marks saved after custom cover preview is persisted
   assert.equal(state.explicit_upload_success, true);
 });
 
+test("deriveDouyinCoverState ignores stale dual-cover warning when both required slots have preview evidence", () => {
+  const state = deriveDouyinCoverState({
+    textHaystack: "横/竖双封面缺失 为增加作品的流量，建议同时设置横版和竖版的封面",
+    expectedCoverSlots: [
+      { slot: "horizontal_4_3", label: "横封面4:3", cover_path: "E:/covers/landscape.jpg" },
+      { slot: "vertical_3_4", label: "竖封面3:4", cover_path: "E:/covers/portrait.jpg" },
+    ],
+    slotSurfaces: [
+      {
+        slot: "horizontal_4_3",
+        label: "横封面4:3",
+        image_sources: ["blob:https://creator.douyin.com/landscape-preview"],
+        action_labels: ["重新上传"],
+      },
+      {
+        slot: "vertical_3_4",
+        label: "竖封面3:4",
+        image_sources: ["blob:https://creator.douyin.com/portrait-preview"],
+        action_labels: ["重新上传"],
+      },
+    ],
+    modalOpen: false,
+  });
+
+  assert.equal(state.custom_cover_ready, true);
+  assert.equal(state.saved, true);
+  assert.equal(state.effective_dual_cover_missing_warning, false);
+});
+
+test("deriveDouyinCoverState prioritizes main-form slot visuals over warning text", () => {
+  const state = deriveDouyinCoverState({
+    textHaystack: "封面优化建议共1条 竖封面缺失 设置封面 横封面4:3 竖封面3:4",
+    expectedCoverSlots: [
+      { slot: "horizontal_4_3", label: "横封面4:3", cover_path: "E:/covers/landscape.jpg" },
+      { slot: "vertical_3_4", label: "竖封面3:4", cover_path: "E:/covers/portrait.jpg" },
+    ],
+    slotSurfaces: [
+      {
+        slot: "horizontal_4_3",
+        label: "横封面4:3",
+        image_sources: ["https://p0-creator-media-private.douyin.com/horizontal.jpeg"],
+        action_labels: ["横封面4:3"],
+      },
+      {
+        slot: "vertical_3_4",
+        label: "竖封面3:4",
+        image_sources: ["https://p0-creator-media-private.douyin.com/vertical.jpeg"],
+        action_labels: ["竖封面3:4"],
+      },
+    ],
+    modalOpen: false,
+  });
+
+  assert.equal(state.custom_cover_ready, true);
+  assert.equal(state.saved, true);
+  assert.equal(state.effective_dual_cover_missing_warning, false);
+  assert.equal(state.slots.every((item) => item.surface_has_visual_cover), true);
+});
+
+test("selectDouyinCoverSlotSurfaceCandidate prefers narrow cover slot over wrapper shell", () => {
+  const chosen = selectDouyinCoverSlotSurfaceCandidate(
+    [
+      {
+        text: "选择封面 横封面4:3 选择封面 竖封面3:4 Ai智能推荐封面生成中...",
+        className: "wrapper-NN3Jh1",
+        area: 81144,
+        action_labels: ["选择封面"],
+      },
+      {
+        text: "横封面4:3",
+        className: "coverControl-CjlzqC",
+        area: 23520,
+        action_labels: [],
+      },
+    ],
+    ["横封面4:3"],
+  );
+
+  assert.equal(chosen?.className, "coverControl-CjlzqC");
+  assert.equal(chosen?.text, "横封面4:3");
+});
+
+test("selectDouyinCoverSlotEntryTarget prefers inner clickable cover entry over slot shell", () => {
+  const chosen = selectDouyinCoverSlotEntryTarget(
+    [
+      {
+        text: "选择封面 竖封面3:4",
+        className: "coverControl-CjlzqC",
+        area: 13230,
+        onclick: false,
+        slot_text: "选择封面 竖封面3:4",
+      },
+      {
+        text: "选择封面",
+        className: "cover-Jg3T4p",
+        area: 10800,
+        onclick: true,
+        slot_text: "选择封面 竖封面3:4",
+      },
+    ],
+    ["选择封面", "竖封面3:4"],
+  );
+
+  assert.equal(chosen?.className, "cover-jg3t4p");
+  assert.equal(chosen?.text, "选择封面");
+  assert.equal(chosen?.onclick, true);
+});
+
+test("isDouyinCoverEditorModalText rejects main publish shell preview text", () => {
+  assert.equal(
+    isDouyinCoverEditorModalText("高清发布 基础信息 作品描述 设置封面 预览视频 预览封面/标题 发文助手"),
+    false,
+  );
+});
+
+test("isDouyinCoverEditorModalText accepts real douyin cover editor text", () => {
+  assert.equal(
+    isDouyinCoverEditorModalText("设置竖封面 上传封面 点击上传文件或拖拽文件到这里 竖封面预览 完成 取消保存"),
+    true,
+  );
+});
+
+test("isDouyinFormalCompositeCoverEditorState rejects non-formal single-cover modal", () => {
+  assert.equal(
+    isDouyinFormalCompositeCoverEditorState({
+      root_text: "设置封面 重新上传 取消 保存",
+      editor_open: true,
+      confirm_button_visible: true,
+    }),
+    false,
+  );
+});
+
+test("isDouyinFormalCompositeCoverEditorState accepts formal dual-cover editor", () => {
+  assert.equal(
+    isDouyinFormalCompositeCoverEditorState({
+      root_text: "设置竖封面 设置横封面 AI封面 上传封面 点击上传文件或拖拽文件到这里 封面检测 完成 设置横封面 竖封面预览（3:4）",
+      editor_open: true,
+      confirm_button_visible: true,
+    }),
+    true,
+  );
+});
+
+test("buildDouyinCompositeCoverEditorPlan uploads vertical and horizontal before final confirm", () => {
+  assert.deepEqual(
+    buildDouyinCompositeCoverEditorPlan([
+      { slot: "horizontal_4_3", label: "横封面4:3", cover_path: "E:/covers/h.jpg" },
+      { slot: "vertical_3_4", label: "竖封面3:4", cover_path: "E:/covers/v.jpg" },
+    ]).map((item) => item.slot),
+    ["vertical_3_4", "horizontal_4_3"],
+  );
+});
+
+test("buildDouyinPrepareProjectExecutionPlan follows publish scheme order and coalesces composite steps", () => {
+  assert.deepEqual(
+    buildDouyinPrepareProjectExecutionPlan("douyin"),
+    [
+      { kind: "cover", project_keys: ["cover_upload_4_3", "cover_upload_3_4"] },
+      { kind: "rich_text", project_keys: ["title", "body"] },
+      { kind: "topics", project_keys: ["tags"] },
+      { kind: "collection", project_keys: ["collection"] },
+      { kind: "declaration", project_keys: ["declaration"] },
+      { kind: "visibility", project_keys: ["visibility"] },
+      { kind: "schedule", project_keys: ["schedule"] },
+    ],
+  );
+});
+
+test("filterDouyinPrepareProjectExecutionPlan skips unavailable douyin editor controls", () => {
+  assert.deepEqual(
+    filterDouyinPrepareProjectExecutionPlan(
+      buildDouyinPrepareProjectExecutionPlan("douyin"),
+      {
+        rich_text: true,
+        cover: false,
+        topics: true,
+        collection: false,
+        declaration: false,
+        visibility: true,
+        schedule: true,
+      },
+    ),
+    [
+      { kind: "cover", project_keys: ["cover_upload_4_3", "cover_upload_3_4"], actionable: false, blocked_reason: "editor_control_not_available" },
+      { kind: "rich_text", project_keys: ["title", "body"], actionable: true, blocked_reason: "" },
+      { kind: "topics", project_keys: ["tags"], actionable: true, blocked_reason: "" },
+      { kind: "collection", project_keys: ["collection"], actionable: false, blocked_reason: "editor_control_not_available" },
+      { kind: "declaration", project_keys: ["declaration"], actionable: false, blocked_reason: "editor_control_not_available" },
+      { kind: "visibility", project_keys: ["visibility"], actionable: true, blocked_reason: "" },
+      { kind: "schedule", project_keys: ["schedule"], actionable: true, blocked_reason: "" },
+    ],
+  );
+});
+
+test("preferredXiaohongshuCoverRatioTexts follows resolved xiaohongshu cover slot contract", () => {
+  assert.deepEqual(
+    preferredXiaohongshuCoverRatioTexts({
+      cover_slots: [
+        { slot: "portrait_3_4", label: "竖封面3:4", cover_path: "E:/covers/portrait.jpg", matrix_key: "portrait_3_4" },
+      ],
+    }),
+    ["3:4", "4:3"],
+  );
+  assert.deepEqual(
+    preferredXiaohongshuCoverRatioTexts({
+      cover_slots: [
+        { slot: "landscape_4_3", label: "横封面4:3", cover_path: "E:/covers/landscape.jpg", matrix_key: "landscape_4_3" },
+      ],
+    }),
+    ["4:3", "3:4"],
+  );
+});
+
 test("deriveDouyinCoverState does not trust text-only upload success without local preview", () => {
   const state = deriveDouyinCoverState({
     textHaystack: "设置封面 重新上传 自定义封面",
@@ -3083,6 +4375,26 @@ test("deriveDouyinCoverState does not trust text-only upload success without loc
   assert.equal(state.has_local_preview, false);
   assert.equal(state.custom_cover_ready, false);
   assert.equal(state.saved, false);
+});
+
+test("selectDouyinCoverSlotSurfaceCandidate prefers scoped slot surface over full page shell", () => {
+  const chosen = selectDouyinCoverSlotSurfaceCandidate([
+    {
+      text: "高清发布 基础信息 作品描述 官方活动 设置封面 选择封面 横封面4:3 选择封面 竖封面3:4 发布设置 预览视频 横/竖双封面缺失",
+      area: 620000,
+      action_labels: ["设置封面", "选择封面", "选择封面"],
+      className: "page-shell",
+    },
+    {
+      text: "设置封面 选择封面 横封面4:3",
+      area: 12000,
+      action_labels: ["选择封面"],
+      className: "cover-slot-card",
+    },
+  ], ["横封面4:3", "横封面 4:3"]);
+
+  assert.equal(chosen?.text, "设置封面 选择封面 横封面4:3");
+  assert.equal(chosen?.area, 12000);
 });
 
 test("isDouyinCustomCoverReady accepts uploaded cover when reupload marker appears", () => {
@@ -4031,6 +5343,7 @@ test("shouldAcceptCompositeUploadReadyState requires stable douyin ready surface
     busy: false,
     failed: false,
     uploadPromptOnly: false,
+    douyinReadySurface: true,
   };
 
   assert.equal(shouldAcceptCompositeUploadReadyState("douyin", state, 1, 1000), false);
@@ -4111,7 +5424,10 @@ test("derivePlatformTabSelectionPolicy prefers receipt surface for douyin receip
     recovery_mode: "receipt_rebind",
   });
 
+  assert.equal(policy.lock_active_tab, true);
+  assert.equal(policy.fresh_start_platform_tab, false);
   assert.equal(policy.prefer_receipt_surface, true);
+  assert.equal(policy.allow_safe_autocreate, false);
 });
 
 test("derivePlatformTabSelectionPolicy prefers stable upload surface for youtube stop-before modes", () => {
@@ -4120,8 +5436,10 @@ test("derivePlatformTabSelectionPolicy prefers stable upload surface for youtube
     prepare_only_current_page: true,
   });
 
+  assert.equal(policy.lock_active_tab, false);
+  assert.equal(policy.fresh_start_platform_tab, true);
   assert.equal(policy.prefer_stable_upload_surface, true);
-  assert.equal(policy.prefer_draft_list_surface, true);
+  assert.equal(policy.prefer_draft_list_surface, false);
   assert.equal(policy.allow_safe_autocreate, true);
 });
 
@@ -4165,7 +5483,7 @@ test("resolvePlatformPublishEntryUrl and platformTabScore reject malformed youtu
   );
   assert.equal(
     resolvePlatformPublishEntryUrl("youtube", tabs, { prefer_draft_list_surface: true }),
-    "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos",
+    "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos/upload",
   );
   assert.equal(
     platformTabScore(
@@ -4178,7 +5496,7 @@ test("resolvePlatformPublishEntryUrl and platformTabScore reject malformed youtu
   );
 });
 
-test("findPlatformTab prefers youtube content-list route over generic upload route during stop-before safe mode", () => {
+test("findPlatformTab prefers youtube upload route over content-list route during stop-before safe mode", () => {
   const contentListTab = {
     type: "page",
     title: "频道内容 - YouTube Studio",
@@ -4196,7 +5514,53 @@ test("findPlatformTab prefers youtube content-list route over generic upload rou
     { prefer_stable_upload_surface: true, prefer_draft_list_surface: true },
   );
 
-  assert.equal(selected?.url, contentListTab.url);
+  assert.equal(selected?.url, genericUploadTab.url);
+});
+
+test("findPlatformTab in current-page mode only considers the active tab", () => {
+  const inactiveDouyinPublishTab = {
+    active: false,
+    type: "page",
+    title: "抖音创作者中心",
+    url: "https://creator.douyin.com/creator-micro/content/post/video",
+  };
+  const activeWrongTab = {
+    active: true,
+    type: "page",
+    title: "频道内容 - YouTube Studio",
+    url: "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos/upload",
+  };
+
+  const selected = findPlatformTab(
+    [inactiveDouyinPublishTab, activeWrongTab],
+    "douyin",
+    { lock_active_tab: true },
+  );
+
+  assert.equal(selected, undefined);
+});
+
+test("findPlatformTab in current-page mode does not fall back to an inactive upload-shell tab", () => {
+  const inactiveDouyinUploadTab = {
+    active: false,
+    type: "page",
+    title: "抖音创作者中心",
+    url: "https://creator.douyin.com/creator-micro/content/upload",
+  };
+  const activeWrongTab = {
+    active: true,
+    type: "page",
+    title: "频道内容 - YouTube Studio",
+    url: "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos/upload",
+  };
+
+  const selected = findPlatformTab(
+    [inactiveDouyinUploadTab, activeWrongTab],
+    "douyin",
+    { lock_active_tab: true },
+  );
+
+  assert.equal(selected, undefined);
 });
 
 test("shouldAcquireReceiptSurfaceRoute requests douyin management route when receipt rebind starts from publish page", () => {
@@ -4352,7 +5716,22 @@ test("derivePublicationTaskPreparationPolicy honors direct publication_recovery_
   assert.equal(policy.clearIfStaleDraft, false);
 });
 
-test("derivePublicationTaskPreparationPolicy disables draft reset while keeping stop-before-final-publish in prepare-only mode", () => {
+test("derivePublicationTaskPreparationPolicy treats stop-before-final-publish as publish suppression, not current-page safety", () => {
+  const policy = derivePublicationTaskPreparationPolicy({
+    platform_specific_overrides: {
+      stop_before_final_publish: true,
+      clear_draft_context: false,
+      force_publish_page_refresh: true,
+    },
+  });
+
+  assert.equal(policy.stopBeforeFinalPublish, true);
+  assert.equal(policy.currentPageOnlyMode, false);
+  assert.equal(policy.forceMediaUpload, true);
+  assert.equal(policy.clearIfStaleDraft, true);
+});
+
+test("derivePublicationTaskPreparationPolicy keeps current-page draft reset disabled in prepare-only mode", () => {
   const policy = derivePublicationTaskPreparationPolicy({
     platform_specific_overrides: {
       prepare_only_current_page: true,
@@ -4366,9 +5745,31 @@ test("derivePublicationTaskPreparationPolicy disables draft reset while keeping 
   assert.equal(policy.verificationOnlyCurrentPage, false);
   assert.equal(policy.repairOnlyCurrentPage, false);
   assert.equal(policy.prepublishOnlyCurrentPage, false);
-  assert.equal(policy.forcePublishPageRefresh, true);
+  assert.equal(policy.forcePublishPageRefresh, false);
   assert.equal(policy.forceMediaUpload, false);
   assert.equal(policy.clearIfStaleDraft, false);
+  assert.equal(policy.recoveryContext.clear_draft_context, false);
+  assert.equal(policy.recoveryContext.force_publish_page_refresh, false);
+});
+
+test("derivePublicationTaskPreparationPolicy strips other current-page recovery modes when prepare-only mode is active", () => {
+  const policy = derivePublicationTaskPreparationPolicy({
+    platform_specific_overrides: {
+      prepare_only_current_page: true,
+      verification_only_current_page: true,
+      repair_only_current_page: true,
+      prepublish_only_current_page: true,
+      clear_draft_context: true,
+      force_publish_page_refresh: true,
+    },
+  });
+
+  assert.equal(policy.prepareOnlyCurrentPage, true);
+  assert.equal(policy.verificationOnlyCurrentPage, false);
+  assert.equal(policy.repairOnlyCurrentPage, false);
+  assert.equal(policy.prepublishOnlyCurrentPage, false);
+  assert.equal(policy.forcePublishPageRefresh, false);
+  assert.equal(policy.forceClearDraft, false);
 });
 
 test("canReuseCurrentPageMediaForPrepublish accepts douyin ready editor surface without filename echo", () => {
@@ -4414,6 +5815,63 @@ test("canReuseCurrentPageMediaForPrepublish accepts bilibili editor surface with
   assert.equal(state.reason, "bilibili_editor_surface");
 });
 
+test("canReuseCurrentPageMediaForPrepublish rejects bilibili attached draft by default when the title drifts", () => {
+  const mediaPath = String.raw`E:\WorkSpace\RoughCut\MAXACE 美杜莎4 顶配次顶配开箱.mp4`;
+  const state = canReuseCurrentPageMediaForPrepublish(
+    "bilibili",
+    {
+      lines: [
+        "上传完成",
+        "更换视频",
+        "标题",
+        "旧稿标题",
+        "MAXACE 美杜莎4 顶配次顶配开箱",
+        "创作声明",
+        "标签",
+        "简介",
+        "定时发布",
+        "存草稿",
+        "立即投稿",
+      ],
+    },
+    mediaPath,
+    { expectedTitle: "MAXACE美杜莎4开箱先看细节" },
+  );
+
+  assert.equal(state.reusable, false);
+  assert.equal(state.reason, "bilibili_existing_draft_title_mismatch");
+});
+
+test("canReuseCurrentPageMediaForPrepublish allows bilibili draft title mismatch reuse only in explicit current-page mode", () => {
+  const mediaPath = String.raw`E:\WorkSpace\RoughCut\MAXACE 美杜莎4 顶配次顶配开箱.mp4`;
+  const state = canReuseCurrentPageMediaForPrepublish(
+    "bilibili",
+    {
+      lines: [
+        "上传完成",
+        "更换视频",
+        "标题",
+        "旧稿标题",
+        "MAXACE 美杜莎4 顶配次顶配开箱",
+        "创作声明",
+        "标签",
+        "简介",
+        "定时发布",
+        "存草稿",
+        "立即投稿",
+      ],
+    },
+    mediaPath,
+    {
+      expectedTitle: "MAXACE美杜莎4开箱先看细节",
+      allowDraftTitleMismatchReuse: true,
+    },
+  );
+
+  assert.equal(state.reusable, true);
+  assert.equal(state.reason, "media_path_match");
+});
+
 test("canReuseCurrentPageMediaForPrepublish accepts youtube upload resume surface without local filename echo", () => {
   const state = canReuseCurrentPageMediaForPrepublish(
     "youtube",
@@ -4436,7 +5894,7 @@ test("canReuseCurrentPageMediaForPrepublish accepts youtube upload resume surfac
   assert.equal(state.reason, "youtube_upload_resume_surface");
 });
 
-test("canReuseCurrentPageMediaForPrepublish accepts youtube uploaded draft row on channel content list", () => {
+test("canReuseCurrentPageMediaForPrepublish rejects youtube uploaded draft row on channel content list", () => {
   const state = canReuseCurrentPageMediaForPrepublish(
     "youtube",
     {
@@ -4452,8 +5910,8 @@ test("canReuseCurrentPageMediaForPrepublish accepts youtube uploaded draft row o
     "E:/videos/source-video.mp4",
   );
 
-  assert.equal(state.reusable, true);
-  assert.equal(state.reason, "youtube_uploaded_draft_row");
+  assert.equal(state.reusable, false);
+  assert.equal(state.reason, "youtube_uploaded_draft_row_ignored");
 });
 
 test("canReuseCurrentPageMediaForPrepublish rejects bare upload prompt surface", () => {
@@ -4650,6 +6108,32 @@ test("shouldAttemptMediaBootstrap still allows stop-before bootstrap when media 
   );
 });
 
+test("shouldContinueStopBeforeUploadBootstrap allows prepare-only current-page direct starts to upload from a fresh entry", () => {
+  assert.equal(
+    shouldContinueStopBeforeUploadBootstrap({
+      stopBeforeFinalPublish: true,
+      currentPageOnlyMode: true,
+      prepareOnlyCurrentPage: true,
+      requiresLocalMedia: true,
+      hasMediaPath: true,
+    }),
+    true,
+  );
+});
+
+test("shouldContinueStopBeforeUploadBootstrap keeps prepublish-only current-page verification from auto-uploading", () => {
+  assert.equal(
+    shouldContinueStopBeforeUploadBootstrap({
+      stopBeforeFinalPublish: true,
+      currentPageOnlyMode: true,
+      prepareOnlyCurrentPage: false,
+      requiresLocalMedia: true,
+      hasMediaPath: true,
+    }),
+    false,
+  );
+});
+
 test("deriveCurrentPageDraftResumeDisposition detects bilibili unpublished draft prompt", () => {
   const disposition = deriveCurrentPageDraftResumeDisposition(
     "bilibili",
@@ -4660,14 +6144,26 @@ test("deriveCurrentPageDraftResumeDisposition detects bilibili unpublished draft
   assert.equal(disposition.reason, "existing_unpublished_draft_prompt");
 });
 
-test("deriveCurrentPageDraftResumeDisposition detects youtube uploaded draft row on channel content", () => {
+test("deriveCurrentPageDraftResumeDisposition detects douyin unpublished draft prompt and prefers discard", () => {
+  const disposition = deriveCurrentPageDraftResumeDisposition(
+    "douyin",
+    "你还有上次未发布的视频，是否继续编辑？ 继续编辑 放弃 点击上传或直接将视频文件拖入此区域"
+  );
+  assert.equal(disposition.present, true);
+  assert.equal(disposition.resume_label, "继续编辑");
+  assert.equal(disposition.discard_label, "放弃");
+  assert.equal(disposition.preferred_action, "discard");
+  assert.equal(disposition.reason, "existing_unpublished_draft_prompt");
+});
+
+test("deriveCurrentPageDraftResumeDisposition ignores youtube uploaded draft row on channel content", () => {
   const disposition = deriveCurrentPageDraftResumeDisposition(
     "youtube",
     "频道内容 MAXACE 美杜莎4 顶配次顶配开箱 处理出现延迟 草稿 编辑草稿 发布日期",
   );
-  assert.equal(disposition.present, true);
+  assert.equal(disposition.present, false);
   assert.equal(disposition.resume_label, "编辑草稿");
-  assert.equal(disposition.reason, "uploaded_draft_row");
+  assert.equal(disposition.reason, "uploaded_draft_row_ignored");
 });
 
 
@@ -4924,10 +6420,31 @@ test("buildPreparationBootstrapRecoveryOverrides preserves safe stop-before flag
 
   assert.equal(overrides.recovery_mode, "prepublish_resume");
   assert.equal(overrides.prepare_only_current_page, true);
+  assert.equal(overrides.fresh_start_platform_tab, false);
   assert.equal(overrides.clear_draft_context, false);
-  assert.equal(overrides.force_publish_page_refresh, true);
+  assert.equal(overrides.force_publish_page_refresh, false);
   assert.equal(overrides.verify_media_upload, true);
   assert.equal(overrides.wait_for_publish_confirmation, true);
+});
+
+test("buildPreparationBootstrapRecoveryOverrides preserves fresh-start tab flag", () => {
+  const policy = derivePublicationTaskPreparationPolicy({
+    publication_recovery_state: {
+      recovery_overrides: {
+        prepare_only_current_page: true,
+        fresh_start_platform_tab: true,
+        recovery_mode: "prepublish_resume",
+        clear_draft_context: false,
+        force_publish_page_refresh: false,
+        verify_media_upload: false,
+        wait_for_publish_confirmation: false,
+      },
+    },
+  });
+  const overrides = buildPreparationBootstrapRecoveryOverrides(policy);
+
+  assert.equal(overrides.prepare_only_current_page, true);
+  assert.equal(overrides.fresh_start_platform_tab, true);
 });
 
 test("buildPreparationBootstrapTimeoutOutcome keeps safe recovery context on bootstrap timeout", () => {
@@ -5413,13 +6930,13 @@ test("detectCompositePublicationSignals ignores douyin static upload reminder on
   assert.equal(signals.upload_failed, false);
 });
 
-test("platformBodyWithTags appends hashtags for douyin composite drafts", () => {
+test("platformBodyWithTags keeps douyin body free of plain-text hashtags", () => {
   const body = platformBodyWithTags("douyin", {
     title: "标题A",
     body: "正文A",
     hashtags: ["测试A", "测试B"],
   });
-  assert.equal(body, "正文A\n#测试A #测试B");
+  assert.equal(body, "正文A");
 });
 
 test("resolveDouyinDeclarationOption falls back to no declaration when content has no explicit marker", () => {
@@ -5457,6 +6974,229 @@ test("detectCompositePublicationSignals ignores bilibili static upload label on 
   const signals = detectCompositePublicationSignals("bilibili", lines.join("\n"), lines);
   assert.equal(signals.upload_busy, false);
   assert.equal(signals.upload_failed, false);
+});
+
+test("shouldInspectHiddenVideoInputsForDraftClear enables hidden uploader cleanup for bilibili only", () => {
+  assert.equal(shouldInspectHiddenVideoInputsForDraftClear("bilibili"), true);
+  assert.equal(shouldInspectHiddenVideoInputsForDraftClear("kuaishou"), false);
+});
+
+test("shouldResetBilibiliUploadModuleAfterDiscard only resets after explicit 不用了 discard", () => {
+  assert.equal(shouldResetBilibiliUploadModuleAfterDiscard({
+    prompt_present: true,
+    discarded: true,
+    clicked_label: "不用了",
+  }), true);
+  assert.equal(shouldResetBilibiliUploadModuleAfterDiscard({
+    prompt_present: true,
+    discarded: false,
+    clicked_label: "继续编辑",
+  }), false);
+  assert.equal(shouldResetBilibiliUploadModuleAfterDiscard({
+    prompt_present: false,
+    discarded: false,
+    clicked_label: "",
+  }), false);
+});
+
+test("bilibiliDraftStorageKeysToClear only clears persisted upload draft record", () => {
+  assert.deepEqual(bilibiliDraftStorageKeysToClear(), [
+    "bili_videoup_record",
+  ]);
+});
+
+test("isBilibiliFreshUploadEntrySnapshot accepts clean upload entry surface", () => {
+  const freshness = isBilibiliFreshUploadEntrySnapshot(
+    {
+      url: "https://member.bilibili.com/platform/upload/video/frame?page_from=creative_home_top_upload",
+      lines: [
+        "发布视频",
+        "点击上传或将视频拖拽到此区域",
+        "上传视频",
+        "视频大小16G以内",
+      ],
+      fileInputs: [{ accept: ".mp4,.mov,video/*" }],
+    },
+    "C:\\media\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+    "美杜莎4顶配次顶配双开箱，版本差异一镜拆给你看",
+  );
+  assert.equal(freshness.fresh, true);
+  assert.equal(freshness.prompt_blocked, false);
+  assert.equal(freshness.stale_mismatch, false);
+});
+
+test("isBilibiliFreshUploadEntrySnapshot rejects stale editor surface with mismatched draft title", () => {
+  const freshness = isBilibiliFreshUploadEntrySnapshot(
+    {
+      url: "https://member.bilibili.com/platform/upload/video/frame?page_from=creative_home_top_upload",
+      lines: [
+        "发布视频",
+        "MAXACE美杜莎4开箱先看细节",
+        "上传完成",
+        "更换视频",
+        "标题",
+        "创作声明",
+        "分区",
+        "标签",
+        "简介",
+        "定时发布",
+        "立即投稿",
+      ],
+      fileInputs: [{ accept: ".mp4,.mov,video/*" }],
+    },
+    "C:\\media\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+    "美杜莎4顶配次顶配双开箱，版本差异一镜拆给你看",
+  );
+  assert.equal(freshness.fresh, false);
+  assert.equal(freshness.stale_mismatch, true);
+});
+
+test("shouldPersistBilibiliDirtyEditorBeforeRouteReset only persists populated editor surfaces", () => {
+  assert.equal(
+    shouldPersistBilibiliDirtyEditorBeforeRouteReset(
+      { field_shell: true, upload_prompt_surface: false },
+      { fresh: false, prompt_blocked: false },
+    ),
+    true,
+  );
+  assert.equal(
+    shouldPersistBilibiliDirtyEditorBeforeRouteReset(
+      { field_shell: false, upload_prompt_surface: true },
+      { fresh: false, prompt_blocked: false },
+    ),
+    false,
+  );
+  assert.equal(
+    shouldPersistBilibiliDirtyEditorBeforeRouteReset(
+      { field_shell: true, upload_prompt_surface: false },
+      { fresh: true, prompt_blocked: false },
+    ),
+    false,
+  );
+});
+
+test("currentPageMatchesPrepareOnlyExecutionContext accepts douyin upload shell as authoritative start", () => {
+  assert.equal(
+    currentPageMatchesPrepareOnlyExecutionContext(
+      "douyin",
+      {
+        url: "https://creator.douyin.com/creator-micro/content/upload",
+        text: "发布视频 点击上传 或直接将视频文件拖入此区域",
+      },
+      {
+        lines: ["发布视频", "点击上传 或直接将视频文件拖入此区域"],
+      },
+      "E:\\WorkSpace\\RoughCut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+      [],
+    ),
+    true,
+  );
+});
+
+test("currentPageMatchesPrepareOnlyExecutionContext accepts douyin loading upload shell as authoritative start", () => {
+  assert.equal(
+    currentPageMatchesPrepareOnlyExecutionContext(
+      "douyin",
+      {
+        url: "https://creator.douyin.com/creator-micro/content/upload",
+        title: "抖音创作者中心",
+        text: "加载中，请稍候...",
+      },
+      {
+        title: "抖音创作者中心",
+        lines: ["加载中，请稍候..."],
+      },
+      "E:\\WorkSpace\\RoughCut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+      [],
+    ),
+    true,
+  );
+});
+
+test("currentPageMatchesPrepareOnlyExecutionContext accepts douyin post-video editor entered from same-run fresh upload", () => {
+  assert.equal(
+    currentPageMatchesPrepareOnlyExecutionContext(
+      "douyin",
+      {
+        url: "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page",
+        text: "抖音创作者中心",
+      },
+      {
+        url: "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page",
+        lines: [
+          "MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+          "上传过程中请不要删除/移动文件",
+          "0%",
+          "文件解析中，请稍等...",
+        ],
+      },
+      "E:\\WorkSpace\\RoughCut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+      [
+        { kind: "prepare_only_current_page_normalize_to_upload_entry" },
+        { kind: "media_upload", uploaded: true },
+      ],
+    ),
+    true,
+  );
+});
+
+test("currentPageMatchesPrepareOnlyExecutionContext rejects douyin post-video editor without same-run fresh upload evidence", () => {
+  assert.equal(
+    currentPageMatchesPrepareOnlyExecutionContext(
+      "douyin",
+      {
+        url: "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page",
+        text: "抖音创作者中心",
+      },
+      {
+        url: "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page",
+        lines: ["作品描述", "设置封面", "请选择合集", "请选择自主声明"],
+      },
+      "E:\\WorkSpace\\RoughCut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+      [],
+    ),
+    false,
+  );
+});
+
+test("shouldBypassDraftResumeAtAuthoritativeUploadEntry only bypasses clean douyin upload shells", () => {
+  assert.equal(
+    shouldBypassDraftResumeAtAuthoritativeUploadEntry("douyin", {
+      url: "https://creator.douyin.com/creator-micro/content/upload",
+      lines: ["你还有上次未发布的视频，是否继续编辑？", "点击上传或直接将视频文件拖入此区域", "上传视频"],
+      headings: ["发布视频"],
+    }),
+    false,
+  );
+  assert.equal(
+    shouldBypassDraftResumeAtAuthoritativeUploadEntry("douyin", {
+      url: "https://creator.douyin.com/creator-micro/content/upload",
+      lines: ["点击上传或直接将视频文件拖入此区域", "上传视频"],
+      headings: ["发布视频"],
+    }),
+    true,
+  );
+  assert.equal(
+    shouldBypassDraftResumeAtAuthoritativeUploadEntry("douyin", {
+      url: "https://creator.douyin.com/creator-micro/content/post/video",
+      lines: ["作品描述", "封面", "发布时间", "发布"],
+      headings: ["发布视频"],
+    }),
+    false,
+  );
+});
+
+test("isBilibiliUploadQueueCardCandidate rejects publish mode tabs and accepts real upload cards", () => {
+  assert.equal(isBilibiliUploadQueueCardCandidate("视频投稿"), false);
+  assert.equal(isBilibiliUploadQueueCardCandidate("互动视频投稿"), false);
+  assert.equal(
+    isBilibiliUploadQueueCardCandidate("MAXACE 美杜莎4 顶配次顶配开箱 上传中..."),
+    true,
+  );
+  assert.equal(
+    isBilibiliUploadQueueCardCandidate("MAXACE 美杜莎4 顶配次顶配开箱", "MAXACE 美杜莎4 顶配次顶配开箱"),
+    true,
+  );
 });
 
 test("shouldAcceptCompositeUploadReadyState accepts bilibili ready editor surface once only static upload text remains", () => {

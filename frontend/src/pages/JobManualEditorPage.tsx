@@ -246,7 +246,7 @@ export function JobManualEditorPage() {
       setLastDraftSavedAt(result.saved_at);
       setNotice({
         tone: "success",
-        message: result.detail?.trim() || "手动调整草稿已自动保存。",
+        message: result.detail?.trim() || "手动调整草稿已自动保存。仅保存草稿，尚未开始正式渲染。",
       });
     },
     onError: (error) => {
@@ -327,8 +327,8 @@ export function JobManualEditorPage() {
 
   const noticeClass = notice?.tone === "error" ? "notice notice-error top-gap" : "notice top-gap";
   const manualEditorActionsEnabled = Boolean(manualEditor.data && manualEditorReadiness.data?.can_edit);
-  const renderActionLabel = hasCompletedRender(job.data) ? "根据当前改动重新渲染" : "根据当前改动正式渲染";
-  const renderSubmittingLabel = hasCompletedRender(job.data) ? "重新渲染提交中..." : "正式渲染提交中...";
+  const renderActionLabel = hasCompletedRender(job.data) ? "提交并开始重新渲染" : "提交并开始正式渲染";
+  const renderSubmittingLabel = hasCompletedRender(job.data) ? "正在提交重新渲染..." : "正在提交正式渲染...";
   const retryStartStep = manualEditorRetryStartStep(manualEditorReadiness.data);
   const retryStartLabel = manualEditorRetryStartLabel(retryStartStep);
   const retryManualEditorPreparation = useMutation({
@@ -358,7 +358,7 @@ export function JobManualEditorPage() {
     <section className="page-stack manual-editor-page">
       <PageHeader
         title="手动调整模式"
-        description={job.data?.source_name || "独立剪辑窗口：预览、定位字幕，然后保存进入重渲染。"}
+        description={job.data?.source_name || "独立剪辑窗口：自动保存只保留草稿；点击主按钮或按 Ctrl/⌘+S 才会正式提交并进入渲染。"}
         actions={
           <div className="manual-editor-page-actions">
             <button
@@ -385,6 +385,11 @@ export function JobManualEditorPage() {
       />
 
       {notice ? <div className={noticeClass}>{notice.message}</div> : null}
+      {manualEditorActionsEnabled ? (
+        <div className="notice top-gap">
+          自动保存只会更新手动调整草稿，不会开始 render。点击“{renderActionLabel}”或按 <kbd>Ctrl/⌘</kbd> + <kbd>S</kbd>，才会调用正式提交并放行后续渲染。
+        </div>
+      ) : null}
 
       {!jobId ? (
         <section className="panel">

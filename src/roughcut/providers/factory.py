@@ -186,6 +186,10 @@ def _build_reasoning_provider(provider: str) -> ReasoningProvider:
         from roughcut.providers.reasoning.minimax_reasoning import MiniMaxReasoningProvider
 
         return MiniMaxReasoningProvider()
+    if provider == "zhipu":
+        from roughcut.providers.reasoning.zhipu_reasoning import ZhipuReasoningProvider
+
+        return ZhipuReasoningProvider()
     if provider == "ollama":
         from roughcut.providers.reasoning.ollama_reasoning import OllamaReasoningProvider
 
@@ -268,6 +272,10 @@ def _build_search_provider():
         from roughcut.providers.search.minimax import MiniMaxSearchProvider
 
         return MiniMaxSearchProvider()
+    if provider == "zhipu":
+        from roughcut.providers.search.zhipu import ZhipuSearchProvider
+
+        return ZhipuSearchProvider()
     if provider == "ollama":
         from roughcut.providers.search.ollama import OllamaSearchProvider
 
@@ -302,6 +310,8 @@ def _build_auto_search_provider_bundle() -> list[tuple[str, SearchProvider]]:
     for name in provider_order:
         if name == "minimax" and _has_minimax_search_credentials(settings):
             _append("minimax", _build_minimax_search_provider)
+        elif name == "zhipu" and _has_zhipu_search_credentials(settings):
+            _append("zhipu", _build_zhipu_search_provider)
         elif name == "openai" and _has_openai_search_credentials(settings):
             _append("openai", _build_openai_search_provider)
         elif name == "openai" and _has_openai_codex_cli_search_bridge(settings):
@@ -363,6 +373,16 @@ def _has_ollama_search_credentials(settings) -> bool:
     return bool(str(getattr(settings, "ollama_api_key", "") or "").strip())
 
 
+def _has_zhipu_search_credentials(settings) -> bool:
+    return bool(
+        normalize_auth_mode(getattr(settings, "zhipu_auth_mode", "")) == "api_key"
+        and str(getattr(settings, "zhipu_api_key", "") or "").strip()
+    ) or bool(
+        normalize_auth_mode(getattr(settings, "zhipu_auth_mode", "")) == "helper"
+        and str(getattr(settings, "zhipu_api_key_helper", "") or "").strip()
+    )
+
+
 def _build_named_search_provider(provider: str) -> SearchProvider:
     normalized = str(provider or "").strip().lower()
     if normalized == "openai":
@@ -371,6 +391,8 @@ def _build_named_search_provider(provider: str) -> SearchProvider:
         return _build_anthropic_search_provider()
     if normalized == "minimax":
         return _build_minimax_search_provider()
+    if normalized == "zhipu":
+        return _build_zhipu_search_provider()
     if normalized == "ollama":
         return _build_ollama_search_provider()
     if normalized == "model":
@@ -414,3 +436,9 @@ def _build_searxng_search_provider() -> SearchProvider:
     from roughcut.providers.search.searxng import SearXNGProvider
 
     return SearXNGProvider()
+
+
+def _build_zhipu_search_provider() -> SearchProvider:
+    from roughcut.providers.search.zhipu import ZhipuSearchProvider
+
+    return ZhipuSearchProvider()

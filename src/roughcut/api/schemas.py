@@ -514,6 +514,7 @@ class IntelligentCopyPlatformMaterialOut(BaseModel):
     tags_copy: str = ""
     full_copy: str = ""
     cover_path: str | None = None
+    cover_slots: list[dict[str, Any]] = Field(default_factory=list)
     cover_generation: dict[str, Any] | None = None
     declaration: str | None = None
     category: str | None = None

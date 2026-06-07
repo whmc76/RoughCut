@@ -21,6 +21,9 @@ def _attempt(
     media_path: str,
     browser_profile_id: str,
     dedupe_signature: str = "dup-signature-1",
+    run_status: str = "",
+    provider_task_id: str = "",
+    job_id: str = "job-1",
 ) -> SimpleNamespace:
     logical_signature = _build_publication_logical_signature_payload(
         platform="douyin",
@@ -32,9 +35,11 @@ def _attempt(
     )
     return SimpleNamespace(
         id=attempt_id,
+        job_id=job_id,
         status=status,
-        run_status="",
+        run_status=run_status,
         provider_status="",
+        provider_task_id=provider_task_id,
         platform="douyin",
         creator_profile_id="creator-1",
         account_label="FAS",
@@ -285,6 +290,74 @@ def test_build_duplicate_groups_uses_logical_signature_as_default_group_key_when
     assert len(groups) == 1
     assert groups[0].logical_signature
     assert groups[0].group_signature == groups[0].logical_signature
+    assert "multiple_active_attempts" in groups[0].reasons
+
+
+def test_build_duplicate_groups_ignores_same_job_retry_queue_duplicates_without_provider_task() -> None:
+    media_path = "E:/media/maxace4.mp4"
+    attempts = [
+        _attempt(
+            attempt_id="attempt-1",
+            status="queued",
+            run_status="retry_scheduled",
+            scheduled_publish_at="",
+            media_path=media_path,
+            browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+            job_id="job-1",
+        ),
+        _attempt(
+            attempt_id="attempt-2",
+            status="queued",
+            run_status="retry_scheduled",
+            scheduled_publish_at="",
+            media_path=media_path,
+            browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+            job_id="job-1",
+        ),
+    ]
+
+    groups = build_duplicate_groups(
+        attempts,
+        browser_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        platforms=["douyin"],
+        media_path=media_path,
+    )
+
+    assert groups == []
+
+
+def test_build_duplicate_groups_keeps_multiple_active_attempts_when_provider_task_exists() -> None:
+    media_path = "E:/media/maxace4.mp4"
+    attempts = [
+        _attempt(
+            attempt_id="attempt-1",
+            status="queued",
+            run_status="retry_scheduled",
+            scheduled_publish_at="",
+            media_path=media_path,
+            browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+            job_id="job-1",
+        ),
+        _attempt(
+            attempt_id="attempt-2",
+            status="queued",
+            run_status="retry_scheduled",
+            provider_task_id="provider-2",
+            scheduled_publish_at="",
+            media_path=media_path,
+            browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+            job_id="job-1",
+        ),
+    ]
+
+    groups = build_duplicate_groups(
+        attempts,
+        browser_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        platforms=["douyin"],
+        media_path=media_path,
+    )
+
+    assert len(groups) == 1
     assert "multiple_active_attempts" in groups[0].reasons
 
 

@@ -23,7 +23,8 @@
     "build": "pnpm run build:frontend",
     "build:frontend": "pnpm --dir frontend build",
     "build:backend": "uv run python -m py_compile src/roughcut/main.py src/roughcut/cli.py",
-    "lint": "pnpm run lint:frontend && pnpm run lint:backend",
+    "lint": "pnpm run lint:frontend && pnpm run lint:backend && pnpm run lint:agent-docs",
+    "lint:agent-docs": "uv run python scripts/check_agent_docs.py",
     "lint:frontend": "pnpm --dir frontend typecheck",
     "lint:backend": "uv run ruff check src",
     "docker:up": "pnpm docker:dev:up",
@@ -63,6 +64,7 @@
     "publication:autopilot": "uv run python scripts/run_publication_autopilot.py"
   },
   "devDependencies": {
+    "chrome-remote-interface": "^0.34.0",
     "concurrently": "^9.2.1"
   }
 }

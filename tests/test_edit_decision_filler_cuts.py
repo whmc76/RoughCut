@@ -282,6 +282,14 @@ def test_short_normal_speech_is_not_low_signal() -> None:
     assert not _is_low_signal_subtitle_text("我懒得看了")
 
 
+def test_short_actionable_clause_with_sentence_tail_particle_is_not_low_signal() -> None:
+    assert not _is_low_signal_subtitle_text("解锁以后呢")
+
+
+def test_short_actionable_clause_with_demonstrative_object_is_not_low_signal() -> None:
+    assert not _is_low_signal_subtitle_text("拿这个三")
+
+
 def test_silence_cut_does_not_remove_subtitle_backed_speech() -> None:
     decision = build_edit_decision(
         "demo.mp4",

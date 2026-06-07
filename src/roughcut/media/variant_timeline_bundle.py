@@ -57,6 +57,12 @@ def variant_llm_cut_review(bundle: dict[str, Any] | None) -> dict[str, Any]:
     return dict(llm_cut_review) if isinstance(llm_cut_review, dict) else {}
 
 
+def variant_multimodal_trim_review_summary(bundle: dict[str, Any] | None) -> dict[str, Any]:
+    diagnostics = variant_timeline_diagnostics(bundle)
+    multimodal_trim_review_summary = diagnostics.get("multimodal_trim_review_summary")
+    return dict(multimodal_trim_review_summary) if isinstance(multimodal_trim_review_summary, dict) else {}
+
+
 def variant_refine_decision_summary(bundle: dict[str, Any] | None) -> dict[str, Any]:
     diagnostics = variant_timeline_diagnostics(bundle)
     refine_decision_summary = diagnostics.get("refine_decision_summary")

@@ -374,7 +374,6 @@
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
-              "cdp_base_url": "http://127.0.0.1:9222",
               "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
             }
           },
@@ -397,7 +396,6 @@
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
-              "cdp_base_url": "http://127.0.0.1:9222",
               "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
             }
           },
@@ -420,7 +418,6 @@
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
-              "cdp_base_url": "http://127.0.0.1:9222",
               "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
             }
           },
@@ -443,7 +440,6 @@
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
-              "cdp_base_url": "http://127.0.0.1:9222",
               "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
             }
           },
@@ -466,7 +462,6 @@
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
-              "cdp_base_url": "http://127.0.0.1:9222",
               "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
             }
           },
@@ -489,7 +484,6 @@
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
-              "cdp_base_url": "http://127.0.0.1:9222",
               "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
             }
           },
@@ -512,7 +506,6 @@
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
-              "cdp_base_url": "http://127.0.0.1:9222",
               "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
             }
           },
@@ -526,17 +519,17 @@
             "enabled": true,
             "adapter": "browser_agent",
             "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ E:/WorkSpace/RoughCut/data/runtime/publication-browser-profile-stable/chrome-user-data。",
             "last_error": null,
-            "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+            "browser_profile_id": "browser-profile:chrome:5748ec82429e20a77ac7",
             "browser_binding": {
               "browser": "chrome",
-              "user_data_dir": "C:/Users/28687/AppData/Local/Google/Chrome/User Data",
+              "user_data_dir": "E:/WorkSpace/RoughCut/data/runtime/publication-browser-profile-stable/chrome-user-data",
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
               "cdp_base_url": "http://127.0.0.1:9222",
-              "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
+              "profile_id": "browser-profile:chrome:5748ec82429e20a77ac7"
             }
           }
         ]

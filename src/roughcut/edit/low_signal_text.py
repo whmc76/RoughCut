@@ -141,6 +141,12 @@ _NORMAL_LANGUAGE_SIGNAL_TERMS = (
     "打开",
     "放在",
     "拿来",
+    "拿这个",
+    "解锁",
+    "以后",
+    "之后",
+    "前面",
+    "后面",
     "对比",
     "区别",
     "懒得",
@@ -154,8 +160,62 @@ _SHORT_NORMAL_LANGUAGE_SIGNAL_RE = re.compile(
     r"(?:看|用|拿|放|试|讲|说|做|拆|开|关|装|换|选|买|要|想|懒得|觉得|喜欢|知道|需要|可以)",
     re.UNICODE,
 )
+_SHORT_ACTIONABLE_CLAUSE_RE = re.compile(
+    r"(?:拿|看|试|讲|说|拆|装|换|开|关|解锁|展示|演示|对比|介绍|上手|打开|合上)"
+    r".{0,6}"
+    r"(?:这个|那个|这里|一下|以后|之后|前面|后面|参数|亮度|续航|模式|功能|版本|开箱|对比|细节|手电|折刀|包装|三|二|一)?",
+    re.UNICODE,
+)
+_SENTENCE_PARTICLE_SUFFIX_RE = re.compile(r"[啊呀呢吧嘛哦喔哎唉诶欸]+$", re.UNICODE)
 _EMPHASIS_REPEAT_CUE_RE = re.compile(r"(?:说|讲|重复)(?:一|两|二|三|3|好多)遍")
 _COUNTING_REPEAT_UNIT_RE = re.compile(r"^(?:第[\u4e00-\u9fff\d]{1,3}|[\u4e00-\u9fff\d]{1,3}个)$")
+_TERMINAL_PUNCTUATION_CHARS = "。！？!?…~"
+_INCOMPLETE_TAIL_SUFFIXES = (
+    "的",
+    "了",
+    "是",
+    "在",
+    "把",
+    "跟",
+    "和",
+    "给",
+    "就",
+    "又",
+    "还",
+    "更",
+    "最",
+    "很",
+    "再",
+    "并",
+    "但",
+    "而",
+    "如果",
+    "因为",
+    "所以",
+    "然后",
+    "而且",
+    "或者",
+    "或者说",
+    "以及",
+    "就是",
+)
+_CONTINUATION_HEAD_PREFIXES = (
+    "然后",
+    "所以",
+    "但是",
+    "不过",
+    "而且",
+    "以及",
+    "另外",
+    "再",
+    "那",
+    "就是",
+    "其实",
+    "因为",
+    "或者",
+    "或者说",
+)
+_STRONG_SUBTITLE_SIGNAL_SCORE = 2.0
 
 
 def compact_subtitle_text(text: str) -> str:
@@ -260,6 +320,98 @@ def is_low_signal_subtitle_text(text: str, *, content_profile: dict | None = Non
     return False
 
 
+def looks_like_incomplete_tail(text: str) -> bool:
+    raw = str(text or "").strip()
+    compact = compact_subtitle_text(raw)
+    if len(compact) < 4:
+        return False
+    if raw and raw[-1] in _TERMINAL_PUNCTUATION_CHARS:
+        return False
+    if any(compact.endswith(token) for token in _INCOMPLETE_TAIL_SUFFIXES):
+        return True
+    return len(compact) <= 10 and compact[-1] in {"的", "了", "是", "在", "把", "跟", "和", "给", "就", "又", "更", "最", "很"}
+
+
+def looks_like_continuation_head(text: str) -> bool:
+    compact = compact_subtitle_text(text)
+    return any(compact.startswith(prefix) for prefix in _CONTINUATION_HEAD_PREFIXES)
+
+
+def looks_like_sentence_continuation(previous_text: str, next_text: str) -> bool:
+    previous = str(previous_text or "").strip()
+    following = str(next_text or "").strip()
+    if not previous or not following:
+        return False
+    if looks_like_incomplete_tail(previous):
+        return True
+    if looks_like_continuation_head(following):
+        return True
+    compact_previous = compact_subtitle_text(previous)
+    compact_next = compact_subtitle_text(following)
+    return bool(
+        compact_previous
+        and compact_next
+        and compact_previous[-1] not in _TERMINAL_PUNCTUATION_CHARS
+        and compact_next[:1] in {"而", "但", "并", "就", "也"}
+    )
+
+
+def looks_like_semantic_bridge(
+    previous_text: str,
+    next_text: str,
+    *,
+    content_profile: dict | None,
+) -> bool:
+    previous = str(previous_text or "").strip()
+    following = str(next_text or "").strip()
+    if not previous or not following:
+        return False
+    return (
+        subtitle_signal_score(previous, content_profile=content_profile) >= _STRONG_SUBTITLE_SIGNAL_SCORE
+        and subtitle_signal_score(following, content_profile=content_profile) >= _STRONG_SUBTITLE_SIGNAL_SCORE
+    )
+
+
+def _combined_subtitle_contexts(previous_text: str, current_text: str, next_text: str) -> list[str]:
+    previous = str(previous_text or "").strip()
+    current = str(current_text or "").strip()
+    following = str(next_text or "").strip()
+    contexts: list[str] = []
+    if previous and current:
+        contexts.append(f"{previous}{current}")
+    if current and following:
+        contexts.append(f"{current}{following}")
+    if previous and current and following:
+        contexts.append(f"{previous}{current}{following}")
+    return contexts
+
+
+def low_signal_subtitle_is_contextually_isolated(
+    text: str,
+    *,
+    previous_text: str = "",
+    next_text: str = "",
+    content_profile: dict | None = None,
+) -> bool:
+    if not is_low_signal_subtitle_text(text, content_profile=content_profile):
+        return False
+    current_score = subtitle_signal_score(text, content_profile=content_profile)
+    if looks_like_sentence_continuation(previous_text, text):
+        return False
+    if looks_like_sentence_continuation(text, next_text):
+        return False
+    if looks_like_semantic_bridge(previous_text, next_text, content_profile=content_profile):
+        return False
+    for combined in _combined_subtitle_contexts(previous_text, text, next_text):
+        if len(compact_subtitle_text(combined)) < max(8, len(compact_subtitle_text(text)) + 2):
+            continue
+        if is_low_signal_subtitle_text(combined, content_profile=content_profile):
+            continue
+        if subtitle_signal_score(combined, content_profile=content_profile) >= max(0.2, current_score + 0.25):
+            return False
+    return True
+
+
 def looks_like_natural_emphasis_repetition(unit: str, *, repeat_count: int, full_text: str = "") -> bool:
     phrase = str(unit or "").strip()
     candidate = str(full_text or "").strip()
@@ -326,21 +478,24 @@ def has_normal_language_signal(text: str, *, content_profile: dict | None) -> bo
     compact = PUNCTUATION_PATTERN.sub("", str(text or "").strip())
     if len(compact) < 4:
         return False
-    if len(compact) <= 12 and _SHORT_NORMAL_LANGUAGE_SIGNAL_RE.search(compact):
+    trimmed_particles = _SENTENCE_PARTICLE_SUFFIX_RE.sub("", compact) or compact
+    if len(trimmed_particles) <= 12 and _SHORT_NORMAL_LANGUAGE_SIGNAL_RE.search(trimmed_particles):
         return True
-    if has_anchor_signal(compact, content_profile=content_profile):
+    if len(trimmed_particles) <= 8 and _SHORT_ACTIONABLE_CLAUSE_RE.search(trimmed_particles):
         return True
-    if has_visual_showcase_signal(compact, content_profile=content_profile):
+    if has_anchor_signal(trimmed_particles, content_profile=content_profile):
         return True
-    if re.search(r"[A-Za-z0-9]", compact):
+    if has_visual_showcase_signal(trimmed_particles, content_profile=content_profile):
+        return True
+    if re.search(r"[A-Za-z0-9]", trimmed_particles):
         return True
     if (
-        len(compact) >= 6
-        and len(set(compact)) >= 3
-        and any(term in compact for term in _NORMAL_LANGUAGE_SIGNAL_TERMS)
+        len(trimmed_particles) >= 4
+        and len(set(trimmed_particles)) >= 2
+        and any(term in trimmed_particles for term in _NORMAL_LANGUAGE_SIGNAL_TERMS)
     ):
         return True
-    return len(compact) >= 10 and len(set(compact)) >= max(4, len(compact) // 4)
+    return len(trimmed_particles) >= 10 and len(set(trimmed_particles)) >= max(4, len(trimmed_particles) // 4)
 
 
 def looks_like_noise_subtitle(text: str) -> bool:

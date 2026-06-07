@@ -16,6 +16,9 @@ from roughcut.speech.postprocess import SubtitleSegmentationAnalysis
 ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER = "transcript_fact_layer"
 ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER = "canonical_transcript_layer"
 ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER = "subtitle_projection_layer"
+CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION = "20260607_alignment_v3"
+SUBTITLE_PROJECTION_SEGMENTATION_ENGINE_VERSION = "20260607_readability_v10"
+SUBTITLE_PROJECTION_SPLIT_PROFILE_VERSION = "20260607_landscape_v2"
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,7 @@ class CanonicalTranscriptLayer:
     segments: tuple[CanonicalTranscriptSegment, ...]
     source_basis: str
     correction_metrics: dict[str, Any]
+    alignment_engine_version: str = CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION
 
     def as_dict(self) -> dict[str, Any]:
         total_duration = 0.0
@@ -165,6 +169,9 @@ class CanonicalTranscriptLayer:
             "word_count": sum(len(segment.words) for segment in self.segments),
             "duration": round(total_duration, 3),
             "correction_metrics": dict(self.correction_metrics),
+            "alignment_engine_version": str(
+                self.alignment_engine_version or CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION
+            ),
             "segments": [segment.as_dict() for segment in self.segments],
         }
 
@@ -179,9 +186,10 @@ class SubtitleProjectionEntry:
     text_raw: str
     text_norm: str | None
     text_final: str | None
+    words: tuple[dict[str, Any], ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "index": int(self.index),
             "start": round(float(self.start), 3),
             "end": round(float(self.end), 3),
@@ -191,6 +199,9 @@ class SubtitleProjectionEntry:
             "text_norm": self.text_norm,
             "text_final": self.text_final,
         }
+        if self.words:
+            payload["words"] = [dict(word) for word in self.words if isinstance(word, dict)]
+        return payload
 
 
 @dataclass(frozen=True)
@@ -202,6 +213,9 @@ class SubtitleProjectionLayer:
     segmentation_analysis: dict[str, Any]
     boundary_refine: dict[str, Any]
     quality_report: dict[str, Any]
+    segmentation_engine_version: str = SUBTITLE_PROJECTION_SEGMENTATION_ENGINE_VERSION
+    split_profile_version: str = SUBTITLE_PROJECTION_SPLIT_PROFILE_VERSION
+    canonical_alignment_engine_version: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         total_duration = 0.0
@@ -217,8 +231,41 @@ class SubtitleProjectionLayer:
             "segmentation_analysis": dict(self.segmentation_analysis),
             "boundary_refine": dict(self.boundary_refine),
             "quality_report": dict(self.quality_report),
+            "segmentation_engine_version": str(
+                self.segmentation_engine_version or SUBTITLE_PROJECTION_SEGMENTATION_ENGINE_VERSION
+            ),
+            "split_profile_version": str(
+                self.split_profile_version or SUBTITLE_PROJECTION_SPLIT_PROFILE_VERSION
+            ),
+            "canonical_alignment_engine_version": str(self.canonical_alignment_engine_version or ""),
             "entries": [entry.as_dict() for entry in self.entries],
         }
+
+
+def canonical_transcript_data_is_current(canonical_data: dict[str, Any] | None) -> bool:
+    return (
+        str((canonical_data or {}).get("alignment_engine_version") or "").strip()
+        == CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION
+    )
+
+
+def subtitle_projection_data_is_current(projection_data: dict[str, Any] | None) -> bool:
+    if (
+        str((projection_data or {}).get("segmentation_engine_version") or "").strip()
+        != SUBTITLE_PROJECTION_SEGMENTATION_ENGINE_VERSION
+    ):
+        return False
+    if (
+        str((projection_data or {}).get("split_profile_version") or "").strip()
+        != SUBTITLE_PROJECTION_SPLIT_PROFILE_VERSION
+    ):
+        return False
+    if str((projection_data or {}).get("transcript_layer") or "").strip() == "canonical_transcript":
+        return (
+            str((projection_data or {}).get("canonical_alignment_engine_version") or "").strip()
+            == CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION
+        )
+    return True
 
 
 def build_transcript_fact_layer(transcript_segments: list[Any]) -> TranscriptFactLayer:
@@ -354,6 +401,11 @@ def _build_transcript_source_segment_from_subtitle_item(item: Any, *, index: int
     text_final = getattr(item, "text_final", None)
     start = float(getattr(item, "start_time", 0.0) or 0.0)
     end = float(getattr(item, "end_time", 0.0) or 0.0)
+    words = tuple(
+        _build_transcript_fact_words(
+            list(getattr(item, "words", None) or getattr(item, "words_json", None) or [])
+        )
+    )
     return TranscriptSourceSegment(
         index=int(raw_source_index),
         source_kind="subtitle_item",
@@ -364,7 +416,7 @@ def _build_transcript_source_segment_from_subtitle_item(item: Any, *, index: int
         text_norm=text_norm,
         text_final=text_final,
         speaker=None,
-        words=(),
+        words=words,
     )
 
 
@@ -1059,6 +1111,7 @@ def _build_projection_entries_from_transcript_words(
             text_raw=str(entry.text_raw or ""),
             text_norm=str(entry.text_norm or ""),
             text_final=str(entry.text_raw or ""),
+            words=tuple(dict(word) for word in tuple(entry.words or ()) if isinstance(word, dict)),
         )
         for index, entry in enumerate(result.entries)
     )
@@ -1199,6 +1252,11 @@ def build_subtitle_projection_layer(
                 text_raw=source.text_raw,
                 text_norm=source.text_norm,
                 text_final=source.text_final,
+                words=tuple(
+                    word.as_dict() if hasattr(word, "as_dict") else dict(word)
+                    for word in tuple(source.words or ())
+                    if hasattr(word, "as_dict") or isinstance(word, dict)
+                ),
             )
             for source in source_segments
         )
@@ -1210,6 +1268,13 @@ def build_subtitle_projection_layer(
         segmentation_analysis=analysis_payload,
         boundary_refine=dict(boundary_refine or {}),
         quality_report=dict(quality_report or {}),
+        segmentation_engine_version=SUBTITLE_PROJECTION_SEGMENTATION_ENGINE_VERSION,
+        split_profile_version=SUBTITLE_PROJECTION_SPLIT_PROFILE_VERSION,
+        canonical_alignment_engine_version=(
+            CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION
+            if resolved_transcript_layer == "canonical_transcript"
+            else ""
+        ),
     )
 
 

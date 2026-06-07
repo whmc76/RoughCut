@@ -3,6 +3,8 @@ from roughcut.review.content_profile import (
     _default_engagement_question,
     _format_content_understanding_failure_reason,
     _is_generic_engagement_question,
+    _seed_profile_from_text,
+    _subject_type_search_anchor,
     select_workflow_template,
 )
 from roughcut.review.content_profile_keywords import build_review_keywords, extract_review_keyword_tokens
@@ -10,6 +12,7 @@ from roughcut.review.content_profile_keywords import build_review_keywords, extr
 
 def test_generic_engagement_question_detects_review_placeholder() -> None:
     assert _is_generic_engagement_question("这条视频主要在讲什么？") is True
+    assert _is_generic_engagement_question("这条视频你会怎么发？") is True
 
 
 def test_unboxing_hook_fallback_keeps_subject_anchor() -> None:
@@ -75,3 +78,10 @@ def test_content_understanding_failure_reason_preserves_provider_root_cause() ->
     )
 
     assert reason == "内容理解调用失败：OpenAI API credential is not configured"
+
+
+def test_seed_profile_from_text_prefers_jump_knife_over_folding_knife() -> None:
+    seeded = _seed_profile_from_text("美杜莎4 直跳刚到手 这把跳刀的手感和做工都得看一眼")
+
+    assert seeded["subject_type_candidates"][0] == "EDC跳刀"
+    assert _subject_type_search_anchor("EDC跳刀") == "跳刀"

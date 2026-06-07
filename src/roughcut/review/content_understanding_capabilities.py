@@ -9,14 +9,18 @@ def resolve_content_understanding_capabilities(
     *,
     reasoning_provider: str,
     visual_provider: str,
+    visual_model: str | None = None,
     visual_mcp_provider: str | None = None,
+    visual_mcp_model: str | None = None,
 ) -> dict[str, dict[str, str]]:
     settings = get_settings()
     resolved = {
         "asr": _resolve_asr_capability(settings),
         "visual_understanding": _resolve_visual_capability(
             visual_provider=visual_provider,
+            visual_model=visual_model,
             visual_mcp_provider=visual_mcp_provider,
+            visual_mcp_model=visual_mcp_model,
         ),
         "ocr": _resolve_ocr_capability(settings),
         "hybrid_retrieval": _resolve_hybrid_retrieval_capability(settings),
@@ -33,10 +37,19 @@ def _resolve_asr_capability(settings: Any) -> dict[str, str]:
     return _ready_capability(provider=provider, mode="native")
 
 
-def _resolve_visual_capability(*, visual_provider: str, visual_mcp_provider: str | None) -> dict[str, str]:
+def _resolve_visual_capability(
+    *,
+    visual_provider: str,
+    visual_model: str | None,
+    visual_mcp_provider: str | None,
+    visual_mcp_model: str | None,
+) -> dict[str, str]:
     native_provider = _clean_text(visual_provider)
+    mcp_provider = _clean_text(visual_mcp_provider)
+    if mcp_provider:
+        return _ready_capability(provider=mcp_provider, mode="llm_mcp_vision", model=_clean_text(visual_mcp_model))
     if native_provider:
-        return _ready_capability(provider=native_provider, mode="native_multimodal")
+        return _ready_capability(provider=native_provider, mode="native_multimodal", model=_clean_text(visual_model))
 
     return _unavailable_capability()
 
@@ -76,8 +89,11 @@ def _resolve_verification_capability(settings: Any) -> dict[str, str]:
     return _ready_capability(provider=provider, mode="verification")
 
 
-def _ready_capability(*, provider: str, mode: str) -> dict[str, str]:
-    return {"provider": provider, "mode": mode, "status": "ready"}
+def _ready_capability(*, provider: str, mode: str, model: str = "") -> dict[str, str]:
+    payload = {"provider": provider, "mode": mode, "status": "ready"}
+    if model:
+        payload["model"] = model
+    return payload
 
 
 def _unavailable_capability() -> dict[str, str]:

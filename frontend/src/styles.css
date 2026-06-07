@@ -10796,6 +10796,42 @@ textarea.input {
   box-shadow: inset 0 -2px 0 rgba(20, 184, 166, 0.72);
 }
 
+.manual-editor-transcript-token.suggested-filler,
+.manual-editor-transcript-punctuation.suggested-filler,
+.manual-editor-transcript-pause.suggested-filler {
+  background: rgba(245, 158, 11, 0.1);
+  color: #9a5b00;
+  box-shadow: inset 0 -2px 0 rgba(245, 158, 11, 0.5);
+  text-decoration: none;
+}
+
+.manual-editor-transcript-token.suggested-catchphrase,
+.manual-editor-transcript-punctuation.suggested-catchphrase,
+.manual-editor-transcript-pause.suggested-catchphrase {
+  background: rgba(217, 119, 6, 0.1);
+  color: #b45309;
+  box-shadow: inset 0 -2px 0 rgba(217, 119, 6, 0.48);
+  text-decoration: none;
+}
+
+.manual-editor-transcript-token.suggested-repeated,
+.manual-editor-transcript-punctuation.suggested-repeated,
+.manual-editor-transcript-pause.suggested-repeated {
+  background: rgba(124, 58, 237, 0.08);
+  color: #6d28d9;
+  box-shadow: inset 0 -2px 0 rgba(124, 58, 237, 0.46);
+  text-decoration: none;
+}
+
+.manual-editor-transcript-token.suggested-pause,
+.manual-editor-transcript-punctuation.suggested-pause,
+.manual-editor-transcript-pause.suggested-pause {
+  background: rgba(14, 116, 144, 0.08);
+  color: #0e7490;
+  box-shadow: inset 0 -2px 0 rgba(14, 116, 144, 0.46);
+  text-decoration: none;
+}
+
 .manual-editor-transcript-break {
   display: block;
   height: 0;

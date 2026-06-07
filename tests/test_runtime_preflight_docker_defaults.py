@@ -13,6 +13,7 @@ def test_docker_autostart_defaults_to_disabled() -> None:
     assert settings.docker_gpu_guard_enabled is True
     assert settings.avatar_render_no_progress_timeout_sec == 0
     assert settings.local_asr_docker_guard_enabled is True
+    assert settings.heygem_docker_idle_timeout_sec == 10
     assert settings.local_asr_docker_compose_file.endswith("docker-compose.asr-matrix.yml")
     assert settings.local_asr_docker_services == "qwen3-asr"
     assert settings.local_asr_docker_idle_timeout_sec == 10
@@ -85,6 +86,28 @@ def test_managed_service_targets_include_lifecycle_metadata(monkeypatch: pytest.
     assert targets["moss_tts_local"]["services"] == "moss-tts-local"
     assert targets["moss_tts_local"]["guard_enabled"] is True
     assert targets["moss_tts_local"]["idle_timeout_sec"] == 10
+
+
+@pytest.mark.asyncio
+async def test_runtime_preflight_does_not_probe_managed_gpu_services(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(runtime_preflight, "_last_preflight_at", 0.0)
+    monkeypatch.setattr(runtime_preflight, "_ensure_core_compose_services_started", lambda: None)
+
+    adopt_reasons: list[str] = []
+
+    def record_adopt(reason: str = "") -> None:
+        adopt_reasons.append(reason)
+
+    monkeypatch.setattr(runtime_preflight, "adopt_running_idle_managed_gpu_services", record_adopt)
+
+    async def fail_hold(*args, **kwargs):
+        raise AssertionError("runtime preflight should not hold managed GPU services during periodic preflight")
+
+    monkeypatch.setattr(runtime_preflight, "hold_managed_gpu_services_async", fail_hold, raising=False)
+
+    await runtime_preflight.ensure_runtime_services_ready(reason="unit_test")
+
+    assert adopt_reasons == ["unit_test"]
 
 
 def test_adopt_running_idle_managed_gpu_services_schedules_idle_stop(monkeypatch: pytest.MonkeyPatch) -> None:

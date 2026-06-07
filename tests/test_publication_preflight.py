@@ -484,6 +484,162 @@ async def test_run_checks_excludes_manual_handoff_platforms_from_agent_ready_and
     ]
 
 
+@pytest.mark.asyncio
+async def test_run_checks_probe_only_does_not_fail_on_packaging_gate() -> None:
+    async def fake_agent_ready(**kwargs: object) -> dict[str, object]:
+        return {
+            "ready": True,
+            "code": "ready",
+            "message": "ok",
+            "health": {
+                "cdp_status": "ok",
+                "capabilities": {
+                    "inventory_probe": True,
+                },
+            },
+        }
+
+    async def fake_fetch_cdp_tabs_payload(client: object, cdp_url: str, **kwargs: object) -> list[dict[str, str]]:
+        return [
+            {
+                "id": "tab-douyin",
+                "title": "抖音创作者中心",
+                "url": "https://creator.douyin.com/creator-micro/content/post/video",
+                "type": "page",
+            }
+        ]
+
+    async def fake_probe_inventory(
+        client: object,
+        browser_agent_base_url: str,
+        auth_token: str,
+        platforms: list[str],
+    ) -> dict[str, object]:
+        return {
+            "status": "ok",
+            "platforms": {
+                "douyin": {
+                    "status": "ready",
+                    "route": {"url": "https://creator.douyin.com/creator-micro/content/post/video"},
+                    "coverage": {"missing_required_surfaces": []},
+                }
+            },
+        }
+
+    def fake_packaging_preflight(**kwargs: object) -> dict[str, object]:
+        return {
+            "checked": True,
+            "status": "report_only",
+            "gate_enforced": False,
+            "reported_failures": ["发布文案未就绪：douyin"],
+            "platform_checks": {"douyin": {"status": "blocked", "message": "platform-packaging 标记为未就绪。"}},
+            "manual_handoff_targets": [],
+            "failures": [],
+        }
+
+    original_agent_ready = preflight.check_publication_browser_agent_ready
+    original_fetch_tabs = preflight._fetch_cdp_tabs_payload
+    original_probe_inventory = preflight._fetch_browser_agent_probe_inventory
+    original_packaging_preflight = preflight._evaluate_packaging_preflight
+    preflight.check_publication_browser_agent_ready = fake_agent_ready
+    preflight._fetch_cdp_tabs_payload = fake_fetch_cdp_tabs_payload
+    preflight._fetch_browser_agent_probe_inventory = fake_probe_inventory
+    preflight._evaluate_packaging_preflight = fake_packaging_preflight
+    try:
+        report = await preflight._run_checks(
+            browser_agent_base_url="http://127.0.0.1:49310",
+            auth_token="",
+            publication_adapter="browser_agent",
+            cdp_url="http://127.0.0.1:9222",
+            platforms=["douyin"],
+            target_profile_ids=["browser-profile:chrome:test"],
+            request_timeout_sec=3,
+            packaging_gate_enforced=False,
+        )
+    finally:
+        preflight.check_publication_browser_agent_ready = original_agent_ready
+        preflight._fetch_cdp_tabs_payload = original_fetch_tabs
+        preflight._fetch_browser_agent_probe_inventory = original_probe_inventory
+        preflight._evaluate_packaging_preflight = original_packaging_preflight
+
+    assert report["failures"] == []
+    assert report["packaging"]["status"] == "report_only"
+    assert report["packaging"]["reported_failures"] == ["发布文案未就绪：douyin"]
+
+
+@pytest.mark.asyncio
+async def test_run_checks_surfaces_probe_inventory_fetch_failure() -> None:
+    async def fake_agent_ready(**kwargs: object) -> dict[str, object]:
+        return {
+            "ready": True,
+            "code": "ready",
+            "message": "ok",
+            "health": {
+                "cdp_status": "ok",
+                "capabilities": {
+                    "inventory_probe": True,
+                },
+            },
+        }
+
+    async def fake_fetch_cdp_tabs_payload(client: object, cdp_url: str, **kwargs: object) -> list[dict[str, str]]:
+        return [
+            {
+                "id": "tab-xhs",
+                "title": "小红书创作服务平台",
+                "url": "https://creator.xiaohongshu.com/publish",
+                "type": "page",
+            }
+        ]
+
+    async def fake_probe_inventory(
+        client: object,
+        browser_agent_base_url: str,
+        auth_token: str,
+        platforms: list[str],
+    ) -> dict[str, object]:
+        raise RuntimeError("probe timeout")
+
+    def fake_packaging_preflight(**kwargs: object) -> dict[str, object]:
+        return {
+            "checked": True,
+            "status": "report_only",
+            "gate_enforced": False,
+            "reported_failures": ["发布文案未就绪：xiaohongshu"],
+            "platform_checks": {"xiaohongshu": {"status": "blocked", "message": "platform-packaging 标记为未就绪。"}},
+            "manual_handoff_targets": [],
+            "failures": [],
+        }
+
+    original_agent_ready = preflight.check_publication_browser_agent_ready
+    original_fetch_tabs = preflight._fetch_cdp_tabs_payload
+    original_probe_inventory = preflight._fetch_browser_agent_probe_inventory
+    original_packaging_preflight = preflight._evaluate_packaging_preflight
+    preflight.check_publication_browser_agent_ready = fake_agent_ready
+    preflight._fetch_cdp_tabs_payload = fake_fetch_cdp_tabs_payload
+    preflight._fetch_browser_agent_probe_inventory = fake_probe_inventory
+    preflight._evaluate_packaging_preflight = fake_packaging_preflight
+    try:
+        report = await preflight._run_checks(
+            browser_agent_base_url="http://127.0.0.1:49310",
+            auth_token="",
+            publication_adapter="browser_agent",
+            cdp_url="http://127.0.0.1:9222",
+            platforms=["xiaohongshu"],
+            target_profile_ids=["browser-profile:chrome:test"],
+            request_timeout_sec=3,
+            packaging_gate_enforced=False,
+        )
+    finally:
+        preflight.check_publication_browser_agent_ready = original_agent_ready
+        preflight._fetch_cdp_tabs_payload = original_fetch_tabs
+        preflight._fetch_browser_agent_probe_inventory = original_probe_inventory
+        preflight._evaluate_packaging_preflight = original_packaging_preflight
+
+    assert report["probe_inventory"]["status"] == "probe_failed"
+    assert report["failures"] == ["browser-agent probe inventory 拉取失败：probe timeout"]
+
+
 def test_evaluate_packaging_preflight_blocks_missing_required_surfaces(tmp_path: Path) -> None:
     material_json = tmp_path / "smart-copy.json"
     material_json.write_text(
@@ -518,6 +674,34 @@ def test_evaluate_packaging_preflight_blocks_missing_required_surfaces(tmp_path:
     assert report["platform_checks"]["douyin"]["status"] == "blocked"
     assert report["platform_checks"]["douyin"]["missing_required_surfaces"] == ["cover", "collection"]
     assert report["failures"] == ["douyin: 缺少关键参数面 cover, collection"]
+
+
+def test_evaluate_packaging_preflight_reports_but_does_not_fail_when_gate_disabled(tmp_path: Path) -> None:
+    packaging_json = tmp_path / "platform-packaging.json"
+    packaging_json.write_text(
+        """{
+  "platforms": {
+    "douyin": {
+      "titles": ["真实标题"],
+      "description": "真实正文",
+      "publish_ready": false
+    }
+  }
+}""",
+        encoding="utf-8",
+    )
+
+    report = preflight._evaluate_packaging_preflight(
+        platforms=["douyin"],
+        platform_packaging=str(packaging_json),
+        enforce_gate=False,
+    )
+
+    assert report["checked"] is True
+    assert report["gate_enforced"] is False
+    assert report["status"] == "report_only"
+    assert report["reported_failures"] == ["发布文案未就绪：douyin"]
+    assert report["failures"] == []
 
 
 def test_evaluate_packaging_preflight_preserves_manual_handoff_platform(tmp_path: Path) -> None:
@@ -881,4 +1065,42 @@ def test_build_preflight_publication_verification_surfaces_probe_gate_blocked_re
         "inspect_probe_visual_evidence",
         "repair_live_publish_preflight",
         "rerun_preflight",
+    ]
+
+
+def test_build_preflight_publication_verification_fails_when_probe_inventory_fetch_failed() -> None:
+    result = {
+        "failures": ["browser-agent probe inventory 拉取失败：probe timeout"],
+        "agent_ready": {"ready": True, "code": "ready", "message": "", "health": {}},
+        "probe_inventory": {
+            "checked": True,
+            "status": "probe_failed",
+            "platforms": {},
+            "failures": ["browser-agent probe inventory 拉取失败：probe timeout"],
+        },
+        "packaging": {
+            "checked": True,
+            "status": "report_only",
+            "gate_enforced": False,
+            "platform_checks": {"xiaohongshu": {"status": "blocked", "message": "platform-packaging 标记为未就绪。"}},
+            "failures": [],
+            "reported_failures": ["发布文案未就绪：xiaohongshu"],
+        },
+        "cdp": {"connected": True, "platform_checks": {"xiaohongshu": {"status": "found"}}},
+    }
+
+    verification = preflight._build_preflight_publication_verification(
+        result,
+        requested_platforms=["xiaohongshu"],
+        require_tabs=True,
+    )
+
+    assert verification["summary_status"] == "failed"
+    assert verification["recommendations"] == [
+        {
+            "platform": "",
+            "issue": "probe_inventory_failed",
+            "operations": ["inspect_probe_visual_evidence", "restore_browser_agent", "rerun_preflight"],
+            "auto_remediable": True,
+        }
     ]

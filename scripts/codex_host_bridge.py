@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from roughcut.host.codex_bridge import run_codex_exec
+from roughcut.host.file_manager import open_in_file_manager
 from roughcut.host.codex_imagegen_runner import fulfill_codex_imagegen_request
 
 _MATERIALIZE_SUFFIXES = {
@@ -29,6 +30,23 @@ _MATERIALIZE_SUFFIXES = {
     ".jpeg",
     ".png",
     ".webp",
+}
+_SMART_COPY_EXCLUDED_TOP_LEVEL_DIRS = frozenset({"_publication_runtime"})
+_SMART_COPY_MANAGED_DIRS = frozenset({"_meta", "_copy", "_cover"})
+_SMART_COPY_ROOT_GENERATED_FILE_PATTERNS = (
+    re.compile(r"^\d{2}-.+-cover\.jpg$", re.IGNORECASE),
+    re.compile(r"^\d{2}-.+\.md$", re.IGNORECASE),
+)
+_SMART_COPY_ROOT_LEGACY_INTERNAL_FILE_PATTERNS = (
+    re.compile(r"^\d{2}-.+-(titles|body|tags)\.txt$", re.IGNORECASE),
+    re.compile(r"^00-cover-.+\.(jpg|codex-imagegen\.json|codex-imagegen-reference\.jpg)$", re.IGNORECASE),
+    re.compile(r"^00-highlight-cover-source\.(jpg|json)$", re.IGNORECASE),
+    re.compile(r"^00-highlight-candidates-sheet\.jpg$", re.IGNORECASE),
+)
+_SMART_COPY_ROOT_LEGACY_INTERNAL_FILENAMES = {
+    "smart-copy.json",
+    "platform-packaging.json",
+    "platform-packaging.md",
 }
 
 
@@ -55,7 +73,9 @@ def _make_handler(expected_token: str):
                 "/v1/codex/exec",
                 "/v1/host/path-suggestions",
                 "/v1/host/materialize-directory",
+                "/v1/host/sync-smart-copy",
                 "/v1/host/complete-codex-imagegen",
+                "/v1/host/open-path",
             }:
                 _json_response(self, HTTPStatus.NOT_FOUND, {"error": "not_found"})
                 return
@@ -73,8 +93,12 @@ def _make_handler(expected_token: str):
                     result = {"suggestions": suggest_host_directory_paths(payload)}
                 elif normalized_path == "/v1/host/materialize-directory":
                     result = materialize_host_directory(payload)
+                elif normalized_path == "/v1/host/sync-smart-copy":
+                    result = sync_smart_copy_directory(payload)
                 elif normalized_path == "/v1/host/complete-codex-imagegen":
                     result = complete_codex_imagegen_request(payload)
+                elif normalized_path == "/v1/host/open-path":
+                    result = open_host_path(payload)
                 else:
                     result = run_codex_exec(_normalize_codex_exec_payload(payload))
             except Exception as exc:
@@ -174,11 +198,37 @@ def materialize_host_directory(payload: dict[str, Any]) -> dict[str, Any]:
             }
         )
 
+    source_material_dir = source_dir / "smart-copy"
+    if source_material_dir.exists() and source_material_dir.is_dir():
+        _sync_smart_copy_tree(source_material_dir, target_dir / "smart-copy")
+
     return {
         "source_folder_path": str(source_dir.resolve()),
         "folder_path": _container_path_for_materialized_file(target_dir, host_output_root, container_output_root),
         "host_folder_path": str(target_dir.resolve()),
         "files": copied,
+    }
+
+
+def sync_smart_copy_directory(payload: dict[str, Any]) -> dict[str, Any]:
+    source_material_dir = Path(_host_path_for_runtime_mount(payload.get("source_material_dir"), require_exists=True))
+    if not source_material_dir.exists() or not source_material_dir.is_dir():
+        raise ValueError("source smart-copy directory does not exist")
+
+    raw_target_folder = str(payload.get("target_folder_path") or "").strip().strip('"')
+    if not raw_target_folder:
+        raise ValueError("target_folder_path is required")
+    target_folder = Path(raw_target_folder).expanduser()
+    if target_folder.exists() and not target_folder.is_dir():
+        raise ValueError("target_folder_path is not a directory")
+    target_folder.mkdir(parents=True, exist_ok=True)
+
+    target_material_dir = target_folder / "smart-copy"
+    copied_files = _sync_smart_copy_tree(source_material_dir, target_material_dir)
+    return {
+        "source_material_dir": str(source_material_dir.resolve()),
+        "target_material_dir": str(target_material_dir.resolve()),
+        "copied_file_count": copied_files,
     }
 
 
@@ -193,6 +243,16 @@ def complete_codex_imagegen_request(payload: dict[str, Any]) -> dict[str, Any]:
         timeout_sec=timeout_sec,
         model=model,
     )
+
+
+def open_host_path(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_path = payload.get("path")
+    target_path = Path(_host_path_for_runtime_mount(raw_path, require_exists=True))
+    open_in_file_manager(target_path)
+    return {
+        "path": str(target_path.resolve()),
+        "kind": "file" if target_path.is_file() else "folder",
+    }
 
 
 def _normalize_codex_exec_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -230,13 +290,6 @@ def _host_path_for_runtime_mount(raw_path: Any, *, require_exists: bool) -> str:
     if not raw_text:
         return raw_text
 
-    candidate = Path(raw_text).expanduser()
-    try:
-        if candidate.exists() or not require_exists:
-            return str(candidate.resolve())
-    except OSError:
-        pass
-
     container_prefix = "/app/data/"
     normalized_text = raw_text.replace("\\", "/")
     if normalized_text.startswith(container_prefix):
@@ -246,6 +299,13 @@ def _host_path_for_runtime_mount(raw_path: Any, *, require_exists: bool) -> str:
         mapped = (host_output_root / Path(relative)).resolve()
         if mapped.exists() or not require_exists:
             return str(mapped)
+
+    candidate = Path(raw_text).expanduser()
+    try:
+        if candidate.exists() or not require_exists:
+            return str(candidate.resolve())
+    except OSError:
+        pass
 
     if require_exists:
         raise FileNotFoundError(f"Host path does not exist: {raw_text}")
@@ -261,6 +321,105 @@ def _should_copy_file(source_file: Path, target_file: Path) -> bool:
     except OSError:
         return True
     return source_stat.st_size != target_stat.st_size or int(source_stat.st_mtime) > int(target_stat.st_mtime)
+
+
+def _sync_smart_copy_tree(source_dir: Path, target_dir: Path) -> int:
+    target_dir.mkdir(parents=True, exist_ok=True)
+    _remove_top_level_dirs(target_dir, _SMART_COPY_EXCLUDED_TOP_LEVEL_DIRS)
+    copied_files = _copy_tree_contents(
+        source_dir,
+        target_dir,
+        exclude_top_level_names=_SMART_COPY_EXCLUDED_TOP_LEVEL_DIRS,
+    )
+    _remove_legacy_root_internal_files(target_dir)
+    _prune_managed_subtrees(source_dir, target_dir)
+    _prune_missing_root_generated_deliverables(source_dir, target_dir)
+    return copied_files
+
+
+def _copy_tree_contents(
+    source_dir: Path,
+    target_dir: Path,
+    *,
+    exclude_top_level_names: set[str] | frozenset[str] | None = None,
+) -> int:
+    copied_files = 0
+    for source_path in sorted(source_dir.rglob("*")):
+        relative = source_path.relative_to(source_dir)
+        if _relative_path_starts_with(relative, exclude_top_level_names):
+            continue
+        target_path = target_dir / relative
+        if source_path.is_dir():
+            target_path.mkdir(parents=True, exist_ok=True)
+            continue
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        if _should_copy_file(source_path, target_path):
+            shutil.copy2(source_path, target_path)
+            copied_files += 1
+    return copied_files
+
+
+def _relative_path_starts_with(relative: Path, names: set[str] | frozenset[str] | None) -> bool:
+    if not names:
+        return False
+    return bool(relative.parts) and relative.parts[0] in names
+
+
+def _remove_top_level_dirs(target_dir: Path, dir_names: set[str] | frozenset[str]) -> None:
+    for name in dir_names:
+        candidate = target_dir / name
+        if candidate.exists():
+            shutil.rmtree(candidate, ignore_errors=True)
+
+
+def _remove_legacy_root_internal_files(target_dir: Path) -> None:
+    if not target_dir.exists():
+        return
+    for child in target_dir.iterdir():
+        if not child.is_file():
+            continue
+        name = child.name
+        if name in _SMART_COPY_ROOT_LEGACY_INTERNAL_FILENAMES or any(
+            pattern.fullmatch(name) for pattern in _SMART_COPY_ROOT_LEGACY_INTERNAL_FILE_PATTERNS
+        ):
+            child.unlink(missing_ok=True)
+
+
+def _prune_managed_subtrees(source_dir: Path, target_dir: Path) -> None:
+    for dirname in _SMART_COPY_MANAGED_DIRS:
+        source_subdir = source_dir / dirname
+        target_subdir = target_dir / dirname
+        if not source_subdir.exists():
+            if target_subdir.exists():
+                shutil.rmtree(target_subdir, ignore_errors=True)
+            continue
+        _prune_missing_tree_contents(source_subdir, target_subdir)
+
+
+def _prune_missing_tree_contents(source_dir: Path, target_dir: Path) -> None:
+    if not target_dir.exists():
+        return
+    for target_path in sorted(target_dir.rglob("*"), reverse=True):
+        relative = target_path.relative_to(target_dir)
+        source_path = source_dir / relative
+        if source_path.exists():
+            continue
+        if target_path.is_dir():
+            shutil.rmtree(target_path, ignore_errors=True)
+        else:
+            target_path.unlink(missing_ok=True)
+
+
+def _prune_missing_root_generated_deliverables(source_dir: Path, target_dir: Path) -> None:
+    if not target_dir.exists():
+        return
+    for target_path in target_dir.iterdir():
+        if not target_path.is_file():
+            continue
+        if not any(pattern.fullmatch(target_path.name) for pattern in _SMART_COPY_ROOT_GENERATED_FILE_PATTERNS):
+            continue
+        if not (source_dir / target_path.name).exists():
+            target_path.unlink(missing_ok=True)
 
 
 def _container_path_for_materialized_file(path: Path, host_output_root: Path, container_output_root: str) -> str:

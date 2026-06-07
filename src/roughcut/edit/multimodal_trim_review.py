@@ -11,7 +11,7 @@ from typing import Any
 
 from roughcut.config import get_settings, llm_task_route
 from roughcut.llm_cache import build_cache_key, digest_payload, load_cached_entry, save_cached_json
-from roughcut.prompts.edit_decision import build_multimodal_trim_review_prompt
+from roughcut.prompts.edit_decision import build_multimodal_trim_review_batch_prompt
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import extract_json_text
 from roughcut.usage import track_usage_operation
@@ -22,6 +22,7 @@ MULTIMODAL_TRIM_REVIEW_SCHEMA_VERSION = "multimodal_trim_review.v1"
 _DEFAULT_REVIEW_REASONS = {"low_signal_subtitle", "timing_trim", "long_non_dialogue"}
 _DEFAULT_FRAME_PADDING_SEC = 0.35
 _DEFAULT_FRAME_TIMESTAMPS = (0.15, 0.5, 0.85)
+_SEMANTIC_UNCERTAINTY_FRAME_TIMESTAMPS = (0.5,)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,34 @@ def multimodal_trim_review_decisions(payload: dict[str, Any] | None) -> list[dic
     return normalized
 
 
+def multimodal_trim_review_min_confidence(min_confidence: float | None = None) -> float:
+    if min_confidence is not None:
+        try:
+            return float(min_confidence)
+        except (TypeError, ValueError):
+            pass
+    return float(getattr(get_settings(), "multimodal_trim_review_min_confidence", 0.72) or 0.72)
+
+
+def multimodal_trim_review_auto_cut_candidates(
+    cut_analysis: dict[str, Any] | None,
+    *,
+    min_confidence: float | None = None,
+) -> list[dict[str, Any]]:
+    analysis = cut_analysis if isinstance(cut_analysis, dict) else {}
+    threshold = multimodal_trim_review_min_confidence(min_confidence)
+    candidates: list[dict[str, Any]] = []
+    for raw in list(analysis.get("rule_candidates") or []):
+        if not isinstance(raw, dict):
+            continue
+        decision = raw.get("multimodal_review") if isinstance(raw.get("multimodal_review"), dict) else {}
+        verdict = str(decision.get("verdict") or "").strip().lower()
+        confidence = float(decision.get("confidence", 0.0) or 0.0)
+        if verdict == "cut" and confidence >= threshold:
+            candidates.append(dict(raw))
+    return candidates
+
+
 def multimodal_trim_review_matches_cut_analysis(
     payload: dict[str, Any] | None,
     cut_analysis: dict[str, Any] | None,
@@ -83,18 +112,13 @@ def apply_multimodal_trim_review_to_cut_analysis(
     min_confidence: float | None = None,
 ) -> dict[str, Any]:
     analysis = dict(cut_analysis or {}) if isinstance(cut_analysis, dict) else {}
+    review = review_payload if isinstance(review_payload, dict) else {}
     decisions_by_id = {
         str(item.get("candidate_id") or "").strip(): item
         for item in multimodal_trim_review_decisions(review_payload)
         if str(item.get("candidate_id") or "").strip()
     }
-    if not decisions_by_id:
-        return analysis
-    threshold = (
-        float(min_confidence)
-        if min_confidence is not None
-        else float(getattr(get_settings(), "multimodal_trim_review_min_confidence", 0.72) or 0.72)
-    )
+    threshold = multimodal_trim_review_min_confidence(min_confidence)
     reviewed_candidates: list[dict[str, Any]] = []
     vetoed_candidate_count = 0
     for raw in list(analysis.get("rule_candidates") or []):
@@ -118,9 +142,17 @@ def apply_multimodal_trim_review_to_cut_analysis(
         int(analysis.get("candidate_count") or 0) - int(analysis.get("auto_apply_candidate_count") or 0),
     )
     analysis["multimodal_trim_review_summary"] = {
-        "reviewed": bool(review_payload and review_payload.get("reviewed")),
+        "reviewed": bool(review.get("reviewed")),
+        "candidate_count": int(review.get("candidate_count") or len(list(review.get("candidates") or [])) or 0),
         "decision_count": len(decisions_by_id),
+        "accepted_count": int(review.get("accepted_count") or 0),
+        "rejected_count": int(review.get("rejected_count") or 0),
+        "pending_count": int(review.get("pending_count") or 0),
         "vetoed_candidate_count": vetoed_candidate_count,
+        "provider": str(review.get("provider") or "").strip() or None,
+        "model": str(review.get("model") or "").strip() or None,
+        "error": str(review.get("error") or "").strip() or None,
+        "summary": str(review.get("summary") or "").strip() or None,
     }
     return analysis
 
@@ -216,7 +248,12 @@ def _review_candidate_priority(item: dict[str, Any]) -> tuple[float, float]:
     )
 
 
-def _resolve_multimodal_trim_review_timeout_seconds(settings: object, *, candidate_count: int) -> float:
+def _resolve_multimodal_trim_review_timeout_seconds(
+    settings: object,
+    *,
+    candidate_count: int,
+    image_count: int,
+) -> float:
     try:
         configured_timeout = float(
             getattr(settings, "multimodal_trim_review_timeout_sec", 20) or 20
@@ -224,11 +261,17 @@ def _resolve_multimodal_trim_review_timeout_seconds(settings: object, *, candida
     except (TypeError, ValueError):
         configured_timeout = 20.0
     configured_timeout = max(8.0, configured_timeout)
-    scaled_timeout = 6.0 + max(1, int(candidate_count)) * 5.0
+    scaled_timeout = 18.0 + max(1, int(image_count)) * 10.0
     return max(configured_timeout, scaled_timeout)
 
 
-def _extract_candidate_frame_times(start: float, end: float) -> list[float]:
+def _candidate_frame_timestamps(candidate: dict[str, Any] | None) -> tuple[float, ...]:
+    if str((candidate or {}).get("review_trigger") or "").strip() == "semantic_uncertainty":
+        return _SEMANTIC_UNCERTAINTY_FRAME_TIMESTAMPS
+    return _DEFAULT_FRAME_TIMESTAMPS
+
+
+def _extract_candidate_frame_times(start: float, end: float, *, candidate: dict[str, Any] | None = None) -> list[float]:
     clamped_start = max(0.0, float(start or 0.0))
     clamped_end = max(clamped_start + 0.05, float(end or clamped_start))
     duration = max(0.05, clamped_end - clamped_start)
@@ -236,7 +279,7 @@ def _extract_candidate_frame_times(start: float, end: float) -> list[float]:
     window_end = max(clamped_end, clamped_end + _DEFAULT_FRAME_PADDING_SEC)
     window_duration = max(duration, window_end - window_start)
     frame_times: list[float] = []
-    for ratio in _DEFAULT_FRAME_TIMESTAMPS:
+    for ratio in _candidate_frame_timestamps(candidate):
         point = window_start + window_duration * ratio
         frame_times.append(round(min(window_end, max(0.0, point)), 3))
     return sorted(dict.fromkeys(frame_times))
@@ -253,6 +296,7 @@ async def _extract_candidate_preview_frames(
         _extract_candidate_frame_times(
             float(candidate.get("start", 0.0) or 0.0),
             float(candidate.get("end", candidate.get("start", 0.0)) or candidate.get("start", 0.0) or 0.0),
+            candidate=candidate,
         )
     ):
         output_path = temp_dir / f"candidate_{index + 1}.jpg"
@@ -296,19 +340,15 @@ async def _extract_frame(video_path: Path, output_path: Path, *, seek_sec: float
         raise RuntimeError(f"multimodal trim frame extraction failed: {result.stderr[-500:]}")
 
 
-async def _review_single_multimodal_candidate(
+def _multimodal_trim_review_cache_fingerprint(
     *,
     source_path: Path,
     source_meta: dict[str, Any],
     candidate: dict[str, Any],
-    timeout_sec: float,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    settings: object,
+) -> dict[str, Any]:
     candidate_id = str(candidate.get("candidate_id") or "").strip()
-    if not candidate_id:
-        return None, None
-    cache_namespace = "edit_plan.multimodal_trim_review"
-    settings = get_settings()
-    fingerprint = {
+    return {
         "source_path": str(source_path),
         "source_meta": source_meta,
         "candidate": {
@@ -322,24 +362,132 @@ async def _review_single_multimodal_candidate(
         "provider": str(getattr(settings, "active_reasoning_provider", "") or "").strip(),
         "model": str(getattr(settings, "active_vision_model", "") or "").strip(),
     }
+
+
+def _load_cached_multimodal_trim_review_decision(
+    *,
+    source_path: Path,
+    source_meta: dict[str, Any],
+    candidate: dict[str, Any],
+    settings: object,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str]:
+    cache_namespace = "edit_plan.multimodal_trim_review"
+    fingerprint = _multimodal_trim_review_cache_fingerprint(
+        source_path=source_path,
+        source_meta=source_meta,
+        candidate=candidate,
+        settings=settings,
+    )
     cache_key = build_cache_key(cache_namespace, fingerprint)
     cached_entry = load_cached_entry(cache_namespace, cache_key)
-    if cached_entry is not None:
-        cached_result = dict(cached_entry.get("result") or {})
-        decision = _normalize_multimodal_review_decision(cached_result, candidate_id=candidate_id)
+    if cached_entry is None:
+        return None, None, cache_key
+    cached_result = dict(cached_entry.get("result") or {})
+    decision = _normalize_multimodal_review_decision(
+        cached_result,
+        candidate_id=str(candidate.get("candidate_id") or "").strip(),
+    )
+    if decision is not None:
+        decision["cached"] = True
+    return decision, cached_result, cache_key
+
+
+def _save_multimodal_trim_review_decision_cache(
+    *,
+    cache_key: str,
+    source_path: Path,
+    source_meta: dict[str, Any],
+    candidate: dict[str, Any],
+    decision: dict[str, Any],
+    provider: str,
+    model: str,
+) -> None:
+    cache_namespace = "edit_plan.multimodal_trim_review"
+    save_cached_json(
+        cache_namespace,
+        cache_key,
+        fingerprint={
+            "source_path": str(source_path),
+            "source_meta": source_meta,
+            "candidate": {
+                "candidate_id": str(candidate.get("candidate_id") or "").strip(),
+                "start": round(float(candidate.get("start", 0.0) or 0.0), 3),
+                "end": round(float(candidate.get("end", 0.0) or 0.0), 3),
+                "reason": str(candidate.get("reason") or "").strip(),
+                "source_text": str(candidate.get("source_text") or "").strip(),
+                "review_trigger": str(candidate.get("review_trigger") or "").strip(),
+            },
+            "provider": str(provider or "").strip(),
+            "model": str(model or "").strip(),
+        },
+        result={
+            "verdict": decision["verdict"],
+            "confidence": decision["confidence"],
+            "reason": decision["reason"],
+            "evidence": list(decision["evidence"]),
+            "summary": decision["summary"],
+        },
+    )
+
+
+async def _review_multimodal_candidate_batch(
+    *,
+    source_path: Path,
+    source_meta: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    timeout_sec: float,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    settings = get_settings()
+    decisions: list[dict[str, Any]] = []
+    raw_decisions_by_id: dict[str, dict[str, Any]] = {}
+    unresolved: list[tuple[dict[str, Any], str]] = []
+    for candidate in candidates:
+        decision, raw_payload, cache_key = _load_cached_multimodal_trim_review_decision(
+            source_path=source_path,
+            source_meta=source_meta,
+            candidate=candidate,
+            settings=settings,
+        )
         if decision is not None:
-            decision["cached"] = True
-            return decision, cached_result
+            decisions.append(decision)
+            raw_decisions_by_id[str(candidate.get("candidate_id") or "").strip()] = dict(raw_payload or {})
+            continue
+        unresolved.append((candidate, cache_key))
+    if not unresolved:
+        return decisions, {"decisions": list(raw_decisions_by_id.values())}
 
     with tempfile.TemporaryDirectory(prefix="roughcut-mtrim-") as temp_dir_str:
-        frame_paths = await _extract_candidate_preview_frames(
-            source_path=source_path,
-            candidate=candidate,
-            temp_dir=Path(temp_dir_str),
+        temp_dir = Path(temp_dir_str)
+        prompt_candidates: list[dict[str, Any]] = []
+        image_paths: list[Path] = []
+        for batch_index, (candidate, _cache_key) in enumerate(unresolved, start=1):
+            candidate_dir = temp_dir / f"candidate_{batch_index}"
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+            frame_paths = await _extract_candidate_preview_frames(
+                source_path=source_path,
+                candidate=candidate,
+                temp_dir=candidate_dir,
+            )
+            if not frame_paths:
+                raise RuntimeError("multimodal_trim_review_frame_missing")
+            first_frame_index = len(image_paths) + 1
+            image_paths.extend(frame_paths)
+            prompt_candidates.append(
+                {
+                    "candidate_id": str(candidate.get("candidate_id") or "").strip(),
+                    "start": round(float(candidate.get("start", 0.0) or 0.0), 3),
+                    "end": round(float(candidate.get("end", 0.0) or 0.0), 3),
+                    "reason": str(candidate.get("reason") or "").strip(),
+                    "source_text": str(candidate.get("source_text") or "").strip() or None,
+                    "review_trigger": str(candidate.get("review_trigger") or "").strip() or None,
+                    "frame_count": len(frame_paths),
+                    "frame_indices": [first_frame_index, len(image_paths)],
+                }
+            )
+        prompt = build_multimodal_trim_review_batch_prompt(
+            source_meta=source_meta,
+            candidates=prompt_candidates,
         )
-        if not frame_paths:
-            raise RuntimeError("multimodal_trim_review_frame_missing")
-        prompt = build_multimodal_trim_review_prompt(source_meta=source_meta, candidate=candidate)
         route = llm_task_route("edit_plan", search_enabled=False, settings=settings)
         usage_context = track_usage_operation("edit_plan.multimodal_trim_review")
         with route if route is not None else nullcontext():
@@ -347,30 +495,97 @@ async def _review_single_multimodal_candidate(
                 content = await asyncio.wait_for(
                     complete_with_images(
                         prompt,
-                        frame_paths,
-                        max_tokens=500,
+                        image_paths,
+                        max_tokens=700,
                         temperature=0.1,
                         json_mode=True,
                     ),
                     timeout=timeout_sec,
                 )
         review_payload = json.loads(extract_json_text(content))
-        decision = _normalize_multimodal_review_decision(review_payload, candidate_id=candidate_id)
-        if decision is None:
-            raise ValueError("multimodal trim review payload was not usable")
-        save_cached_json(
-            cache_namespace,
-            cache_key,
-            fingerprint=fingerprint,
-            result={
-                "verdict": decision["verdict"],
-                "confidence": decision["confidence"],
-                "reason": decision["reason"],
-                "evidence": list(decision["evidence"]),
-                "summary": decision["summary"],
-            },
+        raw_decisions = list(review_payload.get("decisions") or [])
+        if not raw_decisions and len(unresolved) == 1 and isinstance(review_payload, dict):
+            only_candidate_id = str(unresolved[0][0].get("candidate_id") or "").strip()
+            normalized_single = _normalize_multimodal_review_decision(review_payload, candidate_id=only_candidate_id)
+            if normalized_single is not None:
+                raw_decisions = [
+                    {
+                        "candidate_id": only_candidate_id,
+                        "verdict": normalized_single["verdict"],
+                        "confidence": normalized_single["confidence"],
+                        "reason": normalized_single["reason"],
+                        "evidence": list(normalized_single["evidence"]),
+                        "summary": normalized_single["summary"],
+                    }
+                ]
+        raw_by_id = {
+            str(item.get("candidate_id") or "").strip(): dict(item)
+            for item in raw_decisions
+            if isinstance(item, dict) and str(item.get("candidate_id") or "").strip()
+        }
+        for candidate, cache_key in unresolved:
+            candidate_id = str(candidate.get("candidate_id") or "").strip()
+            raw_item = raw_by_id.get(candidate_id)
+            decision = _normalize_multimodal_review_decision(raw_item, candidate_id=candidate_id) if raw_item else None
+            if decision is None:
+                continue
+            decisions.append(decision)
+            raw_decisions_by_id[candidate_id] = raw_item or {}
+            _save_multimodal_trim_review_decision_cache(
+                cache_key=cache_key,
+                source_path=source_path,
+                source_meta=source_meta,
+                candidate=candidate,
+                decision=decision,
+                provider=str(getattr(settings, "active_reasoning_provider", "") or "").strip(),
+                model=str(getattr(settings, "active_vision_model", "") or "").strip(),
+            )
+        return decisions, {
+            "summary": str(review_payload.get("summary") or "").strip(),
+            "decisions": list(raw_decisions_by_id.values()),
+        }
+
+
+async def _review_multimodal_candidates_resilient(
+    *,
+    source_path: Path,
+    source_meta: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    timeout_sec: float,
+) -> tuple[list[dict[str, Any]], list[str], bool]:
+    try:
+        decisions, raw_payload = await _review_multimodal_candidate_batch(
+            source_path=source_path,
+            source_meta=source_meta,
+            candidates=candidates,
+            timeout_sec=timeout_sec,
         )
-        return decision, review_payload
+        summaries: list[str] = []
+        batch_summary = str((raw_payload or {}).get("summary") or "").strip()
+        if batch_summary:
+            summaries.append(batch_summary)
+        for decision in decisions:
+            summary = str((decision or {}).get("summary") or "").strip()
+            if summary:
+                summaries.append(summary)
+        return decisions, summaries, False
+    except Exception:
+        if len(candidates) <= 1:
+            raise
+        midpoint = max(1, len(candidates) // 2)
+        left_decisions, left_summaries, left_split = await _review_multimodal_candidates_resilient(
+            source_path=source_path,
+            source_meta=source_meta,
+            candidates=candidates[:midpoint],
+            timeout_sec=timeout_sec,
+        )
+        right_decisions, right_summaries, right_split = await _review_multimodal_candidates_resilient(
+            source_path=source_path,
+            source_meta=source_meta,
+            candidates=candidates[midpoint:],
+            timeout_sec=timeout_sec,
+        )
+        return left_decisions + right_decisions, left_summaries + right_summaries, True
 
 
 async def review_multimodal_trim_review_payload(
@@ -408,34 +623,45 @@ async def review_multimodal_trim_review_payload(
     queued_candidates = sorted(candidates, key=_review_candidate_priority, reverse=True)
     if max_candidates > 0:
         queued_candidates = queued_candidates[:max_candidates]
-    review_timeout_sec = _resolve_multimodal_trim_review_timeout_seconds(settings, candidate_count=len(queued_candidates))
+    total_frame_count = sum(len(_candidate_frame_timestamps(candidate)) for candidate in queued_candidates)
+    review_timeout_sec = _resolve_multimodal_trim_review_timeout_seconds(
+        settings,
+        candidate_count=len(queued_candidates),
+        image_count=total_frame_count,
+    )
     normalized_meta = _review_source_meta(base_payload, source_meta)
 
     decisions: list[dict[str, Any]] = []
     summaries: list[str] = []
     error_code: str | None = None
-    for candidate in queued_candidates:
-        try:
-            decision, raw_payload = await _review_single_multimodal_candidate(
-                source_path=source_path,
-                source_meta=normalized_meta,
-                candidate=candidate,
-                timeout_sec=review_timeout_sec,
-            )
-            if decision is not None:
-                decisions.append(decision)
-                summary = str((raw_payload or {}).get("summary") or decision.get("summary") or "").strip()
-                if summary:
-                    summaries.append(summary)
-        except (asyncio.TimeoutError, TimeoutError):
+    try:
+        decisions, summaries, used_split_fallback = await _review_multimodal_candidates_resilient(
+            source_path=source_path,
+            source_meta=normalized_meta,
+            candidates=queued_candidates,
+            timeout_sec=review_timeout_sec,
+        )
+        if used_split_fallback and len(decisions) < len(queued_candidates):
             error_code = "multimodal_trim_review_timeout"
-            logger.warning("Multimodal trim review timed out for %s", normalized_meta.get("source_name") or source_path)
-        except ValueError as exc:
-            error_code = "multimodal_trim_review_failed"
-            logger.warning("Multimodal trim review produced an unusable payload for %s: %s", normalized_meta.get("source_name") or source_path, str(exc).strip())
-        except Exception:
-            error_code = "multimodal_trim_review_failed"
-            logger.exception("Multimodal trim review failed for %s", normalized_meta.get("source_name") or source_path)
+    except (asyncio.TimeoutError, TimeoutError):
+        error_code = "multimodal_trim_review_timeout"
+        logger.warning(
+            "Multimodal trim review timed out for %s",
+            normalized_meta.get("source_name") or source_path,
+        )
+    except ValueError as exc:
+        error_code = "multimodal_trim_review_failed"
+        logger.warning(
+            "Multimodal trim review produced an unusable payload for %s: %s",
+            normalized_meta.get("source_name") or source_path,
+            str(exc).strip(),
+        )
+    except Exception:
+        error_code = "multimodal_trim_review_failed"
+        logger.exception(
+            "Multimodal trim review failed for %s",
+            normalized_meta.get("source_name") or source_path,
+        )
 
     min_confidence = float(getattr(settings, "multimodal_trim_review_min_confidence", 0.72) or 0.72)
     decisions_by_id = {str(item.get("candidate_id") or "").strip(): item for item in decisions if str(item.get("candidate_id") or "").strip()}

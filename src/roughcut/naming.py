@@ -27,8 +27,8 @@ TRANSCRIPTION_PROVIDER_ALIASES: dict[str, str] = {
     "local-http-asr": "local_http_asr",
 }
 
-REASONING_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "minimax", "ollama")
-REASONING_PROVIDER_FALLBACK_ORDER: tuple[str, ...] = ("minimax", "openai", "anthropic", "ollama")
+REASONING_PROVIDER_VALUES: tuple[str, ...] = ("openai", "anthropic", "minimax", "zhipu", "ollama")
+REASONING_PROVIDER_FALLBACK_ORDER: tuple[str, ...] = ("minimax", "zhipu", "openai", "anthropic", "ollama")
 SEARCH_PROVIDER_VALUES: tuple[str, ...] = (
     "auto",
     *REASONING_PROVIDER_VALUES,
@@ -79,6 +79,7 @@ PROVIDER_DISPLAY_OPTIONS: tuple[NamedOption, ...] = (
     NamedOption("model", "模型辅助搜索", "search"),
     NamedOption("ollama", "Ollama", "reasoning"),
     NamedOption("openai", "OpenAI", "reasoning"),
+    NamedOption("zhipu", "智谱", "reasoning"),
     NamedOption("local_http_asr", "本地 HTTP ASR", "transcription"),
     NamedOption("runninghub", "RunningHub", "voice"),
     NamedOption("searxng", "SearXNG", "search"),

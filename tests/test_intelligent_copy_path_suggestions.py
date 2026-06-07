@@ -98,3 +98,33 @@ def test_inspect_preserves_requested_host_folder_path_after_materialize(monkeypa
     assert inspection["folder_path"] == requested
     assert inspection["video_file"] == str(materialized / "clip.mp4")
     assert inspection["material_dir"] == str(materialized / "smart-copy")
+
+
+def test_sync_materialized_smart_copy_to_host_posts_bridge_request(monkeypatch, tmp_path):
+    material_dir = tmp_path / "host-intelligent-copy" / "demo" / "smart-copy"
+    material_dir.mkdir(parents=True)
+    requested = r"\\Z4pro-gwil\团队文件-媒体工作台\EDC系列\待发布\MAXACE 美杜莎4 顶配次顶配开箱"
+    monkeypatch.setenv("ROUGHCUT_ACP_BRIDGE_CODEX_PROXY_URL", "http://host.docker.internal:38695/v1/codex/exec")
+    monkeypatch.setenv("ROUGHCUT_ACP_BRIDGE_CODEX_PROXY_TOKEN", "token-1")
+
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+    def fake_post(url, *, json, headers, timeout):
+        captured.update({"url": url, "json": json, "headers": headers, "timeout": timeout})
+        return Response()
+
+    monkeypatch.setattr(review_intelligent_copy.httpx, "post", fake_post)
+
+    review_intelligent_copy._sync_materialized_smart_copy_to_host(
+        requested_folder_path=requested,
+        material_dir=material_dir,
+    )
+
+    assert captured["url"].endswith("/v1/host/sync-smart-copy")
+    assert captured["headers"]["Authorization"] == "Bearer token-1"
+    assert captured["json"]["target_folder_path"] == requested
+    assert captured["json"]["source_material_dir"] == str(material_dir)

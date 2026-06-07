@@ -681,9 +681,34 @@ _PARTICLE_LED_RESTART_PREFIXES = (
     "然后我们",
     "来",
 )
+_DETACHABLE_LEAD_IN_CHAIN_TOKENS = frozenset(
+    {
+        "然后",
+        "那么",
+        "首先",
+        "其实",
+        "所以",
+        "另外",
+        "但是",
+        "不过",
+        "比如",
+        "例如",
+        "或者说",
+        "就是说",
+        "然后呢",
+        "那么呢",
+        "首先呢",
+        "其实呢",
+        "所以呢",
+        "另外呢",
+        "但是呢",
+        "不过呢",
+        *tuple(_BOUNDARY_LEADING_PARTICLES),
+    }
+)
 _NO_SPLIT_ENDINGS = (
     "的", "了", "呢", "吗", "嘛", "啊", "呀", "着", "把", "给", "在", "向", "和", "与", "及",
-    "就", "也", "还", "很", "都", "又", "才", "再", "并", "跟", "让", "被", "是",
+    "就", "也", "还", "很", "都", "又", "才", "再", "并", "跟", "让", "被", "是", "只",
     "然后", "所以", "但是", "而且", "并且", "会", "想", "要", "能",
 )
 _NO_SPLIT_PREFIXES = (
@@ -746,14 +771,26 @@ _SOFT_FRAGMENTARY_ENDINGS = (
     "那个",
     "这边",
     "那边",
+    "比如",
+    "或者说",
     "大家",
     "我们",
     "你们",
+    "其他",
     "相当",
     "一个",
     "一直",
     "之前",
     "之后",
+    "平时",
+    "临时",
+    "晚上",
+    "没啥",
+    "做一下",
+    "讲一下",
+    "说一下",
+    "看一下",
+    "试一下",
 )
 _PREDICATE_CONTINUATION_ENDINGS = (
     "应该",
@@ -773,6 +810,12 @@ _PREDICATE_CONTINUATION_ENDINGS = (
     "说过",
     "提过",
     "用过",
+    "发过",
+    "带过",
+    "出过",
+    "定位",
+    "符合",
+    "满足",
 )
 _PREDICATE_CONTINUATION_PREFIXES = (
     "可以",
@@ -797,6 +840,7 @@ _PREDICATE_CONTINUATION_PREFIXES = (
     "你们",
     "他们",
     "这个",
+    "这款",
     "那个",
     "它",
     "知道",
@@ -805,6 +849,8 @@ _PREDICATE_CONTINUATION_PREFIXES = (
     "证明",
     "体现",
     "说明",
+    "相当",
+    "非常",
 )
 _SOFT_ATTACHED_FRAGMENT_PREFIXES = (
     "要",
@@ -967,6 +1013,10 @@ _FALLBACK_GENERIC_CJK_BOUNDARY_TERMS = tuple(
             "手电",
             "流明",
             "亮度",
+            "升级",
+            "定位",
+            "符合",
+            "满足",
         },
         key=len,
         reverse=True,
@@ -1033,7 +1083,11 @@ _UNCLOSED_NOMINAL_TAIL_RE = re.compile(
     r"(?:"
     r"第(?:[0-9]+|[一二两三四五六七八九十])个|"
     r"(?:[0-9]+|[一二两三四五六七八九十])个|"
-    r"(?:这|那)(?:个|种|类|边)|"
+    r"(?:[0-9]+|[一二两三四五六七八九十])款|"
+    r"(?:这|那|该)(?:个|种|类|边|款|版|期|段|次|点)|"
+    r"(?:这|那|该)升级|"
+    r"(?:前头|后头|上头|里头|这头|那头)|"
+    r"一款|"
     r"(?:每|某)个|"
     r"另一个|前一个|后一个|最后一个|"
     r"的(?:这|那)?(?:个|种|类)?"
@@ -1048,8 +1102,9 @@ _LOW_CONFIDENCE_WINDOW_MAX_ENTRIES = 6
 _LOW_CONFIDENCE_WINDOW_MAX_CHARS = 84
 _SYNTHETIC_WORD_SOURCES = {"synthetic", "segment_only", "provider_missing", "roughcut_synthesized"}
 _SEGMENTATION_COMPACT_PUNCT_RE = re.compile(r"[\s，。！？!?；;：:,、（）()\[\]【】{}\"'《》<>]+")
+_SINGLE_CHAR_CONTINUATION_HEADS = "我你他她它这那就也都还又才先再并但"
 _SINGLE_CHAR_CONTINUATION_START_RE = re.compile(
-    r"^(?P<head>[\u4e00-\u9fff])(?P<rest>也|都|就|是|有|会|要|在|来|去|从|跟|把|被|里|上|下)"
+    rf"^(?P<head>[{_SINGLE_CHAR_CONTINUATION_HEADS}])(?P<rest>也|都|就|是|有|会|要|在|来|去|从|跟|把|被|里|上|下)"
 )
 _SINGLE_CHAR_FREE_STARTERS = {"我", "你", "他", "她", "它", "这", "那", "可", "但", "先", "再"}
 
@@ -1219,6 +1274,12 @@ def _words_for_segmentation(seg: TranscriptSegment) -> list[dict]:
         return []
     if _words_are_usable_for_segmentation(getattr(seg, "text", ""), raw_words):
         normalized_words = _normalize_segmentation_words(raw_words)
+        if _segmentation_words_use_alignment_timings_unsafely(getattr(seg, "text", ""), normalized_words):
+            return _build_text_fallback_words(
+                getattr(seg, "text", ""),
+                start=float(getattr(seg, "start_time", 0.0) or 0.0),
+                end=float(getattr(seg, "end_time", 0.0) or 0.0),
+            )
         if _segmentation_words_are_overly_granular(getattr(seg, "text", ""), normalized_words):
             retokenized_words = _retokenize_granular_segmentation_words(
                 getattr(seg, "text", ""),
@@ -1226,6 +1287,11 @@ def _words_for_segmentation(seg: TranscriptSegment) -> list[dict]:
             )
             if retokenized_words:
                 return retokenized_words
+            return _build_text_fallback_words(
+                getattr(seg, "text", ""),
+                start=float(getattr(seg, "start_time", 0.0) or 0.0),
+                end=float(getattr(seg, "end_time", 0.0) or 0.0),
+            )
         return normalized_words
     return _build_text_fallback_words(
         getattr(seg, "text", ""),
@@ -1256,6 +1322,45 @@ def _segmentation_words_are_overly_granular(text: str, words: list[dict]) -> boo
         if _SEGMENTATION_COMPACT_PUNCT_RE.sub("", token)
     ]
     return len(tokenized) < len(cjk_or_alnum_words) * 0.82
+
+
+def _segmentation_words_use_alignment_timings_unsafely(text: str, words: list[dict]) -> bool:
+    if len(words) < 12:
+        return False
+    compact_words = [
+        _SEGMENTATION_COMPACT_PUNCT_RE.sub("", str(word.get("word") or ""))
+        for word in words
+    ]
+    compact_words = [word for word in compact_words if word]
+    if len(compact_words) < 12:
+        return False
+    if not _segmentation_words_pass_coverage(text, words):
+        return False
+    cjk_or_alnum_words = [word for word in compact_words if re.search(r"[\u4e00-\u9fffA-Za-z0-9]", word)]
+    if len(cjk_or_alnum_words) < 12:
+        return False
+    short_chunk_ratio = sum(1 for word in cjk_or_alnum_words if len(word) <= 2) / len(cjk_or_alnum_words)
+    if short_chunk_ratio < 0.9:
+        return False
+    alignment_sources = {
+        str((word.get("alignment") or {}).get("source") or "")
+        for word in words
+        if isinstance(word, dict)
+    }
+    if alignment_sources and alignment_sources != {"canonical_realign"}:
+        return False
+    internal_gaps = [
+        max(
+            0.0,
+            float(words[index + 1].get("start") or 0.0) - float(words[index].get("end") or 0.0),
+        )
+        for index in range(len(words) - 1)
+    ]
+    if not internal_gaps:
+        return False
+    max_gap = max(internal_gaps)
+    gap_spike_count = sum(1 for gap in internal_gaps if gap >= 0.32)
+    return max_gap >= 0.6 or gap_spike_count >= 2
 
 
 def _retokenize_granular_segmentation_words(text: str, words: list[dict]) -> list[dict]:
@@ -1358,7 +1463,12 @@ def normalize_text(text: str) -> str:
     return text
 
 
-def normalize_display_text(text: str, *, cleanup_fillers: bool = True) -> str:
+def _normalize_display_text_core(
+    text: str,
+    *,
+    cleanup_fillers: bool,
+    lexical_cleanup: bool,
+) -> str:
     result = str(text or "").strip()
     if not result:
         return result
@@ -1368,8 +1478,9 @@ def normalize_display_text(text: str, *, cleanup_fillers: bool = True) -> str:
         result = cleanup_subtitle_fillers(result)
     result = transcribe_subtitle_numerals(result)
     result = _normalize_safe_display_terms(result)
-    result = _collapse_clause_level_homophone_duplicates(result)
-    result = _collapse_inline_homophone_duplicates(result)
+    if lexical_cleanup:
+        result = _collapse_clause_level_homophone_duplicates(result)
+        result = _collapse_inline_homophone_duplicates(result)
     result = apply_subtitle_clause_spacing(result)
     result = re.sub(r"\s+([，,。.!！？；;：:])", r"\1", result)
     result = re.sub(r"([，；：])(?=[^\s])", r"\1 ", result)
@@ -1378,6 +1489,28 @@ def normalize_display_text(text: str, *, cleanup_fillers: bool = True) -> str:
     result = re.sub(r"[，,]+([。.!！？])", r"\1", result)
     result = re.sub(r"\s{2,}", " ", result)
     return result.strip("，,")
+
+
+def normalize_display_text(text: str, *, cleanup_fillers: bool = True) -> str:
+    return _normalize_display_text_core(
+        text,
+        cleanup_fillers=cleanup_fillers,
+        lexical_cleanup=True,
+    )
+
+
+def normalize_projection_display_text(text: str) -> str:
+    """Projection-safe display normalization.
+
+    Projection/display layers may normalize numerals, punctuation, and safe
+    glossary terms, but they must not delete fillers or collapse clauses in a
+    way that rewrites lexical content.
+    """
+    return _normalize_display_text_core(
+        text,
+        cleanup_fillers=False,
+        lexical_cleanup=False,
+    )
 
 
 def normalize_display_numbers(text: str) -> str:
@@ -2265,6 +2398,16 @@ def _resolve_subtitle_entry_sequence(
         resolved = _merge_continuation_entries(resolved, max_chars=max_chars, max_duration=max_duration)
         resolved = _merge_short_chain_entries(resolved, max_chars=max_chars, max_duration=max_duration)
         resolved = _merge_same_source_segment_micro_fragments(resolved, max_chars=max_chars, max_duration=max_duration)
+    resolved = _split_readability_overflow_entries(
+        resolved,
+        max_chars=max_chars,
+        max_duration=max_duration,
+    )
+    resolved = _repair_post_readability_split_fragments(
+        resolved,
+        max_chars=max_chars,
+        max_duration=max_duration,
+    )
     return _cleanup_subtitle_entries(resolved)
 
 
@@ -2441,31 +2584,32 @@ def _build_word_candidate(
     else:
         score -= (duration - max_duration) * 4.0
 
+    text_core = _strip_boundary_trailing_punctuation(text) or text
     boundary_quality = _semantic_boundary_quality(text, next_preview) if next_preview else 4.0
     score += boundary_quality * 4.5
-    if any(text.endswith(token) for token in _NO_SPLIT_ENDINGS) and next_preview:
+    if any(text_core.endswith(token) for token in _NO_SPLIT_ENDINGS) and next_preview:
         score -= 8.0
     if _starts_with_attached_fragment(next_preview):
         score -= 8.0
     if _starts_with_soft_attached_fragment(next_preview):
         score -= 4.0
-    if _looks_like_soft_fragmentary_tail(text):
+    if _looks_like_soft_fragmentary_tail(text_core):
         score -= 4.0
-    if _boundary_splits_compound_term(text, next_preview):
+    if _boundary_splits_compound_term(text_core, next_preview):
         score -= 10.0
-    if _looks_like_split_measure_phrase(text, next_preview):
+    if _looks_like_split_measure_phrase(text_core, next_preview):
         score -= 18.0
-    if _boundary_splits_nominal_phrase(text, next_preview):
+    if _boundary_splits_nominal_phrase(text_core, next_preview):
         score -= 12.0
-    if _boundary_splits_predicate_phrase(text, next_preview):
+    if _boundary_splits_predicate_phrase(text_core, next_preview):
         score -= 14.0
-    if _boundary_splits_model_token(text, next_preview):
+    if _boundary_splits_model_token(text_core, next_preview):
         score -= 16.0
-    if _boundary_splits_honor_transition_phrase(text, next_preview):
+    if _boundary_splits_honor_transition_phrase(text_core, next_preview):
         score -= 18.0
-    if _boundary_splits_protected_term(text, next_preview):
+    if _boundary_splits_protected_term(text_core, next_preview):
         score -= 12.0
-    if _boundary_splits_generic_word(text, next_preview):
+    if _boundary_splits_generic_word(text_core, next_preview):
         score -= 14.0
 
     if gap_after >= 0.25:
@@ -2618,6 +2762,482 @@ def _choose_word_split_index(words: list[dict], *, max_chars: int, max_duration:
     return max(1, min(best_index, len(words) - 1))
 
 
+def _soft_readability_char_limit(max_chars: int) -> int:
+    if max_chars <= 12:
+        return max_chars
+    return min(max_chars, max(14, int(max_chars * 0.62)))
+
+
+def _soft_readability_duration_limit(max_duration: float) -> float:
+    return min(max_duration, max(3.2, max_duration * 0.72))
+
+
+def _entry_exceeds_readability_soft_limit(
+    entry: SubtitleEntry,
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> bool:
+    text = str(entry.text_raw or "").strip()
+    if not text or max_chars <= 12:
+        return False
+    duration = max(0.0, float(entry.end) - float(entry.start))
+    soft_char_limit = _soft_readability_char_limit(max_chars)
+    soft_duration_limit = _soft_readability_duration_limit(max_duration)
+    return len(text) > soft_char_limit or duration > soft_duration_limit
+
+
+def _entry_requires_readability_split(
+    entry: SubtitleEntry,
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> bool:
+    text = str(entry.text_raw or "").strip()
+    if not text or max_chars <= 12:
+        return False
+    duration = max(0.0, float(entry.end) - float(entry.start))
+    if duration <= 0.0:
+        return False
+
+    text_length = len(text)
+    char_overflow = max(0, text_length - max_chars)
+    duration_overflow = max(0.0, duration - max_duration)
+    if char_overflow > 0:
+        return True
+    if duration_overflow > 0.0:
+        if text_length >= max(max_chars - 2, 16):
+            return True
+        if duration_overflow >= 1.0:
+            return True
+
+    soft_char_limit = _soft_readability_char_limit(max_chars)
+    soft_duration_limit = _soft_readability_duration_limit(max_duration)
+    soft_char_overflow = max(0, text_length - soft_char_limit)
+    soft_duration_overflow = max(0.0, duration - soft_duration_limit)
+    if soft_char_overflow >= 4:
+        return True
+    if soft_duration_overflow >= 0.8 and text_length > max(soft_char_limit - 2, 10):
+        return True
+    return False
+
+
+def _choose_readability_split_index(
+    words: list[dict],
+    *,
+    max_chars: int,
+    max_duration: float,
+    entry_text: str | None = None,
+    entry_duration: float | None = None,
+) -> int | None:
+    if len(words) <= 1 or max_chars <= 12:
+        return None
+
+    total_text = str(entry_text or _words_to_text(words))
+    if not total_text:
+        return None
+    if entry_duration is None:
+        total_duration = max(
+            0.0,
+            float(words[-1].get("end", 0.0) or 0.0) - float(words[0].get("start", 0.0) or 0.0),
+        )
+    else:
+        total_duration = max(0.0, float(entry_duration))
+    hard_overflow = len(total_text) > max_chars or total_duration > max_duration
+    char_hard_overflow = len(total_text) > max_chars
+    fallback_hard_overflow = len(total_text) <= max_chars and total_duration > (max_duration + 0.6)
+
+    target = max(8, min(len(total_text) - 1, int(len(total_text) * 0.5)))
+    best_index: int | None = None
+    best_score = float("-inf")
+    best_hard_overflow_index: int | None = None
+    best_hard_overflow_score = float("-inf")
+    min_side_chars = max(4, min(8, max_chars // 4))
+    soft_char_limit = _soft_readability_char_limit(max_chars)
+    soft_duration_limit = _soft_readability_duration_limit(max_duration)
+
+    for index in range(1, len(words)):
+        left_words = words[:index]
+        right_words = words[index:]
+        left = _words_to_text(left_words)
+        right = _words_to_text(right_words)
+        if not left or not right:
+            continue
+        detachable_lead_in = _looks_like_detachable_lead_in(left)
+        if (len(left) < min_side_chars and not detachable_lead_in) or len(right) < min_side_chars:
+            continue
+        if _is_forbidden_subtitle_boundary(left, right):
+            continue
+
+        pause_after = max(
+            0.0,
+            float(right_words[0].get("start", 0.0) or 0.0)
+            - float(left_words[-1].get("end", 0.0) or 0.0),
+        )
+        boundary_quality = _semantic_boundary_quality(left, right)
+        boundary_score = _score_break_boundary(left, right, index=len(left), target=target)
+        if pause_after < 0.18 and boundary_quality < 1.0 and boundary_score < 0.0 and not fallback_hard_overflow:
+            continue
+
+        attached_fragment = _starts_with_attached_fragment(right)
+        soft_attached_fragment = _starts_with_soft_attached_fragment(right)
+        soft_fragmentary_tail = _looks_like_soft_fragmentary_tail(left)
+        right_incomplete = _is_incomplete_subtitle_text(right)
+
+        left_duration = max(
+            0.0,
+            float(left_words[-1].get("end", 0.0) or 0.0)
+            - float(left_words[0].get("start", 0.0) or 0.0),
+        )
+        right_duration = max(
+            0.0,
+            float(right_words[-1].get("end", 0.0) or 0.0)
+            - float(right_words[0].get("start", 0.0) or 0.0),
+        )
+
+        # Readability overflow should not peel a sentence-initial filler/lead-in
+        # into its own row when the remaining clause is still the substantive line.
+        if detachable_lead_in:
+            if len(right) >= max(min_side_chars + 2, soft_char_limit - 2):
+                continue
+            if right_duration >= max(2.8, soft_duration_limit - 0.4):
+                continue
+
+        score = boundary_score
+        score += pause_after * 24.0
+        score += boundary_quality * 4.0
+        score -= abs(len(left) - len(right)) * 0.8
+        if detachable_lead_in:
+            score += 6.0
+        if attached_fragment:
+            score -= 10.0 if pause_after < 0.25 else 2.0
+        if soft_attached_fragment:
+            score -= 8.0 if pause_after < 0.25 else 1.5
+        if soft_fragmentary_tail:
+            score -= 10.0 if pause_after < 0.25 else 2.0
+        if len(left) > soft_char_limit:
+            score -= (len(left) - soft_char_limit) * 6.0
+        if len(right) > soft_char_limit:
+            score -= (len(right) - soft_char_limit) * 6.0
+        if left_duration > soft_duration_limit:
+            score -= (left_duration - soft_duration_limit) * 8.0
+        if right_duration > soft_duration_limit:
+            score -= (right_duration - soft_duration_limit) * 8.0
+        if (
+            pause_after >= 0.32
+            and len(left) >= max(8, soft_char_limit - 6)
+            and len(right) >= max(8, soft_char_limit - 8)
+            and left_duration >= 1.0
+            and right_duration >= 1.0
+            and not attached_fragment
+            and not soft_attached_fragment
+            and not right_incomplete
+        ):
+            pause_supported_score = 8.0 + pause_after * 12.0 - abs(len(left) - len(right)) * 0.35
+            if soft_fragmentary_tail:
+                pause_supported_score += 2.0
+            score = max(score, pause_supported_score)
+
+        if score > best_score:
+            best_score = score
+            best_index = index
+
+        fallback_score = float("-inf")
+        if not attached_fragment and not soft_attached_fragment:
+            left_incomplete = _is_incomplete_subtitle_text(left)
+            right_attached = _starts_with_attached_fragment(right)
+            left_text = str(left or "").strip()
+            left_clause_closed = bool(left_text) and left_text[-1] in (_HARD_BREAK_CHARS + _SOFT_BREAK_CHARS)
+            left_overflow = max(0, len(left) - max_chars)
+            right_overflow = max(0, len(right) - max_chars)
+            left_duration_overflow = max(0.0, left_duration - max_duration)
+            right_duration_overflow = max(0.0, right_duration - max_duration)
+            fallback_score = 0.0
+            fallback_score -= (left_overflow + right_overflow) * 18.0
+            fallback_score -= (left_duration_overflow + right_duration_overflow) * 24.0
+            fallback_score -= abs(len(left) - len(right)) * 0.35
+            fallback_score += pause_after * 12.0
+            fallback_score += min(boundary_quality, 3.0) * 2.0
+            if not left_incomplete or left_clause_closed:
+                fallback_score += 18.0
+            if left_text:
+                if left_text[-1] in _HARD_BREAK_CHARS:
+                    fallback_score += 22.0
+                elif left_text[-1] in _SOFT_BREAK_CHARS:
+                    fallback_score += 14.0
+            if any(str(right or "").startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES):
+                fallback_score += 8.0
+            if left_incomplete and not left_clause_closed:
+                fallback_score -= 18.0
+            if right_attached:
+                fallback_score -= 24.0
+
+        if fallback_score > best_hard_overflow_score:
+            best_hard_overflow_score = fallback_score
+            best_hard_overflow_index = index
+
+    if best_index is None:
+        punctuation_fallback_index = _choose_punctuation_supported_readability_split_index(
+            words,
+            max_chars=max_chars,
+            max_duration=max_duration,
+            entry_text=total_text,
+            entry_duration=total_duration,
+        )
+        if punctuation_fallback_index is not None:
+            return punctuation_fallback_index
+        if char_hard_overflow and best_hard_overflow_index is not None and best_hard_overflow_score >= 8.0:
+            return best_hard_overflow_index
+        if fallback_hard_overflow and best_hard_overflow_index is not None and best_hard_overflow_score >= 0.0:
+            return best_hard_overflow_index
+        return None
+    if hard_overflow and best_score < -6.0:
+        punctuation_fallback_index = _choose_punctuation_supported_readability_split_index(
+            words,
+            max_chars=max_chars,
+            max_duration=max_duration,
+            entry_text=total_text,
+            entry_duration=total_duration,
+        )
+        if punctuation_fallback_index is not None:
+            return punctuation_fallback_index
+    if best_score < 0.0 and not hard_overflow:
+        return None
+    if char_hard_overflow and best_score < -6.0 and best_hard_overflow_index is not None and best_hard_overflow_score >= 8.0:
+        return best_hard_overflow_index
+    if fallback_hard_overflow and best_score < -6.0 and best_hard_overflow_index is not None and best_hard_overflow_score >= 0.0:
+        return best_hard_overflow_index
+    if best_score < -6.0:
+        return None
+    return best_index
+
+
+def _choose_punctuation_supported_readability_split_index(
+    words: list[dict],
+    *,
+    max_chars: int,
+    max_duration: float,
+    entry_text: str | None = None,
+    entry_duration: float | None = None,
+) -> int | None:
+    if len(words) <= 1:
+        return None
+    total_text = str(entry_text or _words_to_text(words))
+    if not total_text or len(total_text) <= max_chars:
+        return None
+    total_duration = max(
+        0.0,
+        float(entry_duration)
+        if entry_duration is not None
+        else float(words[-1].get("end", 0.0) or 0.0) - float(words[0].get("start", 0.0) or 0.0),
+    )
+    if total_duration <= max_duration:
+        return None
+
+    target = max(8, min(len(total_text) - 1, int(len(total_text) * 0.5)))
+    min_side_chars = max(4, min(8, max_chars // 4))
+    best_index: int | None = None
+    best_score = float("-inf")
+
+    for index in range(1, len(words)):
+        left = _words_to_text(words[:index])
+        right = _words_to_text(words[index:])
+        if not left or not right:
+            continue
+        left_core = _strip_boundary_trailing_punctuation(left)
+        right_core = _strip_boundary_leading_particles(right) or right
+        if len(left_core) < min_side_chars or len(right_core) < min_side_chars:
+            continue
+        if _is_forbidden_subtitle_boundary(left, right):
+            continue
+        if _starts_with_attached_fragment(right) or _starts_with_soft_attached_fragment(right):
+            continue
+        if not str(left or "").strip().endswith(tuple(_HARD_BREAK_CHARS + _SOFT_BREAK_CHARS)):
+            continue
+        left_duration = max(
+            0.0,
+            float(words[index - 1].get("end", 0.0) or 0.0) - float(words[0].get("start", 0.0) or 0.0),
+        )
+        right_duration = max(
+            0.0,
+            float(words[-1].get("end", 0.0) or 0.0) - float(words[index].get("start", 0.0) or 0.0),
+        )
+        if left_duration > max_duration + 0.8 or right_duration > max_duration + 0.8:
+            continue
+        score = 20.0
+        score -= abs(len(left) - target) * 0.9
+        score -= abs(len(right) - (len(total_text) - target)) * 0.6
+        if any(right_core.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES):
+            score += 6.0
+        score += max(0.0, _semantic_boundary_quality(left, right)) * 2.0
+        if score > best_score:
+            best_score = score
+            best_index = index
+
+    return best_index
+
+
+def _split_readability_overflow_entries(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> list[SubtitleEntry]:
+    if not entries or max_chars <= 12:
+        return entries
+
+    split_entries: list[SubtitleEntry] = []
+    for entry in entries:
+        queue = [entry]
+        while queue:
+            current = queue.pop(0)
+            words = list(current.words or ())
+            if (
+                len(words) < 2
+                or not _entry_requires_readability_split(
+                    current,
+                    max_chars=max_chars,
+                    max_duration=max_duration,
+                )
+            ):
+                split_entries.append(current)
+                continue
+
+            split_index = _choose_readability_split_index(
+                words,
+                max_chars=max_chars,
+                max_duration=max_duration,
+                entry_text=current.text_raw,
+                entry_duration=float(current.end) - float(current.start),
+            )
+            if split_index is None:
+                split_entries.append(current)
+                continue
+
+            left_words = words[:split_index]
+            right_words = words[split_index:]
+            left_text = _words_to_text(left_words)
+            right_text = _words_to_text(right_words)
+            if not left_text or not right_text:
+                split_entries.append(current)
+                continue
+
+            total_text = str(current.text_raw or "").strip()
+            total_duration = max(0.0, float(current.end) - float(current.start))
+            char_overflow = max(0, len(total_text) - max_chars)
+            duration_overflow = max(0.0, total_duration - max_duration)
+            mild_overflow = char_overflow <= 6 and duration_overflow <= 1.4
+            left_short_residual = (
+                len(str(left_text).strip()) <= 8
+                and (
+                    _is_incomplete_subtitle_text(left_text)
+                    or _looks_like_short_followon_clause_fragment(left_text)
+                    or _looks_like_soft_fragmentary_tail(left_text)
+                )
+            )
+            right_short_residual = (
+                len(str(right_text).strip()) <= 8
+                and (
+                    _is_incomplete_subtitle_text(right_text)
+                    or _looks_like_short_followon_clause_fragment(right_text)
+                    or _looks_like_soft_fragmentary_tail(right_text)
+                )
+            )
+            if mild_overflow and (left_short_residual or right_short_residual):
+                split_entries.append(current)
+                continue
+
+            queue = [
+                _make_subtitle_entry(
+                    current.index,
+                    float(left_words[0]["start"]),
+                    float(left_words[-1]["end"]),
+                    left_text,
+                    words=left_words,
+                ),
+                _make_subtitle_entry(
+                    current.index,
+                    float(right_words[0]["start"]),
+                    float(right_words[-1]["end"]),
+                    right_text,
+                    words=right_words,
+                ),
+                *queue,
+            ]
+    return _reindex_subtitle_entries(split_entries)
+
+
+def _repair_post_readability_split_fragments(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> list[SubtitleEntry]:
+    if len(entries) <= 1:
+        return entries
+
+    repaired: list[SubtitleEntry] = []
+    index = 0
+    while index < len(entries):
+        current = entries[index]
+        current_text = str(current.text_raw or "").strip()
+        if not _looks_like_short_followon_clause_fragment(current_text):
+            repaired.append(current)
+            index += 1
+            continue
+
+        if index + 1 < len(entries):
+            following = entries[index + 1]
+            following_text = str(following.text_raw or "").strip()
+            gap = max(0.0, float(following.start) - float(current.end))
+            combined_text = f"{current_text}{following_text}"
+            combined_duration = max(0.0, float(following.end) - float(current.start))
+            if (
+                following_text
+                and gap <= 0.18
+                and len(combined_text) <= max_chars + 4
+                and combined_duration <= max_duration + 1.4
+            ):
+                repaired.append(
+                    _make_subtitle_entry(
+                        len(repaired),
+                        current.start,
+                        following.end,
+                        combined_text,
+                        words=tuple(current.words or ()) + tuple(following.words or ()),
+                    )
+                )
+                index += 2
+                continue
+
+        if repaired:
+            previous = repaired[-1]
+            previous_text = str(previous.text_raw or "").strip()
+            gap = max(0.0, float(current.start) - float(previous.end))
+            combined_text = f"{previous_text}{current_text}"
+            combined_duration = max(0.0, float(current.end) - float(previous.start))
+            if (
+                previous_text
+                and previous_text[-1] not in _HARD_BREAK_CHARS
+                and gap <= 0.18
+                and len(combined_text) <= max_chars + 4
+                and combined_duration <= max_duration + 1.0
+            ):
+                repaired[-1] = _make_subtitle_entry(
+                    len(repaired) - 1,
+                    previous.start,
+                    current.end,
+                    combined_text,
+                    words=tuple(previous.words or ()) + tuple(current.words or ()),
+                )
+                index += 1
+                continue
+
+        repaired.append(current)
+        index += 1
+    return _reindex_subtitle_entries(repaired)
+
+
 def _semantic_hold_duration_limit(*, text_length: int, max_chars: int, max_duration: float) -> float:
     limit = max(float(max_duration), 3.8) + 1.0
     if text_length <= max_chars:
@@ -2653,6 +3273,42 @@ def _is_forbidden_subtitle_boundary(left: str, right: str) -> bool:
     return _boundary_splits_numeric_unit(left, right)
 
 
+def _boundary_damage_flags(left: str, right: str) -> set[str]:
+    flags: set[str] = set()
+    if _boundary_splits_numeric_unit(left, right):
+        flags.add("numeric_unit")
+    if _boundary_splits_model_token(left, right):
+        flags.add("model_token")
+    if _boundary_splits_compound_term(left, right):
+        flags.add("compound_term")
+    if _boundary_splits_protected_term(left, right):
+        flags.add("protected_term")
+    if _boundary_splits_generic_word(left, right):
+        flags.add("generic_word")
+    if _boundary_splits_nominal_phrase(left, right):
+        flags.add("nominal_phrase")
+    if _boundary_splits_predicate_phrase(left, right):
+        flags.add("predicate_phrase")
+    if _boundary_splits_single_char_residual(left, right):
+        flags.add("single_char_residual")
+    if _starts_with_attached_fragment(right):
+        flags.add("attached_fragment_start")
+    elif _starts_with_soft_attached_fragment(right):
+        flags.add("soft_attached_fragment_start")
+    return flags
+
+
+def _boundary_transfer_introduces_new_damage(
+    original_left: str,
+    original_right: str,
+    new_left: str,
+    new_right: str,
+) -> bool:
+    original_flags = _boundary_damage_flags(original_left, original_right)
+    new_flags = _boundary_damage_flags(new_left, new_right)
+    return bool(new_flags - original_flags)
+
+
 def _is_strong_fragment_boundary(left: str, right: str, *, gap: float) -> bool:
     left_text = str(left or "").strip()
     right_text = str(right or "").strip()
@@ -2677,8 +3333,6 @@ def _is_strong_fragment_boundary(left: str, right: str, *, gap: float) -> bool:
     if _boundary_splits_possessive_phrase(left_text, right_text):
         return True
     if _boundary_splits_single_char_residual(left_text, right_text):
-        return True
-    if _should_merge_subtitle_pair(left_text, right_text):
         return True
     return gap <= 0.05 and len(left_text) <= 5 and _semantic_boundary_quality(left_text, right_text) <= -2.5
 
@@ -2711,26 +3365,26 @@ def _is_incomplete_subtitle_text(text: str) -> bool:
     candidate = str(text or "").strip()
     if not candidate:
         return False
-    if candidate[-1] in (_HARD_BREAK_CHARS + _SOFT_BREAK_CHARS):
-        return False
-    if re.search(r"[A-Za-z]{2,8}$", candidate):
+    core = _strip_boundary_trailing_punctuation(candidate) or candidate
+    if re.search(r"[A-Za-z]{2,8}$", core):
         return True
-    if _looks_like_unclosed_nominal_tail(candidate):
+    if any(core.endswith(token) for token in _SOFT_FRAGMENTARY_ENDINGS):
         return True
-    if any(candidate.endswith(token) for token in _PREDICATE_CONTINUATION_ENDINGS):
+    if _looks_like_unclosed_nominal_tail(core):
         return True
-    if any(candidate.endswith(token) for token in _NO_SPLIT_ENDINGS):
+    if any(core.endswith(token) for token in _PREDICATE_CONTINUATION_ENDINGS):
         return True
-    return bool(re.search(r"(?:得很|会有|还有|没有|以及|为了|对于|因为|如果|或者|还是|就是|不是)$", candidate))
+    if any(core.endswith(token) for token in _NO_SPLIT_ENDINGS):
+        return True
+    return bool(re.search(r"(?:得很|会有|还有|没有|以及|为了|对于|因为|如果|或者|还是|就是|不是)$", core))
 
 
 def _looks_like_unclosed_nominal_tail(text: str) -> bool:
     candidate = str(text or "").strip()
     if not candidate:
         return False
-    if candidate[-1] in (_HARD_BREAK_CHARS + _SOFT_BREAK_CHARS):
-        return False
-    return bool(_UNCLOSED_NOMINAL_TAIL_RE.search(candidate))
+    core = _strip_boundary_trailing_punctuation(candidate) or candidate
+    return bool(_UNCLOSED_NOMINAL_TAIL_RE.search(core))
 
 
 def _starts_with_nominal_head(text: str) -> bool:
@@ -2747,7 +3401,7 @@ def _starts_with_nominal_head(text: str) -> bool:
 
 
 def _boundary_splits_nominal_phrase(left: str, right: str) -> bool:
-    left_text = str(left or "").strip()
+    left_text = _strip_boundary_trailing_punctuation(left) or str(left or "").strip()
     right_text = str(right or "").strip()
     if not left_text or not right_text:
         return False
@@ -2755,16 +3409,40 @@ def _boundary_splits_nominal_phrase(left: str, right: str) -> bool:
 
 
 def _boundary_splits_predicate_phrase(left: str, right: str) -> bool:
-    left_text = str(left or "").strip()
+    left_text = _strip_boundary_trailing_punctuation(left) or str(left or "").strip()
     right_text = str(right or "").strip()
     if not left_text or not right_text:
-        return False
-    if left_text[-1] in (_HARD_BREAK_CHARS + _SOFT_BREAK_CHARS):
         return False
     if not any(left_text.endswith(token) for token in _PREDICATE_CONTINUATION_ENDINGS):
         return False
     stripped_right = _strip_boundary_leading_particles(right_text) or right_text
     return any(stripped_right.startswith(prefix) for prefix in _PREDICATE_CONTINUATION_PREFIXES)
+
+
+def _boundary_splits_bare_determiner_phrase(left: str, right: str) -> bool:
+    left_text = _strip_boundary_trailing_punctuation(left) or str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    if not re.search(r"(?:这|那|该)$", left_text):
+        return False
+    if re.match(r"^[，。！？、：；,.!?]", right_text):
+        return False
+    stripped_right = _strip_boundary_leading_particles(right_text) or right_text
+    return bool(_NOMINAL_HEAD_RE.match(stripped_right))
+
+
+def _boundary_splits_pronoun_modifier_phrase(left: str, right: str) -> bool:
+    left_text = _strip_boundary_trailing_punctuation(left) or str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    if not any(left_text.endswith(token) for token in ("它", "他", "她", "这个", "那个")):
+        return False
+    stripped_right = _strip_boundary_leading_particles(right_text) or right_text
+    return bool(
+        re.match(r"^(?:前头|后头|上头|里头|这头|那头|前面|后面|上面|里面|一个|一种|一款)", stripped_right)
+    )
 
 
 def _semantic_boundary_quality(left: str, right: str) -> float:
@@ -2773,47 +3451,55 @@ def _semantic_boundary_quality(left: str, right: str) -> float:
     if not left_text or not right_text:
         return -100.0
 
+    left_core = _strip_boundary_trailing_punctuation(left_text) or left_text
+    left_incomplete = _is_incomplete_subtitle_text(left_text)
     score = 0.0
-    if _is_incomplete_subtitle_text(left_text):
+    if left_incomplete:
         score -= 5.0
-    if _looks_like_soft_fragmentary_tail(left_text):
+    if _looks_like_soft_fragmentary_tail(left_core):
         score -= 2.0
     if _starts_with_attached_fragment(right_text):
         score -= 5.0
     if _starts_with_soft_attached_fragment(right_text):
         score -= 2.0
-    if _looks_like_split_measure_phrase(left_text, right_text):
+    if _looks_like_split_measure_phrase(left_core, right_text):
         score -= 5.0
-    if _boundary_splits_nominal_phrase(left_text, right_text):
+    if _boundary_splits_nominal_phrase(left_core, right_text):
         score -= 5.0
-    if _boundary_splits_predicate_phrase(left_text, right_text):
+    if _boundary_splits_bare_determiner_phrase(left_core, right_text):
+        score -= 7.0
+    if _boundary_splits_pronoun_modifier_phrase(left_core, right_text):
         score -= 6.0
-    if _boundary_splits_repeated_model_suffix(left_text, right_text):
-        score -= 7.0
-    if _boundary_splits_honor_transition_phrase(left_text, right_text):
-        score -= 7.0
-    if _boundary_splits_possessive_phrase(left_text, right_text):
-        score -= 7.0
-    if _boundary_splits_compound_term(left_text, right_text):
-        score -= 5.0
-    if _boundary_splits_generic_word(left_text, right_text):
-        score -= 7.0
-    if _boundary_splits_single_char_residual(left_text, right_text):
+    if _boundary_splits_predicate_phrase(left_core, right_text):
         score -= 6.0
-    if _boundary_splits_protected_term(left_text, right_text):
+    if _boundary_splits_repeated_model_suffix(left_core, right_text):
+        score -= 7.0
+    if _boundary_splits_honor_transition_phrase(left_core, right_text):
+        score -= 7.0
+    if _boundary_splits_possessive_phrase(left_core, right_text):
+        score -= 7.0
+    if _boundary_splits_compound_term(left_core, right_text):
+        score -= 5.0
+    if _boundary_splits_generic_word(left_core, right_text):
+        score -= 7.0
+    if _boundary_splits_single_char_residual(left_core, right_text):
+        score -= 6.0
+    if _boundary_splits_protected_term(left_core, right_text):
         score -= 8.0
-    if left_text[-1] in _HARD_BREAK_CHARS:
+    if left_text[-1] in _HARD_BREAK_CHARS and not left_incomplete:
         score += 5.0
-    elif left_text[-1] in _SOFT_BREAK_CHARS:
+    elif left_text[-1] in _SOFT_BREAK_CHARS and not left_incomplete:
         score += 2.0
     if any(right_text.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES):
         score += 1.5
-    if any(left_text.endswith(token) for token in _NO_SPLIT_ENDINGS):
+    if any(left_core.endswith(token) for token in _NO_SPLIT_ENDINGS):
         score -= 2.5
     if any(right_text.startswith(token) for token in _NO_SPLIT_PREFIXES):
         score -= 2.5
     if re.match(r"^[，。！？、：；,.!?]", right_text):
         score -= 6.0
+    if left_incomplete and len(right_text) <= 4:
+        score -= 3.0
     if len(right_text) <= 2:
         score -= 1.5
     return score
@@ -2887,6 +3573,8 @@ def _rebalance_semantic_pair(
         expanded_left_words = tuple(left.words or ()) + tuple(prefix_words)
         new_left_text = _words_to_text(list(expanded_left_words)) or f"{left.text_raw}{prefix_text}"
         if len(new_left_text) > max_chars + (8 if len(prefix_text) <= 4 else 6):
+            continue
+        if _boundary_transfer_introduces_new_damage(left.text_raw, right.text_raw, new_left_text, suffix_text):
             continue
 
         new_left_duration = float(prefix_words[-1]["end"]) - float(left.start)
@@ -2967,6 +3655,8 @@ def _rebalance_semantic_pair(
             continue
         if len(moved_text) > _MAX_SEMANTIC_TRANSFER_CHARS:
             break
+        if _boundary_transfer_introduces_new_damage(left.text_raw, right.text_raw, new_left_text, new_right_text):
+            continue
         if len(new_right_text) > max_chars + (8 if len(moved_text) <= 4 else 6):
             continue
 
@@ -3085,36 +3775,42 @@ def _score_break_boundary(left: str, right: str, *, index: int, target: int) -> 
     if _is_forbidden_subtitle_boundary(left_text, right_text):
         return score - 10000
 
+    left_core = _strip_boundary_trailing_punctuation(left_text) or left_text
+    left_incomplete = _is_incomplete_subtitle_text(left_text)
     last_char = left_text[-1]
     if last_char in _HARD_BREAK_CHARS:
-        score += 48
+        score += 48 if not left_incomplete else 8
     elif last_char in _SOFT_BREAK_CHARS:
-        score += 32
+        score += 32 if not left_incomplete else 6
 
     if any(right_text.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES):
         score += 18
 
-    if any(left_text.endswith(token) for token in _NO_SPLIT_ENDINGS):
+    if any(left_core.endswith(token) for token in _NO_SPLIT_ENDINGS):
         score -= 24
     if any(right_text.startswith(token) for token in _NO_SPLIT_PREFIXES):
         score -= 26
     if _starts_with_soft_attached_fragment(right_text):
         score -= 14
-    if _looks_like_split_measure_phrase(left_text, right_text):
+    if _looks_like_split_measure_phrase(left_core, right_text):
         score -= 32
-    if _boundary_splits_predicate_phrase(left_text, right_text):
-        score -= 38
-    if _boundary_splits_repeated_model_suffix(left_text, right_text):
-        score -= 44
-    if _boundary_splits_possessive_phrase(left_text, right_text):
+    if _boundary_splits_bare_determiner_phrase(left_core, right_text):
         score -= 42
-    if _looks_like_soft_fragmentary_tail(left_text):
+    if _boundary_splits_pronoun_modifier_phrase(left_core, right_text):
+        score -= 36
+    if _boundary_splits_predicate_phrase(left_core, right_text):
+        score -= 38
+    if _boundary_splits_repeated_model_suffix(left_core, right_text):
+        score -= 44
+    if _boundary_splits_possessive_phrase(left_core, right_text):
+        score -= 42
+    if _looks_like_soft_fragmentary_tail(left_core):
         score -= 12
-    if _boundary_splits_compound_term(left_text, right_text):
+    if _boundary_splits_compound_term(left_core, right_text):
         score -= 30
-    if _boundary_splits_protected_term(left_text, right_text):
+    if _boundary_splits_protected_term(left_core, right_text):
         score -= 64
-    if _boundary_splits_generic_word(left_text, right_text):
+    if _boundary_splits_generic_word(left_core, right_text):
         score -= 56
 
     if re.match(r"^[，。！？、：；,.!?]", right_text):
@@ -3143,6 +3839,8 @@ def _merge_continuation_entries(
         protected_boundary = _boundary_splits_protected_term(prev.text_raw, entry.text_raw)
         measure_boundary = _looks_like_split_measure_phrase(prev.text_raw, entry.text_raw)
         predicate_boundary = _boundary_splits_predicate_phrase(prev.text_raw, entry.text_raw)
+        bare_determiner_boundary = _boundary_splits_bare_determiner_phrase(prev.text_raw, entry.text_raw)
+        pronoun_modifier_boundary = _boundary_splits_pronoun_modifier_phrase(prev.text_raw, entry.text_raw)
         honor_boundary = _boundary_splits_honor_transition_phrase(prev.text_raw, entry.text_raw)
         possessive_boundary = _boundary_splits_possessive_phrase(prev.text_raw, entry.text_raw)
         compound_boundary = _boundary_splits_compound_term(prev.text_raw, entry.text_raw)
@@ -3150,32 +3848,44 @@ def _merge_continuation_entries(
             protected_boundary
             or measure_boundary
             or predicate_boundary
+            or bare_determiner_boundary
+            or pronoun_modifier_boundary
             or honor_boundary
             or possessive_boundary
             or compound_boundary
         )
         fragment_boundary = _starts_with_attached_fragment(entry.text_raw)
         strong_fragment_boundary = _is_strong_fragment_boundary(prev.text_raw, entry.text_raw, gap=gap)
-        allowed_chars = max_chars + 6 + (4 if protected_boundary else 0) + (4 if prioritized_repair_boundary else 0)
-        short_text_bonus = 2.0 if len(combined_text) <= max(16, max_chars - 8) else 0.0
-        allowed_duration = (
-            max_duration
-            + 1.0
-            + (1.5 if protected_boundary else 0.0)
-            + (0.6 if fragment_boundary else 0.0)
-            + (0.8 if prioritized_repair_boundary else 0.0)
-            + short_text_bonus
-        )
-        allowed_duration = max(
-            allowed_duration,
-            _fragmented_display_hold_duration_limit(
-                text_length=len(combined_text),
-                max_chars=max_chars,
-                max_duration=max_duration,
-                gap=gap,
-                strong_fragment_boundary=strong_fragment_boundary,
-            ),
-        )
+        overflow_chars = 0
+        if fragment_boundary or strong_fragment_boundary:
+            overflow_chars = max(overflow_chars, 2)
+        if prioritized_repair_boundary:
+            overflow_chars = max(overflow_chars, 4)
+        if protected_boundary:
+            overflow_chars = max(overflow_chars, 6)
+        allowed_chars = max_chars + overflow_chars
+
+        duration_overflow = 0.0
+        if fragment_boundary:
+            duration_overflow = max(duration_overflow, 0.6)
+        if strong_fragment_boundary:
+            duration_overflow = max(duration_overflow, 0.8)
+        if prioritized_repair_boundary:
+            duration_overflow = max(duration_overflow, 1.2)
+        if protected_boundary:
+            duration_overflow = max(duration_overflow, 1.8)
+        allowed_duration = max_duration + duration_overflow
+        if overflow_chars > 0 or duration_overflow > 0.0:
+            allowed_duration = max(
+                allowed_duration,
+                _fragmented_display_hold_duration_limit(
+                    text_length=len(combined_text),
+                    max_chars=max_chars,
+                    max_duration=max_duration,
+                    gap=gap,
+                    strong_fragment_boundary=strong_fragment_boundary,
+                ),
+            )
         if (
             gap <= 0.18
             and len(combined_text) <= allowed_chars
@@ -3350,7 +4060,7 @@ def _merge_short_chain_entries(
     max_chars: int,
     max_duration: float,
 ) -> list[SubtitleEntry]:
-    if len(entries) <= 2:
+    if len(entries) <= 1:
         return entries
 
     merged: list[SubtitleEntry] = []
@@ -3390,16 +4100,18 @@ def _merge_short_chain_entries(
         current = entries[index]
         current_text = str(current.text_raw or "").strip()
         stripped_current_text = _strip_boundary_trailing_punctuation(current_text)
+        detachable_lead_in = _looks_like_detachable_lead_in(current_text)
+        short_followon_fragment = _looks_like_short_followon_clause_fragment(current_text)
         is_short_fragment = _is_short_subtitle_fragment(current_text) or bool(
             stripped_current_text
             and stripped_current_text != current_text
             and len(stripped_current_text) <= 2
-        )
+        ) or detachable_lead_in or short_followon_fragment
         if is_short_fragment:
             best_direction: str | None = None
             best_gain = 0.0
 
-            if merged:
+            if merged and not detachable_lead_in:
                 previous = merged[-1]
                 previous_text = str(previous.text_raw or "").strip()
                 left_gap = max(0.0, float(current.start) - float(previous.end))
@@ -3414,6 +4126,7 @@ def _merge_short_chain_entries(
                     and (
                         _starts_with_attached_fragment(current_text)
                         or _starts_with_soft_attached_fragment(current_text)
+                        or short_followon_fragment
                         or _boundary_splits_compound_term(previous_text, current_text)
                         or single_char_residual_left_merge
                         or _looks_like_soft_fragmentary_tail(previous_text)
@@ -3422,7 +4135,11 @@ def _merge_short_chain_entries(
                 if (
                     previous_text
                     and left_gap <= 0.18
-                    and (len(left_text) <= max_chars + 2 or single_char_residual_left_merge)
+                    and (
+                        len(left_text)
+                        <= max_chars + (4 if short_followon_fragment else 2)
+                        or single_char_residual_left_merge
+                    )
                     and previous_text[-1] not in _HARD_BREAK_CHARS
                 ):
                     if force_left_merge:
@@ -3461,13 +4178,21 @@ def _merge_short_chain_entries(
                         or _starts_with_soft_attached_fragment(following_text)
                         or _starts_with_attached_fragment(following_text)
                     )
+                ) or bool(detachable_lead_in and len(following_text) >= 8) or bool(
+                    len(current_text) <= 4
+                    and any(following_text.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES)
+                    and current_text[-1] not in _HARD_BREAK_CHARS
+                ) or bool(
+                    short_followon_fragment
+                    and following_text
+                    and current_text[-1] not in _HARD_BREAK_CHARS
                 )
                 right_prefix = stripped_current_text if force_right_merge else current_text
                 right_text = f"{right_prefix}{following_text}"
                 if (
                     following_text
                     and right_gap <= 0.18
-                    and len(right_text) <= max_chars + 2
+                    and len(right_text) <= (max_chars + (4 if detachable_lead_in or short_followon_fragment else 2))
                     and (current_text[-1] not in _HARD_BREAK_CHARS or force_right_merge)
                 ):
                     if force_right_merge:
@@ -3571,24 +4296,62 @@ def _merge_same_source_segment_micro_fragments(
                     f"{str(run[0].text_raw or '').strip()}{str(run[1].text_raw or '').strip()}",
                     words=tuple(run[0].words or ()) + tuple(run[1].words or ()),
                 )
-                merged.append(merged_entry)
-                index = next_index
-                continue
+                if _boundary_splits_short_followon_clause(run[0].text_raw, run[1].text_raw):
+                    merged.append(merged_entry)
+                    index = next_index
+                    continue
+                if (
+                    len(str(run[0].text_raw or "").strip()) <= 6
+                    and _is_incomplete_subtitle_text(run[0].text_raw)
+                    and not any(str(run[1].text_raw or "").startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES)
+                ):
+                    merged.append(merged_entry)
+                    index = next_index
+                    continue
+                current_analysis = analyze_subtitle_segmentation(run)
+                candidate_analysis = analyze_subtitle_segmentation([merged_entry])
+                current_score = _score_entry_sequence(run, max_chars=max_chars, max_duration=max_duration)
+                candidate_score = _score_entry_sequence([merged_entry], max_chars=max_chars, max_duration=max_duration)
+                if _fragment_window_candidate_is_acceptable(
+                    current_entries=run,
+                    candidate_entries=[merged_entry],
+                    current_score=current_score,
+                    candidate_score=candidate_score,
+                    current_analysis=current_analysis,
+                    candidate_analysis=candidate_analysis,
+                    max_chars=max_chars,
+                ):
+                    merged.append(merged_entry)
+                    index = next_index
+                    continue
             if _should_compact_same_source_run(run, max_chars=max_chars, max_duration=max_duration):
                 compacted = _compact_same_source_run(run, max_chars=max_chars, max_duration=max_duration)
-                for entry in compacted:
-                    merged.append(
-                        SubtitleEntry(
-                            index=len(merged),
-                            start=entry.start,
-                            end=entry.end,
-                            text_raw=entry.text_raw,
-                            text_norm=entry.text_norm,
-                            words=tuple(entry.words or ()),
+                current_analysis = analyze_subtitle_segmentation(run)
+                candidate_analysis = analyze_subtitle_segmentation(compacted)
+                current_score = _score_entry_sequence(run, max_chars=max_chars, max_duration=max_duration)
+                candidate_score = _score_entry_sequence(compacted, max_chars=max_chars, max_duration=max_duration)
+                if _fragment_window_candidate_is_acceptable(
+                    current_entries=run,
+                    candidate_entries=compacted,
+                    current_score=current_score,
+                    candidate_score=candidate_score,
+                    current_analysis=current_analysis,
+                    candidate_analysis=candidate_analysis,
+                    max_chars=max_chars,
+                ):
+                    for entry in compacted:
+                        merged.append(
+                            SubtitleEntry(
+                                index=len(merged),
+                                start=entry.start,
+                                end=entry.end,
+                                text_raw=entry.text_raw,
+                                text_norm=entry.text_norm,
+                                words=tuple(entry.words or ()),
+                            )
                         )
-                    )
-                index = next_index
-                continue
+                    index = next_index
+                    continue
 
         merged.append(
             SubtitleEntry(
@@ -3616,24 +4379,45 @@ def _should_merge_same_source_pair(
     if not left_text or not right_text:
         return False
     gap = max(0.0, float(right.start) - float(left.end))
-    if gap <= 0.18 or gap > 1.8:
+    if gap > 1.8:
         return False
     combined_text = f"{left_text}{right_text}"
     combined_duration = max(0.0, float(right.end) - float(left.start))
     repair_signal = (
-        len(left_text) <= 4
-        or len(right_text) <= 4
-        or _is_short_subtitle_fragment(left_text)
-        or _is_short_subtitle_fragment(right_text)
-        or _starts_with_attached_fragment(right_text)
+        _starts_with_attached_fragment(right_text)
         or _starts_with_soft_attached_fragment(right_text)
         or _looks_like_soft_fragmentary_tail(left_text)
+        or _boundary_splits_short_followon_clause(left_text, right_text)
+        or _boundary_splits_single_char_residual(left_text, right_text)
+        or _boundary_splits_predicate_phrase(left_text, right_text)
         or _boundary_splits_compound_term(left_text, right_text)
         or _boundary_splits_numeric_unit(left_text, right_text)
     )
     if not repair_signal:
         return False
     return len(combined_text) <= max_chars + 4 and combined_duration <= max(max_duration + 2.4, 6.5)
+
+
+def _boundary_splits_short_followon_clause(left_text: str, right_text: str) -> bool:
+    left_candidate = str(left_text or "").strip()
+    right_candidate = str(right_text or "").strip()
+    if not left_candidate or not right_candidate:
+        return False
+    if left_candidate[-1] not in tuple(_SOFT_BREAK_CHARS):
+        return False
+    right_core = _strip_boundary_leading_particles(right_candidate) or right_candidate
+    right_core = _strip_boundary_trailing_punctuation(right_core)
+    if not right_core or len(right_core) > 8:
+        return False
+    if _is_incomplete_subtitle_text(right_core):
+        return False
+    if any(right_core.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES):
+        return False
+    if re.search(r"[A-Za-z0-9]{4,}", right_core):
+        return False
+    if right_candidate[-1] in tuple(_HARD_BREAK_CHARS + _SOFT_BREAK_CHARS):
+        return True
+    return len(right_core) <= 5
 
 
 def _merge_short_bridge_entries(entries: list[SubtitleEntry]) -> list[SubtitleEntry]:
@@ -3647,12 +4431,26 @@ def _merge_short_bridge_entries(entries: list[SubtitleEntry]) -> list[SubtitleEn
         if index + 1 < len(entries):
             following = entries[index + 1]
             candidate = str(current.text_raw or "").strip()
+            following_text = str(following.text_raw or "").strip()
             gap = max(0.0, float(following.start) - float(current.end))
             if (
                 gap <= 0.18
                 and 1 <= len(candidate) <= 3
                 and candidate[0] in _BOUNDARY_LEADING_PARTICLES
             ):
+                if _looks_like_detachable_lead_in(candidate) and len(following_text) >= 10:
+                    merged.append(
+                        SubtitleEntry(
+                            index=len(merged),
+                            start=current.start,
+                            end=current.end,
+                            text_raw=current.text_raw,
+                            text_norm=current.text_norm,
+                            words=tuple(current.words or ()),
+                        )
+                    )
+                    index += 1
+                    continue
                 combined_text = f"{candidate}{following.text_raw}"
                 if len(combined_text) <= 24:
                     merged.append(
@@ -3841,6 +4639,10 @@ def _chunk_low_confidence_window(
         return [(start, end)]
 
     candidate_entries = entries[start:end + 1]
+    focused_windows = _collect_residual_repair_focus_windows(entries, start, end)
+    if focused_windows and len(candidate_entries) > 3:
+        return focused_windows
+
     total_chars = sum(len(str(entry.text_raw or "").strip()) for entry in candidate_entries)
     if (
         len(candidate_entries) <= _LOW_CONFIDENCE_WINDOW_MAX_ENTRIES
@@ -3868,6 +4670,39 @@ def _chunk_low_confidence_window(
         chunked.append((cursor, final_end))
         cursor = final_end + 1
     return chunked
+
+
+def _collect_residual_repair_focus_windows(
+    entries: list[SubtitleEntry],
+    start: int,
+    end: int,
+) -> list[tuple[int, int]]:
+    repair_indexes: list[int] = []
+    for index in range(start, end + 1):
+        current = entries[index]
+        previous = entries[index - 1] if index > 0 else None
+        following = entries[index + 1] if index + 1 < len(entries) else None
+        if _entry_needs_residual_repair(
+            previous=previous,
+            current=current,
+            following=following,
+        ):
+            repair_indexes.append(index)
+    if not repair_indexes:
+        return []
+
+    windows: list[tuple[int, int]] = []
+    for repair_index in repair_indexes:
+        windows.append((max(start, repair_index - 1), min(end, repair_index + 1)))
+
+    merged: list[tuple[int, int]] = []
+    for window_start, window_end in windows:
+        if not merged or window_start > merged[-1][1] + 1:
+            merged.append((window_start, window_end))
+            continue
+        previous_start, previous_end = merged[-1]
+        merged[-1] = (previous_start, max(previous_end, window_end))
+    return merged
 
 
 def _collect_low_confidence_windows(entries: list[SubtitleEntry]) -> list[tuple[int, int]]:
@@ -3943,6 +4778,21 @@ def _entry_needs_residual_repair(
         return True
     if _looks_like_unclosed_nominal_tail(candidate):
         return True
+    if _looks_like_short_detached_clause_fragment(candidate):
+        previous_bad_boundary = (
+            previous is not None
+            and 0.0 <= float(current.start) - float(previous.end) <= _MAX_SEMANTIC_BRIDGE_GAP_SEC
+            and _semantic_boundary_quality(previous.text_raw, candidate) <= -1.5
+            and not any(candidate.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES)
+        )
+        following_bad_boundary = (
+            following is not None
+            and 0.0 <= float(following.start) - float(current.end) <= _MAX_SEMANTIC_BRIDGE_GAP_SEC
+            and _semantic_boundary_quality(candidate, following.text_raw) <= -1.5
+            and not any(following.text_raw.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES)
+        )
+        if previous_bad_boundary or following_bad_boundary:
+            return True
     if len(candidate) > 8:
         return False
     if _starts_with_soft_attached_fragment(candidate):
@@ -4595,8 +5445,6 @@ def _boundary_splits_alnum_token(left: str, right: str) -> bool:
 def _boundary_splits_generic_chinese_word(left: str, right: str) -> bool:
     if _boundary_splits_fallback_chinese_word(left, right):
         return True
-    if jieba is None:
-        return False
     left_tail_match = re.search(r"[\u4e00-\u9fff]{1,8}$", str(left or ""))
     right_head_match = re.match(r"[\u4e00-\u9fff]{1,8}", str(right or ""))
     if not left_tail_match or not right_head_match:
@@ -4606,6 +5454,23 @@ def _boundary_splits_generic_chinese_word(left: str, right: str) -> bool:
     context = f"{left_tail}{right_head}"
     boundary = len(left_tail)
     if len(context) < 2:
+        return False
+    cursor = 0
+    for token in tokenize_alignment_text(context):
+        token = str(token or "")
+        if not token:
+            continue
+        start = cursor
+        end = cursor + len(token)
+        cursor = end
+        if not (start < boundary < end):
+            continue
+        if len(token) < 2 or not re.search(r"[\u4e00-\u9fff]{2,}", token):
+            continue
+        if token in _GOOD_BREAK_PREFIXES or token in _NO_SPLIT_ENDINGS or token in _NO_SPLIT_PREFIXES:
+            continue
+        return True
+    if jieba is None:
         return False
     cursor = 0
     for token in jieba.lcut(context, HMM=True):
@@ -4749,6 +5614,97 @@ def _looks_like_soft_fragmentary_tail(text: str) -> bool:
     return any(candidate.endswith(token) for token in _SOFT_FRAGMENTARY_ENDINGS)
 
 
+def _looks_like_detachable_lead_in_chain(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate or candidate[-1] in _HARD_BREAK_CHARS:
+        return False
+    core = _strip_boundary_trailing_punctuation(candidate)
+    if not core or len(core) > 10:
+        return False
+    if re.search(r"[A-Za-z0-9]{2,}", core):
+        return False
+    tokens = [part.strip() for part in re.split(r"[，,、：:；;\s]+", core) if part.strip()]
+    if len(tokens) == 1:
+        fallback_tokens = [str(token).strip() for token in tokenize_alignment_text(core) if str(token).strip()]
+        if 2 <= len(fallback_tokens) <= 4:
+            tokens = fallback_tokens
+    if len(tokens) < 2 or len(tokens) > 4:
+        return False
+    return all(token in _DETACHABLE_LEAD_IN_CHAIN_TOKENS for token in tokens)
+
+
+def _looks_like_detachable_lead_in(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return False
+    if _looks_like_detachable_lead_in_chain(candidate):
+        return True
+    core = _strip_boundary_trailing_punctuation(candidate)
+    if not core:
+        return False
+    if candidate[-1] in "，,、：:；;" and len(core) <= 6:
+        if re.search(r"[A-Za-z0-9]{2,}", core):
+            return False
+        return True
+    if len(core) > 4:
+        return False
+    return bool(
+        re.fullmatch(
+            r"(?:啊|呃|嗯|嗯啊|呃啊|然后啊|那么啊|但是呢|其实呢|所以呢|这儿|这玩意儿)",
+            core,
+        )
+    )
+
+
+def _looks_like_short_followon_clause_fragment(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate or len(candidate) > 8:
+        return False
+    if re.search(r"[A-Za-z0-9]{2,}", candidate):
+        return False
+
+    stripped = _strip_boundary_leading_particles(candidate)
+    core = stripped or candidate
+    if not core or len(core) > 6:
+        return False
+
+    if _starts_with_attached_fragment(candidate) or _starts_with_soft_attached_fragment(candidate):
+        return True
+    if _looks_like_soft_fragmentary_tail(candidate):
+        return True
+    if candidate[-1] in _SOFT_BREAK_CHARS and any(marker in candidate for marker in ("呃", "嗯", "啊", "呢", "嘛")):
+        return True
+    token_count = len([token for token in tokenize_alignment_text(candidate) if str(token or "").strip()])
+    if token_count >= 2 and candidate[-1] in (_HARD_BREAK_CHARS + _SOFT_BREAK_CHARS):
+        return True
+    if stripped and stripped != candidate and candidate[-1] in (_HARD_BREAK_CHARS + _SOFT_BREAK_CHARS):
+        return True
+    return False
+
+
+def _strip_boundary_trailing_particles(text: str) -> str:
+    result = _strip_boundary_trailing_punctuation(text)
+    trimmed = _BOUNDARY_TRAILING_BRIDGE_RE.sub("", result).rstrip("，,。！？!?、：:；; ")
+    return trimmed or result
+
+
+def _looks_like_short_detached_clause_fragment(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate or len(candidate) > 10:
+        return False
+    if re.search(r"[A-Za-z0-9]{2,}", candidate):
+        return False
+    stripped = _strip_boundary_leading_particles(candidate) or candidate
+    core = _strip_boundary_trailing_particles(stripped)
+    if not core or len(core) > 4:
+        return False
+    if _looks_like_detachable_lead_in(candidate):
+        return True
+    if _looks_like_short_followon_clause_fragment(candidate):
+        return True
+    return bool(re.search(r"[\u3400-\u9fff]", core))
+
+
 def _is_short_subtitle_fragment(text: str) -> bool:
     candidate = str(text or "").strip()
     if not candidate or len(candidate) > 4:
@@ -4800,10 +5756,10 @@ def _should_compact_same_source_run(
     texts = [str(entry.text_raw or "").strip() for entry in entries]
     short_count = sum(1 for text in texts if len(text) <= 6)
     if len(entries) == 2:
+        if not _should_merge_same_source_pair(entries[0], entries[1], max_chars=max_chars, max_duration=max_duration):
+            return False
         combined_text = "".join(texts)
         if len(combined_text) > max_chars + 4:
-            return False
-        if not any(len(text) <= 4 for text in texts):
             return False
     elif short_count < 2:
         return False
@@ -4933,7 +5889,29 @@ def _boundary_splits_single_char_residual(left: str, right: str) -> bool:
         return False
     if not re.match(r"^[\u4e00-\u9fff]", stripped_right):
         return False
-    return len(left_text) >= 2 and not any(left_text.endswith(token) for token in _NO_SPLIT_ENDINGS)
+    if any(left_text.endswith(token) for token in _NO_SPLIT_ENDINGS):
+        return False
+
+    left_tail_match = re.search(r"[\u4e00-\u9fff]{1,4}$", left_text)
+    right_head_match = re.match(r"[\u4e00-\u9fff]{1,4}", stripped_right)
+    if not left_tail_match or not right_head_match:
+        return False
+
+    left_tail = left_tail_match.group(0)
+    right_head = right_head_match.group(0)
+    boundary = len(left_tail)
+    context = f"{left_tail}{right_head}"
+    cursor = 0
+    for token in tokenize_alignment_text(context):
+        token = str(token or "")
+        if not token:
+            continue
+        start = cursor
+        end = cursor + len(token)
+        cursor = end
+        if start < boundary < end and len(token) >= 2:
+            return True
+    return False
 
 
 def _boundary_splits_possessive_phrase(left: str, right: str) -> bool:

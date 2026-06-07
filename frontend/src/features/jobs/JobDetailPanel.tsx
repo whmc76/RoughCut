@@ -401,7 +401,7 @@ export function JobDetailPanel({
           {showDownload ? <div className="muted compact-top">{downloadHint}</div> : null}
           {isAwaitingManualEdit ? (
             <div className="notice compact-top">
-              {selectedJob.review_detail || "智能辅助模式已完成剪辑预处理，等待用户打开手动调整并保存后再进入渲染。"}
+              {selectedJob.review_detail || "智能辅助模式预处理已完成。当前百分比不是渲染进度；任务仍在等待手动调整页正式提交渲染。"}
             </div>
           ) : null}
 

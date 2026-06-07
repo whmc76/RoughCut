@@ -134,7 +134,7 @@ export type JobManualEditRuleSegment = {
   detail?: string | null;
   evidence?: string[];
   auto_applied?: boolean;
-  filler_mode?: "standalone" | "continuous" | null;
+  filler_mode?: "standalone" | "sentence_head" | "sentence_tail" | "continuous" | null;
   source_text?: string | null;
 };
 
@@ -180,6 +180,7 @@ export type JobManualEditSubtitle = {
   text_norm?: string | null;
   text_final?: string | null;
   transcript_text?: string | null;
+  timing_text?: string | null;
   display_suppressed_reason?: string | null;
   words?: JobManualEditWord[];
   alignment_tokens?: JobManualEditAlignmentToken[];

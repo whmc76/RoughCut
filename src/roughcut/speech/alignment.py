@@ -15,7 +15,10 @@ _SINGLE_CHAR_FUNCTION_TOKENS = {
     "我", "你", "他", "她", "它", "这", "那", "会", "要", "能", "可", "先", "再",
 }
 _MULTI_CHAR_ATOMIC_TOKENS = (
+    "奈特科尔",
     "狐蝠工业",
+    "或者说",
+    "或者",
     "我们",
     "你们",
     "他们",
@@ -47,6 +50,8 @@ _MULTI_CHAR_ATOMIC_TOKENS = (
     "质感",
     "容量",
     "尺寸",
+    "简单的",
+    "简单",
     "起来",
     "下来",
     "上来",
@@ -90,6 +95,26 @@ _MULTI_CHAR_ATOMIC_TOKENS = (
     "喜欢",
     "可以",
     "理解",
+    "升级",
+    "展示",
+    "功能",
+    "要求",
+    "产品线",
+    "算是",
+    "满足",
+    "符合",
+    "相当",
+    "高端",
+    "平时",
+    "临时",
+    "出个门",
+    "遛个狗",
+    "晚上",
+    "出门",
+    "带它",
+    "短途",
+    "通勤",
+    "实用",
     "为什么",
     "大家",
     "已经",
@@ -100,6 +125,10 @@ _MULTI_CHAR_ATOMIC_TOKENS = (
     "尾盖",
     "夜骑",
     "补光",
+    "该升级",
+)
+_SORTED_MULTI_CHAR_ATOMIC_TOKENS = tuple(
+    sorted(_MULTI_CHAR_ATOMIC_TOKENS, key=len, reverse=True)
 )
 _MEASURE_UNIT_TOKENS = (
     "流明",
@@ -357,25 +386,40 @@ def _chunk_cjk_tokens(chunk: str) -> list[str]:
     tokens: list[str] = []
     index = 0
     while index < len(text):
-        for atomic in _MULTI_CHAR_ATOMIC_TOKENS:
-            if text.startswith(atomic, index):
-                tokens.append(atomic)
-                index += len(atomic)
-                break
-        else:
-            char = text[index]
-            remaining = len(text) - index
-            if char in _SINGLE_CHAR_FUNCTION_TOKENS or remaining == 1:
-                tokens.append(char)
-                index += 1
-                continue
-            if remaining == 3 and text[index + 2] in _SINGLE_CHAR_FUNCTION_TOKENS:
-                tokens.append(text[index:index + 2])
-                tokens.append(text[index + 2])
-                break
+        direct_atomic = _match_atomic_token(text, index)
+        if direct_atomic:
+            tokens.append(direct_atomic)
+            index += len(direct_atomic)
+            continue
+
+        lookahead_atomic = _match_atomic_token(text, index + 1)
+        if lookahead_atomic and text[index] not in _SINGLE_CHAR_FUNCTION_TOKENS:
+            tokens.append(text[index])
+            index += 1
+            continue
+
+        char = text[index]
+        remaining = len(text) - index
+        if char in _SINGLE_CHAR_FUNCTION_TOKENS or remaining == 1:
+            tokens.append(char)
+            index += 1
+            continue
+        if remaining == 3 and text[index + 2] in _SINGLE_CHAR_FUNCTION_TOKENS:
             tokens.append(text[index:index + 2])
-            index += 2
+            tokens.append(text[index + 2])
+            break
+        tokens.append(text[index:index + 2])
+        index += 2
     return tokens
+
+
+def _match_atomic_token(text: str, index: int) -> str | None:
+    if index < 0 or index >= len(text):
+        return None
+    for atomic in _SORTED_MULTI_CHAR_ATOMIC_TOKENS:
+        if text.startswith(atomic, index):
+            return atomic
+    return None
 
 
 def _strip_outer_punctuation(token: str) -> str:

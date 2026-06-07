@@ -8,13 +8,23 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any
+import re
 
-from roughcut.host.codex_bridge import _resolve_codex_command_candidates, _terminate_process_tree
+from roughcut.host.codex_bridge import _resolve_codex_command_candidates, run_codex_exec
 from roughcut.providers.image_generation import mark_codex_imagegen_request_completed
 from roughcut.telegram.output_codec import decode_process_output
 
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+
+
+def _output_path_was_written_during_current_attempt(output_path: Path, *, started_at: float) -> bool:
+    if not output_path.exists():
+        return False
+    try:
+        return output_path.stat().st_mtime >= float(started_at)
+    except OSError:
+        return False
 
 
 def fulfill_codex_imagegen_request(
@@ -29,7 +39,8 @@ def fulfill_codex_imagegen_request(
         raise ValueError("Codex imagegen request must be a JSON object")
     recorded_output_path = str(payload.get("output_path") or "").strip()
     output_path = _resolve_runtime_mount_path(recorded_output_path, require_exists=False)
-    source_image_path = _resolve_runtime_mount_path(str(payload.get("source_image_path") or ""), require_exists=True)
+    reference_image_paths = _resolve_reference_image_paths(payload)
+    source_image_path = reference_image_paths[0]
     prompt = str(payload.get("prompt") or "").strip()
     if not str(output_path):
         raise ValueError("Codex imagegen request missing output_path")
@@ -65,8 +76,13 @@ def fulfill_codex_imagegen_request(
             result = _run_single_codex_imagegen(
                 command=candidate_command,
                 repo_root=repo_root,
-                source_image_path=source_image_path,
-                prompt=_build_codex_imagegen_prompt(prompt),
+                reference_image_paths=reference_image_paths,
+                prompt=_build_codex_imagegen_prompt(
+                    prompt,
+                    output_path=output_path,
+                    reference_count=len(reference_image_paths),
+                    reference_pack_contract=payload.get("reference_pack_contract"),
+                ),
                 output_path=output_path,
                 model_name=model_name,
                 sandbox_mode=sandbox_mode,
@@ -78,6 +94,8 @@ def fulfill_codex_imagegen_request(
                 output_path=output_path,
                 result_path=Path(result["result_path"]),
                 recorded_output_path=recorded_output_path or None,
+                session_id=str(result.get("session_id") or "").strip() or None,
+                timed_out=bool(result.get("timed_out")),
             )
             return {
                 "status": "completed",
@@ -95,9 +113,30 @@ def fulfill_codex_imagegen_request(
     raise RuntimeError(last_error or "Codex imagegen execution failed")
 
 
-def _build_codex_imagegen_prompt(brief: str) -> str:
+def _build_codex_imagegen_prompt(
+    brief: str,
+    *,
+    output_path: Path,
+    reference_count: int = 1,
+    reference_pack_contract: dict[str, Any] | None = None,
+) -> str:
+    contract = reference_pack_contract if isinstance(reference_pack_contract, dict) else {}
+    reference_line = (
+        "Use all attached images as a single same-product multi-angle reference pack."
+        if int(reference_count or 0) > 1
+        else "Use the attached image as the only reference/edit target."
+    )
+    multi_angle_policy = ""
+    if int(reference_count or 0) > 1 or bool(contract.get("same_product_multi_angle")):
+        multi_angle_policy = (
+            "All attached images show the same real product or the same real comparison pair from different angles, not different products.\n"
+            "Treat image 1 as the preferred hero-angle anchor.\n"
+            "Infer the final composition from the majority hero view across the pack: if most references show a front view, three-quarter front view, or fuller hero angle, keep that as the final dominant view.\n"
+            "Use minority side-profile, edge-on, or detail-only references only to preserve structure and surface details; do not let them replace the dominant front/hero composition.\n"
+        )
     return (
-        "Use the attached image as the only reference/edit target.\n"
+        f"{reference_line}\n"
+        f"{multi_angle_policy}"
         "Use Codex built-in image_gen or image editing capabilities to create exactly one final bitmap cover.\n"
         "Do not use any external image APIs.\n"
         "Do not inspect the repository or run unrelated shell commands.\n"
@@ -105,10 +144,14 @@ def _build_codex_imagegen_prompt(brief: str) -> str:
         f"{brief}\n\n"
         "Requirements:\n"
         "- Keep the product identity consistent with the reference.\n"
+        "- When multiple reference images are attached, combine them to preserve the same real product identity and cross-angle consistency.\n"
+        "- Do not reinterpret a minority side-view reference as the main front view of the final cover.\n"
         "- The bitmap itself must be the final publishable cover, not a text-free base image.\n"
         "- Render the requested brand line, main title, subtitle, and hook text directly in the bitmap when the brief asks for them.\n"
         "- Do not add any extra subtitles, slogans, logos, watermarks, or pseudo text beyond what the brief explicitly requests.\n"
         "- Keep the subject readable after typography placement; do not let title effects cover the main product details.\n"
+        f"- The final bitmap must be written exactly to this path before you finish: {output_path}\n"
+        "- If you need to fall back to direct bitmap rendering in code, save the final image to that exact output path, not a different filename.\n"
         "- After generating the best final bitmap, stop.\n"
         '- Final response JSON only: {"status":"completed","notes":"short summary"}\n'
     )
@@ -118,7 +161,7 @@ def _run_single_codex_imagegen(
     *,
     command: str,
     repo_root: Path,
-    source_image_path: Path,
+    reference_image_paths: list[Path],
     prompt: str,
     output_path: Path,
     model_name: str,
@@ -126,106 +169,72 @@ def _run_single_codex_imagegen(
     timeout_sec: int,
     started_at: float,
 ) -> dict[str, Any]:
-    with tempfile.TemporaryDirectory(prefix="roughcut-host-imagegen-") as temp_dir:
-        stdout_override_path = Path(temp_dir) / "last-message.txt"
-        cmd = [
-            command,
-            "-a",
-            "never",
-        ]
-        if model_name:
-            cmd.extend(["-m", model_name])
-        cmd.extend(
-            [
-                "exec",
-                "--color",
-                "never",
-                "-C",
-                str(repo_root),
-                "-s",
-                sandbox_mode,
-                "-o",
-                str(stdout_override_path),
-                "-i",
-                str(source_image_path),
-                "-",
-            ]
+    timed_out = False
+    try:
+        exec_result = run_codex_exec(
+            {
+                "repo_root": str(repo_root),
+                "prompt": prompt,
+                "images": [str(path) for path in reference_image_paths],
+                "model": model_name,
+                "sandbox": sandbox_mode,
+                "timeout_sec": timeout_sec,
+                "command": command,
+            }
         )
-        process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(repo_root),
-            env={**os.environ.copy(), "PYTHONIOENCODING": os.environ.get("PYTHONIOENCODING", "utf-8")},
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        timed_out = False
-        session_id = ""
-        generated: Path | None = None
-        try:
-            if process.stdin is None:
-                raise RuntimeError("codex imagegen stdin is unavailable")
-            process.stdin.write(prompt.encode("utf-8"))
-            process.stdin.close()
-            deadline = time.time() + timeout_sec
-            stdout_bytes = b""
-            stderr_bytes = b""
-            while True:
-                session_id = _read_codex_session_id(stdout_override_path, fallback=session_id)
-                if session_id:
-                    generated = _resolve_generated_image(session_id=session_id, started_at=started_at)
-                if session_id and generated is not None:
-                    _terminate_process_tree(process)
-                    try:
-                        stdout_bytes, stderr_bytes = process.communicate(timeout=5)
-                    except Exception:
-                        stdout_bytes = b""
-                        stderr_bytes = b""
-                    break
-                if process.poll() is not None:
-                    stdout_bytes = process.stdout.read() if process.stdout is not None else b""
-                    stderr_bytes = process.stderr.read() if process.stderr is not None else b""
-                    break
-                if time.time() >= deadline:
-                    raise subprocess.TimeoutExpired(cmd, timeout_sec, output=stdout_bytes, stderr=stderr_bytes)
-                time.sleep(1.0)
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            _terminate_process_tree(process)
-            try:
-                stdout_bytes, stderr_bytes = process.communicate(timeout=5)
-            except Exception:
-                stdout_bytes = exc.output or b""
-                stderr_bytes = exc.stderr or b""
-        stdout = decode_process_output(stdout_override_path.read_bytes()) if stdout_override_path.exists() else decode_process_output(stdout_bytes)
-        stderr = decode_process_output(stderr_bytes)
-        combined = "\n".join(part for part in (stdout, stderr) if part)
-        session_id = _extract_codex_session_id(combined) or session_id
-        generated = generated or _resolve_generated_image(session_id=session_id, started_at=started_at)
-        if generated is None:
-            if timed_out:
-                raise TimeoutError(f"codex imagegen timed out after {timeout_sec}s and no generated image was found")
-            if process.returncode != 0:
-                raise RuntimeError(stderr or stdout or f"codex exited with code {process.returncode}")
-            raise RuntimeError("codex imagegen finished but no generated image was found")
-        shutil.copy2(generated, output_path)
-        return {
-            "session_id": session_id,
-            "result_path": str(generated),
-            "timed_out": timed_out,
+    except TimeoutError as exc:
+        timed_out = True
+        exec_result = {
+            "stdout": "",
+            "stderr": str(exc),
+            "excerpt": str(exc),
         }
 
+    stdout = str(exec_result.get("stdout") or "")
+    stderr = str(exec_result.get("stderr") or "")
+    excerpt = str(exec_result.get("excerpt") or "")
+    combined = "\n".join(part for part in (stdout, stderr, excerpt) if part)
+    session_id = _extract_codex_session_id(combined)
+    allowed_roots = _generated_image_search_roots(repo_root=repo_root, output_path=output_path)
+    generated = output_path if _output_path_was_written_during_current_attempt(output_path, started_at=started_at) else None
+    if generated is None:
+        generated = _extract_generated_image_path_from_text(combined, allowed_roots=allowed_roots)
+        if generated is not None and generated.resolve() == output_path.resolve():
+            if not _output_path_was_written_during_current_attempt(output_path, started_at=started_at):
+                generated = None
+    if generated is None:
+        generated = _resolve_generated_image(session_id=session_id, started_at=started_at)
+        if generated is not None and generated.resolve() == output_path.resolve():
+            if not _output_path_was_written_during_current_attempt(output_path, started_at=started_at):
+                generated = None
+    if generated is None:
+        if timed_out:
+            raise TimeoutError(f"codex imagegen timed out after {timeout_sec}s and no generated image was found")
+        raise RuntimeError(stderr or stdout or "codex imagegen finished but no generated image was found")
+    if generated.resolve() != output_path.resolve():
+        shutil.copy2(generated, output_path)
+    return {
+        "session_id": session_id,
+        "result_path": str(generated),
+        "timed_out": timed_out,
+    }
 
-def _read_codex_session_id(path: Path, *, fallback: str = "") -> str:
-    try:
-        if path.exists():
-            value = _extract_codex_session_id(decode_process_output(path.read_bytes()))
-            if value:
-                return value
-    except Exception:
-        pass
-    return str(fallback or "")
+
+def _resolve_reference_image_paths(payload: dict[str, Any]) -> list[Path]:
+    raw_references = payload.get("reference_image_paths")
+    candidates = raw_references if isinstance(raw_references, list) and raw_references else [payload.get("source_image_path")]
+    resolved: list[Path] = []
+    for raw_path in candidates:
+        text = str(raw_path or "").strip()
+        if not text:
+            continue
+        path = _resolve_runtime_mount_path(text, require_exists=True)
+        if path in resolved:
+            continue
+        resolved.append(path)
+    if not resolved:
+        raise FileNotFoundError("Codex imagegen reference image missing")
+    return resolved
 
 
 def _extract_codex_session_id(text: str) -> str:
@@ -237,6 +246,32 @@ def _extract_codex_session_id(text: str) -> str:
         if value:
             return value
     return ""
+
+
+def _extract_generated_image_path_from_text(text: str, *, allowed_roots: list[Path] | None = None) -> Path | None:
+    if not text:
+        return None
+    roots = [root.resolve() for root in (allowed_roots or []) if isinstance(root, Path)]
+    candidates: list[Path] = []
+    for match in re.findall(r"[A-Za-z]:\\[^\r\n]+?\.(?:png|jpg|jpeg|webp)", text, flags=re.IGNORECASE):
+        path = Path(match.strip().strip('"'))
+        try:
+            resolved = path.resolve()
+            if not resolved.exists() or not resolved.is_file():
+                continue
+            if roots:
+                try:
+                    if not any(resolved.is_relative_to(root) for root in roots):
+                        continue
+                except AttributeError:
+                    if not any(str(resolved).lower().startswith(str(root).lower()) for root in roots):
+                        continue
+            candidates.append(resolved)
+        except OSError:
+            continue
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
 def _resolve_generated_image(*, session_id: str, started_at: float) -> Path | None:
@@ -265,6 +300,23 @@ def _resolve_generated_image(*, session_id: str, started_at: float) -> Path | No
     if not candidates:
         return None
     return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _generated_image_search_roots(*, repo_root: Path, output_path: Path) -> list[Path]:
+    roots = [repo_root, output_path.parent]
+    codex_home = str(os.getenv("CODEX_HOME", "") or "").strip()
+    if codex_home:
+        roots.append(Path(codex_home) / "generated_images")
+    roots.append(Path.home() / ".codex" / "generated_images")
+    unique: list[Path] = []
+    for root in roots:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            continue
+        if resolved not in unique:
+            unique.append(resolved)
+    return unique
 
 
 def _list_generated_images(root: Path) -> list[Path]:

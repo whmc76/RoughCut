@@ -1,13 +1,60 @@
 from __future__ import annotations
 
+import logging
+import os
+
 from celery import Celery
 
 from roughcut.config import get_settings
+
+logger = logging.getLogger(__name__)
+_PUBLICATION_BOOTSTRAP_SENT = False
 
 
 def _on_worker_init(**kwargs):
     from roughcut.db.session import set_worker_mode
     set_worker_mode(True)
+
+
+def _worker_queue_names_from_env() -> set[str]:
+    return {
+        item.strip()
+        for item in str(os.getenv("ROUGHCUT_WORKER_QUEUES", "")).split(",")
+        if item.strip()
+    }
+
+
+def should_bootstrap_publication_worker_tick() -> bool:
+    queue_names = _worker_queue_names_from_env()
+    return "publication_queue" in queue_names or "all" in queue_names
+
+
+def schedule_publication_worker_bootstrap(app: Celery) -> bool:
+    global _PUBLICATION_BOOTSTRAP_SENT
+    if _PUBLICATION_BOOTSTRAP_SENT:
+        return False
+    if not should_bootstrap_publication_worker_tick():
+        return False
+    settings = get_settings()
+    limit = max(1, int(getattr(settings, "publication_worker_batch_limit", 5) or 5))
+    app.send_task(
+        "roughcut.pipeline.tasks.publication_worker_tick",
+        kwargs={"limit": limit, "schedule_followup": True},
+        queue="publication_queue",
+    )
+    _PUBLICATION_BOOTSTRAP_SENT = True
+    logger.info("Bootstrapped publication worker tick on startup (limit=%s)", limit)
+    return True
+
+
+def _on_worker_ready(sender=None, **kwargs):
+    app = getattr(sender, "app", None)
+    if app is None:
+        return
+    try:
+        schedule_publication_worker_bootstrap(app)
+    except Exception:
+        logger.exception("Failed to bootstrap publication worker tick on startup")
 
 
 def create_celery_app() -> Celery:
@@ -34,7 +81,9 @@ def create_celery_app() -> Celery:
         task_acks_late=True,
     )
     from celery.signals import worker_init
+    from celery.signals import worker_ready
     worker_init.connect(_on_worker_init)
+    worker_ready.connect(_on_worker_ready)
     return app
 
 

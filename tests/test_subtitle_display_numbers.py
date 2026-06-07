@@ -3,6 +3,7 @@ from roughcut.speech.subtitle_segmentation import SubtitleEntry
 from roughcut.speech.subtitle_segmentation import _repair_cross_boundary_spoken_digit_runs
 from roughcut.speech.subtitle_segmentation import normalize_display_numbers
 from roughcut.speech.subtitle_segmentation import normalize_display_text
+from roughcut.speech.subtitle_segmentation import normalize_projection_display_text
 
 
 def test_subtitle_numeral_transcription_uses_arabic_for_codes_and_specs() -> None:
@@ -108,3 +109,33 @@ def test_projection_items_prefer_display_text_over_raw_asr_for_quality() -> None
 
     assert items[0].text_raw == "我的选择就是这个幺"
     assert items[0].text_final == "我的选择就是这个17。"
+
+
+def test_projection_display_normalization_preserves_lexical_content() -> None:
+    assert normalize_projection_display_text("然后，呃，首先") == "然后， 呃， 首先"
+    assert normalize_projection_display_text("这个就是M的这个标，你长按") == "这个就是M的这个标， 你长按"
+    assert normalize_projection_display_text("它前头一个功能键啊，这个功能键是") == "它前头1个功能键啊， 这个功能键是"
+
+
+def test_projection_items_do_not_strip_bridge_clauses_or_fillers() -> None:
+    items = _build_projection_items_from_entries(
+        [
+            SubtitleEntry(
+                index=0,
+                start=0.0,
+                end=1.0,
+                text_raw="然后，呃，首先",
+                text_norm="呃， 首先",
+            ),
+            SubtitleEntry(
+                index=1,
+                start=1.0,
+                end=2.0,
+                text_raw="这个就是M的这个标，你长按",
+                text_norm="M的这个标， 你长按。",
+            ),
+        ]
+    )
+
+    assert items[0].text_final == "然后， 呃， 首先"
+    assert items[1].text_final == "这个就是M的这个标， 你长按"

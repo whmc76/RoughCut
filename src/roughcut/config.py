@@ -25,6 +25,11 @@ from roughcut.naming import (
     VOICE_PROVIDER_VALUES,
     normalize_auth_mode,
 )
+from roughcut.providers.zhipu_compat import (
+    DEFAULT_ZHIPU_BASE_URL,
+    DEFAULT_ZHIPU_CODING_BASE_URL,
+    DEFAULT_ZHIPU_MCP_HTTP_BASE_URL,
+)
 from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_transcription_dialect
 
 DEFAULT_JOB_WORKFLOW_MODE = "standard_edit"
@@ -58,6 +63,7 @@ SECRET_SETTINGS: tuple[str, ...] = (
     "anthropic_api_key",
     "minimax_api_key",
     "minimax_coding_plan_api_key",
+    "zhipu_api_key",
     "ollama_api_key",
     "avatar_api_key",
     "voice_clone_api_key",
@@ -73,6 +79,11 @@ ENV_MANAGED_SETTINGS: tuple[str, ...] = (
     "anthropic_api_key_helper",
     "minimax_base_url",
     "minimax_api_host",
+    "zhipu_base_url",
+    "zhipu_coding_base_url",
+    "zhipu_mcp_http_base_url",
+    "zhipu_auth_mode",
+    "zhipu_api_key_helper",
     "ollama_base_url",
     "avatar_api_base_url",
     "avatar_training_api_base_url",
@@ -143,9 +154,13 @@ DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER = "searxng"
 DEFAULT_MULTIMODAL_FALLBACK_PROVIDER = "minimax"
 DEFAULT_MULTIMODAL_FALLBACK_MODEL = DEFAULT_MINIMAX_REASONING_MODEL
 DEFAULT_MODEL_SEARCH_HELPER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "codex_model_search_helper.py"
+DEFAULT_ZHIPU_REASONING_MODEL = "glm-5.1"
+DEFAULT_ZHIPU_VISION_MODEL = "glm-4.6v-flash"
+DEFAULT_ZHIPU_SEARCH_ENGINE = "search_pro"
 MINIMAX_REASONING_MODEL_ALIASES: dict[str, str] = {
     "minimax-m3": "MiniMax-M3",
-    "minimax-m2.7-highspeed": "MiniMax-M2.7",
+    "minimax-m2.7": "MiniMax-M3",
+    "minimax-m2.7-highspeed": "MiniMax-M3",
 }
 
 
@@ -416,7 +431,7 @@ class Settings(BaseSettings):
     heygem_docker_compose_file: str = "E:/WorkSpace/heygem/docker-compose.yml"
     heygem_docker_env_file: str = "E:/WorkSpace/heygem/.env"
     heygem_docker_services: str = "heygem"
-    heygem_docker_idle_timeout_sec: int = 900
+    heygem_docker_idle_timeout_sec: int = 10
     indextts2_docker_guard_enabled: bool = False
     indextts2_docker_compose_file: str = "E:/WorkSpace/indextts2-service/docker-compose.yml"
     indextts2_docker_env_file: str = "E:/WorkSpace/indextts2-service/.env"
@@ -449,7 +464,7 @@ class Settings(BaseSettings):
     # Reasoning
     llm_mode: str = "performance"  # performance | local
     llm_routing_mode: str = "bundled"  # bundled | hybrid_performance
-    reasoning_provider: str = DEFAULT_REASONING_PROVIDER  # openai | anthropic | minimax | ollama
+    reasoning_provider: str = DEFAULT_REASONING_PROVIDER  # openai | anthropic | minimax | zhipu | ollama
     reasoning_model: str = DEFAULT_REASONING_MODEL
     reasoning_effort: str = "low"
     llm_backup_enabled: bool = True
@@ -474,8 +489,8 @@ class Settings(BaseSettings):
     multimodal_fallback_model: str = DEFAULT_MULTIMODAL_FALLBACK_MODEL
 
     # Search (Phase 2)
-    search_provider: str = DEFAULT_SEARCH_PROVIDER  # auto | openai | anthropic | minimax | ollama | model | searxng
-    search_fallback_provider: str = DEFAULT_SEARCH_FALLBACK_PROVIDER  # openai | anthropic | minimax | ollama | model | searxng
+    search_provider: str = DEFAULT_SEARCH_PROVIDER  # auto | openai | anthropic | minimax | zhipu | ollama | model | searxng
+    search_fallback_provider: str = DEFAULT_SEARCH_FALLBACK_PROVIDER  # openai | anthropic | minimax | zhipu | ollama | model | searxng
     model_search_helper: str = ""
     searxng_url: str = "http://localhost:8080"
 
@@ -492,6 +507,13 @@ class Settings(BaseSettings):
     minimax_base_url: str = "https://api.minimaxi.com/v1"
     minimax_api_host: str = "https://api.minimaxi.com"
     minimax_coding_plan_api_key: str = ""
+    zhipu_api_key: str = ""
+    zhipu_base_url: str = DEFAULT_ZHIPU_BASE_URL
+    zhipu_coding_base_url: str = DEFAULT_ZHIPU_CODING_BASE_URL
+    zhipu_mcp_http_base_url: str = DEFAULT_ZHIPU_MCP_HTTP_BASE_URL
+    zhipu_auth_mode: str = "api_key"  # api_key | helper
+    zhipu_api_key_helper: str = ""
+    zhipu_search_engine: str = DEFAULT_ZHIPU_SEARCH_ENGINE
     ollama_api_key: str = ""
     ollama_base_url: str = "http://localhost:11434"
 
@@ -586,7 +608,7 @@ class Settings(BaseSettings):
     intelligent_copy_cover_image_backend: str = "codex_builtin"  # codex_builtin | openai_images_api | minimax_images_api | dreamina_web
     intelligent_copy_cover_image_model: str = "image2"
     intelligent_copy_cover_image_quality: str = "medium"
-    intelligent_copy_cover_image_timeout_sec: int = 90
+    intelligent_copy_cover_image_timeout_sec: int = 240
     intelligent_copy_cover_codex_max_attempts: int = 1
     intelligent_copy_cover_codex_runner_model: str = "gpt-5.4-mini"
     intelligent_copy_cover_codex_runner_effort: str = "low"
@@ -785,7 +807,7 @@ def normalize_reasoning_model_for_provider(provider: object, model: object) -> s
     normalized_provider = str(provider or "").strip().lower()
     model_value = str(model or "").strip()
     if not model_value:
-        return ""
+        return DEFAULT_ZHIPU_REASONING_MODEL if normalized_provider == "zhipu" else ""
     if normalized_provider != "minimax":
         return model_value
     return MINIMAX_REASONING_MODEL_ALIASES.get(model_value.lower(), model_value)
@@ -793,6 +815,13 @@ def normalize_reasoning_model_for_provider(provider: object, model: object) -> s
 
 def _has_minimax_reasoning_credentials(settings: Any) -> bool:
     return bool(str(getattr(settings, "minimax_api_key", "") or "").strip())
+
+
+def _has_zhipu_reasoning_credentials(settings: Any) -> bool:
+    auth_mode = normalize_auth_mode(getattr(settings, "zhipu_auth_mode", ""))
+    if auth_mode == "helper":
+        return bool(str(getattr(settings, "zhipu_api_key_helper", "") or "").strip())
+    return bool(str(getattr(settings, "zhipu_api_key", "") or "").strip())
 
 
 def _has_configured_searxng(settings: Any) -> bool:
@@ -977,6 +1006,7 @@ def _apply_settings_overrides(settings: Settings, updates: dict[str, Any]) -> No
 def _normalize_settings(settings: Settings) -> None:
     object.__setattr__(settings, "openai_auth_mode", normalize_auth_mode(getattr(settings, "openai_auth_mode", "api_key")))
     object.__setattr__(settings, "anthropic_auth_mode", normalize_auth_mode(getattr(settings, "anthropic_auth_mode", "api_key")))
+    object.__setattr__(settings, "zhipu_auth_mode", normalize_auth_mode(getattr(settings, "zhipu_auth_mode", "api_key")))
     provider, model = normalize_transcription_settings(
         settings.transcription_provider,
         settings.transcription_model,
@@ -1097,7 +1127,7 @@ def resolve_coding_backend_model(
 def _normalize_runtime_override_values(data: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(data)
 
-    for key in ("openai_auth_mode", "anthropic_auth_mode"):
+    for key in ("openai_auth_mode", "anthropic_auth_mode", "zhipu_auth_mode"):
         if key in normalized:
             normalized[key] = normalize_auth_mode(normalized.get(key))
 
@@ -1361,11 +1391,15 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
         backup_search_provider = "auto"
     if backup_search_provider == "minimax" and not _has_minimax_reasoning_credentials(settings) and _has_configured_searxng(settings):
         backup_search_provider = "searxng"
+    if backup_search_provider == "zhipu" and not _has_zhipu_reasoning_credentials(settings) and _has_configured_searxng(settings):
+        backup_search_provider = "searxng"
     object.__setattr__(settings, "backup_search_provider", backup_search_provider)
     backup_search_fallback = str(getattr(settings, "backup_search_fallback_provider", "") or "").strip().lower()
     if backup_search_fallback not in SEARCH_FALLBACK_PROVIDER_VALUES:
         backup_search_fallback = DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER
     if backup_search_fallback == "minimax" and not _has_minimax_reasoning_credentials(settings) and _has_configured_searxng(settings):
+        backup_search_fallback = "searxng"
+    if backup_search_fallback == "zhipu" and not _has_zhipu_reasoning_credentials(settings) and _has_configured_searxng(settings):
         backup_search_fallback = "searxng"
     object.__setattr__(settings, "backup_search_fallback_provider", backup_search_fallback)
     object.__setattr__(
@@ -1392,7 +1426,11 @@ def _normalize_llm_capability_bundle_settings(settings: Settings) -> None:
         search_provider = DEFAULT_SEARCH_PROVIDER
     if search_provider == "minimax" and not _has_minimax_reasoning_credentials(settings) and _has_configured_searxng(settings):
         search_provider = "searxng"
+    if search_provider == "zhipu" and not _has_zhipu_reasoning_credentials(settings) and _has_configured_searxng(settings):
+        search_provider = "searxng"
     if search_fallback == "minimax" and not _has_minimax_reasoning_credentials(settings) and _has_configured_searxng(settings):
+        search_fallback = "searxng"
+    if search_fallback == "zhipu" and not _has_zhipu_reasoning_credentials(settings) and _has_configured_searxng(settings):
         search_fallback = "searxng"
     object.__setattr__(settings, "search_provider", search_provider)
     object.__setattr__(settings, "search_fallback_provider", search_fallback)

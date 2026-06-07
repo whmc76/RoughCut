@@ -4,7 +4,7 @@ from collections.abc import Mapping
 import re
 from typing import Any
 
-from roughcut.config import DEFAULT_MINIMAX_REASONING_MODEL, get_settings
+from roughcut.config import DEFAULT_MINIMAX_REASONING_MODEL, DEFAULT_ZHIPU_VISION_MODEL, get_settings
 
 ARTIFACT_TYPE_VIDEO_UNDERSTANDING = "video_understanding"
 VIDEO_UNDERSTANDING_SCHEMA_VERSION = "video_understanding_v1"
@@ -167,11 +167,19 @@ def _resolve_model_route(
         or _text(visual_capability.get("mode"))
         or "hybrid_profile_fusion"
     )
-    model_name = _text(getattr(settings, "active_reasoning_model", "")) or _text(getattr(settings, "reasoning_model", ""))
-    if provider.lower() == "minimax" and mode == "native_multimodal":
-        model_name = "MiniMax-M3"
+    model_name = (
+        _text(visual_semantic_evidence.get("model"))
+        or _text(visual_capability.get("model"))
+        or (
+            _text(getattr(settings, "active_vision_model", "")) or _text(getattr(settings, "vision_model", ""))
+            if mode in {"native_multimodal", "llm_mcp_vision"}
+            else _text(getattr(settings, "active_reasoning_model", "")) or _text(getattr(settings, "reasoning_model", ""))
+        )
+    )
     if not model_name and provider.lower() == "minimax":
         model_name = DEFAULT_MINIMAX_REASONING_MODEL
+    if not model_name and provider.lower() == "zhipu":
+        model_name = "zai-mcp-server" if mode == "llm_mcp_vision" else DEFAULT_ZHIPU_VISION_MODEL
     return provider, model_name, mode
 
 

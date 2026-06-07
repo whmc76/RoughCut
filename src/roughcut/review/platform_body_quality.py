@@ -16,6 +16,17 @@ _AI_FALLBACK_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"根据(视频|素材|内容|字幕)(可知|来看|整理)"),
 )
 
+_AI_EXPLAINER_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"避免单看一个版本产生偏差"),
+    re.compile(r"方便(?:正在)?纠结.+?的朋友参考"),
+    re.compile(r"把真实.+?写进视频里"),
+    re.compile(r"本期一条视频讲透"),
+    re.compile(r"逐一摆出来对比"),
+    re.compile(r"重点不只在.+?而是"),
+    re.compile(r"(方便|便于).{0,8}(判断|参考|理解|选择)"),
+    re.compile(r"(从|按).{0,6}(维度|方面).{0,8}(对比|展开|拆解)"),
+)
+
 _GENERIC_PHRASES = (
     "内容丰富",
     "值得一看",
@@ -91,6 +102,11 @@ def assess_platform_body(
         blocking_reasons.append(f"正文像 AI 兜底/审核提示文案：{fallback_hits[0]}")
         repair_hints.append("删除“主要围绕/人工核对/根据素材”等兜底句，改成第一人称或现场观察。")
 
+    explainer_hits = _ai_explainer_hits(text)
+    if explainer_hits:
+        blocking_reasons.append(f"正文像 AI 说明文/提纲腔：{explainer_hits[0]}")
+        repair_hints.append("不要写“方便参考/避免偏差/逐一展开/讲透”这类说明文句式，改成具体画面、动作和上手感受。")
+
     generic_score = _generic_score(text)
     if generic_score >= 2 and not _has_experience_detail(text):
         blocking_reasons.append("正文空泛，缺少视频里的具体动作或体验细节")
@@ -134,6 +150,15 @@ def _normalize_body(value: str) -> str:
 def _ai_fallback_hits(text: str) -> list[str]:
     hits: list[str] = []
     for pattern in _AI_FALLBACK_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            hits.append(match.group(0))
+    return _dedupe(hits)
+
+
+def _ai_explainer_hits(text: str) -> list[str]:
+    hits: list[str] = []
+    for pattern in _AI_EXPLAINER_PATTERNS:
         match = pattern.search(text)
         if match:
             hits.append(match.group(0))

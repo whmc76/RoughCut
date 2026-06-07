@@ -32,6 +32,11 @@ def publication_platform_capabilities(platform: str | None) -> dict[str, Any]:
     return dict(entry)
 
 
+def platform_publish_scheme(platform: str | None) -> dict[str, Any]:
+    raw_scheme = publication_platform_capabilities(platform).get("publish_scheme")
+    return dict(raw_scheme) if isinstance(raw_scheme, dict) else {}
+
+
 def publication_collection_policy_skip_values() -> set[str]:
     matrix = load_publication_platform_matrix()
     return {
@@ -58,8 +63,100 @@ def platform_requires_custom_cover_policy(platform: str | None) -> bool:
     return bool(publication_platform_capabilities(platform).get("requires_custom_cover_policy"))
 
 
+def platform_required_cover_slots(platform: str | None) -> list[dict[str, Any]]:
+    raw_slots = publication_platform_capabilities(platform).get("required_cover_slots")
+    if not isinstance(raw_slots, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in raw_slots:
+        if not isinstance(item, dict):
+            continue
+        slot = str(item.get("slot") or item.get("key") or item.get("name") or "").strip()
+        label = str(item.get("label") or "").strip()
+        matrix_key = str(item.get("matrix_key") or item.get("group_key") or "").strip()
+        target_size = item.get("target_size") if isinstance(item.get("target_size"), dict) else {}
+        try:
+            width = int(target_size.get("width") or target_size.get("w") or 0)
+            height = int(target_size.get("height") or target_size.get("h") or 0)
+        except (TypeError, ValueError):
+            width = 0
+            height = 0
+        normalized_item: dict[str, Any] = {}
+        if slot:
+            normalized_item["slot"] = slot
+        if label:
+            normalized_item["label"] = label
+        if matrix_key:
+            normalized_item["matrix_key"] = matrix_key
+        if width > 0 and height > 0:
+            normalized_item["target_size"] = {"width": width, "height": height}
+        if normalized_item:
+            normalized.append(normalized_item)
+    return normalized
+
+
 def platform_default_declaration(platform: str | None) -> str:
     return str(publication_platform_capabilities(platform).get("default_declaration") or "").strip()
+
+
+def platform_publish_entry_url(platform: str | None) -> str:
+    return str(platform_publish_scheme(platform).get("entry_url") or "").strip()
+
+
+def platform_draft_resume_policy(platform: str | None) -> str:
+    return str(platform_publish_scheme(platform).get("draft_resume_policy") or "").strip()
+
+
+def platform_cover_asset_policy(platform: str | None) -> str:
+    return str(platform_publish_scheme(platform).get("cover_asset_policy") or "").strip()
+
+
+def platform_allows_field_edits_while_processing(platform: str | None) -> bool:
+    scheme = platform_publish_scheme(platform)
+    if "allow_field_edits_while_processing" not in scheme:
+        return False
+    return bool(scheme.get("allow_field_edits_while_processing"))
+
+
+def platform_stop_when_current_page_already_correct(platform: str | None) -> bool:
+    scheme = platform_publish_scheme(platform)
+    if "stop_when_current_page_already_correct" not in scheme:
+        return False
+    return bool(scheme.get("stop_when_current_page_already_correct"))
+
+
+def platform_cover_project_mode(platform: str | None) -> str:
+    return str(platform_publish_scheme(platform).get("cover_project_mode") or "").strip()
+
+
+def platform_upload_processing_blocks_final_publish_only(platform: str | None) -> bool:
+    scheme = platform_publish_scheme(platform)
+    if "upload_processing_blocks_final_publish_only" not in scheme:
+        return False
+    return bool(scheme.get("upload_processing_blocks_final_publish_only"))
+
+
+def platform_publish_projects(platform: str | None) -> list[dict[str, str]]:
+    raw_projects = platform_publish_scheme(platform).get("projects")
+    if not isinstance(raw_projects, list):
+        return []
+    normalized: list[dict[str, str]] = []
+    for item in raw_projects:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        label = str(item.get("label") or "").strip()
+        result_key = str(item.get("result_key") or "").strip()
+        project: dict[str, str] = {}
+        if key:
+            project["key"] = key
+        if label:
+            project["label"] = label
+        if result_key:
+            project["result_key"] = result_key
+        if project:
+            normalized.append(project)
+    return normalized
 
 
 def platform_supports_scheduled_publish(platform: str | None) -> bool:
@@ -83,6 +180,10 @@ def platform_soft_verification_fields(platform: str | None) -> set[str]:
 
 def platform_skips_explicit_tag_entry(platform: str | None) -> bool:
     return bool(publication_platform_capabilities(platform).get("skip_explicit_tag_entry"))
+
+
+def platform_skips_explicit_visibility_entry(platform: str | None) -> bool:
+    return bool(publication_platform_capabilities(platform).get("skip_explicit_visibility_entry"))
 
 
 def platform_manual_handoff_only(platform: str | None) -> bool:

@@ -18,6 +18,7 @@ FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app/src
 ENV UV_LINK_MODE=copy
 ENV UV_COMPILE_BYTECODE=1
 ENV UV_HTTP_TIMEOUT=300
@@ -44,6 +45,8 @@ RUN set -eux; \
             fonts-noto-cjk \
             libglib2.0-0 \
             libsm6 \
+            nodejs \
+            npm \
             libxext6 \
             libxrender1 \
         && break; \
@@ -53,6 +56,8 @@ RUN set -eux; \
         sleep 5; \
     done; \
     rm -rf /var/lib/apt/lists/*
+
+RUN npm install -g @z_ai/mcp-server@latest
 
 COPY pyproject.toml uv.lock README.md alembic.ini ./
 

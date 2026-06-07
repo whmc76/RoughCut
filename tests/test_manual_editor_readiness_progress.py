@@ -24,7 +24,7 @@ def test_awaiting_manual_edit_preview_exposes_waiting_detail():
             job_id=job.id,
             step_name="render",
             status="pending",
-            metadata_={"detail": "智能辅助模式已完成预处理，等待用户手动调整后再进入渲染。"},
+            metadata_={"detail": "智能辅助模式已完成预处理。当前进度仅表示预处理完成度，尚未开始正式渲染；请打开手动调整后点击“正式渲染/重新渲染”提交。"},
         ),
     ]
 
@@ -33,7 +33,8 @@ def test_awaiting_manual_edit_preview_exposes_waiting_detail():
     assert job.awaiting_manual_edit is True
     assert job.review_step is None
     assert job.review_label == "手动剪辑"
-    assert job.review_detail == "智能辅助模式已完成预处理，等待用户手动调整后再进入渲染。"
+    assert "尚未开始正式渲染" in job.review_detail
+    assert "正式渲染/重新渲染" in job.review_detail
 
 
 def test_awaiting_manual_edit_current_step_uses_manual_waiting_context():
@@ -53,7 +54,8 @@ def test_awaiting_manual_edit_current_step_uses_manual_waiting_context():
     assert current_step is not None
     assert current_step["step_name"] == "edit_plan"
     assert current_step["status"] == "pending"
-    assert "等待用户打开手动调整" in str(current_step["detail"])
+    assert "当前进度仅表示预处理完成度" in str(current_step["detail"])
+    assert "尚未开始正式渲染" in str(current_step["detail"])
 
 
 def test_awaiting_manual_edit_progress_does_not_count_paused_downstream_steps():

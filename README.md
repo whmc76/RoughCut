@@ -19,7 +19,7 @@
 - **术语纠错** — 维护品牌/型号词表，自动匹配并标注疑似错误
 - **断点续跑** — 每步骤状态持久化在数据库，进程崩溃后可从中断处继续
 - **目录监听** — 监听指定文件夹，新视频自动入队处理
-- **多 LLM 后端** — MiniMax / OpenAI / Anthropic / Ollama 可配置切换
+- **多 LLM 后端** — MiniMax / 智谱 GLM / OpenAI / Anthropic / Ollama 可配置切换
 
 ---
 
@@ -255,6 +255,23 @@ REASONING_PROVIDER=openai
 REASONING_MODEL=gpt-5.5
 TRANSCRIPTION_PROVIDER=openai
 TRANSCRIPTION_MODEL=gpt-4o-transcribe
+```
+
+智谱 GLM 配置：
+
+```env
+ZHIPU_API_KEY=sk-...
+ZHIPU_BASE_URL=https://open.bigmodel.cn/api/paas/v4
+ZHIPU_CODING_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
+ZHIPU_MCP_HTTP_BASE_URL=https://open.bigmodel.cn/api/mcp
+REASONING_PROVIDER=zhipu
+REASONING_MODEL=glm-5.1
+VISION_MODEL=glm-4.6v-flash
+MULTIMODAL_FALLBACK_PROVIDER=zhipu
+MULTIMODAL_FALLBACK_MODEL=glm-4.6v-flash
+SEARCH_PROVIDER=zhipu
+SEARCH_FALLBACK_PROVIDER=zhipu
+ZHIPU_SEARCH_ENGINE=search_pro
 ```
 
 智能发布封面默认使用 Codex 内置 `image_gen` 工作流：系统会先用候选帧合成接触表识别高光帧，再为每个平台写出一份 `*.codex-imagegen.json` 请求清单和参考帧；请求未完成或生成失败时，该平台物料保持 `publish_ready=false`，不会生成可发布兜底封面。只有显式设置 `INTELLIGENT_COPY_COVER_IMAGE_BACKEND=openai_images_api` 时，才会走直接 OpenAI Images API 后端。Codex 路径里的 `INTELLIGENT_COPY_COVER_CODEX_RUNNER_MODEL` 只控制执行 `image_gen` 调用的 Codex 文本代理，默认 `gpt-5.4-mini` + `low`；真正影响画面质量的是请求里的 prompt、尺寸/比例、文字约束、QC 和重试策略，不是把执行代理改成 `gpt-5.5`。
@@ -662,7 +679,7 @@ curl "${ROUGHCUT_API_BASE:-http://localhost:38471/api/v1}/jobs/{job_id}/report"
 | `OUTPUT_DIR` | `./data/runtime/output` | 成片输出目录 |
 | `OUTPUT_NAME_PATTERN` | `{date}_{stem}` | 输出文件名模板 |
 | `RENDER_DEBUG_DIR` | `./data/runtime/render-debug` | render 调试产物目录 |
-| `REASONING_PROVIDER` | `minimax` | 推理后端：`openai` / `anthropic` / `minimax` / `ollama` |
+| `REASONING_PROVIDER` | `minimax` | 推理后端：`openai` / `anthropic` / `minimax` / `zhipu` / `ollama` |
 | `REASONING_MODEL` | `MiniMax-M2.7` | 推理模型名称 |
 | `REASONING_EFFORT` | `low` | 推理强度默认值 |
 | `MULTIMODAL_FALLBACK_PROVIDER` | `minimax` | 主模型视觉失败时的备份 provider |
@@ -680,6 +697,11 @@ curl "${ROUGHCUT_API_BASE:-http://localhost:38471/api/v1}/jobs/{job_id}/report"
 | `MINIMAX_BASE_URL` | `https://api.minimaxi.com/v1` | MiniMax OpenAI 兼容接口地址 |
 | `MINIMAX_API_HOST` | `https://api.minimaxi.com` | MiniMax Coding Plan / MCP API Host |
 | `MINIMAX_CODING_PLAN_API_KEY` | `""` | MiniMax Coding Plan Key；留空时搜索/MCP 默认回退 `MINIMAX_API_KEY` |
+| `ZHIPU_API_KEY` | `""` | 智谱 API Key |
+| `ZHIPU_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | 智谱 GLM 推理 / 多模态 / 网页读取接口地址 |
+| `ZHIPU_CODING_BASE_URL` | `https://open.bigmodel.cn/api/coding/paas/v4` | 智谱 Coding Plan 接口地址 |
+| `ZHIPU_MCP_HTTP_BASE_URL` | `https://open.bigmodel.cn/api/mcp` | 智谱 MCP HTTP 服务根地址 |
+| `ZHIPU_SEARCH_ENGINE` | `search_pro` | 智谱联网搜索引擎档位 |
 | `VISION_MODEL` | `""` | 视觉模型（空 = 使用 reasoning_model） |
 | `TRANSCRIPTION_PROVIDER` | `local_http_asr` | 转写后端：`local_http_asr` / `openai` / `funasr` / `faster_whisper` |
 | `TRANSCRIPTION_MODEL` | `qwen3-asr-1.7b-forced-aligner` | 转写模型占位符；本地 HTTP ASR 的实际模型由 `LOCAL_ASR_MODEL_NAME` 决定 |
@@ -987,6 +1009,7 @@ find . -type d -name "__pycache__" -prune -exec rm -rf {} +
 ## Provider 兼容说明
 
 - `MiniMax` 已按官方 OpenAI 兼容接口接入，可直接作为 `reasoning_provider=minimax` 使用。
+- `智谱` 已接入 `glm-5.1` 文本推理、`glm-4.6v-flash` 视觉、多结果 `web_search` 与 `reader` 网页读取；同时补充了 `web_search_prime` / `web_reader` / `zread` / `@z_ai/mcp-server` 的 MCP 配置导出。
 - `Claude Code` 与 `Codex` 目前在本项目中采用 helper 凭证模式而不是浏览器内第三方 OAuth 回跳。
 - helper 凭证模式的含义：你可以切到 `helper`，并配置一个本地 helper 命令，让 RoughCut 在调用模型前获取当前凭证。
 - 如果 OpenAI helper 输出的是 `~/.codex/auth.json` 中的 ChatGPT access token，而不是实际 OpenAI Platform API key，

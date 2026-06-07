@@ -253,6 +253,45 @@ def test_fas_edc_toy_unboxing_prefers_fas_collection_when_real_option_exists():
     assert collection == "EDC潮玩桌搭"
 
 
+def test_fas_edc_tool_unboxing_prefers_tool_collection_when_real_option_exists():
+    policy = intelligence._publication_policy_for_creator(
+        {"id": "profile-1", "display_name": "FAS", "creator_profile": {"publishing": {}}},
+        {"creator_profile_name": "FAS", "targets": []},
+    )
+    collection = intelligence._choose_real_collection_name(
+        {
+            "account_label": "FAS · Chrome",
+            "collection_suggestions": ["FAS新品", "EDC刀光火工具集", "EDC潮玩桌搭", "机能户外装备"],
+        },
+        {"platform": "kuaishou", "title": "MAXACE美杜莎4 顶配次顶配开箱 手电工具类EDC介绍"},
+        publication_policy=policy,
+    )
+
+    assert collection == "EDC刀光火工具集"
+
+
+def test_fas_edc_keyword_alone_does_not_route_knife_content_to_toy_collection() -> None:
+    policy = intelligence._publication_policy_for_creator(
+        {"id": "profile-1", "display_name": "FAS", "creator_profile": {"publishing": {}}},
+        {"creator_profile_name": "FAS", "targets": []},
+    )
+    collection = intelligence._choose_real_collection_name(
+        {
+            "account_label": "FAS · Chrome",
+            "collection_suggestions": ["EDC潮玩桌搭", "EDC刀光火工具集"],
+        },
+        {
+            "platform": "kuaishou",
+            "title": "",
+            "body": "MAXACE美杜莎4顶配和次顶配都到了，给老铁们开个箱看看。",
+            "tags": ["EDC折刀", "MAXACE美杜莎4", "开箱", "折刀"],
+        },
+        publication_policy=policy,
+    )
+
+    assert collection == "EDC刀光火工具集"
+
+
 def test_selectable_collection_catalog_takes_priority_over_noisy_form_text():
     capability = intelligence._normalize_inventory_platform_options(
         {
@@ -559,10 +598,54 @@ def test_build_scheme_marks_live_publish_preflight_blocked_when_required_surface
     preflight = scheme["items"][0]["live_publish_preflight"]
     assert preflight["status"] == "blocked"
     assert scheme["items"][0]["visibility_or_publish_mode"] == "draft"
-    assert preflight["missing_required_surfaces"] == ["cover", "visibility"]
+    assert preflight["missing_required_surfaces"] == ["cover"]
     assert "schedule" not in preflight["required_surfaces"]
+    assert "visibility" not in preflight["required_surfaces"]
     assert scheme["platform_options"]["kuaishou"]["live_publish_preflight"] == preflight
     assert scheme["platform_options"]["kuaishou"]["platform_specific_overrides"]["live_publish_preflight"] == preflight
+
+
+def test_build_scheme_does_not_require_empty_optional_kuaishou_fields():
+    scheme = intelligence._build_scheme_from_record(
+        plan={
+            "creator_profile_id": "profile-1",
+            "creator_profile_name": "FAS",
+            "targets": [
+                {
+                    "platform": "kuaishou",
+                    "platform_label": "快手",
+                    "title": "真实生成标题",
+                    "body": "真实生成正文",
+                    "tags": ["EDC"],
+                    "declaration": "",
+                    "collection": None,
+                }
+            ],
+        },
+        record={
+            "creator_profile_id": "profile-1",
+            "creator_profile_name": "FAS",
+            "publication_policy": intelligence._empty_publication_policy(),
+            "time_strategy": {"platform_slots": {"kuaishou": [{"time": "20:00", "reason": "test"}]}},
+            "platforms": {
+                "kuaishou": {
+                    "supports_scheduled_publish": True,
+                    "coverage": {
+                        "required_surfaces": ["category", "collection", "declaration", "visibility", "schedule"],
+                        "missing_required_surfaces": ["category", "collection", "declaration", "visibility", "schedule"],
+                    },
+                    "evidence": {"by_surface": []},
+                }
+            },
+        },
+        folder_path="D:/material",
+        browser="chrome",
+    )
+
+    preflight = scheme["items"][0]["live_publish_preflight"]
+    assert preflight["status"] == "ready"
+    assert preflight["required_surfaces"] == []
+    assert preflight["missing_required_surfaces"] == []
 
 
 def test_build_scheme_downgrades_xiaohongshu_schedule_when_surface_missing():
@@ -616,10 +699,94 @@ def test_build_scheme_downgrades_xiaohongshu_schedule_when_surface_missing():
     assert item["visibility_or_publish_mode"] == "draft"
     assert item["scheduled_publish_at"] == ""
     assert platform_option["visibility_or_publish_mode"] == "draft"
-    assert "scheduled_publish_at" not in platform_option
+
+
+def test_normalize_inventory_platform_options_filters_youtube_playlist_navigation_noise():
+    normalized = intelligence._normalize_inventory_platform_options(
+        {
+            "platform": "youtube",
+            "status": "partial",
+            "route": {"url": "https://studio.youtube.com/video/eaTu-rtsyiw/edit"},
+            "option_groups": [
+                {
+                    "key": "youtube_playlists",
+                    "label": "YouTube播放列表",
+                    "options": [
+                        "上传视频 开始直播 发帖 新建播放列表 新建播客",
+                        "播放列表",
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert normalized.get("collection_suggestions") is None
+    assert not normalized.get("collection_catalog")
+
+
+def test_normalize_inventory_platform_options_filters_youtube_category_language_noise():
+    normalized = intelligence._normalize_inventory_platform_options(
+        {
+            "platform": "youtube",
+            "status": "partial",
+            "route": {"url": "https://studio.youtube.com/video/eaTu-rtsyiw/edit"},
+            "option_groups": [
+                {
+                    "key": "youtube_category_language",
+                    "label": "YouTube分类/语言/字幕",
+                    "options": ["字幕", "语言", "类别", "内容检测", "信息中心 内容 数据分析 社区 字幕 内容检测 创收 自定义 音频库"],
+                }
+            ],
+        }
+    )
+
+    assert normalized.get("category_options") is None
+
+
+def test_build_scheme_respects_explicit_skip_collection_policy_for_youtube():
+    scheme = intelligence._build_scheme_from_record(
+        plan={
+            "creator_profile_id": "profile-1",
+            "creator_profile_name": "FAS",
+            "targets": [
+                {
+                    "platform": "youtube",
+                    "platform_label": "YouTube",
+                    "title": "MAXACE美杜莎4顶配和次顶配怎么选？开箱给你答案",
+                    "body": "正文",
+                    "tags": ["EDC"],
+                    "platform_specific_overrides": {
+                        "collection_policy": "skip",
+                        "skip_collection_select": True,
+                    },
+                }
+            ],
+        },
+        record={
+            "creator_profile_id": "profile-1",
+            "creator_profile_name": "FAS",
+            "publication_policy": intelligence._empty_publication_policy(),
+            "time_strategy": {"platform_slots": {"youtube": [{"time": "20:00", "reason": "test"}]}},
+            "platforms": {
+                "youtube": {
+                    "collection_suggestions": ["上传视频 开始直播 发帖 新建播放列表 新建播客"],
+                    "coverage": {
+                        "required_surfaces": ["playlist"],
+                        "missing_required_surfaces": ["playlist"],
+                    },
+                }
+            },
+        },
+        folder_path="D:/material",
+        browser="chrome",
+    )
+
+    item = scheme["items"][0]
+    preflight = item["live_publish_preflight"]
+    assert item["collection_name"] == ""
+    assert item["collection_management"]["status"] == "skipped_by_policy"
     assert preflight["status"] == "ready"
-    assert "schedule" not in preflight["required_surfaces"]
-    assert "schedule" not in preflight["missing_required_surfaces"]
+    assert item["live_publish_preflight"]["required_surfaces"] == []
 
 
 @pytest.mark.asyncio

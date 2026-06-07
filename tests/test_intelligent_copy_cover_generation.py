@@ -4,7 +4,9 @@ import asyncio
 import base64
 import inspect
 import json
+import time
 from contextlib import nullcontext
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,6 +16,14 @@ from PIL import Image
 from roughcut.providers import image_generation as imagegen
 from roughcut.api import intelligent_copy as intelligent_copy_api
 from roughcut.api.schemas import IntelligentCopyGenerateTaskListOut
+from roughcut.intelligent_copy_layout import (
+    smart_copy_cover_source_image_path,
+    smart_copy_cover_source_manifest_path,
+    smart_copy_material_json_path,
+    smart_copy_platform_body_path,
+    smart_copy_platform_tags_path,
+    smart_copy_platform_titles_path,
+)
 from roughcut.media import output as media_output
 from roughcut.providers.image_generation import resolve_image_generation_size
 from roughcut import publication_platform_matrix as ppm
@@ -32,6 +42,10 @@ def test_image_generation_size_uses_closest_supported_orientation() -> None:
     assert resolve_image_generation_size(1080, 1920) == "1024x1536"
     assert resolve_image_generation_size(1080, 1440) == "1024x1536"
     assert resolve_image_generation_size(1000, 1000) == "1024x1024"
+
+
+def test_infer_intelligent_copy_subject_type_prefers_jump_knife_when_explicit() -> None:
+    assert ic._infer_intelligent_copy_subject_type("MAXACE 美杜莎4 直跳双版本开箱") == "EDC跳刀"
 
 
 def test_dreamina_runner_defaults_to_vendored_module() -> None:
@@ -217,6 +231,9 @@ def test_fallback_cover_brief_adds_compare_safe_notes_for_dual_blade_subject() -
 
     assert "如果参考图里有两把刀，必须保持两把都同框清晰完整，不能丢成一把。" in brief["critical_detail_notes"]
     assert "不要给刀身添加不存在的浮雕、动物纹样、刻字或装饰图案。" in brief["critical_detail_notes"]
+    assert "保留螺丝数量、位置、开槽方向、边角切面和金属分区，不要凭空增删五金细节。" in brief["critical_detail_notes"]
+    assert "保留左右两件主体各自的版本映射、材质映射和开合状态映射，不要互换版本特征。" in brief["critical_detail_notes"]
+    assert "展开态不要误画成收合态，收合态不要误画成展开态；不要把第二件主体简化成抽象背景。" in brief["critical_detail_notes"]
     assert brief["product_identity"] == "MAXACE 美杜莎4 顶配vs次顶配"
 
 
@@ -288,6 +305,16 @@ def test_build_cover_title_lines_splits_brand_subject_and_compare_tail() -> None
         "top": "MAXACE",
         "main": "美杜莎4",
         "bottom": "双版开箱对比",
+    }
+
+
+def test_build_cover_title_lines_keeps_model_with_digit_before_action_suffix() -> None:
+    title_lines = ic._build_cover_title_lines("MAXACE 美杜莎4 开箱")
+
+    assert title_lines == {
+        "top": "MAXACE",
+        "main": "美杜莎4",
+        "bottom": "开箱",
     }
 
 
@@ -461,34 +488,106 @@ def test_resolve_overlay_title_style_promotes_edc_cover_to_account_template() ->
 
 
 def test_build_platform_cover_prompt_spec_emits_full_cover_director_policy() -> None:
+    cover_brief = ic._annotate_cover_strategy_axes(
+        {
+            "product_identity": "MAXACE 美杜莎4 顶配与次顶配",
+            "selling_angle": "双版本完整对比展示",
+            "video_type": "开箱对比",
+            "style_key": ic.OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO,
+            "cover_title": "MAXACE美杜莎4 顶配vs次顶配",
+        },
+        creator_profile_name="FAS",
+    )
     spec = ic._build_platform_cover_prompt_spec(
         title="MAXACE美杜莎4 顶配vs次顶配",
         platform_key="bilibili",
         rules=ic.PLATFORM_PUBLISH_RULES["bilibili"],
         width=1280,
         height=720,
-        cover_brief={
-            "product_identity": "MAXACE 美杜莎4 顶配与次顶配",
-            "selling_angle": "双版本完整对比展示",
-            "video_type": "开箱对比",
-        },
+        cover_brief=cover_brief,
     )
 
     director = spec["director_policy"]
     assert director["direction_version"] == "full_cover_codex_v1"
     assert director["typography_owner"] == "codex_full_cover"
-    assert director["style_profile_key"] == "edc_cinematic_hero_full_cover_v1"
+    assert director["style_profile_key"] == "fas_edc_signature_full_cover_v1"
+    assert director["base_style_profile_key"] == "edc_cinematic_hero_full_cover_v1"
     assert "横版信息流封面" in director["visual_instruction"]
     assert "metal_3d" in director["headline_effects"]
     assert director["required_title_lines"]["brand"] == "MAXACE"
     assert director["required_title_lines"]["main"] == "美杜莎4"
+    assert director["matrix_scheme"]["key"] == "landscape_16_9"
+    assert director["content_scheme"]["key"] == "unboxing_compare_dual_subject_v1"
+    assert director["creator_style_scheme"]["style_profile_key"] == "fas_edc_signature_full_cover_v1"
+
+
+def test_build_platform_cover_prompt_spec_switches_non_codex_backend_to_local_overlay(monkeypatch) -> None:
+    monkeypatch.setattr(
+        ic,
+        "get_settings",
+        lambda: SimpleNamespace(
+            intelligent_copy_cover_image_backend="minimax_images_api",
+        ),
+    )
+
+    spec = ic._build_platform_cover_prompt_spec(
+        title="MAXACE美杜莎4 开箱",
+        platform_key="bilibili",
+        rules=ic.PLATFORM_PUBLISH_RULES["bilibili"],
+        width=1280,
+        height=720,
+        cover_brief={
+            "product_identity": "MAXACE美杜莎4 EDC折刀",
+            "selling_angle": "到手开箱看质感和做工",
+            "visual_brief": "刀身特写，标题后期叠加。",
+            "video_type": "开箱",
+        },
+    )
+
+    assert spec["cover_backend"] == "minimax_images_api"
+    assert spec["typography_owner"] == "local_post_overlay"
+    assert spec["director_policy"]["typography_owner"] == "local_post_overlay"
+    assert spec["hard_contract"]["post_title_overlay_required"] is True
+    assert spec["hard_contract"]["full_bitmap_cover_required"] is False
+
+
+def test_provider_safe_cover_prompt_uses_text_free_base_bitmap_contract(monkeypatch) -> None:
+    monkeypatch.setattr(
+        ic,
+        "get_settings",
+        lambda: SimpleNamespace(
+            intelligent_copy_cover_image_backend="minimax_images_api",
+        ),
+    )
+
+    spec = ic._build_platform_cover_prompt_spec(
+        title="MAXACE 美杜莎4 顶配vs次顶配",
+        platform_key="bilibili",
+        rules=ic.PLATFORM_PUBLISH_RULES["bilibili"],
+        width=1280,
+        height=720,
+        cover_brief={
+            "product_identity": "MAXACE美杜莎4 EDC折刀",
+            "selling_angle": "双版本同框对比",
+            "visual_brief": "刀身特写，刀柄上可见品牌标识。",
+            "video_type": "开箱",
+        },
+    )
+
+    prompt = ic._build_provider_safe_cover_image_prompt(spec=spec)
+
+    assert "后期统一叠加品牌/型号主标题和配置副标题" in prompt
+    assert "底图里不能直接画任何标题字" in prompt
+    assert "底图里禁止出现任何可读或半可读的中文、英文、数字、logo 字牌、刀身铭文" in prompt
+    assert "品牌/商品名必须完整保留" not in prompt
+    assert "标题结构必须准确完整" not in prompt
 
 
 def test_standard_cover_matrix_groups_include_four_by_three_master() -> None:
     groups = ic._resolve_standard_cover_matrix_groups()
     keys = [group["key"] for group in groups]
 
-    assert keys == ["landscape_16_9", "landscape_4_3", "portrait_3_4", "portrait_9_16"]
+    assert keys == ["landscape_16_9", "landscape_4_3", "portrait_3_4"]
     four_by_three = next(group for group in groups if group["key"] == "landscape_4_3")
     assert tuple(four_by_three["cover_size"]) == (1440, 1080)
     assert "4:3 横版母版" in four_by_three["visual_instruction"]
@@ -516,6 +615,30 @@ def test_platform_cover_prompt_spec_prefers_matrix_group_visual_instruction() ->
 
     assert spec["visual_instruction"] == rules["visual_instruction"]
     assert spec["director_policy"]["visual_instruction"] == rules["visual_instruction"]
+
+
+def test_annotate_cover_strategy_axes_decouples_matrix_content_and_creator_style() -> None:
+    brief = ic._annotate_cover_strategy_axes(
+        {
+            "product_identity": "MAXACE 美杜莎4 顶配与次顶配",
+            "selling_angle": "双版本完整对比展示",
+            "video_type": "开箱对比",
+            "style_key": ic.OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO,
+            "cover_title": "MAXACE美杜莎4 顶配vs次顶配",
+        },
+        creator_profile_name="FAS 创作矩阵",
+    )
+
+    strategy_axes = dict(brief["strategy_axes"])
+    assert strategy_axes["matrix_scheme"]["scope"] == "cross_platform_cover_matrix"
+    assert strategy_axes["content_scheme"]["key"] == "unboxing_compare_dual_subject_v1"
+    assert strategy_axes["content_scheme"]["compare_subject_policy"] == "preserve_reference_subject_states"
+    assert strategy_axes["content_scheme"]["allow_mixed_open_closed_states"] is True
+    assert strategy_axes["creator_style_scheme"]["style_profile_key"] == "fas_edc_signature_full_cover_v1"
+    assert strategy_axes["subject_fidelity_scheme"]["key"] == "dual_subject_compare_fidelity_v1"
+    assert strategy_axes["subject_fidelity_scheme"]["scope"] == "subject_fidelity_contract"
+    assert "主要部件数量" in " ".join(strategy_axes["subject_fidelity_scheme"]["generic_constraints"])
+    assert "版本映射" in " ".join(strategy_axes["subject_fidelity_scheme"]["instance_observations"])
 
 
 def test_platform_cover_prompt_excludes_packaging_logos_and_printed_cards() -> None:
@@ -1056,14 +1179,10 @@ async def test_prepare_cover_source_falls_back_when_highlight_selection_fails(tm
     monkeypatch.setattr(ic, "_probe_duration", lambda path: 12.0)
     monkeypatch.setattr(ic, "_sample_cover_candidates", lambda *args, **kwargs: [{"seek": 4.5, "preview": preview_path}])
 
-    async def fake_select(*args, **kwargs):
-        raise RuntimeError("Multimodal provider unavailable")
-
     async def fake_extract_frame(path, output_path, seek_sec):
-        calls["extract"] = {"path": path, "output_path": output_path, "seek_sec": seek_sec}
+        calls.setdefault("extracts", []).append({"path": path, "output_path": output_path, "seek_sec": seek_sec})
         Path(output_path).write_bytes(b"frame")
 
-    monkeypatch.setattr(ic, "_select_intelligent_copy_highlight_candidate", fake_select)
     monkeypatch.setattr(ic, "_extract_frame", fake_extract_frame)
 
     source = await ic._prepare_intelligent_copy_cover_source(
@@ -1073,12 +1192,127 @@ async def test_prepare_cover_source_falls_back_when_highlight_selection_fails(tm
         packaging={},
     )
 
-    assert source == material_dir / "00-highlight-cover-source.jpg"
+    assert source == smart_copy_cover_source_image_path(material_dir)
     assert source.exists()
-    assert calls["extract"]["seek_sec"] == 4.5
-    manifest = json.loads((material_dir / "00-highlight-cover-source.json").read_text(encoding="utf-8"))
-    assert manifest["source"] == "fallback_first_candidate"
-    assert "Multimodal provider unavailable" in manifest["reason"]
+    assert calls["extracts"][0]["seek_sec"] == 4.5
+    manifest = json.loads(smart_copy_cover_source_manifest_path(material_dir).read_text(encoding="utf-8"))
+    assert manifest["source"] == "sampled_reference_pack"
+    assert manifest["reference_seek_secs"] == [4.5]
+    assert len(manifest["reference_image_paths"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_prepare_cover_source_persists_four_reference_frames_without_contact_sheet(tmp_path, monkeypatch) -> None:
+    video_path = tmp_path / "source.mp4"
+    video_path.write_bytes(b"video")
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    preview_paths = []
+    for index in range(4):
+        preview_path = tmp_path / f"candidate-{index + 1}.jpg"
+        preview_path.write_bytes(b"preview")
+        preview_paths.append(preview_path)
+
+    monkeypatch.setattr(ic, "get_settings", lambda: SimpleNamespace(cover_candidate_count=4))
+    monkeypatch.setattr(ic, "_probe_duration", lambda _path: 12.0)
+    monkeypatch.setattr(
+        ic,
+        "_sample_cover_candidates",
+        lambda *args, **kwargs: [
+            {"seek": 4.5 + index, "preview": preview_paths[index]}
+            for index in range(4)
+        ],
+    )
+    async def keep_original_order(**kwargs):
+        return {
+            "primary_number": 1,
+            "ranking_numbers": [1, 2, 3, 4],
+            "reason": "保持原顺序",
+            "used_fallback": False,
+        }
+
+    monkeypatch.setattr(ic, "_rank_cover_reference_candidates_for_generation", keep_original_order)
+
+    extracted: list[Path] = []
+
+    async def fake_extract_frame(_path, output_path, _seek_sec):
+        extracted.append(Path(output_path))
+        Path(output_path).write_bytes(f"frame-{len(extracted)}".encode("utf-8"))
+
+    monkeypatch.setattr(ic, "_extract_frame", fake_extract_frame)
+
+    source = await ic._prepare_intelligent_copy_cover_source(
+        video_path=video_path,
+        material_dir=material_dir,
+        content_profile={},
+        packaging={},
+    )
+
+    manifest = json.loads(smart_copy_cover_source_manifest_path(material_dir).read_text(encoding="utf-8"))
+
+    assert source == smart_copy_cover_source_image_path(material_dir)
+    assert [path.name for path in extracted] == [
+        "00-highlight-reference-1.jpg",
+        "00-highlight-reference-2.jpg",
+        "00-highlight-reference-3.jpg",
+        "00-highlight-reference-4.jpg",
+    ]
+    assert manifest["reference_seek_secs"] == [4.5, 5.5, 6.5, 7.5]
+    assert len(manifest["reference_image_paths"]) == 4
+    assert Path(manifest["reference_image_paths"][0]).read_bytes() == source.read_bytes()
+    assert not (material_dir / "_cover" / "00-highlight-candidates-sheet.jpg").exists()
+
+
+@pytest.mark.asyncio
+async def test_prepare_cover_source_reorders_reference_pack_to_frontload_hero_angle(tmp_path, monkeypatch) -> None:
+    video_path = tmp_path / "source.mp4"
+    video_path.write_bytes(b"video")
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    preview_paths = []
+    for index in range(4):
+        preview_path = tmp_path / f"candidate-{index + 1}.jpg"
+        preview_path.write_bytes(b"preview")
+        preview_paths.append(preview_path)
+
+    monkeypatch.setattr(ic, "get_settings", lambda: SimpleNamespace(cover_candidate_count=4))
+    monkeypatch.setattr(ic, "_probe_duration", lambda _path: 12.0)
+    monkeypatch.setattr(
+        ic,
+        "_sample_cover_candidates",
+        lambda *args, **kwargs: [
+            {"seek": 4.5 + index, "preview": preview_paths[index]}
+            for index in range(4)
+        ],
+    )
+    async def fake_complete_with_images(*args, **kwargs):
+        return '{"primary_number":3,"ranking_numbers":[3,4,2,1],"reason":"3号是更完整的正面英雄角度，1号更偏侧面"}'
+
+    monkeypatch.setattr(ic, "complete_with_images", fake_complete_with_images)
+
+    extracted_seeks: list[float] = []
+
+    async def fake_extract_frame(_path, output_path, seek_sec):
+        extracted_seeks.append(float(seek_sec))
+        Path(output_path).write_bytes(str(seek_sec).encode("utf-8"))
+
+    monkeypatch.setattr(ic, "_extract_frame", fake_extract_frame)
+
+    source = await ic._prepare_intelligent_copy_cover_source(
+        video_path=video_path,
+        material_dir=material_dir,
+        content_profile={"subject_type": "EDC折刀", "video_theme": "顶配次顶配对比"},
+        packaging={"highlights": {"product": "MAXACE 美杜莎4 顶配次顶配"}},
+    )
+
+    manifest = json.loads(smart_copy_cover_source_manifest_path(material_dir).read_text(encoding="utf-8"))
+
+    assert extracted_seeks == [6.5, 7.5, 5.5, 4.5]
+    assert manifest["reference_seek_secs"] == [6.5, 7.5, 5.5, 4.5]
+    assert manifest["reference_primary_number"] == 3
+    assert manifest["reference_ranking_numbers"] == [3, 4, 2, 1]
+    assert "正面英雄角度" in manifest["reference_order_reason"]
+    assert Path(manifest["reference_image_paths"][0]).read_bytes() == source.read_bytes()
 
 
 def test_cover_source_selection_contract_prefers_open_edc_hero_frame() -> None:
@@ -1089,6 +1323,32 @@ def test_cover_source_selection_contract_prefers_open_edc_hero_frame() -> None:
 
     assert "完整展开" in contract
     assert "闭合态" in contract
+
+
+def test_list_codex_imagegen_requests_reads_structured_cover_directory(tmp_path) -> None:
+    material_dir = tmp_path / "smart-copy"
+    request_path = material_dir / "_cover" / "00-cover-landscape_16_9.codex-imagegen.json"
+    request_path.parent.mkdir(parents=True)
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "pending_codex_imagegen",
+                "backend": "codex_builtin",
+                "source_image_path": "E:/materials/source.jpg",
+                "output_path": "E:/materials/00-cover-landscape_16_9.jpg",
+                "target_size": {"width": 1920, "height": 1080},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    requests = intelligent_copy_api._list_codex_imagegen_requests(material_dir)
+
+    assert len(requests) == 1
+    assert requests[0]["request_path"] == str(request_path)
+    assert requests[0]["status"] == "pending_codex_imagegen"
+    assert requests[0]["backend"] == "codex_builtin"
 
 
 def test_build_intelligent_copy_titles_preserves_anchor_coverage_when_explicit_titles_are_weak(monkeypatch) -> None:
@@ -1136,8 +1396,67 @@ def test_build_intelligent_copy_titles_boosts_compare_titles_for_bilibili() -> N
         content_profile={"subject_brand": "MAXACE", "subject_model": "MAXACE 美杜莎4"},
     )
 
-    assert any("同款不同配怎么选" in title for title in titles)
+    assert any("双版本开箱" in title or "顶配和次顶配" in title for title in titles)
     assert any("MAXACE" in title or "美杜莎4" in title for title in titles[:3])
+
+
+def test_build_intelligent_copy_brief_derives_compare_defaults_for_unmatched_bilibili_subject() -> None:
+    brief = ic._build_intelligent_copy_brief(
+        video_path=Path("MAXACE 美杜莎4 顶配次顶配开箱.mp4"),
+        subtitle_items=[{"text_final": "今天把顶配和次顶配放一起开箱看看差别"}],
+        content_profile={
+            "subject_brand": "MAXACE",
+            "subject_model": "美杜莎4",
+            "subject_type": "EDC跳刀",
+            "video_theme": "双版本开箱",
+            "engagement_question": "这条视频你会怎么发？",
+        },
+    )
+
+    assert brief["intent"] == "comparison_unboxing"
+    assert brief["question"] != "这条视频你会怎么发？"
+    assert brief["focus_points"][:2] == ["顶配", "次顶配"]
+    assert any("顶配和次顶配" in title for title in brief["title_candidates"])
+
+
+def test_build_intelligent_copy_description_omits_engagement_question_for_bilibili() -> None:
+    description = ic._build_intelligent_copy_description(
+        platform_key="bilibili",
+        copy_brief={
+            "summary": "MAXACE美杜莎4双版本开箱。",
+            "question": "你更想先看哪处细节？",
+            "focus_points": ["顶配", "次顶配", "细节差异"],
+            "forbidden_terms": [],
+            "topic_subject": "MAXACE美杜莎4",
+            "anchor_terms": ["MAXACE", "美杜莎4"],
+        },
+    )
+
+    assert "你更想先看哪处细节" not in description
+    assert "顶配、次顶配、细节差异" in description
+
+
+def test_build_publish_safe_copy_summary_avoids_internal_instruction_tone() -> None:
+    summary = ic._build_publish_safe_copy_summary(
+        subject_label="MAXACE美杜莎4",
+        context_text="MAXACE 美杜莎4 顶配次顶配开箱 到手 上手",
+    )
+
+    assert "后续文案需要围绕" not in summary
+    assert summary == "MAXACE美杜莎4双版本开箱，重点看版本差异、细节展示和上手体验。"
+
+
+def test_ensure_intelligent_copy_subject_identity_replaces_internal_instruction_summary() -> None:
+    profile = ic._ensure_intelligent_copy_subject_identity(
+        {
+            "subject_brand": "MAXACE",
+            "subject_model": "美杜莎4",
+            "summary": "EDC跳刀的成片素材，后续文案需要围绕画面、字幕和已核验事实重新创作。",
+        },
+        Path("MAXACE 美杜莎4 顶配次顶配开箱.mp4"),
+    )
+
+    assert profile["summary"] == "美杜莎4双版本开箱，重点看版本差异、细节展示和上手体验。"
 
 
 @pytest.mark.asyncio
@@ -1194,12 +1513,78 @@ async def test_render_platform_cover_applies_post_overlay_for_codex_generated_co
 
     assert output.exists()
     assert metadata["source"] == "image_generation"
-    assert metadata["target_size"] == {"width": 1080, "height": 1920}
+    assert metadata["target_size"] == {"width": 1080, "height": 1440}
     assert calls["generate"]["source_image_path"].name == "base.jpg"
     assert calls["generate"]["width"] == 1080
-    assert calls["generate"]["height"] == 1920
+    assert calls["generate"]["height"] == 1440
     assert calls["fit"]["fit_mode"] == "cover"
     assert "overlay" in calls
+
+
+@pytest.mark.asyncio
+async def test_render_platform_cover_passes_reference_image_pack_to_codex(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "highlight.jpg"
+    source.write_bytes(b"source")
+    refs = []
+    for index in range(4):
+        ref = tmp_path / f"reference-{index + 1}.jpg"
+        ref.write_bytes(f"ref-{index + 1}".encode("utf-8"))
+        refs.append(ref)
+    output = tmp_path / "douyin-cover.jpg"
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        ic,
+        "get_settings",
+        lambda: SimpleNamespace(
+            intelligent_copy_cover_image_generation_enabled=True,
+            ffmpeg_timeout_sec=1,
+        ),
+    )
+
+    async def fake_generate_edited_cover_image(**kwargs):
+        calls["generate"] = kwargs
+        Path(kwargs["output_path"]).write_bytes(b"generated")
+        return {"backend": "codex_builtin", "model": "image2", "size": "1024x1536"}
+
+    def fake_fit_image_to_canvas(**kwargs):
+        Path(kwargs["output_path"]).write_bytes(b"fit")
+
+    async def fake_overlay_title_layout(*_args):
+        return None
+
+    monkeypatch.setattr(ic, "generate_edited_cover_image", fake_generate_edited_cover_image)
+    monkeypatch.setattr(ic, "_fit_image_to_canvas", fake_fit_image_to_canvas)
+    monkeypatch.setattr(ic, "_overlay_title_layout", fake_overlay_title_layout)
+    monkeypatch.setattr(
+        ic,
+        "assess_cover_publish_readiness",
+        lambda metadata, request, path: {
+            "publish_ready": True,
+            "blocking_reasons": [],
+            "warnings": [],
+            "output_path": str(path),
+        },
+    )
+
+    await ic._render_platform_cover(
+        output_path=output,
+        video_path=tmp_path / "video.mp4",
+        source_image_path=source,
+        reference_image_paths=refs,
+        existing_cover_path=None,
+        title="MOT 风灵音叉推牌 先看细节",
+        platform_key="douyin",
+        rules=ic.PLATFORM_PUBLISH_RULES["douyin"],
+    )
+
+    assert Path(calls["generate"]["source_image_path"]).name == "reference-1.jpg"
+    assert [Path(path).name for path in calls["generate"]["reference_image_paths"]] == [
+        "reference-1.jpg",
+        "reference-2.jpg",
+        "reference-3.jpg",
+        "reference-4.jpg",
+    ]
 
 
 @pytest.mark.asyncio
@@ -1547,7 +1932,7 @@ async def test_verify_generated_cover_has_unexpected_bitmap_text_uses_longer_tim
 
 
 @pytest.mark.asyncio
-async def test_render_platform_cover_blocks_compare_subject_contract_when_dual_subject_is_cropped(tmp_path, monkeypatch) -> None:
+async def test_render_platform_cover_does_not_hard_gate_compare_subject_contract_for_dual_subject_copy(tmp_path, monkeypatch) -> None:
     source = tmp_path / "highlight.jpg"
     source.write_bytes(b"source")
     output = tmp_path / "douyin-cover.jpg"
@@ -1588,15 +1973,20 @@ async def test_render_platform_cover_blocks_compare_subject_contract_when_dual_s
         return {"unexpected_bitmap_text_detected": False, "detected_text": [], "reason": ""}
 
     async def fake_verify_compare_subject(**kwargs):
+        calls["compare"] = kwargs
         return {
             "compare_subject_contract_passed": False,
             "reason": "竖版构图过近，第二件主体只剩局部",
         }
 
+    async def fake_overlay_title_layout(*_args):
+        return None
+
     monkeypatch.setattr(ic, "generate_edited_cover_image", fake_generate_edited_cover_image)
     monkeypatch.setattr(ic, "_fit_image_to_canvas", fake_fit_image_to_canvas)
     monkeypatch.setattr(ic, "_verify_generated_cover_has_unexpected_bitmap_text", fake_verify_unexpected_text)
     monkeypatch.setattr(ic, "_verify_generated_cover_compare_subject_contract", fake_verify_compare_subject)
+    monkeypatch.setattr(ic, "_overlay_title_layout", fake_overlay_title_layout)
 
     metadata = await ic._render_platform_cover(
         output_path=output,
@@ -1614,16 +2004,15 @@ async def test_render_platform_cover_blocks_compare_subject_contract_when_dual_s
         },
     )
 
-    assert metadata["publish_ready"] is False
-    assert any("双主体展示不满足硬合同" in reason for reason in metadata["blocking_reasons"])
+    assert not any("双主体展示不满足硬合同" in reason for reason in metadata["blocking_reasons"])
     request_payload = json.loads(output.with_suffix(".codex-imagegen.json").read_text(encoding="utf-8"))
-    assert request_payload["cover_hard_contract"]["compare_subject_pair_required"] is True
-    assert request_payload["compare_subject_contract_passed"] is False
-    assert "局部" in request_payload["compare_subject_contract_reason"]
+    assert request_payload["cover_hard_contract"]["compare_subject_pair_required"] is False
+    assert "compare_subject_contract_passed" not in request_payload
+    assert "compare" not in calls
 
 
 @pytest.mark.asyncio
-async def test_ensure_generated_cover_title_contract_ready_uses_pre_overlay_bitmap_for_local_overlay_verification(tmp_path, monkeypatch) -> None:
+async def test_ensure_generated_cover_title_contract_ready_ignores_legacy_compare_subject_gate_for_local_overlay(tmp_path, monkeypatch) -> None:
     output = tmp_path / "cover.jpg"
     output.write_bytes(b"final")
     pre_overlay = tmp_path / "cover.pre-overlay.jpg"
@@ -1674,15 +2063,89 @@ async def test_ensure_generated_cover_title_contract_ready_uses_pre_overlay_bitm
     )
 
     assert calls["unexpected"] == pre_overlay
-    assert calls["compare"] == pre_overlay
+    assert "compare" not in calls
+    refreshed = json.loads(request_path.read_text(encoding="utf-8"))
+    assert "bitmap_title_contract_passed" not in refreshed
+    assert "bitmap_title_contract_check_unavailable" not in refreshed
+    assert "bitmap_title_contract_reason" not in refreshed
 
 
 def test_compare_subject_contract_prompt_clarifies_hands_may_be_partially_out_of_frame(tmp_path) -> None:
-    # The exact string matters because the live false-negative came from prompt ambiguity.
-    source = inspect.getsource(ic._verify_generated_cover_compare_subject_contract)
-    assert "不要求双手完整入镜" in source
-    assert "手部可以局部出框" in source
-    assert "刀尖、刀身、柄部、柄尾" in source
+    profile = ic._resolve_cover_content_strategy_profile("unboxing_compare_dual_subject_v1")
+    verification_prompt = str(profile.get("compare_subject_verification_prompt") or "")
+    assert "不要求双手完整入镜" in verification_prompt
+    assert "手部可以局部出框" in verification_prompt
+    assert "允许一件主体为展开态、另一件主体为收合态" in verification_prompt
+    assert "收合态" in verification_prompt
+    assert "包装盒" in verification_prompt
+    assert "不算主体" in verification_prompt
+
+
+@pytest.mark.asyncio
+async def test_verify_generated_cover_compare_subject_contract_uses_longer_budget(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "cover.jpg"
+    output.write_bytes(b"cover")
+    calls: dict[str, object] = {}
+
+    async def fake_run_cover_visual_json_verification(**kwargs):
+        calls["timeout_sec"] = kwargs.get("timeout_sec")
+        calls["attempts"] = kwargs.get("attempts")
+        return {"compare_subject_contract_passed": True, "reason": "ok"}, ""
+
+    monkeypatch.setattr(ic, "_run_cover_visual_json_verification", fake_run_cover_visual_json_verification)
+
+    result = await ic._verify_generated_cover_compare_subject_contract(output_path=output, request_payload={})
+
+    assert result["compare_subject_contract_passed"] is True
+    assert calls["timeout_sec"] == 45.0
+    assert calls["attempts"] == 3
+
+
+def test_build_platform_cover_prompt_spec_uses_content_scheme_portrait_compare_instruction() -> None:
+    cover_brief = ic._annotate_cover_strategy_axes(
+        {
+            "product_identity": "MAXACE美杜莎4 EDC折刀",
+            "selling_angle": "顶配与次顶配双版本完整开箱对比，做工细节和材质质感一眼看懂",
+            "visual_brief": "两把刀同框，左侧展开态，右侧收合态，标题舞台放在上中部。",
+            "video_type": "开箱体验",
+            "style_key": ic.OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO,
+        },
+        creator_profile_name="FAS",
+    )
+    spec = ic._build_platform_cover_prompt_spec(
+        title="MAXACE 美杜莎4 顶配vs次顶配",
+        platform_key="xiaohongshu",
+        rules={
+            **ic.PLATFORM_PUBLISH_RULES["xiaohongshu"],
+            "label": "3:4 竖版母版",
+            "visual_instruction": "3:4 竖版母版，强调质感与双主体完整展示，上半区适合品牌与主标题，下半区保留产品和手持关系，不要挤压主体。",
+        },
+        width=1080,
+        height=1440,
+        cover_brief=cover_brief,
+    )
+    assert spec["hard_contract"]["compare_subject_pair_required"] is False
+    assert spec["director_policy"]["supports_compare_subject_pair"] is True
+    prompt = ic._build_platform_cover_image_prompt(
+        title="MAXACE 美杜莎4 顶配vs次顶配",
+        platform_key="xiaohongshu",
+        rules={
+            **ic.PLATFORM_PUBLISH_RULES["xiaohongshu"],
+            "label": "3:4 竖版母版",
+            "visual_instruction": "3:4 竖版母版，强调质感与双主体完整展示，上半区适合品牌与主标题，下半区保留产品和手持关系，不要挤压主体。",
+        },
+        width=1080,
+        height=1440,
+        cover_brief=cover_brief,
+    )
+    assert "允许一件为展开态、另一件为收合态" in prompt
+    assert "收合态" in prompt
+    assert "主体保真通用约束" in prompt
+    assert "保留主体主要轮廓、比例关系、主要部件数量与相对位置" in prompt
+    assert "双主体编辑预算必须极小" in prompt
+    assert "不允许改变左右主体身份、版本映射、主要部件数量、相对位置、表面分区或开合状态关系" in prompt
+    assert "标题堆叠必须更紧凑地上收" in prompt
+    assert "画面中部必须保留成双主体关系的通道" in prompt
 
 
 @pytest.mark.asyncio
@@ -1739,6 +2202,16 @@ async def test_render_platform_cover_uses_contained_portrait_reference_for_compa
     monkeypatch.setattr(ic, "_verify_generated_cover_compare_subject_contract", fake_verify_compare_subject)
     monkeypatch.setattr(ic, "_overlay_title_layout", fake_overlay_title_layout)
 
+    cover_brief = ic._annotate_cover_strategy_axes(
+        {
+            "product_identity": "美杜莎4 顶配vs次顶配",
+            "selling_angle": "双版本完整对比展示，做工和细节表现",
+            "visual_brief": "两把刀同框，标题后期统一叠加。",
+            "video_type": "开箱对比",
+            "style_key": ic.OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO,
+        }
+    )
+
     await ic._render_platform_cover(
         output_path=output,
         video_path=tmp_path / "video.mp4",
@@ -1747,15 +2220,11 @@ async def test_render_platform_cover_uses_contained_portrait_reference_for_compa
         title="MAXACE美杜莎4 顶配vs次顶配",
         platform_key="douyin",
         rules=ic.PLATFORM_PUBLISH_RULES["douyin"],
-        cover_brief={
-            "product_identity": "美杜莎4 顶配vs次顶配",
-            "selling_angle": "双版本完整对比展示，做工和细节表现",
-            "visual_brief": "两把刀同框，标题后期统一叠加。",
-            "video_type": "开箱对比",
-        },
+        cover_brief=cover_brief,
     )
 
-    assert Path(calls["generate"]["source_image_path"]).name == "prepared-reference.jpg"
+    assert Path(calls["generate"]["source_image_path"]).name == "highlight.jpg"
+    assert [Path(path).name for path in calls["generate"]["reference_image_paths"]] == ["highlight.jpg"]
 
 
 @pytest.mark.asyncio
@@ -2100,7 +2569,7 @@ def test_existing_cover_option_reuses_detected_cover_without_imagegen(tmp_path, 
 
 
 def test_materialize_platform_cover_from_group_keeps_blockers_when_existing_artifact_is_only_fallback(tmp_path, monkeypatch) -> None:
-    group_output = tmp_path / "00-cover-portrait_9_16.jpg"
+    group_output = tmp_path / "00-cover-portrait_3_4.jpg"
     group_output.write_bytes(b"group cover")
     output = tmp_path / "02-douyin-cover.jpg"
     fit_calls: list[dict[str, object]] = []
@@ -2123,16 +2592,101 @@ def test_materialize_platform_cover_from_group_keeps_blockers_when_existing_arti
         platform_key="douyin",
         platform_rules=ic.PLATFORM_PUBLISH_RULES["douyin"],
         cover_group={
-            "key": "portrait_9_16",
-            "label": "9:16 竖版通用封面",
+            "key": "portrait_3_4",
+            "label": "3:4 竖版通用封面",
             "members": ["douyin"],
         },
     )
 
     assert metadata["publish_ready"] is False
     assert metadata["blocking_reasons"] == ["封面图像生成重试后仍失败：Dreamina runner timed out after 90s"]
-    assert fit_calls[0]["source_path"] == group_output
-    assert output.exists()
+    assert fit_calls == []
+    assert not output.exists()
+
+
+def test_prepare_structured_smart_copy_layout_removes_publication_runtime_dir(tmp_path) -> None:
+    material_dir = tmp_path / "smart-copy"
+    runtime_dir = material_dir / "_publication_runtime"
+    runtime_dir.mkdir(parents=True)
+    (runtime_dir / "stale.publishable.mp4").write_bytes(b"stale")
+
+    ic._prepare_structured_smart_copy_layout(material_dir)
+
+    assert not runtime_dir.exists()
+
+
+def test_restore_platform_cover_path_clears_blocked_group_reuse_cover(tmp_path) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    platform_cover = material_dir / "01-bilibili-cover.jpg"
+    platform_cover.write_bytes(b"stale-cover")
+    material = {
+        "key": "bilibili",
+        "cover_path": str(platform_cover),
+        "cover_generation": {
+            "source": "cover_group_reuse",
+            "publish_ready": False,
+            "blocking_reasons": ["完整封面位图标题校验未完成，不能放行到最终封面"],
+        },
+    }
+
+    ic._restore_platform_cover_path(material=material, material_dir=material_dir, index=1)
+
+    assert "cover_path" not in material
+    assert not platform_cover.exists()
+
+
+def test_restore_platform_cover_path_recovers_group_cover_despite_stale_blocked_verdict(tmp_path) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    group_cover = material_dir / "_cover" / "00-cover-portrait_3_4.jpg"
+    group_cover.parent.mkdir()
+    group_cover.write_bytes(b"group-cover")
+    material = {
+        "key": "xiaohongshu",
+        "cover_generation": {
+            "source": "cover_group_reuse",
+            "publish_ready": False,
+            "blocking_reasons": ["封面主标题未稳定锁定品牌/型号，存在内容签名漂移风险"],
+            "cover_group": {
+                "cover_path": str(group_cover),
+            },
+        },
+    }
+
+    ic._restore_platform_cover_path(material=material, material_dir=material_dir, index=2)
+
+    restored_path = material_dir / "02-xiaohongshu-cover.jpg"
+    assert material["cover_path"] == str(restored_path)
+    assert restored_path.exists()
+
+
+def test_synchronize_publishable_root_files_prunes_stale_platform_artifacts(tmp_path) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    stale_x_cover = material_dir / "01-x-cover.jpg"
+    stale_x_md = material_dir / "01-x.md"
+    bilibili_cover = material_dir / "01-bilibili-cover.jpg"
+    bilibili_md = material_dir / "01-bilibili.md"
+    x_cover = material_dir / "08-x-cover.jpg"
+    x_md = material_dir / "08-x.md"
+    for path in (stale_x_cover, stale_x_md, bilibili_cover, bilibili_md, x_cover, x_md):
+        path.write_bytes(b"stale")
+
+    ic._synchronize_publishable_root_files(
+        material_dir=material_dir,
+        material_entries=[
+            (1, {"key": "bilibili", "cover_path": "", "full_copy": "b"}),
+            (8, {"key": "x", "cover_path": str(x_cover), "full_copy": "x"}),
+        ],
+    )
+
+    assert not stale_x_cover.exists()
+    assert not stale_x_md.exists()
+    assert not bilibili_cover.exists()
+    assert bilibili_md.exists()
+    assert x_cover.exists()
+    assert x_md.exists()
 
 
 def test_upgrade_existing_intelligent_copy_result_keeps_pending_group_cover_blocked(monkeypatch, tmp_path) -> None:
@@ -2319,6 +2873,117 @@ async def test_render_platform_cover_writes_codex_imagegen_request_when_builtin_
     assert "fit" in calls
     assert output.exists()
     assert "Codex" in metadata["blocking_reasons"][0]
+
+
+def test_codex_imagegen_request_completed_requires_bridge_generation_marker(tmp_path: Path) -> None:
+    request_path = tmp_path / "cover.codex-imagegen.json"
+    output = tmp_path / "cover.jpg"
+    output.write_bytes(b"fallback")
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "backend": "codex_builtin",
+                "output_path": str(output),
+                "prompt": "prompt",
+                "cover_hard_contract": {},
+                "cover_director_policy": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert imagegen._codex_imagegen_request_completed(
+        request_path,
+        output,
+        expected_prompt="prompt",
+        expected_hard_contract={},
+        expected_director_policy={},
+    ) is False
+
+
+@pytest.mark.asyncio
+async def test_render_platform_cover_writes_completed_snapshot_for_minimax_overlay_flow(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "highlight.jpg"
+    source.write_bytes(b"source")
+    output = tmp_path / "bilibili-cover.jpg"
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        ic,
+        "get_settings",
+        lambda: SimpleNamespace(
+            intelligent_copy_cover_image_generation_enabled=True,
+            intelligent_copy_cover_image_backend="minimax_images_api",
+            ffmpeg_timeout_sec=1,
+        ),
+    )
+
+    async def fake_generate_edited_cover_image(**kwargs):
+        calls["generate"] = kwargs
+        Path(kwargs["output_path"]).write_bytes(b"generated")
+        return {
+            "backend": "minimax_images_api",
+            "status": "completed",
+            "output_path": str(kwargs["output_path"]),
+            "size": "1536x1024",
+        }
+
+    def fake_fit_image_to_canvas(**kwargs):
+        Path(kwargs["output_path"]).write_bytes(b"fit")
+
+    async def fake_verify_unexpected_text(**kwargs):
+        calls["unexpected"] = kwargs["output_path"]
+        return {"unexpected_bitmap_text_detected": False, "detected_text": [], "reason": ""}
+
+    async def fake_overlay_title_layout(*args):
+        calls["overlay"] = args
+
+    monkeypatch.setattr(ic, "generate_edited_cover_image", fake_generate_edited_cover_image)
+    monkeypatch.setattr(ic, "_fit_image_to_canvas", fake_fit_image_to_canvas)
+    monkeypatch.setattr(ic, "_verify_generated_cover_has_unexpected_bitmap_text", fake_verify_unexpected_text)
+    monkeypatch.setattr(ic, "_overlay_title_layout", fake_overlay_title_layout)
+    monkeypatch.setattr(
+        ic,
+        "assess_cover_publish_readiness",
+        lambda *_args, **_kwargs: {
+            "publish_ready": True,
+            "blocking_reasons": [],
+            "warnings": [],
+            "output_path": str(output),
+            "target_size": {"width": 1280, "height": 720},
+            "image_dimensions": {"width": 1280, "height": 720},
+        },
+    )
+
+    metadata = await ic._render_platform_cover(
+        output_path=output,
+        video_path=tmp_path / "video.mp4",
+        source_image_path=source,
+        existing_cover_path=None,
+        title="MAXACE美杜莎4 开箱",
+        platform_key="bilibili",
+        rules=ic.PLATFORM_PUBLISH_RULES["bilibili"],
+        cover_brief={
+            "product_identity": "MAXACE美杜莎4 EDC折刀",
+            "selling_angle": "到手开箱看质感和做工",
+            "visual_brief": "刀身特写，标题后期统一叠加。",
+            "video_type": "开箱",
+        },
+    )
+
+    request_payload = json.loads(output.with_suffix(".codex-imagegen.json").read_text(encoding="utf-8"))
+
+    assert metadata["source"] == "image_generation"
+    assert metadata["publish_ready"] is True
+    assert request_payload["status"] == "completed"
+    assert request_payload["backend"] == "minimax_images_api"
+    assert request_payload["cover_director_policy"]["typography_owner"] == "local_post_overlay"
+    assert request_payload["cover_hard_contract"]["post_title_overlay_required"] is True
+    assert request_payload["cover_hard_contract"]["full_bitmap_cover_required"] is False
+    assert request_payload["post_title_overlay_applied"] is True
+    assert "overlay" in calls
 
 
 @pytest.mark.asyncio
@@ -2562,6 +3227,94 @@ async def test_codex_imagegen_requires_completion_marker_before_publishable_resu
     assert metadata["image_model"] == "codex_builtin_image_generation"
     assert metadata["codex_runner"]["model"] == "gpt-5.4-mini"
     assert metadata["codex_runner"]["reasoning_effort"] == "low"
+
+
+@pytest.mark.asyncio
+async def test_codex_imagegen_request_persists_reference_image_pack(tmp_path, monkeypatch) -> None:
+    source = tmp_path / "source.jpg"
+    source.write_bytes(b"source")
+    extra = tmp_path / "extra.jpg"
+    extra.write_bytes(b"extra")
+    output = tmp_path / "cover.jpg"
+    request_path = tmp_path / "cover.codex-imagegen.json"
+
+    monkeypatch.setattr(
+        imagegen,
+        "get_settings",
+        lambda: SimpleNamespace(
+            intelligent_copy_cover_image_backend="codex_builtin",
+            intelligent_copy_cover_codex_runner_model="gpt-5.4-mini",
+            intelligent_copy_cover_codex_runner_effort="low",
+        ),
+    )
+    monkeypatch.setattr(imagegen, "resolve_codex_proxy_sibling_url", lambda _path: "")
+    monkeypatch.setattr(imagegen, "resolve_codex_proxy_token", lambda: "")
+
+    with pytest.raises(imagegen.CodexImageGenerationPending) as exc_info:
+        await imagegen.generate_edited_cover_image(
+            source_image_path=source,
+            reference_image_paths=[source, extra],
+            output_path=output,
+            final_output_path=output,
+            request_path=request_path,
+            prompt="生成封面",
+            width=1280,
+            height=720,
+        )
+
+    metadata = exc_info.value.metadata
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+
+    assert len(payload["reference_image_paths"]) == 2
+    assert Path(payload["source_image_path"]).exists()
+    assert all(Path(path).exists() for path in payload["reference_image_paths"])
+    assert payload["reference_image_paths"][0] == payload["source_image_path"]
+    assert len({Path(path).name for path in payload["reference_image_paths"]}) == 2
+    assert metadata["reference_image_paths"] == payload["reference_image_paths"]
+
+
+@pytest.mark.asyncio
+async def test_codex_imagegen_request_reuses_shared_highlight_reference_pack_without_per_group_copies(tmp_path, monkeypatch) -> None:
+    material_dir = tmp_path / "smart-copy"
+    cover_dir = material_dir / "_cover"
+    cover_dir.mkdir(parents=True)
+    source = cover_dir / "00-highlight-reference-1.jpg"
+    extra = cover_dir / "00-highlight-reference-2.jpg"
+    source.write_bytes(b"source")
+    extra.write_bytes(b"extra")
+    output = cover_dir / "00-cover-landscape_16_9.jpg"
+    request_path = cover_dir / "00-cover-landscape_16_9.codex-imagegen.json"
+
+    monkeypatch.setattr(
+        imagegen,
+        "get_settings",
+        lambda: SimpleNamespace(
+            intelligent_copy_cover_image_backend="codex_builtin",
+            intelligent_copy_cover_codex_runner_model="gpt-5.4-mini",
+            intelligent_copy_cover_codex_runner_effort="low",
+        ),
+    )
+    monkeypatch.setattr(imagegen, "resolve_codex_proxy_sibling_url", lambda _path: "")
+    monkeypatch.setattr(imagegen, "resolve_codex_proxy_token", lambda: "")
+
+    with pytest.raises(imagegen.CodexImageGenerationPending):
+        await imagegen.generate_edited_cover_image(
+            source_image_path=source,
+            reference_image_paths=[source, extra],
+            output_path=output,
+            final_output_path=output,
+            request_path=request_path,
+            prompt="生成封面",
+            width=1280,
+            height=720,
+        )
+
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+
+    assert payload["source_image_path"] == str(source)
+    assert payload["reference_image_paths"] == [str(source), str(extra)]
+    assert not (cover_dir / "00-cover-landscape_16_9.codex-imagegen-reference.jpg").exists()
+    assert not (cover_dir / "00-cover-landscape_16_9.codex-imagegen-reference-2.jpg").exists()
 
 
 @pytest.mark.asyncio
@@ -2892,6 +3645,96 @@ async def test_generate_intelligent_copy_passes_selected_platforms_to_packaging(
 
 
 @pytest.mark.asyncio
+async def test_generate_intelligent_copy_drains_pending_cover_group_requests(tmp_path, monkeypatch) -> None:
+    source_dir = tmp_path / "MAXACE 美杜莎4 顶配次顶配开箱"
+    source_dir.mkdir()
+    video_path = source_dir / "MAXACE 美杜莎4 顶配次顶配开箱.mp4"
+    subtitle_path = source_dir / "MAXACE 美杜莎4 顶配次顶配开箱.srt"
+    video_path.write_bytes(b"video")
+    subtitle_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nMAXACE 美杜莎4 到货了\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        ic,
+        "inspect_intelligent_copy_folder",
+        lambda _folder: {
+            "folder_path": str(source_dir),
+            "material_dir": str(source_dir / "smart-copy"),
+            "video_file": str(video_path),
+            "subtitle_file": str(subtitle_path),
+            "cover_file": None,
+            "extra_video_files": [],
+            "extra_subtitle_files": [],
+            "extra_cover_files": [],
+            "warnings": [],
+        },
+    )
+    monkeypatch.setattr(ic, "_load_subtitle_items", lambda _path: [{"text_final": "MAXACE 美杜莎4 到货了"}])
+    monkeypatch.setattr(ic, "list_packaging_assets", lambda: {"config": {}})
+    monkeypatch.setattr(
+        ic,
+        "_build_intelligent_copy_fast_profile",
+        lambda **_kwargs: {"subject_model": "MAXACE 美杜莎4", "subject_type": "EDC折刀"},
+    )
+    monkeypatch.setattr(ic, "_build_intelligent_copy_brief", lambda **_kwargs: {"topic_subject": "MAXACE 美杜莎4"})
+
+    async def fake_build_cover_brief(**_kwargs):
+        return {
+            "cover_title": "MAXACE美杜莎4到货了",
+            "video_type": "开箱体验",
+            "product_identity": "MAXACE 美杜莎4",
+            "selling_angle": "顶配次顶配对比",
+            "visual_brief": "主体真实，标题居中。",
+        }
+
+    async def fake_prepare_cover_source(**_kwargs):
+        return None
+
+    async def fake_generate_platform_packaging(**_kwargs):
+        return {
+            "highlights": {"product": "MAXACE 美杜莎4"},
+            "platforms": {
+                "douyin": {
+                    "titles": ["MAXACE美杜莎4到货了", "顶配次顶配怎么选", "差别都在细节"],
+                    "description": "MAXACE美杜莎4到货了，上手先看顶配和次顶配的细节差别。",
+                    "tags": ["MAXACE", "美杜莎4"],
+                },
+            },
+        }
+
+    async def fake_render_cover_group(**_kwargs):
+        output_path = Path(_kwargs["output_path"])
+        output_path.write_bytes(b"fallback")
+        return {
+            "publish_ready": False,
+            "blocking_reasons": ["封面等待 Codex 内置 imagegen 执行完成，已回退使用参考帧封面"],
+            "image_generation": {
+                "status": "pending_codex_imagegen",
+                "request_path": str(output_path.with_suffix(".codex-imagegen.json")),
+                "output_path": str(output_path),
+            },
+        }
+
+    calls: dict[str, object] = {}
+
+    async def fake_drain_pending_cover_group_requests(*, cache, material_dir):
+        calls["drain_cache_size"] = len(cache)
+        calls["drain_material_dir"] = str(material_dir)
+
+    monkeypatch.setattr(ic, "generate_platform_packaging", fake_generate_platform_packaging)
+    monkeypatch.setattr(ic, "_build_intelligent_cover_brief", fake_build_cover_brief)
+    monkeypatch.setattr(ic, "save_platform_packaging_markdown", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(ic, "_prepare_intelligent_copy_cover_source", fake_prepare_cover_source)
+    monkeypatch.setattr(ic, "_render_or_reuse_platform_cover_group", fake_render_cover_group)
+    monkeypatch.setattr(ic, "_write_platform_material_files", lambda **_kwargs: None)
+    monkeypatch.setattr(ic, "_drain_pending_cover_group_requests", fake_drain_pending_cover_group_requests)
+
+    await ic.generate_intelligent_copy(str(source_dir), platforms=["douyin"])
+
+    assert calls["drain_cache_size"] >= 1
+    assert calls["drain_material_dir"] == str(source_dir / "smart-copy")
+
+
+@pytest.mark.asyncio
 async def test_generate_intelligent_copy_reuses_complete_platform_materials_and_only_fills_gaps(tmp_path, monkeypatch) -> None:
     source_dir = tmp_path / "MAXACE 美杜莎4 顶配次顶配开箱"
     source_dir.mkdir()
@@ -3129,6 +3972,15 @@ async def test_generate_intelligent_copy_skips_rewriting_existing_files_for_reus
     await ic.generate_intelligent_copy(str(source_dir), platforms=["douyin", "xiaohongshu"])
 
     assert written_keys == ["xiaohongshu"]
+    assert smart_copy_material_json_path(material_dir).exists()
+    assert not (material_dir / "smart-copy.json").exists()
+    assert smart_copy_platform_titles_path(material_dir, 2, "douyin").exists()
+    assert smart_copy_platform_body_path(material_dir, 2, "douyin").exists()
+    assert smart_copy_platform_tags_path(material_dir, 2, "douyin").exists()
+    assert not (material_dir / "02-douyin-titles.txt").exists()
+    assert not (material_dir / "02-douyin-body.txt").exists()
+    assert not (material_dir / "02-douyin-tags.txt").exists()
+    assert (material_dir / "02-douyin.md").exists()
 
 
 @pytest.mark.asyncio
@@ -3239,7 +4091,11 @@ async def test_rerender_existing_cover_groups_restores_packaging_context_from_si
     monkeypatch.setattr(ic, "_render_or_reuse_platform_cover_group", fake_render_cover_group)
     monkeypatch.setattr(ic, "_write_platform_material_files", lambda **_kwargs: None)
 
-    result = await ic.rerender_existing_intelligent_copy_cover_groups(str(source_dir), platforms=["douyin"])
+    result = await ic.rerender_existing_intelligent_copy_cover_groups(
+        str(source_dir),
+        platforms=["douyin"],
+        creator_profile_name="FAS",
+    )
 
     assert seen["copy_brief_subject"] == "美杜莎4"
     assert seen["packaging_highlights"] == {"product": "MAXACE 美杜莎4 顶配次顶配"}
@@ -3248,6 +4104,8 @@ async def test_rerender_existing_cover_groups_restores_packaging_context_from_si
     assert seen["render_title"] == "MAXACE美杜莎4"
     assert result["platforms"][0]["key"] == "douyin"
     assert result["cover_brief"]["cover_title"] == "MAXACE美杜莎4"
+    assert result["creator_profile_name"] == "FAS"
+    assert result["publication_context"]["creator_profile_name"] == "FAS"
 
 
 @pytest.mark.asyncio
@@ -3336,33 +4194,128 @@ async def test_restore_existing_cover_generation_context_reuses_verified_source_
 
 
 @pytest.mark.asyncio
+async def test_restore_existing_cover_generation_context_reuses_persisted_cover_brief(tmp_path, monkeypatch) -> None:
+    source_dir = tmp_path / "MAXACE 美杜莎4 顶配次顶配开箱"
+    source_dir.mkdir()
+    material_dir = source_dir / "smart-copy"
+    material_dir.mkdir()
+    video_path = source_dir / "video.mp4"
+    subtitle_path = source_dir / "video.srt"
+    cover_source_path = material_dir / "00-highlight-cover-source.jpg"
+    video_path.write_bytes(b"video")
+    subtitle_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nMAXACE 美杜莎4 到货了\n", encoding="utf-8")
+    cover_source_path.write_bytes(b"cover-source")
+    (material_dir / "00-highlight-cover-source.json").write_text(
+        json.dumps({"source": "llm_full_frame_review_valid_backup", "seek_sec": 449.97}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (material_dir / "smart-copy.json").write_text(
+        json.dumps(
+            {
+                "cover_brief": {
+                    "cover_title": "MAXACE美杜莎4双版开箱",
+                    "video_type": "开箱体验",
+                    "product_identity": "MAXACE 美杜莎4 EDC折刀（顶配与高配镜面双版本）",
+                    "selling_angle": "两版本完整对比",
+                    "visual_brief": "双主体同框，突出金属质感",
+                    "background_strategy": "preserve_reference_background",
+                },
+                "cover_source_path": str(cover_source_path),
+                "cover_source_manifest": {"source": "llm_full_frame_review_valid_backup", "seek_sec": 449.97},
+                "content_profile_summary": {
+                    "subject_brand": "MAXACE",
+                    "subject_model": "美杜莎4",
+                    "subject_type": "EDC折刀",
+                },
+                "platforms": [{"key": "xiaohongshu", "titles": ["MAXACE美杜莎4"], "body": "body", "tags": ["MAXACE"]}],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (material_dir / "platform-packaging.json").write_text(
+        json.dumps({"highlights": {"product": "MAXACE 美杜莎4"}, "platforms": {"xiaohongshu": {}}}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        ic,
+        "inspect_intelligent_copy_folder",
+        lambda _folder: {
+            "folder_path": str(source_dir),
+            "material_dir": str(material_dir),
+            "video_file": str(video_path),
+            "subtitle_file": str(subtitle_path),
+            "cover_file": None,
+            "extra_video_files": [],
+            "extra_subtitle_files": [],
+            "extra_cover_files": [],
+            "warnings": [],
+        },
+    )
+    monkeypatch.setattr(ic, "_load_subtitle_items", lambda _path: [{"text_final": "MAXACE 美杜莎4 到货了"}])
+    monkeypatch.setattr(ic, "_build_intelligent_copy_brief", lambda **_kwargs: {"topic_subject": "MAXACE 美杜莎4"})
+    async def fake_extract_frame(_video_path, output_path, _seek):
+        Path(output_path).write_bytes(b"restored")
+
+    monkeypatch.setattr(ic, "_extract_frame", fake_extract_frame)
+
+    async def fail_build_cover_brief(**_kwargs):
+        raise AssertionError("should reuse persisted cover_brief instead of rerunning LLM cover planning")
+
+    async def fail_prepare_cover_source(**_kwargs):
+        raise AssertionError("should reuse existing verified cover source instead of rerunning source selection")
+
+    monkeypatch.setattr(ic, "_build_intelligent_cover_brief", fail_build_cover_brief)
+    monkeypatch.setattr(ic, "_prepare_intelligent_copy_cover_source", fail_prepare_cover_source)
+
+    context = await ic._restore_existing_intelligent_cover_generation_context(str(source_dir), platforms=["xiaohongshu"])
+
+    assert context["cover_brief"]["cover_title"] == "MAXACE美杜莎4双版开箱"
+    assert context["cover_brief"]["strategy_axes"]["content_scheme"]["key"] == "unboxing_compare_dual_subject_v1"
+
+
+@pytest.mark.asyncio
+async def test_resolve_restored_cover_brief_tolerates_missing_existing_result(monkeypatch, tmp_path) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_build_cover_brief(**kwargs):
+        captured.update(kwargs)
+        return {
+            "cover_title": "MAXACE美杜莎4双版开箱",
+            "video_type": "开箱体验",
+            "product_identity": "MAXACE 美杜莎4",
+            "selling_angle": "顶配次顶配对比",
+            "visual_brief": "双主体同框，突出金属质感",
+        }
+
+    monkeypatch.setattr(ic, "_build_intelligent_cover_brief", fake_build_cover_brief)
+
+    brief = await ic._resolve_restored_cover_brief(
+        None,
+        video_path=tmp_path / "video.mp4",
+        subtitle_items=[{"text_final": "MAXACE 美杜莎4 到货了"}],
+        content_profile={"subject_model": "美杜莎4", "subject_type": "EDC折刀"},
+        copy_brief={"topic_subject": "MAXACE 美杜莎4"},
+        packaging={"highlights": {"product": "MAXACE 美杜莎4"}},
+    )
+
+    assert brief["cover_title"] == "MAXACE美杜莎4双版开箱"
+    assert captured["packaging"] == {"highlights": {"product": "MAXACE 美杜莎4"}}
+
+
+@pytest.mark.asyncio
 async def test_prepare_cover_source_preserves_existing_verified_source_when_refresh_falls_back(tmp_path, monkeypatch) -> None:
     video_path = tmp_path / "video.mp4"
     video_path.write_bytes(b"video")
     material_dir = tmp_path / "smart-copy"
     material_dir.mkdir()
-    existing_source_path = material_dir / "00-highlight-cover-source.jpg"
+    existing_source_path = smart_copy_cover_source_image_path(material_dir)
+    existing_source_path.parent.mkdir(parents=True, exist_ok=True)
     existing_source_path.write_bytes(b"verified")
 
     monkeypatch.setattr(ic, "_probe_duration", lambda _path: 600.0)
-    monkeypatch.setattr(
-        ic,
-        "_sample_cover_candidates",
-        lambda *_args, **_kwargs: [
-            {"seek": 12.3, "preview": str(tmp_path / "candidate-1.jpg")},
-        ],
-    )
-    (tmp_path / "candidate-1.jpg").write_bytes(b"candidate")
-
-    async def fake_select_candidate(*_args, **_kwargs):
-        return {
-            "index": 0,
-            "source": "fallback_first_candidate",
-            "score": None,
-            "reason": "高光帧智能选择失败，已使用首个候选帧兜底：TimeoutError",
-        }
-
-    monkeypatch.setattr(ic, "_select_intelligent_copy_highlight_candidate", fake_select_candidate)
+    monkeypatch.setattr(ic, "_sample_cover_candidates", lambda *_args, **_kwargs: [])
 
     extracted: list[Path] = []
 
@@ -3525,16 +4478,672 @@ async def test_rerender_existing_cover_groups_preserves_unselected_platforms_and
         Path(kwargs["output_path"]).write_bytes(b"cover")
         return {"publish_ready": True, "blocking_reasons": []}
 
+    async def fake_prime_standard_cover_matrix_groups(**kwargs):
+        return kwargs["cache"]
+
     monkeypatch.setattr(ic, "_build_intelligent_cover_brief", fake_build_cover_brief)
     monkeypatch.setattr(ic, "_write_platform_material_files", fake_write_platform_material_files)
     monkeypatch.setattr(ic, "_render_or_reuse_platform_cover_group", fake_render_cover_group)
+    monkeypatch.setattr(ic, "_prime_standard_cover_matrix_groups", fake_prime_standard_cover_matrix_groups)
 
     result = await ic.rerender_existing_intelligent_copy_cover_groups(str(source_dir), platforms=["xiaohongshu"])
 
     assert [item["key"] for item in result["platforms"]] == ["bilibili", "xiaohongshu", "wechat-channels"]
-    assert written_serials == [(2, "xiaohongshu")]
-    packaging_payload = json.loads((material_dir / "platform-packaging.json").read_text(encoding="utf-8"))
+    assert written_serials
+    assert set(written_serials) == {(2, "xiaohongshu")}
+    packaging_payload = json.loads((material_dir / "_meta" / "platform-packaging.json").read_text(encoding="utf-8"))
     assert sorted((packaging_payload.get("platforms") or {}).keys()) == ["bilibili", "wechat-channels", "xiaohongshu"]
+
+
+def test_refresh_cover_group_cache_status_reloads_completed_request_from_disk(tmp_path) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    output_path = material_dir / "00-cover-landscape_4_3.jpg"
+    request_path = material_dir / "00-cover-landscape_4_3.codex-imagegen.json"
+    output_path.write_bytes(b"cover")
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "output_path": str(output_path),
+                "bitmap_title_contract_passed": True,
+                "compare_subject_contract_passed": True,
+                "cover_director_policy": {
+                    "style_profile_key": "fas_edc_signature_full_cover_v1",
+                    "subject_fidelity_scheme": {"key": "dual_subject_compare_fidelity_v1"},
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    cache = {
+        "landscape_4_3": {
+            "publish_ready": False,
+            "blocking_reasons": ["封面生成元数据仍标记为等待图片生成完成"],
+            "warnings": [],
+            "image_generation": {
+                "request_path": str(request_path),
+                "output_path": str(output_path),
+            },
+            "cover_group": {
+                "key": "landscape_4_3",
+                "label": "4:3 横版母版",
+                "cover_path": str(output_path),
+                "members": [],
+            },
+        }
+    }
+
+    ic._refresh_cover_group_cache_status(cache=cache, material_dir=material_dir)
+
+    refreshed = cache["landscape_4_3"]
+    assert refreshed["publish_ready"] is True
+    assert refreshed["blocking_reasons"] == []
+
+
+def test_refresh_existing_cover_generation_node_infers_request_path_from_output_when_missing(tmp_path) -> None:
+    material_dir = tmp_path
+    output_path = material_dir / "00-cover-portrait_9_16.jpg"
+    output_path.write_bytes(b"jpg")
+    request_path = output_path.with_suffix(".codex-imagegen.json")
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "backend": "codex_builtin",
+                "output_path": str(output_path),
+                "cover_hard_contract": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    generation = {
+        "source": "cover_group_reuse",
+        "publish_ready": False,
+        "blocking_reasons": ["封面等待 Codex 内置 imagegen 执行完成"],
+        "image_generation": {
+            "backend": "codex_builtin",
+            "status": "pending_codex_imagegen",
+            "output_path": str(output_path),
+        },
+    }
+
+    refreshed = ic._refresh_existing_cover_generation_node(
+        generation=generation,
+        output_path=output_path,
+        material_dir=material_dir,
+    )
+
+    assert refreshed is not None
+    assert refreshed["image_generation"]["request_path"] == str(request_path)
+    assert refreshed["image_generation"]["status"] == "completed"
+
+
+def test_assess_cover_publish_readiness_accepts_trusted_group_derivative_output(tmp_path) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    group_output = material_dir / "00-cover-landscape_16_9.jpg"
+    platform_output = material_dir / "01-bilibili-cover.jpg"
+    Image.new("RGB", (160, 90), "black").save(group_output)
+    time.sleep(1.1)
+    Image.new("RGB", (160, 90), "white").save(platform_output)
+    request_payload = {
+        "status": "completed",
+        "backend": "codex_builtin",
+        "created_at": "2026-06-03T10:00:00+08:00",
+        "output_path": str(group_output),
+        "target_size": {"width": 160, "height": 90},
+    }
+    cover_generation = {
+        "source": "cover_group_reuse",
+        "cover_group": {
+            "key": "landscape_16_9",
+            "cover_path": str(group_output),
+            "members": ["bilibili"],
+        },
+        "group_generation": {
+            "image_generation": {
+                "status": "completed",
+                "backend": "codex_builtin",
+                "output_path": str(group_output),
+            }
+        },
+        "image_generation": {
+            "status": "completed",
+            "backend": "codex_builtin",
+            "output_path": str(group_output),
+        },
+    }
+
+    assessment = ic.assess_cover_publish_readiness(
+        cover_generation,
+        request_payload,
+        platform_output,
+    )
+
+    assert assessment["publish_ready"] is True
+    assert assessment["blocking_reasons"] == []
+
+
+def test_refresh_existing_cover_generation_node_uses_cover_group_lineage_for_platform_derivative(tmp_path) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    group_output = material_dir / "00-cover-landscape_16_9.jpg"
+    platform_output = material_dir / "01-bilibili-cover.jpg"
+    Image.new("RGB", (160, 90), "black").save(group_output)
+    time.sleep(1.1)
+    Image.new("RGB", (160, 90), "white").save(platform_output)
+    request_path = group_output.with_suffix(".codex-imagegen.json")
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "backend": "codex_builtin",
+                "created_at": "2026-06-03T10:00:00+08:00",
+                "output_path": str(group_output),
+                "target_size": {"width": 160, "height": 90},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    generation = {
+        "source": "cover_group_reuse",
+        "cover_group": {
+            "key": "landscape_16_9",
+            "cover_path": str(group_output),
+            "members": ["bilibili"],
+        },
+        "group_generation": {
+            "image_generation": {
+                "status": "completed",
+                "backend": "codex_builtin",
+                "output_path": str(group_output),
+                "request_path": str(request_path),
+            }
+        },
+        "image_generation": {
+            "status": "completed",
+            "backend": "codex_builtin",
+            "output_path": str(group_output),
+            "request_path": str(request_path),
+        },
+    }
+
+    refreshed = ic._refresh_existing_cover_generation_node(
+        generation=generation,
+        output_path=platform_output,
+        material_dir=material_dir,
+    )
+
+    assert refreshed is not None
+    assert refreshed["publish_ready"] is True
+    assert refreshed["blocking_reasons"] == []
+
+
+def test_refresh_cover_group_reuse_platform_derivative_recopies_stale_platform_cover(tmp_path) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    group_output = material_dir / "00-cover-landscape_16_9.jpg"
+    platform_output = material_dir / "01-bilibili-cover.jpg"
+    Image.new("RGB", (160, 90), "black").save(platform_output)
+    time.sleep(1.1)
+    Image.new("RGB", (160, 90), "white").save(group_output)
+    old_mtime = platform_output.stat().st_mtime
+    material = {
+        "key": "bilibili",
+        "cover_path": str(platform_output),
+        "cover_generation": {
+            "source": "cover_group_reuse",
+            "cover_group": {
+                "key": "landscape_16_9",
+                "label": "16:9 横版母版",
+                "cover_path": str(group_output),
+                "members": ["bilibili"],
+            },
+            "group_generation": {
+                "publish_ready": True,
+                "blocking_reasons": [],
+                "warnings": [],
+                "image_generation": {
+                    "status": "completed",
+                    "backend": "codex_builtin",
+                    "output_path": str(group_output),
+                    "request_path": str(group_output.with_suffix(".codex-imagegen.json")),
+                },
+            },
+        },
+    }
+
+    ic._refresh_cover_group_reuse_platform_derivative(
+        material=material,
+        material_dir=material_dir,
+        rules={"cover_size": (160, 90)},
+    )
+
+    assert platform_output.stat().st_mtime > old_mtime
+    refreshed_generation = material["cover_generation"]
+    assert refreshed_generation["source"] == "cover_group_reuse"
+    assessment = ic.assess_cover_publish_readiness(
+        refreshed_generation,
+        {"status": "completed", "backend": "codex_builtin", "output_path": str(group_output), "target_size": {"width": 160, "height": 90}},
+        platform_output,
+    )
+    assert assessment["publish_ready"] is True
+
+
+def test_resolve_cover_verification_bitmap_path_uses_final_bitmap_for_codex_full_cover(tmp_path) -> None:
+    output_path = tmp_path / "final.jpg"
+    pre_overlay_path = tmp_path / "pre-overlay.jpg"
+    output_path.write_bytes(b"final")
+    pre_overlay_path.write_bytes(b"pre")
+
+    resolved = ic._resolve_cover_verification_bitmap_path(
+        request_payload={
+            "pre_overlay_output_path": str(pre_overlay_path),
+            "cover_director_policy": {"typography_owner": "codex_full_cover"},
+        },
+        output_path=output_path,
+    )
+
+    assert resolved == output_path
+
+
+@pytest.mark.asyncio
+async def test_revalidate_existing_cover_generation_request_rewrites_stale_failed_verdicts(tmp_path, monkeypatch) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    output_path = material_dir / "00-cover-landscape_16_9.jpg"
+    request_path = material_dir / "00-cover-landscape_16_9.codex-imagegen.json"
+    output_path.write_bytes(b"cover")
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "backend": "codex_builtin",
+                "output_path": str(output_path),
+                "cover_hard_contract": {
+                    "compare_subject_pair_required": True,
+                    "full_bitmap_cover_required": True,
+                    "brand_model_title_required": True,
+                    "config_subtitle_required": True,
+                    "required_title_lines": {
+                        "brand": "MAXACE",
+                        "top": "MAXACE",
+                        "main": "美杜莎4",
+                        "sub": "顶配vs次顶配",
+                        "bottom": "顶配vs次顶配",
+                        "hook": "双版本开箱",
+                    },
+                },
+                "cover_director_policy": {
+                    "typography_owner": "codex_full_cover",
+                },
+                "compare_subject_contract_passed": False,
+                "compare_subject_contract_reason": "old failure",
+                "compare_subject_contract_checked_at": "2026-06-02T00:00:00",
+                "compare_subject_contract_check_unavailable": True,
+                "bitmap_title_contract_passed": False,
+                "bitmap_title_contract_reason": "old failure",
+                "bitmap_title_contract_verified_at": "2026-06-02T00:00:00",
+                "bitmap_title_contract_check_unavailable": True,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    generation = {
+        "image_generation": {
+            "request_path": str(request_path),
+            "output_path": str(output_path),
+            "status": "completed",
+            "backend": "codex_builtin",
+        }
+    }
+
+    async def fake_ensure(**kwargs):
+        ic._mark_cover_compare_subject_contract_verified(
+            kwargs["request_path"],
+            verification={"compare_subject_contract_passed": True, "reason": "ok"},
+        )
+        ic._mark_cover_bitmap_title_contract_verified(
+            kwargs["request_path"],
+            title_lines=kwargs["title_lines"],
+            verification={
+                "bitmap_title_contract_passed": True,
+                "main_title_matches": True,
+                "subtitle_matches": True,
+                "style_consistent": True,
+                "detected_main_title": "美杜莎4",
+                "detected_subtitle": "顶配vs次顶配",
+                "reason": "ok",
+            },
+        )
+        return json.loads(kwargs["request_path"].read_text(encoding="utf-8"))
+
+    monkeypatch.setattr(ic, "_ensure_generated_cover_title_contract_ready", fake_ensure)
+
+    refreshed = await ic._revalidate_existing_cover_generation_request(
+        generation=generation,
+        output_path=output_path,
+        material_dir=material_dir,
+        rules={"label": "16:9 横版母版", "cover_size": (1600, 900), "visual_instruction": ""},
+        cover_brief={"cover_title": "MAXACE美杜莎4双版开箱"},
+    )
+
+    assert refreshed is not None
+    assert refreshed["publish_ready"] is True
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+    assert payload["compare_subject_contract_passed"] is True
+    assert "compare_subject_contract_check_unavailable" not in payload
+    assert payload["bitmap_title_contract_passed"] is True
+    assert "bitmap_title_contract_check_unavailable" not in payload
+
+
+def test_mark_cover_bitmap_title_contract_verified_finalizes_pending_request_with_existing_output(tmp_path) -> None:
+    output_path = tmp_path / "00-cover-landscape_4_3.jpg"
+    request_path = tmp_path / "00-cover-landscape_4_3.codex-imagegen.json"
+    output_path.write_bytes(b"cover")
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "pending_codex_imagegen",
+                "backend": "codex_builtin",
+                "generated_by_codex_bridge": True,
+                "output_path": str(output_path),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ic._mark_cover_bitmap_title_contract_verified(
+        request_path,
+        title_lines={"main": "美杜莎4", "bottom": "顶配vs次顶配"},
+        verification={
+            "bitmap_title_contract_passed": False,
+            "main_title_matches": False,
+            "subtitle_matches": False,
+            "style_consistent": True,
+            "detected_main_title": "",
+            "detected_subtitle": "",
+            "reason": "missing titles",
+        },
+    )
+
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "completed"
+    assert payload["completed_at"]
+    assert payload["last_attempted_at"]
+    assert payload["result_path"] == str(output_path)
+    assert payload["bitmap_title_contract_passed"] is False
+    assert payload["bitmap_title_contract_reason"] == "missing titles"
+
+
+def test_mark_cover_bitmap_title_contract_verified_finalizes_container_runtime_output_on_host(tmp_path, monkeypatch) -> None:
+    host_output_root = tmp_path / "runtime"
+    host_output_root.mkdir()
+    output_path = host_output_root / "demo" / "00-cover-landscape_4_3.jpg"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_bytes(b"cover")
+    request_path = tmp_path / "00-cover-landscape_4_3.codex-imagegen.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "pending_codex_imagegen",
+                "backend": "codex_builtin",
+                "generated_by_codex_bridge": True,
+                "output_path": "/app/data/demo/00-cover-landscape_4_3.jpg",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", str(host_output_root))
+
+    ic._mark_cover_bitmap_title_contract_verified(
+        request_path,
+        title_lines={"main": "美杜莎4", "bottom": "顶配vs次顶配"},
+        verification={
+            "bitmap_title_contract_passed": True,
+            "main_title_matches": True,
+            "subtitle_matches": True,
+            "style_consistent": True,
+            "detected_main_title": "美杜莎4",
+            "detected_subtitle": "顶配vs次顶配",
+            "reason": "ok",
+        },
+    )
+
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "completed"
+    assert payload["result_path"] == str(output_path)
+
+
+def test_mark_cover_bitmap_title_contract_verified_does_not_finalize_untrusted_codex_output(tmp_path) -> None:
+    output_path = tmp_path / "00-cover-landscape_16_9.jpg"
+    request_path = tmp_path / "00-cover-landscape_16_9.codex-imagegen.json"
+    output_path.write_bytes(b"fallback")
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "pending_codex_imagegen",
+                "backend": "codex_builtin",
+                "output_path": str(output_path),
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    ic._mark_cover_bitmap_title_contract_verified(
+        request_path,
+        title_lines={"main": "美杜莎4", "bottom": "顶配vs次顶配"},
+        verification={
+            "bitmap_title_contract_passed": False,
+            "main_title_matches": False,
+            "subtitle_matches": False,
+            "style_consistent": False,
+            "detected_main_title": "",
+            "detected_subtitle": "",
+            "reason": "untrusted output",
+        },
+    )
+
+    payload = json.loads(request_path.read_text(encoding="utf-8"))
+    assert payload["status"] == "pending_codex_imagegen"
+    assert "completed_at" not in payload
+    assert payload["bitmap_title_contract_reason"] == "untrusted output"
+
+
+@pytest.mark.asyncio
+async def test_drain_pending_cover_group_requests_retries_only_pending_requests(tmp_path, monkeypatch) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    pending_output = material_dir / "00-cover-portrait_3_4.jpg"
+    pending_request = material_dir / "00-cover-portrait_3_4.codex-imagegen.json"
+    completed_output = material_dir / "00-cover-landscape_16_9.jpg"
+    completed_request = material_dir / "00-cover-landscape_16_9.codex-imagegen.json"
+    pending_output.write_bytes(b"pending")
+    completed_output.write_bytes(b"completed")
+    pending_request.write_text(
+        json.dumps({"status": "pending_codex_imagegen", "output_path": str(pending_output)}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    completed_request.write_text(
+        json.dumps({"status": "completed", "output_path": str(completed_output)}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    cache = {
+        "portrait_3_4": {
+            "image_generation": {"request_path": str(pending_request), "output_path": str(pending_output)},
+            "cover_group": {"cover_path": str(pending_output)},
+        },
+        "landscape_16_9": {
+            "image_generation": {"request_path": str(completed_request), "output_path": str(completed_output)},
+            "cover_group": {"cover_path": str(completed_output)},
+        },
+    }
+    calls: list[tuple[Path, Path]] = []
+
+    async def fake_attempt(*, request_path: Path, output_path: Path, settings):
+        calls.append((request_path, output_path))
+
+    monkeypatch.setattr(ic, "_attempt_codex_imagegen_auto_completion", fake_attempt)
+
+    await ic._drain_pending_cover_group_requests(cache=cache, material_dir=material_dir)
+
+    assert calls == [(pending_request, pending_output)]
+
+
+@pytest.mark.asyncio
+async def test_drain_pending_cover_group_requests_records_bridge_error(tmp_path, monkeypatch) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    pending_output = material_dir / "00-cover-portrait_9_16.jpg"
+    pending_request = material_dir / "00-cover-portrait_9_16.codex-imagegen.json"
+    pending_output.write_bytes(b"pending")
+    pending_request.write_text(
+        json.dumps({"status": "pending_codex_imagegen", "output_path": str(pending_output)}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    cache = {
+        "portrait_9_16": {
+            "image_generation": {"request_path": str(pending_request), "output_path": str(pending_output)},
+            "cover_group": {"cover_path": str(pending_output)},
+        },
+    }
+
+    async def fake_attempt(*, request_path: Path, output_path: Path, settings):
+        raise RuntimeError("bridge timeout")
+
+    monkeypatch.setattr(ic, "_attempt_codex_imagegen_auto_completion", fake_attempt)
+
+    await ic._drain_pending_cover_group_requests(cache=cache, material_dir=material_dir)
+
+    payload = json.loads(pending_request.read_text(encoding="utf-8"))
+    assert "bridge timeout" in payload["auto_completion_error"]
+    assert payload["last_attempted_at"]
+
+
+def test_restore_standard_cover_matrix_group_cache_from_disk_rehydrates_requests(tmp_path) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    group_output = material_dir / "00-cover-portrait_3_4.jpg"
+    group_output.write_bytes(b"cover")
+    request_path = material_dir / "00-cover-portrait_3_4.codex-imagegen.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "backend": "codex_builtin",
+                "output_path": str(group_output),
+                "codex_runner": {"model": "gpt-5.4-mini"},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    cache = ic._restore_standard_cover_matrix_group_cache_from_disk(material_dir=material_dir)
+
+    restored = cache["portrait_3_4"]
+    assert restored["cover_group"]["cover_path"] == str(group_output)
+    assert restored["image_generation"]["request_path"] == str(request_path)
+    assert restored["image_generation"]["status"] == "completed"
+
+
+def test_serialize_cover_matrix_includes_generation_timing_from_request(tmp_path) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    output_path = material_dir / "00-cover-landscape_16_9.jpg"
+    request_path = material_dir / "00-cover-landscape_16_9.codex-imagegen.json"
+    output_path.write_bytes(b"cover")
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "created_at": "2026-06-02T22:27:06.186131+08:00",
+                "completed_at": "2026-06-02T22:28:34.852471+08:00",
+                "result_path": "C:/tmp/generated.png",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    cache = {
+        "landscape_16_9": {
+            "publish_ready": True,
+            "blocking_reasons": [],
+            "image_generation": {
+                "request_path": str(request_path),
+                "output_path": str(output_path),
+            },
+            "cover_group": {
+                "key": "landscape_16_9",
+                "label": "16:9 横版母版",
+                "cover_path": str(output_path),
+                "members": ["bilibili"],
+            },
+        }
+    }
+
+    matrix = ic._serialize_cover_matrix(cache)
+
+    timing = matrix["landscape_16_9"]["generation_timing"]
+    assert timing["status"] == "completed"
+    assert timing["duration_sec"] == 88.67
+    assert timing["result_path"] == "C:/tmp/generated.png"
+
+
+def test_serialize_cover_matrix_normalizes_naive_request_timestamps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    request_path = tmp_path / "cover.codex-imagegen.json"
+    output_path = tmp_path / "cover.jpg"
+    output_path.write_bytes(b"cover")
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "pending_codex_imagegen",
+                "created_at": "2026-06-05T15:41:46.500000",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    cache = {
+        "landscape_16_9": {
+            "publish_ready": False,
+            "blocking_reasons": [],
+            "image_generation": {
+                "request_path": str(request_path),
+                "output_path": str(output_path),
+            },
+            "cover_group": {
+                "key": "landscape_16_9",
+                "label": "16:9 横版母版",
+                "cover_path": str(output_path),
+                "members": ["bilibili"],
+            },
+        }
+    }
+    monkeypatch.setattr(
+        ic,
+        "datetime",
+        SimpleNamespace(
+            now=lambda tz=None: datetime(2026, 6, 5, 16, 0, 0, tzinfo=timezone.utc),
+            fromisoformat=datetime.fromisoformat,
+        ),
+    )
+
+    matrix = ic._serialize_cover_matrix(cache)
+
+    timing = matrix["landscape_16_9"]["generation_timing"]
+    assert timing["status"] == "pending_codex_imagegen"
+    assert timing["created_at"] == "2026-06-05T15:41:46.500000"
+    assert timing["duration_sec"] is None
+    assert timing["elapsed_sec"] == 1093.5
 
 
 def test_collect_reusable_platform_materials_ignores_cover_blockers() -> None:
@@ -3772,6 +5381,120 @@ async def test_generate_intelligent_copy_emits_material_validation_and_contract(
     assert bilibili["collection_name"] == "EDC装备评测合集"
 
 
+@pytest.mark.asyncio
+async def test_resolve_packaging_and_cover_context_starts_cover_source_before_packaging_returns(tmp_path, monkeypatch) -> None:
+    video_path = tmp_path / "MAXACE 美杜莎4 顶配次顶配开箱.mp4"
+    material_dir = tmp_path / "smart-copy"
+    video_path.write_bytes(b"video")
+    material_dir.mkdir()
+    cover_started = asyncio.Event()
+
+    async def fake_generate_platform_packaging(**_kwargs):
+        await asyncio.wait_for(cover_started.wait(), timeout=0.2)
+        return {
+            "highlights": {"product": "MAXACE 美杜莎4"},
+            "platforms": {
+                "douyin": {
+                    "titles": ["MAXACE美杜莎4顶配次顶配怎么选", "MAXACE美杜莎4双版本开箱"],
+                    "description": "MAXACE美杜莎4到货了。",
+                    "tags": ["MAXACE", "美杜莎4"],
+                }
+            },
+        }
+
+    async def fake_prepare_cover_source(**_kwargs):
+        cover_started.set()
+        return None
+
+    monkeypatch.setattr(ic, "generate_platform_packaging", fake_generate_platform_packaging)
+    monkeypatch.setattr(ic, "_prepare_intelligent_copy_cover_source", fake_prepare_cover_source)
+    monkeypatch.setattr(ic, "_load_cover_source_manifest", lambda _path: {})
+    monkeypatch.setattr(
+        ic,
+        "_build_intelligent_cover_brief",
+        lambda **_kwargs: {
+            "cover_title": "MAXACE美杜莎4",
+            "video_type": "开箱对比",
+            "product_identity": "MAXACE 美杜莎4",
+            "selling_angle": "顶配次顶配",
+            "visual_brief": "主体完整",
+        },
+    )
+
+    context = await ic._resolve_packaging_and_cover_context(
+        video_path=video_path,
+        material_dir=material_dir,
+        subtitle_items=[{"text_final": "MAXACE 美杜莎4 到货了"}],
+        content_profile={"subject_model": "MAXACE 美杜莎4", "subject_type": "EDC折刀", "video_theme": "开箱对比"},
+        copy_brief={
+            "topic_subject": "MAXACE 美杜莎4",
+            "intent": "开箱对比",
+            "focus_points": ["顶配", "次顶配"],
+            "question": "怎么选",
+        },
+        existing_packaging={},
+        selected_platform_keys=["douyin"],
+        platforms_requiring_regeneration=["douyin"],
+        resolved_copy_style="attention_grabbing",
+        existing_result=None,
+        existing_cover_path=None,
+    )
+
+    assert cover_started.is_set()
+    assert context["packaging"]["platforms"]["douyin"]["titles"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_packaging_and_cover_context_falls_back_to_local_packaging_on_timeout(tmp_path, monkeypatch) -> None:
+    video_path = tmp_path / "MAXACE 美杜莎4 顶配次顶配开箱.mp4"
+    material_dir = tmp_path / "smart-copy"
+    video_path.write_bytes(b"video")
+    material_dir.mkdir()
+
+    async def fake_generate_platform_packaging(**_kwargs):
+        raise asyncio.TimeoutError()
+
+    async def fake_prepare_cover_source(**_kwargs):
+        return None
+
+    monkeypatch.setattr(ic, "generate_platform_packaging", fake_generate_platform_packaging)
+    monkeypatch.setattr(ic, "_prepare_intelligent_copy_cover_source", fake_prepare_cover_source)
+    monkeypatch.setattr(ic, "_load_cover_source_manifest", lambda _path: {})
+    monkeypatch.setattr(
+        ic,
+        "_build_intelligent_cover_brief",
+        lambda **_kwargs: {
+            "cover_title": "MAXACE美杜莎4",
+            "video_type": "开箱对比",
+            "product_identity": "MAXACE 美杜莎4",
+            "selling_angle": "顶配次顶配",
+            "visual_brief": "主体完整",
+        },
+    )
+
+    context = await ic._resolve_packaging_and_cover_context(
+        video_path=video_path,
+        material_dir=material_dir,
+        subtitle_items=[{"text_final": "MAXACE 美杜莎4 到货了"}],
+        content_profile={"subject_model": "MAXACE 美杜莎4", "subject_type": "EDC跳刀", "video_theme": "开箱对比"},
+        copy_brief={
+            "topic_subject": "MAXACE 美杜莎4",
+            "intent": "开箱对比",
+            "focus_points": ["顶配", "次顶配"],
+            "question": "怎么选",
+        },
+        existing_packaging={},
+        selected_platform_keys=["douyin"],
+        platforms_requiring_regeneration=["douyin"],
+        resolved_copy_style="attention_grabbing",
+        existing_result=None,
+        existing_cover_path=None,
+    )
+
+    assert context["packaging"]["platforms"]["douyin"]["titles"]
+    assert "MAXACE 美杜莎4" in context["packaging"]["highlights"]["product"]
+
+
 def test_upgrade_existing_intelligent_copy_result_restores_group_cover_and_contract(tmp_path) -> None:
     source_dir = tmp_path / "MAXACE 美杜莎4 顶配次顶配开箱"
     material_dir = source_dir / "smart-copy"
@@ -3892,7 +5615,7 @@ def test_resolve_cover_canvas_fit_mode_prefers_blur_fill_for_large_ratio_mismatc
     ) == "blur_fill"
 
 
-def test_render_or_reuse_existing_cover_group_uses_blur_fill_for_portrait_matrix(tmp_path, monkeypatch) -> None:
+def test_render_or_reuse_existing_cover_group_uses_cover_fit_for_portrait_matrix(tmp_path, monkeypatch) -> None:
     material_dir = tmp_path / "smart-copy"
     material_dir.mkdir()
     output_path = material_dir / "02-douyin-cover.jpg"
@@ -3903,7 +5626,8 @@ def test_render_or_reuse_existing_cover_group_uses_blur_fill_for_portrait_matrix
 
     def fake_fit_image_to_canvas(**kwargs):
         seen.append(kwargs["fit_mode"])
-        Image.new("RGB", (1080, 1920), (24, 48, 72)).save(kwargs["output_path"])
+        Path(kwargs["output_path"]).parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (1080, 1440), (24, 48, 72)).save(kwargs["output_path"])
 
     monkeypatch.setattr(ic, "_fit_image_to_canvas", fake_fit_image_to_canvas)
 
@@ -3913,17 +5637,17 @@ def test_render_or_reuse_existing_cover_group_uses_blur_fill_for_portrait_matrix
         output_path=output_path,
         existing_cover_path=existing_cover,
         platform_key="douyin",
-        platform_rules={"cover_size": (1080, 1920), "label": "抖音"},
+        platform_rules={"cover_size": (1080, 1440), "label": "抖音"},
         cover_group={
-            "key": "portrait_9_16",
-            "label": "9:16 竖版",
-            "cover_size": (1080, 1920),
+            "key": "portrait_3_4",
+            "label": "3:4 竖版",
+            "cover_size": (1080, 1440),
             "representative_platform": "douyin",
             "members": ["douyin"],
         },
     )
 
-    assert "blur_fill" in seen
+    assert "cover" in seen
     assert result["publish_ready"] is True
     assert output_path.exists()
 
@@ -3940,6 +5664,7 @@ async def test_render_or_reuse_platform_cover_group_passes_matrix_visual_instruc
 
     async def fake_render_platform_cover(**kwargs):
         captured_rules.update(dict(kwargs["rules"]))
+        Path(kwargs["output_path"]).parent.mkdir(parents=True, exist_ok=True)
         Path(kwargs["output_path"]).write_bytes(b"group-cover")
         return {
             "publish_ready": True,
@@ -4012,6 +5737,145 @@ def test_material_contract_blocks_one_click_when_live_publish_preflight_is_block
     assert any("schedule" in reason for reason in contract["blocking_reasons"])
     assert contract["platforms"]["douyin"]["status"] == "passed"
     assert contract["platforms"]["douyin"]["one_click_publish_ready"] is True
+
+
+def test_material_generation_contract_ignores_publish_gate_only_cover_blockers() -> None:
+    material = {
+        "key": "bilibili",
+        "label": "B站",
+        "has_title": True,
+        "titles": ["MAXACE美杜莎4双版本开箱"],
+        "primary_title": "MAXACE美杜莎4双版本开箱",
+        "body": "正文",
+        "tags": ["EDC", "MAXACE"],
+        "full_copy": "完整文案",
+        "cover_path": r"Z:\demo\00-cover-landscape_16_9.jpg",
+        "declaration": "无需添加自主声明",
+        "platform_specific_overrides": {"collection_policy": "skip", "skip_collection_select": True},
+        "cover_generation": {
+            "publish_ready": False,
+            "blocking_reasons": [
+                "完整封面位图标题校验未完成，不能放行到最终封面",
+                "封面主标题未稳定锁定品牌/型号，存在内容签名漂移风险",
+            ],
+            "image_generation": {
+                "backend": "codex_builtin",
+                "status": "completed",
+                "output_path": r"Z:\demo\00-cover-landscape_16_9.jpg",
+            },
+        },
+        "blocking_reasons": [
+            "完整封面位图标题校验未完成，不能放行到最终封面",
+            "封面主标题未稳定锁定品牌/型号，存在内容签名漂移风险",
+        ],
+    }
+
+    generation_contract = ic._build_material_generation_contract([material], requested_platforms=["bilibili"])
+    publish_contract = ic._build_material_contract([material], requested_platforms=["bilibili"])
+
+    assert generation_contract["status"] == "passed"
+    assert generation_contract["generation_ready"] is True
+    assert generation_contract["platforms"]["bilibili"]["generation_ready"] is True
+    assert publish_contract["status"] == "failed"
+    assert publish_contract["one_click_publish_ready"] is False
+
+
+def test_material_generation_contract_ignores_missing_collection_policy_when_artifacts_exist() -> None:
+    material = {
+        "key": "bilibili",
+        "label": "B站",
+        "has_title": True,
+        "titles": ["MAXACE美杜莎4双版本开箱"],
+        "primary_title": "MAXACE美杜莎4双版本开箱",
+        "body": "正文",
+        "tags": ["EDC", "MAXACE"],
+        "full_copy": "完整文案",
+        "cover_path": r"Z:\demo\00-cover-landscape_16_9.jpg",
+    }
+
+    generation_contract = ic._build_material_generation_contract([material], requested_platforms=["bilibili"])
+    publish_contract = ic._build_material_contract([material], requested_platforms=["bilibili"])
+
+    assert generation_contract["status"] == "passed"
+    assert generation_contract["generation_ready"] is True
+    assert generation_contract["platforms"]["bilibili"]["generation_ready"] is True
+    assert publish_contract["status"] == "failed"
+    assert any("合集决策" in reason for reason in publish_contract["blocking_reasons"])
+
+
+def test_platform_packaging_export_includes_material_generation_contract() -> None:
+    material = {
+        "key": "bilibili",
+        "label": "B站",
+        "has_title": True,
+        "titles": ["MAXACE美杜莎4双版本开箱"],
+        "primary_title": "MAXACE美杜莎4双版本开箱",
+        "body": "正文",
+        "tags": ["EDC"],
+        "full_copy": "完整文案",
+        "cover_path": r"Z:\demo\00-cover-landscape_16_9.jpg",
+        "declaration": "无需添加自主声明",
+        "platform_specific_overrides": {"collection_policy": "skip", "skip_collection_select": True},
+        "blocking_reasons": ["完整封面位图标题校验未完成，不能放行到最终封面"],
+        "publish_ready": False,
+        "cover_generation": {
+            "publish_ready": False,
+            "blocking_reasons": ["完整封面位图标题校验未完成，不能放行到最终封面"],
+            "image_generation": {"backend": "codex_builtin", "status": "completed"},
+        },
+    }
+
+    export_payload = ic._build_platform_packaging_export(
+        packaging={"platforms": {}, "highlights": {}},
+        platform_materials=[material],
+        requested_platforms=["bilibili"],
+        cover_matrix={},
+    )
+
+    assert export_payload["material_generation_status"] == "passed"
+    assert export_payload["material_generation_ready"] is True
+    assert export_payload["status"] == "passed"
+    assert export_payload["material_generation_contract"]["platforms"]["bilibili"]["generation_ready"] is True
+    assert export_payload["one_click_publish_ready"] is False
+    assert export_payload["platforms"]["bilibili"]["publish_ready"] is False
+    assert export_payload["platforms"]["bilibili"]["one_click_publish_ready"] is False
+
+
+def test_apply_material_contract_export_state_preserves_one_click_ready_during_manual_handoff() -> None:
+    payload: dict[str, object] = {}
+    contract = {
+        "status": "manual_handoff",
+        "one_click_publish_ready": True,
+        "manual_handoff_platforms": ["wechat-channels"],
+        "blocking_reasons": [],
+    }
+
+    ic._apply_material_contract_export_state(payload, contract, blocking_reasons=[])
+
+    assert payload["status"] == "manual_handoff"
+    assert payload["publish_ready"] is False
+    assert payload["one_click_publish_ready"] is True
+    assert payload["manual_handoff_ready"] is True
+    assert payload["manual_handoff_targets"] == ["wechat-channels"]
+    assert payload["blocking_reasons"] == []
+
+
+def test_apply_material_generation_export_state_prefers_generation_success_over_publish_block() -> None:
+    payload: dict[str, object] = {
+        "status": "failed",
+        "publish_ready": False,
+        "one_click_publish_ready": False,
+    }
+
+    ic._apply_material_generation_export_state(
+        payload,
+        {"status": "passed", "generation_ready": True},
+        material_contract={"status": "failed", "one_click_publish_ready": False},
+    )
+
+    assert payload["status"] == "passed"
+    assert payload["material_generation_status"] == "passed"
+    assert payload["material_generation_ready"] is True
 
 
 def test_upgrade_existing_intelligent_copy_result_accepts_explicit_bilibili_platform_options_for_old_materials(
@@ -4576,6 +6440,25 @@ def test_platform_packaging_export_and_readback_normalize_wechat_platform_key(tm
     )
 
     assert targets[0]["platform"] == "wechat-channels"
+
+
+def test_build_publication_scheme_targets_from_packaging_falls_back_to_titles_when_primary_title_missing(tmp_path) -> None:
+    targets = ic._build_publication_scheme_targets_from_packaging(
+        packaging={
+            "platforms": {
+                "kuaishou": {
+                    "titles": ["MAXACE美杜莎4双版本开箱，顶配和次顶配到底差在哪"],
+                    "description": "折刀这东西关键看开合顺不顺、轴稳不稳。",
+                    "tags": ["EDC折刀", "MAXACE美杜莎4", "开箱", "折刀"],
+                }
+            }
+        },
+        existing_result={"platforms": [{"key": "kuaishou"}]},
+        material_dir=tmp_path,
+        platform_keys=["kuaishou"],
+    )
+
+    assert targets[0]["title"] == "MAXACE美杜莎4双版本开箱，顶配和次顶配到底差在哪"
 
 
 def test_load_existing_intelligent_copy_packaging_prefers_object_shape_platform_packaging(tmp_path) -> None:

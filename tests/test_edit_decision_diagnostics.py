@@ -5,6 +5,7 @@ from roughcut.media.variant_timeline_bundle import (
     variant_high_energy_keeps,
     variant_high_risk_cuts,
     variant_llm_cut_review,
+    variant_multimodal_trim_review_summary,
     variant_refine_decision_summary,
     variant_review_flags,
     variant_timeline_diagnostics,
@@ -71,6 +72,37 @@ def test_variant_diagnostics_include_refine_decision_summary() -> None:
         "candidate_total": 7,
         "candidate_auto_apply": 5,
         "candidate_manual_confirm": 2,
+        "multimodal_auto_apply_cut_count": 0,
+    }
+
+
+def test_variant_diagnostics_include_multimodal_trim_review_summary() -> None:
+    diagnostics = _build_variant_timeline_diagnostics(
+        editorial_analysis={},
+        cut_analysis={
+            "multimodal_trim_review_summary": {
+                "reviewed": True,
+                "candidate_count": 4,
+                "accepted_count": 2,
+                "rejected_count": 1,
+                "pending_count": 1,
+            }
+        },
+        refine_decision_plan={
+            "candidate_summary": {
+                "multimodal_auto_apply": 2,
+            }
+        },
+        timeline_analysis={},
+    )
+
+    assert diagnostics["multimodal_trim_review_summary"] == {
+        "reviewed": True,
+        "candidate_count": 4,
+        "accepted_count": 2,
+        "rejected_count": 1,
+        "pending_count": 1,
+        "auto_apply_cut_count": 2,
     }
 
 
@@ -133,6 +165,30 @@ def test_final_review_diagnostics_mentions_refine_decision_summary() -> None:
     assert "7" in joined
 
 
+def test_final_review_diagnostics_mentions_multimodal_trim_review_summary() -> None:
+    lines = _build_final_review_diagnostics_lines(
+        {
+            "variants": {"plain": {"segments": []}},
+            "timeline_rules": {
+                "diagnostics": {
+                    "multimodal_trim_review_summary": {
+                        "candidate_count": 3,
+                        "accepted_count": 1,
+                        "rejected_count": 1,
+                        "pending_count": 1,
+                        "auto_apply_cut_count": 1,
+                    }
+                }
+            }
+        }
+    )
+
+    joined = "\n".join(lines)
+    assert "多模态复核" in joined
+    assert "候选 3 个" in joined
+    assert "自动并入全自动精修 1 个" in joined
+
+
 def test_variant_timeline_bundle_shared_diagnostic_resolvers() -> None:
     bundle = {
         "variants": {"plain": {"segments": []}},
@@ -144,6 +200,7 @@ def test_variant_timeline_bundle_shared_diagnostic_resolvers() -> None:
                 "cut_evidence_summary": {"protected_visual_cut_count": 2},
                 "cut_analysis_summary": {"accepted_cut_count": 3},
                 "llm_cut_review": {"reviewed": True, "candidate_count": 3},
+                "multimodal_trim_review_summary": {"candidate_count": 2, "accepted_count": 1},
                 "refine_decision_summary": {"mode": "manual_refine", "candidate_total": 5},
             }
         },
@@ -156,6 +213,7 @@ def test_variant_timeline_bundle_shared_diagnostic_resolvers() -> None:
         "cut_evidence_summary": {"protected_visual_cut_count": 2},
         "cut_analysis_summary": {"accepted_cut_count": 3},
         "llm_cut_review": {"reviewed": True, "candidate_count": 3},
+        "multimodal_trim_review_summary": {"candidate_count": 2, "accepted_count": 1},
         "refine_decision_summary": {"mode": "manual_refine", "candidate_total": 5},
     }
     assert variant_review_flags(bundle) == {"review_recommended": True, "review_reasons": ["需要复核"]}
@@ -164,4 +222,5 @@ def test_variant_timeline_bundle_shared_diagnostic_resolvers() -> None:
     assert variant_cut_evidence_summary(bundle) == {"protected_visual_cut_count": 2}
     assert variant_cut_analysis_summary(bundle) == {"accepted_cut_count": 3}
     assert variant_llm_cut_review(bundle) == {"reviewed": True, "candidate_count": 3}
+    assert variant_multimodal_trim_review_summary(bundle) == {"candidate_count": 2, "accepted_count": 1}
     assert variant_refine_decision_summary(bundle) == {"mode": "manual_refine", "candidate_total": 5}
