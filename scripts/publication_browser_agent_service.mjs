@@ -3844,7 +3844,9 @@ async function resolvePlatformTab(platform, options = {}) {
   const lockActiveTab = Boolean(tabSelection.lock_active_tab);
   const allowTabAutocreate = ALLOW_PUBLICATION_TAB_AUTOCREATE || Boolean(tabSelection.allow_safe_autocreate);
   const explicitFreshStartPlatformTab = Boolean(tabSelection.fresh_start_platform_tab);
-  const receiptEntryUrl = tabSelection.prefer_receipt_surface
+  const receiptEntryUrl = (forceFreshTab || explicitFreshStartPlatformTab)
+    ? ""
+    : tabSelection.prefer_receipt_surface
     ? String(PLATFORM_RECEIPT_ENTRY_URLS[normalized] || "").trim()
     : "";
   let tabs = await listCdpTabs();
@@ -4176,6 +4178,7 @@ export function shouldBootstrapGenericPublishRoute(platform, route = {}) {
 export function shouldAcquireReceiptSurfaceRoute(platform, currentUrl = "", selection = {}) {
   const normalizedPlatform = normalizePlatform(platform);
   if (!selection || !selection.prefer_receipt_surface) return false;
+  if (selection.fresh_start_platform_tab) return false;
   if (!PLATFORM_RECEIPT_ENTRY_URLS[normalizedPlatform]) return false;
   return !isPlatformReceiptSurfaceUrl(normalizedPlatform, currentUrl);
 }

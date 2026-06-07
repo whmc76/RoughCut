@@ -5594,6 +5594,20 @@ test("shouldAcquireReceiptSurfaceRoute requests douyin management route when rec
   );
 });
 
+test("shouldAcquireReceiptSurfaceRoute ignores receipt route when fresh-start tab mode is active", () => {
+  assert.equal(
+    shouldAcquireReceiptSurfaceRoute(
+      "douyin",
+      "https://creator.douyin.com/creator-micro/content/post/video",
+      {
+        prefer_receipt_surface: true,
+        fresh_start_platform_tab: true,
+      },
+    ),
+    false,
+  );
+});
+
 test("deriveNavigationJavaScriptDialogHandling accepts leave-site beforeunload during route switch", () => {
   const handling = deriveNavigationJavaScriptDialogHandling(
     {
