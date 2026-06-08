@@ -4,50 +4,49 @@ This file is the source of truth for the current active task state across long C
 
 ## Current Objective
 
-Close the Bilibili production live-publication chain on a clean new-video flow, then finish Douyin fresh-start publication closeout in linear execution mode before moving on to the next platforms.
+Stabilize RoughCut's subtitle and auto-edit pipeline into a stage-disciplined architecture that can support high-throughput batch automatic editing with acceptable quality. The immediate target is to recover a usable end-to-end chain and reach a practical `~90` point operating level before pursuing slower long-tail polish.
 
 ## Current Workstream
 
-- Keep Bilibili findings and current live-runtime facts in dedicated publication state docs instead of chat memory.
-- Close Bilibili source-of-truth, mainline packaging, browser-agent transport, and clean new-flow publication contracts.
-- Reuse the same shared framework on the next platforms one by one, starting from real probe/preflight evidence rather than speculative abstraction.
-- Treat only the publication browser-agent bound to the browser/profile declared by the task's creator card as authoritative runtime for publication work. Edge, in-app browser, and direct Codex Chrome-tab probing are invalid for publication evidence.
-- Refactor publication work to a minimal fresh-start contract: each platform gets a new authoritative upload-shell tab, upload is always first, and shared draft/recovery/reroute logic must not preempt platform executors.
+- Write the authoritative auto-edit recovery architecture and bind it to existing canonical transcript, subtitle projection, and source timeline contracts.
+- Split the recovery work into executable milestones with explicit deliverables, acceptance criteria, and dependency order.
+- Prioritize high-return fixes: restore manual editor availability, stop cross-stage mutation, restore predictable rule behavior, then improve automatic cut quality.
+- Treat publication work as parked context in `docs/publication-agent-ledger.md`; it is not the active objective for this thread.
 
 ## Open Work
 
-- Finish Bilibili remaining execution-layer closeout: cover editor final confirmation evidence and full post-upload publish path.
-- Start the next real platform probes from the current Chrome session and identify the first shared bad layer for Douyin/Xiaohongshu without reopening already-closed Bilibili blockers.
-- Finish Douyin fresh-start closeout from `https://creator.douyin.com/creator-micro/content/upload`.
-- Keep fresh-start linear execution mode: new tab -> upload first -> execute platform-local editor steps once, without shared auto-repair re-entry.
-- Re-verify Douyin on the authoritative browser runtime after the bridge re-attaches `attached_profile_binding`; current code-side linear-mode changes are in place, but the post-restart runtime has not yet rebound the Chrome profile.
+- Restore real-job manual editor usability and remove hidden fallback behavior that rewrites projection or edit inputs across stages.
+- Remove `manual-editor/apply` side mutation: keep subtitle timing/text in the edit contract output, and do not rebind editable subtitles through projection validation repair when no explicit fallback contract allows it.
+- Rebuild the rule system so filler words, catchphrases, pause trimming, repeated speech, and smart-delete candidates are generated in one place and audited consistently.
+- Add a real-job evaluation harness and golden job set so quality claims are based on repeatable runs rather than screenshots or ad hoc inspection.
+- Add a regression test for `_validated_subtitle_projection_for_timeline` contract: default path is non-mutating, repair path is explicit.
 
 ## Resolved Decisions
 
-- `AGENTS.md` must stay generic; active publication contracts live in `docs/publication-agent-ledger.md`.
-- Bilibili standard publish flow is defined as a clean new-video flow, not editor reuse; stale draft/editor handling remains a shared publication concern.
-- Preview publication copy must be promoted into production `smart-copy` source-of-truth before any live publish test.
-- Bilibili cover source-of-truth now treats `4:3 首页推荐封面` and `16:9 个人空间封面` as separate slots; do not collapse them back into a single-cover contract.
-- Publication browser authority is task-bound, not global: `publication-browser-agent -> bridge://chrome-extension -> browser/profile resolved from the task's creator card`. For the current FAS runs, that resolves to `Google Chrome / Profile 2 / browser-profile:chrome:21104fd69d72ad7267c2`. Any probe or live result gathered from Edge, in-app Browser, or direct Codex Chrome tab control is invalid for platform conclusions.
-- Publication refactor direction is now explicit: the standard publish test path for all platforms is fresh-start linear mode. Each platform must open a new authoritative upload-shell tab, upload first, then enter the platform-local editor chain. Shared draft resume/discard handling, route “correction”, duplicate-attempt dedupe, and other generic recovery logic must not block or reroute that flow.
-- Fresh-draft release-gate runs no longer use `prepare_only_current_page`; they use `fresh_start_platform_tab` only. Platform-local editor steps must run once in order and fail closed instead of replaying `body/tags` writes.
+- The recovery direction is "one stage, one responsibility"; no stage may silently re-correct, re-split, or re-delete outputs owned by an earlier stage.
+- `ASR evidence`, `canonical transcript`, `subtitle projection`, `edit candidates`, and `final keep/remove decisions` are separate artifacts and must stay separate.
+- Subtitle segmentation is a single shared automatic stage. Manual editing may inspect and override the result, but does not become the primary segmentation engine.
+- Automatic editing and manual adjustment are two execution modes over the same contracts. Manual mode is a review/refine phase, not a parallel hidden pipeline.
+- Current system scoring should be judged on production usefulness, not isolated model quality. The latest real-task evaluation baseline is roughly `62/100` overall and `~72/100` if manual-editor production usability is excluded.
+- `manual-editor/apply` now avoids silent subtitle re-write during validation (only diagnostics remain), reducing untraceable timing/text edits introduced at submit time.
+- `_validated_subtitle_projection_for_timeline` now has an explicit `apply_repair` switch; `tests/test_pipeline_projection_validation_contracts.py` guards contract: no repair means no content mutation.
 
 ## Do Not Reopen
 
-- Do not move current platform publication facts back into `AGENTS.md`.
-- Do not treat old artifacts or compacted chat history as current task state when a publication state file exists.
-- Do not regress Bilibili cover handling to a single `16:9` primary-cover contract.
-- Do not treat Bilibili stop-before runs as permission to reuse stale editor pages by default.
-- Do not use direct Codex browser plugins to open or probe publication pages as evidence for platform contracts. Publication evidence must come from the bound browser-agent runtime only.
+- Do not move active task state back into `AGENTS.md`.
+- Do not let display subtitle text become the fact layer for timing or edit decisions again.
+- Do not allow subtitle cleanup, filler matching, segmentation, and edit removal to run in overlapping hidden stages.
+- Do not treat auto-cut compression ratio alone as success; false deletion rate and sentence naturalness are co-equal quality gates.
+- Do not claim the chain is recovered until real jobs can complete manual-editor load, automatic edit generation, and render review without hidden fallback corruption.
 
 ## Next Concrete Action
 
-1. Keep Bilibili conclusions current in `docs/publication-agent-ledger.md`.
-2. Keep new-platform work inside the authoritative `publication-browser-agent -> creator-card-bound Chrome runtime` only.
-3. For each new platform, identify the first shared bad layer before editing platform-local flow code.
+1. Start `T0.1` and reproduce the `/manual-editor` / `/manual-editor/readiness` failure on real jobs with traceback evidence.
+2. Start `T0.3` and add high-signal rule/candidate provenance surface for brown/gray/green highlights.
+3. Keep `T0.2` contract assertions active and extend to any newly discovered repair path if real-job traces still show hidden edits.
 
 ## Verification
 
-- Confirm Bilibili live publish payloads read promoted production copy and the normalized dual-cover contract.
-- Confirm platform-specific current facts remain available through dedicated publication state docs.
-- Confirm the next platform probes are driven from current runtime/browser evidence, not stale artifacts.
+- The new design doc must name each pipeline stage, its inputs, outputs, and forbidden side effects.
+- The task list must be dependency-ordered and executable without replaying prior chat history.
+- The current-state file must point future agents to the active recovery docs instead of stale publication-only state.
