@@ -20,6 +20,7 @@ Stabilize RoughCut's subtitle and auto-edit pipeline into a stage-disciplined ar
 - Rebuild the rule system so filler words, catchphrases, pause trimming, repeated speech, and smart-delete candidates are generated in one place and audited consistently.
 - Add a real-job evaluation harness and golden job set so quality claims are based on repeatable runs rather than screenshots or ad hoc inspection.
 - Add a regression test for `_validated_subtitle_projection_for_timeline` contract: default path is non-mutating, repair path is explicit.
+- Tighten smart-cut pause overlap filtering to consume the spoken-ASR surface first (`transcript_text_raw`) so corrected display text can’t hide timing-aware gating.
 
 ## Resolved Decisions
 
@@ -30,6 +31,7 @@ Stabilize RoughCut's subtitle and auto-edit pipeline into a stage-disciplined ar
 - Current system scoring should be judged on production usefulness, not isolated model quality. The latest real-task evaluation baseline is roughly `62/100` overall and `~72/100` if manual-editor production usability is excluded.
 - `manual-editor/apply` now avoids silent subtitle re-write during validation (only diagnostics remain), reducing untraceable timing/text edits introduced at submit time.
 - `_validated_subtitle_projection_for_timeline` now has an explicit `apply_repair` switch; `tests/test_pipeline_projection_validation_contracts.py` guards contract: no repair means no content mutation.
+- `build_cut_analysis_payload` now preserves smart-cut candidate metadata（`rule_id/risk_level/match_surface`）when cached smart candidates are rehydrated, including timing jitter and filler-mode drift, so audit logs can trace deletions across recomputation.
 
 ## Do Not Reopen
 
@@ -41,9 +43,13 @@ Stabilize RoughCut's subtitle and auto-edit pipeline into a stage-disciplined ar
 
 ## Next Concrete Action
 
-1. Start `T0.1` and reproduce the `/manual-editor` / `/manual-editor/readiness` failure on real jobs with traceback evidence.
-2. Start `T0.3` and add high-signal rule/candidate provenance surface for brown/gray/green highlights.
-3. Keep `T0.2` contract assertions active and extend to any newly discovered repair path if real-job traces still show hidden edits.
+1. Continue `T0.1` with a focused real-job regression suite: validate `/manual-editor` and `/manual-editor/readiness` against complete and partially degraded payload sets.
+2. Keep `T0.2` contract assertions active and extend to any newly discovered repair path if real-job traces still show hidden edits.
+3. Start `T1.1` and lock raw / semantic / spoken-rule surfaces end-to-end to eliminate cross-stage leakage.
+
+## Latest Certification
+
+- 2026-06-09: `build_cut_analysis_payload` smart-cut metadata replay regression fixed and certified via `tests/test_manual_editor_helpers.py` (`12` matching tests in cut-analysis path; `244` tests for manual editor helper file full pass). Added `tests/test_manual_editor_session_regressions.py` with three real-job session/load-path cases (`3` passing) and kept it as the first step in live-job-like regression evidence collection. Strengthened `test_manual_editor_session_fallbacks_to_source_when_projection_is_suspicious` to assert fallback is actually applied and fixed `src/roughcut/api/jobs.py` so `source_projection_fallback_applied=True` now rewrites projected subtitles when source fallback rows exist.
 
 ## Verification
 
