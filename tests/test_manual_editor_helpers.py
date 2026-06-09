@@ -64,9 +64,12 @@ from roughcut.api.jobs import (
     _manual_editor_projected_subtitles_have_duplicate_source_overlap,
     _manual_editor_projection_baseline_rows,
     _manual_editor_projection_should_use_source_fallback,
+    _manual_editor_projection_contract_locked,
+    _manual_editor_should_apply_source_projection_fallback,
     _manual_editor_profile_has_vertical_glossary_evidence,
     _manual_editor_reveal_source_asr_words,
     _manual_editor_rule_segments,
+    _manual_editor_source_row_split_diagnostics,
     _manual_editor_split_pieces_cover_source_text,
     _manual_editor_subtitle_item_source_rows,
     _manual_editor_split_long_subtitle_rows,
@@ -81,6 +84,7 @@ from roughcut.api.jobs import (
 )
 from roughcut.edit.otio_export import export_to_otio
 from roughcut.edit.cut_analysis import build_cut_analysis_payload
+from roughcut.edit.subtitle_surfaces import subtitle_semantic_preview_text, subtitle_spoken_rule_text
 from roughcut.speech.subtitle_pipeline import (
     ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER,
     ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER,
@@ -625,6 +629,65 @@ def test_manual_editor_rule_segments_expose_typed_full_transcript_candidates() -
     assert segments[2].reason == "repeated_speech"
     assert segments[3].source == "llm_cut_review"
     assert segments[3].detail == "前一句明确重录，后一句更完整。"
+    assert segments[1].stage == "manual_editor_full_transcript"
+    assert segments[3].stage == "accepted_cut"
+
+
+def test_manual_editor_rule_segments_expose_provenance_fields() -> None:
+    segments = _manual_editor_rule_segments(
+        {
+            "accepted_cuts": [
+                {
+                    "start": 1.0,
+                    "end": 1.2,
+                    "reason": "silence",
+                    "risk_level": "high",
+                    "rule_id": "accepted-cut-1",
+                },
+            ],
+            "manual_editor_rule_candidates": [
+                {
+                    "start": 2.0,
+                    "end": 2.35,
+                    "reason": "filler_word",
+                    "candidate_stage": "manual_editor_smart_cut_rules",
+                    "candidate_id": "filler-1",
+                    "score": 0.92,
+                    "source_text": "嗯",
+                    "filler_mode": "standalone",
+                    "match_surface": "standalone",
+                    "risk_level": "low",
+                },
+                {
+                    "start": 3.0,
+                    "end": 3.48,
+                    "reason": "repeated_speech",
+                    "candidate_stage": "manual_editor_full_transcript",
+                    "risk_level": "medium",
+                    "rule_id": "repeated-1",
+                    "source_text": "这个啊",
+                    "auto_applied": True,
+                },
+            ],
+        }
+    )
+
+    assert [(item.kind, item.start, item.end) for item in segments] == [
+        ("pause", 1.0, 1.2),
+        ("filler", 2.0, 2.35),
+        ("repeated", 3.0, 3.48),
+    ]
+    assert segments[0].stage == "accepted_cut"
+    assert segments[0].risk_level == "high"
+    assert segments[0].rule_id == "accepted-cut-1"
+    assert segments[1].stage == "manual_editor_smart_cut_rules"
+    assert segments[1].match_surface == "standalone"
+    assert segments[1].rule_id == "filler-1"
+    assert segments[1].risk_level == "low"
+    assert segments[1].match_surface_layer == "raw"
+    assert segments[2].stage == "manual_editor_full_transcript"
+    assert segments[2].rule_id == "repeated-1"
+    assert segments[2].risk_level == "medium"
 
 
 def test_manual_editor_segments_accept_cut_analysis_artifact_payload() -> None:
@@ -692,6 +755,7 @@ async def test_load_manual_editor_cut_analysis_payload_prefers_artifact_and_reap
         smart_cut_rules={
             "fillerEnabled": True,
             "fillerStandaloneEnabled": True,
+            "fillerSentenceHeadEnabled": True,
             "fillerContinuousEnabled": False,
             "catchphraseEnabled": False,
             "fillers": "嗯",
@@ -824,6 +888,35 @@ def test_cut_analysis_payload_marks_sentence_tail_particles_without_treating_the
     )
 
 
+def test_cut_analysis_pause_overlap_uses_spoken_rule_text_for_silence_gatekeeping() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={
+            "silence_segments": [
+                {"start": 0.2, "end": 1.0, "duration_sec": 0.8, "source": "audio_vad"},
+            ],
+        },
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {
+                "start_time": 0.0,
+                "end_time": 1.3,
+                "text_final": "啊",
+                "transcript_text_raw": "今天你看这个",
+            },
+        ],
+        smart_cut_rules={
+            "pauseEnabled": True,
+            "pauseThresholdSec": 0.8,
+        },
+    )
+
+    assert not any(
+        item["reason"] == "silence" and float(item["start"]) == 0.2 and float(item["end"]) == 1.0
+        for item in payload["rule_candidates"]
+    )
+
+
 def test_cut_analysis_payload_detects_standalone_fillers_from_raw_source_text_when_final_text_is_cleaned() -> None:
     payload = build_cut_analysis_payload(
         editorial_analysis={},
@@ -901,6 +994,58 @@ def test_cut_analysis_payload_does_not_project_hidden_raw_fillers_onto_timed_vis
         and float(item["start"]) >= 3.55
         for item in filler_candidates
     )
+
+
+def test_cut_analysis_payload_includes_match_surface_layer_for_generated_candidates() -> None:
+    filler_payload = build_cut_analysis_payload(
+        editorial_analysis={},
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 1.0, "text_final": "um let's begin"},
+        ],
+        smart_cut_rules={
+            "fillerEnabled": True,
+            "fillerStandaloneEnabled": True,
+            "fillerSentenceHeadEnabled": False,
+            "fillerSentenceTailEnabled": False,
+            "fillers": "um",
+        },
+    )
+
+    filler = next(
+        (
+            item
+            for item in filler_payload.get("rule_candidates") or []
+            if str(item.get("reason") or "") == "filler_word"
+        ),
+        None,
+    )
+    assert filler is not None
+    assert filler.get("match_surface_layer") == "raw"
+
+    low_signal_payload = build_cut_analysis_payload(
+        editorial_analysis={},
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 1.1, "text_final": "其实也就这样吧"},
+        ],
+        smart_cut_rules={
+            "smartDeleteEnabled": True,
+        },
+    )
+
+    low_signal = next(
+        (
+            item
+            for item in low_signal_payload.get("rule_candidates") or []
+            if str(item.get("reason") or "") == "low_signal_subtitle"
+        ),
+        None,
+    )
+    assert low_signal is not None
+    assert low_signal.get("match_surface_layer") == "canonical"
 
 
 def test_cut_analysis_payload_adds_backend_pause_rule_candidates() -> None:
@@ -996,7 +1141,54 @@ def test_manual_editor_cut_analysis_payload_drops_stale_backend_smart_cut_candid
         },
     )
 
-    assert payload["rule_candidates"] == []
+    assert len(payload["rule_candidates"]) == 1
+    stale_still_present = payload["rule_candidates"][0]
+    assert stale_still_present["reason"] == "repeated_speech"
+    assert stale_still_present["candidate_stage"] == "manual_editor_full_transcript"
+    assert not any(
+        item["reason"] == "filler_word" and item.get("candidate_stage") == "manual_editor_smart_cut_rules"
+        for item in payload["rule_candidates"]
+    )
+
+
+def test_build_cut_analysis_payload_preserves_smart_rule_candidate_metadata() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={
+            "schema": "cut_analysis.v1",
+            "rule_candidates": [
+                {
+                    "start": 0.0,
+                    "end": 0.12,
+                    "reason": "filler_word",
+                    "candidate_stage": "manual_editor_smart_cut_rules",
+                    "source_text": "嗯",
+                    "filler_mode": "standalone",
+                    "rule_id": "cached-filler-001",
+                    "risk_level": "high",
+                    "match_surface": "cached-surface",
+                    "match_surface_layer": "raw",
+                    "auto_applied": False,
+                }
+            ],
+        },
+        source_name="demo.mp4",
+        job_flow_mode="manual",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 1.0, "text_final": "嗯我们开始"},
+        ],
+        smart_cut_rules={
+            "fillerEnabled": True,
+            "fillerStandaloneEnabled": True,
+            "fillerSentenceHeadEnabled": True,
+            "fillers": "嗯",
+        },
+    )
+
+    assert len(payload["rule_candidates"]) == 1
+    assert payload["rule_candidates"][0]["rule_id"] == "cached-filler-001"
+    assert payload["rule_candidates"][0]["risk_level"] == "high"
+    assert payload["rule_candidates"][0]["match_surface"] == "cached-surface"
+    assert payload["rule_candidates"][0]["match_surface_layer"] == "raw"
 
 
 def test_variant_timeline_bundle_carries_refine_decision_plan() -> None:
@@ -1236,6 +1428,33 @@ def test_backend_smart_cut_candidates_keep_longer_low_signal_clause_reviewable()
     assert low_signal[0]["source_text"] == "其实也就这样吧"
 
 
+def test_backend_smart_cut_low_signal_candidates_use_corrected_semantic_preview_text() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={},
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {
+                "start_time": 0.0,
+                "end_time": 1.1,
+                "text_raw": "其实也就酱样吧",
+                "transcript_text_raw": "其实也就酱样吧",
+                "transcript_text": "其实也就这样吧",
+            },
+        ],
+        smart_cut_rules={"smartDeleteEnabled": True},
+    )
+
+    low_signal = [
+        item
+        for item in payload.get("rule_candidates") or []
+        if str(item.get("reason") or "") == "low_signal_subtitle"
+    ]
+
+    assert len(low_signal) == 1
+    assert low_signal[0]["source_text"] == "其实也就这样吧"
+
+
 def test_backend_low_signal_candidates_mark_multimodal_review_when_visual_hint_overlaps() -> None:
     payload = build_cut_analysis_payload(
         editorial_analysis={},
@@ -1321,6 +1540,19 @@ def test_backend_smart_cut_candidates_do_not_mark_example_chain_fragment_as_low_
     assert "门都会带它很实用" not in low_signal_texts
 
 
+def test_backend_subtitle_surface_helpers_split_semantic_and_spoken_contracts() -> None:
+    item = {
+        "text_final": "它算是定位相当高端的一款EDC手电了",
+        "text_norm": "它算是定位相当高端的一款EDC手电了",
+        "text_raw": "它算是定位相当高端的一款EC手电了",
+        "transcript_text_raw": "它算是定位相当高端的一款EC手电了",
+        "transcript_text": "它算是定位相当高端的一款EDC手电了",
+    }
+
+    assert subtitle_semantic_preview_text(item) == "它算是定位相当高端的一款EDC手电了"
+    assert subtitle_spoken_rule_text(item) == "它算是定位相当高端的一款EC手电了"
+
+
 def test_multimodal_trim_review_payload_selects_review_required_candidates() -> None:
     cut_analysis = build_cut_analysis_payload(
         editorial_analysis={},
@@ -1369,7 +1601,6 @@ def test_multimodal_trim_review_payload_includes_low_signal_candidates_without_v
         job_flow_mode="auto",
         source_subtitles=[
             {"start_time": 0.0, "end_time": 1.1, "text_final": "其实也就这样吧"},
-            {"start_time": 1.0, "end_time": 2.0, "text_final": "EDC17亮度一千五流明"},
         ],
         smart_cut_rules={"smartDeleteEnabled": True},
     )
@@ -1893,7 +2124,7 @@ def test_smart_cut_rules_payload_preserves_previous_legacy_default_shape() -> No
     assert payload["catchphraseEnabled"] is False
 
 
-def test_smart_cut_rules_payload_collapses_previous_expanded_head_only_default_to_current_default() -> None:
+def test_smart_cut_rules_payload_preserves_previous_expanded_head_only_default() -> None:
     payload = normalize_smart_cut_rules_payload({
         "fillerEnabled": True,
         "fillerStandaloneEnabled": True,
@@ -1909,12 +2140,12 @@ def test_smart_cut_rules_payload_collapses_previous_expanded_head_only_default_t
     })
 
     assert payload["fillerStandaloneEnabled"] is True
-    assert payload["fillerSentenceHeadEnabled"] is False
+    assert payload["fillerSentenceHeadEnabled"] is True
     assert payload["fillerSentenceTailEnabled"] is False
     assert payload["catchphraseEnabled"] is False
 
 
-def test_smart_cut_rules_payload_collapses_previous_expanded_default_with_catchphrases_to_current_default() -> None:
+def test_smart_cut_rules_payload_preserves_previous_expanded_default_with_catchphrases() -> None:
     payload = normalize_smart_cut_rules_payload({
         "fillerEnabled": True,
         "fillerStandaloneEnabled": True,
@@ -1929,9 +2160,10 @@ def test_smart_cut_rules_payload_collapses_previous_expanded_default_with_catchp
         "catchphrases": DEFAULT_SMART_CUT_CATCHPHRASES,
     })
 
-    assert payload["fillerSentenceHeadEnabled"] is False
+    assert payload["fillerStandaloneEnabled"] is True
+    assert payload["fillerSentenceHeadEnabled"] is True
     assert payload["fillerSentenceTailEnabled"] is False
-    assert payload["catchphraseEnabled"] is False
+    assert payload["catchphraseEnabled"] is True
 
 
 def test_refine_decision_plan_payload_summarizes_cut_analysis_candidates() -> None:
@@ -2509,7 +2741,7 @@ def test_manual_editor_revealed_asr_words_do_not_duplicate_adjacent_fragments() 
     assert rows[1]["transcript_text"] == "这个也是耗尽了我这次的欧"
 
 
-def test_manual_editor_revealed_asr_words_tighten_after_filler_trim() -> None:
+def test_manual_editor_revealed_asr_words_trim_overlap_without_rewriting_row_boundary() -> None:
     rows = _manual_editor_reveal_source_asr_words(
         [
             {
@@ -2547,7 +2779,9 @@ def test_manual_editor_revealed_asr_words_tighten_after_filler_trim() -> None:
     )
 
     assert rows[1]["start_time"] == 859.195
-    assert rows[1]["end_time"] == 862.155
+    assert rows[1]["end_time"] == 863.515
+    assert rows[1]["source_overlap_start_time"] == 859.195
+    assert rows[1]["source_overlap_end_time"] == 862.155
     assert "".join(word["word"] for word in rows[1]["words"]) == "然后这个用手指弹开"
 
 
@@ -2632,7 +2866,7 @@ def test_manual_editor_source_alignment_preserves_existing_word_anchors() -> Non
     assert "".join(word["word"] for word in rows[0]["words"]) == "节目的应该可以看出来啊"
 
 
-def test_manual_editor_source_alignment_tightens_anchored_rows_to_display_words() -> None:
+def test_manual_editor_source_alignment_trims_overlap_without_rewriting_row_boundary() -> None:
     rows = _manual_editor_align_source_rows_to_asr_words(
         [
             {
@@ -2658,8 +2892,10 @@ def test_manual_editor_source_alignment_tightens_anchored_rows_to_display_words(
         ],
     )
 
-    assert rows[0]["start_time"] == 26.3
-    assert rows[0]["end_time"] == 26.7
+    assert rows[0]["start_time"] == 24.54
+    assert rows[0]["end_time"] == 27.073
+    assert rows[0]["source_overlap_start_time"] == 26.3
+    assert rows[0]["source_overlap_end_time"] == 26.7
     assert "".join(word["word"] for word in rows[0]["words"]) == "没想到"
 
 
@@ -2701,6 +2937,8 @@ def test_manual_editor_source_alignment_stays_within_local_time_window_for_unanc
 
     assert rows[0]["start_time"] == 58.24
     assert rows[0]["end_time"] == 61.12
+    assert rows[0]["source_overlap_start_time"] == 58.24
+    assert rows[0]["source_overlap_end_time"] == 61.12
     assert "".join(word["word"] for word in rows[0]["words"]) == "节目的应该可以看出来啊"
 
 
@@ -2745,6 +2983,30 @@ def test_manual_editor_rejects_projection_that_drops_kept_source_words() -> None
                 "start_time": 11.0,
                 "end_time": 15.7,
                 "text_final": "这个也是耗尽了我这次的欧气啊靠",
+            }
+        ],
+    )
+
+
+def test_manual_editor_rejects_projection_single_row_single_char_truncation() -> None:
+    assert _manual_projection_has_source_text_mismatch(
+        [
+            {
+                "index": 1,
+                "source_index": 2,
+                "source_indexes": [2],
+                "start_time": 10.0,
+                "end_time": 14.8,
+                "text_final": "ABCDXYZ",
+            }
+        ],
+        [
+            {
+                "index": 2,
+                "source_index": 2,
+                "start_time": 11.0,
+                "end_time": 15.7,
+                "text_final": "ABCDXYZZ",
             }
         ],
     )
@@ -3021,6 +3283,7 @@ def test_projection_validation_repairs_protected_phrase_lost_inside_merged_proje
             {"start": 77.46, "end": 79.52},
             {"start": 81.36, "end": 87.64},
         ],
+        apply_annotation_repair=True,
     )
 
     assert [item["text_final"] for item in result.subtitles] == [
@@ -3075,6 +3338,7 @@ def test_projection_validation_repairs_repeated_boundary_text_from_span_fallback
             },
         ],
         keep_segments=[{"start": 19.6, "end": 20.78}],
+        apply_annotation_repair=True,
     )
 
     assert [item["text_final"] for item in result.subtitles] == ["太难", "了难上加难"]
@@ -3113,6 +3377,7 @@ def test_projection_validation_repairs_missing_text_from_span_fallback_without_p
             {"start": 77.46, "end": 79.52},
             {"start": 81.36, "end": 87.64},
         ],
+        apply_annotation_repair=True,
     )
 
     assert [item["text_final"] for item in result.subtitles] == [
@@ -3832,6 +4097,88 @@ def test_manual_editor_split_long_rows_falls_back_when_segment_subtitles_drops_t
     assert len(rows) > 2
 
 
+def test_manual_editor_split_long_rows_expose_display_fallback_strategy_without_words(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        jobs_module,
+        "split_subtitle_display_item",
+        lambda **_kwargs: [
+            {"text": "第一段", "start_time": 10.0, "end_time": 13.0},
+            {"text": "第二段", "start_time": 13.0, "end_time": 16.0},
+        ],
+    )
+
+    rows = _manual_editor_split_long_subtitle_rows(
+        [
+            {
+                "index": 2,
+                "start_time": 10.0,
+                "end_time": 16.0,
+                "text_final": "第一段第二段",
+            }
+        ]
+    )
+
+    assert [row["text_final"] for row in rows] == ["第一段", "第二段"]
+    assert rows[0]["split_strategy"] == "display_fallback_no_words"
+    assert rows[0]["split_attempted"] is True
+    assert rows[0]["source_fragment_count"] == 2
+    assert rows[1]["split_strategy"] == "display_fallback_no_words"
+
+    diagnostics = _manual_editor_source_row_split_diagnostics(rows)
+
+    assert diagnostics["attempted_row_count"] == 1
+    assert diagnostics["fragmented_row_count"] == 1
+    assert diagnostics["fragment_count"] == 2
+    assert diagnostics["strategy_counts"] == {"display_fallback_no_words": 1}
+
+
+def test_manual_editor_split_long_rows_expose_word_timed_strategy_when_segmentation_succeeds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        jobs_module,
+        "segment_subtitles",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            entries=[
+                SimpleNamespace(start=20.0, end=22.0, text_raw="第一段", text_norm="第一段"),
+                SimpleNamespace(start=22.0, end=24.0, text_raw="第二段", text_norm="第二段"),
+            ]
+        ),
+    )
+
+    rows = _manual_editor_split_long_subtitle_rows(
+        [
+            {
+                "index": 7,
+                "start_time": 20.0,
+                "end_time": 24.0,
+                "text_raw": "第一段第二段",
+                "text_norm": "第一段第二段",
+                "text_final": "第一段第二段",
+                "words": [
+                    {"word": "第一段", "start": 20.0, "end": 22.0},
+                    {"word": "第二段", "start": 22.0, "end": 24.0},
+                ],
+            }
+        ]
+    )
+
+    assert [row["text_final"] for row in rows] == ["第一段", "第二段"]
+    assert rows[0]["split_strategy"] == "subtitle_segmentation_word_timed"
+    assert rows[0]["split_attempted"] is True
+    assert rows[0]["split_piece_timing_source"] == "segmented_word_timing"
+
+    diagnostics = _manual_editor_source_row_split_diagnostics(rows)
+
+    assert diagnostics["attempted_row_count"] == 1
+    assert diagnostics["fragmented_row_count"] == 1
+    assert diagnostics["fragment_count"] == 2
+    assert diagnostics["recomputed_timing_count"] == 0
+    assert diagnostics["strategy_counts"] == {"subtitle_segmentation_word_timed": 1}
+
+
 def test_manual_editor_split_long_rows_preserve_flashlight_model_aliases_per_piece() -> None:
     context = "20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4"
     raw_text = "长度呢也没有比这个二三或者三七长很多。37跟23的长度是一模一样的。"
@@ -4144,12 +4491,54 @@ def test_manual_editor_subtitle_items_can_serve_as_legacy_source_fallback() -> N
             "source_indexes": [2],
             "start_time": 12.9,
             "end_time": 20.06,
-            "text_raw": "最近这三次NOC的发售太难了",
-            "text_norm": "最近这三次NOC的发售太难了",
-            "text_final": "最近这三次NOC的发售太难了",
+            "text_raw": "最近这三次NOC的发烧太难了",
+            "text_norm": "最近这三次NOC的发烧太难了",
+            "text_final": "最近这三次NOC的发烧太难了",
+            "timing_text": "最近这三次NOC的发烧太难了",
             "projection_source": "subtitle_item",
         }
     ]
+
+
+def test_manual_editor_transcript_source_rows_do_not_apply_early_term_corrections() -> None:
+    rows = _manual_editor_transcript_source_rows(
+        [
+            SimpleNamespace(
+                version=1,
+                segment_index=3,
+                start_time=12.0,
+                end_time=14.0,
+                text="我记得是那个UHD二零了",
+                words_json=[{"word": "我", "start": 12.0, "end": 12.1}],
+            )
+        ],
+        context_text="20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4",
+    )
+
+    assert rows[0]["text_raw"] == "我记得是那个UHD二零了"
+    assert rows[0]["text_norm"] == "我记得是那个UHD二零了"
+    assert rows[0]["text_final"] == "我记得是那个UHD二零了"
+
+
+def test_manual_editor_canonical_source_rows_do_not_apply_early_term_corrections() -> None:
+    rows = _manual_editor_canonical_segment_source_rows(
+        {
+            "segments": [
+                {
+                    "index": 2,
+                    "start": 10.0,
+                    "end": 12.0,
+                    "text_raw": "所以呢我的选择就是这个幺七",
+                    "text_canonical": "所以呢我的选择就是这个幺七",
+                }
+            ]
+        },
+        context_text="20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4",
+    )
+
+    assert rows[0]["text_raw"] == "所以呢我的选择就是这个幺七"
+    assert rows[0]["text_norm"] == "所以呢我的选择就是这个幺七"
+    assert rows[0]["text_final"] == "所以呢我的选择就是这个幺七"
 
 
 def test_manual_editor_transcript_source_rows_drop_redundant_synthetic_duplicate_words() -> None:
@@ -4566,8 +4955,46 @@ def test_manual_editor_source_asr_words_reveal_fillers_hidden_by_canonical_text(
     )
 
     assert rows[0]["text_final"] == "今天主题"
+    assert rows[0]["transcript_text_raw"] == "啊呃今天主题吧"
     assert rows[0]["transcript_text"] == "啊呃今天主题吧"
     assert "".join(word["word"] for word in rows[0]["words"]) == "啊呃今天主题吧"
+
+
+def test_manual_editor_revealed_asr_words_keep_raw_and_corrected_transcript_texts_separate() -> None:
+    rows = _manual_editor_reveal_source_asr_words(
+        [
+            {
+                "index": 0,
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text_final": "它算是定位相当高端的一款EDC手电了",
+            }
+        ],
+        [
+            {"word": char, "start": 1.0 + index * 0.05, "end": 1.04 + index * 0.05, "source": "provider"}
+            for index, char in enumerate("它算是定位相当高端的一款EC手电了")
+        ],
+        context_text="20260228-152013 奈特科尔 nitecore EDC17开箱以及和edc37的对比.mp4",
+    )
+
+    assert rows[0]["transcript_text_raw"] == "它算是定位相当高端的一款EC手电了"
+    assert rows[0]["transcript_text"] == "它算是定位相当高端的一款EDC手电了"
+
+
+def test_manual_editor_source_rows_do_not_collapse_stutter_text_early() -> None:
+    row = _manual_editor_subtitle_payload(
+        {
+            "index": 0,
+            "start_time": 0.0,
+            "end_time": 1.5,
+            "text_raw": "最近这个发售发发售啊太难",
+            "text_norm": "最近这个发售发发售啊太难",
+            "text_final": "最近这个发售发发售啊太难",
+        },
+        index=0,
+    )
+
+    assert row.text_final == "最近这个发售发发售啊太难"
 
 
 def test_manual_editor_source_asr_words_apply_hotword_corrections_without_hiding_fillers() -> None:
@@ -4898,6 +5325,108 @@ async def test_manual_editor_source_subtitles_reuse_cached_projection_rows(
     assert [row["text_final"] for row in rows] == ["自动投影切分"]
 
 
+@pytest.mark.asyncio
+async def test_manual_editor_source_subtitles_preserve_cached_projection_text_without_recleaning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeSession:
+        async def get(self, model: object, job_id: object) -> SimpleNamespace:
+            return SimpleNamespace(source_name="测试视频")
+
+        async def execute(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("projection-backed source rows should not query fallback transcript tables")
+
+    async def _unexpected_projection_loader(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("cached projection rows should prevent reloading projection entries")
+
+    monkeypatch.setattr(
+        jobs_module,
+        "_load_manual_editor_latest_subtitle_projection_entries",
+        _unexpected_projection_loader,
+    )
+
+    rows = await _load_manual_editor_source_subtitle_dicts(
+        _FakeSession(),
+        job_id=uuid4(),
+        latest_projection_rows=[
+            {
+                "index": 0,
+                "start_time": 0.0,
+                "end_time": 2.4,
+                "text_raw": "呃， 这个就是M的这个标， 你长按",
+                "text_norm": "呃， 这个就是M的这个标， 你长按",
+                "text_final": "呃， 这个就是M的这个标， 你长按",
+            }
+        ],
+        latest_projection_data={
+            "transcript_layer": "canonical_transcript",
+            "segmentation_engine_version": SUBTITLE_PROJECTION_SEGMENTATION_ENGINE_VERSION,
+            "split_profile_version": SUBTITLE_PROJECTION_SPLIT_PROFILE_VERSION,
+        },
+    )
+
+    assert [row["text_final"] for row in rows] == ["呃， 这个就是M的这个标， 你长按"]
+
+
+@pytest.mark.asyncio
+async def test_manual_editor_source_subtitles_fallback_does_not_resplit_source_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeSession:
+        async def get(self, model: object, job_id: object) -> SimpleNamespace:
+            return SimpleNamespace(source_name="测试视频")
+
+        async def execute(self, *_args: object, **_kwargs: object) -> object:
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+
+    canonical_layer = {
+        "alignment_engine_version": CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION,
+        "segments": [
+            {
+                "index": 0,
+                "start": 0.0,
+                "end": 12.0,
+                "text_raw": "这是一个很长的原始来源字幕，这里只允许展示原始行，不允许在manual editor阶段重新切分。",
+                "text_canonical": "这是一个很长的原始来源字幕，这里只允许展示原始行，不允许在manual editor阶段重新切分。",
+                "words": [{"word": "这", "start": 0.0, "end": 0.1}],
+            }
+        ],
+    }
+
+    async def _fake_load_latest_optional_artifact(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(data_json=canonical_layer)
+
+    def _unexpected_split(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("manual editor source fallback must not resplit source rows")
+
+    monkeypatch.setattr(jobs_module, "_load_latest_optional_artifact", _fake_load_latest_optional_artifact)
+    monkeypatch.setattr(jobs_module, "_manual_editor_split_long_subtitle_rows", _unexpected_split)
+
+    rows = await _load_manual_editor_source_subtitle_dicts(
+        _FakeSession(),
+        job_id=uuid4(),
+        latest_projection_rows=[
+            {
+                "index": 0,
+                "start_time": 0.0,
+                "end_time": 20.0,
+                "text_final": "短句",
+            }
+        ],
+        latest_projection_data={
+            "transcript_layer": "canonical_transcript",
+            "split_profile": {"max_chars": 20, "max_duration": 3.8},
+            "segmentation_engine_version": SUBTITLE_PROJECTION_SEGMENTATION_ENGINE_VERSION,
+            "split_profile_version": SUBTITLE_PROJECTION_SPLIT_PROFILE_VERSION,
+        },
+    )
+
+    assert [row["text_final"] for row in rows] == [
+        "这是一个很长的原始来源字幕，这里只允许展示原始行，不允许在manual editor阶段重新切分。"
+    ]
+    assert rows[0].get("source_fragment_count") is None
+
+
 def test_manual_editor_projection_data_requires_current_segmentation_engine_version() -> None:
     assert not _manual_editor_projection_data_is_current({})
     assert not _manual_editor_projection_data_is_current({"segmentation_engine_version": "legacy"})
@@ -4921,6 +5450,97 @@ def test_canonical_transcript_data_requires_current_alignment_engine_version() -
     assert canonical_transcript_data_is_current(
         {"alignment_engine_version": CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION}
     )
+
+
+def test_manual_editor_projection_contract_locks_current_authoritative_projection() -> None:
+    assert _manual_editor_projection_contract_locked(
+        manual_projection_items=[],
+        raw_projection_rows=[
+            {
+                "index": 0,
+                "start_time": 0.0,
+                "end_time": 1.2,
+                "text_final": "当前自动切分",
+            }
+        ],
+        projection_data={
+            "transcript_layer": "canonical_transcript",
+            "segmentation_engine_version": SUBTITLE_PROJECTION_SEGMENTATION_ENGINE_VERSION,
+            "split_profile_version": SUBTITLE_PROJECTION_SPLIT_PROFILE_VERSION,
+            "canonical_alignment_engine_version": CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION,
+        },
+        draft_active=False,
+        manual_projection_suspicious=False,
+    ) is True
+
+
+def test_manual_editor_session_model_exposes_projection_diagnostics() -> None:
+    session = jobs_module.ManualEditorSessionOut(
+        job_id=str(uuid4()),
+        timeline_id=str(uuid4()),
+        timeline_version=1,
+        source_name="demo.mp4",
+        source_duration_sec=12.3,
+        source_subtitle_basis="canonical_transcript",
+        projected_subtitle_basis="canonical_transcript",
+        projection_contract_locked=True,
+        projection_diagnostics={
+            "projection_refresh_required": True,
+            "source_projection_fallback_applied": False,
+        },
+    )
+
+    payload = session.model_dump()
+    assert payload["source_subtitle_basis"] == "canonical_transcript"
+    assert payload["projected_subtitle_basis"] == "canonical_transcript"
+    assert payload["projection_contract_locked"] is True
+    assert payload["projection_diagnostics"]["projection_refresh_required"] is True
+
+
+def test_manual_editor_projection_contract_does_not_lock_subtitle_item_fallback() -> None:
+    assert _manual_editor_projection_contract_locked(
+        manual_projection_items=[],
+        raw_projection_rows=[
+            {
+                "index": 0,
+                "start_time": 0.0,
+                "end_time": 1.2,
+                "text_final": "旧字幕条",
+            }
+        ],
+        projection_data={
+            "transcript_layer": "subtitle_item",
+            "projection_kind": "subtitle_item_baseline",
+        },
+        draft_active=False,
+        manual_projection_suspicious=False,
+    ) is False
+
+
+def test_manual_editor_current_projection_contract_blocks_source_fallback_override() -> None:
+    projected = [
+        {"index": 0, "start_time": 0.0, "end_time": 1.2, "text_final": "今天我们直奔主题啊"},
+    ]
+    source_rows = [
+        {"index": 0, "start_time": 0.0, "end_time": 0.5, "text_final": "今天"},
+        {"index": 1, "start_time": 0.5, "end_time": 1.2, "text_final": "我们直奔主题啊"},
+    ]
+
+    assert _manual_editor_should_apply_source_projection_fallback(
+        projected_subtitles=projected,
+        source_subtitles=source_rows,
+        keep_segments=[{"start": 0.0, "end": 1.2}],
+        manual_projection_items=[],
+        raw_projection_rows=projected,
+        projection_data={
+            "transcript_layer": "canonical_transcript",
+            "segmentation_engine_version": SUBTITLE_PROJECTION_SEGMENTATION_ENGINE_VERSION,
+            "split_profile_version": SUBTITLE_PROJECTION_SPLIT_PROFILE_VERSION,
+            "canonical_alignment_engine_version": CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION,
+        },
+        draft_active=False,
+        manual_projection_suspicious=False,
+    ) is False
 
 
 def test_resolve_projection_split_profile_ignores_stale_projection_profile() -> None:
@@ -5065,7 +5685,7 @@ async def test_load_latest_subtitle_payloads_rebuilds_stale_projection_from_cano
 
 
 @pytest.mark.asyncio
-async def test_manual_editor_projection_loader_rebuilds_from_current_canonical_layer(
+async def test_manual_editor_projection_loader_reuses_stale_cached_projection_without_sync_rebuild(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     job_id = uuid4()
@@ -5086,6 +5706,7 @@ async def test_manual_editor_projection_loader_rebuilds_from_current_canonical_l
                 data_json={
                     "segmentation_engine_version": "legacy",
                     "canonical_alignment_engine_version": "legacy",
+                    "transcript_layer": "canonical_transcript",
                     "entries": [
                         {
                             "index": 0,
@@ -5100,55 +5721,21 @@ async def test_manual_editor_projection_loader_rebuilds_from_current_canonical_l
             )
         return None
 
-    async def _fake_load_latest_current_canonical_transcript_data(*args: object, **kwargs: object) -> dict[str, object]:
-        return {
-            "alignment_engine_version": CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION,
-            "segments": [
-                {
-                    "index": 0,
-                    "start": 0.0,
-                    "end": 1.2,
-                    "text_raw": "当前切分",
-                    "text_canonical": "当前切分",
-                    "words": [
-                        {"word": "当前", "start": 0.0, "end": 0.6, "alignment": {}},
-                        {"word": "切分", "start": 0.6, "end": 1.2, "alignment": {}},
-                    ],
-                }
-            ],
-        }
+    async def _unexpected_load_latest_current_canonical_transcript_data(*args: object, **kwargs: object) -> dict[str, object]:
+        raise AssertionError("stale cached projection should not trigger synchronous canonical rebuild")
 
-    async def _fake_rebuild_projection_entries(*args: object, **kwargs: object) -> tuple[list[dict[str, object]], dict[str, object]]:
-        canonical_layer = dict(kwargs.get("canonical_layer") or {})
-        assert canonical_layer.get("alignment_engine_version") == CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION
-        return (
-            [
-                {
-                    "index": 0,
-                    "start_time": 0.0,
-                    "end_time": 1.2,
-                    "text_raw": "当前切分",
-                    "text_norm": "当前切分",
-                    "text_final": "当前切分",
-                }
-            ],
-            {
-                "segmentation_engine_version": SUBTITLE_PROJECTION_SEGMENTATION_ENGINE_VERSION,
-                "split_profile_version": SUBTITLE_PROJECTION_SPLIT_PROFILE_VERSION,
-                "canonical_alignment_engine_version": CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION,
-                "transcript_layer": "canonical_transcript",
-            },
-        )
+    async def _unexpected_rebuild_projection_entries(*args: object, **kwargs: object) -> tuple[list[dict[str, object]], dict[str, object]]:
+        raise AssertionError("stale cached projection should not trigger synchronous projection rebuild")
 
     monkeypatch.setattr(jobs_module, "_load_latest_optional_artifact", _fake_load_latest_optional_artifact)
     monkeypatch.setattr(
         "roughcut.pipeline.steps._load_latest_current_canonical_transcript_data",
-        _fake_load_latest_current_canonical_transcript_data,
+        _unexpected_load_latest_current_canonical_transcript_data,
     )
     monkeypatch.setattr(
         jobs_module,
         "_manual_editor_rebuild_projection_entries_from_canonical_layer",
-        _fake_rebuild_projection_entries,
+        _unexpected_rebuild_projection_entries,
     )
 
     fake_session = _FakeSession()
@@ -5158,13 +5745,49 @@ async def test_manual_editor_projection_loader_rebuilds_from_current_canonical_l
         fallback_items=None,
     )
 
-    assert [row["text_final"] for row in rows] == ["当前切分"]
-    assert projection_data["canonical_alignment_engine_version"] == CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION
-    assert len(fake_session.added) == 1
-    persisted_artifact = fake_session.added[0]
-    assert getattr(persisted_artifact, "artifact_type", "") == ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER
-    assert getattr(persisted_artifact, "job_id", None) == job_id
-    assert bool(fake_session.info.get("manual_editor_projection_cache_refreshed")) is True
+    assert [row["text_final"] for row in rows] == ["旧切分"]
+    assert [row.get("projection_source") for row in rows] == ["canonical_transcript"]
+    assert projection_data["projection_refresh_required"] is True
+    assert len(fake_session.added) == 0
+    assert bool(fake_session.info.get("manual_editor_projection_cache_refreshed")) is False
+
+
+@pytest.mark.asyncio
+async def test_manual_editor_latest_subtitle_payloads_preserve_projection_text_without_recleaning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fake_projection_entries(*args: object, **kwargs: object) -> tuple[list[dict[str, object]], dict[str, object]]:
+        return (
+            [
+                {
+                    "index": 0,
+                    "start_time": 0.0,
+                    "end_time": 1.5,
+                    "text_raw": "你长按它就是一个激光啊，绿激光。",
+                    "text_norm": "你长按它就是一个激光啊，绿激光。",
+                    "text_final": "你长按它就是一个激光啊，绿激光。",
+                }
+            ],
+            {
+                "split_profile": {"max_chars": 20, "max_duration": 3.8},
+                "transcript_layer": "canonical_transcript",
+            },
+        )
+
+    monkeypatch.setattr(
+        jobs_module,
+        "_load_manual_editor_latest_subtitle_projection_entries",
+        _fake_projection_entries,
+    )
+
+    rows, _projection_data = await jobs_module._load_manual_editor_latest_subtitle_payloads(
+        SimpleNamespace(),
+        job_id=uuid4(),
+        fallback_to_items=False,
+        drop_empty=True,
+    )
+
+    assert [row["text_final"] for row in rows] == ["你长按它就是一个激光啊，绿激光。"]
 
 
 def test_subtitle_projection_layer_persists_projection_words() -> None:
@@ -5264,6 +5887,27 @@ def test_projection_assessment_tolerates_small_boundary_reassignment_for_materia
     assert "projection_unsupported_material_tokens" not in assessment["issue_codes"]
 
 
+def test_projection_assessment_tolerates_moderate_hybrid_boundary_reassignment_for_material_tokens() -> None:
+    reference_items = [
+        SimpleNamespace(start_time=0.0, end_time=1.6, text_final="这一款是1500流明啊。"),
+        SimpleNamespace(start_time=1.6, end_time=3.8, text_final="但是它的亮度直接去看。"),
+    ]
+    candidate_items = [
+        SimpleNamespace(start_time=0.0, end_time=3.8, text_final="这一款是1500流明啊，但是它的亮度直接去看。"),
+    ]
+
+    assessment = _build_projection_correction_assessment(
+        basis="canonical_local_hybrid",
+        reference_items=reference_items,
+        candidate_items=candidate_items,
+        display_quality_report={"score": 92.0, "metrics": {"subtitle_count": 1}},
+    )
+
+    assert assessment["metrics"]["missing_material_token_count"] == 0
+    assert assessment["metrics"]["unsupported_material_token_count"] == 0
+    assert "projection_unsupported_material_tokens" not in assessment["issue_codes"]
+
+
 def test_projection_boundary_detection_blocks_material_token_split_across_rows() -> None:
     assert _projection_boundary_splits_material_token("另外一把呢就是现在这个奈特", "科尔啊，也是前两个月。")
     assert not _projection_boundary_splits_material_token("另外一把呢就是现在这个", "奈特科尔啊，也是前两个月。")
@@ -5284,6 +5928,33 @@ def test_projection_material_split_entries_are_merged_back_together() -> None:
 
     assert len(merged) == 1
     assert "奈特科尔" in str(merged[0].text_raw)
+
+
+def test_projection_material_drift_ignores_punctuation_fragmentation() -> None:
+    from roughcut.pipeline.steps import _projection_has_material_content_drift
+
+    assert not _projection_has_material_content_drift(
+        baseline_items=[
+            SimpleNamespace(start_time=0.0, end_time=1.0, text_final="另外一把呢就是现在这个奈特。"),
+            SimpleNamespace(start_time=1.0, end_time=2.0, text_final="科尔啊，也是前两个月。"),
+        ],
+        candidate_items=[
+            SimpleNamespace(start_time=0.0, end_time=2.0, text_final="另外一把呢就是现在这个奈特科尔啊，也是前两个月。"),
+        ],
+    )
+
+
+def test_projection_material_drift_accepts_numeric_equivalent_tokens() -> None:
+    from roughcut.pipeline.steps import _projection_has_material_content_drift
+
+    assert not _projection_has_material_content_drift(
+        baseline_items=[
+            SimpleNamespace(start_time=0.0, end_time=2.0, text_final="它是一千五百流明啊。"),
+        ],
+        candidate_items=[
+            SimpleNamespace(start_time=0.0, end_time=2.0, text_final="它是1500流明啊。"),
+        ],
+    )
 
 
 def test_projection_candidate_selection_prefers_higher_quality_hybrid_when_content_is_preserved() -> None:
@@ -5316,11 +5987,51 @@ def test_projection_candidate_selection_prefers_higher_quality_hybrid_when_conte
         canonical_transcript_layer=SimpleNamespace(correction_metrics={}),
     )
 
-    assert selected["basis"] == "canonical_local_hybrid"
-    assert report["selected_projection_basis"] == "canonical_local_hybrid"
+    assert selected["basis"] == "canonical_refresh"
+    assert report["selected_projection_basis"] == "canonical_refresh"
 
 
-def test_local_hybrid_projection_repairs_detached_short_residual_clause() -> None:
+def test_projection_candidate_selection_prefers_higher_scored_hybrid_despite_slightly_higher_low_confidence_windows() -> None:
+    reference_items = [
+        SimpleNamespace(start_time=0.0, end_time=1.0, text_final="这是EDC17"),
+        SimpleNamespace(start_time=1.0, end_time=2.0, text_final="手电参数"),
+    ]
+    canonical_candidate = {
+        "basis": "canonical_refresh",
+        "transcript_layer": "canonical_transcript",
+        "items": reference_items,
+        "quality_report": {"score": 95.5, "metrics": {"subtitle_count": 2}},
+        "analysis": {
+            "fragment_start_count": 2,
+            "fragment_end_count": 10,
+            "suspicious_boundary_count": 19,
+            "low_confidence_window_count": 29,
+        },
+    }
+    hybrid_candidate = {
+        "basis": "canonical_local_hybrid",
+        "transcript_layer": "canonical_transcript",
+        "items": reference_items,
+        "quality_report": {"score": 100.0, "metrics": {"subtitle_count": 2}},
+        "analysis": {
+            "fragment_start_count": 2,
+            "fragment_end_count": 8,
+            "suspicious_boundary_count": 14,
+            "low_confidence_window_count": 32,
+        },
+    }
+
+    selected, report = _select_projection_candidate(
+        candidates=[canonical_candidate, hybrid_candidate],
+        reference_items=reference_items,
+        canonical_transcript_layer=SimpleNamespace(correction_metrics={}),
+    )
+
+    assert selected["basis"] == "canonical_refresh"
+    assert report["selected_projection_basis"] == "canonical_refresh"
+
+
+def test_local_hybrid_projection_entries_now_pass_through_canonical_boundaries() -> None:
     entries = [
         SimpleNamespace(index=0, start=0.0, end=1.6, text_raw="需要的，所以说那也就没啥好说的了。", text_norm="需要的，所以说那也就没啥好说的了。", words=()),
         SimpleNamespace(index=1, start=1.61, end=2.03, text_raw="该升级。呃", text_norm="该升级。呃", words=()),
@@ -5331,12 +6042,10 @@ def test_local_hybrid_projection_repairs_detached_short_residual_clause() -> Non
     refined = _build_local_hybrid_projection_entries(entries, split_profile={"max_chars": 30, "max_duration": 5.0})
     texts = [str(entry.text_raw) for entry in refined]
 
-    assert "该升级。呃" not in texts
-    assert len(texts) < len(entries)
-    assert any("该升级" in text for text in texts)
+    assert texts == [str(entry.text_raw) for entry in entries]
 
 
-def test_local_hybrid_projection_repairs_detached_short_followon_clause() -> None:
+def test_local_hybrid_projection_entries_do_not_merge_followon_clause() -> None:
     entries = [
         SimpleNamespace(index=0, start=0.0, end=1.2, text_raw="这个晚上出门都会带它", text_norm="这个晚上出门都会带它", words=()),
         SimpleNamespace(index=1, start=1.21, end=1.59, text_raw="很实用", text_norm="很实用", words=()),
@@ -5347,9 +6056,51 @@ def test_local_hybrid_projection_repairs_detached_short_followon_clause() -> Non
     refined = _build_local_hybrid_projection_entries(entries, split_profile={"max_chars": 30, "max_duration": 5.0})
     texts = [str(entry.text_raw) for entry in refined]
 
-    assert "很实用" not in texts
-    assert len(texts) < len(entries)
-    assert any("很实用" in text for text in texts)
+    assert texts == [str(entry.text_raw) for entry in entries]
+
+
+def test_local_hybrid_projection_entries_keep_overfull_rows_for_segmentation_stage() -> None:
+    entries = [
+        SimpleNamespace(index=0, start=0.0, end=1.2, text_raw="这个晚上出门都会带它", text_norm="这个晚上出门都会带它", words=()),
+        SimpleNamespace(index=1, start=1.21, end=1.59, text_raw="很实用", text_norm="很实用", words=()),
+        SimpleNamespace(index=2, start=1.60, end=2.8, text_raw="而且它的这个UV的功能啊", text_norm="而且它的这个UV的功能啊", words=()),
+        SimpleNamespace(index=3, start=2.82, end=3.72, text_raw="也不是说只限用照明", text_norm="也不是说只限用照明", words=()),
+    ]
+
+    refined = _build_local_hybrid_projection_entries(entries, split_profile={"max_chars": 18, "max_duration": 3.4})
+    texts = [str(entry.text_raw) for entry in refined]
+
+    assert texts == [str(entry.text_raw) for entry in entries]
+
+
+def test_local_hybrid_projection_entries_do_not_reassign_short_residual_rightward() -> None:
+    entries = [
+        SimpleNamespace(index=0, start=0.0, end=1.6, text_raw="需要的，所以说那也就没啥好说的了。", text_norm="需要的，所以说那也就没啥好说的了。", words=()),
+        SimpleNamespace(index=1, start=1.61, end=2.03, text_raw="该升级。呃", text_norm="该升级。呃", words=()),
+        SimpleNamespace(index=2, start=2.04, end=3.84, text_raw="我们其他博主也是也都发过这款手电了，我们。", text_norm="我们其他博主也是也都发过这款手电了，我们。", words=()),
+        SimpleNamespace(index=3, start=3.9, end=4.8, text_raw="就简单的做一下展示。", text_norm="就简单的做一下展示。", words=()),
+    ]
+
+    refined = _build_local_hybrid_projection_entries(entries, split_profile={"max_chars": 18, "max_duration": 3.4})
+    texts = [str(entry.text_raw) for entry in refined]
+
+    assert texts == [str(entry.text_raw) for entry in entries]
+
+
+def test_local_hybrid_projection_entries_do_not_resegment_reason_preamble() -> None:
+    entries = [
+        SimpleNamespace(index=0, start=0.0, end=1.1, text_raw="所以说它的揣在兜里非常轻便非常的无感", text_norm="所以说它的揣在兜里非常轻便非常的无感", words=()),
+        SimpleNamespace(index=1, start=1.11, end=2.35, text_raw="所以说为什么我平时比如临时出个门", text_norm="所以说为什么我平时比如临时出个门", words=()),
+        SimpleNamespace(index=2, start=2.36, end=3.72, text_raw="遛个狗啊或者说简单的这个短途的通勤", text_norm="遛个狗啊或者说简单的这个短途的通勤", words=()),
+        SimpleNamespace(index=3, start=3.73, end=4.85, text_raw="这个晚上出门都会带它", text_norm="这个晚上出门都会带它", words=()),
+        SimpleNamespace(index=4, start=4.86, end=5.46, text_raw="很实用而且它的这个UV的功能", text_norm="很实用而且它的这个UV的功能", words=()),
+        SimpleNamespace(index=5, start=5.47, end=6.24, text_raw="也不是说只限用照明", text_norm="也不是说只限用照明", words=()),
+    ]
+
+    refined = _build_local_hybrid_projection_entries(entries, split_profile={"max_chars": 20, "max_duration": 3.8})
+    texts = [str(entry.text_raw) for entry in refined]
+
+    assert texts == [str(entry.text_raw) for entry in entries]
 
 
 def test_projection_candidate_selection_prefers_refresh_when_hybrid_is_more_fragmentary() -> None:
@@ -5457,6 +6208,35 @@ def test_projection_candidate_pool_excludes_hybrid_that_resegments_canonical_bou
     assert [candidate["basis"] for candidate in pool] == ["canonical_refresh"]
 
 
+def test_projection_candidate_pool_allows_higher_quality_hybrid_with_moderate_shape_drift() -> None:
+    canonical_items = [
+        SimpleNamespace(start_time=float(index), end_time=float(index + 1), text_final=f"第{index}行字幕")
+        for index in range(20)
+    ]
+    hybrid_items = [
+        SimpleNamespace(start_time=0.0, end_time=2.0, text_final="第0行字幕第1行字幕"),
+        *[
+            SimpleNamespace(start_time=float(index), end_time=float(index + 1), text_final=f"第{index}行字幕")
+            for index in range(2, 18)
+        ],
+        SimpleNamespace(start_time=18.0, end_time=20.0, text_final="第18行字幕第19行字幕"),
+    ]
+
+    pool = _build_projection_candidate_pool(
+        canonical_projection_items=canonical_items,
+        projection_analysis=SimpleNamespace(),
+        canonical_quality_report={"score": 90.0, "metrics": {"subtitle_count": len(canonical_items)}},
+        hybrid_projection_items=hybrid_items,
+        hybrid_projection_analysis=SimpleNamespace(),
+        hybrid_quality_report={"score": 96.0, "metrics": {"subtitle_count": len(hybrid_items)}},
+        existing_projection_items=[],
+        existing_projection_analysis=SimpleNamespace(),
+        existing_quality_report={},
+    )
+
+    assert [candidate["basis"] for candidate in pool] == ["canonical_refresh"]
+
+
 def test_projection_candidate_pool_keeps_canonical_as_single_segmentation_authority() -> None:
     pool = _build_projection_candidate_pool(
         canonical_projection_items=[SimpleNamespace(start_time=0.0, end_time=1.0, text_final="这是EDC17")],
@@ -5470,10 +6250,7 @@ def test_projection_candidate_pool_keeps_canonical_as_single_segmentation_author
         existing_quality_report={"score": 95.0},
     )
 
-    assert [candidate["basis"] for candidate in pool] == [
-        "canonical_refresh",
-        "canonical_local_hybrid",
-    ]
+    assert [candidate["basis"] for candidate in pool] == ["canonical_refresh"]
 
 
 def test_resolve_subtitle_split_profile_uses_relaxed_landscape_defaults() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from roughcut.config import get_settings
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.providers.factory import get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message
 from roughcut.review.content_profile import apply_source_identity_constraints, extract_source_identity_constraints
@@ -215,7 +216,7 @@ def _subtitle_text(subtitle_items: list[dict[str, Any]], index: int) -> str:
         return ""
     safe_index = max(0, min(index, len(subtitle_items) - 1))
     item = subtitle_items[safe_index]
-    return str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+    return subtitle_display_rule_text(item)
 
 
 def _midpoint_time(subtitle_items: list[dict[str, Any]]) -> float:

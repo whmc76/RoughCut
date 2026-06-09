@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
+
 _STANDALONE_FILLER_TOKENS = (
     "这个",
     "那个",
@@ -85,7 +87,7 @@ def normalize_editable_subtitle_text(text: object) -> str:
     return normalize_source_transcript_text(text)
 
 
-def normalize_source_transcript_text(text: object) -> str:
+def normalize_source_transcript_text(text: object, *, collapse_stutter: bool = True) -> str:
     """Denoise source transcript text without deleting real spoken words.
 
     This is the only normalization allowed before the manual full-transcript
@@ -99,7 +101,8 @@ def normalize_source_transcript_text(text: object) -> str:
     normalized = _strip_asr_noise_markers(normalized)
     normalized = re.sub(r"^[\s，。！？、：；,.!?…~\-—_]+", "", normalized).strip()
     normalized = re.sub(r"([\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", r"\1", normalized)
-    normalized = _collapse_asr_stutter_text(normalized)
+    if collapse_stutter:
+        normalized = _collapse_asr_stutter_text(normalized)
     normalized = re.sub(r"([，。！？、：；,.!?])\1+", r"\1", normalized)
     return re.sub(r"\s{2,}", " ", normalized).strip()
 
@@ -168,7 +171,7 @@ def clean_subtitle_payloads(
     cleaned: list[dict[str, Any]] = []
     for item in subtitles:
         payload = _normalize_subtitle_timing_payload(item)
-        source_text = str(payload.get("text_final") or payload.get("text_norm") or payload.get("text_raw", "") or "").strip()
+        source_text = subtitle_display_rule_text(payload)
         text_final, suppressed_reason = (
             _clean_final_subtitle_text_and_reason(source_text)
             if clean_text
@@ -184,6 +187,20 @@ def clean_subtitle_payloads(
     if not collapse_repeats or not clean_text:
         return cleaned
     return collapse_repeated_subtitle_payloads(cleaned)
+
+
+def preserve_subtitle_payloads(
+    subtitles: list[dict[str, Any]],
+    *,
+    drop_empty: bool = True,
+) -> list[dict[str, Any]]:
+    """Normalize timing keys for authoritative rows without rewriting text."""
+    return clean_subtitle_payloads(
+        subtitles,
+        drop_empty=drop_empty,
+        collapse_repeats=False,
+        clean_text=False,
+    )
 
 
 def _normalize_subtitle_timing_payload(item: dict[str, Any]) -> dict[str, Any]:

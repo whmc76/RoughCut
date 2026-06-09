@@ -9,6 +9,11 @@ import re
 from pathlib import Path
 from typing import Any
 
+from roughcut.edit.subtitle_surfaces import (
+    subtitle_canonical_rule_text,
+    subtitle_display_rule_text,
+    subtitle_raw_rule_text,
+)
 from roughcut.media.subtitle_spans import (
     drop_redundant_synthetic_word_payloads,
     normalize_subtitle_items_for_timeline_projection,
@@ -532,6 +537,16 @@ def remap_subtitles_to_timeline(
             fragment_texts,
             range_components,
         )
+        raw_fragment_texts = _split_remapped_subtitle_surface_text(
+            item,
+            mapped_ranges,
+            text=subtitle_raw_rule_text(item),
+        )
+        canonical_fragment_texts = _split_remapped_subtitle_surface_text(
+            item,
+            mapped_ranges,
+            text=subtitle_canonical_rule_text(item),
+        )
         emitted_ranges = [
             (mapped_range, fragment_text)
             for mapped_range, fragment_text in zip(mapped_ranges, fragment_texts)
@@ -545,6 +560,16 @@ def remap_subtitles_to_timeline(
                 (new_start, new_end, overlap_start, overlap_end),
                 fragment_text=fragment_text,
                 components=range_components.get((new_start, new_end, overlap_start, overlap_end)),
+            )
+            raw_fragment_text = (
+                str(raw_fragment_texts[fragment_index] or "").strip()
+                if fragment_index < len(raw_fragment_texts)
+                else ""
+            )
+            canonical_fragment_text = (
+                str(canonical_fragment_texts[fragment_index] or "").strip()
+                if fragment_index < len(canonical_fragment_texts)
+                else ""
             )
             remapped_item = {
                 **item,
@@ -570,7 +595,12 @@ def remap_subtitles_to_timeline(
                     overlap_end=overlap_end,
                 )
                 remapped_item = _tighten_remapped_item_to_fragment_words(remapped_item)
-            remapped_item = _with_remapped_fragment_text(remapped_item, fragment_text)
+            remapped_item = _with_remapped_fragment_text(
+                remapped_item,
+                raw_text=raw_fragment_text,
+                canonical_text=canonical_fragment_text,
+                display_text=fragment_text,
+            )
             remapped.append(remapped_item)
 
     return _with_unique_remapped_subtitle_indexes(remapped)
@@ -629,25 +659,46 @@ def _with_unique_remapped_subtitle_indexes(items: list[dict]) -> list[dict]:
 
 
 def _subtitle_item_display_text(item: dict[str, Any]) -> str:
-    for key in ("projection_text", "text_final", "text_norm", "text_raw", "text"):
-        value = str((item or {}).get(key) or "").strip()
-        if value:
-            return value
-    return ""
+    return subtitle_display_rule_text(item)
 
 
-def _with_remapped_fragment_text(item: dict[str, Any], text: str) -> dict[str, Any]:
+def _split_remapped_subtitle_surface_text(
+    item: dict[str, Any],
+    mapped_ranges: list[tuple[float, float, float, float]],
+    *,
+    text: str,
+) -> list[str]:
+    normalized_text = str(text or "").strip()
+    if not normalized_text:
+        return ["" for _ in mapped_ranges]
+    surface_item = dict(item)
+    surface_item["projection_text"] = normalized_text
+    surface_item["text_final"] = normalized_text
+    return _split_remapped_subtitle_text(surface_item, mapped_ranges)
+
+
+def _with_remapped_fragment_text(
+    item: dict[str, Any],
+    *,
+    raw_text: str,
+    canonical_text: str,
+    display_text: str,
+) -> dict[str, Any]:
     resolved = dict(item)
     resolved.pop("projection_text", None)
     resolved.pop("projection_text_source", None)
-    updated = False
-    for key in ("text_final", "text_norm", "text_raw", "text"):
-        if key not in resolved:
-            continue
-        resolved[key] = text
-        updated = True
-    if not updated:
-        resolved["text_final"] = text
+    if "text_raw" in resolved:
+        resolved["text_raw"] = raw_text
+    if "text_norm" in resolved:
+        resolved["text_norm"] = canonical_text
+    if "text_final" in resolved:
+        resolved["text_final"] = display_text
+    if "display_source_text" in resolved:
+        resolved["display_source_text"] = display_text
+    if "text" in resolved:
+        resolved["text"] = display_text
+    if not any(key in resolved for key in ("text_raw", "text_norm", "text_final", "text")):
+        resolved["text_final"] = display_text
     return resolved
 
 

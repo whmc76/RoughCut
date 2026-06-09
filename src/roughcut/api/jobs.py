@@ -94,6 +94,11 @@ from roughcut.edit.smart_cut_rules import (
     default_smart_cut_rules_payload,
     normalize_smart_cut_rules_payload,
 )
+from roughcut.edit.subtitle_surfaces import (
+    subtitle_canonical_rule_text,
+    subtitle_display_rule_text,
+    subtitle_raw_rule_text,
+)
 from roughcut.pipeline.celery_app import celery_app
 from roughcut.pipeline.job_rerun import (
     JobRerunPlan,
@@ -161,6 +166,7 @@ from roughcut.publication import (
     check_publication_browser_agent_ready,
     list_publication_attempts,
     normalize_publication_platform,
+    publication_adapter_requires_browser_agent,
     publication_plan_is_publishable,
     publication_plan_is_manual_handoff_ready,
     publication_plan_status,
@@ -418,6 +424,7 @@ class ManualEditorRuleSegmentOut(BaseModel):
     stage: str = "accepted_cut"
     rule_id: str | None = None
     match_surface: str | None = None
+    match_surface_layer: str | None = None
     risk_level: str | None = None
     confidence: float | None = None
     detail: str | None = None
@@ -589,6 +596,13 @@ class ManualEditorReadinessOut(BaseModel):
     missing: list[str] = Field(default_factory=list)
 
 
+_MANUAL_EDITOR_SPLIT_STRATEGY_NO_SPLIT = "no_split"
+_MANUAL_EDITOR_SPLIT_STRATEGY_WORD_TIMED = "subtitle_segmentation_word_timed"
+_MANUAL_EDITOR_SPLIT_STRATEGY_DISPLAY_NO_WORDS = "display_fallback_no_words"
+_MANUAL_EDITOR_SPLIT_STRATEGY_DISPLAY_NO_SEGMENTATION_OUTPUT = "display_fallback_no_segmentation_output"
+_MANUAL_EDITOR_SPLIT_STRATEGY_DISPLAY_SEGMENTATION_MISMATCH = "display_fallback_segmentation_mismatch"
+
+
 def _ensure_content_understanding_payload(profile: dict[str, Any] | None) -> dict[str, Any] | None:
     if not isinstance(profile, dict):
         return profile
@@ -750,7 +764,9 @@ def _manual_editor_projection_has_suspicious_subtitle_timing(
         except (TypeError, ValueError):
             continue
         duration = max(0.0, end - start)
-        text = str(entry.get("text_final") or entry.get("text_norm") or entry.get("text_raw") or entry.get("text") or "")
+        text = subtitle_display_rule_text(entry) or str(entry.get("text") or "")
+        if not text.strip():
+            continue
         compact_len = len(re.sub(r"[\s，。！？!?；;：:,、（）()[]【】{}\"'《》<>]+", "", text))
         if duration > duration_limit and compact_len <= compact_limit:
             return True
@@ -1923,6 +1939,15 @@ _MANUAL_EDITOR_SMART_DELETE_REASON_LABELS = {
     "gap_fill": "规则候选：时间线空隙清理",
 }
 
+_MANUAL_EDITOR_MATCH_SURFACE_LAYER_BY_REASON: dict[str, str] = {
+    "filler_word": "raw",
+    "catchphrase_phrase": "raw",
+    "silence": "raw",
+    "low_signal_subtitle": "canonical",
+    "repeated_speech": "raw",
+    "pause": "raw",
+}
+
 _MANUAL_EDITOR_RULE_KIND_BY_REASON = {
     "filler_word": "filler",
     "catchphrase_phrase": "catchphrase",
@@ -1973,6 +1998,7 @@ def _manual_editor_rule_segment_payload(item: dict[str, Any]) -> ManualEditorRul
         raw_rule_id = item.get("id")
         rule_id = str(raw_rule_id or "").strip() or None
     match_surface = str(item.get("match_surface") or "").strip()
+    match_surface_layer = str(item.get("match_surface_layer") or "").strip()
     try:
         start = max(0.0, float(item.get("start", 0.0) or 0.0))
         end = max(start, float(item.get("end", start) or start))
@@ -2002,6 +2028,8 @@ def _manual_editor_rule_segment_payload(item: dict[str, Any]) -> ManualEditorRul
             match_surface = str(item.get("filler_mode") or "").strip()
         else:
             match_surface = str(item.get("source_text") or "").strip() or None
+    if not match_surface_layer:
+        match_surface_layer = _MANUAL_EDITOR_MATCH_SURFACE_LAYER_BY_REASON.get(reason, "")
     detail = (
         str(multimodal_review.get("reason") or "").strip()
         or str(llm_review.get("reason") or "").strip()
@@ -2022,6 +2050,7 @@ def _manual_editor_rule_segment_payload(item: dict[str, Any]) -> ManualEditorRul
         risk_level=str(item.get("risk_level") or "").strip() or None,
         source=source,
         confidence=confidence,
+        match_surface_layer=match_surface_layer or None,
         detail=detail or None,
         evidence=list(dict.fromkeys(evidence))[:4],
         auto_applied=auto_applied,
@@ -2247,6 +2276,10 @@ async def _load_manual_editor_multimodal_trim_review_payload(
 
 
 def _manual_editor_final_subtitle_text(item: dict[str, Any]) -> str:
+    return _manual_editor_source_editable_text(subtitle_display_rule_text(item))
+
+
+def _manual_editor_editable_final_subtitle_text(item: dict[str, Any]) -> str:
     return _manual_editor_source_editable_text(
         item.get("text_final")
         or item.get("text_norm")
@@ -2267,20 +2300,17 @@ def _manual_editor_raw_editable_text(value: Any) -> str:
 
 
 def _manual_editor_display_source_text(item: dict[str, Any], *, final_text: str = "") -> str:
-    for key in ("text_final", "text_norm", "projection_text", "text", "text_raw"):
-        text = _manual_editor_source_editable_text(item.get(key))
-        if text:
-            return text
-    return _manual_editor_source_editable_text(final_text)
+    return _manual_editor_source_editable_text(
+        subtitle_display_rule_text(item)
+        or final_text
+    )
 
 
 def _manual_editor_timing_text(item: dict[str, Any], *, final_text: str = "") -> str:
     return _manual_editor_source_editable_text(
         item.get("timing_text")
-        or item.get("text_final")
-        or item.get("text_norm")
+        or subtitle_display_rule_text(item)
         or final_text
-        or item.get("text_raw", "")
     )
 
 
@@ -3883,9 +3913,9 @@ def _manual_editor_projection_rows_as_source_rows(
             end_time = float(item.get("end_time", item.get("end", start_time)) or start_time)
         except (TypeError, ValueError):
             continue
-        text_raw = str(item.get("text_raw") or item.get("text_norm") or item.get("text_final") or "").strip()
-        text_norm = str(item.get("text_norm") or item.get("text_final") or item.get("text_raw") or "").strip()
-        text_final = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        text_raw = subtitle_raw_rule_text(item)
+        text_norm = subtitle_canonical_rule_text(item)
+        text_final = subtitle_display_rule_text(item)
         timing_text = str(item.get("timing_text") or text_final or text_norm or text_raw).strip()
         if not timing_text and not text_final and not text_norm and not text_raw:
             continue
@@ -3898,7 +3928,7 @@ def _manual_editor_projection_rows_as_source_rows(
                 "end_time": end_time,
                 "text_raw": text_raw,
                 "text_norm": text_norm or text_raw,
-                "text_final": text_final or text_norm or text_raw,
+                "text_final": text_final,
                 "timing_text": timing_text or text_final or text_norm or text_raw,
                 "words": [
                     dict(word)
@@ -4039,7 +4069,7 @@ async def _load_manual_editor_source_subtitle_dicts(
 
 
 def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> ManualEditorSubtitleOut:
-    source_final = _manual_editor_final_subtitle_text(item)
+    source_final = _manual_editor_editable_final_subtitle_text(item)
     explicit_text_final = str(item.get("text_final") or "")
     if (
         item.get("text_norm") is None
@@ -4344,6 +4374,7 @@ def _manual_editor_split_long_subtitle_rows(
         ]
         pieces: list[dict[str, Any]]
         pieces_have_word_segmented_timings = False
+        split_strategy = _MANUAL_EDITOR_SPLIT_STRATEGY_NO_SPLIT
         if timed_words:
             segmentation_result = segment_subtitles(
                 [
@@ -4381,7 +4412,10 @@ def _manual_editor_split_long_subtitle_rows(
                 ).strip()
             ]
             pieces_have_word_segmented_timings = bool(pieces)
+            if pieces:
+                split_strategy = _MANUAL_EDITOR_SPLIT_STRATEGY_WORD_TIMED
             if pieces and not _manual_editor_split_pieces_cover_source_text(segmentation_text, pieces):
+                split_strategy = _MANUAL_EDITOR_SPLIT_STRATEGY_DISPLAY_SEGMENTATION_MISMATCH
                 pieces = split_subtitle_display_item(
                     start_time=start_time,
                     end_time=end_time,
@@ -4393,6 +4427,7 @@ def _manual_editor_split_long_subtitle_rows(
                     piece["timing_text"] = normalize_flashlight_model_alias_text(str(piece.get("text") or ""))
                 pieces_have_word_segmented_timings = False
             if not pieces:
+                split_strategy = _MANUAL_EDITOR_SPLIT_STRATEGY_DISPLAY_NO_SEGMENTATION_OUTPUT
                 pieces = split_subtitle_display_item(
                     start_time=start_time,
                     end_time=end_time,
@@ -4404,6 +4439,7 @@ def _manual_editor_split_long_subtitle_rows(
                     piece["timing_text"] = normalize_flashlight_model_alias_text(str(piece.get("text") or ""))
                 pieces_have_word_segmented_timings = False
         else:
+            split_strategy = _MANUAL_EDITOR_SPLIT_STRATEGY_DISPLAY_NO_WORDS
             pieces = split_subtitle_display_item(
                 start_time=start_time,
                 end_time=end_time,
@@ -4425,8 +4461,20 @@ def _manual_editor_split_long_subtitle_rows(
         pieces = _manual_editor_rebalance_split_dangling_boundaries(pieces)
         rebalanced_piece_timing_texts = [str(piece.get("timing_text") or piece.get("text") or "") for piece in pieces]
         split_boundary_rebalanced = rebalanced_piece_timing_texts != original_piece_timing_texts
+        split_piece_timing_source = (
+            "segmented_word_timing"
+            if pieces_have_word_segmented_timings and not split_boundary_rebalanced
+            else "recomputed_from_words"
+            if len(pieces) > 1
+            else "row_bounds"
+        )
         if len(pieces) <= 1:
-            rows.append(_manual_editor_tighten_source_row_to_display_words(dict(item), fallback_text=text))
+            row = _manual_editor_tighten_source_row_to_display_words(dict(item), fallback_text=text)
+            row["split_strategy"] = split_strategy
+            row["split_attempted"] = split_strategy != _MANUAL_EDITOR_SPLIT_STRATEGY_NO_SPLIT
+            row["split_boundary_rebalanced"] = bool(split_boundary_rebalanced)
+            row["split_piece_timing_source"] = split_piece_timing_source
+            rows.append(row)
             continue
         piece_timings = (
             [None for _piece in pieces]
@@ -4473,6 +4521,10 @@ def _manual_editor_split_long_subtitle_rows(
             if reindex_fragments:
                 row["source_index"] = int(row["index"])
                 row["source_indexes"] = [int(row["index"])]
+            row["split_strategy"] = split_strategy
+            row["split_attempted"] = split_strategy != _MANUAL_EDITOR_SPLIT_STRATEGY_NO_SPLIT
+            row["split_boundary_rebalanced"] = bool(split_boundary_rebalanced)
+            row["split_piece_timing_source"] = split_piece_timing_source
             row = _manual_editor_tighten_source_row_to_display_words(row, fallback_text=piece["text"])
             rows.append(row)
     rows.sort(
@@ -4488,6 +4540,42 @@ def _manual_editor_split_long_subtitle_rows(
             row["source_index"] = new_index
             row["source_indexes"] = [new_index]
     return rows
+
+
+def _manual_editor_source_row_split_diagnostics(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    strategy_counts: dict[str, int] = {}
+    attempted_row_count = 0
+    fragmented_row_count = 0
+    fragment_count = 0
+    boundary_rebalanced_count = 0
+    recomputed_timing_count = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        strategy = str(row.get("split_strategy") or "").strip()
+        if not strategy or strategy == _MANUAL_EDITOR_SPLIT_STRATEGY_NO_SPLIT:
+            continue
+        fragment_index = _coerce_int(row.get("source_fragment_index"))
+        if fragment_index not in {None, 0}:
+            continue
+        attempted_row_count += 1
+        strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
+        source_fragment_count = max(1, int(_coerce_int(row.get("source_fragment_count")) or 1))
+        if source_fragment_count > 1:
+            fragmented_row_count += 1
+            fragment_count += source_fragment_count
+        if bool(row.get("split_boundary_rebalanced")):
+            boundary_rebalanced_count += 1
+        if str(row.get("split_piece_timing_source") or "").strip() == "recomputed_from_words":
+            recomputed_timing_count += 1
+    return {
+        "attempted_row_count": attempted_row_count,
+        "fragmented_row_count": fragmented_row_count,
+        "fragment_count": fragment_count,
+        "boundary_rebalanced_count": boundary_rebalanced_count,
+        "recomputed_timing_count": recomputed_timing_count,
+        "strategy_counts": strategy_counts,
+    }
 
 
 _MANUAL_EDITOR_MOVABLE_LEADING_PARTICLE_RE = re.compile(r"^([啊吧呢嘛呀呐哦哎诶欸噢喔][，,、。！？!\?…\s]*)")
@@ -6471,16 +6559,12 @@ async def _build_manual_editor_session(
         projected_subtitles,
         source_subtitles=source_subtitle_dicts,
         keep_segments=[segment.model_dump(include={"start", "end"}) for segment in keep_segments],
-        fallback_source_subtitles=_clean_manual_editor_subtitle_projection(
-            source_subtitle_dicts,
-            drop_empty=False,
-            collapse_repeats=False,
-            clean_text=False,
-        ),
+        fallback_source_subtitles=None,
+        apply_annotation_repair=False,
     )
     validated_projected_subtitles = list(projection_validation.subtitles)
     source_projection_fallback_applied = _manual_editor_should_apply_source_projection_fallback(
-        validated_projected_subtitles,
+        projected_subtitles,
         source_subtitles=source_subtitle_dicts,
         keep_segments=keep_segment_payloads,
         manual_projection_items=manual_projection_items,
@@ -6510,6 +6594,7 @@ async def _build_manual_editor_session(
         "validated_projection_count": len(validated_projected_subtitles),
         "display_projection_count": len(projected_subtitles),
         "source_fallback_projection_count": len(source_fallback_projection_items),
+        "source_row_split_diagnostics": _manual_editor_source_row_split_diagnostics(source_subtitle_dicts),
         "projection_validation": (
             projection_validation.model_dump()
             if hasattr(projection_validation, "model_dump")
@@ -6951,6 +7036,7 @@ async def apply_manual_editor_timeline(
         source_subtitles=source_subtitle_dicts,
         keep_segments=keep_segments,
         fallback_source_subtitles=None,
+        apply_annotation_repair=False,
     )
     if bool(getattr(projection_validation, "mismatch_detected", False)):
         logger.debug(
@@ -6959,6 +7045,17 @@ async def apply_manual_editor_timeline(
             bool(getattr(projection_validation, "mismatch_detected", False)),
             bool(getattr(projection_validation, "fallback_used", False)),
         )
+    subtitle_projection_repair = {
+        "repair_requested": False,
+        "repair_applied": False,
+        "mismatch_detected": bool(getattr(projection_validation, "mismatch_detected", False)),
+        "fallback_used": bool(getattr(projection_validation, "fallback_used", False)),
+        "changed": bool(getattr(projection_validation, "changed", False)),
+        "input_count": int(getattr(projection_validation, "input_count", 0) or 0),
+        "output_count": int(getattr(projection_validation, "output_count", 0) or 0),
+        "repair_mode": None,
+        "source": "manual_editor_apply_source_baseline",
+    }
     base_output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in remapped_subtitles), default=0.0)
     subtitle_override_payloads = _manual_subtitle_override_payloads(request.subtitle_overrides)
     subtitle_replacement_payloads = _manual_subtitle_replacement_payloads(request.subtitle_replacements)
@@ -7079,6 +7176,7 @@ async def apply_manual_editor_timeline(
         "segments": editorial_segments,
         "analysis": {
             **timeline_analysis,
+            "subtitle_projection_repair": subtitle_projection_repair,
             "manual_editor": {
                 "applied": True,
                 "base_timeline_id": str(editorial_timeline.id),
@@ -7092,6 +7190,7 @@ async def apply_manual_editor_timeline(
                 "video_transform_changed": bool(change_plan["video_transform_changed"]),
                 "video_transform": video_transform,
                 "video_summary": video_summary,
+                "subtitle_projection_repair": subtitle_projection_repair,
                 "note": str(request.note or "").strip() or None,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
             },
@@ -7919,27 +8018,32 @@ async def publish_job_to_bound_platforms(
     )
     if not publication_plan_is_publishable(plan):
         return _build_job_publication_executor_gate_response(plan)
-    settings = get_settings()
-    agent_ready = await check_publication_browser_agent_ready(
-        browser_agent_base_url=str(getattr(settings, "publication_browser_agent_base_url", "") or ""),
-        auth_token=str(getattr(settings, "publication_browser_agent_auth_token", "") or ""),
-        target_platforms=[str(target.get("platform") or "") for target in (plan.get("targets") or []) if isinstance(target, dict)],
-        target_profile_ids=[
-            str(target.get("browser_profile_id") or target.get("credential_ref") or "")
-            for target in (plan.get("targets") or [])
-            if isinstance(target, dict)
-        ],
-        request_timeout_sec=max(5, int(getattr(settings, "publication_browser_agent_timeout_sec", 60) or 60)),
-    )
-    if not agent_ready.get("ready"):
-        return _build_job_publication_executor_gate_response(
-            plan,
-            blocked_reasons=[
-                *(plan.get("blocked_reasons") or []),
-                str(agent_ready.get("message") or "browser-agent 不支持正式发布。"),
+    browser_agent_targets = [
+        target
+        for target in (plan.get("targets") or [])
+        if isinstance(target, dict) and publication_adapter_requires_browser_agent(target.get("adapter"))
+    ]
+    if browser_agent_targets:
+        settings = get_settings()
+        agent_ready = await check_publication_browser_agent_ready(
+            browser_agent_base_url=str(getattr(settings, "publication_browser_agent_base_url", "") or ""),
+            auth_token=str(getattr(settings, "publication_browser_agent_auth_token", "") or ""),
+            target_platforms=[str(target.get("platform") or "") for target in browser_agent_targets],
+            target_profile_ids=[
+                str(target.get("browser_profile_id") or target.get("credential_ref") or "")
+                for target in browser_agent_targets
             ],
-            publication_executor_preflight=agent_ready,
+            request_timeout_sec=max(5, int(getattr(settings, "publication_browser_agent_timeout_sec", 60) or 60)),
         )
+        if not agent_ready.get("ready"):
+            return _build_job_publication_executor_gate_response(
+                plan,
+                blocked_reasons=[
+                    *(plan.get("blocked_reasons") or []),
+                    str(agent_ready.get("message") or "browser-agent 不支持正式发布。"),
+                ],
+                publication_executor_preflight=agent_ready,
+            )
     result = await submit_publication_attempts(session, plan)
     await session.commit()
     _dispatch_publication_worker_tick(len(result.get("created_attempts") or []))

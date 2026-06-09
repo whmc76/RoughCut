@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.media.subtitles import remap_subtitles_to_timeline
 
 @dataclass(frozen=True)
@@ -11,6 +12,9 @@ class SubtitleProjectionValidationResult:
     subtitles: list[dict[str, Any]]
     mismatch_detected: bool
     fallback_used: bool
+    changed: bool = False
+    input_count: int = 0
+    output_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -65,10 +69,11 @@ _ALLOWED_CJK_DOUBLE_TERMS = {
     "轻轻",
 }
 _CJK_DOUBLE_CHAR_PATTERN = re.compile(r"([\u4e00-\u9fff])\1")
+_LOW_SIGNAL_SINGLE_SOURCE_EDGE_TRIM_FRAGMENTS = frozenset({"啊", "呀", "吧", "呢", "嘛", "呗", "了", "吗", "哦", "喔"})
 
 
 def subtitle_projection_display_text(item: dict[str, Any]) -> str:
-    return str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or item.get("text") or "")
+    return subtitle_display_rule_text(item) or str(item.get("text") or "")
 
 
 def compact_projection_text(value: object) -> str:
@@ -295,6 +300,8 @@ def projection_has_source_text_mismatch(
         checked += 1
         if projection_text_has_mechanical_duplicate_absent_from_source(projected_key, source_key):
             return True
+        if _is_short_source_edge_trim_mismatch(source_key, projected_key, source_indexes):
+            return True
         common_length = projection_text_common_subsequence_length(source_key, projected_key)
         missing_source_units = len(source_key) - common_length
         projected_extra_units = len(projected_key) - common_length
@@ -334,6 +341,30 @@ def projection_text_has_mechanical_duplicate_absent_from_source(projected_key: s
         if duplicate not in source_key:
             return True
     return False
+
+
+def _is_short_source_edge_trim_mismatch(source_key: str, projected_key: str, source_indexes: list[int]) -> bool:
+    if len(source_indexes) != 1:
+        return False
+    if len(source_key) <= 4 or len(projected_key) <= 4:
+        return False
+    if not projected_key in source_key:
+        return False
+    if source_key == projected_key:
+        return False
+    missing = len(source_key) - len(projected_key)
+    if missing <= 0 or missing > 2:
+        return False
+    index = source_key.find(projected_key)
+    if index < 0 or (index > 0 and index + len(projected_key) != len(source_key)):
+        return False
+    if index == 0:
+        removed = source_key[len(projected_key) :]
+    else:
+        removed = source_key[:index]
+    if len(removed) > 2:
+        return False
+    return removed not in _LOW_SIGNAL_SINGLE_SOURCE_EDGE_TRIM_FRAGMENTS
 
 
 def _source_indexes_for_projection_item(item: dict[str, Any]) -> set[int]:
@@ -465,23 +496,28 @@ def validate_projected_subtitles_against_source(
     source_subtitles: list[dict[str, Any]],
     keep_segments: list[dict[str, Any]],
     fallback_source_subtitles: list[dict[str, Any]] | None = None,
+    apply_annotation_repair: bool = False,
 ) -> SubtitleProjectionValidationResult:
     annotated = annotate_projected_subtitle_sources(
         projected_subtitles,
         source_subtitles,
         keep_segments,
     )
-    annotated = _repair_projection_text_drift_from_span_fallback(
-        annotated,
-        source_subtitles=source_subtitles,
-        keep_segments=keep_segments,
-    )
+    if apply_annotation_repair:
+        annotated = _repair_projection_text_drift_from_span_fallback(
+            annotated,
+            source_subtitles=source_subtitles,
+            keep_segments=keep_segments,
+        )
     mismatch = projection_has_source_text_mismatch(annotated, source_subtitles)
     if not mismatch or fallback_source_subtitles is None:
         return SubtitleProjectionValidationResult(
             subtitles=annotated,
             mismatch_detected=mismatch,
             fallback_used=False,
+            changed=list(annotated) != list(projected_subtitles),
+            input_count=len(list(projected_subtitles or [])),
+            output_count=len(list(annotated or [])),
         )
 
     fallback = remap_subtitles_to_timeline(fallback_source_subtitles, keep_segments)
@@ -490,6 +526,9 @@ def validate_projected_subtitles_against_source(
         subtitles=fallback,
         mismatch_detected=True,
         fallback_used=True,
+        changed=list(fallback) != list(projected_subtitles),
+        input_count=len(list(projected_subtitles or [])),
+        output_count=len(list(fallback or [])),
     )
 
 

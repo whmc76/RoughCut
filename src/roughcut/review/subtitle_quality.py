@@ -4,6 +4,7 @@ from collections import Counter
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.speech.subtitle_segmentation import _boundary_splits_generic_word
 
 ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT = "subtitle_quality_report"
@@ -60,11 +61,7 @@ _LEXICAL_CORRECTION_CODES = set(_BAD_TERM_PATTERNS) - _SEMANTIC_CONTAMINATION_CO
 
 
 def _subtitle_text(item: Mapping[str, Any]) -> str:
-    for key in ("text_final", "text_norm", "text_raw", "text"):
-        value = str(item.get(key) or "").strip()
-        if value:
-            return value
-    return ""
+    return subtitle_display_rule_text(item)
 
 
 def _subtitle_duration(item: Mapping[str, Any]) -> float | None:

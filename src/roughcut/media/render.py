@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from roughcut.config import get_settings
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.packaging.library import (
     resolve_insert_effective_duration,
     resolve_insert_motion_behavior,
@@ -1376,7 +1377,7 @@ def _synthesize_subtitle_unit_accents(
             section_choreography=section_choreography,
         ):
             continue
-        text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        text = subtitle_display_rule_text(item)
         if not text:
             continue
         if any(abs(float(existing.get("start_time", 0.0) or 0.0) - start_time) <= 0.18 for existing in existing_overlays + synthesized_overlays):

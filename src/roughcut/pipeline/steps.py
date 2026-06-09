@@ -82,6 +82,11 @@ from roughcut.edit.render_plan import (
     save_render_plan,
 )
 from roughcut.edit.skills import apply_review_focus_overrides, resolve_editing_skill
+from roughcut.edit.subtitle_surfaces import (
+    subtitle_canonical_rule_text,
+    subtitle_display_rule_text,
+    subtitle_raw_rule_text,
+)
 from roughcut.edit.timeline import save_editorial_timeline
 from roughcut.media.audio import NoAudioStreamError, extract_audio, extract_audio_clip
 from roughcut.media.output import (
@@ -360,12 +365,7 @@ def _apply_subtitle_semantic_cleanup(
     )
     changed = 0
     for item in subtitle_items:
-        current = str(
-            getattr(item, "text_final", None)
-            or getattr(item, "text_norm", None)
-            or getattr(item, "text_raw", "")
-            or ""
-        ).strip()
+        current = _subtitle_surface_display_text(item)
         normalized = normalize_contextual_noc_alias_text(current, context_text=context_text)
         normalized = normalize_contextual_unboxing_sale_text(normalized, context_text=context_text)
         if normalized == current:
@@ -376,6 +376,38 @@ def _apply_subtitle_semantic_cleanup(
             item.text_final = normalized
         changed += 1
     return changed
+
+
+def _subtitle_surface_payload(item: Any) -> dict[str, Any]:
+    if isinstance(item, dict):
+        return item
+    return {
+        "transcript_text_raw": getattr(item, "transcript_text_raw", None),
+        "raw_text": getattr(item, "raw_text", None),
+        "text_raw": getattr(item, "text_raw", None),
+        "timing_text": getattr(item, "timing_text", None),
+        "transcript_text": getattr(item, "transcript_text", None),
+        "text_canonical": getattr(item, "text_canonical", None),
+        "text_norm": getattr(item, "text_norm", None),
+        "text_final": getattr(item, "text_final", None),
+        "display_text": getattr(item, "display_text", None),
+        "display_source_text": getattr(item, "display_source_text", None),
+        "projection_text": getattr(item, "projection_text", None),
+        "text": getattr(item, "text", None),
+        "display_suppressed_reason": getattr(item, "display_suppressed_reason", None),
+    }
+
+
+def _subtitle_surface_display_text(item: Any) -> str:
+    return subtitle_display_rule_text(_subtitle_surface_payload(item))
+
+
+def _subtitle_surface_canonical_text(item: Any) -> str:
+    return subtitle_canonical_rule_text(_subtitle_surface_payload(item))
+
+
+def _subtitle_surface_raw_text(item: Any) -> str:
+    return subtitle_raw_rule_text(_subtitle_surface_payload(item))
 
 
 _TRANSCRIPTION_PROVIDER_LABELS: dict[str, str] = {
@@ -691,7 +723,7 @@ def _build_edit_decision_llm_review_candidates(
                     {
                         "start_time": round(float(entry.get("start_time", 0.0) or 0.0), 3),
                         "end_time": round(float(entry.get("end_time", 0.0) or 0.0), 3),
-                        "text": str(entry.get("text_final") or entry.get("text_norm") or entry.get("text_raw") or ""),
+                        "text": subtitle_display_rule_text(entry),
                     }
                     for entry in previous_subtitles
                 ],
@@ -699,7 +731,7 @@ def _build_edit_decision_llm_review_candidates(
                     {
                         "start_time": round(float(entry.get("start_time", 0.0) or 0.0), 3),
                         "end_time": round(float(entry.get("end_time", 0.0) or 0.0), 3),
-                        "text": str(entry.get("text_final") or entry.get("text_norm") or entry.get("text_raw") or ""),
+                        "text": subtitle_display_rule_text(entry),
                     }
                     for entry in next_subtitles
                 ],
@@ -2508,9 +2540,9 @@ def _build_projection_entries_from_subtitle_items(
     )
     for item in ordered:
         display_text = (
-            str(getattr(item, "text_final", None) or getattr(item, "text_norm", None) or getattr(item, "text_raw", "") or "")
+            _subtitle_surface_display_text(item)
             if use_final_text
-            else str(getattr(item, "text_raw", "") or "")
+            else _subtitle_surface_raw_text(item)
         )
         entries.append(
             SubtitleEntry(
@@ -3415,14 +3447,7 @@ def _projection_overlapping_text(
 
 
 def _projection_item_text(item: Any) -> str:
-    return normalize_projection_display_text(
-        str(
-            getattr(item, "text_final", None)
-            or getattr(item, "text_norm", None)
-            or getattr(item, "text_raw", "")
-            or ""
-        )
-    )
+    return normalize_projection_display_text(_subtitle_surface_display_text(item))
 
 
 def _projection_item_start(item: Any) -> float:
@@ -3477,12 +3502,7 @@ def _projection_has_material_content_drift(*, baseline_items: list[Any], candida
 def _projection_material_text(items: list[Any]) -> str:
     parts: list[str] = []
     for item in list(items or []):
-        text = str(
-            getattr(item, "text_final", None)
-            or getattr(item, "text_norm", None)
-            or getattr(item, "text_raw", "")
-            or ""
-        )
+        text = _subtitle_surface_display_text(item)
         if text.strip():
             parts.append(normalize_projection_display_text(text))
     return "\n".join(parts)
@@ -4183,7 +4203,7 @@ def _projection_has_suspicious_subtitle_timing(
         except (TypeError, ValueError):
             continue
         duration = max(0.0, end - start)
-        text = str(entry.get("text_final") or entry.get("text_norm") or entry.get("text_raw") or entry.get("text") or "")
+        text = subtitle_display_rule_text(entry) or str(entry.get("text") or "")
         compact_len = len(re.sub(r"[\s，。！？!?；;：:,、（）()[]【】{}\"'《》<>]+", "", text))
         if duration > duration_limit and compact_len <= compact_limit:
             return True
@@ -4213,6 +4233,9 @@ def _manual_editor_subtitle_items_from_editorial(editorial_timeline: dict[str, A
         end_time = max(start_time, float(item.get("end_time", item.get("end", start_time)) or start_time))
         if end_time <= start_time:
             continue
+        text_final = subtitle_display_rule_text(item)
+        text_raw = str(item.get("text_raw") or "").strip()
+        text_norm = str(item.get("text_norm") or text_final or text_raw).strip()
         payload = dict(item)
         payload.pop("start", None)
         payload.pop("end", None)
@@ -4222,9 +4245,9 @@ def _manual_editor_subtitle_items_from_editorial(editorial_timeline: dict[str, A
                 "index": int(item.get("index", index) or index),
                 "start_time": round(start_time, 3),
                 "end_time": round(end_time, 3),
-                "text_raw": str(item.get("text_raw") or ""),
-                "text_norm": str(item.get("text_norm") or item.get("text_final") or item.get("text_raw") or ""),
-                "text_final": str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or ""),
+                "text_raw": text_raw,
+                "text_norm": text_norm,
+                "text_final": text_final,
             }
         )
     split_profile = subtitle_projection.get("split_profile") if isinstance(subtitle_projection.get("split_profile"), dict) else {}
@@ -4650,6 +4673,7 @@ async def _validated_subtitle_projection_for_timeline(
         source_subtitles=effective_source_subtitles,
         keep_segments=keep_segments,
         fallback_source_subtitles=effective_fallback_source_subtitles,
+        apply_annotation_repair=apply_repair,
     )
     if diagnostics_slot is not None:
         diagnostics_slot.update(
@@ -9989,7 +10013,7 @@ async def _probe_with_retry(
 
 
 def _subtitle_text(item: dict[str, Any]) -> str:
-    return str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+    return subtitle_display_rule_text(item)
 
 
 def _subtitle_section_profile_for_time(

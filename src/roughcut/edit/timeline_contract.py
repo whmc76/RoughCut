@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.media.silence import SilenceSegment
 
 
@@ -273,7 +274,7 @@ def _normalize_subtitle_ranges(subtitle_items: list[dict[str, Any]]) -> list[tup
     for item in subtitle_items or []:
         start = _optional_float(item.get("start_time", item.get("start")))
         end = _optional_float(item.get("end_time", item.get("end")))
-        text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or item.get("text") or "").strip()
+        text = subtitle_display_rule_text(item)
         if start is None or end is None or end <= start or not text:
             continue
         ranges.append((start, end))
@@ -286,7 +287,7 @@ def _normalize_suppressed_subtitle_ranges(subtitle_items: list[dict[str, Any]]) 
         start = _optional_float(item.get("start_time", item.get("start")))
         end = _optional_float(item.get("end_time", item.get("end")))
         reason = str(item.get("display_suppressed_reason") or "").strip()
-        text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or item.get("text") or "").strip()
+        text = subtitle_display_rule_text(item)
         if start is None or end is None or end <= start or not reason or text:
             continue
         ranges.append({"start": start, "end": end, "reason": reason})

@@ -16,6 +16,12 @@ from roughcut.edit.low_signal_text import (
     subtitle_signal_score as _subtitle_signal_score,
 )
 from roughcut.edit.skills import apply_review_focus_overrides, resolve_editing_skill
+from roughcut.edit.subtitle_surfaces import (
+    subtitle_canonical_rule_text,
+    subtitle_display_rule_text,
+    subtitle_raw_rule_text,
+    subtitle_semantic_preview_text,
+)
 from roughcut.edit.timeline_contract import audit_edit_decision_contract
 from roughcut.media.scene import SceneBoundary
 from roughcut.media.silence import SilenceSegment
@@ -1765,9 +1771,9 @@ def _normalize_subtitle_items(subtitle_items: list[dict[str, Any]]) -> list[dict
                 **dict(item),
                 "start_time": start_time,
                 "end_time": end_time,
-                "text_raw": str(item.get("text_raw") or ""),
-                "text_norm": str(item.get("text_norm") or ""),
-                "text_final": str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or ""),
+                "text_raw": subtitle_raw_rule_text(item),
+                "text_norm": subtitle_canonical_rule_text(item),
+                "text_final": subtitle_display_rule_text(item),
             }
         )
     normalized.sort(key=lambda item: (item["start_time"], item["end_time"]))
@@ -2727,22 +2733,11 @@ def _find_next_subtitle(time_point: float, subtitle_items: list[dict[str, Any]])
 
 
 def _subtitle_text(item: dict) -> str:
-    return str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "")
+    return subtitle_semantic_preview_text(item)
 
 
 def _semantic_subtitle_text(item: dict[str, Any] | None) -> str:
-    if not item:
-        return ""
-    subtitle_text = _subtitle_text(item).strip()
-    if subtitle_text:
-        return subtitle_text
-    transcript_text = str(item.get("transcript_text") or "").strip()
-    if transcript_text:
-        return transcript_text
-    transcript_texts = [str(text).strip() for text in (item.get("transcript_texts") or []) if str(text).strip()]
-    if transcript_texts:
-        return " ".join(transcript_texts).strip()
-    return _subtitle_text(item)
+    return subtitle_semantic_preview_text(item)
 
 
 def _looks_like_incomplete_tail(text: str) -> bool:

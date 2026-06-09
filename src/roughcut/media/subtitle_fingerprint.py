@@ -4,19 +4,15 @@ import hashlib
 import json
 from typing import Any
 
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
+
 
 def subtitle_payload_fingerprint(subtitles: list[dict[str, Any]]) -> str | None:
     rows: list[dict[str, Any]] = []
     for fallback_index, item in enumerate(subtitles):
         if not isinstance(item, dict):
             continue
-        text = str(
-            item.get("text_final")
-            or item.get("text_norm")
-            or item.get("text_raw")
-            or item.get("text")
-            or ""
-        ).strip()
+        text = subtitle_display_rule_text(item)
         if not text:
             continue
         try:

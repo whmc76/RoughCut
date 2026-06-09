@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from roughcut.config import get_settings
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.media.subtitles import split_subtitle_display_item
 from roughcut.media.subtitle_text import clean_final_subtitle_text
 from roughcut.providers.multimodal import complete_with_images
@@ -2282,9 +2283,7 @@ def write_srt_file(subtitle_items: list[dict], output_path: Path) -> Path:
     ordered_items = sorted(normalized_items, key=_subtitle_srt_sort_key)
     lines: list[str] = []
     for item in ordered_items:
-        text = clean_final_subtitle_text(
-            item.get("text_final") or item.get("text_norm") or item.get("text_raw", "")
-        )
+        text = clean_final_subtitle_text(subtitle_display_rule_text(item))
         if not text:
             continue
         start_time = float(item["start_time"])

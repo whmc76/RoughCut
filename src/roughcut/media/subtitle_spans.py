@@ -4,6 +4,8 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
+
 
 @dataclass(frozen=True)
 class SubtitleSpanUnit:
@@ -41,11 +43,7 @@ _CHINESE_DIGIT_KEYS = {
 
 
 def subtitle_display_text(item: dict[str, Any]) -> str:
-    for key in ("projection_text", "text_final", "text_norm", "text_raw", "text"):
-        value = str((item or {}).get(key) or "").strip()
-        if value:
-            return value
-    return ""
+    return subtitle_display_rule_text(item)
 
 
 def subtitle_display_units(text: str) -> list[str]:

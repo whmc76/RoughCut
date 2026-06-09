@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.edit.presets import get_workflow_preset, normalize_workflow_template_name
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.db.models import Timeline
 from roughcut.packaging.library import resolve_insert_transition_overlap
 
@@ -1394,7 +1395,7 @@ def _resolve_ai_effect_motion_style(current_motion_style: str, *, base_style: st
 
 
 def _normalize_overlay_text(item: dict[str, Any]) -> str:
-    raw = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+    raw = subtitle_display_rule_text(item)
     text = "".join(raw.split())
     text = text.strip("，。！？!?、,.；;：:\"'()（）[]【】")
     if len(text) < 4 or len(text) > 18:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from roughcut.config import get_settings
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.providers.factory import get_avatar_provider
 from roughcut.review.content_profile import apply_source_identity_constraints, extract_source_identity_constraints
 
@@ -102,7 +103,7 @@ def _build_passthrough_avatar_segments(subtitle_items: list[dict[str, Any]]) -> 
     max_gap = 0.45
 
     for item in normalized_items:
-        text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        text = subtitle_display_rule_text(item)
         if not text:
             continue
         start = float(item.get("start_time") or 0.0)
@@ -157,7 +158,7 @@ def _normalize_subtitle_items(subtitle_items: list[dict[str, Any]]) -> list[dict
     last_normalized_end = 0.0
 
     for item in subtitle_items:
-        text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        text = subtitle_display_rule_text(item)
         if not text:
             continue
         try:

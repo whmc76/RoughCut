@@ -42,6 +42,31 @@ def test_remap_subtitle_spanning_cut_splits_display_text_across_fragments() -> N
     assert all(item["source_text_full"] == "这个产品真的不错" for item in remapped)
 
 
+def test_remap_subtitle_spanning_cut_preserves_raw_canonical_and_display_surfaces() -> None:
+    remapped = remap_subtitles_to_timeline(
+        [
+            {
+                "index": 0,
+                "start_time": 1.0,
+                "end_time": 5.0,
+                "text_raw": "这个EC手电真的不错",
+                "text_norm": "这个EDC手电真的不错",
+                "text_final": "这个手电真的不错",
+            }
+        ],
+        [
+            {"start": 1.0, "end": 2.0},
+            {"start": 4.0, "end": 5.0},
+        ],
+    )
+
+    assert "".join(item["text_raw"] for item in remapped) == "这个EC手电真的不错"
+    assert "".join(item["text_norm"] for item in remapped) == "这个EDC手电真的不错"
+    assert "".join(item["text_final"] for item in remapped) == "这个手电真的不错"
+    assert remapped[0]["text_raw"] != remapped[0]["text_final"]
+    assert remapped[0]["text_norm"] != remapped[0]["text_final"]
+
+
 def test_remap_subtitle_spanning_cut_keeps_full_text_on_dominant_fragment() -> None:
     remapped = remap_subtitles_to_timeline(
         [{"index": 30, "start_time": 156.26, "end_time": 160.72, "text_final": "06来讲它的这个锆合"}],
