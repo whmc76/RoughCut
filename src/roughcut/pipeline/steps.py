@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import math
 import re
 import shutil
 import subprocess
@@ -22,7 +23,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -69,7 +70,10 @@ from roughcut.edit.multimodal_trim_review import (
     build_multimodal_trim_review_payload,
     review_multimodal_trim_review_payload,
 )
-from roughcut.edit.smart_cut_rules import default_smart_cut_rules_payload
+from roughcut.edit.smart_cut_rules import (
+    default_smart_cut_rules_payload,
+    normalize_smart_cut_rules_payload,
+)
 from roughcut.edit.render_plan import (
     build_ai_effect_render_plan,
     build_plain_render_plan,
@@ -99,6 +103,7 @@ from roughcut.media.subtitle_text import (
     normalize_contextual_noc_alias_text,
     normalize_contextual_unboxing_sale_text,
     normalize_flashlight_model_alias_text,
+    preserve_subtitle_payloads,
 )
 from roughcut.media.subtitle_fingerprint import subtitle_payload_fingerprint
 from roughcut.media.subtitle_projection_validation import (
@@ -208,6 +213,8 @@ from roughcut.speech.alignment import tokenize_alignment_text
 from roughcut.review.telegram_bot import get_telegram_review_bot_service
 from roughcut.speech.postprocess import (
     SubtitleEntry,
+    _fragment_window_candidate_is_acceptable,
+    _rebalance_semantic_boundaries,
     _reindex_subtitle_entries,
     analyze_subtitle_segmentation,
     generate_subtitle_window_candidates,
@@ -236,6 +243,7 @@ from roughcut.telegram.review_notification_service import enqueue_review_notific
 from roughcut.usage import track_step_usage, track_usage_operation
 
 ARTIFACT_TYPE_TRANSCRIPT_CORRECTION_SCORE_REPORT = "transcript_correction_score_report"
+_MANUAL_EDITOR_DRAFT_ARTIFACT_TYPE = "manual_editor_draft"
 
 _AVATAR_SEGMENT_READY_RETRIES = 60
 _AVATAR_SEGMENT_READY_RETRY_SECONDS = 1.0
@@ -2675,24 +2683,13 @@ async def _build_canonical_refresh_projection(
         source_name=source_name,
         content_profile={},
     )
-    hybrid_entries = _build_local_hybrid_projection_entries(
-        projection_entries,
-        split_profile=split_profile,
-    )
-    hybrid_projection_items = _build_projection_items_from_entries(hybrid_entries)
-    hybrid_projection_analysis = analyze_subtitle_segmentation(hybrid_entries)
-    hybrid_quality_report = build_subtitle_quality_report_from_items(
-        subtitle_items=hybrid_projection_items,
-        source_name=source_name,
-        content_profile={},
-    )
     candidate_pool = _build_projection_candidate_pool(
         canonical_projection_items=canonical_projection_items,
         projection_analysis=projection_analysis,
         canonical_quality_report=canonical_quality_report,
-        hybrid_projection_items=hybrid_projection_items,
-        hybrid_projection_analysis=hybrid_projection_analysis,
-        hybrid_quality_report=hybrid_quality_report,
+        hybrid_projection_items=[],
+        hybrid_projection_analysis={},
+        hybrid_quality_report={},
         existing_projection_items=existing_projection_items,
         existing_projection_analysis=existing_projection_analysis,
         existing_quality_report=existing_quality_report,
@@ -2782,36 +2779,10 @@ def _build_local_hybrid_projection_entries(
     *,
     split_profile: dict[str, Any],
 ) -> list[SubtitleEntry]:
-    refined_entries = _reindex_subtitle_entries(list(entries or []))
-    if not refined_entries:
-        return refined_entries
-    max_chars = int(split_profile.get("max_chars") or 30)
-    max_duration = float(split_profile.get("max_duration") or 5.0)
-    for _round in range(4):
-        analysis = analyze_subtitle_segmentation(refined_entries)
-        windows = [dict(item) for item in list(analysis.low_confidence_windows or ()) if isinstance(item, dict)]
-        if not windows:
-            break
-        changed = False
-        for window in sorted(windows, key=lambda item: int(item.get("start_index") or 0), reverse=True):
-            start_index = int(window.get("start_index") or 0)
-            end_index = int(window.get("end_index") or start_index)
-            if start_index < 0 or end_index >= len(refined_entries) or start_index >= end_index:
-                continue
-            current_window = refined_entries[start_index:end_index + 1]
-            best_candidate = _best_local_projection_window_candidate(
-                current_window,
-                max_chars=max_chars,
-                max_duration=max_duration,
-            )
-            if not best_candidate:
-                continue
-            refined_entries = refined_entries[:start_index] + best_candidate + refined_entries[end_index + 1:]
-            refined_entries = _reindex_subtitle_entries(refined_entries)
-            changed = True
-        if not changed:
-            break
-    return _merge_material_split_projection_entries(refined_entries)
+    # Projection no longer owns segmentation repair. Keep this helper as a
+    # contract-preserving pass-through so stale callers cannot reintroduce a
+    # hidden second segmentation stage after canonical segmentation.
+    return _reindex_subtitle_entries(list(entries or []))
 
 
 def _build_projection_candidate_pool(
@@ -2826,11 +2797,9 @@ def _build_projection_candidate_pool(
     existing_projection_analysis: Any,
     existing_quality_report: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    # Once canonical transcript segmentation is available, the current canonical
-    # segmentation stage is the only segmentation authority. Historical display
-    # boundaries may still exist for compatibility/fallback, but they must not
-    # participate in candidate selection or they will reintroduce a second
-    # segmentation stage into the automatic pipeline.
+    # Canonical transcript segmentation is the only segmentation authority.
+    # Projection may preserve or display it, but it must not compete with a
+    # second local resegmentation candidate in the automatic pipeline.
     candidate_pool = [
         {
             "basis": "canonical_refresh",
@@ -2840,22 +2809,6 @@ def _build_projection_candidate_pool(
             "quality_report": canonical_quality_report,
         },
     ]
-    if (
-        not canonical_projection_items
-        or _projection_items_preserve_segmentation_shape(
-            canonical_projection_items,
-            hybrid_projection_items,
-        )
-    ):
-        candidate_pool.append(
-            {
-                "basis": "canonical_local_hybrid",
-                "transcript_layer": "canonical_transcript",
-                "items": hybrid_projection_items,
-                "analysis": hybrid_projection_analysis,
-                "quality_report": hybrid_quality_report,
-            }
-        )
     if not canonical_projection_items:
         candidate_pool.append(
             {
@@ -2867,6 +2820,65 @@ def _build_projection_candidate_pool(
             }
         )
     return candidate_pool
+
+
+def _projection_items_allow_hybrid_candidate(
+    *,
+    baseline_items: list[Any],
+    baseline_quality_report: dict[str, Any],
+    candidate_items: list[Any],
+    candidate_quality_report: dict[str, Any],
+) -> bool:
+    if not baseline_items:
+        return True
+    if _projection_has_material_content_drift(
+        baseline_items=baseline_items,
+        candidate_items=candidate_items,
+    ):
+        return False
+    if _projection_items_preserve_segmentation_shape(
+        baseline_items,
+        candidate_items,
+    ):
+        return True
+    baseline_rank = _subtitle_projection_quality_rank(baseline_quality_report)
+    candidate_rank = _subtitle_projection_quality_rank(candidate_quality_report)
+    if candidate_rank <= baseline_rank:
+        return False
+    return _projection_items_have_moderate_shape_drift(
+        baseline_items,
+        candidate_items,
+    )
+
+
+def _projection_items_have_moderate_shape_drift(
+    baseline_items: list[Any],
+    candidate_items: list[Any],
+    *,
+    start_end_slack: float = 0.2,
+) -> bool:
+    if not baseline_items or not candidate_items:
+        return False
+    baseline_count = len(baseline_items)
+    candidate_count = len(candidate_items)
+    if baseline_count <= 12 and candidate_count != baseline_count:
+        return False
+    count_delta = abs(baseline_count - candidate_count)
+    allowed_delta = max(4, min(24, math.ceil(baseline_count * 0.15)))
+    if count_delta > allowed_delta:
+        return False
+    ratio = candidate_count / max(baseline_count, 1)
+    if ratio < 0.82 or ratio > 1.18:
+        return False
+    baseline_start = _projection_item_start(baseline_items[0])
+    candidate_start = _projection_item_start(candidate_items[0])
+    baseline_end = _projection_item_end(baseline_items[-1])
+    candidate_end = _projection_item_end(candidate_items[-1])
+    if abs(baseline_start - candidate_start) > start_end_slack:
+        return False
+    if abs(baseline_end - candidate_end) > start_end_slack:
+        return False
+    return True
 
 
 def _projection_items_preserve_segmentation_shape(
@@ -2893,6 +2905,7 @@ def _best_local_projection_window_candidate(
     max_chars: int,
     max_duration: float,
 ) -> list[SubtitleEntry] | None:
+    current_analysis = analyze_subtitle_segmentation(window_entries)
     current_quality = build_subtitle_quality_report_from_items(
         subtitle_items=_build_projection_items_from_entries(window_entries),
         source_name="",
@@ -2928,6 +2941,18 @@ def _best_local_projection_window_candidate(
             max_chars=max_chars,
             max_duration=max_duration,
         )
+        candidate_analysis = analyze_subtitle_segmentation(candidate)
+        if not _fragment_window_candidate_is_acceptable(
+            current_entries=window_entries,
+            candidate_entries=candidate,
+            current_score=current_score,
+            candidate_score=candidate_score,
+            current_analysis=current_analysis,
+            candidate_analysis=candidate_analysis,
+            max_chars=max_chars,
+            max_duration=max_duration,
+        ):
+            continue
         if candidate_rank > best_rank or (candidate_rank == best_rank and candidate_score > best_score):
             best_candidate = candidate
             best_rank = candidate_rank
@@ -3153,6 +3178,14 @@ def _select_projection_candidate(
             segmentation_analysis=candidate.get("analysis"),
         )
         assessed_candidates.append({**candidate, "assessment": assessment})
+    canonical_refresh_candidates = [
+        candidate
+        for candidate in assessed_candidates
+        if str(candidate.get("basis") or "") == "canonical_refresh"
+        and str(candidate.get("transcript_layer") or "") == "canonical_transcript"
+    ]
+    if canonical_refresh_candidates:
+        assessed_candidates = canonical_refresh_candidates
     selected = max(
         assessed_candidates,
         key=lambda candidate: _projection_candidate_rank(candidate["assessment"]),
@@ -3178,12 +3211,12 @@ def _projection_candidate_rank(assessment: dict[str, Any]) -> tuple[float, int, 
         float(assessment.get("content_fidelity_score") or 0.0),
         -int(metrics.get("missing_material_token_count") or 0),
         -int(metrics.get("unsupported_material_token_count") or 0),
+        float(assessment.get("score") or 0.0),
+        float(assessment.get("display_quality_score") or 0.0),
+        float(assessment.get("segmentation_quality_score") or 0.0),
         -int(metrics.get("low_confidence_window_count") or 0),
         -int(metrics.get("suspicious_boundary_count") or 0),
         -fragment_total,
-        float(assessment.get("segmentation_quality_score") or 0.0),
-        float(assessment.get("score") or 0.0),
-        float(assessment.get("display_quality_score") or 0.0),
         -int(metrics.get("short_fragment_count") or 0),
         -int(metrics.get("subtitle_count") or 0),
     )
@@ -3197,13 +3230,18 @@ def _build_projection_correction_assessment(
     display_quality_report: dict[str, Any],
     segmentation_analysis: Any = None,
 ) -> dict[str, Any]:
+    unsupported_boundary_slack = _projection_unsupported_boundary_slack(
+        basis=basis,
+        reference_items=reference_items,
+        candidate_items=candidate_items,
+    )
     missing_examples = _find_local_material_token_drift(reference_items, candidate_items)
     # Allow small local boundary shifts to reassign material tokens between adjacent rows
     # without treating the candidate as content drift. Missing tokens remain strict.
     unsupported_examples = _find_local_material_token_drift(
         candidate_items,
         reference_items,
-        boundary_slack=0.45,
+        boundary_slack=unsupported_boundary_slack,
     )
     missing_count = len(missing_examples)
     unsupported_count = len(unsupported_examples)
@@ -3250,6 +3288,20 @@ def _build_projection_correction_assessment(
         "missing_material_examples": missing_examples[:8],
         "unsupported_material_examples": unsupported_examples[:8],
     }
+
+
+def _projection_unsupported_boundary_slack(
+    *,
+    basis: str,
+    reference_items: list[Any],
+    candidate_items: list[Any],
+) -> float:
+    if str(basis or "") == "canonical_local_hybrid" and _projection_items_have_moderate_shape_drift(
+        reference_items,
+        candidate_items,
+    ):
+        return 1.2
+    return 0.45
 
 
 def _projection_segmentation_analysis_metrics(analysis: Any) -> dict[str, int]:
@@ -3416,9 +3468,8 @@ def _projection_has_material_content_drift(*, baseline_items: list[Any], candida
     candidate_tokens = _projection_material_tokens(candidate_text)
     if not candidate_tokens:
         return False
-    baseline_compact = re.sub(r"\s+", "", baseline_text).upper()
     for token in candidate_tokens:
-        if re.sub(r"\s+", "", token).upper() not in baseline_compact:
+        if not _projection_text_supports_material_token(baseline_text, token):
             return True
     return False
 
@@ -4100,14 +4151,16 @@ def _project_canonical_transcript_to_timeline(
     )
     projected_entries: list[dict[str, Any]] = []
     for entry in list(segmentation_result.entries or []):
+        text_raw = str(getattr(entry, "text_raw", "") or "")
+        display_text = normalize_projection_display_text(text_raw)
         projected_entries.append(
             {
                 "index": int(getattr(entry, "index", len(projected_entries)) or len(projected_entries)),
                 "start_time": float(getattr(entry, "start", 0.0) or 0.0),
                 "end_time": float(getattr(entry, "end", 0.0) or 0.0),
-                "text_raw": str(getattr(entry, "text_raw", "") or ""),
-                "text_norm": str(getattr(entry, "text_norm", None) or getattr(entry, "text_raw", "") or ""),
-                "text_final": str(getattr(entry, "text_norm", None) or getattr(entry, "text_raw", "") or ""),
+                "text_raw": text_raw,
+                "text_norm": display_text,
+                "text_final": display_text,
                 "projection_source": "canonical_transcript",
             }
         )
@@ -4211,15 +4264,20 @@ async def _load_latest_subtitle_projection_entries(
     *,
     job_id: uuid.UUID,
     fallback_items: list[SubtitleItem] | None = None,
+    projection_entry_payload: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    projection_artifact_slot: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     projection_artifact = await _load_latest_optional_artifact(
         session,
         job_id=job_id,
         artifact_types=(ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER,),
     )
+    if projection_artifact_slot is not None:
+        projection_artifact_slot["projection_artifact"] = projection_artifact
     projection_data = projection_artifact.data_json if projection_artifact and isinstance(projection_artifact.data_json, dict) else {}
+    entry_payload = _subtitle_projection_entry_payload if projection_entry_payload is None else projection_entry_payload
     projection_entries = [
-        _subtitle_projection_entry_payload(entry)
+        entry_payload(entry)
         for entry in list(projection_data.get("entries") or [])
         if isinstance(entry, dict)
     ]
@@ -4305,7 +4363,7 @@ async def _rebuild_current_subtitle_projection_entries(
         for entry in list(refreshed_projection_data.get("entries") or [])
         if isinstance(entry, dict)
     ]
-    return clean_subtitle_payloads(refreshed_entries, drop_empty=drop_empty), refreshed_projection_data
+    return preserve_subtitle_payloads(refreshed_entries, drop_empty=drop_empty), refreshed_projection_data
 
 
 async def _load_latest_current_canonical_transcript_data(
@@ -4396,7 +4454,7 @@ async def _load_latest_subtitle_payloads(
                     split_profile=rebuilt_split_profile,
                 ):
                     return rebuilt_subtitles, rebuilt_projection_data
-        cleaned_subtitles = clean_subtitle_payloads(subtitle_dicts, drop_empty=drop_empty)
+        cleaned_subtitles = preserve_subtitle_payloads(subtitle_dicts, drop_empty=drop_empty)
         split_profile = projection_data.get("split_profile") if isinstance(projection_data.get("split_profile"), dict) else {}
         if not fallback_to_items or not _projection_has_suspicious_subtitle_timing(cleaned_subtitles, split_profile=split_profile):
             return cleaned_subtitles, projection_data
@@ -4410,10 +4468,10 @@ async def _load_latest_subtitle_payloads(
             "transcript_layer": "subtitle_item",
         }
         return (
-            clean_subtitle_payloads([_subtitle_item_payload(item) for item in subtitle_items], drop_empty=drop_empty),
+            preserve_subtitle_payloads([_subtitle_item_payload(item) for item in subtitle_items], drop_empty=drop_empty),
             subtitle_item_projection_data,
         )
-    return clean_subtitle_payloads([_subtitle_item_payload(item) for item in subtitle_items], drop_empty=drop_empty), {}
+    return preserve_subtitle_payloads([_subtitle_item_payload(item) for item in subtitle_items], drop_empty=drop_empty), {}
 
 
 async def _load_subtitle_items(session, *, job_id: uuid.UUID) -> list[SubtitleItem]:
@@ -4459,6 +4517,7 @@ async def _load_source_subtitle_payloads_for_projection_validation(
             ],
             drop_empty=False,
             collapse_repeats=False,
+            clean_text=False,
         )
     transcript_result = await session.execute(
         select(TranscriptSegment)
@@ -4491,11 +4550,13 @@ async def _load_source_subtitle_payloads_for_projection_validation(
                 transcript_payloads,
                 drop_empty=False,
                 collapse_repeats=False,
+                clean_text=False,
             )
     return clean_subtitle_payloads(
         [_subtitle_item_payload(item) for item in await _load_subtitle_items(session, job_id=job_id)],
         drop_empty=False,
         collapse_repeats=False,
+        clean_text=False,
     )
 
 
@@ -4537,6 +4598,35 @@ def _source_subtitle_basis(source_subtitles: list[dict[str, Any]]) -> str:
     return "subtitle_projection"
 
 
+def _subtitle_projection_repair_summary(
+    *,
+    validation: Any,
+    apply_repair: bool,
+) -> dict[str, Any]:
+    mismatch_detected = bool(getattr(validation, "mismatch_detected", False))
+    fallback_used = bool(getattr(validation, "fallback_used", False))
+    changed = bool(getattr(validation, "changed", False))
+    input_count = int(getattr(validation, "input_count", 0) or 0)
+    output_count = int(getattr(validation, "output_count", 0) or 0)
+    repair_applied = bool(apply_repair and changed)
+    if repair_applied and fallback_used:
+        repair_mode = "source_fallback_remap"
+    elif repair_applied and mismatch_detected:
+        repair_mode = "projection_annotation_repair"
+    else:
+        repair_mode = None
+    return {
+        "repair_requested": bool(apply_repair),
+        "repair_applied": repair_applied,
+        "mismatch_detected": mismatch_detected,
+        "fallback_used": fallback_used,
+        "changed": changed,
+        "input_count": input_count,
+        "output_count": output_count,
+        "repair_mode": repair_mode,
+    }
+
+
 async def _validated_subtitle_projection_for_timeline(
     session,
     *,
@@ -4545,15 +4635,39 @@ async def _validated_subtitle_projection_for_timeline(
     keep_segments: list[dict[str, Any]],
     source_subtitles: list[dict[str, Any]] | None = None,
     fallback_source_subtitles: list[dict[str, Any]] | None = None,
+    allow_source_fallback_repair: bool = False,
+    apply_repair: bool = False,
+    diagnostics_slot: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     effective_source_subtitles = source_subtitles or await _load_source_subtitle_payloads_for_projection_validation(session, job_id=job_id)
+    effective_fallback_source_subtitles = (
+        fallback_source_subtitles
+        if allow_source_fallback_repair and fallback_source_subtitles is not None
+        else None
+    )
     validation = validate_projected_subtitles_against_source(
         projected_subtitles,
         source_subtitles=effective_source_subtitles,
         keep_segments=keep_segments,
-        fallback_source_subtitles=fallback_source_subtitles or clean_subtitle_payloads(effective_source_subtitles),
+        fallback_source_subtitles=effective_fallback_source_subtitles,
     )
-    return validation.subtitles
+    if diagnostics_slot is not None:
+        diagnostics_slot.update(
+            _subtitle_projection_repair_summary(
+                validation=validation,
+                apply_repair=apply_repair,
+            )
+        )
+    if bool(getattr(validation, "mismatch_detected", False)) and not apply_repair:
+        logger.debug(
+            "subtitle_projection_validation_mismatch job_id=%s mismatch=%s fallback_used=%s",
+            str(job_id),
+            bool(getattr(validation, "mismatch_detected", False)),
+            bool(getattr(validation, "fallback_used", False)),
+        )
+    if apply_repair:
+        return validation.subtitles
+    return list(projected_subtitles)
 
 
 def _build_source_transcript_projection_validation(
@@ -4600,11 +4714,13 @@ def _attach_edit_decision_projection_gate_analysis(
     *,
     subtitle_source_projection_validation: dict[str, Any],
     automatic_gate: dict[str, Any],
+    subtitle_projection_repair: dict[str, Any] | None = None,
 ) -> None:
     if not hasattr(decision, "analysis") or not isinstance(getattr(decision, "analysis", None), dict):
         decision.analysis = {}
     decision.analysis["subtitle_source_projection_validation"] = subtitle_source_projection_validation
     decision.analysis["automatic_gate"] = automatic_gate
+    decision.analysis["subtitle_projection_repair"] = dict(subtitle_projection_repair or {})
 
 
 async def _load_subtitle_corrections(session, *, job_id: uuid.UUID) -> list[SubtitleCorrection]:
@@ -5744,6 +5860,42 @@ async def _load_latest_optional_artifact(
     if set(artifact_types).issuperset(_CONTENT_PROFILE_ARTIFACT_TYPES):
         return _select_preferred_content_profile_artifact(artifacts)
     return artifacts[0] if artifacts else None
+
+
+async def _resolve_auto_smart_cut_rules(
+    session,
+    *,
+    job_id: uuid.UUID,
+    content_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    rules_artifacts_result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id == job_id,
+            Artifact.artifact_type.in_((_MANUAL_EDITOR_DRAFT_ARTIFACT_TYPE, ARTIFACT_TYPE_REFINE_DECISION_PLAN)),
+        )
+        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+    )
+    rule_artifacts = rules_artifacts_result.scalars().all()
+    content_profile_rules = None
+    if isinstance(content_profile, dict):
+        content_profile_rules = content_profile.get("smart_cut_rules")
+    for payload_source in rule_artifacts:
+        if not isinstance(payload_source, Artifact) or not isinstance(payload_source.data_json, dict):
+            continue
+        raw_rules = payload_source.data_json.get("smart_cut_rules")
+        if raw_rules is None:
+            continue
+        normalized = normalize_smart_cut_rules_payload(raw_rules)
+        if normalized:
+            return normalized
+
+    if isinstance(content_profile_rules, dict):
+        normalized = normalize_smart_cut_rules_payload(content_profile_rules)
+        if normalized:
+            return normalized
+
+    return default_smart_cut_rules_payload()
 
 
 def _resolve_keep_segments_from_refine_plan(
@@ -8446,6 +8598,7 @@ async def run_edit_plan(job_id: str) -> dict:
 
         packaging_plan = resolve_packaging_plan_for_job(str(job.id), content_profile=content_profile)
         keep_segments = [segment for segment in decision.to_dict().get("segments", []) if segment.get("type") == "keep"]
+        subtitle_projection_repair: dict[str, Any] = {}
         remapped_subtitles = await _build_edited_subtitle_projection(
             session,
             job_id=job.id,
@@ -8460,6 +8613,9 @@ async def run_edit_plan(job_id: str) -> dict:
             keep_segments=keep_segments,
             source_subtitles=decision_subtitles,
             fallback_source_subtitles=decision_subtitles,
+            allow_source_fallback_repair=True,
+            apply_repair=True,
+            diagnostics_slot=subtitle_projection_repair,
         )
         subtitle_source_projection_validation = _build_source_transcript_projection_validation(
             remapped_subtitles=remapped_subtitles,
@@ -8541,6 +8697,7 @@ async def run_edit_plan(job_id: str) -> dict:
         )
         render_plan_dict["source_timeline_contract"] = source_timeline_contract
         render_plan_dict["subtitle_source_projection_validation"] = subtitle_source_projection_validation
+        render_plan_dict["subtitle_projection_repair"] = dict(subtitle_projection_repair)
         automatic_gate = _merge_automatic_gate_with_subtitle_projection(
             dict(decision.analysis.get("automatic_gate") or {}),
             subtitle_source_projection_validation,
@@ -8549,6 +8706,7 @@ async def run_edit_plan(job_id: str) -> dict:
             decision,
             subtitle_source_projection_validation=subtitle_source_projection_validation,
             automatic_gate=automatic_gate,
+            subtitle_projection_repair=subtitle_projection_repair,
         )
         editorial_timeline.data_json = decision.to_dict()
         try:
@@ -8557,12 +8715,17 @@ async def run_edit_plan(job_id: str) -> dict:
             pass  # OTIO optional
         render_plan_dict["automatic_gate"] = automatic_gate
         await save_render_plan(job.id, render_plan_dict, session)
+        smart_cut_rules = await _resolve_auto_smart_cut_rules(
+            session,
+            job_id=job.id,
+            content_profile=content_profile,
+        )
         cut_analysis_payload = build_cut_analysis_payload(
             editorial_analysis=decision.analysis,
             source_name=str(job.source_name or ""),
             job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
             source_subtitles=edit_source_subtitles,
-            smart_cut_rules=default_smart_cut_rules_payload(),
+            smart_cut_rules=smart_cut_rules,
             content_profile=content_profile,
         )
         multimodal_trim_review_payload = build_multimodal_trim_review_payload(
@@ -8595,7 +8758,7 @@ async def run_edit_plan(job_id: str) -> dict:
             render_plan_version=int((render_plan_dict.get("version") or 1) or 1),
             cut_analysis=cut_analysis_payload,
             video_transform={},
-            smart_cut_rules=default_smart_cut_rules_payload(),
+            smart_cut_rules=smart_cut_rules,
             editorial_timeline_id=str(editorial_timeline.id),
             editorial_timeline_version=int(editorial_timeline.version or 1),
         )
@@ -8923,6 +9086,7 @@ async def run_render(job_id: str) -> dict:
             plain_duration = float((await _probe_with_retry(tmp_plain_mp4)).duration or 0.0)
             plain_variant_editorial_timeline = _build_full_length_variant_timeline(plain_duration)
             keep_segments = resolved_keep_segments
+            subtitle_projection_repair: dict[str, Any] = {}
             async with get_session_factory()() as projection_session:
                 remapped_subtitles = await _build_edited_subtitle_projection(
                     projection_session,
@@ -8941,6 +9105,8 @@ async def run_render(job_id: str) -> dict:
                     keep_segments=keep_segments,
                     source_subtitles=decision_subtitles,
                     fallback_source_subtitles=decision_subtitles,
+                    apply_repair=False,
+                    diagnostics_slot=subtitle_projection_repair,
                 )
             ai_effect_render_plan = build_ai_effect_render_plan(
                 render_plan_timeline.data_json,
@@ -9317,7 +9483,8 @@ async def run_render(job_id: str) -> dict:
                     "plain": plain_subtitle_sync,
                     "avatar": avatar_subtitle_sync,
                     "ai_effect": ai_effect_subtitle_sync,
-                }
+                },
+                mandatory_variants={"plain", "packaged"},
             )
             if blocking_sync_issues:
                 raise RuntimeError(
@@ -9466,6 +9633,7 @@ async def run_render(job_id: str) -> dict:
                         "plain_subtitle_sync": plain_subtitle_sync,
                         "avatar_subtitle_sync": avatar_subtitle_sync,
                         "ai_effect_subtitle_sync": ai_effect_subtitle_sync,
+                        "subtitle_projection_repair": dict(subtitle_projection_repair),
                     },
                 },
             )
@@ -9546,6 +9714,16 @@ async def run_platform_package(job_id: str) -> dict:
             else None
         )
         manual_editor_subtitles = _manual_editor_subtitle_items_from_editorial(editorial_timeline.data_json if editorial_timeline else None)
+        subtitle_projection_repair: dict[str, Any] = {
+            "repair_requested": False,
+            "repair_applied": False,
+            "mismatch_detected": False,
+            "fallback_used": False,
+            "changed": False,
+            "input_count": 0,
+            "output_count": 0,
+            "repair_mode": None,
+        }
         if manual_editor_subtitles:
             keep_segments = _resolve_keep_segments_from_refine_plan(
                 refine_decision_plan_payload,
@@ -9560,6 +9738,8 @@ async def run_platform_package(job_id: str) -> dict:
                 keep_segments=keep_segments,
                 source_subtitles=decision_subtitles,
                 fallback_source_subtitles=decision_subtitles,
+                apply_repair=False,
+                diagnostics_slot=subtitle_projection_repair,
             )
 
         render_output_result = await session.execute(
@@ -9703,6 +9883,7 @@ async def run_platform_package(job_id: str) -> dict:
         packaging["generation_mode"] = "renderless_copy_only" if renderless_mode else "rendered_video"
         if renderless_mode:
             packaging["generation_note"] = "No finished render output was available; packaging was generated from content profile and subtitles only."
+        packaging["subtitle_projection_repair"] = dict(subtitle_projection_repair)
     save_platform_packaging_markdown(output_md, packaging)
 
     async with get_session_factory()() as session:
@@ -9732,6 +9913,7 @@ async def run_platform_package(job_id: str) -> dict:
             _set_step_cache_metadata(current_step, "platform_packaging", packaging_cache_metadata)
             if fact_sheet_cache_metadata is not None:
                 _set_step_cache_metadata(current_step, "platform_fact_sheet", fact_sheet_cache_metadata)
+            _set_step_cache_metadata(current_step, "subtitle_projection_repair", dict(subtitle_projection_repair))
             await _set_step_progress(session, current_step, detail="平台文案已生成", progress=1.0)
         await session.commit()
 
@@ -10841,9 +11023,17 @@ def _variant_expected_trailing_gap(
     return max(0.0, base_gap + max(0.0, float(packaging_allowance_sec or 0.0)))
 
 
-def _collect_blocking_variant_sync_issues(sync_checks: dict[str, dict[str, Any] | None]) -> list[str]:
+def _collect_blocking_variant_sync_issues(
+    sync_checks: dict[str, dict[str, Any] | None],
+    *,
+    mandatory_variants: set[str] | None = None,
+) -> list[str]:
+    if mandatory_variants is None:
+        mandatory_variants = {"plain", "packaged", "avatar", "ai_effect"}
     issues: list[str] = []
     for variant_name, sync_check in sync_checks.items():
+        if mandatory_variants and variant_name not in mandatory_variants:
+            continue
         if not _variant_sync_is_blocking(sync_check):
             continue
         warning_codes = ", ".join(str(code) for code in sync_check.get("warning_codes") or [])
