@@ -3,46 +3,56 @@ from __future__ import annotations
 from typing import Any
 
 from roughcut.edit.cut_analysis import CUT_ANALYSIS_SCHEMA_VERSION
+from roughcut.edit.editorial_timeline import (
+    editorial_keep_segments,
+    normalize_keep_segments_payloads,
+    resolve_refine_keep_segments_for_timeline,
+)
 from roughcut.edit.multimodal_trim_review import (
     multimodal_trim_review_auto_cut_candidates,
 )
+from roughcut.edit.cut_analysis import cut_analysis_rule_candidates
 from roughcut.edit.smart_cut_rules import default_smart_cut_rules_payload, normalize_smart_cut_rules_payload
+from roughcut.edit.strategy_profile import (
+    DEFAULT_STRATEGY_TYPE,
+    normalize_strategy_profile_payload,
+    normalize_strategy_type,
+    payload_strategy_profile,
+)
 
 
 ARTIFACT_TYPE_REFINE_DECISION_PLAN = "refine_decision_plan"
 REFINE_DECISION_PLAN_SCHEMA_VERSION = "refine_decision_plan.v1"
 
-
-def _segment_payloads(segments: list[dict[str, Any]] | None) -> list[dict[str, float]]:
-    payloads: list[dict[str, float]] = []
-    for item in segments or []:
-        if not isinstance(item, dict):
-            continue
-        try:
-            start = max(0.0, float(item.get("start", 0.0) or 0.0))
-            end = max(start, float(item.get("end", start) or start))
-        except (TypeError, ValueError):
-            continue
-        payloads.append({"start": round(start, 3), "end": round(end, 3)})
-    return payloads
-
-
 def normalize_refine_keep_segments(payload: dict[str, Any] | None) -> list[dict[str, float]]:
     if not isinstance(payload, dict):
         return []
-    return _segment_payloads(payload.get("keep_segments"))
+    return normalize_keep_segments_payloads(list(payload.get("keep_segments") or []))
 
 
-def editorial_keep_segments(payload: dict[str, Any] | None) -> list[dict[str, float]]:
-    if not isinstance(payload, dict):
-        return []
-    return _segment_payloads(
-        [
-            item
-            for item in list(payload.get("segments") or [])
-            if isinstance(item, dict) and item.get("type") == "keep"
-        ]
+def normalize_refine_decision_plan_strategy_metadata(
+    payload: dict[str, Any] | None,
+    *,
+    cut_analysis: dict[str, Any] | None = None,
+    default_strategy_type: Any = DEFAULT_STRATEGY_TYPE,
+) -> dict[str, Any]:
+    plan = dict(payload or {}) if isinstance(payload, dict) else {}
+    normalized_strategy_profile = normalize_strategy_profile_payload(
+        plan.get("strategy_profile")
+        if isinstance(plan.get("strategy_profile"), dict)
+        else payload_strategy_profile(cut_analysis, default_strategy_type=default_strategy_type),
+        default_strategy_type=plan.get("strategy_type")
+        or (cut_analysis or {}).get("strategy_type")
+        or default_strategy_type,
     )
+    plan["strategy_profile"] = normalized_strategy_profile
+    plan["strategy_type"] = normalize_strategy_type(
+        plan.get("strategy_type")
+        or normalized_strategy_profile.get("strategy_type")
+        or (cut_analysis or {}).get("strategy_type")
+        or default_strategy_type
+    )
+    return plan
 
 
 def _merge_segment_ranges(ranges: list[dict[str, float]]) -> list[dict[str, float]]:
@@ -67,8 +77,8 @@ def _apply_remove_ranges_to_keep_segments(
     keep_segments: list[dict[str, Any]] | None,
     remove_ranges: list[dict[str, Any]] | None,
 ) -> list[dict[str, float]]:
-    keep_ranges = _merge_segment_ranges(_segment_payloads(keep_segments))
-    remove_payloads = _merge_segment_ranges(_segment_payloads(remove_ranges))
+    keep_ranges = _merge_segment_ranges(normalize_keep_segments_payloads(keep_segments))
+    remove_payloads = _merge_segment_ranges(normalize_keep_segments_payloads(remove_ranges))
     if not keep_ranges or not remove_payloads:
         return keep_ranges
     resolved: list[dict[str, float]] = []
@@ -99,7 +109,7 @@ def _multimodal_auto_refine_keep_segments(
     *,
     mode: str,
 ) -> tuple[list[dict[str, float]], int]:
-    base_keep_segments = _segment_payloads(keep_segments)
+    base_keep_segments = normalize_keep_segments_payloads(keep_segments)
     if str(mode or "").strip() != "auto_refine":
         return base_keep_segments, 0
     auto_cut_candidates = multimodal_trim_review_auto_cut_candidates(cut_analysis)
@@ -112,22 +122,27 @@ def _multimodal_auto_refine_keep_segments(
     return _apply_remove_ranges_to_keep_segments(base_keep_segments, remove_ranges), len(auto_cut_candidates)
 
 
-def resolve_refine_keep_segments_for_timeline(
-    payload: dict[str, Any] | None,
+def _rule_auto_refine_keep_segments(
+    keep_segments: list[dict[str, Any]] | None,
+    cut_analysis: dict[str, Any] | None,
     *,
-    editorial_timeline_id: str,
-    editorial_timeline_version: int,
-    fallback_segments: list[dict[str, Any]] | None = None,
-) -> list[dict[str, float]]:
-    plan = payload if isinstance(payload, dict) else {}
-    payload_timeline_id = str(plan.get("editorial_timeline_id") or "").strip()
-    payload_timeline_version = int(plan.get("editorial_timeline_version") or 0)
-    if payload_timeline_id == str(editorial_timeline_id or "").strip() and payload_timeline_version == int(editorial_timeline_version or 0):
-        resolved = normalize_refine_keep_segments(plan)
-        if resolved:
-            return resolved
-    return editorial_keep_segments({"segments": list(fallback_segments or [])})
-
+    mode: str,
+) -> tuple[list[dict[str, float]], int]:
+    base_keep_segments = normalize_keep_segments_payloads(keep_segments)
+    if str(mode or "").strip() != "auto_refine":
+        return base_keep_segments, 0
+    auto_rule_candidates = [
+        item
+        for item in cut_analysis_rule_candidates(cut_analysis, resolved=True)
+        if isinstance(item, dict) and bool(item.get("auto_applied"))
+    ]
+    if not auto_rule_candidates:
+        return base_keep_segments, 0
+    remove_ranges = [
+        {"start": float(item.get("start", 0.0) or 0.0), "end": float(item.get("end", 0.0) or 0.0)}
+        for item in auto_rule_candidates
+    ]
+    return _apply_remove_ranges_to_keep_segments(base_keep_segments, remove_ranges), len(auto_rule_candidates)
 
 def refine_plan_audio_defaults(render_plan_data: dict[str, Any] | None) -> dict[str, Any]:
     payload = render_plan_data if isinstance(render_plan_data, dict) else {}
@@ -151,15 +166,33 @@ def build_refine_decision_plan_payload(
     note: str | None = None,
     editorial_timeline_id: str | None = None,
     editorial_timeline_version: int | None = None,
+    strategy_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     analysis = cut_analysis if isinstance(cut_analysis, dict) else {}
-    resolved_keep_segments, multimodal_auto_apply_cut_count = _multimodal_auto_refine_keep_segments(
+    normalized_strategy_profile = normalize_strategy_profile_payload(
+        strategy_profile if isinstance(strategy_profile, dict) else payload_strategy_profile(analysis),
+        default_strategy_type=analysis.get("strategy_type") or DEFAULT_STRATEGY_TYPE,
+    )
+    strategy_type = normalize_strategy_type(
+        normalized_strategy_profile.get("strategy_type") or analysis.get("strategy_type") or DEFAULT_STRATEGY_TYPE
+    )
+    resolved_keep_segments, rule_auto_apply_cut_count = _rule_auto_refine_keep_segments(
         keep_segments,
+        analysis,
+        mode=mode,
+    )
+    resolved_keep_segments, multimodal_auto_apply_cut_count = _multimodal_auto_refine_keep_segments(
+        resolved_keep_segments,
         analysis,
         mode=mode,
     )
     auto_count = int(analysis.get("auto_apply_candidate_count") or 0)
     manual_count = int(analysis.get("manual_confirm_candidate_count") or 0)
+    candidate_risk_summary = (
+        dict(analysis.get("candidate_risk_summary") or {})
+        if isinstance(analysis.get("candidate_risk_summary"), dict)
+        else {}
+    )
     return {
         "schema": REFINE_DECISION_PLAN_SCHEMA_VERSION,
         "mode": str(mode or "manual_refine"),
@@ -168,14 +201,19 @@ def build_refine_decision_plan_payload(
         "render_plan_version": render_plan_version,
         "editorial_timeline_id": str(editorial_timeline_id or "").strip() or None,
         "editorial_timeline_version": editorial_timeline_version,
+        "strategy_type": strategy_type,
+        "strategy_profile": normalized_strategy_profile,
         "keep_segments": resolved_keep_segments,
         "candidate_summary": {
             "total": int(analysis.get("candidate_count") or (auto_count + manual_count)),
             "auto_apply": auto_count,
             "manual_confirm": manual_count,
+            "rule_auto_apply": rule_auto_apply_cut_count,
             "multimodal_auto_apply": multimodal_auto_apply_cut_count,
             "analysis_schema": str(analysis.get("schema") or CUT_ANALYSIS_SCHEMA_VERSION),
+            "risk_levels": candidate_risk_summary,
         },
+        "rule_auto_apply_cut_count": rule_auto_apply_cut_count,
         "multimodal_auto_apply_cut_count": multimodal_auto_apply_cut_count,
         "multimodal_trim_review_summary": dict(analysis.get("multimodal_trim_review_summary") or {}),
         "audio_defaults": dict(audio_defaults or {}),
@@ -201,6 +239,7 @@ def build_refine_decision_plan_from_render_plan(
     note: str | None = None,
     editorial_timeline_id: str | None = None,
     editorial_timeline_version: int | None = None,
+    strategy_profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return build_refine_decision_plan_payload(
         keep_segments=keep_segments,
@@ -215,4 +254,5 @@ def build_refine_decision_plan_from_render_plan(
         note=note,
         editorial_timeline_id=editorial_timeline_id,
         editorial_timeline_version=editorial_timeline_version,
+        strategy_profile=strategy_profile,
     )

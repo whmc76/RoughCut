@@ -3,6 +3,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from roughcut.edit.subtitle_surfaces import subtitle_canonical_rule_text
+from roughcut.edit.subtitle_surfaces import subtitle_semantic_item_text
+from roughcut.edit.subtitle_surfaces import subtitle_surface_item_dict
 from roughcut.review.content_understanding_schema import parse_primary_evidence_graph_payload
 
 _RELATION_CUE_TERMS = (
@@ -131,12 +134,17 @@ def _as_subtitle_items(value: object | None) -> list[dict[str, Any]]:
 def _collect_text_lines(items: list[dict[str, Any]]) -> list[str]:
     lines: list[str] = []
     for item in items:
-        for key in ("text_final", "text_norm", "text", "raw_text", "value"):
-            value = _as_text(item.get(key))
-            if value and value not in lines:
-                lines.append(value)
-                break
+        value = _subtitle_semantic_text(item)
+        if value and value not in lines:
+            lines.append(value)
     return lines
+
+
+def _subtitle_semantic_text(item: dict[str, Any]) -> str:
+    return subtitle_semantic_item_text(
+        item,
+        generic_fallback_text=_as_text(item.get("text") or item.get("raw_text") or item.get("value")),
+    )
 
 
 def _transcript_excerpt_items(transcript_evidence: dict[str, Any]) -> list[dict[str, Any]]:
@@ -148,14 +156,18 @@ def _transcript_excerpt_items(transcript_evidence: dict[str, Any]) -> list[dict[
     items: list[dict[str, Any]] = []
     for index, item in enumerate(segments):
         if isinstance(item, dict):
+            surfaces = subtitle_surface_item_dict(
+                item,
+                generic_fallback_text=_as_text(item.get("text") or item.get("raw_text") or item.get("value")),
+            )
             items.append(
                 {
                     "index": int(item.get("index", index) or index),
                     "start_time": float(item.get("start") or item.get("start_time") or 0.0),
                     "end_time": float(item.get("end") or item.get("end_time") or 0.0),
-                    "text_raw": _as_text(item.get("text") or item.get("raw_text") or item.get("text_raw")),
-                    "text_norm": _as_text(item.get("text") or item.get("raw_text") or item.get("text_norm")),
-                    "text_final": _as_text(item.get("text") or item.get("raw_text") or item.get("text_final")),
+                    "text_raw": surfaces["text_raw"],
+                    "text_norm": surfaces["text_norm"],
+                    "text_final": surfaces["text_final"],
                     "words": list(item.get("words") or []),
                 }
             )
@@ -292,7 +304,7 @@ def _collect_temporal_focus_lines(subtitle_items: list[dict[str, Any]]) -> tuple
     def _pick(window: list[dict[str, Any]]) -> list[str]:
         ranked: list[tuple[int, int, str]] = []
         for index, item in enumerate(window):
-            text = _as_text(item.get("text_final") or item.get("text") or item.get("value"))
+            text = _subtitle_semantic_text(item)
             score = _product_focus_score(text)
             if score <= 0:
                 continue
@@ -367,7 +379,7 @@ def _line_timing_items(
         return None
 
     def item_text(item: dict[str, Any]) -> str:
-        return _as_text(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or item.get("text") or item.get("value"))
+        return _subtitle_semantic_text(item)
 
     best: tuple[int, float, float] | None = None
     for window_size in (1, 2, 3):

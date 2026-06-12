@@ -89,6 +89,9 @@ class _FakeBrowserAgentHealthClient:
         legacy_blocked=True,
         extra_capabilities=None,
         creator_sessions=None,
+        cdp_status="ok",
+        browser_transport=None,
+        attached_profile_binding=None,
     ):
         self.final_publish_platforms = final_publish_platforms
         self.composite_frameworks = composite_frameworks or {
@@ -104,6 +107,16 @@ class _FakeBrowserAgentHealthClient:
         self.legacy_blocked = legacy_blocked
         self.extra_capabilities = extra_capabilities or {}
         self.creator_sessions = creator_sessions or {}
+        self.cdp_status = cdp_status
+        self.browser_transport = browser_transport or {
+            "transport": "chrome_extension_bridge",
+            "bridge_client_id": "bridge-test-client",
+            "endpoint": "bridge://chrome-extension",
+        }
+        self.attached_profile_binding = attached_profile_binding or {
+            "browser": "chrome",
+            "profile_id": "browser-profile:chrome:test",
+        }
         self.gets = []
 
     async def get(self, url, *, headers):
@@ -111,7 +124,9 @@ class _FakeBrowserAgentHealthClient:
         return _FakeBrowserAgentResponse(
             {
                 "status": "ok",
-                "cdp_status": "ok",
+                "cdp_status": self.cdp_status,
+                "browser_transport": self.browser_transport,
+                "attached_profile_binding": self.attached_profile_binding,
                 "capabilities": {
                     "publication_tasks": True,
                     "task_identity_echo": True,
@@ -1736,7 +1751,6 @@ def test_intelligent_copy_packaging_normalization_blocks_missing_publication_met
     assert packaging["publish_ready"] is False
     assert packaging["platforms"]["bilibili"]["blocking_reasons"] == [
         "缺少平台专属发布配置（declaration/category/collection/visibility/schedule）",
-        "缺少合集决策（需指定 collection_name 或显式声明跳过合集）",
     ]
 
 
@@ -4403,6 +4417,61 @@ def test_build_platform_recovery_overrides_preserves_receipt_rebind_overrides_fo
     assert overrides["force_publish_page_refresh"] is True
 
 
+def test_build_platform_recovery_overrides_ignores_all_recovery_for_fresh_start_attempt():
+    attempt = SimpleNamespace(
+        id="attempt-fresh-start-no-recovery",
+        platform="douyin",
+        status="needs_human",
+        provider_status="published",
+        error_code="publication_public_url_missing",
+        request_payload={
+            "publication_plan_signature": {"value": "plan-1"},
+            "platform_specific_overrides": {
+                "fresh_start_platform_tab": True,
+                "recovery_mode": "receipt_rebind",
+                "verification_only_current_page": True,
+                "wait_for_publish_confirmation": True,
+                "force_publish_page_refresh": True,
+            },
+        },
+        response_payload={
+            "error": {
+                "code": "publication_public_url_missing",
+                "message": "receipt pending",
+            },
+        },
+    )
+
+    overrides, recovery_state = publication._build_platform_recovery_overrides(
+        attempt=attempt,
+        request_plan_signature="plan-1",
+    )
+
+    assert overrides == {}
+    assert recovery_state is None
+
+
+def test_should_recover_draft_context_for_attempt_rejects_fresh_start_attempt():
+    attempt = SimpleNamespace(
+        id="attempt-fresh-start-reject-recovery",
+        platform="douyin",
+        status="needs_human",
+        provider_status="needs_human",
+        error_code="publication_audit_unverified",
+        request_payload={
+            "platform_specific_overrides": {
+                "fresh_start_platform_tab": True,
+                "clear_draft_context": True,
+                "force_publish_page_refresh": True,
+                "recovery_mode": "draft_reset",
+            }
+        },
+        response_payload={},
+    )
+
+    assert publication._should_recover_draft_context_for_attempt(attempt) is False
+
+
 def test_is_publication_recovery_target_accepts_safe_receipt_rebind_modes():
     assert publication._is_publication_recovery_target({
         "platform_specific_overrides": {
@@ -4769,6 +4838,51 @@ async def test_publication_browser_agent_ready_allows_prepare_only_without_live_
         browser_agent_base_url="http://127.0.0.1:49310",
         http_client=transport,
         target_platforms=["douyin"],
+        require_live_publish=False,
+    )
+
+    assert result["ready"] is True
+
+
+@pytest.mark.asyncio
+async def test_publication_browser_agent_ready_accepts_degraded_bridge_when_binding_is_authoritative():
+    transport = _FakeBrowserAgentHealthClient(
+        ["douyin"],
+        cdp_status="degraded",
+        browser_transport={
+            "transport": "chrome_extension_bridge",
+            "bridge_client_id": "bridge-test-client",
+            "bridge_client_state": "stale",
+            "endpoint": "bridge://chrome-extension",
+        },
+        attached_profile_binding={
+            "browser": "chrome",
+            "profile_id": "browser-profile:chrome:test",
+        },
+        creator_sessions={
+            "douyin": {
+                "platform": "douyin",
+                "ready": True,
+                "status": "ready",
+                "message": "创作者会话可用。",
+                "route": {
+                    "url": "https://creator.douyin.com/creator-micro/content/upload",
+                    "title": "抖音创作者中心",
+                },
+            }
+        },
+        extra_capabilities={
+            "profile_reuse": True,
+            "profile_binding_mode": "persistent_profile",
+            "reusable_profile_ids": ["browser-profile:chrome:test"],
+        },
+    )
+
+    result = await publication.check_publication_browser_agent_ready(
+        browser_agent_base_url="http://127.0.0.1:49310",
+        http_client=transport,
+        target_platforms=["douyin"],
+        target_profile_ids=["browser-profile:chrome:test"],
         require_live_publish=False,
     )
 
@@ -6719,6 +6833,42 @@ def test_materialize_publication_media_file_copies_into_runtime_root(tmp_path, m
     assert runtime_root in materialized.parents
 
 
+def test_resolve_publication_local_media_path_materializes_existing_unc_path(tmp_path, monkeypatch):
+    source_path = tmp_path / "share-source.mp4"
+    source_path.write_bytes(b"video")
+    runtime_root = tmp_path / "runtime-publication-media"
+    unc_path = r"\\server\share\share-source.mp4"
+    monkeypatch.setattr(publication, "_publication_media_runtime_root", lambda: runtime_root)
+
+    original_path_class = publication.Path
+
+    class _FakePath(type(original_path_class())):
+        def exists(self):
+            if str(self) == unc_path:
+                return True
+            return super().exists()
+
+        def is_file(self):
+            if str(self) == unc_path:
+                return True
+            return super().is_file()
+
+    def _fake_path(value):
+        if str(value) == unc_path:
+            return _FakePath(str(source_path))
+        return original_path_class(value)
+
+    monkeypatch.setattr(publication, "Path", _fake_path)
+
+    resolved = publication.resolve_publication_local_media_path(unc_path)
+
+    assert resolved is not None
+    assert resolved.exists()
+    assert resolved.is_file()
+    assert resolved.read_bytes() == b"video"
+    assert runtime_root in resolved.parents
+
+
 @pytest.mark.asyncio
 async def test_publication_plan_requires_done_job_local_media_and_bound_credentials(tmp_path):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -7696,6 +7846,78 @@ async def test_submit_publication_attempts_reuses_active_attempt_for_safe_receip
     assert rebound_attempt is not None
     assert rebound_attempt.status == "queued"
     assert rebound_attempt.run_status == "retry_scheduled"
+
+
+@pytest.mark.asyncio
+async def test_submit_publication_attempts_fresh_start_ignores_active_attempt_history(tmp_path):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            job = Job(source_path="source.mp4", source_name="source.mp4", status="done")
+            session.add(job)
+            await session.flush()
+            plan = publication.build_publication_plan(
+                job=job,
+                render_output=SimpleNamespace(output_path=str(media_path)),
+                platform_packaging={
+                    "platforms": {
+                        "douyin": {
+                            "titles": ["标题"],
+                            "description": "简介",
+                            "tags": ["tag"],
+                        }
+                    }
+                },
+                creator_profile={
+                    "id": "creator-1",
+                    "display_name": "creator",
+                    "creator_profile": {
+                        "publishing": {
+                            "platform_credentials": [
+                                {
+                                    "platform": "douyin",
+                                    "account_label": "主号",
+                                    "credential_ref": "chrome-profile:main",
+                                    "status": "logged_in",
+                                    "enabled": True,
+                                    "adapter": "browser_agent",
+                                }
+                            ]
+                        }
+                    },
+                },
+                platform_options={
+                    "douyin": {
+                        "platform_specific_overrides": {
+                            "fresh_start_platform_tab": True,
+                        }
+                    }
+                },
+            )
+            first = await publication.submit_publication_attempts(session, plan)
+            await session.flush()
+            attempt_id = first["created_attempts"][0]["id"]
+            attempt = await session.get(PublicationAttempt, attempt_id)
+            assert attempt is not None
+            attempt.status = "processing"
+            attempt.run_status = "processing"
+            await session.flush()
+
+            second = await publication.submit_publication_attempts(session, plan)
+            await session.flush()
+            second_attempt_id = second["created_attempts"][0]["id"]
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+    assert len(second["created_attempts"]) == 1
+    assert second_attempt_id != attempt_id
+    assert second["skipped_targets"] == []
 
 
 @pytest.mark.asyncio

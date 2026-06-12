@@ -6,6 +6,9 @@
 
 | 日期 | 标题 | 定位 | 文件 |
 |------|------|------|------|
+| 2026-06-12 | Universal Auto Edit Strategy Implementation Plan | 通用自动剪辑策略重构实现方案 | [2026-06-12-universal-auto-edit-strategy-implementation-plan.md](./2026-06-12-universal-auto-edit-strategy-implementation-plan.md) |
+| 2026-06-11 | Universal Auto Edit Strategy Boundaries | 通用自动剪辑发布引擎与类型化剪辑策略边界 | [2026-06-11-universal-auto-edit-strategy-boundaries.md](./2026-06-11-universal-auto-edit-strategy-boundaries.md) |
+| 2026-06-08 | Auto Edit Quality Recovery Architecture | 当前自动剪辑质量恢复主方案 | [2026-06-08-auto-edit-quality-recovery-architecture.md](./2026-06-08-auto-edit-quality-recovery-architecture.md) |
 | 2026-05-18 | Project Build Principles | 当前项目构建原则 | [project-build-principles.md](./project-build-principles.md) |
 | 2026-05-16 | Source Timeline Contract Refactor | 当前源时间轴/剪辑门禁主重构 | [2026-05-16-source-timeline-contract-refactor.md](./2026-05-16-source-timeline-contract-refactor.md) |
 | 2026-04-23 | Naming System | 当前命名规范 | [naming-system.md](./naming-system.md) |

@@ -3,9 +3,15 @@ from roughcut.speech.alignment import tokenize_alignment_text
 from roughcut.speech.subtitle_pipeline import _build_canonical_transcript_words
 from roughcut.speech.transcript_projection import build_transcript_projection_layer
 from roughcut.speech.subtitle_segmentation import (
+    _assess_subtitle_boundary,
     SubtitleEntry,
+    _boundary_splits_reason_preamble,
     _boundary_splits_predicate_phrase,
+    _boundary_splits_protected_term,
+    _boundary_starts_with_suffix_particle_continuation,
+    _entry_needs_residual_repair,
     _boundary_splits_single_char_residual,
+    _is_forbidden_subtitle_boundary,
     _is_incomplete_subtitle_text,
     _looks_like_short_detached_clause_fragment,
     _merge_continuation_entries,
@@ -19,6 +25,7 @@ from roughcut.speech.subtitle_segmentation import (
     _words_for_segmentation,
     analyze_subtitle_segmentation,
     normalize_display_text,
+    normalize_projection_display_text,
     segment_subtitles,
 )
 
@@ -723,8 +730,284 @@ def test_rebalance_semantic_boundaries_does_not_move_sentence_closer_into_follow
     rebalanced = _rebalance_semantic_boundaries(entries, max_chars=18, max_duration=4.0)
 
     assert [entry.text_raw for entry in rebalanced] == [
-        "我们其他博主也是也都发过这款手电",
-        "了，我们就简单的做一下展示。",
+        "我们其他博主也是也都发过这款手电了，",
+        "我们就简单的做一下展示。",
+    ]
+
+
+def test_rebalance_semantic_boundaries_moves_short_detached_tail_into_following_clause() -> None:
+    entries = [
+        _worded_entry(
+            0,
+            0.0,
+            [
+                ("需要的，", 0.6),
+                ("所以说", 0.4),
+                ("那也就", 0.5),
+                ("没啥好说的了", 1.0),
+                ("该升级", 0.4),
+            ],
+            text="需要的，所以说那也就没啥好说的了该升级",
+        ),
+        _worded_entry(
+            1,
+            3.2,
+            [
+                ("我们其他博主也是也都发过这款手电了", 2.4),
+                ("我们", 0.4),
+            ],
+            text="我们其他博主也是也都发过这款手电了我们",
+        ),
+    ]
+
+    rebalanced = _rebalance_semantic_boundaries(entries, max_chars=18, max_duration=4.0)
+
+    assert [entry.text_raw for entry in rebalanced] == [
+        "需要的，所以说那也就没啥好说的了",
+        "该升级我们其他博主也是也都发过这款手电了我们",
+    ]
+
+
+def test_rebalance_semantic_boundaries_moves_short_detached_lead_in_leftward() -> None:
+    entries = [
+        _worded_entry(
+            0,
+            0.0,
+            [("这个晚上出门都会带它", 1.8)],
+            text="这个晚上出门都会带它",
+        ),
+        _worded_entry(
+            1,
+            2.0,
+            [
+                ("很实用", 0.8),
+                ("而且它的这个UV的功能啊", 2.0),
+            ],
+            text="很实用而且它的这个UV的功能啊",
+        ),
+    ]
+
+    rebalanced = _rebalance_semantic_boundaries(entries, max_chars=18, max_duration=4.0)
+
+    assert [entry.text_raw for entry in rebalanced] == [
+        "这个晚上出门都会带它很实用",
+        "而且它的这个UV的功能啊",
+    ]
+
+
+def test_rebalance_semantic_boundaries_preserves_subject_led_clause_restart() -> None:
+    entries = [
+        _worded_entry(
+            0,
+            0.0,
+            [
+                ("我们其他博主也是也都发过", 2.4),
+                ("这款手电了，", 0.6),
+            ],
+            text="我们其他博主也是也都发过这款手电了，",
+        ),
+        _worded_entry(
+            1,
+            3.1,
+            [
+                ("我们", 0.36),
+                ("就简单的", 0.84),
+                ("做一下展示。", 0.96),
+            ],
+            text="我们就简单的做一下展示。",
+        ),
+    ]
+
+    rebalanced = _rebalance_semantic_boundaries(entries, max_chars=18, max_duration=4.0)
+
+    assert [entry.text_raw for entry in rebalanced] == [
+        "我们其他博主也是也都发过这款手电了，",
+        "我们就简单的做一下展示。",
+    ]
+
+
+def test_rebalance_semantic_boundaries_preserves_adverb_led_clause_restart() -> None:
+    entries = [
+        _worded_entry(
+            0,
+            0.0,
+            [
+                ("很实用", 0.7),
+                ("而且它的这个UV的功能啊，", 2.1),
+            ],
+            text="很实用而且它的这个UV的功能啊，",
+        ),
+        _worded_entry(
+            1,
+            2.9,
+            [
+                ("也", 0.28),
+                ("不是说", 0.56),
+                ("只限用照明", 0.92),
+            ],
+            text="也不是说只限用照明",
+        ),
+    ]
+
+    rebalanced = _rebalance_semantic_boundaries(entries, max_chars=18, max_duration=4.0)
+
+    assert [entry.text_raw for entry in rebalanced] == [
+        "很实用而且它的这个UV的功能啊，",
+        "也不是说只限用照明",
+    ]
+
+
+def test_boundary_splits_reason_preamble_for_temporal_followon_clause() -> None:
+    assert _boundary_splits_reason_preamble("所以说为什么我", "平时比如临时出个门") is True
+
+
+def test_boundary_splits_reason_preamble_for_subject_clause_restart() -> None:
+    assert _boundary_splits_reason_preamble("所以说为什么", "我平时比如临时出个门") is True
+
+
+def test_boundary_splits_predicate_phrase_for_meisha_haoshuo_followon() -> None:
+    assert _boundary_splits_predicate_phrase("所以说那也就没啥", "好说的了该升级") is True
+
+
+def test_boundary_starts_with_suffix_particle_continuation_for_dele_clause() -> None:
+    assert _boundary_starts_with_suffix_particle_continuation("所以说那也就没啥好说", "的了该升级我们") is True
+
+
+def test_boundary_starts_with_suffix_particle_continuation_for_le_clause() -> None:
+    assert _boundary_starts_with_suffix_particle_continuation("我们其他博主也是也都发过这款手电", "了我们就简单的做一下展示") is True
+
+
+def test_assess_subtitle_boundary_centralizes_forbidden_reason_preamble_flags() -> None:
+    assessment = _assess_subtitle_boundary("所以说为什么", "我平时比如临时出个门")
+
+    assert assessment.forbidden is True
+    assert "reason_preamble" in assessment.damage_flags
+
+
+def test_assess_subtitle_boundary_centralizes_suffix_particle_continuation_flags() -> None:
+    assessment = _assess_subtitle_boundary("我们其他博主也是也都发过这款手电", "了我们就简单的做一下展示")
+
+    assert assessment.forbidden is True
+    assert "suffix_particle_continuation" in assessment.damage_flags
+    assert "protected_term" not in assessment.damage_flags
+
+
+def test_forbidden_subtitle_boundary_blocks_reason_and_suffix_particle_splits() -> None:
+    assert _is_forbidden_subtitle_boundary("所以说为什么", "我平时比如临时出个门")
+    assert _is_forbidden_subtitle_boundary("所以说那也就没啥好说", "的了该升级我们")
+    assert _is_forbidden_subtitle_boundary("我们其他博主也是也都发过这款手电", "了我们就简单的做一下展示")
+
+
+def test_boundary_splits_protected_term_for_info_count_noun() -> None:
+    assert _boundary_splits_protected_term("它前头一个功能", "键啊这个功能键是") is True
+
+
+def test_boundary_splits_generic_word_ignores_explicit_clause_break() -> None:
+    from roughcut.speech.subtitle_segmentation import _boundary_splits_generic_word
+
+    assert _boundary_splits_generic_word("这个标", "你长按它就是一个激光") is True
+    assert _boundary_splits_generic_word("这个标，", "你长按它就是一个激光") is False
+
+
+def test_boundary_splits_generic_word_ignores_cross_boundary_bigram_artifacts() -> None:
+    from roughcut.speech.subtitle_segmentation import _boundary_splits_generic_word
+
+    cases = [
+        ("这个总算这个年还能过", "要不然这个真的是难受。"),
+        ("然后一体感很强", "嗯，配合这种通体抛。"),
+        ("那个版本的重量呢也非常好", "非常适合EDC啊。"),
+        ("什么叫强调", "非常呢？它"),
+        ("这个非常近的话", "你实际"),
+        ("开啊，就是你用这个指甲直接去", "呃，你用指甲卡住。"),
+    ]
+
+    for left, right in cases:
+        assert _boundary_splits_generic_word(left, right) is False
+
+
+def test_normalize_projection_display_text_compacts_internal_cjk_spacing() -> None:
+    assert normalize_projection_display_text("然后 呃首先它前头1个功能键啊") == "然后呃首先它前头1个功能键啊"
+    assert normalize_projection_display_text("你长按它就是一个激光啊 绿激光") == "你长按它就是一个激光啊绿激光"
+
+
+def test_entry_needs_residual_repair_for_previous_word_continuation_fragment() -> None:
+    previous = SubtitleEntry(index=0, start=0.0, end=1.0, text_raw="然后首先它前头一个功能", text_norm="然后首先它前头一个功能", words=())
+    current = SubtitleEntry(index=1, start=1.01, end=2.5, text_raw="键啊这个功能键是这个就是M的这个标你", text_norm="键啊这个功能键是这个就是M的这个标你", words=())
+
+    assert _entry_needs_residual_repair(previous=previous, current=current, following=None) is True
+
+
+def test_rebalance_semantic_boundaries_moves_suffix_particle_back_to_left_clause() -> None:
+    entries = [
+        _worded_entry(
+            0,
+            0.0,
+            [
+                ("我们其他博主也是也都发过", 1.4),
+                ("这款手电", 0.7),
+            ],
+            text="我们其他博主也是也都发过这款手电",
+        ),
+        _worded_entry(
+            1,
+            2.12,
+            [
+                ("了，", 0.2),
+                ("我们", 0.32),
+                ("就简单的", 0.72),
+                ("做一下展示", 0.9),
+            ],
+            text="了，我们就简单的做一下展示",
+        ),
+    ]
+
+    rebalanced = _rebalance_semantic_boundaries(entries, max_chars=18, max_duration=4.0)
+
+    assert [entry.text_raw for entry in rebalanced] == [
+        "我们其他博主也是也都发过这款手电了，",
+        "我们就简单的做一下展示",
+    ]
+
+
+def test_rebalance_semantic_boundaries_moves_subject_head_back_to_right_clause_after_punctuation() -> None:
+    entries = [
+        _worded_entry(
+            0,
+            0.0,
+            [
+                ("这个", 0.3),
+                ("功能", 0.3),
+                ("键是", 0.3),
+                ("这个", 0.3),
+                ("就是", 0.4),
+                ("M", 0.2),
+                ("的", 0.2),
+                ("这个", 0.3),
+                ("标，", 0.3),
+                ("你", 0.2),
+            ],
+            text="这个功能键是这个就是M的这个标，你",
+        ),
+        _worded_entry(
+            1,
+            2.8,
+            [
+                ("长按", 0.4),
+                ("它", 0.3),
+                ("就是", 0.4),
+                ("一个", 0.4),
+                ("激光啊，", 0.5),
+                ("绿激光。", 0.5),
+            ],
+            text="长按它就是一个激光啊，绿激光。",
+        ),
+    ]
+
+    rebalanced = _rebalance_semantic_boundaries(entries, max_chars=18, max_duration=4.0)
+
+    assert [entry.text_raw for entry in rebalanced] == [
+        "这个功能键是这个就是M的这个标，",
+        "你长按它就是一个激光啊，绿激光。",
     ]
 
 
@@ -1407,3 +1690,30 @@ def test_quality_report_exposes_alignment_source_metrics_per_subtitle() -> None:
     assert alignment["source_counts"] == {"fallback": 1, "provider": 2, "synthetic": 1}
     assert alignment["source_ratios"]["provider"] == 0.5
     assert [item["dominant_source"] for item in alignment["per_subtitle"]] == ["provider", "synthetic"]
+
+
+def test_quality_report_suppresses_generic_summary_warning_when_subject_context_is_specific() -> None:
+    report = build_subtitle_quality_report(
+        subtitle_items=[{"text_final": "先介绍一下"}],
+        content_profile={
+            "subject_brand": "NOC",
+            "subject_model": "MT34",
+            "summary": "这条视频主要围绕NOC MT34展开，内容方向偏产品开箱与上手体验，适合后续做搜索校验、字幕纠错和剪辑包装。",
+        },
+    )
+
+    assert report["warning_reasons"] == []
+    assert report["metrics"]["summary_generic_hits"] == []
+    assert report["metrics"]["suppressed_summary_generic_hits"] == ["适合后续做搜索校验、字幕纠错和剪辑包装"]
+
+
+def test_quality_report_keeps_warning_for_pure_generic_summary_phrase() -> None:
+    report = build_subtitle_quality_report(
+        subtitle_items=[{"text_final": "先介绍一下"}],
+        content_profile={
+            "summary": "适合后续做搜索校验、字幕纠错和剪辑包装",
+        },
+    )
+
+    assert any("摘要模板化命中" in reason for reason in report["warning_reasons"])
+    assert report["metrics"]["summary_generic_hits"] == ["适合后续做搜索校验、字幕纠错和剪辑包装"]

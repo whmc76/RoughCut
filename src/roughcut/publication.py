@@ -29,6 +29,8 @@ from roughcut.intelligent_copy_layout import (
 from roughcut.providers.factory import get_reasoning_provider
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.db.models import PublicationAttempt, PublicationAttemptRun
+from roughcut.publication_executor_registry import PublicationExecutor
+from roughcut.publication_executor_registry import PublicationExecutorRegistry
 from roughcut.publication_platform_matrix import (
     platform_allows_field_edits_while_processing,
     platform_cover_project_mode,
@@ -47,6 +49,15 @@ from roughcut.publication_platform_matrix import (
     platform_supports_scheduled_publish,
     platform_upload_processing_blocks_final_publish_only,
 )
+from roughcut.publication_social_auto_upload import (
+    SOCIAL_AUTO_UPLOAD_ADAPTER,
+    build_social_auto_upload_account_name,
+    build_social_auto_upload_check_command,
+    build_social_auto_upload_login_command,
+    build_social_auto_upload_upload_command,
+    run_social_auto_upload_command,
+    supports_social_auto_upload_platform,
+)
 from roughcut.publication_packaging import (
     derive_publication_cover_slots,
     load_publication_packaging_payload,
@@ -60,6 +71,7 @@ PUBLICATION_BROWSER_AGENT_TASK_IDENTITY_CONTRACT = "publication_task_identity_v1
 PUBLICATION_BROWSER_AGENT_CREATOR_SESSION_CONTRACT = "publication_creator_session_probe_v1"
 X_LINK_SHARE_PUBLICATION_ADAPTER = "x_link_share"
 X_LINK_SHARE_PUBLICATION_RUN_CONTRACT = "x_link_share_publication_v1"
+SOCIAL_AUTO_UPLOAD_PUBLICATION_RUN_CONTRACT = "social_auto_upload_publication_v1"
 BROWSER_AGENT_EXECUTION_MODE = "browser_agent"
 PUBLISHABLE_CREDENTIAL_STATUSES = {"logged_in", "available", "verified"}
 PUBLICATION_ACTIVE_STATUSES = {"queued", "claimed", "submitted", "processing", "scheduled_pending"}
@@ -156,6 +168,8 @@ def _normalize_publication_adapter(value: Any) -> str:
     normalized = str(value or CANONICAL_PUBLICATION_ADAPTER).strip().lower().replace("-", "_")
     if normalized in {"xlinkshare", "xlink_share", "xlink", "xshare", "x_link", "xshare_task", "x_share", "x_share_only"}:
         return X_LINK_SHARE_PUBLICATION_ADAPTER
+    if normalized in {"socialautoupload", "social_auto_upload", "social_auto", "sau"}:
+        return SOCIAL_AUTO_UPLOAD_ADAPTER
     if normalized in {""}:
         return CANONICAL_PUBLICATION_ADAPTER
     return normalized
@@ -165,6 +179,8 @@ def _resolve_publication_adapter_publication_contract(value: Any) -> str:
     adapter = _normalize_publication_adapter(value)
     if adapter == X_LINK_SHARE_PUBLICATION_ADAPTER:
         return X_LINK_SHARE_PUBLICATION_RUN_CONTRACT
+    if adapter == SOCIAL_AUTO_UPLOAD_ADAPTER:
+        return SOCIAL_AUTO_UPLOAD_PUBLICATION_RUN_CONTRACT
     return BROWSER_AGENT_PUBLICATION_RUN_CONTRACT
 
 
@@ -184,9 +200,41 @@ def _publication_adapter_display_name(adapter: str) -> str:
     normalized = _normalize_publication_adapter(adapter)
     if normalized == X_LINK_SHARE_PUBLICATION_ADAPTER:
         return "x_link_share"
+    if normalized == SOCIAL_AUTO_UPLOAD_ADAPTER:
+        return "social-auto-upload"
     if normalized == "browser_agent":
         return "browser-agent"
     return normalized or CANONICAL_PUBLICATION_ADAPTER
+
+
+def publication_adapter_requires_browser_agent(adapter: Any) -> bool:
+    normalized = _normalize_publication_adapter(adapter)
+    return normalized in {CANONICAL_PUBLICATION_ADAPTER, X_LINK_SHARE_PUBLICATION_ADAPTER}
+
+
+def _social_auto_upload_enabled_platforms() -> set[str]:
+    settings = get_settings()
+    raw = str(getattr(settings, "publication_social_auto_upload_platforms", "") or "")
+    return {
+        normalize_publication_platform(item)
+        for item in [part.strip() for part in raw.split(",")]
+        if normalize_publication_platform(item)
+    }
+
+
+def _resolve_publication_target_adapter(platform: Any, adapter: Any) -> str:
+    normalized_adapter = _normalize_publication_adapter(adapter)
+    normalized_platform = normalize_publication_platform(platform)
+    if normalized_adapter != CANONICAL_PUBLICATION_ADAPTER:
+        return normalized_adapter
+    if normalized_platform == "x":
+        return X_LINK_SHARE_PUBLICATION_ADAPTER
+    if normalized_platform == "youtube":
+        return CANONICAL_PUBLICATION_ADAPTER
+    if normalized_platform and normalized_platform in _social_auto_upload_enabled_platforms():
+        if supports_social_auto_upload_platform(normalized_platform):
+            return SOCIAL_AUTO_UPLOAD_ADAPTER
+    return normalized_adapter
 
 SUPPORTED_PUBLICATION_PLATFORMS: dict[str, dict[str, str]] = {
     "douyin": {"label": "抖音", "kind": "video"},
@@ -204,6 +252,7 @@ STABLE_PUBLICATION_PLATFORMS: tuple[str, ...] = (
     "xiaohongshu",
     "bilibili",
     "kuaishou",
+    "wechat-channels",
     "toutiao",
     "youtube",
     "x",
@@ -507,7 +556,7 @@ async def check_publication_browser_agent_ready(
             "message": f"browser-agent 未声明这些平台的专用复合框架：{labels}；已阻止退回旧轻量脚本。",
             "health": payload,
         }
-    if str(payload.get("cdp_status") or "").strip().lower() not in {"", "ok", "ready"}:
+    if str(payload.get("cdp_status") or "").strip().lower() not in {"", "ok", "ready", "degraded"}:
         return {
             "ready": False,
             "code": "browser_agent_cdp_unavailable",
@@ -963,16 +1012,16 @@ def build_publication_plan(
         declaration = declared or platform_default_declaration(platform)
         category = _sanitize_publication_target_category(
             platform,
-            publish_options.get("category") or _package_publish_option(package, "category"),
+            _resolve_publication_plan_option_value(publish_options, package, "category"),
         )
-        collection = publish_options.get("collection") or _package_publish_option(package, "collection")
-        visibility_or_publish_mode = (
-            publish_options.get("visibility_or_publish_mode")
-            or _package_publish_option(package, "visibility_or_publish_mode")
+        collection = _resolve_publication_plan_option_value(publish_options, package, "collection")
+        visibility_or_publish_mode = _resolve_publication_plan_option_value(
+            publish_options,
+            package,
+            "visibility_or_publish_mode",
         )
-        scheduled_publish_at = (
-            publish_options.get("scheduled_publish_at")
-            or _normalize_scheduled_publish_at(_package_publish_option(package, "scheduled_publish_at"))
+        scheduled_publish_at = _normalize_scheduled_publish_at(
+            _resolve_publication_plan_option_value(publish_options, package, "scheduled_publish_at")
         )
         if platform == "youtube":
             visibility_or_publish_mode = _normalize_youtube_visibility_or_publish_mode(
@@ -996,11 +1045,16 @@ def build_publication_plan(
             collection=collection,
             platform_specific_overrides=merged_platform_overrides,
         )
+        if platform == "douyin":
+            merged_platform_overrides.pop("topic_selection_plan", None)
+            merged_platform_overrides.pop("native_topics", None)
         native_topics = _resolve_publication_native_topics(
             package=package,
             publish_options=publish_options,
             platform_specific_overrides=merged_platform_overrides,
         )
+        if platform == "douyin":
+            native_topics = []
         package_cover_contract = {
             **package,
             "platform": platform,
@@ -1048,7 +1102,7 @@ def build_publication_plan(
                     ),
                     "browser_binding": credential.get("browser_binding") if isinstance(credential.get("browser_binding"), dict) else {},
                     "account_label": credential["account_label"],
-                    "adapter": _normalize_publication_adapter(credential.get("adapter")),
+                    "adapter": _resolve_publication_target_adapter(platform, credential.get("adapter")),
                     "execution_mode": str(
                         credential.get("execution_mode") or BROWSER_AGENT_EXECUTION_MODE
                     ).strip()
@@ -1115,7 +1169,7 @@ def build_publication_plan(
                 ),
                 "browser_binding": credential.get("browser_binding") if isinstance(credential.get("browser_binding"), dict) else {},
                 "account_label": credential["account_label"],
-                "adapter": _normalize_publication_adapter(credential.get("adapter")),
+                "adapter": _resolve_publication_target_adapter(platform, credential.get("adapter")),
                 "execution_mode": str(
                     credential.get("execution_mode") or BROWSER_AGENT_EXECUTION_MODE
                 ).strip()
@@ -1386,6 +1440,8 @@ async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any
             or raw_target_overrides.get("prepublish_only_current_page")
             or raw_target_overrides.get("prepare_only_current_page")
         )
+        fresh_start_platform_tab = bool(raw_target_overrides.get("fresh_start_platform_tab"))
+        history_scoped_attempt = current_page_scoped_attempt or fresh_start_platform_tab
         is_recovery_target = _is_publication_recovery_target(target)
         target_adapter = _normalize_publication_adapter(target.get("adapter"))
         target_execution_mode = str(target.get("execution_mode") or BROWSER_AGENT_EXECUTION_MODE).strip() or BROWSER_AGENT_EXECUTION_MODE
@@ -1413,7 +1469,7 @@ async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any
         existing_attempts_for_logical = attempts_by_logical_signature.get(logical_signature) or []
         history_attempts_for_logical = broad_attempts_by_logical_signature.get(logical_signature) or []
         has_terminal_success = False
-        if not current_page_scoped_attempt:
+        if not history_scoped_attempt:
             has_terminal_success = any(
                 str(item.status or "").strip().lower() in {"published", "draft_created", "scheduled_pending"}
                 for item in [*existing_attempts_for_dedupe, *existing_attempts_for_logical, *history_attempts_for_logical]
@@ -1429,7 +1485,7 @@ async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any
             continue
         safe_active_receipt_rebind = False
         active_attempt = None
-        if not current_page_scoped_attempt:
+        if not history_scoped_attempt:
             active_attempt = next(
                 (
                     item
@@ -1481,7 +1537,7 @@ async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any
         if force_new_attempt_for_active_recovery:
             active_attempt = None
         reusable_attempt = None
-        if not current_page_scoped_attempt:
+        if not history_scoped_attempt:
             reusable_attempt = next(
                 (
                     item
@@ -1503,7 +1559,7 @@ async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any
         platform_recovery_attempt = None
         platform_recovery_overrides = {}
         platform_recovery_state = None
-        if target_platform and is_recovery_target and not current_page_scoped_attempt:
+        if target_platform and is_recovery_target and not history_scoped_attempt:
             platform_attempts_for_recovery = _select_recovery_candidate_attempts_for_platform(
                 attempts_by_platform.get(target_platform, [])
             )
@@ -1979,6 +2035,274 @@ async def reconcile_publication_attempt_from_browser_agent_payload(
     }
 
 
+def _mark_publication_attempt_needs_human(
+    attempt: PublicationAttempt,
+    run: PublicationAttemptRun | None,
+    *,
+    code: str,
+    message: str,
+) -> None:
+    now = _utc_now()
+    attempt.status = "needs_human"
+    attempt.run_status = "needs_human"
+    attempt.error_code = code
+    attempt.error_message = message
+    attempt.next_retry_at = None
+    attempt.operator_summary = f"需要人工处理：{message}"
+    if run is not None:
+        run.status = "needs_human"
+        run.phase = "submit"
+        run.heartbeat_at = now
+        run.completed_at = now
+        run.error_message = message
+
+
+async def submit_publication_attempt_to_social_auto_upload(
+    session: AsyncSession,
+    attempt: PublicationAttempt,
+) -> dict[str, Any]:
+    settings = get_settings()
+    root = str(getattr(settings, "publication_social_auto_upload_root", "") or "").strip()
+    if not root:
+        run = await _latest_publication_run(session, attempt.id)
+        _mark_publication_attempt_failed(
+            attempt,
+            run,
+            code="social_auto_upload_root_missing",
+            message="未配置 publication_social_auto_upload_root，无法调用 social-auto-upload。",
+            retryable=False,
+        )
+        await session.flush()
+        return {"attempt_id": attempt.id, "status": attempt.status, "error": attempt.error_message}
+
+    platform = normalize_publication_platform(attempt.platform)
+    if not supports_social_auto_upload_platform(platform):
+        run = await _latest_publication_run(session, attempt.id)
+        _mark_publication_attempt_failed(
+            attempt,
+            run,
+            code="social_auto_upload_platform_unsupported",
+            message=f"social-auto-upload 当前未接入 {platform or attempt.platform} 平台。",
+            retryable=False,
+        )
+        await session.flush()
+        return {"attempt_id": attempt.id, "status": attempt.status, "error": attempt.error_message}
+
+    request_payload = attempt.request_payload if isinstance(attempt.request_payload, dict) else {}
+    python_executable = str(getattr(settings, "publication_social_auto_upload_python", "") or "python").strip() or "python"
+    timeout_sec = max(30, int(getattr(settings, "publication_social_auto_upload_timeout_sec", 1800) or 1800))
+    account_name = build_social_auto_upload_account_name(attempt)
+    headless = bool(getattr(settings, "publication_social_auto_upload_headless", True))
+    auto_login = bool(getattr(settings, "publication_social_auto_upload_auto_login", False))
+    run = await _latest_publication_run(session, attempt.id)
+
+    check_result = await run_social_auto_upload_command(
+        build_social_auto_upload_check_command(
+            root=root,
+            python_executable=python_executable,
+            platform=platform,
+            account_name=account_name,
+        ),
+        root=root,
+        timeout_sec=min(timeout_sec, 300),
+    )
+    if not check_result.ok:
+        if auto_login:
+            login_result = await run_social_auto_upload_command(
+                build_social_auto_upload_login_command(
+                    python_executable=python_executable,
+                    platform=platform,
+                    account_name=account_name,
+                    headless=headless,
+                ),
+                root=root,
+                timeout_sec=timeout_sec,
+            )
+            if not login_result.ok:
+                _mark_publication_attempt_needs_human(
+                    attempt,
+                    run,
+                    code="social_auto_upload_login_required",
+                    message=(login_result.stderr or login_result.stdout or "账号登录失败，请人工扫码登录。").strip(),
+                )
+                attempt.response_payload = {
+                    "executor": SOCIAL_AUTO_UPLOAD_ADAPTER,
+                    "stage": "login",
+                    "command": login_result.command,
+                    "returncode": login_result.returncode,
+                    "stdout": login_result.stdout,
+                    "stderr": login_result.stderr,
+                }
+                await session.flush()
+                return {"attempt_id": attempt.id, "status": attempt.status, "error": attempt.error_message}
+        else:
+            _mark_publication_attempt_needs_human(
+                attempt,
+                run,
+                code="social_auto_upload_auth_required",
+                message="账号登录态无效，请先完成 social-auto-upload 登录。",
+            )
+            attempt.response_payload = {
+                "executor": SOCIAL_AUTO_UPLOAD_ADAPTER,
+                "stage": "check",
+                "command": check_result.command,
+                "returncode": check_result.returncode,
+                "stdout": check_result.stdout,
+                "stderr": check_result.stderr,
+            }
+            await session.flush()
+            return {"attempt_id": attempt.id, "status": attempt.status, "error": attempt.error_message}
+
+    try:
+        upload_command = build_social_auto_upload_upload_command(
+            python_executable=python_executable,
+            platform=platform,
+            account_name=account_name,
+            request_payload=request_payload,
+        )
+    except Exception as exc:
+        _mark_publication_attempt_failed(
+            attempt,
+            run,
+            code="social_auto_upload_payload_invalid",
+            message=str(exc),
+            retryable=False,
+        )
+        await session.flush()
+        return {"attempt_id": attempt.id, "status": attempt.status, "error": str(exc)}
+
+    upload_result = await run_social_auto_upload_command(
+        upload_command,
+        root=root,
+        timeout_sec=timeout_sec,
+    )
+    if not upload_result.ok:
+        _mark_publication_attempt_failed(
+            attempt,
+            run,
+            code="social_auto_upload_submit_failed",
+            message=(upload_result.stderr or upload_result.stdout or "social-auto-upload 执行失败").strip(),
+            retryable=False,
+        )
+        attempt.response_payload = {
+            "executor": SOCIAL_AUTO_UPLOAD_ADAPTER,
+            "stage": "upload",
+            "command": upload_result.command,
+            "returncode": upload_result.returncode,
+            "stdout": upload_result.stdout,
+            "stderr": upload_result.stderr,
+        }
+        await session.flush()
+        return {"attempt_id": attempt.id, "status": attempt.status, "error": attempt.error_message}
+
+    now = _utc_now()
+    scheduled_publish_at = _parse_datetime(request_payload.get("scheduled_publish_at"))
+    mapped_status = "draft_created" if scheduled_publish_at else "published"
+    attempt.provider_task_id = attempt.provider_task_id or attempt.id
+    attempt.provider_execution_id = None
+    attempt.provider_status = mapped_status
+    attempt.response_payload = {
+        "executor": SOCIAL_AUTO_UPLOAD_ADAPTER,
+        "stage": "upload",
+        "command": upload_result.command,
+        "returncode": upload_result.returncode,
+        "stdout": upload_result.stdout,
+        "stderr": upload_result.stderr,
+    }
+    attempt.status = mapped_status
+    attempt.run_status = mapped_status
+    attempt.submitted_at = now
+    attempt.next_retry_at = None
+    attempt.adapter = SOCIAL_AUTO_UPLOAD_ADAPTER
+    attempt.error_code = None
+    attempt.error_message = None
+    if mapped_status == "published":
+        attempt.published_at = now
+        attempt.operator_summary = "social-auto-upload 已完成自动发布。"
+    else:
+        attempt.scheduled_at = scheduled_publish_at
+        attempt.operator_summary = "social-auto-upload 已创建平台定时发布任务。"
+    if run is not None:
+        run.status = mapped_status
+        run.phase = "completed"
+        run.heartbeat_at = now
+        run.completed_at = now
+        run.provider_task_id = attempt.provider_task_id
+        run.provider_execution_id = attempt.provider_execution_id
+        run.provider_status = attempt.provider_status
+        run.result_json = attempt.response_payload
+        run.error_message = None
+    await session.flush()
+    return {"attempt_id": attempt.id, "status": attempt.status, "provider_task_id": attempt.provider_task_id}
+
+
+async def reconcile_publication_attempt_with_social_auto_upload(
+    session: AsyncSession,
+    attempt: PublicationAttempt,
+) -> dict[str, Any]:
+    await session.flush()
+    return {
+        "attempt_id": attempt.id,
+        "status": attempt.status,
+        "provider_task_id": attempt.provider_task_id,
+    }
+
+
+def _build_publication_executor_registry(
+    *,
+    browser_agent_base_url: str,
+    auth_token: str = "",
+    http_client: Any | None = None,
+    request_timeout_sec: int = 60,
+) -> PublicationExecutorRegistry:
+    registry = PublicationExecutorRegistry()
+
+    async def _submit_browser_agent_executor(
+        session: AsyncSession,
+        attempt: PublicationAttempt,
+    ) -> dict[str, Any]:
+        return await submit_publication_attempt_to_browser_agent(
+            session,
+            attempt,
+            browser_agent_base_url=browser_agent_base_url,
+            auth_token=auth_token,
+            http_client=http_client,
+            request_timeout_sec=request_timeout_sec,
+        )
+
+    async def _reconcile_browser_agent_executor(
+        session: AsyncSession,
+        attempt: PublicationAttempt,
+    ) -> dict[str, Any]:
+        return await reconcile_publication_attempt_with_browser_agent(
+            session,
+            attempt,
+            browser_agent_base_url=browser_agent_base_url,
+            auth_token=auth_token,
+            http_client=http_client,
+            request_timeout_sec=request_timeout_sec,
+        )
+
+    browser_agent_executor = PublicationExecutor(
+        adapter=CANONICAL_PUBLICATION_ADAPTER,
+        submit=_submit_browser_agent_executor,
+        reconcile=_reconcile_browser_agent_executor,
+    )
+    registry.register(
+        CANONICAL_PUBLICATION_ADAPTER,
+        X_LINK_SHARE_PUBLICATION_ADAPTER,
+        executor=browser_agent_executor,
+    )
+
+    social_auto_upload_executor = PublicationExecutor(
+        adapter=SOCIAL_AUTO_UPLOAD_ADAPTER,
+        submit=submit_publication_attempt_to_social_auto_upload,
+        reconcile=reconcile_publication_attempt_with_social_auto_upload,
+    )
+    registry.register(SOCIAL_AUTO_UPLOAD_ADAPTER, executor=social_auto_upload_executor)
+    return registry
+
+
 async def submit_publication_attempt_for_adapter(
     session: AsyncSession,
     attempt: PublicationAttempt,
@@ -1989,15 +2313,14 @@ async def submit_publication_attempt_for_adapter(
     request_timeout_sec: int = 60,
 ) -> dict[str, Any]:
     adapter = _normalize_publication_adapter(attempt.adapter)
-    if adapter == X_LINK_SHARE_PUBLICATION_ADAPTER or adapter == CANONICAL_PUBLICATION_ADAPTER:
-        return await submit_publication_attempt_to_browser_agent(
-            session,
-            attempt,
-            browser_agent_base_url=browser_agent_base_url,
-            auth_token=auth_token,
-            http_client=http_client,
-            request_timeout_sec=request_timeout_sec,
-        )
+    executor = _build_publication_executor_registry(
+        browser_agent_base_url=browser_agent_base_url,
+        auth_token=auth_token,
+        http_client=http_client,
+        request_timeout_sec=request_timeout_sec,
+    ).resolve(adapter)
+    if executor is not None:
+        return await executor.submit(session, attempt)
     _mark_publication_attempt_failed(
         attempt,
         await _latest_publication_run(session, attempt.id),
@@ -2019,15 +2342,14 @@ async def reconcile_publication_attempt_for_adapter(
     request_timeout_sec: int = 60,
 ) -> dict[str, Any]:
     adapter = _normalize_publication_adapter(attempt.adapter)
-    if adapter == X_LINK_SHARE_PUBLICATION_ADAPTER or adapter == CANONICAL_PUBLICATION_ADAPTER:
-        return await reconcile_publication_attempt_with_browser_agent(
-            session,
-            attempt,
-            browser_agent_base_url=browser_agent_base_url,
-            auth_token=auth_token,
-            http_client=http_client,
-            request_timeout_sec=request_timeout_sec,
-        )
+    executor = _build_publication_executor_registry(
+        browser_agent_base_url=browser_agent_base_url,
+        auth_token=auth_token,
+        http_client=http_client,
+        request_timeout_sec=request_timeout_sec,
+    ).resolve(adapter)
+    if executor is not None:
+        return await executor.reconcile(session, attempt)
     _mark_publication_attempt_failed(
         attempt,
         await _latest_publication_run(session, attempt.id),
@@ -2687,6 +3009,8 @@ def _should_recover_draft_context_for_attempt(attempt: PublicationAttempt) -> bo
     prior_overrides = request_payload.get("platform_specific_overrides")
     if not isinstance(prior_overrides, dict):
         prior_overrides = {}
+    if bool(prior_overrides.get("fresh_start_platform_tab")):
+        return False
     if not _is_publication_recovery_target({"platform_specific_overrides": prior_overrides}):
         return False
     return _should_recover_attempt_with_draft_refresh(attempt)
@@ -2761,6 +3085,7 @@ def _build_platform_recovery_overrides(
     prior_overrides = request_payload.get("platform_specific_overrides")
     if not isinstance(prior_overrides, dict):
         prior_overrides = {}
+    fresh_start_platform_tab = bool(prior_overrides.get("fresh_start_platform_tab"))
     response_payload = attempt.response_payload if isinstance(attempt.response_payload, dict) else {}
     failure_context = _extract_publication_failure_context(
         attempt,
@@ -2768,6 +3093,8 @@ def _build_platform_recovery_overrides(
         task=response_payload,
         response_payload=response_payload,
     )
+    if fresh_start_platform_tab:
+        return {}, None
     carried_recovery_overrides = {
         key: value for key, value in prior_overrides.items()
         if key in PUBLICATION_RECOVERY_OVERRIDE_KEYS
@@ -3127,7 +3454,7 @@ def _normalize_publication_platform_options(value: dict[str, Any] | None) -> dic
         if category:
             option["category"] = category[:120]
         native_topics = _coerce_publication_topic_list(raw_value.get("native_topics"))
-        if native_topics:
+        if native_topics and platform != "douyin":
             option["native_topics"] = native_topics
         visibility_or_publish_mode = str(raw_value.get("visibility_or_publish_mode") or "").strip()
         if visibility_or_publish_mode:
@@ -3135,7 +3462,7 @@ def _normalize_publication_platform_options(value: dict[str, Any] | None) -> dic
         platform_specific_overrides = raw_value.get("platform_specific_overrides")
         if isinstance(platform_specific_overrides, dict):
             option["platform_specific_overrides"] = platform_specific_overrides
-            if "native_topics" not in option:
+            if "native_topics" not in option and platform != "douyin":
                 override_native_topics = _coerce_publication_topic_list(platform_specific_overrides.get("native_topics"))
                 if override_native_topics:
                     option["native_topics"] = override_native_topics
@@ -3161,6 +3488,16 @@ def _package_publish_option(package: dict[str, Any], key: str) -> Any:
     if value is None and key == "collection":
         return _normalize_collection_option(package)
     return value
+
+
+def _resolve_publication_plan_option_value(
+    publish_options: dict[str, Any] | None,
+    package: dict[str, Any],
+    key: str,
+) -> Any:
+    if isinstance(publish_options, dict) and key in publish_options:
+        return publish_options.get(key)
+    return _package_publish_option(package, key)
 
 
 def _publication_preflight_block_reason(platform: str, publish_options: dict[str, Any]) -> str:
@@ -5628,6 +5965,8 @@ def resolve_publication_local_media_path(raw_path: Any) -> Path | None:
     raw = str(raw_path or "").strip()
     if not raw:
         return None
+    if _looks_like_external_media_path(raw):
+        return _materialize_publication_media_file(raw)
     path = Path(raw).expanduser()
     try:
         if path.exists() and path.is_file():
@@ -5643,8 +5982,6 @@ def resolve_publication_local_media_path(raw_path: Any) -> Path | None:
         if mapped.exists() and mapped.is_file():
             return mapped.resolve()
 
-    if _looks_like_external_media_path(raw):
-        return _materialize_publication_media_file(raw)
     return None
 
 

@@ -27,6 +27,7 @@ from roughcut.watcher.folder_watcher import (
     suggest_merge_groups_for_inventory_items,
     ensure_watch_inventory_thumbnail,
     get_watch_root_inventory_scan_status,
+    normalize_persisted_watch_inventory_payload,
     replace_watch_root_inventory_scan_snapshot,
     scan_watch_root_inventory,
     start_watch_root_inventory_scan,
@@ -90,10 +91,11 @@ async def _create_merged_job_for_watch_root(
 def _cached_status_payload(root: WatchRoot, *, include_inventory: bool, inventory_limit: int | None) -> dict:
     cached = root.inventory_cache_json or None
     if isinstance(cached, dict):
-        payload = {
+        payload = normalize_persisted_watch_inventory_payload({
             **cached,
             "scan_mode": root.scan_mode or "fast",
-        }
+            "root_path": root.path,
+        })
         if not include_inventory:
             payload["inventory"] = {"pending": [], "deduped": []}
         elif inventory_limit is not None:

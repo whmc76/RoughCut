@@ -292,6 +292,126 @@ def test_build_bilibili_mainline_task_accepts_runtime_collection_and_schedule_ov
     assert "skip_collection_select" not in overrides
 
 
+def test_build_bilibili_mainline_task_derives_schedule_from_slot_without_requery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    media_path = tmp_path / "video.mp4"
+    media_path.write_bytes(b"video")
+    cover_path = tmp_path / "01-bilibili-cover.jpg"
+    cover_path.write_bytes(b"cover")
+
+    profiles_payload = {
+        "profiles": [
+            {
+                "id": "creator-1",
+                "name": "FAS",
+                "creator_profile": {
+                    "publishing": {
+                        "platform_credentials": [
+                            {
+                                "id": "cred-bili",
+                                "platform": "bilibili",
+                                "credential_ref": "browser-profile:chrome:bili-1",
+                                "account_label": "FAS B站",
+                                "browser_profile_id": "browser-profile:chrome:bili-1",
+                                "status": "logged_in",
+                            }
+                        ]
+                    }
+                },
+            }
+        ]
+    }
+    platform_packaging = {
+        "platforms": {
+            "bilibili": {
+                "titles": ["MAXACE美杜莎4开箱先看细节"],
+                "description": "正文内容",
+                "tags": ["MAXACE", "EDC"],
+                "cover_path": str(cover_path),
+                "declaration": "内容无需标注",
+                "category": "生活兴趣/户外潮流",
+                "collection_name": "EDC刀光火工具集",
+                "scheduled_publish_slot": "19:30",
+            }
+        }
+    }
+
+    def _unexpected_derive(**_kwargs):
+        raise AssertionError("should not derive publication scheme when slot contract is already present")
+
+    monkeypatch.setattr(publication_mainline, "_derive_mainline_platform_option", _unexpected_derive)
+    monkeypatch.setattr(publication_mainline, "_next_local_datetime", lambda slot: f"2026-06-10T{slot}")
+
+    payload = publication_mainline.build_platform_mainline_browser_agent_task(
+        creator_profile_id="creator-1",
+        profiles_payload=profiles_payload,
+        platform_packaging=platform_packaging,
+        platform="bilibili",
+        media_path=str(media_path),
+    )
+
+    assert payload["content"]["scheduled_publish_at"] == "2026-06-10T19:30"
+
+
+def test_build_bilibili_mainline_task_accepts_slot_override_for_schedule(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    media_path = tmp_path / "video.mp4"
+    media_path.write_bytes(b"video")
+    cover_path = tmp_path / "01-bilibili-cover.jpg"
+    cover_path.write_bytes(b"cover")
+
+    profiles_payload = {
+        "profiles": [
+            {
+                "id": "creator-1",
+                "name": "FAS",
+                "creator_profile": {
+                    "publishing": {
+                        "platform_credentials": [
+                            {
+                                "id": "cred-bili",
+                                "platform": "bilibili",
+                                "credential_ref": "browser-profile:chrome:bili-1",
+                                "account_label": "FAS B站",
+                                "browser_profile_id": "browser-profile:chrome:bili-1",
+                                "status": "logged_in",
+                            }
+                        ]
+                    }
+                },
+            }
+        ]
+    }
+    platform_packaging = {
+        "platforms": {
+            "bilibili": {
+                "titles": ["MAXACE美杜莎4开箱先看细节"],
+                "description": "正文内容",
+                "tags": ["MAXACE", "EDC"],
+                "cover_path": str(cover_path),
+                "declaration": "内容无需标注",
+            }
+        }
+    }
+
+    monkeypatch.setattr(publication_mainline, "_next_local_datetime", lambda slot: f"2026-06-10T{slot}")
+
+    payload = publication_mainline.build_platform_mainline_browser_agent_task(
+        creator_profile_id="creator-1",
+        profiles_payload=profiles_payload,
+        platform_packaging=platform_packaging,
+        platform="bilibili",
+        media_path=str(media_path),
+        scheduled_publish_at_override="19:30",
+    )
+
+    assert payload["content"]["scheduled_publish_at"] == "2026-06-10T19:30"
+
+
 def test_build_bilibili_mainline_task_accepts_runtime_copy_overrides(tmp_path: Path) -> None:
     media_path = tmp_path / "video.mp4"
     media_path.write_bytes(b"video")

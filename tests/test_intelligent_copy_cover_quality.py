@@ -59,6 +59,81 @@ def test_completed_codex_cover_with_existing_matching_file_is_publish_ready(tmp_
     assert result["image_dimensions"] == {"width": 1080, "height": 1920}
 
 
+def test_cover_quality_accepts_stale_metadata_pending_when_request_completed(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "cover.jpg"
+    output.write_bytes(b"generated")
+
+    monkeypatch.setattr(quality, "_read_image_dimensions", lambda path: (1080, 1920, None))
+
+    result = quality.assess_cover_publish_readiness(
+        _metadata(output, status="pending_codex_imagegen"),
+        _request(output, status="completed"),
+        output,
+    )
+
+    assert result["publish_ready"] is True
+    assert result["blocking_reasons"] == []
+
+
+def test_reference_cover_fallback_is_never_publish_ready_even_if_file_and_verification_exist(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "cover.jpg"
+    output.write_bytes(b"fallback")
+    request = _request(output, status="pending_codex_imagegen")
+    request["bitmap_title_contract_verified_at"] = datetime.now(UTC).isoformat()
+    request["bitmap_title_contract_check_unavailable"] = True
+
+    monkeypatch.setattr(quality, "_read_image_dimensions", lambda path: (1080, 1920, None))
+
+    result = quality.assess_cover_publish_readiness(
+        {
+            "source": "reference_cover_fallback",
+            "image_generation": {
+                "status": "pending_codex_imagegen",
+                "backend": "codex_builtin",
+                "output_path": str(output),
+            },
+        },
+        request,
+        output,
+    )
+
+    assert result["publish_ready"] is False
+    assert "封面当前仅为参考帧占位图，正式生图尚未完成" in result["blocking_reasons"]
+
+
+def test_cover_group_reuse_inherits_reference_cover_fallback_blocker(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "bilibili-cover.jpg"
+    output.write_bytes(b"fallback")
+    request = _request(output, status="pending_codex_imagegen")
+    request["bitmap_title_contract_verified_at"] = datetime.now(UTC).isoformat()
+
+    monkeypatch.setattr(quality, "_read_image_dimensions", lambda path: (1600, 900, None))
+
+    result = quality.assess_cover_publish_readiness(
+        {
+            "source": "cover_group_reuse",
+            "group_generation": {
+                "source": "reference_cover_fallback",
+                "image_generation": {
+                    "status": "pending_codex_imagegen",
+                    "backend": "codex_builtin",
+                    "output_path": str(output),
+                },
+            },
+            "image_generation": {
+                "status": "pending_codex_imagegen",
+                "backend": "codex_builtin",
+                "output_path": str(output),
+            },
+        },
+        request,
+        output,
+    )
+
+    assert result["publish_ready"] is False
+    assert "封面当前仅为参考帧占位图，正式生图尚未完成" in result["blocking_reasons"]
+
+
 def test_completed_codex_cover_missing_file_is_not_publish_ready(tmp_path, monkeypatch) -> None:
     output = tmp_path / "missing-cover.jpg"
 

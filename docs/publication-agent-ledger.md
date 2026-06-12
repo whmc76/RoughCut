@@ -60,14 +60,15 @@ Keep Bilibili closed on the shared framework side and only reopen it if fresh li
   - `首页推荐封面（4:3） -> landscape_4_3`
   - `个人空间封面（16:9） -> landscape_16_9`
 - Browser-agent Bilibili cover execution now consumes per-slot expected paths and fails closed when either slot path is missing instead of reusing one image for both slots.
+- The Bilibili cover-editor closeout is now closed in the `social-auto-upload` adapter path:
+  - the modal submit button is resolved from the visible bottom action band instead of generic text-only matching
+  - main-form cover readiness is verified from actual preview/background-image state instead of stale overlay text
+  - final publish click now accepts the real `立即投稿` container/button variants
+  - post-submit flow now waits for platform completion/redirect evidence before closing the browser, so upload is not aborted mid-transfer
+- Fresh live evidence on `2026-06-10 22:21:33` confirms the title `迟来的开箱！maxace蜂巢3顶配，这做工细节经得起细看` is present in `https://member.bilibili.com/platform/upload-manager/article` with platform state `转码中 / 审核中`.
 
 ### Open
 
-- Current first open Bilibili blocker is no longer source-of-truth or stale-draft reset. It is the execution-layer closeout inside the cover editor:
-  - fresh live evidence still shows `clicked_done=false`
-  - `default_first_frame_after=true`
-  - `editor_still_open=false`
-  - so slot-path routing is fixed, but the cover editor final confirmation/readback contract is still not fully closed.
 - Upload progress may still legitimately block final publish. This is not a Bilibili framework regression as long as the task stops on `upload_ready` only.
 - After browser-agent restarts, `RoughCut Publication Bridge` may need to reconnect before live verification can resume. This is an external runtime state, not a publication-framework regression.
 
@@ -107,3 +108,115 @@ The dual-cover source-of-truth contract can only be reopened if fresh live evide
 - Current first open blocker for Xiaohongshu is twofold:
   - production `platform-packaging` still `publish_ready=false`
   - direct `/probes` for `xiaohongshu` currently times out, so detailed page inventory is still a shared framework issue rather than a Xiaohongshu-local flow issue
+
+## 2026-06-11 Stable Baseline
+
+### Formal RoughCut Publication Status
+
+- `douyin` is closed as a RoughCut formal publication platform.
+- `kuaishou` is closed as a RoughCut formal publication platform.
+- `xiaohongshu` is closed as a RoughCut formal publication platform.
+- `bilibili` is closed as a RoughCut formal publication platform on the adapter/runtime side.
+- `wechat-channels` is not closed yet. Current blocker is login-state stability, not publish-field control logic.
+
+### Current Production Flow
+
+- Intelligent publish no longer requires `browser-agent` readiness for targets that resolve to `social_auto_upload` only.
+- Formal publish now reads promoted production `smart-copy`, not preview-only artifacts.
+- Incompatible source media is auto-transcoded into `smart-copy/_publication_runtime/*.publication-runtime.mp4` before publish.
+- Current direct-publish override is authoritative: explicit blank `scheduled_publish_at` cancels inherited schedule windows instead of falling back to packaging slots.
+- All currently closed platforms should publish through the same RoughCut `submit_publication_attempts -> adapter executor` path; do not validate with one script and then release with another.
+
+### Bilibili
+
+- The stable Bilibili cover contract is dual-slot and must stay explicit:
+  - `landscape_4_3` for `首页推荐封面（4:3）`
+  - `landscape_16_9` for `个人空间封面（16:9）`
+- RoughCut formal payloads now carry both cover slots into `social-auto-upload`.
+- RoughCut `social-auto-upload` adapter now also emits stable Bilibili category fallback by passing both:
+  - page category display: `生活兴趣/户外潮流`
+  - fallback `tid=250`
+- Root cause of the earlier “测试时分区正确，真发布跑偏” regression:
+  - symptom: the published Bilibili稿件 drifted to the wrong partition during formal release
+  - first bad layer: `src/roughcut/publication_social_auto_upload.py::maybe_resolve_bilibili_tid`
+  - root cause: when UI category text existed but did not map directly to a known `tid`, the adapter suppressed `legacy_api_fallback` and sent only the display string downstream
+  - why it surfaced now: RoughCut formal publish had switched to the `social-auto-upload` adapter path, which needs a stable `tid` fallback even when page text uses a newer hierarchical label
+- This root cause is fixed in-repo. Reopen Bilibili only if fresh live evidence from the current script version shows category drift again.
+- The already published `maxace蜂巢3顶配` Bilibili稿件 may still contain the old wrong partition/tag result. Treat that as historical output drift, not an open framework blocker.
+
+### Douyin
+
+- Current formal contract is direct publish first, not schedule-first.
+- Stable requirements already proven in the formal path:
+  - accurate collection selection
+  - vertical and horizontal cover slot support
+  - no wait-for-upload-complete gate before editable field completion
+- Do not reintroduce pre-publish “repair re-entry” loops. Upload starts first; editable fields are filled linearly while upload progresses.
+
+### Kuaishou
+
+- Current formal contract is closed on:
+  - collection selection
+  - declaration
+  - topic/tag insertion
+  - upload-time field completion
+- Tag selection should prefer real dropdown suggestions when available, but case drift in the final tag should not block publish if the first matching recommendation is usable.
+
+### Xiaohongshu
+
+- Current formal contract is closed on:
+  - collection
+  - original declaration
+  - group chat
+  - cover-first ordering to avoid later modal interruption
+- The decisive stabilization rule is: complete cover-related work before later declaration/group-chat modal interactions can be interrupted by upload-finish side effects.
+
+### WeChat Channels
+
+- WeChat Channels is now part of the RoughCut `social-auto-upload` target matrix and is no longer treated as manual handoff by contract.
+- Cover contract is already upstream-aligned:
+  - `landscape_4_3`
+  - `portrait_3_4`
+- Current open blocker is login-state durability:
+  - symptom: formal publish reaches `social-auto-upload` but fails before upload because the page lands on `https://channels.weixin.qq.com/login.html`
+  - first bad layer: upstream `E:/WorkSpace/_eval/social-auto-upload/uploader/tencent_uploader/main.py::cookie_auth/_is_tencent_login_completed`
+  - root cause: the old login check treated login-page marketing text containing `发表视频` as proof of a valid creator session
+  - why it surfaced now: once WeChat Channels moved into the same formal adapter path, fake-positive cookie validation allowed the publish step to continue into a non-creator page where no upload control existed
+- Upstream fixes already applied locally:
+  - `cookie_auth()` now waits for route stabilization before judging validity
+  - `_is_tencent_login_completed()` now requires real creator-page controls instead of generic marketing text
+  - upload entry probing now captures explicit diagnostics when no file input is found
+- Practical conclusion:
+  - if `sau_cli.py tencent check --account "FAS · Chrome"` is `invalid`, do not continue publish attempts
+  - first refresh login, then publish
+- Remaining blocker to close WeChat Channels is external runtime state: cookie expiry / confirmation flow, not current field automation logic.
+
+### YouTube And X
+
+- Current target direction is:
+  - `youtube -> browser-agent` bound to the creator card's real Chrome profile
+  - `x -> x_link_share` with the public YouTube link, not local video upload
+- Root cause of the old YouTube/X drift:
+  - symptom: `x` was modeled in RoughCut runtime payloads as a link-share target, but the shared platform matrix still described it like a local video-upload platform
+  - first bad layer: `src/roughcut/publication_platform_matrix.json`
+  - root cause: shared publish-project contract for `x` had not been updated after `x_link_share` became the intended execution path
+  - why it surfaced now: adding `YouTube -> X` chained publish would otherwise keep test/playbook logic and production adapter logic split again
+- This is now corrected in-repo:
+  - `_resolve_publication_target_adapter("x", "")` defaults to `x_link_share`
+  - `x.publish_scheme.projects` now uses `link_share`, not `media_upload`
+- Current status:
+  - `youtube` is intentionally kept off the RoughCut `social-auto-upload` adapter path
+  - root cause: `social-auto-upload` cannot safely reuse an already-open real Chrome Google session for YouTube without hitting profile-lock/runtime drift
+  - practical rule: when the requirement is "reuse the bound real Chrome Google account", `youtube` must stay on `browser-agent`, not `social-auto-upload`
+
+### Certification Snapshot
+
+- On `2026-06-10` real RoughCut formal publication for `maxace蜂巢3顶配开箱` reached:
+  - `bilibili -> published`
+  - `douyin -> published`
+  - `kuaishou -> published`
+  - `xiaohongshu -> published`
+  - `wechat-channels -> blocked by invalid login state`
+- `PUBLICATION_SOCIAL_AUTO_UPLOAD_PYTHON` must point to the repo-local interpreter:
+  - `E:/WorkSpace/_eval/social-auto-upload/.venv/Scripts/python.exe`
+  - using system `python` can reintroduce fake auth failures caused by missing dependencies.

@@ -4,32 +4,358 @@ This file is the source of truth for the current active task state across long C
 
 ## Current Objective
 
-Stabilize RoughCut's subtitle and auto-edit pipeline into a stage-disciplined architecture that can support high-throughput batch automatic editing with acceptable quality. The immediate target is to recover a usable end-to-end chain and reach a practical `~90` point operating level before pursuing slower long-tail polish.
+Drive the universal auto-edit strategy refactor from the now-closed `information_density` baseline, without reopening already-closed `C1-C5` framework work. The active objective is to finish the behavior-preserving strategy-contract migration in this order: `Phase 0` baseline freeze, `Phase 1` strategy metadata, `Phase 2` candidate producer metadata, `Phase 3` unified strategy decision/risk gate, then `Phase 4-5` editorial vs packaging boundary isolation.
 
 ## Current Workstream
 
-- Write the authoritative auto-edit recovery architecture and bind it to existing canonical transcript, subtitle projection, and source timeline contracts.
-- Split the recovery work into executable milestones with explicit deliverables, acceptance criteria, and dependency order.
-- Prioritize high-return fixes: restore manual editor availability, stop cross-stage mutation, restore predictable rule behavior, then improve automatic cut quality.
+- Use `docs/design/2026-06-12-universal-auto-edit-strategy-implementation-plan.md` as the execution source of truth for this refactor.
+- Treat the current chain as the `information_density` baseline, not as the long-term product boundary.
+- Keep the refactor behavior-preserving until the strategy-contract migration is complete; metadata and helper boundaries may change, but current keep/remove decisions must stay equivalent.
+- Stop expanding report schemas, golden metadata, and new registries unless a real replay proves they are required for this strategy migration.
+- Keep verification minimal and practical: targeted contract tests plus one real anchor replay are enough for each narrow slice.
+- `Phase 0` current-slice baseline verification is now closed with focused regressions plus a real manual-editor apply-semantics anchor.
+- `Phase 1` strategy metadata, `Phase 2` candidate producer metadata, the first `Phase 3` shared strategy-decision slice, the first `Phase 4` shared editorial-timeline slice, and the first `Phase 5` shared packaging-timeline slice are now landed in code.
+- `Phase 5` helper coverage has now reached `variant_timeline_bundle`, `manual-editor/apply` packaging-plan recovery, render-start packaging/effect presence checks, and batch scorecard transition/effect summaries.
+- `Phase 5` shared packaging helper has now also been hardened to accept already-normalized `packaging_timeline` payloads directly, so nested packaging assets are no longer lost when helper consumers pass normalized payloads instead of full render plans.
+- `Phase 5` consumer cleanup has now been extended from `pipeline/steps.py` into `media/render.py`, `api/jobs.py`, and the subtitle section-profile consumer path, so nested packaging payloads are now read through shared packaging helpers across the main render/manual-editor consumption chain.
+- The formal execution source of truth now also states that the refactor can proceed immediately from the current baseline; do not wait for future strategy design before continuing the behavior-preserving migration.
+- The next code-bearing slice is to keep replacing remaining duplicate keep/remove and packaging reconstruction points with the shared helpers, with the latest `Phase 5` cut having removed the remaining high-value flat `outro/editing_accents` consumers in `src/roughcut/pipeline/steps.py` and the normalized-payload packaging-helper loss in `src/roughcut/edit/packaging_timeline.py`.
+- A fresh anchor replay has now revalidated the current refactor baseline on `noc_mt34_short_done` via `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-phase5`; result: `status=partial` by design, `required_checks=4/4`, `manual_editor_apply_semantics_ok=true`, `live_readiness=pass`.
+- Do not start `step_demonstration`, `experience_and_mood`, `event_highlight`, or `narrative_assembly` implementation before `information_density` strategy migration is closed.
 - Treat publication work as parked context in `docs/publication-agent-ledger.md`; it is not the active objective for this thread.
+- Avoid parallel coding on `src/roughcut/pipeline/steps.py`, `src/roughcut/api/jobs.py`, and `src/roughcut/media/render.py`; if another thread is still touching those files, treat it as read-only or merge-later context instead of active concurrent implementation.
+- Historical notes later in this file may describe packages as "still open" at the time they were written. For current closure judgment, trust the 2026-06-12 matrix/audit first: `C1-C5` are closed for the current narrowed scope, and only optional evidence breadth or deferred `C6` work remains.
 
 ## Open Work
 
-- Restore real-job manual editor usability and remove hidden fallback behavior that rewrites projection or edit inputs across stages.
-- Remove `manual-editor/apply` side mutation: keep subtitle timing/text in the edit contract output, and do not rebind editable subtitles through projection validation repair when no explicit fallback contract allows it.
-- Rebuild the rule system so filler words, catchphrases, pause trimming, repeated speech, and smart-delete candidates are generated in one place and audited consistently.
-- Add a real-job evaluation harness and golden job set so quality claims are based on repeatable runs rather than screenshots or ad hoc inspection.
-- Add a regression test for `_validated_subtitle_projection_for_timeline` contract: default path is non-mutating, repair path is explicit.
-- Tighten smart-cut pause overlap filtering to consume the spoken-ASR surface first (`transcript_text_raw`) so corrected display text can’t hide timing-aware gating.
+- Land `Phase 4` and `Phase 5` as boundary-isolation work only: explicit editorial helper first, packaging isolation second.
+- Continue replacing duplicated keep/remove reconstruction with the shared editorial helper instead of adding new per-surface utilities.
+- Continue replacing duplicated packaging/effect extraction with the shared packaging helper instead of re-reading render-plan flat fields ad hoc.
+- Keep sweeping for any residual low-value flat packaging reads after the packaged-timeline mapping cleanup, but do not reopen `Phase 5` with a new abstraction layer unless a real consumer still bypasses the shared helper.
+- Keep at least one fresh anchor replay in the loop after each meaningful `Phase 4/5` consumer cleanup; the current short-anchor replay is green again, but a later wider render-stage anchor is still useful before claiming the strategy migration closed.
+- Extend the shared strategy-decision slice only where it removes real duplicate judgment points; do not create a parallel decision framework beside current payloads.
+- Keep one real manual-editor anchor in the loop whenever `cut_analysis / refine_decision_plan / timeline` behavior changes.
+- Keep provider-class render failures (`avatar_full_track_provider_response_error / avatar_full_track_busy_exhausted / avatar_full_track_slot_timeout`) as optional future evidence capture only if they reappear in real runs; do not reopen render diagnostics/report frameworks preemptively.
+- Keep scorecard / required-check fields trimmed to delivery-critical signals only; only trim further if a newer real sample still proves operator-facing noise remains after the current markdown contraction.
 
 ## Resolved Decisions
 
+- 2026-06-12: `C1` 的 transcript-row fallback segment shape 也已补齐成显式 surface payload，不再只留单一 `text`：
+  - 观察到的症状：
+    - `src/roughcut/pipeline/steps.py::_build_edit_plan_transcript_segments(...)`
+    - 当没有 artifact transcript-evidence，只能从 `TranscriptSegment` rows 回退时
+    - 旧逻辑只会构造：
+      - `text`
+    - 而不会同步给出 `text_raw / text_canonical / text_norm / text_final`
+    - 这让后续 normalize/consumer 只能继续围绕 generic `text` 猜 surface
+  - 第一坏层：
+    - transcript-row fallback segment shape
+  - 根因：
+    - 前面虽然已经在 normalize/semantic helper 层逐步收口
+    - 但 transcript-row fallback 自己仍输出单字段 shape，导致后续消费者只能继续把它当弱事实层
+  - 已落地修复：
+    - `_build_edit_plan_transcript_segments(...)` 现在会显式输出：
+      - `text`
+      - `text_raw`
+      - `text_canonical`
+      - `text_norm`
+      - `text_final`
+    - 对 transcript-row fallback 而言，这几个字段当前同值，目的是消除后续“只剩 generic text 再做二次推断”的 shape 漂移
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py -k "build_edit_plan_transcript_segments_emits_surface_aware_fallback_shape or normalize_transcript_segment_payloads_preserve_raw_and_canonical_surfaces" -q`
+    - `python -m py_compile src/roughcut/pipeline/steps.py`
+  - 结论：
+    - `C1` 现在又少了一条 transcript evidence fallback 仍输出弱 shape 的回归源
+    - 剩余 mixed-read 更接近离散消费点，而不是 transcript-row 主入口还在产出不完整 surface payload
+- 2026-06-12: `C1` 的 canonical projection fallback 分词入口也已收回 shared semantic helper：
+  - 观察到的症状：
+    - `src/roughcut/pipeline/steps.py::_build_fallback_canonical_words(...)`
+    - 旧逻辑直接用：
+      - `text_canonical or text or text_raw`
+    - 这意味着一旦 segment 上同时存在 generic `text` 与显式 canonical surface，fallback 分词仍可能先拿到 generic `text`
+  - 第一坏层：
+    - canonical projection fallback 分词入口
+  - 根因：
+    - canonical projection 主路径虽然已经开始保留 surface
+    - 但 fallback 分词入口还保留旧的字段优先级，没复用当前 shared semantic 读取 contract
+  - 已落地修复：
+    - `_build_fallback_canonical_words(...)` 现统一改走 `subtitle_semantic_item_text(...)`
+    - 语义收口为：
+      - 优先显式 canonical surface
+      - 只有完全没有 surface 时，才允许 generic `text` 兜底
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py -k "build_fallback_canonical_words_prefers_explicit_canonical_surface_over_generic_text or subtitle_semantic_item_text_preserves_explicit_canonical_surface_over_generic_text or normalize_transcript_segment_payloads_preserve_raw_and_canonical_surfaces" -q`
+    - `python -m py_compile src/roughcut/pipeline/steps.py src/roughcut/edit/subtitle_surfaces.py`
+  - 结论：
+    - `C1` 现在又少了一条 canonical projection fallback 仍可能绕开显式 canonical surface 的回归源
+    - 剩余 mixed-read 更接近更分散的个别消费点，而不是 canonical projection 相关入口还在用旧 fallback 逻辑
+- 2026-06-12: `C1` 的 canonical-transcript segment 入口也已从 `api/pipeline` 双份手写 fallback 收回 shared surface helper：
+  - 观察到的症状：
+    - `src/roughcut/api/jobs.py::_manual_editor_canonical_layer_namespace(...)`
+    - `src/roughcut/api/jobs.py::_manual_editor_canonical_segment_source_rows(...)`
+    - `src/roughcut/api/jobs.py` 的 canonical context 汇总
+    - `src/roughcut/pipeline/steps.py` 的 canonical namespace / projection-validation source payload
+    - 这些位置之前都各自手写：
+      - `text_canonical <- text_canonical or text or text_raw`
+      - `text_raw <- text_raw or text_canonical or text`
+      - `transcript_text <- text_raw or text`
+    - 结果是同一份 canonical segment 在 `api` 和 `pipeline` 间仍有多套事实恢复口径
+  - 第一坏层：
+    - canonical-transcript segment 的 shared normalize / source-row 入口
+  - 根因：
+    - surface helper 已经存在
+    - 但 canonical-transcript 这一类“上游已带显式 raw/canonical surface”的 payload 仍在多个入口各自手工补全字段
+    - 导致 generic `text` 仍可能在某些边界重新干扰显式 `text_canonical/text_raw`
+  - 已落地修复：
+    - 上述入口现统一改走 `subtitle_surface_item_dict(...)` / `subtitle_semantic_item_text(...)`
+    - 语义统一为：
+      - `text_raw` 优先显式 raw
+      - `text_canonical/text_norm` 优先显式 canonical
+      - 只有完全没有显式 surface 时，才允许 generic `text` 兜底
+    - `projection validation` 的 canonical source payload 也已保持：
+      - `text_raw = raw`
+      - `text_norm = canonical`
+      - `transcript_text = raw or canonical`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "canonical_layer_namespace_preserves_explicit_canonical_over_generic_text or projection_validation_source_payloads_preserve_canonical_over_generic_text or projection_validation_source_payloads_keep_fact_layers_without_explicit_display_text" -q`
+    - `python -m py_compile src/roughcut/api/jobs.py src/roughcut/pipeline/steps.py`
+  - 结论：
+    - `C1` 又少了一条 `api/pipeline` 双份 canonical fallback 分叉
+    - 剩余 mixed-read 更接近零散消费点，而不是 canonical-transcript 主入口仍在多套口径恢复 surface
+- 2026-06-12: `C1` 的一批 review 语义读取入口也已从“canonical helper 失败就回退 generic text”收回共享 semantic helper：
+  - 观察到的症状：
+    - 下列主消费点都在使用同一类模式：
+      - `src/roughcut/review/content_profile.py::_content_profile_semantic_text(...)`
+      - `src/roughcut/review/content_understanding_evidence.py::_subtitle_semantic_text(...)`
+      - `src/roughcut/review/domain_glossaries.py::_glossary_semantic_text(...)`
+      - `src/roughcut/review/intelligent_copy.py::_intelligent_copy_semantic_text(...)`
+      - `src/roughcut/review/subtitle_translation.py::_subtitle_translation_source_text(...)`
+    - 旧逻辑都是：
+      - `subtitle_canonical_rule_text(item) or generic text`
+    - 这意味着即使 item 上已经有显式 canonical surface，后面仍有机会在某些 payload 形态下被 generic `text` 抢回语义事实
+  - 第一坏层：
+    - review 语义入口的 shared fallback 模式
+  - 根因：
+    - `subtitle_canonical_rule_text(...)` 只解决“按 surface 读取”的问题
+    - 但这些调用点自己又各自加了一层 generic text fallback，导致“显式 surface 优先、generic 只在完全没 surface 时兜底”这个原则没有单点化
+  - 已落地修复：
+    - `src/roughcut/edit/subtitle_surfaces.py` 新增 `subtitle_semantic_item_text(...)`
+    - helper 语义：
+      - 有显式 surface 时，返回 canonical surface
+      - 只有完全没有 surface 时，才使用 generic fallback text
+    - 上述 5 个主消费点现已统一复用该 helper
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py -k "subtitle_semantic_item_text_preserves_explicit_canonical_surface_over_generic_text or review_transcript_evidence_items_preserve_surface_distinctions or normalize_transcript_segment_payloads_preserve_raw_and_canonical_surfaces" -q`
+    - `python -m py_compile src/roughcut/edit/subtitle_surfaces.py src/roughcut/review/content_profile.py src/roughcut/review/content_understanding_evidence.py src/roughcut/review/domain_glossaries.py src/roughcut/review/intelligent_copy.py src/roughcut/review/subtitle_translation.py`
+  - 结论：
+    - `C1` 现在又少了一类“多处 review semantic read 自己手写 generic fallback，导致 canonical surface 被兼容字段抢回去”的共享回归源
+    - 剩余 mixed-read 更接近个别孤立消费点，而不是这批语义主入口仍在重复同一种 fallback 漂移
+- 2026-06-12: `C1` 的 transcript-context 主路径也已从“normalize 时先抹平 surface，再在消费端读 generic text”收回 canonical 语义合同：
+  - 观察到的症状：
+    - `src/roughcut/pipeline/steps.py::_normalize_transcript_segment_payloads(...)`
+    - 之前只会产出单一 `text`
+    - `src/roughcut/pipeline/steps.py` 在构造 cut-review `transcript_context` 时又直接读 `entry["text"]`
+    - 这会让上游明明已有 `text_raw / text_canonical` 的 transcript segment，在主链语义上下文里再次被 generic `text` 压扁
+  - 第一坏层：
+    - pipeline transcript segment normalize / transcript_context build
+  - 根因：
+    - transcript payload normalize 仍停留在“只保留一份文本”的旧 contract
+    - 后续 review/context 构造只能继续消费这个被压扁的 `text`
+  - 已落地修复：
+    - `_normalize_transcript_segment_payloads(...)` 现复用 `subtitle_surface_item_dict(...)`
+    - normalize 后会保留：
+      - `text_raw`
+      - `text_canonical`
+      - `text_norm`
+      - `text_final`
+      - 同时继续保留兼容字段 `text`
+    - cut-review `transcript_context` 现在优先走 `subtitle_canonical_rule_text(entry)`，只有拿不到 canonical surface 时才回退 `entry["text"]`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py -k "normalize_transcript_segment_payloads_preserve_raw_and_canonical_surfaces or review_transcript_evidence_items_preserve_surface_distinctions or pipeline_suspicious_timing_uses_display_surface_contract" -q`
+    - `python -m py_compile src/roughcut/pipeline/steps.py`
+  - 结论：
+    - `C1` 现在又少了一条“transcript context 主路径先把 raw/canonical 写平，再拿 generic text 当语义事实”的回归源
+    - 剩余 mixed-read 更像零散消费者，而不是 transcript normalize/context 这条主链仍有系统性 surface 压扁
+- 2026-06-12: `C1` 的 suspicious-subtitle-timing gate 也已从“generic text 兜底复活 display 层”收回共享 surface 合同：
+  - 观察到的症状：
+    - `src/roughcut/api/jobs.py::_manual_editor_projection_has_suspicious_subtitle_timing(...)`
+    - `src/roughcut/pipeline/steps.py::_projection_has_suspicious_subtitle_timing(...)`
+    - 这两处旧逻辑都会在 `subtitle_display_rule_text(entry)` 为空时，再回退到 `entry["text"]`
+    - `pipeline` 侧还缺少“空文本直接跳过”的保护，因此 display-suppressed row 也可能被误判成“长时短字可疑字幕”
+  - 第一坏层：
+    - manual-editor / pipeline 共用的 suspicious timing gate
+  - 根因：
+    - 虽然 display surface helper 已经能正确返回空字符串
+    - 但 gate 层仍保留了“读不到 display 就回退 generic text”的旧兜底思路
+    - 再加上 `pipeline` 侧没有 `if not text.strip(): continue`，导致 suppressed row 会被空文本路径误伤
+  - 已落地修复：
+    - 两处 gate 现统一改走：
+      - `subtitle_surface_item_dict(entry, generic_fallback_text=entry["text"])["text_final"]`
+    - 语义变成：
+      - 有显式 surface 时尊重 display contract
+      - 完全没有显式 surface 时才允许 generic `text` 兜底
+    - `pipeline` 侧补齐空 display 文本直接 `continue`，与 `api` 侧保持同一 gate 行为
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py -k "manual_editor_suspicious_timing_uses_display_surface_contract or pipeline_suspicious_timing_uses_display_surface_contract" -q`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "rejects_short_subtitle_with_runaway_duration" -q`
+    - `python -m py_compile src/roughcut/api/jobs.py src/roughcut/pipeline/steps.py src/roughcut/edit/subtitle_surfaces.py`
+  - 结论：
+    - `C1` 现在又少了一条“shared gate 仍会用 generic text 复活 suppressed display row”的回归源
+    - 剩余 mixed-read 更接近个别消费点清理，而不是这条 projection/manual gate 仍在系统性反灌 display 层
+- 2026-06-12: `C1` 的 review transcript-evidence 入口又收掉了一层“显式 surface 在构造 excerpt items 时被写平”的共享残口：
+  - 观察到的症状：
+    - `src/roughcut/review/content_profile.py::_transcript_evidence_items(...)`
+    - `src/roughcut/review/content_understanding_evidence.py::_transcript_excerpt_items(...)`
+    - 两处都会把 transcript evidence 里的 dict segment 重新组装成：
+      - `text_raw = text/raw_text/text_raw`
+      - `text_norm = text/raw_text/text_norm`
+      - `text_final = text/raw_text/text_final`
+    - 这会在上游明明已经给出独立 `text_raw/text_norm/text_final` 时，又把三层 surface 写回同一个 generic text
+  - 第一坏层：
+    - review 侧 transcript-evidence item builder
+  - 根因：
+    - `content_profile` 与 `content_understanding_evidence` 都各自保留了一份“从 transcript evidence 拼 subtitle-like item”的老逻辑
+    - 这份逻辑没有区分“generic text 兜底”和“显式 surface 已存在”，导致显式 surface 会被构造层覆盖
+  - 已落地修复：
+    - 在 `src/roughcut/edit/subtitle_surfaces.py` 新增 `subtitle_surface_item_dict(...)`
+    - helper 原则：
+      - 如果 item 已有显式 surface，就分别保留 `text_raw / text_norm / text_final`
+      - 只有完全没有显式 surface 时，才用 generic text 同值兜底
+    - `content_profile` 与 `content_understanding_evidence` 已统一复用该 helper
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py -k "subtitle_surface_item_dict or review_transcript_evidence_items_preserve_surface_distinctions or manual_editor_projection_rows_preserve_explicit_surfaces" -q`
+    - `python -m py_compile src/roughcut/edit/subtitle_surfaces.py src/roughcut/review/content_profile.py src/roughcut/review/content_understanding_evidence.py`
+  - 结论：
+    - `C1` 现在又少了一类“前面 surface helper 已分层，但 review transcript-evidence 入口又把三层写平”的共享回归源
+    - 剩余 `C1` 更接近个别 mixed-read 调用点，而不是这条 review evidence 构造链仍在系统性破坏 surface 分层
+- 2026-06-12: `C1` 的 manual-editor source-row split 里最后一处明显 surface 写平残口已收掉：
+  - 观察到的症状：
+    - `src/roughcut/api/jobs.py::_manual_editor_split_long_subtitle_rows(...)`
+    - 在 source fallback 行按词时序拆成多个 fragment 时
+    - 之前会把同一个 `piece["text"]` 直接并排写回 `text_raw / text_norm / text_final / transcript_text / display_source_text`
+    - 结果是 fragment 级 source row 会重新把 `raw / canonical / display` 三层揉平
+  - 第一坏层：
+    - `src/roughcut/api/jobs.py::_manual_editor_split_long_subtitle_rows(...)`
+  - 根因：
+    - 前面大部分 surface 读取合同已经切回 shared helper
+    - 但 manual-editor 的 split 写回层仍按旧思路把“当前片段展示文本”当成所有 surface 的统一事实
+    - 导致一旦 source row 被拆分，前面收回来的 fact/display 分层又在这里被局部覆盖
+  - 已落地修复：
+    - 分词切分结果现在显式保留 `piece.text_raw / piece.text_norm`
+    - fragment 写回 row 时：
+      - `text_raw` 走 raw 片段
+      - `text_norm / transcript_text` 走 canonical 片段
+      - `text_final / display_source_text / text` 走 display 片段
+    - 当原 row 没有 `text_norm`，但分词结果里确实存在独立 canonical 片段时，也会显式把 `text_norm` 落回 fragment row，而不是继续丢失 canonical surface
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "split_source_fragments_preserve_spoken_text_raw_over_normalized_text or split_long_rows_use_timing_text_as_segmentation_authority or source_fallback_splits_long_subtitle_rows or split_source_fragments_follow_word_timings" -q`
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py -k "manual_editor_projection_rows_preserve_explicit_surfaces" -q`
+    - `python -m py_compile src/roughcut/api/jobs.py`
+  - 结论：
+    - `C1` 现在不再是“读取 helper 已分层，但 manual-editor split 回写时又把层次写平”
+    - 剩余 `C1` 更偏长尾 mixed-read 清理，而不是这条 source-row 主链仍有明显事实层污染
+- 2026-06-12: `C5` 的 scorecard markdown 展示层已完成一轮基于真实失败样本的收缩，而不是继续扩 schema：
+  - 触发样本：
+    - `output/test/auto-edit-recovery-golden/controlled-render-failure/20260612-060442`
+  - 观察到的症状：
+    - `detailed_output_scorecard.md` 在真实 render 失败时仍把大量 `N/A / not_generated / skipped / pass` 细节与 `auto_apply_candidate_count` 这类非交付决策字段一起平铺输出
+    - 操作者第一眼很难直接看出“这次为什么不能交付”
+  - 第一坏层：
+    - `scripts/build_batch_output_scorecard.py::render_markdown(...)`
+  - 根因：
+    - JSON 主数据结构已经够用，但 markdown 渲染仍按“全量转抄”思路输出，没有按失败态聚焦 delivery blockers
+  - 已落地修复：
+    - 失败聚焦模式下：
+      - aggregate stages 只保留非 `A` 阶段
+      - job stage 明细只保留非 `pass` 行
+      - 隐藏 `multi_platform_package / tts / ai_effects` 这类 `N/A / skipped / missing` 派生噪声
+      - 隐藏 `version_scores` 中纯 `not_generated` 项
+      - aggregate / job `editing_risk_metrics` markdown 不再展示 `auto_apply_candidate_count` 等非交付决策字段
+    - JSON scorecard 结构不变，仍保留复核所需事实面
+  - targeted regression：
+    - `python -m pytest tests/test_build_batch_output_scorecard.py -k "render_markdown or live_readiness_summary_collects_failed_checks" -q`
+    - `python -m py_compile scripts/build_batch_output_scorecard.py`
+  - fresh 真实复验：
+    - `python scripts/build_batch_output_scorecard.py --batch-report output/test/auto-edit-recovery-golden/controlled-render-failure/20260612-060442/batch_report.json --output-json output/test/auto-edit-recovery-golden/controlled-render-failure/20260612-060442/detailed_output_scorecard.slim.json --output-md output/test/auto-edit-recovery-golden/controlled-render-failure/20260612-060442/detailed_output_scorecard.slim.md`
+  - 结论：
+    - `C5` 当前不再缺“再做一轮 scorecard 展示瘦身”
+    - 后续只有在更新的真实样本上仍证明输出噪声过高时，才需要继续动 markdown 展示层
+- 2026-06-12: `C4` 的 `render_ffprobe_failed` 主链证据已补齐，而且是在真实链路上的受控回放，不是脱离主流程的伪造单测：
+  - 新增 `scripts/capture_controlled_render_failure_sample.py`
+  - 用 golden anchor `noc_mt34_short_done` clone 出真实 job 后，先跑到 `edit_plan`
+  - 仅改最新 `render_plan`，把 `intro.path` 指向非媒体文件 `docs/agent-doc-index.md`
+  - 然后重置 `render / final_review / platform_package` 为 `pending` 并重新执行原链路
+  - fresh 产物目录：
+    - `output/test/auto-edit-recovery-golden/controlled-render-failure/20260612-060442`
+  - 当前已确认：
+    - job 级失败原因为 `render_ffprobe_failed`
+    - `render_diagnostics_summary.failed_render_job_ids` 命中该 job
+    - `live_readiness.checks.render_end_state_stability.failed_render_job_ids` 命中该 job
+    - scorecard 明确阻断 `render_end_state_stability`
+    - audit snapshot 覆盖该失败 job
+  - 离线复验命令：
+    - `python scripts/verify_render_failure_signal_consistency.py --report-dir output/test/auto-edit-recovery-golden/controlled-render-failure/20260612-060442`
+    - 返回 `ok=true`
+  - 结论：
+    - `C4` 不再缺少 `render_ffprobe_failed` 这一类失败的主链证据
+    - 剩余若还要补，只是自然发生的 provider/busy/slot-timeout 样本广度，而不是 render 诊断链仍未闭环
+- 2026-06-12: 真实 `manual_editor no_material_change / metadata_refresh_render` 样本已补齐。通过 `python scripts/capture_manual_editor_no_material_change.py --job-id abbb6269-5f76-4435-a200-17a751d7632b --apply --json` 对真实 job 执行一次 no-op manual-editor apply 后，已得到：
+  - `apply_response.change_scope = no_material_change`
+  - `apply_response.render_strategy = metadata_refresh_render`
+  - `apply_response.rerun_steps = ["platform_package"]`
+  - 最新 `editorial.analysis.manual_editor.change_scope = no_material_change`
+  - 最新 `render_plan.manual_editor.change_scope = no_material_change`
+  这意味着 `C2` 不再缺少主链级真实 no-material-change 证据，后续无需再为这个点继续改 apply/render 框架。
+- 2026-06-12: 剩余收口动作已固化成 `docs/2026-06-12-final-evidence-capture-runbook.md`。这意味着后续若继续推进 `C2/C4/C5`，默认动作不再是继续加 helper、加字段、加抽象，而是先按 runbook 补两类真实样本证据；只有当 fresh 样本无法被当前共享 contract / diagnostics / gate 表达时，才允许重开代码改造。
+- 2026-06-12: `scripts/verify_manual_editor_apply_semantics.py` 现已支持 `--job-id/--source-name` 直接检查真实 job，不必先把新样本写回 golden manifest 才能验证 `no_material_change / metadata_refresh_render` 合同。这是为最终 evidence-capture runbook 服务的最小工具补足，不引入第二套合同判断逻辑。
+- 2026-06-12: `scripts/list_final_evidence_candidates.py` 已补齐，用于在不改 manifest 的情况下直接列出最近可打开的 manual-editor 真实 job，以及最近命中 `ffmpeg/provider` 目标失败原因的真实 job。fresh 实跑 `--mode all --limit 20 --json` 已确认：当前库里存在一批 `manual_editor_candidates`，但 `render_failure_candidates=[]`，因此下一步优先级继续是先抓一条真实 `no_material_change` 保存样本，而不是重开 render 框架改造。
+- 2026-06-12: `scripts/verify_render_failure_signal_consistency.py` 已补齐，用于对单个 `report_dir` 离线核验 render 失败证据是否在 `job-level render_diagnostics / render_diagnostics_summary / live_readiness.render_end_state_stability / scorecard render stage / audit snapshot` 之间保持同口径。已用真实 timeout 样本 `output/test/auto-edit-recovery-golden/c5-high-risk-render-anchor-long/20260611-094926` 复验为 `ok=true`。这意味着后续一旦出现真实 `ffmpeg/provider` 失败样本，不需要再人工逐层翻报告链。
+- 2026-06-12: 对历史范围再次扩大后的核查仍支持“只剩样本缺口”这一判断，而不是主链仍有结构缺口：
+  - 针对 `artifacts` 中最相关的类型（`render_runtime_diagnostics / quality_assessment / render_outputs / editorial / refine_decision_plan`）做更大历史窗口 SQL 扫描后，`ffmpeg_* / render_ffprobe_failed / avatar_full_track_provider_response_error / avatar_full_track_busy_exhausted / avatar_full_track_slot_timeout` 命中仍为 `0`。
+  - 对 `output/test/auto-edit-recovery-golden/**/*.snapshot.json` 的失败快照再做离线抽样后，当前可见失败主因仍主要是：
+    - `render` / 其他步骤 timeout
+    - `stop_after` 主动 partial 停止
+    而不是目标中的 `ffmpeg/provider` 分类。
+  - 这进一步说明：在受控 `render_ffprobe_failed` 回放补齐之前，`C4` 的缺口是“目标失败样本尚未出现”，而不是共享 diagnostics / scorecard / live gate 还没打通。
+- 2026-06-12: 已新增 `docs/2026-06-12-final-completion-audit-matrix.md`，把当前 Stage B 收口要求压成逐项“要求 / 证据 / 状态 / 缺口类型”矩阵。当前矩阵结论是：
+  - `C2` 已按当前范围收口；
+  - `C3/C5` 主链结构已收口，剩余多为可选 breadth；
+  - `C4` 在当时仅 timeout 主链已闭环；
+  - 之后已由受控真实链路回放补齐 `render_ffprobe_failed` 主项证据；自然 provider 类失败仍只剩可选 breadth。
+- 2026-06-12 的当前数据库抽样也支持上面的结论，而不是只靠 `output/test` 文件检索。对 `artifacts` 中与收口最相关的子集（`render_runtime_diagnostics / quality_assessment / render_outputs / editorial / refine_decision_plan`，共 `216` 条）做定向 SQL 检查后，现成命中数为：
+  - `manual_editor_no_material_change / metadata_refresh_render`: `0`
+  - `ffmpeg_* / render_ffprobe_failed`: `0`
+  - `avatar_full_track_provider_response_error / avatar_full_track_busy_exhausted / avatar_full_track_slot_timeout`: `0`
+  这进一步确认：当前工作区剩余未封口项主要是“缺少现成真实样本证据”，而不是共享 helper、报告链或 manual-editor/render 主合同还存在结构性分叉。
+- `C4` 的旧结论已被当天后续受控回放部分更新：此前对 `output/test/**/batch_report.json|golden_set_summary.md|*.md` 的关键词扫描确实只看到 `avatar_full_track_call_timeout` 主链；但现在 `render_ffprobe_failed` 已通过真实链路受控回放补齐，所以后续 `C4` 若继续推进，只应等待自然 provider 类样本，而不是再修改 shared helper 或报告链结构。
+- `C2` 当前剩余缺口已进一步缩成样本覆盖，而不是合同结构。2026-06-12 对 `docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json`、`output/test/**/batch_report.json`、`golden_set_summary.md` 与 `verify_manual_editor_apply_semantics.py --json` 的核查已确认：现有工作区里没有现成的真实 `no_material_change / metadata_refresh_render` manual-editor 锚点。也就是说，`C2` 在代码/门禁层面已经收口到共享合同，剩下的是补一条真实样本证据，而不是继续改 apply/render 框架。
+- `C2/C5` manual-editor real-anchor verification is now aligned with the manifest contract instead of the broad `manual_editor` tag. `verify_manual_editor_apply_semantics.py` defaults to cases that explicitly require `manual_editor_apply_semantics`, which removed unrelated pseudo-failures from anchors lacking editorial/render-plan timelines. Fresh rerun evidence on 2026-06-12 now shows the 4 contract-bearing anchors all pass, including `edc17_manual_editor_anchor` with `managed_auto_cut_count=0`, proving zero-managed-cut subtitle-only cases are now part of the real verification surface instead of being auto-skipped noise.
+- `C4` scorecard avatar/render category mapping is now also shared. `scripts/build_batch_output_scorecard.py` no longer keeps its own `slot/call/busy/provider/render_timeout*` string ladder, and instead consumes `roughcut.pipeline.render_diagnostics.classify_render_or_avatar_reason_category`, keeping batch, readiness, audit, and scorecard on the same root-cause vocabulary.
+- `C2` manual-editor apply semantics is no longer hardcoded to “subtitle_only only”. The golden/manual-editor verifier now treats `manual_editor_change_contract` itself as the authority: `no_material_change` with `metadata_refresh_render` is a valid passing contract, inconsistent scope/strategy pairs fail, and `verify_manual_editor_apply_semantics.py` no longer auto-skips anchors just because they have zero frontend-managed auto cuts.
+- `C4` audit snapshot no longer keeps a third private render/avatar reason guesser. `scripts/export_job_audit_snapshot.py` now also consumes the shared `roughcut.pipeline.render_diagnostics` helper for avatar reason categories and blocked-render root-cause synthesis, so timeout and FFmpeg failures stay aligned across batch report, live readiness, and audit markdown.
+- `C4` render failure classification no longer lives in parallel timeout-only branches. Shared helpers now live in `roughcut.pipeline.render_diagnostics`, and both `scripts/run_fullchain_batch.py` and `pipeline/live_readiness.py` consume the same render-step normalization and avatar reason-category inference, so legacy readiness fallback no longer reimplements a narrower timeout-only guesser.
+- `C3` auto mode cut application is now an explicit rule-registry contract instead of an implicit `risk_level == low` shortcut. `RuleDefinition.auto_apply_in_auto_mode` is now the single source of truth for which rules are even eligible for automatic application, while risk level still decides whether an elevated candidate must fall back to manual confirmation.
 - The recovery direction is "one stage, one responsibility"; no stage may silently re-correct, re-split, or re-delete outputs owned by an earlier stage.
 - `ASR evidence`, `canonical transcript`, `subtitle projection`, `edit candidates`, and `final keep/remove decisions` are separate artifacts and must stay separate.
 - Subtitle segmentation is a single shared automatic stage. Manual editing may inspect and override the result, but does not become the primary segmentation engine.
 - Automatic editing and manual adjustment are two execution modes over the same contracts. Manual mode is a review/refine phase, not a parallel hidden pipeline.
 - Current system scoring should be judged on production usefulness, not isolated model quality. The latest real-task evaluation baseline is roughly `62/100` overall and `~72/100` if manual-editor production usability is excluded.
 - `manual-editor/apply` now avoids silent subtitle re-write during validation (only diagnostics remain), reducing untraceable timing/text edits introduced at submit time.
+- `manual-editor/apply` no longer forces `no_material_change` saves through `render`; the shared contract now shrinks that path to `platform_package` only, while `subtitle_only / timeline / video_transform` still rerun from `render`.
+- `run_auto_edit_recovery_golden_set.py` now reuses the same `manual_editor_contract` helpers as the API/render path for subtitle-only semantics and rerun shrinking, so evaluation no longer hardcodes a second interpretation of `manual-editor/apply`.
+- `run_auto_edit_recovery_golden_set.py` now also materializes the previously dangling `term_format_consistency` and `low_signal_traceability` required checks from the golden manifest, using existing identity/quality signals and low-signal candidate traceability rather than leaving those gates unresolved.
+- `load_golden_job_manifest(...)` now validates `required_checks` against an explicit supported set, so future gate names cannot silently enter the manifest without a real implementation path and regression coverage.
+- `promote_auto_edit_golden_references.py` now enforces the same supported required-check set before and after manifest refresh, so reference-promotion tooling cannot bypass the manifest gate contract and write unsupported checks back into source-of-truth JSON.
+- `live_readiness._extract_required_checks_summary(...)` now backfills from `golden_case_rows` when the batch-level `required_checks` summary is missing, so required-check failures no longer disappear simply because a summary field was omitted in a replay artifact.
+- `live_readiness._extract_manual_editor_apply_semantics_summary(...)` now also prefers `golden_case_rows` over stale batch-level summary counts, preventing outdated semantics summaries from masking current failing manual-editor anchor cases.
+- `live_readiness._extract_risk_alignment_summary(...)` now likewise prefers `golden_case_rows` over stale `risk_alignment_summary` payloads, so current anchor-level mismatch evidence wins over outdated aggregate counters.
+- `compare_live_batch_runs.py` now carries `live_readiness` gate results into aggregate retrospective output (`live_gate_passed / live_status / live_failed_checks`), so comparison reports no longer present score-only improvement while hiding gate regressions.
+- `build_batch_output_scorecard.py` now includes a compact `live_readiness` summary (`gate_passed / status / failed_checks`) so the main scorecard no longer shows only quality/risk numbers while hiding whether the batch actually passed release gates.
+- `cut_analysis` candidate consumption now has a shared resolved-candidate read path, so legacy/partial payloads no longer require manual-editor, refine, and evaluation consumers to each reinterpret missing `auto_applied` flags separately.
+- multimodal review default gating is now also registry-driven, so `multimodal_trim_review.py` no longer carries a second handwritten default-review reason list beside the shared rule definitions.
+- variant-bundle editing risk gate thresholds are now shared between quality assessment and scorecard, so downstream reporting no longer re-interprets `blocking_high_risk / manual_confirm_heavy / provider_degraded` from stale issue-code snapshots.
+- `required_checks.subtitle_projection` now follows availability semantics: projection warnings stay visible in detail, but only blocking/missing/semantic-contamination issues fail the gate.
+- legacy `editing_risk_metrics` fallback now also uses the shared editing-risk threshold helper, so even pre-render / no-bundle scorecards are no longer forced to trust stale `quality_issue_codes` snapshots for blocker state.
 - `_validated_subtitle_projection_for_timeline` now has an explicit `apply_repair` switch; `tests/test_pipeline_projection_validation_contracts.py` guards contract: no repair means no content mutation.
 - `build_cut_analysis_payload` now preserves smart-cut candidate metadata（`rule_id/risk_level/match_surface`）when cached smart candidates are rehydrated, including timing jitter and filler-mode drift, so audit logs can trace deletions across recomputation.
 - Projection refresh no longer participates in a second hidden segmentation pass: `canonical_refresh` is now the only automatic projection candidate once canonical segmentation exists, and the legacy local hybrid path has been reduced to a non-authoritative pass-through helper.
@@ -41,15 +367,3656 @@ Stabilize RoughCut's subtitle and auto-edit pipeline into a stage-disciplined ar
 - Do not allow subtitle cleanup, filler matching, segmentation, and edit removal to run in overlapping hidden stages.
 - Do not treat auto-cut compression ratio alone as success; false deletion rate and sentence naturalness are co-equal quality gates.
 - Do not claim the chain is recovered until real jobs can complete manual-editor load, automatic edit generation, and render review without hidden fallback corruption.
+- Do not build "large-system" safety infrastructure for this objective. If a check does not directly protect automatic alignment, cut correctness, manual review consistency, render completion, or release acceptance, park it.
+
+## Latest Validation
+
+- 2026-06-12: `C5` 的 legacy `editing_risk_metrics` fallback 也已摆脱对旧 issue-code 快照的强依赖：
+  - 观察到的症状：
+    - `scripts/build_batch_output_scorecard.py::_editing_risk_metrics_from_legacy_inputs(...)`
+    - 在无 `variant_timeline_bundle` 的 legacy / pre-render 路径中
+    - 之前仍直接用 `quality_issue_codes` 反推：
+      - `llm_provider_degraded`
+      - `blocking_high_risk_cuts`
+      - `blocking_manual_confirm_heavy`
+  - 第一坏层：
+    - `scripts/build_batch_output_scorecard.py::_editing_risk_metrics_from_legacy_inputs(...)`
+  - 根因：
+    - variant-bundle 路径已经改成共享 `collect_editing_risk_gate_signals(...)`
+    - 但 legacy fallback 路径还停留在旧 issue-code 推断，导致同样的高风险/manual-confirm 阈值逻辑在 scorecard 内仍有两套来源
+  - 已落地修复：
+    - `src/roughcut/pipeline/quality.py` 新增 `collect_editing_risk_gate_signals_from_inputs(...)`
+    - `collect_editing_risk_gate_signals(...)` 现也复用这层输入型 helper
+    - `scripts/build_batch_output_scorecard.py::_editing_risk_metrics_from_legacy_inputs(...)` 现改为基于：
+      - `high_risk_cut_count`
+      - `llm_cut_review`
+      - `multimodal_trim_review_summary`
+      - `manual_confirm_candidate_count`
+      直接走共享 threshold 逻辑
+    - legacy 路径仍保留 `source/source_reason` 区分，但 blocker 状态不再优先信旧 issue code
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_build_batch_output_scorecard.py -k "editing_risk_metrics_reads_variant_bundle_and_issue_codes or editing_risk_metrics_uses_pre_render_variant_bundle_without_media_variants or editing_risk_metrics_falls_back_to_legacy_editorial_and_cut_analysis or editing_risk_metrics_legacy_path_ignores_stale_issue_codes_when_shared_gate_disagrees or editing_risk_metrics_exposes_llm_provider_degraded_state" -q`
+    - `python -m py_compile src/roughcut/pipeline/quality.py scripts/build_batch_output_scorecard.py`
+  - implication：
+    - `C5` 现在不只是 variant-bundle 路径，连 legacy no-bundle scorecard 也已经回到同一套 blocker 判定逻辑
+    - 后续若继续调高风险/manual-confirm 阈值，只需要改共享 helper，不必再同步修两条 scorecard 路径
+  - fresh 真实复验：
+    - `python scripts/build_batch_output_scorecard.py --batch-report output/test/auto-edit-recovery-golden/c5-short-anchor-rerun/20260611-092820/batch_report.json --output-json output/test/auto-edit-recovery-golden/c5-short-anchor-rerun/20260611-092820/detailed_output_scorecard.legacy-shared-gate.json --output-md output/test/auto-edit-recovery-golden/c5-short-anchor-rerun/20260611-092820/detailed_output_scorecard.legacy-shared-gate.md`
+    - 已确认真实产物中：
+      - `editing_risk_metrics.source = legacy_editorial_cut_analysis`
+      - `source_reason = pre_render_stop_without_variant_bundle`
+      - `manual_confirm_count = 7`
+      - `multimodal_pending_count = 4`
+      - `blocking_high_risk_cuts = false`
+      - `blocking_manual_confirm_heavy = false`
+    - 这说明 no-bundle / pre-render 的真实 scorecard 现在也已按共享 gate helper 出值，而不是继续依赖历史 issue-code 快照
+
+- 2026-06-12: `C5` 的 `required_checks.subtitle_projection` 又收掉了一条“warning 误当硬失败”的假阻塞：
+  - 观察到的症状：
+    - `scripts/run_auto_edit_recovery_golden_set.py::inspect_evaluation_required_checks(...)`
+    - 之前只要 `quality_issue_codes` 里出现任意 `canonical_projection_quality_*`
+    - `subtitle_projection` required check 就直接失败
+  - 第一坏层：
+    - `scripts/run_auto_edit_recovery_golden_set.py`
+  - 根因：
+    - `subtitle_projection` 这个 required check 的目标是“字幕投影是否可用”
+    - 但实现把 projection warning 和 projection blocking 混成了一类，导致 warning 也会被当成主链不可用
+  - 已落地修复：
+    - 新增共享 `_subtitle_projection_required_check_status(...)`
+    - 现在只把以下问题视为 required check 失败：
+      - `canonical_projection_quality_*_blocking`
+      - `missing_subtitles`
+      - `subtitle_semantic_contamination`
+    - `canonical_projection_quality_warning` 继续保留在 detail / warning_codes 中，但不再阻断 required check
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "subtitle_projection_required_check or evaluate_required_checks_prefers_typed_check_statuses_over_stage_names or build_case_result_rows_requires_contract_checks or summarize_required_checks_aggregates_case_level_outcomes" -q`
+    - `python -m py_compile scripts/run_auto_edit_recovery_golden_set.py`
+  - implication：
+    - `C5` 的 required checks 现在更贴近“主链可用性”而不是“质量 warning 一律拦截”
+    - 后续如果继续收 required checks，应保持同一原则：warning 可见，但只有不可用/污染/缺失才阻断
+  - fresh 真实复验：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-s06mini-projection-required-check-rerun`
+    - fresh 产物：`output/test/auto-edit-recovery-golden/c5-s06mini-projection-required-check-rerun/20260611-210423`
+    - 已确认：
+      - `golden_set_summary.md` 中 `required_checks_passed: 3/3`
+      - case 级 `required_checks_passed: True`
+      - `batch_report.json` 中 `required_checks_contract_passed = 3`, `required_checks_contract_failed = 0`
+      - `subtitle_projection.warning_codes = []`，且 `required_checks_failed = []`
+    - 这说明 `noc_mt34_s06mini_edit_plan_risk_anchor` 这条当前活锚点在 fresh replay 上已经不再被 `subtitle_projection` required check 误挡
+
+- 2026-06-12: `C3/C5` 的编辑风险阻断阈值也已收回共享 helper，去掉了 scorecard 对 quality issue code 的二次反推：
+  - 观察到的症状：
+    - `src/roughcut/pipeline/quality.py` 已是编辑风险阻断的事实来源
+    - 但 `scripts/build_batch_output_scorecard.py` 在 variant-bundle 路径仍单独用 `quality_issue_codes` 反推：
+      - `editing_high_risk_cuts_provider_degraded`
+      - `editing_high_risk_cuts_blocking`
+      - `editing_manual_confirm_heavy_blocking`
+    - 这会导致下游 scorecard 继续受旧 issue-code 快照影响，而不一定忠实反映当前 bundle 里的 `high_risk/manual_confirm/multimodal/llm_review` 事实
+  - 第一坏层：
+    - `scripts/build_batch_output_scorecard.py::_editing_risk_metrics(...)`
+  - 根因：
+    - 编辑风险阻断阈值虽然已经在 `quality.py` 内稳定存在
+    - 但没有被抽成共享 helper，导致 scorecard 只能靠 issue code 再解释一次
+  - 已落地修复：
+    - `src/roughcut/pipeline/quality.py` 新增 `collect_editing_risk_gate_signals(...)`
+    - helper 统一产出：
+      - `high_risk_cut_count`
+      - `llm_cut_review_provider_degraded`
+      - `multimodal_pending_count`
+      - `refine_manual_confirm`
+      - `blocking_high_risk_cuts`
+      - `blocking_manual_confirm_heavy`
+    - `assess_job_quality(...)` 与 `scripts/build_batch_output_scorecard.py::_editing_risk_metrics(...)` 现统一复用该 helper
+    - legacy 无 bundle 路径仍保留 issue-code fallback，避免强行扩大改动面
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_quality_profile_soft_gate.py -k "collect_editing_risk_gate_signals_matches_quality_blocking_contract or quality_assessment_flags_blocking_when_high_risk_cuts_remain_unresolved or quality_assessment_downgrades_high_risk_cut_blocking_when_llm_provider_is_degraded or quality_assessment_flags_manual_confirm_heavy_edit_plan_as_blocking" -q`
+    - `PYTHONPATH=src python -m pytest tests/test_build_batch_output_scorecard.py -k "editing_risk_metrics_reads_variant_bundle_and_issue_codes or editing_risk_metrics_uses_pre_render_variant_bundle_without_media_variants or editing_risk_metrics_falls_back_to_legacy_editorial_and_cut_analysis or editing_risk_metrics_exposes_llm_provider_degraded_state" -q`
+    - `python -m py_compile src/roughcut/pipeline/quality.py scripts/build_batch_output_scorecard.py`
+  - implication：
+    - `C3/C5` 现在不再是上游 quality 一套、下游 scorecard 再靠 issue code 猜一套
+    - 后续若继续调整高风险 cut / manual-confirm 阈值，应优先只改共享 helper
+
+- 2026-06-12: `C3` 的 multimodal review 默认门禁也已收回规则注册表，去掉了第二份私有理由名单：
+  - 观察到的症状：
+    - `src/roughcut/edit/multimodal_trim_review.py` 之前仍保留 `_DEFAULT_REVIEW_REASONS = {"low_signal_subtitle", "timing_trim", "long_non_dialogue"}`
+    - 这意味着新增或调整 smart-delete 规则时，除了改共享 `RuleDefinition`，还得记得再改一份 multimodal review 私名单
+  - 第一坏层：
+    - `src/roughcut/edit/multimodal_trim_review.py`
+  - 根因：
+    - `C3` 虽然已经把 reason/risk/match-surface 收进共享注册表
+    - 但“哪些规则默认进入 multimodal review、触发类型是什么”还没有单点化，仍有 registry 外的手写门禁
+  - 已落地修复：
+    - `RuleDefinition` 新增 `multimodal_review_cut`
+    - `rule_requires_multimodal_review(...)` / `rule_multimodal_review_trigger(...)` 新增到 `src/roughcut/edit/rule_registry.py`
+    - `build_multimodal_trim_review_payload(...)` 与 `cut_analysis` 的 review gate 现统一复用这组 helper
+    - `multimodal_trim_review.py` 已删除 `_DEFAULT_REVIEW_REASONS`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "multimodal_trim_review_payload_includes_low_signal_candidates_without_video_hints or multimodal_trim_review_payload_uses_registry_for_default_semantic_review_rules or multimodal_trim_review_payload_includes_visual_protection_hints or multimodal_trim_review_auto_cut_candidates_filter_high_confidence_cut_verdicts or cut_analysis_candidate_items_resolved_reuses_shared_auto_apply_contract or cut_analysis_payload_keeps_reviewed_rule_candidate_out_of_rule_auto_apply_bucket" -q`
+    - `python -m py_compile src/roughcut/edit/rule_registry.py src/roughcut/edit/cut_analysis.py src/roughcut/edit/multimodal_trim_review.py`
+  - implication：
+    - `C3` 现在不再需要维护“规则定义一份、multimodal 默认复核理由再一份”的双名单
+    - 后续若继续加 smart-delete / review gate 规则，应优先只改共享 `RuleDefinition`
+
+- 2026-06-12: `C3` 的 cut-analysis 候选读取又收掉了一层“历史 payload 读取各自再猜 auto-apply”的残余分叉：
+  - 观察到的症状：
+    - `cut_analysis_effective_applied_cuts(...)`、`refine_decisions._rule_auto_refine_keep_segments(...)`、`api/jobs.py` 的 manual-editor 规则展示/前端 auto-cut 恢复
+    - 之前都各自依赖 `bool(item["auto_applied"])` 或本地 accepted/rule candidate 分支
+    - 一旦读到缺少 `auto_applied` 的 legacy payload，就会继续靠不同 consumer 自己补判断
+  - 第一坏层：
+    - `src/roughcut/edit/cut_analysis.py`
+  - 根因：
+    - `accepted_cuts / rule_candidates` 的共享事实层虽然已在 `build_cut_analysis_payload(...)` 中统一生成
+    - 但后续消费者读取旧 payload 时还没有共享的 resolved-candidate 入口，导致 auto-apply 语义仍在下游重复解释
+  - 已落地修复：
+    - `cut_analysis_accepted_cuts(...)` / `cut_analysis_rule_candidates(...)` / `cut_analysis_candidate_items(...)` 新增 `resolved=True` 路径
+    - shared resolver 会统一补齐 metadata 与 `auto_applied`
+    - `cut_analysis_effective_applied_cuts(...)`、`refine_decisions.py`、`api/jobs.py` 的 manual-editor candidate consumers 已接到该共享入口
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "cut_analysis_candidate_items_resolved_reuses_shared_auto_apply_contract or cut_analysis_effective_applied_cuts_resolves_legacy_auto_payload_candidates or refine_decision_plan_auto_refine_resolves_legacy_low_risk_rule_candidates or refine_decision_plan_auto_refine_applies_low_risk_rule_candidates" -q`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_rule_segments_expose_provenance_fields or manual_editor_segments_accept_cut_analysis_artifact_payload or frontend_managed_auto_cuts_keep_low_risk_catchphrase_ranges" -q`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope or apply_shrinks_no_material_change_to_platform_package_rerun" -q`
+  - implication：
+    - `C3/C2` 这条候选读取链现在不再需要 manual-editor、refine、评测各自解释“缺 flag 的低风险候选是不是 auto-apply”
+    - 后续若继续瘦规则链，应优先复用 resolved-candidate 入口，而不是再加新的 `bool(auto_applied)` 叶子判断
+
+- 2026-06-12: manual-editor `subtitle_only` render 语义已提升为跨边界共享 contract：
+  - 观察到的症状：
+    - `src/roughcut/api/jobs.py` 已定义 `subtitle_only -> reuse_timeline_effect_plan`
+    - 但 `src/roughcut/pipeline/steps.py::run_render(...)` 之前仍在本地用两个字符串条件重新解释 `manual_subtitle_only_render`
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - manual-editor apply 与 render handoff 共享同一份变更合同
+    - 但 render 入口还没有复用这份合同，而是在下游继续自建语义判断
+  - 已落地修复：
+    - 新增共享模块 `roughcut.edit.manual_editor_contract`
+    - `manual_editor_change_contract / manual_editor_rerun_issue_code / manual_editor_apply_detail / manual_editor_is_subtitle_only_render`
+    - `api/jobs.py` 与 `pipeline/steps.py` 统一复用同一套 `subtitle_only` 合同判断
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_change_contract_reuses_scope_for_rerun_and_detail" -q --basetemp '.tmp/pytest-manual-editor-shared-contract'`
+    - `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "manual_editor_subtitle_only_contract_is_shared_with_render or ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only" -q --basetemp '.tmp/pytest-manual-editor-render-contract'`
+  - implication：
+    - `subtitle_only` 不再是 apply 一套、render 再猜一套
+    - 后续继续收 `manual-editor` 真正高风险不变量时，可以直接围绕同一份 shared contract 继续推进
+
+- 2026-06-12: manual-editor apply 的 change contract 已收成共享事实层：
+  - 观察到的症状：
+    - `src/roughcut/api/jobs.py::apply_manual_editor_timeline(...)`
+    - 同一份 `change_plan`
+    - 之前在 editorial `analysis.manual_editor`、render plan `manual_editor`、rerun issue_code、API return detail 四个出口重复翻译
+  - 第一坏层：
+    - `src/roughcut/api/jobs.py::apply_manual_editor_timeline(...)`
+  - 根因：
+    - `change_scope / render_strategy / *_changed / rerun issue code / 用户可见 detail`
+    - 本质是同一份 manual-editor 变更事实
+    - 但 apply 主链仍把它散着写成多份平行映射
+  - 已落地修复：
+    - 新增共享 `_manual_editor_change_contract(...)`
+    - 新增 `_manual_editor_rerun_issue_code(...)`
+    - 新增 `_manual_editor_apply_detail(...)`
+    - editorial / render_plan / rerun_plan / API return 统一复用同一组变更事实
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_change_contract_reuses_scope_for_rerun_and_detail or manual_editor_change_plan_detects_subtitle_only_edits" -q --basetemp '.tmp/pytest-manual-editor-change-contract'`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" -q --basetemp '.tmp/pytest-manual-editor-apply-contract'`
+  - implication：
+    - manual-editor apply 现在不再把同一份变更语义分散翻译到四个出口
+    - 后续继续收 manual-editor 不变量时，可以围绕这份共享 change contract 继续推进，而不是再加一层局部约定
+
+- 2026-06-12: batch render diagnostics 的 render_step 规范化也已收成共享 helper：
+  - 观察到的症状：
+    - `scripts/run_fullchain_batch.py`
+    - `_build_render_diagnostics(...)` 与 `_normalize_render_diagnostics_for_reporting(...)`
+    - 之前分别维护 `render_step` 的失败原因分类与 `issue_codes` 补全逻辑
+  - 第一坏层：
+    - `scripts/run_fullchain_batch.py`
+  - 根因：
+    - `render_step` 的报告 contract 和 avatar/cover 一样，仍有“构造时一份、reporting normalize 时一份”的重复解释层
+  - 已落地修复：
+    - 新增共享 `_normalize_render_step_summary_for_reporting(...)`
+    - `render_step` 的失败分类、`issue_codes` 补全、非 failed 清洗统一复用同一 helper
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_run_fullchain_batch.py -k "normalize_render_step_summary_for_reporting_classifies_timeout_and_strips_done_fields or build_render_diagnostics_classifies_non_avatar_render_failures_and_cover_status or build_render_diagnostics_does_not_mark_done_render_as_failed" -q --basetemp '.tmp/pytest-render-step-summary-normalize'`
+  - implication：
+    - batch render diagnostics 的 `render_step` 现在也不再在构造和 reporting 阶段各维护一份失败解释逻辑
+    - 后续若继续瘦 audit 历史合流，应优先直接复用这份共享 `render_step` helper
+
+- 2026-06-12: cover render summary 也已收成共享 helper：
+  - 观察到的症状：
+    - `scripts/run_fullchain_batch.py::_build_render_diagnostics(...)`
+    - `scripts/export_job_audit_snapshot.py::summarize_render_outputs(...)`
+    - 之前各自手写同一份 `cover_result` 字段裁剪逻辑
+  - 第一坏层：
+    - `scripts/run_fullchain_batch.py` / `scripts/export_job_audit_snapshot.py`
+  - 根因：
+    - `cover_result` 的报告 contract 和 avatar 一样，已经稳定
+    - 但 batch 与 audit 仍各自保留一份同构摘要逻辑
+  - 已落地修复：
+    - 新增共享 `_normalize_cover_render_result_for_reporting(...)`
+    - `run_fullchain_batch` 的 render diagnostics 构造与 `export_job_audit_snapshot` 的 render summary 提取统一复用
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_run_fullchain_batch.py -k "normalize_cover_render_result_for_reporting_keeps_current_summary_shape or build_render_diagnostics_classifies_non_avatar_render_failures_and_cover_status or build_render_diagnostics_does_not_mark_done_render_as_failed" -q --basetemp '.tmp/pytest-cover-render-summary-normalize'`
+  - implication：
+    - cover render summary 现在不再在 batch 与 audit 两侧各维护一份字段裁剪
+    - 后续若继续瘦 `render_step` 报告链路，也应按同样原则收口成共享 helper
+
+- 2026-06-12: batch render diagnostics 的 avatar summary 规范化已收成共享 helper：
+  - 观察到的症状：
+    - `scripts/run_fullchain_batch.py`
+    - `_build_render_diagnostics(...)` 与 `_normalize_render_diagnostics_for_reporting(...)`
+    - 之前各自实现一份 `avatar_result` 的摘要化与 `reason_category` 推断逻辑
+  - 第一坏层：
+    - `scripts/run_fullchain_batch.py`
+  - 根因：
+    - batch render diagnostics 的 avatar 报告 contract 没有真正单点化
+    - 构造阶段和报告阶段各自保留了一份同构逻辑，后续容易继续漂
+  - 已落地修复：
+    - 新增共享 `_normalize_avatar_render_result_for_reporting(...)`
+    - `_build_render_diagnostics(...)` 与 `_normalize_render_diagnostics_for_reporting(...)` 统一复用同一 helper
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_run_fullchain_batch.py -k "build_render_diagnostics_adds_avatar_reason_category_for_provider_errors or normalize_render_diagnostics_for_reporting_adds_avatar_reason_category" -q --basetemp '.tmp/pytest-batch-render-avatar-normalize'`
+  - implication：
+    - batch render diagnostics 的 avatar 报告口径现在不再一边构造一边再解释
+    - 后续继续瘦 batch/audit 链路时，可直接复用同一 avatar summary helper
+
+- 2026-06-12: audit pack 的 avatar reason category 推断已收回 render summary normalize helper：
+  - 观察到的症状：
+    - `scripts/build_job_audit_pack.py`
+    - 在调用 `export_job_audit_snapshot._normalize_render_outputs_summary_for_reporting(...)` 之后
+    - 仍单独本地补一遍 `avatar_result.reason_category`
+  - 第一坏层：
+    - `scripts/build_job_audit_pack.py::build_markdown(...)`
+  - 根因：
+    - `render_outputs_summary` 的“报告规范化”还没有真正单点化
+    - audit pack 只能在下游再次复制一份 avatar reason 分类规则
+  - 已落地修复：
+    - `_normalize_render_outputs_summary_for_reporting(...)` 现在会统一补全 `avatar_result.reason_category`
+    - `build_job_audit_pack.py` 删除本地 `_avatar_reason_category(...)` 与重复后处理
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "normalize_render_outputs_summary_for_reporting_adds_avatar_reason_category or build_audit_markdown_includes_render_outputs_summary or build_audit_markdown_prefers_failed_render_root_cause_over_missing_avatar_render" -q --basetemp '.tmp/pytest-audit-render-summary-normalize'`
+  - implication：
+    - render summary 的报告口径现在不再需要 audit pack 下游再补一遍 avatar reason 分类
+    - 后续继续瘦 audit/report 链路时，可直接复用同一 normalize helper
+
+- 2026-06-12: scorecard 的 render variant 评分映射已收成共享 helper：
+  - 观察到的症状：
+    - `scripts/build_batch_output_scorecard.py`
+    - 之前对 `packaged/plain/avatar/ai_effect` 四个版本的 `media path + quality_check key` 仍是四行手写平行映射
+  - 第一坏层：
+    - `scripts/build_batch_output_scorecard.py`
+  - 根因：
+    - `run_render(...)` 已把 render outputs 的 variant 字段与 quality-check 字段收成稳定事实
+    - 但 scorecard 消费端还在本地重复维护一份 variant key 对照关系
+  - 已落地修复：
+    - 新增共享 `_build_version_scores(render_outputs)`
+    - `version_scores` 统一通过同一份 `variant_specs` 构造，不再在主流程里并排手写四个 variant 映射
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_build_batch_output_scorecard.py -k "build_version_scores_reads_current_render_quality_check_shape" -q --basetemp '.tmp/pytest-build-version-scores'`
+  - implication：
+    - 后续若继续瘦或调整 render variant 评分字段，只需要改一个共享入口
+    - scorecard 不再继续维护一份隐式的四版本平行翻译层
+
+- 2026-06-12: packaged variant subtitle sync 读取 contract 已对齐当前 bundle 事实层：
+  - 观察到的症状：
+    - `variant_timeline_bundle["variants"]["packaged"]["quality_checks"]`
+    - `run_render(...)` 现在直接写入 subtitle sync 结果字典
+    - 但 `src/roughcut/pipeline/quality.py::_resolve_packaged_variant_subtitle_sync_check(...)` 仍按旧的 `quality_checks["subtitle_sync"]` 嵌套结构读取
+  - 第一坏层：
+    - `src/roughcut/pipeline/quality.py::_resolve_packaged_variant_subtitle_sync_check(...)`
+  - 根因：
+    - producer 已瘦成“quality_checks 直接就是 packaged subtitle sync 事实”
+    - consumer 还停留在历史双轨 contract，导致 variant bundle 路径读不到当前事实，只能继续退回 `render_outputs` 兜底
+  - 已落地修复：
+    - `_resolve_packaged_variant_subtitle_sync_check(...)` 现在优先接受当前直写 dict shape
+    - 同时保留旧 `quality_checks["subtitle_sync"]` 嵌套 shape 兼容
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_pipeline_quality_contracts.py -q --basetemp '.tmp/pytest-pipeline-quality-contracts'`
+  - implication：
+    - packaged variant 的 subtitle sync 现在能直接从 variant bundle 当前事实层读取
+    - 后续继续瘦评分/门禁链路时，可以少依赖一次 `render_outputs` fallback
+
+- 2026-06-12: render variant subtitle sync 与 quality checks 已收成共享事实：
+  - 观察到的症状：
+    - `packaged/plain/avatar/ai_effect` 四个 variant 的 subtitle sync 结果
+    - 之前同时以独立局部值、sync 阻断输入、variant bundle `quality_check`、artifact `quality_checks` 多种形态散着传递
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - 这批 sync/quality 数据本质上是同一份 render 运行时事实
+    - 但主链没有先收成共享映射，导致后续每新增或调整一个 variant 校验点都要同时改多处出口
+  - 已落地修复：
+    - 新增共享 `variant_subtitle_sync_checks`
+    - sync 阻断判断、variant timeline bundle 的 `quality_check`、artifact `quality_checks` 统一复用
+    - 新增共享 `render_quality_checks`，把 artifact 里的 subtitle sync / projection repair 收成单点
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-render-quality-checks-shrink' -q`
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or select_cover_source_video_uses_plain_render_only or get_cover_seek_uses_media_meta_without_tmpdir_argument or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe" --basetemp '.tmp/pytest-render-quality-checks-shrink' -q`
+  - implication：
+    - 后续再改 subtitle sync 或 quality report 时，不需要继续在阻断、bundle、artifact 三处并排维护同一组事实
+
+- 2026-06-12: `packaged_mp4 / packaged_srt` 已直接锚到主输出事实：
+  - 观察到的症状：
+    - `render_outputs_payload` 里 `packaged_mp4` / `packaged_srt`
+    - 之前仍各自引用独立的 `serialized_packaged_*`，而不是直接锚到 `primary_output_*`
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - `packaged` 本来就是主输出事实
+    - 但 payload 层还残留“一份 packaged 字段、一份 primary 字段”并排存在的表达方式
+  - 已落地修复：
+    - `render_outputs_payload["packaged_mp4"]` 改为 `primary_output_path`
+    - `render_outputs_payload["packaged_srt"]` 改为 `primary_output_srt`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-packaged-primary-anchor' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or select_cover_source_video_uses_plain_render_only or get_cover_seek_uses_media_meta_without_tmpdir_argument or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe" --basetemp '.tmp/pytest-packaged-primary-anchor' -q`（`4` 项通过）
+  - implication：
+    - `packaged` 字段现在不再只是“碰巧等于主输出”，而是明确锚到同一事实
+    - 后续继续瘦 `render` 时，应继续优先消除这种“主输出与 packaged 并排编码却本质同源”的表达残留
+
+- 2026-06-12: `packaged` 主输出路径/字幕已经收成单点事实：
+  - 观察到的症状：
+    - `packaged` 主输出路径与字幕
+    - 在 `local_paths["mp4"/"srt"]`、`render_output.output_path`、terminal return 中重复引用
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - 这些值本身就是单一的 packaged 主输出事实
+    - 但主链没有把它们显式收口，而是在多个出口各自取同一个字段
+  - 已落地修复：
+    - 新增 `primary_output_path` / `primary_output_srt`
+    - `local_paths["mp4"/"srt"]`、`render_output.output_path`、返回值统一复用同一组主输出事实
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-primary-output-alias' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or select_cover_source_video_uses_plain_render_only or get_cover_seek_uses_media_meta_without_tmpdir_argument or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe" --basetemp '.tmp/pytest-primary-output-alias' -q`（`4` 项通过）
+  - implication：
+    - `packaged` 主输出现在不再在多个出口散着引用
+    - 后续继续瘦 `render` 时，应继续把这种“天然单一的主输出事实”显式收口，而不是继续靠多处约定维持
+
+- 2026-06-12: variant 主输出路径已经收成共享映射：
+  - 观察到的症状：
+    - `packaged/plain/avatar/ai_effect` 四个 variant 路径
+    - 同时在 `local_paths["variants"]`、`local_paths["mp4"]`、`render_output.output_path`、terminal return 中重复引用
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - 这些路径本身就是同一组稳定输出事实
+    - 但主链没有把 variant 主路径收成共享映射，而是在多个出口各自挑字段拼接
+  - 已落地修复：
+    - 新增共享 `serialized_variant_paths`
+    - `local_paths["variants"]`、`local_paths["mp4"]`、`render_output.output_path`、返回值统一复用同一组路径事实
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-variant-paths-shrink' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or select_cover_source_video_uses_plain_render_only or get_cover_seek_uses_media_meta_without_tmpdir_argument or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe" --basetemp '.tmp/pytest-variant-paths-shrink' -q`（`4` 项通过）
+  - implication：
+    - variant 主路径现在也进入了单点维护
+    - 后续继续瘦 `render` 时，应继续优先把这种“多出口共享同一组稳定路径事实”的残留收成共享映射
+
+- 2026-06-12: `render_outputs` 稳定字段已经收成共享 payload：
+  - 观察到的症状：
+    - `plain_mp4/plain_srt`、`packaged_mp4/packaged_srt`、`avatar_mp4/avatar_srt`、`ai_effect_mp4/ai_effect_srt`、`cover`、`cover_variants`、`cover_selection`
+    - 同时在 `local_paths` 与 `render_outputs` artifact 中重复列出同一组字段
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - 这些字段已经构成一份稳定的输出事实
+    - 但主链仍在两个 payload 里并排维护同一组 key，存在重复编码和后续漂移风险
+  - 已落地修复：
+    - 新增共享 `render_outputs_payload`
+    - `local_paths` 与 `render_outputs` artifact 现在统一复用同一组稳定字段
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-render-outputs-payload' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or select_cover_source_video_uses_plain_render_only or get_cover_seek_uses_media_meta_without_tmpdir_argument or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe" --basetemp '.tmp/pytest-render-outputs-payload' -q`（`4` 项通过）
+  - implication：
+    - `render_outputs` 事实现在真正进入了单点维护
+    - 后续继续瘦 `render` 时，应继续优先收这种“稳定输出字段在多个 payload 间重复列出”的残留
+
+- 2026-06-12: plain / packaged / ai_effect 核心输出路径也收成共享序列化结果：
+  - 观察到的症状：
+    - `plain_mp4/plain_srt`、`packaged_mp4/packaged_srt`、`ai_effect_mp4/ai_effect_srt`
+    - 在 `local_paths`、`render_outputs` artifact、`render_output.output_path`、返回值里重复做同一套 `str(...)` 序列化
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - 这些路径在输出阶段已经是稳定事实
+    - 但主链没有把它们收成共享序列化结果，而是在多个 payload 里重复编码
+  - 已落地修复：
+    - 新增 `serialized_packaged_mp4` / `serialized_plain_mp4` / `serialized_ai_effect_mp4`
+    - 新增 `serialized_packaged_srt` / `serialized_plain_srt` / `serialized_ai_effect_srt`
+    - `local_paths`、`render_outputs` artifact、`render_output.output_path`、返回值统一复用这些共享结果
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-core-output-serialization' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or select_cover_source_video_uses_plain_render_only or get_cover_seek_uses_media_meta_without_tmpdir_argument or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe" --basetemp '.tmp/pytest-core-output-serialization' -q`（`4` 项通过）
+  - implication：
+    - 核心输出路径现在也和 avatar / cover 一样，进入了单点序列化
+    - 后续继续瘦 `render` 时，应继续优先消除这种“同一稳定路径事实在多个出口重复编码”的残留
+
+- 2026-06-12: avatar / cover 输出序列化值已经收成共享结果：
+  - 观察到的症状：
+    - `avatar_mp4` / `avatar_srt` / `cover` / `cover_variants`
+    - 在 `local_paths` 和 `render_outputs` artifact 里重复做同一套字符串序列化
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - 这些值在输出阶段已经是稳定事实
+    - 但主链没有把它们收成共享结果，而是在多个 payload 里重复拼装
+  - 已落地修复：
+    - 新增 `serialized_avatar_mp4` / `serialized_avatar_srt` / `serialized_cover` / `serialized_cover_variants`
+    - `local_paths` 与 `render_outputs` artifact 统一复用同一组序列化结果
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-output-serialization-shrink' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or select_cover_source_video_uses_plain_render_only or get_cover_seek_uses_media_meta_without_tmpdir_argument or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe" --basetemp '.tmp/pytest-output-serialization-shrink' -q`（`4` 项通过）
+  - implication：
+    - 这次不是新增抽象，而是把已经稳定的输出值收成共享序列化结果
+    - 后续继续瘦 `render` 时，应优先收这种“同一事实在多个 payload 里重复编码”的残留
+
+- 2026-06-12: avatar 输出就绪条件已经收成单一状态：
+  - 观察到的症状：
+    - `tmp_avatar_mp4.exists()`、`local_avatar_mp4 is not None`、`local_avatar_srt is not None`、`avatar_meta is not None`
+    - 这组条件在拷贝、SRT 写出、sync 校验、local_paths、render_outputs artifact、variant bundle 里重复出现
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - avatar 输出是否“真正可交付”已经是一个独立运行时状态
+    - 但主链没有把它收成单一布尔值，而是在多处重复拼同一组 guard
+  - 已落地修复：
+    - 新增单一状态 `avatar_outputs_ready`
+    - 统一收口 avatar copy / avatar SRT / avatar sync / local paths / artifact payload / variant bundle 的重复 guard
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-avatar-ready-guard' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or select_cover_source_video_uses_plain_render_only or get_cover_seek_uses_media_meta_without_tmpdir_argument or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe" --basetemp '.tmp/pytest-avatar-ready-guard' -q`（`4` 项通过）
+  - implication：
+    - 这次不是新增框架，而是把一个已经存在的运行时事实显式化，减少 6 处重复 guard
+    - 后续继续瘦 `render` 时，优先保留这种“真实状态收口”，而不是再散着写重复条件
+
+- 2026-06-12: blocking sync issue 集合的一次性局部名也收成就地判断了：
+  - 观察到的症状：
+    - `blocking_sync_issues = _collect_blocking_variant_sync_issues(...)`
+    - 这个局部值只在紧接着的 `if` 判断和报错拼接里消费一次
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - 这不是共享状态，只是一次性判断结果
+    - 主链里仍保留了一层无复用价值的局部命名
+  - 已落地修复：
+    - 改成 `if blocking_sync_issues := ...` 的就地判断
+    - 保留原有报错信息拼接，不改行为
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-sync-issues-walrus' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py -q --basetemp '.tmp/pytest-sync-issues-walrus'`（`3` 项通过）
+    - 源码残留检查：`rg -n "blocking_sync_issues = _collect_blocking_variant_sync_issues" src/roughcut/pipeline/steps.py tests` 返回 `exit 1`（无匹配）
+  - implication：
+    - sync 阻断判断现在又少了一层一次性局部名
+    - 后续继续瘦 `render` 时，应继续清理这种“只为下一条 if 服务”的命名状态
+
+- 2026-06-12: ai_effect outro duration 的一次性局部值也内联掉了：
+  - 观察到的症状：
+    - `ai_effect_outro_duration` 只用于一次 `_variant_expected_trailing_gap(...)`
+    - 唯一目的只是给 `ai_effect_subtitle_sync` 提供 packaging allowance
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - 这不是共享状态，只是一次性派生值
+    - 主链里仍保留了一层局部别名
+  - 已落地修复：
+    - 删除 `ai_effect_outro_duration`
+    - 直接在 `ai_effect_subtitle_sync` 的 `packaging_allowance_sec=` 位置内联相同条件计算
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-ai-effect-outro-inline' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe or resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source" --basetemp '.tmp/pytest-ai-effect-outro-inline' -q`（`2` 项通过）
+    - 源码残留检查：`rg -n "ai_effect_outro_duration" src/roughcut/pipeline/steps.py tests` 返回 `exit 1`（无匹配）
+  - implication：
+    - ai_effect subtitle sync 路径现在又少了一层一次性中间值
+    - 后续继续瘦 `render` 时，应继续清理这种“只为下一次函数调用服务”的局部派生值
+
+- 2026-06-12: packaged / ai_effect outro path 的一次性比较别名也收掉了：
+  - 观察到的症状：
+    - `packaged_outro_path` 与 `ai_effect_outro_path` 只用于一次字符串比较
+    - 唯一目的只是判断 `ai_effect_outro_duration` 是否可直接复用 `packaged_outro_duration`
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - 这两个值不是共享状态，只是一次性比较前的局部别名
+    - 主链里仍多保留了一层无复用价值的中间变量
+  - 已落地修复：
+    - 删除 `packaged_outro_path` / `ai_effect_outro_path`
+    - 直接在 `ai_effect_outro_duration` 的条件判断里内联 path 比较
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-outro-path-inline' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe or resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source" --basetemp '.tmp/pytest-outro-path-inline' -q`（`2` 项通过）
+    - 源码残留检查：`rg -n "ai_effect_outro_path|packaged_outro_path" src/roughcut/pipeline/steps.py tests` 返回 `exit 1`（无匹配）
+  - implication：
+    - packaged / ai_effect outro 复用判断现在又少了一层一次性局部别名
+    - 后续继续瘦 `render` 时，应继续清理这种“只为一次比较而起名”的局部状态
+
+- 2026-06-12: cover 导出调用前的一次性局部别名也内联掉了：
+  - 观察到的症状：
+    - `meta_result = await _get_cover_seek(job.id)` 只在后面 `extract_cover_frame(...)` 的 `seek_sec=` 用一次
+    - `cover_source_path = _select_cover_source_video(tmp_plain_mp4)` 也只在同一个调用里用一次
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - 这两个值都不是共享状态，只是 cover 导出调用前的一次性局部别名
+    - 主链里仍多保留了一层噪音变量
+  - 已落地修复：
+    - 删除 `meta_result` / `cover_source_path`
+    - 直接在 `extract_cover_frame(...)` 调用处内联 `_get_cover_seek(...)` 与 `_select_cover_source_video(...)`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-cover-call-inline' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or select_cover_source_video_uses_plain_render_only or get_cover_seek_uses_media_meta_without_tmpdir_argument" --basetemp '.tmp/pytest-cover-call-inline' -q`（`3` 项通过）
+    - 源码残留检查：`rg -n "meta_result = await _get_cover_seek|cover_source_path = _select_cover_source_video" src/roughcut/pipeline/steps.py tests` 返回 `exit 1`（无匹配）
+  - implication：
+    - cover 导出路径现在又少了一层一次性局部别名
+    - 后续继续瘦 `render` 时，应继续优先清理这种“仅服务于下一行调用”的中间变量
+
+- 2026-06-12: packaged / ai_effect 的 trailing allowance 一次性别名也内联掉了：
+  - 观察到的症状：
+    - `packaged_trailing_allowance` 与 `ai_effect_trailing_allowance` 都只是
+      `_variant_expected_trailing_gap(...)` 的一次性结果
+    - 各自只在后面 `_compute_subtitle_sync_check(...)` 调用里消费一次
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - 这不是共享事实层，只是一次性派生值
+    - 主链里仍多保留了一层局部别名，增加阅读噪音
+  - 已落地修复：
+    - 删除 `packaged_trailing_allowance` / `ai_effect_trailing_allowance`
+    - 直接在各自 `_compute_subtitle_sync_check(...)` 调用处内联 `_variant_expected_trailing_gap(...)`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-trailing-allowance-inline' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe or packaged_timeline_mapping_reuses_intro_and_insert_probe_context" --basetemp '.tmp/pytest-trailing-allowance-inline' -q`（`3` 项通过）
+    - 源码残留检查：`rg -n "packaged_trailing_allowance|ai_effect_trailing_allowance" src/roughcut/pipeline/steps.py tests` 返回 `exit 1`（无匹配）
+  - implication：
+    - packaged / ai_effect 的 subtitle sync 路径现在又少了一层一次性中间值
+    - 后续继续瘦 `render` 时，应继续清理这种“只传一次的派生值先起名、后立刻消费”的残留
+
+- 2026-06-12: avatar variant 的一次性 `segments` 别名也内联掉了：
+  - 观察到的症状：
+    - `avatar_variant_segments` 只在 variant bundle 前由 `avatar_variant_duration_sec` 现算一次
+    - 唯一消费点就是 avatar variant entry 的 `segments=...`
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - 这不是共享状态，只是一次性中间别名
+    - 主链仍多保留了一层命名状态，增加阅读噪音
+  - 已落地修复：
+    - 删除 `avatar_variant_segments`
+    - avatar variant entry 直接在 `segments=` 位置按 `avatar_variant_duration_sec` 现算 full-length keep timeline
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-avatar-variant-segments-inline' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe or packaged_timeline_mapping_reuses_intro_and_insert_probe_context" --basetemp '.tmp/pytest-avatar-variant-segments-inline' -q`（`3` 项通过）
+    - 源码残留检查：`rg -n "avatar_variant_segments" src/roughcut/pipeline/steps.py tests` 返回 `exit 1`（无匹配）
+  - implication：
+    - avatar variant bundle 现在少了一层一次性中间别名
+    - 后续继续瘦 `render` 时，应继续清掉这种“现算一次、只用一次”的命名状态
+
+- 2026-06-12: ai_effect variant 上的 avatar_commentary 深拷贝也收掉了：
+  - 观察到的症状：
+    - `run_render(...)` 里 `ai_effect_render_plan["avatar_commentary"] = copy.deepcopy(avatar_plan)`
+    - 但 `avatar_commentary` 在 render/runtime 里只有读取，没有任何写回
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - ai_effect variant 与当前 `avatar_plan` 共享同一条 avatar commentary 事实层
+    - 但主链仍保留一层不必要的深拷贝，制造了“ai_effect 有独立 avatar_commentary 状态”的假象
+  - 已落地修复：
+    - 删除 `copy.deepcopy(avatar_plan)`
+    - ai_effect render plan 现在直接复用同一 `avatar_plan`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-avatar-commentary-alias' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe or packaged_timeline_mapping_reuses_intro_and_insert_probe_context" --basetemp '.tmp/pytest-avatar-commentary-alias' -q`（`3` 项通过）
+    - 源码残留检查：`rg -n "copy\\.deepcopy\\(avatar_plan\\)" src/roughcut/pipeline/steps.py tests` 返回 `exit 1`（无匹配）
+  - implication：
+    - ai_effect variant 现在不再为 avatar commentary 额外制造镜像副本
+    - 后续继续瘦 `render` 时，应继续清理这种“下游只读消费，却仍保留 deep copy”的残留
+
+- 2026-06-12: ai_effect variant 的镜像 source/subtitles 别名也收掉了：
+  - 观察到的症状：
+    - `run_render(...)` 里 `ai_effect_source_path = packaged_source_path`
+    - `ai_effect_subtitles = [dict(item) for item in packaged_subtitles]`
+    - 但 ai_effect/source 与 packaged/source 完全同源，`render_video(...)` 对 `subtitle_items` 只读消费，内部也会自建 choreographed 副本
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - ai_effect variant 与 packaged variant 在 source/subtitle 事实层没有分叉
+    - 但主链仍保留一层镜像别名，制造了“ai_effect 有独立 source/subtitle 状态”的假象
+  - 已落地修复：
+    - 删除 `ai_effect_source_path` 与 `ai_effect_subtitles`
+    - ai_effect render、SRT 写出、variant bundle 现在直接复用 `packaged_source_path` 与 `packaged_subtitles`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-ai-effect-alias-shrink' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe or packaged_timeline_mapping_reuses_intro_and_insert_probe_context" --basetemp '.tmp/pytest-ai-effect-alias-shrink' -q`（`3` 项通过）
+    - 源码残留检查：`rg -n "ai_effect_source_path|ai_effect_subtitles" src/roughcut/pipeline/steps.py tests` 返回 `exit 1`（无匹配）
+  - implication：
+    - ai_effect variant 现在不再伪装成拥有独立 source/subtitle 别名层
+    - 后续继续瘦 `render` 时，应继续清理这种“共享事实层之上又套一层同值别名”的残留
+
+- 2026-06-12: ai_effect variant 的镜像 editorial timeline 深拷贝也收掉了：
+  - 观察到的症状：
+    - `run_render(...)` 里 `ai_effect_editorial_timeline = copy.deepcopy(packaged_editorial_timeline)`
+    - 但 `render_video(...)` 对 `editorial_timeline` 只读 keep segments，不做写回
+    - variant bundle 里 `ai_effect` 读到的 `segments` 也与 `packaged` 完全同源
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - ai_effect variant 和 packaged variant 在 timeline 事实层没有分叉
+    - 但主链仍额外保留一份镜像深拷贝，制造了“ai_effect 有独立 timeline 状态”的假象
+  - 已落地修复：
+    - 删除 `ai_effect_editorial_timeline` 深拷贝
+    - ai_effect render 与 variant bundle 现在直接复用 `packaged_editorial_timeline`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-ai-effect-timeline-alias' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe or packaged_timeline_mapping_reuses_intro_and_insert_probe_context" --basetemp '.tmp/pytest-ai-effect-timeline-alias' -q`（`3` 项通过）
+    - 源码残留检查：`rg -n "ai_effect_editorial_timeline" src/roughcut/pipeline/steps.py tests` => `no matches`
+  - implication：
+    - ai_effect variant 现在不再伪装成拥有独立 timeline 状态
+    - 后续继续瘦 `render` 时，应继续优先清理这种“只读共享事实却仍做镜像深拷贝”的残留
+
+- 2026-06-12: plain variant 的死 timeline 中间变量也收掉了：
+  - 观察到的症状：
+    - `run_render(...)` 里 `plain_variant_editorial_timeline = _build_full_length_variant_timeline(plain_duration)`
+    - 但在 packaged helper contract 改为 `original_duration_sec` 之后，这个变量已经没有任何消费点
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - helper contract 已经收回到 duration 事实层
+    - 主链里还残留旧的结构级中间变量，没有同步删干净
+  - 已落地修复：
+    - 删除 `plain_variant_editorial_timeline` 死变量
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-plain-variant-state-removal' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe or packaged_timeline_mapping_reuses_intro_and_insert_probe_context" --basetemp '.tmp/pytest-plain-variant-state-removal' -q`（`3` 项通过）
+    - 源码残留检查：`rg -n "plain_variant_editorial_timeline" src/roughcut/pipeline/steps.py tests` => `no matches`
+  - implication：
+    - plain path 现在不再残留“duration 已是事实、还要额外挂一份 timeline 结构变量”的旧表示
+    - 后续继续瘦 `render` 时，应继续清理这种 contract 已收口、调用层还遗留的死中间变量
+
+- 2026-06-12: packaged variant helper 的 timeline contract 继续收回到 duration 事实层：
+  - 观察到的症状：
+    - `_resolve_packaged_render_variant(...)` 已只剩一个调用者
+    - plain 路径传入的 `original_editorial_timeline` 实际固定就是 `_build_full_length_variant_timeline(plain_duration)`
+    - helper 仍保留整块 timeline 参数，暗示还存在第二套结构来源
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::_resolve_packaged_render_variant(...)`
+  - 根因：
+    - packaged/avatar variant 真实只依赖 `source_path + duration + subtitle_items`
+    - 但 helper 签名还残留旧的结构级 timeline 输入，没有完全收回到单一 duration 事实层
+  - 已落地修复：
+    - `_resolve_packaged_render_variant(...)` 改为接收 `original_duration_sec`
+    - plain path 直接在 helper 内部构造 full-length keep timeline
+    - `run_render(...)` 调用点不再传整块 `plain_variant_editorial_timeline`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source or select_cover_source_video_uses_plain_render_only or get_cover_seek_uses_media_meta_without_tmpdir_argument" --basetemp '.tmp/pytest-packaged-variant-duration-contract' -q`（`3` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-packaged-duration-contract' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py -q --basetemp '.tmp/pytest-render-variant-sync-after-packaged-duration-contract'`（`3` 项通过）
+  - implication：
+    - packaged/avatar variant helper 现在更接近“source + duration + subtitles”这套真实最小 contract
+    - 后续继续瘦 `render` 时，应继续优先删除这种“事实已是 duration，签名还保留整块 timeline”的旧兼容层
+
+- 2026-06-12: avatar variant 的死 overlay 状态也收掉了：
+  - 观察到的症状：
+    - `run_render(...)` 里 `avatar_overlay_accents` 只声明、只透传
+    - 全链路没有任何赋值点，传进 avatar variant bundle 的始终是 `None`
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - avatar variant 当前并没有独立 overlay event 事实层
+    - 但主链仍保留一份从未生效的中间状态，继续暗示 avatar 有额外 overlay 分支
+  - 已落地修复：
+    - 删除 `avatar_overlay_accents` 临时状态
+    - avatar variant bundle 构造时不再传无意义的 `overlay_events=None`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-avatar-overlay-state-shrink' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_single_subtitle_source or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe or packaged_timeline_mapping_reuses_intro_and_insert_probe_context" --basetemp '.tmp/pytest-render-avatar-overlay-state-shrink' -q`（`3` 项通过）
+    - 源码残留检查：`rg -n "avatar_overlay_accents" src/roughcut/pipeline/steps.py tests` => `no matches`
+  - implication：
+    - avatar variant 现在少了一份纯装饰性的死状态
+    - 后续继续瘦 `render` 时，应继续优先清理这种“声明存在、实际永远不生效”的旧设计残留
+
+- 2026-06-12: avatar variant 的镜像 editorial timeline 状态也收掉了：
+  - 观察到的症状：
+    - `run_render(...)` 里 `avatar_variant_editorial_timeline` 只是在各个 avatar 分支中跟着 `avatar_variant_duration_sec` 一起被重复构造
+    - 后面唯一用途也只是取出 full-length keep `segments`
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - avatar variant 的真实事实层已经收缩成单一 `avatar_variant_duration_sec`
+    - 但主链还额外缓存了一份镜像 `editorial_timeline`，制造了重复状态和三处同步赋值
+  - 已落地修复：
+    - 删除 `avatar_variant_editorial_timeline` 临时状态
+    - avatar variant bundle 需要 `segments` 时，直接由 `avatar_variant_duration_sec` 现算 full-length keep timeline
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-avatar-variant-state-shrink' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_single_subtitle_source or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe or packaged_timeline_mapping_reuses_intro_and_insert_probe_context" --basetemp '.tmp/pytest-render-avatar-state-shrink' -q`（`3` 项通过）
+    - 源码残留检查：`rg -n "avatar_variant_editorial_timeline" src/roughcut/pipeline/steps.py tests` => `no matches`
+  - implication：
+    - avatar variant 现在也回到“单一 duration 事实驱动 full-length timeline”的最小状态
+    - 后续继续瘦 `render` 时，优先清理这类“单一事实旁边又挂一份镜像结构缓存”的旧设计残留
+
+- 2026-06-12: packaged variant helper 的伪双轨字幕签名也收掉了：
+  - 观察到的症状：
+    - `_resolve_packaged_render_variant(...)` 只剩一个调用点
+    - 但 helper 仍保留 `original_subtitle_items` / `variant_subtitle_items` 两套字幕参数
+    - 当前调用里两者实际传的是同一份 `packaged_subtitles`
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::_resolve_packaged_render_variant(...)`
+  - 根因：
+    - packaged/avatar variant 早已收缩成“共享同一份字幕事实，只切换 source/timeline 形态”
+    - 但 helper 签名还残留旧的双轨字幕输入，继续暗示存在两套字幕来源
+  - 已落地修复：
+    - `_resolve_packaged_render_variant(...)` 改为单一 `subtitle_items` 输入
+    - `run_render(...)` 的调用点同步收口，不再传无意义的原/变体双字幕参数
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "resolve_packaged_render_variant_reuses_single_subtitle_source or select_cover_source_video_uses_plain_render_only or get_cover_seek_uses_media_meta_without_tmpdir_argument" --basetemp '.tmp/pytest-packaged-variant-signature-shrink' -q`（`3` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-packaged-variant-signature-shrink' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py -q --basetemp '.tmp/pytest-render-variant-sync-after-packaged-variant-signature-shrink'`（`3` 项通过）
+  - implication：
+    - packaged/avatar variant helper 现在更接近真实最小 contract：共享字幕，只按 source/timeline 切 variant
+    - 后续继续瘦 `render` 时，仍应优先清理这种“逻辑已单线、签名还保留旧双轨”的残留
+
+- 2026-06-12: cover seek 的历史死参数也收掉了：
+  - 观察到的症状：
+    - `_get_cover_seek(job_id, tmpdir)` 里的 `tmpdir` 已经完全不参与任何逻辑
+    - 只是旧签名残留，增加阅读噪音和错误暗示
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::_get_cover_seek(...)`
+  - 根因：
+    - cover 选择逻辑已经收缩到只依赖 `job_id -> media_meta`
+    - 但 helper 签名没有同步收口
+  - 已落地修复：
+    - `_get_cover_seek(...)` 现只保留 `job_id`
+    - `run_render(...)` 的调用点已同步改掉，不再传无效 `tmpdir`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "select_cover_source_video_uses_plain_render_only or get_cover_seek_uses_media_meta_without_tmpdir_argument" --basetemp '.tmp/pytest-cover-signature-shrink' -q`（`2` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-cover-signature-shrink' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py -q`（`3` 项通过）
+  - implication：
+    - cover 路径现在连 helper 签名层也更接近真实最小依赖
+    - 后续继续瘦身时，应优先清理这种“逻辑已收缩、签名仍残留旧上下文”的噪音
+- 2026-06-12: cover 路径又收掉了一层白拷贝和死参数：
+  - 观察到的症状：
+    - `run_render(...)` 之前会把 `tmp_plain_mp4` 额外复制成 `tmp_cover_plain_mp4`
+    - 但后面的 `_select_cover_source_video(...)` 实际只会选择 plain render，自始至终不会用到 packaged，也不需要那份中间副本
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+    - `src/roughcut/pipeline/steps.py::_select_cover_source_video(...)`
+  - 根因：
+    - cover 源选择逻辑已经收缩成“plain only”
+    - 但调用点和函数签名还残留旧的 packaged 参数与中间复制动作
+  - 已落地修复：
+    - 删除 `tmp_cover_plain_mp4` 中间文件复制
+    - `_select_cover_source_video(...)` 现只接收 `plain_video_path`
+    - cover 导出直接复用现有 `tmp_plain_mp4`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "select_cover_source_video_uses_plain_render_only or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe" --basetemp '.tmp/pytest-cover-source-shrink' -q`（`2` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-cover-source-shrink' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py -q`（`3` 项通过）
+  - implication：
+    - cover 路径现在更接近“已有 plain render 直接复用”，少了一次无意义文件复制
+    - 后续若还要继续瘦 `render`，应继续优先清理这种“历史调用签名还在、真实分支已收缩”的残留
+- 2026-06-12: avatar variant 的 media probe 又收掉了一层同轮重复：
+  - 观察到的症状：
+    - reusable avatar / avatar PIP / segmented avatar PIP 分支里
+    - 之前都会先 probe 一次拿 duration
+    - 后面又在统一 variant metadata 阶段对同一 `tmp_avatar_mp4` 再 `_probe_with_retry(...)` 一次拿 full meta
+    - 这和 plain render 的老问题一样，属于同轮同文件重复 probe
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - avatar 分支只缓存了 duration，没有把第一次 probe 得到的 meta 往后复用
+  - 已落地修复：
+    - reusable avatar / full-track PIP / segmented PIP 分支现在都会直接保存第一次 `_probe_with_retry(...)` 的 `avatar_meta`
+    - 后续统一 variant metadata 阶段优先复用已有 `avatar_meta`
+    - 只有前面没有拿到 meta 时，才会 fallback 再 probe
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only or render_plan_carries_user_selected_frame_rate" --basetemp '.tmp/pytest-avatar-meta-reuse' -q`（`2` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-avatar-meta-reuse' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py -q`（`3` 项通过）
+  - implication：
+    - avatar variant 现在也开始遵守“同轮同文件只 probe 一次”
+    - 后续若继续瘦 `render`，优先盯剩余媒体路径是否还在先拿 duration、后拿 full meta 的重复模式
+- 2026-06-12: `tmp_plain_mp4` 的 media probe 又收掉了一层同轮重复：
+  - 观察到的症状：
+    - `run_render(...)` 之前会先对 `tmp_plain_mp4` probe 一次拿 `plain_duration`
+    - 后面又再 `_probe_with_retry(tmp_plain_mp4)` 一次拿 `plain_meta`
+    - 这两次都发生在同一轮 render、同一文件、不存在中间改写
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - 纯因为“先拿 duration，再拿完整 meta”写成了两次 probe
+    - 不是两份不同事实，也不是运行时必须重取
+  - 已落地修复：
+    - 现在先一次 `_probe_with_retry(tmp_plain_mp4)` 得到 `plain_meta`
+    - 直接复用其中的 `duration` 构造 `plain_variant_editorial_timeline`
+    - 后续不再对同一 `tmp_plain_mp4` 再 probe 一遍
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only or render_plan_carries_user_selected_frame_rate" --basetemp '.tmp/pytest-plain-meta-reuse' -q`（`2` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-plain-meta-reuse' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py -q`（`3` 项通过）
+  - implication：
+    - plain render 的媒体事实现在也开始遵守“同轮同文件只 probe 一次”
+    - 这类优化不会直接涨功能分，但能持续削掉 render 主链里的伪复杂度
+- 2026-06-12: packaged / ai_effect 的 shared `outro` duration probe 又收掉了一层重复：
+  - 观察到的症状：
+    - `packaged_subtitle_sync` 和 `ai_effect_subtitle_sync` 之前各自会调用 `_resolve_packaging_trailing_gap_allowance(...)`
+    - 当 packaged / ai_effect 共享同一份 `outro.path` 时，这会把同一份 `outro` 时长 probe 两遍
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+    - `src/roughcut/pipeline/steps.py::_resolve_packaging_trailing_gap_allowance(...)`
+  - 根因：
+    - trailing-gap allowance 的 `outro` duration 事实没有在 packaged / ai_effect 两个分支之间复用
+    - 于是主链仍然保留了一层“相同路径，相同 probe，再做一遍”的无意义重复
+  - 已落地修复：
+    - `run_render(...)` 现在会先解析 `packaged_outro_duration`
+    - 若 `ai_effect_render_plan.outro.path` 与 packaged 相同，`ai_effect` 直接复用同一时长
+    - 只有路径不同时，才单独再 probe
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaged_timeline_mapping_reuses_intro_and_insert_probe_context or packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe" --basetemp '.tmp/pytest-outro-dedupe' -q`（`2` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-outro-dedupe' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py -q`（`3` 项通过）
+  - implication：
+    - packaged / ai_effect 的 trailing-gap allowance 现在开始遵守“同一路径只 probe 一次”
+    - 后续若还要继续瘦 `render`，就继续按这个标准清理 shared media facts 的重复 probe
+- 2026-06-12: packaged timeline 的 intro/insert 偏移 context 又收掉了一层重复解析：
+  - 观察到的症状：
+    - `_map_subtitles_to_packaged_timeline(...)` 和 `_map_editing_accents_to_packaged_timeline(...)`
+    - 之前会各自重复：
+      - `probe intro duration`
+      - `probe insert duration`
+      - 解析 `effective_insert_duration`
+      - 计算基础 `insert_after_sec`
+    - 这属于同一 packaged timeline context 被解析两遍，而不是两份真正不同的事实
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::_map_subtitles_to_packaged_timeline(...)`
+    - `src/roughcut/pipeline/steps.py::_map_editing_accents_to_packaged_timeline(...)`
+  - 根因：
+    - packaged timeline 的共享偏移上下文没有显式抽出来复用
+    - 导致字幕映射和 accent 映射各自 probe 一套 intro/insert 元信息
+  - 已落地修复：
+    - 新增 `_resolve_packaged_timeline_mapping_context(...)`
+    - `run_render(...)` 现在对 packaged plan 只解析一次 shared context
+    - `_map_subtitles_to_packaged_timeline(...)` 与 `_map_editing_accents_to_packaged_timeline(...)` 新增 `timeline_mapping` 入口并复用同一份 context
+    - 仍保留各自依赖当前事件长度的 `added_insert_duration` 计算，没有过度合并
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaged_timeline_mapping_reuses_intro_and_insert_probe_context or frontend_managed_auto_cuts_keep_low_risk_catchphrase_ranges" --basetemp '.tmp/pytest-packaged-mapping-context' -q`（`2` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-packaged-context' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py -q`（`3` 项通过）
+  - implication：
+    - packaged timeline 的 intro/insert 偏移事实现在开始遵守“一次解析，多处复用”
+    - 后续若还要继续收 `render` 主链，应优先找剩余 probe / offset / mapping facts 是否仍在多处重复展开
+- 2026-06-12: render 主链的 packaged baseline 又收掉了一层纯重复解析：
+  - 观察到的症状：
+    - `run_render(...)` 之前会用完全相同的参数调用两次 `_resolve_packaged_render_variant(...)`
+    - 一次给 `packaged`
+    - 一次给 `ai_effect`
+    - 但这两条路径实际共享同一份 packaged/avatar 基线，只是后续 render plan 不同
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 根因：
+    - packaged variant 基线解析和后续 variant-specific render plan 混在一起
+    - 导致同一事实层被重复解析两次，形成不必要的分叉点
+  - 已落地修复：
+    - `_resolve_packaged_render_variant(...)` 现在只调用一次
+    - `ai_effect` 直接复用同一 `source_path`，并对 timeline/subtitles 做本地复制供后续分支消费
+    - 这次没有新增抽象，只是去掉重复解析
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only or render_plan_carries_user_selected_frame_rate" --basetemp '.tmp/pytest-render-variant-dedupe' -q`（`2` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-variant-dedupe' -q`（`1` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_render_variant_sync_issues.py -q`（`3` 项通过）
+  - implication：
+    - packaged / ai_effect 现在先共享同一份 packaged baseline，再各自做后续 render
+    - 后续若还要继续砍 render 主链复杂度，应优先瞄准“同一事实层是否还被多次解析/多次映射”
+- 2026-06-12: AI effect 计划层的 manual `subtitle_only` 路径又收掉了一层“半复用”：
+  - 观察到的症状：
+    - 之前 `build_ai_effect_render_plan(..., reuse_bound_assets=True)` 虽然已经不再重建 `section_choreography / insert / music / subtitles`
+    - 但它仍会无条件调用 `_build_ai_effect_editing_accents(...)`
+    - 这会继续重选 `transition_boundaries`、重建 `text overlays / pulse overlays / sound effects`
+    - 结果是 `manual subtitle_only` 虽然复用了绑定资产，却仍可能偷偷扩写新的 AI effect 事件结构
+  - 第一坏层：
+    - `src/roughcut/edit/render_plan.py::build_ai_effect_render_plan(...)`
+    - `src/roughcut/edit/render_plan.py::_build_ai_effect_editing_accents(...)`
+  - 根因：
+    - 旧的 `reuse_bound_assets` 只覆盖“编排资产绑定”，没有覆盖 effect 事件结构本身
+    - 于是 manual `subtitle_only` 仍然处于“复用一半、重建一半”的半截收口状态
+  - 已落地修复：
+    - `_build_ai_effect_editing_accents(...)` 新增 `reuse_event_structure`
+    - `build_ai_effect_render_plan(..., reuse_bound_assets=True)` 现在会同步传 `reuse_event_structure=True`
+    - 此时 AI effect 版仍保留 style variant 转换，但不再重选 transition boundary，也不再新建 emphasis/pulse/sound 事件
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only or overlay_only_editing_accents_can_skip_subtitle_unit_synthesis or video_transform_accents_can_skip_subtitle_unit_synthesis or render_plan_carries_user_selected_frame_rate" --basetemp '.tmp/pytest-render-reuse-events' -q`（`4` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-after-ai-effect-reuse' -q`（`1` 项通过）
+  - implication：
+    - manual `subtitle_only` 的 AI effect 路径现在更接近真正的“仅做样式层转换，不再重建事件层事实”
+    - 后续如果 subtitle-only 还影响 AI effect 事件数量或边界，应优先查显式旧 `editing_accents` 输入，而不是再怀疑计划层会偷偷扩写
+- 2026-06-12: 规则注册表与 manual editor 的 catchphrase / synthetic-timeline 口径又收掉了一层分叉：
+  - 观察到的症状：
+    - `catchphrase_phrase` 在 `rule_registry` 里是 `low risk`
+    - `cut_analysis` 也会按统一阈值把它归进 auto-apply
+    - 但 `manual_editor_frontend_managed_auto_cut_reasons()` 之前明确把它排除在外
+    - 结果是“自动已应用的口头禅删减”与 manual editor / keep-segment 回灌的共享合同不一致
+  - 第一坏层：
+    - `src/roughcut/edit/rule_registry.py`
+    - `src/roughcut/api/jobs.py::_manual_editor_frontend_managed_auto_cut_ranges(...)`
+  - 根因：
+    - 规则风险阈值与 manual editor 前端托管删减集合并不是完全从同一份 metadata 推导
+    - 同时 `manual_editor_keep/manual_editor_removed` 这组 synthetic reason 仍由 `jobs.py` 本地手写判断
+  - 已落地修复：
+    - `catchphrase_phrase` 现已纳入 `frontend_managed_auto_cut=True`
+    - 新增 `manual_editor_synthetic_timeline_reasons()` 共享 helper
+    - `_manual_editor_is_synthetic_manual_timeline_payload(...)` 已切回共享 helper，不再在 `jobs.py` 私写 `{"manual_editor_keep", "manual_editor_removed"}`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_rule_registry.py -q`（`6` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "apply_semantics_keep_subtitle_only_scope_when_frontend_auto_cuts_are_unchanged or frontend_managed_auto_cuts_keep_low_risk_catchphrase_ranges or manual_keep_segments_expand_to_full_editorial_timeline" --basetemp '.tmp/pytest-manual-rule-shrink' -q`（`3` 项通过）
+  - implication：
+    - low-risk catchphrase auto cuts 现在不会再在 manual editor / subtitle-only 保存路径里掉链子
+    - manual editor synthetic timeline 的 reason 口径少了一处本地分叉，后续若再扩 manual timeline 识别，不必回到 `jobs.py` 重写 reason 集
+- 2026-06-12: `render` 执行层的 manual `subtitle_only` 路径又收掉了一层字幕驱动的隐性特效重算：
+  - 观察到的症状：
+    - 计划层虽然已经开始复用旧 `editing_accents / section_choreography / insert / music / subtitles`
+    - 但 `src/roughcut/media/render.py::render_video(...)` 仍会在执行阶段根据当前 `subtitle_items` 再调用：
+      - `_build_video_transform_editing_accents(...)`
+      - `_build_overlay_only_editing_accents(...)`
+    - 结果是“只改字幕”的提交仍可能额外生成新的 overlay / transform accent 事件，导致执行层偷偷偏离既有 effect plan
+  - 第一坏层：
+    - `src/roughcut/media/render.py::render_video(...)`
+  - 根因：
+    - 执行层默认把“字幕单元提示特效合成”当成总是安全的增强
+    - 但对 `manual subtitle_only + reuse_timeline_effect_plan`，这已经不再是增强，而是隐藏重算
+  - 已落地修复：
+    - `render_video(...)` / `_apply_timed_overlays_to_video(...)` 新增窄开关 `synthesize_subtitle_unit_accents`
+    - `_build_video_transform_editing_accents(...)` 与 `_build_overlay_only_editing_accents(...)` 在该开关关闭时只复用既有 `editing_accents`，不再按当前字幕重新合成 accent 事件
+    - `run_render(...)` 现在在 `manual_subtitle_only_render` 路径下显式传 `synthesize_subtitle_unit_accents=False`
+  - targeted regression：
+    - `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only or overlay_only_editing_accents_can_skip_subtitle_unit_synthesis or video_transform_accents_can_skip_subtitle_unit_synthesis or render_plan_carries_user_selected_frame_rate" --basetemp '.tmp/pytest-render-shrink' -q`（`4` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-post-render-shrink' -q`（`1` 项通过）
+  - implication：
+    - manual `subtitle_only` render 现在更接近真正的“复用旧 effect plan，只更新字幕展示”
+    - 后续如果还看到 subtitle-only 改动影响镜头节奏或覆盖事件，应优先查显式 `editing_accents` 来源，而不是再怀疑执行层会偷偷从字幕重建
+- 2026-06-12: `manual editor` 会话里的 source fallback 又收掉了一层双轨事实：
+  - 观察到的症状：
+    - `_build_manual_editor_session(...)` 之前会先用一版 `projected_subtitles` 做 validation
+    - 然后再按 `source_projection_fallback_applied` 偷偷切成另一版 `source fallback` 显示给 editor
+    - 结果是 editor 看到的字幕、validator 校验的字幕、diagnostics 统计的字幕并不严格是同一份事实
+  - 第一坏层：
+    - `src/roughcut/api/jobs.py::_build_manual_editor_session(...)`
+  - 根因：
+    - source fallback 决策放在 validation 之后，形成“先校验一版、再改显示一版”的隐式双轨
+  - 已落地修复：
+    - source fallback 现在会在 validation 之前确定最终显示基线
+    - validator、session display、projection diagnostics 现已围绕同一份 `projected_subtitles` 工作
+    - 这次没有新增 schema，只是收掉了隐藏分支顺序
+  - targeted regression：
+    - `python -m pytest tests/test_manual_editor_session_regressions.py -k "fallbacks_to_source_when_projection_is_suspicious or validates_the_same_source_fallback_projection_it_displays or validation_stays_non_mutating_and_fallback_explicit" --basetemp '.tmp/pytest-manual-session-fallback' -q`（`3` 项通过）
+    - `python -m pytest tests/test_manual_editor_readiness_progress.py -k "stop_after_cancelled_job_as_ready" --basetemp '.tmp/pytest-manual-readiness-stop-after' -q`（`1` 项通过）
+  - implication：
+    - manual editor 现在少了一层“显示和校验不是同一份字幕”的伪复杂度
+    - 后续若还要继续收 fallback，只需要围绕“是否该切基线”本身，而不是再处理双轨副作用
+- 2026-06-12: `manual-editor/apply` 的 subtitle-only 提交合同补上了 endpoint 级证据：
+  - 观察到的风险：
+    - helper 层虽然已经证明“frontend 托管自动删减不应把 subtitle-only 提交误判成 timeline edit”
+    - 但 endpoint 级之前还没有直接证明：真实 `apply_manual_editor_timeline(...)` 落库时，`change_scope`、`rerun issue code`、`refine keep_segments` 三者保持同一口径
+  - 事实结论：
+    - 当前实现已符合收缩后的主链合同，不需要再加新状态层
+    - 缺的是 endpoint 级回归证据，而不是新的框架修补
+  - 已补回归：
+    - 新增 `tests/test_manual_editor_session_regressions.py::test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope`
+    - 定向验证：
+      - `python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope or session_ready_for_realistic_job" --basetemp '.tmp/pytest-manual-apply-subtitle-only' -q`（`2` 项通过）
+      - `python -m pytest tests/test_manual_editor_helpers.py -k "apply_semantics_keep_subtitle_only_scope_when_frontend_auto_cuts_are_unchanged" --basetemp '.tmp/pytest-manual-apply-helper' -q`（`1` 项通过）
+  - 锁住的合同：
+    - `change_scope = subtitle_only`
+    - `render_strategy = reuse_timeline_effect_plan`
+    - `rerun issue_codes = ["manual_subtitle_edit"]`
+    - `refine_decision_plan.keep_segments` 仍保存 effective keep segments，不会把 frontend 托管自动删减冲掉
+- 2026-06-12: `manual-editor/apply` 的 subtitle-only 路径又收掉了一层隐藏重算：
+  - 观察到的症状：
+    - 即使 `change_scope = subtitle_only`，`apply_manual_editor_timeline(...)` 之前仍会重建 `cut_analysis`
+    - 并继续调用 `review_multimodal_trim_review_payload(...)`，把视频删减复核链也跟着重跑一遍
+    - 这对字幕-only 提交没有增量价值，只会增加耗时和隐式复杂度
+  - 第一坏层：
+    - `src/roughcut/api/jobs.py::apply_manual_editor_timeline(...)`
+  - 根因：
+    - multimodal trim review 的复用路径已有 `_load_manual_editor_multimodal_trim_review_payload(...)`
+    - 但 apply 主链没有在非 timeline-change 场景切回这条复用入口
+  - 已落地修复：
+    - `timeline_changed=False` 时，apply 现在直接复用匹配的 multimodal trim review artifact
+    - 只有真实 timeline 变更时，才继续调用 `review_multimodal_trim_review_payload(...)`
+  - targeted regression：
+    - `python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope or session_ready_for_realistic_job" --basetemp '.tmp/pytest-manual-apply-subtitle-only' -q`（`2` 项通过）
+    - `python -m pytest tests/test_manual_editor_helpers.py -k "load_manual_editor_multimodal_trim_review_payload_prefers_matching_artifact" --basetemp '.tmp/pytest-manual-multimodal-loader' -q`（`1` 项通过）
+  - implication：
+    - subtitle-only 提交不再隐式拉起视频删减复核链
+    - apply 主链现在更接近“只改字幕，就只重用必要事实层”的收缩目标
+- 2026-06-12: `manual-editor/apply` 的 subtitle-only / no-material-change 路径又收掉了一层 packaging 重算：
+  - 观察到的症状：
+    - 即使没有 timeline 变化、也没有画面变换，apply 之前仍会调用：
+      - `resolve_packaging_plan_for_job(...)`
+      - `_plan_insert_asset_slot(...)`
+      - `_plan_music_entry(...)`
+    - 这些步骤属于包装编排重算，对“只改字幕”提交没有直接必要
+  - 第一坏层：
+    - `src/roughcut/api/jobs.py::apply_manual_editor_timeline(...)`
+  - 根因：
+    - 旧实现没有区分“需要重排包装计划的 timeline/video transform 提交”和“只需复用旧 render plan 包装参数的 subtitle-only/no-material-change 提交”
+  - 已落地修复：
+    - 新增 `_manual_editor_packaging_plan_from_render_plan(...)`
+    - `timeline_changed=False` 且 `video_transform_changed=False` 时，apply 现在直接从旧 `render_plan` 复用包装参数
+    - 只有真实 timeline / video transform 变化时，才重跑 packaging resolve / insert / music planning
+  - targeted regression：
+    - `python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-packaging' -q`（`1` 项通过）
+    - `python -m pytest tests/test_manual_editor_helpers.py -k "load_manual_editor_multimodal_trim_review_payload_prefers_matching_artifact" --basetemp '.tmp/pytest-manual-multimodal-loader' -q`（`1` 项通过）
+  - 锁住的合同：
+    - subtitle-only 提交不会再触发 packaging resolve / insert slot / music planning
+    - 旧 render plan 中的包装参数会被直接复用到新 plan
+- 2026-06-12: `manual-editor/apply` 的 subtitle-only / no-material-change 路径又收掉了一层 effect 输入重算：
+  - 观察到的症状：
+    - 即使没有 timeline 变化，旧逻辑在 `timeline_analysis` 缺失时仍会调用 `infer_timeline_analysis(...)`
+    - `editing_accents` 缺失时也会继续调用 `build_smart_editing_accents(...)`
+    - 这会让“只改字幕”的提交继续重走节奏/特效推导链
+  - 第一坏层：
+    - `src/roughcut/api/jobs.py::apply_manual_editor_timeline(...)`
+  - 根因：
+    - 旧实现把“不完整旧 render plan”的补全逻辑混进了 subtitle-only / no-material-change 提交路径
+    - 但这类提交的收缩目标本来就是复用旧 render 输入，而不是继续重建 effect 事实层
+  - 已落地修复：
+    - `timeline_changed=False` 时，不再 fallback 调用 `infer_timeline_analysis(...)`
+    - 旧 `editing_accents` 缺失时，也不再调用 `build_smart_editing_accents(...)`
+    - 当前路径直接复用旧值；没有就保持空，让后续 render 走既有默认
+  - targeted regression：
+    - `python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-effects' -q`（`1` 项通过）
+  - 锁住的合同：
+    - subtitle-only 提交不会再触发 `infer_timeline_analysis(...)`
+    - subtitle-only 提交不会再触发 `build_smart_editing_accents(...)`
+- 2026-06-12: render 入口的 manual subtitle-only 路径也收掉了一层 AI effect 再绑定：
+  - 观察到的症状：
+    - `run_render(...)` 会在 AI 特效版分支无条件调用 `build_ai_effect_render_plan(...)`
+    - 旧实现会继续重建 `section_choreography`，并重绑 `insert / music / subtitles`
+    - 这会把 subtitle-only render 再次拉回包装/编排层的隐藏重算
+  - 第一坏层：
+    - `src/roughcut/edit/render_plan.py::build_ai_effect_render_plan(...)`
+    - `src/roughcut/pipeline/steps.py::run_render(...)`
+  - 已落地修复：
+    - `build_ai_effect_render_plan(...)` 新增 `reuse_bound_assets`
+    - `run_render(...)` 在 `manual_subtitle_only_render` 路径下会传 `reuse_bound_assets=True`
+    - 此时 AI 特效版仍会保留风格转换，但不再重建 choreography，也不再重绑 `insert / music / subtitles`
+  - targeted regression：
+    - `python -m pytest tests/test_render_frame_rate_unification.py -k "ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only or render_plan_carries_user_selected_frame_rate" --basetemp '.tmp/pytest-render-ai-reuse' -q`（`2` 项通过）
+    - `python -m pytest tests/test_manual_editor_session_regressions.py -k "apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" --basetemp '.tmp/pytest-manual-apply-effects' -q`（`1` 项通过）
+  - implication：
+    - render 入口现在也开始遵守“subtitle-only 先复用已绑定输入”的收缩边界
+    - 后续若还要继续瘦身，应优先盯真正执行时的媒体处理而不是再回到计划层补算
+- 2026-06-12: 已把“实际已应用的自动删减”收回到共享 helper，而不是继续让下游各自猜 `accepted_cuts`：
+  - 观察到的症状：
+    - auto mode 真实 MT34 replay 中，`cut_analysis.accepted_cuts` 为空
+    - 但 `rule_candidates` 中已有 `auto_applied=True` 的低风险候选，并已通过 `refine_decision_plan` 生效
+    - 下游若只读 `accepted_cuts`，就会继续把“实际已应用删减”看成 0，需要各自额外补丁或 fallback
+  - 第一坏层：
+    - `src/roughcut/edit/cut_analysis.py` 的共享抽象缺少“effective applied cuts”统一口径
+  - 根因：
+    - 当前链路把“人工接受 cut”和“自动应用低风险 rule candidate”分开存储
+    - 但多个下游消费口真正需要的是“最终已应用删减集合”，而不是仅 `accepted_cuts`
+  - 已落地修复：
+    - 新增 `cut_analysis_effective_applied_cuts(...)`
+      - 返回 `accepted_cuts + auto_applied rule_candidates`
+      - 对同时间段同 reason 做去重
+    - 关键消费口已切到共享 helper：
+      - `scripts/build_batch_output_scorecard.py`
+      - `src/roughcut/pipeline/steps.py::_build_variant_timeline_diagnostics(...)`
+      - `scripts/run_auto_edit_recovery_golden_set.py::inspect_evaluation_required_checks(...)`
+    - `manual editor` 保留原不变量：
+      - accepted cuts 仍优先于 preview rule candidates
+      - shared helper 只作为 fallback，不打破既有 accepted-over-preview 语义
+  - targeted regression：
+    - `tests/test_manual_editor_helpers.py -k "cut_analysis_effective_applied_cuts or frontend_managed_auto_cuts"` → `8 passed`
+    - `tests/test_build_batch_output_scorecard.py -k "score_editing_prefers_variant_bundle_cut_analysis_and_refine_summary or render_markdown"` → `3 passed`
+    - `tests/test_run_auto_edit_recovery_golden_set.py -k "build_case_result_rows_includes_risk_alignment_summary or summarize_reference_refresh_candidates_extracts_actionable_rows"` → `2 passed`
+  - real replay：
+    - report dir: `output/test/auto-edit-recovery-golden/c5-mt34-effective-applied-helper/20260611-175800`
+    - 结果保持稳定：
+      - `keep_ratio = 0.929 / 0.966`
+      - scorecard `accepted_cuts = 2 / 7`
+      - `edit_plan = 100.0 (A)`
+      - `required_checks_passed = 8/8`
+  - implication：
+    - 后续若还要消费“主链最终已应用删减”，应优先读共享 helper，而不是再次各自猜 `accepted_cuts` 或 `rule_auto_apply_cut_count`
+- 2026-06-12: `edit_plan` 的 audio rebuild 误伤门禁已收掉：
+  - 观察到的症状：
+    - 真实 MT34 partial replay 中，`edit_plan` 已完成、`keep_ratio` 合理、`accepted_cuts` 已可见
+    - 但仅因 `audio_artifact_rebuilt`，`live_stage_scores.edit_plan` 仍长期显示 `warn / 75.0 (C)`
+  - 第一坏层：
+    - `scripts/run_fullchain_batch.py::build_live_stage_validations(...)`
+  - 根因：
+    - `audio_artifact_rebuilt` 是成功恢复后的运行时说明，不是当前主链失败或质量阻断
+    - 旧逻辑把它直接降成 stage warning，导致 scorecard 对 `edit_plan` 产生系统性噪音
+  - 已落地修复：
+    - `edit_plan` 在 `step_status=done` 且 `keep_ratio > 0` 时统一记为 `pass`
+    - `audio_artifact_rebuilt` 仍保留在 `summary + issue_codes` 中，供审计与诊断使用
+  - targeted regression：
+    - `tests/test_run_fullchain_batch.py -k "build_live_stage_validations or live_readiness"` → `18 passed`
+  - real replay：
+    - report dir: `output/test/auto-edit-recovery-golden/c5-mt34-edit-plan-pass/20260611-174940`
+    - aggregate stage:
+      - `edit_plan: 100.0 (A)`
+    - per job:
+      - `pass | 剪辑保留比 93%；音频派生文件缺失，已从源视频重建`
+      - `pass | 剪辑保留比 97%；音频派生文件缺失，已从源视频重建`
+  - implication：
+    - 当前 `edit_plan` 主链评分不再被“已恢复成功的音频重建”误伤
+    - 后续应继续收真正影响自动剪辑效果的候选质量与最终一致性问题
+- 2026-06-12: `edit_plan` 的“看起来没剪”问题已收掉一层共享口径断裂：
+  - 观察到的症状：
+    - real replay 已显示 `auto_apply_candidate_count > 0`、`rule_auto_apply_cut_count > 0`
+    - 但 `batch_report` 与 `detailed_output_scorecard` 仍显示：
+      - `keep_ratio = 1.0`
+      - `accepted_cuts = 0`
+    - 造成主链已自动删减却在人类报告里表现成“100%保留、没有实际剪辑”
+  - 第一坏层：
+    - `scripts/run_fullchain_batch.py::collect_job_report(...)`
+    - `scripts/build_batch_output_scorecard.py::_score_editing_with_variant_bundle(...)`
+  - 根因：
+    - `edit_plan` 之后真实生效的 keep segments 在 `refine_decision_plan`
+    - 但 report/scorecard 仍沿用 pre-refine `editorial_timeline.accepted_cuts / keep_segments` 旧口径
+  - 已落地修复：
+    - `batch_report keep_ratio` 现优先按 `resolve_refine_keep_segments_for_timeline(...)` 的有效 keep segments 计算
+    - variant-bundle editing summary 现将 `rule_auto_apply_cut_count + multimodal_auto_apply_cut_count` 计入有效 `accepted_cuts`
+  - targeted regression：
+    - `tests/test_run_fullchain_batch.py -k "compute_effective_keep_ratio or build_live_stage_validations or live_readiness"` → `19 passed`
+    - `tests/test_build_batch_output_scorecard.py -k "score_editing_prefers_variant_bundle_cut_analysis_and_refine_summary or render_markdown"` → `3 passed`
+  - real replay：
+    - report dir: `output/test/auto-edit-recovery-golden/c5-mt34-effective-keep-ratio/20260611-174649`
+    - `noc_mt34_25s.mp4`:
+      - `keep_ratio = 0.929`
+      - scorecard `editing` summary: `accepted_cuts=2`
+    - `noc_mt34_90s.mp4`:
+      - `keep_ratio = 0.966`
+      - scorecard `editing` summary: `accepted_cuts=7`
+  - implication：
+    - 当前 MT34 主链不再是假象“没剪”；真实自动删减已进入统一人类可读出口
+    - 接下来的收口重点应回到“删得对不对、manual editor / render 是否一致”，而不是继续修报告错口径
+- 2026-06-12: `live_readiness` 的稳定批次门禁已按执行边界收缩：
+  - 根因：`build_live_readiness_summary(...)` 之前对完整发布回放和 `stop_after=edit_plan` 的部分主链回放统一要求 `stable_runs >= 3`
+  - 这会把已经通过合同和质量门禁的自动剪辑主链 partial replay 继续误判为未收口
+  - 修复后：summary 显式透传 `stop_after`，`live_readiness` 对 partial replay 自动收缩为 `required_stable_runs = 1`
+  - targeted regression：`tests/test_run_fullchain_batch.py -k "live_readiness"` → `12 passed`
+  - real replay：
+    - report dir: `output/test/auto-edit-recovery-golden/c5-mt34-stable-gate-shrunk/20260611-174234`
+    - `stop_after = edit_plan`
+    - `required_checks_passed = 8/8`
+    - `live_readiness.status = pass`
+    - `stable_run_count = 1`
+  - implication：`edit_plan` 主链验收现在不再被完整发布稳定批次门禁误伤；完整非 `stop_after` 路径仍保留原稳定性要求
+- 2026-06-12: Re-ran the three neighbor anchors after the `content_profile` live-validation fix:
+  - report dir: `output/test/auto-edit-recovery-golden/c5-neighbor-anchor-rerun-shrunk/20260611-172915`
+  - `required_checks_passed = 12/12`
+  - all three jobs remain `partial` at `edit_plan` with `quality_score = 100.0`
+  - the previous false `content_profile` P0 blocker is gone; all three jobs now show `content_profile=pass`
+  - `live_readiness` still fails, but now due to release gate conditions rather than chain-state contradiction
+  - remaining real closure focus is no longer live-validation noise; it is the two MT34 anchors whose fresh `edit_plan` replay still does not reproduce reference render-stage high-risk cuts
+- 2026-06-12: Scorecard markdown was slimmed for pre-render partial runs:
+  - when a batch intentionally stops before `render`, markdown no longer shows `avatar/tts/ai_effects/multi_platform_package` failure-like scores or skipped `render/final_review/platform_package` stage rows
+  - fresh artifact: `output/test/auto-edit-recovery-golden/c5-neighbor-anchor-rerun-shrunk/20260611-172915/detailed_output_scorecard.shrunk.md`
+  - this keeps the human-facing acceptance report focused on subtitle quality, edit-plan quality, and editing risk metrics instead of unexecuted downstream stages
+- 2026-06-12: MT34 risk-alignment noise was shrunk to the real stage boundary:
+  - `_build_case_risk_alignment(...)` now defers comparison when a case's reference high-risk expectation belongs to a later stage (for example `render`) that the fresh replay has not reached yet
+  - fresh artifact: `output/test/auto-edit-recovery-golden/c5-mt34-risk-alignment-shrunk/20260611-173659`
+  - result:
+    - both `noc_mt34_short_done` and `noc_mt34_long_done` now show `comparison_deferred = true`
+    - `mismatch_codes = []`
+    - `risk_alignment_summary.reference_high_risk_case_count = 0`
+    - `live_readiness` no longer fails on MT34 risk-alignment mismatch and now only fails on `stable_runs 1/3`
+  - implication: the remaining open work is no longer "why didn't edit_plan reproduce render-only high risk"; it is either
+    - run enough stable batches to satisfy the release gate, or
+    - run these anchors through `render` when render-stage risk reproduction itself is the thing being evaluated
+- 2026-06-12: Strategy contraction is active. The working target is no longer to grow a broad C1-C6 framework in every direction; it is to keep the automatic editing path efficient, simple, and useful. Active work should prefer direct fixes to alignment/cut/review/render behavior and should stop adding new scorecard or golden fields unless a real anchor failure needs them.
+- 2026-06-12: Fixed the latest real replay false blocker at `scripts/run_fullchain_batch.py::build_live_stage_validations(...)`: a valid frozen/manual-confirmed content profile now passes live validation even when the older `content_profile` step status is stale. This keeps `live_readiness` from reporting a P0 blocker when the actual edit-plan chain is usable.
+
+## Historical Validation Log (Parked)
+
+- 2026-06-12: `C3/C5` 的 auto-apply 合同又继续下沉到了 scorecard 风险指标层，收掉了“golden/reference 链已经能看见 `auto_apply_candidate_count`，但 `detailed_output_scorecard` 版本对比仍只统计 `manual_confirm/high_risk/pending`”的残口：
+  - 观察到的症状：
+    - 前一轮已将 `auto_apply_candidate_count` 带到：
+      - `risk_alignment`
+      - `reference_refresh_candidates`
+      - `manifest risk_hints`
+    - 但 `scripts/build_batch_output_scorecard.py::_editing_risk_metrics(...)` 仍未显式暴露该字段：
+      - legacy 路径只给 `high_risk_cut_count / manual_confirm_count / multimodal_pending_count`
+      - variant bundle 路径也只给 `high_risk_cut_count / manual_confirm_count / multimodal_pending_count`
+    - 结果是版本级 scorecard 仍无法直接对比：
+      - 自动应用吞掉了多少候选
+      - 与 manual-confirm 的比例变化
+  - 第一坏层：
+    - `scripts/build_batch_output_scorecard.py::_editing_risk_metrics_from_legacy_inputs(...)`
+    - `scripts/build_batch_output_scorecard.py::_editing_risk_metrics(...)`
+  - 根因：
+    - `C3` 的新统计字段已经进入 artifact / diagnostics / golden 链，但 scorecard 风险指标仍沿用旧 schema，没有把 `auto_apply_candidate_count` 作为一等指标汇总。
+  - 已落地修复：
+    - `scripts/build_batch_output_scorecard.py`
+      - legacy risk metrics 现已新增：
+        - `auto_apply_candidate_count = cut_analysis.auto_apply_candidate_count`
+      - variant-bundle risk metrics 现已新增：
+        - 优先读 `refine_decision_summary.candidate_auto_apply`
+        - 否则 fallback `cut_analysis_summary.auto_apply_candidate_count`
+      - aggregate risk metrics 新增：
+        - `auto_apply_candidate_count`
+      - markdown 输出新增：
+        - aggregate `auto_apply_candidate_count`
+        - job-level `editing_risk_metrics.auto_apply_candidate_count`
+    - 回归补齐：
+      - `tests/test_build_batch_output_scorecard.py`
+        - `test_editing_risk_metrics_reads_variant_bundle_and_issue_codes`
+        - `test_editing_risk_metrics_uses_pre_render_variant_bundle_without_media_variants`
+        - `test_editing_risk_metrics_falls_back_to_legacy_editorial_and_cut_analysis`
+        - `test_editing_risk_metrics_exposes_llm_provider_degraded_state`
+        - `test_render_markdown_includes_aggregate_and_job_level_editing_risk_metrics`
+      - 现已一并断言 `auto_apply_candidate_count`
+  - 验证：
+    - `$env:PYTHONPATH='src'; $env:TEMP='E:\\WorkSpace\\RoughCut\\.tmp'; $env:TMP='E:\\WorkSpace\\RoughCut\\.tmp'; python -m pytest tests/test_build_batch_output_scorecard.py -k "editing_risk_metrics or render_markdown_includes_aggregate_and_job_level_editing_risk_metrics" -q`
+    - `5 passed`
+    - `python -m py_compile scripts/build_batch_output_scorecard.py`
+  - 当前结论：
+    - `C5` 的版本对比出口现在不再只能看“高风险/人工确认/待复核”三类量，而是能直接看到：
+      - `auto_apply_candidate_count`
+      - `manual_confirm_count`
+      - `multimodal_pending_count`
+    - 这使得后续判断 `C3/C6` 是否真的提升自动剪辑效率时，不必再从候选风险分布里手工反推自动应用规模。
+
+- 2026-06-12: `C3/C5` 的 auto-apply 统计又继续下沉到了 `risk_alignment / reference_refresh_candidates / manifest promotion`，收掉了“snapshot 里已有 `auto_apply_candidate_count`，但 reference 对账与刷新链仍只记录 `rule_auto_apply_cut_count`”的残口：
+  - 观察到的症状：
+    - 前一轮已经把 `auto_apply_candidate_count` 带进：
+      - `variant_timeline_bundle` diagnostics
+      - golden `reference/evaluation risk snapshot`
+    - 但 `scripts/run_auto_edit_recovery_golden_set.py::_build_case_risk_alignment(...)` 仍只显式对账：
+      - `manual_confirm_candidate_count`
+      - `rule_auto_apply_cut_count`
+    - `summarize_reference_refresh_candidates(...)` 与 `scripts/promote_auto_edit_golden_references.py` 也只会把 `reference_rule_auto_apply_cut_count` 写回 manifest risk hints。
+    - 结果是后续 reference refresh 虽能保留“最终真正切掉多少 rule auto-apply cut”，却仍丢“有多少候选整体落进 auto-apply bucket”这层上游事实。
+  - 第一坏层：
+    - `scripts/run_auto_edit_recovery_golden_set.py::_build_case_risk_alignment(...)`
+    - `scripts/promote_auto_edit_golden_references.py::_refreshed_risk_hints(...)`
+  - 根因：
+    - 评测/刷新链把 auto-apply 事实狭义理解成 `rule_auto_apply_cut_count`，没有同步消费前面已经进入 snapshot 的 `auto_apply_candidate_count`。
+  - 已落地修复：
+    - `scripts/run_auto_edit_recovery_golden_set.py`
+      - `risk_alignment` 现已新增：
+        - `reference_auto_apply_candidate_count`
+        - `fresh_auto_apply_candidate_count`
+      - `reference_refresh_candidates` 现已同步透传上述两项
+    - `scripts/promote_auto_edit_golden_references.py`
+      - manifest `risk_hints` 现已新增：
+        - `reference_auto_apply_candidate_count`
+      - promotion `updates` 输出中也已补该字段，便于 dry-run / apply 对账
+    - 回归补齐：
+      - `tests/test_run_auto_edit_recovery_golden_set.py`
+        - `test_build_case_risk_alignment_prefers_reference_snapshot_manual_confirm_signals`
+        - `test_build_case_result_rows_includes_risk_alignment_summary`
+        - `test_summarize_reference_refresh_candidates_extracts_actionable_rows`
+        - `test_promote_manifest_references_updates_reference_job_and_risk_hints`
+        - `test_promote_manifest_references_keeps_manual_editor_reference_job_and_updates_reference_risk_job`
+      - 上述测试现已一并断言 `reference/fresh auto_apply_candidate_count`
+  - 验证：
+    - `$env:PYTHONPATH='src'; $env:TEMP='E:\\WorkSpace\\RoughCut\\.tmp'; $env:TMP='E:\\WorkSpace\\RoughCut\\.tmp'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "build_case_risk_alignment_prefers_reference_snapshot_manual_confirm_signals or build_case_result_rows_includes_risk_alignment_summary or summarize_reference_refresh_candidates_extracts_actionable_rows or promote_manifest_references_updates_reference_job_and_risk_hints or promote_manifest_references_keeps_manual_editor_reference_job_and_updates_reference_risk_job" -q`
+    - `5 passed`
+    - `python -m py_compile scripts/run_auto_edit_recovery_golden_set.py scripts/promote_auto_edit_golden_references.py`
+  - 当前结论：
+    - `C5` 的 reference refresh 现在不再只保留“切掉了多少 rule auto-apply cut”，而是同时保留“整体有多少候选进入 auto-apply bucket”。
+    - 后续若继续比较 reference/fresh 的风险合同，不必再从 `candidate_risk_summary.total/auto_apply` 或 `rule_auto_apply_cut_count` 反推这层事实。
+
+- 2026-06-12: `C3/C5` 的 candidate 统计又往下游穿透了一层，收掉了“`cut_analysis` 已有 `auto_apply_candidate_count`，但 `variant_timeline_diagnostics` / golden risk snapshot 仍看不到该字段”的合同断口：
+  - 观察到的症状：
+    - 前一轮已经把 `cut_analysis` 与 `multimodal review apply` 的 candidate 统计统一到了同一 helper。
+    - 但 `src/roughcut/pipeline/steps.py::_build_variant_timeline_diagnostics(...)` 输出的 `cut_analysis_summary` 仍只带：
+      - `candidate_count`
+      - `accepted_cut_count`
+      - `rule_candidate_count`
+      - `manual_confirm_candidate_count`
+      - `candidate_risk_summary`
+    - 缺少 `auto_apply_candidate_count`
+    - 结果是：
+      - `variant_timeline_bundle` 下游诊断看不到自动应用候选总量
+      - `scripts/run_auto_edit_recovery_golden_set.py::_build_job_risk_snapshot_from_artifacts(...)` fallback 到 `cut_analysis_summary` 时，也无法把这项事实带入 golden 风险快照
+  - 第一坏层：
+    - `src/roughcut/pipeline/steps.py::_build_variant_timeline_diagnostics(...)`
+  - 根因：
+    - `cut_analysis` 主体字段已扩充，但 bundle diagnostics 仍沿用旧版摘要 schema；下游 `variant bundle -> risk snapshot` 依赖的是这个旧摘要，而不是原始 `cut_analysis` 全字段。
+  - 已落地修复：
+    - `src/roughcut/pipeline/steps.py`
+      - `cut_analysis_summary` 现已补入 `auto_apply_candidate_count`
+    - `scripts/run_auto_edit_recovery_golden_set.py`
+      - `cut_analysis_summary` fallback 现已恢复 `auto_apply_candidate_count`
+      - `_build_job_risk_snapshot_from_artifacts(...)` 现已显式输出：
+        - `auto_apply_candidate_count`
+    - 回归补齐：
+      - `tests/test_edit_decision_diagnostics.py`
+        - `test_variant_timeline_bundle_shared_diagnostic_resolvers`
+          现已断言 `variant_cut_analysis_summary(bundle)` 保留 `auto_apply_candidate_count`
+      - `tests/test_run_auto_edit_recovery_golden_set.py`
+        - `test_reference_risk_snapshot_restores_rule_auto_apply_and_risk_levels_from_artifacts`
+          现已断言 golden risk snapshot 恢复 `auto_apply_candidate_count`
+  - 验证：
+    - `$env:PYTHONPATH='src'; $env:TEMP='E:\\WorkSpace\\RoughCut\\.tmp'; $env:TMP='E:\\WorkSpace\\RoughCut\\.tmp'; python -m pytest tests/test_edit_decision_diagnostics.py tests/test_run_auto_edit_recovery_golden_set.py -k "variant_timeline_bundle_shared_diagnostic_resolvers or reference_risk_snapshot_restores_rule_auto_apply_and_risk_levels_from_artifacts" -q`
+    - `2 passed`
+    - `python -m py_compile src/roughcut/pipeline/steps.py scripts/run_auto_edit_recovery_golden_set.py`
+  - 当前结论：
+    - `C3` 的“规则自动应用数量”现在不再只停留在 `cut_analysis` 原始 artifact 内部，而是已经进入：
+      - `variant_timeline_bundle` diagnostics
+      - golden `reference/evaluation risk snapshot`
+    - 后续若继续收 `C5` 的评测链，可以直接基于这些下游字段做对账，而不用再回退到半手工推断。
+
+- 2026-06-12: `C3/C5` 之间又收掉了一层“multimodal review 已经改写候选集合，但 cut_analysis 统计摘要仍停留在旧候选数，导致后续 risk snapshot / scorecard 继续读取过期统计”的共享摘要残口：
+  - 观察到的症状：
+    - `src/roughcut/edit/multimodal_trim_review.py::apply_multimodal_trim_review_to_cut_analysis(...)` 在收到 review 结果后，会：
+      - 删除被 `keep` veto 的 rule candidate
+      - 给保留候选挂上 `multimodal_review`
+    - 但旧逻辑只手动回写：
+      - `rule_candidate_count`
+      - `candidate_count`
+      - `manual_confirm_candidate_count`
+    - 没有同步重算：
+      - `auto_apply_candidate_count`
+      - `candidate_risk_summary`
+    - 结果是下游 `C5` 的 `reference/evaluation risk snapshot`、scorecard、门禁摘要可能继续消费“review 前”的老统计，而不是当前有效候选集。
+  - 第一坏层：
+    - `src/roughcut/edit/multimodal_trim_review.py::apply_multimodal_trim_review_to_cut_analysis(...)`
+  - 根因：
+    - `build_cut_analysis_payload(...)` 与 multimodal review apply 路径各自维护一套 candidate 统计逻辑；前者会完整统计 total/auto_apply/manual_confirm 风险分布，后者只做局部字段修补，导致同一份 `cut_analysis` 在不同阶段可能出现自相矛盾的摘要。
+  - 已落地修复：
+    - `src/roughcut/edit/cut_analysis.py`
+      - 新增共享 helper：`summarize_cut_analysis_candidate_metrics(...)`
+      - 统一输出：
+        - `candidate_count`
+        - `accepted_cut_count`
+        - `rule_candidate_count`
+        - `auto_apply_candidate_count`
+        - `manual_confirm_candidate_count`
+        - `candidate_risk_summary`
+      - `build_cut_analysis_payload(...)` 已切到该 helper，不再单独维护另一套统计。
+    - `src/roughcut/edit/multimodal_trim_review.py`
+      - `apply_multimodal_trim_review_to_cut_analysis(...)` 现已在改写 `rule_candidates` 后，统一调用同一 helper 重算 candidate 摘要，而不再只手补一部分字段。
+    - `tests/test_manual_editor_helpers.py`
+      - `test_apply_multimodal_trim_review_to_cut_analysis_vetoes_keep_candidates` 现已补断言：
+        - veto 后 `auto_apply_candidate_count = 0`
+        - `manual_confirm_candidate_count = 1`
+        - `candidate_risk_summary` 同步收口为仅剩一条 `medium` manual-confirm 候选
+  - 验证：
+    - `$env:PYTHONPATH='src'; $env:TEMP='E:\\WorkSpace\\RoughCut\\.tmp'; $env:TMP='E:\\WorkSpace\\RoughCut\\.tmp'; python -m pytest tests/test_manual_editor_helpers.py -k "apply_multimodal_trim_review_to_cut_analysis_vetoes_keep_candidates or cut_analysis_payload_tracks_candidate_risk_summary or treats_low_risk_accepted_cuts_without_flag_as_auto_in_auto_mode or keeps_review_gated_accepted_cut_as_manual_without_explicit_flag or reviewed_rule_candidate_out_of_rule_auto_apply_bucket" -q`
+    - `5 passed`
+    - `python -m py_compile src/roughcut/edit/cut_analysis.py src/roughcut/edit/multimodal_trim_review.py`
+  - 当前结论：
+    - `C3` 的风险候选统计现在不再因为经过 multimodal review apply 就落回“字段部分更新”的半旧态。
+    - `C5` 后续读取到的 `candidate_risk_summary / manual_confirm / auto_apply` 已重新对齐到当前有效候选集，而不是 review 前快照。
+
+- 2026-06-12: `C3` 又收掉了一层“同样是 low-risk auto-apply 合同，`rule_candidates` 会被 multimodal review gate 拦住，但 `accepted_cuts` 旧分支仍可能绕过门禁”的共享判定分叉：
+  - 观察到的症状：
+    - `src/roughcut/edit/cut_analysis.py` 里当前有两套 auto-apply 判定：
+      - `_rule_candidate_auto_applied_by_mode(...)`
+      - `_accepted_cut_auto_applied_by_mode(...)`
+    - 前者已经显式阻断：
+      - `multimodal_review_required`
+      - `multimodal_review`
+    - 但后者在 `auto_applied` 字段缺失时，只按 `risk_level=low` 自动放行。
+    - 这会导致同一条低风险 cut 若经 `rule_candidates` 进入链路，会停在人工/多模态门禁前；若经 legacy `accepted_cuts` 进入链路，则可能被重新算成 auto-apply，破坏 `C3` “低风险自动应用、需要复核的候选必须停下” 的统一合同。
+  - 第一坏层：
+    - `src/roughcut/edit/cut_analysis.py::_accepted_cut_auto_applied_by_mode(...)`
+  - 根因：
+    - auto-apply contract 被拆成了两套 helper；`accepted_cuts` 分支继承了较早的“只看 low-risk reason”逻辑，没有同步消费后续加入的 multimodal review gate。
+  - 已落地修复：
+    - `src/roughcut/edit/cut_analysis.py`
+      - 新增共享 helper：`_item_requires_review_gate_before_auto_apply(...)`
+      - `_rule_candidate_auto_applied_by_mode(...)` 与 `_accepted_cut_auto_applied_by_mode(...)` 现统一走该 gate：
+        - 只要存在 `multimodal_review_required`
+        - 或已附带 `multimodal_review`
+        - 且未显式声明 `auto_applied`
+        - 就不会再被低风险默认自动放行
+    - `tests/test_manual_editor_helpers.py`
+      - 新增 `test_cut_analysis_payload_keeps_review_gated_accepted_cut_as_manual_without_explicit_flag`
+      - 新增 `test_cut_analysis_payload_keeps_reviewed_rule_candidate_out_of_rule_auto_apply_bucket`
+      - 并联同既有 low-risk auto/manual 分流回归一起复跑，确认没有把正常低风险 auto-apply 主链打坏
+  - 验证：
+    - `$env:PYTHONPATH='src'; $env:TEMP='E:\\WorkSpace\\RoughCut\\.tmp'; $env:TMP='E:\\WorkSpace\\RoughCut\\.tmp'; python -m pytest tests/test_manual_editor_helpers.py -k "review_gated_accepted_cut or reviewed_rule_candidate_out_of_rule_auto_apply_bucket or treats_low_risk_accepted_cuts_without_flag_as_auto_in_auto_mode or auto_applies_low_risk_rule_candidates_in_auto_mode or keeps_low_risk_rule_candidates_as_manual_in_manual_mode" -q`
+    - `5 passed`
+    - `python -m py_compile src/roughcut/edit/cut_analysis.py`
+  - 当前结论：
+    - `C3` 的 auto-apply 门禁现在不再因为走 `accepted_cuts` 兼容路径而放宽，low-risk 自动应用与 multimodal review 约束已重新回到同一份共享合同上。
+    - 下一层残口仍是把这套“low / medium / high risk + review gate”继续前推到更多真实规则链和 fresh 样本，而不是再回头修这条分支不一致。
+
+- 2026-06-12: `C4/C5` 之间又收掉了一层“旧 batch scorecard 把历史 render 阻塞误报成 `缺少 avatar_result`，导致真实评测报表无法区分 avatar 未启用、avatar provider 降级、以及 render 上游阻塞”的 legacy 解释残口：
+  - 观察到的症状：
+    - 在旧批次 `output/test/auto-edit-recovery-golden/c5-high-risk-render-anchor-long/20260611-094926/batch_report.json` 中：
+      - `render_diagnostics.render_step.status = failed`
+      - `render_diagnostics.render_step.detail = TimeoutError: 步骤 render 执行超过 300.0 秒`
+      - 但重建后的 `detailed_output_scorecard` 仍显示：
+        - `avatar: 47.0 (E) | 缺少 avatar_result ...`
+    - 这会把“真实 render 超时阻塞”错误折叠成“avatar 事实缺失”，让 `C5` 报表层无法区分：
+      - 未启用数字人
+      - 数字人 provider/runtime 已降级并产出 reason
+      - 上游 render 自身超时/阻塞，根本未进入 avatar 结果产出层
+  - 第一坏层：
+    - `scripts/build_batch_output_scorecard.py::_score_avatar(...)`
+  - 根因：
+    - scorecard 之前只认两类 avatar 事实来源：
+      - `render_runtime_diagnostics.avatar_result`
+      - `render_outputs.avatar_result`
+    - 对这类历史 job：
+      - 既没有 `render_outputs`
+      - 也没有 `render_runtime_diagnostics`
+      - 只剩经归一后的 `render_diagnostics.render_step.reason = render_timeout_process`
+    - 结果 scorecard 会把“已知 render 阻塞”误报成“未知 avatar 缺失”
+  - 已落地修复：
+    - `scripts/build_batch_output_scorecard.py`
+      - `_score_avatar(...)` 现新增 legacy fallback：
+        - 当没有 `avatar_result`，但存在 failed `render_step.reason` 时，合成只读 avatar 状态：
+          - `status = blocked`
+          - `reason = render_step.reason`
+        - 这样旧报表至少能忠实表达“avatar 未产出是被 render 阻塞”，而不是继续显示 `缺少 avatar_result`
+      - 同时为该 fallback 补齐 render timeout 类 reason 归一：
+        - `render_timeout_process`
+        - `render_timeout_thread`
+        - `render_timeout`
+    - `tests/test_build_batch_output_scorecard.py`
+      - 新增 `test_score_avatar_falls_back_to_typed_render_step_reason_when_avatar_result_missing`
+  - 验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_build_batch_output_scorecard.py -k "score_avatar" -q`
+    - `4 passed`
+    - `python -m py_compile scripts/build_batch_output_scorecard.py`
+    - 真实旧批次重建：
+      - `python scripts/build_batch_output_scorecard.py --batch-report output/test/auto-edit-recovery-golden/c5-high-risk-render-anchor-long/20260611-094926/batch_report.json --output-json output/test/auto-edit-recovery-golden/c5-high-risk-render-anchor-long/20260611-094926/detailed_output_scorecard.legacy-normalized.json --output-md output/test/auto-edit-recovery-golden/c5-high-risk-render-anchor-long/20260611-094926/detailed_output_scorecard.legacy-normalized.md`
+      - 已确认真实产物中：
+        - `detailed_output_scorecard.legacy-normalized.md`
+          - `avatar: 57.0 (E) | avatar_result=blocked:render_timeout_process(render_timeout_process)；集成模式 picture_in_picture；render_execution=deferred_to_render；未生成独立口播分段，当前为全轨透传/弱插入模式`
+        - `detailed_output_scorecard.legacy-normalized.json`
+          - `avatar.status = blocked`
+          - `avatar.summary` 不再出现 `缺少 avatar_result`
+  - 当前结论：
+    - `C4/C5` 这条旧报表解释链现在已经能把“历史 render 超时阻塞”与“avatar runtime/provider 降级”区分开，不再把上游 render 失败误报成 avatar 层未知
+    - 后续如果继续补 legacy render failure coverage，重点应是扩展更多旧失败 reason 的 typed fallback，而不是再回头处理这条 `缺少 avatar_result` 误报
+
+- 2026-06-12: `C4/C5` 这条 legacy scorecard 链又继续收掉了一层“弱 `missing_avatar_render` 兜底事实压过强 `render_step` timeout 根因”的 shared 解释冲突：
+  - 观察到的症状：
+    - 旧长样本 `output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long/20260611-100119/batch_report.json` 中同时存在：
+      - `render_diagnostics.avatar_result.reason = missing_avatar_render`
+      - `render_diagnostics.render_step.reason = render_failed`
+      - `render_diagnostics.render_step.detail = TimeoutError: 步骤 render 执行超过 300.0 秒`
+    - 在 `build_batch_output_scorecard.py` 完成第一轮 legacy timeout 归一后，重建 scorecard 仍会显示：
+      - `avatar_result=degraded:missing_avatar_render`
+    - 这不是“没有 stronger root cause”，而是更弱的 avatar fallback 覆盖了更强的 render timeout 事实
+  - 第一坏层：
+    - `scripts/build_batch_output_scorecard.py::_score_avatar(...)`
+  - 根因：
+    - `_score_avatar(...)` 之前无条件优先：
+      - `render_diagnostics.avatar_result`
+      - 再回退 `render_step`
+    - 因此只要 runtime 里有旧式 `missing_avatar_render`，即使同一份 `render_diagnostics` 里已有 failed `render_step`，scorecard 也会继续展示更弱的 missing-avatar 兜底原因
+  - 已落地修复：
+    - `scripts/build_batch_output_scorecard.py`
+      - 现已把以下弱 avatar fallback 识别为“不可压过 failed render_step”：
+        - `missing_avatar_render`
+        - `missing_avatar_video`
+        - `missing_avatar_output`
+      - 当同一份 `render_diagnostics` 中：
+        - `avatar_result.reason` 只是上述弱兜底之一
+        - 且 `render_step.status = failed`
+        - 且 `render_step.reason` 存在
+      - scorecard 会丢弃弱 avatar fallback，优先回退到 typed `render_step.reason`
+    - `tests/test_build_batch_output_scorecard.py`
+      - 新增 `test_score_avatar_prefers_failed_render_step_over_weak_missing_avatar_fallback`
+  - 验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_build_batch_output_scorecard.py -k "score_avatar" -q`
+    - `5 passed`
+    - `python -m py_compile scripts/build_batch_output_scorecard.py`
+    - 真实旧产物重建：
+      - `python scripts/build_batch_output_scorecard.py --batch-report output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long/20260611-100119/batch_report.json --output-json output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long/20260611-100119/detailed_output_scorecard.legacy-normalized.json --output-md output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long/20260611-100119/detailed_output_scorecard.legacy-normalized.md`
+      - 已确认真实产物中：
+        - `detailed_output_scorecard.legacy-normalized.md`
+          - 从 `avatar_result=degraded:missing_avatar_render` 收口为
+          - `avatar_result=blocked:render_timeout_process(render_timeout_process)`
+    - 同轮复扫：
+      - `c4-real-render-smoke`：保持 `avatar.status = done`
+      - `c4-real-render-smoke-no-avatar`：保持 `avatar.status = not_enabled`
+      - `c4-runtime-diagnostics-rerun-long-strong-reason`：保持 `avatar_full_track_call_timeout(call_timeout)`
+      - `c5-high-risk-render-anchor-long`：保持 `render_timeout_process` fallback，不再回退 `缺少 avatar_result`
+  - 当前结论：
+    - `C4/C5` 的 legacy scorecard 解释层现在已能区分三类状态：
+      - 数字人未启用
+      - 数字人 runtime/provider 自身降级
+      - render 上游阻塞导致 avatar 无法产出
+    - 后续继续扩展 C4 的旧失败覆盖时，应优先补更多 typed render failure 门类，而不是再回头修这条 weak-missing fallback 冲突
+
+- 2026-06-12: `C4/C5` 的 live gate 也补上了一层旧 summary 纠偏，避免历史 `render_failed` 脏计数在 `jobs[*].render_diagnostics` 已归一后继续误阻断 `live_readiness`：
+  - 观察到的症状：
+    - 当前 `live_readiness._extract_render_diagnostics_summary(...)` 在读取顶层 `render_diagnostics_summary` 时，虽然已会用 `jobs[*].render_diagnostics` fallback 覆写：
+      - `failed_render_reasons`
+      - `cover_degraded_reasons`
+      - `avatar_degraded_reasons`
+      - `avatar_degraded_reason_categories`
+    - 但它此前不会同步覆写：
+      - `failed_render_job_count`
+      - `failed_render_job_ids`
+      - 以及 cover/avatar degraded 的 count/id 字段
+    - 结果是：即使 job 级 `render_diagnostics` 经过归一后已证明不是 failed，旧顶层 summary 里的 stale failed count 仍可能继续阻断 gate
+  - 第一坏层：
+    - `src/roughcut/pipeline/live_readiness.py::_extract_render_diagnostics_summary(...)`
+  - 根因：
+    - 当前实现只把 jobs fallback 当成“reason map 补丁”，没有把它当成更强的 render 终态事实层
+    - 因此 legacy summary 和 normalized job diagnostics 冲突时，会出现：
+      - reason 已经变了
+      - 但 failed count / failed ids 还是旧值
+  - 已落地修复：
+    - `src/roughcut/pipeline/live_readiness.py`
+      - 当 `jobs[*].render_diagnostics` 可提取出 fallback summary 时，现已整体优先信任 jobs fallback 的 render diagnostics 事实：
+        - `evaluated_job_count`
+        - `failed_render_job_count`
+        - `failed_render_job_ids`
+        - `failed_render_reasons`
+        - `cover_degraded_job_count / ids / reasons`
+        - `avatar_degraded_job_count / ids / reasons / reason_categories`
+      - 不再只覆写 reason map、保留旧 count
+    - `tests/test_run_fullchain_batch.py`
+      - 新增 `test_live_readiness_prefers_normalized_job_render_counts_over_stale_legacy_summary`
+  - 验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_fullchain_batch.py -k "live_readiness" -q`
+    - `11 passed`
+    - `python -m py_compile src/roughcut/pipeline/live_readiness.py`
+    - 真实旧产物复验：
+      - `output/test/auto-edit-recovery-golden/c4-real-render-smoke-no-avatar/20260611-075411/batch_report.json`
+      - 该旧 batch 的 job 级 `render_diagnostics` 仍残留：
+        - `render_step.status = done`
+        - `render_step.reason = render_failed`
+      - 但用当前 `build_live_readiness_summary(...)` 重新解析后，`render_end_state_stability` 已归一为：
+        - `passed = true`
+        - `failed_render_job_count = 0`
+        - `failed_render_job_ids = []`
+        - `failed_render_reasons = {}`
+  - 当前结论：
+    - `C4/C5` 的 live gate 现在不再只是“能改正旧 reason 名称”，而是能在 legacy summary 与 normalized job diagnostics 冲突时，整体信任更强的 job 级事实
+    - 后续若继续补 `ffmpeg_* / render_ffprobe_failed / cover_export_failed` 的旧样本覆盖，应直接验证 job 级归一后，scorecard 与 live gate 是否都能同步消化，而不是只看单层 summary 文案
+
+- 2026-06-12: `C4/C5` 的 audit snapshot / audit pack 也补上了一层“runtime-only failed render job 不再把 `render_outputs_summary` 退成空对象”的共享读取收口：
+  - 观察到的症状：
+    - 对于 `output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long/20260611-100119` 这类失败长样本：
+      - artifact counts 已有 `render_runtime_diagnostics = 2`
+      - 但没有 `render_outputs`
+    - 旧的 `scripts/export_job_audit_snapshot.py::summarize_render_outputs(...)` 把 `render_outputs` 当成硬前置，没有该 artifact 就直接返回 `{}`
+    - 结果 audit pack 中会出现：
+      - `render outputs summary: {}`
+      - 即使 runtime 已经产出了 avatar/cover 降级事实，audit 也完全看不到
+  - 第一坏层：
+    - `scripts/export_job_audit_snapshot.py::summarize_render_outputs(...)`
+  - 根因：
+    - 共享读取层把 `render_outputs_summary` 狭义理解成“最终 render output artifact 的摘要”，没有把 `render_runtime_diagnostics` 当成同等有效的运行时事实来源
+    - 因此 failed render job 在没有最终 `render_outputs` 时，会把 audit 摘要直接打空
+  - 已落地修复：
+    - `scripts/export_job_audit_snapshot.py`
+      - `summarize_render_outputs(...)` 现已支持 runtime-only 模式：
+        - 没有 `render_outputs` 时，若存在 `render_runtime_diagnostics`，仍会生成 `render_outputs_summary`
+      - 只有在两者都不存在时才返回空对象
+    - `tests/test_run_auto_edit_recovery_golden_set.py`
+      - 新增 `test_summarize_render_outputs_supports_runtime_only_failed_render_jobs`
+  - 验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "summarize_render_outputs or build_audit_markdown_includes_render_outputs_summary" -q`
+    - `4 passed`
+    - `python -m py_compile scripts/export_job_audit_snapshot.py scripts/build_job_audit_pack.py`
+    - 真实重建：
+      - `python scripts/build_job_audit_pack.py --job-id e61e9e00-0e3d-4888-8d9c-37cb3d119286 --output-md output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long/20260611-100119/job-audit-pack.runtime-only.md --snapshot-output-json output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long/20260611-100119/job-audit-pack.runtime-only.snapshot.json`
+      - 已确认真实产物中：
+        - `job-audit-pack.runtime-only.md`
+          - 从 `render outputs summary: {}` 收口为：
+          - `render outputs summary: {"avatar_result": {"status": "degraded", "reason": "missing_avatar_render", "detail": "没有拿到可用数字人视频，已自动回退普通成片。"}}`
+        - `job-audit-pack.runtime-only.snapshot.json`
+          - `artifacts.render_outputs_summary.avatar_result` 已存在，不再是空对象
+  - 当前结论：
+    - `C4/C5` 的 audit 层现在至少不会再因为缺少最终 `render_outputs` 而把 runtime 诊断直接丢空
+    - 后续若继续收这条链，下一层应考虑是否要像 scorecard 一样，让 audit 摘要在 `missing_avatar_render` 与更强 `render_step` failed root cause 冲突时，也显式展示更强的阻塞原因
+
+- 2026-06-12: 上述 audit 链又继续收掉了一层“弱 `missing_avatar_render` 兜底不应压过 failed render step”的强弱优先级冲突：
+  - 观察到的症状：
+    - 即使 audit snapshot / audit pack 已能在 runtime-only failed render job 上输出 `render_outputs_summary`
+    - 旧逻辑仍会直接展示：
+      - `avatar_result.reason = missing_avatar_render`
+    - 而同一 job 的 `step_status.render` 已经是 failed/cancelled 终态
+    - 这会让 audit 与 scorecard 对同一 failed render job 给出两套不同解释：scorecard 已转向 blocked render cause，audit 仍停在 missing-avatar 弱兜底
+  - 第一坏层：
+    - `scripts/export_job_audit_snapshot.py`
+    - `scripts/build_job_audit_pack.py`
+  - 根因：
+    - 共享 snapshot 读取层此前只负责“把 runtime-only fact 读出来”，但没有再结合 `step_status.render` 判断：
+      - 当前 avatar reason 是否只是弱 fallback
+      - 当前是否已有更强的 render blocker
+    - 因此 `missing_avatar_render` 会继续压住 failed render step 的更强终态
+  - 已落地修复：
+    - `scripts/export_job_audit_snapshot.py`
+      - 新增 `_normalize_render_outputs_summary_for_reporting(...)`
+      - 当 `render_outputs_summary.avatar_result.reason` 属于：
+        - `missing_avatar_render`
+        - `missing_avatar_video`
+        - `missing_avatar_output`
+      - 且 `step_status.render` 已是 `failed/cancelled`
+      - 就会把 audit 摘要中的 avatar 解释提升为 blocked render cause，而不是继续停在 weak fallback
+      - snapshot 现在还会把 render step 的 `sync_runner` 元数据带入 `step_status[*]`，便于后续继续区分 `process/thread` 类 timeout
+    - `scripts/build_job_audit_pack.py`
+      - 渲染 markdown 前会再次对已加载 snapshot 做同一层归一，避免旧 snapshot-json 直接绕过新合同
+    - `tests/test_run_auto_edit_recovery_golden_set.py`
+      - 新增 `test_build_audit_markdown_prefers_failed_render_root_cause_over_missing_avatar_render`
+  - 验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "summarize_render_outputs or build_audit_markdown" -q`
+    - `6 passed`
+    - `python -m py_compile scripts/export_job_audit_snapshot.py scripts/build_job_audit_pack.py`
+    - 真实重建：
+      - `python scripts/build_job_audit_pack.py --job-id e61e9e00-0e3d-4888-8d9c-37cb3d119286 --output-md output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long/20260611-100119/job-audit-pack.root-cause.md --snapshot-output-json output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long/20260611-100119/job-audit-pack.root-cause.snapshot.json`
+      - 已确认真实产物中：
+        - `job-audit-pack.root-cause.md`
+          - 从 `missing_avatar_render` 收口为 blocked render cause：
+          - `render outputs summary: {"avatar_result": {"status": "blocked", "reason": "render_failed", "detail": "任务到达时作业已终止，当前步骤已停止。"}}`
+        - `job-audit-pack.root-cause.snapshot.json`
+          - `artifacts.render_outputs_summary.avatar_result.status = blocked`
+          - 不再是原始 weak fallback `degraded:missing_avatar_render`
+  - 当前结论：
+    - `C4/C5` 的 audit 层现在已经和 scorecard 同方向收口：弱 missing-avatar fallback 不会再压过 failed render step
+    - 当前这条真实长样本由于数据库中的 render step 已变成 `cancelled`，snapshot 最终归一到 `render_failed` 而不是 `render_timeout_process`
+    - 后续若要继续细化到 `process/thread` 级 timeout，还需要抓到仍保留 sync-runner 细节的真实失败样本或在 snapshot 中进一步保留该历史 metadata
+
+- 2026-06-12: 上面这条 audit timeout 残口又继续推进了一层，不再依赖“当前 DB 仍保留 failed step”这个前提，而是会主动从 workspace 历史 `batch_report` 补回更强的 render 失败细节：
+  - 观察到的症状：
+    - 当前 DB 导出的 `e61e9e00-0e3d-4888-8d9c-37cb3d119286` snapshot 会被后续状态漂移冲淡：
+      - `job.status = processing`
+      - `render step = cancelled`
+      - `render_outputs_summary.avatar_result.reason = missing_avatar_render`
+    - 但同 workspace 下早已存在更强的历史证据：
+      - `output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long/20260611-100119/batch_report.json`
+      - 其中 `jobs[*].render_diagnostics.render_step` 已保存：
+        - `status = failed`
+        - `detail/error = TimeoutError: 步骤 render 执行超过 300.0 秒`
+        - `sync_runner_timeout_strategy = process`
+        - `sync_runner_timeout_seconds = 300.0`
+    - 旧 snapshot 导出链此前完全信任当前 DB，不会回看这些 workspace 内现成的历史失败证据
+  - 第一坏层：
+    - `scripts/export_job_audit_snapshot.py::export_snapshot(...)`
+  - 根因：
+    - 失败根因只存在于“当时落下来的 batch_report / audit_packs”里，而不是稳定保存在当前 DB 最新态
+    - 导出链只读当前 DB，就会把更强的 timeout/process 细节丢掉
+  - 已落地修复：
+    - `scripts/export_job_audit_snapshot.py`
+      - 新增 `_load_historical_batch_render_diagnostics(job_id, search_root=ROOT/output/test)`
+        - 会在 workspace 现有 `batch_report.json` 中查找同 job 的历史 `render_diagnostics`
+      - 新增 `_merge_historical_render_context(...)`
+        - 若当前 snapshot 的 `job/status/error`、`step_status.render`、`render_outputs_summary` 比历史 batch 证据更弱，就用历史 `render_diagnostics.render_step` 补强：
+          - `job.status`
+          - `job.error_message`
+          - `step_status.render.status/detail/error/sync_runner`
+          - 必要时补 `render_outputs_summary.avatar_result/cover_result`
+      - 随后再进入 `_normalize_render_outputs_summary_for_reporting(...)`，让 audit 摘要能利用恢复出来的 `sync_runner_timeout_strategy`
+    - `tests/test_run_auto_edit_recovery_golden_set.py`
+      - 新增 `test_merge_historical_render_context_restores_failed_timeout_evidence`
+  - 验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "historical_render_context or summarize_render_outputs or build_audit_markdown" -q`
+    - `7 passed`
+    - `python -m py_compile scripts/export_job_audit_snapshot.py scripts/build_job_audit_pack.py`
+    - 真实重建：
+      - `python scripts/build_job_audit_pack.py --job-id e61e9e00-0e3d-4888-8d9c-37cb3d119286 --output-md output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long/20260611-100119/job-audit-pack.history-merged.md --snapshot-output-json output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long/20260611-100119/job-audit-pack.history-merged.snapshot.json`
+      - 已确认真实产物中：
+        - `job-audit-pack.history-merged.snapshot.json`
+          - `job.status = failed`
+          - `job.error_message = TimeoutError: 步骤 render 执行超过 300.0 秒`
+          - `step_status.render.status = failed`
+          - `step_status.render.sync_runner.sync_runner_timeout_strategy = process`
+        - `job-audit-pack.history-merged.md`
+          - `render outputs summary: {"avatar_result": {"status": "blocked", "reason": "render_timeout_process", "detail": "TimeoutError: 步骤 render 执行超过 300.0 秒"}}`
+  - 当前结论：
+    - `C4/C5` 的 audit 导出链现在不再只依赖当前 DB 最新态，而是会在 workspace 内主动回收同 job 的历史 batch 失败证据
+    - 对真实长样本 `e61...`，audit 现在已经从弱 `missing_avatar_render` 收口到 `render_timeout_process`
+    - 后续若继续补这条链，优先顺序应是：
+      - 再找 `thread timeout / ffmpeg / ffprobe / cover_export_failed` 的历史 batch 证据
+      - 用同一套历史补强机制推进 audit 与 gate/scorecard 一致
+
+- 2026-06-12: 上述 audit 历史补强链又收掉了最后一层“没有任何 `avatar_result/render_outputs` 时仍会退回空摘要”的失败样本残口：
+  - 观察到的症状：
+    - `3173c091-1124-46a0-bade-eba2ddc9c91e` 这类真实失败 job：
+      - 当前 DB 中没有 `render_outputs`
+      - 也没有 `render_runtime_diagnostics`
+      - 历史 `audit_packs/*.snapshot.json` 与当前导出 snapshot 都会显示：
+        - `render_outputs_summary = {}`
+    - 但同 workspace 下的历史 `batch_report.json` 已保存：
+      - `render_step.status = failed`
+      - `detail/error = TimeoutError: 步骤 render 执行超过 300.0 秒`
+      - `sync_runner_timeout_strategy = process`
+    - 也就是说 audit 已经拿到了足够强的 render blocker 事实，却仍因为“没有 avatar/runtime summary”而退回空对象
+  - 第一坏层：
+    - `scripts/export_job_audit_snapshot.py::_normalize_render_outputs_summary_for_reporting(...)`
+  - 根因：
+    - 上一轮归一逻辑只处理两种情况：
+      - runtime-only summary 存在
+      - 或 summary 中已有弱 `missing_avatar_render`
+    - 对“summary 完全为空，但 failed render step 已存在”的 case，没有合成 blocked avatar summary 的逻辑
+  - 已落地修复：
+    - `scripts/export_job_audit_snapshot.py`
+      - `_normalize_render_outputs_summary_for_reporting(...)` 现在在 summary 为空时，若 `step_status.render` 已是 `failed/cancelled` 且可从：
+        - `detail/error`
+        - `sync_runner`
+      - 归类出稳定 render 原因，就会直接合成：
+        - `avatar_result.status = blocked`
+        - `avatar_result.reason = render_timeout_process / ...`
+      - 不再要求先存在弱 `missing_avatar_render`
+    - `tests/test_run_auto_edit_recovery_golden_set.py`
+      - 新增 `test_build_audit_markdown_synthesizes_blocked_render_summary_when_avatar_result_missing`
+  - 验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "build_audit_markdown or historical_render_context or summarize_render_outputs" -q`
+    - `8 passed`
+    - `python -m py_compile scripts/export_job_audit_snapshot.py scripts/build_job_audit_pack.py`
+    - 真实重建：
+      - `python scripts/build_job_audit_pack.py --job-id 3173c091-1124-46a0-bade-eba2ddc9c91e --output-md output/test/auto-edit-recovery-golden/c5-high-risk-render-anchor-long/20260611-094926/job-audit-pack.history-merged.md --snapshot-output-json output/test/auto-edit-recovery-golden/c5-high-risk-render-anchor-long/20260611-094926/job-audit-pack.history-merged.snapshot.json`
+      - 已确认真实产物中：
+        - `job-audit-pack.history-merged.md`
+          - 从 `render outputs summary: {}` 收口为：
+          - `render outputs summary: {"avatar_result": {"status": "blocked", "reason": "render_timeout_process", "detail": "TimeoutError: 步骤 render 执行超过 300.0 秒"}}`
+        - `job-audit-pack.history-merged.snapshot.json`
+          - `step_status.render.sync_runner.sync_runner_timeout_strategy = process`
+          - `artifacts.render_outputs_summary.avatar_result.reason = render_timeout_process`
+  - 当前结论：
+    - 现在 audit 导出链即使面对“没有 render_outputs、没有 runtime avatar artifact、只有历史 batch render_step”的失败 job，也能合成稳定的 blocked render 摘要
+    - `C4/C5` 在 timeout 这条真实失败主链上，scorecard / live gate / audit 现在都已能对齐到 `render_timeout_process` 这一层，不再各说各话
+
+- 2026-06-12: 对 workspace 历史 `batch_report` 的新一轮原始错误文本扫描，已经把当前 `C4` 的“真实剩余覆盖面”收束出来：
+  - 扫描方法：
+    - 直接遍历 `output/test/**/batch_report.json`
+    - 检索：
+      - `TimeoutError: 步骤 render 执行超过`
+      - `ffmpeg`
+      - `ffprobe`
+      - `cover export / 封面导出失败`
+      - `render_variant_sync_blocked / subtitle drift`
+      - 各类 packaging 关键词
+  - 当前结果：
+    - 命中的真实 render 失败主因只有一类：
+      - `timeout_process`
+    - 命中样本至少包括：
+      - `c4-runtime-diagnostics-rerun-long`
+      - `c4-timeout-reason-rerun-long`
+      - `c5-high-risk-render-anchor-long`
+      - 以及旧 `continue*` 目录中的 `1.0s / 1200.0s` timeout 样本
+    - 当前 workspace 中未检出带以下原始失败证据的现成历史 batch 样本：
+      - `render_timeout_thread`
+      - `ffmpeg_render_failed`
+      - `ffmpeg_*packaging_failed`
+      - `render_ffprobe_failed`
+      - `cover_export_failed`
+      - `render_variant_sync_blocked`
+  - 当前结论：
+    - 这意味着 `C4` 在“真实 render 失败锚点”层面，目前已被证实并收口的是 `timeout_process` 主链
+    - 其余门类并不是“已经验证失败但未修”，而是“当前工作区缺少真实历史证据”
+    - 因此后续 `C4` 的优先动作应改为：
+      - 通过新 replay 主动制造/采集这些门类的真实样本
+      - 或等待新的真实失败 case 进入 workspace，再用现有历史补强链接入 scorecard / live gate / audit
+    - 不应继续把“工作区里当前没有的 `ffmpeg/ffprobe/cover_export/thread-timeout` 历史样本”误判成现成未收口残口
+
+- 2026-06-12: `C4` 又收掉了一层“render runtime 已有原始 avatar reason，但 batch/golden/live gate 仍不能直接看出统一 provider/timeout/busy 门类”的报告合同缺口：
+  - 观察到的症状：
+    - 当前 runtime 已会产出诸如：
+      - `avatar_full_track_slot_timeout`
+      - `avatar_full_track_call_timeout`
+      - `avatar_full_track_busy_exhausted`
+      - `avatar_full_track_provider_response_error`
+    - 但 `render_diagnostics_summary` 与 `live_readiness.render_end_state_stability` 只按原始 `avatar_result.reason` 聚合
+    - 这导致报告层虽然“不丢明细”，却还不能直接按验收口径看出：
+      - `slot_timeout`
+      - `call_timeout`
+      - `busy_exhausted`
+      - `provider_error`
+  - 第一坏层：
+    - `scripts/run_fullchain_batch.py::_build_render_diagnostics(...)`
+    - `scripts/run_auto_edit_recovery_golden_set.py::summarize_render_diagnostics(...)`
+    - `src/roughcut/pipeline/live_readiness.py::_extract_render_diagnostics_summary(...)`
+  - 根因：
+    - 现有合同只忠实透传 provider-specific 原始 reason code，没有在报告/gate 层再补一层稳定 category
+    - 结果是“原始细节存在，但 summary/gate 仍不够直读”
+  - 已落地修复：
+    - `scripts/run_fullchain_batch.py`
+      - 新增 `_classify_avatar_runtime_reason_category(...)`
+      - `render_diagnostics.avatar_result` 现同时写：
+        - `reason`
+        - `reason_category`
+    - `scripts/run_auto_edit_recovery_golden_set.py`
+      - `summarize_render_diagnostics(...)` 新增：
+        - `avatar_degraded_reason_categories`
+      - `render_case_summary_markdown(...)` 现会输出该 category 聚合
+    - `src/roughcut/pipeline/live_readiness.py`
+      - `render_end_state_stability` 现同步透传：
+        - `avatar_degraded_reason_categories`
+      - 旧 summary 缺该字段时，仍可从 `jobs[*].render_diagnostics.avatar_result.reason_category` fallback 恢复
+    - `scripts/build_batch_output_scorecard.py`
+      - `avatar` 维度 summary 现会把 `reason_category` 一并写出，不再只有 provider-specific 原始 reason
+    - `scripts/build_job_audit_pack.py`
+      - audit pack 渲染 `render_outputs_summary.avatar_result` 时，若 snapshot 里尚无 `reason_category`，会按已有 `reason` 做同口径归一补齐
+    - `scripts/export_job_audit_snapshot.py`
+      - `summarize_render_outputs(...)` 现会把 `render_runtime_diagnostics` 与 `render_outputs` 合并，优先保留更强的 runtime avatar/cover 事实，而不是退回较弱的 `missing_*` reason
+  - 验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_fullchain_batch.py tests/test_run_auto_edit_recovery_golden_set.py -k "render_diagnostics or render_case_summary_markdown_includes_manual_editor_apply_semantics or live_readiness_extract_render_diagnostics_summary_preserves_reason_counts or live_readiness_backfills_render_reason_counts_from_jobs_when_summary_is_legacy" -q`
+    - `8 passed`
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_build_batch_output_scorecard.py tests/test_run_auto_edit_recovery_golden_set.py tests/test_run_fullchain_batch.py -k "score_avatar_prefers_runtime_render_diagnostics_when_render_outputs_missing_avatar_result or build_audit_markdown_includes_render_outputs_summary or render_diagnostics or live_readiness_extract_render_diagnostics_summary_preserves_reason_counts or live_readiness_backfills_render_reason_counts_from_jobs_when_summary_is_legacy" -q`
+    - `9 passed`
+    - `python -m py_compile scripts/build_batch_output_scorecard.py scripts/build_job_audit_pack.py scripts/run_fullchain_batch.py scripts/run_auto_edit_recovery_golden_set.py src/roughcut/pipeline/live_readiness.py`
+    - `python -m py_compile scripts/run_fullchain_batch.py scripts/run_auto_edit_recovery_golden_set.py src/roughcut/pipeline/live_readiness.py`
+    - 真实重建：
+      - `python scripts/build_batch_output_scorecard.py --batch-report output/test/auto-edit-recovery-golden/c4-timeout-reason-rerun-long/20260611-102900/batch_report.json --output-json output/test/auto-edit-recovery-golden/c4-timeout-reason-rerun-long/20260611-102900/detailed_output_scorecard.reason-category.json --output-md output/test/auto-edit-recovery-golden/c4-timeout-reason-rerun-long/20260611-102900/detailed_output_scorecard.reason-category.md`
+      - `python scripts/build_job_audit_pack.py --job-id 4fe43aba-5f1d-4778-9a7c-ebbe9abd1599 --output-md output/test/auto-edit-recovery-golden/c4-timeout-reason-rerun-long/20260611-102900/job-audit-pack.reason-category.md --snapshot-output-json output/test/auto-edit-recovery-golden/c4-timeout-reason-rerun-long/20260611-102900/job-audit-pack.reason-category.snapshot.json`
+      - 已确认真实产物中：
+        - `detailed_output_scorecard.reason-category.md`
+          - `avatar_result=degraded:avatar_full_track_call_timeout(call_timeout)`
+        - `job-audit-pack.reason-category.snapshot.json`
+          - `render_outputs_summary.avatar_result.reason = avatar_full_track_call_timeout`
+          - `render_outputs_summary.avatar_result.reason_category = call_timeout`
+        - `job-audit-pack.reason-category.md`
+          - `render outputs summary` 不再退回 `missing_avatar_render`
+  - 当前结论：
+    - `C4` 这层报告/gate/scorecard/audit 合同现在不再只暴露 provider-specific 原始 reason，而是已经把 avatar 降级/失败归入稳定门类，同时保留原始细节
+    - 后续真实 render replay 应重点继续验证 FFmpeg/provider 细分类覆盖是否还存在未进入 typed category 的新残口，而不是再回头补这层 summary/gate contract
+
+- 2026-06-12: `C3` 又收掉了一层“实现已按新 surface contract 收口，但测试仍要求旧 raw 口径”的回归噪音，避免后续为了迎合过期断言把候选来源层再次改坏：
+  - 观察到的症状：
+    - 当前 `src/roughcut/edit/smart_cut_candidates.py::_subtitle_rule_match_text_and_layer(...)` 已按
+      - `timed raw -> spoken raw -> canonical`
+      的顺序决定 `match_surface_layer`
+    - `subtitle_raw_rule_text(...)` 在无显式 raw 时只回退到 canonical，不会再把仅有 `text_final` 的最小 subtitle 输入伪装成 raw
+    - 但 `tests/test_manual_editor_helpers.py::test_cut_analysis_payload_includes_match_surface_layer_for_generated_candidates` 仍断言：
+      - 最小 `text_final="um let's begin"` 的 `filler_word.match_surface_layer == "raw"`
+  - 第一坏层：
+    - 回归合同本身，而不是主链实现
+  - 根因：
+    - `C3/T2.6` 当时已把“最小 `text_final` 输入上的 filler/catchphrase 候选”从“直接丢失”修成“通过 canonical fallback 生成，并显式标注 canonical”
+    - 但后续测试中仍残留一条旧预期，继续把 canonical fallback 候选当成 raw surface
+  - 已落地修复：
+    - `tests/test_manual_editor_helpers.py::test_cut_analysis_payload_includes_match_surface_layer_for_generated_candidates`
+      - filler 最小 `text_final` 输入现明确断言 `match_surface_layer == "canonical"`
+      - 新增 catchphrase 最小 `text_final` 输入同样断言 `match_surface_layer == "canonical"`
+  - 验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "match_surface_layer_for_generated_candidates or auto_applies_low_risk_rule_candidates_in_auto_mode or keeps_low_risk_rule_candidates_as_manual_in_manual_mode or adds_backend_smart_cut_rule_candidates or catchphrase" -q`
+    - `6 passed`
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py tests/test_rule_registry.py tests/test_edit_decision_diagnostics.py -k "risk or refine_decision or auto_apply or llm_review_gate or managed_auto_cut" -q`
+    - `27 passed`
+  - 当前结论：
+    - `C3` 这条 shared contract 已重新对齐：最小 subtitle 输入上的低风险规则候选仍能进入生成与分流链，但 provenance 现在忠实反映 canonical fallback，而不再伪装成 raw
+    - 后续不要再把“只有 `text_final` 的 filler/catchphrase 候选也必须记作 raw”当作正确回归口径
+
+- 2026-06-11: `C2/C3/C5` 之间最后一处 shared helper 串扰已拿到 fresh 证据收平，`edc17_manual_editor_anchor` 不再出现“风险分桶变好但 manual-editor apply 语义回归”的冲突态：
+  - 观察到的症状：
+    - 在为 `cut_analysis.accepted_cuts` 补齐低风险 `auto_applied` 自动归类后，fresh replay `output/test/auto-edit-recovery-golden/c3-edc17-accepted-cut-autobucket-rerun/20260611-155021` 一度把 `manual_confirm_candidate_count` 从 `5` 降到 `3`
+    - 但同轮又把 `manual_editor_apply_semantics` 打坏：
+      - `managed_auto_cut_count = 10`
+      - `effective_keep_segment_count = 10`
+      - `roundtrip_matches_editorial = false`
+  - 第一坏层：
+    - `src/roughcut/api/jobs.py::_manual_editor_apply_frontend_managed_auto_cuts(...)`
+    - `scripts/run_auto_edit_recovery_golden_set.py::inspect_manual_editor_apply_semantics(...)`
+  - 根因：
+    - `accepted_cuts` 一旦存在，shared helper 会被当成“当前前端托管自动删减”的事实层
+    - 但 `edc17` 这类 case 中，一部分 low-risk accepted silence 只存在于诊断/accepted bucket，不代表当前 editorial timeline 真实已删
+    - 同时 verifier 仍沿用旧口径：apply 语义检查没有显式传入当前 editorial keep timeline，导致 fresh gate 继续把这些 accepted cuts 当成当前生效删减
+  - 已落地修复：
+    - `_manual_editor_restore_frontend_managed_auto_cuts(...)` 现统一按当前 deleted ranges 过滤 accepted managed cuts
+    - `_manual_editor_apply_frontend_managed_auto_cuts(...)` 新增 `current_keep_segments` 输入；真实 apply 路径用当前 editorial keep timeline 判定哪些 accepted cuts 仍属当前 frontend-managed auto cuts
+    - `scripts/run_auto_edit_recovery_golden_set.py::inspect_manual_editor_apply_semantics(...)` 已同步 verifier/gate 口径：
+      - apply 检查显式传入 `previous_effective_keep_segments`
+      - managed-auto-cut 计数改为按当前 deleted ranges 过滤后的结果
+  - 新回归：
+    - `tests/test_manual_editor_helpers.py`
+      - `test_manual_editor_frontend_managed_auto_cuts_ignore_accepted_ranges_without_current_deleted_overlap`
+      - `test_manual_editor_frontend_managed_auto_cuts_keep_accepted_ranges_when_current_deleted_overlap`
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "frontend_managed_auto_cuts or cut_analysis_payload_tracks_candidate_risk_summary or low_risk_accepted_cuts_without_flag_as_auto_in_auto_mode or auto_applies_low_risk_rule_candidates_in_auto_mode or timeline_accepts_canonical_refresh_basis_as_canonical_family or apply_semantics_keep_subtitle_only_scope" -q`
+    - `11 passed`
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "manual_editor_apply_semantics or promote_manifest_references or load_golden_job_manifest_accepts_rich_job_entries" -q`
+    - `7 passed`
+  - 真实验证：
+    - reference 语义校验：
+      - `python scripts/verify_manual_editor_apply_semantics.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id edc17_manual_editor_anchor --json`
+      - 结果：
+        - `managed_auto_cut_count = 0`
+        - `effective_keep_segment_count = 1`
+        - `roundtrip_matches_editorial = true`
+        - `ok = true`
+    - fresh replay：
+      - `output/test/auto-edit-recovery-golden/c3-edc17-accepted-cut-autobucket-rerun-v3/20260611-155856`
+      - 已确认：
+        - `quality_score = 100.0`
+        - `required_checks_contract_passed = 4/4`
+        - `manual_editor_apply_semantics_ok = true`
+        - `manual_editor_roundtrip_matches_editorial = true`
+        - `evaluation_risk_snapshot.manual_confirm_candidate_count = 3`
+        - `evaluation_risk_snapshot.candidate_risk_summary.auto_apply.low = 52`
+        - `evaluation_risk_snapshot.candidate_risk_summary.manual_confirm.low = 0`
+        - `risk_alignment.status = aligned`
+        - `stable_run_count = 1`
+  - 当前结论：
+    - `edc17_manual_editor_anchor` 现在已经从“C3 accepted-cut 自动归类打坏 C2 manual-editor apply”的冲突态，推进到“C2/C3 同时成立，剩余仅是 C5 稳定批次累计”的状态
+    - 后续不要再把这条 case 作为“accepted cuts 存在即代表当前 frontend-managed auto cuts”的问题重复排查，除非 shared helper 再次退回旧口径
+
+- 2026-06-11: `C5/C3` 上的 `S06mini` 活锚点已完成一轮新的真实根因验收，确认此前残口不再需要继续猜测：
+  - fresh 失败样本 `78333d16-3783-41a6-af34-572bf8cb06e2` 的真实 `llm_cut_review` 候选指纹已直接复算为 `245730cfbbfd4b4f403f3ef2e17d264b819c18a19ff5999f8e1be039dd359884`
+  - 该指纹已与历史真实 cache `data/runtime/output/_cache/llm/edit_plan_cut_review/3b4f633454918005033b1d4891a279c5be886085ba6e82fc4328988e42deff93.json` 对齐，证明 cross-job cache 兼容路径并非“理论补丁”，而是有真实可复用 entry；旧 fresh replay 没命中只是因为运行时点早于兼容逻辑落地
+  - reference job `8f7b2179-5435-473d-a923-886db86f62ef` 与 fresh 旧样本上的 `multimodal_trim_review_source_missing` 也已确认属于旧 artifact：源码修复后重新 replay 不再报 source missing
+- 2026-06-11: 新 replay `output/test/auto-edit-recovery-golden/c5-cache-multimodal-rerun/20260611-145916` 已直接验证两条共享运行时收口成立：
+  - fresh evaluation job `8a961bb0-65e1-41f9-a0e4-1dd9c91b5bc0`
+  - `variant_timeline_bundle.timeline_rules.diagnostics.llm_cut_review` 已变为：
+    - `reviewed = true`
+    - `cached = true`
+    - `provider = zhipu`
+    - `model = glm-5.1`
+    - `decision_count = 3`
+    - `restored_cut_count = 3`
+  - `multimodal_trim_review_summary` 已从旧的 `error = multimodal_trim_review_source_missing` 收口为：
+    - `reviewed = true`
+    - `error = None`
+    - `provider = zhipu`
+    - `model = glm-4.6v-flash`
+  - 同轮 `batch_report.json` 已确认：
+    - `quality_score = 92.5`
+    - `required_checks_contract_passed = 3/3`
+    - `quality_issue_codes = ["subtitle_quality_warning", "multimodal_trim_review_incomplete"]`
+- 2026-06-11: 这轮 replay 又暴露出 `subtitle_quality_warning` 的真正共享根因还没完全收平：
+  - `content_profile_final.summary` 已带明确主体 `NOC MT34` 与内容方向，但 `subtitle_quality_report` 仍把它判成 `摘要模板化命中 1 项`
+  - 根因不是“再换一句 summary 文案”，而是 `subtitle_quality.py::_summary_generic_phrase_hits(...)` 仍会把“带明确 subject/context 的结构化摘要 + 通用用途后缀”当成模板化摘要
+  - 已在 `subtitle_quality.py` 新增 `_summary_has_specific_context_despite_generic_suffix(...)`，让显式 subject + 内容方向/重点信息存在时 suppress generic-summary hit，而不是继续通过改文案绕过 gate
+  - 新回归：
+    - `tests/test_subtitle_word_boundary.py::test_quality_report_suppresses_generic_summary_warning_when_subject_context_is_specific`
+    - `tests/test_subtitle_word_boundary.py::test_quality_report_keeps_warning_for_pure_generic_summary_phrase`
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_subtitle_word_boundary.py -k "quality_report_suppresses_generic_summary_warning_when_subject_context_is_specific or quality_report_keeps_warning_for_pure_generic_summary_phrase" -q`
+    - `2 passed`
+- 2026-06-11: 修复后的再次 replay `output/test/auto-edit-recovery-golden/c5-cache-multimodal-subtitle-rerun/20260611-150427` 已确认：
+  - fresh evaluation job `c5bd1488-e28c-4a65-99f3-6f3633eb2096`
+  - `quality_score = 98.5`
+  - `subtitle_quality_score = 98.9`
+  - `quality_issue_codes` 已只剩：`["multimodal_trim_review_incomplete"]`
+  - `subtitle_postprocess` stage 已从 `warn` 收口为 `pass`
+  - `required_checks_contract_passed = 3/3`
+  - 当前这条活锚点在 `edit_plan` 边界上的共享误判层已基本收平，剩余残口是“已 review 但仍 pending 1 条的 multimodal candidate”，而不再是 provider/cache/source-missing/subtitle-self-penalty 这类系统性问题
+- 2026-06-11: 上述最后一条 `multimodal_trim_review_incomplete` 也已确认是共享状态语义误判，而不是真正“没完成 review”：
+  - fresh job 的 `multimodal_trim_review` 候选实际状态为：
+    - `reviewed = true`
+    - 单候选 `candidate_id = timing_trim:149.745:150.630:`
+    - `review_state = unsure`
+    - `review.verdict = unsure`
+    - `review.confidence = 0.0`
+  - 第一坏层：
+    - `src/roughcut/edit/multimodal_trim_review.py::review_multimodal_trim_review_payload(...)`
+    - 它此前把“没有拿到 decision”与“拿到 unsure decision”都折叠到同一个 `pending_count`
+  - 根因：
+    - `pending_count` 被同时承担了两种不同语义：
+      - runtime 未完成 / 超时 / source missing / 无 decision
+      - 模型已看过，但建议保守不自动删（`unsure`）
+    - `quality.py` 随后又把 `pending_count > 0` 一律解释成 `multimodal_trim_review_incomplete`
+  - 已落地修复：
+    - `multimodal_trim_review.py` 现已把状态拆分为：
+      - `pending_count`：仅统计未取得 decision 的候选
+      - `unsure_count`：统计已 review 但 verdict 不足以自动 accept/reject 的候选
+    - `apply_multimodal_trim_review_to_cut_analysis(...)` 也同步把 `unsure_count` 写入 `multimodal_trim_review_summary`
+    - `quality.py` 继续只对真正的 `pending_count > 0` 落 `multimodal_trim_review_incomplete`，不再把 reviewed-unsure 当成 incomplete
+  - 定向回归：
+    - `tests/test_manual_editor_helpers.py::test_review_multimodal_trim_review_payload_tracks_unsure_without_marking_pending`
+    - `tests/test_quality_profile_soft_gate.py::test_quality_assessment_does_not_flag_reviewed_unsure_multimodal_as_incomplete`
+    - 联同既有 multimodal / quality 相关窄回归：
+      - `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py tests/test_quality_profile_soft_gate.py -k "multimodal_trim_review_payload_tracks_unsure_without_marking_pending or multimodal_trim_review_payload_applies_model_verdicts or multimodal_trim_review_payload_resolves_storage_path_when_direct_source_missing or quality_assessment_does_not_flag_reviewed_unsure_multimodal_as_incomplete or multimodal_trim_review_timeout or manual_confirm_heavy_edit_plan_as_blocking" -q`
+      - `7 passed`
+- 2026-06-11: 最终复验 `output/test/auto-edit-recovery-golden/c5-multimodal-unsure-rerun/20260611-150844` 已确认这条活锚点的 `edit_plan` fresh replay 在当前口径下已完全清空共享质量 issue：
+  - `quality_score = 100.0`
+  - `quality_issue_codes = []`
+  - `required_checks_contract_passed = 3/3`
+  - `subtitle_postprocess/content_profile/edit_plan` 全部 `pass`
+  - `risk_alignment` 继续保持对齐：
+    - `fresh_source = variant_timeline_bundle`
+    - `fresh_multimodal_pending_count = 0`
+    - `fresh_llm_reviewed = true`
+    - `fresh_manual_confirm_count = 4`
+  - 当前 `live_readiness.failure_reasons` 已只剩：
+    - `连续稳定批次不足：1/3`
+  - 也就是说，`noc_mt34_s06mini_edit_plan_risk_anchor` 这条 case 现阶段不再是结构/合同残口，而是进入了 `C5` 稳定批次累计问题
+- 2026-06-11: 该活锚点的 `C5` 稳定批次累计也已被真实跑通，而不再只是“单次 100 分”：
+  - 第 2 次累计：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-stable-run-2 --previous-batch-report output/test/auto-edit-recovery-golden/c5-multimodal-unsure-rerun/20260611-150844/batch_report.json`
+    - 产物：`output/test/auto-edit-recovery-golden/c5-stable-run-2/20260611-151153`
+    - 结果：`quality_score = 100.0`，`stable_run_count = 2`
+  - 第 3 次累计：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-stable-run-3 --previous-batch-report output/test/auto-edit-recovery-golden/c5-multimodal-unsure-rerun/20260611-150844/batch_report.json --previous-batch-report output/test/auto-edit-recovery-golden/c5-stable-run-2/20260611-151153/batch_report.json`
+    - 产物：`output/test/auto-edit-recovery-golden/c5-stable-run-3/20260611-151249`
+    - 已确认：
+      - `quality_score = 100.0`
+      - `quality_issue_codes = []`
+      - `live_readiness.status = pass`
+      - `live_readiness.gate_passed = true`
+      - `stable_run_count = 3`
+      - `required_stable_runs = 3`
+      - `ready_for_live_dry_run = true`
+  - 当前结论：
+    - `noc_mt34_s06mini_edit_plan_risk_anchor` 已从“高风险残口活锚点”收口为“通过 C5 连续稳定批次 gate 的已稳定锚点”
+    - 后续不要再把这条 case 作为优先残口反复排查，除非新的主链改动把它重新打坏
+- 2026-06-11: `edc17_manual_editor_anchor` 也已完成一轮新的真实收口，并把 `C2/C5` 之间的 reference 角色冲突修成共享合同，而不是继续靠手工回退：
+  - 观察到的症状：
+    - fresh replay `output/test/auto-edit-recovery-golden/c5-edc17-anchor-rerun-v2/20260611-152046` 已达到 `quality_score=100.0 / required_checks=4/4`
+    - 但直接用 promotion 工具把 `reference_job_id` 升级为 fresh evaluation job 后，后续 replay `output/test/auto-edit-recovery-golden/c5-edc17-reference-promoted-rerun/20260611-152417` 虽然 `risk_alignment` 对齐了，却把 `manual_editor_apply_semantics` 打成失败：
+      - `managed_auto_cut_count=50`
+      - `roundtrip_matches_editorial=false`
+      - `failed_required_checks=["manual_editor_apply_semantics"]`
+  - 第一坏层：
+    - `scripts/promote_auto_edit_golden_references.py` 与 `scripts/run_auto_edit_recovery_golden_set.py`
+    - 同一个 `reference_job_id` 同时承担了两种不同职责：
+      - `C2` 的 manual-editor apply 语义基线
+      - `C5` 的 reference risk baseline
+    - 一旦 promotion 把它切到 `cloned_profile_only` 的 partial evaluation job，risk 合同会更新，但 manual-editor 语义检查就会读取到不适合作为 apply baseline 的 partial job。
+  - 已落地修复：
+    - `GoldenJobCase` 新增 `reference_risk_job_id`
+    - `inspect_reference_risk_snapshot(...)` 现优先读取 `reference_risk_job_id`，没有时才回落 `reference_job_id`
+    - `promote_auto_edit_golden_references.py` 现在对声明了 `manual_editor_apply_semantics` 的锚点做分责刷新：
+      - 保留原 `reference_job_id` 作为 manual-editor 语义锚点
+      - 将 promoted evaluation job 写入 `reference_risk_job_id`
+      - 继续同步 `risk_hints.reference_expected_source / manual_confirm / rule_auto_apply / candidate_risk_summary / risk_levels`
+    - `docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json` 的 `edc17_manual_editor_anchor` 已改回：
+      - `reference_job_id = fb30a42c-1af1-4c78-b065-bc3cd4004b2e`
+      - `reference_risk_job_id = a8b490ec-155d-4cff-85ee-f1316740205a`
+  - 回归验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "promote_manifest_references or load_golden_job_manifest_accepts_rich_job_entries or manual_editor_apply_semantics" -q`
+    - `7 passed`
+  - 真实 replay 结果：
+    - 分责修复后的 fresh replay：
+      - `output/test/auto-edit-recovery-golden/c5-edc17-split-reference-rerun/20260611-153040`
+      - `quality_score = 100.0`
+      - `required_checks_contract_passed = 4/4`
+      - `stable_run_count = 1`
+    - 稳定批次第 2 次：
+      - `output/test/auto-edit-recovery-golden/c5-edc17-stable-run-2/20260611-153133`
+      - `quality_score = 98.5`
+      - `required_checks_contract_passed = 4/4`
+      - `stable_run_count = 2`
+      - 期间命中一次 `multimodal` provider `400`，但未打坏 required checks
+    - 稳定批次第 3 次：
+      - `output/test/auto-edit-recovery-golden/c5-edc17-stable-run-3/20260611-153224`
+      - `quality_score = 98.5`
+      - `required_checks_contract_passed = 4/4`
+      - `live_readiness.status = pass`
+      - `live_readiness.gate_passed = true`
+      - `stable_run_count = 3`
+  - 当前结论：
+    - `edc17_manual_editor_anchor` 已从“fresh 质量通过但 reference 合同过期”的半收口状态，推进到“`C2` 语义锚点与 `C5` 风险锚点分责后，连续稳定批次 gate 已通过”的已稳定锚点
+    - 后续不要再把这条 case 作为“promotion 后 manual-editor 崩了”的问题重复排查，除非新的 golden/reference 逻辑再次把两种 reference 职责混回去
+- 2026-06-11: `noc_mt34_short_done / noc_mt34_long_done` 这组锚点也已完成一轮新的 `C2/C5` 共享收口，并确认此前不是“样本本身坏掉”，而是 manual-editor 语义检查同时被两类共享口径误伤：
+  - 观察到的症状：
+    - `verify_manual_editor_apply_semantics.py` 最初直接失败：
+      - `noc_mt34_short_done`
+        - `managed_auto_cut_count=2`
+        - `roundtrip_matches_editorial=false`
+        - `change_scope=subtitle_only`
+      - `noc_mt34_long_done`
+        - `managed_auto_cut_count=10`
+        - `requested_keep_segment_count=1`
+        - `change_scope=timeline`
+        - `render_strategy=full_timeline_render`
+    - 但 fresh edit-plan replay `output/test/auto-edit-recovery-golden/c5-short-long-scan-v2/20260611-154229` 在修复后又证明主链质量本身是健康的：
+      - `quality_score = 100.0 / 100.0`
+      - `required_checks_contract_passed = 8/8`
+  - 第一坏层：
+    - `src/roughcut/api/jobs.py::_manual_editor_frontend_managed_auto_cut_ranges(...)`
+      - 会把 `manual_editor_session.cut_analysis.rule_candidates` 中 `manual_editor_smart_cut_rules` 的 preview silence（`auto_applied=true`）和真实 `accepted_cuts` 混到一起，误当成当前已生效的 frontend-managed auto cuts
+      - 结果 `short` 的 preview cut `5.85-6.08`、`long` 的多条 preview silence 被错误带入 roundtrip 语义比较
+    - `src/roughcut/api/jobs.py::_manual_editor_timeline_matches_current_subtitles(...)`
+      - 会把 editorial timeline 记录的 `source_subtitle_basis=canonical_refresh` 与当前 source rows 的 `canonical_transcript` 按字面不相等处理
+      - 结果 `noc_mt34_long_done` 的 timeline 被误判 stale，`base_keep_segments` 回退成整段全保留
+  - 真实证据：
+    - 直接读取 reference job 结构后确认：
+      - `c65c2a8d-f49b-4a80-b580-29d12b855063` 与 `a87e30c8-0030-49f2-aeee-a83ff7b16060` 的最新 `cut_analysis` artifact 本身几乎不带 `auto_applied` preview cuts
+      - 但 `_build_manual_editor_session(...).cut_analysis` 中却出现：
+        - `short`: preview `silence:5.850:6.080`
+        - `long`: 10 条 `manual_editor_smart_cut_rules` silence preview
+      - `noc_mt34_long_done` 的 editorial metadata 明确是：
+        - `source_subtitle_basis = canonical_refresh`
+        - 当前 source rows `projection_source = canonical_transcript`
+  - 已落地修复：
+    - `_manual_editor_frontend_managed_auto_cut_ranges(...)`
+      - 现优先把 `accepted_cuts` 中属于 frontend-managed reason 的已生效 timeline 删除视为权威事实
+      - 只有在 `accepted_cuts` 不提供这类事实时，才回退使用 `rule_candidates.auto_applied`
+    - `_manual_editor_timeline_matches_current_subtitles(...)`
+      - 新增 basis-family 归一化
+      - `canonical_refresh` 与 `canonical_transcript` 现统一视为同一 canonical 权威链
+  - 定向回归：
+    - `tests/test_manual_editor_helpers.py`
+      - `test_manual_editor_timeline_accepts_canonical_refresh_basis_as_canonical_family`
+      - `test_manual_editor_frontend_managed_auto_cuts_prefer_accepted_cuts_over_preview_rule_candidates`
+      - `test_manual_editor_frontend_managed_auto_cuts_fall_back_to_rule_candidates_when_accepted_cuts_missing`
+    - 联同既有 frontend-managed auto cuts / subtitle-only 语义回归：
+      - `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "frontend_managed_auto_cuts or timeline_accepts_canonical_refresh_basis_as_canonical_family or apply_semantics_keep_subtitle_only_scope" -q`
+      - `6 passed`
+  - 修复后真实语义复验：
+    - `$env:PYTHONPATH='src'; python scripts/verify_manual_editor_apply_semantics.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --case-id noc_mt34_long_done --json`
+    - 结果：
+      - `noc_mt34_short_done`
+        - `managed_auto_cut_count=1`
+        - `roundtrip_matches_editorial=true`
+        - `ok=true`
+      - `noc_mt34_long_done`
+        - `managed_auto_cut_count=5`
+        - `requested_keep_segment_count=1`
+        - `effective_keep_segment_count=5`
+        - `roundtrip_matches_editorial=true`
+        - `ok=true`
+  - fresh golden replay 与稳定批次：
+    - fresh scan：
+      - `output/test/auto-edit-recovery-golden/c5-short-long-scan-v2/20260611-154229`
+      - `quality_score = 100.0 / 100.0`
+      - `required_checks_contract_passed = 8/8`
+      - `manual_editor_apply_semantics_summary.passed_case_count = 2`
+      - `failure_reasons = ["连续稳定批次不足：1/3"]`
+      - `issue_code_counts = {"audio_artifact_rebuilt": 2}`
+    - stable run 2：
+      - `output/test/auto-edit-recovery-golden/c5-short-long-stable-run-2/20260611-154421`
+      - `quality_score = 100.0 / 100.0`
+      - `required_checks_contract_passed = 8/8`
+      - `stable_run_count = 2`
+    - stable run 3：
+      - `output/test/auto-edit-recovery-golden/c5-short-long-stable-run-3/20260611-154456`
+      - `quality_score = 100.0 / 100.0`
+      - `required_checks_contract_passed = 8/8`
+      - `live_readiness.status = pass`
+      - `live_readiness.gate_passed = true`
+      - `stable_run_count = 3`
+  - 当前结论：
+    - `noc_mt34_short_done / noc_mt34_long_done` 已从“manual-editor 语义锚点回归失败”的状态，推进到“共享语义合同修复后，第二组锚点连续稳定批次 gate 通过”的已稳定锚点
+    - 当前仍可观测的 `audio_artifact_rebuilt` 属于显式 runtime 回退事实，已进入报告链，但它不再阻断这两条 edit-plan 锚点的 `C5` 准入
 
 ## Next Concrete Action
 
-1. Continue `T1.1` migration and replace remaining mixed `text_final/text_norm/text_raw` consumers in auto-edit shared utilities with explicit `raw/canonical/display` surface helpers.
-2. Start `T1.2` residual path audit and list every remaining re-segmentation or display-layer rewrite path outside `Subtitle Segmentation`.
-3. Extend golden-set replay to include a surface-contract checkpoint so display suppression and rule surfaces can be diffed on fixed real jobs.
+1. 把 `C5` 的稳定批次从单一 `S06mini` 锚点扩展到相邻真实锚点，优先选择：
+   - `edc17_manual_editor_anchor`
+   - `noc_mt34_short_done`
+   - `noc_mt34_long_done`
+   目标不是再做单条 100 分，而是确认 `required_checks / risk_alignment / blocking_quality_issues / render_end_state_stability` 在多题材锚点上也能连续累积。
+2. 将 `S06mini` 的当前稳定态作为“已通过锚点”固定进后续回归策略：
+   - 若后续 `C3/C6` 改动重新打坏这条锚点，应视为共享退化
+   - 若不再退化，则不要继续在这条 case 上消耗主精力
+3. 主任务优先级转回：
+   - `C3` 规则注册表与风险门禁统一
+   - `C6` 智能删减质量增强
+   当前更值得继续打的是“规则候选/自动应用/人工确认三者统一”和“真实误删率下降”，而不是这条已稳定通过的锚点本身
+   - `$env:PYTHONPATH='src'; python -m pytest tests/test_edit_decision_diagnostics.py tests/test_quality_profile_soft_gate.py tests/test_build_batch_output_scorecard.py -k "unsure or high_risk or llm_provider_degraded or editing_risk_metrics" -q`
+   - `9 passed`
+12. 最新真实 replay 已确认这不是只在测试中成立：
+   - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-edge-risk-rerun`
+   - 产物：`output/test/auto-edit-recovery-golden/c5-edge-risk-rerun/20260611-142250`
+   - 本轮 fresh 又命中真实 provider 波动：
+     - `Zhipu 429`
+     - `MiniMax 529`
+   - 但在新口径下，当前产物已确认：
+     - `detailed_output_scorecard.json`
+       - `editing_risk_metrics.high_risk_cut_count = 1`
+       - `manual_confirm_count = 7`
+       - `llm_reviewed = false`
+       - `llm_error = llm_cut_review_failed`
+       - `llm_provider_degraded = true`
+       - `blocking_high_risk_cuts = false`
+     - `batch_report.json`
+       - `quality_issue_codes` 命中 `editing_high_risk_cuts_provider_degraded`
+       - `live_readiness.checks.blocking_quality_issues.passed = true`
+     - `failure_reasons` 已收敛为：
+       - `连续稳定批次不足：0/3`
+       - `平均质量分不足：56.5 < 80.0`
+13. `S06mini` 这条活锚点上的 `identity_narrative_conflict` 也已定位到共享质量合同误判，而不是内容画像本身真的错：
+   - 观察到的症状：
+     - `quality_issue_codes` 中持续出现 `identity_narrative_conflict`
+     - 旧口径会把 `hook_line = 一刀难求的NOC S06mini锆合金版开箱` 判成与 `subject_model = MT34` 冲突，并额外扣 `20` 分
+   - 第一坏层：
+     - `src/roughcut/pipeline/quality.py::_collect_identity_narrative_conflicts(...)`
+   - 根因：
+     - narrative conflict 只拿 `subject_brand/subject_model` 做字面冲突判断，没有消费 `identity_review.evidence_bundle.graph_confirmed_entities` 里已经确认的同实体别名关系；因此 `MT34 / S06mini` 这种已确认同一实体的 model alias 仍会被误判成“另一个型号”
+   - 已落地修复：
+     - `quality.py` 现已在 narrative conflict 前补入 `_identity_narrative_field_matches_verified_alias(...)`
+     - 会从 `identity_review.evidence_bundle` 聚合：
+       - `candidate_brand/candidate_model`
+       - `brand_aliases/model_aliases`
+       - 与当前 `brand/model` 对齐的 `graph_confirmed_entities.brand/model/phrases`
+     - 当 `hook_line/summary/cover_title` 命中的 identity 实际是这些已验证 alias 时，不再落 `identity_narrative_conflict`
+   - 定向回归：
+     - `tests/test_quality_profile_soft_gate.py`
+       - `test_verified_model_alias_in_hook_line_does_not_trigger_identity_narrative_conflict`
+       - `test_unverified_model_alias_in_hook_line_still_triggers_identity_narrative_conflict`
+     - `$env:PYTHONPATH='src'; python -m pytest tests/test_quality_profile_soft_gate.py -k "identity_narrative_conflict or verified_model_alias or comparison_target" -q`
+     - `3 passed`
+   - 直接对真实 profile 复算 `_collect_identity_narrative_conflicts(...)` 已从 `['hook_line']` 收敛为 `[]`
+14. `S06mini` 活锚点上的 `transcript_correction_fidelity_warning` 也已确认是共享质量门重复扣分，而不是 transcript 内容保真真的退化：
+   - 观察到的症状：
+     - `transcript_correction_score_report.score = 83.57`
+     - 同时 report 内部又显示：
+       - `content_fidelity_score = 100.0`
+       - `display_quality_score = 98.86`
+       - `segmentation_quality_score = 10.0`
+     - 旧口径下 `quality.py` 只要总分 `< 96` 就直接落 `transcript_correction_fidelity_warning`
+   - 第一坏层：
+     - `src/roughcut/pipeline/quality.py` 读取 `transcript_correction_score_report` 的 warning 规则
+   - 根因：
+     - correction score 是 `content fidelity + display quality + segmentation quality` 的混合分
+     - 但 live quality gate 把这个混合分直接解释成“校正内容保真偏低”
+     - 结果是分句/边界质量（已经由 `subtitle_quality_report` 覆盖）会在 transcript fidelity 路径再扣一次，形成重复惩罚
+   - 已落地修复：
+     - `quality.py` 现会先解析 `selected transcript correction candidate`
+     - 只有在以下条件之一成立时，才继续落 `transcript_correction_fidelity_warning`：
+       - `content_fidelity_score < 96`
+       - 或 candidate/report 自身存在 `issue_codes`
+       - 或缺少 candidate 细节，无法判定
+     - 单纯由 `segmentation_quality_score` 拉低的总分，不再被误记成 fidelity warning
+   - 定向回归：
+     - `tests/test_quality_profile_soft_gate.py`
+       - `test_segmentation_only_projection_penalty_does_not_trigger_transcript_fidelity_warning`
+       - `test_content_fidelity_loss_still_triggers_transcript_fidelity_warning`
+     - `$env:PYTHONPATH='src'; python -m pytest tests/test_quality_profile_soft_gate.py -k "transcript_fidelity_warning or segmentation_only_projection_penalty or content_fidelity_loss" -q`
+     - `2 passed`
+   - 直接对真实 DB artifact 复算 `assess_job_quality(...)`：
+     - 旧 issue list：
+       - `transcript_correction_fidelity_warning`
+       - `subtitle_quality_warning`
+       - `identity_narrative_conflict`
+       - `editing_high_risk_cuts_provider_degraded`
+       - `multimodal_trim_review_incomplete`
+     - 新 issue list：
+       - `subtitle_quality_warning`
+       - `editing_high_risk_cuts_provider_degraded`
+       - `multimodal_trim_review_incomplete`
+     - 分数已提升到 `88.5`
+15. `S06mini` 活锚点上的 `subtitle_quality_warning` 也已进一步确认是摘要生成源头的自罚，而不是字幕事实层本身的问题：
+   - 观察到的症状：
+     - `subtitle_quality_report.warning_reasons = ["摘要模板化命中 1 项"]`
+     - 命中的短语固定是：`适合后续做搜索校验、字幕纠错和剪辑包装`
+   - 第一坏层：
+     - `src/roughcut/review/content_profile.py::_build_profile_summary(...)`
+   - 根因：
+     - 默认摘要 fallback 分支直接产出会被 `subtitle_quality.py::_summary_generic_phrase_hits(...)` 识别为模板化的固定话术
+     - 同函数下方原本已经存在更具体的 `detail_phrase + 信息核对/字幕复核/图文包装` 版本，但它位于 return 之后，长期处于 dead code 状态
+   - 已落地修复：
+     - `_build_profile_summary(...)` 现已把默认 unboxing/general 分支改回可达的 detail-aware 版本：
+       - 有 `detail_phrase` 时：`重点提到...，适合后续做信息核对、字幕复核和图文包装`
+       - 无 `detail_phrase` 时：`适合后续做信息核对、字幕复核和图文包装`
+     - 不再生成会被 generic summary gate 命中的旧短语
+   - 定向回归：
+     - `tests/test_content_profile_source_identity.py`
+       - `test_build_profile_summary_avoids_generic_packaging_phrase_for_specific_product`
+       - `test_build_profile_summary_uses_detail_phrase_when_available`
+     - `$env:PYTHONPATH='src'; python -m pytest tests/test_content_profile_source_identity.py -k "build_profile_summary_avoids_generic_packaging_phrase or build_profile_summary_uses_detail_phrase" -q`
+     - `2 passed`
+   - 真实样本复算证据：
+     - 对 job `78333d16-3783-41a6-af34-572bf8cb06e2` 的当前 `content_profile_final` 重建 summary 并重新计算 `subtitle_quality_report`
+     - 结果已确认：
+       - `summary_generic_hits = []`
+       - `warning_reasons = []`
+       - `subtitle_quality_report.score = 98.86`
+     - 在“新 summary + 新 subtitle_quality_report”下再复算 `assess_job_quality(...)`：
+       - `issue_codes = ["editing_high_risk_cuts_provider_degraded", "multimodal_trim_review_incomplete"]`
+       - `score = 94.5`
+16. `S06mini` 活锚点上的 `multimodal_trim_review_incomplete` 又进一步定位到了共享运行时 source resolve 边界，而不是“候选真的需要人工久挂”：
+   - 观察到的症状：
+     - `variant_timeline_bundle.timeline_rules.diagnostics.multimodal_trim_review_summary`
+       - `error = multimodal_trim_review_source_missing`
+       - `candidate_count = 1`
+       - `pending_count = 1`
+     - 质量门因此继续落 `multimodal_trim_review_incomplete`
+   - 第一坏层：
+     - `src/roughcut/edit/multimodal_trim_review.py::review_multimodal_trim_review_payload(...)`
+   - 根因：
+     - 调用方传入的 `job.source_path` 是相对 storage key：`jobs/...`
+     - 该共享 review helper 以前只检查 `Path(source_path).exists()`，不走 storage resolve
+     - 但真实 job 上直接复查 `_resolve_local_preview_source(job)` 已确认：
+       - 原始 `job.source_path = jobs/b5248dd9-b219-4ad0-a74a-9b360d8b7492/...`
+       - 可恢复到本地真实文件：
+         `E:\WorkSpace\RoughCut\data\runtime\jobs\b5248dd9-b219-4ad0-a74a-9b360d8b7492\...`
+     - 因此 `source_missing` 是共享运行时边界漏做 resolve，不是素材真丢
+   - 已落地修复：
+     - `multimodal_trim_review.py` 新增 `_resolve_multimodal_review_source_path(...)`
+     - 现在会先尝试：
+       - 直路径存在
+       - 再走 `get_storage().resolve_path(...)`
+     - 成功解析后继续走多模态 review 主链，不再把相对 storage key 直接判死为 `source_missing`
+   - 定向回归：
+     - `tests/test_manual_editor_helpers.py`
+       - `test_review_multimodal_trim_review_payload_applies_model_verdicts`
+       - `test_review_multimodal_trim_review_payload_resolves_storage_path_when_direct_source_missing`
+     - `$env:PYTHONPATH='src'; $env:TEMP='E:\\WorkSpace\\RoughCut\\.tmp'; $env:TMP='E:\\WorkSpace\\RoughCut\\.tmp'; python -m pytest tests/test_manual_editor_helpers.py -k "review_multimodal_trim_review_payload_applies_model_verdicts or review_multimodal_trim_review_payload_resolves_storage_path_when_direct_source_missing" -q`
+     - `2 passed`
+17. 这说明 `C5` 在这条活锚点上已经把“provider 波动 + 首尾 silence 误判 + unsure 仍自动删 + identity alias 误判 + transcript fidelity 重复扣分 + summary 模板自罚 + multimodal source resolve 缺口”这七层噪音一起收到了共享合同/运行时边界；当前 gate 剩余失败原因已经进一步收敛到真实 provider 波动与 fresh replay 证据补齐。
+18. 因此下一层优先级已从“高风险 blocker 误判收口”切到“`C4/C5/C6` 真实 provider 降级与复核闭环”：当前需要继续压的项已经缩到：
+   - `editing_high_risk_cuts_provider_degraded`
+   - fresh replay 下 `multimodal_trim_review` 是否在源可解析后真正完成复核
+19. `C3` 的低风险规则自动应用主链、`C4` 的 render/runtime 分类和 `C1` 的残余 surface cleanup 仍未结束，但它们已经不是当前这条 `s06mini` live gate 的首要阻断。
+
+8. `C3` 当前第一优先级已从“风险摘要统一”切到“低风险规则候选真正贯通自动应用链”。最新根因是：surface ownership 收紧后，`src/roughcut/edit/smart_cut_candidates.py` 对 filler/catchphrase 候选只吃 `timed/raw` text，导致只有 `text_final` 的最小 subtitle 输入在生成层直接失去候选，后面的 `auto_apply/manual_confirm` 分流再正确也无事实可分。
+9. 该裂口已先在共享生成层收口：`_subtitle_rule_match_text_and_layer(...)` 现在按 `timed raw -> spoken raw -> canonical` 明确回退，并把实际 `match_surface_layer` 带进候选协议；`filler_word / catchphrase_phrase` 不再假装都来自 raw surface。
+10. 定向回归已确认这不是局部补丁，而是 `cut_analysis` 主链恢复：
+   - `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py tests/test_rule_registry.py tests/test_edit_decision_diagnostics.py -k "risk or refine_decision or auto_apply or llm_review_gate or managed_auto_cut" -q`
+   - `21 passed`
+11. `C5` 报告链上又补齐了一层真实证据：`scripts/run_auto_edit_recovery_golden_set.py` 的 reference/fresh risk snapshot 现在不再只记录 `manual_confirm / multimodal / llm` 半截信息，而会把 `candidate_risk_summary / rule_auto_apply_cut_count / risk_levels` 一并从 `cut_analysis/refine_decision_plan` artifacts 恢复出来，即使当前样本没有 `variant_timeline_bundle` diagnostics 也不丢。
+12. 该报告链补丁已通过定向回归：
+   - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "reference_risk_snapshot or risk_alignment or required_checks" -q`
+   - `8 passed`
+13. 最新真实 replay 已确认这些字段已进入产物，而不是只存在于测试：
+   - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-c3-evaluation-risk-snapshot-rerun`
+   - 产物：`output/test/auto-edit-recovery-golden/c5-c3-evaluation-risk-snapshot-rerun/20260611-132953`
+   - `golden_set_summary.md` / `batch_report.json` 现已直接包含 `evaluation_risk_snapshot`
+   - fresh `evaluation_risk_snapshot` 已显示：
+     - `manual_confirm_candidate_count = 4`
+     - `candidate_risk_summary.total = {low: 92, medium: 3, high: 1}`
+     - `rule_auto_apply_cut_count = 92`
+     - `risk_levels.manual_confirm = {low: 0, medium: 3, high: 1}`
+7. `risk_alignment` 这层现在也已经补上新合同对账，而不再只比较 `manual_confirm/high_risk`：
+   - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-risk-alignment-contract-rerun`
+   - 产物：`output/test/auto-edit-recovery-golden/c5-risk-alignment-contract-rerun/20260611-133434`
+   - `golden_set_summary.md` 现已直接显示：
+     - `reference_rule_auto_apply_cut_count = 0`
+     - `fresh_rule_auto_apply_cut_count = 92`
+     - `reference_risk_contract_complete = False`
+     - `fresh_risk_contract_complete = True`
+     - `mismatch_codes = [fresh_source_mismatch, reference_risk_contract_incomplete]`
+8. 这意味着当前真实残口已经非常具体：同一锚点的旧 reference artifact 仍只有 `manual_confirm_candidate_count=131`，没有新的 `candidate_risk_summary / risk_levels` 细分；而 fresh replay 已经把大量 low-risk 候选前推成 `auto_apply=92`。并且这条差异现在已经被前推成 live/golden gate，而不再只是 markdown 注释：
+   - 直接对现有真实报表 `output/test/auto-edit-recovery-golden/c5-risk-alignment-contract-rerun/20260611-133434/batch_report.json` 复算 `build_live_readiness_summary(...)`，当前已确认：
+     - `risk_alignment_contract.passed = False`
+     - `risk_alignment_contract.actual = 1`
+     - `mismatch_code_counts.reference_risk_contract_incomplete = 1`
+     - `failure_reasons` 中已包含 `reference 风险合同未对齐`
+9. 这条 gate 现在也已经给出可执行 remediation，而不只是“失败”：
+   - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-reference-refresh-candidates-rerun`
+   - 产物：`output/test/auto-edit-recovery-golden/c5-reference-refresh-candidates-rerun/20260611-134505`
+   - `golden_set_summary.md` / `batch_report.json` 现已新增 `Reference Refresh Candidates` / `reference_refresh_candidates`
+   - 当前候选已明确给出：
+     - `reference_job_id = 6bab0abf-ad03-4eb6-a58e-faa8e4da2cc1`
+     - `evaluation_job_id = 8f7b2179-5435-473d-a923-886db86f62ef`
+     - `fresh_rule_auto_apply_cut_count = 92`
+     - `fresh_manual_confirm_count = 4`
+     - `refresh_reason = reference risk contract is incomplete; evaluation snapshot carries the current contract`
+10. 现在不仅有 refresh candidate，还已经有可执行 promotion 工具：
+   - `python scripts/promote_auto_edit_golden_references.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --batch-report output/test/auto-edit-recovery-golden/c5-reference-refresh-candidates-rerun/20260611-134505/batch_report.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --output output/test/auto-edit-recovery-golden/c5-reference-refresh-candidates-rerun/20260611-134505/refreshed-manifest.preview.json`
+   - 当前 dry-run 已确认会把该 case 的：
+     - `reference_job_id` 从 `6bab0abf-ad03-4eb6-a58e-faa8e4da2cc1` 升级为 `8f7b2179-5435-473d-a923-886db86f62ef`
+     - `reference_expected_source` 更新为 `variant_timeline_bundle`
+     - `reference_manual_confirm_candidate_count` 更新为 `4`
+     - `reference_rule_auto_apply_cut_count` 更新为 `92`
+     - `reference_candidate_risk_summary / reference_risk_levels` 一并写回 manifest preview
+11. 因此下一层工作不再是抽象讨论，而是可以直接选：
+   - 用 promotion 工具真正 apply 到 golden manifest，完成 reference refresh；
+   - 或继续保留当前 gate，让旧 reference 样本在未刷新前始终阻断版本级对比。
+12. `C3` 下一层残口仍是“low risk 自动应用、medium/high risk 默认候选/阻断”的阈值继续前推到更多规则生成链与真实样本，而不再是当前这类 surface contract 或报表链漏斗。
+13. `C4` 上仍需继续追一层：虽然 `edit_plan` 的音频自动重建现在已可见，但还需要判断 clone/evaluation job 是否应该在更早阶段就保证 `audio_wav` storage_path 可解析，而不是把恢复压力留给 `edit_plan`。
+14. `C1` 上仍有零散 surface cleanup 没收完，尤其是 `api/jobs.py`、`review/*`、`platform_copy.py` 的残余宽松 fallback 需要继续清理；但 `subtitle_projection` 已不再是当前阶段的主阻塞点。
 
 ## Latest Certification
 
+- 2026-06-11: `C5/T5.ze` 已把“reference 已 promotion，但 live gate 仍被旧 reference 合同和无关 manual-editor 语义失败噪音拖住”的状态推进到“reference 风险合同已真实对齐，manual-editor 语义 gate 只统计显式声明该合同的锚点”的阶段。观察到的症状是：`noc_mt34_s06mini_edit_plan_risk_anchor` 在完成 `reference` promotion 后，虽然 `risk_alignment` 已经对齐，但 `live_readiness` 仍被 `manual_editor_apply_semantics` 阻断。继续下钻后确认有两层问题：
+  - 第一坏层一开始在 `scripts/run_auto_edit_recovery_golden_set.py::inspect_manual_editor_apply_semantics(...)`：该检查把 `editorial timeline` 当成 previous effective keep timeline，而对 `auto_refine` reference 来说，正确事实层应优先读取对齐的 `refine_decision_plan.keep_segments`。现已新增 `_previous_effective_keep_segments(...)`，优先消费 aligned refine keep segments，并补回归：
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_previous_effective_keep_segments_prefers_aligned_refine_plan_over_editorial_full_keep`
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_previous_effective_keep_segments_falls_back_to_editorial_when_refine_plan_is_misaligned`
+  - 继续复验后又确认更上层的共享 gate 仍有误口径：`summarize_manual_editor_apply_semantics(...)` 与 `live_readiness` fallback 会把所有 case 都计入 `manual_editor_apply_semantics_summary`，即使该 case 的 `required_checks` 根本没有声明 `manual_editor_apply_semantics`。这会让 `noc_mt34_s06mini_edit_plan_risk_anchor` 这类 risk-anchor 误伤共享 gate。现已完成：
+    - `scripts/run_auto_edit_recovery_golden_set.py::summarize_manual_editor_apply_semantics(...)`
+    - `src/roughcut/pipeline/live_readiness.py::_extract_manual_editor_apply_semantics_summary(...)`
+    两处都已改为只统计 `required_checks` 明确包含 `manual_editor_apply_semantics` 的 case。
+  - 新增/更新回归：
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_summarize_manual_editor_apply_semantics_aggregates_case_level_outcomes`
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_summarize_manual_editor_apply_semantics_ignores_cases_without_required_check`
+    - `tests/test_run_fullchain_batch.py::test_live_readiness_fails_when_manual_editor_apply_semantics_contract_not_all_passed`
+    - `tests/test_run_fullchain_batch.py::test_live_readiness_ignores_manual_editor_apply_semantics_for_cases_without_required_check`
+  - 定向验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py tests/test_run_fullchain_batch.py -k "manual_editor_apply_semantics or previous_effective_keep_segments" -q`
+    - `8 passed`
+  - real promotion / replay 证据：
+    - reference 已真实 apply：
+      - `python scripts/promote_auto_edit_golden_references.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --batch-report output/test/auto-edit-recovery-golden/c5-reference-refresh-candidates-rerun/20260611-134505/batch_report.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --apply`
+    - promotion 后第一轮 replay：
+      - `output/test/auto-edit-recovery-golden/c5-reference-promoted-rerun/20260611-135250`
+      - 已确认 `risk_alignment.status = aligned`、`mismatch_codes = []`、`reference_refresh_candidates = []`、`live_readiness.checks.risk_alignment_contract.passed = true`
+    - gate 口径收紧后的 fresh replay：
+      - `output/test/auto-edit-recovery-golden/c5-reference-promoted-rerun-v4/20260611-140520`
+      - 已确认 `live_readiness` 中不再出现 `manual_editor_apply_semantics_contract`
+      - 当前剩余失败原因已收敛为：
+        - `连续稳定批次不足：0/3`
+        - `平均质量分不足：46.5 < 80.0`
+        - `存在 blocking quality issues：1 个 job`
+      - 同次 replay 还真实暴露了外部推理服务波动：
+        - `Zhipu 429 Too Many Requests`
+        - `MiniMax 529`
+        - fresh case 因此落出 `editing_high_risk_cuts_blocking`
+  结论：
+  - `C5` 在这条活锚点上已经把“旧 reference 合同不完整”与“无关 manual-editor 语义 gate 噪音”都收掉了；
+  - 下一层真实阻断已转成 fresh 评测稳定性和 `LLM cut review` 外部 provider 波动，而不是继续反复补 reference/gate 可见性。
+
+- 2026-06-11: `C5/T5.zf` 已把“fresh edit_plan 命中外部推理 provider 波动时，会被质量门禁直接放大成 `editing_high_risk_cuts_blocking`”推进到“provider 波动已进入独立 degraded 合同”的阶段。观察到的症状是：在 `output/test/auto-edit-recovery-golden/c5-reference-promoted-rerun-v4/20260611-140520` 这轮真实 replay 中，`Zhipu 429` 与 `MiniMax 529` 让 `llm_cut_review` 失败；旧逻辑下 `src/roughcut/pipeline/quality.py` 只要看到 `high_risk_cuts` 且 `llm_reviewed=false` 就直接产出 `editing_high_risk_cuts_blocking`，把“provider 外部失败”误判成“内容风险未收口”本身。现已完成：
+  - `src/roughcut/pipeline/quality.py`
+    - 新增 `_LLM_CUT_REVIEW_PROVIDER_DEGRADED_ERRORS`
+    - 新增 `editing_high_risk_cuts_provider_degraded`
+    - 当 `llm_cut_review.error in {llm_cut_review_timeout, llm_cut_review_failed, llm_cut_review_unconfigured}` 且存在 `high_risk_cuts` 时，当前会落一条非 blocking 的 provider-degraded issue，而不再直接落 `editing_high_risk_cuts_blocking`
+    - `signals` 同步新增 `llm_cut_review_provider_degraded`
+  - `scripts/build_batch_output_scorecard.py`
+    - `editing_risk_metrics` 新增：
+      - `llm_error`
+      - `llm_provider_degraded`
+    - aggregate risk metrics 新增：
+      - `llm_provider_degraded_job_count`
+    - markdown 输出现已直接展示 `llm_error` 与 `llm_provider_degraded`
+  - 新增/更新回归：
+    - `tests/test_quality_profile_soft_gate.py::test_quality_assessment_downgrades_high_risk_cut_blocking_when_llm_provider_is_degraded`
+    - `tests/test_build_batch_output_scorecard.py::test_editing_risk_metrics_exposes_llm_provider_degraded_state`
+    - `tests/test_build_batch_output_scorecard.py::test_render_markdown_includes_aggregate_and_job_level_editing_risk_metrics`
+  - 定向验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_quality_profile_soft_gate.py tests/test_build_batch_output_scorecard.py -k "high_risk or llm_provider_degraded or editing_risk_metrics or render_markdown" -q`
+    - `7 passed`
+  - real 真实复算证据：
+    - 对上一轮真实 provider 失败 job `e5b623ad-0f30-4045-a7e6-194e86915ea1` 重新调用 `assess_job_quality(...)`
+    - 已确认：
+      - `issue_codes` 中出现 `editing_high_risk_cuts_provider_degraded`
+      - 不再出现 `editing_high_risk_cuts_blocking`
+      - `signals.llm_cut_review_provider_degraded = true`
+  - fresh 新 replay 证据：
+    - `output/test/auto-edit-recovery-golden/c5-llm-provider-degraded-rerun/20260611-141208`
+    - 这次并未复现 provider 波动，而是回到了真实高风险样本：
+      - `editing_risk_metrics.high_risk_cut_count = 2`
+      - `manual_confirm_count = 6`
+      - `llm_reviewed = true`
+      - `blocking_high_risk_cuts = true`
+    - 说明当前门禁已能区分：
+      - provider 波动导致的暂态 degraded
+      - 与 fresh replay 真正复现出的内容侧高风险 blocker
+  结论：
+  - `C5` 不再把外部 provider 故障直接误判成内容 blocker；
+  - 下一层应继续盯住真实 `high_risk_cuts` 的规则/复核收口，而不是再围绕 provider 抖动做可见性修补。
+
+- 2026-06-11: `C5/T5.zg` 已把“fresh replay 中 hook/尾段 silence 与 LLM unsure 仍会一起把样本推成 high-risk blocker”推进到“LLM unsure 会降回 manual-confirm，单边首尾 silence 不再进入 blocker 高风险”的阶段。观察到的症状是：在 `output/test/auto-edit-recovery-golden/c5-llm-provider-degraded-rerun/20260611-141208` 中，即使 provider 没故障，`noc_mt34_s06mini_edit_plan_risk_anchor` 仍出现 `high_risk_cut_count=2 / manual_confirm_count=6 / blocking_high_risk_cuts=true`。继续下钻真实 diagnostics 后确认：
+  - 其中一个 blocker 是开头 `0.000-1.560` 的 `silence`
+    - `risk_level=low`
+    - `hook_guard`
+    - `llm_review.verdict = unsure`
+    - 但旧逻辑仍让它留在 `accepted_cuts`
+  - 另一个 blocker 是尾部 `950.850-952.620` 的 `silence`
+    - 同样 `risk_level=low`
+    - 只是因为 `boundary_keep_energy` 高、贴着左侧 keep
+    - 旧 `high_risk_cuts` 定义会把这种单边首尾 silence 也当成 blocker
+  现已完成：
+  - `src/roughcut/pipeline/steps.py::_apply_llm_cut_review_to_decision(...)`
+    - `verdict=unsure` 的 accepted cut 现在会：
+      - 从 `accepted_cuts` 中移除
+      - 恢复对应 keep segment
+      - 降回 `manual_editor_rule_candidates(auto_applied=false)`
+  - `src/roughcut/pipeline/steps.py::_build_variant_timeline_diagnostics(...)`
+    - `high_risk_cuts` 现在仅统计“两侧都有 keep 的高能量 cut”
+    - 单边首尾 silence 不再进入 blocker 级 `high_risk_cuts`
+  - 新增回归：
+    - `tests/test_edit_decision_diagnostics.py::test_apply_llm_cut_review_demotes_unsure_cut_to_manual_candidate`
+    - `tests/test_edit_decision_diagnostics.py::test_variant_diagnostics_excludes_edge_silence_from_high_risk_cuts`
+  - 联动验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_edit_decision_diagnostics.py tests/test_quality_profile_soft_gate.py tests/test_build_batch_output_scorecard.py -k "unsure or high_risk or llm_provider_degraded or editing_risk_metrics" -q`
+    - `9 passed`
+  - real replay 证据：
+    - `output/test/auto-edit-recovery-golden/c5-unsure-demotion-rerun/20260611-141934`
+      - `editing.accepted_cuts=1`
+      - `editing_risk_metrics.high_risk_cut_count=1`
+      - `manual_confirm_count=5`
+      - 对比上一轮已确认开头 hook silence 已从 blocker 中退出
+    - `output/test/auto-edit-recovery-golden/c5-edge-risk-rerun/20260611-142250`
+      - 本轮虽然又命中 provider 波动（`Zhipu 429` + `MiniMax 529`）
+      - 但当前产物已确认：
+        - `editing_risk_metrics.high_risk_cut_count = 1`
+        - `llm_provider_degraded = true`
+        - `blocking_high_risk_cuts = false`
+        - `live_readiness.checks.blocking_quality_issues.passed = true`
+        - `failure_reasons` 仅剩：
+          - `连续稳定批次不足：0/3`
+          - `平均质量分不足：56.5 < 80.0`
+  结论：
+  - `C5` 在这条活锚点上已经进一步把“LLM unsure 仍自动删”和“单边首尾 silence 被误列为 blocker 高风险”都收掉了；
+  - 当前这条样本的 live gate 已不再被 blocker 项阻断，下一层任务已转成稳定批次与总体质量分提升。
+
+- 2026-06-11: `C5/T5.zd` 已把“golden 报告能列出 reference refresh candidate，但真正刷新 manifest 仍要人工复制字段”推进到“reference baseline refresh 已有显式 promotion 工具”的阶段。观察到的症状是：上一轮虽然 `golden_set_summary.md` 已新增 `Reference Refresh Candidates`，但刷新 baseline 仍停留在手工操作：操作者需要自己把 `evaluation_job_id` 抄回 `reference_job_id`，再人工同步 `risk_hints.reference_expected_source / manual_confirm / auto_apply / risk_summary`。这会让 reference refresh 过程重新回到人工易错状态。现已完成：
+  - 新增脚本：
+    - `scripts/promote_auto_edit_golden_references.py`
+  - 核心能力：
+    - 读取 `batch_report.json` 顶层 `reference_refresh_candidates`
+    - 按 `case_id` 选择要 promotion 的 golden case
+    - 将 `reference_job_id` 升级为候选 `evaluation_job_id`
+    - 同步写回新的 `risk_hints`：
+      - `reference_expected_source`
+      - `reference_manual_confirm_candidate_count`
+      - `reference_multimodal_pending_count`
+      - `reference_rule_auto_apply_cut_count`
+      - `reference_candidate_risk_summary`
+      - `reference_risk_levels`
+    - 支持 dry-run 导出 `--output`，也支持 `--apply` 原地覆盖 manifest
+  - 新增/更新回归：
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_promote_manifest_references_updates_reference_job_and_risk_hints`
+  - 定向验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "reference_refresh or promote_manifest_references or render_case_summary_markdown" -q`
+    - `4 passed`
+  - real dry-run 复验：
+    - `python scripts/promote_auto_edit_golden_references.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --batch-report output/test/auto-edit-recovery-golden/c5-reference-refresh-candidates-rerun/20260611-134505/batch_report.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --output output/test/auto-edit-recovery-golden/c5-reference-refresh-candidates-rerun/20260611-134505/refreshed-manifest.preview.json`
+    - 输出已确认：
+      - `updated_case_count = 1`
+      - `previous_reference_job_id = 6bab0abf-ad03-4eb6-a58e-faa8e4da2cc1`
+      - `new_reference_job_id = 8f7b2179-5435-473d-a923-886db86f62ef`
+      - `reference_expected_source = variant_timeline_bundle`
+      - `reference_manual_confirm_candidate_count = 4`
+      - `reference_rule_auto_apply_cut_count = 92`
+    - 预览 manifest：
+      `output/test/auto-edit-recovery-golden/c5-reference-refresh-candidates-rerun/20260611-134505/refreshed-manifest.preview.json`
+      已确认对应 case 的 `reference_job_id` 与新风险合同字段已同步落入文件。
+  结论：
+  - `C5` 现在已经具备从“发现旧 reference 合同过期”到“生成 fresh candidate”再到“导出可应用的 manifest refresh 预览”的闭环；
+  - 下一层如果继续推进，就可以真正执行 manifest promotion，或围绕这个脚本补审批/审计流程，而不是继续补可见性。
+
+- 2026-06-11: `C5/T5.zc` 已把“reference 风险合同不完整会阻断 gate，但后续仍要人工去 case row 中摘 evaluation job 当刷新候选”推进到“golden 产物直接给出可操作的 refresh candidate 清单”的阶段。观察到的症状是：虽然 `reference_risk_contract_incomplete` 已进入 live/golden gate，但当前报告仍然只会显示 mismatch；操作者若想真正刷新 reference，只能再手工从 `evaluation_risk_snapshot` 和 `risk_alignment` 里提取 `evaluation_job_id`、fresh `rule_auto_apply`、fresh `manual_confirm` 等信息，执行路径仍然不够显式。现已完成：
+  - `scripts/run_auto_edit_recovery_golden_set.py`
+    - 新增 `summarize_reference_refresh_candidates(case_rows)`
+    - 当 `mismatch_codes` 命中 `reference_risk_contract_incomplete` 且存在 `evaluation_risk_snapshot` 时，现会自动输出 refresh candidate：
+      - `case_id`
+      - `reference_job_id`
+      - `evaluation_job_id`
+      - `evaluation_mode`
+      - `fresh_rule_auto_apply_cut_count`
+      - `fresh_manual_confirm_count`
+      - `fresh_multimodal_pending_count`
+      - `fresh_candidate_risk_summary`
+      - `fresh_risk_levels`
+      - `refresh_reason`
+    - `batch_report.json` 顶层现已写出 `reference_refresh_candidates`
+    - `golden_set_summary.md` 现已新增 `## Reference Refresh Candidates`
+  - 新增/更新回归：
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_summarize_reference_refresh_candidates_extracts_actionable_rows`
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_render_case_summary_markdown_includes_reference_refresh_candidates`
+  - 定向验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "reference_refresh or risk_alignment or render_case_summary_markdown" -q`
+    - `6 passed`
+  - fresh 真实复验：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-reference-refresh-candidates-rerun`
+    - 产物目录：
+      `output/test/auto-edit-recovery-golden/c5-reference-refresh-candidates-rerun/20260611-134505`
+    - 已确认真实 `golden_set_summary.md` 中：
+      - `## Reference Refresh Candidates`
+      - `candidate_count: 1`
+      - `evaluation_job_id = 8f7b2179-5435-473d-a923-886db86f62ef`
+      - `fresh_rule_auto_apply_cut_count = 92`
+      - `reference_manual_confirm_candidate_count = 131`
+      - `refresh_reason = reference risk contract is incomplete; evaluation snapshot carries the current contract`
+    - `batch_report.json` 顶层 `reference_refresh_candidates` 也已同步出现同一条结构化记录
+  结论：
+  - `C5` 现在不只会阻断旧 reference 合同比较，还能直接给出“该用哪条 fresh evaluation 作为刷新候选”的清单；
+  - 下一层如果要继续收口，就可以开始做“reference baseline promotion / refresh workflow”本身，而不必再补报表可见性。
+
+- 2026-06-11: `C5/T5.zb` 已把“risk_alignment 已能在 golden markdown 里暴露 mismatch，但 live_readiness 仍可能被旧聚合摘要绕过”推进到“reference 风险合同不完整已经进入共享 gate”的阶段。观察到的症状是：上一轮虽然 `golden_set_summary.md` 已经直接显示 `reference_risk_contract_incomplete`，但对真实 `batch_report.json` 重新调用 `build_live_readiness_summary(...)` 后，`risk_alignment_contract` 仍显示 `passed=True`。继续下钻后确认第一坏层不在 gate 判定本身，而在两个汇总层：
+  - `scripts/run_auto_edit_recovery_golden_set.py::summarize_case_risk_alignment(...)` 之前只在 `reference_high_risk_case_count > 0` 时才累计 `mismatch_codes`，导致 `reference_risk_contract_incomplete` 这类“无高风险但合同不一致”的 case 会在 summary 层被吃掉；
+  - `src/roughcut/pipeline/live_readiness.py::_extract_risk_alignment_summary(...)` 又会优先信任 batch_report 中已有的 `risk_alignment_summary`，即使其中的 `mismatch_code_counts` 已经过时为空，也不会再用 `golden_case_rows` 回填。
+  现已完成：
+  - `scripts/run_auto_edit_recovery_golden_set.py`
+    - `summarize_case_risk_alignment(...)` 现已先累计 `mismatch_codes`，再判断是否属于 reference-high-risk case
+    - 非 high-risk 的 contract mismatch 不再在 golden summary 聚合时丢失
+  - `src/roughcut/pipeline/live_readiness.py`
+    - `_extract_risk_alignment_summary(...)` 现已先从 `golden_case_rows` 构建 fallback summary
+    - 当 `risk_alignment_summary` 自带的 `mismatch_code_counts` 为空时，会自动回填 case-row 级 mismatch
+    - `risk_alignment_contract` check 现已真正消费这条补齐后的 mismatch summary
+  - 新增/更新回归：
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_summarize_case_risk_alignment_keeps_non_high_risk_contract_mismatches`
+    - `tests/test_run_fullchain_batch.py::test_live_readiness_fails_when_reference_risk_contract_is_incomplete`
+  - 定向验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "risk_alignment" -q`
+      - `3 passed`
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_fullchain_batch.py -k "live_readiness" -q`
+      - `8 passed`
+  - 真实复验：
+    - 直接读取已有真实报表：
+      `output/test/auto-edit-recovery-golden/c5-risk-alignment-contract-rerun/20260611-133434/batch_report.json`
+    - 重新执行 `build_live_readiness_summary(...)` 后已确认：
+      - `risk_alignment_contract.passed = False`
+      - `risk_alignment_contract.actual = 1`
+      - `risk_alignment_contract.mismatch_case_ids = ["noc_mt34_s06mini_edit_plan_risk_anchor"]`
+      - `risk_alignment_contract.mismatch_code_counts = {"fresh_source_mismatch": 1, "reference_risk_contract_incomplete": 1}`
+      - `failure_reasons` 现已包含 `reference 风险合同未对齐`
+  结论：
+  - `reference_risk_contract_incomplete` 已不再只是 golden markdown 里的人工判读项，而是共享 live/golden gate 的真实失败原因；
+  - 下一层可以更明确地在“reference 重放补齐新合同”与“保留 gate 继续阻断旧合同样本”之间收口决策。
+
+- 2026-06-11: `C5/T5.za` 已把“fresh 与 reference 的风险结构差异只能靠人工读两段快照”推进到“risk_alignment 直接对账新合同字段”的阶段。观察到的症状是：上一轮真实产物虽然已经把 `evaluation_risk_snapshot` 写进 `golden_set_summary.md`，但 `risk_alignment` 本身仍只比较 `high_risk_cut_count / manual_confirm_count / source`，没法直接表达“reference 还是旧合同，fresh 已经有完整 `rule_auto_apply + risk_levels` 结构”。这会让报告消费者看到两个快照，却仍要人工判读哪边是结构性不可比。现已完成：
+  - `scripts/run_auto_edit_recovery_golden_set.py`
+    - `_build_case_risk_alignment(...)` 新增消费 `evaluation_risk_snapshot`
+    - `risk_alignment` 现已直接带出：
+      - `reference_rule_auto_apply_cut_count`
+      - `fresh_rule_auto_apply_cut_count`
+      - `reference_candidate_risk_summary`
+      - `fresh_candidate_risk_summary`
+      - `reference_risk_levels`
+      - `fresh_risk_levels`
+      - `reference_risk_contract_complete`
+      - `fresh_risk_contract_complete`
+    - 当 `reference_expected_source == cut_analysis_refine_decision_plan` 且 fresh 已有完整风险合同、reference 仍无该结构时，会显式产出
+      `reference_risk_contract_incomplete`
+  - 新增/更新回归：
+    - `tests/test_run_auto_edit_recovery_golden_set.py`
+      - `test_build_case_risk_alignment_prefers_reference_snapshot_manual_confirm_signals`
+      - `test_build_case_result_rows_includes_risk_alignment_summary`
+  - 定向验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "risk_alignment or evaluation_risk_snapshot or reference_risk_snapshot" -q`
+    - `5 passed`
+  - fresh 真实复验：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-risk-alignment-contract-rerun`
+    - 产物目录：
+      `output/test/auto-edit-recovery-golden/c5-risk-alignment-contract-rerun/20260611-133434`
+    - 已确认真实 `golden_set_summary.md` 中：
+      - `reference_rule_auto_apply_cut_count = 0`
+      - `fresh_rule_auto_apply_cut_count = 92`
+      - `reference_risk_contract_complete = False`
+      - `fresh_risk_contract_complete = True`
+      - `mismatch_codes = fresh_source_mismatch, reference_risk_contract_incomplete`
+  结论：
+  - `C5` 现在不只是在真实产物里展示新风险字段，还能直接指出“reference 与 fresh 当前不是同一份风险合同”；
+  - 下一层应该在“reference 重放补齐新合同”与“把 `reference_risk_contract_incomplete` 升成显式 gate/warning”之间作出收口选择。
+
+- 2026-06-11: `C5/T5.z` 已把“真实 golden 报告只能看到 reference 半截风险画像，fresh 新合同要靠人工查 artifact 才能解释”推进到“fresh/evaluation 风险快照直接进入真实产物”的阶段。观察到的症状是：虽然上一轮 `run_auto_edit_recovery_golden_set.py` 已能在 `reference_risk_snapshot` 中恢复 `candidate_risk_summary / rule_auto_apply_cut_count / risk_levels`，但真实 `golden_set_summary.md` 仍只展示 reference 快照；fresh job 自身更完整的风险画像只能从 `editing_risk_metrics` 的压缩字段或人工读 artifact 得到，无法直接证明 C3 新合同已经进入真实报告。现已完成：
+  - `scripts/run_auto_edit_recovery_golden_set.py`
+    - 将风险快照构建统一抽成 `_build_job_risk_snapshot_from_artifacts(...)`
+    - 新增 `inspect_evaluation_risk_snapshot(...)`
+    - 新增 `collect_evaluation_risk_snapshots(...)`
+    - `build_case_result_rows(...)` 现已注入 `evaluation_risk_snapshot`
+    - `golden_set_summary.md` 渲染现已直接输出 `evaluation_risk_snapshot`
+    - `batch_report.json` 顶层现已写出 `evaluation_risk_snapshots`
+  - 新增/更新回归：
+    - `tests/test_run_auto_edit_recovery_golden_set.py`
+      - `test_reference_risk_snapshot_restores_rule_auto_apply_and_risk_levels_from_artifacts`
+      - `test_build_case_result_rows_includes_evaluation_risk_snapshot`
+  - 定向验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "reference_risk_snapshot or evaluation_risk_snapshot or risk_alignment or required_checks" -q`
+    - `9 passed`
+  - fresh 真实复验：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-c3-evaluation-risk-snapshot-rerun`
+    - 产物目录：
+      `output/test/auto-edit-recovery-golden/c5-c3-evaluation-risk-snapshot-rerun/20260611-132953`
+    - 已确认真实 `golden_set_summary.md` 中：
+      - `evaluation_risk_snapshot.manual_confirm_candidate_count = 4`
+      - `evaluation_risk_snapshot.candidate_risk_summary.total = {low: 92, medium: 3, high: 1}`
+      - `evaluation_risk_snapshot.rule_auto_apply_cut_count = 92`
+      - `evaluation_risk_snapshot.risk_levels.manual_confirm = {low: 0, medium: 3, high: 1}`
+      - `required_checks_passed: 3/3`
+    - 同时确认旧 reference 快照仍为：
+      - `manual_confirm_candidate_count = 131`
+      - `candidate_risk_summary = {}`
+      - `risk_levels = {}`
+  结论：
+  - `C5` 现在已经能在真实 golden 产物中直接展示 fresh job 的完整 C3 风险合同；
+  - 当前残口已经从“字段链没进报表”转成“旧 reference 与新合同不可直接对账”，下一层应考虑 reference 重放或扩展 `risk_alignment` 对账维度。
+
+- 2026-06-11: `C5/T5.y` 已把“内部 variant diagnostics 有完整风险摘要，但 golden/reference 风险快照只保留半截字段”推进到“真实报表链开始携带完整 C3 风险合同”的阶段。观察到的症状是：`src/roughcut/pipeline/steps.py` 与 `cut_analysis/refine_decision_plan` 已经稳定产出 `candidate_risk_summary / rule_auto_apply_cut_count / risk_levels`，但 `scripts/run_auto_edit_recovery_golden_set.py::inspect_reference_risk_snapshot(...)` 在没有 `variant_timeline_bundle` diagnostics 时，只会从 artifacts 回填 `manual_confirm_candidate_count / candidate_manual_confirm / multimodal_auto_apply`，导致 golden 报告里的参考风险画像比真实链路事实源更弱，无法证明 low-risk 自动应用合同已经进入真实报表。现已完成：
+  - `scripts/run_auto_edit_recovery_golden_set.py`
+    - 抽出纯 helper：`_build_reference_risk_snapshot_from_artifacts(...)`
+    - reference/fresh 风险快照在缺少 bundle diagnostics 时，现在会从
+      - `cut_analysis.candidate_risk_summary`
+      - `refine_decision_plan.rule_auto_apply_cut_count`
+      - `refine_decision_plan.candidate_summary.risk_levels`
+      恢复完整风险摘要
+    - 不再只保留 `manual_confirm / multimodal / llm` 的半截字段
+  - `tests/test_run_auto_edit_recovery_golden_set.py`
+    - 新增 `test_reference_risk_snapshot_restores_rule_auto_apply_and_risk_levels_from_artifacts`
+    - 锁定合同：即使只有 `cut_analysis/refine_decision_plan/multimodal/editorial` artifacts，没有 `variant_timeline_bundle` diagnostics，golden 风险快照也必须恢复：
+      - `candidate_risk_summary`
+      - `rule_auto_apply_cut_count`
+      - `multimodal_auto_apply_cut_count`
+      - `risk_levels`
+  - 定向验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "reference_risk_snapshot or risk_alignment or required_checks" -q`
+    - `8 passed`
+  结论：
+  - `C5` 现在不再只是“scorecard 里有 manual-confirm 数字”；golden/reference 风险快照也开始携带完整 C3 风险协议；
+  - 下一层应直接做最小 fresh replay，确认这些字段已经从代码路径进入真实产物，而不只是停留在测试构造。
+
+- 2026-06-11: `C3/T2.6` 已把“风险合同存在、但 low-risk 候选在部分输入上直接消失”推进到“规则生成层也开始遵守新的 surface ownership 和自动应用协议”。观察到的症状是：在 `build_cut_analysis_payload(...)` 的自动/手动模式回归里，`filler_word` 候选并没有错误地被分流，而是更早一层根本没被生成；`tests/test_manual_editor_helpers.py::test_cut_analysis_payload_auto_applies_low_risk_rule_candidates_in_auto_mode` 与 `...manual_in_manual_mode` 都因为 `payload["rule_candidates"]` 里没有 `filler_word` 而失败。继续下钻后确认第一坏层在 `src/roughcut/edit/smart_cut_candidates.py::build_smart_cut_rule_candidates(...)`：surface refactor 之后，这条链对 filler/catchphrase 匹配只吃 `_subtitle_timing_supported_rule_text(...) or _subtitle_spoken_rule_text(...)`，而 `subtitle_raw_rule_text(...)` 已不再回退到 `text_final`；因此像 `{"text_final": "嗯"}` 这种最小 subtitle 输入会在候选生成层直接变成空串，后续 `rule_auto_applies_in_auto_mode(...)` 再正确也无候选可自动应用。现已完成：
+  - `src/roughcut/edit/smart_cut_candidates.py`
+    - 新增 `_subtitle_rule_match_text_and_layer(...)`
+    - 统一按 `timed raw -> spoken raw -> canonical` 选择规则匹配文本
+    - `filler_word / catchphrase_phrase` 现在会把真实使用的 `match_surface_layer` 写回候选，不再在 canonical fallback 时仍伪装成 `raw`
+  - `tests/test_manual_editor_helpers.py`
+    - `test_cut_analysis_payload_auto_applies_low_risk_rule_candidates_in_auto_mode`
+    - `test_cut_analysis_payload_keeps_low_risk_rule_candidates_as_manual_in_manual_mode`
+    - 现已额外断言在最小 `text_final` 输入上产出的 `filler_word.match_surface_layer == "canonical"`
+  - 定向验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py tests/test_rule_registry.py tests/test_edit_decision_diagnostics.py -k "risk or refine_decision or auto_apply or llm_review_gate or managed_auto_cut" -q`
+    - `21 passed`
+  结论：
+  - `C3` 已不再停留在“下游摘要和门禁都知道 low-risk/medium/high-risk”，而是连规则候选生成入口也开始遵守同一份 surface ownership；
+  - `low risk 自动应用` 现在至少在最小 subtitle 输入和 auto/manual 分流回归上重新闭合；
+  - 下一层残口转为把同类阈值继续前推到更多规则类型和真实 replay，而不是再修“候选为什么根本没出来”。
+
+- 2026-06-11: `C3/T2.5` 已把“注册表只有静态字段、风险门禁仍靠散落硬编码”推进到“共享注册表开始驱动下游风险行为”的阶段。观察到的症状是：虽然 `src/roughcut/edit/rule_registry.py` 已统一维护 `risk_level`，但真正决定“哪些 cut 需要进 LLM 高风险复核”的第一坏层 `src/roughcut/pipeline/steps.py::_should_review_cut_with_llm(...)` 仍然写死在本地 reason 集合上；同时 `cut_analysis / refine_decision_plan / variant_timeline_diagnostics` 只有总量 `auto_apply/manual_confirm` 计数，没有风险分层摘要，导致后续 `manual_confirm_heavy`、自动应用阈值和高风险门禁都无法真正基于统一风险合同对账。现已完成：
+  - `src/roughcut/edit/rule_registry.py`
+    - `RuleDefinition` 新增 `llm_review_cut`
+    - 新增共享 helper：
+      - `normalize_rule_risk_level(...)`
+      - `rule_requires_llm_review(...)`
+      - `empty_rule_risk_level_counts()`
+      - `summarize_rule_risk_levels(...)`
+    - 当前高风险/需 LLM 复核规则已显式挂回注册表：
+      - `rollback_instruction`
+      - `restart_retake`
+      - `restart_cue`
+      - `low_signal_subtitle`
+      - `long_non_dialogue`
+  - `src/roughcut/pipeline/steps.py`
+    - `_should_review_cut_with_llm(...)` 现已改为优先消费注册表的 `llm_review_cut / risk_level`
+    - 不再靠本地硬编码 reason 集合判断哪些规则必须进入高风险复核
+    - `variant_timeline_diagnostics.cut_analysis_summary / refine_decision_summary` 已新增风险分层摘要透传
+  - `src/roughcut/edit/cut_analysis.py`
+    - 新增 `candidate_risk_summary`
+    - 统一输出：
+      - `total`
+      - `auto_apply`
+      - `manual_confirm`
+      三组 `low / medium / high` 计数
+  - `src/roughcut/edit/refine_decisions.py`
+    - `candidate_summary` 已新增 `risk_levels`
+    - `refine_decision_plan` 不再只有总量 `auto_apply / manual_confirm`，而是开始带统一风险分层
+  - 新增/更新回归：
+    - `tests/test_rule_registry.py`
+      - `test_rule_registry_exposes_llm_review_gate_and_risk_normalization`
+      - `test_rule_registry_summarizes_risk_levels`
+    - `tests/test_edit_decision_diagnostics.py`
+      - `test_llm_review_gate_uses_rule_registry_risk_contract`
+      - `refine_decision_summary` 断言新增 `risk_levels`
+    - `tests/test_manual_editor_helpers.py`
+      - `test_cut_analysis_payload_tracks_candidate_risk_summary`
+      - `refine_decision_plan` / diagnostics 断言同步更新到新合同
+  - 定向验证：
+    - `python -m py_compile src/roughcut/edit/rule_registry.py src/roughcut/edit/cut_analysis.py src/roughcut/edit/refine_decisions.py src/roughcut/pipeline/steps.py tests/test_rule_registry.py tests/test_manual_editor_helpers.py tests/test_edit_decision_diagnostics.py`
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_rule_registry.py tests/test_manual_editor_helpers.py tests/test_edit_decision_diagnostics.py -k "risk or refine_decision or llm_review_gate or rule_registry" -q`（`17` 项通过）
+  结论：
+  - `C3` 已不再只是“共享 reason 集合在一个文件里”；
+  - 风险等级开始真正驱动 LLM 复核入口与共享摘要合同；
+  - 下一层残口更聚焦在“low risk 自动应用、medium/high risk 默认候选/阻断”阈值如何继续前推到各条规则生成链，而不是再修 reason 漂移本身。
+
+- 2026-06-11: `C1/C5` 已把 `noc_mt34_s06mini_edit_plan_risk_anchor` 的 `required_checks` 从 `2/3` 推到 `3/3`，并且确认这次是根因修复而不是门禁绕过。观察到的症状是：在上一轮修完 `generic_word_split` 后，fresh replay 中 `subtitle_quality_score` 已提升到 `90.9`，`generic_word_split_count=0`，但 `required_checks.subtitle_projection` 仍因 `canonical_projection_quality_warning` 失败。继续下钻后确认第一坏层不在 projection selection，而在 `pipeline/quality.py` 的共享 issue attribution：只要 canonical projection 被选中，`subtitle_quality_report.warning_reasons` 中任何 warning 都会被打上 `canonical_projection_quality_warning`，即使 warning 实际是“摘要模板化命中 1 项”这种内容画像侧信号。现已完成：
+  - `src/roughcut/speech/subtitle_segmentation.py`
+    - 新增 `_is_trusted_generic_boundary_token(...)`
+    - `_boundary_splits_generic_chinese_word(...)` 对跨边界二字 token 改为“仅受信词项才算 generic split”
+    - `len(left_text) <= 3` 时保留 `_boundary_splits_single_char_residual(...)` 的短残句兜底，避免把 `这个标 / 你长按...` 这类真阳性一起关掉
+  - `src/roughcut/pipeline/quality.py`
+    - 新增 `_subtitle_quality_reasons_implicate_projection(...)`
+    - 仅当 warning/blocking 真正指向 projection 字幕质量时，才把 subtitle quality issue 归因为 `canonical_projection_quality_*`
+    - `摘要模板化命中` 这类非 projection warning 现在保持为 `subtitle_quality_warning`
+  - 新增回归：
+    - `tests/test_subtitle_word_boundary.py::test_boundary_splits_generic_word_ignores_cross_boundary_bigram_artifacts`
+    - `tests/test_quality_profile_soft_gate.py::test_quality_assessment_does_not_label_summary_generic_warning_as_canonical_projection`
+  - 定向验证：
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_subtitle_word_boundary.py -k "generic_word_split or boundary_splits_generic_word" -q`（`5` 项通过）
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_subtitle_word_boundary.py -k "quality_report_warns_single_generic_word_split or quality_report_blocks_dense_generic_word_splits" -q`（`2` 项通过）
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_quality_profile_soft_gate.py -k "canonical_projection or summary_generic_warning" -q`（`2` 项通过）
+    - `python -m py_compile src/roughcut/speech/subtitle_segmentation.py src/roughcut/pipeline/quality.py tests/test_subtitle_word_boundary.py tests/test_quality_profile_soft_gate.py`
+  - fresh 真实复验：
+    - 首轮（仅修边界误判）：
+      `output/test/auto-edit-recovery-golden/c1-s06mini-subtitle-projection-rerun/20260611-125706`
+      已确认：
+      - `subtitle_quality_score = 90.9`
+      - `generic_word_split_count = 0`
+      - 但 `required_checks_contract_passed = 2/3`
+      - 失败原因仍是 `subtitle_projection.detail = canonical_projection_quality_warning`
+    - 二轮（补 issue attribution 后）：
+      `output/test/auto-edit-recovery-golden/c1-s06mini-subtitle-projection-rerun-v2/20260611-130124`
+      已确认：
+      - `required_checks_contract_passed = 3/3`
+      - `required_checks_failed_case_ids = []`
+      - `quality_issue_codes` 已从 `canonical_projection_quality_warning` 收敛为普通 `subtitle_quality_warning`
+      - `golden_set_summary.md` 中 `required_checks_passed: 3/3`
+  结论：
+  - `C1` 当前最核心的 projection 活锚点已经打穿；
+  - `required_checks` 不再被 `subtitle_projection` 单点拖死；
+  - 下一阶段优先级可以从 `subtitle_projection` 主阻塞切回 `C3/C4/C5` 的风险合同、运行时边界与真实评测收口。
+
+- 2026-06-11: `C5/T5.x` 已把“manual-confirm-heavy 风险只存在于报表里”推进到“真实 live gate 会阻断”的阶段。观察到的症状是：此前 `src/roughcut/pipeline/quality.py` 只会在 `high_risk_cuts` 未收口时产出 `editing_high_risk_cuts_blocking`，对于 edit-plan 阶段 `candidate_manual_confirm` 极高但 `high_risk_cuts=0` 的样本，scorecard 虽能看到风险数字，`live_readiness.blocking_quality_issues` 却不会阻断。第一坏层在共享质量评估层 `assess_job_quality(...)`，而不是 golden runner 或 scorecard renderer。现已完成：
+  - `src/roughcut/pipeline/quality.py`
+    - 新增 `editing_manual_confirm_heavy_blocking`
+    - 当前阈值：`candidate_manual_confirm >= 50`
+    - 同时把 `signals.high_risk_cut_count` 写入质量信号，便于 batch/golden 对账
+  - `scripts/build_batch_output_scorecard.py`
+    - job 级 `editing_risk_metrics` 新增 `blocking_manual_confirm_heavy`
+    - aggregate 层新增 `blocking_manual_confirm_job_count`
+    - markdown/json scorecard 均已透出该字段
+  - 回归修复与验证：
+    - `python -m py_compile src/roughcut/pipeline/quality.py scripts/build_batch_output_scorecard.py tests/test_quality_profile_soft_gate.py tests/test_build_batch_output_scorecard.py`
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_build_batch_output_scorecard.py -k "editing_risk_metrics or render_markdown_includes_aggregate_and_job_level_editing_risk_metrics" -q`（`4` 项通过）
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_quality_profile_soft_gate.py -k "high_risk_cuts_blocking or manual_confirm_heavy_edit_plan_as_blocking or multimodal_trim_review_timeout or refine_decision_summary_signal" -q`（`3` 项通过）
+  - fresh 真实复验：
+    `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-s06mini-manual-confirm-gate-rerun`
+    产物目录：
+    `output/test/auto-edit-recovery-golden/c5-s06mini-manual-confirm-gate-rerun/20260611-111738`
+    已确认真实产物中：
+    - `batch_report.json`
+      - `quality_issue_codes` 同时出现
+        - `editing_high_risk_cuts_blocking`
+        - `editing_manual_confirm_heavy_blocking`
+      - `live_readiness.checks.blocking_quality_issues.issue_code_counts`
+        - `editing_high_risk_cuts_blocking = 1`
+        - `editing_manual_confirm_heavy_blocking = 1`
+    - `detailed_output_scorecard.json`
+      - `editing_risk_metrics.high_risk_cut_count = 1`
+      - `editing_risk_metrics.manual_confirm_count = 97`
+      - `editing_risk_metrics.multimodal_pending_count = 1`
+      - `editing_risk_metrics.blocking_high_risk_cuts = true`
+      - `editing_risk_metrics.blocking_manual_confirm_heavy = true`
+      - `aggregate_risk_metrics.blocking_manual_confirm_job_count = 1`
+    - `golden_set_summary.md`
+      - `reference_manual_confirm_candidate_count = 131`
+      - `fresh_high_risk_cut_count = 1`
+      - `fresh_manual_confirm_count = 97`
+      - `high_risk_reproduced = True`
+  结论：
+  - `C5` 已不再缺“fresh 可复现高风险样本”；
+  - `noc_mt34_s06mini_edit_plan_risk_anchor` 现在同时是 `manual_confirm_heavy` 和 `high_risk_cut` 的活锚点；
+  - 下一步重点应从“找样本”切到“统一风险分层门禁”和“required_checks 为什么仍未通过”。
+
+- 2026-06-11: `C3/C5` 交界已把 `required_checks` 从“全靠 fake stage 名比对”推进到“按真实检查类型取事实源”。观察到的症状是：`scripts/run_auto_edit_recovery_golden_set.py::_evaluate_required_checks(...)` 之前除 `manual_editor_apply_semantics` 外，其余检查全部按 `live_stage_validations[stage_name].status == pass` 判断，导致 `manual_editor_ready / subtitle_projection / cut_analysis_traceability` 这类本来不对应同名 live stage 的合同在真实 `S06mini` 样本上被整体误判为失败。继续下钻后又发现第二坏层：`cut_analysis` 只会对 `rule_candidates` 规范化 trace metadata，`accepted_cuts` 不会统一补 `rule_id / risk_level / match_surface*`，而 `manual_editor_ready` 则会被 `stop_after edit_plan` 收尾写成 `cancelled` 状态污染 readiness.status。现已完成：
+  - `scripts/run_auto_edit_recovery_golden_set.py`
+    - 新增 evaluation-side typed check inspection：
+      - `manual_editor_ready` 改为基于 `_build_manual_editor_readiness(...).can_open_editor`
+      - `subtitle_projection` 改为直接消费 `quality_issue_codes` 中的 `canonical_projection_quality_* / missing_subtitles / subtitle_semantic_contamination`
+      - `cut_analysis_traceability` 改为直接检查 evaluation job 的 `cut_analysis / variant_timeline_bundle`
+    - `required_checks` 汇总现已支持 `check_statuses`，不再把这些检查一律回退成 fake stage 名比对
+  - `src/roughcut/edit/cut_analysis.py`
+    - `accepted_cuts` 现在也会走 `_normalize_rule_candidate_metadata(...)`
+    - 遗留 backend smart candidates 在 fresh smart candidate 未命中时不再 silently drop
+    - `silence` accepted cut 现在会稳定补 `source_text/match_surface/rule_id`
+  - `src/roughcut/pipeline/steps.py`
+    - `variant_timeline_bundle.diagnostics.high_risk_cuts` 现已透传 `source_text / match_surface / match_surface_layer / risk_level / rule_id`
+  - 定向验证：
+    - `python -m py_compile scripts/run_auto_edit_recovery_golden_set.py src/roughcut/edit/cut_analysis.py src/roughcut/pipeline/steps.py tests/test_run_auto_edit_recovery_golden_set.py tests/test_manual_editor_helpers.py`
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "required_checks or traceable_cut_candidate or manual_editor_apply_semantics" -q`（`7` 项通过）
+    - `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "build_cut_analysis_payload_backfills_silence_metadata_for_accepted_cuts or build_cut_analysis_payload_backfills_repeated_speech_metadata_from_legacy_candidate or build_cut_analysis_payload_preserves_smart_rule_candidate_metadata" -q`（`3` 项通过）
+  - fresh 真实复验：
+    1. 首轮 rerun：
+       `output/test/auto-edit-recovery-golden/c5-s06mini-required-checks-rerun/20260611-113038`
+       已确认 `required_check_statuses` 从“完全 fake failure”切成真实明细：
+       - `manual_editor_ready`: `passed=false` 但 `detail` 已显示是 stop-after 收尾终态污染
+       - `subtitle_projection`: `passed=false`，真实原因 `canonical_projection_quality_warning`
+       - `cut_analysis_traceability`: `passed=false`，真实原因 `missing_traceability_items=4`
+    2. 修正后 rerun：
+       `output/test/auto-edit-recovery-golden/c5-s06mini-required-checks-rerun-v2/20260611-113507`
+       已确认：
+       - `required_checks_contract_passed = 2/3`
+       - `manual_editor_ready = true`
+       - `cut_analysis_traceability = true`
+       - 仅剩 `subtitle_projection` 因 `canonical_projection_quality_warning` 未通过
+  - 后续继续收口：
+    - `src/roughcut/api/jobs.py::_build_manual_editor_readiness(...)` 已进一步拆掉“可开编辑器”和“batch partial 终态”之间的错误耦合：
+      - 对 `stop_after` 主动收尾且上游工件齐全的 `cancelled` job，`readiness.status` 现在直接回 `ready`
+      - `can_edit` 不再被这类批跑终态误伤
+    - 定向验证：
+      - `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_readiness_progress.py -k "stop_after_cancelled_job_as_ready or ready_clears_current_step or failed_step_prefers_error_message or does_not_report_complete_when_outputs_are_missing" --basetemp '.tmp/pytest-manual-editor-readiness' -q`（`4` 项通过）
+  结论：
+  - `C5` 上 `required_checks` 已不再被 runner 误判整体拖死；
+  - `C3` 的 accepted/high-risk traceability 合同已补到 fresh 样本可通过；
+  - 当前 `S06mini` 活锚点在阶段 B 的真实残口已明确收敛为 `subtitle_projection` 单点问题，应转入 `C1` 收口。
+
+- 2026-06-11: `C5/T5.x` 已把“高风险锚点靠记忆挑选”收成显式 manifest contract。观察到的症状是：当前本地 reference job 数据并不总能稳定读回 `variant_timeline_bundle/cut_analysis` 历史风险证据，而 `docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json` 过去只保存 `case_id/reference_job_id/tags/notes`，导致后续 fresh replay 选样仍依赖聊天上下文或人工记忆“哪个 case 历史上有 high-risk”。第一坏层在 `scripts/run_auto_edit_recovery_golden_set.py::GoldenJobCase/load_golden_job_manifest(...)` 的 manifest schema 太薄，而不是 replay runner 本身。现已完成：
+  - `GoldenJobCase` 新增 `risk_hints` 字段，`load_golden_job_manifest(...)` 已支持从 manifest 读取结构化风险提示。
+  - `build_case_result_rows(...)` 与 `render_case_summary_markdown(...)` 现已把 `risk_hints` 透传到 batch/golden 摘要中，后续筛样不再只能看 `notes/tags`。
+  - `docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json` 已先为两条最关键的 NOC 样本补入当前已知风险提示：
+    - `noc_mt34_short_done`：`reference_high_risk_cut_count=1`，且当前已知 fresh legacy 信号 `manual_confirm=7 / multimodal_pending=4 / llm_reviewed=true`
+    - `noc_mt34_long_done`：`reference_high_risk_cut_count=3`
+  验证：
+  - `python -m py_compile scripts/run_auto_edit_recovery_golden_set.py tests/test_run_auto_edit_recovery_golden_set.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "load_golden_job_manifest_accepts_rich_job_entries or render_case_summary_markdown_includes_manual_editor_apply_semantics or build_case_result_rows_requires_contract_checks" -q`（`3` 项通过）
+  结论：
+  - `C5` 现在多了一层可持续的样本筛选合同；下一步 replay 不再是盲跑，而是能直接围绕 manifest 里声明过的风险信号做收口。
+
+- 2026-06-11: `C5/T5.x` 已完成第一条按 `risk_hints` 驱动的 fresh replay，并拿到对后续筛样方向有用的反证。运行：
+  `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_long_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-risk-hint-anchor-scan`
+  fresh 产物目录：
+  `output/test/auto-edit-recovery-golden/c5-risk-hint-anchor-scan/20260611-091900`
+  已确认：
+  - `golden_set_summary.md` 已把 `risk_hints.reference_high_risk_cut_count=3` 直接显示在 case 摘要中。
+  - fresh `detailed_output_scorecard.json` 中：
+    - `editing_risk_metrics.high_risk_cut_count = 0`
+    - `manual_confirm_count = 7`
+    - `multimodal_pending_count = 0`
+    - `llm_reviewed = true`
+  - 运行日志同时暴露了一个新的 runtime 事实：`edit_plan` 阶段在音频 artifact 缺失时会自动执行
+    `Audio artifact missing during edit_plan; rebuilding from source job=33892f8d-b069-44ba-9e0a-037927b775f3 storage_path=jobs/a87e30c8-0030-49f2-aeee-a83ff7b16060/audio.wav`
+  结论：
+  - `noc_mt34_long_done` 不适合作为“fresh 必现 nonzero high-risk cut”的第一锚点；
+  - 但它证明了历史 `reference_high_risk_cut_count=3` 并不等价于 `edit_plan` fresh replay 会复现高风险 cut，当前更像是 legacy manual-confirm 信号仍可复现，而 high-risk cut 可能要到更后阶段或别的样本才出现；
+  - 下一条更高价值样本应转向 `noc_mt34_short_done`，同时需要评估 `edit_plan` 的音频自动重建是否属于允许的显式回退，还是新的隐藏 fallback。
+
+- 2026-06-11: `C4/C5` 交界又收掉了一层“真实发生了运行时回退，但 batch/golden 看不见”的隐藏边界。观察到的症状是：`noc_mt34_long_done` 的 fresh replay 日志里会出现
+  `Audio artifact missing during edit_plan; rebuilding from source ...`
+  但在修复前，这个事实只存在于运行日志和 `edit_plan` step metadata，`batch_report.json/md`、`live_stage_validations`、`golden_set_summary` 都把 `edit_plan` 记成普通 `pass`，导致评测门禁无法区分“正常完成”与“依赖回退完成”。第一坏层在 `scripts/run_fullchain_batch.py::build_live_stage_validations(...)`：它只消费 `step.status/detail/error`，完全忽略了 step metadata 里的 runtime fallback 标记。现已完成：
+  - `scripts/run_fullchain_batch.py` 现已向 `build_live_stage_validations(...)` 透传完整 `step_metadata`。
+  - `edit_plan` 若带 `audio_artifact_rebuilt=True`，现在会显式输出：
+    - `status=warn`
+    - `summary=剪辑保留比 ...；音频派生文件缺失，已从源视频重建`
+    - `issue_codes=["audio_artifact_rebuilt"]`
+  - 新增回归 `tests/test_run_fullchain_batch.py::test_build_live_stage_validations_surfaces_edit_plan_audio_rebuild_as_warning`。
+  - fresh 复验：
+    `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_long_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-audio-rebuild-warning-rerun`
+    产物目录：
+    `output/test/auto-edit-recovery-golden/c5-audio-rebuild-warning-rerun/20260611-092610`
+    已确认 `batch_report.json/md` 中真实出现：
+    - `edit_plan: warn`
+    - `issues=audio_artifact_rebuilt`
+  验证：
+  - `python -m py_compile scripts/run_fullchain_batch.py tests/test_run_fullchain_batch.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_fullchain_batch.py -k "build_live_stage_validations or live_readiness" -q`（`10` 项通过）
+  结论：
+  - 当前音频自动重建不再是隐藏 fallback；后续要决定的是“保留为允许的显式 warning”还是“把 storage 可解析性前移为更早阶段合同”。
+
+- 2026-06-11: `C5/T5.x` 又收掉了一层“risk metric 有值，但不知道来自 bundle 还是 legacy fallback”的报告歧义。观察到的症状是：`noc_mt34_short_done` 的 fresh replay 已经稳定复现 `manual_confirm_count=7 / multimodal_pending_count=4 / llm_reviewed=true`，但旧版 scorecard 只会给出这些数值本身，看不出它们是来自 `variant_timeline_bundle` 还是 `editorial + cut_analysis` legacy fallback，因此后续很容易把“已有 legacy 风险信号”误判成“bundle 级高风险已稳定复现”。第一坏层在 `scripts/build_batch_output_scorecard.py::_editing_risk_metrics(...)` 的输出 contract：它有数值，没有来源。现已完成：
+  - `editing_risk_metrics` 新增 `source` 字段：
+    - `variant_timeline_bundle`
+    - `legacy_editorial_cut_analysis`
+  - `aggregate_risk_metrics` 新增：
+    - `variant_bundle_job_count`
+    - `legacy_risk_job_count`
+  - markdown/json scorecard 现已把来源显式写出，不再需要靠上下文推断。
+  - fresh 复验：
+    - 先运行：
+      `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-short-anchor-rerun`
+      产物目录：
+      `output/test/auto-edit-recovery-golden/c5-short-anchor-rerun/20260611-092820`
+    - 再重建带新 contract 的 scorecard：
+      `python scripts/build_batch_output_scorecard.py --batch-report output/test/auto-edit-recovery-golden/c5-short-anchor-rerun/20260611-092820/batch_report.json --output-json output/test/auto-edit-recovery-golden/c5-short-anchor-rerun/20260611-092820/detailed_output_scorecard.with-source.json --output-md output/test/auto-edit-recovery-golden/c5-short-anchor-rerun/20260611-092820/detailed_output_scorecard.with-source.md`
+    - 已确认真实产物中：
+      - job 级 `editing_risk_metrics.source=legacy_editorial_cut_analysis`
+      - aggregate `variant_bundle_job_count=0`
+      - aggregate `legacy_risk_job_count=1`
+  验证：
+  - `python -m py_compile scripts/build_batch_output_scorecard.py tests/test_build_batch_output_scorecard.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_build_batch_output_scorecard.py -q`（`8` 项通过）
+  结论：
+  - 当前 `noc_mt34_short_done` 已不只是“有非零风险信号”，而是能明确证明“这些信号仍停留在 legacy fallback 层”；后续 `C5` 的第一坏层应转向“为什么 fresh replay 没把这些风险沉淀到 variant bundle”。 
+
+- 2026-06-11: `C5/T5.x` 又把“为什么是 legacy fallback”本身收成了显式阶段原因，而不是继续留给人工推断。观察到的症状是：即使上一轮已经新增了 `editing_risk_metrics.source`，报告仍然无法区分“因为 stop-after 停在 render 前，所以天然没有 bundle”与“正常应该有 bundle，但 bundle 异常缺失”这两种语义完全不同的情况。第一坏层仍在 `scripts/build_batch_output_scorecard.py::_editing_risk_metrics_from_legacy_inputs(...)`：它知道自己走的是 legacy，却不知道为什么。现已完成：
+  - `editing_risk_metrics` 新增 `source_reason`：
+    - `variant_bundle_available`
+    - `pre_render_stop_without_variant_bundle`
+    - `render_failed_before_variant_bundle`
+    - `variant_bundle_unavailable`
+  - fresh 复验：
+    `python scripts/build_batch_output_scorecard.py --batch-report output/test/auto-edit-recovery-golden/c5-short-anchor-rerun/20260611-092820/batch_report.json --output-json output/test/auto-edit-recovery-golden/c5-short-anchor-rerun/20260611-092820/detailed_output_scorecard.with-source-reason.json --output-md output/test/auto-edit-recovery-golden/c5-short-anchor-rerun/20260611-092820/detailed_output_scorecard.with-source-reason.md`
+    已确认真实产物中：
+    - `editing_risk_metrics.source=legacy_editorial_cut_analysis`
+    - `editing_risk_metrics.source_reason=pre_render_stop_without_variant_bundle`
+  验证：
+  - `python -m py_compile scripts/build_batch_output_scorecard.py tests/test_build_batch_output_scorecard.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_build_batch_output_scorecard.py -q`（`8` 项通过）
+  结论：
+  - 当前 `C5` 已能把 “legacy risk because pre-render stop” 与 “legacy risk because missing bundle anomaly” 区分开；下一步应转向 runtime 决策：是否要把一份不依赖 render 输出的轻量 diagnostics bundle 前移到 `edit_plan`。
+
+- 2026-06-11: `C5/T5.x` 已把上述 runtime 决策真正落地成共享产物，而不是继续停留在报告层推断。观察到的症状是：`run_edit_plan()` 已经掌握 `cut_analysis + refine_decision_plan + timeline_analysis`，但修复前没有写入 `variant_timeline_bundle`，导致 `stop-after edit_plan` 的 fresh replay 即使已有稳定的 `manual_confirm / multimodal_pending / llm_reviewed` 诊断，也只能在 scorecard 中回退到 `legacy_editorial_cut_analysis`。第一坏层在 `src/roughcut/pipeline/steps.py::run_edit_plan(...)` 的产物边界，而不是 scorecard 或 telegram consumer。现已完成：
+  - `run_edit_plan()` 在写入 `edit_review_bundle / cut_analysis / multimodal_trim_review / refine_decision_plan` 的同时，也会写入 diagnostics-only `variant_timeline_bundle`：
+    - 共享 `timeline_rules.editorial_analysis`
+    - `timeline_rules.cut_analysis`
+    - `timeline_rules.refine_decision_plan`
+    - `timeline_rules.diagnostics`
+    - `variants={}`，render 后再由完整 bundle 覆盖
+  - 新增回归：
+    - `tests/test_build_batch_output_scorecard.py::test_editing_risk_metrics_uses_pre_render_variant_bundle_without_media_variants`
+    - `tests/test_manual_editor_helpers.py::test_variant_timeline_bundle_allows_diagnostics_only_payload_without_render_variants`
+  - fresh 复验：
+    `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-pre-render-variant-bundle-rerun`
+    产物目录：
+    `output/test/auto-edit-recovery-golden/c5-pre-render-variant-bundle-rerun/20260611-093951`
+    已确认真实产物中：
+    - `editing_risk_metrics.source=variant_timeline_bundle`
+    - `editing_risk_metrics.source_reason=variant_bundle_available`
+    - `manual_confirm_count=7`
+    - `multimodal_pending_count=4`
+    - `llm_reviewed=true`
+    - aggregate `variant_bundle_job_count=1`
+    - aggregate `legacy_risk_job_count=0`
+    同时 `edit_plan` 仍保留显式 warning：
+    - `issues=audio_artifact_rebuilt`
+  验证：
+  - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_build_batch_output_scorecard.py tests/test_manual_editor_helpers.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_build_batch_output_scorecard.py -q`（`9` 项通过）
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "variant_timeline_bundle" -q`（`2` 项通过）
+  结论：
+  - `C5` 的 pre-render fresh scorecard 已不再依赖 legacy fallback 才能看见编辑风险摘要；
+  - 下一步应从“补 bundle”切到“筛出 fresh 可稳定复现 nonzero high-risk cut 的锚点”，否则质量门禁仍缺真正的高风险阻断样本。
+
+- 2026-06-11: `C5/T5.x` 又把“高风险锚点的阶段语义”收成了 manifest contract，并补了当前工作区真实样本扫描。观察到的症状是：即使 `risk_hints` 已经能写 `reference_high_risk_cut_count`，后续仍然会把“render 后 reference bundle 的历史高风险”误当成“edit_plan fresh replay 应该立刻复现的高风险”，导致锚点筛选和 fresh 验证口径继续混淆。第一坏层仍在 `scripts/run_auto_edit_recovery_golden_set.py::GoldenJobCase/load_golden_job_manifest(...)` 及 `golden_set_summary.md` 的风险提示 contract：它能表达“有风险”，但不能表达“风险属于哪个阶段、期望在哪个阶段出现、来自哪个 artifact”。现已完成：
+  - `risk_hints` 现在支持保留嵌套结构；`render_case_summary_markdown(...)` 已可稳定输出：
+    - `reference_expected_stage`
+    - `reference_expected_source`
+    - `fresh_expectations.<stage>.*`
+  - `docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json` 已为两个 NOC 高风险样本补入阶段语义：
+    - `noc_mt34_short_done`
+    - `noc_mt34_long_done`
+  - 对当前 manifest reference jobs 的数据库扫描已确认：当前工作区里只有这两个 case 的 reference job 真正带 `variant_timeline_bundle + render_outputs` 且 `high_risk_cut_count > 0`；其余样本大多没有完整 render/bundle 证据，不能再被误当成高风险 fresh gate 候选。
+  验证：
+  - `python -m py_compile scripts/run_auto_edit_recovery_golden_set.py tests/test_run_auto_edit_recovery_golden_set.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "load_golden_job_manifest_accepts_rich_job_entries or render_case_summary_markdown_includes_manual_editor_apply_semantics or build_case_result_rows_requires_contract_checks" -q`（`3` 项通过）
+  结论：
+  - `C5` 现在不再只是“知道哪个 case 历史上有高风险”，而是能明确区分“reference 高风险属于 render 后 bundle”与“fresh edit_plan 期望只验证 manual_confirm / pending / llm reviewed”。
+
+- 2026-06-11: `C5/T5.x` 又补完了当前仅存两条高风险 reference 样本的 fresh render 证据，而且结果对下一步方向很关键。运行：
+  - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/c5-high-risk-render-anchor-short`
+  - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_long_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/c5-high-risk-render-anchor-long`
+  fresh 产物目录：
+  - `output/test/auto-edit-recovery-golden/c5-high-risk-render-anchor-short/20260611-094444`
+  - `output/test/auto-edit-recovery-golden/c5-high-risk-render-anchor-long/20260611-094926`
+  已确认：
+  - `noc_mt34_short_done`：
+    - `editing_risk_metrics.source=variant_timeline_bundle`
+    - `high_risk_cut_count=0`
+    - `manual_confirm_count=7`
+    - `multimodal_pending_count=4`
+    - `llm_reviewed=true`
+    - render 未在风险层复现 reference 的 `high_risk_cut_count=1`，反而先暴露 `subtitle_sync_issue`
+  - `noc_mt34_long_done`：
+    - `editing_risk_metrics.source=variant_timeline_bundle`
+    - `high_risk_cut_count=0`
+    - `manual_confirm_count=7`
+    - `multimodal_pending_count=0`
+    - `llm_reviewed=true`
+    - render 未复现 reference 的 `high_risk_cut_count=3`
+    - `batch_report.render_diagnostics.render_step` 真实记录 `TimeoutError: 步骤 render 执行超过 300.0 秒`
+    - 运行日志同时暴露 `avatar_full_track_call_timeout`，说明长样本还存在“avatar 降级事实先发生，但最终报告只看到 render timeout”的 runtime 证据缺口
+  结论：
+  - 当前工作区里“reference 非零 high-risk”并不等价于“fresh render 可复现非零 high-risk”；
+  - `C5` 现阶段缺的不是 scorecard/source contract，而是真正可复现 `high_risk_cut_count > 0` 的新锚点；
+  - `C4` 也暴露出下一层问题：当 avatar 降级后又整体 render timeout 时，最终 batch/golden 报告没有把早先的 avatar timeout 事实完整沉淀出来。
+
+- 2026-06-11: `C4/T4.x` 已把上述“先发生的 avatar 降级事实被后续 render timeout 吃掉”的运行时缺口收成显式 artifact contract。观察到的症状是：`noc_mt34_long_done` 的 fresh render 日志会先打印
+  `Avatar overlay degraded to plain render ... reason=avatar_full_track_call_timeout`
+  但修复前 `batch_report.render_diagnostics` 最终要么完全没有 `avatar_result`，要么只剩较弱的 `missing_avatar_render`，导致 batch/golden 无法准确回放“真实先发生了什么”。第一坏层在 `src/roughcut/pipeline/steps.py::run_render(...)` 的 render 诊断持久化边界：此前 `avatar_result/cover_result` 只在 render 尾部和 `render_outputs` 一起落库；一旦 render 在此之前 timeout，就只剩日志，没有 artifact。补第一轮后又发现第二坏层：同一 job 内可能先写入更强的 `avatar_full_track_call_timeout`，再被后续较弱的 `missing_avatar_render` snapshot 覆盖。现已完成：
+  - `src/roughcut/pipeline/steps.py`
+    - 新增 `ARTIFACT_TYPE_RENDER_RUNTIME_DIAGNOSTICS = "render_runtime_diagnostics"`
+    - 新增 `_persist_render_runtime_diagnostics(...)`，在 avatar/cover 运行时状态变化时立刻落库，而不再等最终 `render_outputs`
+    - 新增 `_merge_render_runtime_result(...)`，当后续 snapshot 只提供较弱的 `missing_*` 原因时，保留之前更强的降级原因（例如 `avatar_full_track_call_timeout`）
+  - `scripts/run_fullchain_batch.py`
+    - `collect_job_report(...)` 现在会把 `render_outputs` 与 `render_runtime_diagnostics` 合并后再交给 `_build_render_diagnostics(...)`
+    - 新增 `_merge_render_runtime_payloads(...)`，保证 batch/golden 报告即使在最终 `render_outputs` 缺失时也能看到 runtime diagnostics
+  - 回归：
+    - `tests/test_manual_editor_helpers.py::test_merge_render_runtime_result_preserves_stronger_existing_degraded_reason`
+    - `tests/test_run_fullchain_batch.py::test_merge_render_runtime_payloads_preserves_runtime_avatar_and_cover_facts`
+  验证：
+  - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py scripts/run_fullchain_batch.py tests/test_run_fullchain_batch.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "merge_render_runtime_result" -q`（`1` 项通过）
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_fullchain_batch.py -k "merge_render_runtime_payloads or build_render_diagnostics" -q`（`4` 项通过）
+  - fresh 复验：
+    `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_long_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long-strong-reason`
+    产物目录：
+    `output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long-strong-reason/20260611-100932`
+    已确认：
+    - 运行日志仍会先出现 `avatar_full_track_call_timeout`
+    - 最终 `batch_report.render_diagnostics.avatar_result.reason=avatar_full_track_call_timeout`
+    - 同时 `render_step` 仍真实保留 `TimeoutError: 步骤 render 执行超过 300.0 秒`
+  结论：
+  - `C4` 的 runtime 审计边界已经从“只有最终 render_outputs 才算数”推进到“先发生的降级事实也能独立进入 batch/golden 报告”
+  - 当前 residual risk 不再是“avatar timeout 事实丢失”，而是 `detailed_output_scorecard.avatar` 这一维度仍主要依据 `render_outputs/avatar_plan` 打分，尚未消费新的 runtime diagnostics contract。
+
+- 2026-06-11: `C4/C5` 交界又收掉了一层“报告链已看到 runtime diagnostics，但 scorecard 维度评分仍按旧事实源”的残口。观察到的症状是：即使上一轮已经让 `batch_report.render_diagnostics.avatar_result.reason=avatar_full_track_call_timeout`，`detailed_output_scorecard.avatar` 仍然只读 `render_outputs.avatar_result`，于是长样本 fresh 产物里 avatar 这一维依旧显示“缺少 avatar_result”，和 batch_report 已经掌握的运行时事实矛盾。第一坏层在 `scripts/build_batch_output_scorecard.py::_score_avatar(...)` 的事实来源，而不是 runtime artifact 本身。现已完成：
+  - `_score_avatar(...)` 现在新增 `render_diagnostics` 输入，并优先消费其中的 `avatar_result`
+  - 当 runtime diagnostics 存在具体原因时，avatar summary 现在会显式写出
+    `avatar_result=degraded:avatar_full_track_call_timeout`
+  - 新增回归：
+    - `tests/test_build_batch_output_scorecard.py::test_score_avatar_prefers_runtime_render_diagnostics_when_render_outputs_missing_avatar_result`
+  验证：
+  - `python -m py_compile scripts/build_batch_output_scorecard.py tests/test_build_batch_output_scorecard.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_build_batch_output_scorecard.py -q`（`10` 项通过）
+  - 基于上一轮 fresh 长样本产物重建 scorecard：
+    `python scripts/build_batch_output_scorecard.py --batch-report output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long-strong-reason/20260611-100932/batch_report.json --output-json output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long-strong-reason/20260611-100932/detailed_output_scorecard.runtime-avatar.json --output-md output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long-strong-reason/20260611-100932/detailed_output_scorecard.runtime-avatar.md`
+    已确认：
+    - `avatar.score=57.0`
+    - `avatar.status=degraded`
+    - `avatar.summary=avatar_result=degraded:avatar_full_track_call_timeout；集成模式 picture_in_picture；render_execution=deferred_to_render；未生成独立口播分段，当前为全轨透传/弱插入模式`
+  结论：
+  - `C4` 的 runtime diagnostics contract 已经打通到 batch/golden 报告和 scorecard avatar 维度，不再存在“诊断知道真实原因、评分却仍按缺失数据处理”的口径分裂。
+
+- 2026-06-11: `C4/T4.x` 继续把 render runtime 审计从“单 job 明细可见”推进到“批次摘要可直接看出失败主要死在哪”。观察到的症状是：虽然 `render_diagnostics` 现在已经能在 job 明细中保留 `render_failed / cover_export_failed / avatar_full_track_call_timeout` 等原因，但 `render_diagnostics_summary`、`golden_set_summary.md` 和 `live_readiness.checks.render_end_state_stability` 仍只统计 `failed/degraded job_count`，看不出是哪类原因占主导。第一坏层在 `scripts/run_auto_edit_recovery_golden_set.py::summarize_render_diagnostics(...)` 与 `src/roughcut/pipeline/live_readiness.py::_extract_render_diagnostics_summary(...)` 的聚合 contract：只有 job 数，没有 reason-count。现已完成：
+  - `summarize_render_diagnostics(...)` 新增：
+    - `failed_render_reasons`
+    - `cover_degraded_reasons`
+    - `avatar_degraded_reasons`
+  - `render_case_summary_markdown(...)` 顶部新增 `Render Diagnostics Summary` 摘要区，会直接输出 reason=count
+  - `build_live_readiness_summary(...)` 现在会把 reason-count 一并透传到 `checks.render_end_state_stability`
+  - `live_readiness` 还补了兼容逻辑：对历史 batch_report，如果旧版 `render_diagnostics_summary` 没有 reason-count，会自动从 `jobs[*].render_diagnostics` fallback 重算，不需要重跑整批
+  回归：
+  - `tests/test_run_auto_edit_recovery_golden_set.py::test_summarize_render_diagnostics_aggregates_failed_and_degraded_jobs`
+  - `tests/test_run_auto_edit_recovery_golden_set.py::test_render_case_summary_markdown_includes_manual_editor_apply_semantics`
+  - `tests/test_run_fullchain_batch.py::test_live_readiness_extract_render_diagnostics_summary_preserves_reason_counts`
+  - `tests/test_run_fullchain_batch.py::test_live_readiness_backfills_render_reason_counts_from_jobs_when_summary_is_legacy`
+  验证：
+  - `python -m py_compile scripts/run_auto_edit_recovery_golden_set.py src/roughcut/pipeline/live_readiness.py tests/test_run_auto_edit_recovery_golden_set.py tests/test_run_fullchain_batch.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "summarize_render_diagnostics or render_case_summary_markdown_includes_manual_editor_apply_semantics" -q`（`2` 项通过）
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_fullchain_batch.py -k "live_readiness_extract_render_diagnostics_summary_preserves_reason_counts or live_readiness_backfills_render_reason_counts_from_jobs_when_summary_is_legacy" -q`（`2` 项通过）
+  - 基于 fresh 长样本产物 `output/test/auto-edit-recovery-golden/c4-runtime-diagnostics-rerun-long-strong-reason/20260611-100932/batch_report.json` 的 jobs-only fallback 生成摘要文件：
+    - `golden_set_summary.with-render-reasons.jobs-fallback.md`
+    已确认顶层真实出现：
+    - `failed_render_reasons: render_failed=1`
+    - `avatar_degraded_reasons: avatar_full_track_call_timeout=1`
+  结论：
+  - `C4` 的 render root-cause 审计现在不再只停在 job 级明细；批次摘要、live readiness 和历史 batch_report fallback 都能直接看到 reason 级分布。
+
+- 2026-06-11: `C4/T4.x` 又收掉了一层“真实是 timeout，但 fresh 报告只会写 generic render_failed”的分类残口。观察到的症状是：尽管 batch runner 早已把 `sync_runner_timeout_strategy=process/thread` 与 timeout 元数据写进 `JobStep.metadata_`，`scripts/run_fullchain_batch.py::_classify_render_failure_reason(...)` 在构建 `render_diagnostics.render_step` 时此前只看 `error/detail` 文本，没有消费 `sync_runner` 元数据，因此长样本 fresh render timeout 仍可能在报告层被压扁成 `render_failed`。第一坏层在 `_build_render_diagnostics(...) -> _classify_render_failure_reason(...)` 的 failure classification contract，而不是 timeout runner 本身。现已完成：
+  - `_build_render_diagnostics(...)` 现在会先提取 `sync_runner` 元数据，再传给 `_classify_render_failure_reason(...)`
+  - `_classify_render_failure_reason(...)` 现已按 timeout 策略显式区分：
+    - `render_timeout_process`
+    - `render_timeout_thread`
+    - `render_timeout`
+    并统一输出 `issue_codes=["render_timeout"]`
+  - 回归：
+    - `tests/test_run_fullchain_batch.py::test_build_render_diagnostics_preserves_avatar_reason_and_sync_runner`
+    - `tests/test_run_fullchain_batch.py::test_classify_render_failure_reason_distinguishes_thread_timeout`
+    - `tests/test_run_fullchain_batch.py::test_build_render_diagnostics_classifies_non_avatar_render_failures_and_cover_status`
+  验证：
+  - `python -m py_compile scripts/run_fullchain_batch.py tests/test_run_fullchain_batch.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_fullchain_batch.py -k "build_render_diagnostics_preserves_avatar_reason_and_sync_runner or classify_render_failure_reason_distinguishes_thread_timeout or build_render_diagnostics_classifies_non_avatar_render_failures_and_cover_status" -q`（`3` 项通过）
+  - fresh rerun：
+    `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_long_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/c4-timeout-reason-rerun-long`
+    产物目录：
+    `output/test/auto-edit-recovery-golden/c4-timeout-reason-rerun-long/20260611-102900`
+    已确认：
+    - `batch_report.json` 中 `render_diagnostics.render_step.reason=render_timeout_process`
+    - `golden_set_summary.md` 中 `failed_render_reasons: render_timeout_process=1`
+    - 同一 fresh 产物仍同时保留 `avatar_degraded_reasons: avatar_full_track_call_timeout=1`
+  结论：
+  - `C4` 的 fresh render timeout 已经从“只能看到 generic failed”推进到“可按 process/thread timeout 策略回放”，后续剩余工作更聚焦在 FFmpeg/provider 细分类补齐，而不是再处理 timeout reason 丢失。
+
+- 2026-06-11: `C5/T5.x` 又把“reference 高风险到底有没有在 fresh 里复现，以及 fresh 风险信号来自哪里”收成了批次级显式对账合同。观察到的症状是：即使 manifest 已经补了 `risk_hints.reference_high_risk_cut_count / reference_expected_stage / reference_expected_source`，每次判断某个 case 是否还能作为高风险 gate 活锚点，仍需要人工同时对读 `risk_hints`、`detailed_output_scorecard.editing_risk_metrics` 和 `variant_timeline_bundle`，没有统一摘要能直接说明“是高风险未复现”还是“fresh 只是在 legacy/source 侧错位”。第一坏层在 `scripts/run_auto_edit_recovery_golden_set.py::build_case_result_rows(...)` 与 `render_case_summary_markdown(...)`：它们会透传风险提示，但不会做 reference-vs-fresh 对账。现已完成：
+  - `build_case_result_rows(...)` 现已新增 case 级 `risk_alignment`：
+    - `reference_high_risk_cut_count`
+    - `reference_expected_stage / reference_expected_source`
+    - `fresh_high_risk_cut_count`
+    - `fresh_source / fresh_source_reason`
+    - `fresh_manual_confirm_count / fresh_multimodal_pending_count / fresh_llm_reviewed`
+    - `high_risk_reproduced`
+    - `mismatch_codes`
+    - `status`
+  - 新增 `summarize_case_risk_alignment(...)`，会在 batch report 顶层写出：
+    - `reference_high_risk_case_count`
+    - `reproduced_case_count`
+    - `unreproduced_case_count`
+    - `mismatch_case_ids`
+    - `mismatch_code_counts`
+  - `golden_set_summary.md` 顶部现已新增 `Risk Alignment Summary`，每个 case 下也会打印 `risk_alignment`，后续筛样不再需要手动对读三份 JSON。
+  - 回归：
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_build_case_result_rows_includes_risk_alignment_summary`
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_render_case_summary_markdown_includes_manual_editor_apply_semantics`
+  验证：
+  - `python -m py_compile scripts/run_auto_edit_recovery_golden_set.py tests/test_run_auto_edit_recovery_golden_set.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "risk_alignment or render_case_summary_markdown_includes_manual_editor_apply_semantics" -q`（`2` 项通过）
+  - fresh 复验：
+    `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-risk-alignment-rerun-short`
+    产物目录：
+    `output/test/auto-edit-recovery-golden/c5-risk-alignment-rerun-short/20260611-104538`
+    已确认：
+    - `golden_set_summary.md` 顶部出现：
+      - `reference_high_risk_case_count: 1`
+      - `reproduced_case_count: 0`
+      - `mismatch_codes: reference_high_risk_not_reproduced=1`
+    - 同一 case 的 `risk_alignment` 已明确：
+      - `fresh_source=variant_timeline_bundle`
+      - `fresh_high_risk_cut_count=0`
+      - `fresh_manual_confirm_count=7`
+      - `fresh_multimodal_pending_count=4`
+      - `fresh_llm_reviewed=true`
+      - `status=mismatch`
+  结论：
+  - `noc_mt34_short_done` 现在已经不只是“reference 有高风险、fresh 没高风险”的模糊现象，而是被显式合同化成“fresh 已进入 variant bundle 来源，但 reference 高风险未复现”的活反例；下一步筛样应优先寻找新的高风险锚点，而不是继续反复验证同一条 case。
+
+- 2026-06-11: `C5/T5.x` 继续把上述对账从“只看 fresh 侧 + manifest hint”推进到“同一份报告里同时带上 reference job 的真实风险快照”。观察到的症状是：虽然上一轮已经新增 `risk_alignment`，但其中的 reference 侧事实仍主要依赖 `risk_hints.reference_high_risk_cut_count` 这类 manifest 提示；每次需要确认 reference 里当时到底有没有 `render_outputs`、`variant_timeline_bundle`、`llm_cut_review_failed` 或 `first_high_risk_cut_reason=silence`，仍要额外跑 SQL 或人工查数据库。第一坏层在 `scripts/run_auto_edit_recovery_golden_set.py` 只采 evaluation job，不采 reference job 风险画像。现已完成：
+  - 新增 `inspect_reference_risk_snapshot(...) / collect_reference_risk_snapshots(...)`
+  - 每个 case 现在都会在 `batch_report.json`、`golden_case_rows`、`golden_set_summary.md` 中带出 `reference_risk_snapshot`：
+    - `artifact_types`
+    - `variant_bundle_present / has_render_outputs / has_cut_analysis`
+    - `high_risk_cut_count`
+    - `manual_confirm_candidate_count / refine_candidate_manual_confirm / multimodal_pending_count`
+    - `llm_reviewed / llm_candidate_count / llm_error`
+    - `review_recommended / review_reasons`
+    - `first_high_risk_cut_reason`
+  - `risk_alignment` 现在也会优先消费 `reference_risk_snapshot.high_risk_cut_count`，不再只信 manifest hint。
+  - 回归：
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_build_case_result_rows_includes_reference_risk_snapshot`
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_build_case_result_rows_includes_risk_alignment_summary`
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_render_case_summary_markdown_includes_manual_editor_apply_semantics`
+  验证：
+  - `python -m py_compile scripts/run_auto_edit_recovery_golden_set.py tests/test_run_auto_edit_recovery_golden_set.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "reference_risk_snapshot or risk_alignment or render_case_summary_markdown_includes_manual_editor_apply_semantics or build_case_result_rows_includes_reference_risk_snapshot" -q`（`3` 项通过）
+  - fresh 复验：
+    `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-reference-risk-snapshot-rerun-short`
+    产物目录：
+    `output/test/auto-edit-recovery-golden/c5-reference-risk-snapshot-rerun-short/20260611-105848`
+    已确认：
+    - `golden_set_summary.md` / `batch_report.json` 中真实出现：
+      - `reference_risk_snapshot.artifact_types = render_outputs, variant_timeline_bundle`
+      - `reference_risk_snapshot.high_risk_cut_count = 1`
+      - `reference_risk_snapshot.llm_reviewed = false`
+      - `reference_risk_snapshot.llm_error = llm_cut_review_failed`
+      - `reference_risk_snapshot.first_high_risk_cut_reason = silence`
+    - 同一 case 的 `risk_alignment` 现已在同一份报告中把 reference/fresh 差异对齐展示：
+      - reference：`high_risk_cut_count=1 / llm_reviewed=false`
+      - fresh：`high_risk_cut_count=0 / manual_confirm_count=7 / multimodal_pending_count=4 / llm_reviewed=true`
+  结论：
+  - 后续筛样与门禁分析已经不再依赖外部 SQL 才能看懂 reference 历史高风险画像；当前真正的缺口已经进一步收束成“缺新的 fresh 高风险正锚点”，而不是“看不清 reference 当时到底发生了什么”。
+
+- 2026-06-11: `C5/T5.x` 又补出了一类此前 manifest 里缺失的“edit_plan 高 manual-confirm 风险锚点”，并顺手修掉了 reference snapshot 对这类样本的读取缺陷。观察到的症状是：全库扫描虽然再次确认只有 `noc_mt34_short_done / noc_mt34_long_done` 两条 reference 真正带非零 `variant_timeline_bundle.high_risk_cuts`，但同时也暴露出另一类高价值风险样本：一些 reference 并没有 render 后 `variant_timeline_bundle`，却在 `cut_analysis/refine_decision_plan` 中带极高 `manual_confirm_candidate_count`，例如：
+  - `fb30a42c-1af1-4c78-b065-bc3cd4004b2e`（`edc17_manual_editor_anchor`）`manual_confirm_candidate_count=94`
+  - `6bab0abf-ad03-4eb6-a58e-faa8e4da2cc1`（新增 `noc_mt34_s06mini_edit_plan_risk_anchor`）`manual_confirm_candidate_count=131`
+  第一坏层在 `inspect_reference_risk_snapshot(...)`：它最初只会从 `variant_timeline_bundle.timeline_rules.diagnostics` 取 `manual_confirm/high_risk`，导致这类只有 `cut_analysis + refine_decision_plan + multimodal_trim_review` 的 `edit_plan` reference 被误读成 `manual_confirm_candidate_count=0`。现已完成：
+  - `inspect_reference_risk_snapshot(...)` 现已在缺少 `variant_timeline_bundle` 时回退聚合：
+    - `cut_analysis.manual_confirm_candidate_count`
+    - `refine_decision_plan.candidate_summary.manual_confirm`
+    - `multimodal_trim_review.summary.pending_count`
+    - `editorial.analysis.llm_cut_review`
+  - `docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json` 已补：
+    - 为现有 `edc17_manual_editor_anchor` 新增 `risk_hints.reference_manual_confirm_candidate_count=94`
+    - 新增 `noc_mt34_s06mini_edit_plan_risk_anchor`
+  - 回归：
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_build_case_risk_alignment_prefers_reference_snapshot_manual_confirm_signals`
+    - `tests/test_run_auto_edit_recovery_golden_set.py::test_build_case_result_rows_includes_reference_risk_snapshot`
+  验证：
+  - `python -m py_compile scripts/run_auto_edit_recovery_golden_set.py tests/test_run_auto_edit_recovery_golden_set.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "reference_risk_snapshot or risk_alignment or build_case_risk_alignment_prefers_reference_snapshot_manual_confirm_signals" -q`（`3` 项通过）
+  - fresh 复验：
+    `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_s06mini_edit_plan_risk_anchor --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-s06mini-risk-anchor-rerun-fixed`
+    产物目录：
+    `output/test/auto-edit-recovery-golden/c5-s06mini-risk-anchor-rerun-fixed/20260611-110725`
+    已确认：
+    - `reference_risk_snapshot.manual_confirm_candidate_count=131`
+    - `reference_risk_snapshot.refine_candidate_manual_confirm=131`
+    - fresh `detailed_output_scorecard.json` 中：
+      - `manual_confirm_count=96`
+      - `multimodal_pending_count=1`
+      - `llm_reviewed=true`
+    - `risk_alignment` 中：
+      - `reference_expected_stage=edit_plan`
+      - `reference_expected_source=cut_analysis_refine_decision_plan`
+      - `fresh_source=variant_timeline_bundle`
+      - `fresh_manual_confirm_count=96`
+      - `fresh_multimodal_pending_count=1`
+      - `mismatch_codes=["fresh_source_mismatch"]`
+  结论：
+  - `C5` 现在已经不再只有 render 后 `high_risk_cut_count` 反例，也新增了一条可复现的 `edit_plan` 高 manual-confirm 风险锚点；
+  - 当前剩余缺口进一步收束成两类并行工作：
+    1. 继续寻找至少一条 fresh 可复现 `high_risk_cut_count > 0` 的 render 后正锚点
+    2. 把这类 `edit_plan` manual-confirm-heavy 锚点正式接入后续风险门禁口径，而不是只做报告展示。
+
+- 2026-06-11: `C3/T3.x` 又收掉了一层“名义上已统一、实际上仍多份手写名单”的共享抽象漂移。观察到的症状是：`manual_editor_frontend_managed_auto_cut_reasons`、`speech_explicit_cut_reasons`、`speech_review_cut_reasons`、`pause_cut_reasons` 虽然都已经搬进 `src/roughcut/edit/rule_registry.py`，但本质上仍是四份平行 `frozenset`；新增或调整一个 pause / smart-delete reason 时，依然需要同时改多处，后续很容易再次出现 manual-editor、timeline-contract、风险门禁各自漏改的分叉。第一坏层在 `src/roughcut/edit/rule_registry.py` 自身的数据建模，而不是下游 consumer。现已完成：
+  - `RuleDefinition` 新增共享元数据位：
+    - `frontend_managed_auto_cut`
+    - `speech_explicit_cut`
+    - `speech_review_cut`
+    - `pause_cut`
+  - `manual_editor_frontend_managed_auto_cut_reasons()`、`speech_explicit_cut_reasons()`、`speech_review_cut_reasons()`、`pause_cut_reasons()` 不再返回手写常量集，而是统一由规则注册表元数据推导；`manual_cut` 仅作为 contract 例外项在 helper 层显式补入。
+  - 这样后续新增 `pause / smart_delete / repeated_speech` 原因时，只需更新一次规则定义，不再需要再维护四份并行名单。
+  验证：
+  - `python -m py_compile src/roughcut/edit/rule_registry.py tests/test_rule_registry.py src/roughcut/edit/timeline_contract.py src/roughcut/api/jobs.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_rule_registry.py tests/test_source_timeline_contract.py -q`（`10` 项通过）
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "frontend_managed_auto_cuts or repeated_speech_metadata or registry_defaults_for_repeated_speech" -q`（`4` 项通过）
+  结论：
+  - `C3` 的“共享 reason 集合”不再只是物理同文件，而是已经变成真正由单一注册表元数据驱动；下一步剩余缺口更聚焦在“风险等级如何统一驱动自动应用/人工确认阈值”，而不是继续追集合漂移。
+
+- 2026-06-11: `C5/T5.x` 又收掉了一个 fresh 真实评测口径分裂问题。观察到的症状是：`scripts/build_batch_output_scorecard.py` 在 `variant_timeline_bundle` 缺失的 partial/edit_plan fresh replay 中，`editing.summary` 会从 legacy editorial 分析回退并显示 `llm_cut_review=yes`，但 `editing_risk_metrics` 却直接硬编码回 `0/0/0/false`；第一坏层在 `scripts/build_batch_output_scorecard.py::_editing_risk_metrics(...)`，而不是 runtime job 本身。根因是编辑评分与风险聚合没有共用同一套 fallback contract，导致同一 job 在同一份 scorecard 内自相矛盾。现已完成：
+  - `scripts/build_batch_output_scorecard.py` 新增 legacy 风险指标回退路径：当 `variant_timeline_bundle` 不可用时，`editing_risk_metrics` 不再直接归零，而是改为从 `editorial.analysis + cut_analysis` 恢复：
+    - `llm_reviewed`
+    - `high_risk_cut_count`
+    - `manual_confirm_count`
+    - `multimodal_pending_count`
+    - `blocking_high_risk_cuts`
+  - `build_scorecard(...)` 现已同时读取 `cut_analysis` artifact，确保 legacy fallback 不只知道 `editorial.accepted_cuts`，还能恢复 `manual_confirm_candidate_count` 与 `multimodal_trim_review_summary.pending_count`。
+  - `tests/test_build_batch_output_scorecard.py` 已新增 legacy fallback 回归，覆盖“无有效 variant bundle 但 legacy editorial/cut_analysis 仍有真实风险信号”场景。
+  fresh 验证：
+  - `python -m py_compile scripts/build_batch_output_scorecard.py tests/test_build_batch_output_scorecard.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_build_batch_output_scorecard.py -k "editing_risk_metrics or score_editing_prefers_variant_bundle_cut_analysis_and_refine_summary" -q`（`4` 项通过）
+  - fresh rerun：
+    `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-risk-metrics-nonzero-smoke-rerun`
+    产物目录：
+    `output/test/auto-edit-recovery-golden/c5-risk-metrics-nonzero-smoke-rerun/20260611-083153`
+    已确认：
+    - `detailed_output_scorecard.json` 中同一 job 的 `editing.summary` 仍为 `llm_cut_review=yes`
+    - `editing_risk_metrics.llm_reviewed` 已同步变为 `true`
+    - 同时恢复出 `manual_confirm_count=7`、`multimodal_pending_count=4`
+    - `Aggregate Risk Metrics` 真实汇总为：
+      - `high_risk_cut_count=0`
+      - `manual_confirm_count=7`
+      - `multimodal_pending_count=4`
+      - `llm_reviewed_job_count=1`
+  结论：
+  - scorecard 第一坏层已收口；后续 `C5` 的主要问题不再是“报告口径分裂”，而是“如何挑出 fresh replay 可稳定复现非零高风险指标的真实锚点”。
+
+- 2026-06-11: `C5/T5.x` 已补到第一轮 fresh 真实 batch/golden 证据，证明这轮新增的 gate 与 scorecard 指标已经进入真实产物链，而不只是单测。已完成两组 fresh smoke：
+  - `heygem_anchor_b_done`：
+    `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id heygem_anchor_b_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/c5-risk-metrics-real-smoke`
+    产物目录：
+    `output/test/auto-edit-recovery-golden/c5-risk-metrics-real-smoke/20260611-082039`
+    已确认：
+    - `batch_report.json` 带出 `manual_editor_apply_semantics_summary`、`render_diagnostics_summary`
+    - `live_readiness.checks` 中真实出现：
+      - `blocking_quality_issues`（因 `missing_subtitles=1` 阻断）
+      - `required_checks_contract`
+      - `manual_editor_apply_semantics_contract`
+      - `render_end_state_stability`
+    - `detailed_output_scorecard.json/md` 已真实带出 `aggregate_risk_metrics` 与 job 级 `editing_risk_metrics`
+    - `golden_set_summary.md` 已真实显示 `manual_editor_apply_semantics_error` 与 required-check 失败明细
+  - `noc_mt34_short_done`：
+    `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/c5-risk-metrics-nonzero-smoke`
+    产物目录：
+    `output/test/auto-edit-recovery-golden/c5-risk-metrics-nonzero-smoke/20260611-082507`
+    已确认：
+    - fresh `detailed_output_scorecard.json/md` 同样带出 `aggregate_risk_metrics`
+    - 该样本 fresh replay 虽然 reference job 历史上存在 `high_risk_cuts`，但本轮 fresh replay 的 `editing_risk_metrics` 仍为 `0/0/0`，说明“reference 锚点曾出现高风险 cut”不等于“fresh replay 必然复现相同风险”
+    - 因此后续要继续筛选真正能在 fresh replay 中稳定产出非零风险指标的锚点，而不是只看历史 reference job 诊断
+  - 为此已额外扫描当前 manifest reference jobs，确认：
+    - `noc_mt34_short_done` 的 reference job 曾记录 `high_risk=1`
+    - `noc_mt34_long_done` 的 reference job 曾记录 `high_risk=3`
+    但这组历史信号尚不足以直接当作 fresh gate 证据。
+  验证：
+  - fresh 产物文件已真实存在：
+    - `output/test/auto-edit-recovery-golden/c5-risk-metrics-real-smoke/20260611-082039/batch_report.json`
+    - `.../detailed_output_scorecard.json`
+    - `.../golden_set_summary.md`
+    - `output/test/auto-edit-recovery-golden/c5-risk-metrics-nonzero-smoke/20260611-082507/batch_report.json`
+    - `.../detailed_output_scorecard.json`
+  - `detailed_output_scorecard.md` 中已出现 `Aggregate Risk Metrics`
+
+- 2026-06-11: `C5/T5.x` 已把 `C2/C4` 证据真正接进统一 live gate，而不是只留在 `batch_report` 字段。定位到第一坏层在 `src/roughcut/pipeline/live_readiness.py`：此前 gate 只看 `golden_success_rate / average_quality / p0 / false_success / required_checks`，并不直接消费 `manual_editor_apply_semantics` 的逐 case 失败，也不直接对 `render_diagnostics.render_step` 的失败终态做阻断统计，导致 `C2/C4` 虽有证据，却还不是 `C5` 的可执行门禁。现已完成：
+  - `scripts/run_auto_edit_recovery_golden_set.py` 新增 `manual_editor_apply_semantics_summary`、`render_diagnostics_summary`，并把 `golden_case_rows` 写入 `batch_report.json`，使 batch/golden 总账不再只剩原始明细字段。
+  - `src/roughcut/pipeline/live_readiness.py` 新增两组门禁提取与稳定性判定：
+    - `manual_editor_apply_semantics_contract`
+    - `render_end_state_stability`
+    - `blocking_quality_issues`
+  - `manual_editor_apply_semantics` 现在只要存在失败 case，就会直接进入 `failure_reasons` 并阻断 `gate_passed`。
+  - `render_diagnostics.render_step.status=failed` 现在会进入 `render_end_state_stability` 失败计数并阻断 gate；`cover_result.status=degraded`、`avatar_result.status=degraded` 会作为 warning 明确沉淀，而不再埋在 job 详情里。
+  - `quality_issue_codes` 里的稳定硬阻断码（如 `missing_subtitles`、`*_blocking`、`subtitle_semantic_contamination`）现在也会直接进入 `blocking_quality_issues` gate，不再只能通过平均质量分间接暴露。
+  - `src/roughcut/pipeline/quality.py` 现已把“误删高风险未消化”前推成共享阻断码：当 `variant_timeline_bundle` 仍存在 `high_risk_cuts`，且还伴随 `candidate_manual_confirm > 0`、`multimodal pending > 0` 或 `LLM high-risk review` 未完成时，会直接产出 `editing_high_risk_cuts_blocking`，从而被 `blocking_quality_issues` gate 自动接住。
+  - `scripts/build_batch_output_scorecard.py` 现已把同一批风险信号收成批次级 `aggregate_risk_metrics`，并在 markdown 中输出 `Aggregate Risk Metrics`。当前已稳定透出：
+    - `high_risk_cut_count`
+    - `manual_confirm_count`
+    - `multimodal_pending_count`
+    - `llm_reviewed_job_count`
+    - `blocking_high_risk_job_count`
+    这让 `C5` 后续可以直接做真实任务前后对比，而不是只看单 job 诊断。
+  验证：
+  - `python -m py_compile src/roughcut/pipeline/live_readiness.py scripts/run_auto_edit_recovery_golden_set.py tests/test_run_auto_edit_recovery_golden_set.py tests/test_run_fullchain_batch.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "summarize_manual_editor_apply_semantics or summarize_render_diagnostics or summarize_required_checks" -q`（`3` 项通过）
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_run_fullchain_batch.py -k "live_readiness" -q`（`5` 项通过）
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_quality_profile_soft_gate.py -k "high_risk_cuts_blocking or multimodal_trim_review_timeout or refine_decision_summary_signal" -q`（`2` 项通过）
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_build_batch_output_scorecard.py -q`（`7` 项通过）
+
+- 2026-06-11: `C3/T3.x` 开始把规则候选的共享协议真正收口到统一注册表，而不是继续容忍 `repeated_speech` 走旧链。观察到的症状是：`filler/catchphrase/pause/low_signal` 已由 `smart_cut_candidates.py` 产出稳定 `rule_id/risk_level/match_surface_layer`，但 `repeated_speech` 仍主要来自 `manual_editor_full_transcript` 旧候选链，进入 `cut_analysis` / manual editor 后经常缺少统一元数据；第一坏层在 `src/roughcut/edit/cut_analysis.py` 与 `src/roughcut/api/jobs.py` 的共享契约缺失，而不是某条规则本身。现已完成：
+  - 新增 `src/roughcut/edit/rule_registry.py`，把规则原因到 `kind / risk_level / match_surface_layer / label` 的映射收口到共享注册表。
+  - `src/roughcut/edit/smart_cut_candidates.py` 已改为复用共享注册表生成 `rule_id/risk_level`，不再单独维护一套本地风险等级表。
+  - `src/roughcut/edit/cut_analysis.py` 新增规则候选元数据归一化：旧链流入的 `repeated_speech` 现在会自动补齐 `source_text / match_surface / match_surface_layer / risk_level / rule_id`，并继续保留原 `candidate_stage`，避免误伪装成别的阶段。
+  - `src/roughcut/api/jobs.py` 的 manual editor 规则段展示也改为读取同一共享注册表，不再单独维护 `reason -> kind/label/layer` 的平行映射。
+  - 新一轮继续收口后，`rule_registry.py` 现在还接管了三组原因集合的单一事实源：
+    - `manual_editor_frontend_managed_auto_cut_reasons`
+    - `speech_explicit_cut_reasons / speech_review_cut_reasons`
+    - `pause_cut_reasons`
+    `src/roughcut/api/jobs.py` 与 `src/roughcut/edit/timeline_contract.py` 已删除各自私有集合定义，避免后续 pause / smart-delete / low-signal 原因在 manual-editor 与 source-timeline contract 两侧继续漂移。
+  验证：
+  - `python -m py_compile src/roughcut/edit/rule_registry.py src/roughcut/edit/smart_cut_candidates.py src/roughcut/edit/cut_analysis.py src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "repeated_speech_metadata or registry_defaults_for_repeated_speech or preserves_smart_rule_candidate_metadata or drops_repeated_speech_when_toggle_closed" -q`（`4` 项通过）
+  - `python -m py_compile src/roughcut/edit/rule_registry.py src/roughcut/edit/timeline_contract.py src/roughcut/api/jobs.py tests/test_rule_registry.py`
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_rule_registry.py tests/test_source_timeline_contract.py -q`（`9` 项通过）
+  - `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "frontend_managed_auto_cuts or repeated_speech_metadata or registry_defaults_for_repeated_speech" -q`（`4` 项通过）
+
+- 2026-06-11: `C4/T2.4` 已补到 fresh 真实 smoke 证据，并顺手修掉一个新暴露的报告回归。症状是第一轮 non-avatar render smoke 已产出 fresh `cover_result`，但 `batch_report.render_diagnostics.render_step` 在 `status=done` 时仍被错误打上 `reason=render_failed`；第一坏层在 `scripts/run_fullchain_batch.py::_build_render_diagnostics(...)`，该逻辑此前无条件对 `render` step 的 `detail/error` 做失败分类，没有先检查 `render_step.status`。现已完成：
+  - `_build_render_diagnostics(...)` 仅在 `render_step.status == "failed"` 时才注入 `reason/issue_codes`。
+  - 新增回归 `tests/test_run_fullchain_batch.py::test_build_render_diagnostics_does_not_mark_done_render_as_failed`。
+  - 新的 non-avatar 真实 smoke：
+    `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id heygem_anchor_b_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/c4-real-render-smoke-no-avatar-rerun`
+    已产出 fresh `run_dir=output/test/auto-edit-recovery-golden/c4-real-render-smoke-no-avatar-rerun/20260611-075916`，并确认：
+    - `batch_report.json` 中 `render_diagnostics.cover_result.status=done`、`variant_count=5`
+    - `batch_report.json` 中 `render_diagnostics.render_step` 仅保留 `status=done` 与 detail，不再误报 `render_failed`
+    - `audit_packs/*.snapshot.json` 的 `render_outputs_summary.cover_result` 与 `audit_packs/*.md` 的 `render outputs summary` 均已带出封面结果
+  验证：
+  - `PYTHONPATH=src python -m pytest tests/test_run_fullchain_batch.py -k "render_diagnostics or render_markdown" -q`（`4` 项通过）
+  - `python -m py_compile scripts/run_fullchain_batch.py tests/test_run_fullchain_batch.py`
+
+- 2026-06-11: `C4/T2.4` 继续收口非 avatar render 失败的可分类性。定位到第一坏层不在 batch 报告本身，而在 `src/roughcut/pipeline/steps.py::run_render(...)` 产物契约：数字人降级已有 `avatar_result.reason/error_metadata`，但封面导出失败、字幕同步阻断、普通 FFmpeg 渲染失败等非 avatar 问题只剩 `render` step 的自由文本异常，缺少稳定 `reason`，导致 batch/audit 侧只能展示原始报错而无法统一分类。现已完成：
+  - `src/roughcut/pipeline/steps.py` 在 `render_outputs` artifact 中新增 `cover_result`，显式记录封面生成 `done/degraded` 及 `reason=cover_export_failed`。
+  - `scripts/run_fullchain_batch.py` 新增 `_classify_render_failure_reason(...)`，会把 `render_variant_sync_blocked`、`ffmpeg render failed`、`ffmpeg insert/introduction/music packaging failed`、`ffprobe failed` 等自由文本错误统一归类到稳定 `reason` 与 `issue_codes`。
+  - `scripts/run_fullchain_batch.py::_build_render_diagnostics(...)` 现已同时汇总 `avatar_result`、`cover_result` 和带 `reason/issue_codes` 的 `render_step`。
+  - `scripts/export_job_audit_snapshot.py::summarize_render_outputs(...)` 已补透 `cover_result`，audit snapshot 不再只看见 avatar 降级。
+  新增并通过回归：
+  - `tests/test_run_fullchain_batch.py::test_build_render_diagnostics_classifies_non_avatar_render_failures_and_cover_status`
+  - `tests/test_run_auto_edit_recovery_golden_set.py::test_summarize_render_outputs_preserves_avatar_failure_payload`（现同时覆盖 `cover_result`）
+  验证：
+  - `PYTHONPATH=src python -m pytest tests/test_run_fullchain_batch.py -q`（`21` 项通过）
+  - `PYTHONPATH=src python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "summarize_render_outputs or build_audit_markdown_includes_render_outputs_summary" -q`（`2` 项通过）
+  - `python -m py_compile src/roughcut/pipeline/steps.py scripts/run_fullchain_batch.py scripts/export_job_audit_snapshot.py tests/test_run_fullchain_batch.py tests/test_run_auto_edit_recovery_golden_set.py`
+  - 真实 smoke 证据补充：
+    - 第一次 non-avatar 样本 fresh run：`output/test/auto-edit-recovery-golden/c4-real-render-smoke-no-avatar/20260611-075411`
+      已确认 `audit snapshot` / `audit pack` 中出现 `render_outputs_summary.cover_result.status=done`
+    - 第二次修复后 fresh rerun：`output/test/auto-edit-recovery-golden/c4-real-render-smoke-no-avatar-rerun/20260611-075916`
+      已确认 `batch_report.render_diagnostics.cover_result` 与修复后的 `render_step` 状态行为一致。
+
+- 2026-06-11: `C2/T2.x` 继续把 manual-editor apply 不变量接入 golden 主报告，而不是只留在旁路脚本。定位到第一坏层不在 `api/jobs.py` 的 apply 逻辑本身，而在评测/门禁契约：`subtitle_only / timeline_changed / render_strategy / base_keep_segments` 的真实锚点验证此前只存在于 `scripts/verify_manual_editor_apply_semantics.py`，`run_auto_edit_recovery_golden_set.py` 的 `case_rows/required_checks/golden_set_summary` 无法消费这组证据，导致 C2 的关键不变量不能进入统一门禁。现已完成：
+  - `scripts/run_auto_edit_recovery_golden_set.py` 新增共享 helper `inspect_manual_editor_apply_semantics(...)` / `collect_manual_editor_apply_semantics(...)`，直接读取 reference job 的 editorial/render_plan/manual-editor session，验证：
+    - `session_baseline_matches_restored`
+    - `roundtrip_matches_editorial`
+    - `change_scope=subtitle_only`
+    - `timeline_changed=false`
+    - `render_strategy=reuse_timeline_effect_plan`
+  - golden `case_rows`、`golden_set_summary.md` 与 `batch_report.json` 现已透出 `manual_editor_apply_semantics_ok`、`managed_auto_cut_count`、`change_scope`、`timeline_changed`、`render_strategy` 等字段。
+  - `required_checks` 新增支持 `manual_editor_apply_semantics`，不再只能依赖 `live_stage_validations`。
+  - `scripts/verify_manual_editor_apply_semantics.py` 已改为复用同一 helper，避免脚本和 golden 门禁各自维护一套语义检查实现。
+  - `docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json` 已把 `manual_editor_apply_semantics` 接入 4 条当前已验证通过的锚点：`noc_mt34_manual_editor_anchor`、`edc17_manual_editor_anchor`、`noc_mt34_short_done`、`noc_mt34_long_done`。
+  新增并通过回归：
+  - `tests/test_run_auto_edit_recovery_golden_set.py::test_evaluate_required_checks_respects_manual_editor_apply_semantics_gate`
+  - `tests/test_run_auto_edit_recovery_golden_set.py::test_build_case_result_rows_requires_contract_checks`
+  - `tests/test_run_auto_edit_recovery_golden_set.py::test_render_case_summary_markdown_includes_manual_editor_apply_semantics`
+  验证：
+  - `PYTHONPATH=src python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -q`（`17` 项通过）
+  - `python -m py_compile scripts/run_auto_edit_recovery_golden_set.py scripts/verify_manual_editor_apply_semantics.py tests/test_run_auto_edit_recovery_golden_set.py`
+  - `PYTHONPATH=src python scripts/verify_manual_editor_apply_semantics.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_manual_editor_anchor --case-id edc17_manual_editor_anchor --case-id noc_mt34_short_done --case-id noc_mt34_long_done --json`
+    已确认 4 条锚点全部 `ok=true`，其中 `managed_auto_cut_count` 分别为 `70 / 10 / 1 / 5`。
+  - 真实轻量 golden 复验：
+    `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after content_profile --report-dir output/test/auto-edit-recovery-golden/c2-semantics-rerun2`
+    已确认 `golden_set_summary.md` 直接展示 `manual_editor_apply_semantics_ok: True` 与 `change_scope=subtitle_only / timeline_changed=False / render_strategy=reuse_timeline_effect_plan`，同时 `required_checks_total=4`、`required_checks_contract_passed=1`，说明新 gate 已进入统一 required-check 汇总而不是停留在旁路脚本。
+
+- 2026-06-11: `C4/T2.4` 继续收口 render 报告链可观测性。定位到第一坏层不在 `src/roughcut/pipeline/steps.py` 的 typed failure 产出，而在下游报告契约：`avatar_result.reason/error_metadata` 已写入 `render_outputs`，但 `scripts/run_fullchain_batch.py::JobRunReport` 与 `scripts/export_job_audit_snapshot.py` 未透传该字段，导致 `batch_report` / markdown / audit pack 仍无法直接看到数字人降级或失败根因。现已完成：
+  - `scripts/run_fullchain_batch.py` 新增 `render_diagnostics` 聚合，显式把 `avatar_result(status/reason/detail/retryable/error_metadata)` 与 `render` step 的 `sync_runner_*` 元数据一起写入 `JobRunReport`。
+  - `render_markdown(...)` 已直出 `render_avatar` 与 `render_step` 摘要，batch markdown 可直接区分 `slot_timeout / call_timeout / busy_exhausted / provider_error` 等 typed failure。
+  - `scripts/export_job_audit_snapshot.py` 新增 `render_outputs_summary`，会从最新 `render_outputs` artifact 提取 `avatar_result` 诊断摘要。
+  - `scripts/build_job_audit_pack.py` 已把 `render outputs summary` 写入 audit pack，失败回放不再只剩 step 状态。
+  新增并通过定向回归：
+  - `tests/test_run_fullchain_batch.py::test_build_render_diagnostics_preserves_avatar_reason_and_sync_runner`
+  - `tests/test_run_fullchain_batch.py::test_render_markdown_includes_step_sync_runner_metadata`
+  - `tests/test_run_auto_edit_recovery_golden_set.py::test_summarize_render_outputs_preserves_avatar_failure_payload`
+  - `tests/test_run_auto_edit_recovery_golden_set.py::test_build_audit_markdown_includes_render_outputs_summary`
+  验证：
+  - `PYTHONPATH=src python -m pytest tests/test_run_fullchain_batch.py -k "render_markdown or build_render_diagnostics or build_step_sync_runner_metadata" -q`（`3` 项通过）
+  - `PYTHONPATH=src python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -k "summarize_render_outputs or build_audit_markdown_includes_render_outputs_summary" -q`（`2` 项通过）
+  - `PYTHONPATH=src python -m pytest tests/test_run_fullchain_batch.py tests/test_run_auto_edit_recovery_golden_set.py -q`（`35` 项通过）
+  - `python -m py_compile scripts/run_fullchain_batch.py scripts/export_job_audit_snapshot.py scripts/build_job_audit_pack.py tests/test_run_fullchain_batch.py tests/test_run_auto_edit_recovery_golden_set.py`
+  - 真实样本复验：`python scripts/export_job_audit_snapshot.py --job-id 08548600-abb8-4ab6-9b63-59593b2a4632 --output-json output/test/render-diagnostics-scan/08548600-abb8-4ab6-9b63-59593b2a4632.snapshot.json` 与 `python scripts/build_job_audit_pack.py --snapshot-json output/test/render-diagnostics-scan/08548600-abb8-4ab6-9b63-59593b2a4632.snapshot.json --output-md output/test/render-diagnostics-scan/08548600-abb8-4ab6-9b63-59593b2a4632.audit2.md` 已确认真实 `render_outputs_summary.avatar_result` 可在 snapshot / audit pack 中直接看到：`status=degraded`、`reason=missing_avatar_render`。
+
+- 2026-06-11: `C1/T1.1` 第六阶段继续收口到 canonical transcript fact layer。定位到第一坏层在 `src/roughcut/speech/subtitle_pipeline.py::_build_canonical_transcript_layer_from_source_segments(...)` 仍默认使用 `text_final -> text_norm -> text_raw` 构 canonical transcript，这会让 display surface 反向污染 canonical fact layer。现已完成：
+  - `TranscriptSourceSegment` 补透传 `display_suppressed_reason`。
+  - canonical transcript 构建已改为显式使用 `subtitle_canonical_rule_text(...)` 从 source segment 取 canonical text，不再默认优先 `text_final`。
+  新增并通过定向回归：
+  - `tests/test_subtitle_fact_conservation.py::test_canonical_transcript_layer_uses_canonical_surface_when_display_is_suppressed`
+  验证：
+  - `PYTHONPATH=src python -m pytest tests/test_subtitle_fact_conservation.py tests/test_transcript_semantic_cleanup.py -q`（`35` 项通过）
+  - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py tests/test_subtitle_translation_contracts.py tests/test_platform_packaging_quality_gate.py tests/test_edit_decision_diagnostics.py -q`（`73` 项通过）
+  - `python -m py_compile src/roughcut/speech/subtitle_pipeline.py tests/test_subtitle_fact_conservation.py`
+
+- 2026-06-11: `C1/T1.1` 第五阶段继续收口到 manual-editor source-row contract。定位到第一坏层在 `src/roughcut/api/jobs.py` 的 source-row 构造仍让 `timing_text` 默认优先回退 `display surface`（`text_final -> text_norm -> text_raw`），这会让 display-suppressed 或展示层压缩文本反向控制 manual-editor 的分句与时序 authority。现已完成：
+  - `src/roughcut/api/jobs.py` 中 source-row 构造的 `timing_text` 兜底已改为 `explicit timing_text -> canonical -> raw`，不再默认优先 `text_final`。
+  验证：
+  - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "projection_rows_as_source_rows or split_long_rows_use_timing_text_as_segmentation_authority" -q`（`3` 项通过）
+  - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py tests/test_subtitle_translation_contracts.py tests/test_platform_packaging_quality_gate.py tests/test_edit_decision_diagnostics.py -q`（`73` 项通过）
+  - `python -m py_compile src/roughcut/api/jobs.py`
+
+- 2026-06-11: `C1/T1.1` 第五阶段后继续收掉 subtitle projection payload 归一化里的 display 反灌 canonical。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_manual_editor_subtitle_items_from_editorial(...)`：该路径此前把 `text_norm` 设为 `text_norm or text_final or text_raw`，导致只要 editorial subtitle projection 里存在 display text，就会自动伪造 canonical layer。继续追根后确认共享根因在 `src/roughcut/edit/subtitle_surfaces.py`：宽松 helper 与“显式层字段读取”没有分开，导致 projection/editorial 这类边界层即使调用 helper，也会把 `text_final` 回灌进 raw/canonical。现已完成：
+  - `src/roughcut/edit/subtitle_surfaces.py` 新增 strict helper：
+    - `subtitle_raw_explicit_text(...)`
+    - `subtitle_canonical_explicit_text(...)`
+    它们只读取所属层的显式字段，不再跨层补值。
+  - 原有 `subtitle_raw_rule_text(...)` / `subtitle_canonical_rule_text(...)` 仍保留宽松 fallback 语义，避免普通 consumer 行为被整体打断。
+  - `src/roughcut/pipeline/steps.py::_manual_editor_subtitle_items_from_editorial(...)` 现改为使用 strict helper 归一化 `text_raw/text_norm`，不会再从 `text_final` 反向生出 canonical。
+  新增并通过定向回归：
+  - `tests/test_manual_editor_helpers.py::test_manual_editor_projection_items_do_not_backfill_canonical_from_display_surface`
+  - `tests/test_subtitle_surface_contracts.py::test_explicit_surface_helpers_do_not_cross_fill_between_layers`
+  验证：
+  - `python -m py_compile src/roughcut/edit/subtitle_surfaces.py src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py tests/test_subtitle_surface_contracts.py`
+  - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_projection_items_are_authoritative_for_render or manual_editor_projection_items_accept_start_end_keys or manual_editor_projection_items_do_not_backfill_canonical_from_display_surface or manual_editor_ignores_stored_projection_with_runaway_timing" -q`（`4` 项通过）
+  - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py -k "explicit_surface_helpers_do_not_cross_fill_between_layers or subtitle_surface_helpers_use_owned_fallbacks_before_cross_layer_fallback or manual_editor_projection_rows_preserve_explicit_surfaces" -q`（`3` 项通过）
+
+- 2026-06-11: `C1/T1.1` 第五阶段再继续收掉 canonical transcript -> source subtitle payload 的混层入口。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_load_source_subtitle_payloads_for_projection_validation(...)`：canonical transcript layer 本身已经同时保存 `text_raw/text_canonical`，但这里仍把 `text_final` 直接设成 canonical text，再把整包送进 projection validation，导致“事实层 source subtitles”在进入校验前就被提前 display 化。现已完成：
+  - canonical transcript 路径下构造的 source subtitle payload 现在只显式写入：
+    - `text_raw`
+    - `text_norm`
+    - `transcript_text`
+    - `projection_source`
+    不再预先伪造 `text_final`。
+  - transcript fallback 路径也同步移除了这里的显式 `text_final` 注入，保持 source payload 仍然是 fact-first 输入。
+  新增并通过定向回归：
+  - `tests/test_manual_editor_helpers.py::test_projection_validation_source_payloads_keep_fact_layers_without_explicit_display_text`
+  验证：
+  - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+  - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "projection_validation_source_payloads_keep_fact_layers_without_explicit_display_text or manual_editor_projection_loader_reuses_stale_cached_projection_without_sync_rebuild or manual_editor_projection_loader_rebuilds_synchronously_from_canonical_layer" -q`（`2` 项通过）
+
+- 2026-06-11: `C1/T1.1` 再往前一层，收掉 transcript-word projection 入口里的 raw→display 提前写入。定位到第一坏层在 `src/roughcut/speech/subtitle_pipeline.py::_build_projection_entries_from_transcript_words(...)`：该路径调用 `segment_subtitles(...)` 后，本应只生成 transcript-first 的 projection entry（`text_raw/text_norm + words`），却仍直接把 `text_final=str(entry.text_raw or "")` 写死，等于在 canonical/projection 之前就把 raw 层预设成 display 层。现已完成：
+  - `_build_projection_entries_from_transcript_words(...)` 现在不再预写 `text_final`，改为保留 `text_final=None`。
+  - 这样 transcript-word projection entry 在进入后续 display 生成/cleaning 之前，仍保持 fact-first contract。
+  新增并通过定向回归：
+  - `tests/test_subtitle_surface_contracts.py::test_transcript_word_projection_entries_do_not_prewrite_display_surface`
+  验证：
+  - `python -m py_compile src/roughcut/speech/subtitle_pipeline.py tests/test_subtitle_surface_contracts.py`
+  - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py -k "transcript_word_projection_entries_do_not_prewrite_display_surface or explicit_surface_helpers_do_not_cross_fill_between_layers or pipeline_object_surface_helpers_respect_display_suppression" -q`（`3` 项通过）
+
+- 2026-06-11: `C1/T1.1` 再继续收掉 projection refresh 持久化时的混层 fallback。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_persist_projection_layer_to_subtitle_items(...)`：该路径此前会按 `text_raw -> text_norm -> text_final` 连锁补值，并在写 `SubtitleItem` 时继续执行：
+  - `text_raw=text_raw or text_final`
+  - `text_norm=normalize_projection_display_text(text_norm or text_final)`
+  这会把前面已收口的 fact-first projection entry 在落库时重新 display 化。现已完成：
+  - `_persist_projection_layer_to_subtitle_items(...)` 现在改为：
+    - `text_raw` 只取显式 raw 层
+    - `text_norm` 优先取显式 canonical 层，缺失时才从 raw 做 display-normalization
+    - `text_final` 统一由 display helper 生成
+  - 落库 `SubtitleItem` 时不再使用 `text_final` 反向补 `text_raw/text_norm`。
+  新增并通过定向回归：
+  - `tests/test_manual_editor_helpers.py::test_persist_projection_layer_to_subtitle_items_preserves_fact_layers_before_display_surface`
+  验证：
+  - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+  - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "persist_projection_layer_to_subtitle_items_preserves_fact_layers_before_display_surface or projection_validation_source_payloads_keep_fact_layers_without_explicit_display_text or manual_editor_projection_loader_reuses_stale_cached_projection_without_sync_rebuild" -q`（`3` 项通过）
+
+- 2026-06-11: `C1/T1.1` 再继续收掉 canonical segments -> source payload 的别名混层。定位到第一坏层仍在 `src/roughcut/pipeline/steps.py::_load_source_subtitle_payloads_for_projection_validation(...)` 的 canonical segment 分支：虽然上一轮已经去掉了这里的显式 `text_final`，但 `text_raw/text_norm` 仍会通过 `segment.get("text")` 这个兼容别名参与回退，导致 canonical layer 的展示/兼容字段仍有机会盖掉显式 raw/canonical 层。现已完成：
+  - canonical segment 路径现在改为：
+    - `text_raw` 只读 `segment["text_raw"]`
+    - `text_norm` 优先 `segment["text_canonical"]`，缺失时才回退 `text_raw`
+    - `transcript_text` 保留 `text_raw -> text` 的兼容回退
+  - 这样 `text` 只再承担兼容 transcript 文本的角色，不再参与事实层优先级。
+  验证：
+  - 在 `tests/test_manual_editor_helpers.py::test_projection_validation_source_payloads_keep_fact_layers_without_explicit_display_text` 中加入冲突别名 `text="展示层别名不应覆盖显式事实层"`，确认 loader 仍输出：
+    - `text_raw="你看到的是EC手电"`
+    - `text_norm="你看到的是EDC手电"`
+  - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+  - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "projection_validation_source_payloads_keep_fact_layers_without_explicit_display_text or persist_projection_layer_to_subtitle_items_preserves_fact_layers_before_display_surface or manual_editor_projection_loader_reuses_stale_cached_projection_without_sync_rebuild" -q`（`3` 项通过）
+
+- 2026-06-11: `C1/T1.1` 第四阶段继续落地到 translation/review downstream consumers。定位到第一坏层在 `subtitle_translation.py`、`platform_copy.py::_build_platform_claim_evidence_pack(...)`、`telegram_bot.py::_extract_subtitle_items_from_report(...)` 仍各自维护手写 `text_final/text_norm/text_raw` 回退链，导致翻译源文本、claim evidence transcript、人工复核 preview report 对同一条字幕存在多套 surface 解释。现已完成：
+  - `src/roughcut/review/subtitle_translation.py` 新增统一 canonical source helper，`detect_subtitle_language(...)`、`_translate_subtitle_chunk(...)` 与 fallback 翻译源文本统一改为读取 canonical surface。
+  - `src/roughcut/review/platform_copy.py::_build_platform_claim_evidence_pack(...)` 改为显式读取 canonical surface，claim grounding transcript 不再受 display 抑制或 raw 噪声回退影响。
+  - `src/roughcut/review/telegram_bot.py::_extract_subtitle_items_from_report(...)` 改为显式读取 display surface，review preview report 不再把 suppressed display 行重新显示给复核链路。
+  - `src/roughcut/review/subtitle_quality.py::build_subtitle_quality_report_from_items(...)` 现已透传 `display_suppressed_reason`，object/dict 适配层不再丢失 suppression 上下文，避免质量报告在归一化后重新把 suppressed filler 当成可见字幕统计。
+  新增并通过定向回归：
+  - `tests/test_subtitle_translation_contracts.py::test_detect_subtitle_language_uses_canonical_surface`
+  - `tests/test_subtitle_translation_contracts.py::test_translate_subtitle_chunk_uses_canonical_surface`
+  - `tests/test_platform_packaging_quality_gate.py::test_build_platform_claim_evidence_pack_uses_canonical_surface_contract`
+  - `tests/test_edit_decision_diagnostics.py::test_extract_subtitle_items_from_report_respects_display_surface_contract`
+  - `tests/test_subtitle_surface_contracts.py::test_subtitle_quality_report_from_items_preserves_display_suppression_contract`
+  验证：
+  - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py tests/test_subtitle_translation_contracts.py tests/test_platform_packaging_quality_gate.py tests/test_edit_decision_diagnostics.py -q`（`73` 项通过）
+  - `python -m py_compile src/roughcut/review/subtitle_quality.py src/roughcut/review/subtitle_translation.py src/roughcut/review/platform_copy.py src/roughcut/review/telegram_bot.py tests/test_subtitle_surface_contracts.py tests/test_platform_packaging_quality_gate.py tests/test_edit_decision_diagnostics.py tests/test_subtitle_translation_contracts.py`
+
+- 2026-06-11: `C1/T1.1` 第四阶段后继续补了两处 review/shared 残余消费者。定位到第一坏层在 `src/roughcut/review/subtitle_consistency.py` 与 `src/roughcut/review/subtitle_memory.py`：前者仍手写 `text_final -> text_norm -> text_raw`，会把 display-suppressed 行重新拉回 consistency gate；后者则把 recent subtitles 的 `text_final` 优先级喂给 hotword / glossary / entity memory，导致展示层文本反向污染 canonical fact layer。现已完成：
+  - `src/roughcut/review/subtitle_consistency.py` 现已显式读取 `subtitle_display_rule_text(...)`，consistency report 只基于真正可见字幕 surface，不再让 suppressed 行复活。
+  - `src/roughcut/review/subtitle_memory.py` 新增 recent subtitle fact helper，recent subtitle 的术语提取、style examples 与 confirmed entity context 统一改为读取 canonical surface。
+  新增并通过定向回归：
+  - `tests/test_subtitle_surface_contracts.py::test_subtitle_consistency_report_uses_display_surface_contract`
+  - `tests/test_hotword_learning.py::test_build_subtitle_review_memory_uses_canonical_surface_for_recent_subtitles`
+  验证：
+  - `python -m py_compile src/roughcut/review/subtitle_consistency.py src/roughcut/review/subtitle_memory.py tests/test_hotword_learning.py tests/test_subtitle_surface_contracts.py`
+  - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py -k "subtitle_consistency_report_uses_display_surface_contract or subtitle_quality_report_from_items_preserves_display_suppression_contract or shared_display_helpers_respect_surface_contract" -q`（`3` 项通过）
+  - `PYTHONPATH=src python -m pytest tests/test_hotword_learning.py -k "detect_glossary_domains_uses_canonical_surface_for_subtitle_haystack or build_subtitle_review_memory_uses_canonical_surface_for_recent_subtitles" -q`（`2` 项通过）
+
+- 2026-06-11: `C1/T1.1` 第三阶段继续落地到 content/copy shared consumers。定位到第一坏层在 `content_profile`、`intelligent_copy`、`domain_glossaries` 等共享语义消费者仍使用手写 `text_final/text_norm/text_raw` 回退链，导致 display-suppressed 行和 display 层漂移文本仍可能反向污染 transcript excerpt、identity snippet、领域探测与智能文案 fast-profile 输入。现已完成：
+  - `src/roughcut/review/content_profile.py` 新增统一 canonical semantic 读取，`_excerpt_item_text(...)`、`_build_subtitle_signal_blob(...)`、identity glossary alias source texts 与 `_collect_identity_subtitle_snippets(...)` 统一改为读取 canonical surface。
+  - `src/roughcut/review/intelligent_copy.py` 的 `_build_intelligent_copy_fast_profile(...)`、`_merge_intelligent_copy_profile_hints(...)`、`build_transcript_excerpt_for_cover(...)`、`_build_intelligent_copy_brief(...)` 统一改为读取 canonical surface，避免智能文案推断被 display/raw 混用污染。
+  - `src/roughcut/review/domain_glossaries.py::detect_glossary_domains(...)` 现改为基于 canonical surface 拼接 subtitle haystack，领域探测不再被展示层抑制或 raw 噪声误导。
+  - `src/roughcut/review/content_profile.py` 继续收掉 `_seed_profile_from_subtitles(...)`、review automation `subtitle_count` 与 `_subtitle_polish_source_text(...)` 的残余手写回退；其中 seed/count 统一读 canonical，subtitle polish source 改为显式读 display surface。
+  新增并通过定向回归：
+  - `tests/test_content_profile_source_identity.py::test_content_profile_semantic_excerpt_and_snippets_use_canonical_surface`
+  - `tests/test_content_profile_review_guards.py::test_seed_profile_from_subtitles_uses_canonical_surface`
+  - `tests/test_content_profile_review_guards.py::test_subtitle_polish_source_text_uses_display_surface`
+  - `tests/test_hotword_learning.py::test_detect_glossary_domains_uses_canonical_surface_for_subtitle_haystack`
+  - `tests/test_intelligent_copy_cover_generation.py::test_intelligent_copy_transcript_helpers_use_canonical_surface`
+  - `tests/test_intelligent_copy_cover_generation.py::test_merge_intelligent_copy_profile_hints_uses_canonical_surface`
+  验证：
+  - `PYTHONPATH=src python -m pytest tests/test_content_profile_source_identity.py tests/test_hotword_learning.py -q`（`31` 项通过）
+  - `PYTHONPATH=src python -m pytest tests/test_content_profile_review_guards.py -k "canonical_surface or display_surface or jump_knife" -q`（`3` 项通过）
+  - `PYTHONPATH=src python -m pytest tests/test_intelligent_copy_cover_generation.py -k "transcript_helpers_use_canonical_surface or merge_intelligent_copy_profile_hints_uses_canonical_surface" -q`（`2` 项通过）
+  - `python -m py_compile src/roughcut/review/content_profile.py src/roughcut/review/intelligent_copy.py src/roughcut/review/domain_glossaries.py tests/test_content_profile_source_identity.py tests/test_content_profile_review_guards.py tests/test_hotword_learning.py tests/test_intelligent_copy_cover_generation.py`
+
+- 2026-06-11: `C1/T1.1` 第二阶段继续落地到 review/shared consumers。定位到第一坏层在 `review` 消费侧仍绕过统一 surface helper，手写 `text_final/text_norm/text_raw` 回退链，导致 display-suppressed 行可能被重新拼回包装 transcript、Telegram 全量字幕复核和内容理解证据。现已完成：
+  - `src/roughcut/review/platform_copy.py::build_transcript_for_packaging(...)` 改为显式使用 `subtitle_display_rule_text(...)`，平台包装 transcript 不再复活 suppressed display 行。
+  - `src/roughcut/review/content_understanding_evidence.py` 新增共享 semantic surface 读取，`_collect_text_lines(...)`、`_collect_temporal_focus_lines(...)`、`_line_timing_items(...)` 统一走 canonical surface，保证内容理解证据与 timed focus span 读取事实层而非展示层回退。
+  - `src/roughcut/review/telegram_bot.py::_load_full_subtitle_review_lines(...)` 改为显式读取 display surface，Telegram 全量字幕人工复核清单不再把 suppressed display 行重新暴露给人工复核。
+  新增并通过定向回归：
+  - `tests/test_platform_packaging_quality_gate.py::test_build_transcript_for_packaging_respects_display_surface_contract`
+  - `tests/test_content_understanding_fusion.py::test_build_evidence_bundle_uses_canonical_surface_for_semantic_inputs`
+  - `tests/test_edit_decision_diagnostics.py::test_load_full_subtitle_review_lines_respects_display_surface_contract`
+  验证：
+  - `PYTHONPATH=src python -m pytest tests/test_platform_packaging_quality_gate.py tests/test_content_understanding_fusion.py tests/test_content_understanding_source_context.py tests/test_edit_decision_diagnostics.py -q`（`61` 项通过）
+  - `python -m py_compile src/roughcut/review/platform_copy.py src/roughcut/review/content_understanding_evidence.py src/roughcut/review/telegram_bot.py tests/test_platform_packaging_quality_gate.py tests/test_content_understanding_fusion.py tests/test_content_understanding_source_context.py tests/test_edit_decision_diagnostics.py`
+
+- 2026-06-11: `C1/T1.1` 第一阶段继续落地到共享读取层。`src/roughcut/api/jobs.py` 与 `src/roughcut/pipeline/quality.py` 已收掉一批高影响 `text_final/text_norm/text_raw` 混用点：
+  - `_manual_editor_subtitle_item_source_rows(...)` 现改为显式使用 `subtitle_raw_rule_text / subtitle_canonical_rule_text / subtitle_display_rule_text`，不再把 display-suppressed 行回退成可编辑 `final_text`。
+  - `_manual_editor_projection_rows_as_source_rows(...)` 现保留 canonical surface 作为 `text_norm` 与默认 `timing_text`，不再把 suppressed display 场景重新回退成 raw。
+  - manual-editor source-row context fallback 改为 canonical surface 聚合，而非 `text_final or text_norm or text_raw` 手工链。
+  - `pipeline/quality.py::_build_subtitle_text(...)` 现改为读取 display surface，避免 display-suppressed 字幕重新进入质量文本聚合。
+  新增并通过定向回归：
+  - `tests/test_manual_editor_helpers.py::test_manual_editor_subtitle_item_source_rows_respect_surface_contract`
+  - `tests/test_manual_editor_helpers.py::test_manual_editor_projection_rows_as_source_rows_preserve_canonical_without_raw_fallback`
+  - `tests/test_quality_profile_soft_gate.py::test_build_subtitle_text_respects_display_surface_contract`
+  验证：
+  - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "subtitle_item_source_rows or projection_rows_as_source_rows" -q`（`3` 项通过）
+  - `PYTHONPATH=src python -m pytest tests/test_quality_profile_soft_gate.py -q`（`9` 项通过）
+  - `python -m py_compile src/roughcut/api/jobs.py src/roughcut/pipeline/quality.py tests/test_manual_editor_helpers.py tests/test_quality_profile_soft_gate.py`
+
+- 2026-06-11: `T2.4` 继续收窄 `run_render` 的数字人阻塞诊断面。`src/roughcut/pipeline/steps.py` 已将 `avatar_full_track` 的关键失败边界显式类型化：插槽获取超时、单次 provider 调用超时、busy 重试耗尽、provider 返回异常、结果路径缺失，均统一落到 `AvatarFullTrackRenderError(reason_code, retryable, metadata)`，并由 `_avatar_full_track_error_payload(...)` 映射回 `avatar_result.reason/detail/retryable/error_metadata`，使渲染阶段降级回普通成片时不再只有模糊 `avatar_render_failed`。补充回归 `tests/test_avatar_full_track_busy_wait.py`：
+  - `test_execute_avatar_full_track_render_request_respects_busy_wait_cap`
+  - `test_execute_avatar_full_track_render_request_respects_call_timeout`
+  - `test_hold_avatar_full_track_slot_raises_typed_timeout`
+  - `test_avatar_full_track_error_payload_preserves_reason_and_metadata`
+  验证：
+  - `PYTHONPATH=src python -m pytest tests/test_avatar_full_track_busy_wait.py -q`（`11` 项通过）
+  - `PYTHONPATH=src python -m pytest tests/test_avatar_full_track_busy_wait.py tests/test_run_fullchain_batch.py -q`（`30` 项通过）
+  - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_avatar_full_track_busy_wait.py`
+
+- 2026-06-10: `T2.4` 收口 `run_fullchain_batch` 与 `run_two_full_tasks_direct` 的同步执行系统级保护。`run_fullchain_batch` 已给每步同步执行加上 wall-clock timeout 防护（默认 1800s，`render` 默认 300s），并支持 `ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS` 与 `ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS_<STEPNAME>` 覆盖，超时以 `TimeoutError` 收束任务并按终态 `failed` 合并到 batch 报表。新增回归 `tests/test_run_fullchain_batch.py`（含 timeout 默认/覆盖与 step timeout 失败落库），并把同构 `timeout + force_selector` 覆盖同步至 `run_two_full_tasks_direct.py`，补齐 `tests/test_run_two_full_tasks_direct.py`（`_configure_local_event_loop_policy` 与 step timeout 失败分支）。验证：
+  - `python -m pytest tests/test_run_fullchain_batch.py tests/test_run_two_full_tasks_direct.py -q`（`20` 项通过）
+  - `python -m py_compile scripts/run_fullchain_batch.py scripts/run_two_full_tasks_direct.py tests/test_run_fullchain_batch.py tests/test_run_two_full_tasks_direct.py`
+  - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_manual_editor_anchor --stop-after render --report-dir output/test/auto-edit-recovery-golden/continue`
+    已验证：`ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS_RENDER=1` 下，`render` 阶段失败会写入 `batch_report` 终态 `failed`。
+  - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_manual_editor_anchor --stop-after render --report-dir output/test/auto-edit-recovery-golden/continue-20260610-process2` 配置 `ROUGHCUT_BATCH_STEP_TIMEOUT_STRATEGY=thread` 与 `ROUGHCUT_BATCH_STEP_TIMEOUT_STRATEGY_RENDER=process`，验证进程级超时策略可收敛 `render` 挂起为 `TimeoutError: 步骤 render 执行超过 1.0 秒`。
+  - `python -m pytest tests/test_run_fullchain_batch.py -q`（`19` 项通过）验证 `render` 端到端默认 timeout 策略修订为 `process`，并确保该策略映射在无效 override 下仍回落到 `process`（防止线程级超时悬挂）。
+  - 新增 `tests/test_run_fullchain_batch.py` 覆盖：
+    - `test_resolve_batch_step_timeout_strategy`
+    - `test_run_job_calls_process_timeout_strategy`
+    - `test_run_job_step_timeout_records_execution_metadata`
+    补齐 `thread/process` 策略分支回归路径，并把超时/回收观测字段入库 `JobStep.metadata_`（`sync_runner_*`）。
+
+  - 进展：进程级超时与子进程异常已把 `sync_runner_timeout_strategy`、`sync_runner_reap_method`、`sync_runner_process_exit_code` 等落地到 `JobStep.metadata_`，并在 `collect_job_report` 聚合到 `JobRunReport.step_sync_runner_metadata`，`render_markdown` 输出中同步展示。
+
+
+- 2026-06-09: `T2.4` 继续聚焦 `run_render` full-track 数字人口播阻塞问题。`src/roughcut/pipeline/steps.py` 在 `_resolve_avatar_full_track_busy_max_wait_seconds()` 基础上完成 `avatar_full_track` busy-wait 上限注入（默认 900s，可配 `ROUGHCUT_AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS`，最小 30s），并用 unit tests 覆盖 env 解析、非法回退、以及在 busy 分支下的重试上限控制（新增 `tests/test_avatar_full_track_busy_wait.py`，4 条通过）。补充验证：`python -m pytest -q tests/test_avatar_full_track_busy_wait.py`（`4` 项通过）。在 `--stop-after render` 端到端烟雾上，脚本仍出现长耗时现象（未在短窗口内收敛），当前判断为 `render` 真实执行路径仍可能因服务侧返回/等待特征导致阻塞；下一步建议对 `avatar` 接口响应分类与超时回退条件继续做源头收口，并补充针对真实服务响应的超时断言回归。
+
+- 2026-06-09: `T2.3` 继续推进真实样本冒烟可执行性。为修复 `run_edit_plan` 在当前环境中因 `scenedetect` 缺失反复输出 traceback 的阻断，`src/roughcut/media/scene.py` 已将 `scenedetect` 缺失降级为告警 + 空场景边界返回（`edit_plan` 继续执行），并新增 `tests/test_scene_detection.py::test_detect_scenes_without_scenedetect_returns_empty`。验证：
+  - `python -m pytest tests/test_scene_detection.py tests/test_run_fullchain_batch.py -q`（`15` 项通过）；
+  - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_manual_editor_anchor --stop-after content_profile --report-dir output/test/auto-edit-recovery-golden/quick`（`partial` 运行成功产出报告，且不再触发 `scenedetect` traceback）；
+  - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_manual_editor_anchor --stop-after render --report-dir output/test/auto-edit-recovery-golden/quick-render3` 在当前环境仍有长耗时未在短窗口内完成；未出现此前 `NotImplementedError` 或 `scenedetect` 堆栈中断，下一步建议继续延时观察或在更轻量样本下复测。
+
+- 2026-06-09: `T2.2` 继续收口 full-chain 执行主链。修复 `scripts/run_fullchain_batch.py` 与 `scripts/run_two_full_tasks_direct.py` 的 Windows 事件循环策略边界：默认不再强制 `WindowsSelectorEventLoopPolicy`，避免 `run_render` 路径触发 `asyncio.base_events._make_subprocess_transport` 的 `NotImplementedError`（先前在 `NotImplementedError` 崩溃中已定位到该边界）；保留 `ROUGHCUT_FORCE_SELECTOR_EVENT_LOOP` 为显式兼容开关。补齐的关键验证：
+  - `python -m pytest tests/test_run_fullchain_batch.py -q`（`12` 项通过）
+  - `python -m py_compile scripts/run_fullchain_batch.py scripts/run_two_full_tasks_direct.py`
+  - `python scripts/run_two_full_tasks_direct.py --help`（命令行入口可正常加载）
+  - 子进程执行烟雾：`asyncio.create_subprocess_exec('cmd', '/c', 'echo', 'ok')` 在默认策略下可跑通（`Subprocess return code 0`）。
+  - 将 `ROUGHCUT_FORCE_SELECTOR_EVENT_LOOP=1` 时的 `asyncio.get_event_loop_policy()` 变更验证为 `WindowsSelectorEventLoopPolicy`，证明兼容开关路径可复现。
+
+- 2026-06-09: `T0.4/T0.2` 继续把主链验证收成可复用入口。`scripts/run_auto_edit_recovery_golden_set.py` 新增 `--case-id/--tag` 过滤，回归时不必再全量跑 `9` 条；同时新增 `scripts/verify_manual_editor_apply_semantics.py`，直接在真实锚点上验证 `manual-editor/apply` 的关键不变式：前端 `base_keep_segments` 必须等于 restored baseline，重新应用 frontend-managed auto cuts 后必须回到当前 editorial raw keep timeline，且带字幕 override 的保存仍应保持 `change_scope=subtitle_only`、`timeline_changed=false`。验证：`tests/test_run_auto_edit_recovery_golden_set.py` 在 `PYTHONPATH=src` 下通过（`10` 项）；真实锚点 `noc_mt34_manual_editor_anchor` 与 `edc17_manual_editor_anchor` 均验证通过，其中 frontend-managed auto cut 数分别为 `70` 与 `10`，`roundtrip_matches_editorial=true`，`render_strategy=reuse_timeline_effect_plan`。
+
+- 2026-06-09: `T0.2/T2.x` 继续修主链可见问题。定位到 `manual-editor/apply` 的第一坏层在 `api/jobs.py::apply_manual_editor_timeline(...)`：前端 `keep_segments` 表示“用户手动保留基线”，而 `accepted_cuts` 中一部分自动删减（如 `silence/filler_word/repeated_speech` 等）是前端单独托管的。此前 apply 直接把这份前端基线写入新的 editorial timeline / refine decision plan / render keep segments，导致纯字幕修改会被误判为 timeline 变更，且已有自动删减可能在保存后被冲掉。现已新增 `_manual_editor_apply_frontend_managed_auto_cuts(...)`，在 apply 时先把前端托管自动删减重新应用到真实渲染 keep segments，同时 change-plan 比较改为基于 restored baseline 与请求基线做 apples-to-apples 判断。新增并通过 `tests/test_manual_editor_helpers.py` 中两条回归，且 `tests/test_manual_editor_helpers.py`、`tests/test_manual_editor_session_regressions.py`、`tests/test_pipeline_projection_validation_contracts.py` 在 `PYTHONPATH=src` 下通过（`263` 项）。
+
+- 2026-06-09: `T2.1` 继续收口 manual-editor 规则一致性。修复 `_manual_editor_cut_analysis_payload` 在 `cut_analysis.v1` 兼容分支只读 `rule_candidates` 的边界，补上无 `rule_candidates` 时回退 `manual_editor_rule_candidates` 的路径。这样关闭 `repeatedEnabled` 时不会再将旧 `manual_editor_full_transcript` 的 `repeated_speech` 误重新注入。新增并通过 `test_manual_editor_cut_analysis_payload_drops_repeated_speech_when_toggle_closed` 与既有 `drops_stale...`/`build_cut_analysis_payload_preserves...` 回归（`4` 项 + `5` 项定向复跑通过）。
+
+- 2026-06-09: `T1.1/T2.x` 继续收口 smart-cut 的 surface ownership。定位到 pause candidate 的第一坏层在 `edit/smart_cut_candidates.py::_meaningful_timed_ranges_for_pause(...)`：该路径此前直接把带时间 `word/alignment token` 的文本当事实层，若 timed surface 只保留 display/canonical 缩短文本，就会让 raw spoken 中被隐藏的有效口播失去 pause gate 保护。现已改为优先消费 `subtitle_spoken_rule_text(...)`，当 spoken meaningful surface 明显长于 timed meaningful surface 时，直接把重叠区视作有语音证据，阻止 pause 候选越过隐藏口播。新增回归 `test_cut_analysis_pause_overlap_blocks_when_spoken_surface_is_longer_than_timed_display_text`，并联同既有 pause/surface 用例 `python -m pytest tests/test_manual_editor_helpers.py -k "surface or smart_cut or pause"` 通过（`22` 项），其中新增与原有 pause gate 核心用例共 `3` 项定向验证通过。
+- 2026-06-09: `T1.2/T1.3` 继续收口 manual-editor stage ownership。`api/jobs.py` 中 `_manual_editor_editable_final_subtitle_text` 改为直接基于 `subtitle_display_rule_text(...)` 生成可编辑文本，去掉了 `text_final -> text_norm -> text_raw` 的手工回退链，避免 display-suppressed 或展示层变体再次反向影响手动编辑候选与候选时序文本的来源归属。
+- 2026-06-09: `T1.2` 进一步收紧 display suppression 显示归属。`subtitle_display_rule_text(...)` 现已改为在存在 `display_suppressed_reason` 时直接返回空值，不依赖 `text_final` 是否存在；补充合同回归 `tests/test_subtitle_surface_contracts.py` 覆盖无 `text_final` 的抑制行与 manual-editor editable 行为。
+- 2026-06-09: `T0.4/T1.2` 继续收口 batch/golden 主链失败状态合同。此前 `run_fullchain_batch.py` 的同步步骤执行路径只写 step/job `failed`，但没有补齐 orchestrator 依赖的 retry exhausted 语义，导致真实 `probe` 失败样本会被后台状态协调重新写回 `job.status=processing`，审计层只能靠派生状态纠偏。现已在 batch runner 内补齐终态合同：`mark_step(..., terminal_failure=True)` 会把同步失败步骤标记为 exhausted attempt，并写入 `sync_runner_terminal_failure` 元数据；`finalize_job(..., error=...)` 也会写回真实 job error。验证：`tests/test_run_fullchain_batch.py`、`tests/test_run_auto_edit_recovery_golden_set.py` 在 `PYTHONPATH=src` 下通过（`16` 项）；真实 smoke `output/test/auto-edit-recovery-golden/20260609-132050` 中两个残余失败样本 `MAXACE 美杜莎4 顶配次顶配开箱.mp4` 与 `roughcut_formal_media.mp4` 的 `stored_job_status` 已从此前错误的 `processing` 收敛为真实 `failed`，audit pack 直接暴露 `FileNotFoundError` 根因与重跑前置动作。 
 - 2026-06-09: `T1.2` 主链收口已通过一轮更宽回归复验。manual-editor editing payload 与 display payload 的职责重新分开：`_manual_editor_subtitle_payload(...)` 现使用独立 editable-final helper，保留 standalone filler 等完整编辑文本；而 display-only helper 继续用于 display surface contract，不再互相污染。`_manual_editor_subtitle_items_from_editorial(...)` 也恢复为“缺 raw 不反灌 raw，norm/final 依展示文本规范化”的旧合同，避免 editorial projection item 在 render 前被误写成三层同文案。同时，`tests/test_manual_editor_helpers.py` 中依赖 projection annotation repair 的用例已改为显式声明 `apply_annotation_repair=True`，与新的 validator 合同保持一致。验证：`tests/test_manual_editor_helpers.py`、`tests/test_manual_editor_session_regressions.py`、`tests/test_pipeline_projection_validation_contracts.py`、`tests/test_subtitle_timeline_remap.py`、`tests/test_subtitle_surface_contracts.py` 在 `PYTHONPATH=src` 下全量通过（`287` 项）。
 - 2026-06-09: `T1.2` 再次收掉 manual-editor 会话加载里的隐藏投影切换。此前 `_build_manual_editor_session(...)` 即使不直接展示 validator 返回值，仍会把 `validate_projected_subtitles_against_source(...)` 产生的 repair/fallback 中间结果喂给 source fallback 判定，形成“校验顺手改写，改写再参与决策”的暗链。现在会话加载改为：validator 只做 non-mutating diagnostics（`fallback_source_subtitles=None`, `apply_annotation_repair=False`），`source_projection_fallback_applied` 仅基于原始 `projected_subtitles` 走显式 fallback 分支。验证：新增 `tests/test_manual_editor_session_regressions.py::test_manual_editor_session_validation_stays_non_mutating_and_fallback_explicit`，并联同 `tests/test_manual_editor_session_regressions.py`、`tests/test_pipeline_projection_validation_contracts.py`、`tests/test_subtitle_timeline_remap.py`、`tests/test_subtitle_surface_contracts.py` 在 `PYTHONPATH=src` 下通过（`40` 项）。
 - 2026-06-09: `T1.2` 继续消除默认副作用链。`validate_projected_subtitles_against_source(...)` 现在新增显式 `apply_annotation_repair` 开关，默认只做 source/projection 校验与诊断，不再默认执行 `_repair_projection_text_drift_from_span_fallback(...)` 去改写字幕；`pipeline/steps.py::_validated_subtitle_projection_for_timeline(...)` 仅在 `apply_repair=True` 时才把 annotation repair 透传给 validator。合同回归 `tests/test_pipeline_projection_validation_contracts.py` 已新增“默认非变异 / 显式才修复” 两条验证，并联同 `tests/test_subtitle_timeline_remap.py`、`tests/test_subtitle_surface_contracts.py` 在 `PYTHONPATH=src` 下通过（`34` 项）。
@@ -72,3 +4039,412 @@ Stabilize RoughCut's subtitle and auto-edit pipeline into a stage-disciplined ar
 - The new design doc must name each pipeline stage, its inputs, outputs, and forbidden side effects.
 - The task list must be dependency-ordered and executable without replaying prior chat history.
 - The current-state file must point future agents to the active recovery docs instead of stale publication-only state.
+
+- 2026-06-12: `C1` 继续收掉 variant timeline bundle 的展示层回流口。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_normalize_subtitle_event(...)`：该 shared normalizer 产出的 `subtitle_events` 本质是 display 事件，但此前仍手写 `text_final -> text_norm -> text_raw -> text` 回退链，会把 display-suppressed 行或 canonical/raw 漂移文本重新写回 variant bundle。现已改为显式使用 `subtitle_display_rule_text(...)`，仅在完全没有 surface 字段时才回退通用 `text`。新增并通过回归：
+  - `tests/test_manual_editor_helpers.py::test_variant_subtitle_event_respects_display_surface_contract`
+  - `tests/test_manual_editor_helpers.py::test_variant_subtitle_event_preserves_source_mapping_metadata`
+  验证：
+  - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "variant_subtitle_event_preserves_source_mapping_metadata or variant_subtitle_event_respects_display_surface_contract" -q`（`2` 项通过）
+  - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 再收掉 subtitle correction 去重阶段的展示层误判。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_filter_redundant_corrections_for_current_subtitles(...)`：该逻辑的职责是“当前字幕 display 已经包含 suggested_span 时，去掉冗余纠错”，但此前却使用 `text_final -> text_norm -> text_raw` 手写回退链，导致 display-suppressed 或 display 缺失场景下，canonical/raw 也可能被误当作“当前已显示正确”，从而过早丢弃纠错。现已改为显式使用 `subtitle_display_rule_text(...)` 作为当前字幕判断依据。新增并通过回归：
+  - `tests/test_transcript_semantic_cleanup.py::test_redundant_correction_filter_drops_candidates_already_in_current_subtitles`
+  - `tests/test_transcript_semantic_cleanup.py::test_redundant_correction_filter_respects_display_surface_contract`
+  验证：
+  - `PYTHONPATH=src python -m pytest tests/test_transcript_semantic_cleanup.py -k "redundant_correction_filter" -q`（`2` 项通过）
+  - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_transcript_semantic_cleanup.py`
+
+- 2026-06-12: `C1` 又收掉 manual-editor source split 主入口的一条 surface 回流。定位到第一坏层在 `src/roughcut/api/jobs.py::_manual_editor_split_long_subtitle_rows(...)` 及 `_manual_editor_split_pieces_cover_source_text(...)`：
+  - `segment_subtitles(...)` 的输出本身区分 `text_raw/text_norm`，但旧逻辑在组装 split pieces 时仍让 `text/timing_text`、`text_final`、coverage 校验和 tighten fallback 互相混用，导致两类问题：
+    - source split 结果可能把 display 文本重新打回 raw；
+    - 一旦 canonical surface 与 raw timing surface 不完全同文，coverage helper 又会把它误判为“分段丢字”，触发不必要的 display fallback。
+  - 已落地修复：
+    - split pieces 现在显式保留 `text_raw` 与 `text_norm`；
+    - `timing_text/text` 继续承担 segmentation authority；
+    - `text_final` 在无显式 `timing_text` authority 时优先走 canonical surface，有显式 `timing_text` authority 时保持原 authority 文本；
+    - `_manual_editor_split_pieces_cover_source_text(...)` 改为优先基于 `timing_text` 校验 coverage，而不是盲用 `piece["text"]`；
+    - `_manual_editor_tighten_source_row_to_display_words(...)` 的 fallback 文本改为使用最终 display text，而不再复用 timing authority 文本。
+  - 新增/更新回归：
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_split_source_fragments_preserve_spoken_text_raw_over_normalized_text`
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_split_long_rows_use_timing_text_as_segmentation_authority`
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_split_piece_coverage_detects_dropped_middle_clause`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "split_source_fragments_preserve_spoken_text_raw_over_normalized_text or split_long_rows_use_timing_text_as_segmentation_authority or source_fallback_splits_long_subtitle_rows or split_source_fragments_follow_word_timings or split_piece_coverage_detects_dropped_middle_clause" -q`（`5` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py -k "manual_editor_projection_rows_preserve_explicit_surfaces" -q`（`1` 项通过）
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 再收掉 transcript projection validation 的文本事实入口回流。定位到第一坏层在 `src/roughcut/media/subtitle_projection_validation.py::_build_transcript_projection_speech_units(...)`：
+  - 当 transcript segment 没有 words 时，旧逻辑只读 `text or text_raw`，会忽略已显式给出的 canonical surface；
+  - 这会把 generic `text` 重新当成 projection validation 的事实层语料，直接影响 `validate_projected_subtitles_against_transcript(...)` 的 kept/missing speech 判定。
+  - 已落地修复：
+    - 该入口现统一改走 `subtitle_semantic_item_text(...)`；
+    - 有显式 surface 时优先 canonical，只有完全没有 surface 时才回退 generic `text`。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_transcript_projection_validation_prefers_explicit_canonical_surface_for_text_only_segments`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "transcript_projection_validation_ignores_speech_removed_by_cut or transcript_projection_validation_warns_for_synthetic_timing_gap or transcript_projection_validation_prefers_explicit_canonical_surface_for_text_only_segments" -q`（`3` 项通过）
+    - `python -m py_compile src/roughcut/media/subtitle_projection_validation.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 再收掉 canonical-display boundary merge 的 raw 抢权。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_join_projection_entry_texts(...)` 与 `_merge_short_display_boundary_entries(...)`：
+  - 这两处 helper 名义上属于 display-boundary 合并逻辑，但旧实现仍优先读取 `text_raw`；
+  - 当 projection entry 已同时携带 `text_raw/text_norm` 时，短 display 边界的合并结果仍可能把 canonical display 文本重新打回 raw，进而污染后续 `canonical_display_boundary_hybrid` 路径。
+  - 已落地修复：
+    - `_join_projection_entry_texts(...)` 改为优先拼接 `text_norm`，仅在缺失时回退 `text_raw`；
+    - `_merge_short_display_boundary_entries(...)` 的短句判定和长度预算也同步改为优先基于 canonical surface。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_merge_short_display_boundary_entries_prefers_canonical_surface_over_raw_text`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "merge_short_display_boundary_entries_prefers_canonical_surface_over_raw_text or projection_candidate_selection_prefers_higher_quality_hybrid_when_content_is_preserved or local_hybrid_projection_entries_now_pass_through_canonical_boundaries or local_hybrid_projection_entries_do_not_merge_followon_clause" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 transcript normalize 主入口里 generic `text` 的抢权。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_normalize_transcript_segment_payloads(...)`：
+  - 虽然该 helper 之前已经保留 `text_raw / text_canonical / text_norm / text_final`，但兼容字段 `text` 仍然使用 `item["text"]` 优先；
+  - 这意味着只要下游还存在旧路径读取 `text`，显式 canonical surface 仍可能被 generic 文本重新污染。
+  - 已落地修复：
+    - `text` 现在改为优先复用 `surfaces["text_norm"]`，其次 `surfaces["text_raw"]`，只有完全没有显式 surface 时才回退原始 generic `text`。
+  - 更新回归：
+    - `tests/test_subtitle_surface_contracts.py::test_normalize_transcript_segment_payloads_preserve_raw_and_canonical_surfaces`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py -k "normalize_transcript_segment_payloads_preserve_raw_and_canonical_surfaces or review_transcript_evidence_items_preserve_surface_distinctions or subtitle_semantic_item_text_preserves_explicit_canonical_surface_over_generic_text or pipeline_suspicious_timing_uses_display_surface_contract" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_subtitle_surface_contracts.py`
+
+- 2026-06-12: `C1` 又收掉 canonical transcript 投影回写里的 raw 回流。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_project_canonical_transcript_to_timeline(...)`：
+  - 该 helper 在 `segment_subtitles(...)` 已返回 `text_raw/text_norm` 的前提下，旧逻辑仍只拿 `text_raw` 去生成 `text_norm/text_final`；
+  - 这会把 canonical projection 主链上已经显式给出的 canonical surface 再次打回 raw，污染后续 `canonical_transcript` 投影文本。
+  - 已落地修复：
+    - 该入口现在显式读取 `entry.text_norm`；
+    - `text_final` 与 `text_norm` 优先使用 canonical surface，只有缺失时才回退 raw。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_project_canonical_transcript_to_timeline_prefers_explicit_canonical_surface_from_segmentation`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "edited_subtitle_projection_keeps_fallback_text_instead_of_canonical or project_canonical_transcript_to_timeline_prefers_explicit_canonical_surface_from_segmentation or transcript_projection_validation_blocks_kept_asr_speech_without_subtitle" -q`（`3` 项通过）
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 projection entry -> item 共享转换层的 canonical/display 写平。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_build_projection_items_from_entries(...)`：
+  - 旧逻辑先通过 `_projection_display_source_text(...)` 选出 display source，再把 `display_norm` 同时写进 `text_norm` 和 `text_final`；
+  - 这意味着即便 entry 上已经有独立 `text_norm`，一旦 display heuristic 选择 raw 文本，canonical surface 也会在这一层被覆盖掉。
+  - 已落地修复：
+    - 共享转换层现在显式保留 `canonical_text = normalize_projection_display_text(text_norm or raw_text)`；
+    - `text_norm` 与 `text_final` 不再共用同一来源，前者保留 canonical surface，后者继续由 display heuristic 决定。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_build_projection_items_from_entries_preserves_canonical_surface_separately_from_display`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "build_projection_items_from_entries_preserves_canonical_surface_separately_from_display or merge_short_display_boundary_entries_prefers_canonical_surface_over_raw_text or project_canonical_transcript_to_timeline_prefers_explicit_canonical_surface_from_segmentation or projection_candidate_selection_prefers_higher_quality_hybrid_when_content_is_preserved" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 canonical source-row 入口里 `text_norm/text_final` 的写平。定位到第一坏层在 `src/roughcut/api/jobs.py::_manual_editor_canonical_segment_source_rows(...)`：
+  - 该 helper 允许在 manual-editor source rows 中显式暴露 raw ASR filler，这是合理的；
+  - 但旧逻辑在决定 `display_text` 之后，直接把 `text_norm` 也写成了 `display_text`，导致一旦触发 raw filler 暴露，canonical surface 会被一起降成 raw。
+  - 已落地修复：
+    - `text_final/timing_text` 继续允许暴露 raw filler；
+    - `text_norm` 改为单独保留 canonical text，不再跟随 display 层一起退化。
+  - 更新回归：
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_canonical_source_rows_reveal_raw_asr_fillers`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "canonical_source_rows_reveal_raw_asr_fillers or canonical_source_rows_do_not_apply_early_term_corrections or projection_rows_as_source_rows_preserve_canonical_without_raw_fallback" -q`（`3` 项通过）
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 `subtitle_pipeline` transcript-segment normalize 对 dict 载荷显式 surface 的丢失。定位到第一坏层在 `src/roughcut/speech/subtitle_pipeline.py::_normalize_transcript_source_segments(...)` 与 `_build_transcript_source_segment_from_transcript_segment(...)`：
+  - 旧逻辑基本只通过对象属性读取 transcript segment；
+  - 当上游传入的是 `dict` transcript segments 时，即便已经显式带了 `text_norm/text_final/text_canonical`，这些字段也会在 canonical transcript 入口被忽略。
+  - 已落地修复：
+    - `_looks_like_transcript_segments(...)` 现在能识别 dict 形态的 transcript rows；
+    - `_normalize_transcript_source_segments(...)` 的排序改为兼容 dict/attr 双形态；
+    - `_build_transcript_source_segment_from_transcript_segment(...)` 现在会读取 dict 中的 `text_norm/text_canonical/text_final`，不再只看对象属性。
+  - 新增回归：
+    - `tests/test_subtitle_fact_conservation.py::test_canonical_transcript_layer_preserves_explicit_canonical_surface_from_dict_transcript_segments`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_fact_conservation.py -k "canonical_transcript_layer_preserves_explicit_canonical_surface_from_dict_transcript_segments or canonical_transcript_layer_preserves_source_raw_filler_text or canonical_transcript_layer_uses_canonical_surface_when_display_is_suppressed" -q`（`3` 项通过）
+    - `python -m py_compile src/roughcut/speech/subtitle_pipeline.py tests/test_subtitle_fact_conservation.py`
+
+- 2026-06-12: `C1` 又收掉 transcript -> segmentation 共享入口对 dict canonical surface 的漏读。定位到第一坏层在 `src/roughcut/speech/subtitle_pipeline.py::_build_segmentation_adapters_from_transcript_segments(...)`：
+  - 旧逻辑仍只通过对象属性读取 `start/end/text/words`；
+  - 对 dict transcript segments 来说，即便已经显式带了 `text_canonical/text_norm`，该入口也只会把 generic `text` 传给 `segment_subtitles(...)`。
+  - 已落地修复：
+    - 该入口现改为统一使用 `_row_value(...)` 读取 dict/attr 双形态；
+    - 传给 segmentation 的 `text` 现在优先 `text_canonical`，其次 `text_norm`，最后才回退 generic `text`。
+  - 新增回归：
+    - `tests/test_subtitle_surface_contracts.py::test_transcript_word_projection_entries_prefer_explicit_canonical_surface_from_dict_segments`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_surface_contracts.py -k "transcript_word_projection_entries_do_not_prewrite_display_surface or transcript_word_projection_entries_prefer_explicit_canonical_surface_from_dict_segments or normalize_transcript_segment_payloads_preserve_raw_and_canonical_surfaces" -q`（`3` 项通过）
+    - `python -m py_compile src/roughcut/speech/subtitle_pipeline.py tests/test_subtitle_surface_contracts.py`
+
+- 2026-06-12: `C1` 又收掉 `subtitle_pipeline` subtitle-item 对称入口对 dict surface 的漏读。定位到第一坏层在 `src/roughcut/speech/subtitle_pipeline.py::_build_transcript_source_segment_from_subtitle_item(...)`：
+  - 上一轮已经收掉了 dict transcript-segment 分支，但 subtitle-item 分支仍全部用 `getattr(...)`；
+  - 因此只要 `build_canonical_transcript_layer(...)` 直接收到 dict subtitle items，显式 `text_raw/text_norm/text_final/display_suppressed_reason` 仍会在 canonical transcript normalize 入口被丢掉。
+  - 已落地修复：
+    - subtitle-item 分支现统一改走 `_row_value(...)`；
+    - `text_raw/text_norm/text_final/words/start/end/display_suppressed_reason` 都兼容 dict/attr 双形态。
+  - 新增回归：
+    - `tests/test_subtitle_fact_conservation.py::test_canonical_transcript_layer_preserves_explicit_surfaces_from_dict_subtitle_items`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_fact_conservation.py -k "canonical_transcript_layer_preserves_explicit_surfaces_from_dict_subtitle_items or canonical_transcript_layer_preserves_explicit_canonical_surface_from_dict_transcript_segments or canonical_transcript_layer_uses_canonical_surface_when_display_is_suppressed" -q`（`3` 项通过）
+    - `python -m py_compile src/roughcut/speech/subtitle_pipeline.py tests/test_subtitle_fact_conservation.py`
+
+- 2026-06-12: `C1` 又收掉同一 shared normalize 中 dict subtitle-item 的排序退化。定位到第一坏层在 `src/roughcut/speech/subtitle_pipeline.py::_normalize_transcript_source_segments(...)` 的 subtitle-item 分支：
+  - 虽然上一轮已经让 `_build_transcript_source_segment_from_subtitle_item(...)` 能读取 dict；
+  - 但排序 key 仍然全用 `getattr(...)`，导致 dict subtitle items 的 `start_time/end_time/item_index` 会退成默认值，进入 canonical transcript normalize 时顺序可能错误。
+  - 已落地修复：
+    - subtitle-item 分支的排序 key 现统一改走 `_row_value(...)`；
+    - `dict` 与对象形态在进入 canonical transcript normalize 前，都会按真实 `start_time/end_time/item_index` 排序。
+  - 新增回归：
+    - `tests/test_subtitle_fact_conservation.py::test_canonical_transcript_layer_sorts_dict_subtitle_items_by_timing`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_fact_conservation.py -k "canonical_transcript_layer_sorts_dict_subtitle_items_by_timing or canonical_transcript_layer_preserves_explicit_surfaces_from_dict_subtitle_items or canonical_transcript_layer_preserves_explicit_canonical_surface_from_dict_transcript_segments" -q`（`3` 项通过）
+    - `python -m py_compile src/roughcut/speech/subtitle_pipeline.py tests/test_subtitle_fact_conservation.py`
+
+- 2026-06-12: `C1` 又收掉 `TranscriptFactLayer` 对 dict canonical surface 的 generic-text 抢权。定位到第一坏层在 `src/roughcut/speech/subtitle_pipeline.py::build_transcript_fact_layer(...)`：
+  - 旧逻辑完全依赖 `getattr(...)` 读取 `segment_index/start_time/end_time/text/words_json`；
+  - 对 dict transcript segments 来说，不仅 dict 兼容缺失，而且即便已经显式给了 `text_canonical/text_norm`，事实层文本仍只会取 generic `text`。
+  - 已落地修复：
+    - `build_transcript_fact_layer(...)` 现在统一改走 `_row_value(...)`；
+    - 事实层 `text` 现在优先 `text_canonical`，其次 `text_norm`，最后才回退 generic `text`。
+  - 新增回归：
+    - `tests/test_subtitle_fact_conservation.py::test_transcript_fact_layer_prefers_explicit_canonical_surface_from_dict_segments`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_fact_conservation.py -k "transcript_fact_layer_prefers_explicit_canonical_surface_from_dict_segments or canonical_transcript_layer_sorts_dict_subtitle_items_by_timing or canonical_transcript_layer_preserves_explicit_surfaces_from_dict_subtitle_items" -q`（`3` 项通过）
+    - `python -m py_compile src/roughcut/speech/subtitle_pipeline.py tests/test_subtitle_fact_conservation.py`
+
+- 2026-06-12: `C1` 又收掉 `subtitle_postprocess` / `reference_segments` 共用 transcript adapter 的 surface 压平。定位到第一坏层在 `src/roughcut/pipeline/steps.py::run_subtitle_postprocess(...)` 与 `_build_reference_segment_adapters(...)`：
+  - 这两个入口都会把 transcript rows 重包成 `SimpleNamespace(segment_index/start_time/end_time/text/words_json)`；
+  - 旧逻辑只保留 generic `text`，即便上游 row 已显式携带 `text_raw/text_canonical/text_norm/text_final`，进入 `build_canonical_transcript_layer_from_transcript_segments(...)` 前也会再次被压成单一 surface。
+  - 已落地修复：
+    - 新增共享 helper `_build_transcript_segment_adapter(...)`，统一从 transcript row 提取 raw/canonical/display surface；
+    - adapter 输出的 `text` 现在优先承载 raw spoken surface，同时显式保留 `text_raw/text_norm/text_canonical/text_final/display_suppressed_reason`；
+    - `run_subtitle_postprocess(...)` 与 `_build_reference_segment_adapters(...)` 都改走这一共享入口，不再各自写一份压平逻辑。
+  - 新增回归：
+    - `tests/test_subtitle_fact_conservation.py::test_transcript_segment_adapters_preserve_explicit_raw_and_canonical_surfaces`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_fact_conservation.py -k "transcript_segment_adapters_preserve_explicit_raw_and_canonical_surfaces or transcript_fact_layer_prefers_explicit_canonical_surface_from_dict_segments or canonical_transcript_layer_preserves_explicit_surfaces_from_dict_subtitle_items or canonical_transcript_layer_preserves_explicit_canonical_surface_from_dict_transcript_segments" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_subtitle_fact_conservation.py`
+
+- 2026-06-12: `C1` 又收掉 transcript-first synthetic subtitle item 入口的 surface 写平。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_build_transcript_first_canonical_layer(...)`：
+  - 该入口会把 transcript rows 先映射成 synthetic subtitle items，再交给 canonical transcript 主链；
+  - 旧逻辑直接把 `text_raw/text_norm/text_final` 全写成同一个 `transcript_text`，导致只要 transcript row 已经显式携带 raw/canonical 差异，进入 transcript-first 主链前就会被再次压平。
+  - 已落地修复：
+    - synthetic item 现在改走同一份 transcript surface payload；
+    - `text_raw` 保留 spoken/raw，`text_norm` 保留 canonical，`text_final` 仅在显式 display 缺失时回退 canonical；
+    - `display_suppressed_reason` 也一起透传，避免 display 抑制语义在 synthetic 入口丢失。
+  - 新增回归：
+    - `tests/test_subtitle_fact_conservation.py::test_transcript_first_canonical_layer_preserves_explicit_raw_and_canonical_surfaces`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_fact_conservation.py -k "transcript_first_canonical_layer_preserves_explicit_raw_and_canonical_surfaces or transcript_segment_adapters_preserve_explicit_raw_and_canonical_surfaces or transcript_fact_layer_prefers_explicit_canonical_surface_from_dict_segments or canonical_transcript_layer_preserves_explicit_surfaces_from_dict_subtitle_items or canonical_transcript_layer_preserves_explicit_canonical_surface_from_dict_transcript_segments" -q`（`5` 项通过）
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_subtitle_fact_conservation.py`
+
+- 2026-06-12: `C1` 又收掉 `existing_entries` 共享构建器的 canonical surface 覆写。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_build_projection_entries_from_subtitle_items(...)`：
+  - 该 helper 会把现有 subtitle items 转成 `SubtitleEntry`，供 `existing_projection_items`、`display_boundary_hybrid` 和 segmentation analysis 共用；
+  - 旧逻辑无论 source item 是否已显式带有 `text_norm`，都会把 entry 的 `text_norm` 重写成 `text_raw/text_final` 的 display-normalized 版本；
+  - 这意味着只要走 `existing_entries -> _build_projection_items_from_entries(...)` 这条共享链，canonical 面就会先在入口被压回 display/raw，再影响后续 hybrid 对比和质量评估。
+  - 已落地修复：
+    - `_build_projection_entries_from_subtitle_items(...)` 现在统一先解析 subtitle surface payload；
+    - `text_raw` 继续承载当前模式需要的 entry text（display 或 raw）；
+    - `text_norm` 改为单独保留 canonical surface，仅在 canonical 缺失时才回退 entry text。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_build_projection_entries_from_subtitle_items_preserves_canonical_surface_when_using_display_text`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "build_projection_entries_from_subtitle_items_preserves_canonical_surface_when_using_display_text or build_projection_items_from_entries_preserves_canonical_surface_separately_from_display or merge_short_display_boundary_entries_prefers_canonical_surface_over_raw_text or projection_candidate_selection_prefers_higher_quality_hybrid_when_content_is_preserved" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 canonical artifact 反序列化入口的 surface 丢失。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_canonical_transcript_layer_namespace(...)`：
+  - 该 helper 会把已落盘的 canonical transcript artifact 重新转成对象，再喂给 `_rebuild_current_subtitle_projection_entries(...)` 和后续 canonical refresh projection 链；
+  - 旧逻辑虽然已经能保留 `text_raw/text_canonical`，但 `text_norm/text_final/display_suppressed_reason` 没有透传；
+  - 这意味着一旦走“读取 artifact -> rebuild projection”这条共享回放路径，display 抑制语义和显式 display/canonical surface 仍会在入口被削掉。
+  - 已落地修复：
+    - `_canonical_transcript_layer_namespace(...)` 现在同时保留 `text_norm/text_canonical/text_final/display_suppressed_reason`；
+    - canonical artifact 回放和实时构建出来的 canonical layer surface 合同保持一致，不再只有半套字段。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_canonical_transcript_layer_namespace_preserves_explicit_display_and_canonical_surfaces`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "canonical_transcript_layer_namespace_preserves_explicit_display_and_canonical_surfaces or build_projection_entries_from_subtitle_items_preserves_canonical_surface_when_using_display_text or build_projection_items_from_entries_preserves_canonical_surface_separately_from_display or merge_short_display_boundary_entries_prefers_canonical_surface_over_raw_text" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 projection artifact 回放 entry payload 的元信息裁剪。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_subtitle_projection_entry_payload(...)`：
+  - 该 helper 是 `_load_latest_subtitle_projection_entries(...)` 的默认 entry 适配器，会把已落盘的 projection artifact `entries` 重新裁成运行时 payload；
+  - 旧逻辑只保留 timing 和 `text_raw/text_norm/text_final`，像 `display_suppressed_reason`、`projection_source` 这类 surface 相关元信息会在 replay 入口直接丢失；
+  - 这意味着只要走 projection artifact 回放链，display 抑制语义和投影来源标识就无法继续传到后续 review/rebuild 逻辑。
+  - 已落地修复：
+    - `_subtitle_projection_entry_payload(...)` 现在会同时保留 `display_suppressed_reason` 与 `projection_source`；
+    - `words/words_json` 仍照旧清洗后透传，projection artifact replay 的 surface payload 更完整。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_subtitle_projection_entry_payload_preserves_surface_metadata`
+  - 更新回归：
+    - `tests/test_manual_editor_helpers.py::test_subtitle_projection_entry_payload_accepts_both_timing_key_styles`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "subtitle_projection_entry_payload_accepts_both_timing_key_styles or subtitle_projection_entry_payload_preserves_surface_metadata or canonical_transcript_layer_namespace_preserves_explicit_display_and_canonical_surfaces or build_projection_entries_from_subtitle_items_preserves_canonical_surface_when_using_display_text" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 projection fallback subtitle-item payload 的 surface 元信息裁剪。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_subtitle_item_payload(...)`：
+  - 该 helper 是 `_load_latest_subtitle_projection_entries(...)` 在 projection artifact 缺失时的默认回退载荷构建器；
+  - 旧逻辑只回填 timing 和 `text_raw/text_norm/text_final`，与上面的 replay entry payload 一样，会把 `display_suppressed_reason` 在 fallback 入口直接裁掉；
+  - 这意味着 projection replay path 已经保住 display 抑制语义，但一旦切回 fallback subtitle items，这份 surface 元信息又会再次丢失。
+  - 已落地修复：
+    - `_subtitle_item_payload(...)` 现在会保留 `display_suppressed_reason`；
+    - `_load_latest_current_canonical_transcript_data(...)` 构造 canonical rebuild 种子用的 `subtitle_dicts` 也同步补上 `display_suppressed_reason`，让 fallback 与 rebuild seed 的 surface 合同一致。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_subtitle_item_payload_preserves_display_suppressed_reason`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "subtitle_item_payload_preserves_display_suppressed_reason or subtitle_projection_entry_payload_preserves_surface_metadata or subtitle_projection_entry_payload_accepts_both_timing_key_styles or canonical_transcript_layer_namespace_preserves_explicit_display_and_canonical_surfaces" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 projection validation source payload 的 suppression 语义丢失。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_load_source_subtitle_payloads_for_projection_validation(...)`：
+  - 该 helper 是 projection validation / edit-plan 的统一 source payload 入口，会优先从 canonical transcript artifact 生成 source subtitles；
+  - 旧逻辑虽然已经保留了 `text_raw/text_norm/transcript_text/projection_source`，但 canonical 分支和 transcript fallback 分支都没有把 `display_suppressed_reason` 带进去；
+  - 而 `roughcut.media.subtitle_projection_validation` 本身会读取 `display_suppressed_reason`，所以 source payload 在入口丢字段后，后续校验链拿到的仍是残缺 surface contract。
+  - 已落地修复：
+    - canonical source payload 现在会透传 `display_suppressed_reason`；
+    - transcript fallback payload 也同步带上 `display_suppressed_reason`（无值时为 `None`），让 validation source contract 前后一致。
+  - 更新回归：
+    - `tests/test_manual_editor_helpers.py::test_projection_validation_source_payloads_keep_fact_layers_without_explicit_display_text`
+    - `tests/test_manual_editor_helpers.py::test_projection_validation_source_payloads_preserve_canonical_over_generic_text`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "projection_validation_source_payloads_keep_fact_layers_without_explicit_display_text or projection_validation_source_payloads_preserve_canonical_over_generic_text or subtitle_item_payload_preserves_display_suppressed_reason or subtitle_projection_entry_payload_preserves_surface_metadata" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 subtitle-item fallback adapter 的 source basis 缺失。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_subtitle_item_payload(...)`：
+  - 该 helper 不仅是 `_load_latest_subtitle_projection_entries(...)` 的 fallback payload 构建器，也会被 `_load_source_subtitle_payloads_for_projection_validation(...)` 的 subtitle-item 兜底路径直接复用；
+  - 上一轮已经补了 `display_suppressed_reason`，但旧逻辑仍没有显式标出 `projection_source`；
+  - 这意味着一旦 canonical / transcript source 都缺失，subtitle-item fallback rows 的来源只能靠外围默认值推断，`_source_subtitle_basis(...)` 这类基于逐条 payload 的判断会退化。
+  - 已落地修复：
+    - `_subtitle_item_payload(...)` 现在统一输出 `projection_source="subtitle_item"`；
+    - subtitle-item fallback、projection replay fallback、projection validation source fallback 三条共享路径的来源合同一致。
+  - 更新回归：
+    - `tests/test_manual_editor_helpers.py::test_subtitle_item_payload_preserves_display_suppressed_reason`
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_projection_validation_source_payloads_fallback_to_subtitle_items_keep_source_basis`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "subtitle_item_payload_preserves_display_suppressed_reason or projection_validation_source_payloads_fallback_to_subtitle_items_keep_source_basis or projection_validation_source_payloads_keep_fact_layers_without_explicit_display_text or subtitle_projection_entry_payload_preserves_surface_metadata" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 variant subtitle event 导出链的来源标识裁剪。定位到第一坏层在 `src/roughcut/pipeline/steps.py::_normalize_subtitle_event(...)`：
+  - 该 helper 是 variant timeline bundle 的统一 subtitle-event adapter，负责把 projection rows 归一成导出事件；
+  - 旧逻辑已经保留了 `source_index/source_indexes/source_overlap_*` 等 source mapping 元信息，但仍会把 `projection_source` 在最后一跳裁掉；
+  - 这意味着前面 replay/fallback/source payload 链虽然已经补齐了来源标识，variant bundle 导出时又会把它丢掉，调试和下游核对会失去最后一跳的 basis trace。
+  - 已落地修复：
+    - `_normalize_subtitle_event(...)` 现在会继续透传 `projection_source`；
+    - variant subtitle event 与前面的 projection payload/source payload 保持同一份来源合同。
+  - 更新回归：
+    - `tests/test_manual_editor_helpers.py::test_variant_subtitle_event_preserves_source_mapping_metadata`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "variant_subtitle_event_preserves_source_mapping_metadata or subtitle_item_payload_preserves_display_suppressed_reason or projection_validation_source_payloads_fallback_to_subtitle_items_keep_source_basis or subtitle_projection_entry_payload_preserves_surface_metadata" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 manual-editor API subtitle DTO 的来源标识断点。定位到第一坏层在 `src/roughcut/api/jobs.py::ManualEditorSubtitleOut` 与 `_manual_editor_subtitle_payload(...)`：
+  - pipeline 侧的 replay/fallback/source payload 链已经逐步补齐了 `projection_source`，但 manual-editor API 最终返回给前端的 subtitle DTO 仍没有对应字段；
+  - 这意味着即便链路内部已经保住了 basis trace，到 API 出口仍会丢掉，manual-editor 前端无法直接看到每条字幕的真实来源。
+  - 已落地修复：
+    - `ManualEditorSubtitleOut` 新增 `projection_source`；
+    - `_manual_editor_subtitle_payload(...)` 现在会显式透传 `projection_source`。
+  - 更新回归：
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_subtitle_payload_exposes_transcript_text_without_replacing_final_text`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_subtitle_payload_exposes_transcript_text_without_replacing_final_text or variant_subtitle_event_preserves_source_mapping_metadata or projection_validation_source_payloads_fallback_to_subtitle_items_keep_source_basis or subtitle_item_payload_preserves_display_suppressed_reason" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/api/jobs.py src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 manual-editor 自有 replay/fallback adapter 的 surface 合同落后。定位到第一坏层在 `src/roughcut/api/jobs.py::_manual_editor_subtitle_item_payload(...)` 与 `_manual_editor_subtitle_projection_entry_payload(...)`：
+  - manual-editor 模块有自己的一套 projection replay/fallback adapter，和 pipeline 主链并行存在；
+  - 旧逻辑里 item fallback payload 仍只有 `text_raw/text_norm/text_final`，projection entry replay 虽有 `projection_source` 但没有 `display_suppressed_reason`；
+  - 这意味着 pipeline 主链已经补齐的 surface 元信息，进入 manual-editor 专用 fallback/replay 链后仍会再次丢一遍。
+  - 已落地修复：
+    - `_manual_editor_subtitle_item_payload(...)` 现在保留 `display_suppressed_reason`，并显式标注 `projection_source="subtitle_item"`；
+    - `_manual_editor_subtitle_projection_entry_payload(...)` 现在也会透传 `display_suppressed_reason`。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_subtitle_item_payload_preserves_surface_metadata`
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_subtitle_projection_entry_payload_preserves_surface_metadata`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_subtitle_item_payload_preserves_surface_metadata or manual_editor_subtitle_projection_entry_payload_preserves_surface_metadata or manual_editor_subtitle_payload_exposes_transcript_text_without_replacing_final_text or variant_subtitle_event_preserves_source_mapping_metadata" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/api/jobs.py src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 manual-editor projection-as-source 共享出口的 suppression 裁剪。定位到第一坏层在 `src/roughcut/api/jobs.py::_manual_editor_projection_rows_as_source_rows(...)`：
+  - 该 helper 会在 manual-editor 直接复用 projection rows 作为 source rows 时，统一重建一层 source payload；
+  - 旧逻辑已经保留了 `projection_source` 和 `segmentation_locked`，但没有把 `display_suppressed_reason` 一起透传；
+  - 这意味着 suppressed display 的 canonical source rows 虽然能保留 `text_final=""`，但 suppression 理由在 manual-editor source-row 出口仍会丢失。
+  - 已落地修复：
+    - `_manual_editor_projection_rows_as_source_rows(...)` 现在会显式透传 `display_suppressed_reason`；
+    - manual-editor 专用 source rows、fallback payload、replay payload 三条并行路径的 suppression 合同一致。
+  - 更新回归：
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_projection_rows_as_source_rows_preserve_canonical_without_raw_fallback`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_projection_rows_as_source_rows_preserve_canonical_without_raw_fallback or manual_editor_subtitle_item_payload_preserves_surface_metadata or manual_editor_subtitle_projection_entry_payload_preserves_surface_metadata or manual_editor_subtitle_payload_exposes_transcript_text_without_replacing_final_text" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 manual-editor canonical source-row 出口的 suppression 理由丢失。定位到第一坏层在 `src/roughcut/api/jobs.py::_manual_editor_canonical_segment_source_rows(...)`：
+  - 该 helper 会把 canonical transcript layer 直接转成 manual-editor 源字幕 rows，是 canonical source path 的共享出口；
+  - 旧逻辑已经保留了 raw/canonical/display 三层文本和 `projection_source`，但没有继续透传 `display_suppressed_reason`；
+  - 这意味着 canonical source rows 即便会因为 raw ASR reveal 继续显示文本，suppressed display 的原始理由到 manual-editor 源字幕层仍会断掉。
+  - 已落地修复：
+    - `_manual_editor_canonical_segment_source_rows(...)` 现在会显式透传 `display_suppressed_reason`；
+    - canonical source rows 与 manual-editor projection-as-source rows、fallback payload、replay payload 的 suppression 合同一致。
+  - 更新回归：
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_canonical_source_rows_reveal_raw_asr_fillers`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_canonical_source_rows_reveal_raw_asr_fillers or manual_editor_projection_rows_as_source_rows_preserve_canonical_without_raw_fallback or manual_editor_subtitle_item_payload_preserves_surface_metadata or manual_editor_subtitle_payload_exposes_transcript_text_without_replacing_final_text" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 manual-editor source-row builders 之间的 suppression 合同不一致。定位到第一坏层在 `src/roughcut/api/jobs.py::_manual_editor_transcript_source_rows(...)` 与 `_manual_editor_subtitle_item_source_rows(...)`：
+  - 前几轮已经让 canonical source rows、projection-as-source rows、fallback/replay payload 能透传 `display_suppressed_reason`；
+  - 但 transcript source rows 与 subtitle-item source rows 这两条并行 builder 仍没有显式输出该字段，即便只是 `None` 也缺失；
+  - 这会导致 manual-editor 源字幕 rows 的字段合同按来源不同而变化，下游如果按统一 shape 读取会继续碰到“有的分支有 suppression key，有的没有”的不稳定性。
+  - 已落地修复：
+    - `_manual_editor_transcript_source_rows(...)` 现在会显式输出 `display_suppressed_reason`；
+    - `_manual_editor_subtitle_item_source_rows(...)` 现在也会显式输出 `display_suppressed_reason`。
+  - 更新回归：
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_transcript_source_rows_do_not_apply_early_term_corrections`
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_subtitle_items_can_serve_as_legacy_source_fallback`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_transcript_source_rows_do_not_apply_early_term_corrections or manual_editor_subtitle_items_can_serve_as_legacy_source_fallback or manual_editor_canonical_source_rows_reveal_raw_asr_fillers or manual_editor_projection_rows_as_source_rows_preserve_canonical_without_raw_fallback" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 manual-editor canonical namespace 反序列化的 surface 缺口。定位到第一坏层在 `src/roughcut/api/jobs.py::_manual_editor_canonical_layer_namespace(...)`：
+  - 这是一条 manual-editor 专用的 canonical transcript artifact 反序列化入口，会把 canonical layer 重新转成 namespace，再喂给 `_manual_editor_rebuild_projection_entries_from_canonical_layer(...)`；
+  - 旧逻辑只保留了 `text_raw/text_canonical`，没有把 `text_norm/text_final/display_suppressed_reason` 一起透传；
+  - 这意味着 pipeline 主链和 manual-editor source rows 已经补齐的 surface 合同，到了 manual-editor canonical rebuild replay 入口仍会再次被削成半套字段。
+  - 已落地修复：
+    - `_manual_editor_canonical_layer_namespace(...)` 现在会同时保留 `text_norm/text_canonical/text_final/display_suppressed_reason`；
+    - manual-editor canonical rebuild replay 与 pipeline canonical replay、manual-editor source-row 出口的 surface 合同保持一致。
+  - 更新回归：
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_canonical_layer_namespace_preserves_explicit_canonical_over_generic_text`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_canonical_layer_namespace_preserves_explicit_canonical_over_generic_text or manual_editor_canonical_source_rows_reveal_raw_asr_fillers or manual_editor_projection_rows_as_source_rows_preserve_canonical_without_raw_fallback or manual_editor_subtitle_payload_exposes_transcript_text_without_replacing_final_text" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 又收掉 manual-editor orphan-word 虚拟行的来源标识缺失。定位到第一坏层在 `src/roughcut/api/jobs.py::_manual_editor_orphan_word_subtitles(...)`：
+  - 该 helper 会把未被任何现有字幕覆盖的 ASR words 聚合成 `virtual_rows`，作为 manual-editor 源字幕层的补洞机制；
+  - 旧逻辑会新建一整行 dict，但没有显式填 `projection_source`，也没有给出固定的 `display_suppressed_reason` 键；
+  - 这意味着 manual-editor 源字幕 rows 即使大部分分支已经对齐了统一 contract，这条 orphan-word 虚拟行分支仍会产出“没有来源标识的裸行”。
+  - 已落地修复：
+    - orphan-word `virtual_rows` 现在显式标记 `projection_source="transcript_segment"`；
+    - 同时显式给出 `display_suppressed_reason=None`，保证与其它 source-row builder 的 shape 一致。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_orphan_word_subtitles_expose_transcript_source_basis`
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_orphan_word_subtitles_expose_transcript_source_basis or manual_editor_transcript_source_rows_do_not_apply_early_term_corrections or manual_editor_canonical_layer_namespace_preserves_explicit_canonical_over_generic_text or manual_editor_subtitle_payload_exposes_transcript_text_without_replacing_final_text" -q`（`4` 项通过）
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py`
+
+- 2026-06-12: `C1` 进入窄收口审计后，暂未再发现新的 shared surface-contract 漏点：
+  - 对 `src/roughcut/api/jobs.py` 与 `src/roughcut/pipeline/steps.py` 中所有现存 `projection_source / display_suppressed_reason` 传播点做了集中核对；
+  - 重点复核了 manual-editor 的 source-row builders、fallback/replay payload、canonical namespace replay、variant subtitle event 导出、projection validation source payload、subtitle-item fallback、projection artifact replay 这些并行入口/出口；
+  - 当前证据表明，`C1` 剩余风险已从“明显共享入口漏字段”降到“可能只剩更局部、需要真实任务触发才能暴露的窄边角”。
+  - 宽验证：
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_canonical_layer_namespace_preserves_explicit_canonical_over_generic_text or manual_editor_canonical_source_rows_reveal_raw_asr_fillers or manual_editor_projection_rows_as_source_rows_preserve_canonical_without_raw_fallback or manual_editor_transcript_source_rows_do_not_apply_early_term_corrections or manual_editor_subtitle_items_can_serve_as_legacy_source_fallback or manual_editor_subtitle_item_payload_preserves_surface_metadata or manual_editor_subtitle_projection_entry_payload_preserves_surface_metadata or manual_editor_orphan_word_subtitles_expose_transcript_source_basis or manual_editor_subtitle_payload_exposes_transcript_text_without_replacing_final_text or variant_subtitle_event_preserves_source_mapping_metadata or projection_validation_source_payloads_fallback_to_subtitle_items_keep_source_basis or projection_validation_source_payloads_keep_fact_layers_without_explicit_display_text" -q`（`12` 项通过）
+    - `PYTHONPATH=src python -m pytest tests/test_subtitle_fact_conservation.py -k "transcript_first_canonical_layer_preserves_explicit_raw_and_canonical_surfaces or transcript_segment_adapters_preserve_explicit_raw_and_canonical_surfaces or transcript_fact_layer_prefers_explicit_canonical_surface_from_dict_segments or canonical_transcript_layer_preserves_explicit_surfaces_from_dict_subtitle_items or canonical_transcript_layer_preserves_explicit_canonical_surface_from_dict_transcript_segments" -q`（`5` 项通过）
+    - `python -m py_compile src/roughcut/api/jobs.py src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py tests/test_subtitle_fact_conservation.py`
+
+- 2026-06-12: `C1` 又补了一轮更接近实战的 manual-editor 聚合链回放，结论从“接近收口”提升为“当前范围可收口”：
+  - `tests/test_manual_editor_session_regressions.py -q` 全文件通过（`9 passed`），覆盖了 manual-editor session 就绪、projection 缺失 fallback、projection suspicious fallback、displayed projection 与 validated projection 一致性、退化 cut-analysis 容忍等更长链路；
+  - `tests/test_run_auto_edit_recovery_golden_set.py -k "manual_editor" -q` 通过（`9 passed`），覆盖 manual-editor apply semantics gate、case summary、reference promotion、boundary-preference 等聚合语义门禁；
+  - 结合前面的 helper/source-row/replay contract 回归，这说明当前 workspace 里 `C1` 已不再有“明确共享入口仍在削薄 surface contract”的证据。
+  - 当前判断：
+    - `C1` 不再应标注为 `near closure`；
+    - 对本轮策略收缩后的阶段 B 范围，`C1` 应视为 `closed for current scope`；
+    - 剩余风险仅属于可选真实样本 breadth，而不是继续代码 churn 的结构阻断。
+
+- 2026-06-12: `C3` 也已从“接近收口”提升为“当前范围可收口”，不再继续保留虚假的半开状态：
+  - focused 验证已补齐到规则注册表、source timeline contract、resolved-candidate、multimodal gate、frontend-managed auto-cut 这几条共享主链；
+  - `PYTHONPATH=src python -m pytest tests/test_rule_registry.py tests/test_source_timeline_contract.py -q` 通过（`13 passed`）；
+  - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "cut_analysis_candidate_items_resolved_reuses_shared_auto_apply_contract or cut_analysis_effective_applied_cuts_resolves_legacy_auto_payload_candidates or refine_decision_plan_auto_refine_resolves_legacy_low_risk_rule_candidates or refine_decision_plan_auto_refine_applies_low_risk_rule_candidates or multimodal_trim_review_payload_uses_registry_for_default_semantic_review_rules or cut_analysis_payload_keeps_reviewed_rule_candidate_out_of_rule_auto_apply_bucket or frontend_managed_auto_cuts_keep_low_risk_catchphrase_ranges" -q` 通过（`7 passed`）；
+  - `python -m py_compile src/roughcut/edit/rule_registry.py src/roughcut/edit/cut_analysis.py src/roughcut/edit/multimodal_trim_review.py src/roughcut/api/jobs.py tests/test_rule_registry.py tests/test_source_timeline_contract.py tests/test_manual_editor_helpers.py` 通过；
+  - 这说明当前 workspace 里，`C3` 已不再存在“主链 consumer 还在各自猜 auto-apply / review gate”的结构性证据；
+  - 当前判断：
+    - `C3` 不再应标注为 `near closure`；
+    - 对本轮策略收缩后的阶段 B 范围，`C3` 应视为 `closed for current scope`；
+    - 剩余只该等新的真实误删/误分桶样本触发，而不是继续扩张规则框架。

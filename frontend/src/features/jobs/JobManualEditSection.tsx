@@ -219,6 +219,11 @@ type SmartCutRuleMatch = KeepSegment & {
   kind: SmartCutRuleKind;
   fillerMode?: SmartCutFillerMode;
   reason?: string;
+  stage?: string;
+  ruleId?: string | null;
+  matchSurface?: string | null;
+  matchSurfaceLayer?: string | null;
+  riskLevel?: string | null;
   detail?: string | null;
   sourceText?: string;
   protected?: boolean;
@@ -233,6 +238,11 @@ type SmartDeleteSuggestion = {
   text: string;
   reasonSummary: string;
   detailSummary?: string;
+  stage?: string;
+  matchSurface?: string | null;
+  riskLevel?: string | null;
+  ruleId?: string | null;
+  matchSurfaceLayer?: string | null;
 };
 
 type TimedSourceRange = KeepSegment & {
@@ -479,14 +489,6 @@ const PREVIOUS_NARROW_SMART_CUT_RULES: SmartCutRules = {
   fillers: DEFAULT_SMART_CUT_FILLERS,
   catchphrases: DEFAULT_SMART_CUT_CATCHPHRASES,
 };
-const PREVIOUS_EXPANDED_SMART_CUT_RULES: SmartCutRules = {
-  ...PREVIOUS_NARROW_SMART_CUT_RULES,
-  fillerSentenceHeadEnabled: true,
-};
-const PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES: SmartCutRules = {
-  ...PREVIOUS_EXPANDED_SMART_CUT_RULES,
-  catchphraseEnabled: true,
-};
 const DEFAULT_SMART_CUT_RULES: SmartCutRules = {
   ...PREVIOUS_NARROW_SMART_CUT_RULES,
 };
@@ -527,36 +529,6 @@ function normalizeSmartCutRules(value: Partial<SmartCutRules> | null | undefined
     fillers: normalizeSmartCutFillersValue(rawFillers),
     catchphrases: normalizeSmartCutTermListValue(rawCatchphrases, DEFAULT_SMART_CUT_CATCHPHRASES),
   };
-  if (
-    (
-      normalized.fillerEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.fillerEnabled
-      && normalized.fillerStandaloneEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.fillerStandaloneEnabled
-      && normalized.fillerSentenceHeadEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.fillerSentenceHeadEnabled
-      && normalized.fillerSentenceTailEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.fillerSentenceTailEnabled
-      && normalized.catchphraseEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.catchphraseEnabled
-      && normalized.repeatedEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.repeatedEnabled
-      && normalized.pauseEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.pauseEnabled
-      && normalized.smartDeleteEnabled === PREVIOUS_EXPANDED_SMART_CUT_RULES.smartDeleteEnabled
-      && normalized.pauseThresholdSec === PREVIOUS_EXPANDED_SMART_CUT_RULES.pauseThresholdSec
-      && normalized.fillers === PREVIOUS_EXPANDED_SMART_CUT_RULES.fillers
-      && normalized.catchphrases === PREVIOUS_EXPANDED_SMART_CUT_RULES.catchphrases
-    )
-    || (
-      normalized.fillerEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.fillerEnabled
-      && normalized.fillerStandaloneEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.fillerStandaloneEnabled
-      && normalized.fillerSentenceHeadEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.fillerSentenceHeadEnabled
-      && normalized.fillerSentenceTailEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.fillerSentenceTailEnabled
-      && normalized.catchphraseEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.catchphraseEnabled
-      && normalized.repeatedEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.repeatedEnabled
-      && normalized.pauseEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.pauseEnabled
-      && normalized.smartDeleteEnabled === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.smartDeleteEnabled
-      && normalized.pauseThresholdSec === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.pauseThresholdSec
-      && normalized.fillers === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.fillers
-      && normalized.catchphrases === PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES.catchphrases
-    )
-  ) {
-    return { ...DEFAULT_SMART_CUT_RULES };
-  }
   return normalized;
 }
 
@@ -778,10 +750,12 @@ function subtitleTranscriptSourceText(subtitle: JobManualEditSubtitle) {
   const timingText = String(subtitle.timing_text || "").trim();
   const normText = String(subtitle.text_norm || "").trim();
   const rawText = String(subtitle.text_raw || "").trim();
+  const transcriptTextRaw = String(subtitle.transcript_text_raw || "").trim();
   const transcriptText = String(subtitle.transcript_text || "").trim();
-  const baselineText = finalText || timingText || normText || rawText || transcriptText;
-  if (transcriptText) {
-    const preferredTranscriptText = preferDenoisedAsrTranscriptText(baselineText, transcriptText);
+  const transcriptSourceText = transcriptText || transcriptTextRaw;
+  const baselineText = finalText || timingText || normText || rawText || transcriptSourceText;
+  if (transcriptSourceText) {
+    const preferredTranscriptText = preferDenoisedAsrTranscriptText(baselineText, transcriptSourceText);
     if (transcriptTextAddsUnsupportedFillerNoise(subtitle, baselineText, preferredTranscriptText)) {
       return applyConservativeAsrWordCorrections(baselineText);
     }
@@ -793,26 +767,52 @@ function subtitleTranscriptSourceText(subtitle: JobManualEditSubtitle) {
   return applyConservativeAsrWordCorrections(baselineText);
 }
 
+// Full-text projection prefers the corrected transcript preview, while rule scans
+// must stay on the raw ASR-oriented surface unless the backend provided explicit
+// timing text for the exact spoken fragment.
 function subtitleRuleSourceText(subtitle: JobManualEditSubtitle, kind: SmartCutRuleKind) {
   if (kind === "filler" || kind === "catchphrase") {
     const explicitTimingText = String(subtitle.timing_text || "").trim();
+    const baselineText = subtitleText(subtitle);
     if (explicitTimingText) {
       return applyConservativeAsrWordCorrections(denoiseAsrTranscriptText(explicitTimingText));
+    }
+    const transcriptTextRaw = String(subtitle.transcript_text_raw || "").trim();
+    const transcriptText = String(subtitle.transcript_text || "").trim();
+    if (transcriptTextRaw) {
+      const cleaned = applyConservativeAsrWordCorrections(denoiseAsrTranscriptText(transcriptTextRaw));
+      if (!transcriptTextAddsUnsupportedFillerNoise(subtitle, baselineText, cleaned)) {
+        return cleaned;
+      }
     }
     const timingSupportedText = subtitleTimingSupportedRuleText(subtitle);
     if (timingSupportedText) {
       return timingSupportedText;
     }
-    const transcriptText = String(subtitle.transcript_text || "").trim();
     if (transcriptText) {
-      return applyConservativeAsrWordCorrections(
-        preferDenoisedAsrTranscriptText(subtitleText(subtitle) || String(subtitle.text_raw || "").trim(), transcriptText),
-      );
+      const cleaned = applyConservativeAsrWordCorrections(denoiseAsrTranscriptText(transcriptText) || transcriptText);
+      if (!transcriptTextAddsUnsupportedFillerNoise(subtitle, baselineText, cleaned)) {
+        return cleaned;
+      }
+      return "";
     }
     const rawText = String(subtitle.text_raw || "").trim();
     if (rawText) {
       return applyConservativeAsrWordCorrections(rawText);
     }
+  }
+  if (kind === "repeated" || kind === "pause") {
+    const transcriptText = String(subtitle.transcript_text || "").trim();
+    if (transcriptText) {
+      return applyConservativeAsrWordCorrections(denoiseAsrTranscriptText(transcriptText) || transcriptText);
+    }
+    const transcriptTextRaw = String(subtitle.transcript_text_raw || "").trim();
+    if (transcriptTextRaw) {
+      return applyConservativeAsrWordCorrections(denoiseAsrTranscriptText(transcriptTextRaw));
+    }
+  }
+  if (kind === "smart_delete") {
+    return subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle);
   }
   return subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle);
 }
@@ -3051,6 +3051,17 @@ function smartCutRuleReason(kind: SmartCutRuleKind, match?: SmartCutRuleMatch | 
   }
 }
 
+function smartCutRuleMatchProvenance(match?: SmartCutRuleMatch | null) {
+  if (!match) return "";
+  const stageLabel = match.stage
+    ? `来源阶段：${match.stage}`
+    : "来源阶段：auto_edit_decision";
+  const surfaceLabel = match.matchSurface ? `匹配面：${match.matchSurface}` : "";
+  const riskLabel = match.riskLevel ? `风险：${match.riskLevel}` : "";
+  const layerLabel = match.matchSurfaceLayer ? `匹配来源层：${match.matchSurfaceLayer}` : "";
+  return [stageLabel, layerLabel, surfaceLabel, riskLabel].filter(Boolean).join("；");
+}
+
 function manualCutReason() {
   return "手动删除：用户在全文剪辑或时间轴中删除。";
 }
@@ -4435,7 +4446,7 @@ function rangeHasReliableTextCutTiming(range: TimedSourceRange, subtitle: JobMan
 }
 
 function findRepeatedSpeechRangesInSubtitle(subtitle: JobManualEditSubtitle) {
-  const text = subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle);
+  const text = subtitleRuleSourceText(subtitle, "repeated");
   if (!text) return [];
   const ranges: KeepSegment[] = [];
   const repeatedMatches = text.matchAll(/([\u4e00-\u9fff]{1,3})([\s，,、]*)\1/g);
@@ -4493,8 +4504,8 @@ function findRepeatedSpeechRangesAcrossSubtitles(subtitles: JobManualEditSubtitl
   for (let index = 1; index < sorted.length; index += 1) {
     const previous = sorted[index - 1];
     const current = sorted[index];
-    const previousChars = Array.from(subtitleTranscriptSourceText(previous) || subtitleText(previous));
-    const currentChars = Array.from(subtitleTranscriptSourceText(current) || subtitleText(current));
+    const previousChars = Array.from(subtitleRuleSourceText(previous, "repeated"));
+    const currentChars = Array.from(subtitleRuleSourceText(current, "repeated"));
     const maxLength = Math.min(12, previousChars.length, currentChars.length);
     for (let phraseLength = maxLength; phraseLength >= 4; phraseLength -= 1) {
       const phrase = previousChars.slice(previousChars.length - phraseLength).join("");
@@ -4535,7 +4546,7 @@ function subtitleHasUsableWordTimings(subtitle: JobManualEditSubtitle) {
 function pauseRangeOverlapsMeaningfulSpeech(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
   const overlappingSubtitles = subtitles.filter((subtitle) => {
     const overlap = Math.min(range.end, subtitle.end_time) - Math.max(range.start, subtitle.start_time);
-    return overlap > 0.08 && smartCutMeaningfulText(subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle), fillers).length >= 2;
+    return overlap > 0.08 && smartCutMeaningfulText(subtitleRuleSourceText(subtitle, "pause"), fillers).length >= 2;
   });
   if (!overlappingSubtitles.length) return false;
 
@@ -4625,7 +4636,7 @@ function pauseRangeOverlapsTimedSpeech(range: SilenceRange, wordRanges: KeepSegm
 function subtitleBoundedPauseRanges(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
   const ranges: KeepSegment[] = [];
   const sorted = sortedSubtitles(subtitles).filter((subtitle) => (
-    smartCutMeaningfulText(subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle), fillers).length >= 2
+    smartCutMeaningfulText(subtitleRuleSourceText(subtitle, "pause"), fillers).length >= 2
   ));
   for (let index = 1; index < sorted.length; index += 1) {
     const previous = sorted[index - 1];
@@ -4645,7 +4656,7 @@ function subtitleBoundedPauseRanges(range: SilenceRange, subtitles: JobManualEdi
 function rangeOverlapsSubtitleSpeech(range: KeepSegment, subtitles: JobManualEditSubtitle[], fillers: string[]) {
   return subtitles.some((subtitle) => {
     const overlap = Math.min(range.end, subtitle.end_time) - Math.max(range.start, subtitle.start_time);
-    return overlap > 0.08 && smartCutMeaningfulText(subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle), fillers).length >= 2;
+    return overlap > 0.08 && smartCutMeaningfulText(subtitleRuleSourceText(subtitle, "pause"), fillers).length >= 2;
   });
 }
 
@@ -4669,7 +4680,7 @@ function fallbackCuttablePauseRanges(range: SilenceRange, subtitles: JobManualEd
 
 function rangeOverlapsUntrustedSubtitleSpeech(range: KeepSegment, subtitles: JobManualEditSubtitle[], fillers: string[]) {
   return subtitles.some((subtitle) => {
-    if (smartCutMeaningfulText(subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle), fillers).length < 2) return false;
+    if (smartCutMeaningfulText(subtitleRuleSourceText(subtitle, "pause"), fillers).length < 2) return false;
     const overlap = Math.min(range.end, subtitle.end_time) - Math.max(range.start, subtitle.start_time);
     if (overlap <= 0.08) return false;
     return !asrTimedSpeechRangesForSubtitle(subtitle).length;
@@ -4678,7 +4689,7 @@ function rangeOverlapsUntrustedSubtitleSpeech(range: KeepSegment, subtitles: Job
 
 function audioRangeBroadlyOverlapsSubtitleSpeech(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
   return subtitles.some((subtitle) => {
-    if (smartCutMeaningfulText(subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle), fillers).length < 2) return false;
+    if (smartCutMeaningfulText(subtitleRuleSourceText(subtitle, "pause"), fillers).length < 2) return false;
     const subtitleDuration = Math.max(0.001, subtitle.end_time - subtitle.start_time);
     const overlap = Math.min(range.end, subtitle.end_time) - Math.max(range.start, subtitle.start_time);
     return overlap > 0.08 && overlap / subtitleDuration >= 0.55;
@@ -4689,7 +4700,7 @@ const SMART_CUT_VISUAL_SHOWCASE_TEXT_RE = /(看到|看一下|来看|镜头|画�
 
 function audioRangeOverlapsProtectedVisualSubtitle(range: SilenceRange, subtitles: JobManualEditSubtitle[], fillers: string[]) {
   return subtitles.some((subtitle) => {
-    const text = subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle);
+    const text = subtitleRuleSourceText(subtitle, "pause");
     if (!SMART_CUT_VISUAL_SHOWCASE_TEXT_RE.test(text)) return false;
     if (smartCutMeaningfulText(text, fillers).length < 2) return false;
     const overlap = Math.min(range.end, subtitle.end_time) - Math.max(range.start, subtitle.start_time);
@@ -4724,7 +4735,7 @@ function pauseRangesCanCluster(
   if (hasRelevantTimedSpeech) {
     return !timedSpeechRanges.some((range) => range.end > gapStart + 0.001 && range.start < gapEnd - 0.001);
   }
-  return !smartCutMeaningfulText(subtitleTextForSourceRange({ start: gapStart, end: gapEnd }, subtitles), fillers);
+  return !smartCutMeaningfulText(subtitleTextForSourceRange({ start: gapStart, end: gapEnd }, subtitles, "pause"), fillers);
 }
 
 function pauseRangesCanReviewGroup(
@@ -4738,7 +4749,7 @@ function pauseRangesCanReviewGroup(
   if (gapEnd <= gapStart + 0.001) return true;
   if (gapEnd - gapStart > SMART_CUT_PAUSE_REVIEW_GROUP_GAP_SEC) return false;
   if (Math.max(left.end, right.end) - Math.min(left.start, right.start) > SMART_CUT_PAUSE_REVIEW_GROUP_MAX_SPAN_SEC) return false;
-  const text = subtitleTextForSourceRange({ start: gapStart, end: gapEnd }, subtitles);
+  const text = subtitleTextForSourceRange({ start: gapStart, end: gapEnd }, subtitles, "pause");
   const meaningfulText = smartCutMeaningfulText(text, fillers);
   if (meaningfulText.length > SMART_CUT_PAUSE_REVIEW_GROUP_MAX_TEXT_CHARS) return false;
   if (/[。！？!?]/.test(text) && meaningfulText.length > 8) return false;
@@ -4766,13 +4777,17 @@ function pauseGroupsForThreshold(
   return groups;
 }
 
-function subtitleTextForSourceRange(range: KeepSegment, subtitles: JobManualEditSubtitle[]) {
+function subtitleTextForSourceRange(
+  range: KeepSegment,
+  subtitles: JobManualEditSubtitle[],
+  kind?: SmartCutRuleKind,
+) {
   const fragments: string[] = [];
   for (const subtitle of subtitles) {
     const overlapStart = Math.max(range.start, subtitle.start_time);
     const overlapEnd = Math.min(range.end, subtitle.end_time);
     if (overlapEnd <= overlapStart + 0.015) continue;
-    const text = subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle);
+    const text = kind ? subtitleRuleSourceText(subtitle, kind) : (subtitleTranscriptSourceText(subtitle) || subtitleText(subtitle));
     const chars = Array.from(text);
     if (!chars.length) continue;
     const duration = Math.max(0.001, subtitle.end_time - subtitle.start_time);
@@ -4786,7 +4801,7 @@ function subtitleTextForSourceRange(range: KeepSegment, subtitles: JobManualEdit
 
 function smartDeleteRangeContainsProtectedTerm(range: SmartCutRuleMatch, subtitles: JobManualEditSubtitle[]) {
   const text = [
-    subtitleTextForSourceRange(range, subtitles),
+    subtitleTextForSourceRange(range, subtitles, "smart_delete"),
     range.sourceText || "",
     range.detail || "",
     range.reason || "",
@@ -4859,6 +4874,14 @@ function backendSmartCutRuleRanges(
       end: Number(end.toFixed(3)),
       kind: segment.kind,
       reason: segment.reason,
+      stage: segment.stage,
+      ruleId: segment.rule_id ?? (segment as { ruleId?: string | null }).ruleId ?? null,
+      matchSurface: segment.match_surface ?? (segment as { matchSurface?: string | null }).matchSurface ?? null,
+      matchSurfaceLayer:
+        segment.match_surface_layer
+        ?? (segment as { matchSurfaceLayer?: string | null }).matchSurfaceLayer
+        ?? null,
+      riskLevel: segment.risk_level ?? (segment as { riskLevel?: string | null }).riskLevel ?? null,
       detail: segment.detail || undefined,
       sourceText: segment.source_text || segment.evidence?.find((item) => item.trim()) || segment.detail || segment.reason,
       autoCut: segment.kind === "smart_delete" ? false : true,
@@ -4904,6 +4927,10 @@ function buildLocalSmartCutRuleAnalysis(
   enabledKinds: Set<SmartCutRuleKind> = new Set(["filler", "catchphrase", "repeated", "pause", "smart_delete"]),
 ): SmartCutRuleAnalysis {
   const normalizedRules = normalizeSmartCutRules(rules);
+  const shouldScanFiller = enabledKinds.has("filler") && normalizedRules.fillerEnabled;
+  const shouldScanCatchphrase = enabledKinds.has("catchphrase") && normalizedRules.catchphraseEnabled;
+  const shouldScanRepeated = enabledKinds.has("repeated") && normalizedRules.repeatedEnabled;
+  const shouldScanPause = enabledKinds.has("pause") && normalizedRules.pauseEnabled;
   const analysis: SmartCutRuleAnalysis = {
     filler: [],
     catchphrase: [],
@@ -4915,33 +4942,35 @@ function buildLocalSmartCutRuleAnalysis(
   if (!enabledKinds.has("smart_delete")) {
     analysis.smartDelete = [];
   }
-  const fillers = enabledKinds.has("filler") || enabledKinds.has("pause")
+  const fillers = shouldScanFiller
     ? parseSmartCutFillers(normalizedRules.fillers)
     : [];
-  const catchphrases = enabledKinds.has("catchphrase") || enabledKinds.has("pause")
+  const catchphrases = shouldScanCatchphrase
     ? parseSmartCutCatchphrases(normalizedRules.catchphrases || "")
     : [];
-  const lowSignalTerms = [...new Set([...catchphrases, ...fillers])].sort((left, right) => right.length - left.length);
+  const lowSignalTerms = shouldScanPause
+    ? [...new Set([...catchphrases, ...fillers])].sort((left, right) => right.length - left.length)
+    : [];
   for (const subtitle of subtitles) {
-    if (enabledKinds.has("filler")) {
+    if (shouldScanFiller) {
       for (const filler of fillers) {
         analysis.filler.push(...findTextRangesInSubtitle(subtitle, filler, "filler").map((range) => ({ ...range, kind: "filler" as const })));
       }
     }
-    if (enabledKinds.has("catchphrase")) {
+    if (shouldScanCatchphrase) {
       for (const catchphrase of catchphrases) {
         analysis.catchphrase.push(...findPhraseRangesInSubtitle(subtitle, catchphrase, "catchphrase").map((range) => ({ ...range, kind: "catchphrase" as const, sourceText: catchphrase })));
       }
     }
-    if (enabledKinds.has("repeated")) {
+    if (shouldScanRepeated) {
       analysis.repeated.push(...findRepeatedSpeechRangesInSubtitle(subtitle).map((range) => ({ ...range, kind: "repeated" as const })));
     }
   }
-  if (enabledKinds.has("repeated")) {
+  if (shouldScanRepeated) {
     analysis.repeated.push(...findRepeatedSpeechRangesAcrossSubtitles(subtitles));
   }
   const pauseCandidates: SmartCutRuleMatch[] = [];
-  if (enabledKinds.has("pause")) {
+  if (shouldScanPause) {
     for (const range of silenceRanges) {
       for (const cuttableRange of cuttablePauseRanges(range, subtitles, lowSignalTerms)) {
         if (rangeOverlapsUntrustedSubtitleSpeech(cuttableRange, subtitles, lowSignalTerms)) continue;
@@ -4972,47 +5001,66 @@ function resolveAuthoritativeSmartCutRuleAnalysis(
   authoritativeKinds: Set<SmartCutRuleKind>,
 ): SmartCutRuleAnalysis {
   const normalizedRules = normalizeSmartCutRules(rules);
-  const lowSignalTerms = [...new Set([
-    ...parseSmartCutCatchphrases(normalizedRules.catchphrases || ""),
-    ...parseSmartCutFillers(normalizedRules.fillers),
-  ])].sort((left, right) => right.length - left.length);
-  const mergedPauseCandidates = authoritativeKinds.has("pause")
-    ? backendAnalysis.pauseCandidates
-    : mergePreferredSmartCutRuleMatches(
-      backendAnalysis.pauseCandidates,
-      localAnalysis.pauseCandidates.filter((range) => range.end > range.start + 0.02),
-    );
+  const shouldResolveFiller = normalizedRules.fillerEnabled;
+  const shouldResolveCatchphrase = normalizedRules.catchphraseEnabled;
+  const shouldResolveRepeated = normalizedRules.repeatedEnabled;
+  const shouldResolvePause = normalizedRules.pauseEnabled;
+  const shouldResolveSmartDelete = normalizedRules.smartDeleteEnabled;
+  const lowSignalTerms = shouldResolvePause
+    ? [...new Set([
+      ...parseSmartCutCatchphrases(normalizedRules.catchphrases || ""),
+      ...parseSmartCutFillers(normalizedRules.fillers),
+    ])].sort((left, right) => right.length - left.length)
+    : [];
+  const mergedPauseCandidates = shouldResolvePause
+    ? (authoritativeKinds.has("pause")
+      ? backendAnalysis.pauseCandidates
+      : mergePreferredSmartCutRuleMatches(
+        backendAnalysis.pauseCandidates,
+        localAnalysis.pauseCandidates.filter((range) => range.end > range.start + 0.02),
+      ))
+    : [];
   const mergedPause: SmartCutRuleMatch[] = [];
-  for (const group of pauseGroupsForThreshold(mergedPauseCandidates, subtitles, lowSignalTerms)) {
-    const pauseDuration = group.reduce((total, range) => total + Math.max(0, range.end - range.start), 0);
-    if (pauseDuration >= normalizedRules.pauseThresholdSec) {
-      mergedPause.push(...group);
+  if (shouldResolvePause) {
+    for (const group of pauseGroupsForThreshold(mergedPauseCandidates, subtitles, lowSignalTerms)) {
+      const pauseDuration = group.reduce((total, range) => total + Math.max(0, range.end - range.start), 0);
+      if (pauseDuration >= normalizedRules.pauseThresholdSec) {
+        mergedPause.push(...group);
+      }
     }
   }
-  const resolvedRepeated = authoritativeKinds.has("repeated")
-    ? backendAnalysis.repeated
-    : mergePreferredSmartCutRuleMatches(
-      backendAnalysis.repeated,
-      localAnalysis.repeated.filter((range) => range.end > range.start + 0.02),
-    );
-  const resolvedFiller = authoritativeKinds.has("filler")
-    ? backendAnalysis.filler
-    : mergePreferredSmartCutRuleMatches(
-      backendAnalysis.filler,
-      localAnalysis.filler.filter((range) => range.end > range.start + 0.02),
-    );
-  const resolvedCatchphrase = authoritativeKinds.has("catchphrase")
-    ? backendAnalysis.catchphrase
-    : mergePreferredSmartCutRuleMatches(
-      backendAnalysis.catchphrase,
-      localAnalysis.catchphrase.filter((range) => range.end > range.start + 0.02),
-    );
-  const resolvedSmartDelete = authoritativeKinds.has("smart_delete")
-    ? backendAnalysis.smartDelete
-    : mergePreferredSmartCutRuleMatches(
-      backendAnalysis.smartDelete,
-      localAnalysis.smartDelete,
-    );
+  const resolvedRepeated = shouldResolveRepeated
+    ? (authoritativeKinds.has("repeated")
+      ? backendAnalysis.repeated
+      : mergePreferredSmartCutRuleMatches(
+        backendAnalysis.repeated,
+        localAnalysis.repeated.filter((range) => range.end > range.start + 0.02),
+      ))
+    : [];
+  const resolvedFiller = shouldResolveFiller
+    ? (authoritativeKinds.has("filler")
+      ? backendAnalysis.filler
+      : mergePreferredSmartCutRuleMatches(
+        backendAnalysis.filler,
+        localAnalysis.filler.filter((range) => range.end > range.start + 0.02),
+      ))
+    : [];
+  const resolvedCatchphrase = shouldResolveCatchphrase
+    ? (authoritativeKinds.has("catchphrase")
+      ? backendAnalysis.catchphrase
+      : mergePreferredSmartCutRuleMatches(
+        backendAnalysis.catchphrase,
+        localAnalysis.catchphrase.filter((range) => range.end > range.start + 0.02),
+      ))
+    : [];
+  const resolvedSmartDelete = shouldResolveSmartDelete
+    ? (authoritativeKinds.has("smart_delete")
+      ? backendAnalysis.smartDelete
+      : mergePreferredSmartCutRuleMatches(
+        backendAnalysis.smartDelete,
+        localAnalysis.smartDelete,
+      ))
+    : [];
   return {
     filler: resolvedFiller,
     catchphrase: resolvedCatchphrase,
@@ -5078,12 +5126,12 @@ function joinReadableSummaryParts(parts: Array<string | undefined>) {
 }
 
 function subtitleSnippetForSourceRange(range: KeepSegment, subtitles: JobManualEditSubtitle[]) {
-  return textSnippet(subtitleTextForSourceRange(range, subtitles));
+  return textSnippet(subtitleTextForSourceRange(range, subtitles, "smart_delete"));
 }
 
 function subtitleSnippetForSourceRanges(ranges: KeepSegment[], subtitles: JobManualEditSubtitle[], maxChars = 42) {
   const fragments = ranges
-    .map((range) => subtitleTextForSourceRange(range, subtitles))
+    .map((range) => subtitleTextForSourceRange(range, subtitles, "smart_delete"))
     .map((text) => text.replace(/\s+/g, " ").trim())
     .filter(Boolean);
   if (!fragments.length) return "";
@@ -5247,6 +5295,11 @@ export function buildSmartDeleteSuggestions(
       end: group[group.length - 1].end,
       sourceRanges,
       primaryRange,
+      stage: primaryRange.stage,
+      matchSurface: primaryRange.matchSurface,
+      matchSurfaceLayer: primaryRange.matchSurfaceLayer,
+      riskLevel: primaryRange.riskLevel,
+      ruleId: primaryRange.ruleId,
       text,
       reasonSummary: smartDeleteReasonSummary(primaryRange.reason),
       detailSummary,
@@ -8308,6 +8361,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
                     } = transcriptTokenSmartCutVisualState(token, transcriptCutRanges, activeSmartCutRuleRanges);
                     const smartDeleteSuggestion = smartDeleteSuggestionForToken(token);
                     const cutKind = cut ? smartCutKind ?? "manual" : null;
+                    const provenance = smartCutRuleMatchProvenance(smartCutMatch || smartDeleteSuggestion || smartCutSuggestion);
                     const cutReason = cutKind && cutKind !== "manual"
                       ? `${smartCutRuleLabel(cutKind)}：${smartCutRuleReason(cutKind, smartCutMatch)}`
                       : cut ? manualCutReason() : null;
@@ -8316,10 +8370,11 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
                       : smartCutSuggestion && smartCutSuggestionKind
                         ? `${smartCutRuleLabel(smartCutSuggestionKind)}建议：${smartCutRuleReason(smartCutSuggestionKind, smartCutSuggestion)}`
                         : null;
+                    const matchedProvenance = provenance ? `；${provenance}` : "";
                     const tokenTitle = cutReason
-                      ? `${cutReason}${suggestionReason ? `；${suggestionReason}` : ""} ${formatSeconds(token.start)} - ${formatSeconds(token.end)}`
+                      ? `${cutReason}${suggestionReason ? `；${suggestionReason}` : ""} ${formatSeconds(token.start)} - ${formatSeconds(token.end)}${matchedProvenance}`
                       : suggestionReason
-                        ? `${suggestionReason} ${formatSeconds(token.start)} - ${formatSeconds(token.end)}`
+                        ? `${suggestionReason} ${formatSeconds(token.start)} - ${formatSeconds(token.end)}${matchedProvenance}`
                       : `${formatSeconds(token.start)} - ${formatSeconds(token.end)}`;
                     const breakNode = token.breakAfter === "paragraph"
                       ? (
@@ -8686,6 +8741,9 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
                               <strong>{formatSeconds(suggestion.start)} - {formatSeconds(suggestion.end)}</strong>
                               <span className="manual-editor-smart-suggestion-text">{suggestion.text || "待删内容"}</span>
                               <span className="manual-editor-smart-suggestion-reason">{suggestion.reasonSummary}</span>
+                              {smartCutRuleMatchProvenance(suggestion.primaryRange) ? (
+                                <span className="manual-editor-smart-suggestion-detail">{smartCutRuleMatchProvenance(suggestion.primaryRange)}</span>
+                              ) : null}
                               {suggestion.detailSummary ? <span className="manual-editor-smart-suggestion-detail">{suggestion.detailSummary}</span> : null}
                             </button>
                             <div className="manual-editor-smart-suggestion-actions">

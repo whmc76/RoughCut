@@ -232,6 +232,7 @@ def build_ai_effect_render_plan(
     subtitle_items: list[dict[str, Any]] | None = None,
     timeline_analysis: dict[str, Any] | None = None,
     editing_skill: dict[str, Any] | None = None,
+    reuse_bound_assets: bool = False,
 ) -> dict[str, Any]:
     ai_plan = copy.deepcopy(render_plan)
     ai_plan["avatar_commentary"] = None
@@ -241,20 +242,23 @@ def build_ai_effect_render_plan(
     )
     resolved_timeline_analysis = timeline_analysis or (ai_plan.get("timeline_analysis") if isinstance(ai_plan.get("timeline_analysis"), dict) else {})
     resolved_editing_skill = editing_skill or (ai_plan.get("editing_skill") if isinstance(ai_plan.get("editing_skill"), dict) else {})
-    ai_plan["section_choreography"] = _build_section_choreography(
-        timeline_analysis=resolved_timeline_analysis,
-        editing_skill=resolved_editing_skill,
-        style_variant="ai_effect",
-    )
-    ai_plan["insert"] = _bind_insert_to_section_choreography(
-        ai_plan.get("insert"),
-        section_choreography=ai_plan.get("section_choreography") or {},
-    )
-    ai_plan["music"] = _bind_music_to_choreography(
-        ai_plan.get("music"),
-        section_choreography=ai_plan.get("section_choreography") or {},
-        insert=ai_plan.get("insert"),
-    )
+    if reuse_bound_assets and isinstance(ai_plan.get("section_choreography"), dict):
+        ai_plan["section_choreography"] = copy.deepcopy(ai_plan.get("section_choreography") or {})
+    else:
+        ai_plan["section_choreography"] = _build_section_choreography(
+            timeline_analysis=resolved_timeline_analysis,
+            editing_skill=resolved_editing_skill,
+            style_variant="ai_effect",
+        )
+        ai_plan["insert"] = _bind_insert_to_section_choreography(
+            ai_plan.get("insert"),
+            section_choreography=ai_plan.get("section_choreography") or {},
+        )
+        ai_plan["music"] = _bind_music_to_choreography(
+            ai_plan.get("music"),
+            section_choreography=ai_plan.get("section_choreography") or {},
+            insert=ai_plan.get("insert"),
+        )
     base_effect_style = _resolve_workflow_smart_effect_style(
         str((ai_plan.get("editing_accents") or {}).get("style") or ""),
         workflow_preset=workflow_preset,
@@ -265,10 +269,14 @@ def build_ai_effect_render_plan(
             str(subtitles.get("motion_style") or ""),
             base_style=base_effect_style,
         )
-        ai_plan["subtitles"] = _bind_subtitles_to_choreography(
-            subtitles,
-            section_choreography=ai_plan.get("section_choreography") or {},
-            editing_skill=resolved_editing_skill,
+        ai_plan["subtitles"] = (
+            subtitles
+            if reuse_bound_assets
+            else _bind_subtitles_to_choreography(
+                subtitles,
+                section_choreography=ai_plan.get("section_choreography") or {},
+                editing_skill=resolved_editing_skill,
+            )
         )
     ai_plan["editing_accents"] = _build_ai_effect_editing_accents(
         ai_plan.get("editing_accents"),
@@ -278,6 +286,7 @@ def build_ai_effect_render_plan(
         editing_skill=resolved_editing_skill,
         workflow_preset=workflow_preset,
         preserve_color=preserve_color,
+        reuse_event_structure=reuse_bound_assets,
     )
     return ai_plan
 
@@ -1213,6 +1222,7 @@ def _build_ai_effect_editing_accents(
     editing_skill: dict[str, Any] | None,
     workflow_preset: str | None,
     preserve_color: bool,
+    reuse_event_structure: bool = False,
 ) -> dict[str, Any]:
     base = copy.deepcopy(editing_accents) if isinstance(editing_accents, dict) else {}
     base_style = _resolve_workflow_smart_effect_style(
@@ -1236,73 +1246,84 @@ def _build_ai_effect_editing_accents(
         review_focus=review_focus,
     )
     base_transitions = copy.deepcopy(base.get("transitions") or {})
-    transition_boundaries = sorted(
-        {
-            *[
+    base_emphasis_overlays = [dict(item) for item in base.get("emphasis_overlays") or []]
+    if reuse_event_structure:
+        transition_boundaries = sorted(
+            [
                 int(index)
                 for index in (base_transitions.get("boundary_indexes") or [])
                 if isinstance(index, int) or str(index).lstrip("-").isdigit()
-            ],
-            *_select_transition_boundaries(
-                keep_segments,
-                timeline_analysis=timeline_analysis,
-                editing_skill=resolved_skill,
-                max_count=min(
-                    int(tokens.get("transition_max_count") or 6),
-                    focused_transition_max_count or int(tokens.get("transition_max_count") or 6),
+            ]
+        )
+        merged_overlays = base_emphasis_overlays
+        sound_effects = [dict(item) for item in base.get("sound_effects") or []]
+    else:
+        transition_boundaries = sorted(
+            {
+                *[
+                    int(index)
+                    for index in (base_transitions.get("boundary_indexes") or [])
+                    if isinstance(index, int) or str(index).lstrip("-").isdigit()
+                ],
+                *_select_transition_boundaries(
+                    keep_segments,
+                    timeline_analysis=timeline_analysis,
+                    editing_skill=resolved_skill,
+                    max_count=min(
+                        int(tokens.get("transition_max_count") or 6),
+                        focused_transition_max_count or int(tokens.get("transition_max_count") or 6),
+                    ),
+                    min_segment_duration=1.1,
+                    min_removed_gap=0.18,
                 ),
-                min_segment_duration=1.1,
-                min_removed_gap=0.18,
+            }
+        )
+        text_overlays = _select_emphasis_overlays(
+            subtitle_items,
+            timeline_analysis=timeline_analysis,
+            editing_skill=resolved_skill,
+            preferred_candidates=list((timeline_analysis or {}).get("emphasis_candidates") or []),
+            max_count=min(
+                int(tokens.get("overlay_max_count") or 6),
+                focused_overlay_max_count or int(tokens.get("overlay_max_count") or 6),
             ),
-        }
-    )
-    text_overlays = _select_emphasis_overlays(
-        subtitle_items,
-        timeline_analysis=timeline_analysis,
-        editing_skill=resolved_skill,
-        preferred_candidates=list((timeline_analysis or {}).get("emphasis_candidates") or []),
-        max_count=min(
-            int(tokens.get("overlay_max_count") or 6),
-            focused_overlay_max_count or int(tokens.get("overlay_max_count") or 6),
-        ),
-        min_spacing_sec=min(
-            float(tokens.get("overlay_spacing_sec") or 4.0),
-            focused_overlay_spacing_sec,
-        ),
-        min_duration_sec=0.45,
-        max_duration_sec=float(tokens.get("overlay_max_duration_sec") or 1.45),
-    )
-    base_emphasis_overlays = [dict(item) for item in base.get("emphasis_overlays") or []]
-    occupied_times = [
-        float(item.get("start_time", 0.0) or 0.0)
-        for item in [*base_emphasis_overlays, *text_overlays]
-    ]
-    pulse_overlays = _build_transition_pulse_overlays(
-        keep_segments,
-        boundary_indexes=transition_boundaries,
-        occupied_times=occupied_times,
-    )
-    merged_overlays = _merge_ai_effect_overlays(
-        base_emphasis_overlays,
-        text_overlays,
-        pulse_overlays,
-        max_count=int(tokens.get("max_total_overlays") or 10),
-    )
-    sound_effects = [
-        {
-            "start_time": overlay["start_time"],
-            "duration_sec": round(
-                tokens["sound_duration_sec"] if overlay.get("text") else max(tokens["sound_duration_sec"] - 0.02, 0.08),
-                3,
+            min_spacing_sec=min(
+                float(tokens.get("overlay_spacing_sec") or 4.0),
+                focused_overlay_spacing_sec,
             ),
-            "frequency": tokens["sound_frequency"] if overlay.get("text") else max(tokens["sound_frequency"] - 220, 880),
-            "volume": round(
-                tokens["sound_volume"] if overlay.get("text") else max(tokens["sound_volume"] - 0.012, 0.04),
-                3,
-            ),
-        }
-        for overlay in merged_overlays
-    ]
+            min_duration_sec=0.45,
+            max_duration_sec=float(tokens.get("overlay_max_duration_sec") or 1.45),
+        )
+        occupied_times = [
+            float(item.get("start_time", 0.0) or 0.0)
+            for item in [*base_emphasis_overlays, *text_overlays]
+        ]
+        pulse_overlays = _build_transition_pulse_overlays(
+            keep_segments,
+            boundary_indexes=transition_boundaries,
+            occupied_times=occupied_times,
+        )
+        merged_overlays = _merge_ai_effect_overlays(
+            base_emphasis_overlays,
+            text_overlays,
+            pulse_overlays,
+            max_count=int(tokens.get("max_total_overlays") or 10),
+        )
+        sound_effects = [
+            {
+                "start_time": overlay["start_time"],
+                "duration_sec": round(
+                    tokens["sound_duration_sec"] if overlay.get("text") else max(tokens["sound_duration_sec"] - 0.02, 0.08),
+                    3,
+                ),
+                "frequency": tokens["sound_frequency"] if overlay.get("text") else max(tokens["sound_frequency"] - 220, 880),
+                "volume": round(
+                    tokens["sound_volume"] if overlay.get("text") else max(tokens["sound_volume"] - 0.012, 0.04),
+                    3,
+                ),
+            }
+            for overlay in merged_overlays
+        ]
     return {
         **base,
         "style": effect_style,

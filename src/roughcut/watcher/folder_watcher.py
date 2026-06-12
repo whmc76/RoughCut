@@ -38,6 +38,7 @@ _SCAN_STATES: dict[str, "WatchInventoryScanState"] = {}
 _SCAN_FILE_CACHE: dict[str, dict[str, "CachedWatchFileResult"]] = {}
 _WATCH_INVENTORY_THUMBNAIL_LOCKS: dict[str, asyncio.Lock] = {}
 _WATCH_INVENTORY_THUMBNAIL_GENERATION_SEMAPHORE = asyncio.Semaphore(2)
+_SCAN_TASK_ORPHAN_GRACE_SECONDS = 45
 
 
 async def _call_inventory_job_factory(
@@ -237,6 +238,7 @@ def get_watch_root_inventory_scan_status(
     state = _SCAN_STATES.get(watch_path)
     if not state:
         return None
+    _recover_watch_root_inventory_scan_state(watch_path, state)
     return state.to_dict(include_inventory=include_inventory, inventory_limit=inventory_limit)
 
 
@@ -628,6 +630,73 @@ def _new_scan_state(watch_path: str, *, scan_mode: str) -> WatchInventoryScanSta
         pending=[],
         deduped=[],
     )
+
+
+def _recover_watch_root_inventory_scan_state(watch_path: str, state: WatchInventoryScanState) -> WatchInventoryScanState:
+    task = _SCAN_TASKS.get(watch_path)
+    if state.status != "running":
+        return state
+    if task is not None and not task.done():
+        return state
+    if not _scan_state_exceeded_orphan_grace(state):
+        return state
+    state.status = "failed"
+    state.error = state.error or "目录扫描已中断，请重新扫描。"
+    state.current_file = None
+    state.current_phase = None
+    state.current_file_size_bytes = None
+    state.current_file_processed_bytes = None
+    state.finished_at = _now_iso()
+    state.updated_at = state.finished_at
+    _SCAN_TASKS.pop(watch_path, None)
+    _SCAN_STATES[watch_path] = state
+    return state
+
+
+def normalize_persisted_watch_inventory_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    normalized = dict(payload or {}) if isinstance(payload, dict) else {}
+    inventory = normalized.get("inventory") or {}
+    normalized["inventory"] = {
+        "pending": list(inventory.get("pending") or []),
+        "deduped": list(inventory.get("deduped") or []),
+    }
+    normalized["pending_count"] = int(normalized.get("pending_count") or len(normalized["inventory"]["pending"]))
+    normalized["deduped_count"] = int(normalized.get("deduped_count") or len(normalized["inventory"]["deduped"]))
+    status = str(normalized.get("status") or "").strip().lower()
+    if status == "running" and _scan_payload_exceeded_orphan_grace(normalized):
+        normalized["status"] = "failed"
+        normalized["error"] = str(normalized.get("error") or "").strip() or "目录扫描已中断，请重新扫描。"
+        normalized["current_file"] = None
+        normalized["current_phase"] = None
+        normalized["current_file_size_bytes"] = None
+        normalized["current_file_processed_bytes"] = None
+        normalized["finished_at"] = normalized.get("finished_at") or _now_iso()
+        normalized["updated_at"] = normalized.get("updated_at") or normalized["finished_at"]
+    elif status in {"", "idle"}:
+        normalized["status"] = "done"
+    return normalized
+
+
+def _scan_state_exceeded_orphan_grace(state: WatchInventoryScanState) -> bool:
+    return _scan_timestamp_exceeded_orphan_grace(state.updated_at or state.started_at)
+
+
+def _scan_payload_exceeded_orphan_grace(payload: dict[str, Any]) -> bool:
+    return _scan_timestamp_exceeded_orphan_grace(
+        str(payload.get("updated_at") or payload.get("started_at") or "").strip()
+    )
+
+
+def _scan_timestamp_exceeded_orphan_grace(timestamp: str) -> bool:
+    if not timestamp:
+        return False
+    try:
+        updated_at = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return False
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - updated_at).total_seconds() > _SCAN_TASK_ORPHAN_GRACE_SECONDS
 
 
 def _normalize_scan_mode(scan_mode: str | None) -> str:
@@ -1409,17 +1478,9 @@ def _is_inventory_item_settled(item: dict[str, Any], *, settle_seconds: int) -> 
 
 
 def _normalize_inventory_payload_status(payload: dict[str, Any]) -> dict[str, Any]:
-    inventory = payload.get("inventory") or {}
-    payload["inventory"] = {
-        "pending": list(inventory.get("pending") or []),
-        "deduped": list(inventory.get("deduped") or []),
-    }
-    payload["pending_count"] = len(payload["inventory"]["pending"])
-    payload["deduped_count"] = len(payload["inventory"]["deduped"])
-    payload["updated_at"] = datetime.now(timezone.utc).isoformat()
-    if payload.get("status") in {None, "", "idle"}:
-        payload["status"] = "done"
-    return payload
+    normalized = normalize_persisted_watch_inventory_payload(payload)
+    normalized["updated_at"] = datetime.now(timezone.utc).isoformat()
+    return normalized
 
 
 def _mark_inventory_items_as_dispatched(

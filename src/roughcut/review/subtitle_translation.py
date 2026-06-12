@@ -4,6 +4,7 @@ import json
 import re
 from typing import Any
 
+from roughcut.edit.subtitle_surfaces import subtitle_semantic_item_text
 from roughcut.providers.factory import get_reasoning_provider
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.usage import track_usage_operation
@@ -12,6 +13,15 @@ _DEFAULT_TARGET_LANGUAGE = "en"
 _DEFAULT_TARGET_LANGUAGE_MODE = "auto"
 _DEFAULT_PREFERRED_UI_LANGUAGE = "zh-CN"
 _CHUNK_SIZE = 24
+
+
+def _subtitle_translation_source_text(item: dict[str, Any] | None) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return subtitle_semantic_item_text(
+        item,
+        generic_fallback_text=str(item.get("text") or item.get("raw_text") or "").strip(),
+    )
 
 
 async def translate_subtitle_items(
@@ -60,10 +70,10 @@ async def _translate_subtitle_chunk(
     prompt_items = [
         {
             "index": int(item.get("index", 0)),
-            "text": str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip(),
+            "text": _subtitle_translation_source_text(item),
         }
         for item in subtitle_items
-        if str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        if _subtitle_translation_source_text(item)
     ]
     if not prompt_items:
         return []
@@ -98,7 +108,7 @@ async def _translate_subtitle_chunk(
 
     translated_items: list[dict[str, Any]] = []
     for subtitle in subtitle_items:
-        text_source = str(subtitle.get("text_final") or subtitle.get("text_norm") or subtitle.get("text_raw") or "").strip()
+        text_source = _subtitle_translation_source_text(subtitle)
         if not text_source:
             continue
         index = int(subtitle.get("index", 0))
@@ -169,7 +179,7 @@ def normalize_translation_target_mode(value: str | None) -> str:
 
 def detect_subtitle_language(subtitle_items: list[dict[str, Any]]) -> str:
     text = "\n".join(
-        str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        _subtitle_translation_source_text(item)
         for item in subtitle_items
     ).strip()
     if not text:

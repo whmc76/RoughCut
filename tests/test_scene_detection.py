@@ -67,3 +67,12 @@ def test_detect_scenes_stops_when_runtime_budget_expires(monkeypatch) -> None:
 
     assert _FakeSceneManager.instances[-1].stopped is True
     assert [(item.start, item.end) for item in boundaries] == [(1.25, 2.5)]
+
+
+def test_detect_scenes_without_scenedetect_returns_empty(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "scenedetect", None)
+    monkeypatch.setitem(sys.modules, "scenedetect.detectors", None)
+
+    boundaries = detect_scenes(Path("sample.mp4"))
+
+    assert boundaries == []

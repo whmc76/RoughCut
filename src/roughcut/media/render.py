@@ -14,6 +14,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from roughcut.config import get_settings
+from roughcut.edit.editorial_timeline import editorial_keep_segments, normalize_keep_segments_payloads
+from roughcut.edit.packaging_timeline import (
+    packaging_timeline_assets,
+    packaging_timeline_editing_accents,
+    packaging_timeline_section_choreography,
+    packaging_timeline_subtitles,
+)
 from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.packaging.library import (
     resolve_insert_effective_duration,
@@ -59,6 +66,15 @@ _TRANSPOSE_MAP = {
 _DEFAULT_TARGET_LUFS = -16.0
 _DEFAULT_PEAK_LIMIT_DB = -2.0
 _DEFAULT_LRA = 10.0
+
+
+def _render_packaging_context(render_plan: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    return {
+        "assets": packaging_timeline_assets(render_plan),
+        "editing_accents": packaging_timeline_editing_accents(render_plan),
+        "section_choreography": packaging_timeline_section_choreography(render_plan),
+        "subtitles": packaging_timeline_subtitles(render_plan),
+    }
 
 
 def _normalize_rotation_cw(value: Any) -> int | None:
@@ -470,6 +486,7 @@ async def render_video(
     keep_segments: list[dict[str, Any]] | None = None,
     subtitle_items: list[dict] | None = None,
     overlay_editing_accents: dict[str, Any] | None = None,
+    synthesize_subtitle_unit_accents: bool = True,
     progress_callback: Callable[[float], None] | None = None,
     debug_dir: Path | None = None,
 ) -> Path:
@@ -561,16 +578,19 @@ async def render_video(
     )
 
     filter_parts: list[str] = []
-    editing_accents = render_plan.get("editing_accents") or {}
-    section_choreography = render_plan.get("section_choreography") or {}
+    packaging_context = _render_packaging_context(render_plan)
+    editing_accents = packaging_context["editing_accents"]
+    section_choreography = packaging_context["section_choreography"]
+    subtitles_plan = packaging_context["subtitles"]
     choreographed_subtitles = _build_choreographed_subtitle_items(
         subtitle_items,
-        subtitles_plan=render_plan.get("subtitles") or {},
-    ) if subtitle_items and render_plan.get("subtitles") else []
+        subtitles_plan=subtitles_plan,
+    ) if subtitle_items and subtitles_plan else []
     video_transform_accents = _build_video_transform_editing_accents(
         editing_accents,
         subtitle_items=choreographed_subtitles,
         section_choreography=section_choreography,
+        synthesize_subtitle_unit_accents=synthesize_subtitle_unit_accents,
     )
     segment_filters, video_label, audio_label = _build_segment_filter_chain(
         keep_segments,
@@ -623,7 +643,9 @@ async def render_video(
 
     overlay_plan = _build_overlay_only_editing_accents(
         overlay_editing_accents if isinstance(overlay_editing_accents, dict) else editing_accents,
+        subtitle_items=subtitle_items,
         section_choreography=section_choreography,
+        synthesize_subtitle_unit_accents=synthesize_subtitle_unit_accents,
     )
     needs_timed_overlays = bool(
         subtitle_items
@@ -718,6 +740,7 @@ async def render_video(
             render_plan=render_plan,
             subtitle_items=subtitle_items,
             overlay_editing_accents=overlay_plan,
+            synthesize_subtitle_unit_accents=synthesize_subtitle_unit_accents,
             debug_dir=debug_dir,
         )
         if overlay_output_path != output_path:
@@ -1317,6 +1340,7 @@ def _build_overlay_only_editing_accents(
     *,
     subtitle_items: list[dict[str, Any]] | None = None,
     section_choreography: dict[str, Any] | None = None,
+    synthesize_subtitle_unit_accents: bool = True,
 ) -> dict[str, Any]:
     base = dict(editing_accents or {})
     emphasis_overlays = _prune_events_by_choreography_density([
@@ -1335,11 +1359,15 @@ def _build_overlay_only_editing_accents(
             section_choreography=section_choreography,
         )
     ], section_choreography=section_choreography)
-    synthesized = _synthesize_subtitle_unit_accents(
-        subtitle_items,
-        existing_overlays=emphasis_overlays,
-        existing_sounds=sound_effects,
-        section_choreography=section_choreography,
+    synthesized = (
+        _synthesize_subtitle_unit_accents(
+            subtitle_items,
+            existing_overlays=emphasis_overlays,
+            existing_sounds=sound_effects,
+            section_choreography=section_choreography,
+        )
+        if synthesize_subtitle_unit_accents
+        else {"emphasis_overlays": [], "sound_effects": []}
     )
     return {
         "style": _normalize_smart_effect_style(str(base.get("style") or "")),
@@ -1467,10 +1495,17 @@ def _build_video_transform_editing_accents(
     *,
     subtitle_items: list[dict[str, Any]] | None,
     section_choreography: dict[str, Any] | None = None,
+    synthesize_subtitle_unit_accents: bool = True,
 ) -> dict[str, Any]:
     base = dict(editing_accents or {})
     existing_overlays = [dict(item) for item in base.get("emphasis_overlays") or [] if isinstance(item, dict)]
     synthesized_overlays: list[dict[str, Any]] = []
+    if not synthesize_subtitle_unit_accents:
+        return {
+            **base,
+            "emphasis_overlays": existing_overlays,
+            "sound_effects": [dict(item) for item in base.get("sound_effects") or [] if isinstance(item, dict)],
+        }
     for item in subtitle_items or []:
         if not isinstance(item, dict):
             continue
@@ -1536,6 +1571,7 @@ async def _apply_timed_overlays_to_video(
     render_plan: dict[str, Any],
     subtitle_items: list[dict] | None,
     overlay_editing_accents: dict[str, Any] | None,
+    synthesize_subtitle_unit_accents: bool = True,
     debug_dir: Path | None,
 ) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1543,9 +1579,12 @@ async def _apply_timed_overlays_to_video(
     source_info = _probe_video_stream(source_path)
     render_w = int(source_info.get("display_width") or source_info.get("width") or 0)
     render_h = int(source_info.get("display_height") or source_info.get("height") or 0)
+    packaging_context = _render_packaging_context(render_plan)
     overlay_plan = _build_overlay_only_editing_accents(
         overlay_editing_accents,
-        section_choreography=render_plan.get("section_choreography") or {},
+        subtitle_items=subtitle_items,
+        section_choreography=packaging_context["section_choreography"],
+        synthesize_subtitle_unit_accents=synthesize_subtitle_unit_accents,
     )
     filter_parts: list[str] = []
     video_label = _append_delivery_color_filter(
@@ -1614,26 +1653,10 @@ def _resolve_render_keep_segments(
     *,
     explicit_keep_segments: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    explicit = [
-        {
-            "start": float(item.get("start", 0.0) or 0.0),
-            "end": float(item.get("end", 0.0) or 0.0),
-        }
-        for item in list(explicit_keep_segments or [])
-        if isinstance(item, dict) and float(item.get("end", 0.0) or 0.0) > float(item.get("start", 0.0) or 0.0)
-    ]
+    explicit = normalize_keep_segments_payloads(list(explicit_keep_segments or []))
     if explicit:
         return explicit
-    return [
-        {
-            "start": float(item.get("start", 0.0) or 0.0),
-            "end": float(item.get("end", 0.0) or 0.0),
-        }
-        for item in list((editorial_timeline or {}).get("segments") or [])
-        if isinstance(item, dict)
-        and item.get("type") == "keep"
-        and float(item.get("end", 0.0) or 0.0) > float(item.get("start", 0.0) or 0.0)
-    ]
+    return editorial_keep_segments(editorial_timeline)
 
 
 async def _build_timed_overlay_filter_chain(
@@ -1653,14 +1676,16 @@ async def _build_timed_overlay_filter_chain(
 
     settings = get_settings()
     overlay_plan = overlay_plan or {}
+    packaging_context = _render_packaging_context(render_plan)
+    subtitles_plan = packaging_context["subtitles"]
     choreographed_subtitles = _build_choreographed_subtitle_items(
         subtitle_items,
-        subtitles_plan=render_plan.get("subtitles") or {},
-    ) if subtitle_items and render_plan.get("subtitles") else []
+        subtitles_plan=subtitles_plan,
+    ) if subtitle_items and subtitles_plan else []
 
     filter_parts: list[str] = list(initial_filter_parts or [])
 
-    if subtitle_items and render_plan.get("subtitles"):
+    if subtitle_items and subtitles_plan:
         subtitle_margin_override = await _resolve_subtitle_margin_with_avatar(
             expected_width=render_w,
             expected_height=render_h,
@@ -1670,14 +1695,14 @@ async def _build_timed_overlay_filter_chain(
         write_ass_file(
             choreographed_subtitles,
             ass_path,
-            style_name=str((render_plan.get("subtitles") or {}).get("style") or "bold_yellow_outline"),
+            style_name=str(subtitles_plan.get("style") or "bold_yellow_outline"),
             font_name=settings.subtitle_font,
             font_size=settings.subtitle_font_size,
             text_color_rgb=settings.subtitle_color,
             outline_color_rgb=settings.subtitle_outline_color,
             outline_width=settings.subtitle_outline_width,
             margin_v_override=subtitle_margin_override,
-            motion_style=str((render_plan.get("subtitles") or {}).get("motion_style") or "motion_static"),
+            motion_style=str(subtitles_plan.get("motion_style") or "motion_static"),
             play_res_x=render_w,
             play_res_y=render_h,
         )
@@ -2132,7 +2157,8 @@ async def _apply_packaging_plan(
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         current_path = _stage_packaging_source(source_path, tmp)
-        insert_plan = render_plan.get("insert")
+        packaging_assets = packaging_timeline_assets(render_plan)
+        insert_plan = packaging_assets.get("insert")
         if insert_plan:
             current_path = await _apply_insert_clip(
                 current_path,
@@ -2143,22 +2169,22 @@ async def _apply_packaging_plan(
                 output_path=tmp / "inserted.mp4",
                 debug_dir=debug_dir,
             )
-        if render_plan.get("intro") or render_plan.get("outro"):
+        if packaging_assets.get("intro") or packaging_assets.get("outro"):
             current_path = await _apply_intro_outro(
                 current_path,
-                intro_plan=render_plan.get("intro"),
-                outro_plan=render_plan.get("outro"),
+                intro_plan=packaging_assets.get("intro"),
+                outro_plan=packaging_assets.get("outro"),
                 expected_width=expected_width,
                 expected_height=expected_height,
                 target_fps=target_fps,
                 output_path=tmp / "with_bookends.mp4",
                 debug_dir=debug_dir,
             )
-        if render_plan.get("music") or render_plan.get("watermark"):
+        if packaging_assets.get("music") or packaging_assets.get("watermark"):
             current_path = await _apply_music_and_watermark(
                 current_path,
-                music_plan=render_plan.get("music"),
-                watermark_plan=render_plan.get("watermark"),
+                music_plan=packaging_assets.get("music"),
+                watermark_plan=packaging_assets.get("watermark"),
                 expected_width=expected_width,
                 expected_height=expected_height,
                 output_path=tmp / "packaged.mp4",

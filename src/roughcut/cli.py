@@ -328,6 +328,37 @@ def orchestrator(poll_interval: float):
     asyncio.run(run_orchestrator(poll_interval=poll_interval))
 
 
+@cli.command("intelligent-copy-task-runner")
+@click.option("--task-id", required=True)
+@click.option("--folder-path", required=True)
+@click.option("--copy-style", default=None)
+@click.option("--platform", "platforms", multiple=True)
+@click.option("--use-existing-cover/--no-use-existing-cover", default=False)
+@click.option("--creator-profile-id", default=None)
+@click.option("--creator-profile-name", default=None)
+def intelligent_copy_task_runner(
+    task_id: str,
+    folder_path: str,
+    copy_style: str | None,
+    platforms: tuple[str, ...],
+    use_existing_cover: bool,
+    creator_profile_id: str | None,
+    creator_profile_name: str | None,
+):
+    """Run one intelligent copy generation task in a dedicated process."""
+    from roughcut.api.intelligent_copy import _run_generation_task_thread
+
+    _run_generation_task_thread(
+        task_id,
+        folder_path,
+        copy_style,
+        list(platforms) or None,
+        use_existing_cover,
+        creator_profile_id,
+        creator_profile_name,
+    )
+
+
 @cli.command()
 @click.argument("path")
 @click.option("--workflow-template", default=None, help="Default workflow template")

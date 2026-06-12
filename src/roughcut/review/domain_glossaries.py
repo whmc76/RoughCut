@@ -4,9 +4,19 @@ import re
 from collections import OrderedDict
 from typing import Any
 
+from roughcut.edit.subtitle_surfaces import subtitle_semantic_item_text
 from roughcut.review.topic_fact_confirmation import topic_fact_confirmation_present, topic_fact_is_confirmed
 
 from roughcut.edit.presets import normalize_workflow_template_name
+
+
+def _glossary_semantic_text(item: dict[str, Any] | None) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return subtitle_semantic_item_text(
+        item,
+        generic_fallback_text=str(item.get("text") or item.get("raw_text") or "").strip(),
+    )
 
 
 GlossaryTermLike = dict[str, Any]
@@ -563,7 +573,7 @@ def _detect_glossary_signal_domains(
         haystacks.append(str(effective_profile.get(key) or ""))
     if not topic_fact_scoped:
         for item in subtitle_items or []:
-            haystacks.append(str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or ""))
+            haystacks.append(_glossary_semantic_text(item))
     joined = " ".join(haystacks).upper()
     scores: dict[str, int] = {}
     for domain, keywords in _DOMAIN_KEYWORDS.items():

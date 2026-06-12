@@ -652,3 +652,50 @@ def test_topic_fact_scope_ignores_subtitle_and_source_domain_noise() -> None:
     )
 
     assert domains == ["food"]
+
+
+def test_detect_glossary_domains_uses_canonical_surface_for_subtitle_haystack() -> None:
+    domains = detect_glossary_domains(
+        workflow_template="",
+        content_profile={},
+        subtitle_items=[
+            {
+                "text_raw": "这个EDC折刀和工具钳都很像",
+                "text_norm": "LuckyKiss 益生菌含片零食开箱",
+                "text_final": "",
+                "display_suppressed_reason": "standalone_filler",
+            }
+        ],
+        source_name="demo.mp4",
+    )
+
+    assert "food" in domains
+    assert "edc" not in domains
+
+
+def test_build_subtitle_review_memory_uses_canonical_surface_for_recent_subtitles() -> None:
+    review_memory = build_subtitle_review_memory(
+        workflow_template="",
+        subject_domain=None,
+        source_name="demo.mp4",
+        glossary_terms=[],
+        user_memory={},
+        recent_subtitles=[
+            {
+                "text_raw": "这个EDC折刀和工具钳都很像",
+                "text_norm": "LuckyKiss 益生菌含片零食开箱",
+                "text_final": "",
+                "display_suppressed_reason": "standalone_filler",
+                "source_name": "demo.mp4",
+            }
+        ],
+        content_profile={},
+        include_recent_terms=True,
+        include_recent_examples=True,
+    )
+
+    terms = {str(item.get("term") or "") for item in (review_memory.get("terms") or [])}
+
+    assert any(term.casefold() == "luckykiss" for term in terms)
+    assert "EDC" not in terms
+    assert "LuckyKiss" in review_memory["style_examples"][0]["text"]

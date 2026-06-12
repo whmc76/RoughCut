@@ -11,6 +11,10 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.config import get_settings
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
+from roughcut.edit.subtitle_surfaces import subtitle_canonical_rule_text
+from roughcut.edit.subtitle_surfaces import subtitle_semantic_item_text
+from roughcut.edit.subtitle_surfaces import subtitle_surface_item_dict
 from roughcut.edit.presets import WorkflowPreset, get_workflow_preset, normalize_workflow_template_name, select_workflow_template
 from roughcut.llm_cache import digest_payload
 from roughcut.media.subtitle_text import clean_final_subtitle_text, normalize_editable_subtitle_text
@@ -1278,14 +1282,16 @@ def build_content_profile_cache_fingerprint(
 
 
 def _excerpt_item_text(item: dict[str, Any]) -> str:
-    return str(
-        item.get("text_final")
-        or item.get("text_norm")
-        or item.get("text_raw")
-        or item.get("text")
-        or item.get("raw_text")
-        or ""
-    ).strip()
+    return _content_profile_semantic_text(item)
+
+
+def _content_profile_semantic_text(item: dict[str, Any] | None) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return subtitle_semantic_item_text(
+        item,
+        generic_fallback_text=str(item.get("text") or item.get("raw_text") or "").strip(),
+    )
 
 
 def _excerpt_item_start(item: dict[str, Any]) -> float:
@@ -1348,14 +1354,18 @@ def _transcript_evidence_items(transcript_evidence: dict[str, Any] | None) -> li
     items: list[dict[str, Any]] = []
     for index, item in enumerate(raw_segments):
         if isinstance(item, dict):
+            surfaces = subtitle_surface_item_dict(
+                item,
+                generic_fallback_text=str(item.get("text") or item.get("raw_text") or "").strip(),
+            )
             items.append(
                 {
                     "index": int(item.get("index", index) or index),
                     "start_time": float(item.get("start_time") or item.get("start") or 0.0),
                     "end_time": float(item.get("end_time") or item.get("end") or 0.0),
-                    "text_raw": str(item.get("text") or item.get("raw_text") or item.get("text_raw") or "").strip(),
-                    "text_norm": str(item.get("text") or item.get("raw_text") or item.get("text_norm") or "").strip(),
-                    "text_final": str(item.get("text") or item.get("raw_text") or item.get("text_final") or "").strip(),
+                    "text_raw": surfaces["text_raw"],
+                    "text_norm": surfaces["text_norm"],
+                    "text_final": surfaces["text_final"],
                     "words": list(item.get("words") or []),
                 }
             )
@@ -1409,7 +1419,7 @@ def apply_glossary_terms(text: str, glossary_terms: list[dict[str, Any]]) -> str
 def _build_subtitle_signal_blob(subtitle_items: list[dict[str, Any]] | None, *, max_items: int = 96) -> str:
     chunks: list[str] = []
     for item in (subtitle_items or [])[:max_items]:
-        text = _clean_line(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "")
+        text = _clean_line(_content_profile_semantic_text(item))
         if text:
             chunks.append(text)
     return "\n".join(chunks)
@@ -1685,7 +1695,7 @@ def assess_content_profile_automation(
     subtitle_count = sum(
         1
         for item in subtitle_items
-        if _clean_line(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "")
+        if _clean_line(_content_profile_semantic_text(item))
     )
     source_context = _normalize_source_context_payload((profile or {}).get("source_context"))
     has_editorial_source_context = _source_context_has_editorial_brief(source_context)
@@ -2399,7 +2409,7 @@ def _collect_identity_evidence_bundle(
                     visible_text,
                     evidence_text,
                     *[
-                        str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "")
+                        _content_profile_semantic_text(item)
                         for item in (subtitle_items or [])
                     ],
                 ],
@@ -2412,7 +2422,7 @@ def _collect_identity_evidence_bundle(
                     visible_text,
                     evidence_text,
                     *[
-                        str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "")
+                        _content_profile_semantic_text(item)
                         for item in (subtitle_items or [])
                     ],
                 ],
@@ -2459,7 +2469,7 @@ def _collect_identity_subtitle_snippets(
 ) -> list[str]:
     snippets: list[str] = []
     for item in subtitle_items or []:
-        text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        text = _content_profile_semantic_text(item)
         if not text:
             continue
         matched_terms = _collect_identity_match_terms(
@@ -5895,10 +5905,14 @@ async def polish_subtitle_items(
 
 def _subtitle_polish_source_text(item: Any) -> str:
     return normalize_editable_subtitle_text(
-        getattr(item, "text_final", None)
-        or getattr(item, "text_norm", None)
-        or getattr(item, "text_raw", None)
-        or ""
+        subtitle_display_rule_text(
+            {
+                "text_raw": getattr(item, "text_raw", None),
+                "text_norm": getattr(item, "text_norm", None),
+                "text_final": getattr(item, "text_final", None),
+                "display_suppressed_reason": getattr(item, "display_suppressed_reason", None),
+            }
+        )
     )
 
 
@@ -6406,7 +6420,7 @@ def _seed_profile_from_subtitles(
     subject_domain: str = "",
 ) -> dict[str, Any]:
     transcript_lines = [
-        str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        _content_profile_semantic_text(item)
         for item in subtitle_items
     ]
     transcript = "\n".join(line for line in transcript_lines if line)
@@ -9377,12 +9391,9 @@ def _build_profile_summary(profile: dict[str, Any]) -> str:
         if detail_phrase:
             return f"这条视频主要围绕{product}展开，重点提到{detail_phrase}，内容方向偏{theme}，便于后续保留实际体验和判断依据。"
         return f"这条视频主要围绕{product}展开，内容方向偏{theme}，重点是店名菜名、口感描述和是否值得去。"
-    return f"这条视频主要围绕{product}展开，内容方向偏{theme}，适合后续做搜索校验、字幕纠错和剪辑包装。"
-
-
     if detail_phrase:
         return f"这条视频主要围绕{product}展开，重点提到{detail_phrase}，内容方向偏{theme}，适合后续做信息核对、字幕复核和图文包装。"
-    return f"������Ƶ��ҪΧ��{product}չ�������ݷ���ƫ{theme}���ʺϺ���������У�顢��Ļ�����ͼ�����װ��"
+    return f"这条视频主要围绕{product}展开，内容方向偏{theme}，适合后续做信息核对、字幕复核和图文包装。"
 
 
 def _build_identity_driven_video_theme(profile: dict[str, Any], *, transcript_excerpt: str) -> str:

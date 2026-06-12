@@ -3,7 +3,9 @@ from roughcut.review.content_profile import (
     _default_engagement_question,
     _format_content_understanding_failure_reason,
     _is_generic_engagement_question,
+    _seed_profile_from_subtitles,
     _seed_profile_from_text,
+    _subtitle_polish_source_text,
     _subject_type_search_anchor,
     select_workflow_template,
 )
@@ -85,3 +87,35 @@ def test_seed_profile_from_text_prefers_jump_knife_over_folding_knife() -> None:
 
     assert seeded["subject_type_candidates"][0] == "EDC跳刀"
     assert _subject_type_search_anchor("EDC跳刀") == "跳刀"
+
+
+def test_seed_profile_from_subtitles_uses_canonical_surface() -> None:
+    seeded = _seed_profile_from_subtitles(
+        [
+            {
+                "text_raw": "这个 EDC 折刀",
+                "text_norm": "这是 MAXACE 美杜莎4 直跳",
+                "text_final": "",
+                "display_suppressed_reason": "standalone_filler",
+            }
+        ]
+    )
+
+    assert seeded["subject_type_candidates"][0] == "EDC跳刀"
+
+
+def test_subtitle_polish_source_text_uses_display_surface() -> None:
+    text = _subtitle_polish_source_text(
+        type(
+            "SubtitleRow",
+            (),
+            {
+                "text_raw": "那个 EDC 折刀",
+                "text_norm": "这是 MAXACE 美杜莎4",
+                "text_final": "",
+                "display_suppressed_reason": "standalone_filler",
+            },
+        )()
+    )
+
+    assert text == ""

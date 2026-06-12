@@ -6,7 +6,7 @@ import inspect
 import json
 import time
 from contextlib import nullcontext
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,6 +16,7 @@ from PIL import Image
 from roughcut.providers import image_generation as imagegen
 from roughcut.api import intelligent_copy as intelligent_copy_api
 from roughcut.api.schemas import IntelligentCopyGenerateTaskListOut
+from roughcut import cover_title_contract as ctc
 from roughcut.intelligent_copy_layout import (
     smart_copy_cover_source_image_path,
     smart_copy_cover_source_manifest_path,
@@ -35,6 +36,60 @@ from roughcut.review import platform_copy as pc
 def _disable_real_codex_imagegen_autorun(monkeypatch) -> None:
     monkeypatch.setattr(imagegen, "resolve_codex_proxy_token", lambda: "")
     monkeypatch.setattr(imagegen, "resolve_codex_proxy_sibling_url", lambda _path: "")
+
+
+def test_intelligent_copy_transcript_helpers_use_canonical_surface() -> None:
+    subtitle_items = [
+        {
+            "text_raw": "那个 EDC 折刀",
+            "text_norm": "这是 MAXACE 美杜莎4",
+            "text_final": "",
+            "display_suppressed_reason": "standalone_filler",
+        },
+        {
+            "text_raw": "看一下细节",
+            "text_norm": "看一下细节",
+            "text_final": "看一下细节",
+        },
+    ]
+    captured: dict[str, str] = {}
+
+    original_should_use = ic._should_use_intelligent_copy_fast_path
+    try:
+        ic._should_use_intelligent_copy_fast_path = lambda text: captured.setdefault("text", text) == "__never__"
+        ic._build_intelligent_copy_fast_profile(
+            video_path=Path("demo.mp4"),
+            subtitle_items=subtitle_items,
+            copy_style="attention_grabbing",
+        )
+    finally:
+        ic._should_use_intelligent_copy_fast_path = original_should_use
+
+    excerpt = ic.build_transcript_excerpt_for_cover(subtitle_items)
+
+    assert "这是 MAXACE 美杜莎4" in excerpt
+    assert "EDC 折刀" not in excerpt
+    assert "这是 MAXACE 美杜莎4" in captured["text"]
+    assert "EDC 折刀" not in captured["text"]
+
+
+def test_merge_intelligent_copy_profile_hints_uses_canonical_surface() -> None:
+    profile = ic._merge_intelligent_copy_profile_hints(
+        content_profile={},
+        video_path=Path("MAXACE 美杜莎4.mp4"),
+        subtitle_items=[
+            {
+                "text_raw": "这个 EDC 折刀",
+                "text_norm": "这是 MAXACE 美杜莎4 直跳",
+                "text_final": "",
+                "display_suppressed_reason": "standalone_filler",
+            }
+        ],
+        copy_style="attention_grabbing",
+    )
+
+    assert profile["hook_line"].startswith("这是 MAXACE 美杜莎4")
+    assert profile["subject_type"] == "EDC跳刀"
 
 
 def test_image_generation_size_uses_closest_supported_orientation() -> None:
@@ -131,6 +186,50 @@ def test_generate_task_schema_accepts_historical_platform_material_without_const
     assert model.tasks[0].result.platforms[0].constraints.title_limit == 0
 
 
+def test_generation_task_is_orphaned_when_same_process_worker_missing_after_grace(monkeypatch) -> None:
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    task = {
+        "id": "task-orphaned",
+        "status": "running",
+        "worker_owner_pid": 4321,
+        "last_heartbeat_at": now.isoformat(),
+    }
+
+    monkeypatch.setattr(intelligent_copy_api, "_GENERATION_TASKS", {})
+    monkeypatch.setattr(intelligent_copy_api, "_GENERATION_TASK_ORPHAN_GRACE_SECONDS", 45)
+    monkeypatch.setattr(intelligent_copy_api.os, "getpid", lambda: 4321)
+
+    assert intelligent_copy_api._generation_task_is_orphaned(task) is False
+
+    task["last_heartbeat_at"] = (now - timedelta(seconds=60)).isoformat()
+
+    assert intelligent_copy_api._generation_task_is_orphaned(task) is True
+
+
+def test_recover_generation_task_runtime_state_marks_orphaned_task_failed(monkeypatch) -> None:
+    task = {
+        "id": "task-orphaned",
+        "status": "running",
+        "stage": "running",
+        "worker_owner_pid": 4321,
+        "last_heartbeat_at": (datetime.now(timezone.utc).replace(microsecond=0) - timedelta(seconds=60)).isoformat(),
+    }
+
+    monkeypatch.setattr(intelligent_copy_api, "_load_generation_tasks", lambda: [task])
+    monkeypatch.setattr(intelligent_copy_api, "_GENERATION_TASKS", {})
+    monkeypatch.setattr(intelligent_copy_api.os, "getpid", lambda: 4321)
+    recorded: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        intelligent_copy_api,
+        "_mark_generation_task_failed",
+        lambda task_id, error: recorded.append((task_id, error)) or {"id": task_id, "error": error},
+    )
+
+    intelligent_copy_api._recover_generation_task_runtime_state()
+
+    assert recorded == [("task-orphaned", "生成任务未找到存活执行器，请重新生成。")]
+
+
 def test_platform_cover_prompt_for_codex_requires_integrated_full_cover_typography(monkeypatch) -> None:
     monkeypatch.setattr(
         ic,
@@ -220,7 +319,7 @@ def test_fallback_cover_brief_defaults_to_replace_background_for_highlight_sourc
     assert "刀身镜面反光区域是实心金属高光，不是开孔、镂空、雕花或缺口。" in brief["critical_detail_notes"]
 
 
-def test_fallback_cover_brief_adds_compare_safe_notes_for_dual_blade_subject() -> None:
+def test_fallback_cover_brief_does_not_inject_dual_subject_notes_for_compare_wording() -> None:
     brief = ic._build_fallback_cover_brief(
         packaging={"highlights": {"product": "MAXACE 美杜莎4", "video_type": "开箱对比"}},
         content_profile={"subject_type": "EDC折刀", "summary": "顶配和次顶配双版同框开箱"},
@@ -229,11 +328,9 @@ def test_fallback_cover_brief_adds_compare_safe_notes_for_dual_blade_subject() -
         existing_cover_path=None,
     )
 
-    assert "如果参考图里有两把刀，必须保持两把都同框清晰完整，不能丢成一把。" in brief["critical_detail_notes"]
     assert "不要给刀身添加不存在的浮雕、动物纹样、刻字或装饰图案。" in brief["critical_detail_notes"]
     assert "保留螺丝数量、位置、开槽方向、边角切面和金属分区，不要凭空增删五金细节。" in brief["critical_detail_notes"]
-    assert "保留左右两件主体各自的版本映射、材质映射和开合状态映射，不要互换版本特征。" in brief["critical_detail_notes"]
-    assert "展开态不要误画成收合态，收合态不要误画成展开态；不要把第二件主体简化成抽象背景。" in brief["critical_detail_notes"]
+    assert not any("两把" in note or "双主体" in note for note in brief["critical_detail_notes"])
     assert brief["product_identity"] == "MAXACE 美杜莎4 顶配vs次顶配"
 
 
@@ -284,7 +381,7 @@ def test_cover_style_router_treats_maxace_knife_subject_as_edc_cinematic() -> No
     assert style == ic.OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO
 
 
-def test_cover_source_selection_contract_prefers_dual_subject_compare_frame_for_medusa_compare() -> None:
+def test_cover_source_selection_contract_does_not_require_dual_subject_compare_frame() -> None:
     contract = ic._build_cover_source_selection_contract(
         content_profile={
             "subject_type": "EDC折刀",
@@ -294,8 +391,8 @@ def test_cover_source_selection_contract_prefers_dual_subject_compare_frame_for_
         packaging={"highlights": {"product": "MAXACE 美杜莎4", "video_type": "开箱对比"}},
     )
 
-    assert "两件主体同框" in contract
-    assert "版本差异一眼可见" in contract
+    assert "主体完整展开" in contract
+    assert "两件主体同框" not in contract
 
 
 def test_build_cover_title_lines_splits_brand_subject_and_compare_tail() -> None:
@@ -347,6 +444,73 @@ def test_build_cover_title_layout_plan_keeps_compare_subtitle_stable_for_medusa_
     assert title_lines["brand"] == "MAXACE"
     assert title_lines["main"] == "美杜莎4"
     assert title_lines["sub"] == "顶配vs次顶配"
+    assert title_lines["hook"] == "双版本开箱"
+
+
+def test_single_tier_unboxing_is_not_mistaken_for_compare() -> None:
+    title_lines = ic._build_cover_title_layout_plan(
+        title="maxace蜂巢3顶配开箱",
+        cover_brief={
+            "product_identity": "maxace蜂巢3顶配EDC折刀",
+            "selling_angle": "细节做工与上手质感",
+            "video_type": "开箱",
+        },
+    )
+
+    assert ic._cover_title_line_contains_compare_tail("maxace蜂巢3顶配开箱") is False
+    assert "顶配" in title_lines["main"]
+    assert "对比" not in title_lines["sub"]
+    assert "版本" not in title_lines["sub"]
+    assert title_lines["hook"] == "开箱实拍"
+
+
+def test_build_cover_title_layout_plan_dedupes_brand_and_unboxing_layers() -> None:
+    title_lines = ic._build_cover_title_layout_plan(
+        title="maxace蜂巢3顶配开箱",
+        cover_brief={
+            "product_identity": "maxace蜂巢3顶配EDC折刀",
+            "selling_angle": "细节做工与上手质感",
+            "video_type": "开箱",
+        },
+    )
+
+    assert title_lines["brand"] == "maxace"
+    assert title_lines["main"] == "蜂巢3顶配"
+    assert title_lines["sub"] == ""
+    assert title_lines["hook"] == "开箱实拍"
+
+
+def test_cover_title_semantic_plan_distinguishes_variant_subtitle_and_action_hook() -> None:
+    semantic_plan = ctc.build_cover_title_semantic_plan(
+        brand="MAXACE",
+        main="美杜莎4",
+        subtitle="顶配vs次顶配",
+        hook="双版本开箱",
+        strip_compare_suffix=ic._strip_cover_compare_suffix,
+    )
+
+    assert semantic_plan["main"]["slot"] == "identity"
+    assert semantic_plan["subtitle"]["slot"] == "variant_compare"
+    assert semantic_plan["hook"]["slot"] == "action_evidence"
+
+
+def test_shared_cover_title_contract_normalizes_alias_fields() -> None:
+    normalized = ctc.normalize_cover_title_line_contract(
+        {
+            "top": "MAXACE",
+            "main": "美杜莎4",
+            "bottom": "顶配vs次顶配",
+        }
+    )
+
+    assert normalized == {
+        "brand": "MAXACE",
+        "top": "MAXACE",
+        "main": "美杜莎4",
+        "sub": "顶配vs次顶配",
+        "bottom": "顶配vs次顶配",
+        "hook": "",
+    }
 
 
 def test_build_cover_title_layout_plan_splits_compact_brand_prefix_without_space() -> None:
@@ -393,6 +557,55 @@ def test_account_metal_cyber_stack_keeps_structured_text_scale_more_constrained(
     assert len(tokens["main"]["passes"]) == 3
     assert len(tokens["sub"]["passes"]) == 2
     assert len(tokens["hook"]["passes"]) == 2
+
+
+def test_media_output_resolve_cover_title_prefers_four_layer_contract(monkeypatch) -> None:
+    monkeypatch.setattr(
+        media_output,
+        "get_settings",
+        lambda: SimpleNamespace(cover_title=""),
+    )
+
+    resolved = media_output._resolve_cover_title(
+        {
+            "cover_title": {
+                "brand": "MAXACE",
+                "main": "美杜莎4",
+                "sub": "顶配vs次顶配",
+                "hook": "双版本开箱",
+            }
+        }
+    )
+
+    assert resolved == {
+        "brand": "MAXACE",
+        "top": "MAXACE",
+        "main": "美杜莎4",
+        "sub": "顶配vs次顶配",
+        "bottom": "顶配vs次顶配",
+        "hook": "双版本开箱",
+    }
+
+
+def test_media_output_sanitize_generated_cover_title_preserves_hook_from_fallback() -> None:
+    sanitized = media_output._sanitize_generated_cover_title(
+        {"brand": "MAXACE", "main": "美杜莎4", "sub": "顶配vs次顶配"},
+        fallback_plan={
+            "brand": "MAXACE",
+            "main": "美杜莎4",
+            "sub": "顶配vs次顶配",
+            "hook": "双版本开箱",
+        },
+        content_profile={
+            "subject_brand": "MAXACE",
+            "subject_model": "美杜莎4",
+            "visible_text": "MAXACE 美杜莎4",
+            "video_theme": "双版本开箱",
+        },
+    )
+
+    assert sanitized["hook"] == "双版本开箱"
+    assert sanitized["sub"] == "顶配vs次顶配"
 
 
 def test_cover_title_overlay_already_applied_invalidates_stale_style_or_lines() -> None:
@@ -474,6 +687,64 @@ def test_platform_cover_prompt_uses_required_main_and_subtitle_lines_for_safe_ar
     assert "副标题「顶配vs次顶配」" in prompt
 
 
+def test_single_subject_cover_prompt_does_not_inject_compare_contract() -> None:
+    brief = ic._annotate_cover_strategy_axes(
+        {
+            "product_identity": "maxace蜂巢3顶配EDC折刀",
+            "selling_angle": "细节做工与上手质感",
+            "video_type": "开箱",
+            "style_key": ic.OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO,
+            "cover_title": "maxace蜂巢3顶配开箱",
+        },
+        creator_profile_name="FAS",
+    )
+    spec = ic._build_platform_cover_prompt_spec(
+        title="maxace蜂巢3顶配开箱",
+        platform_key="bilibili",
+        rules=ic.PLATFORM_PUBLISH_RULES["bilibili"],
+        width=1280,
+        height=720,
+        cover_brief=brief,
+    )
+
+    prompt = ic._build_codex_platform_cover_image_prompt(spec=spec)
+
+    assert brief["strategy_axes"]["content_scheme"]["key"] == "unboxing_single_subject_v1"
+    assert "双版本开箱" not in prompt
+    assert "版本对比" not in prompt
+    assert "两件主体" not in prompt
+    assert "不要凭空增加第二主体" in prompt
+
+
+def test_single_subject_cover_prompt_omits_empty_duplicate_subtitle_layer() -> None:
+    brief = ic._annotate_cover_strategy_axes(
+        {
+            "product_identity": "maxace蜂巢3顶配EDC折刀",
+            "selling_angle": "细节做工与上手质感",
+            "video_type": "开箱",
+            "style_key": ic.OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO,
+            "cover_title": "maxace蜂巢3顶配开箱",
+        },
+        creator_profile_name="FAS",
+    )
+    spec = ic._build_platform_cover_prompt_spec(
+        title="maxace蜂巢3顶配开箱",
+        platform_key="bilibili",
+        rules=ic.PLATFORM_PUBLISH_RULES["bilibili"],
+        width=1280,
+        height=720,
+        cover_brief=brief,
+    )
+
+    prompt = ic._build_codex_platform_cover_image_prompt(spec=spec)
+
+    assert "品牌行「maxace」" in prompt
+    assert "主标题「蜂巢3顶配」" in prompt
+    assert "吸睛文案「开箱实拍」" in prompt
+    assert "副标题「无」" not in prompt
+    assert "副标题「开箱」" not in prompt
+
+
 def test_resolve_overlay_title_style_promotes_edc_cover_to_account_template() -> None:
     cover_style, title_style = ic._resolve_overlay_title_style(
         rules=ic.PLATFORM_PUBLISH_RULES["douyin"],
@@ -517,7 +788,7 @@ def test_build_platform_cover_prompt_spec_emits_full_cover_director_policy() -> 
     assert director["required_title_lines"]["brand"] == "MAXACE"
     assert director["required_title_lines"]["main"] == "美杜莎4"
     assert director["matrix_scheme"]["key"] == "landscape_16_9"
-    assert director["content_scheme"]["key"] == "unboxing_compare_dual_subject_v1"
+    assert director["content_scheme"]["key"] == "unboxing_single_subject_v1"
     assert director["creator_style_scheme"]["style_profile_key"] == "fas_edc_signature_full_cover_v1"
 
 
@@ -551,6 +822,26 @@ def test_build_platform_cover_prompt_spec_switches_non_codex_backend_to_local_ov
     assert spec["hard_contract"]["full_bitmap_cover_required"] is False
 
 
+def test_non_knife_cover_prompt_uses_generic_subject_contract() -> None:
+    prompt = ic._build_platform_cover_image_prompt(
+        title="小米音箱开箱",
+        platform_key="bilibili",
+        rules=ic.PLATFORM_PUBLISH_RULES["bilibili"],
+        width=1600,
+        height=900,
+        cover_brief={
+            "product_identity": "小米蓝牙音箱",
+            "selling_angle": "外观细节与上手体验",
+            "visual_brief": "桌面摆放，主体清楚，层次干净。",
+            "video_type": "开箱",
+        },
+    )
+
+    assert "不允许改刀型" not in prompt
+    assert "刀柄、刀身主体" not in prompt
+    assert "主体结构、主要部件布局、展示状态" in prompt
+
+
 def test_provider_safe_cover_prompt_uses_text_free_base_bitmap_contract(monkeypatch) -> None:
     monkeypatch.setattr(
         ic,
@@ -578,7 +869,7 @@ def test_provider_safe_cover_prompt_uses_text_free_base_bitmap_contract(monkeypa
 
     assert "后期统一叠加品牌/型号主标题和配置副标题" in prompt
     assert "底图里不能直接画任何标题字" in prompt
-    assert "底图里禁止出现任何可读或半可读的中文、英文、数字、logo 字牌、刀身铭文" in prompt
+    assert "底图里禁止出现任何可读或半可读的中文、英文、数字、logo 字牌、产品本体铭文" in prompt
     assert "品牌/商品名必须完整保留" not in prompt
     assert "标题结构必须准确完整" not in prompt
 
@@ -590,6 +881,7 @@ def test_standard_cover_matrix_groups_include_four_by_three_master() -> None:
     assert keys == ["landscape_16_9", "landscape_4_3", "portrait_3_4"]
     four_by_three = next(group for group in groups if group["key"] == "landscape_4_3")
     assert tuple(four_by_three["cover_size"]) == (1440, 1080)
+    assert "wechat_channels" in four_by_three["members"]
     assert "4:3 横版母版" in four_by_three["visual_instruction"]
     assert "9:16" not in four_by_three["visual_instruction"]
 
@@ -631,14 +923,14 @@ def test_annotate_cover_strategy_axes_decouples_matrix_content_and_creator_style
 
     strategy_axes = dict(brief["strategy_axes"])
     assert strategy_axes["matrix_scheme"]["scope"] == "cross_platform_cover_matrix"
-    assert strategy_axes["content_scheme"]["key"] == "unboxing_compare_dual_subject_v1"
-    assert strategy_axes["content_scheme"]["compare_subject_policy"] == "preserve_reference_subject_states"
-    assert strategy_axes["content_scheme"]["allow_mixed_open_closed_states"] is True
+    assert strategy_axes["content_scheme"]["key"] == "unboxing_single_subject_v1"
+    assert strategy_axes["content_scheme"]["compare_subject_policy"] == ""
+    assert strategy_axes["content_scheme"]["allow_mixed_open_closed_states"] is False
     assert strategy_axes["creator_style_scheme"]["style_profile_key"] == "fas_edc_signature_full_cover_v1"
-    assert strategy_axes["subject_fidelity_scheme"]["key"] == "dual_subject_compare_fidelity_v1"
+    assert strategy_axes["subject_fidelity_scheme"]["key"] == "generic_subject_fidelity_v1"
     assert strategy_axes["subject_fidelity_scheme"]["scope"] == "subject_fidelity_contract"
     assert "主要部件数量" in " ".join(strategy_axes["subject_fidelity_scheme"]["generic_constraints"])
-    assert "版本映射" in " ".join(strategy_axes["subject_fidelity_scheme"]["instance_observations"])
+    assert "版本映射" not in " ".join(strategy_axes["subject_fidelity_scheme"]["generic_constraints"])
 
 
 def test_platform_cover_prompt_excludes_packaging_logos_and_printed_cards() -> None:
@@ -1419,6 +1711,24 @@ def test_build_intelligent_copy_brief_derives_compare_defaults_for_unmatched_bil
     assert any("顶配和次顶配" in title for title in brief["title_candidates"])
 
 
+def test_build_intelligent_copy_brief_does_not_promote_compare_from_contaminated_summary() -> None:
+    brief = ic._build_intelligent_copy_brief(
+        video_path=Path("maxace蜂巢3开箱.mp4"),
+        subtitle_items=[{"text_final": "这期主要看看蜂巢3的细节、手感和做工。"}],
+        content_profile={
+            "subject_brand": "maxace",
+            "subject_model": "蜂巢3",
+            "subject_type": "EDC折刀",
+            "summary": "顶配和次顶配双版本开箱，重点看差异。",
+            "engagement_question": "你更想先看哪处细节？",
+        },
+    )
+
+    assert brief["intent"] != "comparison_unboxing"
+    assert brief["focus_points"] == ["开箱过程", "细节展示", "上手体验"]
+    assert brief["title_candidates"] == []
+
+
 def test_build_intelligent_copy_description_omits_engagement_question_for_bilibili() -> None:
     description = ic._build_intelligent_copy_description(
         platform_key="bilibili",
@@ -2070,15 +2380,24 @@ async def test_ensure_generated_cover_title_contract_ready_ignores_legacy_compar
     assert "bitmap_title_contract_reason" not in refreshed
 
 
-def test_compare_subject_contract_prompt_clarifies_hands_may_be_partially_out_of_frame(tmp_path) -> None:
-    profile = ic._resolve_cover_content_strategy_profile("unboxing_compare_dual_subject_v1")
-    verification_prompt = str(profile.get("compare_subject_verification_prompt") or "")
-    assert "不要求双手完整入镜" in verification_prompt
-    assert "手部可以局部出框" in verification_prompt
-    assert "允许一件主体为展开态、另一件主体为收合态" in verification_prompt
-    assert "收合态" in verification_prompt
-    assert "包装盒" in verification_prompt
-    assert "不算主体" in verification_prompt
+@pytest.mark.asyncio
+async def test_compare_subject_contract_prompt_rejects_invented_second_subject(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "cover.jpg"
+    output.write_bytes(b"cover")
+    captured: dict[str, object] = {}
+
+    async def fake_run_cover_visual_json_verification(**kwargs):
+        captured["prompt"] = kwargs["prompt"]
+        return {"compare_subject_contract_passed": True, "reason": "ok"}, ""
+
+    monkeypatch.setattr(ic, "_run_cover_visual_json_verification", fake_run_cover_visual_json_verification)
+
+    await ic._verify_generated_cover_compare_subject_contract(output_path=output, request_payload={})
+
+    prompt = str(captured["prompt"])
+    assert "真实主商品本身" in prompt
+    assert "不把包装盒" in prompt
+    assert "凭空增加误导性的第二主体" in prompt
 
 
 @pytest.mark.asyncio
@@ -2106,7 +2425,7 @@ def test_build_platform_cover_prompt_spec_uses_content_scheme_portrait_compare_i
         {
             "product_identity": "MAXACE美杜莎4 EDC折刀",
             "selling_angle": "顶配与次顶配双版本完整开箱对比，做工细节和材质质感一眼看懂",
-            "visual_brief": "两把刀同框，左侧展开态，右侧收合态，标题舞台放在上中部。",
+            "visual_brief": "主体真实，手持展示，标题舞台放在上中部。",
             "video_type": "开箱体验",
             "style_key": ic.OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO,
         },
@@ -2118,38 +2437,36 @@ def test_build_platform_cover_prompt_spec_uses_content_scheme_portrait_compare_i
         rules={
             **ic.PLATFORM_PUBLISH_RULES["xiaohongshu"],
             "label": "3:4 竖版母版",
-            "visual_instruction": "3:4 竖版母版，强调质感与双主体完整展示，上半区适合品牌与主标题，下半区保留产品和手持关系，不要挤压主体。",
+            "visual_instruction": "3:4 竖版母版，强调质感与主体完整展示，上半区适合品牌与主标题，下半区保留产品和手持关系，不要挤压主体。",
         },
         width=1080,
         height=1440,
         cover_brief=cover_brief,
     )
     assert spec["hard_contract"]["compare_subject_pair_required"] is False
-    assert spec["director_policy"]["supports_compare_subject_pair"] is True
+    assert spec["director_policy"]["supports_compare_subject_pair"] is False
     prompt = ic._build_platform_cover_image_prompt(
         title="MAXACE 美杜莎4 顶配vs次顶配",
         platform_key="xiaohongshu",
         rules={
             **ic.PLATFORM_PUBLISH_RULES["xiaohongshu"],
             "label": "3:4 竖版母版",
-            "visual_instruction": "3:4 竖版母版，强调质感与双主体完整展示，上半区适合品牌与主标题，下半区保留产品和手持关系，不要挤压主体。",
+            "visual_instruction": "3:4 竖版母版，强调质感与主体完整展示，上半区适合品牌与主标题，下半区保留产品和手持关系，不要挤压主体。",
         },
         width=1080,
         height=1440,
         cover_brief=cover_brief,
     )
-    assert "允许一件为展开态、另一件为收合态" in prompt
-    assert "收合态" in prompt
+    assert "不要凭空增加第二主体" in prompt
     assert "主体保真通用约束" in prompt
     assert "保留主体主要轮廓、比例关系、主要部件数量与相对位置" in prompt
-    assert "双主体编辑预算必须极小" in prompt
-    assert "不允许改变左右主体身份、版本映射、主要部件数量、相对位置、表面分区或开合状态关系" in prompt
+    assert "双主体编辑预算必须极小" not in prompt
     assert "标题堆叠必须更紧凑地上收" in prompt
-    assert "画面中部必须保留成双主体关系的通道" in prompt
+    assert "画面中部要保留主主体展示通道" in prompt
 
 
 @pytest.mark.asyncio
-async def test_render_platform_cover_uses_contained_portrait_reference_for_compare_subject_pair(tmp_path, monkeypatch) -> None:
+async def test_render_platform_cover_keeps_original_reference_for_compare_wording(tmp_path, monkeypatch) -> None:
     source = tmp_path / "highlight.jpg"
     source.write_bytes(b"source")
     output = tmp_path / "douyin-cover.jpg"
@@ -2206,7 +2523,7 @@ async def test_render_platform_cover_uses_contained_portrait_reference_for_compa
         {
             "product_identity": "美杜莎4 顶配vs次顶配",
             "selling_angle": "双版本完整对比展示，做工和细节表现",
-            "visual_brief": "两把刀同框，标题后期统一叠加。",
+            "visual_brief": "主体真实，标题后期统一叠加。",
             "video_type": "开箱对比",
             "style_key": ic.OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO,
         }
@@ -2223,8 +2540,9 @@ async def test_render_platform_cover_uses_contained_portrait_reference_for_compa
         cover_brief=cover_brief,
     )
 
-    assert Path(calls["generate"]["source_image_path"]).name == "highlight.jpg"
-    assert [Path(path).name for path in calls["generate"]["reference_image_paths"]] == ["highlight.jpg"]
+    assert len(calls["generate"]["reference_image_paths"]) == 1
+    assert Path(calls["generate"]["source_image_path"]).name == "base.jpg"
+    assert Path(calls["generate"]["reference_image_paths"][0]).name == "base.jpg"
 
 
 @pytest.mark.asyncio
@@ -2469,6 +2787,7 @@ async def test_request_dreamina_web_generation_uses_backend_aware_timeout(tmp_pa
 async def test_platform_cover_group_reuses_one_generated_cover_for_same_class(tmp_path, monkeypatch) -> None:
     source = tmp_path / "highlight.jpg"
     source.write_bytes(b"source")
+    (tmp_path / "_cover").mkdir()
     cache: dict[str, dict[str, object]] = {}
     render_calls: list[dict[str, object]] = []
     fit_calls: list[dict[str, object]] = []
@@ -2527,12 +2846,23 @@ async def test_platform_cover_group_reuses_one_generated_cover_for_same_class(tm
     )
 
     assert len(render_calls) == 1
-    assert render_calls[0]["output_path"] == tmp_path / "00-cover-landscape_16_9.jpg"
+    assert render_calls[0]["output_path"] == tmp_path / "_cover" / "00-cover-landscape_16_9.jpg"
     assert bilibili["cover_group"]["key"] == "landscape_16_9"
     assert youtube["cover_group"]["key"] == "landscape_16_9"
     assert bilibili["publish_ready"] is True
     assert youtube["publish_ready"] is True
     assert len(fit_calls) == 2
+
+
+def test_toutiao_cover_group_uses_landscape_16_9_matrix() -> None:
+    group = ic._resolve_platform_cover_group(
+        platform_key="toutiao",
+        rules=ic.PLATFORM_PUBLISH_RULES["toutiao"],
+    )
+
+    assert group["key"] == "landscape_16_9"
+    assert tuple(group["cover_size"]) == (1600, 900)
+    assert "toutiao" in list(group["members"] or [])
 
 
 def test_existing_cover_option_reuses_detected_cover_without_imagegen(tmp_path, monkeypatch) -> None:
@@ -3165,10 +3495,9 @@ def test_build_codex_platform_cover_image_prompt_strengthens_portrait_compare_co
 
     prompt = ic._build_codex_platform_cover_image_prompt(spec=spec)
 
-    assert "竖版对比封面也必须保留双主体完整同框" in prompt
-    assert "不允许只剩局部特写" in prompt
-    assert "刀尖、柄尾和主要轮廓都必须完整留在画面内" in prompt
-    assert "优先使用略微拉远的构图" in prompt
+    assert "不要凭空增加第二主体" in prompt
+    assert "画面中部要保留主主体展示通道" in prompt
+    assert "双主体编辑预算必须极小" not in prompt
 
 
 @pytest.mark.asyncio
@@ -4272,7 +4601,7 @@ async def test_restore_existing_cover_generation_context_reuses_persisted_cover_
     context = await ic._restore_existing_intelligent_cover_generation_context(str(source_dir), platforms=["xiaohongshu"])
 
     assert context["cover_brief"]["cover_title"] == "MAXACE美杜莎4双版开箱"
-    assert context["cover_brief"]["strategy_axes"]["content_scheme"]["key"] == "unboxing_compare_dual_subject_v1"
+    assert context["cover_brief"]["strategy_axes"]["content_scheme"]["key"] == "unboxing_single_subject_v1"
 
 
 @pytest.mark.asyncio
@@ -4510,7 +4839,7 @@ def test_refresh_cover_group_cache_status_reloads_completed_request_from_disk(tm
                 "compare_subject_contract_passed": True,
                 "cover_director_policy": {
                     "style_profile_key": "fas_edc_signature_full_cover_v1",
-                    "subject_fidelity_scheme": {"key": "dual_subject_compare_fidelity_v1"},
+                    "subject_fidelity_scheme": {"key": "generic_subject_fidelity_v1"},
                 },
             },
             ensure_ascii=False,
@@ -4681,6 +5010,63 @@ def test_refresh_existing_cover_generation_node_uses_cover_group_lineage_for_pla
     assert refreshed is not None
     assert refreshed["publish_ready"] is True
     assert refreshed["blocking_reasons"] == []
+
+
+def test_refresh_existing_cover_generation_node_keeps_reference_cover_fallback_blocked(tmp_path) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    group_output = material_dir / "00-cover-landscape_16_9.jpg"
+    platform_output = material_dir / "01-bilibili-cover.jpg"
+    Image.new("RGB", (160, 90), "black").save(group_output)
+    Image.new("RGB", (160, 90), "black").save(platform_output)
+    request_path = group_output.with_suffix(".codex-imagegen.json")
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "pending_codex_imagegen",
+                "backend": "codex_builtin",
+                "created_at": "2026-06-03T10:00:00+08:00",
+                "output_path": str(group_output),
+                "target_size": {"width": 160, "height": 90},
+                "bitmap_title_contract_verified_at": "2026-06-03T10:00:03+08:00",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    generation = {
+        "source": "cover_group_reuse",
+        "cover_group": {
+            "key": "landscape_16_9",
+            "cover_path": str(group_output),
+            "members": ["bilibili"],
+        },
+        "group_generation": {
+            "source": "reference_cover_fallback",
+            "image_generation": {
+                "status": "pending_codex_imagegen",
+                "backend": "codex_builtin",
+                "output_path": str(group_output),
+                "request_path": str(request_path),
+            },
+        },
+        "image_generation": {
+            "status": "pending_codex_imagegen",
+            "backend": "codex_builtin",
+            "output_path": str(group_output),
+            "request_path": str(request_path),
+        },
+    }
+
+    refreshed = ic._refresh_existing_cover_generation_node(
+        generation=generation,
+        output_path=platform_output,
+        material_dir=material_dir,
+    )
+
+    assert refreshed is not None
+    assert refreshed["publish_ready"] is False
+    assert "封面当前仅为参考帧占位图，正式生图尚未完成" in refreshed["blocking_reasons"]
 
 
 def test_refresh_cover_group_reuse_platform_derivative_recopies_stale_platform_cover(tmp_path) -> None:
@@ -5175,6 +5561,137 @@ def test_collect_reusable_platform_materials_ignores_cover_blockers() -> None:
     assert reusable["douyin"]["body"] == "MAXACE美杜莎4到货了，上手看顶配和次顶配的差别。"
 
 
+def test_finalize_cover_request_generation_status_recovers_pending_request_after_overlay(tmp_path) -> None:
+    output_path = tmp_path / "cover.jpg"
+    request_path = tmp_path / "cover.codex-imagegen.json"
+    output_path.write_bytes(b"cover")
+    payload = {
+        "status": "pending_codex_imagegen",
+        "backend": "codex_builtin",
+        "output_path": str(output_path),
+        "post_title_overlay_applied": True,
+    }
+
+    ic._finalize_cover_request_generation_status(request_path=request_path, payload=payload)
+
+    assert payload["status"] == "completed"
+    assert payload["result_path"] == str(output_path)
+    assert payload["completed_at"]
+
+
+@pytest.mark.asyncio
+async def test_generate_intelligent_copy_ignores_stale_existing_result_when_sources_changed(tmp_path, monkeypatch) -> None:
+    source_dir = tmp_path / "maxace蜂巢3"
+    source_dir.mkdir()
+    video_path = source_dir / "maxace蜂巢3.mp4"
+    subtitle_path = source_dir / "maxace蜂巢3.srt"
+    video_path.write_bytes(b"video-v2")
+    subtitle_path.write_text("1\n00:00:00,000 --> 00:00:01,000\n这期看看蜂巢3的细节\n", encoding="utf-8")
+
+    material_dir = source_dir / "smart-copy"
+    material_dir.mkdir()
+    result_path = material_dir / "smart-copy.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "source_signature": {
+                    "video": {"path": str(video_path), "exists": True, "size": 1, "mtime_ns": 1},
+                    "subtitle": {"path": str(subtitle_path), "exists": True, "size": 1, "mtime_ns": 1},
+                },
+                "platforms": [
+                    {
+                        "key": "douyin",
+                        "label": "抖音",
+                        "has_title": True,
+                        "body_label": "描述",
+                        "tag_label": "标签",
+                        "titles": ["旧测试残留标题：顶配次顶配怎么选"],
+                        "primary_title": "旧测试残留标题：顶配次顶配怎么选",
+                        "title_copy_all": "旧测试残留标题：顶配次顶配怎么选",
+                        "body": "旧测试残留正文。",
+                        "tags": ["旧标签"],
+                        "tags_copy": "#旧标签",
+                        "full_copy": "旧测试残留正文。\n\n#旧标签",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        ic,
+        "inspect_intelligent_copy_folder",
+        lambda _folder: {
+            "folder_path": str(source_dir),
+            "material_dir": str(material_dir),
+            "video_file": str(video_path),
+            "subtitle_file": str(subtitle_path),
+            "cover_file": None,
+            "extra_video_files": [],
+            "extra_subtitle_files": [],
+            "extra_cover_files": [],
+            "warnings": [],
+        },
+    )
+    monkeypatch.setattr(ic, "_load_subtitle_items", lambda _path: [{"text_final": "这期看看蜂巢3的细节"}])
+    monkeypatch.setattr(ic, "list_packaging_assets", lambda: {"config": {}})
+    monkeypatch.setattr(
+        ic,
+        "_build_intelligent_copy_fast_profile",
+        lambda **_kwargs: {"subject_brand": "maxace", "subject_model": "蜂巢3", "subject_type": "EDC折刀"},
+    )
+    monkeypatch.setattr(
+        ic,
+        "save_platform_packaging_markdown",
+        lambda *_args, **_kwargs: None,
+    )
+
+    async def fake_generate_platform_packaging(**_kwargs):
+        return {
+            "highlights": {"product": "maxace蜂巢3"},
+            "platforms": {
+                "douyin": {
+                    "titles": ["maxace蜂巢3开箱先看细节"],
+                    "description": "这期围绕maxace蜂巢3展开，重点看细节展示和上手体验。",
+                    "tags": ["maxace", "蜂巢3"],
+                }
+            },
+        }
+
+    async def fake_build_cover_brief(**_kwargs):
+        return {
+            "cover_title": "maxace蜂巢3",
+            "video_type": "开箱体验",
+            "product_identity": "maxace蜂巢3",
+            "selling_angle": "先看细节",
+            "visual_brief": "主体真实，标题居中。",
+        }
+
+    async def fake_prepare_cover_source(**_kwargs):
+        return None
+
+    async def fake_render_cover_group(**_kwargs):
+        output_path = Path(_kwargs["output_path"])
+        output_path.write_bytes(b"cover")
+        return {"publish_ready": True, "blocking_reasons": []}
+
+    monkeypatch.setattr(ic, "generate_platform_packaging", fake_generate_platform_packaging)
+    monkeypatch.setattr(ic, "_build_intelligent_cover_brief", fake_build_cover_brief)
+    monkeypatch.setattr(ic, "_prepare_intelligent_copy_cover_source", fake_prepare_cover_source)
+    monkeypatch.setattr(ic, "_render_or_reuse_platform_cover_group", fake_render_cover_group)
+    monkeypatch.setattr(ic, "_write_platform_material_files", lambda **_kwargs: None)
+
+    result = await ic.generate_intelligent_copy(str(source_dir), platforms=["douyin"])
+
+    assert result["platforms"][0]["primary_title"] == "maxace蜂巢3开箱先看细节"
+    assert result["platforms"][0]["body"] == "这期围绕maxace蜂巢3展开，重点看细节展示和上手体验。"
+    assert "旧测试残留" not in result["platforms"][0]["primary_title"]
+    assert any("已忽略与当前视频/字幕不匹配的旧 smart-copy 结果" in warning for warning in result["warnings"])
+
+
 def test_material_self_heal_fills_safe_publication_metadata() -> None:
     packaging = {
         "platforms": {
@@ -5604,6 +6121,67 @@ def test_upgrade_existing_intelligent_copy_result_restores_group_cover_and_contr
     assert payload["platforms"][1]["visibility_or_publish_mode"] == "scheduled"
 
 
+def test_upgrade_existing_intelligent_copy_result_reannotates_persisted_single_subject_cover_brief(tmp_path) -> None:
+    source_dir = tmp_path / "maxace蜂巢3顶配开箱"
+    material_dir = source_dir / "smart-copy"
+    material_dir.mkdir(parents=True)
+    smart_copy_path = material_dir / "smart-copy.json"
+    smart_copy_path.write_text(
+        json.dumps(
+            {
+                "creator_profile_name": "FAS",
+                "content_profile_summary": {
+                    "subject_brand": "maxace",
+                    "subject_model": "蜂巢3顶配",
+                    "subject_type": "EDC折刀",
+                    "summary": "这期围绕EDC折刀展开，重点看开箱过程、细节展示和上手体验。",
+                },
+                "cover_brief": {
+                    "cover_title": "maxace蜂巢3顶配开箱",
+                    "product_identity": "maxace蜂巢3顶配EDC折刀",
+                    "selling_angle": "细节做工与上手质感",
+                    "visual_brief": "主体真实，突出做工细节。",
+                    "video_type": "开箱",
+                    "style_key": ic.OFFICIAL_COVER_STYLE_EDC_CINEMATIC_HERO,
+                    "strategy_axes": {
+                        "content_scheme": {"key": "unboxing_single_subject_v1"},
+                        "subject_fidelity_scheme": {"key": "generic_subject_fidelity_v1"},
+                    },
+                },
+                "platforms": [
+                    {
+                        "key": "bilibili",
+                        "label": "B站",
+                        "has_title": True,
+                        "title_label": "标题",
+                        "body_label": "简介",
+                        "tag_label": "标签",
+                        "constraints": {"title_limit": 80, "body_limit": 250, "tag_limit": 10, "tag_style": "hashtags_space"},
+                        "titles": ["maxace蜂巢3顶配开箱"],
+                        "primary_title": "maxace蜂巢3顶配开箱",
+                        "title_copy_all": "1. maxace蜂巢3顶配开箱",
+                        "body": "这期主要看细节做工和上手质感。",
+                        "tags": ["maxace", "蜂巢3顶配"],
+                        "tags_copy": "#maxace #蜂巢3顶配",
+                        "full_copy": "maxace蜂巢3顶配开箱\n\n这期主要看细节做工和上手质感。\n\n#maxace #蜂巢3顶配",
+                        "cover_path": None,
+                        "publish_ready": False,
+                        "blocking_reasons": [],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    result = ic.upgrade_existing_intelligent_copy_result(str(source_dir), platforms=["bilibili"])
+
+    assert result["cover_brief"]["strategy_axes"]["content_scheme"]["key"] == "unboxing_single_subject_v1"
+    assert result["cover_brief"]["strategy_axes"]["subject_fidelity_scheme"]["key"] == "generic_subject_fidelity_v1"
+
+
 def test_resolve_cover_canvas_fit_mode_prefers_blur_fill_for_large_ratio_mismatch(tmp_path) -> None:
     source = tmp_path / "landscape.jpg"
     Image.new("RGB", (1600, 900), (24, 48, 72)).save(source)
@@ -5953,7 +6531,7 @@ def test_upgrade_existing_intelligent_copy_result_accepts_explicit_bilibili_plat
     assert material["platform_specific_overrides"]["collection_management"]["target_collection_name"] == "EDC潮玩桌搭"
 
 
-def test_material_contract_requires_explicit_collection_policy_for_supported_platforms() -> None:
+def test_material_contract_defaults_to_skip_collection_when_unspecified() -> None:
     contract = ic._build_material_contract(
         [
             {
@@ -5977,11 +6555,8 @@ def test_material_contract_requires_explicit_collection_policy_for_supported_pla
         ]
     )
 
-    assert contract["status"] == "failed"
-    assert contract["platforms"]["douyin"]["collection_policy_ready"] is False
-    assert contract["platforms"]["douyin"]["one_click_publish_ready"] is False
-    assert "collection_policy" in contract["platforms"]["douyin"]["missing_fields"]
-    assert any("合集决策" in reason for reason in contract["blocking_reasons"])
+    assert contract["platforms"]["douyin"]["collection_policy_ready"] is True
+    assert "collection_policy" not in contract["platforms"]["douyin"]["missing_fields"]
     assert contract["platforms"]["toutiao"]["collection_policy_ready"] is True
 
 
@@ -6010,13 +6585,118 @@ def test_material_contract_uses_shared_matrix_for_xiaohongshu_cover_and_collecti
     assert contract["status"] == "failed"
     xhs = contract["platforms"]["xiaohongshu"]
     assert xhs["cover_ready"] is False
-    assert xhs["collection_policy_ready"] is False
+    assert xhs["collection_policy_ready"] is True
     assert "cover_path" in xhs["missing_fields"]
-    assert "collection_policy" in xhs["missing_fields"]
+    assert "collection_policy" not in xhs["missing_fields"]
     x_entry = contract["platforms"]["x"]
     assert x_entry["cover_ready"] is True
     assert x_entry["collection_policy_ready"] is True
     assert x_entry["publication_metadata_ready"] is True
+
+
+def test_derive_safe_platform_specific_overrides_defaults_explicit_collection_skip_for_bilibili() -> None:
+    overrides = ic._derive_safe_platform_specific_overrides(
+        platform_key="bilibili",
+        material={},
+        platform_payload={},
+    )
+
+    assert overrides["skip_collection_select"] is True
+    assert overrides["collection_policy"] == "skip"
+
+
+def test_apply_creator_publication_policy_to_material_projects_collection_management() -> None:
+    material = {
+        "key": "bilibili",
+        "label": "B站",
+        "body": "这期是 FAS 新品开箱，上手看看细节。",
+        "tags": ["FAS", "新品开箱"],
+    }
+
+    ic._apply_creator_publication_policy_to_material(
+        platform_key="bilibili",
+        material=material,
+        platform_payload={"titles": ["FAS 新品开箱"], "description": "这期是 FAS 新品开箱，上手看看细节。"},
+        creator_publication_policy={
+            "version": 1,
+            "source": "creator_profile",
+            "rules": [
+                {
+                    "id": "fas-bili-collection",
+                    "source": "creator_profile",
+                    "type": "preferred_collection",
+                    "platforms": ["bilibili"],
+                    "preferred_collection_name": "FAS新品",
+                }
+            ],
+        },
+        creator_profile_name="FAS",
+        rules=ic.PLATFORM_PUBLISH_RULES["bilibili"],
+    )
+
+    overrides = material["platform_specific_overrides"]
+    assert overrides["collection_management"]["status"] == "needs_create"
+    assert overrides["collection_management"]["target_collection_name"] == "FAS新品"
+    assert "skip_collection_select" not in overrides
+    assert material.get("collection_name", "") == ""
+
+
+def test_refresh_platform_material_cover_generation_status_materializes_group_derivative(tmp_path, monkeypatch) -> None:
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    group_output = material_dir / "00-cover-landscape_16_9.jpg"
+    group_output.write_bytes(b"cover")
+    request_path = material_dir / "00-cover-landscape_16_9.codex-imagegen.json"
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "backend": "codex_builtin",
+                "output_path": str(group_output),
+                "result_path": str(group_output),
+                "generated_by_codex_bridge": True,
+                "completed_at": "2026-06-09T10:00:00+08:00",
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    material = {
+        "key": "x",
+        "label": "X",
+        "body": "正文",
+        "tags": ["FAS"],
+        "platform_specific_overrides": {},
+        "cover_generation": {
+            "source": "cover_group_reuse",
+            "cover_group": {"key": "landscape_16_9", "cover_path": str(group_output)},
+            "group_generation": {
+                "image_generation": {
+                    "status": "completed",
+                    "backend": "codex_builtin",
+                    "request_path": str(request_path),
+                    "output_path": str(group_output),
+                },
+                "cover_group": {"key": "landscape_16_9", "cover_path": str(group_output)},
+                "blocking_reasons": [],
+                "publish_ready": True,
+            },
+        },
+    }
+    monkeypatch.setattr(
+        ic,
+        "_fit_image_to_canvas",
+        lambda *, source_path, output_path, width, height, fit_mode="contain": output_path.write_bytes(source_path.read_bytes()),
+    )
+    monkeypatch.setattr(ic, "_write_platform_material_files", lambda **_kwargs: None)
+
+    ic._refresh_platform_material_cover_generation_status(material_dir=material_dir, platform_materials=[material])
+
+    expected_cover = ic.smart_copy_platform_cover_path(material_dir, ic._resolve_platform_material_serial("x"), "x")
+    assert material["cover_path"] == str(expected_cover)
+    assert expected_cover.exists()
+    assert "封面等待 Codex 内置 imagegen 执行完成" not in material.get("blocking_reasons", [])
 
 
 def test_normalize_existing_platform_material_omits_empty_publication_metadata() -> None:
@@ -6377,6 +7057,122 @@ def test_packaging_from_existing_result_derives_publish_ready_from_preflight_whe
     )
 
     assert packaging["platforms"]["douyin"]["publish_ready"] is False
+
+
+def test_material_roundtrip_preserves_slot_and_collection_contract() -> None:
+    payload = ic._material_to_result_payload(
+        {
+            "key": "xiaohongshu",
+            "label": "小红书",
+            "titles": ["标题"],
+            "body": "正文",
+            "tags": ["开箱"],
+            "cover_path": "E:/covers/xhs.jpg",
+            "blocking_reasons": [],
+            "collection_name": "FAS新品",
+            "scheduled_publish_slot": "18:00",
+            "scheduled_publish_rationale": "晚高峰首发",
+            "collection_management": {
+                "status": "select_existing",
+                "selected_collection_name": "FAS新品",
+            },
+            "available_collections": ["FAS新品", "EDC潮玩桌搭"],
+            "collection_catalog": [{"name": "FAS新品", "selectable": True}],
+            "platform_specific_overrides": {
+                "group_chat_name": "F.A.S EDC畅聊群",
+            },
+        }
+    )
+
+    assert payload["scheduled_publish_slot"] == "18:00"
+    assert payload["scheduled_publish_rationale"] == "晚高峰首发"
+    assert payload["collection_management"]["selected_collection_name"] == "FAS新品"
+    assert payload["available_collections"] == ["FAS新品", "EDC潮玩桌搭"]
+    assert payload["collection_catalog"][0]["name"] == "FAS新品"
+
+
+def test_packaging_and_targets_roundtrip_preserve_slot_and_collection_contract(tmp_path) -> None:
+    packaging = ic._packaging_from_existing_intelligent_copy_result(
+        {
+            "platforms": [
+                {
+                    "key": "xiaohongshu",
+                    "titles": ["标题"],
+                    "body": "正文",
+                    "tags": ["开箱"],
+                    "collection_name": "FAS新品",
+                    "scheduled_publish_slot": "18:00",
+                    "scheduled_publish_rationale": "晚高峰首发",
+                    "collection_management": {
+                        "status": "select_existing",
+                        "selected_collection_name": "FAS新品",
+                    },
+                    "available_collections": ["FAS新品", "EDC潮玩桌搭"],
+                    "collection_catalog": [{"name": "FAS新品", "selectable": True}],
+                }
+            ]
+        },
+        platform_keys=["xiaohongshu"],
+    )
+
+    xhs = packaging["platforms"]["xiaohongshu"]
+    assert xhs["scheduled_publish_slot"] == "18:00"
+    assert xhs["scheduled_publish_rationale"] == "晚高峰首发"
+    assert xhs["collection_management"]["selected_collection_name"] == "FAS新品"
+    assert xhs["available_collections"] == ["FAS新品", "EDC潮玩桌搭"]
+
+    targets = ic._build_publication_scheme_targets_from_packaging(
+        packaging={"platforms": {"xiaohongshu": xhs}},
+        existing_result={
+            "platforms": [
+                {
+                    "key": "xiaohongshu",
+                    "full_copy": "正文\n#开箱",
+                    "copy_material": {"body": "正文"},
+                }
+            ]
+        },
+        material_dir=tmp_path,
+        platform_keys=["xiaohongshu"],
+    )
+
+    assert targets[0]["scheduled_publish_slot"] == "18:00"
+    assert targets[0]["scheduled_publish_rationale"] == "晚高峰首发"
+    assert targets[0]["collection_name"] == "FAS新品"
+    assert targets[0]["collection_management"]["selected_collection_name"] == "FAS新品"
+
+
+def test_platform_packaging_export_preserves_slot_and_collection_contract() -> None:
+    export_payload = ic._build_platform_packaging_export(
+        packaging={"highlights": {}, "platforms": {}},
+        platform_materials=[
+            {
+                "key": "xiaohongshu",
+                "label": "小红书",
+                "titles": ["标题"],
+                "body": "正文",
+                "tags": ["开箱"],
+                "cover_path": "",
+                "copy_material": {},
+                "scheduled_publish_slot": "18:00",
+                "scheduled_publish_rationale": "晚高峰首发",
+                "collection_name": "FAS新品",
+                "collection_management": {
+                    "status": "select_existing",
+                    "selected_collection_name": "FAS新品",
+                },
+                "available_collections": ["FAS新品", "EDC潮玩桌搭"],
+                "collection_catalog": [{"name": "FAS新品", "selectable": True}],
+            }
+        ],
+        requested_platforms=["xiaohongshu"],
+    )
+
+    xhs = export_payload["platforms"]["xiaohongshu"]
+    assert xhs["scheduled_publish_slot"] == "18:00"
+    assert xhs["scheduled_publish_rationale"] == "晚高峰首发"
+    assert xhs["collection_management"]["selected_collection_name"] == "FAS新品"
+    assert xhs["available_collections"] == ["FAS新品", "EDC潮玩桌搭"]
 
 
 def test_platform_packaging_export_and_readback_normalize_wechat_platform_key(tmp_path) -> None:
@@ -7169,6 +7965,59 @@ async def test_upgrade_folder_materials_route_passes_publication_scheme_path(mon
     assert captured["publication_scheme_path"] == "E:/schemes/formal-live-scheme.json"
     assert captured["creator_profile_id"] == "profile-1"
     assert captured["creator_profile_name"] == "FAS"
+
+
+@pytest.mark.asyncio
+async def test_generate_folder_materials_route_passes_creator_profile(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+    creator_profile = {
+        "display_name": "FAS",
+        "creator_profile": {
+            "publishing": {
+                "publication_rules": [
+                    {"type": "preferred_collection", "platforms": ["bilibili"], "preferred_collection_name": "FAS新品"}
+                ]
+            }
+        },
+    }
+
+    monkeypatch.setattr(
+        intelligent_copy_api,
+        "_resolve_generation_creator_profile",
+        lambda _creator_profile_id: creator_profile,
+    )
+
+    async def fake_generate(folder_path: str, **kwargs):
+        captured["folder_path"] = folder_path
+        captured.update(kwargs)
+        return {
+            "status": "passed",
+            "folder_path": folder_path,
+            "material_dir": f"{folder_path}/smart-copy",
+            "platforms": [],
+            "material_contract": {"status": "passed", "one_click_publish_ready": True, "platforms": {}},
+            "material_validation": {"status": "passed"},
+            "publish_ready": True,
+            "blocking_reasons": [],
+            "manual_handoff_ready": False,
+            "manual_handoff_targets": [],
+        }
+
+    monkeypatch.setattr(intelligent_copy_api, "generate_intelligent_copy", fake_generate)
+
+    body = intelligent_copy_api.IntelligentCopyGenerateIn(
+        folder_path="E:/materials/demo",
+        platforms=["bilibili"],
+        creator_profile_id="profile-1",
+    )
+
+    result = await intelligent_copy_api.generate_folder_materials(body)
+
+    assert result["status"] == "passed"
+    assert captured["folder_path"] == "E:/materials/demo"
+    assert captured["creator_profile_id"] == "profile-1"
+    assert captured["creator_profile_name"] == "FAS"
+    assert captured["creator_profile"] == creator_profile
 
 
 @pytest.mark.asyncio

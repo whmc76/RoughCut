@@ -431,6 +431,8 @@ def _build_scheme_from_record(*, plan: dict[str, Any], record: dict[str, Any], f
         visibility = "scheduled" if effective_scheduled_publish else "draft"
         option = {
             "visibility_or_publish_mode": visibility,
+            "scheduled_publish_slot": slot,
+            "scheduled_publish_rationale": str(first_slot.get("reason") or _default_slot_reason(platform, slot)),
         }
         if effective_scheduled_publish:
             option["scheduled_publish_at"] = scheduled_at
@@ -475,11 +477,13 @@ def _build_scheme_from_record(*, plan: dict[str, Any], record: dict[str, Any], f
                 "cover_path": str(target.get("cover_path") or ""),
                 "full_copy": str(target.get("full_copy") or ""),
                 "copy_material": target.get("copy_material") if isinstance(target.get("copy_material"), dict) else {},
+                "scheduled_publish_slot": slot,
                 "scheduled_publish_at": scheduled_at if effective_scheduled_publish else "",
                 "collection_name": collection_name,
                 "collection_management": collection_management,
                 "category": category,
                 "visibility_or_publish_mode": visibility,
+                "scheduled_publish_rationale": str(first_slot.get("reason") or _default_slot_reason(platform, slot)),
                 "rationale": str(first_slot.get("reason") or _default_slot_reason(platform, slot)),
                 "probe_summary": _capability_summary(capability),
                 "validation_status": "publish_time_light_validation",
@@ -861,7 +865,9 @@ def _repair_scheme(payload: dict[str, Any], *, fallback: dict[str, Any]) -> dict
             item["category"] = repaired_category
         option = deepcopy(fallback_options.get(platform) or {})
         for source_key, target_key in (
+            ("scheduled_publish_slot", "scheduled_publish_slot"),
             ("scheduled_publish_at", "scheduled_publish_at"),
+            ("scheduled_publish_rationale", "scheduled_publish_rationale"),
             ("collection_id", "collection_id"),
             ("collection_name", "collection_name"),
             ("category", "category"),
@@ -1861,7 +1867,7 @@ def _build_topic_selection_plan(platform: str, tags: list[str], option_groups: l
     if platform == "xiaohongshu":
         mode = "search_and_select_platform_topic_suggestions"
         note = "小红书话题必须在话题搜索/推荐结果中逐个选择，不能只把 #文本 写进正文。"
-    elif platform in {"douyin", "kuaishou", "bilibili"}:
+    elif platform in {"kuaishou", "bilibili"}:
         mode = "prefer_platform_topic_suggestions_then_fallback_to_tag_input"
         note = "优先选择平台推荐/搜索到的真实话题项；没有匹配时才回退为普通标签输入。"
     else:

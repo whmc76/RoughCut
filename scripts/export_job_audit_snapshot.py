@@ -14,6 +14,12 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from roughcut.pipeline.render_diagnostics import (
+    classify_avatar_runtime_reason_category,
+    classify_render_failure_reason,
+)
 
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 if hasattr(sys.stdout, "reconfigure"):
@@ -162,6 +168,228 @@ def select_active_profile(artifacts: list[dict[str, Any]]) -> tuple[str | None, 
     return None, {}
 
 
+def _normalize_render_outputs_summary_for_reporting(
+    render_outputs_summary: dict[str, Any] | None,
+    step_rows: list[dict[str, Any]] | None,
+    *,
+    job_error: str = "",
+) -> dict[str, Any]:
+    summary = dict(render_outputs_summary or {}) if isinstance(render_outputs_summary, dict) else {}
+    avatar_result = dict(summary.get("avatar_result") or {}) if isinstance(summary.get("avatar_result"), dict) else {}
+    if avatar_result and not str(avatar_result.get("reason_category") or "").strip():
+        reason_category = classify_avatar_runtime_reason_category(str(avatar_result.get("reason") or "").strip()) or ""
+        if reason_category:
+            avatar_result["reason_category"] = reason_category
+            summary["avatar_result"] = avatar_result
+    render_step = next(
+        (
+            dict(row)
+            for row in list(step_rows or [])
+            if str((row or {}).get("step_name") or "").strip() == "render"
+            and str((row or {}).get("status") or "").strip().lower() in {"failed", "cancelled"}
+        ),
+        {},
+    )
+    if not render_step:
+        return summary
+
+    detail = str(render_step.get("detail") or "").strip()
+    error = str(render_step.get("error") or job_error or detail).strip()
+    reason, _ = classify_render_failure_reason(
+        error=error,
+        detail=detail,
+        sync_runner=render_step.get("sync_runner") if isinstance(render_step.get("sync_runner"), dict) else {},
+    )
+    if not reason:
+        return summary
+
+    avatar_result = dict(summary.get("avatar_result") or {}) if isinstance(summary.get("avatar_result"), dict) else {}
+    if avatar_result:
+        weak_reason = str(avatar_result.get("reason") or "").strip().lower()
+        if weak_reason not in {"missing_avatar_render", "missing_avatar_video", "missing_avatar_output"}:
+            return summary
+
+    summary["avatar_result"] = {
+        "status": "blocked",
+        "reason": reason,
+        "detail": detail or error,
+    }
+    return summary
+
+
+def _load_historical_batch_render_diagnostics(
+    job_id: str,
+    *,
+    search_root: Path | None = None,
+) -> dict[str, Any]:
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        return {}
+    root = search_root or (ROOT / "output" / "test")
+    if not root.exists():
+        return {}
+
+    best_payload: dict[str, Any] = {}
+    best_score = -1
+    best_mtime = -1.0
+    for path in root.rglob("batch_report.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for row in list(payload.get("jobs") or []):
+            if not isinstance(row, dict):
+                continue
+            if str(row.get("job_id") or "").strip() != normalized_job_id:
+                continue
+            diagnostics = row.get("render_diagnostics")
+            if not isinstance(diagnostics, dict) or not diagnostics:
+                continue
+            render_step = diagnostics.get("render_step") if isinstance(diagnostics.get("render_step"), dict) else {}
+            score = 0
+            if render_step:
+                score += 1
+                if str(render_step.get("reason") or "").strip():
+                    score += 1
+                if isinstance(render_step.get("sync_runner"), dict) and render_step.get("sync_runner"):
+                    score += 2
+            if isinstance(diagnostics.get("avatar_result"), dict) and diagnostics.get("avatar_result"):
+                score += 1
+            if isinstance(diagnostics.get("cover_result"), dict) and diagnostics.get("cover_result"):
+                score += 1
+            mtime = path.stat().st_mtime
+            if score > best_score or (score == best_score and mtime > best_mtime):
+                best_payload = dict(diagnostics)
+                best_score = score
+                best_mtime = mtime
+    return best_payload
+
+
+def _merge_historical_render_context(
+    *,
+    effective_status: str,
+    effective_error: str,
+    step_rows: list[dict[str, Any]],
+    render_outputs_summary: dict[str, Any],
+    historical_render_diagnostics: dict[str, Any] | None,
+) -> tuple[str, str, list[dict[str, Any]], dict[str, Any]]:
+    diagnostics = dict(historical_render_diagnostics or {}) if isinstance(historical_render_diagnostics, dict) else {}
+    if not diagnostics:
+        return effective_status, effective_error, step_rows, render_outputs_summary
+
+    merged_status = str(effective_status or "").strip()
+    merged_error = str(effective_error or "").strip()
+    merged_rows = [dict(row) for row in list(step_rows or []) if isinstance(row, dict)]
+    merged_summary = dict(render_outputs_summary or {}) if isinstance(render_outputs_summary, dict) else {}
+
+    historical_render_step = diagnostics.get("render_step") if isinstance(diagnostics.get("render_step"), dict) else {}
+    if historical_render_step:
+        historical_status = str(historical_render_step.get("status") or "").strip().lower()
+        historical_detail = compact_text(historical_render_step.get("detail") or "")
+        historical_error = compact_text(historical_render_step.get("error") or "") or historical_detail
+        if historical_status == "failed":
+            if merged_status.lower() not in {"failed"}:
+                merged_status = "failed"
+            if historical_error and not merged_error:
+                merged_error = historical_error
+        for row in merged_rows:
+            if str(row.get("step_name") or "").strip() != "render":
+                continue
+            current_status = str(row.get("status") or "").strip().lower()
+            current_error = compact_text(row.get("error") or "")
+            current_detail = compact_text(row.get("detail") or "")
+            if (
+                current_status not in {"failed"}
+                and historical_status == "failed"
+            ) or (
+                historical_status == "failed"
+                and historical_error
+                and not current_error
+            ) or (
+                historical_status == "failed"
+                and isinstance(historical_render_step.get("sync_runner"), dict)
+                and historical_render_step.get("sync_runner")
+                and not row.get("sync_runner")
+            ):
+                row["status"] = historical_status
+                row["detail"] = historical_detail or current_detail
+                row["error"] = historical_error or current_error
+                if isinstance(historical_render_step.get("sync_runner"), dict) and historical_render_step.get("sync_runner"):
+                    row["sync_runner"] = dict(historical_render_step.get("sync_runner") or {})
+            break
+
+    if not merged_summary and diagnostics:
+        avatar_result = diagnostics.get("avatar_result") if isinstance(diagnostics.get("avatar_result"), dict) else {}
+        cover_result = diagnostics.get("cover_result") if isinstance(diagnostics.get("cover_result"), dict) else {}
+        if avatar_result:
+            merged_summary["avatar_result"] = dict(avatar_result)
+        if cover_result:
+            merged_summary["cover_result"] = dict(cover_result)
+
+    return merged_status, merged_error, merged_rows, merged_summary
+
+
+def summarize_render_outputs(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
+    from run_fullchain_batch import _normalize_cover_render_result_for_reporting
+
+    render_artifact = next(
+        (
+            item
+            for item in reversed(list(artifacts))
+            if str(item.get("artifact_type") or "").strip() == "render_outputs"
+            and isinstance(item.get("data_json"), dict)
+        ),
+        None,
+    )
+    runtime_artifact = next(
+        (
+            item
+            for item in reversed(list(artifacts))
+            if str(item.get("artifact_type") or "").strip() == "render_runtime_diagnostics"
+            and isinstance(item.get("data_json"), dict)
+        ),
+        None,
+    )
+    payload = render_artifact.get("data_json") if render_artifact and isinstance(render_artifact.get("data_json"), dict) else {}
+    runtime_payload = runtime_artifact.get("data_json") if runtime_artifact and isinstance(runtime_artifact.get("data_json"), dict) else {}
+    if not isinstance(payload, dict):
+        payload = {}
+    if not isinstance(runtime_payload, dict):
+        runtime_payload = {}
+    if not payload and not runtime_payload:
+        return {}
+    summary: dict[str, Any] = {}
+    avatar_result = runtime_payload.get("avatar_result") if isinstance(runtime_payload.get("avatar_result"), dict) and runtime_payload.get("avatar_result") else payload.get("avatar_result")
+    if isinstance(avatar_result, dict) and avatar_result:
+        avatar_summary: dict[str, Any] = {}
+        for key in ("status", "reason", "detail", "retryable", "profile_name"):
+            value = avatar_result.get(key)
+            if value not in (None, "", []):
+                avatar_summary[key] = value
+        reason_category = str(avatar_result.get("reason_category") or "").strip() or (
+            classify_avatar_runtime_reason_category(str(avatar_result.get("reason") or "").strip()) or ""
+        )
+        if reason_category:
+            avatar_summary["reason_category"] = reason_category
+        error_metadata = avatar_result.get("error_metadata")
+        if isinstance(error_metadata, dict) and error_metadata:
+            avatar_summary["error_metadata"] = dict(error_metadata)
+        if avatar_summary:
+            summary["avatar_result"] = avatar_summary
+    cover_result = runtime_payload.get("cover_result") if isinstance(runtime_payload.get("cover_result"), dict) and runtime_payload.get("cover_result") else payload.get("cover_result")
+    if isinstance(cover_result, dict) and cover_result:
+        cover_summary = _normalize_cover_render_result_for_reporting(cover_result)
+        if cover_summary:
+            summary["cover_result"] = cover_summary
+    for key in ("cover", "final_video", "project_path"):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            summary[key] = value
+    return summary
+
+
 def build_heuristics(
     *,
     active_profile: dict[str, Any],
@@ -206,6 +434,31 @@ def build_heuristics(
     }
 
 
+def derive_effective_job_status(*, stored_status: str, step_rows: list[dict[str, Any]]) -> str:
+    normalized = str(stored_status or "").strip()
+    statuses = {str((row or {}).get("status") or "").strip().lower() for row in step_rows}
+    details = [
+        str((((row or {}).get("metadata") or {}).get("detail") if isinstance((row or {}).get("metadata"), dict) else "") or "")
+        for row in step_rows
+    ]
+    if "failed" in statuses:
+        return "failed"
+    if normalized.lower() == "cancelled" and any("stop_after" in detail for detail in details):
+        return "partial"
+    return normalized or "unknown"
+
+
+def derive_effective_job_error(*, stored_error: Any, step_rows: list[dict[str, Any]]) -> str:
+    normalized = compact_text(stored_error or "")
+    if normalized:
+        return normalized
+    for row in step_rows:
+        error = compact_text((row or {}).get("error_message") or "")
+        if error:
+            return error
+    return ""
+
+
 async def export_snapshot(args: argparse.Namespace) -> dict[str, Any]:
     load_env_file(ROOT / ".env")
     database_url = os.getenv("DATABASE_URL")
@@ -219,7 +472,7 @@ async def export_snapshot(args: argparse.Namespace) -> dict[str, Any]:
                 await conn.execute(
                     text(
                         """
-                        SELECT id, source_name, source_path, status, created_at, updated_at
+                        SELECT id, source_name, source_path, status, error_message, created_at, updated_at
                         FROM jobs
                         WHERE id = :job_id
                         """
@@ -234,7 +487,7 @@ async def export_snapshot(args: argparse.Namespace) -> dict[str, Any]:
                 await conn.execute(
                     text(
                         """
-                        SELECT step_name, status, attempt, started_at, finished_at, metadata
+                        SELECT step_name, status, attempt, started_at, finished_at, error_message, metadata
                         FROM job_steps
                         WHERE job_id = :job_id
                         ORDER BY started_at NULLS FIRST, finished_at NULLS FIRST, step_name
@@ -330,7 +583,9 @@ async def export_snapshot(args: argparse.Namespace) -> dict[str, Any]:
     )
     step_map = {str(row["step_name"]): str(row["status"]) for row in step_rows}
     artifact_counts = Counter(str(row["artifact_type"]) for row in artifact_rows)
-    active_profile_type, active_profile = select_active_profile([dict(row) for row in artifact_rows])
+    artifact_dict_rows = [dict(row) for row in artifact_rows]
+    active_profile_type, active_profile = select_active_profile(artifact_dict_rows)
+    render_outputs_summary = summarize_render_outputs(artifact_dict_rows)
     heuristics = build_heuristics(
         active_profile=active_profile,
         transcript_hits=transcript_hits,
@@ -341,31 +596,57 @@ async def export_snapshot(args: argparse.Namespace) -> dict[str, Any]:
 
     source_name = str(job_row["source_name"])
     located_paths = locate_source_paths(source_name, list(args.locate_root))
+    step_dict_rows = [dict(row) for row in step_rows]
+    effective_status = derive_effective_job_status(stored_status=str(job_row["status"]), step_rows=step_dict_rows)
+    effective_error = derive_effective_job_error(stored_error=job_row.get("error_message"), step_rows=step_dict_rows)
+    snapshot_step_rows = [
+        {
+            "step_name": str(row["step_name"]),
+            "status": str(row["status"]),
+            "attempt": int(row["attempt"] or 0),
+            "started_at": str(row["started_at"] or ""),
+            "finished_at": str(row["finished_at"] or ""),
+            "detail": compact_text((row.get("metadata") or {}).get("detail") if isinstance(row.get("metadata"), dict) else ""),
+            "error": compact_text(row.get("error_message") or ""),
+            "sync_runner": (
+                dict((row.get("metadata") or {}).get("sync_runner") or {})
+                if isinstance(row.get("metadata"), dict) and isinstance((row.get("metadata") or {}).get("sync_runner"), dict)
+                else {}
+            ),
+        }
+        for row in step_dict_rows
+    ]
+    historical_render_diagnostics = _load_historical_batch_render_diagnostics(str(job_row["id"]))
+    effective_status, effective_error, snapshot_step_rows, render_outputs_summary = _merge_historical_render_context(
+        effective_status=effective_status,
+        effective_error=effective_error,
+        step_rows=snapshot_step_rows,
+        render_outputs_summary=render_outputs_summary,
+        historical_render_diagnostics=historical_render_diagnostics,
+    )
+    render_outputs_summary = _normalize_render_outputs_summary_for_reporting(
+        render_outputs_summary,
+        snapshot_step_rows,
+        job_error=effective_error,
+    )
 
     snapshot = {
         "job": {
             "id": str(job_row["id"]),
             "source_name": source_name,
             "source_path": str(job_row["source_path"]),
-            "status": str(job_row["status"]),
+            "status": effective_status,
+            "stored_status": str(job_row["status"]),
+            "error_message": effective_error,
             "created_at": str(job_row["created_at"]),
             "updated_at": str(job_row["updated_at"]),
             "located_paths": located_paths,
         },
-        "step_status": [
-            {
-                "step_name": str(row["step_name"]),
-                "status": str(row["status"]),
-                "attempt": int(row["attempt"] or 0),
-                "started_at": str(row["started_at"] or ""),
-                "finished_at": str(row["finished_at"] or ""),
-                "detail": compact_text((row.get("metadata") or {}).get("detail") if isinstance(row.get("metadata"), dict) else ""),
-            }
-            for row in step_rows
-        ],
+        "step_status": snapshot_step_rows,
         "artifacts": {
             "counts": dict(artifact_counts),
             "active_profile_type": active_profile_type,
+            "render_outputs_summary": render_outputs_summary,
             "active_profile_summary": {
                 "subject_type": str(active_profile.get("subject_type") or ""),
                 "subject_brand": str(active_profile.get("subject_brand") or ""),

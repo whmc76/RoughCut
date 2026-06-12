@@ -8,6 +8,7 @@ const BRIDGE_AUTO_RELOAD_ALARM = "roughcut_publication_bridge_auto_reload";
 const BRIDGE_POLL_TIMEOUT_MS = 1000;
 const BRIDGE_IDLE_POLL_DELAY_MS = 750;
 const BRIDGE_AUTO_RELOAD_DELAY_MINUTES = 0.5;
+const BRIDGE_HTTP_TIMEOUT_MS = 8000;
 const attachedTabs = new Set();
 const eventSubscriptions = new Map();
 let bridgeLoopStarted = false;
@@ -34,19 +35,31 @@ async function getServiceBase() {
   return await getStorageValue(STORAGE_KEYS.serviceBase, DEFAULT_SERVICE_BASE);
 }
 
-async function bridgeFetchJson(path, { method = "GET", body } = {}) {
+async function bridgeFetchJson(path, { method = "GET", body, timeoutMs = BRIDGE_HTTP_TIMEOUT_MS } = {}) {
   const serviceBase = await getServiceBase();
-  const response = await fetch(`${serviceBase}${path}`, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!response.ok) {
-    throw new Error(`bridge_http_${response.status}`);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.max(1000, Number(timeoutMs || BRIDGE_HTTP_TIMEOUT_MS)));
+  try {
+    const response = await fetch(`${serviceBase}${path}`, {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`bridge_http_${response.status}`);
+    }
+    return await response.json();
+  } catch (error) {
+    if (String(error?.name || "").trim() === "AbortError") {
+      throw new Error(`bridge_http_timeout:${path}`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
-  return await response.json();
 }
 
 function serializeTab(tab) {
@@ -241,6 +254,7 @@ async function pumpBridgeLoop() {
       const clientId = await sendHello();
       const response = await bridgeFetchJson(
         `/bridge/next?client_id=${encodeURIComponent(clientId)}&timeout_ms=${BRIDGE_POLL_TIMEOUT_MS}`,
+        { timeoutMs: BRIDGE_HTTP_TIMEOUT_MS },
       );
       const command = response?.command;
       if (!command || !command.request_id) {

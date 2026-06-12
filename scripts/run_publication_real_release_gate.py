@@ -4747,6 +4747,18 @@ def _is_fresh_draft_prepare_mode(expected_statuses: set[str], visibility_mode: s
     return normalized_statuses.issubset({"draft_created", "processing"}) and "draft_created" in normalized_statuses
 
 
+def _browser_agent_ready_target_platforms(
+    *,
+    effective_platforms: list[str],
+    fresh_draft_prepare_mode: bool,
+) -> list[str]:
+    if fresh_draft_prepare_mode:
+        # Fresh-draft preparation validates bridge/profile authority first and
+        # lets the real publish task perform platform-local route recovery.
+        return []
+    return list(effective_platforms or [])
+
+
 def _validate_authoritative_publication_browser_runtime(agent_ready: dict[str, Any]) -> list[str]:
     if not isinstance(agent_ready, dict):
         return ["browser-agent 运行态缺失，无法确认发布浏览器绑定。"]
@@ -4766,14 +4778,16 @@ def _validate_authoritative_publication_browser_runtime(agent_ready: dict[str, A
 def _build_fresh_draft_prepare_live_check(agent_ready: dict[str, Any]) -> dict[str, Any]:
     health = agent_ready.get("health") if isinstance(agent_ready, dict) and isinstance(agent_ready.get("health"), dict) else {}
     transport = health.get("browser_transport") if isinstance(health.get("browser_transport"), dict) else {}
+    normalized_cdp_status = _normalize(health.get("cdp_status")).lower()
     cdp_connected = (
-        _normalize(health.get("cdp_status")).lower() == "ok"
+        normalized_cdp_status in {"ok", "ready", "degraded"}
         and _normalize(transport.get("transport")).lower() == "chrome_extension_bridge"
     )
     return {
         "cdp": {
             "connected": bool(cdp_connected),
             "source": "browser_agent_healthz",
+            "state": normalized_cdp_status,
         },
         "platform_checks": {},
     }
@@ -4891,10 +4905,21 @@ def _build_platform_options(
                     "verification_only_current_page": False,
                     "repair_only_current_page": False,
                     "prepublish_only_current_page": False,
+                    "prepare_only_current_page": False,
+                    "stop_before_final_publish": False,
                     "verify_media_upload": False,
                     "wait_for_publish_confirmation": False,
                 }
             )
+        if fresh_draft_prepare_mode:
+            for key in (
+                "verification_only_current_page",
+                "repair_only_current_page",
+                "prepublish_only_current_page",
+                "prepare_only_current_page",
+                "stop_before_final_publish",
+            ):
+                platform_overrides[key] = False
         if platform_overrides:
             option["platform_specific_overrides"] = platform_overrides
         hint_overrides = None if fresh_draft_prepare_mode else recovery_hint_map.get(normalized_platform)
@@ -7447,7 +7472,10 @@ async def _run_real_publish_gate(
     agent_ready = await check_publication_browser_agent_ready(
         browser_agent_base_url=browser_agent_base_url,
         auth_token=auth_token,
-        target_platforms=effective_platforms,
+        target_platforms=_browser_agent_ready_target_platforms(
+            effective_platforms=effective_platforms,
+            fresh_draft_prepare_mode=fresh_draft_prepare_mode,
+        ),
         target_profile_ids=target_profile_ids,
         request_timeout_sec=readiness_timeout,
         require_live_publish=not fresh_draft_prepare_mode,
@@ -7468,7 +7496,8 @@ async def _run_real_publish_gate(
     preflight_failures: list[str] = []
     if not bool(agent_ready.get("ready")):
         preflight_failures.append(f"browser-agent 未就绪: {agent_ready.get('code')} {agent_ready.get('message')}")
-    preflight_failures.extend(_validate_authoritative_publication_browser_runtime(agent_ready))
+    else:
+        preflight_failures.extend(_validate_authoritative_publication_browser_runtime(agent_ready))
     if not bool(live_check.get("cdp", {}).get("connected")):
         preflight_failures.append("CDP 不可达")
     if require_tabs and not fresh_draft_prepare_mode:
@@ -7643,13 +7672,16 @@ async def _run_real_publish_gate(
                         [],
                         "preflight_contract_check",
                     )
+                single_attempt_execution_mode = _use_single_attempt_execution_mode(
+                    fresh_draft_prepare_mode=fresh_draft_prepare_mode
+                )
                 submit_result = await submit_publication_attempts(session, plan)
                 created_attempts = submit_result.get("created_attempts") or []
                 skipped_targets = [
                     item for item in (submit_result.get("skipped_targets") or [])
                     if isinstance(item, dict)
                 ]
-                active_rebind_targets = _build_active_attempt_receipt_rebind_targets(
+                active_rebind_targets = [] if single_attempt_execution_mode else _build_active_attempt_receipt_rebind_targets(
                     plan,
                     skipped_targets,
                 )
@@ -7715,9 +7747,6 @@ async def _run_real_publish_gate(
                 if max_stagnant_rounds < 4:
                     max_stagnant_rounds = 4
                 worker_call_timeout_seconds = max(30, int(worker_call_timeout))
-                single_attempt_execution_mode = _use_single_attempt_execution_mode(
-                    fresh_draft_prepare_mode=fresh_draft_prepare_mode
-                )
                 worker_invocation_count = 0
 
                 start_ts = datetime.now(ZoneInfo("Asia/Shanghai")).timestamp()

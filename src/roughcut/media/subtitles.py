@@ -1365,11 +1365,7 @@ def write_ass_file(
             play_res_x=play_res_x,
             font_size=int(style_definition["font_size"]),
         )
-        text = clean_final_subtitle_text(
-            item.get("text_final")
-            or item.get("text_norm")
-            or item.get("text_raw", "")
-        )
+        text = clean_final_subtitle_text(subtitle_display_rule_text(item))
         if not text:
             continue
         for display_segment in split_subtitle_display_item(

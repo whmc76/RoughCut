@@ -432,6 +432,27 @@ def test_redundant_correction_filter_drops_candidates_already_in_current_subtitl
     assert _filter_redundant_corrections_for_current_subtitles([redundant, pending], [subtitle]) == [pending]
 
 
+def test_redundant_correction_filter_respects_display_surface_contract() -> None:
+    subtitle = type(
+        "SubtitleItem",
+        (),
+        {
+            "id": "subtitle-1",
+            "text_raw": "旧词",
+            "text_norm": "正词",
+            "text_final": "",
+            "display_suppressed_reason": "standalone_filler",
+        },
+    )()
+    correction = {
+        "subtitle_item_id": "subtitle-1",
+        "original_span": "旧词",
+        "suggested_span": "正词",
+    }
+
+    assert _filter_redundant_corrections_for_current_subtitles([correction], [subtitle]) == [correction]
+
+
 def test_normalize_transcript_result_collapses_flashlight_model_alt_lists() -> None:
     result = TranscriptResult(
         segments=[

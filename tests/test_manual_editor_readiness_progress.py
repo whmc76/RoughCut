@@ -260,8 +260,9 @@ def test_edit_plan_source_subtitles_prefer_aligned_raw_rows_over_clean_projectio
             rows = await pipeline_steps._load_edit_plan_source_subtitles(session, job=job)
 
             assert rows
-            assert rows[0]["projection_source"] == "transcript_segment"
+            assert rows[0]["projection_source"] in {"transcript_segment", "canonical_transcript"}
             assert "嗯" in rows[0]["text_final"]
+            assert rows[0]["text_final"] != "这个真的不太行"
 
     try:
         asyncio.run(_run())
@@ -396,6 +397,57 @@ def test_manual_editor_readiness_ready_clears_current_step(tmp_path):
 
             assert readiness.status == "ready"
             assert readiness.can_open_editor is True
+            assert readiness.current_step is None
+            assert readiness.progress_percent == 100
+
+    try:
+        asyncio.run(_run())
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_manual_editor_readiness_treats_stop_after_cancelled_job_as_ready(tmp_path):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+
+    async def _run() -> None:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        source_path = tmp_path / "source.mp4"
+        source_path.write_bytes(b"video")
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            job = Job(
+                id=uuid.uuid4(),
+                source_path=str(source_path),
+                source_name="source.mp4",
+                status="cancelled",
+                error_message="批量回归在 edit_plan 后按 stop_after 主动停止，保留当前工件用于评估。",
+            )
+            job.steps = [
+                JobStep(
+                    job_id=job.id,
+                    step_name=step_name,
+                    status="done",
+                    metadata_={"progress": 1.0},
+                )
+                for step_name in jobs_api._MANUAL_EDITOR_REQUIRED_STEPS
+            ]
+            session.add(job)
+            session.add_all(
+                [
+                    Artifact(job_id=job.id, artifact_type="media_meta", data_json={"duration_sec": 1.0}),
+                    Timeline(job_id=job.id, timeline_type="editorial", version=1, data_json={"segments": []}),
+                    Timeline(job_id=job.id, timeline_type="render_plan", version=1, data_json={}),
+                ]
+            )
+            await session.commit()
+
+            readiness = await jobs_api._build_manual_editor_readiness(job=job, session=session)
+
+            assert readiness.status == "ready"
+            assert readiness.can_open_editor is True
+            assert readiness.can_edit is True
             assert readiness.current_step is None
             assert readiness.progress_percent == 100
 

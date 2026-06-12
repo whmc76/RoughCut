@@ -6,6 +6,8 @@ import logging
 import os
 import re
 import shutil
+import subprocess
+import sys
 import traceback
 import uuid
 from datetime import datetime, timezone
@@ -16,6 +18,7 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,6 +59,7 @@ from roughcut.publication import (
     build_publication_plan,
     check_publication_browser_agent_ready,
     list_publication_attempts,
+    publication_adapter_requires_browser_agent,
     publication_plan_is_publishable,
     publication_plan_is_manual_handoff_ready,
     publication_plan_status,
@@ -81,6 +85,14 @@ _GENERATION_TASK_STORE_LOCK = RLock()
 _GENERATION_TASK_STORE_PATH = Path("data/intelligent_copy/generation_tasks.json")
 _GENERATION_TASK_HISTORY_LIMIT = 30
 _GENERATION_TASK_STALE_AFTER_SECONDS = 6 * 60 * 60
+_GENERATION_TASK_ORPHAN_GRACE_SECONDS = 45
+_LOCAL_IMAGE_ALLOWED_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+_LOCAL_IMAGE_MEDIA_TYPES = {
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
 
 
 def _build_publication_plan_gate_response(plan: dict[str, Any], **extra: Any) -> dict[str, Any]:
@@ -271,6 +283,7 @@ async def generate_folder_materials(body: IntelligentCopyGenerateIn):
             use_existing_cover=body.use_existing_cover,
             creator_profile_id=str(body.creator_profile_id or "").strip() or None,
             creator_profile_name=str((creator_profile or {}).get("display_name") or "").strip() or None,
+            creator_profile=creator_profile,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -332,6 +345,10 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
         "updated_at": now,
         "started_at": None,
         "completed_at": None,
+        "worker_owner_pid": os.getpid(),
+        "worker_claimed_at": None,
+        "last_heartbeat_at": now,
+        "worker_log_path": "",
         "material_dir": str(inspection.get("material_dir") or ""),
         "error": None,
         "inspection": inspection,
@@ -353,7 +370,7 @@ async def create_generate_task(body: IntelligentCopyGenerateIn):
 
 @router.get("/generate-tasks/recent", response_model=IntelligentCopyGenerateTaskListOut)
 async def list_recent_generate_tasks(limit: int = 12):
-    _mark_stale_generation_tasks()
+    _recover_generation_task_runtime_state()
     safe_limit = max(1, min(int(limit or 12), _GENERATION_TASK_HISTORY_LIMIT))
     tasks = _sorted_generation_tasks()
     return {"tasks": tasks[:safe_limit]}
@@ -361,6 +378,7 @@ async def list_recent_generate_tasks(limit: int = 12):
 
 @router.get("/generate-tasks/{task_id}", response_model=IntelligentCopyGenerateTaskOut)
 async def get_generate_task(task_id: str):
+    _recover_generation_task_runtime_state()
     task = _get_generation_task(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="生成任务不存在。")
@@ -540,27 +558,32 @@ async def publish_intelligent_folder(body: IntelligentPublishIn, session: AsyncS
     )
     if not publication_plan_is_publishable(plan):
         return _build_publication_executor_gate_response(plan)
-    settings = get_settings()
-    agent_ready = await check_publication_browser_agent_ready(
-        browser_agent_base_url=str(getattr(settings, "publication_browser_agent_base_url", "") or ""),
-        auth_token=str(getattr(settings, "publication_browser_agent_auth_token", "") or ""),
-        target_platforms=[str(target.get("platform") or "") for target in (plan.get("targets") or []) if isinstance(target, dict)],
-        target_profile_ids=[
-            str(target.get("browser_profile_id") or target.get("credential_ref") or "")
-            for target in (plan.get("targets") or [])
-            if isinstance(target, dict)
-        ],
-        request_timeout_sec=max(5, int(getattr(settings, "publication_browser_agent_timeout_sec", 60) or 60)),
-    )
-    if not agent_ready.get("ready"):
-        return _build_publication_executor_gate_response(
-            plan,
-            blocked_reasons=[
-                *(plan.get("blocked_reasons") or []),
-                str(agent_ready.get("message") or "browser-agent 不支持正式发布。"),
+    browser_agent_targets = [
+        target
+        for target in (plan.get("targets") or [])
+        if isinstance(target, dict) and publication_adapter_requires_browser_agent(target.get("adapter"))
+    ]
+    if browser_agent_targets:
+        settings = get_settings()
+        agent_ready = await check_publication_browser_agent_ready(
+            browser_agent_base_url=str(getattr(settings, "publication_browser_agent_base_url", "") or ""),
+            auth_token=str(getattr(settings, "publication_browser_agent_auth_token", "") or ""),
+            target_platforms=[str(target.get("platform") or "") for target in browser_agent_targets],
+            target_profile_ids=[
+                str(target.get("browser_profile_id") or target.get("credential_ref") or "")
+                for target in browser_agent_targets
             ],
-            publication_executor_preflight=agent_ready,
+            request_timeout_sec=max(5, int(getattr(settings, "publication_browser_agent_timeout_sec", 60) or 60)),
         )
+        if not agent_ready.get("ready"):
+            return _build_publication_executor_gate_response(
+                plan,
+                blocked_reasons=[
+                    *(plan.get("blocked_reasons") or []),
+                    str(agent_ready.get("message") or "browser-agent 不支持正式发布。"),
+                ],
+                publication_executor_preflight=agent_ready,
+            )
     result = await submit_publication_attempts(session, plan)
     await session.commit()
     _dispatch_publication_worker_tick(len(result.get("created_attempts") or []))
@@ -626,6 +649,17 @@ def open_folder(body: IntelligentCopyInspectIn):
     return OpenFolderOut(path=resolved_path, kind=kind)
 
 
+@router.get("/local-image")
+def local_image_preview(path: str):
+    resolved = _resolve_frontend_local_image_path(path)
+    suffix = resolved.suffix.lower()
+    if suffix not in _LOCAL_IMAGE_ALLOWED_SUFFIXES:
+        raise HTTPException(status_code=400, detail="不支持的图片格式。")
+    if not resolved.exists() or not resolved.is_file():
+        raise HTTPException(status_code=404, detail="图片文件不存在。")
+    return FileResponse(resolved, media_type=_LOCAL_IMAGE_MEDIA_TYPES.get(suffix, "application/octet-stream"))
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -676,7 +710,7 @@ def _dedupe_generation_tasks_by_target(tasks: list[dict[str, Any]]) -> list[dict
 
 
 def _generation_task_is_currently_active(item: dict[str, Any]) -> bool:
-    return item.get("status") in {"queued", "running"} and str(item.get("id") or "") in _GENERATION_TASKS
+    return item.get("status") in {"queued", "running"} and _generation_task_has_live_executor(item)
 
 
 def _generation_task_target_key(item: dict[str, Any]) -> str:
@@ -841,7 +875,7 @@ def _find_active_generation_task(
             continue
         if str(item.get("creator_profile_id") or "").strip() != normalized_creator_profile_id:
             continue
-        if item.get("status") in {"queued", "running"} and task_id in _GENERATION_TASKS:
+        if item.get("status") in {"queued", "running"} and _generation_task_has_live_executor(item):
             return item
     return None
 
@@ -869,6 +903,20 @@ def _mark_stale_generation_tasks() -> None:
             _mark_generation_task_failed(task_id, "生成任务已中断，请重新生成。")
 
 
+def _recover_generation_task_runtime_state() -> None:
+    for item in _load_generation_tasks():
+        task_id = str(item.get("id") or "")
+        if item.get("status") not in {"queued", "running"}:
+            continue
+        if _generation_task_has_live_executor(item):
+            continue
+        if _generation_task_is_orphaned(item):
+            _mark_generation_task_failed(task_id, "生成任务未找到存活执行器，请重新生成。")
+            continue
+        if _generation_task_is_stale(item):
+            _mark_generation_task_failed(task_id, "生成任务已中断，请重新生成。")
+
+
 def _generation_task_is_stale(item: dict[str, Any]) -> bool:
     timestamp = str(item.get("updated_at") or item.get("started_at") or item.get("created_at") or "").strip()
     if not timestamp:
@@ -882,6 +930,70 @@ def _generation_task_is_stale(item: dict[str, Any]) -> bool:
     return (datetime.now(timezone.utc) - updated_at).total_seconds() > _GENERATION_TASK_STALE_AFTER_SECONDS
 
 
+def _generation_task_is_orphaned(item: dict[str, Any]) -> bool:
+    task_id = str(item.get("id") or "").strip()
+    if not task_id or item.get("status") not in {"queued", "running"}:
+        return False
+    if _generation_task_has_live_executor(item):
+        return False
+    if not _generation_task_exceeded_orphan_grace(item):
+        return False
+    owner_pid = _generation_task_owner_pid(item)
+    if owner_pid is None:
+        return True
+    if owner_pid == os.getpid():
+        return True
+    return not _pid_is_alive(owner_pid)
+
+
+def _generation_task_exceeded_orphan_grace(item: dict[str, Any]) -> bool:
+    timestamp = str(
+        item.get("last_heartbeat_at")
+        or item.get("worker_claimed_at")
+        or item.get("updated_at")
+        or item.get("started_at")
+        or item.get("created_at")
+        or ""
+    ).strip()
+    if not timestamp:
+        return False
+    try:
+        updated_at = datetime.fromisoformat(timestamp)
+    except ValueError:
+        return False
+    if updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - updated_at).total_seconds() > _GENERATION_TASK_ORPHAN_GRACE_SECONDS
+
+
+def _generation_task_owner_pid(item: dict[str, Any]) -> int | None:
+    try:
+        pid = int(item.get("worker_owner_pid"))
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _pid_is_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _generation_task_has_live_executor(item: dict[str, Any]) -> bool:
+    task_id = str(item.get("id") or "").strip()
+    if task_id and task_id in _GENERATION_TASKS:
+        return True
+    owner_pid = _generation_task_owner_pid(item)
+    return owner_pid is not None and _pid_is_alive(owner_pid)
+
+
 def _schedule_generation_task(
     task_id: str,
     *,
@@ -892,19 +1004,48 @@ def _schedule_generation_task(
     creator_profile_id: str | None,
     creator_profile_name: str | None,
 ) -> None:
-    async def runner() -> None:
-        await asyncio.to_thread(
-            _run_generation_task_thread,
-            task_id,
-            folder_path,
-            copy_style,
-            platforms,
-            use_existing_cover,
-            creator_profile_id,
-            creator_profile_name,
-        )
+    command = [
+        sys.executable,
+        "-m",
+        "roughcut.cli",
+        "intelligent-copy-task-runner",
+        "--task-id",
+        task_id,
+        "--folder-path",
+        folder_path,
+        "--use-existing-cover" if use_existing_cover else "--no-use-existing-cover",
+    ]
+    if copy_style:
+        command.extend(["--copy-style", str(copy_style)])
+    for platform in platforms or []:
+        command.extend(["--platform", str(platform)])
+    if creator_profile_id:
+        command.extend(["--creator-profile-id", str(creator_profile_id)])
+    if creator_profile_name:
+        command.extend(["--creator-profile-name", str(creator_profile_name)])
 
-    _GENERATION_TASKS[task_id] = asyncio.create_task(runner())
+    creationflags = 0
+    if hasattr(subprocess, "CREATE_NO_WINDOW"):
+        creationflags |= subprocess.CREATE_NO_WINDOW
+    log_path = _GENERATION_TASK_STORE_PATH.parent / f"{task_id}.runner.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = log_path.open("ab")
+    process = subprocess.Popen(
+        command,
+        cwd=str(Path(__file__).resolve().parents[3]),
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        creationflags=creationflags,
+    )
+    log_handle.close()
+    _patch_generation_task(
+        task_id,
+        {
+            "worker_owner_pid": process.pid,
+            "last_heartbeat_at": _now_iso(),
+            "worker_log_path": str(log_path),
+        },
+    )
 
 
 def _run_generation_task_thread(
@@ -948,6 +1089,9 @@ async def _run_generation_task(
                 "stage": "starting",
                 "message": "开始生成物料。",
                 "started_at": _now_iso(),
+                "worker_owner_pid": os.getpid(),
+                "worker_claimed_at": _now_iso(),
+                "last_heartbeat_at": _now_iso(),
                 "error": None,
             },
         )
@@ -958,12 +1102,14 @@ async def _run_generation_task(
                 "progress": max(0, min(99, int(update.get("progress") or 0))),
                 "stage": str(update.get("stage") or "running"),
                 "message": str(update.get("message") or ""),
+                "last_heartbeat_at": _now_iso(),
             }
             for key in ("folder_path", "material_dir", "inspection", "partial_result"):
                 if key in update:
                     patch[key] = update[key]
             _patch_generation_task(task_id, patch)
 
+        creator_profile = _resolve_generation_creator_profile(creator_profile_id)
         result = await generate_intelligent_copy(
             folder_path,
             copy_style=copy_style,
@@ -971,6 +1117,7 @@ async def _run_generation_task(
             use_existing_cover=use_existing_cover,
             creator_profile_id=creator_profile_id,
             creator_profile_name=creator_profile_name,
+            creator_profile=creator_profile,
             progress_callback=progress_callback,
         )
         terminal_patch = _derive_generation_task_terminal_patch(result)
@@ -1202,16 +1349,84 @@ def _stable_publish_path(path: Path) -> str:
     return str(path)
 
 
+def _publication_runtime_dir_for_source(source_path: Path) -> Path:
+    return source_path.parent / "smart-copy" / "_publication_runtime"
+
+
+def _publication_runtime_target_path(source_path: Path) -> Path:
+    return _publication_runtime_dir_for_source(source_path) / f"{source_path.stem}.publication-runtime.mp4"
+
+
+def _publication_runtime_copy_is_fresh(*, source_path: Path, runtime_path: Path) -> bool:
+    try:
+        if not runtime_path.exists() or not runtime_path.is_file():
+            return False
+        return runtime_path.stat().st_mtime >= source_path.stat().st_mtime
+    except OSError:
+        return False
+
+
+async def _transcode_publication_runtime_media(*, source_path: Path, runtime_path: Path) -> None:
+    runtime_path.parent.mkdir(parents=True, exist_ok=True)
+    settings = get_settings()
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source_path),
+        "-c:v",
+        "libx264",
+        "-preset",
+        str(getattr(settings, "render_cpu_preset", "veryfast") or "veryfast"),
+        "-crf",
+        str(int(getattr(settings, "render_crf", 19) or 19)),
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        str(getattr(settings, "render_audio_bitrate", "192k") or "192k"),
+        "-movflags",
+        "+faststart",
+        str(runtime_path),
+    ]
+    result = await asyncio.to_thread(
+        subprocess.run,
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=max(30, int(getattr(settings, "ffmpeg_timeout_sec", 600) or 600)),
+    )
+    if result.returncode != 0:
+        stderr = str(result.stderr or "").strip()
+        stdout = str(result.stdout or "").strip()
+        detail = stderr or stdout or "ffmpeg transcode failed"
+        raise RuntimeError(f"publication runtime 转码失败：{detail[-800:]}")
+
+
 async def _resolve_publish_source_media_path(*, video_path: Path) -> Path:
     source_path = video_path.expanduser()
     source_meta = await probe_media(source_path)
     compatibility = publication_upload_compatibility(source_meta)
-    if not bool(compatibility.get("compatible")):
-        raise RuntimeError(
-            "成片视频不满足发布兼容要求，已停止自动生成 publication runtime 副本："
-            + "；".join(str(item).strip() for item in (compatibility.get("reasons") or []) if str(item).strip())
-        )
-    return source_path.resolve()
+    if bool(compatibility.get("compatible")):
+        return source_path.resolve()
+
+    runtime_path = _publication_runtime_target_path(source_path)
+    if _publication_runtime_copy_is_fresh(source_path=source_path, runtime_path=runtime_path):
+        runtime_meta = await probe_media(runtime_path)
+        runtime_compatibility = publication_upload_compatibility(runtime_meta)
+        if bool(runtime_compatibility.get("compatible")):
+            return runtime_path.resolve()
+
+    await _transcode_publication_runtime_media(source_path=source_path, runtime_path=runtime_path)
+    runtime_meta = await probe_media(runtime_path)
+    runtime_compatibility = publication_upload_compatibility(runtime_meta)
+    if not bool(runtime_compatibility.get("compatible")):
+        reasons = "；".join(str(item).strip() for item in (runtime_compatibility.get("reasons") or []) if str(item).strip())
+        raise RuntimeError(f"publication runtime 副本仍不满足上传兼容要求：{reasons}")
+    return runtime_path.resolve()
 
 
 def _find_generation_task_snapshot(folder_path: str) -> dict[str, Any] | None:
@@ -1295,6 +1510,31 @@ def _resolve_intelligent_publish_creator_profile(creator_profile_id: str | None)
             raise HTTPException(status_code=404, detail="Creator profile not found") from exc
     profiles = list_avatar_material_profiles()
     return next((profile for profile in profiles if active_publication_credentials(profile)), profiles[0] if profiles else None)
+
+
+def _resolve_frontend_local_image_path(raw_path: str) -> Path:
+    text = str(raw_path or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="缺少图片路径。")
+    normalized = text.replace("\\", "/")
+    container_prefix = "/app/data/"
+    if normalized.startswith(container_prefix):
+        container_path = Path(normalized)
+        try:
+            if container_path.exists():
+                return container_path.resolve()
+        except OSError:
+            pass
+        repo_root = Path(__file__).resolve().parents[3]
+        host_output_root = Path(
+            os.getenv("ROUGHCUT_OUTPUT_HOST_ROOT", "") or (repo_root / "data" / "runtime")
+        ).expanduser()
+        relative = normalized[len(container_prefix):].lstrip("/")
+        return (host_output_root / Path(relative)).resolve()
+    candidate = Path(text).expanduser()
+    if candidate.is_absolute():
+        return candidate.resolve()
+    return (Path.cwd() / candidate).resolve()
 
 
 async def _find_existing_intelligent_publish_job(session: AsyncSession, *, video_path: Path) -> Job | None:

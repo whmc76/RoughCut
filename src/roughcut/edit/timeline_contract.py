@@ -4,39 +4,9 @@ import math
 from dataclasses import dataclass
 from typing import Any
 
+from roughcut.edit.rule_registry import pause_cut_reasons, speech_explicit_cut_reasons, speech_review_cut_reasons
 from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.media.silence import SilenceSegment
-
-
-SPEECH_EXPLICIT_CUT_REASONS = {
-    "filler_word",
-    "repeated_speech",
-    "restart_retake",
-    "restart_cue",
-    "rollback_instruction",
-    "noise_subtitle",
-    "manual_cut",
-}
-
-SPEECH_REVIEW_CUT_REASONS = {
-    "silence",
-    "timing_trim",
-    "micro_keep",
-    "micro_keep_bridge",
-    "long_non_dialogue",
-    "gap_fill",
-    "low_signal_subtitle",
-}
-
-PAUSE_CUT_REASONS = {
-    "silence",
-    "timing_trim",
-    "micro_keep",
-    "micro_keep_bridge",
-    "long_non_dialogue",
-    "manual_cut",
-    "rollback_instruction",
-}
 
 SYNTHETIC_ALIGNMENT_SOURCES = {
     "canonical_realign",
@@ -87,6 +57,9 @@ def audit_edit_decision_contract(
     silence_segments: list[SilenceSegment],
     min_kept_pause_sec: float = 0.55,
 ) -> dict[str, Any]:
+    speech_explicit_reasons = speech_explicit_cut_reasons()
+    speech_review_reasons = speech_review_cut_reasons()
+    pause_reasons = pause_cut_reasons()
     speech_units = _build_speech_units(transcript_segments)
     pause_units = _build_pause_units(silence_segments, duration=duration)
     segments = _normalize_edit_segments(edit_segments, duration=duration)
@@ -114,11 +87,11 @@ def audit_edit_decision_contract(
             cut_speech.append(payload)
             if not reason:
                 blocking.append({**payload, "issue": "speech_cut_without_reason"})
-            elif reason in SPEECH_EXPLICIT_CUT_REASONS:
+            elif reason in speech_explicit_reasons:
                 pass
-            elif unit.trusted and reason in SPEECH_REVIEW_CUT_REASONS:
+            elif unit.trusted and reason in speech_review_reasons:
                 blocking.append({**payload, "issue": "trusted_speech_cut_by_non_speech_reason"})
-            elif reason not in SPEECH_EXPLICIT_CUT_REASONS | SPEECH_REVIEW_CUT_REASONS:
+            elif reason not in speech_explicit_reasons | speech_review_reasons:
                 warnings.append({**payload, "issue": "speech_cut_by_unknown_reason"})
         if kept and not _unit_has_subtitle_coverage(unit, subtitle_ranges):
             suppressed_overlap = _overlapping_suppressed_subtitle(unit, suppressed_subtitle_ranges)
@@ -150,7 +123,7 @@ def audit_edit_decision_contract(
             cut_pauses.append(payload)
             if not reason:
                 blocking.append({**payload, "issue": "pause_cut_without_reason"})
-            elif reason not in PAUSE_CUT_REASONS:
+            elif reason not in pause_reasons:
                 warnings.append({**payload, "issue": "pause_cut_by_unexpected_reason"})
         kept_duration = sum(float(item["overlap"]) for item in kept)
         if kept_duration >= min_kept_pause_sec:

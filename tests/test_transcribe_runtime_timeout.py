@@ -8,6 +8,7 @@ import uuid
 import pytest
 
 from roughcut.edit.decisions import EditDecision
+from roughcut.llm_cache import save_cached_json
 from roughcut.pipeline.steps import (
     _resolve_transcribe_no_progress_timeout_seconds,
     _maybe_review_edit_decision_cuts_with_llm,
@@ -169,3 +170,87 @@ async def test_llm_cut_review_falls_back_when_payload_repair_still_fails(
         "error": "llm_cut_review_failed",
         "fallback": "deterministic_evidence",
     }
+
+
+@pytest.mark.asyncio
+async def test_llm_cut_review_reuses_compatible_cross_job_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decision = EditDecision(source="unit-test")
+    settings = SimpleNamespace(
+        edit_decision_llm_review_enabled=True,
+        edit_decision_llm_review_min_confidence=0.72,
+        active_reasoning_provider="openai",
+        active_reasoning_model="gpt-5",
+        output_dir=str(tmp_path),
+    )
+    candidates = [{"candidate_id": "cut-1", "start": 1.0, "end": 2.0, "reason": "silence"}]
+    old_job_id = uuid.uuid4()
+    new_job_id = uuid.uuid4()
+
+    monkeypatch.setattr("roughcut.pipeline.steps.get_settings", lambda: settings)
+    monkeypatch.setattr("roughcut.pipeline.steps.llm_task_route", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(
+        "roughcut.pipeline.steps._build_edit_decision_llm_review_candidates",
+        lambda **kwargs: list(candidates),
+    )
+    monkeypatch.setattr(
+        "roughcut.pipeline.steps.build_high_risk_cut_review_prompt",
+        lambda **kwargs: [{"role": "system", "content": "review"}],
+    )
+    monkeypatch.setattr(
+        "roughcut.pipeline.steps.get_reasoning_provider",
+        lambda: (_ for _ in ()).throw(AssertionError("provider should not be called when compatible cache exists")),
+    )
+
+    fingerprint = {
+        "source_meta": {
+            "job_id": str(old_job_id),
+            "source_name": "sample.mp4",
+            "subject_brand": "NOC",
+            "subject_model": "MT34",
+            "subject_type": "EDC折刀",
+        },
+        "provider": "openai",
+        "model": "gpt-5",
+        "candidates_sha256": "same-candidates",
+        "min_confidence": 0.72,
+    }
+    save_cached_json(
+        "edit_plan.cut_review",
+        "legacy-key",
+        fingerprint=fingerprint,
+        result={
+            "provider": "openai",
+            "model": "gpt-5",
+            "summary": "cached review",
+            "decisions": [
+                {
+                    "candidate_id": "cut-1",
+                    "verdict": "keep",
+                    "confidence": 0.91,
+                    "reason": "cached keep",
+                    "evidence": [],
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr("roughcut.pipeline.steps.digest_payload", lambda payload: "same-candidates")
+
+    result = await _maybe_review_edit_decision_cuts_with_llm(
+        job_id=new_job_id,
+        source_name="sample.mp4",
+        decision=decision,
+        subtitle_items=[],
+        transcript_segments=[],
+        content_profile={
+            "subject_brand": "NOC",
+            "subject_model": "MT34",
+            "subject_type": "EDC折刀",
+        },
+    )
+
+    assert result.analysis["llm_cut_review"]["reviewed"] is True
+    assert result.analysis["llm_cut_review"]["cached"] is True
+    assert result.analysis["llm_cut_review"]["summary"] == "cached review"

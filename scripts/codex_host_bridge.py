@@ -201,6 +201,10 @@ def materialize_host_directory(payload: dict[str, Any]) -> dict[str, Any]:
     source_material_dir = source_dir / "smart-copy"
     if source_material_dir.exists() and source_material_dir.is_dir():
         _sync_smart_copy_tree(source_material_dir, target_dir / "smart-copy")
+    else:
+        stale_material_dir = target_dir / "smart-copy"
+        if stale_material_dir.exists():
+            shutil.rmtree(stale_material_dir, ignore_errors=True)
 
     return {
         "source_folder_path": str(source_dir.resolve()),

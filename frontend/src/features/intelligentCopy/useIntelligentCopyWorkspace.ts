@@ -720,12 +720,13 @@ export function useIntelligentCopyWorkspace() {
   }, [selectedGenerateTask.data]);
 
   const generate = useMutation({
-    mutationFn: (payload: { folderPath: string; copyStyle: string; platforms: string[]; useExistingCover: boolean }) =>
+    mutationFn: (payload: { folderPath: string; copyStyle: string; platforms: string[]; useExistingCover: boolean; creatorProfileId?: string | null }) =>
       api.createIntelligentCopyGenerateTask(
         payload.folderPath,
         payload.copyStyle,
         payload.platforms,
         payload.useExistingCover,
+        payload.creatorProfileId || null,
     ),
     onSuccess: (payload) => {
       rememberFolderPath(preferredVisibleFolderPath(payload.inspection?.folder_path, payload.folder_path, folderPath));

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "RoughCut Publication Bridge",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Expose the real logged-in Chrome session to the RoughCut publication browser-agent via chrome.debugger.",
   "permissions": [
     "alarms",

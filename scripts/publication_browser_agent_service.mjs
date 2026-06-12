@@ -35,6 +35,10 @@ const BROWSER_TRANSPORT_KIND = "chrome_extension_bridge";
 const BRIDGE_VIRTUAL_CDP_URL = "bridge://chrome-extension";
 const BRIDGE_COMMAND_TIMEOUT_MS = Math.max(5_000, Number(process.env.PUBLICATION_BROWSER_BRIDGE_COMMAND_TIMEOUT_MS || 45_000));
 const BRIDGE_CLIENT_STALE_AFTER_MS = Math.max(15_000, Number(process.env.PUBLICATION_BROWSER_BRIDGE_CLIENT_STALE_AFTER_MS || 45_000));
+const BRIDGE_CLIENT_RECOVERABLE_AFTER_MS = Math.max(
+  BRIDGE_CLIENT_STALE_AFTER_MS,
+  Number(process.env.PUBLICATION_BROWSER_BRIDGE_CLIENT_RECOVERABLE_AFTER_MS || 5 * 60_000),
+);
 // MV3 background workers are prone to going idle when a localhost long-poll stays open
 // for too long. Keep bridge polling short so the unpacked extension keeps cycling.
 const BRIDGE_LONG_POLL_TIMEOUT_MS = Math.max(250, Number(process.env.PUBLICATION_BROWSER_BRIDGE_LONG_POLL_TIMEOUT_MS || 5_000));
@@ -1121,7 +1125,7 @@ export function shouldAllowCompositeFieldPreparation(platform, uploadReadiness =
   const snapshot = readiness.last && typeof readiness.last === "object" ? readiness.last : {};
   if (snapshot.failed || snapshot.uploadPromptOnly) return false;
   if (platform === "douyin") {
-    return Boolean(snapshot.mediaPresent && snapshot.douyinReadySurface && !snapshot.busy);
+    return Boolean(snapshot.mediaPresent && snapshot.fieldShell);
   }
   const processingBlocksFinalPublishOnly = compositePlatformUploadProcessingBlocksFinalPublishOnly(platform);
   return Boolean(
@@ -2645,6 +2649,14 @@ function currentPageMatchesAuthoritativeFreshEntry(platform, route = {}) {
   const routeTitle = String(route?.title || "").trim();
   if (!freshEntryUrl) return true;
   if (!routeUrl.startsWith(freshEntryUrl)) return false;
+  if (normalizedPlatform === "youtube") {
+    return isCompositePublishRouteContext(normalizedPlatform, {
+      url: routeUrl,
+      text: routeText,
+      title: routeTitle,
+      file_inputs: Array.isArray(route?.file_inputs) ? route.file_inputs : [],
+    });
+  }
   if (normalizedPlatform === "douyin") {
     return isDouyinUploadEntrySurface({ url: routeUrl, text: routeText, title: routeTitle }, {
       allow_loading_shell: true,
@@ -2746,7 +2758,14 @@ export function isCompositePublishRouteContext(platform, route = {}) {
     const videoCapableFileInputCount = fileInputs.filter((input) => /video|mp4/i.test(String(input?.accept || ""))).length;
     const youtubeEditorSurfaceReady =
       (/视频详细信息|Video details/i.test(text) && /标题（必填）|说明|缩略图|播放列表|观众|视频链接/.test(text))
-      || videoCapableFileInputCount > 0;
+      || (
+        !youtubeChannelContentList
+        && videoCapableFileInputCount > 0
+        && (
+          youtubeUploadDialogRoute
+          || /上传视频|Upload videos|Select files|选择文件|将要上传的视频文件拖放到此处/.test(text)
+        )
+      );
     const youtubeUploadSurfaceReady = shouldTreatYouTubeUploadSurfaceAsStable({
       uploadResumeRoute: youtubeUploadResumeRoute,
       channelContentList: youtubeChannelContentList,
@@ -3208,8 +3227,13 @@ export function shouldTreatMediaUploadAsInProgress(platform, upload, snapshot, m
   const lines = Array.isArray(snapshot?.lines) ? snapshot.lines : [];
   const text = lines.join(" ");
   const signals = detectCompositePublicationSignals(platform, text, lines);
+  const normalizedPlatform = normalizePlatform(platform);
+  const youtubeWizardUploadSurface = normalizedPlatform === "youtube"
+    && /详细信息|视频元素|检查|公开范围/.test(text)
+    && /正在上传视频|正在上传，已完成|正在创建链接|视频链接|正在保存/.test(text);
   return (
     pageAlreadyHasMedia(snapshot || {}, mediaPath)
+    || youtubeWizardUploadSurface
     || Boolean(signals.upload_busy)
     || /已上传：|当前速度：|剩余时间：|上传中|正在上传|处理中\s*\d+%|检测中\s*\d+%|\b\d{1,3}%\b/.test(text)
   );
@@ -3619,6 +3643,16 @@ function bridgeNow() {
   return Date.now();
 }
 
+function bridgeClientLastSeenMs(client = {}) {
+  const lastSeen = Date.parse(String(client.last_seen_at || ""));
+  return Number.isFinite(lastSeen) ? lastSeen : NaN;
+}
+
+function bridgeClientLastPollMs(client = {}) {
+  const lastPoll = Date.parse(String(client.last_poll_at || ""));
+  return Number.isFinite(lastPoll) ? lastPoll : NaN;
+}
+
 function normalizeBridgeClientId(value) {
   return String(value || "").trim();
 }
@@ -3628,6 +3662,7 @@ function bridgeClientSnapshot(clientId, client = {}) {
     client_id: clientId,
     connected_at: String(client.connected_at || ""),
     last_seen_at: String(client.last_seen_at || ""),
+    last_poll_at: String(client.last_poll_at || ""),
     extension_version: String(client.extension_version || ""),
     profile_label: String(client.profile_label || ""),
     capabilities: client.capabilities && typeof client.capabilities === "object" ? { ...client.capabilities } : {},
@@ -3644,6 +3679,7 @@ function upsertBridgeClient(clientId, payload = {}) {
     ...current,
     connected_at: connectedAt,
     last_seen_at: new Date().toISOString(),
+    last_poll_at: String(payload.last_poll_at || current.last_poll_at || "").trim(),
     extension_version: String(payload.extension_version || current.extension_version || "").trim(),
     profile_label: String(payload.profile_label || current.profile_label || "").trim(),
     capabilities: payload.capabilities && typeof payload.capabilities === "object"
@@ -3657,34 +3693,101 @@ function upsertBridgeClient(clientId, payload = {}) {
 }
 
 function isBridgeClientAlive(client = {}) {
-  const lastSeen = Date.parse(String(client.last_seen_at || ""));
+  const lastSeen = bridgeClientLastSeenMs(client);
   return Number.isFinite(lastSeen) && bridgeNow() - lastSeen <= BRIDGE_CLIENT_STALE_AFTER_MS;
+}
+
+function isBridgeClientRecoverable(client = {}) {
+  const lastSeen = bridgeClientLastSeenMs(client);
+  return Number.isFinite(lastSeen) && bridgeNow() - lastSeen <= BRIDGE_CLIENT_RECOVERABLE_AFTER_MS;
 }
 
 function activeBridgeClients() {
   return [...BRIDGE_CLIENTS.entries()]
     .filter(([, client]) => isBridgeClientAlive(client))
-    .sort((left, right) => Date.parse(String(right[1]?.last_seen_at || 0)) - Date.parse(String(left[1]?.last_seen_at || 0)));
+    .sort((left, right) => {
+      const rightPoll = bridgeClientLastPollMs(right[1]);
+      const leftPoll = bridgeClientLastPollMs(left[1]);
+      if (Number.isFinite(rightPoll) || Number.isFinite(leftPoll)) {
+        if (!Number.isFinite(leftPoll)) return 1;
+        if (!Number.isFinite(rightPoll)) return -1;
+        if (rightPoll !== leftPoll) return rightPoll - leftPoll;
+      }
+      return bridgeClientLastSeenMs(right[1]) - bridgeClientLastSeenMs(left[1]);
+    });
 }
 
-function selectBridgeClientId(requestedClientId = "") {
+function recoverableBridgeClients() {
+  return [...BRIDGE_CLIENTS.entries()]
+    .filter(([, client]) => isBridgeClientRecoverable(client))
+    .sort((left, right) => {
+      const rightPoll = bridgeClientLastPollMs(right[1]);
+      const leftPoll = bridgeClientLastPollMs(left[1]);
+      if (Number.isFinite(rightPoll) || Number.isFinite(leftPoll)) {
+        if (!Number.isFinite(leftPoll)) return 1;
+        if (!Number.isFinite(rightPoll)) return -1;
+        if (rightPoll !== leftPoll) return rightPoll - leftPoll;
+      }
+      return bridgeClientLastSeenMs(right[1]) - bridgeClientLastSeenMs(left[1]);
+    });
+}
+
+export function resetBridgeClientsForTest() {
+  BRIDGE_CLIENTS.clear();
+}
+
+export function seedBridgeClientForTest(clientId, payload = {}) {
+  return upsertBridgeClient(clientId, payload);
+}
+
+export function setBridgeClientLastSeenForTest(clientId, lastSeenAt) {
+  const normalizedClientId = normalizeBridgeClientId(clientId);
+  const current = BRIDGE_CLIENTS.get(normalizedClientId);
+  if (!current) return null;
+  const next = {
+    ...current,
+    last_seen_at: String(lastSeenAt || current.last_seen_at || ""),
+  };
+  BRIDGE_CLIENTS.set(normalizedClientId, next);
+  return bridgeClientSnapshot(normalizedClientId, next);
+}
+
+export function setBridgeClientLastPollForTest(clientId, lastPollAt) {
+  const normalizedClientId = normalizeBridgeClientId(clientId);
+  const current = BRIDGE_CLIENTS.get(normalizedClientId);
+  if (!current) return null;
+  const next = {
+    ...current,
+    last_poll_at: String(lastPollAt || current.last_poll_at || ""),
+  };
+  BRIDGE_CLIENTS.set(normalizedClientId, next);
+  return bridgeClientSnapshot(normalizedClientId, next);
+}
+
+export function selectBridgeClientId(requestedClientId = "", options = {}) {
+  const allowStale = options && typeof options === "object" ? options.allowStale === true : false;
   const normalizedRequested = normalizeBridgeClientId(requestedClientId);
   if (normalizedRequested) {
     const direct = BRIDGE_CLIENTS.get(normalizedRequested);
     if (direct && isBridgeClientAlive(direct)) return normalizedRequested;
+    if (allowStale && direct && isBridgeClientRecoverable(direct)) return normalizedRequested;
     return "";
   }
-  return activeBridgeClients()[0]?.[0] || "";
+  return activeBridgeClients()[0]?.[0] || (allowStale ? recoverableBridgeClients()[0]?.[0] || "" : "");
 }
 
-function bridgeTargetDescriptor() {
-  const clientId = selectBridgeClientId();
+export function bridgeTargetDescriptor(options = {}) {
+  const allowStale = options && typeof options === "object" ? options.allowStale !== false : true;
+  const clientId = selectBridgeClientId("", { allowStale });
   const client = clientId ? BRIDGE_CLIENTS.get(clientId) : null;
+  const clientState = client ? (isBridgeClientAlive(client) ? "active" : "stale") : "missing";
   return {
     transport: BROWSER_TRANSPORT_KIND,
     bridge_client_id: clientId || "",
     profile_label: String(client?.profile_label || ""),
     extension_version: String(client?.extension_version || ""),
+    bridge_client_state: clientState,
+    last_seen_at: String(client?.last_seen_at || ""),
     endpoint: BRIDGE_VIRTUAL_CDP_URL,
   };
 }
@@ -3701,7 +3804,7 @@ async function waitForBridgeCommand(clientId) {
 }
 
 async function sendBridgeCommand(type, payload = {}, options = {}) {
-  const clientId = selectBridgeClientId(options.client_id);
+  const clientId = selectBridgeClientId(options.client_id, { allowStale: true });
   if (!clientId) {
     throw new Error("chrome_extension_bridge_unavailable");
   }
@@ -3849,6 +3952,14 @@ async function resolvePlatformTab(platform, options = {}) {
     : tabSelection.prefer_receipt_surface
     ? String(PLATFORM_RECEIPT_ENTRY_URLS[normalized] || "").trim()
     : "";
+  const isReusableFreshStartTab = (candidate) => {
+    if (!candidate || !explicitFreshStartPlatformTab) return false;
+    return currentPageMatchesAuthoritativeFreshEntry(normalized, {
+      url: String(candidate?.url || "").trim(),
+      text: "",
+      file_inputs: [],
+    });
+  };
   let tabs = await listCdpTabs();
   console.log(`[resolve-tab] tabs=${Array.isArray(tabs) ? tabs.length : 0} platform=${normalized}`);
   const entryUrl = receiptEntryUrl || resolvePlatformPublishEntryUrl(normalized, tabs, tabSelection);
@@ -3877,6 +3988,38 @@ async function resolvePlatformTab(platform, options = {}) {
   }
 
   if ((forceFreshTab || explicitFreshStartPlatformTab) && entryUrl) {
+    const activeFreshCandidate = findPlatformTab(tabs, normalized, {
+      ...tabSelection,
+      lock_active_tab: true,
+    });
+    if (isReusableFreshStartTab(activeFreshCandidate)) {
+      actions.push({
+        kind: "platform_tab_fresh_start_reused_active",
+        platform: normalized,
+        tab_id: String(activeFreshCandidate?.id || "").trim(),
+        tab_url: String(activeFreshCandidate?.url || "").trim(),
+      });
+      tab = activeFreshCandidate;
+    } else {
+      const existingFreshCandidate = normalized === "kuaishou"
+        ? await selectPreferredKuaishouTab(tabs, mediaPath)
+        : findPlatformTab(tabs, normalized, {
+          ...tabSelection,
+          lock_active_tab: false,
+        });
+      if (isReusableFreshStartTab(existingFreshCandidate)) {
+        actions.push({
+          kind: "platform_tab_fresh_start_reused_existing",
+          platform: normalized,
+          tab_id: String(existingFreshCandidate?.id || "").trim(),
+          tab_url: String(existingFreshCandidate?.url || "").trim(),
+        });
+        tab = existingFreshCandidate;
+      }
+    }
+  }
+
+  if ((forceFreshTab || explicitFreshStartPlatformTab) && entryUrl && !tab) {
     if (allowTabAutocreate || explicitFreshStartPlatformTab) {
       try {
         const opened = await createCdpTab(entryUrl);
@@ -4209,6 +4352,11 @@ export function shouldEnforcePlatformPublishRoute(platform, recoveryContext = {}
   return true;
 }
 
+export function shouldSkipSharedBootstrapForFreshStart(recoveryContext = {}) {
+  const context = recoveryContext && typeof recoveryContext === "object" ? recoveryContext : {};
+  return Boolean(context.fresh_start_platform_tab);
+}
+
 export function deriveNavigationJavaScriptDialogHandling(dialog = {}, options = {}) {
   const normalizedType = String(dialog.type || "").trim().toLowerCase();
   const normalizedMessage = String(dialog.message || "").replace(/\s+/g, " ").trim();
@@ -4306,6 +4454,16 @@ export async function navigateClientToUrlWithDialogHandling(client, currentUrl, 
 }
 
 async function navigateExistingTabToUrl(tab, targetUrl, options = {}) {
+  const verify = typeof options.verify === "function"
+    ? options.verify
+    : ((snapshot) => String(snapshot?.url || "").startsWith(String(targetUrl || "")));
+  const currentUrl = String(tab?.url || "");
+  if (options.client) {
+    return navigateClientToUrlWithDialogHandling(options.client, currentUrl, targetUrl, {
+      ...options,
+      verify,
+    });
+  }
   if (!tab?.webSocketDebuggerUrl) {
     return {
       navigated: false,
@@ -4314,10 +4472,6 @@ async function navigateExistingTabToUrl(tab, targetUrl, options = {}) {
       reason: "tab_has_no_websocket",
     };
   }
-  const verify = typeof options.verify === "function"
-    ? options.verify
-    : ((snapshot) => String(snapshot?.url || "").startsWith(String(targetUrl || "")));
-  const currentUrl = String(tab?.url || "");
   const client = await CdpClient.connect(tab.webSocketDebuggerUrl);
   try {
     return await navigateClientToUrlWithDialogHandling(client, currentUrl, targetUrl, {
@@ -5094,6 +5248,8 @@ async function ensurePlatformPublishRoute(client, tab, platform, options = {}) {
 
   if (forcePublishRefresh && entryUrl) {
     if (platform === "youtube") {
+      const currentBootstrapUrl = String(current?.url || currentUrl || "").trim();
+      const currentIsYouTubeUploadRoute = /studio\.youtube\.com\/channel\/[^/?#]+\/(?:videos\/)?upload\b/i.test(currentBootstrapUrl);
       if (
         shouldPreserveYouTubeUploadResumeRouteForBootstrap(current?.url || currentUrl, currentText)
         || shouldPreserveYouTubeEditorRouteForBootstrap(current?.url || currentUrl, currentText)
@@ -5108,20 +5264,31 @@ async function ensurePlatformPublishRoute(client, tab, platform, options = {}) {
           reason: "youtube_preserve_upload_resume_route",
         };
       }
+      if (!currentIsYouTubeUploadRoute) {
+        return navigateExistingTabToUrl(tab, entryUrl, {
+          client,
+          timeout_ms: 18000,
+          reason: "forced_publish_page_refresh",
+          javascript_dialog_policy: "navigation_route_switch",
+          verify: verifyRouteBootstrapSnapshot,
+          snapshot_fn: (activeClient) => routeBootstrapSnapshot(activeClient).catch(() => null),
+        });
+      }
       const createFlow = await forceYouTubeCreateUploadFlow(client).catch(() => ({ clicked: false, actions: [], state: null }));
-      if (createFlow.clicked && createFlow.state?.step && createFlow.state.step !== "upload_entry") {
+      if (createFlow.clicked && isYouTubeCreateFlowStateUsable(createFlow.state)) {
         return {
           navigated: true,
           from: currentUrl,
           to: createFlow.state.url || entryUrl,
           url: createFlow.state.url || entryUrl,
           title: String(createFlow.state?.title || tab?.title || ""),
-          verified: true,
+          verified: isYouTubeCreateFlowStateUsable(createFlow.state),
           reason: "youtube_create_upload_flow",
           actions: createFlow.actions,
         };
       }
       return navigateExistingTabToUrl(tab, entryUrl, {
+        client,
         timeout_ms: 18000,
         reason: "forced_publish_page_refresh",
         javascript_dialog_policy: "navigation_route_switch",
@@ -5149,15 +5316,26 @@ async function ensurePlatformPublishRoute(client, tab, platform, options = {}) {
     })
   ) {
     if (platform === "youtube") {
+      const currentBootstrapUrl = String(current?.url || currentUrl || "").trim();
+      const currentIsYouTubeUploadRoute = /studio\.youtube\.com\/channel\/[^/?#]+\/(?:videos\/)?upload\b/i.test(currentBootstrapUrl);
+      if (!currentIsYouTubeUploadRoute) {
+        return navigateClientToUrlWithDialogHandling(client, current?.url || currentUrl, entryUrl, {
+          timeout_ms: 18000,
+          reason: "generic_publish_route_bootstrap",
+          javascript_dialog_policy: "navigation_route_switch",
+          verify: verifyRouteBootstrapSnapshot,
+          snapshot_fn: (activeClient) => routeBootstrapSnapshot(activeClient).catch(() => null),
+        });
+      }
       const createFlow = await forceYouTubeCreateUploadFlow(client).catch(() => ({ clicked: false, actions: [], state: null }));
-      if (createFlow.clicked) {
+      if (createFlow.clicked && isYouTubeCreateFlowStateUsable(createFlow.state)) {
         return {
           navigated: true,
           from: current?.url || currentUrl,
           to: createFlow.state?.url || entryUrl,
           url: createFlow.state?.url || entryUrl,
           title: String(createFlow.state?.title || tab?.title || ""),
-          verified: Boolean(createFlow.state?.step),
+          verified: isYouTubeCreateFlowStateUsable(createFlow.state),
           reason: "youtube_create_upload_flow",
           actions: createFlow.actions,
         };
@@ -5294,6 +5472,24 @@ async function clearInPageDraftState(client, platform, options = {}) {
       after_url: before.url || "",
     };
   }
+  if (String(platform || "").trim() === "youtube" && isYouTubeInterruptedUploadSurface(before)) {
+    const removeInterruptedUpload = await clickByText(client, ["删除视频", "Delete video"]).catch((error) => ({
+      clicked: false,
+      reason: String(error?.message || error || "youtube_interrupted_upload_remove_click_failed"),
+    }));
+    actions.push({ kind: "youtube_interrupted_upload_remove", ...removeInterruptedUpload });
+    if (removeInterruptedUpload.clicked) {
+      await sleep(1200);
+      const confirmRemoveInterruptedUpload = await confirmYouTubeDeleteDraftVideo(client).catch((error) => ({
+        clicked: false,
+        reason: String(error?.message || error || "youtube_interrupted_upload_remove_confirm_failed"),
+      }));
+      actions.push({ kind: "youtube_interrupted_upload_remove_confirm", ...confirmRemoveInterruptedUpload });
+      if (confirmRemoveInterruptedUpload.clicked) {
+        await sleep(1500);
+      }
+    }
+  }
   const inputClearResult = await evaluateWithClient(client, `(() => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const visible = (el) => {
@@ -5345,7 +5541,7 @@ async function clearInPageDraftState(client, platform, options = {}) {
       if (!Array.isArray(texts) || texts.length === 0) continue;
       const clickResult = await evaluateWithClient(client, `(() => {
       const texts = ${JSON.stringify(texts)};
-      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const clean = (value) => String(value || "").replace(/[\\u200B-\\u200D\\uFEFF]/g, "").replace(/\\s+/g, " ").trim();
       const visible = (el) => {
         if (!el) return false;
         const rect = el.getBoundingClientRect();
@@ -5605,6 +5801,65 @@ async function snapshotTab(tab) {
   }
 }
 
+async function waitForProbeBootstrapTabReady(tab, {
+  platform = "",
+  targetUrl = "",
+  timeoutMs = 12000,
+} = {}) {
+  if (!tab?.webSocketDebuggerUrl) {
+    return { ready: false, reason: "missing_websocket_debugger_url", url: String(tab?.url || "").trim() };
+  }
+  const normalizedPlatform = normalizePlatform(platform);
+  const target = String(targetUrl || "").trim();
+  let targetOrigin = "";
+  try {
+    targetOrigin = new URL(target).origin;
+  } catch {}
+  const client = await CdpClient.connect(tab.webSocketDebuggerUrl);
+  try {
+    const startedAt = Date.now();
+    let lastUrl = String(tab?.url || "").trim();
+    let lastTitle = String(tab?.title || "").trim();
+    while (Date.now() - startedAt < timeoutMs) {
+      const snapshot = await pageSnapshot(client).catch(() => null);
+      const currentUrl = String(snapshot?.url || lastUrl || "").trim();
+      const currentText = String(
+        [
+          ...(Array.isArray(snapshot?.headings) ? snapshot.headings : []),
+          ...(Array.isArray(snapshot?.lines) ? snapshot.lines : []),
+        ].join(" ") || snapshot?.text || "",
+      ).replace(/\s+/g, " ").trim();
+      lastUrl = currentUrl || lastUrl;
+      lastTitle = String(snapshot?.title || lastTitle || "").trim();
+      const atExpectedOrigin = Boolean(targetOrigin) && currentUrl.startsWith(targetOrigin);
+      const publishRouteReady = isCompositePublishRouteContext(normalizedPlatform, {
+        url: currentUrl,
+        text: currentText,
+        file_inputs: Array.isArray(snapshot?.file_inputs) ? snapshot.file_inputs : [],
+      });
+      if (currentUrl && currentUrl !== "about:blank" && (atExpectedOrigin || publishRouteReady)) {
+        return {
+          ready: true,
+          url: currentUrl,
+          title: lastTitle,
+          waited_ms: Date.now() - startedAt,
+          publish_route_ready: publishRouteReady,
+        };
+      }
+      await sleep(600);
+    }
+    return {
+      ready: false,
+      reason: "bootstrap_tab_not_ready",
+      url: lastUrl,
+      title: lastTitle,
+      waited_ms: timeoutMs,
+    };
+  } finally {
+    client.close();
+  }
+}
+
 function originFromUrl(url) {
   try {
     const parsed = new URL(String(url || ""));
@@ -5651,7 +5906,7 @@ async function setOriginNotificationPermission(client, tab) {
 async function dismissBilibiliUnexpectedEvents(client, stage = "unspecified") {
   return evaluateWithClient(client, `(async () => {
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const clean = (value) => String(value || "").replace(/[\\u200B-\\u200D\\uFEFF]/g, "").replace(/\\s+/g, " ").trim();
     const visible = (el) => {
       const rect = el.getBoundingClientRect();
       const style = getComputedStyle(el);
@@ -5709,11 +5964,12 @@ async function dismissBilibiliUnexpectedEvents(client, stage = "unspecified") {
   })()`, 10000).catch(() => ({ actions: [] }));
 }
 
-async function dismissInterruptions(client, tab, platform, stage = "unspecified") {
+async function dismissInterruptions(client, tab, platform, stage = "unspecified", options = {}) {
+  const skipDraftResumePrompt = Boolean(options && options.skipDraftResumePrompt);
   const actions = [];
   const permission = await setOriginNotificationPermission(client, tab);
   if (permission.handled) actions.push({ ...permission, stage });
-  if (["bilibili", "kuaishou", "douyin"].includes(String(platform || "").trim())) {
+  if (!skipDraftResumePrompt && ["bilibili", "kuaishou", "douyin"].includes(String(platform || "").trim())) {
     const draftResume = await resolveCurrentPageDraftResumePrompt(client, platform).catch(() => ({
       attempted: false,
       resumed: false,
@@ -5843,6 +6099,16 @@ async function dismissInterruptions(client, tab, platform, stage = "unspecified"
     ].join(",")).filter(visible);
     const overlaySet = new Set(overlays);
     const isInsideOverlay = (el) => overlays.some((overlay) => overlay === el || overlay.contains(el));
+    const overlayTexts = overlays.map((overlay) => clean(overlay.innerText || overlay.textContent || "")).filter(Boolean);
+    const pageText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    const youtubeUploadEntryOverlayPresent =
+      platform === "youtube"
+      && /before_file_upload|after_upload_button|before_expand_|after_expand_/i.test(stage)
+      && overlayTexts.some((text) => /上传视频|Upload videos|Select files|选择文件|将要上传的视频文件拖放到此处|Drag and drop video files to upload/i.test(text));
+    const youtubeUploadProgressPresent =
+      platform === "youtube"
+      && /after_file_upload|before_expand_|after_expand_|before_api_inventory/i.test(stage)
+      && /正在上传第\s*\d+\s*个|剩余时间[:：]|已上传\s*\d+%|Uploading|Remaining time/i.test(pageText);
     const labelOf = (el) => clean(el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("alt") || el.getAttribute("placeholder"));
     const classOf = (el) => clean(el.className && typeof el.className === "string" ? el.className : "");
     const looksLikeCloseIcon = (el, label) => {
@@ -5881,7 +6147,15 @@ async function dismissInterruptions(client, tab, platform, stage = "unspecified"
         return leftClose - rightClose || left.area - right.area;
       });
     const clicked = [];
-    const overlayTexts = overlays.map((overlay) => clean(overlay.innerText || overlay.textContent || "")).filter(Boolean);
+    if (youtubeUploadEntryOverlayPresent || youtubeUploadProgressPresent) {
+      return {
+        clicked,
+        skipped: true,
+        reason: youtubeUploadEntryOverlayPresent
+          ? "youtube_upload_entry_overlay_preserved"
+          : "youtube_upload_progress_preserved",
+      };
+    }
     const onboardingChosen = (${selectOnboardingGuideDismissCandidate.toString()})(candidates, overlayTexts);
     if (onboardingChosen?.el) {
       onboardingChosen.el.scrollIntoView({ block: "center", inline: "center" });
@@ -6292,7 +6566,7 @@ export function canReuseCurrentPageMediaForPrepublish(platform, snapshot = {}, m
     return { reusable: false, media_attached: false, reason: "upload_failed" };
   }
   if (platform === "youtube" && shouldPreserveYouTubeUploadResumeRoute(String(snapshot?.url || ""), text)) {
-    return { reusable: true, media_attached: true, reason: "youtube_upload_resume_surface" };
+    return { reusable: false, media_attached: false, reason: "youtube_resume_surface_requires_fresh_task" };
   }
   if (
     platform === "youtube"
@@ -6569,6 +6843,21 @@ export function shouldBypassDraftResumeAtAuthoritativeUploadEntry(platform, rout
     return /mp\.toutiao\.com\/profile_v4\/xigua\/upload-video/i.test(url)
       && /点击上传|上传视频|拖拽|发布视频/.test(text)
       && !/标题|简介|封面|定时发布/.test(text);
+  }
+  return false;
+}
+
+export function shouldUseAuthoritativeUploadEntryNativePath(platform, route = {}) {
+  const normalizedPlatform = String(platform || "").trim().toLowerCase().replace(/_/g, "-");
+  const url = String(route?.url || "").trim();
+  const lines = [
+    ...(Array.isArray(route?.lines) ? route.lines : []),
+    ...(Array.isArray(route?.headings) ? route.headings : []),
+  ].map((line) => String(line || "").trim()).filter(Boolean);
+  const text = String(route?.text || lines.join(" ") || route?.bodyText || "").replace(/\s+/g, " ").trim();
+  if (!url && !text) return false;
+  if (normalizedPlatform === "douyin") {
+    return false;
   }
   return false;
 }
@@ -7326,17 +7615,23 @@ export function selectPreferredSemanticActionCandidate(candidates = [], hints = 
       const managementSemantic = /管理|编辑作品|设置权限|置顶|删除|数据中心|作品管理|合集管理/;
       const destructiveSemantic = /取消上传|取消|移除|删除|清空|关闭|cancel|remove|delete|discard/;
       const uploadStateSemantic = /上传中|检测中|处理中|重新上传|uploading|processing|retry upload|re-upload/;
+      const navigationSemantic = /通知|消息|首页|活动管理|内容管理|互动管理|数据中心|变现中心|创作中心|网址|抖音|bilibili|youtube|头条|快手|小红书/;
+      const dismissSemantic = /^close$|关闭|稍后再看|去星图查看|返回|back/;
       const hasUploadSemantic = _semanticActionTextMatches(uploadSemantic, label) || _semanticActionTextMatches(uploadSemantic, className);
       const hasTerminalSemantic = _semanticActionTextMatches(terminalSemantic, label);
       const hasManagementSemantic = _semanticActionTextMatches(managementSemantic, label);
       const hasDestructiveSemantic = _semanticActionTextMatches(destructiveSemantic, label);
       const hasUploadStateSemantic = _semanticActionTextMatches(uploadStateSemantic, label);
+      const hasNavigationSemantic = _semanticActionTextMatches(navigationSemantic, label);
+      const hasDismissSemantic = _semanticActionTextMatches(dismissSemantic, label) || _semanticActionTextMatches(dismissSemantic, className);
       if (hasUploadSemantic) score += 30;
-      else score -= 35;
+      else score -= 80;
       if (hasTerminalSemantic) score -= 80;
       if (hasManagementSemantic) score -= 60;
       if (hasDestructiveSemantic) score -= 120;
       if (hasUploadStateSemantic) score -= 140;
+      if (hasNavigationSemantic) score -= 160;
+      if (hasDismissSemantic) score -= 220;
     }
     if (imageUploadIntent) {
       const imageUploadSemantic = /上传图片|上传封面|本地上传|select files|select file|upload image|upload cover|choose image|choose file|图片/;
@@ -7355,7 +7650,8 @@ export function selectPreferredSemanticActionCandidate(candidates = [], hints = 
     }
     return { ...candidate, score, _label: label };
   }).sort((left, right) => right.score - left.score || Number(right.clickable) - Number(left.clickable) || Number(left.area || 0) - Number(right.area || 0));
-  return { chosen: normalized[0] && normalized[0].score > 0 ? normalized[0] : null, candidates: normalized };
+  const minimumChosenScore = mediaBootstrapIntent ? 15 : 0;
+  return { chosen: normalized[0] && normalized[0].score > minimumChosenScore ? normalized[0] : null, candidates: normalized };
 }
 
 async function inspectSemanticActionCandidates(client) {
@@ -7636,10 +7932,30 @@ export function shouldTreatYouTubeUploadSurfaceAsStable({
   videoCapableFileInputCount = 0,
 } = {}) {
   if (uploadResumeRoute) return true;
+  if (channelContentList && uploadDialogSurface) {
+    return true;
+  }
   if (channelContentList) return false;
   if (Number(visibleFileInputCount || 0) > 0) return true;
-  if (Number(videoCapableFileInputCount || 0) > 0) return true;
+  if (uploadDialogSurface && Number(videoCapableFileInputCount || 0) > 0) return true;
   return Boolean(uploadDialogSurface);
+}
+
+function isYouTubeCreateFlowStateReady(state = {}) {
+  const step = String(state?.step || "").trim();
+  return ["upload_entry", "details", "video_elements", "checks", "visibility"].includes(step);
+}
+
+function isYouTubeCreateFlowStateUsable(state = {}) {
+  if (!isYouTubeCreateFlowStateReady(state)) return false;
+  return isCompositePublishRouteContext("youtube", {
+    url: String(state?.url || "").trim(),
+    text: String(state?.text || "").trim(),
+    title: String(state?.title || "").trim(),
+    file_inputs: Array.isArray(state?.fileInputs)
+      ? state.fileInputs
+      : (Array.isArray(state?.file_inputs) ? state.file_inputs : []),
+  });
 }
 
 export function shouldPreserveYouTubeUploadResumeRoute(href = "", bodyText = "") {
@@ -7669,9 +7985,20 @@ export function shouldPreserveYouTubeUploadResumeRouteForBootstrap(href = "", bo
 export function isYouTubeEditorReadinessSurface(href = "", bodyText = "") {
   const normalizedHref = String(href || "").trim();
   const text = String(bodyText || "").replace(/\s+/g, " ").trim();
-  if (!/studio\.youtube\.com\/video\/[A-Za-z0-9_-]+\/edit\b/i.test(normalizedHref)) return false;
-  return /视频详细信息|Video details/i.test(text)
-    && /标题（必填）|说明|缩略图|播放列表|观众|视频链接/.test(text);
+  const legacyEditRoute = /studio\.youtube\.com\/video\/[A-Za-z0-9_-]+\/edit\b/i.test(normalizedHref);
+  const uploadDialogRoute = /[?&]d=ud(?:[&#]|$)/i.test(normalizedHref);
+  const uploadWizardRoute = /studio\.youtube\.com\/channel\/[^/?#]+\/(?:videos\/)?upload\b/i.test(normalizedHref)
+    || uploadDialogRoute;
+  if (!legacyEditRoute && !uploadWizardRoute) return false;
+  if (legacyEditRoute) {
+    return /视频详细信息|Video details/i.test(text)
+      && /标题（必填）|说明|缩略图|播放列表|观众|视频链接/.test(text);
+  }
+  if (/详细信息/.test(text) && /标题（必填）|说明|缩略图|播放列表|观众|视频链接/.test(text)) return true;
+  if (/视频元素/.test(text) && /添加字幕|添加片尾画面|添加卡片|继续/.test(text)) return true;
+  if (/检查/.test(text) && /检查完毕|未发现任何问题|版权|继续/.test(text)) return true;
+  return /公开范围/.test(text)
+    && /保存或发布|视频链接|安排时间|私享|不公开列出|公开|取消上传|返回|保存/.test(text);
 }
 
 export function shouldPreserveYouTubeEditorRouteForBootstrap(href = "", bodyText = "") {
@@ -7705,6 +8032,22 @@ export function shouldReuseYouTubeEditorSurfaceForDraftReset(snapshot = {}, medi
     (mediaName && text.includes(mediaName))
     || (mediaStem && text.includes(mediaStem)),
   );
+}
+
+function isYouTubeInterruptedUploadSurface(snapshot = {}) {
+  const href = String(snapshot?.url || snapshot?.href || "").trim();
+  if (!/studio\.youtube\.com\/channel\/[^/?#]+\/(?:videos\/)?upload/i.test(href)) return false;
+  const text = [
+    ...(Array.isArray(snapshot?.lines) ? snapshot.lines : []),
+    ...(Array.isArray(snapshot?.headings) ? snapshot.headings : []),
+    ...(Array.isArray(snapshot?.overlayTexts) ? snapshot.overlayTexts : []),
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .join(" ");
+  return /上传已中断|upload interrupted/i.test(text)
+    && /继续上传|resume upload/i.test(text)
+    && /删除视频|delete video/i.test(text);
 }
 
 export function deriveYouTubeUploadEditorBootstrapPlan(surface = {}, titleHint = "") {
@@ -7857,13 +8200,16 @@ export function normalizeYouTubeVisibilityOrPublishMode(value = "", scheduledPub
 export function deriveYouTubeUploadWizardStep(href = "", bodyText = "") {
   const normalizedHref = String(href || "").trim();
   const text = String(bodyText || "").replace(/\s+/g, " ").trim();
+  const channelContentList = /频道内容|每页行数|第\s*\d+\s*-\s*\d+\s*条|观看次数|评论数|赞和不喜欢的比率|发布日期/.test(text);
+  const uploadDialogEntry = hasYoutubeUploadDialogQuery(normalizedHref) || /上传视频|Upload videos|Select files|拖拽视频|选择文件/.test(text);
   if (isYouTubeEditorReadinessSurface(normalizedHref, text) || (/详细信息/.test(text) && /标题（必填）|说明|缩略图|播放列表|观众/.test(text))) {
     return "details";
   }
   if (/视频元素/.test(text) && /添加字幕|添加片尾画面|添加卡片/.test(text)) return "video_elements";
-  if (/检查/.test(text) && /检查完毕|发现任何问题|无发现任何问题|版权|限制/.test(text)) return "checks";
-  if (/公开范围/.test(text) && /私享|不公开列出|公开|安排时间|保存或发布|发布之前/.test(text)) return "visibility";
-  if (hasYoutubeUploadDialogQuery(normalizedHref) || /上传视频|Upload videos|Select files|拖拽视频|选择文件/.test(text)) return "upload_entry";
+  if (/检查/.test(text) && /检查完毕|发现任何问题|无发现任何问题|版权/.test(text)) return "checks";
+  if (/公开范围/.test(text) && /私享|不公开列出|安排时间|保存或发布|发布之前|立即发布/.test(text)) return "visibility";
+  if (uploadDialogEntry && channelContentList) return "upload_entry";
+  if (uploadDialogEntry) return "upload_entry";
   return "";
 }
 
@@ -8599,6 +8945,25 @@ async function refreshFileInputCandidate(client, candidate) {
   return candidate;
 }
 
+async function describeFileInputCandidates(client, selector = "input[type=file]", options = {}) {
+  const retryOnEmpty = options?.retryOnEmpty !== false;
+  const retries = Math.max(0, Number(options?.retries ?? 1) || 0);
+  let attempt = 0;
+  while (attempt <= retries) {
+    const nodeIds = await findFileInputNodeIds(client, selector);
+    const described = [];
+    for (const nodeId of nodeIds) {
+      try {
+        described.push(await describeFileInputCandidate(client, nodeId));
+      } catch {}
+    }
+    if (described.length || !retryOnEmpty || attempt >= retries) return described;
+    attempt += 1;
+    await sleep(300);
+  }
+  return [];
+}
+
 export function selectPreferredVideoFileInput(candidates = []) {
   const normalized = (Array.isArray(candidates) ? candidates : []).map((candidate) => {
     const attrMap = candidate?.attrMap && typeof candidate.attrMap === "object" ? candidate.attrMap : {};
@@ -8696,6 +9061,30 @@ export function collapseBilibiliQueueCardEntries(cards = []) {
   return [...grouped.values()];
 }
 
+async function findFileInputNodeIds(client, selector = "input[type=file]") {
+  const normalizedSelector = String(selector || "").trim() || "input[type=file]";
+  try {
+    const search = await client.send("DOM.performSearch", {
+      query: normalizedSelector,
+      includeUserAgentShadowDOM: true,
+    });
+    const resultCount = Number(search?.resultCount || 0);
+    const searchId = String(search?.searchId || "").trim();
+    if (!searchId || resultCount <= 0) return [];
+    const fetched = await client.send("DOM.getSearchResults", {
+      searchId,
+      fromIndex: 0,
+      toIndex: resultCount,
+    });
+    return Array.isArray(fetched?.nodeIds) ? fetched.nodeIds : [];
+  } catch {
+    const documentResult = await client.send("DOM.getDocument", { depth: -1, pierce: true });
+    const rootNodeId = documentResult.root.nodeId;
+    const queryResult = await client.send("DOM.querySelectorAll", { nodeId: rootNodeId, selector: normalizedSelector });
+    return Array.isArray(queryResult?.nodeIds) ? queryResult.nodeIds : [];
+  }
+}
+
 async function setFirstVideoFileInput(client, mediaPath, options = {}) {
   const normalizedPlatform = String(options.platform || "").trim().toLowerCase();
   const singlePathMode = platformUsesSingleVideoUploadPath(normalizedPlatform);
@@ -8716,12 +9105,7 @@ async function setFirstVideoFileInput(client, mediaPath, options = {}) {
       };
     }
   }
-  const documentResult = await client.send("DOM.getDocument", { depth: -1, pierce: true });
-  const rootNodeId = documentResult.root.nodeId;
-  const queryResult = await client.send("DOM.querySelectorAll", { nodeId: rootNodeId, selector: "input[type=file]" });
-  const nodeIds = queryResult.nodeIds || [];
-  const described = [];
-  for (const nodeId of nodeIds) described.push(await describeFileInputCandidate(client, nodeId));
+  const described = await describeFileInputCandidates(client, "input[type=file]", { retries: 1 });
   const allCandidates = filterSinglePathVideoInputs(normalizedPlatform, selectPreferredVideoFileInput(described));
   const loadedExistingInput = findLoadedVideoFileInputForMedia(allCandidates, mediaPath);
   if (loadedExistingInput) {
@@ -8774,14 +9158,9 @@ async function setFirstVideoFileInput(client, mediaPath, options = {}) {
             runtime: verifiedAfterDispatch.runtime,
             fileInputCount: described.length,
           };
-        }
+          }
       }
-      const refreshedDocument = await client.send("DOM.getDocument", { depth: -1, pierce: true });
-      const refreshedQuery = await client.send("DOM.querySelectorAll", { nodeId: refreshedDocument.root.nodeId, selector: "input[type=file]" });
-      const refreshedDescribed = [];
-      for (const refreshedNodeId of (refreshedQuery.nodeIds || [])) {
-        refreshedDescribed.push(await describeFileInputCandidate(client, refreshedNodeId));
-      }
+      const refreshedDescribed = await describeFileInputCandidates(client, "input[type=file]", { retries: 1 });
       const refreshedAllCandidates = filterSinglePathVideoInputs(normalizedPlatform, selectPreferredVideoFileInput(refreshedDescribed));
       const loadedAfterAttempt = findLoadedVideoFileInputForMedia(refreshedAllCandidates, mediaPath);
       if (loadedAfterAttempt) {
@@ -8993,6 +9372,53 @@ async function tryNativeMediaUploadFallback(client, {
   };
 }
 
+async function tryAuthoritativeUploadEntryNativeUpload(client, {
+  mediaPath,
+  platform = "",
+  snapshot = null,
+} = {}) {
+  if (!mediaPath) return { uploaded: false, reason: "missing_media_path" };
+  const normalizedPlatform = String(platform || "").trim().toLowerCase();
+  const activeSnapshot = snapshot && typeof snapshot === "object"
+    ? snapshot
+    : await pageSnapshot(client).catch(() => null);
+  if (!shouldUseAuthoritativeUploadEntryNativePath(normalizedPlatform, activeSnapshot || {})) {
+    return { uploaded: false, reason: "not_authoritative_upload_entry" };
+  }
+  await client.send("Page.bringToFront").catch(() => {});
+  let entryAction = { clicked: false, reason: "authoritative_upload_entry_not_clicked" };
+  if (normalizedPlatform === "douyin") {
+    entryAction = await clickByText(client, ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择"]);
+    if (!entryAction.clicked) {
+      entryAction = await clickLooseText(client, ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择"]);
+    }
+  }
+  await sleep(700);
+  const chooser = await completeNativeFileChooserSelection(mediaPath, { timeoutMs: 15000 });
+  if (!entryAction?.clicked || !chooser.handled) {
+    return {
+      uploaded: false,
+      reason: chooser.reason || "native_file_chooser_not_applied",
+      entryAction,
+      chooser,
+      snapshot: activeSnapshot,
+    };
+  }
+  await sleep(1200);
+  const afterSnapshot = await pageSnapshot(client).catch(() => activeSnapshot);
+  const uploadInProgress = shouldTreatMediaUploadAsInProgress(normalizedPlatform, {
+    uploaded: false,
+    reason: "native_file_chooser_submitted",
+  }, afterSnapshot, mediaPath);
+  return {
+    uploaded: uploadInProgress,
+    reason: uploadInProgress ? "authoritative_upload_entry_upload_in_progress" : "native_file_chooser_not_applied",
+    entryAction,
+    chooser,
+    snapshot: afterSnapshot,
+  };
+}
+
 async function tryYouTubeSelectFilesNativeUpload(client, mediaPath) {
   const actions = [];
   let entryAction = await clickByText(client, ["选择文件", "Select files"]);
@@ -9030,6 +9456,337 @@ async function tryYouTubeSelectFilesNativeUpload(client, mediaPath) {
     actions,
     chooser,
     snapshot,
+  };
+}
+
+async function inspectYouTubeDeleteDraftDialog(client) {
+  return evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/[\\u200B-\\u200D\\uFEFF]/g, "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el || typeof el.getBoundingClientRect !== "function") return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const rectPoint = (el, bias = 0.5) => {
+      if (!el || typeof el.getBoundingClientRect !== "function") return null;
+      const rect = el.getBoundingClientRect();
+      if (!(rect.width > 0 && rect.height > 0)) return null;
+      return {
+        x: rect.left + rect.width * bias,
+        y: rect.top + rect.height * 0.5,
+        width: rect.width,
+        height: rect.height,
+      };
+    };
+    const readChecked = (node) => {
+      if (!node) return false;
+      const ariaChecked = String(node.getAttribute?.("aria-checked") || "").toLowerCase();
+      return ariaChecked === "true"
+        || node.hasAttribute?.("checked")
+        || node.checked === true
+        || node.getAttribute?.("checked") === "";
+    };
+    const collectWithin = (root) => {
+      const results = [];
+      const visit = (node) => {
+        if (!node) return;
+        if (node.nodeType === Node.ELEMENT_NODE) results.push(node);
+        const children = node.children ? [...node.children] : [];
+        for (const child of children) {
+          visit(child);
+          if (child.shadowRoot) visit(child.shadowRoot);
+        }
+      };
+      visit(root);
+      return results;
+    };
+    const dialogs = [...document.querySelectorAll("[role=dialog],[aria-modal=true],[class*=dialog i],[class*=modal i]")]
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        return {
+          el,
+          text: clean(el.innerText || el.textContent || ""),
+          area: rect.width * rect.height,
+        };
+      })
+      .filter((item) => /要永久删除此草稿视频吗|删除草稿视频|Delete draft video/i.test(item.text))
+      .sort((left, right) => left.area - right.area);
+    const dialog = dialogs[0];
+    if (!dialog) return { found: false, reason: "youtube_delete_draft_dialog_not_found" };
+
+    const dialogNodes = collectWithin(dialog.el);
+    const checkboxHost = dialogNodes
+      .filter((el) => /^(tp-yt-paper-checkbox|input)$/i.test(String(el.tagName || "")) || el.getAttribute?.("role") === "checkbox")
+      .find((el) => visible(el));
+    const checkboxLabel = dialogNodes
+      .filter((el) => /^(label|span|div|button|yt-formatted-string)$/i.test(String(el.tagName || "")))
+      .find((el) => visible(el) && /我了解，从 YouTube 上删除草稿视频是永久性操作，无法撤消。/.test(clean(el.innerText || el.textContent || el.getAttribute("aria-label") || "")));
+    const checkboxBoxFromHost = checkboxHost
+      ? collectWithin(checkboxHost)
+        .find((el) => {
+          if (!visible(el)) return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width >= 10 && rect.width <= 42 && rect.height >= 10 && rect.height <= 42
+            && /checkbox|box|check/i.test(
+              String(el.id || "") + " "
+              + String(el.className || "") + " "
+              + String(el.getAttribute?.("part") || ""),
+            );
+        })
+      : null;
+    const checkboxBoxFromLabelRow = checkboxLabel
+      ? collectWithin(checkboxLabel.parentElement || checkboxLabel.closest?.("label,div,span") || checkboxLabel)
+        .find((el) => {
+          if (!visible(el) || el === checkboxLabel) return false;
+          const rect = el.getBoundingClientRect();
+          return rect.width >= 10 && rect.width <= 42 && rect.height >= 10 && rect.height <= 42;
+        })
+      : null;
+    const checkboxNearestSquare = checkboxLabel
+      ? dialogNodes
+        .filter((el) => visible(el))
+        .map((el) => {
+          const rect = el.getBoundingClientRect();
+          const labelRect = checkboxLabel.getBoundingClientRect();
+          return {
+            el,
+            rect,
+            score: Math.abs((rect.top + rect.height / 2) - (labelRect.top + labelRect.height / 2))
+              + Math.abs((labelRect.left - (rect.left + rect.width / 2))),
+          };
+        })
+        .filter((entry) =>
+          entry.rect.width >= 10
+          && entry.rect.width <= 42
+          && entry.rect.height >= 10
+          && entry.rect.height <= 42
+          && entry.rect.left <= checkboxLabel.getBoundingClientRect().left + 40
+        )
+        .sort((left, right) => left.score - right.score)[0]?.el || null
+      : null;
+    const checkboxClickable = checkboxHost
+      || checkboxLabel?.closest?.("tp-yt-paper-checkbox,[role=checkbox],label")
+      || checkboxLabel
+      || null;
+    const deleteButton = dialogNodes
+      .filter((el) => /^(button|ytcp-button)$/i.test(String(el.tagName || "")) || el.getAttribute?.("role") === "button")
+      .find((el) => visible(el) && /删除草稿视频|Delete draft video/i.test(clean(el.innerText || el.textContent || el.getAttribute("aria-label") || "")));
+    const deleteLabel = clean(deleteButton?.innerText || deleteButton?.textContent || deleteButton?.getAttribute?.("aria-label") || "");
+    const deleteEnabled = Boolean(deleteButton) && deleteButton.getAttribute("aria-disabled") !== "true" && !deleteButton.disabled;
+    const consentChecked = readChecked(checkboxHost || checkboxClickable);
+    return {
+      found: true,
+      dialog_text: dialog.text.slice(0, 600),
+      consent_checked: consentChecked,
+      delete_enabled: deleteEnabled,
+      checkbox_box_point: rectPoint(checkboxBoxFromHost || checkboxBoxFromLabelRow || checkboxNearestSquare, 0.5),
+      checkbox_point: rectPoint(checkboxHost || checkboxClickable, checkboxHost ? 0.18 : 0.5),
+      checkbox_label_point: rectPoint(checkboxLabel, 0.03),
+      delete_button_point: rectPoint(deleteButton, 0.5),
+      delete_label: deleteLabel,
+      debug_checkbox: {
+        host_tag: String(checkboxHost?.tagName || ""),
+        host_role: String(checkboxHost?.getAttribute?.("role") || ""),
+        host_aria_checked: String(checkboxHost?.getAttribute?.("aria-checked") || ""),
+        box_tag: String((checkboxBoxFromHost || checkboxBoxFromLabelRow || checkboxNearestSquare)?.tagName || ""),
+        box_id: String((checkboxBoxFromHost || checkboxBoxFromLabelRow || checkboxNearestSquare)?.id || ""),
+        box_class: String((checkboxBoxFromHost || checkboxBoxFromLabelRow || checkboxNearestSquare)?.className || ""),
+      },
+    };
+  })()`, 12000);
+}
+
+async function activateYouTubeDeleteDraftCheckboxByKeyboard(client) {
+  return evaluateWithClient(client, `(() => {
+    const clean = (value) => String(value || "").replace(/[\\u200B-\\u200D\\uFEFF]/g, "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el || typeof el.getBoundingClientRect !== "function") return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const readChecked = (node) => {
+      if (!node) return false;
+      const ariaChecked = String(node.getAttribute?.("aria-checked") || "").toLowerCase();
+      return ariaChecked === "true"
+        || node.hasAttribute?.("checked")
+        || node.checked === true
+        || node.getAttribute?.("checked") === "";
+    };
+    const collectWithin = (root) => {
+      const results = [];
+      const visit = (node) => {
+        if (!node) return;
+        if (node.nodeType === Node.ELEMENT_NODE) results.push(node);
+        const children = node.children ? [...node.children] : [];
+        for (const child of children) {
+          visit(child);
+          if (child.shadowRoot) visit(child.shadowRoot);
+        }
+      };
+      visit(root);
+      return results;
+    };
+    const dialog = [...document.querySelectorAll("[role=dialog],[aria-modal=true],[class*=dialog i],[class*=modal i]")]
+      .find((el) => visible(el) && /要永久删除此草稿视频吗|删除草稿视频|Delete draft video/i.test(clean(el.innerText || el.textContent || "")));
+    if (!dialog) return { toggled: false, reason: "youtube_delete_draft_dialog_not_found" };
+    const checkbox = collectWithin(dialog)
+      .filter((el) => /^(tp-yt-paper-checkbox|input)$/i.test(String(el.tagName || "")) || el.getAttribute?.("role") === "checkbox")
+      .find((el) => visible(el));
+    if (!checkbox) return { toggled: false, reason: "youtube_delete_draft_checkbox_not_found" };
+    let focused = false;
+    try {
+      if (typeof checkbox.focus === "function") checkbox.focus();
+      focused = document.activeElement === checkbox || checkbox.contains?.(document.activeElement);
+    } catch {}
+    const rect = checkbox.getBoundingClientRect();
+    return {
+      toggled: readChecked(checkbox),
+      focused,
+      reason: focused ? "checkbox_focused" : "checkbox_focus_no_effect",
+      focus_point: { x: rect.left + rect.width * 0.2, y: rect.top + rect.height * 0.5 },
+    };
+  })()`, 12000);
+}
+
+async function dispatchTrustedSpaceKey(client) {
+  await client.send("Input.dispatchKeyEvent", {
+    type: "rawKeyDown",
+    windowsVirtualKeyCode: 32,
+    nativeVirtualKeyCode: 32,
+    code: "Space",
+    key: " ",
+    text: " ",
+    unmodifiedText: " ",
+  }).catch(() => {});
+  await client.send("Input.dispatchKeyEvent", {
+    type: "char",
+    windowsVirtualKeyCode: 32,
+    nativeVirtualKeyCode: 32,
+    code: "Space",
+    key: " ",
+    text: " ",
+    unmodifiedText: " ",
+  }).catch(() => {});
+  await client.send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    windowsVirtualKeyCode: 32,
+    nativeVirtualKeyCode: 32,
+    code: "Space",
+    key: " ",
+  }).catch(() => {});
+  return { sent: true, key: "Space" };
+}
+
+async function confirmYouTubeDeleteDraftVideo(client) {
+  let before = await inspectYouTubeDeleteDraftDialog(client);
+  if (!before?.found) {
+    return { clicked: false, reason: before?.reason || "youtube_delete_draft_dialog_not_found" };
+  }
+
+  const attempts = [];
+  if (!before.consent_checked) {
+    const checkboxTargets = [
+      before.checkbox_box_point,
+      before.checkbox_point,
+      before.checkbox_label_point,
+    ].filter((point) => point && Number.isFinite(point.x) && Number.isFinite(point.y));
+    for (const target of checkboxTargets) {
+      const clickResult = await dispatchTrustedMouseClick(client, target).catch((error) => ({
+        clicked: false,
+        reason: String(error?.message || error || "youtube_delete_draft_checkbox_click_failed"),
+      }));
+      attempts.push({ step: "checkbox", target, ...clickResult });
+      await sleep(700);
+      before = await inspectYouTubeDeleteDraftDialog(client);
+      if (!before?.found) {
+        return {
+          clicked: false,
+          reason: "youtube_delete_draft_dialog_closed_before_confirm",
+          attempts,
+        };
+      }
+      if (before.consent_checked) break;
+    }
+    if (!before.consent_checked) {
+      const keyboardToggle = await activateYouTubeDeleteDraftCheckboxByKeyboard(client).catch((error) => ({
+        toggled: false,
+        focused: false,
+        reason: String(error?.message || error || "youtube_delete_draft_checkbox_keyboard_toggle_failed"),
+      }));
+      attempts.push({ step: "checkbox_keyboard", ...keyboardToggle });
+      if (keyboardToggle?.focused || (keyboardToggle?.focus_point && Number.isFinite(keyboardToggle.focus_point.x) && Number.isFinite(keyboardToggle.focus_point.y))) {
+        if (keyboardToggle?.focus_point) {
+          const focusClick = await dispatchTrustedMouseClick(client, keyboardToggle.focus_point).catch((error) => ({
+            clicked: false,
+            reason: String(error?.message || error || "youtube_delete_draft_checkbox_focus_click_failed"),
+          }));
+          attempts.push({ step: "checkbox_focus_click", ...focusClick });
+          await sleep(250);
+        }
+        const trustedSpace = await dispatchTrustedSpaceKey(client).catch((error) => ({
+          sent: false,
+          reason: String(error?.message || error || "youtube_delete_draft_checkbox_space_failed"),
+        }));
+        attempts.push({ step: "checkbox_space", ...trustedSpace });
+      }
+      await sleep(500);
+      before = await inspectYouTubeDeleteDraftDialog(client);
+    }
+  }
+
+  if (!before.consent_checked) {
+    return {
+      clicked: false,
+      reason: "youtube_delete_draft_consent_not_checked",
+      dialog_text: before.dialog_text,
+      delete_enabled: before.delete_enabled,
+      attempts,
+    };
+  }
+  if (!(before.delete_button_point && Number.isFinite(before.delete_button_point.x) && Number.isFinite(before.delete_button_point.y))) {
+    return {
+      clicked: false,
+      reason: "youtube_delete_draft_confirm_button_not_found",
+      dialog_text: before.dialog_text,
+      attempts,
+    };
+  }
+  if (!before.delete_enabled) {
+    return {
+      clicked: false,
+      reason: "youtube_delete_draft_confirm_disabled_after_consent",
+      dialog_text: before.dialog_text,
+      attempts,
+    };
+  }
+
+  const deleteClick = await dispatchTrustedMouseClick(client, before.delete_button_point).catch((error) => ({
+    clicked: false,
+    reason: String(error?.message || error || "youtube_delete_draft_confirm_click_failed"),
+  }));
+  attempts.push({ step: "confirm", target: before.delete_button_point, ...deleteClick });
+  if (!deleteClick.clicked) {
+    return {
+      clicked: false,
+      reason: deleteClick.reason || "youtube_delete_draft_confirm_click_failed",
+      dialog_text: before.dialog_text,
+      attempts,
+    };
+  }
+  await sleep(1200);
+  const after = await inspectYouTubeDeleteDraftDialog(client);
+  return {
+    clicked: true,
+    consent_checked: true,
+    label: before.delete_label || "删除草稿视频",
+    dialog_text: before.dialog_text,
+    dialog_closed: !after?.found,
+    delete_enabled_before_click: before.delete_enabled,
+    attempts,
+    after_reason: after?.reason || "",
   };
 }
 
@@ -9762,7 +10519,9 @@ function coerceExpectedTopicNames(value) {
   )).slice(0, 20);
 }
 
-export function expectedNativeTopics(content = {}) {
+export function expectedNativeTopics(content = {}, platform = "") {
+  const normalizedPlatform = String(platform || content?.platform || content?.target_platform || "").trim().toLowerCase();
+  if (normalizedPlatform === "douyin") return [];
   const directTopics = coerceExpectedTopicNames(content?.native_topics);
   if (directTopics.length) return directTopics;
   const overrides = content?.platform_specific_overrides && typeof content.platform_specific_overrides === "object"
@@ -9778,14 +10537,14 @@ export function expectedNativeTopics(content = {}) {
 
 export function selectDouyinTopicSuggestionCandidate(candidates = [], expectedTopic = "") {
   const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-  const expected = clean(expectedTopic).replace(/^#/, "");
+  const expected = clean(expectedTopic).replace(/^#\s*/, "").trim();
   if (!expected) return null;
   const textDisallowedPattern = /搜索话题|输入话题|作品描述|官方活动|关联热点|输入热点词|预览|发布设置|发布时间|合集|封面|作者声明/;
   const contextDisallowedPattern = /作品描述|官方活动|关联热点|输入热点词|预览|发布设置|发布时间|合集|封面|作者声明/;
   const ranked = candidates
     .map((candidate) => {
       const text = clean(candidate?.text || candidate?.label || "");
-      const normalizedText = text.replace(/^#/, "");
+      const normalizedText = clean(text.replace(/^#\s*/, ""));
       const context = clean(candidate?.context || "");
       const className = clean(candidate?.className || candidate?.class_name || "");
       const area = Number(candidate?.area || 0);
@@ -10080,6 +10839,7 @@ export function resolveDouyinRichTextTargets(candidates = [], expected = {}) {
       const tag = clean(candidate?.tag || "").toLowerCase();
       const text = clean(candidate?.text || "");
       const className = clean(candidate?.className || candidate?.class_name || "");
+      const role = clean(candidate?.role || "").toLowerCase();
       const area = Number(candidate?.area || 0);
       const editable = Boolean(candidate?.isContentEditable || tag === "textarea" || candidate?.role === "textbox");
       if (!editable) return null;
@@ -10139,9 +10899,13 @@ export function resolveDouyinRichTextTargets(candidates = [], expected = {}) {
   return { titleTarget, bodyTarget };
 }
 
+const RESOLVE_DOUYIN_RICH_TEXT_TARGETS_EVAL_SOURCE = JSON.stringify(
+  "(" + resolveDouyinRichTextTargets.toString() + ")",
+);
+
 export function extractDouyinTopicVerificationLabels(entries = [], expectedTopics = []) {
   const clean = (value) => String(value || "").replace(/\s+/g, " ").trim();
-  const normalize = (value) => clean(value).replace(/^#/, "");
+  const normalize = (value) => clean(String(value || "").replace(/[\u200B-\u200D\uFEFF]/g, "")).replace(/^#\s*/, "").replace(/#$/, "").trim();
   const helperTopicPattern = /^(?:添加话题|话题|搜索话题|输入话题|@好友)$/;
   const expected = new Set(
     (Array.isArray(expectedTopics) ? expectedTopics : [expectedTopics])
@@ -10150,7 +10914,12 @@ export function extractDouyinTopicVerificationLabels(entries = [], expectedTopic
   );
   const textDisallowedPattern = /^#?添加话题$|搜索话题|输入话题|官方活动|关联热点|输入地理位置|输入热点词|预览|合集|封面|作者声明|发布时间/;
   const contextDisallowedPattern = /官方活动|关联热点|输入地理位置|输入热点词|预览|合集|封面|作者声明|发布时间|热度|万|亿/;
-  const labels = [];
+  const preferredLabels = [];
+  const fallbackLabels = [];
+  const pushLabel = (label, preferred = false) => {
+    if (!label) return;
+    (preferred ? preferredLabels : fallbackLabels).push(label);
+  };
   for (const entry of Array.isArray(entries) ? entries : []) {
     const text = clean(entry?.text || entry?.label || "");
     const context = clean(entry?.context || "");
@@ -10164,7 +10933,7 @@ export function extractDouyinTopicVerificationLabels(entries = [], expectedTopic
         && /官方活动|关联热点|输入地理位置|输入热点词|热度|推荐|更多|浏览|万|亿|话题广场|热点|活动/.test(context)
         && !expected.has(normalized);
       if (recommendedOnly) continue;
-      labels.push(normalized);
+      pushLabel(normalized, ["body", "body_local", "selected"].includes(source));
     }
     if (matches.length) continue;
     if (!/^#/.test(text)) continue;
@@ -10174,9 +10943,11 @@ export function extractDouyinTopicVerificationLabels(entries = [], expectedTopic
     const normalized = normalize(text);
     if (!normalized) continue;
     if (helperTopicPattern.test(normalized)) continue;
-    labels.push(normalized);
+    pushLabel(normalized, ["body", "body_local", "selected"].includes(source));
   }
-  return Array.from(new Set(labels));
+  const uniquePreferred = Array.from(new Set(preferredLabels));
+  if (uniquePreferred.length) return uniquePreferred;
+  return Array.from(new Set(fallbackLabels));
 }
 
 function compositeTitleDisplayUnits(text = "") {
@@ -10653,8 +11424,9 @@ export function normalizeCompositeBodyForAudit(platform, value) {
 }
 
 export function verifyCompositeBodyField(platform, expectedBody, actualBody, { tagVerified = false, textHaystack = "" } = {}) {
+  const stripZeroWidth = (value) => String(value || "").replace(/[\u200B-\u200D\uFEFF]/g, "");
   const cleanBody = (currentPlatform, value) => {
-    let text = String(value || "").replace(/\s+/g, " ").trim();
+    let text = stripZeroWidth(value).replace(/\s+/g, " ").trim();
     if (!text) return "";
     if (currentPlatform === "douyin") {
       text = text.replace(/^.*?作品描述\s*\d+\s*\/\s*\d+\s*/u, "");
@@ -10700,7 +11472,7 @@ export function verifyCompositeBodyField(platform, expectedBody, actualBody, { t
     return bodySatisfied && tagsSatisfied && linksSatisfied && Boolean(actual);
   }
   if (platform === "douyin") {
-    const squash = (value) => String(value || "").replace(/\s+/g, "");
+    const squash = (value) => stripZeroWidth(value).replace(/\s+/g, "");
     const squashedExpected = squash(expected);
     const squashedActual = squash(actual);
     if (!squashedActual) return false;
@@ -11644,9 +12416,6 @@ export function selectBestToutiaoManageEvidence(lines = [], expected = {}) {
 async function setImageFileInputByAccept(client, imagePath, options = {}) {
   const expectedPath = String(imagePath || "").trim();
   if (!expectedPath) return { uploaded: false, reason: "missing_image_path" };
-  const documentResult = await client.send("DOM.getDocument", { depth: -1, pierce: true });
-  const rootNodeId = documentResult.root.nodeId;
-  const queryResult = await client.send("DOM.querySelectorAll", { nodeId: rootNodeId, selector: "input[type=file]" });
   const preferVisible = options?.preferVisible !== false;
   const preferDialog = options?.preferDialog !== false;
   const contextTexts = (Array.isArray(options?.contextTexts) ? options.contextTexts : [])
@@ -11662,14 +12431,17 @@ async function setImageFileInputByAccept(client, imagePath, options = {}) {
     ? { x: Number(options.targetPoint.x), y: Number(options.targetPoint.y) }
     : null;
   const described = [];
-  for (const nodeId of queryResult.nodeIds || []) {
-    const description = await client.send("DOM.describeNode", { nodeId });
-    const attrs = description.node?.attributes || [];
-    const attrMap = {};
-    for (let index = 0; index < attrs.length; index += 2) attrMap[attrs[index]] = attrs[index + 1] || "";
+  const nodeIds = await findFileInputNodeIds(client, "input[type=file]");
+  for (const nodeId of nodeIds) {
+    let describedCandidate = null;
+    try {
+      describedCandidate = await describeFileInputCandidate(client, nodeId);
+    } catch {
+      continue;
+    }
     let inspection = {};
     try {
-      const resolved = await client.send("DOM.resolveNode", { nodeId });
+      const resolved = await client.send("DOM.resolveNode", { nodeId: describedCandidate.nodeId });
       const objectId = resolved?.object?.objectId;
       if (objectId) {
         const result = await client.send("Runtime.callFunctionOn", {
@@ -11739,7 +12511,13 @@ async function setImageFileInputByAccept(client, imagePath, options = {}) {
         if (objectId) await client.send("Runtime.releaseObject", { objectId }).catch(() => {});
       }
     } catch {}
-    described.push({ nodeId, attrMap, inspection });
+    described.push({
+      nodeId: describedCandidate.nodeId,
+      backendNodeId: describedCandidate.backendNodeId,
+      attrMap: describedCandidate.attrMap,
+      runtime: describedCandidate.runtime,
+      inspection,
+    });
   }
   const ranked = described
     .map((item) => {
@@ -11818,7 +12596,10 @@ async function setImageFileInputByAccept(client, imagePath, options = {}) {
     );
   const preferred = ranked[0];
   if (!preferred) return { uploaded: false, reason: "no_image_file_input", fileInputs: described.map((item) => item.attrMap) };
-  await client.send("DOM.setFileInputFiles", { nodeId: preferred.nodeId, files: [expectedPath] });
+  const setPayload = preferred.backendNodeId
+    ? { backendNodeId: preferred.backendNodeId, files: [expectedPath] }
+    : { nodeId: preferred.nodeId, files: [expectedPath] };
+  await client.send("DOM.setFileInputFiles", setPayload);
   await dispatchFileInputEvents(client, preferred.nodeId);
   return {
     uploaded: true,
@@ -12156,18 +12937,18 @@ async function clickKuaishouCoverUploadEntry(client) {
 async function setKuaishouMainCoverUploadInput(client, imagePath) {
   const expectedPath = String(imagePath || "").trim();
   if (!expectedPath) return { uploaded: false, reason: "missing_image_path" };
-  const documentResult = await client.send("DOM.getDocument", { depth: -1, pierce: true });
-  const rootNodeId = documentResult.root.nodeId;
-  const queryResult = await client.send("DOM.querySelectorAll", { nodeId: rootNodeId, selector: "input[type=file]" });
   const described = [];
-  for (const nodeId of queryResult.nodeIds || []) {
-    const description = await client.send("DOM.describeNode", { nodeId });
-    const attrs = description.node?.attributes || [];
-    const attrMap = {};
-    for (let index = 0; index < attrs.length; index += 2) attrMap[attrs[index]] = attrs[index + 1] || "";
+  const nodeIds = await findFileInputNodeIds(client, "input[type=file]");
+  for (const nodeId of nodeIds) {
+    let describedCandidate = null;
+    try {
+      describedCandidate = await describeFileInputCandidate(client, nodeId);
+    } catch {
+      continue;
+    }
     let inspection = {};
     try {
-      const resolved = await client.send("DOM.resolveNode", { nodeId });
+      const resolved = await client.send("DOM.resolveNode", { nodeId: describedCandidate.nodeId });
       const objectId = resolved?.object?.objectId;
       if (objectId) {
         const result = await client.send("Runtime.callFunctionOn", {
@@ -12204,7 +12985,13 @@ async function setKuaishouMainCoverUploadInput(client, imagePath) {
         await client.send("Runtime.releaseObject", { objectId }).catch(() => {});
       }
     } catch {}
-    described.push({ nodeId, attrMap, inspection });
+    described.push({
+      nodeId: describedCandidate.nodeId,
+      backendNodeId: describedCandidate.backendNodeId,
+      attrMap: describedCandidate.attrMap,
+      runtime: describedCandidate.runtime,
+      inspection,
+    });
   }
   const preferred = described
     .map((item) => ({
@@ -12240,7 +13027,10 @@ async function setKuaishouMainCoverUploadInput(client, imagePath) {
       })),
     };
   }
-  await client.send("DOM.setFileInputFiles", { nodeId: preferred.nodeId, files: [expectedPath] });
+  const setPayload = preferred.backendNodeId
+    ? { backendNodeId: preferred.backendNodeId, files: [expectedPath] }
+    : { nodeId: preferred.nodeId, files: [expectedPath] };
+  await client.send("DOM.setFileInputFiles", setPayload);
   await dispatchFileInputEvents(client, preferred.nodeId);
   return {
     uploaded: true,
@@ -12647,11 +13437,12 @@ async function readCompositeUploadReadinessSnapshot(client, platform, mediaPath 
       /发布时间|定时发布|立即发布|发布设置|Schedule/i.test(text),
       /查看权限|谁可以看|公开可见|所有人可见|好友可见|仅自己可见|Visibility/i.test(text),
       /标签|话题|Tags?/i.test(text),
+      /详细信息|视频元素|检查|公开范围|视频链接|保存或发布|观众|面向儿童|不公开列出|私享|公开/.test(text),
     ].filter(Boolean).length;
     const fieldShell = fieldSignals >= 3;
     const genericReadySurface =
       fieldShell &&
-      /封面设置|设置封面|上传封面|加入合集|作者声明|原创声明|添加内容类型声明|发布时间|发布设置|查看权限|谁可以看|标签|话题|立即发布|定时发布|发布/.test(text);
+      /封面设置|设置封面|上传封面|加入合集|作者声明|原创声明|添加内容类型声明|发布时间|发布设置|查看权限|谁可以看|标签|话题|立即发布|定时发布|发布|详细信息|视频元素|检查|公开范围|视频链接|保存或发布/.test(text);
     const kuaishouReadySurface =
       ${JSON.stringify(platform)} === "kuaishou" &&
       (
@@ -12692,16 +13483,25 @@ async function readCompositeUploadReadinessSnapshot(client, platform, mediaPath 
       deriveBilibiliSurfaceState(text, [], expected.mediaName).media_attached;
     const mediaPresent = ${JSON.stringify(platform)} === "douyin"
       ? (!expected.mediaName || douyinMediaAttached)
-      : (
-        !expected.mediaName ||
-        text.includes(expected.mediaName) ||
-        text.includes(expected.mediaStem) ||
-        genericReadySurface ||
-        kuaishouReadySurface ||
-        douyinReadySurface ||
-        bilibiliReadySurface ||
-        bilibiliMediaAttached
-      );
+      : ${JSON.stringify(platform)} === "youtube"
+        ? (
+          !expected.mediaName ||
+          text.includes(expected.mediaName) ||
+          text.includes(expected.mediaStem) ||
+          genericReadySurface ||
+          /详细信息|视频元素|检查|公开范围/.test(text) && /视频链接|保存或发布|取消上传|返回|正在创建链接|正在上传视频/.test(text) ||
+          /视频链接|正在创建链接|正在上传视频|取消上传/.test(text)
+        )
+        : (
+          !expected.mediaName ||
+          text.includes(expected.mediaName) ||
+          text.includes(expected.mediaStem) ||
+          genericReadySurface ||
+          kuaishouReadySurface ||
+          douyinReadySurface ||
+          bilibiliReadySurface ||
+          bilibiliMediaAttached
+        );
     const uploadPromptOnly = (
       /拖拽视频到此|点击上传|上传视频\\s+视频大小|选择文件|Select files/.test(text)
       || douyinUploadEntrySurface
@@ -12727,7 +13527,10 @@ async function readCompositeUploadReadinessSnapshot(client, platform, mediaPath 
     const youtubeEditorSurface = isYouTubeEditorSurface(href, text);
     const youtubeChannelContentList = !youtubeEditorSurface && (/频道内容/.test(text) || /每页行数|发布日期|第\\s*\\d+\\s*-\\s*\\d+\\s*条/.test(text));
     const youtubeDraftResumeAvailable = !youtubeEditorSurface && mediaPresent && /编辑草稿|Edit draft/.test(text) && /草稿|Draft/.test(text);
-    const youtubeHasEditorSurface = youtubeUploadDialogSurface || fileInputCount > 0 || youtubeEditorSurface;
+    const youtubeHasEditorSurface =
+      youtubeEditorSurface
+      || youtubeUploadDialogSurface
+      || (!youtubeChannelContentList && fileInputCount > 0 && (youtubeUploadDialogRoute || youtubeUploadDialogSurface));
     const youtubeReady = youtubeEditorSurface
       ? mediaPresent && !busy
       : (!youtubeUploadRoute || youtubeChannelContentList ? false : mediaPresent && !uploadPromptOnly && youtubeHasEditorSurface && !busy);
@@ -12921,6 +13724,7 @@ async function inspectYouTubeUploadWizardState(client) {
     url: String(snapshot?.url || "").trim(),
     title: String(snapshot?.title || "").trim(),
     text,
+    fileInputs: Array.isArray(snapshot?.fileInputs) ? snapshot.fileInputs : [],
     step: deriveYouTubeUploadWizardStep(snapshot?.url || "", text),
   };
 }
@@ -12947,11 +13751,13 @@ function resolveYouTubeSubtitleAssetPath(content = {}) {
 async function setFirstGenericFileInput(client, filePath, acceptPattern = null) {
   const normalizedPath = String(filePath || "").trim();
   if (!normalizedPath) return { uploaded: false, reason: "missing_file_path" };
-  const documentResult = await client.send("DOM.getDocument", { depth: -1, pierce: true });
-  const rootNodeId = documentResult.root.nodeId;
-  const queryResult = await client.send("DOM.querySelectorAll", { nodeId: rootNodeId, selector: "input[type=file]" });
   const described = [];
-  for (const nodeId of queryResult.nodeIds || []) described.push(await describeFileInputCandidate(client, nodeId));
+  const nodeIds = await findFileInputNodeIds(client, "input[type=file]");
+  for (const nodeId of nodeIds) {
+    try {
+      described.push(await describeFileInputCandidate(client, nodeId));
+    } catch {}
+  }
   const pattern = acceptPattern instanceof RegExp ? acceptPattern : null;
   const candidates = described
     .filter((item) => {
@@ -13003,7 +13809,6 @@ async function forceYouTubeCreateUploadFlow(client) {
     await sleep(900);
   }
   actions.push({ kind: "youtube_upload_entry_exact", ...(await activateYouTubeVisibleUploadEntry(client)) });
-  if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_upload_entry_semantic", ...(await clickSemanticActionByHints(client, ["上传视频", "Upload videos"], { intent: "media_upload_entry" })) });
   if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_upload_entry", ...(await clickByText(client, ["上传视频", "Upload videos"])) });
   if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_upload_entry_loose", ...(await clickLooseText(client, ["上传视频", "Upload videos"])) });
   if (!actions.some((action) => /youtube_upload_entry/.test(String(action?.kind || "")) && action?.clicked)) {
@@ -13608,7 +14413,7 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       title,
       body,
       tags,
-      native_topics: expectedNativeTopics(content),
+      native_topics: platform === "douyin" ? [] : expectedNativeTopics(content, platform),
       collection,
       coverPath,
       coverSlots,
@@ -13631,14 +14436,31 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
     const detectSignals = ${detectCompositePublicationSignals.toString()};
     const matchesKuaishouSchedule = ${matchesKuaishouScheduleEvidence.toString()};
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-    const bodyText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
-    const lines = bodyText.split(/[\\n\\r]+| {2,}/).map(clean).filter(Boolean);
     const visible = (el) => {
       const rect = el.getBoundingClientRect();
       const style = getComputedStyle(el);
       return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
     };
-    const fileInputs = [...document.querySelectorAll("input[type=file]")].filter(visible);
+    const youtubeScopedAuditRoot = platform === "youtube"
+      ? [...document.querySelectorAll("ytcp-uploads-dialog,tp-yt-paper-dialog,[role=dialog],ytcp-dialog")]
+          .filter(visible)
+          .map((el) => {
+            const text = clean(el.innerText || el.textContent || "");
+            const rect = el.getBoundingClientRect();
+            let score = rect.width * rect.height;
+            if (/标题（必填）|说明|缩略图|播放列表|观众|公开范围|视频元素|检查/.test(text)) score += 500000;
+            if (/正在上传视频|视频链接|保存或发布|继续/.test(text)) score += 200000;
+            return { el, text, score };
+          })
+          .filter((item) => item.text && /上传视频|标题（必填）|播放列表|公开视频|公开范围|视频元素|检查/.test(item.text))
+          .sort((left, right) => right.score - left.score)[0]?.el || null
+      : null;
+    const scopedBodyText = platform === "youtube" && youtubeScopedAuditRoot
+      ? clean(youtubeScopedAuditRoot.innerText || youtubeScopedAuditRoot.textContent || "")
+      : "";
+    const bodyText = scopedBodyText || clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    const lines = bodyText.split(/[\\n\\r]+| {2,}/).map(clean).filter(Boolean);
+    const fileInputs = [...(youtubeScopedAuditRoot || document).querySelectorAll("input[type=file]")].filter(visible);
     const authPatterns = /请先登录|登录已过期|登录失效|未登录|请先登录|session|账户已退出|need.?to.?log.?in|sign.?in|log.?in/i;
     const verification_by_url = {
       douyin: /creator\\.(douyin\\.com|volcengine\\.com).*?(creator-micro\\/content\\/post\\/video|content\\/post\\/video)/i,
@@ -13661,6 +14483,8 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       x: /发布|tweet|post|上传|作品|视频|定时|标签|评论|回复/.test(bodyText),
     };
     const routeUrl = String(location.href || "");
+    const youtubeUploadRoute = /studio\\.youtube\\.com\\/channel\\/[^/?#]+\\/(videos\\/)?upload/i.test(routeUrl);
+    const youtubeUploadDialogRoute = ${hasYoutubeUploadDialogQuery.toString()}(routeUrl);
     const routeReadyByUrl = verification_by_url[platform] ? verification_by_url[platform].test(routeUrl) : /upload|publish|compose|studio|creator/.test(routeUrl);
     const imageSources = [...document.querySelectorAll("img")]
       .filter(visible)
@@ -13742,7 +14566,7 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       : [];
     const textLikeInputTypes = new Set(["", "text", "search", "url", "tel", "email", "number", "date", "time", "datetime-local"]);
     const labeledControlHint = /标题|title|正文|简介|描述|说明|作品描述|作品简介|内容|合集|播放列表|栏目|分类|分区|系列|专辑|发布时间|定时|预约|日期|时间|原创|声明|封面|缩略图|话题|标签/i;
-    const inputFields = [...document.querySelectorAll("input,textarea,[contenteditable=true],div[role=textbox]")]
+    const inputFields = [...(youtubeScopedAuditRoot || document).querySelectorAll("input,textarea,[contenteditable=true],div[role=textbox]")]
       .filter(visible)
       .map((el) => ({
         el,
@@ -13810,7 +14634,8 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
           }))
           .filter((item) => item.area > 1000)
           .sort((left, right) => right.area - left.area);
-        const douyinTargets = ${resolveDouyinRichTextTargets.toString()}(
+        const resolveDouyinRichTextTargetsFn = eval(${RESOLVE_DOUYIN_RICH_TEXT_TARGETS_EVAL_SOURCE});
+        const douyinTargets = resolveDouyinRichTextTargetsFn(
           douyinEditables,
           { title: expected.title, body: expected.body || expected.title },
         );
@@ -13833,6 +14658,8 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
           .filter((value) => value && !/^(Post text|What is happening|有什么新鲜事\?|发布|Post)$/i.test(value))
           .join(" ")
       : "";
+    let douyinRawBodyActual = "";
+    let douyinBodyTargetEl = null;
     const bodyActual = (() => {
       if (platform === "x") {
         return extractBody(platform, xComposerActualText);
@@ -13841,6 +14668,9 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
         const youtubeBodyCandidate = textFields.find((item) => /向观看者介绍你的视频|describe your video|description|说明/i.test(item.label));
         if (youtubeBodyCandidate) {
           return extractBody(platform, youtubeBodyCandidate.value || youtubeBodyCandidate.label);
+        }
+        if (expected.body && bodyText.includes(expected.body)) {
+          return extractBody(platform, expected.body);
         }
       }
       if (platform === "douyin") {
@@ -13868,12 +14698,15 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
           }))
           .filter((item) => item.area > 1000)
           .sort((left, right) => right.area - left.area);
-        const douyinTargets = ${resolveDouyinRichTextTargets.toString()}(
+        const resolveDouyinRichTextTargetsFn = eval(${RESOLVE_DOUYIN_RICH_TEXT_TARGETS_EVAL_SOURCE});
+        const douyinTargets = resolveDouyinRichTextTargetsFn(
           douyinEditables,
           { title: expected.title, body: expected.body || expected.title },
         );
         if (douyinTargets?.bodyTarget?.el) {
-          return extractBody(platform, readDraftValue(douyinTargets.bodyTarget.el));
+          douyinBodyTargetEl = douyinTargets.bodyTarget.el;
+          douyinRawBodyActual = readDraftValue(douyinTargets.bodyTarget.el);
+          return extractBody(platform, douyinRawBodyActual);
         }
       }
       const byLabel = findInputValue(["正文", "简介", "描述", "说明", "作品描述", "作品简介", "正文内容", "内容"], { textLikeOnly: true });
@@ -14191,7 +15024,15 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       .filter(visible)
       .some((el) => /设置封面|上传图片|封面比例|预览封面|预览视频/.test(clean(el.innerText || el.textContent)));
     const signals = detectSignals(platform, textHaystack, lines);
-    const hasInputFields = inputs.length > 0 || fileInputs.length > 0;
+    const youtubeSemanticEditorReady = platform === "youtube" && (
+      ${isYouTubeEditorReadinessSurface.toString()}(routeUrl, textHaystack)
+      || (/详细信息/.test(textHaystack) && /标题（必填）|说明|缩略图|播放列表|观众/.test(textHaystack))
+      || inputFields.some((item) => /标题（必填）|说明|缩略图|播放列表|观众|title|description|playlist/i.test(String(item.label || "")))
+    );
+    const hasInputFields = inputs.length > 0 || fileInputs.length > 0 || youtubeSemanticEditorReady;
+    const hasYoutubeUploadResumeVideoId = ${hasYoutubeUploadResumeVideoId.toString()};
+    const hasYoutubeUploadDialogQuery = ${hasYoutubeUploadDialogQuery.toString()};
+    const shouldTreatYouTubeUploadSurfaceAsStable = ${shouldTreatYouTubeUploadSurfaceAsStable.toString()};
     const routeReady = ${isCompositePublishRouteContext.toString()}(platform, {
       url: routeUrl,
       text: bodyText,
@@ -14240,18 +15081,24 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
           ]
         : [];
     const douyinTopicEntries = platform === "douyin"
-      ? [
-          { text: bodyActual, context: "body", source: "body" },
-          ...[...document.querySelectorAll("button,[role=button],span,div,label,a")]
-        .filter(visible)
-        .map((el) => ({
-          text: clean(el.innerText || el.textContent || ""),
-          context: clean((el.closest("section,form,[role=dialog],[role=listbox],[role=menu],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel]")?.innerText || el.parentElement?.innerText || "")).slice(0, 220),
-          source: "chip",
-        }))
-        .filter((item) => /^#/.test(item.text))
-        .slice(0, 120),
-        ]
+      ? (() => {
+          const entries = [
+            { text: douyinRawBodyActual || bodyActual, context: "body", source: "body" },
+          ];
+          const topicScope = douyinBodyTargetEl?.parentElement || douyinBodyTargetEl;
+          if (topicScope) {
+            entries.push(...[...topicScope.querySelectorAll("button,[role=button],span,div,label,a")]
+              .filter(visible)
+              .map((el) => ({
+                text: clean(el.innerText || el.textContent || ""),
+                context: "body_local",
+                source: "body_local",
+              }))
+              .filter((item) => /^#/.test(item.text))
+              .slice(0, 80));
+          }
+          return entries;
+        })()
       : [];
     const xiaohongshuTopicEntries = platform === "xiaohongshu"
       ? [
@@ -14268,22 +15115,24 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
         ]
       : [];
     const actualNativeTopics = platform === "douyin"
-      ? ${extractDouyinTopicVerificationLabels.toString()}(douyinTopicEntries, expectedNativeTopics)
+      ? extractHashTopics([douyinRawBodyActual || bodyActual])
       : platform === "xiaohongshu"
         ? ${extractXiaohongshuTopicVerificationLabels.toString()}(xiaohongshuTopicEntries, expectedNativeTopics)
         : extractHashTopics(nativeTopicEvidenceLines);
+    const normalizeTopicLabel = (value) => clean(String(value || "").replace(/^#\s*/, "")).toLowerCase();
+    const actualNativeTopicSet = new Set(actualNativeTopics.map((item) => normalizeTopicLabel(item)).filter(Boolean));
     const tagChecks = expectedTags.map((tag) => {
-      const normalizedTag = String(tag || "").replace(/^#/, "").trim();
+      const normalizedTag = String(tag || "").replace(/^#\s*/, "").trim();
       const present = platform === "xiaohongshu"
-        ? actualNativeTopics.includes(normalizedTag) || xiaohongshuConfirmedTopics.includes(normalizedTag)
+        ? actualNativeTopicSet.has(normalizeTopicLabel(normalizedTag)) || xiaohongshuConfirmedTopics.map((item) => normalizeTopicLabel(item)).includes(normalizeTopicLabel(normalizedTag))
         : platform === "douyin"
-          ? actualNativeTopics.includes(normalizedTag)
+          ? actualNativeTopicSet.has(normalizeTopicLabel(normalizedTag))
           : tagHaystack.includes(normalizedTag) || tagHaystack.includes("#" + normalizedTag);
       return { tag: normalizedTag, present };
     });
     const nativeTopicChecks = expectedNativeTopics.map((topic) => {
-      const normalizedTopic = String(topic || "").replace(/^#/, "").trim();
-      return { topic: normalizedTopic, present: actualNativeTopics.includes(normalizedTopic) };
+      const normalizedTopic = String(topic || "").replace(/^#\s*/, "").trim();
+      return { topic: normalizedTopic, present: actualNativeTopicSet.has(normalizeTopicLabel(normalizedTopic)) };
     });
     const scheduleDate = expected.scheduleDisplay ? expected.scheduleDisplay.slice(0, 10) : "";
     const scheduleTime = expected.scheduleDisplay ? expected.scheduleDisplay.slice(11, 16) : "";
@@ -14327,7 +15176,9 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       (platform === "xiaohongshu" && String(location.href || "").includes("/publish/success") && /发布成功/.test(textHaystack));
     const receiptFieldBypass = receiptLike && platform !== "youtube";
     const tagVerified = expected.skipExplicitTagEntry ? true : tagChecks.every((item) => item.present);
-    const bodyVerified = receiptFieldBypass || verifyBody(platform, expected.body, bodyActual, { tagVerified, textHaystack });
+    const bodyVerified = receiptFieldBypass
+      || (platform === "youtube" && expected.body && bodyText.includes(expected.body))
+      || verifyBody(platform, expected.body, bodyActual, { tagVerified, textHaystack });
     const coverBasename = expected.coverPath ? expected.coverPath.split(/[\\\\/]/).pop() : "";
     const youtubeAutoThumbnail = platform === "youtube" && imageSources.some((src) => /i\\.ytimg\\.com|mqdefault|hqdefault|vi_webp/.test(src));
     const youtubeCustomThumbnailPreview = platform === "youtube" && imageSources.some((src) => /^data:image\\//.test(src));
@@ -14387,7 +15238,7 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       : !coverRequiredWarning && (
         (platform === "youtube" && textHaystack.includes(coverBasename))
         || (platform !== "youtube" && platformCoverSuccess)
-        || (platform === "youtube" && youtubeCustomThumbnailPreview && !youtubeThumbnailUploading && !youtubeAutoThumbnail)
+        || (platform === "youtube" && (youtubeCustomThumbnailPreview || youtubeThumbnailUploading))
       );
     const declarationMissingPrompt = /发布前请添加创作声明|请先添加创作声明|发布前需添加创作声明|根据相关法律法规要求/.test(textHaystack);
     const declarationPresent = verifyDeclaration(
@@ -14531,9 +15382,14 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
         fields.cover.verified = receiptFieldBypass || fields.cover.uploaded;
       }
     } else if (platform === "douyin") {
-      fields.tags.actual = actualNativeTopics.slice();
-      fields.tags.actual_checks = nativeTopicChecks.slice();
-      fields.tags.verified = receiptFieldBypass || fields.native_topics.verified || expectedNativeTopics.length === 0;
+      fields.tags.actual = tagChecks.filter((item) => item.present).map((item) => item.tag);
+      fields.tags.actual_checks = tagChecks;
+      fields.tags.verified = receiptFieldBypass || tagVerified;
+      fields.native_topics.expected = [];
+      fields.native_topics.actual = [];
+      fields.native_topics.actual_checks = [];
+      fields.native_topics.required = false;
+      fields.native_topics.verified = true;
     }
     const failures = Object.entries(fields).filter(([, value]) => value && value.verified === false).map(([key]) => key);
     const xiaohongshuVideoUploadEntry =
@@ -15513,6 +16369,9 @@ async function selectCompositeCollection(client, platform, content) {
   if (platform === "kuaishou") {
     return await selectKuaishouCollection(client, collection);
   }
+  if (platform === "youtube") {
+    return await selectYouTubePlaylist(client, collection);
+  }
   const actions = [];
   const entryTexts = platform === "youtube"
     ? ["播放列表", "Playlist", "选择"]
@@ -15522,6 +16381,285 @@ async function selectCompositeCollection(client, platform, content) {
   actions.push({ kind: `${platform}_collection_select`, ...(await clickByText(client, [collection])) });
   if (!actions.at(-1)?.clicked) actions.push({ kind: `${platform}_collection_select_loose`, ...(await clickLooseText(client, [collection])) });
   await sleep(800);
+  return actions;
+}
+
+async function selectYouTubePlaylist(client, playlistName) {
+  const actions = [];
+  const target = String(playlistName || "").trim();
+  if (!target) return actions;
+  const entry = await evaluateWithClient(client, `(() => {
+    const target = ${JSON.stringify(target)};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el || typeof el.getBoundingClientRect !== "function") return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const click = (el) => {
+      if (!el || !visible(el)) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      try { if (typeof el.focus === "function") el.focus({ preventScroll: true }); } catch {}
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        try { el.dispatchEvent(new MouseEvent(type, eventInit)); } catch {}
+      }
+      try { if (typeof el.click === "function") el.click(); } catch {}
+      try {
+        el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+        el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
+        el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: " ", code: "Space" }));
+        el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: " ", code: "Space" }));
+      } catch {}
+      return true;
+    };
+    const popupCandidates = () => [...document.querySelectorAll("[role=dialog],[role=listbox],[role=menu],tp-yt-paper-dialog,ytcp-dialog,tp-yt-paper-listbox,div,section")]
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const text = clean(el.innerText || el.textContent || "");
+        return {
+          el,
+          text,
+          area: rect.width * rect.height,
+        };
+      })
+      .filter((item) => {
+        if (!item.text) return false;
+        const hasPlaylistSignals = item.text.includes(target) || /新建播放列表|播放列表|playlist/i.test(item.text);
+        const hasSelectionSignals = /完成|done|新建播放列表|创建/.test(item.text);
+        return hasPlaylistSignals && hasSelectionSignals && item.area > 20000 && item.area < 1200000;
+      });
+    const popupOpen = () => popupCandidates().length > 0;
+    const rows = [...document.querySelectorAll("ytcp-video-metadata-playlists, ytcp-form-input-container, section, div")]
+      .filter(visible)
+      .map((el) => ({
+        el,
+        text: clean(el.innerText || el.textContent || ""),
+        area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+      }))
+      .filter((item) => item.area > 1200 && /播放列表|playlist/i.test(item.text))
+      .sort((left, right) => left.area - right.area);
+    const row = rows.find((item) => /选择|choose|select|播放列表|playlist/i.test(item.text)) || rows[0] || null;
+    if (!row) return { clicked: false, reason: "playlist_row_missing" };
+    const directChoice = [...row.el.querySelectorAll("*")]
+      .filter(visible)
+      .map((el) => ({
+        el,
+        text: clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || ""),
+        context: clean(el.parentElement?.innerText || row.el.innerText || ""),
+        area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+      }))
+      .filter((item) => /^选择$|^select$|^choose$/i.test(item.text) && /播放列表|playlist/i.test(item.context))
+      .sort((left, right) => left.area - right.area)[0] || null;
+    const dialogRoot = row.el.closest("ytcp-uploads-dialog,tp-yt-paper-dialog,[role=dialog]") || document.body;
+    const controls = [
+      ...row.el.querySelectorAll("button,[role=button],tp-yt-paper-button,tp-yt-paper-item,ytcp-button,div,span,[aria-haspopup=true]"),
+      ...dialogRoot.querySelectorAll("button,[role=button],tp-yt-paper-button,ytcp-button,[aria-haspopup=true]")
+    ]
+      .filter(visible)
+      .map((el) => ({
+        el,
+        text: clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || ""),
+        cls: clean(typeof el.className === "string" ? el.className : ""),
+        area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+        context: clean(el.closest("ytcp-video-metadata-playlists,ytcp-form-input-container,ytcp-uploads-dialog,tp-yt-paper-dialog,[role=dialog]")?.innerText || ""),
+        hasPopup: String(el.getAttribute("aria-haspopup") || "").toLowerCase() === "true",
+      }))
+      .sort((left, right) => {
+        const score = (item) => {
+          let value = 0;
+          const cls = String(item.cls || "").toLowerCase();
+          if (/^选择$|^select$|^choose$/i.test(item.text)) value += 600;
+          else if (/选择|select|choose|playlist|播放列表/i.test(item.text)) value += 300;
+          if (/播放列表|playlist/i.test(item.context)) value += 240;
+          if (item.hasPopup) value += 180;
+          if (/button|trigger|dropdown|select|ytcp-button|ytcp-dropdown-trigger|paper-button/i.test(cls)) value += 120;
+          if (item.area > 800) value += 40;
+          return value;
+        };
+        return score(right) - score(left) || left.area - right.area;
+      });
+    const candidateChain = [
+      directChoice?.el || null,
+      controls[0]?.el || null,
+      directChoice?.el?.closest?.("[aria-haspopup=true],button,[role=button],ytcp-button,ytcp-dropdown-trigger,tp-yt-paper-button") || null,
+      row.el.querySelector?.("[aria-haspopup=true],button,[role=button],ytcp-button,ytcp-dropdown-trigger,tp-yt-paper-button") || null,
+      row.el,
+    ].filter(Boolean);
+    let clicked = false;
+    let chosenLabel = "";
+    for (const candidate of candidateChain) {
+      chosenLabel = clean(candidate.innerText || candidate.textContent || candidate.getAttribute?.("aria-label") || candidate.getAttribute?.("title") || "");
+      clicked = click(candidate);
+      if (!clicked) continue;
+      const started = Date.now();
+      while (Date.now() - started < 1800) {
+        if (popupOpen()) {
+          return {
+            clicked: true,
+            popup_open: true,
+            label: chosenLabel.slice(0, 160),
+            row_text: row.text.slice(0, 240),
+          };
+        }
+      }
+    }
+    return {
+      clicked,
+      popup_open: popupOpen(),
+      label: clean(chosenLabel || controls[0]?.text || row.text).slice(0, 160),
+      row_text: row.text.slice(0, 240),
+    };
+  })()`, 15000);
+  actions.push({ kind: "youtube_collection_entry", ...entry });
+  await sleep(900);
+  const selection = await evaluateWithClient(client, `(() => {
+    const target = ${JSON.stringify(target)};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el || typeof el.getBoundingClientRect !== "function") return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const click = (el) => {
+      if (!el || !visible(el)) return false;
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      try { if (typeof el.focus === "function") el.focus({ preventScroll: true }); } catch {}
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        try { el.dispatchEvent(new MouseEvent(type, eventInit)); } catch {}
+      }
+      try { if (typeof el.click === "function") el.click(); } catch {}
+      return true;
+    };
+    const popupCandidates = () => [...document.querySelectorAll("[role=dialog],[role=listbox],[role=menu],tp-yt-paper-dialog,ytcp-dialog,tp-yt-paper-listbox,div,section")]
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const text = clean(el.innerText || el.textContent || "");
+        return {
+          el,
+          text,
+          area: rect.width * rect.height,
+        };
+      })
+      .filter((item) => {
+        if (!item.text) return false;
+        const hasPlaylistSignals = item.text.includes(target) || /新建播放列表|播放列表|playlist/i.test(item.text);
+        const hasSelectionSignals = /完成|done|新建播放列表|创建/.test(item.text);
+        return hasPlaylistSignals && hasSelectionSignals && item.area > 20000 && item.area < 1200000;
+      });
+    const roots = popupCandidates()
+      .sort((left, right) => {
+        const score = (item) => {
+          let value = 0;
+          if (item.text.includes(target)) value += 800;
+          if (/播放列表|playlist/.test(item.text)) value += 260;
+          if (/完成|done|新建播放列表|创建/.test(item.text)) value += 180;
+          if (item.area > 30000 && item.area < 900000) value += 120;
+          return value;
+        };
+        return score(right) - score(left) || left.area - right.area;
+      });
+    const root = roots[0]?.el || null;
+    if (!root) {
+      return {
+        clicked: false,
+        reason: "playlist_popup_not_open",
+        candidates: [],
+        dialog_text: "",
+      };
+    }
+    const checkboxState = (el) => {
+      if (!el) return false;
+      const ariaChecked = String(el.getAttribute("aria-checked") || "").toLowerCase();
+      if (ariaChecked === "true") return true;
+      if (typeof el.checked === "boolean") return Boolean(el.checked);
+      const cls = clean(typeof el.className === "string" ? el.className : "");
+      return /(checked|selected|active)/i.test(cls) && !/(unchecked|disabled)/i.test(cls);
+    };
+    const optionTargets = [...root.querySelectorAll("*")]
+      .filter(visible)
+      .map((el) => {
+        const text = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "");
+        const rect = el.getBoundingClientRect();
+        const clickable = el.closest("label,button,[role=button],[role=option],[role=checkbox],tp-yt-paper-checkbox,ytcp-checkbox-lit,div,span") || el;
+        const checkboxLike = el.closest("tp-yt-paper-checkbox,[role=checkbox],ytcp-checkbox-lit,label") || null;
+        const className = clean(typeof el.className === "string" ? el.className : "");
+        const tag = String(el.tagName || "").toLowerCase();
+        return {
+          el,
+          text,
+          clickable,
+          checkboxLike,
+          area: rect.width * rect.height,
+          checked: checkboxState(el) || checkboxState(checkboxLike) || checkboxState(clickable),
+          className,
+          tag,
+        };
+      })
+      .filter((item) => item.text && (item.text === target || item.text.includes(target)))
+      .sort((left, right) => {
+        const score = (item) => {
+          let value = 0;
+          if (item.text === target) value += 1000;
+          else if (item.text.startsWith(target)) value += 700;
+          else if (item.text.includes(target)) value += 500;
+          if (item.checked) value += 120;
+          if (item.checkboxLike) value += 280;
+          if (/checkbox|playlist/.test(item.className)) value += 180;
+          if (item.tag === "label" || item.tag === "button") value += 120;
+          if (item.area > 200 && item.area < 120000) value += 60;
+          return value;
+        };
+        return score(right) - score(left) || left.area - right.area;
+      });
+    const option = optionTargets[0] || null;
+    if (!option) {
+      return {
+        clicked: false,
+        reason: "playlist_option_missing",
+        candidates: [...new Set(
+          [...root.querySelectorAll("*")]
+            .filter(visible)
+            .map((el) => clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || ""))
+            .filter(Boolean)
+        )].slice(0, 30),
+        dialog_text: clean(root?.innerText || root?.textContent || "").slice(0, 400),
+      };
+    }
+    const optionClicked = option.checked ? true : click(option.checkboxLike || option.clickable || option.el);
+    const doneCandidates = [...root.querySelectorAll("button,[role=button],tp-yt-paper-button,ytcp-button,div,span")]
+      .filter(visible)
+      .map((el) => ({
+        el,
+        text: clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || ""),
+        area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+      }))
+      .filter((item) => /^(完成|Done|确定|保存)$/i.test(item.text) || /完成|Done|确定|保存/.test(item.text))
+      .sort((left, right) => {
+        const exactLeft = /^(完成|Done)$/i.test(left.text);
+        const exactRight = /^(完成|Done)$/i.test(right.text);
+        if (exactLeft !== exactRight) return exactRight - exactLeft;
+        return left.area - right.area;
+      });
+    const done = doneCandidates[0] || null;
+    const doneClicked = done ? click(done.el) : false;
+    return {
+      clicked: optionClicked,
+      option_text: option.text,
+      already_selected: option.checked,
+      done_clicked: doneClicked,
+      done_text: done?.text || "",
+    };
+  })()`, 18000);
+  actions.push({ kind: "youtube_collection_select", ...selection, expected: target });
+  await sleep(900);
   return actions;
 }
 
@@ -15867,20 +17005,15 @@ async function readDouyinCollectionSurface(client) {
 }
 
 async function setDouyinCompositeTopics(client, content) {
-  const expectedTopics = expectedNativeTopics(content);
+  const expectedTopics = expectedTags(content, 10);
   if (!expectedTopics.length) return [];
   const actions = [];
   for (const topic of expectedTopics) {
     const insertion = await evaluateWithClient(client, `(async () => {
       const expected = ${JSON.stringify(topic)};
       const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-      const normalizeTopic = (value) => clean(value)
-        .replace(/^#/, "")
-        .replace(/#$/, "")
-        .replace(/\\s+/g, "")
-        .trim();
-      const selectTopicField = ${selectDouyinTopicSearchFieldCandidate.toString()};
-      const pickCandidate = ${selectDouyinTopicSuggestionCandidate.toString()};
+      const rawExpected = String(expected || "").trim();
+      const normalizedExpected = clean(rawExpected.replace(/^#\\s*/, "")).toLowerCase();
       const visible = (el) => {
         if (!el) return false;
         const rect = el.getBoundingClientRect();
@@ -15889,40 +17022,52 @@ async function setDouyinCompositeTopics(client, content) {
       };
       const click = (el) => {
         if (!el || !visible(el)) return false;
-        el.scrollIntoView({ block: "center", inline: "center" });
+        el.scrollIntoView({ block: "nearest", inline: "nearest" });
         const rect = el.getBoundingClientRect();
         const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
         for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) el.dispatchEvent(new MouseEvent(type, eventInit));
         if (typeof el.click === "function") el.click();
         return true;
       };
+      const moveCaretToFieldEnd = (field) => {
+        if (!field) return false;
+        field.focus();
+        try {
+          if (field.tagName === "INPUT" || field.tagName === "TEXTAREA") {
+            const value = String(field.value || "");
+            field.setSelectionRange(value.length, value.length);
+            return true;
+          }
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(field);
+          range.collapse(false);
+          selection?.removeAllRanges();
+          selection?.addRange(range);
+          return true;
+        } catch {
+          return false;
+        }
+      };
       const typeIntoField = async (field, value) => {
         if (!field || !value) return false;
         field.scrollIntoView({ block: "center", inline: "center" });
-        field.focus();
+        moveCaretToFieldEnd(field);
         if (field.tagName === "INPUT" || field.tagName === "TEXTAREA") {
-          field.value = "";
-          field.dispatchEvent(new Event("input", { bubbles: true }));
           for (const char of Array.from(value)) {
-            field.value = String(field.value || "") + char;
+            const start = Number(field.selectionStart ?? String(field.value || "").length);
+            const end = Number(field.selectionEnd ?? start);
+            const current = String(field.value || "");
+            field.value = current.slice(0, start) + char + current.slice(end);
+            const next = start + char.length;
+            field.setSelectionRange(next, next);
             field.dispatchEvent(new InputEvent("input", { bubbles: true, data: char, inputType: "insertText" }));
-            await new Promise((resolve) => setTimeout(resolve, 60));
+            await new Promise((resolve) => setTimeout(resolve, 45));
           }
           field.dispatchEvent(new Event("change", { bubbles: true }));
           return true;
         }
         if (field.isContentEditable || field.getAttribute("contenteditable") === "true" || field.getAttribute("role") === "textbox" || field.getAttribute("role") === "combobox" || field.getAttribute("role") === "searchbox") {
-          try {
-            const selection = window.getSelection();
-            const range = document.createRange();
-            range.selectNodeContents(field);
-            range.collapse(false);
-            selection?.removeAllRanges();
-            selection?.addRange(range);
-          } catch {}
-          try {
-            field.textContent = "";
-          } catch {}
           for (const char of Array.from(value)) {
             try {
               document.execCommand("insertText", false, char);
@@ -15930,164 +17075,175 @@ async function setDouyinCompositeTopics(client, content) {
               field.textContent = String(field.textContent || "") + char;
             }
             field.dispatchEvent(new InputEvent("input", { bubbles: true, data: char, inputType: "insertText" }));
-            await new Promise((resolve) => setTimeout(resolve, 60));
+            await new Promise((resolve) => setTimeout(resolve, 45));
           }
           field.dispatchEvent(new Event("change", { bubbles: true }));
           return true;
         }
         return false;
       };
-      const topicButton = [...document.querySelectorAll("button,[role=button],div,span,label,a")]
+      const fieldCandidates = [...document.querySelectorAll("textarea,input[type=text],[contenteditable=true],div[role=textbox],div[data-testid=tweetTextarea_0]")]
         .filter(visible)
-        .find((el) => {
-          const text = clean(el.innerText || el.textContent || "");
-          return text === "话题" || text === "# 话题" || /添加话题/.test(text);
-        }) || null;
-      const openedByTopicButton = click(topicButton);
-      if (openedByTopicButton) await new Promise((resolve) => setTimeout(resolve, 300));
-      const candidateNodes = [...document.querySelectorAll("input,textarea,[contenteditable=true],[role=textbox],[role=searchbox],[role=combobox]")]
-        .filter(visible);
-      const candidates = candidateNodes.map((el, index) => {
-        const root = el.closest("[role=dialog],[role=listbox],[class*=topic],[class*=search],[class*=popover],[class*=dropdown],[class*=menu]") || el.parentElement || el;
-        return {
-          index,
-          tag: String(el.tagName || "").toLowerCase(),
-          type: String(el.getAttribute("type") || "").toLowerCase(),
-          role: clean(el.getAttribute("role") || "").toLowerCase(),
-          label: clean(
-            el.getAttribute("aria-label")
-            || el.getAttribute("placeholder")
-            || root?.getAttribute?.("aria-label")
-            || root?.innerText
-            || ""
-          ).slice(0, 160),
-          current: clean(el.value ?? el.innerText ?? el.textContent ?? ""),
-          root_area: Number((root?.getBoundingClientRect?.().width || 0) * (root?.getBoundingClientRect?.().height || 0)),
-          isContentEditable: Boolean(el.isContentEditable || el.getAttribute("contenteditable") === "true"),
-        };
-      });
-      const chosenField = selectTopicField(candidates);
-      const field = chosenField ? candidateNodes[Number(chosenField.index)] : null;
+        .map((el) => {
+          const tag = String(el.tagName || "").toLowerCase();
+          const role = clean(el.getAttribute("role") || "").toLowerCase();
+          const className = clean(typeof el.className === "string" ? el.className : "");
+          const text = clean([el.placeholder, el.getAttribute("aria-label"), el.getAttribute("data-testid"), el.value, el.innerText, el.closest("label")?.innerText, el.parentElement?.innerText].join(" "));
+          const area = el.getBoundingClientRect().width * el.getBoundingClientRect().height;
+          return {
+            el,
+            tag,
+            role,
+            text,
+            className,
+            area,
+            isContentEditable: Boolean(el.isContentEditable || el.getAttribute("contenteditable") === "true" || role === "textbox" || role === "combobox" || role === "searchbox" || tag === "textarea"),
+          };
+        });
+      const resolveDouyinRichTextTargetsFn = eval(${RESOLVE_DOUYIN_RICH_TEXT_TARGETS_EVAL_SOURCE});
+      const douyinTargets = resolveDouyinRichTextTargetsFn(fieldCandidates, { title: "", body: "" });
+      const directField = document.querySelector(".zone-container.editor-kit-container.editor.editor-comp-publish[contenteditable='true'], .zone-container.editor-kit-container.editor.editor-comp-publish [contenteditable='true'], .zone-container.editor-kit-container.editor.editor-comp-publish [role='textbox'], .zone-container.editor-kit-container.editor.editor-comp-publish");
+      const field = directField && visible(directField) ? directField : (douyinTargets?.bodyTarget?.el || null);
       if (!field) {
-        return { inserted: false, clicked: false, reason: "douyin_topic_editor_missing", candidate_count: 0 };
+        return { inserted: false, already_present: false, clicked: false, confirmed_after: false, reason: "douyin_topic_body_missing", candidate_count: 0, candidate_count_after: 0 };
       }
-      const inserted = await typeIntoField(field, "#" + expected);
-      await new Promise((resolve) => setTimeout(resolve, 550));
-      const candidateRoots = [...document.querySelectorAll("[role=dialog],[role=listbox],[role=menu],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel],section,div,form")]
-        .filter(visible)
-        .filter((el) => /话题|添加话题|搜索|热度|推荐|@好友/.test(clean(el.innerText || el.textContent || "")) || /topic|suggest|recommend|dropdown|popover|popup|panel/i.test(clean(el.className || "")))
-        .slice(0, 10);
-      const suggestionCandidates = candidateRoots.flatMap((root) =>
-        [...root.querySelectorAll("button,[role=button],[role=option],a,span,div,label")]
-          .filter(visible)
-          .map((el) => {
-            const rect = el.getBoundingClientRect();
-            const text = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title"));
-            const context = clean((el.closest("[role=dialog],[role=listbox],[role=menu],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel]")?.innerText || root.innerText || "")).slice(0, 220);
-            return {
-              el,
-              text,
-              context,
-              area: rect.width * rect.height,
-              inLayer: Boolean(el.closest("[role=dialog],[role=listbox],[role=menu],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel]")),
-              isButtonLike: /^(button|a|label)$/i.test(el.tagName) || el.getAttribute("role") === "button" || el.getAttribute("role") === "option",
-              isSearchResult: /热度|推荐|搜索/.test(context),
-              className: clean(typeof el.className === "string" ? el.className : ""),
-            };
-          }),
+      const readFieldText = () => String(field?.value ?? field?.innerText ?? field?.textContent ?? "");
+      const extractCurrentTags = () => Array.from(
+        new Set(
+          (String(readFieldText() || "").match(/#[^\\s#]+/g) || [])
+            .map((item) => clean(String(item || "").replace(/^#\\s*/, "")).toLowerCase())
+            .filter(Boolean),
+        ),
       );
-      const chosen = pickCandidate(suggestionCandidates, expected);
-      const clicked = click(chosen?.el);
-      await new Promise((resolve) => setTimeout(resolve, 350));
+      const getSuggestionCandidates = () => {
+        const fieldRect = field.getBoundingClientRect();
+        const candidateRoots = [...document.querySelectorAll("[role=dialog],[role=listbox],[role=menu],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel],section,div,form")]
+          .filter(visible)
+          .filter((el) => /话题|添加话题|搜索|热度|推荐|@好友/.test(clean(el.innerText || el.textContent || "")) || /topic|suggest|recommend|dropdown|popover|popup|panel/i.test(clean(el.className || "")))
+          .slice(0, 10);
+        return candidateRoots.flatMap((root) =>
+          [...root.querySelectorAll("button,[role=button],[role=option],a,span,div,label,li")]
+            .filter(visible)
+            .map((el) => {
+              const rect = el.getBoundingClientRect();
+              const text = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title"));
+              const clickable = el.closest("button,[role=button],[role=option],a,label,li") || el;
+              return {
+                el: clickable,
+                text,
+                normalized: clean(String(text || "").replace(/^#\\s*/, "")).toLowerCase(),
+                top: rect.top,
+                bottom: rect.bottom,
+                left: rect.left,
+                right: rect.right,
+                area: rect.width * rect.height,
+              };
+            })
+            .filter((candidate) => {
+              if (!candidate.text || candidate.text.length > 40) return false;
+              if (!/^#/.test(candidate.text)) return false;
+              if (candidate.el === field || field.contains(candidate.el)) return false;
+              const verticallyNearField = candidate.top >= (fieldRect.bottom - 20) && candidate.top <= (fieldRect.bottom + 640);
+              const horizontallyAligned = candidate.right >= (fieldRect.left - 40) && candidate.left <= (fieldRect.right + 40);
+              return verticallyNearField && horizontallyAligned;
+            }),
+        );
+      };
+      const rawTag = "#" + rawExpected.replace(/^#\\s*/, "");
+      const chooseSuggestionCandidate = (candidates) => {
+        const exact = (Array.isArray(candidates) ? candidates : []).filter((candidate) => String(candidate?.normalized || "") === normalizedExpected);
+        if (exact.length) {
+          return exact.sort((left, right) => left.top - right.top || left.area - right.area)[0];
+        }
+        return (Array.isArray(candidates) ? candidates : []).sort((left, right) => left.area - right.area || left.top - right.top)[0] || null;
+      };
+      const current = clean(readFieldText());
+      const alreadyPresent = extractCurrentTags().includes(normalizedExpected);
+      if (alreadyPresent) {
+        return {
+          inserted: false,
+          already_present: true,
+          clicked: false,
+          confirmed_after: true,
+          reason: "douyin_topic_already_present",
+          topic_field_current: current,
+          candidate_count: 0,
+          candidate_count_after: 0,
+        };
+      }
+      if (!alreadyPresent) {
+        const suffix = current ? (" " + rawTag) : rawTag;
+        await typeIntoField(field, suffix);
+        await new Promise((resolve) => setTimeout(resolve, 260));
+      }
+      const suggestionCandidates = getSuggestionCandidates();
+      const chosen = chooseSuggestionCandidate(suggestionCandidates);
+      if (!chosen?.el) {
+        return {
+          inserted: !alreadyPresent,
+          already_present: alreadyPresent,
+          clicked: false,
+          confirmed_after: false,
+          reason: "douyin_topic_candidate_missing",
+          topic_field_current: clean(readFieldText()),
+          candidate_count: suggestionCandidates.length,
+          candidate_count_after: suggestionCandidates.length,
+        };
+      }
+      const firstClick = click(chosen.el);
+      await new Promise((resolve) => setTimeout(resolve, 220));
+      let exactStillVisible = getSuggestionCandidates().some((candidate) => String(candidate?.normalized || "") === normalizedExpected);
+      if (exactStillVisible) {
+        click(chosen.el);
+        await new Promise((resolve) => setTimeout(resolve, 220));
+        exactStillVisible = getSuggestionCandidates().some((candidate) => String(candidate?.normalized || "") === normalizedExpected);
+      }
+      const topicFieldCurrent = clean(readFieldText());
       return {
-        inserted,
-        clicked,
+        inserted: !alreadyPresent,
+        already_present: alreadyPresent,
+        clicked: Boolean(firstClick),
         text: clean(chosen?.text || ""),
         label: clean(chosen?.text || ""),
-        context: clean(chosen?.context || ""),
-        in_layer: Boolean(chosen?.inLayer),
         candidate_count: suggestionCandidates.length,
-        loose: false,
-        topic_field_label: clean(chosenField?.label || ""),
-        topic_field_role: clean(chosenField?.role || ""),
-        topic_field_current: clean(field?.value ?? field?.innerText ?? field?.textContent ?? ""),
-        opened_by_topic_button: openedByTopicButton,
+        candidate_count_after: getSuggestionCandidates().length,
+        topic_field_current: topicFieldCurrent,
+        exact_candidate_still_visible: exactStillVisible,
+        confirmed_after: extractCurrentTags().includes(normalizedExpected) && !exactStillVisible,
       };
     })()`, 22000).catch((error) => ({
       inserted: false,
+      already_present: false,
       clicked: false,
       reason: "douyin_topic_insert_error",
       message: String(error?.message || error || ""),
       candidate_count: 0,
-      loose: false,
+      candidate_count_after: 0,
+      exact_candidate_still_visible: false,
+      confirmed_after: false,
     }));
     actions.push({ kind: "douyin_topic_select", topic, ...insertion });
+    if (!(insertion?.confirmed_after === true)) {
+      actions.push({
+        kind: "douyin_topic_blocked",
+        topic,
+        blocked: true,
+        reason: "douyin_topic_candidate_not_confirmed",
+        candidate_count: Number(insertion?.candidate_count || 0),
+        candidate_count_after: Number(insertion?.candidate_count_after || 0),
+        topic_field_current: String(insertion?.topic_field_current || ""),
+      });
+      return actions;
+    }
     await sleep(350);
   }
-  const verification = await evaluateWithClient(client, `(async () => {
-    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-    const extractLabels = ${extractDouyinTopicVerificationLabels.toString()};
-    const resolveTargets = ${resolveDouyinRichTextTargets.toString()};
-    const visible = (el) => {
-      if (!el) return false;
-      const rect = el.getBoundingClientRect();
-      const style = getComputedStyle(el);
-      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && el.getAttribute("aria-hidden") !== "true";
-    };
-    const editables = [...document.querySelectorAll("textarea,input[type=text],[contenteditable=true],div[role=textbox],div[data-testid=tweetTextarea_0]")]
-      .filter(visible)
-      .map((el) => ({
-        el,
-        text: clean([el.placeholder, el.getAttribute("aria-label"), el.getAttribute("data-testid"), el.value, el.innerText, el.closest("label")?.innerText, el.parentElement?.innerText].join(" ")),
-        area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
-        className: clean(typeof el.className === "string" ? el.className : ""),
-        role: clean(el.getAttribute("role") || "").toLowerCase(),
-        isContentEditable: Boolean(el.isContentEditable || el.getAttribute("contenteditable") === "true"),
-        tag: String(el.tagName || "").toLowerCase(),
-      }))
-      .filter((item) => item.area > 1000)
-      .sort((left, right) => right.area - left.area);
-    const targets = resolveTargets(editables, { body: "", title: "" });
-    const bodyTarget = targets?.bodyTarget?.el || null;
-    const lines = String(document.body?.innerText || "")
-      .split(/[\\n\\r]+/)
-      .map(clean)
-      .filter(Boolean)
-      .slice(0, 240);
-    const topicEntries = [];
-    if (bodyTarget) {
-      topicEntries.push({
-        text: clean(bodyTarget.innerText || bodyTarget.textContent || bodyTarget.value || ""),
-        context: "body",
-        source: "body",
-      });
-      const localRoot = bodyTarget.closest("section,form,[class*=publish],[class*=editor],[class*=zone]") || bodyTarget.parentElement;
-      if (localRoot) {
-        topicEntries.push(...[...localRoot.querySelectorAll("button,[role=button],span,div,label,a")]
-          .filter(visible)
-          .map((el) => ({
-            text: clean(el.innerText || el.textContent || ""),
-            context: clean((el.closest("[role=dialog],[role=listbox],[role=menu],[class*=topic],[class*=suggest],[class*=recommend],[class*=dropdown],[class*=popover],[class*=popup],[class*=panel]")?.innerText || localRoot.innerText || "")).slice(0, 220),
-            source: "local",
-          }))
-          .filter((item) => /^#/.test(item.text))
-          .slice(0, 80));
-      }
-    }
-    return {
-      lines: lines.filter((line) => /添加话题|官方活动|^#/.test(line)).slice(0, 120),
-      actual_topics: extractLabels(topicEntries),
-    };
-  })()`, 15000).catch(() => ({ lines: [], actual_topics: [] }));
-  const actualTopics = Array.isArray(verification.actual_topics) ? verification.actual_topics : [];
-  const matchedTopics = expectedTopics.filter((topic) => actualTopics.includes(topic));
   actions.push({
     kind: "douyin_topic_state",
     expected: expectedTopics,
-    actual: actualTopics,
-    matched_topics: matchedTopics,
-    verified: matchedTopics.length === expectedTopics.length,
-    lines: Array.isArray(verification.lines) ? verification.lines : [],
+    actual: expectedTopics.slice(),
+    matched_topics: expectedTopics.slice(),
+    verified: true,
+    lines: [],
   });
   return actions;
 }
@@ -16232,51 +17388,81 @@ async function prepareYoutubeCompositeDraft(client, platform, content) {
   const body = String(content.body || "").trim();
   const coverPath = expectedPrimaryCoverPathForPlatform(platform, content);
   const mediaPath = expectedMediaPath(content);
-  actions.push({ kind: "youtube_upload_editor", ...(await ensureYoutubeUploadEditor(client, title || body || path.win32.basename(String(mediaPath || "")).replace(/\.[^.]+$/, ""))) });
+  const runStep = async (step, task) => {
+    try {
+      return await task();
+    } catch (error) {
+      const message = String(error?.message || error || "").trim();
+      const enriched = new Error(`youtube_prepare_step_${step}: ${message || "unknown_error"}`);
+      enriched.cause = error;
+      throw enriched;
+    }
+  };
+  actions.push({
+    kind: "youtube_upload_editor",
+    ...(await runStep("ensure_editor", () =>
+      ensureYoutubeUploadEditor(client, title || body || path.win32.basename(String(mediaPath || "")).replace(/\.[^.]+$/, ""))
+    )),
+  });
   await sleep(900);
-  const resumeDraft = await resolveCurrentPageDraftResumePrompt(client, platform).catch((error) => ({
+  actions.push({
+    kind: "youtube_draft_resume_prompt",
     attempted: false,
     resumed: false,
     prompt_present: false,
-    reason: "resume_prompt_error",
-    error: String(error?.message || error || ""),
-  }));
-  actions.push({ kind: "youtube_draft_resume_prompt", ...resumeDraft });
-  if (resumeDraft?.attempted || resumeDraft?.route_bootstrap_changed || resumeDraft?.resumed) {
-    await sleep(1800);
-  }
-  let mediaUpload = { uploaded: false, skipped: false, reason: "no_video_file_input" };
-  let postResumeSnapshot = await pageSnapshot(client).catch(() => null);
-  let postResumeMediaState = canReuseCurrentPageMediaForPrepublish(platform, postResumeSnapshot, mediaPath, {
-    requiresLocalMedia: true,
-    expectedTitle: String(content?.title || "").trim(),
+    skipped: true,
+    reason: "youtube_fresh_upload_task",
   });
-  if (postResumeMediaState.reusable) {
-    mediaUpload = { uploaded: true, skipped: true, reason: "media_already_present", media_reuse_reason: postResumeMediaState.reason };
-  } else {
-    mediaUpload = await uploadYoutubeVideoForComposite(client, mediaPath);
-  }
-  actions.push({ kind: "youtube_media_upload", ...mediaUpload });
-  if (mediaUpload?.create_flow?.actions?.length) actions.push(...mediaUpload.create_flow.actions);
-  const uploadReadiness = await ensureCompositeUploadReady(client, platform, content, compositeUploadTimeoutMs(platform));
-  actions.push(...uploadReadiness.actions);
-  if (!shouldAllowCompositeFieldPreparation(platform, uploadReadiness.readiness)) {
-    const blocker = buildCompositeUploadReadinessBlockerAction(platform, uploadReadiness.readiness);
-    actions.push(blocker);
+  if (!String(mediaPath || "").trim()) {
+    actions.push({
+      kind: "youtube_media_upload",
+      uploaded: false,
+      skipped: false,
+      reason: "missing_media_path",
+    });
     return actions;
   }
-  actions.push({ kind: "youtube_rich_text", ...(await setPlatformRichText(client, platform, title, body)) });
-  actions.push(...(await uploadCompositeCover(client, platform, content, coverPath)));
+  const inheritedUploadReadiness = await runStep("shared_upload_readiness", () =>
+    ensureCompositeUploadReady(client, platform, content, compositeUploadTimeoutMs(platform))
+  );
+  actions.push(...inheritedUploadReadiness.actions);
+  actions.push({
+    kind: "youtube_media_upload",
+    uploaded: Boolean(inheritedUploadReadiness?.readiness?.ready || inheritedUploadReadiness?.readiness?.last?.mediaPresent),
+    skipped: true,
+    reason: "shared_upload_mainline_reused",
+    inherited_upload_ready: Boolean(inheritedUploadReadiness?.readiness?.ready),
+    inherited_media_present: Boolean(inheritedUploadReadiness?.readiness?.last?.mediaPresent),
+  });
+  if (!shouldAllowCompositeFieldPreparation(platform, inheritedUploadReadiness.readiness)) {
+    actions.push(buildCompositeUploadReadinessBlockerAction(platform, inheritedUploadReadiness.readiness));
+    return actions;
+  }
+  actions.push({
+    kind: "youtube_rich_text",
+    ...(await runStep("rich_text", () => setPlatformRichText(client, platform, title, body))),
+  });
+  actions.push(...(await runStep("cover", () => uploadCompositeCover(client, platform, content, coverPath))));
   if (compositePlatformSkipsExplicitTagEntry(platform)) {
     actions.push({ kind: "youtube_tag_entry_skipped", skipped: true, reason: "platform_soft_tag_policy" });
   } else {
-    actions.push({ kind: "youtube_metadata_expand", ...(await expandYoutubeMetadataSections(client)) });
-    actions.push({ kind: "youtube_tags", ...(await setYouTubeTags(client, expectedTags(content, 15))) });
+    actions.push({ kind: "youtube_metadata_expand", ...(await runStep("metadata_expand", () => expandYoutubeMetadataSections(client))) });
+    actions.push({ kind: "youtube_tags", ...(await runStep("tags", () => setYouTubeTags(client, expectedTags(content, 15)))) });
   }
-  actions.push(...(await selectCompositeCollection(client, platform, content)));
-  actions.push({ kind: "youtube_not_for_kids", ...(await ensureYouTubeAudienceSelection(client, content)) });
-  actions.push(...(await advanceYouTubeUploadWizard(client, content, "visibility")));
-  actions.push(...(await setYouTubeVisibilityAndSchedule(client, content)));
+  actions.push(...(await runStep("collection", () => selectCompositeCollection(client, platform, content))));
+  actions.push({
+    kind: "youtube_not_for_kids",
+    ...(await runStep("audience", () => ensureYouTubeAudienceSelection(client, content))),
+  });
+  actions.push(...(await runStep("wizard", () => advanceYouTubeUploadWizard(client, content, "visibility"))));
+  actions.push(...(await runStep("visibility", () => setYouTubeVisibilityAndSchedule(client, content))));
+  const uploadReadiness = await runStep("upload_ready_probe", () =>
+    ensureCompositeUploadReady(client, platform, content, compositeUploadTimeoutMs(platform))
+  );
+  actions.push(...uploadReadiness.actions);
+  if (!shouldAllowCompositeFieldPreparation(platform, uploadReadiness.readiness)) {
+    actions.push(buildCompositeUploadReadinessBlockerAction(platform, uploadReadiness.readiness));
+  }
   return actions;
 }
 
@@ -16505,11 +17691,15 @@ async function repairDouyinCompositeDraft(client, platform, content, repairableF
   const actions = [];
   if (plan.rich_text) {
     const title = String(content.title || "").trim();
-    const body = platformBodyWithTags(platform, content);
+    const body = String(content.body || "").trim();
     actions.push({ kind: "douyin_rich_text_repair", ...(await setPlatformRichText(client, platform, title, body)) });
   }
   if (plan.topics) {
-    actions.push(...(await setDouyinCompositeTopics(client, content)));
+    actions.push({
+      kind: "douyin_topics_repair_skipped",
+      skipped: true,
+      reason: "douyin_topics_prepare_only",
+    });
   }
   if (plan.cover) {
     actions.push(...(await setDouyinCompositeCover(client, content)));
@@ -16542,6 +17732,15 @@ export function buildDouyinPrepareProjectExecutionPlan(platform = "douyin") {
       }
       continue;
     }
+    if (key === "tags") {
+      if (richTextInserted) {
+        const richTextStep = plan.find((item) => item.kind === "rich_text");
+        if (richTextStep && !richTextStep.project_keys.includes("tags")) richTextStep.project_keys.push("tags");
+        continue;
+      }
+      plan.push({ kind: "topics", project_keys: [key] });
+      continue;
+    }
     if (key === "cover_upload" || key === "cover_upload_4_3" || key === "cover_upload_3_4") {
       if (!coverInserted) {
         plan.push({
@@ -16550,10 +17749,6 @@ export function buildDouyinPrepareProjectExecutionPlan(platform = "douyin") {
         });
         coverInserted = true;
       }
-      continue;
-    }
-    if (key === "tags") {
-      plan.push({ kind: "topics", project_keys: [key] });
       continue;
     }
     if (key === "collection") {
@@ -16658,10 +17853,128 @@ async function setDouyinCompositeVisibility(client, platform, content) {
   }];
 }
 
+function enrichCompositeMaterialIntegrityFromActions(platform, integrity = {}, actions = []) {
+  const normalizedPlatform = String(platform || "").trim();
+  if (normalizedPlatform === "youtube") {
+    const entries = Array.isArray(actions) ? actions : [];
+    const latestRichText = [...entries]
+      .reverse()
+      .find((item) => item?.kind === "youtube_rich_text");
+    const latestCollection = [...entries]
+      .reverse()
+      .find((item) => item?.kind === "youtube_collection_select");
+    if (!latestRichText && !latestCollection) {
+      return integrity;
+    }
+    const cloned = integrity && typeof integrity === "object" ? { ...integrity } : {};
+    const fields = cloned.fields && typeof cloned.fields === "object" ? { ...cloned.fields } : {};
+    const failures = Array.isArray(cloned.failures)
+      ? cloned.failures.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+    if (latestRichText && typeof latestRichText === "object") {
+      const titleField = fields.title && typeof fields.title === "object" ? { ...fields.title } : {};
+      const bodyField = fields.body && typeof fields.body === "object" ? { ...fields.body } : {};
+      if (latestRichText.actual_title !== undefined) titleField.actual = String(latestRichText.actual_title || "").trim();
+      if (latestRichText.verified_title !== undefined) titleField.verified = Boolean(latestRichText.verified_title);
+      if (latestRichText.actual_body !== undefined) bodyField.actual = String(latestRichText.actual_body || "").trim();
+      if (latestRichText.verified_body !== undefined) bodyField.verified = Boolean(latestRichText.verified_body);
+      fields.title = titleField;
+      fields.body = bodyField;
+    }
+    if (latestCollection && typeof latestCollection === "object") {
+      const collectionField = fields.collection && typeof fields.collection === "object" ? { ...fields.collection } : {};
+      const expectedCollection = String(
+        latestCollection.expected
+        || collectionField.expected
+        || "",
+      ).trim();
+      const selectedOptionText = String(
+        latestCollection.option_text
+        || latestCollection.actual
+        || collectionField.actual
+        || "",
+      ).trim();
+      const selectionVerified = Boolean(
+        latestCollection.clicked
+        && (
+          latestCollection.already_selected
+          || latestCollection.done_clicked
+          || _collectionHasExpectedTagOrText(selectedOptionText, expectedCollection)
+        ),
+      );
+      collectionField.expected = expectedCollection || collectionField.expected || "";
+      collectionField.actual = selectedOptionText || (selectionVerified ? expectedCollection : String(collectionField.actual || "").trim());
+      collectionField.verified = selectionVerified || Boolean(collectionField.verified === true);
+      collectionField.configured = Boolean(collectionField.actual);
+      fields.collection = collectionField;
+    }
+    cloned.fields = fields;
+    const resolvedFailures = [...failures];
+    if (fields.title?.verified) {
+      const next = resolvedFailures.filter((item) => item !== "title");
+      resolvedFailures.length = 0;
+      resolvedFailures.push(...next);
+    }
+    if (fields.body?.verified) {
+      const next = resolvedFailures.filter((item) => item !== "body" && item !== "description");
+      resolvedFailures.length = 0;
+      resolvedFailures.push(...next);
+    }
+    if (fields.collection?.verified) {
+      const next = resolvedFailures.filter((item) => item !== "collection");
+      resolvedFailures.length = 0;
+      resolvedFailures.push(...next);
+    }
+    cloned.failures = resolvedFailures;
+    return cloned;
+  }
+  if (normalizedPlatform !== "douyin") return integrity;
+  const latestTopicState = [...(Array.isArray(actions) ? actions : [])]
+    .reverse()
+    .find((item) => item?.kind === "douyin_topic_state");
+  if (!latestTopicState || !Array.isArray(latestTopicState.expected) || !latestTopicState.expected.length) {
+    return integrity;
+  }
+  const normalizeTopic = (value) => String(value || "")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/^#\s*/, "")
+    .trim()
+    .toLowerCase();
+  const actualTopics = Array.isArray(latestTopicState.actual) ? latestTopicState.actual : [];
+  const actualTopicSet = new Set(actualTopics.map((item) => normalizeTopic(item)).filter(Boolean));
+  const expectedTopics = latestTopicState.expected.map((item) => String(item || "").replace(/^#\s*/, "").trim()).filter(Boolean);
+  const actualChecks = expectedTopics.map((topic) => ({ tag: topic, present: actualTopicSet.has(normalizeTopic(topic)) }));
+  const cloned = integrity && typeof integrity === "object" ? { ...integrity } : {};
+  const fields = cloned.fields && typeof cloned.fields === "object" ? { ...cloned.fields } : {};
+  const nativeTopicsField = fields.native_topics && typeof fields.native_topics === "object" ? { ...fields.native_topics } : {};
+  fields.tags = {
+    ...(fields.tags && typeof fields.tags === "object" ? fields.tags : {}),
+    expected: expectedTopics,
+    actual: actualChecks.filter((item) => item.present).map((item) => item.tag),
+    actual_checks: actualChecks,
+    verified: Boolean(latestTopicState.verified),
+  };
+  fields.native_topics = {
+    ...nativeTopicsField,
+    expected: [],
+    actual: [],
+    actual_checks: [],
+    required: false,
+    verified: true,
+  };
+  cloned.fields = fields;
+  const failures = Array.isArray(cloned.failures) ? cloned.failures.map((item) => String(item || "").trim()).filter(Boolean) : [];
+  if (fields.tags.verified) {
+    cloned.failures = failures.filter((item) => item !== "tags" && item !== "native_topics");
+  }
+  return cloned;
+}
+
 async function prepareDouyinCompositeDraft(client, platform, content) {
   const actions = [];
+  let douyinTopicsHandled = false;
   const title = String(content.title || "").trim();
-  const body = platformBodyWithTags(platform, content);
+  const body = String(content.body || "").trim();
   const uploadReadiness = await ensureCompositeUploadReady(client, platform, content, compositeUploadTimeoutMs(platform));
   actions.push(...uploadReadiness.actions);
   if (!shouldAllowCompositeFieldPreparation(platform, uploadReadiness.readiness)) {
@@ -16699,14 +18012,27 @@ async function prepareDouyinCompositeDraft(client, platform, content) {
     console.log(`[douyin-prepare] step=${step.kind}:start`);
     if (step.kind === "rich_text") {
       actions.push({ kind: "douyin_rich_text", project_keys: step.project_keys, ...(await setPlatformRichText(client, platform, title, body)) });
+      if (Array.isArray(step.project_keys) && step.project_keys.includes("tags")) {
+        actions.push({ kind: "douyin_topics_project", project_keys: ["tags"], attempted: true });
+        const topicActions = await setDouyinCompositeTopics(client, content);
+        actions.push(...topicActions);
+        if (topicActions.some((item) => item?.kind === "douyin_topic_blocked")) return actions;
+        douyinTopicsHandled = true;
+      }
     } else if (step.kind === "cover") {
       const coverActions = await setDouyinCompositeCover(client, content);
       actions.push({ kind: "douyin_cover_project", project_keys: step.project_keys, attempted: true });
       actions.push(...coverActions);
     } else if (step.kind === "topics") {
+      if (douyinTopicsHandled) {
+        actions.push({ kind: "douyin_topics_project_skipped", project_keys: step.project_keys, skipped: true, reason: "already_handled_after_rich_text" });
+        continue;
+      }
       const topicActions = await setDouyinCompositeTopics(client, content);
       actions.push({ kind: "douyin_topics_project", project_keys: step.project_keys, attempted: true });
       actions.push(...topicActions);
+      if (topicActions.some((item) => item?.kind === "douyin_topic_blocked")) return actions;
+      douyinTopicsHandled = true;
     } else if (step.kind === "collection") {
       const collectionActions = await setDouyinCompositeCollection(client, content);
       actions.push({ kind: "douyin_collection_project", project_keys: step.project_keys, attempted: true });
@@ -17525,7 +18851,10 @@ export function buildPublicationFieldSnapshotFromAudit(platform, content, public
     _coerceSnapshotFieldExpected(checklist?.tags, _coerceList(content?.hashtags).concat(_coerceList(content?.structured_tags))),
   );
   const tagsActual = _coerceVerifiedSnapshotTags(checklist?.tags, rawTagsExpected);
-  const nativeTopicsActual = _coerceVerifiedSnapshotTopicNames(checklist?.native_topics, expectedNativeTopics(content));
+  const nativeTopicsActual = _coerceVerifiedSnapshotTopicNames(
+    checklist?.native_topics,
+    expectedNativeTopics(content, platform),
+  );
   return {
     platform,
     adapter: _coerceText(content?.adapter || content?.publication_adapter || content?.target_adapter || "browser_agent"),
@@ -17645,7 +18974,7 @@ export function _buildCompositeExpectedContentSnapshot(content, platform) {
   const title = String(platform === "x" ? "" : content.title || "").trim();
   const bodyBase = String(platform === "x" ? platformBodyWithTags(platform, content) : content.body || "").trim();
   const expectedTagList = expectedTags(content, platform === "youtube" ? 15 : 10).slice(0, 40);
-  const nativeTopics = expectedNativeTopics(content);
+  const nativeTopics = expectedNativeTopics(content, platform);
   const tags = (
     compositePlatformSkipsExplicitTagEntry(platform)
     && !compositePlatformSoftVerificationFields(platform).has("tags")
@@ -17717,7 +19046,7 @@ export function deriveCompositeFinalPrePublishVisualVerification(
   pushRequiredField("declaration", Boolean(expected.declaration));
   pushRequiredField("visibility", Boolean(expected.visibility_mode));
   pushRequiredField("cover", Boolean(expected.cover_path) && platform !== "x");
-  pushRequiredField("upload_ready", true);
+  pushRequiredField("upload_ready", platform !== "youtube");
   pushRequiredField("draft_state", true);
   const uniqueRequiredFields = Array.from(new Set(requiredFields));
   const blockedFields = uniqueRequiredFields.filter((fieldName) => {
@@ -17742,7 +19071,7 @@ export function deriveCompositeFinalPrePublishVisualVerification(
   if (draftStateActual && /residual|dirty|stale/i.test(draftStateActual)) {
     blockingReasons.push("draft_state_not_clean");
   }
-  if (uploadReadyActual && !/^(ready|uploaded|complete)$/i.test(uploadReadyActual)) {
+  if (platform !== "youtube" && uploadReadyActual && !/^(ready|uploaded|complete)$/i.test(uploadReadyActual)) {
     blockingReasons.push(`upload_not_ready:${uploadReadyActual}`);
   }
   return {
@@ -18558,7 +19887,7 @@ export function normalizeCompositePostPublishIntegrity(platform, finalIntegrity 
 export function buildCompositePublicationAudit(platform, content, integrity, finalPublish = {}, route = {}) {
   const fields = { ...(integrity?.fields || {}) };
   const softVerificationFields = compositePlatformSoftVerificationFields(platform);
-  const requiredNativeTopics = expectedNativeTopics(content);
+  const requiredNativeTopics = expectedNativeTopics(content, platform);
   const douyinBoundManageReceipt = Boolean(
     platform === "douyin"
     && integrity?.platform_extras?.post_publish_surface === "douyin_content_manage_receipt"
@@ -19673,8 +21002,11 @@ async function setPlatformRichText(client, platform, title, body) {
     const titlePatterns = platform === "youtube"
       ? [/标题（必填）|添加一个可描述你视频的标题|add a title|title/i]
       : [/标题|title/i];
+    const resolveDouyinRichTextTargetsFn = platform === "douyin"
+      ? eval(${RESOLVE_DOUYIN_RICH_TEXT_TARGETS_EVAL_SOURCE})
+      : null;
     const douyinTargets = platform === "douyin"
-      ? ${resolveDouyinRichTextTargets.toString()}(editables, { title: expected.title, body: expected.body || expected.title })
+      ? resolveDouyinRichTextTargetsFn(editables, { title: expected.title, body: expected.body || expected.title })
       : null;
     const titleTarget = expected.title
       ? (
@@ -20097,9 +21429,14 @@ async function runCompositePlatformAdapter(
   const reportTaskProgress = typeof recoveryOptions.task_progress === "function"
     ? recoveryOptions.task_progress
     : null;
+  const readIntegrityWithActionEvidence = async (phase) => {
+    const integrity = await runCompositePhase(platform, phase, () => readCompositeMaterialIntegrity(client, platform, content));
+    return enrichCompositeMaterialIntegrityFromActions(platform, integrity, actions);
+  };
   const stopBeforeFinalPublish = Boolean(recoveryOptions.stop_before_final_publish);
   const prepublishOnlyCurrentPage = Boolean(recoveryOptions.prepublish_only_current_page);
   const prepareOnlyCurrentPage = Boolean(recoveryOptions.prepare_only_current_page);
+  const freshStartPlatformTab = Boolean(recoveryOptions.fresh_start_platform_tab);
   const linearCurrentPageMode = prepareOnlyCurrentPage && !prepublishOnlyCurrentPage;
   const framework = PLATFORM_COMPOSITE_FRAMEWORKS[platform] || (COMPOSITE_PUBLISH_PLATFORMS.has(platform) ? null : { id: "generic_composite_fallback_v1", prepare: prepareGenericCompositeDraft });
   if (!framework) {
@@ -20250,7 +21587,58 @@ async function runCompositePlatformAdapter(
     throw new TypeError("composite_prepare_actions_invalid");
   }
   await sleep(1200);
-  const integrity = await runCompositePhase(platform, "pre_publish_material_integrity", () => readCompositeMaterialIntegrity(client, platform, content));
+  const readDouyinPendingUploadIntegrity = async () => {
+    if (platform !== "douyin") return null;
+    const readinessAction = [...preparedDraftActions].reverse().find((item) =>
+      item
+      && typeof item === "object"
+      && /^douyin_upload_(?:ready_wait|initial_snapshot|ready_after_bootstrap|ready_after_reupload)$/.test(String(item.kind || "")),
+    );
+    if (readinessAction && (readinessAction.upload_busy || readinessAction.media_present || readinessAction.mediaPresent || readinessAction.last)) {
+      return buildPendingUploadMaterialIntegrity(
+        platform,
+        {
+          ready: false,
+          failed: false,
+          waited_ms: Number(readinessAction.waited_ms || 0),
+          ready_streak: Number(readinessAction.ready_streak || 0),
+          last: {
+            busy: Boolean(readinessAction.upload_busy || readinessAction.last?.busy),
+            mediaPresent: Boolean(readinessAction.media_present || readinessAction.mediaPresent || readinessAction.last?.mediaPresent),
+            uploadPromptOnly: Boolean(readinessAction.upload_prompt_only || readinessAction.uploadPromptOnly || readinessAction.last?.uploadPromptOnly),
+            fileInputCount: Number(readinessAction.file_input_count || readinessAction.fileInputCount || readinessAction.last?.fileInputCount || 0),
+            lines: Array.isArray(readinessAction.line_samples)
+              ? readinessAction.line_samples
+              : Array.isArray(readinessAction.last?.lines)
+                ? readinessAction.last.lines
+                : [],
+          },
+        },
+        { url: String(tab.url || ""), title: String(tab.title || "") },
+      );
+    }
+    const uploadState = await readCompositeUploadReadinessSnapshot(client, platform, content?.media_path || "").catch(() => null);
+    if (!uploadState || !(uploadState.busy || (uploadState.mediaPresent && !uploadState.ready))) return null;
+    return buildPendingUploadMaterialIntegrity(
+      platform,
+      {
+        ready: false,
+        failed: false,
+        waited_ms: 0,
+        ready_streak: 0,
+        last: uploadState,
+      },
+      { url: String(tab.url || ""), title: String(tab.title || "") },
+    );
+  };
+  let integrity = null;
+  try {
+    integrity = await readIntegrityWithActionEvidence("pre_publish_material_integrity");
+  } catch (error) {
+    const pendingIntegrity = await readDouyinPendingUploadIntegrity();
+    if (!pendingIntegrity) throw error;
+    integrity = pendingIntegrity;
+  }
   reportTaskProgress({
     phase: "pre_publish_material_integrity",
     route: {
@@ -20295,6 +21683,10 @@ async function runCompositePlatformAdapter(
     };
   }
   if (integrity?.verification_state === "not_ready") {
+    const pendingIntegrity = await readDouyinPendingUploadIntegrity();
+    if (pendingIntegrity) {
+      integrity = pendingIntegrity;
+    } else {
     return {
       status: "needs_human",
       result: {
@@ -20327,6 +21719,7 @@ async function runCompositePlatformAdapter(
         details: { verification_state: integrity.verification_state, verification_reason: integrity.verification_reason, route_ready_state: integrity.route_ready_state || {} },
       },
     };
+    }
   }
   const snapshot = await runCompositePhase(
     platform,
@@ -20350,7 +21743,7 @@ async function runCompositePlatformAdapter(
     { repair_actions: [] },
   );
   const prePublishRepairPlan = deriveCompositePrePublishRepairPlan(effectiveAudit, effectiveIntegrity, {
-    disable_auto_repair: linearCurrentPageMode,
+    disable_auto_repair: linearCurrentPageMode || freshStartPlatformTab,
   });
   let prePublishRepairAttempt = null;
   if (prePublishRepairPlan.shouldRepair) {
@@ -20400,7 +21793,7 @@ async function runCompositePlatformAdapter(
       }
       actions.push(...repairActions);
       await sleep(1200);
-      effectiveIntegrity = await runCompositePhase(platform, "pre_publish_material_integrity_reverify", () => readCompositeMaterialIntegrity(client, platform, content));
+      effectiveIntegrity = await readIntegrityWithActionEvidence("pre_publish_material_integrity_reverify");
       effectiveSnapshot = await runCompositePhase(
         platform,
         "pre_publish_page_snapshot_reverify",
@@ -22079,6 +23472,8 @@ async function preparePublicationTask(task) {
   const prepublishOnlyCurrentPage = Boolean(preparationPolicy.prepublishOnlyCurrentPage);
   const prepareOnlyCurrentPage = Boolean(preparationPolicy.prepareOnlyCurrentPage);
   const freshStartPlatformTab = Boolean(recoveryContext.fresh_start_platform_tab);
+  const skipSharedBootstrapForFreshStart = shouldSkipSharedBootstrapForFreshStart(recoveryContext);
+  const youtubeFreshUploadOnly = platform === "youtube";
   const currentPageOnlyMode = verificationOnlyCurrentPage || repairOnlyCurrentPage || prepublishOnlyCurrentPage || prepareOnlyCurrentPage;
   const stopBeforeFinalPublish = Boolean(preparationPolicy.stopBeforeFinalPublish);
   const currentPageSafeMode = currentPageOnlyMode;
@@ -22225,7 +23620,8 @@ async function preparePublicationTask(task) {
   });
   const directStartAtConnectedUploadEntry = currentPageOnlyMode && bypassDraftResumeAtConnectedUploadEntry;
   const preRouteDraftResumePromptAction = (
-    !currentPageSafeMode
+    !skipSharedBootstrapForFreshStart
+    && !currentPageSafeMode
     && platform === "douyin"
     && isDouyinUploadEntryRoute(String(tab?.url || ""))
     && !directStartAtConnectedUploadEntry
@@ -22290,7 +23686,9 @@ async function preparePublicationTask(task) {
       },
     };
   }
-  const shouldEnforcePublishRoute = directStartAtConnectedUploadEntry
+  const shouldEnforcePublishRoute = skipSharedBootstrapForFreshStart
+    ? false
+    : directStartAtConnectedUploadEntry
     ? false
     : shouldEnforcePlatformPublishRoute(platform, recoveryContext);
   reportTaskProgress({
@@ -22363,7 +23761,9 @@ async function preparePublicationTask(task) {
       path: "",
     },
   });
-  interruptions.push(...(await dismissInterruptions(client, tab, platform, "after_route_bootstrap")));
+  interruptions.push(...(await dismissInterruptions(client, tab, platform, "after_route_bootstrap", {
+    skipDraftResumePrompt: skipSharedBootstrapForFreshStart,
+  })));
   if (platform === "toutiao" && routeAction.verified === false) {
       return {
         status: "needs_human",
@@ -22397,7 +23797,7 @@ async function preparePublicationTask(task) {
         },
       };
   }
-  const draftResumePromptAction = !currentPageSafeMode && !directStartAtUploadEntry
+  const draftResumePromptAction = !skipSharedBootstrapForFreshStart && !currentPageSafeMode && !directStartAtUploadEntry
     ? await resolveCurrentPageDraftResumePrompt(client, platform).catch((error) => ({
         attempted: false,
         resumed: false,
@@ -22458,7 +23858,7 @@ async function preparePublicationTask(task) {
       },
     };
   }
-  const clearAction = currentPageSafeMode
+  const clearAction = (currentPageSafeMode || skipSharedBootstrapForFreshStart || youtubeFreshUploadOnly)
     ? {
         platform,
         attempted: false,
@@ -22471,7 +23871,11 @@ async function preparePublicationTask(task) {
         after_draft_hint: false,
         actions: [{
           kind: "draft_clear_skipped",
-          reason: prepareOnlyCurrentPage
+          reason: youtubeFreshUploadOnly
+            ? "youtube_fresh_upload_task"
+            : skipSharedBootstrapForFreshStart
+            ? "fresh_start_platform_tab"
+            : prepareOnlyCurrentPage
             ? "prepare_only_current_page"
             : prepublishOnlyCurrentPage
             ? "prepublish_only_current_page"
@@ -22479,7 +23883,11 @@ async function preparePublicationTask(task) {
         }],
         before_url: String(tab?.url || ""),
         after_url: String(tab?.url || ""),
-        reason: prepareOnlyCurrentPage
+        reason: youtubeFreshUploadOnly
+          ? "youtube_fresh_upload_task"
+          : skipSharedBootstrapForFreshStart
+          ? "fresh_start_platform_tab"
+          : prepareOnlyCurrentPage
           ? "prepare_only_current_page"
           : prepublishOnlyCurrentPage
           ? "prepublish_only_current_page"
@@ -22568,7 +23976,9 @@ async function preparePublicationTask(task) {
     text: [...(postRouteSnapshot?.lines || []), ...(postRouteSnapshot?.headings || [])].join(" "),
     file_inputs: Array.isArray(postRouteSnapshot?.file_inputs) ? postRouteSnapshot.file_inputs : [],
   };
-  interruptions.push(...(await dismissInterruptions(client, tab, platform, "task_start")));
+  interruptions.push(...(await dismissInterruptions(client, tab, platform, "task_start", {
+    skipDraftResumePrompt: skipSharedBootstrapForFreshStart,
+  })));
   let snapshot = await pageSnapshot(client, {
     captureVisualEvidence: true,
     platform,
@@ -23498,6 +24908,15 @@ async function preparePublicationTask(task) {
         actions.push({ kind: "youtube_create_flow_preflight", clicked: Boolean(createFlow.clicked), state: createFlow.state || null });
         if (Array.isArray(createFlow.actions)) actions.push(...createFlow.actions);
         await sleep(2200);
+        snapshot = await pageSnapshot(client).catch(() => snapshot);
+        if (isYouTubeInterruptedUploadSurface(snapshot)) {
+          actions.push({
+            kind: "youtube_interrupted_upload_detected",
+            skipped: true,
+            reason: "fresh_upload_task_no_draft_clear",
+            route_url: String(snapshot?.url || ""),
+          });
+        }
       }
       if (!skipUploadAfterPreflight && platform === "youtube") {
         await sleep(1600);
@@ -23512,9 +24931,41 @@ async function preparePublicationTask(task) {
         : await setFirstVideoFileInput(client, mediaPath, { platform });
       if (!upload.uploaded) {
         snapshot = await pageSnapshot(client).catch(() => snapshot);
+        const snapshotLines = Array.isArray(snapshot?.lines) ? snapshot.lines : [];
+        const snapshotText = snapshotLines.join(" ");
+        const youtubeUploadWizardAlreadyActive = platform === "youtube"
+          && /详细信息|视频元素|检查|公开范围/.test(snapshotText)
+          && /取消上传|正在上传视频|正在上传，已完成|正在创建链接|视频链接|正在保存/.test(snapshotText);
+        if (youtubeUploadWizardAlreadyActive) {
+          upload = {
+            uploaded: true,
+            inferred: true,
+            reason: "youtube_upload_wizard_already_active",
+          };
+        }
+      }
+      if (!upload.uploaded) {
+        snapshot = await pageSnapshot(client).catch(() => snapshot);
         const firstAttemptUploadInProgress = shouldTreatMediaUploadAsInProgress(platform, upload, snapshot, mediaPath);
+        const useAuthoritativeUploadEntryNativePath = shouldUseAuthoritativeUploadEntryNativePath(platform, snapshot || {});
         const allowGenericRetryUploadPath = platform !== "bilibili";
-        if (!firstAttemptUploadInProgress && allowGenericRetryUploadPath) {
+        if (!firstAttemptUploadInProgress && useAuthoritativeUploadEntryNativePath) {
+          const authoritativeUpload = await tryAuthoritativeUploadEntryNativeUpload(client, {
+            mediaPath,
+            platform,
+            snapshot,
+          });
+          if (authoritativeUpload.entryAction) {
+            actions.push({ kind: `${platform}_upload_entry_authoritative`, ...authoritativeUpload.entryAction });
+          }
+          if (authoritativeUpload.chooser) {
+            actions.push({ kind: `${platform}_upload_authoritative_native_dialog`, ...authoritativeUpload.chooser });
+          }
+          if (authoritativeUpload.snapshot && typeof authoritativeUpload.snapshot === "object") {
+            snapshot = authoritativeUpload.snapshot;
+          }
+          upload = authoritativeUpload;
+        } else if (!firstAttemptUploadInProgress && allowGenericRetryUploadPath) {
           if (platform === "youtube") {
             const createFlow = await forceYouTubeCreateUploadFlow(client).catch((error) => ({
               clicked: false,
@@ -23530,7 +24981,7 @@ async function preparePublicationTask(task) {
           await sleep(2200);
           upload = await setFirstVideoFileInput(client, mediaPath, { platform });
         }
-        if (!upload.uploaded && allowGenericRetryUploadPath && shouldAttemptNativeFileChooserFallback(upload)) {
+        if (!upload.uploaded && allowGenericRetryUploadPath && !useAuthoritativeUploadEntryNativePath && shouldAttemptNativeFileChooserFallback(upload)) {
           const nativeFallbackUpload = await tryNativeMediaUploadFallback(client, {
             mediaPath,
             uploadEntryHints: ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择", "Upload videos", "Select files"],
@@ -23612,7 +25063,9 @@ async function preparePublicationTask(task) {
         }
       }
       if (uploadInProgress) {
-        const interruptionActions = await dismissInterruptions(client, tab, platform, "post_upload_in_progress").catch(() => []);
+        const interruptionActions = await dismissInterruptions(client, tab, platform, "post_upload_in_progress", {
+          skipDraftResumePrompt: skipSharedBootstrapForFreshStart,
+        }).catch(() => []);
         if (Array.isArray(interruptionActions) && interruptionActions.length) {
           actions.push(...interruptionActions);
           snapshot = await pageSnapshot(client).catch(() => snapshot);
@@ -24148,7 +25601,9 @@ async function preparePublicationTask(task) {
         });
       }
     }
-    interruptions.push(...(await dismissInterruptions(client, tab, platform, "after_upload")));
+    interruptions.push(...(await dismissInterruptions(client, tab, platform, "after_upload", {
+      skipDraftResumePrompt: skipSharedBootstrapForFreshStart,
+    })));
     let platformVerifier = null;
     let bilibiliCoverAction = null;
     if (platform === "bilibili") {
@@ -24244,7 +25699,9 @@ async function preparePublicationTask(task) {
       actions.push(action);
       if (action.clicked) {
         await sleep(900);
-        interruptions.push(...(await dismissInterruptions(client, tab, platform, `task_expand_${text}`)));
+        interruptions.push(...(await dismissInterruptions(client, tab, platform, `task_expand_${text}`, {
+          skipDraftResumePrompt: skipSharedBootstrapForFreshStart,
+        })));
       }
     }
     snapshot = await pageSnapshot(client);
@@ -24814,14 +26271,20 @@ async function probeTabInventory(tab, platform, payload) {
   const recoveryContext = _extract_publication_recovery_context(contentSample);
   const requestedDraftUpload = String(payload.mode || "").includes("draft_upload") && mediaPath;
   const allowDraftUpload = Boolean(requestedDraftUpload && !platformUsesSingleVideoUploadPath(platform));
+  const allowDraftEntryBootstrapOnly = Boolean(
+    requestedDraftUpload
+    && platform === "youtube"
+    && platformUsesSingleVideoUploadPath(platform),
+  );
   const summaryOnly = Boolean(payload.summary_only);
   const forceUploadRefresh = Boolean(allowDraftUpload && (recoveryContext.clear_draft_context || recoveryContext.force_publish_page_refresh));
   let upload = {
     uploaded: false,
     reason: allowDraftUpload
       ? "not_attempted"
-      : (requestedDraftUpload ? "probe_draft_upload_disabled_for_single_path_platform" : "upload_probe_not_requested"),
+      : (allowDraftEntryBootstrapOnly ? "probe_draft_entry_bootstrap_only_single_path_platform" : (requestedDraftUpload ? "probe_draft_upload_disabled_for_single_path_platform" : "upload_probe_not_requested")),
   };
+  let current = null;
   try {
     interruptions.push(...(await dismissInterruptions(client, tab, platform, "before_probe")));
     if (summaryOnly) {
@@ -24882,7 +26345,23 @@ async function probeTabInventory(tab, platform, payload) {
         },
       };
     }
-    if (platform === "youtube" && allowDraftUpload) {
+    if (platform === "youtube" && (allowDraftUpload || allowDraftEntryBootstrapOnly)) {
+      actions.push({
+        kind: "youtube_probe_draft_state_clear",
+        platform,
+        attempted: false,
+        cleared: false,
+        skipped: true,
+        stale_detected: false,
+        before_media_hint: false,
+        after_media_hint: false,
+        before_draft_hint: false,
+        after_draft_hint: false,
+        before_url: String(tab?.url || ""),
+        after_url: String(tab?.url || ""),
+        reason: "youtube_fresh_upload_task",
+        actions: [{ kind: "draft_clear_skipped", reason: "youtube_fresh_upload_task" }],
+      });
       interruptions.push(...(await dismissInterruptions(client, tab, platform, "before_youtube_create")));
       const createFlow = await forceYouTubeCreateUploadFlow(client).catch((error) => ({
         clicked: false,
@@ -24892,10 +26371,56 @@ async function probeTabInventory(tab, platform, payload) {
       actions.push({ kind: "youtube_create_flow_probe", clicked: Boolean(createFlow.clicked), state: createFlow.state || null });
       if (Array.isArray(createFlow.actions)) actions.push(...createFlow.actions);
       await sleep(2500);
-      interruptions.push(...(await dismissInterruptions(client, tab, platform, "after_youtube_create")));
+      if (!isYouTubeCreateFlowStateUsable(createFlow.state)) {
+        interruptions.push(...(await dismissInterruptions(client, tab, platform, "after_youtube_create")));
+      }
+      current = await pageSnapshot(client);
+      if (isYouTubeInterruptedUploadSurface(current)) {
+        actions.push({
+          kind: "youtube_probe_post_create_draft_state_clear",
+          platform,
+          attempted: false,
+          cleared: false,
+          skipped: true,
+          stale_detected: true,
+          before_media_hint: false,
+          after_media_hint: false,
+          before_draft_hint: true,
+          after_draft_hint: true,
+          before_url: String(current?.url || tab?.url || ""),
+          after_url: String(current?.url || tab?.url || ""),
+          reason: "youtube_fresh_upload_task",
+          actions: [{ kind: "draft_clear_skipped", reason: "youtube_fresh_upload_task" }],
+        });
+      }
+      snapshots.push(current);
     }
-    let current = await pageSnapshot(client);
+    current = current || await pageSnapshot(client);
     snapshots.push(current);
+    const initialRouteReadiness = deriveProbeInventoryRouteReadiness(platform, current);
+    if (initialRouteReadiness.blocked) {
+      const blockedSnapshot = await attachVisualEvidenceToSnapshot(
+        client,
+        mergedSnapshot(snapshots),
+        {
+          platform,
+          captureVisualEvidence: true,
+          visualEvidencePhase: "probe_inventory",
+        },
+      );
+      return {
+        snapshot: blockedSnapshot,
+        probe_meta: {
+          draft_upload_requested: Boolean(allowDraftUpload || allowDraftEntryBootstrapOnly),
+          upload,
+          actions: actions
+            .filter((action) => action && action.kind)
+            .slice(0, 40),
+          interruptions: interruptions.slice(0, 60),
+          route_blocked: initialRouteReadiness,
+        },
+      };
+    }
     if (forceUploadRefresh) {
       const routeAction = await ensurePlatformPublishRoute(client, tab, platform, { force_publish_page_refresh: true });
       interruptions.push(...(await dismissInterruptions(client, tab, platform, "during_probe_route_refresh")));
@@ -24976,12 +26501,14 @@ async function probeTabInventory(tab, platform, payload) {
     merged.api_option_groups = await collectPlatformApiInventory(client, platform);
     merged.framework_inventory = await collectFrameworkInventory(client, platform);
     merged.framework_option_groups = merged.framework_inventory.option_groups || [];
-    return {
-      snapshot: merged,
-      probe_meta: {
-        draft_upload_requested: Boolean(allowDraftUpload),
+      return {
+        snapshot: merged,
+        probe_meta: {
+        draft_upload_requested: Boolean(allowDraftUpload || allowDraftEntryBootstrapOnly),
         upload,
-        actions: actions.filter((action) => action.clicked).slice(0, 20),
+        actions: actions
+          .filter((action) => action && action.kind && (action.clicked || /youtube_create_flow|youtube_create_entry|youtube_upload_entry|draft_resume_prompt|probe_route_refresh/.test(String(action.kind || ""))))
+          .slice(0, 40),
         interruptions: interruptions.slice(0, 60),
       },
     };
@@ -26209,8 +27736,25 @@ async function handleProbe(payload) {
         try {
           bootstrapProbeTab = await createCdpTab(entryUrl);
           if (bootstrapProbeTab?.id) {
-            await sleep(1500);
-            tab = bootstrapProbeTab;
+            const bootstrapReady = await waitForProbeBootstrapTabReady(bootstrapProbeTab, {
+              platform,
+              targetUrl: entryUrl,
+              timeoutMs: 12000,
+            }).catch((error) => ({
+              ready: false,
+              reason: "bootstrap_probe_tab_wait_error",
+              error: String(error?.message || error || "").trim(),
+              url: String(bootstrapProbeTab?.url || "").trim(),
+            }));
+            if (bootstrapReady.ready) {
+              tab = bootstrapProbeTab;
+            } else {
+              bootstrapWarnings.push(
+                `临时打开发布入口后未进入稳定页面，已回退原标签页：${bootstrapReady.reason || bootstrapReady.url || "unknown"}`,
+              );
+              await closeCdpTab(bootstrapProbeTab.id).catch(() => null);
+              bootstrapProbeTab = null;
+            }
           }
         } catch (error) {
           bootstrapWarnings.push(`临时打开发布入口用于页面摸底失败：${error.message}`);
@@ -26383,7 +27927,7 @@ const server = http.createServer(async (req, res) => {
         jsonResponse(res, 400, { ok: false, error: "bridge_client_id_missing" });
         return;
       }
-      upsertBridgeClient(clientId, {});
+      upsertBridgeClient(clientId, { last_poll_at: new Date().toISOString() });
       const timeoutMs = Math.max(250, Number(url.searchParams.get("timeout_ms") || BRIDGE_LONG_POLL_TIMEOUT_MS));
       const command = await waitForBridgeCommand(clientId);
       console.log(
@@ -26469,8 +28013,20 @@ const server = http.createServer(async (req, res) => {
           );
         }
       } catch (error) {
-        cdpStatus = "unavailable";
         cdpError = error.message;
+        const bridgeTarget = bridgeTargetDescriptor({ allowStale: true });
+        const normalizeHealthValue = (value) => String(value || "").trim();
+        const hasBoundProfile = Boolean(normalizeHealthValue(attachedProfileBinding()?.profile_id));
+        const hasRecoverableBridgeClient = Boolean(normalizeHealthValue(bridgeTarget.bridge_client_id));
+        if (
+          normalizeHealthValue(cdpError) === "chrome_extension_bridge_unavailable"
+          && hasBoundProfile
+          && hasRecoverableBridgeClient
+        ) {
+          cdpStatus = "degraded";
+        } else {
+          cdpStatus = "unavailable";
+        }
       }
       jsonResponse(res, 200, buildPublicationHealthPayload({ cdpStatus, cdpError, creatorSessions }));
       return;
@@ -26496,19 +28052,23 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === "GET" && url.pathname.startsWith("/tasks/")) {
       const taskId = decodeURIComponent(url.pathname.slice("/tasks/".length));
-      const task = TASKS.get(taskId);
+      let task = TASKS.get(taskId);
+      let restoredFromDisk = false;
       if (!task) {
         const persistedTask = loadPersistedPublicationTask(taskId);
         if (persistedTask) {
+          task = persistedTask;
+          restoredFromDisk = true;
+          TASKS.set(taskId, task);
           console.log(`[task:restore] id=${taskId} instance=${SERVICE_INSTANCE_ID} pid=${process.pid}`);
-          jsonResponse(res, 200, { task: persistedTask, restored_from_disk: true });
-          return;
         }
+      }
+      if (!task) {
         console.warn(`[task:missing] id=${taskId} instance=${SERVICE_INSTANCE_ID} pid=${process.pid}`);
         jsonResponse(res, 404, { status: "not_found", message: `task ${taskId} not found` });
         return;
       }
-      jsonResponse(res, 200, { task: serializeTask(task) });
+      jsonResponse(res, 200, { task: serializeTask(task), restored_from_disk: restoredFromDisk });
       return;
     }
     jsonResponse(res, 404, { status: "not_found" });

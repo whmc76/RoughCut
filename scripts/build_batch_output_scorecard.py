@@ -9,11 +9,14 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 from sqlalchemy import select
 
 from roughcut.db.models import Artifact, Timeline
 from roughcut.db.session import get_session_factory
+from roughcut.edit.cut_analysis import cut_analysis_accepted_cuts, cut_analysis_effective_applied_cuts
+from roughcut.edit.packaging_timeline import packaging_timeline_editing_accents
 from roughcut.media.variant_timeline_bundle import (
     variant_cut_analysis_summary,
     resolve_effective_variant_timeline_bundle,
@@ -21,12 +24,18 @@ from roughcut.media.variant_timeline_bundle import (
     variant_refine_decision_summary,
     variant_timeline_diagnostics,
 )
+from roughcut.pipeline.quality import (
+    collect_editing_risk_gate_signals,
+    collect_editing_risk_gate_signals_from_inputs,
+)
+from roughcut.pipeline.render_diagnostics import classify_render_or_avatar_reason_category
 from roughcut.publication_platform_matrix import (
     normalize_publication_platform_name,
     platform_manual_handoff_only,
     platform_soft_verification_fields,
 )
 from roughcut.publication_packaging import publication_packaging_entry_publish_ready
+from scripts.run_fullchain_batch import _normalize_render_diagnostics_for_reporting
 
 
 def parse_args() -> argparse.Namespace:
@@ -69,6 +78,23 @@ def _mean(values: list[float | None]) -> float | None:
     if not numbers:
         return None
     return _round_score(sum(numbers) / len(numbers))
+
+
+def _live_readiness_summary(batch_report: dict[str, Any]) -> dict[str, Any] | None:
+    payload = batch_report.get("live_readiness") if isinstance(batch_report.get("live_readiness"), dict) else {}
+    if not payload:
+        return None
+    checks = payload.get("checks") if isinstance(payload.get("checks"), dict) else {}
+    failed_checks = sorted(
+        str(name).strip()
+        for name, check in checks.items()
+        if str(name).strip() and isinstance(check, dict) and not bool(check.get("passed"))
+    )
+    return {
+        "gate_passed": bool(payload.get("gate_passed")),
+        "status": str(payload.get("status") or "").strip() or None,
+        "failed_checks": failed_checks,
+    }
 
 
 def _score_from_status(status: str | None, *, pass_score: float = 100.0, warn_score: float = 75.0) -> float:
@@ -175,6 +201,30 @@ def _summarize_variant_score(name: str, media_path: str | None, quality_check: d
     }
 
 
+def _build_version_scores(render_outputs: dict[str, Any]) -> list[dict[str, Any]]:
+    if not isinstance(render_outputs, dict):
+        return []
+    variant_quality_checks = (
+        render_outputs.get("quality_checks")
+        if isinstance(render_outputs.get("quality_checks"), dict)
+        else {}
+    )
+    variant_specs = (
+        ("packaged", "packaged_mp4", "subtitle_sync"),
+        ("plain", "plain_mp4", "plain_subtitle_sync"),
+        ("avatar", "avatar_mp4", "avatar_subtitle_sync"),
+        ("ai_effect", "ai_effect_mp4", "ai_effect_subtitle_sync"),
+    )
+    return [
+        _summarize_variant_score(
+            variant_name,
+            str(render_outputs.get(media_path_key) or "").strip(),
+            variant_quality_checks.get(quality_check_key),
+        )
+        for variant_name, media_path_key, quality_check_key in variant_specs
+    ]
+
+
 def _score_platform_package(packaging: dict[str, Any], publish_path: str | None) -> dict[str, Any]:
     if not packaging and not publish_path:
         return {
@@ -273,8 +323,46 @@ def _score_platform_package(packaging: dict[str, Any], publish_path: str | None)
     }
 
 
-def _score_avatar(avatar_plan: dict[str, Any], render_outputs: dict[str, Any]) -> dict[str, Any]:
-    if not avatar_plan and not render_outputs.get("avatar_result"):
+def _score_avatar(
+    avatar_plan: dict[str, Any],
+    render_outputs: dict[str, Any],
+    render_diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    diagnostics = render_diagnostics if isinstance(render_diagnostics, dict) else {}
+    runtime_avatar_result = (
+        diagnostics.get("avatar_result")
+        if isinstance(diagnostics.get("avatar_result"), dict)
+        else {}
+    )
+    render_step = (
+        diagnostics.get("render_step")
+        if isinstance(diagnostics.get("render_step"), dict)
+        else {}
+    )
+    render_avatar_result = (
+        render_outputs.get("avatar_result")
+        if isinstance(render_outputs.get("avatar_result"), dict)
+        else {}
+    )
+    avatar_result = runtime_avatar_result or render_avatar_result
+    weak_missing_avatar_reason = str(avatar_result.get("reason") or "").strip().lower() if isinstance(avatar_result, dict) else ""
+    if weak_missing_avatar_reason in {"missing_avatar_render", "missing_avatar_video", "missing_avatar_output"}:
+        render_step_status = str(render_step.get("status") or "").strip().lower()
+        render_step_reason = str(render_step.get("reason") or "").strip()
+        if render_step_status == "failed" and render_step_reason:
+            avatar_result = {}
+    if not avatar_result:
+        render_step_status = str(render_step.get("status") or "").strip().lower()
+        render_step_reason = str(render_step.get("reason") or "").strip()
+        if render_step_status == "failed" and render_step_reason:
+            avatar_result = {
+                "status": "blocked",
+                "reason": render_step_reason,
+                "detail": str(render_step.get("detail") or render_step.get("error") or "").strip(),
+            }
+        elif render_step_status and render_step_status != "done":
+            avatar_result = {"status": render_step_status}
+    if not avatar_plan and not avatar_result:
         return {
             "score": None,
             "grade": "N/A",
@@ -282,7 +370,6 @@ def _score_avatar(avatar_plan: dict[str, Any], render_outputs: dict[str, Any]) -
             "summary": "未启用数字人模块",
         }
 
-    avatar_result = render_outputs.get("avatar_result") if isinstance(render_outputs.get("avatar_result"), dict) else {}
     status = str(avatar_result.get("status") or "").strip().lower()
     integration_mode = str(avatar_result.get("integration_mode") or avatar_plan.get("integration_mode") or "").strip()
     render_status = str(((avatar_plan.get("render_execution") or {}).get("status")) or "").strip().lower()
@@ -294,7 +381,17 @@ def _score_avatar(avatar_plan: dict[str, Any], render_outputs: dict[str, Any]) -
         reasons.append("数字人版本已写入")
     elif status:
         score -= 35.0
-        reasons.append(f"avatar_result={status}")
+        reason = str(avatar_result.get("reason") or "").strip()
+        reason_category = str(avatar_result.get("reason_category") or "").strip()
+        if not reason_category:
+            reason_category = classify_render_or_avatar_reason_category(reason) or ""
+        if reason:
+            if reason_category:
+                reasons.append(f"avatar_result={status}:{reason}({reason_category})")
+            else:
+                reasons.append(f"avatar_result={status}:{reason}")
+        else:
+            reasons.append(f"avatar_result={status}")
     else:
         score -= 45.0
         reasons.append("缺少 avatar_result")
@@ -371,7 +468,7 @@ def _score_ai_effects(render_plan: dict[str, Any], render_outputs: dict[str, Any
     overlay_events = (packaged_variant.get("overlay_events") or {}) if isinstance(packaged_variant, dict) else {}
     packaged_overlays = list(overlay_events.get("emphasis_overlays") or [])
     packaged_sounds = list(overlay_events.get("sound_effects") or [])
-    editing_accents = render_plan.get("editing_accents") if isinstance(render_plan.get("editing_accents"), dict) else {}
+    editing_accents = packaging_timeline_editing_accents(render_plan)
     transitions = (editing_accents.get("transitions") or {}) if isinstance(editing_accents, dict) else {}
     transition_indexes = list(transitions.get("boundary_indexes") or []) if isinstance(transitions, dict) else []
 
@@ -485,6 +582,18 @@ def _score_editing_from_inputs(
     }
 
 
+def _effective_applied_cut_count(
+    *,
+    accepted_cut_count: int,
+    refine_decision_summary: dict[str, Any] | None = None,
+) -> int:
+    summary = refine_decision_summary if isinstance(refine_decision_summary, dict) else {}
+    refine_auto_apply_cut_count = int(
+        summary.get("rule_auto_apply_cut_count") or 0
+    ) + int(summary.get("multimodal_auto_apply_cut_count") or 0)
+    return max(int(accepted_cut_count or 0), refine_auto_apply_cut_count)
+
+
 def _score_editing_from_legacy_editorial(
     job: dict[str, Any],
     editorial: dict[str, Any],
@@ -497,7 +606,7 @@ def _score_editing_from_legacy_editorial(
     llm_reviewed = bool(llm_cut_review.get("reviewed"))
     llm_error = str(llm_cut_review.get("error") or "").strip()
     llm_candidate_count = int(llm_cut_review.get("candidate_count") or 0)
-    transitions = (((render_plan.get("editing_accents") or {}).get("transitions")) or {}) if isinstance(render_plan, dict) else {}
+    transitions = ((packaging_timeline_editing_accents(render_plan).get("transitions")) or {}) if isinstance(render_plan, dict) else {}
     boundary_indexes = list(transitions.get("boundary_indexes") or []) if isinstance(transitions, dict) else []
     issue_codes = [str(code).strip() for code in list(job.get("quality_issue_codes") or []) if str(code).strip()]
     return _score_editing_from_inputs(
@@ -509,6 +618,57 @@ def _score_editing_from_legacy_editorial(
         boundary_indexes=boundary_indexes,
         issue_codes=issue_codes,
     )
+
+
+def _editing_risk_metrics_from_legacy_inputs(
+    job: dict[str, Any],
+    editorial: dict[str, Any],
+    cut_analysis: dict[str, Any] | None,
+) -> dict[str, Any]:
+    analysis = editorial.get("analysis") if isinstance(editorial.get("analysis"), dict) else {}
+    llm_cut_review = analysis.get("llm_cut_review") if isinstance(analysis.get("llm_cut_review"), dict) else {}
+    accepted_cuts = cut_analysis_effective_applied_cuts(cut_analysis) or [
+        dict(item) for item in list(analysis.get("accepted_cuts") or []) if isinstance(item, dict)
+    ]
+    multimodal_trim_review_summary = (
+        dict(cut_analysis.get("multimodal_trim_review_summary") or {}) if isinstance(cut_analysis, dict) else {}
+    )
+    high_risk_cut_count = sum(
+        1 for item in accepted_cuts if float(item.get("boundary_keep_energy", 0.0) or 0.0) >= 1.0
+    )
+    editing_risk_gate = collect_editing_risk_gate_signals_from_inputs(
+        high_risk_cut_count=high_risk_cut_count,
+        llm_cut_review=llm_cut_review,
+        multimodal_trim_review_summary=multimodal_trim_review_summary,
+        refine_decision_summary={
+            "candidate_manual_confirm": int((cut_analysis or {}).get("manual_confirm_candidate_count") or 0),
+        },
+    )
+    live_stage_validations = [dict(item) for item in list(job.get("live_stage_validations") or []) if isinstance(item, dict)]
+    render_stage = next(
+        (item for item in live_stage_validations if str(item.get("stage") or "").strip().lower() == "render"),
+        {},
+    )
+    render_stage_status = str(render_stage.get("status") or "").strip().lower()
+    if str(job.get("status") or "").strip().lower() == "partial" and render_stage_status == "skipped":
+        source_reason = "pre_render_stop_without_variant_bundle"
+    elif render_stage_status == "failed":
+        source_reason = "render_failed_before_variant_bundle"
+    else:
+        source_reason = "variant_bundle_unavailable"
+    return {
+        "source": "legacy_editorial_cut_analysis",
+        "source_reason": source_reason,
+        "high_risk_cut_count": high_risk_cut_count,
+        "auto_apply_candidate_count": int((cut_analysis or {}).get("auto_apply_candidate_count") or 0),
+        "manual_confirm_count": int((cut_analysis or {}).get("manual_confirm_candidate_count") or 0),
+        "multimodal_pending_count": int(multimodal_trim_review_summary.get("pending_count") or 0),
+        "llm_reviewed": bool(llm_cut_review.get("reviewed")),
+        "llm_error": str(editing_risk_gate.get("llm_cut_review_error") or "").strip(),
+        "llm_provider_degraded": bool(editing_risk_gate.get("llm_cut_review_provider_degraded")),
+        "blocking_high_risk_cuts": bool(editing_risk_gate.get("blocking_high_risk_cuts")),
+        "blocking_manual_confirm_heavy": bool(editing_risk_gate.get("blocking_manual_confirm_heavy")),
+    }
 
 
 def _score_editing_with_variant_bundle(
@@ -526,11 +686,14 @@ def _score_editing_with_variant_bundle(
     refine_decision_summary = variant_refine_decision_summary(resolved_bundle)
     llm_cut_review = variant_llm_cut_review(resolved_bundle)
     keep_ratio = _safe_float(job.get("keep_ratio")) or 0.0
-    accepted_cut_count = int(cut_analysis_summary.get("accepted_cut_count") or 0)
+    accepted_cut_count = _effective_applied_cut_count(
+        accepted_cut_count=int(cut_analysis_summary.get("accepted_cut_count") or 0),
+        refine_decision_summary=refine_decision_summary,
+    )
     llm_reviewed = bool(llm_cut_review.get("reviewed"))
     llm_error = str(llm_cut_review.get("error") or "").strip()
     llm_candidate_count = int(llm_cut_review.get("candidate_count") or 0)
-    transitions = (((render_plan.get("editing_accents") or {}).get("transitions")) or {}) if isinstance(render_plan, dict) else {}
+    transitions = ((packaging_timeline_editing_accents(render_plan).get("transitions")) or {}) if isinstance(render_plan, dict) else {}
     boundary_indexes = list(transitions.get("boundary_indexes") or []) if isinstance(transitions, dict) else []
     issue_codes = [str(code).strip() for code in list(job.get("quality_issue_codes") or []) if str(code).strip()]
     refine_mode = str(refine_decision_summary.get("mode") or "").strip()
@@ -546,6 +709,42 @@ def _score_editing_with_variant_bundle(
         refine_mode=refine_mode,
         refine_candidate_total=refine_candidate_total,
     )
+
+
+def _editing_risk_metrics(
+    job: dict[str, Any],
+    editorial: dict[str, Any],
+    cut_analysis: dict[str, Any] | None,
+    variant_bundle: dict[str, Any] | None,
+) -> dict[str, Any]:
+    resolved_bundle = resolve_effective_variant_timeline_bundle(variant_bundle) or {}
+    if not resolved_bundle:
+        return _editing_risk_metrics_from_legacy_inputs(job, editorial, cut_analysis)
+    refine_decision_summary = variant_refine_decision_summary(resolved_bundle)
+    editing_risk_gate = collect_editing_risk_gate_signals(resolved_bundle)
+    llm_cut_review = dict(editing_risk_gate.get("llm_cut_review") or {})
+    high_risk_cut_count = int(editing_risk_gate.get("high_risk_cut_count") or 0)
+    auto_apply_candidate_count = int(
+        refine_decision_summary.get("candidate_auto_apply")
+        or (variant_cut_analysis_summary(resolved_bundle).get("auto_apply_candidate_count") or 0)
+    )
+    manual_confirm_count = int(editing_risk_gate.get("refine_manual_confirm") or 0)
+    multimodal_pending_count = int(editing_risk_gate.get("multimodal_pending_count") or 0)
+    llm_reviewed = bool(llm_cut_review.get("reviewed"))
+    llm_error = str(editing_risk_gate.get("llm_cut_review_error") or "").strip()
+    return {
+        "source": "variant_timeline_bundle",
+        "source_reason": "variant_bundle_available",
+        "high_risk_cut_count": high_risk_cut_count,
+        "auto_apply_candidate_count": auto_apply_candidate_count,
+        "manual_confirm_count": manual_confirm_count,
+        "multimodal_pending_count": multimodal_pending_count,
+        "llm_reviewed": llm_reviewed,
+        "llm_error": llm_error,
+        "llm_provider_degraded": bool(editing_risk_gate.get("llm_cut_review_provider_degraded")),
+        "blocking_high_risk_cuts": bool(editing_risk_gate.get("blocking_high_risk_cuts")),
+        "blocking_manual_confirm_heavy": bool(editing_risk_gate.get("blocking_manual_confirm_heavy")),
+    }
 
 
 def _build_stage_scores(job: dict[str, Any]) -> list[dict[str, Any]]:
@@ -565,6 +764,28 @@ def _build_stage_scores(job: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _merge_runtime_render_diagnostics(
+    batch_render_diagnostics: dict[str, Any] | None,
+    runtime_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(batch_render_diagnostics or {}) if isinstance(batch_render_diagnostics, dict) else {}
+    runtime = runtime_payload if isinstance(runtime_payload, dict) else {}
+    for key in ("avatar_result", "cover_result"):
+        value = runtime.get(key)
+        if isinstance(value, dict) and value:
+            merged[key] = dict(value)
+    return _normalize_render_diagnostics_for_reporting(merged)
+
+
+def _job_stopped_before_render(job: dict[str, Any]) -> bool:
+    live_stage_scores = [dict(item) for item in list(job.get("live_stage_scores") or []) if isinstance(item, dict)]
+    render_stage = next(
+        (item for item in live_stage_scores if str(item.get("stage") or "").strip().lower() == "render"),
+        {},
+    )
+    return str(render_stage.get("status") or "").strip().lower() == "skipped"
 
 
 async def _load_job_runtime(job_id: str) -> dict[str, Any]:
@@ -604,10 +825,12 @@ async def build_scorecard(batch_report: dict[str, Any]) -> dict[str, Any]:
         timelines = runtime["timelines"]
 
         render_outputs = (artifacts.get("render_outputs") or {}).get("data_json") or {}
+        render_runtime_diagnostics = (artifacts.get("render_runtime_diagnostics") or {}).get("data_json") or {}
         avatar_plan = (artifacts.get("avatar_commentary_plan") or {}).get("data_json") or {}
         packaging = (artifacts.get("platform_packaging_md") or {}).get("data_json") or {}
         subtitle_quality = (artifacts.get("subtitle_quality_report") or {}).get("data_json") or {}
         variant_bundle = (artifacts.get("variant_timeline_bundle") or {}).get("data_json") or {}
+        cut_analysis = (artifacts.get("cut_analysis") or {}).get("data_json") or {}
         editorial = timelines.get("editorial") or {}
         render_plan = timelines.get("render_plan") or {}
 
@@ -632,23 +855,26 @@ async def build_scorecard(batch_report: dict[str, Any]) -> dict[str, Any]:
             else "缺少 subtitle_quality_report",
         }
 
-        variant_quality_checks = render_outputs.get("quality_checks") if isinstance(render_outputs.get("quality_checks"), dict) else {}
-        version_scores = [
-            _summarize_variant_score("packaged", str(render_outputs.get("packaged_mp4") or "").strip(), variant_quality_checks.get("subtitle_sync")),
-            _summarize_variant_score("plain", str(render_outputs.get("plain_mp4") or "").strip(), variant_quality_checks.get("plain_subtitle_sync")),
-            _summarize_variant_score("avatar", str(render_outputs.get("avatar_mp4") or "").strip(), variant_quality_checks.get("avatar_subtitle_sync")),
-            _summarize_variant_score("ai_effect", str(render_outputs.get("ai_effect_mp4") or "").strip(), variant_quality_checks.get("ai_effect_subtitle_sync")),
-        ]
+        version_scores = _build_version_scores(render_outputs)
 
         packaging_score = _score_platform_package(
             packaging,
             str((artifacts.get("platform_packaging_md") or {}).get("storage_path") or "").strip() or str(job.get("platform_doc") or "").strip(),
         )
-        avatar_score = _score_avatar(avatar_plan, render_outputs)
+        normalized_render_diagnostics = _merge_runtime_render_diagnostics(
+            job.get("render_diagnostics") if isinstance(job.get("render_diagnostics"), dict) else None,
+            render_runtime_diagnostics if isinstance(render_runtime_diagnostics, dict) else None,
+        )
+        avatar_score = _score_avatar(
+            avatar_plan,
+            render_outputs,
+            normalized_render_diagnostics,
+        )
         tts_score = _score_tts(avatar_plan)
         ai_effects_score = _score_ai_effects(render_plan, render_outputs, variant_bundle)
         subtitle_effects_score = _score_subtitle_effects(render_plan)
         editing_score = _score_editing_with_variant_bundle(job, editorial, render_plan, variant_bundle)
+        editing_risk_metrics = _editing_risk_metrics(job, editorial, cut_analysis, variant_bundle)
         live_stage_scores = _build_stage_scores(job)
 
         scorecard_jobs.append(
@@ -665,6 +891,7 @@ async def build_scorecard(batch_report: dict[str, Any]) -> dict[str, Any]:
                 "ai_effects": ai_effects_score,
                 "subtitle_effects": subtitle_effects_score,
                 "editing": editing_score,
+                "editing_risk_metrics": editing_risk_metrics,
                 "live_stage_scores": live_stage_scores,
             }
         )
@@ -709,6 +936,29 @@ async def build_scorecard(batch_report: dict[str, Any]) -> dict[str, Any]:
         score = _mean([_safe_float((job.get(name) or {}).get("score")) for job in scorecard_jobs])
         aggregate_dimensions.append({"dimension": name, "score": score, "grade": _score_to_grade(score)})
 
+    aggregate_risk_metrics = {
+        "high_risk_cut_count": sum(int((job.get("editing_risk_metrics") or {}).get("high_risk_cut_count") or 0) for job in scorecard_jobs),
+        "auto_apply_candidate_count": sum(int((job.get("editing_risk_metrics") or {}).get("auto_apply_candidate_count") or 0) for job in scorecard_jobs),
+        "manual_confirm_count": sum(int((job.get("editing_risk_metrics") or {}).get("manual_confirm_count") or 0) for job in scorecard_jobs),
+        "multimodal_pending_count": sum(int((job.get("editing_risk_metrics") or {}).get("multimodal_pending_count") or 0) for job in scorecard_jobs),
+        "llm_reviewed_job_count": sum(1 for job in scorecard_jobs if bool((job.get("editing_risk_metrics") or {}).get("llm_reviewed"))),
+        "llm_provider_degraded_job_count": sum(
+            1 for job in scorecard_jobs if bool((job.get("editing_risk_metrics") or {}).get("llm_provider_degraded"))
+        ),
+        "blocking_high_risk_job_count": sum(1 for job in scorecard_jobs if bool((job.get("editing_risk_metrics") or {}).get("blocking_high_risk_cuts"))),
+        "blocking_manual_confirm_job_count": sum(
+            1 for job in scorecard_jobs if bool((job.get("editing_risk_metrics") or {}).get("blocking_manual_confirm_heavy"))
+        ),
+        "variant_bundle_job_count": sum(
+            1 for job in scorecard_jobs if str((job.get("editing_risk_metrics") or {}).get("source") or "").strip() == "variant_timeline_bundle"
+        ),
+        "legacy_risk_job_count": sum(
+            1
+            for job in scorecard_jobs
+            if str((job.get("editing_risk_metrics") or {}).get("source") or "").strip() == "legacy_editorial_cut_analysis"
+        ),
+    }
+
     return {
         "created_at": batch_report.get("created_at"),
         "batch_report": "",
@@ -716,10 +966,88 @@ async def build_scorecard(batch_report: dict[str, Any]) -> dict[str, Any]:
         "jobs": scorecard_jobs,
         "aggregate_stage_scores": aggregate_stage_scores,
         "aggregate_dimension_scores": aggregate_dimensions,
+        "aggregate_risk_metrics": aggregate_risk_metrics,
+        "live_readiness": _live_readiness_summary(batch_report),
     }
 
 
 def render_markdown(scorecard: dict[str, Any], batch_report_path: Path) -> str:
+    jobs = [dict(item) for item in list(scorecard.get("jobs") or []) if isinstance(item, dict)]
+    pre_render_only = bool(jobs) and all(_job_stopped_before_render(job) for job in jobs)
+    live_readiness = scorecard.get("live_readiness") if isinstance(scorecard.get("live_readiness"), dict) else {}
+    focus_failures = bool(live_readiness.get("failed_checks")) or any(str(job.get("output_path") or "").strip() == "" for job in jobs)
+
+    def _visible_aggregate_stage_items() -> list[dict[str, Any]]:
+        items = [dict(item) for item in list(scorecard.get("aggregate_stage_scores") or []) if isinstance(item, dict)]
+        if pre_render_only:
+            items = [
+                item
+                for item in items
+                if str(item.get("stage") or "").strip() not in {"render", "final_review", "platform_package"}
+            ]
+        if focus_failures:
+            failure_items = [item for item in items if str(item.get("grade") or "").strip() != "A"]
+            if failure_items:
+                return failure_items
+        return items
+
+    def _render_editing_risk_line(job: dict[str, Any]) -> str:
+        payload = job.get("editing_risk_metrics") if isinstance(job.get("editing_risk_metrics"), dict) else {}
+        parts = [
+            f"source={payload.get('source')}",
+            f"high_risk_cut_count={payload.get('high_risk_cut_count')}",
+            f"manual_confirm_count={payload.get('manual_confirm_count')}",
+            f"multimodal_pending_count={payload.get('multimodal_pending_count')}",
+            f"blocking_high_risk_cuts={str(bool(payload.get('blocking_high_risk_cuts'))).lower()}",
+            f"blocking_manual_confirm_heavy={str(bool(payload.get('blocking_manual_confirm_heavy'))).lower()}",
+        ]
+        if bool(payload.get("llm_provider_degraded")):
+            parts.append("llm_provider_degraded=true")
+        return "- editing_risk_metrics: " + ", ".join(parts)
+
+    def _visible_job_render_sections(job: dict[str, Any], *, job_pre_render_only: bool) -> list[str]:
+        if job_pre_render_only:
+            return []
+        sections = [
+            ("multi_platform_package", job.get("multi_platform_package") or {}),
+            ("avatar", job.get("avatar") or {}),
+            ("tts", job.get("tts") or {}),
+            ("ai_effects", job.get("ai_effects") or {}),
+        ]
+        lines_out: list[str] = []
+        for name, payload in sections:
+            status = str(payload.get("status") or "").strip().lower()
+            if focus_failures and status in {"not_generated", "skipped", "missing"}:
+                continue
+            lines_out.append(f"- {name}: {payload.get('score')} ({payload.get('grade')}) | {payload.get('summary')}")
+        visible_versions = [
+            dict(item)
+            for item in list(job.get("version_scores") or [])
+            if isinstance(item, dict)
+            and (not focus_failures or str(item.get("status") or "").strip().lower() not in {"not_generated", "skipped"})
+        ]
+        if visible_versions:
+            lines_out.append("- version_scores:")
+            for item in visible_versions:
+                lines_out.append(
+                    f"  - {item['name']}: {item.get('score')} ({item.get('grade')}) | {' / '.join(item.get('reasons') or [])}"
+                )
+        return lines_out
+
+    def _visible_live_stage_items(job: dict[str, Any], *, job_pre_render_only: bool) -> list[dict[str, Any]]:
+        items = [dict(item) for item in list(job.get("live_stage_scores") or []) if isinstance(item, dict)]
+        if job_pre_render_only:
+            items = [
+                item
+                for item in items
+                if str(item.get("stage") or "").strip() not in {"render", "final_review", "platform_package"}
+            ]
+        if focus_failures:
+            failure_items = [item for item in items if str(item.get("status") or "").strip().lower() != "pass"]
+            if failure_items:
+                return failure_items
+        return items
+
     lines = [
         "# Detailed Output Scorecard",
         "",
@@ -730,13 +1058,43 @@ def render_markdown(scorecard: dict[str, Any], batch_report_path: Path) -> str:
         "## Aggregate Dimensions",
         "",
     ]
+    hidden_dimensions = {"multi_platform_package", "avatar", "tts", "ai_effects"} if pre_render_only else set()
+    if focus_failures:
+        hidden_dimensions.update({"multi_platform_package", "tts", "ai_effects"})
     for item in list(scorecard.get("aggregate_dimension_scores") or []):
+        if str(item.get("dimension") or "").strip() in hidden_dimensions:
+            continue
         lines.append(f"- {item['dimension']}: {item.get('score')} ({item.get('grade')})")
+    risk_metrics = scorecard.get("aggregate_risk_metrics") if isinstance(scorecard.get("aggregate_risk_metrics"), dict) else {}
+    if risk_metrics:
+        lines.extend(["", "## Aggregate Risk Metrics", ""])
+        risk_lines = [
+            f"- high_risk_cut_count: {risk_metrics.get('high_risk_cut_count')}",
+            f"- manual_confirm_count: {risk_metrics.get('manual_confirm_count')}",
+            f"- multimodal_pending_count: {risk_metrics.get('multimodal_pending_count')}",
+            f"- blocking_high_risk_job_count: {risk_metrics.get('blocking_high_risk_job_count')}",
+            f"- blocking_manual_confirm_job_count: {risk_metrics.get('blocking_manual_confirm_job_count')}",
+        ]
+        if int(risk_metrics.get("llm_provider_degraded_job_count") or 0) > 0:
+            risk_lines.append(f"- llm_provider_degraded_job_count: {risk_metrics.get('llm_provider_degraded_job_count')}")
+        lines.extend(risk_lines)
+    if live_readiness:
+        lines.extend(
+            [
+                "",
+                "## Live Readiness",
+                "",
+                f"- gate_passed: {str(bool(live_readiness.get('gate_passed'))).lower()}",
+                f"- status: {live_readiness.get('status') or ''}",
+                f"- failed_checks: {', '.join(live_readiness.get('failed_checks') or []) or '-'}",
+            ]
+        )
     lines.extend(["", "## Aggregate Stages", ""])
-    for item in list(scorecard.get("aggregate_stage_scores") or []):
+    for item in _visible_aggregate_stage_items():
         lines.append(f"- {item['stage']}: {item.get('score')} ({item.get('grade')})")
 
-    for job in list(scorecard.get("jobs") or []):
+    for job in jobs:
+        job_pre_render_only = _job_stopped_before_render(job)
         lines.extend(
             [
                 "",
@@ -745,21 +1103,14 @@ def render_markdown(scorecard: dict[str, Any], batch_report_path: Path) -> str:
                 f"- output_path: {job.get('output_path') or ''}",
                 f"- overall_video_quality: {job['overall_video_quality'].get('score')} ({job['overall_video_quality'].get('grade')}) | {job['overall_video_quality'].get('summary')}",
                 f"- subtitle_quality: {job['subtitle_quality'].get('score')} ({job['subtitle_quality'].get('grade')}) | {job['subtitle_quality'].get('summary')}",
-                f"- multi_platform_package: {job['multi_platform_package'].get('score')} ({job['multi_platform_package'].get('grade')}) | {job['multi_platform_package'].get('summary')}",
-                f"- avatar: {job['avatar'].get('score')} ({job['avatar'].get('grade')}) | {job['avatar'].get('summary')}",
-                f"- tts: {job['tts'].get('score')} ({job['tts'].get('grade')}) | {job['tts'].get('summary')}",
-                f"- ai_effects: {job['ai_effects'].get('score')} ({job['ai_effects'].get('grade')}) | {job['ai_effects'].get('summary')}",
                 f"- subtitle_effects: {job['subtitle_effects'].get('score')} ({job['subtitle_effects'].get('grade')}) | {job['subtitle_effects'].get('summary')}",
                 f"- editing: {job['editing'].get('score')} ({job['editing'].get('grade')}) | {job['editing'].get('summary')}",
-                "- version_scores:",
+                _render_editing_risk_line(job),
             ]
         )
-        for item in list(job.get("version_scores") or []):
-            lines.append(
-                f"  - {item['name']}: {item.get('score')} ({item.get('grade')}) | {' / '.join(item.get('reasons') or [])}"
-            )
+        lines.extend(_visible_job_render_sections(job, job_pre_render_only=job_pre_render_only))
         lines.append("- live_stage_scores:")
-        for item in list(job.get("live_stage_scores") or []):
+        for item in _visible_live_stage_items(job, job_pre_render_only=job_pre_render_only):
             lines.append(
                 f"  - {item['stage']}: {item.get('score')} ({item.get('grade')}) | {item.get('status')} | {item.get('summary')}"
             )

@@ -105,6 +105,13 @@ def _aggregate_summary(batch_report: dict[str, Any], audit_report: dict[str, Any
     jobs = [item for item in batch_report.get("jobs") or [] if isinstance(item, dict)]
     audit_jobs = [item for item in audit_report.get("jobs") or [] if isinstance(item, dict)]
     dimensions = _aggregate_dimension_map(scorecard_report)
+    live_readiness = batch_report.get("live_readiness") if isinstance(batch_report.get("live_readiness"), dict) else {}
+    live_checks = live_readiness.get("checks") if isinstance(live_readiness.get("checks"), dict) else {}
+    failed_live_checks = sorted(
+        str(name).strip()
+        for name, payload in live_checks.items()
+        if str(name).strip() and isinstance(payload, dict) and not bool(payload.get("passed"))
+    )
     return {
         "job_count": len(jobs),
         "success_count": int(batch_report.get("success_count") or 0),
@@ -118,6 +125,10 @@ def _aggregate_summary(batch_report: dict[str, Any], audit_report: dict[str, Any
         "ai_effects": _safe_float((dimensions.get("ai_effects") or {}).get("score")),
         "subtitle_effects": _safe_float((dimensions.get("subtitle_effects") or {}).get("score")),
         "editing": _safe_float((dimensions.get("editing") or {}).get("score")),
+        "live_gate_passed": bool(live_readiness.get("gate_passed")) if live_readiness else None,
+        "live_status": str(live_readiness.get("status") or "").strip() or None,
+        "live_failed_checks": failed_live_checks,
+        "live_failure_reasons": [str(item) for item in list(live_readiness.get("failure_reasons") or []) if str(item).strip()],
     }
 
 
@@ -219,6 +230,9 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- failed_count: {baseline.get('failed_count')} -> {candidate.get('failed_count')}",
         f"- manual_review_required_count: {baseline.get('manual_review_required_count')} -> {candidate.get('manual_review_required_count')}",
         f"- critical_pollution_count: {baseline.get('critical_pollution_count')} -> {candidate.get('critical_pollution_count')}",
+        f"- live_gate_passed: {baseline.get('live_gate_passed')} -> {candidate.get('live_gate_passed')}",
+        f"- live_status: {baseline.get('live_status') or '-'} -> {candidate.get('live_status') or '-'}",
+        f"- live_failed_checks: {', '.join(baseline.get('live_failed_checks') or []) or '-'} -> {', '.join(candidate.get('live_failed_checks') or []) or '-'}",
         f"- overall_video_quality: {_render_delta(_safe_float(baseline.get('overall_video_quality')), _safe_float(candidate.get('overall_video_quality')))}",
         f"- subtitle_quality: {_render_delta(_safe_float(baseline.get('subtitle_quality')), _safe_float(candidate.get('subtitle_quality')))}",
         f"- multi_platform_package: {_render_delta(_safe_float(baseline.get('multi_platform_package')), _safe_float(candidate.get('multi_platform_package')))}",

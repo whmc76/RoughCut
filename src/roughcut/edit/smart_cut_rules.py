@@ -55,14 +55,6 @@ _PREVIOUS_NARROW_SMART_CUT_RULES: dict[str, Any] = {
     "fillers": DEFAULT_SMART_CUT_FILLERS,
     "catchphrases": DEFAULT_SMART_CUT_CATCHPHRASES,
 }
-_PREVIOUS_EXPANDED_SMART_CUT_RULES: dict[str, Any] = {
-    **_PREVIOUS_NARROW_SMART_CUT_RULES,
-    "fillerSentenceHeadEnabled": True,
-}
-_PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES: dict[str, Any] = {
-    **_PREVIOUS_EXPANDED_SMART_CUT_RULES,
-    "catchphraseEnabled": True,
-}
 DEFAULT_SMART_CUT_RULES: dict[str, Any] = {
     **_PREVIOUS_NARROW_SMART_CUT_RULES,
 }
@@ -94,86 +86,6 @@ def normalize_smart_cut_fillers_value(value: Any) -> str:
     }:
         return DEFAULT_SMART_CUT_FILLERS
     return "，".join(dict.fromkeys(items))
-
-
-def _looks_like_previous_narrow_default_rules(value: dict[str, Any]) -> bool:
-    normalized_fillers = normalize_smart_cut_fillers_value(value.get("fillers"))
-    normalized_catchphrases = str(value.get("catchphrases") or DEFAULT_SMART_CUT_CATCHPHRASES)
-    try:
-        pause_threshold_sec = round(
-            min(
-                5.0,
-                max(
-                    0.1,
-                    float(
-                        value.get("pauseThresholdSec", DEFAULT_SMART_CUT_RULES["pauseThresholdSec"])
-                        or DEFAULT_SMART_CUT_RULES["pauseThresholdSec"]
-                    ),
-                ),
-            ),
-            3,
-        )
-    except (TypeError, ValueError):
-        pause_threshold_sec = round(float(DEFAULT_SMART_CUT_RULES["pauseThresholdSec"]), 3)
-    return {
-        "fillerEnabled": bool(value.get("fillerEnabled")),
-        "fillerStandaloneEnabled": bool(value.get("fillerStandaloneEnabled")),
-        "fillerSentenceHeadEnabled": bool(value.get("fillerSentenceHeadEnabled")),
-        "fillerSentenceTailEnabled": bool(value.get("fillerSentenceTailEnabled")),
-        "catchphraseEnabled": bool(value.get("catchphraseEnabled")),
-        "repeatedEnabled": bool(value.get("repeatedEnabled")),
-        "pauseEnabled": bool(value.get("pauseEnabled")),
-        "smartDeleteEnabled": bool(value.get("smartDeleteEnabled")),
-        "pauseThresholdSec": pause_threshold_sec,
-        "fillers": normalized_fillers,
-        "catchphrases": normalized_catchphrases,
-    } == _PREVIOUS_NARROW_SMART_CUT_RULES
-
-
-def _looks_like_previous_legacy_default_rules(value: dict[str, Any]) -> bool:
-    if "fillerSentenceHeadEnabled" in value or "fillerSentenceTailEnabled" in value:
-        return False
-    normalized_fillers = normalize_smart_cut_fillers_value(value.get("fillers"))
-    normalized_catchphrases = str(value.get("catchphrases") or DEFAULT_SMART_CUT_CATCHPHRASES)
-    try:
-        pause_threshold_sec = round(
-            min(
-                5.0,
-                max(
-                    0.1,
-                    float(
-                        value.get("pauseThresholdSec", _PREVIOUS_NARROW_SMART_CUT_RULES["pauseThresholdSec"])
-                        or _PREVIOUS_NARROW_SMART_CUT_RULES["pauseThresholdSec"]
-                    ),
-                ),
-            ),
-            3,
-        )
-    except (TypeError, ValueError):
-        pause_threshold_sec = round(float(_PREVIOUS_NARROW_SMART_CUT_RULES["pauseThresholdSec"]), 3)
-    return {
-        "fillerEnabled": bool(value.get("fillerEnabled", _PREVIOUS_NARROW_SMART_CUT_RULES["fillerEnabled"])),
-        "fillerStandaloneEnabled": bool(value.get("fillerStandaloneEnabled", _PREVIOUS_NARROW_SMART_CUT_RULES["fillerStandaloneEnabled"])),
-        "catchphraseEnabled": bool(value.get("catchphraseEnabled", _PREVIOUS_NARROW_SMART_CUT_RULES["catchphraseEnabled"])),
-        "repeatedEnabled": bool(value.get("repeatedEnabled", _PREVIOUS_NARROW_SMART_CUT_RULES["repeatedEnabled"])),
-        "pauseEnabled": bool(value.get("pauseEnabled", _PREVIOUS_NARROW_SMART_CUT_RULES["pauseEnabled"])),
-        "smartDeleteEnabled": bool(value.get("smartDeleteEnabled", _PREVIOUS_NARROW_SMART_CUT_RULES["smartDeleteEnabled"])),
-        "pauseThresholdSec": pause_threshold_sec,
-        "fillers": normalized_fillers,
-        "catchphrases": normalized_catchphrases,
-        "fillerContinuousEnabled": bool(value.get("fillerContinuousEnabled", False)),
-    } == {
-        "fillerEnabled": _PREVIOUS_NARROW_SMART_CUT_RULES["fillerEnabled"],
-        "fillerStandaloneEnabled": _PREVIOUS_NARROW_SMART_CUT_RULES["fillerStandaloneEnabled"],
-        "catchphraseEnabled": _PREVIOUS_NARROW_SMART_CUT_RULES["catchphraseEnabled"],
-        "repeatedEnabled": _PREVIOUS_NARROW_SMART_CUT_RULES["repeatedEnabled"],
-        "pauseEnabled": _PREVIOUS_NARROW_SMART_CUT_RULES["pauseEnabled"],
-        "smartDeleteEnabled": _PREVIOUS_NARROW_SMART_CUT_RULES["smartDeleteEnabled"],
-        "pauseThresholdSec": _PREVIOUS_NARROW_SMART_CUT_RULES["pauseThresholdSec"],
-        "fillers": _PREVIOUS_NARROW_SMART_CUT_RULES["fillers"],
-        "catchphrases": _PREVIOUS_NARROW_SMART_CUT_RULES["catchphrases"],
-        "fillerContinuousEnabled": False,
-    }
 
 
 def normalize_smart_cut_rules_payload(payload: Any) -> dict[str, Any]:
@@ -208,9 +120,4 @@ def normalize_smart_cut_rules_payload(payload: Any) -> dict[str, Any]:
         "fillers": normalize_smart_cut_fillers_value(merged.get("fillers") or DEFAULT_SMART_CUT_FILLERS),
         "catchphrases": str(merged.get("catchphrases") or DEFAULT_SMART_CUT_CATCHPHRASES),
     }
-    if (
-        normalized == _PREVIOUS_EXPANDED_SMART_CUT_RULES
-        or normalized == _PREVIOUS_EXPANDED_WITH_CATCHPHRASE_SMART_CUT_RULES
-    ):
-        return dict(DEFAULT_SMART_CUT_RULES)
     return normalized

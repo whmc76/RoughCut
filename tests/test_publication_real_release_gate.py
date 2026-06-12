@@ -199,6 +199,23 @@ def test_is_fresh_draft_prepare_mode_requires_draft_status_and_visibility() -> N
     assert release_gate._is_fresh_draft_prepare_mode({"published"}, "draft") is False
 
 
+def test_browser_agent_ready_target_platforms_skips_creator_probe_for_fresh_draft_prepare() -> None:
+    assert (
+        release_gate._browser_agent_ready_target_platforms(
+            effective_platforms=["youtube", "douyin"],
+            fresh_draft_prepare_mode=True,
+        )
+        == []
+    )
+    assert (
+        release_gate._browser_agent_ready_target_platforms(
+            effective_platforms=["youtube", "douyin"],
+            fresh_draft_prepare_mode=False,
+        )
+        == ["youtube", "douyin"]
+    )
+
+
 def test_single_attempt_execution_mode_enabled_for_fresh_draft_prepare() -> None:
     assert release_gate._use_single_attempt_execution_mode(fresh_draft_prepare_mode=True) is True
     assert release_gate._use_single_attempt_execution_mode(fresh_draft_prepare_mode=False) is False
@@ -258,6 +275,24 @@ def test_build_fresh_draft_prepare_live_check_uses_healthz_authority_only() -> N
     assert live_check["platform_checks"] == {}
 
 
+def test_build_fresh_draft_prepare_live_check_accepts_degraded_bridge_state() -> None:
+    live_check = release_gate._build_fresh_draft_prepare_live_check(
+        {
+            "health": {
+                "cdp_status": "degraded",
+                "browser_transport": {"transport": "chrome_extension_bridge", "bridge_client_id": "bridge-test-client"},
+                "attached_profile_binding": {
+                    "browser": "chrome",
+                    "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+                },
+            }
+        }
+    )
+
+    assert live_check["cdp"]["connected"] is True
+    assert live_check["cdp"]["state"] == "degraded"
+
+
 def test_build_platform_options_routes_fresh_draft_prepare_directly_to_platform_executor() -> None:
     options = release_gate._build_platform_options(
         ["douyin"],
@@ -273,7 +308,8 @@ def test_build_platform_options_routes_fresh_draft_prepare_directly_to_platform_
     )
 
     overrides = options["douyin"]["platform_specific_overrides"]
-    assert overrides.get("prepare_only_current_page") is None
+    assert overrides["prepare_only_current_page"] is False
+    assert overrides["stop_before_final_publish"] is False
     assert overrides["fresh_start_platform_tab"] is True
     assert overrides["clear_draft_context"] is False
     assert overrides["force_publish_page_refresh"] is False
@@ -305,7 +341,8 @@ def test_build_platform_options_fresh_draft_prepare_does_not_require_scheme_seed
     )
 
     overrides = options["douyin"]["platform_specific_overrides"]
-    assert overrides.get("prepare_only_current_page") is None
+    assert overrides["prepare_only_current_page"] is False
+    assert overrides["stop_before_final_publish"] is False
     assert overrides["fresh_start_platform_tab"] is True
     assert options["douyin"].get("native_topics") == ["#添加话题"]
     assert options["douyin"].get("ui_control_semantics") == {"collection_select": True}
@@ -334,7 +371,8 @@ def test_build_platform_options_fresh_draft_prepare_ignores_recovery_hint_overri
     )
 
     overrides = options["douyin"]["platform_specific_overrides"]
-    assert overrides.get("prepare_only_current_page") is None
+    assert overrides["prepare_only_current_page"] is False
+    assert overrides["stop_before_final_publish"] is False
     assert overrides["fresh_start_platform_tab"] is True
     assert overrides["clear_draft_context"] is False
     assert overrides["force_publish_page_refresh"] is False

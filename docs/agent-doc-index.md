@@ -29,6 +29,23 @@ Use this file to route into the smallest set of source-of-truth documents needed
 - `docs/design/INDEX.md`
   Design-doc entrypoint for deeper architecture work.
 
+## Auto Edit Recovery
+
+- `docs/design/2026-06-08-auto-edit-quality-recovery-architecture.md`
+  Current source-of-truth architecture for restoring predictable subtitle, projection, and automatic editing behavior.
+- `docs/2026-06-08-auto-edit-quality-recovery-task-list.md`
+  Dependency-ordered execution plan for the current recovery and quality-uplift work.
+- `docs/2026-06-11-auto-edit-refactor-closure-checklist.md`
+  Consolidated closure checklist for finishing the refactor, optimization, and hardening pass through production-grade acceptance.
+- `docs/2026-06-12-final-closure-audit.md`
+  Current judgment on what is structurally closed versus what is only missing real-sample evidence.
+- `docs/2026-06-12-final-completion-audit-matrix.md`
+  Requirement-by-requirement completion matrix for deciding what is actually closed, what is optional breadth, and what is still only missing real samples.
+- `docs/2026-06-12-final-evidence-capture-runbook.md`
+  Shortest operational path for the remaining real-sample gaps; use this before any further framework edits.
+- `docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json`
+  First committed real-job golden slice for recovery replay and regression evidence.
+
 ## Read Discipline
 
 - Prefer the current state doc and the narrowest relevant task doc over broad historical reading.

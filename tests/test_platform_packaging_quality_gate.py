@@ -78,6 +78,58 @@ def test_build_platform_claim_evidence_pack_keeps_creative_brief_out_of_hard_evi
     assert "creative_brief 只是创作提示" in prompt
 
 
+def test_build_transcript_for_packaging_respects_display_surface_contract() -> None:
+    transcript = platform_copy.build_transcript_for_packaging(
+        [
+            {
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text_raw": "那个",
+                "text_norm": "这个手电",
+                "text_final": "",
+                "display_suppressed_reason": "standalone_filler",
+            },
+            {
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text_raw": "它续航很长",
+                "text_norm": "它续航很长",
+                "text_final": "它续航很长",
+            },
+        ]
+    )
+
+    assert transcript == "[1.0-2.0] 它续航很长"
+
+
+def test_build_platform_claim_evidence_pack_uses_canonical_surface_contract() -> None:
+    evidence_pack = platform_copy._build_platform_claim_evidence_pack(
+        source_name="demo.mp4",
+        prompt_brief={},
+        fact_sheet={"verified_facts": [], "guardrail_summary": ""},
+        subtitle_items=[
+            {
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text_raw": "那个 EDC 折刀",
+                "text_norm": "这是 MAXACE 美杜莎4",
+                "text_final": "",
+                "display_suppressed_reason": "standalone_filler",
+            }
+        ],
+        content_profile={},
+    )
+
+    assert evidence_pack["transcript"] == [
+        {
+            "id": "sub_1",
+            "start": 0.0,
+            "end": 1.0,
+            "text": "这是 MAXACE 美杜莎4",
+        }
+    ]
+
+
 def test_claim_grounded_is_the_only_supported_claim_strategy_name() -> None:
     assert "claim_grounded" in packaging_library.COPY_STYLE_OPTIONS
     assert "m27_claim_grounded" not in packaging_library.COPY_STYLE_OPTIONS
@@ -328,6 +380,50 @@ async def test_generate_platform_packaging_falls_back_to_deterministic_copy_on_r
     assert len(bilibili["titles"]) >= 3
     assert bilibili["description"]
     assert len(bilibili["tags"]) >= 2
+    assert result["generation_repair_trace"][0]["status"] == "deterministic_fallback"
+
+
+@pytest.mark.asyncio
+async def test_generate_platform_packaging_constraint_only_mode_fallback_does_not_inject_platform_content(monkeypatch) -> None:
+    async def fake_generate_single_platform_fast(*_args, **_kwargs):
+        raise RuntimeError("第 1 次文案包装生成超时（>1s）")
+
+    monkeypatch.setattr(platform_copy, "_generate_single_platform_packaging_fast", fake_generate_single_platform_fast)
+
+    result = await platform_copy.generate_platform_packaging(
+        source_name="maxace蜂巢3开箱.mp4",
+        content_profile={
+            "subject_brand": "maxace",
+            "subject_model": "蜂巢3",
+            "subject_type": "EDC折刀",
+            "video_theme": "开箱上手",
+            "summary": "这期围绕maxace蜂巢3展开，重点看细节展示和上手体验。",
+        },
+        subtitle_items=[{"text_final": "这期看看蜂巢3的细节和上手体验", "start_time": 0.0, "end_time": 1.0}],
+        copy_style="attention_grabbing",
+        prompt_brief={
+            "mode": "intelligent_copy",
+            "source_language": "zh",
+            "video_theme": "开箱上手",
+            "copy_brief": {
+                "intent": "decor_unboxing",
+                "topic_subject": "maxace蜂巢3",
+                "summary": "这期围绕maxace蜂巢3展开，重点看细节展示和上手体验。",
+                "question": "",
+                "focus_points": ["细节展示", "上手体验", "做工表现"],
+            },
+        },
+        fact_sheet={"status": "unverified", "verified_facts": []},
+        target_platforms=["bilibili"],
+    )
+
+    bilibili = result["platforms"]["bilibili"]
+    assert bilibili["titles"] == [
+        "maxace蜂巢3：细节展示",
+        "maxace蜂巢3，重点看上手体验",
+        "maxace蜂巢3，先看细节展示和做工表现",
+    ]
+    assert bilibili["description"] == "这期围绕maxace蜂巢3展开，重点看细节展示和上手体验。"
     assert result["generation_repair_trace"][0]["status"] == "deterministic_fallback"
 
 

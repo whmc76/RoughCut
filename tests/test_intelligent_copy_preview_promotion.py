@@ -5,6 +5,7 @@ from pathlib import Path
 
 from roughcut.review import intelligent_copy as intelligent_copy_module
 from roughcut.review.intelligent_copy import promote_platform_preview_to_intelligent_copy_result
+from roughcut.review.intelligent_copy import upgrade_existing_intelligent_copy_result
 
 
 def test_promote_platform_preview_updates_canonical_smart_copy_sources(tmp_path: Path) -> None:
@@ -212,3 +213,84 @@ def test_promote_platform_preview_rebuilds_publication_metadata_from_creator_con
     assert douyin_entry["platform_specific_overrides"]["collection_management"]["selected_collection_name"] == "EDC刀光火工具集"
     assert result["creator_profile_id"] == "creator-123"
     assert result["publication_context"]["creator_profile_name"] == "FAS"
+
+
+def test_upgrade_existing_result_restores_missing_platforms_from_packaging(tmp_path: Path) -> None:
+    folder = tmp_path / "case"
+    material_dir = folder / "smart-copy"
+    meta_dir = material_dir / "_meta"
+    copy_dir = material_dir / "_copy"
+    meta_dir.mkdir(parents=True)
+    copy_dir.mkdir(parents=True)
+
+    existing_result = {
+        "platforms": [
+            {
+                "key": "bilibili",
+                "label": "B站",
+                "titles": ["旧B站标题"],
+                "primary_title": "旧B站标题",
+                "body": "旧B站正文",
+                "tags": ["旧B站标签"],
+                "constraints": {},
+                "title_label": "标题",
+                "body_label": "简介",
+                "tag_label": "标签",
+            }
+        ],
+        "cover_matrix": {},
+    }
+    packaging = {
+        "highlights": {"product": "maxace蜂巢3顶配"},
+        "platforms": {
+            "bilibili": {
+                "titles": ["旧B站标题"],
+                "description": "旧B站正文",
+                "tags": ["旧B站标签"],
+            }
+        },
+        "platform_scope": {
+            "requested_platforms": ["bilibili", "youtube", "x"],
+            "covered_platforms": ["bilibili", "youtube", "x"],
+            "missing_requested_platforms": [],
+        },
+        "cover_matrix": {
+            "landscape_16_9": {
+                "cover_path": "E:/covers/youtube-cover.jpg",
+                "cover_size": [1600, 900],
+                "members": ["bilibili", "youtube"],
+            },
+            "landscape_4_3": {
+                "cover_path": "E:/covers/x-cover.jpg",
+                "cover_size": [1440, 1080],
+                "members": ["x"],
+            },
+        },
+    }
+    (meta_dir / "smart-copy.json").write_text(json.dumps(existing_result, ensure_ascii=False, indent=2), encoding="utf-8")
+    (meta_dir / "platform-packaging.json").write_text(json.dumps(packaging, ensure_ascii=False, indent=2), encoding="utf-8")
+    (copy_dir / "01-bilibili-titles.txt").write_text("1. 旧B站标题\n", encoding="utf-8")
+    (copy_dir / "01-bilibili-body.txt").write_text("旧B站正文\n", encoding="utf-8")
+    (copy_dir / "01-bilibili-tags.txt").write_text("旧B站标签\n", encoding="utf-8")
+    (copy_dir / "07-youtube-titles.txt").write_text("1. YouTube新标题\n", encoding="utf-8")
+    (copy_dir / "07-youtube-body.txt").write_text("YouTube新正文\n", encoding="utf-8")
+    (copy_dir / "07-youtube-tags.txt").write_text("YouTube标签A, YouTube标签B\n", encoding="utf-8")
+    (copy_dir / "08-x-body.txt").write_text("X新正文\n", encoding="utf-8")
+    (copy_dir / "08-x-tags.txt").write_text("#X标签A\n", encoding="utf-8")
+
+    result = upgrade_existing_intelligent_copy_result(
+        str(folder),
+        platforms=["bilibili", "youtube", "x"],
+    )
+
+    platform_keys = [item["key"] for item in result["platforms"]]
+    assert platform_keys == ["bilibili", "youtube", "x"]
+
+    youtube_item = next(item for item in result["platforms"] if item["key"] == "youtube")
+    assert youtube_item["primary_title"] == "YouTube新标题"
+    assert youtube_item["body"] == "YouTube新正文"
+    assert youtube_item["tags"] == ["YouTube标签A", "YouTube标签B"]
+
+    updated_packaging = json.loads((meta_dir / "platform-packaging.json").read_text(encoding="utf-8"))
+    assert sorted(updated_packaging["platforms"].keys()) == ["bilibili", "x", "youtube"]
+    assert updated_packaging["platform_scope"]["covered_platforms"] == ["bilibili", "x", "youtube"]

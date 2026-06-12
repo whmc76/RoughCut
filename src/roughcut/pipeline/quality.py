@@ -8,8 +8,10 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, SubtitleItem
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text, subtitle_semantic_item_text
 from roughcut.pipeline.rerun_actions import pick_recommended_rerun_steps
 from roughcut.media.variant_timeline_bundle import (
+    variant_high_risk_cuts,
     variant_multimodal_trim_review_summary,
     resolve_effective_variant_timeline_bundle,
     variant_llm_cut_review,
@@ -24,6 +26,7 @@ from roughcut.review.content_profile import (
     _is_generic_subject_type,
     _is_specific_video_theme,
     _mapped_brand_for_model,
+    _seed_profile_from_text,
     _subject_domain_from_subject_type,
     _text_conflicts_with_verified_identity,
     apply_source_identity_constraints,
@@ -72,6 +75,12 @@ _NUMERIC_DETAIL_RE = re.compile(
 _IDENTITY_NARRATIVE_FIELDS = ("video_theme", "summary", "hook_line", "visible_text")
 _ENTITY_CANDIDATE_MIN_SCORE = 0.70
 _GENERIC_WORD_SPLIT_BLOCKING_MIN_COUNT = 8
+_EDIT_PLAN_MANUAL_CONFIRM_BLOCKING_MIN_COUNT = 50
+_LLM_CUT_REVIEW_PROVIDER_DEGRADED_ERRORS = {
+    "llm_cut_review_timeout",
+    "llm_cut_review_failed",
+    "llm_cut_review_unconfigured",
+}
 
 
 @dataclass(slots=True)
@@ -81,6 +90,62 @@ class QualityIssue:
     penalty: float
     auto_fix_step: str | None = None
     blocking: bool = False
+
+
+def collect_editing_risk_gate_signals(variant_bundle: dict[str, Any] | None) -> dict[str, Any]:
+    resolved_bundle = resolve_effective_variant_timeline_bundle(variant_bundle) or {}
+    high_risk_cuts = variant_high_risk_cuts(resolved_bundle)
+    llm_cut_review = variant_llm_cut_review(resolved_bundle)
+    multimodal_trim_review_summary = variant_multimodal_trim_review_summary(resolved_bundle)
+    refine_decision_summary = variant_refine_decision_summary(resolved_bundle)
+    return collect_editing_risk_gate_signals_from_inputs(
+        high_risk_cut_count=len(high_risk_cuts),
+        llm_cut_review=llm_cut_review,
+        multimodal_trim_review_summary=multimodal_trim_review_summary,
+        refine_decision_summary=refine_decision_summary,
+        high_risk_cuts=high_risk_cuts,
+    )
+
+
+def collect_editing_risk_gate_signals_from_inputs(
+    *,
+    high_risk_cut_count: int,
+    llm_cut_review: dict[str, Any] | None,
+    multimodal_trim_review_summary: dict[str, Any] | None,
+    refine_decision_summary: dict[str, Any] | None,
+    high_risk_cuts: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    llm_cut_review = dict(llm_cut_review or {})
+    multimodal_trim_review_summary = dict(multimodal_trim_review_summary or {})
+    refine_decision_summary = dict(refine_decision_summary or {})
+    high_risk_cuts = list(high_risk_cuts or [])
+    refine_manual_confirm = int(refine_decision_summary.get("candidate_manual_confirm") or 0)
+    multimodal_pending_count = int(multimodal_trim_review_summary.get("pending_count") or 0)
+    llm_cut_review_error = str(llm_cut_review.get("error") or "").strip()
+    llm_cut_review_provider_degraded = (
+        not bool(llm_cut_review.get("reviewed"))
+        and llm_cut_review_error in _LLM_CUT_REVIEW_PROVIDER_DEGRADED_ERRORS
+    )
+    high_risk_cut_count = max(0, int(high_risk_cut_count or 0))
+    blocking_high_risk_cuts = bool(high_risk_cut_count) and not llm_cut_review_provider_degraded and (
+        refine_manual_confirm > 0
+        or multimodal_pending_count > 0
+        or not bool(llm_cut_review.get("reviewed"))
+    )
+    blocking_manual_confirm_heavy = refine_manual_confirm >= _EDIT_PLAN_MANUAL_CONFIRM_BLOCKING_MIN_COUNT
+    return {
+        "high_risk_cut_count": high_risk_cut_count,
+        "high_risk_cuts": high_risk_cuts,
+        "llm_cut_review": llm_cut_review,
+        "llm_cut_review_error": llm_cut_review_error,
+        "llm_cut_review_provider_degraded": llm_cut_review_provider_degraded,
+        "multimodal_trim_review_summary": multimodal_trim_review_summary,
+        "multimodal_pending_count": multimodal_pending_count,
+        "refine_decision_summary": refine_decision_summary,
+        "refine_manual_confirm": refine_manual_confirm,
+        "blocking_high_risk_cuts": blocking_high_risk_cuts,
+        "blocking_manual_confirm_heavy": blocking_manual_confirm_heavy,
+    }
 
 
 def evaluate_profile_identity_gate(profile: dict[str, Any] | None) -> dict[str, Any]:
@@ -233,6 +298,12 @@ def assess_job_quality(
             for item in (correction_score_data.get("issue_codes") or [])
             if str(item).strip()
         ]
+        selected_candidate_assessment = _selected_transcript_correction_candidate_assessment(correction_score_data)
+        correction_content_fidelity_score = _safe_float(
+            selected_candidate_assessment.get("content_fidelity_score")
+            if isinstance(selected_candidate_assessment, dict)
+            else None
+        )
         if bool(correction_score_data.get("blocking")) and issue_codes:
             issues.append(
                 QualityIssue(
@@ -243,7 +314,16 @@ def assess_job_quality(
                     blocking=True,
                 )
             )
-        elif correction_score and correction_score < 96.0:
+        elif (
+            correction_score
+            and correction_score < 96.0
+            and (
+                not isinstance(selected_candidate_assessment, dict)
+                or correction_content_fidelity_score is None
+                or correction_content_fidelity_score < 96.0
+                or bool(issue_codes)
+            )
+        ):
             issues.append(
                 QualityIssue(
                     "transcript_correction_fidelity_warning",
@@ -289,7 +369,18 @@ def assess_job_quality(
         subtitle_quality_auto_fix_step = "subtitle_postprocess"
         if correction_score_artifact and isinstance(correction_score_artifact.data_json, dict):
             selected_layer = str(correction_score_artifact.data_json.get("selected_transcript_layer") or "")
-            if selected_layer == "canonical_transcript":
+            selected_basis = str(correction_score_artifact.data_json.get("selected_basis") or "").strip()
+            selection_policy = str(correction_score_artifact.data_json.get("selection_policy") or "").strip()
+            canonical_projection_selected = (
+                selected_layer == "canonical_transcript"
+                and selected_basis != "display_baseline_preserved"
+                and selection_policy != "display_baseline_preserved_for_quality_guard"
+            )
+            if canonical_projection_selected and _subtitle_quality_reasons_implicate_projection(
+                warning_reasons=subtitle_quality_warning_reasons,
+                blocking_reasons=subtitle_quality_blocking_reasons,
+                metrics=subtitle_quality_metrics,
+            ):
                 subtitle_quality_auto_fix_step = "transcript_review"
         subtitle_quality_issue_prefix = (
             "canonical_projection_quality"
@@ -504,13 +595,18 @@ def assess_job_quality(
                 auto_fix_step="render",
             )
         )
-    llm_cut_review = variant_llm_cut_review(variant_bundle)
-    multimodal_trim_review_summary = variant_multimodal_trim_review_summary(variant_bundle)
-    refine_decision_summary = variant_refine_decision_summary(variant_bundle)
+    editing_risk_gate = collect_editing_risk_gate_signals(variant_bundle)
+    llm_cut_review = dict(editing_risk_gate.get("llm_cut_review") or {})
+    high_risk_cuts = list(editing_risk_gate.get("high_risk_cuts") or [])
+    multimodal_trim_review_summary = dict(editing_risk_gate.get("multimodal_trim_review_summary") or {})
+    refine_decision_summary = dict(editing_risk_gate.get("refine_decision_summary") or {})
+    refine_manual_confirm = int(editing_risk_gate.get("refine_manual_confirm") or 0)
+    llm_cut_review_error = str(editing_risk_gate.get("llm_cut_review_error") or "").strip()
+    llm_cut_review_provider_degraded = bool(editing_risk_gate.get("llm_cut_review_provider_degraded"))
     if (
         llm_cut_review
         and not bool(llm_cut_review.get("reviewed"))
-        and str(llm_cut_review.get("error") or "").strip() == "llm_cut_review_timeout"
+        and llm_cut_review_error == "llm_cut_review_timeout"
     ):
         issues.append(
             QualityIssue(
@@ -518,6 +614,47 @@ def assess_job_quality(
                 "edit_plan 的高风险 cut LLM 复核超时，当前已回退到确定性证据剪辑结果",
                 2.0,
                 auto_fix_step="edit_plan",
+            )
+        )
+    if high_risk_cuts and llm_cut_review_provider_degraded:
+        issues.append(
+            QualityIssue(
+                "editing_high_risk_cuts_provider_degraded",
+                (
+                    f"存在 {len(high_risk_cuts)} 个高风险 cut，"
+                    f"但 LLM 复核因 provider 波动未完成（error={llm_cut_review_error}）；"
+                    f"当前保留确定性证据结果，manual_confirm={refine_manual_confirm}，"
+                    f"multimodal_pending={int(multimodal_trim_review_summary.get('pending_count') or 0)}"
+                ),
+                min(8.0, 3.0 + len(high_risk_cuts)),
+                auto_fix_step="edit_plan",
+            )
+        )
+    elif bool(editing_risk_gate.get("blocking_high_risk_cuts")):
+        issues.append(
+            QualityIssue(
+                "editing_high_risk_cuts_blocking",
+                (
+                    f"仍有 {len(high_risk_cuts)} 个高风险 cut 未完成收口，"
+                    f"manual_confirm={refine_manual_confirm}，"
+                    f"multimodal_pending={int(multimodal_trim_review_summary.get('pending_count') or 0)}"
+                ),
+                min(18.0, 8.0 + len(high_risk_cuts) * 2.0),
+                auto_fix_step="edit_plan",
+                blocking=True,
+            )
+        )
+    if bool(editing_risk_gate.get("blocking_manual_confirm_heavy")):
+        issues.append(
+            QualityIssue(
+                "editing_manual_confirm_heavy_blocking",
+                (
+                    f"edit_plan 仍有 {refine_manual_confirm} 个 manual-confirm 候选未收口，"
+                    f"multimodal_pending={int(multimodal_trim_review_summary.get('pending_count') or 0)}"
+                ),
+                min(16.0, 6.0 + refine_manual_confirm / 10.0),
+                auto_fix_step="edit_plan",
+                blocking=True,
             )
         )
     if (
@@ -581,6 +718,8 @@ def assess_job_quality(
             ),
             "pending_subtitle_corrections": pending_corrections,
             "profile_artifact_type": profile_artifact.artifact_type if profile_artifact else None,
+            "llm_cut_review_provider_degraded": llm_cut_review_provider_degraded,
+            "editing_risk_gate": editing_risk_gate,
             "transcript_context": {
                 "source": transcript_context_source,
                 "canonical_transcript_layer_present": bool(canonical_transcript_artifact),
@@ -596,6 +735,7 @@ def assess_job_quality(
             "effective_status": effective_status,
             "step_completion_ratio": round(step_completion_ratio, 3),
             "subtitle_sync": sync_check,
+            "high_risk_cut_count": len(high_risk_cuts),
             "llm_cut_review": llm_cut_review,
             "multimodal_trim_review_summary": multimodal_trim_review_summary,
             "refine_decision_summary": refine_decision_summary,
@@ -626,7 +766,14 @@ def _build_subtitle_text(items: Sequence[SubtitleItem], *, canonical_transcript_
     if canonical_text:
         parts.append(canonical_text)
     for item in items:
-        text = str(item.text_final or item.text_norm or item.text_raw or "").strip()
+        text = subtitle_display_rule_text(
+            {
+                "text_raw": str(item.text_raw or ""),
+                "text_norm": str(item.text_norm or ""),
+                "text_final": str(item.text_final or ""),
+                "display_suppressed_reason": str(getattr(item, "display_suppressed_reason", "") or ""),
+            }
+        )
         if text:
             parts.append(text)
     return _normalize_text(" ".join(parts))
@@ -714,13 +861,10 @@ def _build_canonical_transcript_text(canonical_transcript: dict[str, Any] | None
     for segment in list(canonical_transcript.get("segments") or []):
         if not isinstance(segment, dict):
             continue
-        text = str(
-            segment.get("text_canonical")
-            or segment.get("text")
-            or segment.get("text_final")
-            or segment.get("text_raw")
-            or ""
-        ).strip()
+        text = subtitle_semantic_item_text(
+            segment,
+            generic_fallback_text=str(segment.get("text") or segment.get("text_raw") or "").strip(),
+        )
         if text:
             parts.append(text)
     return " ".join(parts)
@@ -765,6 +909,30 @@ def _build_profile_text(profile: dict[str, Any], *, canonical_transcript_text: s
     return _normalize_text(" ".join(part for part in parts if part))
 
 
+def _selected_transcript_correction_candidate_assessment(report: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(report, dict):
+        return {}
+    selected_basis = str(report.get("selected_basis") or report.get("selected_projection_basis") or "").strip()
+    selected_layer = str(report.get("selected_transcript_layer") or "").strip()
+    candidates = list(report.get("candidates") or [])
+    if not candidates:
+        return {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_basis = str(candidate.get("basis") or "").strip()
+        candidate_layer = str(candidate.get("transcript_layer") or selected_layer).strip()
+        if selected_basis and candidate_basis and candidate_basis != selected_basis:
+            continue
+        if selected_layer and candidate.get("transcript_layer") and candidate_layer != selected_layer:
+            continue
+        return candidate
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            return candidate
+    return {}
+
+
 def _collect_identity_narrative_conflicts(profile: dict[str, Any]) -> list[str]:
     if not isinstance(profile, dict):
         return []
@@ -784,6 +952,13 @@ def _collect_identity_narrative_conflicts(profile: dict[str, Any]) -> list[str]:
             model=model,
         ):
             continue
+        if _identity_narrative_field_matches_verified_alias(
+            profile,
+            value,
+            brand=brand,
+            model=model,
+        ):
+            continue
         if _text_conflicts_with_verified_identity(
             value,
             brand=brand,
@@ -794,15 +969,121 @@ def _collect_identity_narrative_conflicts(profile: dict[str, Any]) -> list[str]:
     cover_title = profile.get("cover_title")
     if isinstance(cover_title, dict):
         cover_text = " ".join(str(cover_title.get(key) or "").strip() for key in ("top", "main", "bottom")).strip()
-        if cover_text and _text_conflicts_with_verified_identity(
+        if (
+            cover_text
+            and not _identity_narrative_field_matches_verified_alias(
+                profile,
+                cover_text,
+                brand=brand,
+                model=model,
+            )
+            and _text_conflicts_with_verified_identity(
             cover_text,
             brand=brand,
             model=model,
             glossary_terms=None,
+            )
         ):
             conflicts.append("cover_title")
     seen: set[str] = set()
     return [field for field in conflicts if not (field in seen or seen.add(field))]
+
+
+def _identity_narrative_field_matches_verified_alias(
+    profile: dict[str, Any],
+    text: str,
+    *,
+    brand: str,
+    model: str,
+) -> bool:
+    if not text or not (brand or model):
+        return False
+    seeded = _seed_profile_from_text(
+        text,
+        glossary_terms=None,
+        subject_domain=str(profile.get("subject_domain") or ""),
+    )
+    seeded_brand = str(seeded.get("subject_brand") or "").strip()
+    seeded_model = str(seeded.get("subject_model") or "").strip()
+    if not (seeded_brand or seeded_model):
+        return False
+    supported_terms = _collect_verified_identity_alias_terms(
+        profile,
+        brand=brand,
+        model=model,
+    )
+    if not supported_terms:
+        return False
+    if seeded_brand and not any(_identity_values_match(seeded_brand, item) for item in supported_terms):
+        return False
+    if seeded_model and not any(_identity_values_match(seeded_model, item) for item in supported_terms):
+        return False
+    return True
+
+
+def _collect_verified_identity_alias_terms(
+    profile: dict[str, Any],
+    *,
+    brand: str,
+    model: str,
+) -> set[str]:
+    supported_terms: set[str] = set()
+
+    def add_value(value: object) -> None:
+        candidate = str(value or "").strip()
+        if not candidate:
+            return
+        supported_terms.add(candidate)
+        for part in re.split(r"[\\/|、，,；;（）()]+", candidate):
+            normalized_part = str(part or "").strip()
+            if normalized_part:
+                supported_terms.add(normalized_part)
+
+    add_value(brand)
+    add_value(model)
+
+    identity_review = profile.get("identity_review")
+    evidence_bundle = identity_review.get("evidence_bundle") if isinstance(identity_review, dict) else {}
+    if not isinstance(evidence_bundle, dict):
+        return supported_terms
+
+    for field_name in ("candidate_brand", "candidate_model"):
+        add_value(evidence_bundle.get(field_name))
+    for alias in list(evidence_bundle.get("brand_aliases") or []):
+        add_value(alias)
+    for alias in list(evidence_bundle.get("model_aliases") or []):
+        add_value(alias)
+
+    for entity in list(evidence_bundle.get("graph_confirmed_entities") or []):
+        if not isinstance(entity, dict):
+            continue
+        entity_brand = str(entity.get("brand") or "").strip()
+        entity_model = str(entity.get("model") or "").strip()
+        is_verified_entity = False
+        if brand and entity_brand and _identity_values_match(brand, entity_brand):
+            is_verified_entity = True
+        if model and entity_model and _identity_values_match(model, entity_model):
+            is_verified_entity = True
+        if not is_verified_entity:
+            continue
+        add_value(entity_brand)
+        add_value(entity_model)
+        for alias in list(entity.get("brand_aliases") or []):
+            add_value(alias)
+        for alias in list(entity.get("model_aliases") or []):
+            add_value(alias)
+        for phrase in list(entity.get("phrases") or []):
+            add_value(phrase)
+
+    constraints = profile.get("source_identity_constraints")
+    if isinstance(constraints, dict):
+        for field_name in ("subject_brand", "subject_model"):
+            add_value(constraints.get(field_name))
+        for field_name in ("subject_model_candidates", "subject_type_candidates", "filename_entries"):
+            for item in list(constraints.get(field_name) or []):
+                add_value(item)
+
+    return supported_terms
 
 
 def _identity_narrative_field_allows_comparison_target(
@@ -1023,6 +1304,33 @@ def _safe_float(value: Any) -> float | None:
         return None
 
 
+def _subtitle_quality_reasons_implicate_projection(
+    *,
+    warning_reasons: Sequence[str],
+    blocking_reasons: Sequence[str],
+    metrics: dict[str, Any],
+) -> bool:
+    generic_word_split_count = int(metrics.get("generic_word_split_count") or 0)
+    semantic_bad_term_total = int(metrics.get("semantic_bad_term_total") or 0)
+    if generic_word_split_count > 0 or semantic_bad_term_total > 0:
+        return True
+
+    combined_reasons = " ".join(
+        str(item).strip() for item in [*list(warning_reasons or []), *list(blocking_reasons or [])] if str(item).strip()
+    )
+    if not combined_reasons:
+        return False
+    projection_keywords = (
+        "跨字幕",
+        "短碎句",
+        "语义污染",
+        "字幕",
+        "断句",
+        "截断",
+    )
+    return any(keyword in combined_reasons for keyword in projection_keywords)
+
+
 def _grade_for_score(score: float) -> str:
     if score >= 90.0:
         return "A"
@@ -1045,6 +1353,8 @@ def _resolve_packaged_variant_subtitle_sync_check(variant_bundle: dict[str, Any]
     quality_checks = packaged_variant.get("quality_checks")
     if not isinstance(quality_checks, dict):
         return None
+    if isinstance(quality_checks.get("status"), str):
+        return quality_checks
     subtitle_sync = quality_checks.get("subtitle_sync")
     if isinstance(subtitle_sync, dict):
         return subtitle_sync

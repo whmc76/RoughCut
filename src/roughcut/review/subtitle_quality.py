@@ -227,6 +227,20 @@ def _profile_uses_conservative_identity_summary(profile: Mapping[str, Any] | Non
     return bool(identity_review.get("conservative_summary"))
 
 
+def _summary_has_specific_context_despite_generic_suffix(
+    profile: Mapping[str, Any] | None,
+    *,
+    phrase: str,
+) -> bool:
+    summary = _profile_summary(profile)
+    if not summary or phrase not in summary:
+        return False
+    subject = _profile_subject(profile)
+    if not subject or subject not in summary:
+        return False
+    return any(marker in summary for marker in ("重点提到", "重点呈现", "重点带到", "内容方向偏", "重点是"))
+
+
 def _summary_generic_phrase_hits(profile: Mapping[str, Any] | None) -> tuple[list[str], list[str]]:
     summary = _profile_summary(profile)
     conservative_identity_summary = _profile_uses_conservative_identity_summary(profile)
@@ -234,6 +248,9 @@ def _summary_generic_phrase_hits(profile: Mapping[str, Any] | None) -> tuple[lis
     suppressed_hits: list[str] = []
     for phrase in _GENERIC_SUMMARY_PHRASES:
         if phrase not in summary:
+            continue
+        if _summary_has_specific_context_despite_generic_suffix(profile, phrase=phrase):
+            suppressed_hits.append(phrase)
             continue
         if conservative_identity_summary and phrase in _CONSERVATIVE_IDENTITY_SUMMARY_PHRASES:
             suppressed_hits.append(phrase)
@@ -389,6 +406,7 @@ def build_subtitle_quality_report_from_items(
                     "text_raw": item.get("text_raw"),
                     "text_norm": item.get("text_norm"),
                     "text_final": item.get("text_final"),
+                    "display_suppressed_reason": item.get("display_suppressed_reason"),
                     "start_time": item.get("start_time", item.get("start")),
                     "end_time": item.get("end_time", item.get("end")),
                     "words": list(item.get("words") or ()),
@@ -401,6 +419,7 @@ def build_subtitle_quality_report_from_items(
                 "text_raw": getattr(item, "text_raw", None),
                 "text_norm": getattr(item, "text_norm", None),
                 "text_final": getattr(item, "text_final", None),
+                "display_suppressed_reason": getattr(item, "display_suppressed_reason", None),
                 "start_time": getattr(item, "start_time", getattr(item, "start", None)),
                 "end_time": getattr(item, "end_time", getattr(item, "end", None)),
                 "words": list(getattr(item, "words", ()) or ()),

@@ -130,6 +130,11 @@ export type JobManualEditRuleSegment = {
   kind: "filler" | "catchphrase" | "repeated" | "pause" | "smart_delete";
   reason: string;
   source?: string;
+  stage?: string;
+  rule_id?: string | null;
+  match_surface?: string | null;
+  match_surface_layer?: string | null;
+  risk_level?: string | null;
   confidence?: number | null;
   detail?: string | null;
   evidence?: string[];
@@ -179,6 +184,7 @@ export type JobManualEditSubtitle = {
   text_raw?: string | null;
   text_norm?: string | null;
   text_final?: string | null;
+  transcript_text_raw?: string | null;
   transcript_text?: string | null;
   timing_text?: string | null;
   display_suppressed_reason?: string | null;
@@ -204,6 +210,9 @@ export type JobManualEditSession = {
   rule_segments?: JobManualEditRuleSegment[];
   cut_analysis?: Record<string, unknown> | null;
   refine_decision_plan?: Record<string, unknown> | null;
+  source_subtitle_basis?: string | null;
+  projected_subtitle_basis?: string | null;
+  projection_contract_locked?: boolean;
   source_subtitles: JobManualEditSubtitle[];
   projected_subtitles: JobManualEditSubtitle[];
   subtitle_overrides: JobManualEditSubtitleOverride[];

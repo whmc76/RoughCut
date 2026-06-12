@@ -28,8 +28,11 @@ def detect_scenes(
     try:
         from scenedetect import open_video, SceneManager
         from scenedetect.detectors import ContentDetector
-    except ImportError:
-        raise RuntimeError("scenedetect is not installed. Run: pip install scenedetect[opencv]")
+    except ModuleNotFoundError:
+        logger.warning(
+            "scenedetect is not installed. Render/plan pipeline will continue without scene boundaries: pip install scenedetect[opencv]"
+        )
+        return []
 
     video = open_video(str(video_path))
     scene_manager = SceneManager()

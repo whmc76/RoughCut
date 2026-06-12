@@ -1,4 +1,5 @@
 import type { PublicationAttempt } from "../../types";
+import { apiPath } from "../../api/core";
 
 export function publicationAttemptUrl(attempt: PublicationAttempt | null | undefined): string {
   return String(attempt?.public_url || attempt?.external_url || "").trim();
@@ -19,7 +20,7 @@ export function publicationAttemptCoverPreviewUrl(attempt: PublicationAttempt | 
   const coverPath = publicationAttemptCoverPath(attempt);
   if (!coverPath) return "";
   const version = publicationAttemptCoverVersion(attempt);
-  return `/__roughcut_local_image?path=${encodeURIComponent(coverPath)}&v=${encodeURIComponent(version || coverPath)}`;
+  return apiPath(`/intelligent-copy/local-image?path=${encodeURIComponent(coverPath)}&v=${encodeURIComponent(version || coverPath)}`);
 }
 
 function publicationAttemptCoverVersion(attempt: PublicationAttempt | null | undefined): string {

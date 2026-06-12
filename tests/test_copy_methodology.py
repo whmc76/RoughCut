@@ -22,7 +22,7 @@ def test_build_copy_methodology_prompt_lists_platform_specific_constraints() -> 
     assert "禁用表达：" in prompt
 
 
-def test_copy_brief_for_platform_appends_methodology_banned_phrases() -> None:
+def test_copy_brief_for_platform_keeps_content_shared_without_platform_methodology_injection() -> None:
     brief = ic._copy_brief_for_platform(
         copy_brief={
             "intent": "comparison_unboxing",
@@ -31,9 +31,8 @@ def test_copy_brief_for_platform_appends_methodology_banned_phrases() -> None:
         platform_key="bilibili",
     )
 
-    assert brief["methodology"]["archetype"] == "双版本开箱对比"
     assert "硬广" in brief["forbidden_terms"]
-    assert "方便参考" in brief["forbidden_terms"]
+    assert "methodology" not in brief
 
 
 def test_build_platform_description_uses_methodology_shape_for_comparison_unboxing() -> None:

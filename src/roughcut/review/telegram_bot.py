@@ -40,6 +40,8 @@ from roughcut.media.variant_timeline_bundle import (
 )
 from roughcut.packaging.library import list_packaging_assets, resolve_packaging_plan_for_job
 from roughcut.providers.factory import get_reasoning_provider, get_transcription_provider
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.review.downstream_context import select_resolved_downstream_profile
 from roughcut.review.final_review_rerun import (
     build_final_review_rerun_plans as _build_final_review_rerun_plans,
@@ -2445,7 +2447,7 @@ def _extract_subtitle_items_from_report(report: Any | None) -> list[dict[str, An
                 "index": int(item.get("index") or 0),
                 "start": float(item.get("start") or 0.0),
                 "end": float(item.get("end") or item.get("start") or 0.0),
-                "text": str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip(),
+                "text": subtitle_display_rule_text(item),
             }
         )
     return items
@@ -2531,12 +2533,13 @@ def _coerce_subtitle_event_to_item(event: Any, *, index: int) -> dict[str, Any] 
     if end_sec is None:
         end_sec = start_sec
 
-    text = ""
-    for key in ("text", "text_final", "text_norm", "text_raw", "content", "subtitle"):
-        value = str(event.get(key) or "").strip()
-        if value:
-            text = value
-            break
+    text = subtitle_display_rule_text(event)
+    if not text:
+        for key in ("text", "content", "subtitle"):
+            value = str(event.get(key) or "").strip()
+            if value:
+                text = value
+                break
     if not text:
         return None
 
@@ -3385,7 +3388,14 @@ async def _load_full_subtitle_review_lines(
     lines: list[TelegramSubtitleLineCandidate] = []
     slot_index = 1
     for item in subtitle_items:
-        text = str(item.text_final or item.text_norm or item.text_raw or "").strip()
+        text = subtitle_display_rule_text(
+            {
+                "text_raw": item.text_raw,
+                "text_norm": item.text_norm,
+                "text_final": item.text_final,
+                "display_suppressed_reason": getattr(item, "display_suppressed_reason", None),
+            }
+        )
         if not text:
             continue
         lines.append(

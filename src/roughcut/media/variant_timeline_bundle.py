@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from roughcut.edit.packaging_timeline import resolve_packaging_timeline_payload
+
 
 def resolve_effective_variant_timeline_bundle(bundle: dict[str, Any] | None) -> dict[str, Any] | None:
     if isinstance(bundle, dict) and (
@@ -15,6 +17,10 @@ def variant_timeline_rules(bundle: dict[str, Any] | None) -> dict[str, Any]:
     payload = resolve_effective_variant_timeline_bundle(bundle)
     timeline_rules = payload.get("timeline_rules") if isinstance(payload, dict) else None
     return dict(timeline_rules) if isinstance(timeline_rules, dict) else {}
+
+
+def variant_packaging_timeline(bundle: dict[str, Any] | None) -> dict[str, Any]:
+    return resolve_packaging_timeline_payload(variant_timeline_rules(bundle))
 
 
 def variant_timeline_diagnostics(bundle: dict[str, Any] | None) -> dict[str, Any]:

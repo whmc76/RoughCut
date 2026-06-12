@@ -782,6 +782,8 @@ def publication_packaging_entry_blocking_reasons(entry: dict[str, Any]) -> list[
         ).strip()
     collection_policy = str(platform_specific_overrides.get("collection_policy") or "").strip().lower()
     explicit_collection_skip = bool(platform_specific_overrides.get("skip_collection_select")) or collection_policy in publication_collection_policy_skip_values()
+    if not explicit_collection_name:
+        explicit_collection_skip = True
     collection_policy_ready = (
         not platform_requires_explicit_collection_policy(platform)
         or bool(explicit_collection_name)

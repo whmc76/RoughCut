@@ -97,6 +97,8 @@ powershell -File .\scripts\start_publication_browser_session.ps1 `
   -ProfileDirectory "Profile 2"
 ```
 
+默认会同时通过 `--load-extension` 自动加载 repo 内的 `browser/publication-bridge-extension`。只有在明确做无桥调试时，才允许额外传 `-DisableBridgeExtension`。
+
 ```bash
 pnpm dev:publication-browser-agent
 ```

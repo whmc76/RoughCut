@@ -23,7 +23,13 @@ export const intelligentCopyApi = {
       method: "POST",
       body: JSON.stringify({ query, limit }),
     }),
-  generateIntelligentCopy: (folderPath: string, copyStyle?: string, platforms?: string[], useExistingCover = false) =>
+  generateIntelligentCopy: (
+    folderPath: string,
+    copyStyle?: string,
+    platforms?: string[],
+    useExistingCover = false,
+    creatorProfileId?: string | null,
+  ) =>
     request<IntelligentCopyResult>("/intelligent-copy/generate", {
       method: "POST",
       body: JSON.stringify({
@@ -31,9 +37,16 @@ export const intelligentCopyApi = {
         copy_style: copyStyle || null,
         platforms: platforms ?? [],
         use_existing_cover: useExistingCover,
+        creator_profile_id: creatorProfileId || null,
       }),
     }),
-  createIntelligentCopyGenerateTask: (folderPath: string, copyStyle?: string, platforms?: string[], useExistingCover = false) =>
+  createIntelligentCopyGenerateTask: (
+    folderPath: string,
+    copyStyle?: string,
+    platforms?: string[],
+    useExistingCover = false,
+    creatorProfileId?: string | null,
+  ) =>
     request<IntelligentCopyGenerateTask>("/intelligent-copy/generate-tasks", {
       method: "POST",
       body: JSON.stringify({
@@ -41,6 +54,7 @@ export const intelligentCopyApi = {
         copy_style: copyStyle || null,
         platforms: platforms ?? [],
         use_existing_cover: useExistingCover,
+        creator_profile_id: creatorProfileId || null,
       }),
     }),
   getIntelligentCopyGenerateTask: (taskId: string) =>

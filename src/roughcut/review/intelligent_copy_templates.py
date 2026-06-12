@@ -116,6 +116,25 @@ def build_platform_description(
     return " ".join(part for part in body_parts if part).strip()
 
 
+def build_constraint_only_platform_description(
+    *,
+    summary: str,
+    question: str,
+    focus_line: str,
+    topic_subject: str = "",
+) -> str:
+    summary_text = str(summary or "").strip()
+    focus_text = str(focus_line or "").strip()
+    subject = str(topic_subject or "").strip()
+    if summary_text:
+        return " ".join(part for part in (summary_text, question) if str(part or "").strip()).strip()
+    if focus_text and subject:
+        return " ".join(part for part in (f"这期围绕{subject}展开，重点看{focus_text}。", question) if str(part or "").strip()).strip()
+    if focus_text:
+        return " ".join(part for part in (f"这期重点看{focus_text}。", question) if str(part or "").strip()).strip()
+    return " ".join(part for part in (subject, question) if str(part or "").strip()).strip()
+
+
 def build_title_candidates(*, intent: str, topic_subject: str, focus_points: list[str]) -> list[str]:
     templates = INTENT_TITLE_TEMPLATES.get(intent) or INTENT_TITLE_TEMPLATES["generic"]
     focus_0 = focus_points[0] if len(focus_points) > 0 else "重点"
@@ -130,3 +149,26 @@ def build_title_candidates(*, intent: str, topic_subject: str, focus_points: lis
             ).strip()
         )
     return candidates
+
+
+def build_constraint_only_title_candidates(*, topic_subject: str, focus_points: list[str]) -> list[str]:
+    subject = str(topic_subject or "").strip()
+    if not subject:
+        return []
+    focus = [str(item).strip() for item in focus_points if str(item).strip()]
+    candidates: list[str] = []
+    if focus:
+        candidates.append(f"{subject}：{focus[0]}")
+    if len(focus) > 1:
+        candidates.append(f"{subject}，重点看{focus[1]}")
+    if len(focus) > 2:
+        candidates.append(f"{subject}，先看{focus[0]}和{focus[2]}")
+    if not candidates:
+        candidates.append(f"{subject}开箱与上手记录")
+    candidates.append(f"{subject}开箱先看细节")
+    candidates.append(f"{subject}上手体验记录")
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in deduped:
+            deduped.append(candidate)
+    return deduped

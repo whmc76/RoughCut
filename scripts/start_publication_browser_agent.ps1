@@ -1,8 +1,11 @@
 param(
     [string]$NodePath = "",
     [string]$ScriptPath = "",
-    [string]$CdpUrl = "http://127.0.0.1:9222",
+    [string]$CdpUrl = "bridge://chrome-extension",
     [string]$Browser = "chrome",
+    [string]$CreatorProfileId = "",
+    [string]$Platform = "",
+    [string]$ProfilesJson = "",
     [string]$UserDataDir = "",
     [string]$ProfileDirectory = "",
     [int]$Port = 49310,
@@ -16,6 +19,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+
+if ([string]::IsNullOrWhiteSpace($ProfilesJson)) {
+    $ProfilesJson = Join-Path $repoRoot "data\avatar_materials\profiles.json"
+}
 
 function Get-DefaultPublicationUserDataDir {
     $configured = [Environment]::GetEnvironmentVariable("ROUGHCUT_PUBLICATION_BROWSER_USER_DATA_DIR", "Process")
@@ -48,6 +55,43 @@ function Get-DefaultPublicationProfileDirectory {
     }
     return "Profile 2"
 }
+
+function Resolve-CreatorPublicationBrowserBinding {
+    param(
+        [string]$ProfilesJsonPath,
+        [string]$ResolvedCreatorProfileId,
+        [string]$ResolvedPlatform
+    )
+    if ([string]::IsNullOrWhiteSpace($ResolvedCreatorProfileId) -or -not (Test-Path -LiteralPath $ProfilesJsonPath)) {
+        return $null
+    }
+    $payload = Get-Content -LiteralPath $ProfilesJsonPath -Raw | ConvertFrom-Json
+    $profiles = @($payload)
+    $profile = $profiles | Where-Object { [string]($_.id) -eq $ResolvedCreatorProfileId } | Select-Object -First 1
+    if (-not $profile) {
+        throw "Creator profile not found: $ResolvedCreatorProfileId"
+    }
+    $credentials = @($profile.creator_profile.publishing.platform_credentials)
+    if (-not $credentials.Count) {
+        return $null
+    }
+    $normalizedPlatform = [string]$ResolvedPlatform
+    if ([string]::IsNullOrWhiteSpace($normalizedPlatform)) {
+        $normalizedPlatform = ""
+    }
+    $normalizedPlatform = $normalizedPlatform.Trim().ToLowerInvariant()
+    $credential = $null
+    if ($normalizedPlatform) {
+        $credential = $credentials | Where-Object { [string]($_.platform).Trim().ToLowerInvariant() -eq $normalizedPlatform } | Select-Object -First 1
+    }
+    if (-not $credential) {
+        $credential = $credentials | Where-Object { $_.enabled -eq $true -and [string]($_.status).Trim().ToLowerInvariant() -eq "logged_in" } | Select-Object -First 1
+    }
+    if (-not $credential) {
+        return $null
+    }
+    return $credential.browser_binding
+}
 if ([string]::IsNullOrWhiteSpace($ScriptPath)) {
     $ScriptPath = Join-Path $repoRoot "scripts\publication_browser_agent_service.mjs"
 }
@@ -61,6 +105,27 @@ if ([string]::IsNullOrWhiteSpace($UserDataDir)) {
 }
 if ([string]::IsNullOrWhiteSpace($ProfileDirectory)) {
     $ProfileDirectory = Get-DefaultPublicationProfileDirectory
+}
+if (-not [string]::IsNullOrWhiteSpace($CreatorProfileId)) {
+    $browserBinding = Resolve-CreatorPublicationBrowserBinding -ProfilesJsonPath $ProfilesJson -ResolvedCreatorProfileId $CreatorProfileId.Trim() -ResolvedPlatform $Platform
+    if ($browserBinding) {
+        $resolvedBindingBrowser = [string]$browserBinding.browser
+        if (-not [string]::IsNullOrWhiteSpace($resolvedBindingBrowser)) {
+            $Browser = $resolvedBindingBrowser
+        }
+        if ([string]::IsNullOrWhiteSpace($UserDataDir) -or $UserDataDir -eq (Get-DefaultPublicationUserDataDir)) {
+            $resolvedBindingUserDataDir = [string]$browserBinding.user_data_dir
+            if (-not [string]::IsNullOrWhiteSpace($resolvedBindingUserDataDir)) {
+                $UserDataDir = $resolvedBindingUserDataDir
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($ProfileDirectory) -or $ProfileDirectory -eq (Get-DefaultPublicationProfileDirectory)) {
+            $resolvedBindingProfileDirectory = [string]$browserBinding.profile_directory
+            if (-not [string]::IsNullOrWhiteSpace($resolvedBindingProfileDirectory)) {
+                $ProfileDirectory = $resolvedBindingProfileDirectory
+            }
+        }
+    }
 }
 if (-not (Test-Path -LiteralPath $NodePath)) {
     throw "Node executable not found: $NodePath"

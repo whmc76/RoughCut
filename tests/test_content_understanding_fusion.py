@@ -145,6 +145,37 @@ def test_build_evidence_bundle_emits_timed_focus_spans() -> None:
     )
 
 
+def test_build_evidence_bundle_uses_canonical_surface_for_semantic_inputs() -> None:
+    bundle = build_evidence_bundle(
+        source_name="demo.mp4",
+        subtitle_items=[
+            {
+                "start_time": 0.0,
+                "end_time": 1.5,
+                "text_raw": "那个",
+                "text_norm": "这是 NITECORE EDC17 手电",
+                "text_final": "",
+                "display_suppressed_reason": "standalone_filler",
+            },
+            {
+                "start_time": 1.5,
+                "end_time": 3.0,
+                "text_raw": "顺便和 EDC37 做个对比",
+                "text_norm": "顺便和 EDC37 做个对比",
+                "text_final": "顺便和 EDC37 做个对比",
+            },
+        ],
+        transcript_excerpt="这是 NITECORE EDC17 手电，顺便和 EDC37 做个对比。",
+    )
+
+    semantic_inputs = bundle["semantic_fact_inputs"]
+    assert "这是 NITECORE EDC17 手电" in semantic_inputs["subtitle_lines"]
+    assert any(
+        span["timestamp"] == "00:00-00:01" and "NITECORE EDC17" in span["text"]
+        for span in semantic_inputs["timed_focus_spans"]
+    )
+
+
 def test_understanding_evidence_spans_backfill_timing_from_bundle() -> None:
     bundle = build_evidence_bundle(
         source_name="demo.mp4",

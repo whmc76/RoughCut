@@ -107,6 +107,14 @@ def test_normalize_source_transcript_text_preserves_real_spoken_fillers_and_inte
     assert normalize_source_transcript_text("<|nospeech|> 啊我靠饮恨") == "啊我靠饮恨"
 
 
+def test_normalize_source_transcript_text_can_preserve_stutter_for_authoritative_manual_surfaces() -> None:
+    assert (
+        normalize_source_transcript_text("NNOCOC的的这个个发发售售，太太难难了", collapse_stutter=False)
+        == "NNOCOC的的这个个发发售售，太太难难了"
+    )
+    assert normalize_source_transcript_text("最近这个发售发发售啊太难", collapse_stutter=False) == "最近这个发售发发售啊太难"
+
+
 def test_normalize_source_transcript_text_preserves_legitimate_repeated_digits() -> None:
     assert normalize_source_transcript_text("最高2500流明，日用1500流明") == "最高2500流明，日用1500流明"
     assert normalize_source_transcript_text("峰值能达到10000流明啊") == "峰值能达到10000流明啊"
@@ -340,6 +348,34 @@ def test_write_ass_file_skips_filler_only_dialogues(tmp_path: Path) -> None:
             {"start_time": 0.0, "end_time": 0.8, "text_final": "这个"},
             {"start_time": 0.8, "end_time": 1.6, "text_final": "这个产品吧还行"},
             {"start_time": 1.6, "end_time": 2.2, "text_final": "吧"},
+        ],
+        output_path,
+    )
+
+    content = output_path.read_text(encoding="utf-8-sig")
+    dialogue_lines = [line for line in content.splitlines() if line.startswith("Dialogue:")]
+    assert len(dialogue_lines) == 1
+    assert "这个产品吧还行" in dialogue_lines[0]
+
+
+def test_write_ass_file_does_not_restore_display_suppressed_row_from_hidden_surfaces(tmp_path: Path) -> None:
+    output_path = tmp_path / "subtitle.ass"
+
+    write_ass_file(
+        [
+            {
+                "start_time": 0.0,
+                "end_time": 0.8,
+                "text_raw": "这个",
+                "text_norm": "这个",
+                "text_final": "",
+                "display_suppressed_reason": "standalone_filler",
+            },
+            {
+                "start_time": 0.8,
+                "end_time": 1.6,
+                "text_final": "这个产品吧还行",
+            },
         ],
         output_path,
     )

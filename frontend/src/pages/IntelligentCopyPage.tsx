@@ -28,6 +28,7 @@ import {
 import { useI18n } from "../i18n";
 import { copyStylePresets } from "../stylePresets";
 import type { IntelligentCopyGenerateTask, IntelligentCopyPlatformMaterial, PublicationAttempt, PublicationSchemeItem } from "../types";
+import { apiPath } from "../api/core";
 
 export function IntelligentCopyPage() {
   const { t } = useI18n();
@@ -228,6 +229,22 @@ export function IntelligentCopyPage() {
                   onChange={(event) => workspace.setCopyStyle(event.target.value)}
                   options={copyStylePresets.map((preset) => ({ value: preset.key, label: preset.label }))}
                 />
+                <label>
+                  <span>创作者卡片</span>
+                  <select
+                    className="input"
+                    value={workspace.selectedPublicationProfileId}
+                    onChange={(event) => workspace.setSelectedPublicationProfileId(event.target.value)}
+                    disabled={!workspace.publicationProfiles.length}
+                  >
+                    {!workspace.publicationProfiles.length ? <option value="">没有创作者卡片</option> : null}
+                    {workspace.publicationProfiles.map((profile) => (
+                      <option key={profile.id} value={profile.id}>
+                        {profile.display_name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
                 <label className="checkbox-line">
                   <input
                     type="checkbox"
@@ -291,6 +308,7 @@ export function IntelligentCopyPage() {
                       copyStyle: workspace.copyStyle,
                       platforms: workspace.selectedMaterialPlatformIds,
                       useExistingCover: workspace.useExistingCover,
+                      creatorProfileId: workspace.selectedPublicationProfileId || null,
                     })
                   }
                   disabled={generateDisabled}
@@ -1471,7 +1489,7 @@ function localImagePreviewUrl(path: string, metadata?: Record<string, unknown> |
     imageGeneration && typeof imageGeneration === "object" && "completed_at" in imageGeneration
       ? String((imageGeneration as Record<string, unknown>).completed_at ?? "")
       : "";
-  return `/__roughcut_local_image?path=${encodeURIComponent(path)}&v=${encodeURIComponent(completedAt || path)}`;
+  return apiPath(`/intelligent-copy/local-image?path=${encodeURIComponent(path)}&v=${encodeURIComponent(completedAt || path)}`);
 }
 
 function platformPreviewClass(platform: string): string {

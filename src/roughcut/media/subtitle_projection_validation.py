@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
-from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text, subtitle_semantic_item_text
 from roughcut.media.subtitles import remap_subtitles_to_timeline
 
 @dataclass(frozen=True)
@@ -73,7 +73,12 @@ _LOW_SIGNAL_SINGLE_SOURCE_EDGE_TRIM_FRAGMENTS = frozenset({"啊", "呀", "吧", 
 
 
 def subtitle_projection_display_text(item: dict[str, Any]) -> str:
-    return subtitle_display_rule_text(item) or str(item.get("text") or "")
+    if str(item.get("display_suppressed_reason") or "").strip():
+        return ""
+    text = subtitle_display_rule_text(item)
+    if text:
+        return text
+    return str(item.get("text") or "")
 
 
 def compact_projection_text(value: object) -> str:
@@ -559,7 +564,10 @@ def _build_transcript_projection_speech_units(
             )
         if words:
             continue
-        text = str(segment.get("text") or segment.get("text_raw") or "").strip()
+        text = subtitle_semantic_item_text(
+            segment,
+            generic_fallback_text=str(segment.get("text") or segment.get("text_raw") or "").strip(),
+        )
         start = _optional_float(segment.get("start_time", segment.get("start")))
         end = _optional_float(segment.get("end_time", segment.get("end")))
         if not text or start is None or end is None or end <= start:

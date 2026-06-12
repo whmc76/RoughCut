@@ -23,6 +23,7 @@ from roughcut.review.model_identity import model_numbers_conflict
 from roughcut.review.text_rewrite_policy import disabled_text_rewrite
 from roughcut.speech.dialects import resolve_transcription_dialect
 from roughcut.edit.presets import normalize_workflow_template_name
+from roughcut.edit.subtitle_surfaces import subtitle_canonical_rule_text
 
 
 _DOMAIN_ANCHORS = (
@@ -441,6 +442,12 @@ _SUPPORTED_MEMORY_DOMAINS = {
 }
 
 
+def _recent_subtitle_fact_text(row: dict[str, Any] | None) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return subtitle_canonical_rule_text(row)
+
+
 def build_subtitle_review_memory(
     *,
     workflow_template: str | None = None,
@@ -735,9 +742,7 @@ def build_subtitle_review_memory(
                 remember_term(correct_form, fallback_weight + context_bonus, metadata=term_metadata_payload)
 
     for row in recent_subtitles or []:
-        text = _clean_example_text(
-            row.get("text_final") or row.get("text_norm") or row.get("text_raw") or ""
-        )
+        text = _clean_example_text(_recent_subtitle_fact_text(row))
         if not text:
             continue
         if not _text_supported_by_subject_domain(text, resolved_subject_domain):
@@ -1033,7 +1038,7 @@ def _select_user_memory_confirmed_entities(
         str(item or "")
         for item in [
             *((content_profile or {}).get(key) or "" for key in ("subject_type", "content_kind", "video_theme", "summary")),
-            *(row.get("text_final") or row.get("text_norm") or row.get("text_raw") or "" for row in (recent_subtitles or [])),
+            *(_recent_subtitle_fact_text(row) for row in (recent_subtitles or [])),
         ]
     )
     normalized_context = _compact_subject_text(context_text).casefold()

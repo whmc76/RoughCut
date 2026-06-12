@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 import re
 import shutil
 import subprocess
@@ -56,13 +57,24 @@ from roughcut.edit.cut_analysis import (
     ARTIFACT_TYPE_CUT_ANALYSIS,
     build_cut_analysis_payload,
     cut_analysis_accepted_cuts,
+    cut_analysis_effective_applied_cuts,
 )
+from roughcut.edit.editorial_timeline import resolve_refine_keep_segments_for_timeline
 from roughcut.edit.otio_export import export_to_otio
+from roughcut.edit.packaging_timeline import (
+    build_packaging_timeline_payload,
+    packaging_timeline_analysis,
+    packaging_timeline_assets,
+    packaging_timeline_editing_accents,
+    packaging_timeline_editing_skill,
+    packaging_timeline_section_choreography,
+    packaging_timeline_subtitles,
+    resolve_packaging_timeline_payload,
+)
 from roughcut.edit.presets import normalize_workflow_template_name
 from roughcut.edit.refine_decisions import (
     ARTIFACT_TYPE_REFINE_DECISION_PLAN,
     build_refine_decision_plan_from_render_plan,
-    resolve_refine_keep_segments_for_timeline,
 )
 from roughcut.edit.multimodal_trim_review import (
     ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW,
@@ -70,6 +82,7 @@ from roughcut.edit.multimodal_trim_review import (
     build_multimodal_trim_review_payload,
     review_multimodal_trim_review_payload,
 )
+from roughcut.edit.manual_editor_contract import manual_editor_is_subtitle_only_render
 from roughcut.edit.smart_cut_rules import (
     default_smart_cut_rules_payload,
     normalize_smart_cut_rules_payload,
@@ -83,9 +96,13 @@ from roughcut.edit.render_plan import (
 )
 from roughcut.edit.skills import apply_review_focus_overrides, resolve_editing_skill
 from roughcut.edit.subtitle_surfaces import (
+    subtitle_canonical_explicit_text,
     subtitle_canonical_rule_text,
     subtitle_display_rule_text,
+    subtitle_raw_explicit_text,
     subtitle_raw_rule_text,
+    subtitle_semantic_item_text,
+    subtitle_surface_item_dict,
 )
 from roughcut.edit.timeline import save_editorial_timeline
 from roughcut.media.audio import NoAudioStreamError, extract_audio, extract_audio_clip
@@ -119,7 +136,14 @@ from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.probe import probe, validate_media
 from roughcut.media.render import render_video
 from roughcut.media.silence import detect_silence
-from roughcut.llm_cache import build_cache_key, build_cache_metadata, digest_payload, load_cached_entry, save_cached_json
+from roughcut.llm_cache import (
+    build_cache_key,
+    build_cache_metadata,
+    digest_payload,
+    get_cache_path,
+    load_cached_entry,
+    save_cached_json,
+)
 from roughcut.naming import AVATAR_CAPABILITY_GENERATION, normalize_avatar_capability_status
 from roughcut.packaging.library import (
     list_packaging_assets,
@@ -129,6 +153,7 @@ from roughcut.packaging.library import (
     resolve_insert_transition_overlap,
     resolve_packaging_plan_for_job,
 )
+from roughcut.edit.rule_registry import rule_requires_llm_review
 from roughcut.prompts.edit_decision import build_high_risk_cut_review_prompt
 from roughcut.providers.factory import get_avatar_provider, get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message, extract_json_text
@@ -248,6 +273,7 @@ from roughcut.telegram.review_notification_service import enqueue_review_notific
 from roughcut.usage import track_step_usage, track_usage_operation
 
 ARTIFACT_TYPE_TRANSCRIPT_CORRECTION_SCORE_REPORT = "transcript_correction_score_report"
+ARTIFACT_TYPE_RENDER_RUNTIME_DIAGNOSTICS = "render_runtime_diagnostics"
 _MANUAL_EDITOR_DRAFT_ARTIFACT_TYPE = "manual_editor_draft"
 
 _AVATAR_SEGMENT_READY_RETRIES = 60
@@ -408,6 +434,52 @@ def _subtitle_surface_canonical_text(item: Any) -> str:
 
 def _subtitle_surface_raw_text(item: Any) -> str:
     return subtitle_raw_rule_text(_subtitle_surface_payload(item))
+
+
+def _transcript_segment_surface_payload(segment: Any) -> dict[str, Any]:
+    if isinstance(segment, dict):
+        return dict(segment)
+    return {
+        "id": getattr(segment, "id", None),
+        "index": getattr(segment, "index", None),
+        "segment_index": getattr(segment, "segment_index", None),
+        "start": getattr(segment, "start", None),
+        "end": getattr(segment, "end", None),
+        "start_time": getattr(segment, "start_time", None),
+        "end_time": getattr(segment, "end_time", None),
+        "speaker": getattr(segment, "speaker", None),
+        "text": getattr(segment, "text", None),
+        "text_raw": getattr(segment, "text_raw", None),
+        "text_norm": getattr(segment, "text_norm", None),
+        "text_canonical": getattr(segment, "text_canonical", None),
+        "text_final": getattr(segment, "text_final", None),
+        "display_suppressed_reason": getattr(segment, "display_suppressed_reason", None),
+        "words": getattr(segment, "words", None),
+        "words_json": getattr(segment, "words_json", None),
+    }
+
+
+def _build_transcript_segment_adapter(segment: Any, *, index: int) -> SimpleNamespace:
+    payload = _transcript_segment_surface_payload(segment)
+    surfaces = subtitle_surface_item_dict(
+        payload,
+        generic_fallback_text=str(payload.get("text") or payload.get("text_raw") or ""),
+    )
+    words_json = payload.get("words_json", None) or payload.get("words", None) or []
+    return SimpleNamespace(
+        id=payload.get("id"),
+        segment_index=int(payload.get("segment_index", payload.get("index", index)) or index),
+        start_time=float(payload.get("start_time", payload.get("start", 0.0)) or 0.0),
+        end_time=float(payload.get("end_time", payload.get("end", 0.0)) or 0.0),
+        speaker=payload.get("speaker"),
+        text=str(surfaces["text_raw"] or payload.get("text") or ""),
+        text_raw=surfaces["text_raw"],
+        text_norm=surfaces["text_norm"],
+        text_canonical=surfaces["text_norm"],
+        text_final=surfaces["text_final"],
+        display_suppressed_reason=payload.get("display_suppressed_reason"),
+        words_json=drop_redundant_synthetic_word_payloads(copy.deepcopy(list(words_json))),
+    )
 
 
 _TRANSCRIPTION_PROVIDER_LABELS: dict[str, str] = {
@@ -665,7 +737,7 @@ def _context_items_around_cut(
 
 def _should_review_cut_with_llm(item: dict[str, Any]) -> bool:
     reason = str(item.get("reason") or "").strip()
-    if reason in {"rollback_instruction", "restart_retake", "low_signal_subtitle", "long_non_dialogue"}:
+    if rule_requires_llm_review(reason, risk_level=item.get("risk_level")):
         return True
     if reason != "silence":
         return False
@@ -739,7 +811,7 @@ def _build_edit_decision_llm_review_candidates(
                     {
                         "start": round(float(entry.get("start", 0.0) or 0.0), 3),
                         "end": round(float(entry.get("end", 0.0) or 0.0), 3),
-                        "text": str(entry.get("text") or ""),
+                        "text": subtitle_canonical_rule_text(entry) or str(entry.get("text") or ""),
                         "speaker": str(entry.get("speaker") or ""),
                         "confidence": round(float(entry.get("confidence", 0.0) or 0.0), 3)
                         if entry.get("confidence") is not None
@@ -839,11 +911,17 @@ def _apply_llm_cut_review_to_decision(
     normalized_reviews = _normalize_cut_review_decisions(review_result)
     review_by_id = {item["candidate_id"]: item for item in normalized_reviews}
     min_confidence = float(review_result.get("min_confidence", 0.72) or 0.72)
-    restore_ids = {
+    keep_restore_ids = {
         candidate_id
         for candidate_id, item in review_by_id.items()
         if str(item.get("verdict") or "") == "keep" and float(item.get("confidence", 0.0) or 0.0) >= min_confidence
     }
+    unsure_demote_ids = {
+        candidate_id
+        for candidate_id, item in review_by_id.items()
+        if str(item.get("verdict") or "") == "unsure"
+    }
+    restore_ids = keep_restore_ids | unsure_demote_ids
 
     if restore_ids:
         updated_segments: list[EditSegment] = []
@@ -855,17 +933,40 @@ def _apply_llm_cut_review_to_decision(
         decision.segments = _merge_edit_segments(updated_segments)
 
     accepted_cuts: list[dict[str, Any]] = []
+    existing_rule_candidates = [
+        dict(item)
+        for item in list((decision.analysis or {}).get("manual_editor_rule_candidates") or [])
+        if isinstance(item, dict)
+    ]
+    demoted_rule_candidates: list[dict[str, Any]] = []
     for item in list((decision.analysis or {}).get("accepted_cuts") or []):
         if not isinstance(item, dict):
             continue
         candidate_id = _cut_review_candidate_id(item)
         if candidate_id in restore_ids:
+            if candidate_id in unsure_demote_ids:
+                payload = dict(item)
+                payload["auto_applied"] = False
+                if candidate_id in review_by_id:
+                    payload["llm_review"] = dict(review_by_id[candidate_id])
+                demoted_rule_candidates.append(payload)
             continue
         payload = dict(item)
         if candidate_id in review_by_id:
             payload["llm_review"] = dict(review_by_id[candidate_id])
         accepted_cuts.append(payload)
     decision.analysis["accepted_cuts"] = accepted_cuts
+    if demoted_rule_candidates:
+        merged_rule_candidates: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for item in [*existing_rule_candidates, *demoted_rule_candidates]:
+            candidate_id = _cut_review_candidate_id(item)
+            if candidate_id and candidate_id in seen_ids:
+                continue
+            if candidate_id:
+                seen_ids.add(candidate_id)
+            merged_rule_candidates.append(item)
+        decision.analysis["manual_editor_rule_candidates"] = merged_rule_candidates
 
     keep_energy_segments = _build_keep_energy_segments_analysis(
         decision.segments,
@@ -879,7 +980,8 @@ def _apply_llm_cut_review_to_decision(
         "reviewed": bool(normalized_reviews),
         "candidate_count": len(list(review_result.get("candidates") or [])),
         "decision_count": len(normalized_reviews),
-        "restored_cut_count": len(restore_ids),
+        "restored_cut_count": len(keep_restore_ids),
+        "demoted_cut_count": len(unsure_demote_ids),
         "cached": bool(review_result.get("cached")),
         "provider": str(review_result.get("provider") or ""),
         "model": str(review_result.get("model") or ""),
@@ -887,6 +989,67 @@ def _apply_llm_cut_review_to_decision(
         "decisions": normalized_reviews,
     }
     return decision
+
+
+def _load_compatible_cross_job_cut_review_cache(
+    cache_namespace: str,
+    *,
+    source_meta: dict[str, Any],
+    provider: str,
+    model: str,
+    candidates_sha256: str,
+    min_confidence: float,
+) -> dict[str, Any] | None:
+    namespace_dir = get_cache_path(cache_namespace, "probe").parent
+    if not namespace_dir.exists():
+        return None
+    expected_source_meta = {
+        "source_name": str(source_meta.get("source_name") or "").strip(),
+        "subject_brand": str(source_meta.get("subject_brand") or "").strip(),
+        "subject_model": str(source_meta.get("subject_model") or "").strip(),
+        "subject_type": str(source_meta.get("subject_type") or "").strip(),
+    }
+    for path in sorted(namespace_dir.glob("*.json"), reverse=True):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        fingerprint = payload.get("fingerprint")
+        result = payload.get("result")
+        if not isinstance(fingerprint, dict) or not isinstance(result, dict):
+            continue
+        cached_source_meta = fingerprint.get("source_meta")
+        if not isinstance(cached_source_meta, dict):
+            continue
+        comparable_source_meta = {
+            "source_name": str(cached_source_meta.get("source_name") or "").strip(),
+            "subject_brand": str(cached_source_meta.get("subject_brand") or "").strip(),
+            "subject_model": str(cached_source_meta.get("subject_model") or "").strip(),
+            "subject_type": str(cached_source_meta.get("subject_type") or "").strip(),
+        }
+        if comparable_source_meta != expected_source_meta:
+            continue
+        if str(fingerprint.get("provider") or "").strip() != str(provider or "").strip():
+            continue
+        if str(fingerprint.get("model") or "").strip() != str(model or "").strip():
+            continue
+        if str(fingerprint.get("candidates_sha256") or "").strip() != str(candidates_sha256 or "").strip():
+            continue
+        try:
+            cached_min_confidence = float(fingerprint.get("min_confidence") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if cached_min_confidence != float(min_confidence or 0.0):
+            continue
+        return {
+            "namespace": str(payload.get("namespace") or cache_namespace).strip(),
+            "key": str(payload.get("key") or "").strip(),
+            "result": dict(result),
+            "usage_baseline": payload.get("usage_baseline"),
+        }
+    return None
 
 
 async def _maybe_review_edit_decision_cuts_with_llm(
@@ -935,6 +1098,15 @@ async def _maybe_review_edit_decision_cuts_with_llm(
     }
     cache_key = build_cache_key(cache_namespace, fingerprint)
     cached_entry = load_cached_entry(cache_namespace, cache_key)
+    if cached_entry is None:
+        cached_entry = _load_compatible_cross_job_cut_review_cache(
+            cache_namespace,
+            source_meta=source_meta,
+            provider=str(active_provider or ""),
+            model=str(active_model or ""),
+            candidates_sha256=str(fingerprint.get("candidates_sha256") or ""),
+            min_confidence=float(fingerprint.get("min_confidence") or 0.72),
+        )
     if cached_entry is not None:
         cached_result = dict(cached_entry.get("result") or {})
         cached_result["cached"] = True
@@ -1964,12 +2136,17 @@ def _build_edit_plan_transcript_segments(
 
     fallback_segments: list[dict[str, Any]] = []
     for row in transcript_rows:
+        text = str(row.text or "")
         fallback_segments.append(
             {
                 "index": int(row.segment_index),
                 "start": float(row.start_time),
                 "end": float(row.end_time),
-                "text": str(row.text or ""),
+                "text": text,
+                "text_raw": text,
+                "text_canonical": text,
+                "text_norm": text,
+                "text_final": text,
                 "speaker": row.speaker,
                 "words": drop_redundant_synthetic_word_payloads(list(row.words_json or [])),
             }
@@ -1982,12 +2159,20 @@ def _normalize_transcript_segment_payloads(raw_segments: list[Any]) -> list[dict
     for index, item in enumerate(list(raw_segments or [])):
         if not isinstance(item, dict):
             continue
+        surfaces = subtitle_surface_item_dict(
+            item,
+            generic_fallback_text=str(item.get("text") or item.get("raw_text") or item.get("text_raw") or ""),
+        )
         normalized.append(
             {
                 "index": int(item.get("index", index) or index),
                 "start": float(item.get("start_time") or item.get("start") or 0.0),
                 "end": float(item.get("end_time") or item.get("end") or 0.0),
-                "text": str(item.get("text") or item.get("raw_text") or item.get("text_raw") or ""),
+                "text": str(surfaces["text_norm"] or surfaces["text_raw"] or item.get("text") or ""),
+                "text_raw": surfaces["text_raw"],
+                "text_canonical": surfaces["text_norm"],
+                "text_norm": surfaces["text_norm"],
+                "text_final": surfaces["text_final"],
                 "speaker": item.get("speaker"),
                 "confidence": item.get("confidence"),
                 "logprob": item.get("logprob"),
@@ -2539,18 +2724,22 @@ def _build_projection_entries_from_subtitle_items(
         ),
     )
     for item in ordered:
-        display_text = (
-            _subtitle_surface_display_text(item)
-            if use_final_text
-            else _subtitle_surface_raw_text(item)
+        payload = _subtitle_surface_payload(item)
+        surfaces = subtitle_surface_item_dict(
+            payload,
+            generic_fallback_text=str(payload.get("text") or payload.get("text_raw") or ""),
+        )
+        canonical_text = str(surfaces["text_norm"] or surfaces["text_raw"] or "")
+        entry_text = str(
+            surfaces["text_final"] if use_final_text else surfaces["text_raw"] or canonical_text
         )
         entries.append(
             SubtitleEntry(
                 index=int(getattr(item, "item_index", 0) or 0),
                 start=float(getattr(item, "start_time", 0.0) or 0.0),
                 end=float(getattr(item, "end_time", 0.0) or 0.0),
-                text_raw=display_text,
-                text_norm=normalize_projection_display_text(display_text),
+                text_raw=entry_text,
+                text_norm=normalize_projection_display_text(canonical_text or entry_text),
                 words=(),
             )
         )
@@ -2562,6 +2751,7 @@ def _build_projection_items_from_entries(entries: list[SubtitleEntry]) -> list[S
     for index, entry in enumerate(list(entries or [])):
         raw_text = str(getattr(entry, "text_raw", "") or "")
         normalized_text = str(getattr(entry, "text_norm", "") or "")
+        canonical_text = normalize_projection_display_text(normalized_text or raw_text)
         display_source = _projection_display_source_text(raw_text, normalized_text)
         display_norm = normalize_projection_display_text(display_source)
         projection_items.append(
@@ -2570,7 +2760,7 @@ def _build_projection_items_from_entries(entries: list[SubtitleEntry]) -> list[S
                 start_time=float(getattr(entry, "start", 0.0) or 0.0),
                 end_time=float(getattr(entry, "end", 0.0) or 0.0),
                 text_raw=raw_text,
-                text_norm=display_norm,
+                text_norm=canonical_text,
                 text_final=display_norm,
                 words=tuple(getattr(entry, "words", ()) or ()),
             )
@@ -2646,15 +2836,7 @@ def _build_segmentation_segments_from_canonical_layer(canonical_transcript_layer
 def _build_reference_segment_adapters(transcript_rows: list[TranscriptSegment]) -> list[SimpleNamespace]:
     adapters: list[SimpleNamespace] = []
     for index, row in enumerate(list(transcript_rows or [])):
-        adapters.append(
-            SimpleNamespace(
-                segment_index=int(getattr(row, "segment_index", index) or index),
-                start_time=float(getattr(row, "start_time", 0.0) or 0.0),
-                end_time=float(getattr(row, "end_time", 0.0) or 0.0),
-                text=str(getattr(row, "text", "") or ""),
-                words_json=drop_redundant_synthetic_word_payloads(list(getattr(row, "words_json", None) or [])),
-            )
-        )
+        adapters.append(_build_transcript_segment_adapter(row, index=index))
     return adapters
 
 
@@ -2715,21 +2897,52 @@ async def _build_canonical_refresh_projection(
         source_name=source_name,
         content_profile={},
     )
+    display_boundary_hybrid_entries = _build_display_boundary_hybrid_projection_entries(
+        canonical_entries=projection_entries,
+        display_entries=existing_entries,
+        split_profile=split_profile,
+    )
+    hybrid_projection_items = _build_projection_items_from_entries(display_boundary_hybrid_entries)
+    hybrid_projection_analysis = analyze_subtitle_segmentation(display_boundary_hybrid_entries)
+    hybrid_quality_report = build_subtitle_quality_report_from_items(
+        subtitle_items=hybrid_projection_items,
+        source_name=source_name,
+        content_profile={},
+    )
+    preferred_basis = None
+    if _display_boundary_hybrid_candidate_worth_adding(
+        canonical_quality_report=canonical_quality_report,
+        hybrid_quality_report=hybrid_quality_report,
+    ):
+        preferred_basis = "canonical_display_boundary_hybrid"
+    keep_existing_projection = _should_keep_existing_subtitle_projection(
+        existing_quality_report=existing_quality_report,
+        refreshed_quality_report=canonical_quality_report,
+        canonical_transcript_layer=canonical_transcript_layer,
+        existing_projection_items=existing_projection_items,
+        refreshed_projection_items=canonical_projection_items,
+    )
     candidate_pool = _build_projection_candidate_pool(
         canonical_projection_items=canonical_projection_items,
         projection_analysis=projection_analysis,
         canonical_quality_report=canonical_quality_report,
-        hybrid_projection_items=[],
-        hybrid_projection_analysis={},
-        hybrid_quality_report={},
+        hybrid_projection_items=hybrid_projection_items,
+        hybrid_projection_analysis=hybrid_projection_analysis,
+        hybrid_quality_report=hybrid_quality_report,
         existing_projection_items=existing_projection_items,
         existing_projection_analysis=existing_projection_analysis,
         existing_quality_report=existing_quality_report,
+        allow_display_baseline_preserved=keep_existing_projection,
     )
     selected_candidate, correction_score_report = _select_projection_candidate(
         candidates=candidate_pool,
         reference_items=canonical_projection_items,
         canonical_transcript_layer=canonical_transcript_layer,
+        preferred_basis=(
+            "display_baseline_preserved"
+            if keep_existing_projection
+            else preferred_basis
+        ),
     )
     projection_items = list(selected_candidate["items"])
     projection_analysis = selected_candidate["analysis"]
@@ -2739,10 +2952,10 @@ async def _build_canonical_refresh_projection(
     correction_score_report = {
         **dict(correction_score_report or {}),
         "selected_basis": projection_basis,
-        "selection_policy": (
-            "canonical_transcript_is_single_projection_authority"
-            if canonical_projection_items
-            else "display_baseline_preserved_as_legacy_fallback"
+        "selection_policy": _projection_selection_policy(
+            selected_basis=projection_basis,
+            canonical_projection_items=canonical_projection_items,
+            keep_existing_projection=keep_existing_projection,
         ),
     }
     subtitle_quality_report["correction_score"] = correction_score_report
@@ -2756,6 +2969,19 @@ async def _build_canonical_refresh_projection(
         transcript_layer=transcript_layer,
     )
     return refreshed_projection_layer, subtitle_quality_report, correction_score_report
+
+
+def _projection_selection_policy(
+    *,
+    selected_basis: str,
+    canonical_projection_items: list[Any],
+    keep_existing_projection: bool,
+) -> str:
+    if selected_basis == "display_baseline_preserved":
+        if canonical_projection_items and keep_existing_projection:
+            return "display_baseline_preserved_for_quality_guard"
+        return "display_baseline_preserved_as_legacy_fallback"
+    return "canonical_transcript_is_single_projection_authority"
 
 
 def _should_keep_existing_subtitle_projection(
@@ -2828,6 +3054,7 @@ def _build_projection_candidate_pool(
     existing_projection_items: list[SimpleNamespace],
     existing_projection_analysis: Any,
     existing_quality_report: dict[str, Any],
+    allow_display_baseline_preserved: bool = False,
 ) -> list[dict[str, Any]]:
     # Canonical transcript segmentation is the only segmentation authority.
     # Projection may preserve or display it, but it must not compete with a
@@ -2841,7 +3068,28 @@ def _build_projection_candidate_pool(
             "quality_report": canonical_quality_report,
         },
     ]
-    if not canonical_projection_items:
+    if (
+        canonical_projection_items
+        and hybrid_projection_items
+        and _display_boundary_hybrid_candidate_worth_adding(
+            canonical_quality_report=canonical_quality_report,
+            hybrid_quality_report=hybrid_quality_report,
+        )
+        and _display_boundary_hybrid_candidate_shape_is_acceptable(
+            canonical_projection_items=canonical_projection_items,
+            hybrid_projection_items=hybrid_projection_items,
+        )
+    ):
+        candidate_pool.append(
+            {
+                "basis": "canonical_display_boundary_hybrid",
+                "transcript_layer": "canonical_transcript",
+                "items": hybrid_projection_items,
+                "analysis": hybrid_projection_analysis,
+                "quality_report": hybrid_quality_report,
+            }
+        )
+    if allow_display_baseline_preserved or not canonical_projection_items:
         candidate_pool.append(
             {
                 "basis": "display_baseline_preserved",
@@ -2852,6 +3100,57 @@ def _build_projection_candidate_pool(
             }
         )
     return candidate_pool
+
+
+def _display_boundary_hybrid_candidate_worth_adding(
+    *,
+    canonical_quality_report: dict[str, Any],
+    hybrid_quality_report: dict[str, Any],
+) -> bool:
+    canonical_generic_splits = _generic_word_split_metric(canonical_quality_report)
+    hybrid_generic_splits = _generic_word_split_metric(hybrid_quality_report)
+    if canonical_generic_splits <= 0 or hybrid_generic_splits >= canonical_generic_splits:
+        return False
+    hybrid_warning_count = len(list((hybrid_quality_report or {}).get("warning_reasons") or []))
+    canonical_warning_count = len(list((canonical_quality_report or {}).get("warning_reasons") or []))
+    return hybrid_warning_count <= canonical_warning_count
+
+
+def _display_boundary_hybrid_candidate_shape_is_acceptable(
+    *,
+    canonical_projection_items: list[Any],
+    hybrid_projection_items: list[Any],
+) -> bool:
+    if _projection_has_material_content_drift(
+        baseline_items=canonical_projection_items,
+        candidate_items=hybrid_projection_items,
+    ):
+        return False
+    return _projection_items_preserve_segmentation_shape(
+        canonical_projection_items,
+        hybrid_projection_items,
+    ) or _projection_items_have_moderate_shape_drift(
+        canonical_projection_items,
+        hybrid_projection_items,
+    )
+
+
+def _generic_word_split_metric(report: dict[str, Any]) -> int:
+    metrics = dict((report or {}).get("metrics") or {})
+    try:
+        count = int(metrics.get("generic_word_split_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count > 0:
+        return count
+    for reason in list((report or {}).get("warning_reasons") or []):
+        reason_text = str(reason or "").strip()
+        if "普通词跨字幕截断" not in reason_text:
+            continue
+        match = re.search(r"(\d+)\s*处", reason_text)
+        if match:
+            return int(match.group(1))
+    return 0
 
 
 def _projection_items_allow_hybrid_candidate(
@@ -3136,7 +3435,7 @@ def _best_display_boundary_target_index(
 
 
 def _join_projection_entry_texts(entries: list[SubtitleEntry]) -> str:
-    parts = [str(entry.text_raw or entry.text_norm or "").strip() for entry in list(entries or [])]
+    parts = [str(entry.text_norm or entry.text_raw or "").strip() for entry in list(entries or [])]
     parts = [part for part in parts if part]
     if not parts:
         return ""
@@ -3154,11 +3453,15 @@ def _merge_short_display_boundary_entries(
     soft_limit = max(max_chars, int(max_chars * 1.8))
     while index < len(entries):
         current = entries[index]
-        current_text = normalize_projection_display_text(current.text_raw)
+        current_text = normalize_projection_display_text(current.text_norm or current.text_raw)
         if (
             _is_short_display_boundary_entry(current_text)
             and index + 1 < len(entries)
-            and len(current_text + normalize_projection_display_text(entries[index + 1].text_raw)) <= soft_limit
+            and len(
+                current_text
+                + normalize_projection_display_text(entries[index + 1].text_norm or entries[index + 1].text_raw)
+            )
+            <= soft_limit
         ):
             merged.append(_merge_projection_entries(current, entries[index + 1], len(merged)))
             index += 2
@@ -3166,7 +3469,8 @@ def _merge_short_display_boundary_entries(
         if (
             _is_short_display_boundary_entry(current_text)
             and merged
-            and len(normalize_projection_display_text(merged[-1].text_raw) + current_text) <= soft_limit
+            and len(normalize_projection_display_text(merged[-1].text_norm or merged[-1].text_raw) + current_text)
+            <= soft_limit
         ):
             merged[-1] = _merge_projection_entries(merged[-1], current, len(merged) - 1)
             index += 1
@@ -3198,6 +3502,7 @@ def _select_projection_candidate(
     candidates: list[dict[str, Any]],
     reference_items: list[Any],
     canonical_transcript_layer: Any,
+    preferred_basis: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     correction_metrics = dict(getattr(canonical_transcript_layer, "correction_metrics", {}) or {})
     assessed_candidates: list[dict[str, Any]] = []
@@ -3210,15 +3515,30 @@ def _select_projection_candidate(
             segmentation_analysis=candidate.get("analysis"),
         )
         assessed_candidates.append({**candidate, "assessment": assessment})
+    display_baseline_candidates = [
+        candidate
+        for candidate in assessed_candidates
+        if str(candidate.get("basis") or "") == "display_baseline_preserved"
+    ]
     canonical_refresh_candidates = [
         candidate
         for candidate in assessed_candidates
-        if str(candidate.get("basis") or "") == "canonical_refresh"
+        if str(candidate.get("basis") or "") in {"canonical_refresh", "canonical_display_boundary_hybrid"}
         and str(candidate.get("transcript_layer") or "") == "canonical_transcript"
     ]
-    if canonical_refresh_candidates:
+    if canonical_refresh_candidates and not display_baseline_candidates:
         assessed_candidates = canonical_refresh_candidates
-    selected = max(
+    preferred_candidate = None
+    if preferred_basis:
+        preferred_candidate = next(
+            (
+                candidate
+                for candidate in assessed_candidates
+                if str(candidate.get("basis") or "") == preferred_basis
+            ),
+            None,
+        )
+    selected = preferred_candidate or max(
         assessed_candidates,
         key=lambda candidate: _projection_candidate_rank(candidate["assessment"]),
     )
@@ -3608,9 +3928,12 @@ async def _persist_projection_layer_to_subtitle_items(
     await session.execute(delete(SubtitleItem).where(SubtitleItem.job_id == job_id, SubtitleItem.version == version))
     persisted_count = 0
     for index, entry in enumerate(entries):
-        text_raw = str(getattr(entry, "text_raw", "") or "")
-        text_norm = str(getattr(entry, "text_norm", "") or normalize_projection_display_text(text_raw))
-        text_final = str(getattr(entry, "text_final", "") or text_norm)
+        payload = _subtitle_surface_payload(entry)
+        text_raw = subtitle_raw_explicit_text(payload)
+        text_norm = subtitle_canonical_explicit_text(payload)
+        if not text_norm and text_raw:
+            text_norm = normalize_projection_display_text(text_raw)
+        text_final = _subtitle_surface_display_text(payload)
         if not text_final.strip():
             continue
         session.add(
@@ -3620,8 +3943,8 @@ async def _persist_projection_layer_to_subtitle_items(
                 item_index=persisted_count,
                 start_time=float(getattr(entry, "start", 0.0) or 0.0),
                 end_time=float(getattr(entry, "end", 0.0) or 0.0),
-                text_raw=text_raw or text_final,
-                text_norm=normalize_projection_display_text(text_norm or text_final),
+                text_raw=text_raw,
+                text_norm=normalize_projection_display_text(text_norm),
                 text_final=normalize_projection_display_text(text_final),
             )
         )
@@ -3707,12 +4030,16 @@ def _filter_redundant_corrections_for_current_subtitles(
         subtitle_item = subtitle_by_id.get(subtitle_item_id)
         current_text = ""
         if subtitle_item is not None:
-            current_text = str(
-                getattr(subtitle_item, "text_final", None)
-                or getattr(subtitle_item, "text_norm", None)
-                or getattr(subtitle_item, "text_raw", None)
-                or ""
-            ).strip()
+            current_text = subtitle_display_rule_text(
+                {
+                    "text_raw": str(getattr(subtitle_item, "text_raw", "") or ""),
+                    "text_norm": str(getattr(subtitle_item, "text_norm", "") or ""),
+                    "text_final": str(getattr(subtitle_item, "text_final", "") or ""),
+                    "display_suppressed_reason": str(
+                        getattr(subtitle_item, "display_suppressed_reason", "") or ""
+                    ),
+                }
+            )
         normalized_text = _normalize_review_term_token(current_text)
         normalized_original = _normalize_review_term_token(original_span)
         normalized_suggested = _normalize_review_term_token(suggested_span)
@@ -3816,18 +4143,30 @@ def _build_transcript_first_canonical_layer(
     for index, transcript_row in enumerate(transcript_rows_ordered):
         segment_index = int(getattr(transcript_row, "segment_index", index) or index)
         synthetic_id = synthetic_ids[segment_index]
-        transcript_text = str(getattr(transcript_row, "text", "") or "")
+        transcript_payload = _transcript_segment_surface_payload(transcript_row)
+        transcript_text = str(transcript_payload.get("text") or "")
+        surfaces = subtitle_surface_item_dict(
+            transcript_payload,
+            generic_fallback_text=str(transcript_text or transcript_payload.get("text_raw") or ""),
+        )
+        raw_text = str(surfaces["text_raw"] or transcript_text or "")
+        canonical_text = str(surfaces["text_norm"] or raw_text)
+        display_text = str(surfaces["text_final"] or canonical_text)
         if str(category_scope or "").strip().lower() == "flashlight":
-            transcript_text = normalize_flashlight_model_alias_text(transcript_text)
+            raw_text = normalize_flashlight_model_alias_text(raw_text)
+            canonical_text = normalize_flashlight_model_alias_text(canonical_text)
+            if display_text:
+                display_text = normalize_flashlight_model_alias_text(display_text)
         synthetic_items.append(
             SimpleNamespace(
                 id=synthetic_id,
                 item_index=segment_index,
                 start_time=float(getattr(transcript_row, "start_time", 0.0) or 0.0),
                 end_time=float(getattr(transcript_row, "end_time", 0.0) or 0.0),
-                text_raw=transcript_text,
-                text_norm=transcript_text,
-                text_final=transcript_text,
+                text_raw=raw_text,
+                text_norm=canonical_text,
+                text_final=display_text,
+                display_suppressed_reason=transcript_payload.get("display_suppressed_reason"),
             )
         )
 
@@ -3912,7 +4251,10 @@ _CANONICAL_COLLAPSED_TIMING_MAX_WINDOW_SEC = 0.9
 
 
 def _build_fallback_canonical_words(segment: dict[str, Any]) -> list[dict[str, Any]]:
-    text = str(segment.get("text_canonical") or segment.get("text") or segment.get("text_raw") or "").strip()
+    text = subtitle_semantic_item_text(
+        segment,
+        generic_fallback_text=str(segment.get("text") or segment.get("text_raw") or ""),
+    )
     tokens = tokenize_alignment_text(text)
     if not tokens:
         return []
@@ -4172,14 +4514,15 @@ def _project_canonical_transcript_to_timeline(
     projected_entries: list[dict[str, Any]] = []
     for entry in list(segmentation_result.entries or []):
         text_raw = str(getattr(entry, "text_raw", "") or "")
-        display_text = normalize_projection_display_text(text_raw)
+        text_norm = str(getattr(entry, "text_norm", "") or "")
+        display_text = normalize_projection_display_text(text_norm or text_raw)
         projected_entries.append(
             {
                 "index": int(getattr(entry, "index", len(projected_entries)) or len(projected_entries)),
                 "start_time": float(getattr(entry, "start", 0.0) or 0.0),
                 "end_time": float(getattr(entry, "end", 0.0) or 0.0),
                 "text_raw": text_raw,
-                "text_norm": display_text,
+                "text_norm": normalize_projection_display_text(text_norm or text_raw),
                 "text_final": display_text,
                 "projection_source": "canonical_transcript",
             }
@@ -4203,7 +4546,9 @@ def _projection_has_suspicious_subtitle_timing(
         except (TypeError, ValueError):
             continue
         duration = max(0.0, end - start)
-        text = subtitle_display_rule_text(entry) or str(entry.get("text") or "")
+        text = subtitle_surface_item_dict(entry, generic_fallback_text=str(entry.get("text") or ""))["text_final"]
+        if not text.strip():
+            continue
         compact_len = len(re.sub(r"[\s，。！？!?；;：:,、（）()[]【】{}\"'《》<>]+", "", text))
         if duration > duration_limit and compact_len <= compact_limit:
             return True
@@ -4234,8 +4579,8 @@ def _manual_editor_subtitle_items_from_editorial(editorial_timeline: dict[str, A
         if end_time <= start_time:
             continue
         text_final = subtitle_display_rule_text(item)
-        text_raw = str(item.get("text_raw") or "").strip()
-        text_norm = str(item.get("text_norm") or text_final or text_raw).strip()
+        text_raw = subtitle_raw_explicit_text(item)
+        text_norm = subtitle_canonical_explicit_text(item)
         payload = dict(item)
         payload.pop("start", None)
         payload.pop("end", None)
@@ -4264,6 +4609,8 @@ def _subtitle_item_payload(item: SubtitleItem) -> dict[str, Any]:
         "text_raw": item.text_raw,
         "text_norm": item.text_norm,
         "text_final": item.text_final,
+        "display_suppressed_reason": getattr(item, "display_suppressed_reason", None),
+        "projection_source": "subtitle_item",
     }
 
 
@@ -4275,6 +4622,8 @@ def _subtitle_projection_entry_payload(entry: dict[str, Any]) -> dict[str, Any]:
         "text_raw": entry.get("text_raw"),
         "text_norm": entry.get("text_norm"),
         "text_final": entry.get("text_final"),
+        "display_suppressed_reason": entry.get("display_suppressed_reason"),
+        "projection_source": entry.get("projection_source"),
     }
     words = drop_redundant_synthetic_word_payloads(list(entry.get("words") or entry.get("words_json") or []))
     if words:
@@ -4330,15 +4679,20 @@ def _canonical_transcript_layer_namespace(canonical_layer: dict[str, Any] | None
                     alignment=dict(raw_word.get("alignment") or {}),
                 )
             )
+        surfaces = subtitle_surface_item_dict(
+            segment,
+            generic_fallback_text=str(segment.get("text") or segment.get("text_raw") or ""),
+        )
         segments.append(
             SimpleNamespace(
                 index=int(segment.get("index", index) or index),
                 start=float(segment.get("start", segment.get("start_time", 0.0)) or 0.0),
                 end=float(segment.get("end", segment.get("end_time", 0.0)) or 0.0),
-                text_raw=str(segment.get("text_raw") or segment.get("text") or ""),
-                text_canonical=str(
-                    segment.get("text_canonical") or segment.get("text") or segment.get("text_raw") or ""
-                ),
+                text_raw=surfaces["text_raw"] or surfaces["text_norm"],
+                text_norm=surfaces["text_norm"],
+                text_canonical=surfaces["text_norm"],
+                text_final=surfaces["text_final"],
+                display_suppressed_reason=str(segment.get("display_suppressed_reason") or "").strip() or None,
                 accepted_corrections=tuple(segment.get("accepted_corrections") or ()),
                 pending_corrections=tuple(segment.get("pending_corrections") or ()),
                 words=tuple(words),
@@ -4423,6 +4777,7 @@ async def _load_latest_current_canonical_transcript_data(
             "text_raw": item.text_raw,
             "text_norm": item.text_norm,
             "text_final": item.text_final,
+            "display_suppressed_reason": getattr(item, "display_suppressed_reason", None),
         }
         for item in subtitle_items
     ]
@@ -4524,17 +4879,28 @@ async def _load_source_subtitle_payloads_for_projection_validation(
         return clean_subtitle_payloads(
             [
                 {
-                    "index": int(segment.get("index", index) or index),
-                    "source_index": int(segment.get("index", index) or index),
-                    "source_indexes": [int(segment.get("index", index) or index)],
-                    "start_time": float(segment.get("start", segment.get("start_time", 0.0)) or 0.0),
-                    "end_time": float(segment.get("end", segment.get("end_time", 0.0)) or 0.0),
-                    "text_raw": str(segment.get("text_raw") or segment.get("text") or ""),
-                    "text_norm": str(segment.get("text_canonical") or segment.get("text") or segment.get("text_raw") or ""),
-                    "text_final": str(segment.get("text_canonical") or segment.get("text") or segment.get("text_raw") or ""),
-                    "transcript_text": str(segment.get("text_raw") or segment.get("text") or ""),
-                    "words": [dict(word) for word in list(segment.get("words") or []) if isinstance(word, dict)],
-                    "projection_source": "canonical_transcript",
+                    **{
+                        "index": int(segment.get("index", index) or index),
+                        "source_index": int(segment.get("index", index) or index),
+                        "source_indexes": [int(segment.get("index", index) or index)],
+                        "start_time": float(segment.get("start", segment.get("start_time", 0.0)) or 0.0),
+                        "end_time": float(segment.get("end", segment.get("end_time", 0.0)) or 0.0),
+                        "words": [dict(word) for word in list(segment.get("words") or []) if isinstance(word, dict)],
+                        "projection_source": "canonical_transcript",
+                    },
+                    **(
+                        lambda surfaces: {
+                            "text_raw": surfaces["text_raw"],
+                            "text_norm": surfaces["text_norm"],
+                            "transcript_text": surfaces["text_raw"] or surfaces["text_norm"],
+                            "display_suppressed_reason": segment.get("display_suppressed_reason"),
+                        }
+                    )(
+                        subtitle_surface_item_dict(
+                            segment,
+                            generic_fallback_text=str(segment.get("text") or segment.get("text_raw") or ""),
+                        )
+                    ),
                 }
                 for index, segment in enumerate(canonical_segments)
             ],
@@ -4560,8 +4926,8 @@ async def _load_source_subtitle_payloads_for_projection_validation(
                 "end_time": float(row.end_time),
                 "text_raw": str(row.text or ""),
                 "text_norm": str(row.text or ""),
-                "text_final": str(row.text or ""),
                 "transcript_text": str(row.text or ""),
+                "display_suppressed_reason": getattr(row, "display_suppressed_reason", None),
                 "words": drop_redundant_synthetic_word_payloads([dict(word) for word in list(row.words_json or []) if isinstance(word, dict)]),
                 "projection_source": "transcript_segment",
             }
@@ -5886,6 +6252,73 @@ async def _load_latest_optional_artifact(
     return artifacts[0] if artifacts else None
 
 
+async def _persist_render_runtime_diagnostics(
+    session,
+    *,
+    job_id: uuid.UUID,
+    step_id: uuid.UUID | None,
+    avatar_result: dict[str, Any] | None = None,
+    cover_result: dict[str, Any] | None = None,
+) -> None:
+    latest_artifact = await _load_latest_optional_artifact(
+        session,
+        job_id=job_id,
+        artifact_types=(ARTIFACT_TYPE_RENDER_RUNTIME_DIAGNOSTICS,),
+    )
+    latest_payload = latest_artifact.data_json if latest_artifact and isinstance(latest_artifact.data_json, dict) else {}
+    payload: dict[str, Any] = {}
+    if isinstance(avatar_result, dict) and avatar_result:
+        payload["avatar_result"] = _merge_render_runtime_result(
+            latest_payload.get("avatar_result"),
+            avatar_result,
+        )
+    elif isinstance(latest_payload.get("avatar_result"), dict):
+        payload["avatar_result"] = copy.deepcopy(latest_payload["avatar_result"])
+    if isinstance(cover_result, dict) and cover_result:
+        payload["cover_result"] = _merge_render_runtime_result(
+            latest_payload.get("cover_result"),
+            cover_result,
+        )
+    elif isinstance(latest_payload.get("cover_result"), dict):
+        payload["cover_result"] = copy.deepcopy(latest_payload["cover_result"])
+    if not payload:
+        return
+    session.add(
+        Artifact(
+            job_id=job_id,
+            step_id=step_id,
+            artifact_type=ARTIFACT_TYPE_RENDER_RUNTIME_DIAGNOSTICS,
+            data_json=payload,
+        )
+    )
+    await session.commit()
+
+
+def _merge_render_runtime_result(
+    previous_value: Any,
+    current_value: dict[str, Any] | None,
+) -> dict[str, Any]:
+    current = copy.deepcopy(current_value) if isinstance(current_value, dict) else {}
+    previous = previous_value if isinstance(previous_value, dict) else {}
+    if not previous:
+        return current
+    previous_status = str(previous.get("status") or "").strip().lower()
+    current_status = str(current.get("status") or "").strip().lower()
+    previous_reason = str(previous.get("reason") or "").strip().lower()
+    current_reason = str(current.get("reason") or "").strip().lower()
+    previous_is_specific_degraded = previous_status == "degraded" and previous_reason and not previous_reason.startswith("missing_")
+    current_is_weaker_missing = current_status == "degraded" and current_reason.startswith("missing_")
+    if previous_is_specific_degraded and current_is_weaker_missing:
+        merged = copy.deepcopy(previous)
+        for key, value in current.items():
+            if key not in merged and value not in (None, "", []):
+                merged[key] = copy.deepcopy(value)
+        return merged
+    merged = copy.deepcopy(previous)
+    merged.update(current)
+    return merged
+
+
 async def _resolve_auto_smart_cut_rules(
     session,
     *,
@@ -6809,14 +7242,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             height=media_meta_json.get("height"),
         )
         segmentation_segments = [
-            SimpleNamespace(
-                segment_index=int(getattr(segment, "segment_index", index) or index),
-                start_time=float(getattr(segment, "start_time", 0.0) or 0.0),
-                end_time=float(getattr(segment, "end_time", 0.0) or 0.0),
-                text=str(getattr(segment, "text", "") or ""),
-                words_json=drop_redundant_synthetic_word_payloads(copy.deepcopy(getattr(segment, "words_json", None) or [])),
-            )
-            for index, segment in enumerate(segments)
+            _build_transcript_segment_adapter(segment, index=index) for index, segment in enumerate(segments)
         ]
         canonical_transcript_layer = build_canonical_transcript_layer_from_transcript_segments(
             segmentation_segments,
@@ -8785,6 +9211,19 @@ async def run_edit_plan(job_id: str) -> dict:
             smart_cut_rules=smart_cut_rules,
             editorial_timeline_id=str(editorial_timeline.id),
             editorial_timeline_version=int(editorial_timeline.version or 1),
+            strategy_profile=cut_analysis_payload.get("strategy_profile")
+            if isinstance(cut_analysis_payload, dict)
+            else None,
+        )
+        variant_timeline_bundle = _build_variant_timeline_bundle(
+            editorial_timeline_id=editorial_timeline.id,
+            render_plan_timeline_id=render_plan_dict.get("timeline_id"),
+            keep_segments=keep_segments,
+            editorial_analysis=(editorial_timeline.data_json or {}).get("analysis") or {},
+            cut_analysis=cut_analysis_payload,
+            refine_decision_plan=refine_decision_plan_payload,
+            render_plan=render_plan_dict,
+            variants={},
         )
         session.add(
             Artifact(
@@ -8829,6 +9268,14 @@ async def run_edit_plan(job_id: str) -> dict:
                 step_id=step.id,
                 artifact_type=ARTIFACT_TYPE_REFINE_DECISION_PLAN,
                 data_json=refine_decision_plan_payload,
+            )
+        )
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=step.id,
+                artifact_type="variant_timeline_bundle",
+                data_json=variant_timeline_bundle,
             )
         )
 
@@ -8903,6 +9350,7 @@ async def run_render(job_id: str) -> dict:
             if cut_analysis_artifact and isinstance(cut_analysis_artifact.data_json, dict)
             else None
         )
+        packaging_timeline = resolve_packaging_timeline_payload(render_plan_timeline.data_json)
         automatic_gate = dict(render_plan_timeline.data_json.get("automatic_gate") or {})
         if bool(automatic_gate.get("blocking")):
             blocking_reasons = ", ".join(
@@ -8911,20 +9359,17 @@ async def run_render(job_id: str) -> dict:
             raise RuntimeError(
                 f"render blocked by automatic gate: {blocking_reasons or 'source_timeline_contract_blocking'}"
             )
-        has_packaging = any(
-            render_plan_timeline.data_json.get(key)
-            for key in ("intro", "outro", "insert", "watermark", "music")
-        )
+        packaging_assets = packaging_timeline_assets(packaging_timeline)
+        has_packaging = any(packaging_assets.get(key) for key in ("intro", "outro", "insert", "watermark", "music"))
+        editing_accents = packaging_timeline_editing_accents(packaging_timeline)
         has_editing_accents = bool(
-            (render_plan_timeline.data_json.get("editing_accents") or {}).get("transitions", {}).get("boundary_indexes")
-            or (render_plan_timeline.data_json.get("editing_accents") or {}).get("emphasis_overlays")
-            or (render_plan_timeline.data_json.get("editing_accents") or {}).get("sound_effects")
+            (editing_accents.get("transitions") or {}).get("boundary_indexes")
+            or editing_accents.get("emphasis_overlays")
+            or editing_accents.get("sound_effects")
         )
         manual_editor_meta = render_plan_timeline.data_json.get("manual_editor") or {}
-        manual_subtitle_only_render = (
-            isinstance(manual_editor_meta, dict)
-            and str(manual_editor_meta.get("change_scope") or "") == "subtitle_only"
-            and str(manual_editor_meta.get("render_strategy") or "") == "reuse_timeline_effect_plan"
+        manual_subtitle_only_render = manual_editor_is_subtitle_only_render(
+            manual_editor_meta if isinstance(manual_editor_meta, dict) else None
         )
 
         content_profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
@@ -9071,7 +9516,6 @@ async def run_render(job_id: str) -> dict:
             tmp_avatar_mp4 = Path(tmpdir) / "output_avatar.mp4"
             tmp_ai_effect_mp4 = Path(tmpdir) / "output_ai_effect.mp4"
             tmp_packaged_mp4 = Path(tmpdir) / "output_packaged.mp4"
-            tmp_cover_plain_mp4 = Path(tmpdir) / "output_cover_plain.mp4"
             reusable_plain_path = (
                 Path(str(reusable_render_outputs.get("plain_mp4"))).expanduser()
                 if reusable_render_outputs
@@ -9106,9 +9550,8 @@ async def run_render(job_id: str) -> dict:
                     subtitle_items=None,
                     debug_dir=debug_dir / "plain",
                 )
-            await _copy_file_with_retry(tmp_plain_mp4, tmp_cover_plain_mp4)
-            plain_duration = float((await _probe_with_retry(tmp_plain_mp4)).duration or 0.0)
-            plain_variant_editorial_timeline = _build_full_length_variant_timeline(plain_duration)
+            plain_meta = await _probe_with_retry(tmp_plain_mp4)
+            plain_duration = float(plain_meta.duration or 0.0)
             keep_segments = resolved_keep_segments
             subtitle_projection_repair: dict[str, Any] = {}
             async with get_session_factory()() as projection_session:
@@ -9136,19 +9579,26 @@ async def run_render(job_id: str) -> dict:
                 render_plan_timeline.data_json,
                 keep_segments=keep_segments,
                 subtitle_items=remapped_subtitles,
+                reuse_bound_assets=manual_subtitle_only_render,
+            )
+            packaged_timeline_mapping = await _resolve_packaged_timeline_mapping_context(
+                render_plan_timeline.data_json,
+                keep_segments=keep_segments,
             )
             packaged_subtitles = await _map_subtitles_to_packaged_timeline(
                 remapped_subtitles,
                 render_plan_timeline.data_json,
                 keep_segments=keep_segments,
+                timeline_mapping=packaged_timeline_mapping,
             )
             final_overlay_accents = await _map_editing_accents_to_packaged_timeline(
-                render_plan_timeline.data_json.get("editing_accents"),
+                packaging_timeline_editing_accents(render_plan_timeline.data_json),
                 render_plan_timeline.data_json,
                 keep_segments=keep_segments,
+                timeline_mapping=packaged_timeline_mapping,
             )
             ai_effect_overlay_accents = await _map_editing_accents_to_packaged_timeline(
-                ai_effect_render_plan.get("editing_accents"),
+                packaging_timeline_editing_accents(ai_effect_render_plan),
                 ai_effect_render_plan,
                 keep_segments=keep_segments,
             )
@@ -9170,20 +9620,23 @@ async def run_render(job_id: str) -> dict:
                     list(avatar_plan.get("segments") or []),
                 )
             avatar_result: dict[str, Any] | None = None
+            cover_result: dict[str, Any] = {
+                "status": "pending",
+                "detail": "等待生成封面图。",
+            }
             avatar_variant_source_path: Path | None = None
             avatar_variant_duration_sec: float | None = None
-            avatar_variant_editorial_timeline: dict[str, Any] | None = None
-            avatar_overlay_accents: dict[str, Any] | None = None
+            avatar_meta = None
             reusable_avatar_path = (
                 Path(str(reusable_render_outputs.get("avatar_mp4"))).expanduser()
                 if reusable_render_outputs and reusable_render_outputs.get("avatar_mp4")
                 else None
             )
             if manual_subtitle_only_render and reusable_avatar_path is not None and reusable_avatar_path.exists():
-                avatar_duration = float((await probe(reusable_avatar_path)).duration or 0.0)
+                avatar_meta = await _probe_with_retry(reusable_avatar_path)
+                avatar_duration = float(avatar_meta.duration or 0.0)
                 avatar_variant_source_path = reusable_avatar_path
                 avatar_variant_duration_sec = avatar_duration
-                avatar_variant_editorial_timeline = _build_full_length_variant_timeline(avatar_duration)
                 tmp_avatar_mp4 = reusable_avatar_path
                 avatar_result = {
                     "enabled": True,
@@ -9194,6 +9647,12 @@ async def run_render(job_id: str) -> dict:
                     "output_path": str(reusable_avatar_path),
                     "detail": "字幕微调复用既有数字人画中画底片。",
                 }
+                await _persist_render_runtime_diagnostics(
+                    session,
+                    job_id=job.id,
+                    step_id=step.id if step else None,
+                    avatar_result=avatar_result,
+                )
             if (
                 avatar_variant_source_path is None
                 and
@@ -9233,10 +9692,10 @@ async def run_render(job_id: str) -> dict:
                             border_width=int(avatar_plan.get("overlay_border_width") or 0),
                             border_color=str(avatar_plan.get("overlay_border_color") or "#F4E4B8"),
                         )
-                        pip_duration = float((await probe(pip_output_path)).duration or 0.0)
+                        avatar_meta = await _probe_with_retry(pip_output_path)
+                        pip_duration = float(avatar_meta.duration or 0.0)
                         avatar_variant_source_path = pip_output_path
                         avatar_variant_duration_sec = pip_duration
-                        avatar_variant_editorial_timeline = _build_full_length_variant_timeline(pip_duration)
                         tmp_avatar_mp4 = avatar_variant_source_path
                         avatar_result = {
                             **(avatar_result or {}),
@@ -9252,14 +9711,35 @@ async def run_render(job_id: str) -> dict:
                             "reason": "missing_avatar_render",
                             "detail": "没有拿到可用数字人视频，已自动回退普通成片。",
                         }
-                except Exception as exc:
-                    logger.exception("Avatar overlay degraded to plain render for job %s", job_id)
+                except AvatarFullTrackRenderError as exc:
+                    error_payload = _avatar_full_track_error_payload(exc)
+                    logger.warning(
+                        "Avatar overlay degraded to plain render for job %s reason=%s detail=%s",
+                        job_id,
+                        error_payload.get("reason"),
+                        error_payload.get("detail"),
+                    )
                     avatar_result = {
                         **(avatar_result or {}),
                         "status": "degraded",
-                        "reason": "avatar_render_failed",
-                        "detail": f"数字人渲染失败，已自动回退普通成片：{exc}",
+                        **error_payload,
+                        "detail": f"数字人渲染未完成，已自动回退普通成片：{error_payload['detail']}",
                     }
+                except Exception as exc:
+                    logger.exception("Avatar overlay degraded to plain render for job %s", job_id)
+                    error_payload = _avatar_full_track_error_payload(exc)
+                    avatar_result = {
+                        **(avatar_result or {}),
+                        "status": "degraded",
+                        **error_payload,
+                        "detail": f"数字人渲染失败，已自动回退普通成片：{error_payload['detail']}",
+                    }
+                await _persist_render_runtime_diagnostics(
+                    session,
+                    job_id=job.id,
+                    step_id=step.id if step else None,
+                    avatar_result=avatar_result,
+                )
             elif (
                 avatar_variant_source_path is None
                 and
@@ -9293,10 +9773,10 @@ async def run_render(job_id: str) -> dict:
                             border_width=int(avatar_plan.get("overlay_border_width") or 0),
                             border_color=str(avatar_plan.get("overlay_border_color") or "#F4E4B8"),
                         )
-                        pip_duration = float((await probe(pip_output_path)).duration or 0.0)
+                        avatar_meta = await _probe_with_retry(pip_output_path)
+                        pip_duration = float(avatar_meta.duration or 0.0)
                         avatar_variant_source_path = pip_output_path
                         avatar_variant_duration_sec = pip_duration
-                        avatar_variant_editorial_timeline = _build_full_length_variant_timeline(pip_duration)
                         tmp_avatar_mp4 = avatar_variant_source_path
                         avatar_result = {
                             **(avatar_result or {}),
@@ -9328,35 +9808,33 @@ async def run_render(job_id: str) -> dict:
                         "reason": "avatar_segment_render_failed",
                         "detail": f"数字人片段渲染失败，已自动回退普通成片：{exc}",
                     }
+                await _persist_render_runtime_diagnostics(
+                    session,
+                    job_id=job.id,
+                    step_id=step.id if step else None,
+                    avatar_result=avatar_result,
+                )
             await _refresh_render_progress(
                 detail="素版已完成，开始生成包装版",
                 progress=0.55,
             )
             packaged_source_path, packaged_editorial_timeline, packaged_subtitles = _resolve_packaged_render_variant(
                 original_source_path=tmp_plain_mp4,
-                original_editorial_timeline=plain_variant_editorial_timeline,
-                original_subtitle_items=packaged_subtitles,
+                original_duration_sec=plain_duration,
+                subtitle_items=packaged_subtitles,
                 variant_source_path=avatar_variant_source_path,
                 variant_duration_sec=avatar_variant_duration_sec,
-                variant_subtitle_items=packaged_subtitles,
-            )
-            ai_effect_source_path, ai_effect_editorial_timeline, ai_effect_subtitles = _resolve_packaged_render_variant(
-                original_source_path=tmp_plain_mp4,
-                original_editorial_timeline=plain_variant_editorial_timeline,
-                original_subtitle_items=packaged_subtitles,
-                variant_source_path=avatar_variant_source_path,
-                variant_duration_sec=avatar_variant_duration_sec,
-                variant_subtitle_items=packaged_subtitles,
             )
             if avatar_variant_source_path is not None and avatar_variant_duration_sec is not None:
-                ai_effect_render_plan["avatar_commentary"] = copy.deepcopy(avatar_plan)
+                ai_effect_render_plan["avatar_commentary"] = avatar_plan
             await render_video(
-                source_path=ai_effect_source_path,
+                source_path=packaged_source_path,
                 render_plan=ai_effect_render_plan,
-                editorial_timeline=ai_effect_editorial_timeline,
+                editorial_timeline=packaged_editorial_timeline,
                 output_path=tmp_ai_effect_mp4,
-                subtitle_items=ai_effect_subtitles,
+                subtitle_items=packaged_subtitles,
                 overlay_editing_accents=ai_effect_overlay_accents,
+                synthesize_subtitle_unit_accents=not manual_subtitle_only_render,
                 debug_dir=debug_dir / "ai_effect_variant",
             )
             await render_video(
@@ -9366,12 +9844,12 @@ async def run_render(job_id: str) -> dict:
                 output_path=tmp_packaged_mp4,
                 subtitle_items=packaged_subtitles,
                 overlay_editing_accents=final_overlay_accents,
+                synthesize_subtitle_unit_accents=not manual_subtitle_only_render,
                 debug_dir=debug_dir / "packaged",
             )
-            plain_meta = await _probe_with_retry(tmp_plain_mp4)
             packaged_meta = await _probe_with_retry(tmp_packaged_mp4)
             ai_effect_meta = await _probe_with_retry(tmp_ai_effect_mp4)
-            avatar_meta = await _probe_with_retry(tmp_avatar_mp4) if tmp_avatar_mp4.exists() else None
+            avatar_meta = avatar_meta or (await _probe_with_retry(tmp_avatar_mp4) if tmp_avatar_mp4.exists() else None)
 
             local_plain_mp4 = build_variant_output_path(
                 out_dir,
@@ -9453,9 +9931,15 @@ async def run_render(job_id: str) -> dict:
                 width=plain_meta.width,
                 height=plain_meta.height,
             )
+            avatar_outputs_ready = (
+                tmp_avatar_mp4.exists()
+                and local_avatar_mp4 is not None
+                and local_avatar_srt is not None
+                and avatar_meta is not None
+            )
 
             await _copy_file_with_retry(tmp_plain_mp4, local_plain_mp4)
-            if tmp_avatar_mp4.exists() and local_avatar_mp4 is not None:
+            if avatar_outputs_ready:
                 await _copy_file_with_retry(tmp_avatar_mp4, local_avatar_mp4)
             await _copy_file_with_retry(tmp_ai_effect_mp4, local_ai_effect_mp4)
             await _copy_file_with_retry(tmp_packaged_mp4, local_packaged_mp4)
@@ -9474,43 +9958,52 @@ async def run_render(job_id: str) -> dict:
             # Write SRT with remapped timestamps (matches the edited video)
             write_srt_file(packaged_subtitles, local_packaged_srt)
             write_srt_file(remapped_subtitles, local_plain_srt)
-            if tmp_avatar_mp4.exists() and local_avatar_srt is not None:
+            if avatar_outputs_ready:
                 write_srt_file(packaged_subtitles, local_avatar_srt)
-            write_srt_file(ai_effect_subtitles, local_ai_effect_srt)
+            write_srt_file(packaged_subtitles, local_ai_effect_srt)
             plain_subtitle_sync = _compute_subtitle_sync_check(local_plain_mp4, local_plain_srt)
-            packaged_trailing_allowance = _variant_expected_trailing_gap(
-                base_sync_check=plain_subtitle_sync,
-                packaging_allowance_sec=await _resolve_packaging_trailing_gap_allowance(render_plan_timeline.data_json),
-            )
-            ai_effect_trailing_allowance = _variant_expected_trailing_gap(
-                base_sync_check=plain_subtitle_sync,
-                packaging_allowance_sec=await _resolve_packaging_trailing_gap_allowance(ai_effect_render_plan),
-            )
+            packaged_outro_path = str(
+                (packaging_timeline_assets(render_plan_timeline.data_json).get("outro") or {}).get("path") or ""
+            ).strip()
+            ai_effect_outro_path = str(
+                (packaging_timeline_assets(ai_effect_render_plan).get("outro") or {}).get("path") or ""
+            ).strip()
+            packaged_outro_duration = await _resolve_packaging_trailing_gap_allowance(render_plan_timeline.data_json)
             packaged_subtitle_sync = _compute_subtitle_sync_check(
                 local_packaged_mp4,
                 local_packaged_srt,
-                allowed_trailing_gap_sec=packaged_trailing_allowance,
+                allowed_trailing_gap_sec=_variant_expected_trailing_gap(
+                    base_sync_check=plain_subtitle_sync,
+                    packaging_allowance_sec=packaged_outro_duration,
+                ),
             )
             avatar_subtitle_sync = (
                 _compute_subtitle_sync_check(local_avatar_mp4, local_avatar_srt)
-                if local_avatar_mp4 is not None and local_avatar_srt is not None and tmp_avatar_mp4.exists()
+                if avatar_outputs_ready
                 else None
             )
             ai_effect_subtitle_sync = _compute_subtitle_sync_check(
                 local_ai_effect_mp4,
                 local_ai_effect_srt,
-                allowed_trailing_gap_sec=ai_effect_trailing_allowance,
+                allowed_trailing_gap_sec=_variant_expected_trailing_gap(
+                    base_sync_check=plain_subtitle_sync,
+                    packaging_allowance_sec=(
+                        packaged_outro_duration
+                        if packaged_outro_path and packaged_outro_path == ai_effect_outro_path
+                        else await _resolve_packaging_trailing_gap_allowance(ai_effect_render_plan)
+                    ),
+                ),
             )
-            blocking_sync_issues = _collect_blocking_variant_sync_issues(
-                {
-                    "packaged": packaged_subtitle_sync,
-                    "plain": plain_subtitle_sync,
-                    "avatar": avatar_subtitle_sync,
-                    "ai_effect": ai_effect_subtitle_sync,
-                },
+            variant_subtitle_sync_checks = {
+                "packaged": packaged_subtitle_sync,
+                "plain": plain_subtitle_sync,
+                "avatar": avatar_subtitle_sync,
+                "ai_effect": ai_effect_subtitle_sync,
+            }
+            if blocking_sync_issues := _collect_blocking_variant_sync_issues(
+                variant_subtitle_sync_checks,
                 mandatory_variants={"plain", "packaged"},
-            )
-            if blocking_sync_issues:
+            ):
                 raise RuntimeError(
                     "render_variant_sync_blocked: "
                     + "; ".join(blocking_sync_issues)
@@ -9518,22 +10011,39 @@ async def run_render(job_id: str) -> dict:
 
             # Extract cover frame from the plain render so burned subtitles never leak into thumbnails.
             try:
-                meta_result = await _get_cover_seek(job.id, tmpdir)
-                cover_source_path = _select_cover_source_video(tmp_cover_plain_mp4, tmp_packaged_mp4)
                 cover_variants = await extract_cover_frame(
-                    cover_source_path,
+                    _select_cover_source_video(tmp_plain_mp4),
                     local_cover,
-                    seek_sec=meta_result,
+                    seek_sec=await _get_cover_seek(job.id),
                     content_profile=content_profile,
                     cover_style=(render_plan_timeline.data_json.get("cover") or {}).get("style"),
                     title_style=(render_plan_timeline.data_json.get("cover") or {}).get("title_style"),
                 )
                 cover_selection = load_cover_selection_summary(local_cover)
+                cover_result = {
+                    "status": "done",
+                    "detail": "封面图已生成。",
+                    "cover_path": str(local_cover),
+                    "variant_count": len(cover_variants),
+                    "selection_review_recommended": bool((cover_selection or {}).get("review_recommended")),
+                }
             except Exception:
                 logger.exception("Cover export failed for job %s", job_id)
+                cover_result = {
+                    "status": "degraded",
+                    "reason": "cover_export_failed",
+                    "detail": "封面导出失败，成片已保留但未产出封面图。",
+                }
                 local_cover = None  # Cover is non-critical
                 cover_variants = []
                 cover_selection = None
+            await _persist_render_runtime_diagnostics(
+                session,
+                job_id=job.id,
+                step_id=step.id if step else None,
+                avatar_result=avatar_result,
+                cover_result=cover_result,
+            )
         except Exception:
             async with get_session_factory()() as failure_session:
                 render_output = await failure_session.get(RenderOutput, render_output_id)
@@ -9547,27 +10057,50 @@ async def run_render(job_id: str) -> dict:
                 render_heartbeat_thread.join(timeout=1.0)
 
     # Update render output
-    local_paths = {
-        "mp4": str(local_packaged_mp4),
-        "srt": str(local_packaged_srt),
-        "packaged_mp4": str(local_packaged_mp4),
-        "plain_mp4": str(local_plain_mp4),
-        "avatar_mp4": str(local_avatar_mp4) if local_avatar_mp4 is not None and local_avatar_mp4.exists() else None,
-        "ai_effect_mp4": str(local_ai_effect_mp4),
-        "packaged_srt": str(local_packaged_srt),
-        "plain_srt": str(local_plain_srt),
-        "avatar_srt": str(local_avatar_srt) if local_avatar_srt is not None and local_avatar_srt.exists() else None,
-        "ai_effect_srt": str(local_ai_effect_srt),
-        "cover": str(local_cover) if local_cover else None,
-        "cover_variants": [str(path) for path in cover_variants] if local_cover else [],
+    serialized_packaged_mp4 = str(local_packaged_mp4)
+    serialized_plain_mp4 = str(local_plain_mp4)
+    serialized_ai_effect_mp4 = str(local_ai_effect_mp4)
+    serialized_packaged_srt = str(local_packaged_srt)
+    serialized_plain_srt = str(local_plain_srt)
+    serialized_ai_effect_srt = str(local_ai_effect_srt)
+    serialized_avatar_mp4 = str(local_avatar_mp4) if avatar_outputs_ready else None
+    serialized_avatar_srt = str(local_avatar_srt) if avatar_outputs_ready else None
+    serialized_cover = str(local_cover) if local_cover else None
+    serialized_cover_variants = [str(path) for path in cover_variants] if local_cover else []
+    serialized_variant_paths = {
+        "packaged": serialized_packaged_mp4,
+        "plain": serialized_plain_mp4,
+        "avatar": serialized_avatar_mp4,
+        "ai_effect": serialized_ai_effect_mp4,
+    }
+    primary_output_path = serialized_variant_paths["packaged"]
+    primary_output_srt = serialized_packaged_srt
+    render_quality_checks = {
+        "subtitle_sync": variant_subtitle_sync_checks["packaged"],
+        "plain_subtitle_sync": variant_subtitle_sync_checks["plain"],
+        "avatar_subtitle_sync": variant_subtitle_sync_checks["avatar"],
+        "ai_effect_subtitle_sync": variant_subtitle_sync_checks["ai_effect"],
+        "subtitle_projection_repair": dict(subtitle_projection_repair),
+    }
+    render_outputs_payload = {
+        "plain_mp4": serialized_plain_mp4,
+        "packaged_mp4": primary_output_path,
+        "avatar_mp4": serialized_avatar_mp4,
+        "ai_effect_mp4": serialized_ai_effect_mp4,
+        "plain_srt": serialized_plain_srt,
+        "packaged_srt": primary_output_srt,
+        "avatar_srt": serialized_avatar_srt,
+        "ai_effect_srt": serialized_ai_effect_srt,
+        "cover": serialized_cover,
+        "cover_variants": serialized_cover_variants,
         "cover_selection": cover_selection,
+    }
+    local_paths = {
+        "mp4": primary_output_path,
+        "srt": primary_output_srt,
+        **render_outputs_payload,
         "output_name": out_name,
-        "variants": {
-            "packaged": str(local_packaged_mp4),
-            "plain": str(local_plain_mp4),
-            "avatar": str(local_avatar_mp4) if local_avatar_mp4 is not None and local_avatar_mp4.exists() else None,
-            "ai_effect": str(local_ai_effect_mp4),
-        },
+        "variants": dict(serialized_variant_paths),
     }
     variant_timeline_bundle = _build_variant_timeline_bundle(
         editorial_timeline_id=editorial_timeline.id,
@@ -9585,7 +10118,7 @@ async def run_render(job_id: str) -> dict:
                 subtitle_events=remapped_subtitles,
                 transition_offsets=[],
                 segments=editorial_timeline.data_json.get("segments") or [],
-                quality_check=plain_subtitle_sync or {},
+                quality_check=variant_subtitle_sync_checks["plain"] or {},
             ),
             "packaged": _build_variant_timeline_entry(
                 media_path=local_packaged_mp4,
@@ -9595,17 +10128,17 @@ async def run_render(job_id: str) -> dict:
                 transition_offsets=packaged_transition_offsets,
                 segments=packaged_editorial_timeline.get("segments") or [],
                 overlay_events=final_overlay_accents,
-                quality_check=packaged_subtitle_sync or {},
+                quality_check=variant_subtitle_sync_checks["packaged"] or {},
             ),
             "ai_effect": _build_variant_timeline_entry(
                 media_path=local_ai_effect_mp4,
                 srt_path=local_ai_effect_srt,
                 media_meta=ai_effect_meta,
-                subtitle_events=ai_effect_subtitles,
+                subtitle_events=packaged_subtitles,
                 transition_offsets=ai_effect_transition_offsets,
-                segments=ai_effect_editorial_timeline.get("segments") or [],
+                segments=packaged_editorial_timeline.get("segments") or [],
                 overlay_events=ai_effect_overlay_accents,
-                quality_check=ai_effect_subtitle_sync or {},
+                quality_check=variant_subtitle_sync_checks["ai_effect"] or {},
             ),
             **(
                 {
@@ -9615,19 +10148,22 @@ async def run_render(job_id: str) -> dict:
                         media_meta=avatar_meta,
                         subtitle_events=packaged_subtitles,
                         transition_offsets=[],
-                        segments=(avatar_variant_editorial_timeline or {}).get("segments") or [],
-                        overlay_events=avatar_overlay_accents,
-                        quality_check=avatar_subtitle_sync or {},
+                        segments=(
+                            _build_full_length_variant_timeline(avatar_variant_duration_sec).get("segments") or []
+                            if avatar_variant_duration_sec is not None
+                            else []
+                        ),
+                        quality_check=variant_subtitle_sync_checks["avatar"] or {},
                     )
                 }
-                if local_avatar_mp4 is not None and local_avatar_srt is not None and avatar_meta is not None
+                if avatar_outputs_ready
                 else {}
             ),
         },
     )
     async with get_session_factory()() as session:
         render_output = await session.get(RenderOutput, render_output_id)
-        render_output.output_path = str(local_packaged_mp4)
+        render_output.output_path = primary_output_path
         render_output.status = "done"
         render_output.progress = 1.0
         step_result = await session.execute(
@@ -9640,25 +10176,10 @@ async def run_render(job_id: str) -> dict:
                 step_id=render_step.id if render_step else None,
                 artifact_type="render_outputs",
                 data_json={
-                    "plain_mp4": str(local_plain_mp4),
-                    "packaged_mp4": str(local_packaged_mp4),
-                    "avatar_mp4": str(local_avatar_mp4) if local_avatar_mp4 is not None and local_avatar_mp4.exists() else None,
-                    "ai_effect_mp4": str(local_ai_effect_mp4),
-                    "plain_srt": str(local_plain_srt),
-                    "packaged_srt": str(local_packaged_srt),
-                    "avatar_srt": str(local_avatar_srt) if local_avatar_srt is not None and local_avatar_srt.exists() else None,
-                    "ai_effect_srt": str(local_ai_effect_srt),
-                    "cover": str(local_cover) if local_cover else None,
-                    "cover_variants": [str(path) for path in cover_variants] if local_cover else [],
-                    "cover_selection": cover_selection,
+                    **render_outputs_payload,
+                    "cover_result": cover_result,
                     "avatar_result": avatar_result,
-                    "quality_checks": {
-                        "subtitle_sync": packaged_subtitle_sync,
-                        "plain_subtitle_sync": plain_subtitle_sync,
-                        "avatar_subtitle_sync": avatar_subtitle_sync,
-                        "ai_effect_subtitle_sync": ai_effect_subtitle_sync,
-                        "subtitle_projection_repair": dict(subtitle_projection_repair),
-                    },
+                    "quality_checks": render_quality_checks,
                 },
             )
         )
@@ -9690,7 +10211,7 @@ async def run_render(job_id: str) -> dict:
             )
         await session.commit()
 
-    return {"output_path": str(local_packaged_mp4), "local": local_paths}
+    return {"output_path": primary_output_path, "local": local_paths}
 
 
 async def run_platform_package(job_id: str) -> dict:
@@ -9944,13 +10465,12 @@ async def run_platform_package(job_id: str) -> dict:
     return {"markdown": str(output_md)}
 
 
-async def _get_cover_seek(job_id, tmpdir: str) -> float:
+async def _get_cover_seek(job_id) -> float:
     """
     Determine a good seek time for cover frame extraction.
     Uses ~18% of video duration, with 6s minimum and 45s maximum.
     Falls back to 6.0s if no media_meta artifact found.
     """
-    del tmpdir
     factory = get_session_factory()
     async with factory() as session:
         try:
@@ -9964,8 +10484,7 @@ async def _get_cover_seek(job_id, tmpdir: str) -> float:
     return 6.0
 
 
-def _select_cover_source_video(plain_video_path: Path, packaged_video_path: Path) -> Path:
-    del packaged_video_path
+def _select_cover_source_video(plain_video_path: Path) -> Path:
     if plain_video_path.exists():
         return plain_video_path
     raise FileNotFoundError("Plain render is required for cover extraction")
@@ -10020,14 +10539,15 @@ def _subtitle_section_profile_for_time(
     render_plan: dict[str, Any],
     time_sec: float,
 ) -> dict[str, Any] | None:
-    for profile in list(((render_plan.get("subtitles") or {}).get("section_profiles") or [])):
+    subtitles = packaging_timeline_subtitles(render_plan)
+    for profile in list((subtitles.get("section_profiles") or [])):
         if not isinstance(profile, dict):
             continue
         start_sec = float(profile.get("start_sec", 0.0) or 0.0)
         end_sec = float(profile.get("end_sec", start_sec) or start_sec)
         if start_sec - 1e-6 <= time_sec <= end_sec + 1e-6:
             return profile
-    directive = _section_directive_for_time(render_plan.get("timeline_analysis") or {}, time_sec)
+    directive = _section_directive_for_time(packaging_timeline_analysis(render_plan), time_sec)
     if not isinstance(directive, dict):
         return None
     return {
@@ -10839,33 +11359,29 @@ async def _map_subtitles_to_packaged_timeline(
     render_plan: dict,
     *,
     keep_segments: list[dict[str, Any]] | None = None,
+    timeline_mapping: dict[str, Any] | None = None,
 ) -> list[dict]:
     if not subtitle_items:
         return []
 
     mapped = [dict(item) for item in subtitle_items]
-    transition_offsets = _resolve_transition_overlap_offsets(
+    timeline_mapping = timeline_mapping or await _resolve_packaged_timeline_mapping_context(
         render_plan,
         keep_segments=keep_segments or [],
     )
+    transition_offsets = list(timeline_mapping.get("transition_offsets") or [])
     if transition_offsets:
         mapped = _shift_timed_items_for_transition_overlaps(mapped, transition_offsets=transition_offsets)
-    leading_offset = 0.0
+    intro_duration = float(timeline_mapping.get("intro_duration_sec", 0.0) or 0.0)
+    if intro_duration > 0:
+        for item in mapped:
+            item["start_time"] = float(item["start_time"]) + intro_duration
+            item["end_time"] = float(item["end_time"]) + intro_duration
 
-    intro_plan = render_plan.get("intro")
-    if intro_plan and intro_plan.get("path"):
-        intro_duration = await _probe_media_duration(Path(intro_plan["path"]))
-        if intro_duration > 0:
-            leading_offset += intro_duration
-            for item in mapped:
-                item["start_time"] = float(item["start_time"]) + intro_duration
-                item["end_time"] = float(item["end_time"]) + intro_duration
-
-    insert_plan = render_plan.get("insert")
-    if insert_plan and insert_plan.get("path"):
-        insert_duration = await _probe_media_duration(Path(insert_plan["path"]))
-        insert_after_sec = float(insert_plan.get("insert_after_sec", 0.0) or 0.0) + leading_offset
-        effective_insert_duration = resolve_insert_effective_duration(insert_plan, source_duration=insert_duration)
+    insert_plan = timeline_mapping.get("insert_plan")
+    insert_after_sec = float(timeline_mapping.get("insert_after_sec", 0.0) or 0.0)
+    effective_insert_duration = float(timeline_mapping.get("effective_insert_duration_sec", 0.0) or 0.0)
+    if insert_plan and effective_insert_duration > 0:
         current_timeline_duration = max(
             (
                 float(item.get("end_time", item.get("start_time", 0.0)) or 0.0)
@@ -10900,6 +11416,7 @@ async def _map_editing_accents_to_packaged_timeline(
     render_plan: dict,
     *,
     keep_segments: list[dict[str, Any]] | None = None,
+    timeline_mapping: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     base = dict(editing_accents or {})
     mapped = {
@@ -10908,10 +11425,11 @@ async def _map_editing_accents_to_packaged_timeline(
         "emphasis_overlays": [dict(item) for item in base.get("emphasis_overlays") or []],
         "sound_effects": [dict(item) for item in base.get("sound_effects") or []],
     }
-    transition_offsets = _resolve_transition_overlap_offsets(
+    timeline_mapping = timeline_mapping or await _resolve_packaged_timeline_mapping_context(
         render_plan,
         keep_segments=keep_segments or [],
     )
+    transition_offsets = list(timeline_mapping.get("transition_offsets") or [])
     if transition_offsets:
         mapped["emphasis_overlays"] = _shift_timed_items_for_transition_overlaps(
             mapped.get("emphasis_overlays") or [],
@@ -10921,24 +11439,18 @@ async def _map_editing_accents_to_packaged_timeline(
             mapped.get("sound_effects") or [],
             transition_offsets=transition_offsets,
         )
-    leading_offset = 0.0
+    intro_duration = float(timeline_mapping.get("intro_duration_sec", 0.0) or 0.0)
+    if intro_duration > 0:
+        for collection_name in ("emphasis_overlays", "sound_effects"):
+            for item in mapped.get(collection_name) or []:
+                item["start_time"] = float(item.get("start_time", 0.0) or 0.0) + intro_duration
+                if "end_time" in item:
+                    item["end_time"] = float(item.get("end_time", 0.0) or 0.0) + intro_duration
 
-    intro_plan = render_plan.get("intro")
-    if intro_plan and intro_plan.get("path"):
-        intro_duration = await _probe_media_duration(Path(intro_plan["path"]))
-        if intro_duration > 0:
-            leading_offset += intro_duration
-            for collection_name in ("emphasis_overlays", "sound_effects"):
-                for item in mapped.get(collection_name) or []:
-                    item["start_time"] = float(item.get("start_time", 0.0) or 0.0) + intro_duration
-                    if "end_time" in item:
-                        item["end_time"] = float(item.get("end_time", 0.0) or 0.0) + intro_duration
-
-    insert_plan = render_plan.get("insert")
-    if insert_plan and insert_plan.get("path"):
-        insert_duration = await _probe_media_duration(Path(insert_plan["path"]))
-        insert_after_sec = float(insert_plan.get("insert_after_sec", 0.0) or 0.0) + leading_offset
-        effective_insert_duration = resolve_insert_effective_duration(insert_plan, source_duration=insert_duration)
+    insert_plan = timeline_mapping.get("insert_plan")
+    insert_after_sec = float(timeline_mapping.get("insert_after_sec", 0.0) or 0.0)
+    effective_insert_duration = float(timeline_mapping.get("effective_insert_duration_sec", 0.0) or 0.0)
+    if insert_plan and effective_insert_duration > 0:
         current_timeline_duration = max(
             (
                 float(
@@ -10981,6 +11493,43 @@ async def _map_editing_accents_to_packaged_timeline(
     return mapped
 
 
+async def _resolve_packaged_timeline_mapping_context(
+    render_plan: dict[str, Any] | None,
+    *,
+    keep_segments: list[dict[str, Any]],
+) -> dict[str, Any]:
+    plan = render_plan or {}
+    packaging_assets = packaging_timeline_assets(plan)
+    transition_offsets = _resolve_transition_overlap_offsets(
+        plan,
+        keep_segments=keep_segments,
+    )
+
+    intro_duration = 0.0
+    intro_plan = packaging_assets.get("intro")
+    intro_path = str((intro_plan or {}).get("path") or "").strip()
+    if intro_path:
+        intro_duration = max(0.0, float(await _probe_media_duration(Path(intro_path)) or 0.0))
+
+    insert_plan = packaging_assets.get("insert")
+    insert_path = str((insert_plan or {}).get("path") or "").strip()
+    effective_insert_duration = 0.0
+    if insert_path and isinstance(insert_plan, dict):
+        insert_duration = max(0.0, float(await _probe_media_duration(Path(insert_path)) or 0.0))
+        effective_insert_duration = max(
+            0.0,
+            float(resolve_insert_effective_duration(insert_plan, source_duration=insert_duration) or 0.0),
+        )
+
+    return {
+        "transition_offsets": transition_offsets,
+        "intro_duration_sec": intro_duration,
+        "insert_plan": insert_plan if insert_path else None,
+        "insert_after_sec": float(((insert_plan or {}).get("insert_after_sec", 0.0) or 0.0)) + intro_duration,
+        "effective_insert_duration_sec": effective_insert_duration,
+    }
+
+
 def _build_full_length_variant_timeline(duration_sec: float) -> dict[str, Any]:
     duration = max(0.0, float(duration_sec or 0.0))
     if duration <= 0.0:
@@ -10997,8 +11546,7 @@ def _build_full_length_variant_timeline(duration_sec: float) -> dict[str, Any]:
 
 
 async def _resolve_packaging_trailing_gap_allowance(render_plan: dict[str, Any] | None) -> float:
-    plan = render_plan or {}
-    outro_plan = plan.get("outro") if isinstance(plan, dict) else None
+    outro_plan = packaging_timeline_assets(render_plan).get("outro")
     outro_path = str((outro_plan or {}).get("path") or "").strip()
     if not outro_path:
         return 0.0
@@ -11182,17 +11730,16 @@ def _resolve_insert_sound_tokens(packaging_intent: str) -> dict[str, float]:
 def _resolve_packaged_render_variant(
     *,
     original_source_path: Path,
-    original_editorial_timeline: dict[str, Any],
-    original_subtitle_items: list[dict[str, Any]],
+    original_duration_sec: float,
+    subtitle_items: list[dict[str, Any]],
     variant_source_path: Path | None = None,
     variant_duration_sec: float | None = None,
-    variant_subtitle_items: list[dict[str, Any]] | None = None,
 ) -> tuple[Path, dict[str, Any], list[dict[str, Any]]]:
     if variant_source_path is None:
         return (
             original_source_path,
-            dict(original_editorial_timeline),
-            [dict(item) for item in original_subtitle_items],
+            _build_full_length_variant_timeline(original_duration_sec),
+            [dict(item) for item in subtitle_items],
         )
 
     duration = max(0.0, float(variant_duration_sec or 0.0))
@@ -11210,7 +11757,7 @@ def _resolve_packaged_render_variant(
                 }
             ]
         },
-        [dict(item) for item in (variant_subtitle_items or [])],
+        [dict(item) for item in subtitle_items],
     )
 
 
@@ -11258,10 +11805,17 @@ async def _render_full_track_avatar_video(
         return None
     first_segment = segments[0] or {}
     if str(first_segment.get("status") or "") != "success":
-        raise RuntimeError(str(first_segment.get("error") or "avatar_full_track_render_failed"))
+        raise AvatarFullTrackRenderError(
+            str(first_segment.get("error") or "avatar_full_track_render_failed"),
+            reason_code="avatar_full_track_provider_response_error",
+            metadata={"segment_status": str(first_segment.get("status") or "").strip().lower() or None},
+        )
     result_value = str(first_segment.get("local_result_path") or "").strip()
     if not result_value:
-        raise RuntimeError("avatar_full_track_result_missing")
+        raise AvatarFullTrackRenderError(
+            "avatar_full_track_result_missing",
+            reason_code="avatar_full_track_result_missing",
+        )
     result_path = Path(result_value)
     if not result_path.exists():
         if debug_dir is not None:
@@ -11276,20 +11830,89 @@ async def _render_full_track_avatar_video(
 
 _AVATAR_FULL_TRACK_RETRY_DELAYS_SECONDS = (5.0, 10.0, 20.0, 30.0)
 _AVATAR_FULL_TRACK_SLOT_KEY = "avatar_full_track"
-_AVATAR_FULL_TRACK_SLOT_TIMEOUT_SEC = 7200
+_AVATAR_FULL_TRACK_SLOT_TIMEOUT_SECONDS = 7200
 _AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS = 900.0
+_AVATAR_FULL_TRACK_CALL_TIMEOUT_SECONDS = 180.0
+
+
+class AvatarFullTrackRenderError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        reason_code: str,
+        retryable: bool = False,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.reason_code = str(reason_code or "avatar_render_failed").strip() or "avatar_render_failed"
+        self.retryable = bool(retryable)
+        self.metadata = dict(metadata or {})
+
+
+def _avatar_full_track_error_payload(exc: BaseException) -> dict[str, Any]:
+    if isinstance(exc, AvatarFullTrackRenderError):
+        payload = {
+            "reason": exc.reason_code,
+            "detail": str(exc),
+            "retryable": exc.retryable,
+        }
+        if exc.metadata:
+            payload["error_metadata"] = dict(exc.metadata)
+        return payload
+    return {
+        "reason": "avatar_render_failed",
+        "detail": str(exc),
+        "retryable": False,
+    }
+
+
+def _resolve_avatar_full_track_busy_max_wait_seconds() -> float:
+    raw_value = os.getenv("ROUGHCUT_AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS", str(_AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS)).strip()
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return float(_AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS)
+    return max(30.0, value)
+
+
+def _resolve_avatar_full_track_call_timeout_seconds() -> float:
+    raw_value = os.getenv("ROUGHCUT_AVATAR_FULL_TRACK_CALL_TIMEOUT_SECONDS", str(_AVATAR_FULL_TRACK_CALL_TIMEOUT_SECONDS)).strip()
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return float(_AVATAR_FULL_TRACK_CALL_TIMEOUT_SECONDS)
+    return max(10.0, value)
+
+
+def _resolve_avatar_full_track_slot_timeout_seconds() -> float:
+    raw_value = os.getenv(
+        "ROUGHCUT_AVATAR_FULL_TRACK_SLOT_TIMEOUT_SECONDS",
+        str(_AVATAR_FULL_TRACK_SLOT_TIMEOUT_SECONDS),
+    ).strip()
+    try:
+        value = float(raw_value)
+    except (TypeError, ValueError):
+        return float(_AVATAR_FULL_TRACK_SLOT_TIMEOUT_SECONDS)
+    return max(3.0, value)
 
 
 @asynccontextmanager
 async def _hold_avatar_full_track_slot(*, job_id: str):
     logger.info("Waiting for avatar full-track slot job=%s", job_id)
+    slot_timeout_seconds = _resolve_avatar_full_track_slot_timeout_seconds()
     acquired, token = await asyncio.to_thread(
         _acquire_operation_lock,
         _AVATAR_FULL_TRACK_SLOT_KEY,
-        timeout_sec=_AVATAR_FULL_TRACK_SLOT_TIMEOUT_SEC,
+        timeout_sec=int(slot_timeout_seconds),
     )
     if not acquired:
-        raise RuntimeError("avatar_full_track_slot_timeout")
+        raise AvatarFullTrackRenderError(
+            "avatar_full_track_slot_timeout",
+            reason_code="avatar_full_track_slot_timeout",
+            retryable=True,
+            metadata={"slot_timeout_seconds": float(slot_timeout_seconds)},
+        )
     logger.info("Avatar full-track slot acquired job=%s", job_id)
     try:
         yield
@@ -11326,21 +11949,42 @@ async def _execute_avatar_full_track_render_request(
         last_error: Exception | None = None
         attempt = 0
         busy_waited_seconds = 0.0
+        busy_max_wait_seconds = _resolve_avatar_full_track_busy_max_wait_seconds()
+        call_timeout_seconds = _resolve_avatar_full_track_call_timeout_seconds()
         while True:
             try:
-                render_execution = await asyncio.to_thread(
-                    get_avatar_provider().execute_render,
-                    job_id=job_id,
-                    request=render_request,
+                render_execution = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        get_avatar_provider().execute_render,
+                        job_id=job_id,
+                        request=render_request,
+                    ),
+                    timeout=call_timeout_seconds,
                 )
+            except asyncio.TimeoutError as exc:
+                raise AvatarFullTrackRenderError(
+                    f"avatar_full_track_call_timeout>{float(call_timeout_seconds):.1f}s",
+                    reason_code="avatar_full_track_call_timeout",
+                    retryable=True,
+                    metadata={"call_timeout_seconds": float(call_timeout_seconds)},
+                ) from exc
             except Exception as exc:
                 last_error = exc
                 if _is_avatar_service_busy_message(exc):
                     delay = _AVATAR_FULL_TRACK_RETRY_DELAYS_SECONDS[
                         min(attempt, len(_AVATAR_FULL_TRACK_RETRY_DELAYS_SECONDS) - 1)
                     ]
-                    if busy_waited_seconds + delay > _AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS:
-                        raise
+                    if busy_waited_seconds + delay > busy_max_wait_seconds:
+                        raise AvatarFullTrackRenderError(
+                            str(exc),
+                            reason_code="avatar_full_track_busy_exhausted",
+                            retryable=True,
+                            metadata={
+                                "busy_waited_seconds": float(busy_waited_seconds),
+                                "busy_max_wait_seconds": float(busy_max_wait_seconds),
+                                "attempts": int(attempt + 1),
+                            },
+                        ) from exc
                     attempt += 1
                     busy_waited_seconds += delay
                     logger.warning(
@@ -11348,7 +11992,7 @@ async def _execute_avatar_full_track_render_request(
                         job_id,
                         attempt + 1,
                         busy_waited_seconds,
-                        _AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS,
+                        busy_max_wait_seconds,
                         delay,
                     )
                     await asyncio.sleep(delay)
@@ -11365,8 +12009,18 @@ async def _execute_avatar_full_track_render_request(
                 delay = _AVATAR_FULL_TRACK_RETRY_DELAYS_SECONDS[
                     min(attempt, len(_AVATAR_FULL_TRACK_RETRY_DELAYS_SECONDS) - 1)
                 ]
-                if busy_waited_seconds + delay > _AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS:
-                    raise RuntimeError(error_text)
+                if busy_waited_seconds + delay > busy_max_wait_seconds:
+                    raise AvatarFullTrackRenderError(
+                        error_text,
+                        reason_code="avatar_full_track_busy_exhausted",
+                        retryable=True,
+                        metadata={
+                            "busy_waited_seconds": float(busy_waited_seconds),
+                            "busy_max_wait_seconds": float(busy_max_wait_seconds),
+                            "attempts": int(attempt + 1),
+                            "segment_status": str(first_segment.get("status") or "").strip().lower() or None,
+                        },
+                    )
                 attempt += 1
                 busy_waited_seconds += delay
                 last_error = RuntimeError(error_text)
@@ -11375,15 +12029,25 @@ async def _execute_avatar_full_track_render_request(
                     job_id,
                     attempt + 1,
                     busy_waited_seconds,
-                    _AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS,
+                    busy_max_wait_seconds,
                     delay,
                 )
                 await asyncio.sleep(delay)
                 continue
-            raise RuntimeError(error_text)
+            raise AvatarFullTrackRenderError(
+                error_text,
+                reason_code="avatar_full_track_provider_response_error",
+                metadata={
+                    "segment_status": str(first_segment.get("status") or "").strip().lower() or None,
+                    "provider_error": error_text,
+                },
+            )
         if last_error is not None:
             raise last_error
-        raise RuntimeError("avatar_full_track_render_failed")
+        raise AvatarFullTrackRenderError(
+            "avatar_full_track_render_failed",
+            reason_code="avatar_full_track_render_failed",
+        )
 
 
 def _remap_avatar_segments_to_timeline(
@@ -11923,6 +12587,7 @@ def _build_variant_timeline_bundle(
     cloned_editorial_analysis = _clone_json_like(editorial_analysis or {})
     cloned_cut_analysis = _clone_json_like(cut_analysis or {})
     cloned_refine_decision_plan = _clone_json_like(refine_decision_plan or {})
+    packaging_timeline = build_packaging_timeline_payload(render_plan)
     bundle = {
         "timeline_rules": {
             "editorial_timeline_id": str(editorial_timeline_id or "").strip() or None,
@@ -11931,23 +12596,13 @@ def _build_variant_timeline_bundle(
             "editorial_analysis": cloned_editorial_analysis,
             "cut_analysis": cloned_cut_analysis,
             "refine_decision_plan": cloned_refine_decision_plan,
-            "timeline_analysis": _clone_json_like(render_plan.get("timeline_analysis") or {}),
-            "editing_skill": _clone_json_like(render_plan.get("editing_skill") or {}),
-            "section_choreography": _clone_json_like(render_plan.get("section_choreography") or {}),
+            "packaging_timeline": packaging_timeline,
             "diagnostics": _build_variant_timeline_diagnostics(
                 editorial_analysis=cloned_editorial_analysis,
                 cut_analysis=cloned_cut_analysis,
                 refine_decision_plan=cloned_refine_decision_plan,
-                timeline_analysis=render_plan.get("timeline_analysis") or {},
+                timeline_analysis=packaging_timeline.get("timeline_analysis") or {},
             ),
-            "packaging": {
-                "intro": _clone_json_like(render_plan.get("intro")),
-                "outro": _clone_json_like(render_plan.get("outro")),
-                "insert": _clone_json_like(render_plan.get("insert")),
-                "watermark": _clone_json_like(render_plan.get("watermark")),
-                "music": _clone_json_like(render_plan.get("music")),
-            },
-            "editing_accents": _clone_json_like(render_plan.get("editing_accents") or {}),
         },
         "variants": {name: dict(payload) for name, payload in variants.items() if isinstance(payload, dict)},
     }
@@ -11967,7 +12622,7 @@ def _build_variant_timeline_diagnostics(
         for item in list((editorial_analysis or {}).get("keep_energy_segments") or [])
         if isinstance(item, dict)
     ]
-    accepted_cuts = cut_analysis_accepted_cuts(cut_analysis) or [
+    accepted_cuts = cut_analysis_effective_applied_cuts(cut_analysis) or [
         dict(item)
         for item in list((editorial_analysis or {}).get("accepted_cuts") or [])
         if isinstance(item, dict)
@@ -11983,19 +12638,32 @@ def _build_variant_timeline_diagnostics(
         for item in keep_energy_segments
         if float(item.get("keep_energy", 0.0) or 0.0) >= 1.0
     ]
-    high_risk_cuts = [
-        {
-            "start": round(float(item.get("start", 0.0) or 0.0), 3),
-            "end": round(float(item.get("end", 0.0) or 0.0), 3),
-            "reason": str(item.get("reason") or ""),
-            "boundary_keep_energy": round(float(item.get("boundary_keep_energy", 0.0) or 0.0), 3),
-            "left_keep_role": str(item.get("left_keep_role") or ""),
-            "right_keep_role": str(item.get("right_keep_role") or ""),
-            "evidence": _compact_cut_evidence_payload(item.get("evidence")),
-        }
-        for item in accepted_cuts
-        if float(item.get("boundary_keep_energy", 0.0) or 0.0) >= 1.0
-    ]
+    high_risk_cuts: list[dict[str, Any]] = []
+    for item in accepted_cuts:
+        boundary_keep_energy = float(item.get("boundary_keep_energy", 0.0) or 0.0)
+        if boundary_keep_energy < 1.0:
+            continue
+        left_keep_role = str(item.get("left_keep_role") or "")
+        right_keep_role = str(item.get("right_keep_role") or "")
+        # Only treat cuts as high-risk when they split two meaningful kept sides.
+        if not left_keep_role or not right_keep_role:
+            continue
+        high_risk_cuts.append(
+            {
+                "start": round(float(item.get("start", 0.0) or 0.0), 3),
+                "end": round(float(item.get("end", 0.0) or 0.0), 3),
+                "reason": str(item.get("reason") or ""),
+                "source_text": str(item.get("source_text") or ""),
+                "match_surface": str(item.get("match_surface") or ""),
+                "match_surface_layer": str(item.get("match_surface_layer") or ""),
+                "risk_level": str(item.get("risk_level") or ""),
+                "rule_id": str(item.get("rule_id") or ""),
+                "boundary_keep_energy": round(boundary_keep_energy, 3),
+                "left_keep_role": left_keep_role,
+                "right_keep_role": right_keep_role,
+                "evidence": _compact_cut_evidence_payload(item.get("evidence")),
+            }
+        )
     raw_llm_cut_review = (editorial_analysis or {}).get("llm_cut_review")
     llm_cut_review = (
         {
@@ -12038,7 +12706,9 @@ def _build_variant_timeline_diagnostics(
             "candidate_count": int((cut_analysis or {}).get("candidate_count") or 0),
             "accepted_cut_count": int((cut_analysis or {}).get("accepted_cut_count") or len(accepted_cuts)),
             "rule_candidate_count": int((cut_analysis or {}).get("rule_candidate_count") or 0),
+            "auto_apply_candidate_count": int((cut_analysis or {}).get("auto_apply_candidate_count") or 0),
             "manual_confirm_candidate_count": int((cut_analysis or {}).get("manual_confirm_candidate_count") or 0),
+            "candidate_risk_summary": _clone_json_like((cut_analysis or {}).get("candidate_risk_summary") or {}),
         },
         "refine_decision_summary": {
             "mode": str(((refine_decision_plan or {}).get("mode")) or "").strip() or None,
@@ -12046,7 +12716,13 @@ def _build_variant_timeline_diagnostics(
             "candidate_total": int(refine_candidate_summary.get("total") or 0),
             "candidate_auto_apply": int(refine_candidate_summary.get("auto_apply") or 0),
             "candidate_manual_confirm": int(refine_candidate_summary.get("manual_confirm") or 0),
+            "rule_auto_apply_cut_count": int(
+                (refine_decision_plan or {}).get("rule_auto_apply_cut_count")
+                or refine_candidate_summary.get("rule_auto_apply")
+                or 0
+            ),
             "multimodal_auto_apply_cut_count": int(refine_candidate_summary.get("multimodal_auto_apply") or 0),
+            "risk_levels": _clone_json_like(refine_candidate_summary.get("risk_levels") or {}),
         },
         "high_energy_keeps": high_energy_keeps[:8],
         "high_risk_cuts": high_risk_cuts[:8],
@@ -12176,11 +12852,7 @@ def _normalize_subtitle_event(item: dict[str, Any]) -> dict[str, Any] | None:
     start_time = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
     end_time = float(item.get("end_time", item.get("end", start_time)) or start_time)
     text = clean_final_subtitle_text(
-        item.get("text_final")
-        or item.get("text_norm")
-        or item.get("text_raw")
-        or item.get("text")
-        or ""
+        subtitle_display_rule_text(item) or str(item.get("text") or "")
     )
     if not text:
         return None
@@ -12191,6 +12863,7 @@ def _normalize_subtitle_event(item: dict[str, Any]) -> dict[str, Any] | None:
         "text": text,
     }
     for key in (
+        "projection_source",
         "source_index",
         "source_indexes",
         "source_fragment_index",
@@ -12243,7 +12916,7 @@ def _validate_variant_timeline_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
 
     timeline_rules = bundle.get("timeline_rules")
     if isinstance(timeline_rules, dict):
-        timeline_analysis = timeline_rules.get("timeline_analysis")
+        timeline_analysis = packaging_timeline_analysis(timeline_rules)
         if isinstance(timeline_analysis, dict):
             previous_section_end: float | None = None
             for section_index, section in enumerate(timeline_analysis.get("semantic_sections") or [], start=1):
@@ -12287,14 +12960,14 @@ def _validate_variant_timeline_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
                 if previous_action_end is not None and start_sec < previous_action_end - 1e-6:
                     issues.append(f"timeline_analysis: section actions are not monotonic at index {action_index}")
                 previous_action_end = max(previous_action_end or end_sec, end_sec)
-        editing_skill = timeline_rules.get("editing_skill")
+        editing_skill = packaging_timeline_editing_skill(timeline_rules)
         if isinstance(editing_skill, dict):
             if not str(editing_skill.get("key") or "").strip():
                 issues.append("editing_skill: key missing")
             section_policy = editing_skill.get("section_policy")
             if section_policy is not None and not isinstance(section_policy, dict):
                 issues.append("editing_skill: section_policy is not a dict")
-        section_choreography = timeline_rules.get("section_choreography")
+        section_choreography = packaging_timeline_section_choreography(timeline_rules)
         if isinstance(section_choreography, dict):
             previous_section_end: float | None = None
             for section_index, section in enumerate(section_choreography.get("sections") or [], start=1):
@@ -12311,6 +12984,12 @@ def _validate_variant_timeline_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
                 if previous_section_end is not None and start_sec < previous_section_end - 1e-6:
                     issues.append(f"section_choreography: sections are not monotonic at index {section_index}")
                 previous_section_end = max(previous_section_end or end_sec, end_sec)
+        packaging_assets = packaging_timeline_assets(timeline_rules)
+        if not isinstance(packaging_assets, dict):
+            issues.append("packaging_timeline: packaging assets payload is not a dict")
+        editing_accents = packaging_timeline_editing_accents(timeline_rules)
+        if not isinstance(editing_accents, dict):
+            issues.append("packaging_timeline: editing_accents payload is not a dict")
         diagnostics = timeline_rules.get("diagnostics")
         if isinstance(diagnostics, dict):
             keep_energy_summary = diagnostics.get("keep_energy_summary")
@@ -12338,7 +13017,7 @@ def _resolve_transition_overlap_offsets(
     if len(keep_segments) < 2:
         return []
 
-    transitions = ((render_plan or {}).get("editing_accents") or {}).get("transitions") or {}
+    transitions = (packaging_timeline_editing_accents(render_plan).get("transitions") or {})
     if not transitions.get("enabled"):
         return []
 

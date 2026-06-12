@@ -543,6 +543,12 @@ class Settings(BaseSettings):
     publication_worker_batch_limit: int = 5
     publication_attempt_lease_sec: int = 300
     publication_browser_agent_timeout_sec: int = 60
+    publication_social_auto_upload_root: str = ""
+    publication_social_auto_upload_python: str = "python"
+    publication_social_auto_upload_timeout_sec: int = 1800
+    publication_social_auto_upload_platforms: str = ""
+    publication_social_auto_upload_auto_login: bool = False
+    publication_social_auto_upload_headless: bool = True
 
     # Security
     max_upload_size_mb: int = 2048

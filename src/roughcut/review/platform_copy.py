@@ -16,9 +16,15 @@ from roughcut.llm_cache import digest_payload
 from roughcut.providers.factory import get_reasoning_provider, get_search_provider
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.publication_packaging import derive_publication_cover_slots
+from roughcut.edit.subtitle_surfaces import subtitle_canonical_rule_text
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.review.content_profile_memory import merge_content_profile_creative_preferences
 from roughcut.review.copy_methodology import build_copy_methodology, build_copy_methodology_prompt
-from roughcut.review.intelligent_copy_templates import build_platform_description
+from roughcut.review.intelligent_copy_templates import (
+    build_constraint_only_platform_description,
+    build_constraint_only_title_candidates,
+    build_platform_description,
+)
 from roughcut.review.platform_body_quality import assess_platform_body
 from roughcut.review.platform_tag_quality import assess_platform_tags
 from roughcut.review.platform_title_quality import assess_platform_titles
@@ -166,7 +172,7 @@ _BRAND_CN_ALIASES = {
 def build_transcript_for_packaging(subtitle_items: list[dict[str, Any]], *, max_chars: int = 6000) -> str:
     lines: list[str] = []
     for item in subtitle_items:
-        text = (item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        text = subtitle_display_rule_text(item)
         if not text:
             continue
         lines.append(f"[{item.get('start_time', 0):.1f}-{item.get('end_time', 0):.1f}] {text}")
@@ -432,6 +438,7 @@ async def generate_platform_packaging(
     fact_sheet: dict[str, Any] | None = None,
     target_platforms: list[str] | None = None,
 ) -> dict[str, Any]:
+    constraint_only_mode = str((prompt_brief or {}).get("mode") or "").strip().lower() == "intelligent_copy"
     prompt_brief = prompt_brief or build_packaging_prompt_brief(
         source_name=source_name,
         content_profile=content_profile,
@@ -463,7 +470,7 @@ async def generate_platform_packaging(
     target_keys = [key for key, _label, _body_label, _tag_label in target_order]
     methodology_block = ""
     copy_brief = prompt_brief.get("copy_brief") if isinstance(prompt_brief.get("copy_brief"), dict) else {}
-    if copy_brief:
+    if copy_brief and not constraint_only_mode:
         methodology_parts = []
         for platform_key in target_keys:
             methodology_parts.append(
@@ -475,10 +482,12 @@ async def generate_platform_packaging(
             )
         methodology_block = "\n\n".join(part for part in methodology_parts if part.strip())
     methodology_text = f"共享爆款文案方法论：\n{methodology_block}\n\n" if methodology_block else ""
-    platform_bias_lines = "\n".join(
-        f"- {label}：{_platform_bias_instruction(label)}"
-        for _key, label, _body_label, _tag_label in target_order
-    )
+    platform_bias_lines = ""
+    if not constraint_only_mode:
+        platform_bias_lines = "\n".join(
+            f"- {label}：{_platform_bias_instruction(label)}"
+            for _key, label, _body_label, _tag_label in target_order
+        )
     fallback_used = False
     if len(target_keys) == 1:
         try:
@@ -489,6 +498,7 @@ async def generate_platform_packaging(
                 fact_sheet=fact_sheet,
                 copy_style=copy_style,
                 methodology_text=methodology_text,
+                constraint_only_mode=constraint_only_mode,
             )
         except RuntimeError as exc:
             fallback_used = True
@@ -498,6 +508,7 @@ async def generate_platform_packaging(
                 copy_style=copy_style,
                 fact_sheet=fact_sheet,
                 target_platforms=target_platforms,
+                constraint_only_mode=constraint_only_mode,
             )
             repair_trace = [
                 {
@@ -509,41 +520,57 @@ async def generate_platform_packaging(
     else:
         prompt = (
             "你是多平台视频包装官，负责把字幕整理成适合不同平台发布的标题、简介和标签。"
-            f"{_domain_prompt_voice_instruction(content_profile)}"
-            "要求：\n"
-            "1. 输出真实自然，不要像硬广，不编造事实。\n"
-            "1.1 不要写成说明文、提纲或运营复盘。禁止出现“方便参考/避免偏差/逐一展开/讲透/写进视频里/从几个维度对比”这类 AI 总结腔。\n"
-            "2. 刀具、EDC、工具相关内容必须保守合规，避免危险导向表述。\n"
-            "3. 每个平台必须提供 3 个标题、1 段简介/正文、1 组标签，且各平台的简介/正文不能只是轻微同义改写。\n"
-            "4. 标题要有明确创作目标差异：流量入口、质感细节、决策判断。不要为了凑数输出同义标题。\n"
-            "5. 标签必须贴合产品、品类、场景、风格、视频类型。\n"
-            "6. 不要输出空字段。\n"
-            "7. 参数、功率、流明、毫瓦、射程、容量、价格、发布时间、升级倍率，只能写在“已核验事实”里出现过的信息。\n"
-            "8. 如果没有核验证据，改写成保守表达，只写到手体验、外观、做工、上手感受，不写具体参数。\n\n"
-            f"9. {source_language_instruction}\n"
-            "10. 如果给了作者信息，只能按平台策略选择最合适的 0 到 3 个字段自然带出，不要所有平台重复同一段自我介绍。\n"
-            "11. 平台简介策略必须明显区分：\n"
-            "- B站：先给核心判断，再说这期重点拆什么，可自然带作者专业身份或长期关注方向。\n"
-            "- 小红书：像真实分享笔记，带一点作者人设、审美/使用偏好、到手感受。\n"
-            "- 抖音：一句结果 + 一句记忆点，可带极短作者身份锚点，节奏要快。\n"
-            "- 快手：像当面讲实话，直给、不绕，可带接地气的人设表达。\n"
-            "- 视频号：稳妥可信，偏总结式，可带作者职业/内容定位增强可信度。\n"
-            "- 头条号：偏资讯/观点摘要，标题和正文要先把判断讲明白。\n"
-            "- YouTube：描述可更完整，适合补充结构、关键看点和检索关键词，但不能因此自动改成英文。\n"
-            "- X：没有独立视频标题，推文正文要短，像可直接发出的贴文。\n"
-            "12. 简介/正文允许适度加入 emoji 增强可读性和生动感：小红书、抖音、快手可用 1-3 个；B站、视频号、头条号、YouTube、X 控制在 0-2 个。emoji 必须服务于语义，不要堆砌，不要放在标题里。\n\n"
-            "13. 多源上下文按可用即用原则工作：文件名、主体识别、可见文字、字幕节选、已核验事实、已有摘要/钩子只要存在都可综合使用；某个来源缺失不是阻塞。\n"
-            "14. 事实边界：字幕、文件名/可见文字、外部核验事实才算事实依据；摘要、hook、theme 这类创作提示只能帮助组织表达，不能拿来当新事实扩写。\n\n"
-            f"本次统一文案风格：{_copy_style_instruction(copy_style)}\n\n"
-            f"{fact_guardrail_text}\n\n"
-            f"{author_prompt_text}\n\n"
-            f"{creative_guidance_text}\n\n"
-            f"{methodology_text}"
-            "默认平台偏置：\n"
-            f"{platform_bias_lines}\n\n"
-            "请输出 JSON，格式如下：\n"
-            f"{_platform_packaging_schema_hint(target_keys)}\n\n"
-            f"视频摘要上下文：{json.dumps(prompt_brief, ensure_ascii=False)}"
+            + f"{_domain_prompt_voice_instruction(content_profile)}"
+            + "要求：\n"
+            + "1. 输出真实自然，不要像硬广，不编造事实。\n"
+            + "1.1 不要写成说明文、提纲或运营复盘。禁止出现“方便参考/避免偏差/逐一展开/讲透/写进视频里/从几个维度对比”这类 AI 总结腔。\n"
+            + "2. 刀具、EDC、工具相关内容必须保守合规，避免危险导向表述。\n"
+            + (
+                "3. 每个平台必须提供 3 个标题、1 段简介/正文、1 组标签；平台差异只能来自规则约束，不要人为强行改写成不同内容角度。\n"
+                + "4. 标题可以是同一事实层的不同表述，但不能为了平台差异强行制造新卖点、新对比或新人设。\n"
+                if constraint_only_mode
+                else
+                "3. 每个平台必须提供 3 个标题、1 段简介/正文、1 组标签，且各平台的简介/正文不能只是轻微同义改写。\n"
+                + "4. 标题要有明确创作目标差异：流量入口、质感细节、决策判断。不要为了凑数输出同义标题。\n"
+            )
+            + "5. 标签必须贴合产品、品类、场景、风格、视频类型。\n"
+            + "6. 不要输出空字段。\n"
+            + "7. 参数、功率、流明、毫瓦、射程、容量、价格、发布时间、升级倍率，只能写在“已核验事实”里出现过的信息。\n"
+            + "8. 如果没有核验证据，改写成保守表达，只写到手体验、外观、做工、上手感受，不写具体参数。\n\n"
+            + f"9. {source_language_instruction}\n"
+            + (
+                "10. 如果给了作者信息，也不能把作者人设扩写成平台专属内容主轴；只在事实需要时最小化带出。\n"
+                if constraint_only_mode
+                else
+                "10. 如果给了作者信息，只能按平台策略选择最合适的 0 到 3 个字段自然带出，不要所有平台重复同一段自我介绍。\n"
+            )
+            + (
+                "11. 平台差异只允许来自规则约束，不要主动给平台注入不同内容角度、不同叙事立场或不同人设。\n"
+                + "12. 简介/正文允许适度加入 emoji 增强可读性和生动感，但不能改变内容事实边界。\n\n"
+                if constraint_only_mode
+                else
+                "11. 平台简介策略必须明显区分：\n"
+                + "- B站：先给核心判断，再说这期重点拆什么，可自然带作者专业身份或长期关注方向。\n"
+                + "- 小红书：像真实分享笔记，带一点作者人设、审美/使用偏好、到手感受。\n"
+                + "- 抖音：一句结果 + 一句记忆点，可带极短作者身份锚点，节奏要快。\n"
+                + "- 快手：像当面讲实话，直给、不绕，可带接地气的人设表达。\n"
+                + "- 视频号：稳妥可信，偏总结式，可带作者职业/内容定位增强可信度。\n"
+                + "- 头条号：偏资讯/观点摘要，标题和正文要先把判断讲明白。\n"
+                + "- YouTube：描述可更完整，适合补充结构、关键看点和检索关键词，但不能因此自动改成英文。\n"
+                + "- X：没有独立视频标题，推文正文要短，像可直接发出的贴文。\n"
+                + "12. 简介/正文允许适度加入 emoji 增强可读性和生动感：小红书、抖音、快手可用 1-3 个；B站、视频号、头条号、YouTube、X 控制在 0-2 个。emoji 必须服务于语义，不要堆砌，不要放在标题里。\n\n"
+            )
+            + "13. 多源上下文按可用即用原则工作：文件名、主体识别、可见文字、字幕节选、已核验事实、已有摘要/钩子只要存在都可综合使用；某个来源缺失不是阻塞。\n"
+            + "14. 事实边界：字幕、文件名/可见文字、外部核验事实才算事实依据；摘要、hook、theme 这类创作提示只能帮助组织表达，不能拿来当新事实扩写。\n\n"
+            + f"本次统一文案风格：{_copy_style_instruction(copy_style)}\n\n"
+            + f"{fact_guardrail_text}\n\n"
+            + f"{author_prompt_text}\n\n"
+            + f"{creative_guidance_text}\n\n"
+            + f"{methodology_text}"
+            + (f"默认平台偏置：\n{platform_bias_lines}\n\n" if platform_bias_lines else "")
+            + "请输出 JSON，格式如下：\n"
+            + f"{_platform_packaging_schema_hint(target_keys)}\n\n"
+            + f"视频摘要上下文：{json.dumps(prompt_brief, ensure_ascii=False)}"
         )
         try:
             raw_response, repair_trace = await _generate_platform_packaging_with_repair(
@@ -563,6 +590,7 @@ async def generate_platform_packaging(
                 copy_style=copy_style,
                 fact_sheet=fact_sheet,
                 target_platforms=target_platforms,
+                constraint_only_mode=constraint_only_mode,
             )
             repair_trace = [
                 {
@@ -578,19 +606,20 @@ async def generate_platform_packaging(
         fact_sheet=fact_sheet,
         author_profile=author_profile,
     )
-    packaging = _apply_methodology_body_repairs(
-        packaging,
-        prompt_brief=prompt_brief,
-        content_profile=content_profile,
-        fact_sheet=fact_sheet,
-        target_platforms=target_platforms,
-    )
-    packaging = _apply_methodology_title_repairs(
-        packaging,
-        content_profile=content_profile,
-        target_platforms=target_platforms,
-        copy_style=copy_style,
-    )
+    if not constraint_only_mode:
+        packaging = _apply_methodology_body_repairs(
+            packaging,
+            prompt_brief=prompt_brief,
+            content_profile=content_profile,
+            fact_sheet=fact_sheet,
+            target_platforms=target_platforms,
+        )
+        packaging = _apply_methodology_title_repairs(
+            packaging,
+            content_profile=content_profile,
+            target_platforms=target_platforms,
+            copy_style=copy_style,
+        )
     if not fallback_used:
         _assert_platform_packaging_publishable(
             packaging,
@@ -619,6 +648,7 @@ def _build_deterministic_platform_packaging(
     copy_style: str,
     fact_sheet: dict[str, Any] | None,
     target_platforms: list[str] | None = None,
+    constraint_only_mode: bool = False,
 ) -> dict[str, Any]:
     copy_brief = prompt_brief.get("copy_brief") if isinstance(prompt_brief.get("copy_brief"), dict) else {}
     topic_subject = str(copy_brief.get("topic_subject") or "").strip() or _preferred_subject_label(content_profile) or "这期内容"
@@ -626,7 +656,6 @@ def _build_deterministic_platform_packaging(
     question = str(copy_brief.get("question") or prompt_brief.get("engagement_question") or "").strip()
     focus_points = [str(item).strip() for item in (copy_brief.get("focus_points") or []) if str(item).strip()]
     focus_line = "、".join(focus_points[:3]) or "开箱细节和上手感受"
-    intent = str(copy_brief.get("intent") or "").strip()
     highlights = {
         "product": topic_subject,
         "video_type": str(prompt_brief.get("video_theme") or "").strip() or "开箱上手",
@@ -637,22 +666,35 @@ def _build_deterministic_platform_packaging(
     }
     platforms: dict[str, dict[str, Any]] = {}
     for key, label, _body_label, _tag_label in _resolve_target_platform_order(target_platforms):
-        methodology = build_copy_methodology(intent=intent, platform_key=key)
-        titles = _build_deterministic_platform_titles(
-            label=label,
-            topic_subject=topic_subject,
-            methodology=methodology,
-            content_profile=content_profile,
-            copy_style=copy_style,
-        )
-        description = build_platform_description(
-            key,
-            summary=summary,
-            question=question,
-            focus_line=focus_line,
-            methodology=methodology,
-            topic_subject=topic_subject,
-        ).strip()
+        if constraint_only_mode:
+            titles = build_constraint_only_title_candidates(
+                topic_subject=topic_subject,
+                focus_points=focus_points,
+            )[:3]
+            description = build_constraint_only_platform_description(
+                summary=summary,
+                question=question,
+                focus_line=focus_line,
+                topic_subject=topic_subject,
+            ).strip()
+        else:
+            intent = str(copy_brief.get("intent") or "").strip()
+            methodology = build_copy_methodology(intent=intent, platform_key=key)
+            titles = _build_deterministic_platform_titles(
+                label=label,
+                topic_subject=topic_subject,
+                methodology=methodology,
+                content_profile=content_profile,
+                copy_style=copy_style,
+            )
+            description = build_platform_description(
+                key,
+                summary=summary,
+                question=question,
+                focus_line=focus_line,
+                methodology=methodology,
+                topic_subject=topic_subject,
+            ).strip()
         if not description:
             description = build_fallback_description(
                 label=label,
@@ -681,6 +723,7 @@ async def _generate_single_platform_packaging_fast(
     fact_sheet: dict[str, Any] | None,
     copy_style: str,
     methodology_text: str,
+    constraint_only_mode: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     _key, label, _body_label, _tag_label = _resolve_target_platform_order([platform_key])[0]
     fact_guardrail_text = _build_fact_guardrail_text(fact_sheet)
@@ -690,17 +733,21 @@ async def _generate_single_platform_packaging_fast(
     schema_hint = '{"titles":[""],"description":"","tags":[""]}'
     prompt = (
         f"你只为{label}生成一版发布文案，只输出合法 JSON。"
-        f"{_domain_prompt_voice_instruction(content_profile)}"
-        "\n要求："
-        "\n1. 只返回 titles、description、tags。"
-        "\n2. titles 必须给 3 个。"
-        "\n3. 不要 AI 总结腔，不要说明文，不要模板废话。"
-        "\n4. 只写视频里能确认的内容，不写参数猜测。"
-        f"\n5. {source_language_instruction}"
-        f"\n\n{fact_guardrail_text}\n\n{creative_guidance_text}\n\n"
-        f"平台偏置：{_platform_bias_instruction(label)}"
-        f"\n输出格式：{schema_hint}"
-        f"\n视频摘要上下文：{json.dumps(compact_context, ensure_ascii=False)}"
+        + f"{_domain_prompt_voice_instruction(content_profile)}"
+        + "\n要求："
+        + "\n1. 只返回 titles、description、tags。"
+        + "\n2. titles 必须给 3 个。"
+        + "\n3. 不要 AI 总结腔，不要说明文，不要模板废话。"
+        + "\n4. 只写视频里能确认的内容，不写参数猜测。"
+        + f"\n5. {source_language_instruction}"
+        + f"\n\n{fact_guardrail_text}\n\n{creative_guidance_text}\n\n"
+        + (
+            "平台差异只允许来自规则约束，不要主动补充平台专属内容角度。\n"
+            if constraint_only_mode
+            else f"平台偏置：{_platform_bias_instruction(label)}"
+        )
+        + f"\n输出格式：{schema_hint}"
+        + f"\n视频摘要上下文：{json.dumps(compact_context, ensure_ascii=False)}"
     )
     try:
         with llm_task_route("copy", search_enabled=False):
@@ -2054,7 +2101,7 @@ def _build_platform_claim_evidence_pack(
     profile = content_profile or {}
     transcript_lines: list[dict[str, Any]] = []
     for index, item in enumerate(subtitle_items[:160], start=1):
-        text = str(item.get("text_final") or item.get("text_norm") or item.get("text_raw") or "").strip()
+        text = subtitle_canonical_rule_text(item)
         if not text:
             continue
         transcript_lines.append(
@@ -3238,6 +3285,12 @@ def _normalize_platform_publication_metadata(platform_raw: dict[str, Any]) -> di
     visibility_or_publish_mode = str(platform_raw.get("visibility_or_publish_mode") or "").strip()
     if visibility_or_publish_mode:
         normalized["visibility_or_publish_mode"] = visibility_or_publish_mode
+    scheduled_publish_slot = str(platform_raw.get("scheduled_publish_slot") or "").strip()
+    if scheduled_publish_slot:
+        normalized["scheduled_publish_slot"] = scheduled_publish_slot
+    scheduled_publish_rationale = str(platform_raw.get("scheduled_publish_rationale") or "").strip()
+    if scheduled_publish_rationale:
+        normalized["scheduled_publish_rationale"] = scheduled_publish_rationale
     scheduled_publish_at = str(platform_raw.get("scheduled_publish_at") or "").strip()
     if scheduled_publish_at:
         normalized["scheduled_publish_at"] = scheduled_publish_at
@@ -3260,6 +3313,15 @@ def _normalize_platform_publication_metadata(platform_raw: dict[str, Any]) -> di
     platform_specific_overrides = platform_raw.get("platform_specific_overrides")
     if isinstance(platform_specific_overrides, dict) and platform_specific_overrides:
         normalized["platform_specific_overrides"] = dict(platform_specific_overrides)
+    collection_management = platform_raw.get("collection_management")
+    if isinstance(collection_management, dict) and collection_management:
+        normalized["collection_management"] = dict(collection_management)
+    available_collections = [str(item).strip() for item in (platform_raw.get("available_collections") or []) if str(item).strip()]
+    if available_collections:
+        normalized["available_collections"] = available_collections
+    collection_catalog = [dict(item) for item in (platform_raw.get("collection_catalog") or []) if isinstance(item, dict)]
+    if collection_catalog:
+        normalized["collection_catalog"] = collection_catalog
     return normalized
 
 

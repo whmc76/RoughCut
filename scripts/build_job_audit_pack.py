@@ -17,7 +17,11 @@ if hasattr(sys.stdout, "reconfigure"):
 if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
-from export_job_audit_snapshot import DEFAULT_KEYWORDS, export_snapshot
+from export_job_audit_snapshot import (
+    DEFAULT_KEYWORDS,
+    _normalize_render_outputs_summary_for_reporting,
+    export_snapshot,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -90,6 +94,7 @@ def _render_step_status(snapshot: dict[str, Any]) -> str:
     return "\n".join(
         f"- `{row.get('step_name')}`: `{row.get('status')}`"
         + (f" | {row.get('detail')}" if row.get("detail") else "")
+        + (f" | error={row.get('error')}" if row.get("error") else "")
         for row in rows
     )
 
@@ -114,16 +119,37 @@ def build_markdown(snapshot: dict[str, Any], confirm_payload: dict[str, Any]) ->
     job = snapshot.get("job") or {}
     artifact_summary = ((snapshot.get("artifacts") or {}).get("active_profile_summary") or {})
     artifact_counts = ((snapshot.get("artifacts") or {}).get("counts") or {})
+    render_outputs_summary = _normalize_render_outputs_summary_for_reporting(
+        ((snapshot.get("artifacts") or {}).get("render_outputs_summary") or {}),
+        list(snapshot.get("step_status") or []),
+        job_error=str(job.get("error_message") or ""),
+    )
     heuristics = snapshot.get("heuristics") or {}
     issues = list(heuristics.get("issues") or [])
     located_paths = list(job.get("located_paths") or [])
+    job_error = str(job.get("error_message") or "").strip()
+    stored_status = str(job.get("stored_status") or "").strip()
+    failed_steps = [
+        row
+        for row in snapshot.get("step_status") or []
+        if str((row or {}).get("status") or "").strip().lower() == "failed"
+    ]
+    probe_failed = any(str((row or {}).get("step_name") or "").strip() == "probe" for row in failed_steps)
 
     checklist_items = []
-    if artifact_counts.get("content_profile_final", 0) <= 0:
+    if probe_failed:
+        probe_row = next(
+            (row for row in failed_steps if str((row or {}).get("step_name") or "").strip() == "probe"),
+            {},
+        )
+        checklist_items.append("先修复源文件定位、挂载路径或本地素材缺失问题，再重跑 `probe`。")
+        if probe_row.get("error"):
+            checklist_items.append(f"当前根因：`probe` 失败，错误为 `{probe_row.get('error')}`。")
+    elif artifact_counts.get("content_profile_final", 0) <= 0:
         checklist_items.append("先完成人工确认并写回 `content_profile_final`。")
-    if any(step.get("step_name") == "final_review" and step.get("status") != "done" for step in snapshot.get("step_status") or []):
+    if not probe_failed and any(step.get("step_name") == "final_review" and step.get("status") != "done" for step in snapshot.get("step_status") or []):
         checklist_items.append("继续推进 `edit_plan / render / final_review / platform_package`。")
-    if issues:
+    if issues and not probe_failed:
         checklist_items.append("优先处理自动审核识别出的阻塞项，再继续下游生产。")
     if not checklist_items:
         checklist_items.append("当前摘要审核已闭环，可按现有 final profile 继续后续成片链路。")
@@ -135,7 +161,9 @@ def build_markdown(snapshot: dict[str, Any], confirm_payload: dict[str, Any]) ->
 - `job_id`: `{job.get("id", "")}`
 - `source_name`: `{job.get("source_name", "")}`
 - `job_status`: `{job.get("status", "")}`
+- `stored_job_status`: `{stored_status}`
 - `source_path`: `{job.get("source_path", "")}`
+- `job_error`: {job_error or "_无_"}
 - 共享盘定位:
 {_render_list(located_paths, "未定位到原片路径")}
 
@@ -151,6 +179,7 @@ def build_markdown(snapshot: dict[str, Any], confirm_payload: dict[str, Any]) ->
 ## 3. 工件与步骤状态
 
 - artifact counts: `{json.dumps(artifact_counts, ensure_ascii=False)}`
+- render outputs summary: `{json.dumps(render_outputs_summary, ensure_ascii=False)}`
 - step status:
 {_render_step_status(snapshot)}
 

@@ -5,7 +5,8 @@ from roughcut.review.content_profile import (
     apply_glossary_terms,
 )
 from roughcut.review.glossary_engine import assess_glossary_correction_automation
-from roughcut.speech.subtitle_pipeline import _apply_accepted_corrections, build_canonical_transcript_layer
+from roughcut.pipeline.steps import _build_reference_segment_adapters, _build_transcript_first_canonical_layer
+from roughcut.speech.subtitle_pipeline import _apply_accepted_corrections, build_canonical_transcript_layer, build_transcript_fact_layer
 from roughcut.speech.subtitle_segmentation import normalize_display_numbers, normalize_display_text
 from roughcut.speech.transcribe import _normalize_transcript_result
 
@@ -177,6 +178,158 @@ def test_canonical_transcript_layer_preserves_source_raw_filler_text() -> None:
 
     assert layer.segments[0].text_raw == "啊我靠饮恨"
     assert layer.segments[0].text_canonical == "我靠饮恨"
+
+
+def test_canonical_transcript_layer_uses_canonical_surface_when_display_is_suppressed() -> None:
+    class Subtitle:
+        id = "subtitle-1"
+        item_index = 0
+        start_time = 0.0
+        end_time = 2.0
+        text_raw = "那个 EDC 折刀"
+        text_norm = "这是 MAXACE 美杜莎4"
+        text_final = ""
+        display_suppressed_reason = "standalone_filler"
+
+    layer = build_canonical_transcript_layer([Subtitle()], corrections=[])
+
+    assert layer.segments[0].text_raw == "那个 EDC 折刀"
+    assert layer.segments[0].text_canonical == "这是 MAXACE 美杜莎4"
+
+
+def test_canonical_transcript_layer_preserves_explicit_canonical_surface_from_dict_transcript_segments() -> None:
+    layer = build_canonical_transcript_layer(
+        transcript_segments=[
+            {
+                "index": 0,
+                "start": 0.0,
+                "end": 1.0,
+                "text": "generic text should not override canonical transcript",
+                "text_raw": "你看到的是EC手电",
+                "text_canonical": "你看到的是EDC手电",
+            }
+        ],
+        corrections=[],
+    )
+
+    assert layer.source_basis == "transcript_first"
+    assert layer.segments[0].text_raw == "generic text should not override canonical transcript"
+    assert layer.segments[0].text_canonical == "你看到的是EDC手电"
+
+
+def test_canonical_transcript_layer_preserves_explicit_surfaces_from_dict_subtitle_items() -> None:
+    layer = build_canonical_transcript_layer(
+        [
+            {
+                "id": "subtitle-1",
+                "item_index": 0,
+                "start_time": 0.0,
+                "end_time": 2.0,
+                "text_raw": "那个 EDC 折刀",
+                "text_norm": "这是 MAXACE 美杜莎4",
+                "text_final": "",
+                "display_suppressed_reason": "standalone_filler",
+            }
+        ],
+        corrections=[],
+    )
+
+    assert layer.segments[0].text_raw == "那个 EDC 折刀"
+    assert layer.segments[0].text_canonical == "这是 MAXACE 美杜莎4"
+
+
+def test_canonical_transcript_layer_sorts_dict_subtitle_items_by_timing() -> None:
+    layer = build_canonical_transcript_layer(
+        [
+            {
+                "id": "subtitle-2",
+                "item_index": 2,
+                "start_time": 3.0,
+                "end_time": 4.0,
+                "text_raw": "第二段",
+                "text_norm": "第二段",
+            },
+            {
+                "id": "subtitle-1",
+                "item_index": 1,
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text_raw": "第一段",
+                "text_norm": "第一段",
+            },
+        ],
+        corrections=[],
+    )
+
+    assert [segment.index for segment in layer.segments] == [1, 2]
+    assert [segment.text_canonical for segment in layer.segments] == ["第一段", "第二段"]
+
+
+def test_transcript_fact_layer_prefers_explicit_canonical_surface_from_dict_segments() -> None:
+    layer = build_transcript_fact_layer(
+        [
+            {
+                "index": 0,
+                "start": 0.0,
+                "end": 1.0,
+                "text": "generic text should not override canonical transcript",
+                "text_canonical": "你看到的是EDC手电",
+            }
+        ]
+    )
+
+    assert layer.segments[0].text == "你看到的是EDC手电"
+
+
+def test_transcript_segment_adapters_preserve_explicit_raw_and_canonical_surfaces() -> None:
+    adapters = _build_reference_segment_adapters(
+        [
+            {
+                "segment_index": 0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text": "generic text should not override explicit raw speech",
+                "text_raw": "你看到的是EC手电",
+                "text_canonical": "你看到的是EDC手电",
+            }
+        ]
+    )
+
+    layer = build_canonical_transcript_layer(
+        transcript_segments=adapters,
+        corrections=[],
+        source_basis="subtitle_postprocess",
+    )
+
+    assert adapters[0].text == "你看到的是EC手电"
+    assert layer.segments[0].text_raw == "你看到的是EC手电"
+    assert layer.segments[0].text_canonical == "你看到的是EDC手电"
+
+
+def test_transcript_first_canonical_layer_preserves_explicit_raw_and_canonical_surfaces() -> None:
+    transcript_rows = [
+        type(
+            "TranscriptRow",
+            (),
+            {
+                "segment_index": 0,
+                "start_time": 0.0,
+                "end_time": 1.0,
+                "text": "generic text should not override explicit raw speech",
+                "text_raw": "你看到的是EC手电",
+                "text_canonical": "你看到的是EDC手电",
+            },
+        )()
+    ]
+
+    layer = _build_transcript_first_canonical_layer(
+        transcript_rows=transcript_rows,
+        subtitle_items=[],
+        corrections=[],
+    )
+
+    assert layer.segments[0].text_raw == "你看到的是EC手电"
+    assert layer.segments[0].text_canonical == "你看到的是EDC手电"
 
 
 def test_glossary_automation_blocks_neighbor_model_rewrite() -> None:

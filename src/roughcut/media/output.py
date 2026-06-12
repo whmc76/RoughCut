@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from roughcut.config import get_settings
+from roughcut.cover_title_contract import normalize_cover_title_line_contract as _shared_normalize_cover_title_line_contract
 from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.media.subtitles import split_subtitle_display_item
 from roughcut.media.subtitle_text import clean_final_subtitle_text
@@ -893,25 +894,23 @@ def _adapt_cover_title_for_strategy(
     if not _cover_title_is_usable(title_lines):
         return title_lines
 
-    adapted = {
-        "top": str((title_lines or {}).get("top") or "").strip()[:14],
-        "main": str((title_lines or {}).get("main") or "").strip()[:18],
-        "bottom": str((title_lines or {}).get("bottom") or "").strip()[:18],
-    }
-    bottom = adapted["bottom"]
-    if not bottom:
+    adapted = _normalize_cover_title_line_contract(title_lines)
+    subtitle = str(adapted.get("sub") or "").strip()
+    if not subtitle:
         return adapted
 
     copy_style = str((content_profile or {}).get("copy_style") or "attention_grabbing").strip() or "attention_grabbing"
     subject = str((content_profile or {}).get("subject_model") or (content_profile or {}).get("subject_type") or adapted["main"]).strip()
     if strategy_key == "bilibili":
-        adapted["bottom"] = _cover_strategy_bilibili(bottom, subject=subject, copy_style=copy_style)[:18]
+        subtitle = _cover_strategy_bilibili(subtitle, subject=subject, copy_style=copy_style)[:18]
     elif strategy_key == "xiaohongshu":
-        adapted["bottom"] = _cover_strategy_xiaohongshu(bottom, subject=subject, copy_style=copy_style)[:18]
+        subtitle = _cover_strategy_xiaohongshu(subtitle, subject=subject, copy_style=copy_style)[:18]
     elif strategy_key == "ctr":
-        adapted["bottom"] = _cover_strategy_ctr(bottom, subject=subject, copy_style=copy_style)[:18]
+        subtitle = _cover_strategy_ctr(subtitle, subject=subject, copy_style=copy_style)[:18]
     elif strategy_key == "brand":
-        adapted["bottom"] = _cover_strategy_brand(bottom, subject=subject, copy_style=copy_style)[:18]
+        subtitle = _cover_strategy_brand(subtitle, subject=subject, copy_style=copy_style)[:18]
+    adapted["sub"] = subtitle
+    adapted["bottom"] = subtitle
     return adapted
 
 
@@ -1067,24 +1066,38 @@ def _resolve_cover_title(content_profile: dict[str, Any] | None) -> dict[str, st
     settings = get_settings()
     if settings.cover_title.strip():
         parts = [part.strip() for part in settings.cover_title.split("|")]
-        return {
-            "top": parts[0] if len(parts) > 0 else "",
-            "main": parts[1] if len(parts) > 1 else parts[0],
-            "bottom": parts[2] if len(parts) > 2 else "",
-        }
+        if len(parts) >= 4:
+            return _normalize_cover_title_line_contract(
+                {
+                    "brand": parts[0],
+                    "main": parts[1],
+                    "sub": parts[2],
+                    "hook": parts[3],
+                }
+            )
+        return _normalize_cover_title_line_contract(
+            {
+                "top": parts[0] if len(parts) > 0 else "",
+                "main": parts[1] if len(parts) > 1 else parts[0],
+                "bottom": parts[2] if len(parts) > 2 else "",
+            }
+        )
 
     if not content_profile:
         return None
     cover_title = content_profile.get("cover_title")
     if not isinstance(cover_title, dict):
         return None
-    if not any(cover_title.get(key) for key in ("top", "main", "bottom")):
+    if not any(cover_title.get(key) for key in ("brand", "top", "main", "sub", "bottom", "hook")):
         return None
-    return {
-        "top": str(cover_title.get("top") or "").strip(),
-        "main": str(cover_title.get("main") or "").strip(),
-        "bottom": str(cover_title.get("bottom") or "").strip(),
-    }
+    return _normalize_cover_title_line_contract(
+        {
+            "brand": str(cover_title.get("brand") or cover_title.get("top") or "").strip(),
+            "main": str(cover_title.get("main") or "").strip(),
+            "sub": str(cover_title.get("sub") or cover_title.get("bottom") or "").strip(),
+            "hook": str(cover_title.get("hook") or "").strip(),
+        }
+    )
 
 
 def _cover_title_is_usable(title_lines: dict[str, str] | None) -> bool:
@@ -1117,11 +1130,7 @@ def _sanitize_generated_cover_title(
     if not title_lines:
         return fallback_plan
 
-    normalized = {
-        "top": str(title_lines.get("top") or "").strip()[:14],
-        "main": str(title_lines.get("main") or "").strip()[:18],
-        "bottom": str(title_lines.get("bottom") or "").strip()[:18],
-    }
+    normalized = _normalize_cover_title_line_contract(title_lines)
     if not _cover_title_is_usable(normalized):
         return fallback_plan
 
@@ -1135,9 +1144,13 @@ def _sanitize_generated_cover_title(
         return fallback_plan
 
     if fallback_plan:
-        normalized["top"] = normalized["top"] or str(fallback_plan.get("top") or "").strip()[:14]
-        normalized["main"] = normalized["main"] or str(fallback_plan.get("main") or "").strip()[:18]
-        normalized["bottom"] = normalized["bottom"] or str(fallback_plan.get("bottom") or "").strip()[:18]
+        fallback_normalized = _normalize_cover_title_line_contract(fallback_plan)
+        normalized["brand"] = normalized["brand"] or fallback_normalized["brand"]
+        normalized["top"] = normalized["top"] or fallback_normalized["top"]
+        normalized["main"] = normalized["main"] or fallback_normalized["main"]
+        normalized["sub"] = normalized["sub"] or fallback_normalized["sub"]
+        normalized["bottom"] = normalized["bottom"] or fallback_normalized["bottom"]
+        normalized["hook"] = normalized["hook"] or fallback_normalized["hook"]
 
     return normalized
 
@@ -1740,20 +1753,7 @@ def _apply_cross_platform_safe_zone(
 
 
 def _normalize_cover_title_line_contract(title_lines: dict[str, str] | None) -> dict[str, str]:
-    lines = dict(title_lines or {})
-    brand = str(lines.get("brand") or lines.get("top") or "").strip()
-    main = str(lines.get("main") or "").strip()
-    sub = str(lines.get("sub") or lines.get("bottom") or "").strip()
-    hook = str(lines.get("hook") or "").strip()
-    normalized = {
-        "brand": brand[:14],
-        "top": brand[:14],
-        "main": main[:18],
-        "sub": sub[:18],
-        "bottom": sub[:18],
-        "hook": hook[:18],
-    }
-    return normalized
+    return _shared_normalize_cover_title_line_contract(title_lines)
 
 
 def _cover_focus_line_y(line_key: str) -> str:

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from roughcut.db.models import PublicationAttempt
-from roughcut.publication_intelligence import build_cached_publication_scheme
+from roughcut.publication_intelligence import _next_local_datetime, build_cached_publication_scheme
 from roughcut.publication import build_publication_browser_profile_id, normalize_publication_browser_binding
 from roughcut.publication_packaging import (
     normalize_publication_packaging_payload,
@@ -37,6 +37,15 @@ def _normalize_tags(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [text for item in value if (text := str(item or "").strip())]
+
+
+def _resolve_scheduled_publish_at(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+        return text
+    return _next_local_datetime(text)
 
 
 def _load_creator_profile(profiles_payload: Any, creator_profile_id: str) -> dict[str, Any]:
@@ -213,13 +222,21 @@ def _build_mainline_platform_options(
         or ""
     ).strip():
         options["visibility_or_publish_mode"] = visibility
-    scheduled_publish_at = str(scheduled_publish_at_override or "").strip()
+    scheduled_publish_slot = str(
+        platform_packaging_entry.get("scheduled_publish_slot")
+        or derived_option.get("scheduled_publish_slot")
+        or ""
+    ).strip()
+    if scheduled_publish_slot:
+        options["scheduled_publish_slot"] = scheduled_publish_slot
+    scheduled_publish_at = _resolve_scheduled_publish_at(scheduled_publish_at_override)
     if not scheduled_publish_at:
-        scheduled_publish_at = str(
+        scheduled_publish_at = _resolve_scheduled_publish_at(
             platform_packaging_entry.get("scheduled_publish_at")
             or derived_option.get("scheduled_publish_at")
-            or ""
-        ).strip()
+        )
+    if not scheduled_publish_at:
+        scheduled_publish_at = _resolve_scheduled_publish_at(scheduled_publish_slot)
     if scheduled_publish_at:
         options["scheduled_publish_at"] = scheduled_publish_at
     collection = _coerce_platform_collection(collection_override)
@@ -239,7 +256,13 @@ def _mainline_requires_derived_platform_option(platform_packaging_entry: dict[st
     collection = _coerce_platform_collection(
         platform_packaging_entry.get("collection") or platform_packaging_entry.get("collection_name")
     )
-    has_schedule = bool(str(platform_packaging_entry.get("scheduled_publish_at") or "").strip())
+    has_schedule = bool(
+        str(
+            platform_packaging_entry.get("scheduled_publish_at")
+            or platform_packaging_entry.get("scheduled_publish_slot")
+            or ""
+        ).strip()
+    )
     has_category = bool(str(platform_packaging_entry.get("category") or "").strip())
     return not (collection and has_schedule and has_category)
 

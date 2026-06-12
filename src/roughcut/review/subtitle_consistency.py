@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
+from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.review.subtitle_quality import build_subtitle_quality_report
 from roughcut.review.subtitle_term_resolution import _should_ignore_patch_candidate
 
@@ -23,11 +24,7 @@ _BAD_TERM_REASON_MAP: dict[str, tuple[re.Pattern[str], str, str]] = {
 
 
 def _subtitle_text(item: Mapping[str, Any]) -> str:
-    for key in ("text_final", "text_norm", "text_raw", "text"):
-        value = str(item.get(key) or "").strip()
-        if value:
-            return value
-    return ""
+    return subtitle_display_rule_text(dict(item))
 
 
 def _correction_attr(correction: Any, key: str) -> Any:

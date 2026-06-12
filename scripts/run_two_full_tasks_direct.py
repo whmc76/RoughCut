@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import concurrent.futures
 import json
+import os
 import sys
 import time
 from dataclasses import asdict
@@ -15,17 +16,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from sqlalchemy import select
-
 from roughcut.config import get_settings
 from roughcut.db.models import Job
 from roughcut.db.session import get_session_factory
 from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
-from roughcut.pipeline.steps import run_step_sync
 from run_fullchain_batch import (
     StepRun,
     auto_approve_final_review,
     auto_confirm_content_profile,
+    _resolve_batch_step_timeout_seconds,
+    _run_step_sync_with_timeout,
     collect_job_report,
     finalize_job,
     mark_step,
@@ -34,6 +34,12 @@ from run_fullchain_batch import (
 
 
 def _configure_local_event_loop_policy() -> None:
+    # Selector loops do not support asyncio subprocess APIs used by render. Keep
+    # default Proactor behavior unless explicitly forced.
+    force_selector = str(os.getenv("ROUGHCUT_FORCE_SELECTOR_EVENT_LOOP", "")).strip().lower() in {"1", "true", "yes", "on"}
+    if not force_selector:
+        return
+
     # asyncpg on Windows can emit Proactor InvalidStateError noise when this script
     # repeatedly opens and tears down short-lived event loops via asyncio.run().
     if sys.platform != "win32":
@@ -45,7 +51,7 @@ def _configure_local_event_loop_policy() -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run two fresh full-chain RoughCut jobs in parallel.")
+    parser = argparse.ArgumentParser(description="Run two fresh full-chain ROUGHCUT jobs in parallel.")
     parser.add_argument("--source", action="append", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--report-dir", type=Path, required=True)
@@ -180,16 +186,51 @@ def run_full_chain(job_id: str) -> tuple[list[StepRun], str]:
             )
             continue
         mark_step(job_id, step_name, "running")
+        step_timeout_seconds = _resolve_batch_step_timeout_seconds(step_name)
         try:
-            run_step_sync(step_name, job_id)
+            _run_step_sync_with_timeout(step_name, job_id, step_timeout_seconds)
             mark_step(job_id, step_name, "done")
             step_runs.append(
                 StepRun(step=step_name, status="done", elapsed_seconds=round(time.perf_counter() - started, 3), detail=read_step_detail(job_id, step_name))
             )
+        except TimeoutError as exc:
+            status = "failed"
+            error_text = f"{type(exc).__name__}: {exc}"
+            metadata_updates = getattr(exc, "__batch_step_execution_metadata__", None)
+            if isinstance(metadata_updates, dict):
+                mark_step(
+                    job_id,
+                    step_name,
+                    "failed",
+                    error=error_text,
+                    terminal_failure=True,
+                    metadata_updates=metadata_updates,
+                )
+            else:
+                mark_step(job_id, step_name, "failed", error=error_text, terminal_failure=True)
+            step_runs.append(
+                StepRun(
+                    step=step_name,
+                    status="failed",
+                    elapsed_seconds=round(time.perf_counter() - started, 3),
+                    error=error_text,
+                )
+            )
+            break
         except Exception as exc:
             status = "failed"
             error_text = f"{type(exc).__name__}: {exc}"
-            mark_step(job_id, step_name, "failed", error=error_text)
+            failure_metadata = getattr(exc, "__batch_step_execution_metadata__", None)
+            if isinstance(failure_metadata, dict):
+                mark_step(
+                    job_id,
+                    step_name,
+                    "failed",
+                    error=error_text,
+                    metadata_updates=failure_metadata,
+                )
+            else:
+                mark_step(job_id, step_name, "failed", error=error_text)
             step_runs.append(
                 StepRun(step=step_name, status="failed", elapsed_seconds=round(time.perf_counter() - started, 3), error=error_text)
             )

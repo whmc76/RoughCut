@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   applyCompositeSafeRuntimePolicyDefaults,
   buildPublicationHealthPayload,
+  bridgeTargetDescriptor,
   buildCompactProbeInventorySummary,
   buildLightweightProbeInventorySummary,
   deriveProbeInventoryRouteReadiness,
@@ -63,6 +64,9 @@ import {
   derivePublicationTaskTimeoutStatus,
   deriveCompositePrePublishRepairPlan,
   derivePlatformTabSelectionPolicy,
+  selectPreferredSemanticActionCandidate,
+  shouldSkipSharedBootstrapForFreshStart,
+  shouldUseAuthoritativeUploadEntryNativePath,
   classifyDouyinCoverUploadInputRoot,
   extractDouyinTopicVerificationLabels,
   extractYouTubeStudioChannelId,
@@ -72,6 +76,11 @@ import {
   PUBLICATION_TASK_IDENTITY_CONTRACT,
   resolvePlatformPublishEntryUrl,
   SERVICE_SCRIPT_SHA256,
+  seedBridgeClientForTest,
+  selectBridgeClientId,
+  setBridgeClientLastSeenForTest,
+  setBridgeClientLastPollForTest,
+  resetBridgeClientsForTest,
   platformTabScore,
   shouldBootstrapProbeInventoryRoute,
   shouldBootstrapGenericPublishRoute,
@@ -620,6 +629,65 @@ test("shouldBootstrapProbeInventoryRoute requests xiaohongshu publish entry when
   );
 });
 
+test("shouldUseAuthoritativeUploadEntryNativePath only uses douyin upload shell", () => {
+  assert.equal(
+    shouldUseAuthoritativeUploadEntryNativePath("douyin", {
+      url: "https://creator.douyin.com/creator-micro/content/upload",
+      text: "发布视频 点击上传 或直接将视频文件拖入此区域 视频大小和格式",
+      title: "抖音创作者中心",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldUseAuthoritativeUploadEntryNativePath("douyin", {
+      url: "https://creator.douyin.com/creator-micro/content/post/video",
+      text: "作品描述 设置封面 自主声明 添加合集 发布时间",
+      title: "抖音创作者中心",
+    }),
+    false,
+  );
+});
+
+test("selectPreferredSemanticActionCandidate rejects notification and close for media upload entry intent", () => {
+  const ranked = selectPreferredSemanticActionCandidate(
+    [
+      {
+        label: "通知",
+        tag: "a",
+        role: "",
+        className: "",
+        area: 2400,
+        clickable: true,
+        visible: true,
+      },
+      {
+        label: "close",
+        tag: "button",
+        role: "",
+        className: "douyin-creator-pc-modal-close",
+        area: 576,
+        clickable: true,
+        visible: true,
+      },
+      {
+        label: "上传视频",
+        tag: "button",
+        role: "",
+        className: "douyin-upload-button",
+        area: 28000,
+        clickable: true,
+        visible: true,
+      },
+    ],
+    ["上传视频", "点击上传", "选择视频"],
+    { intent: "media_upload_entry" },
+  );
+
+  assert.equal(ranked.chosen?.label, "上传视频");
+  assert.ok((ranked.candidates || []).find((item) => item.label === "通知")?.score < 0);
+  assert.ok((ranked.candidates || []).find((item) => item.label === "close")?.score < 0);
+});
+
 test("buildPendingUploadMaterialIntegrity preserves youtube draft resume pending reason", () => {
   const integrity = buildPendingUploadMaterialIntegrity(
     "youtube",
@@ -1002,6 +1070,40 @@ test("buildPublicationHealthPayload preserves creator session probe results", ()
   assert.equal(payload.creator_sessions.douyin.code, "douyin_route_auth_required");
   assert.equal(payload.creator_sessions.douyin.visual_evidence.capture_type, "screenshot");
   assert.equal(payload.creator_sessions.douyin.visual_evidence.phase, "creator_session_probe");
+});
+
+test("bridgeTargetDescriptor keeps last known stale bridge client for degraded health", () => {
+  resetBridgeClientsForTest();
+  seedBridgeClientForTest("bridge-test-client", { extension_version: "0.1.6" });
+  setBridgeClientLastSeenForTest("bridge-test-client", new Date(Date.now() - 60_000).toISOString());
+
+  const payload = buildPublicationHealthPayload({ cdpStatus: "degraded", cdpError: "chrome_extension_bridge_unavailable" });
+
+  assert.equal(payload.cdp_status, "degraded");
+  assert.equal(payload.browser_transport.bridge_client_id, "bridge-test-client");
+  assert.equal(payload.browser_transport.bridge_client_state, "stale");
+});
+
+test("selectBridgeClientId can reuse stale bridge client when allowStale is enabled", () => {
+  resetBridgeClientsForTest();
+  seedBridgeClientForTest("bridge-test-client", { extension_version: "0.1.6" });
+  setBridgeClientLastSeenForTest("bridge-test-client", new Date(Date.now() - 60_000).toISOString());
+
+  assert.equal(selectBridgeClientId("bridge-test-client"), "");
+  assert.equal(selectBridgeClientId("bridge-test-client", { allowStale: true }), "bridge-test-client");
+  assert.equal(bridgeTargetDescriptor({ allowStale: true }).bridge_client_id, "bridge-test-client");
+});
+
+test("selectBridgeClientId prefers clients with real bridge polling over hello-only clients", () => {
+  resetBridgeClientsForTest();
+  seedBridgeClientForTest("hello-only-client", { extension_version: "0.1.6" });
+  seedBridgeClientForTest("polling-client", { extension_version: "0.1.6" });
+  setBridgeClientLastSeenForTest("hello-only-client", new Date(Date.now() + 5_000).toISOString());
+  setBridgeClientLastSeenForTest("polling-client", new Date().toISOString());
+  setBridgeClientLastPollForTest("polling-client", new Date().toISOString());
+
+  assert.equal(selectBridgeClientId(), "polling-client");
+  assert.equal(bridgeTargetDescriptor().bridge_client_id, "polling-client");
 });
 
 test("expectedMediaPath falls back to direct content media_path when media_items are absent", () => {
@@ -3702,6 +3804,24 @@ test("derivePlatformTabSelectionPolicy enables fresh-start tab mode for linear p
   assert.equal(policy.prefer_receipt_surface, false);
 });
 
+test("shouldSkipSharedBootstrapForFreshStart only triggers for fresh-start tab mode", () => {
+  assert.equal(
+    shouldSkipSharedBootstrapForFreshStart({
+      fresh_start_platform_tab: true,
+      force_publish_page_refresh: true,
+      clear_draft_context: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldSkipSharedBootstrapForFreshStart({
+      prepare_only_current_page: true,
+      fresh_start_platform_tab: false,
+    }),
+    false,
+  );
+});
+
 test("derivePlatformTabSelectionPolicy defaults douyin verification-only linear runs to fresh-start tab outside receipt rebind", () => {
   const policy = derivePlatformTabSelectionPolicy("douyin", {
     verification_only_current_page: true,
@@ -3886,6 +4006,23 @@ test("extractDouyinTopicVerificationLabels ignores hot-list suggestions and help
   ]);
 
   assert.deepEqual(labels, ["EDC折刀", "MAXACE美杜莎4"]);
+});
+
+test("extractDouyinTopicVerificationLabels prefers body topics over recommended chips", () => {
+  const labels = extractDouyinTopicVerificationLabels([
+    { text: "开箱看看差别 #MAXACE #美杜莎4 #开箱", context: "body", source: "body" },
+    { text: "#评测", context: "推荐话题 热度 2.5亿", source: "local" },
+    { text: "#胶卷相机", context: "推荐话题 热度 2.5亿", source: "local" },
+  ], ["MAXACE", "美杜莎4", "开箱"]);
+
+  assert.deepEqual(labels, ["MAXACE", "美杜莎4", "开箱"]);
+});
+
+test("verifyCompositeBodyField tolerates douyin zero-width characters and linebreak flattening", () => {
+  const expected = "第一行正文\n第二行正文\n第三行正文";
+  const actual = "第一行正文\u200b 第二行正文 第三行正文\u200b";
+
+  assert.equal(verifyCompositeBodyField("douyin", expected, actual), true);
 });
 
 test("selectDouyinTopicSearchFieldCandidate rejects recommendation container and prefers editable search input", () => {
@@ -4306,8 +4443,7 @@ test("buildDouyinPrepareProjectExecutionPlan follows publish scheme order and co
     buildDouyinPrepareProjectExecutionPlan("douyin"),
     [
       { kind: "cover", project_keys: ["cover_upload_4_3", "cover_upload_3_4"] },
-      { kind: "rich_text", project_keys: ["title", "body"] },
-      { kind: "topics", project_keys: ["tags"] },
+      { kind: "rich_text", project_keys: ["title", "body", "tags"] },
       { kind: "collection", project_keys: ["collection"] },
       { kind: "declaration", project_keys: ["declaration"] },
       { kind: "visibility", project_keys: ["visibility"] },
@@ -4316,6 +4452,7 @@ test("buildDouyinPrepareProjectExecutionPlan follows publish scheme order and co
   );
 });
 
+
 test("filterDouyinPrepareProjectExecutionPlan skips unavailable douyin editor controls", () => {
   assert.deepEqual(
     filterDouyinPrepareProjectExecutionPlan(
@@ -4323,7 +4460,6 @@ test("filterDouyinPrepareProjectExecutionPlan skips unavailable douyin editor co
       {
         rich_text: true,
         cover: false,
-        topics: true,
         collection: false,
         declaration: false,
         visibility: true,
@@ -4332,8 +4468,7 @@ test("filterDouyinPrepareProjectExecutionPlan skips unavailable douyin editor co
     ),
     [
       { kind: "cover", project_keys: ["cover_upload_4_3", "cover_upload_3_4"], actionable: false, blocked_reason: "editor_control_not_available" },
-      { kind: "rich_text", project_keys: ["title", "body"], actionable: true, blocked_reason: "" },
-      { kind: "topics", project_keys: ["tags"], actionable: true, blocked_reason: "" },
+      { kind: "rich_text", project_keys: ["title", "body", "tags"], actionable: true, blocked_reason: "" },
       { kind: "collection", project_keys: ["collection"], actionable: false, blocked_reason: "editor_control_not_available" },
       { kind: "declaration", project_keys: ["declaration"], actionable: false, blocked_reason: "editor_control_not_available" },
       { kind: "visibility", project_keys: ["visibility"], actionable: true, blocked_reason: "" },

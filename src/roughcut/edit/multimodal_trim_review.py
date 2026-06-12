@@ -10,21 +10,37 @@ from pathlib import Path
 from typing import Any
 
 from roughcut.config import get_settings, llm_task_route
+from roughcut.edit.cut_analysis import summarize_cut_analysis_candidate_metrics
+from roughcut.edit.rule_registry import rule_multimodal_review_trigger
 from roughcut.llm_cache import build_cache_key, digest_payload, load_cached_entry, save_cached_json
 from roughcut.prompts.edit_decision import build_multimodal_trim_review_batch_prompt
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import extract_json_text
+from roughcut.storage.s3 import get_storage
 from roughcut.usage import track_usage_operation
 
 
 ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW = "multimodal_trim_review"
 MULTIMODAL_TRIM_REVIEW_SCHEMA_VERSION = "multimodal_trim_review.v1"
-_DEFAULT_REVIEW_REASONS = {"low_signal_subtitle", "timing_trim", "long_non_dialogue"}
 _DEFAULT_FRAME_PADDING_SEC = 0.35
 _DEFAULT_FRAME_TIMESTAMPS = (0.15, 0.5, 0.85)
 _SEMANTIC_UNCERTAINTY_FRAME_TIMESTAMPS = (0.5,)
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_multimodal_review_source_path(source_path: Path | None) -> Path | None:
+    if source_path is None:
+        return None
+    candidate = Path(source_path).expanduser()
+    if candidate.exists() and candidate.is_file():
+        return candidate
+    resolve_path = getattr(get_storage(), "resolve_path", None)
+    if callable(resolve_path):
+        resolved = resolve_path(str(source_path))
+        if resolved.exists() and resolved.is_file():
+            return resolved
+    return None
 
 
 def _candidate_id(item: dict[str, Any]) -> str:
@@ -135,11 +151,11 @@ def apply_multimodal_trim_review_to_cut_analysis(
                 continue
         reviewed_candidates.append(item)
     analysis["rule_candidates"] = reviewed_candidates
-    analysis["rule_candidate_count"] = len(reviewed_candidates)
-    analysis["candidate_count"] = int(len(list(analysis.get("accepted_cuts") or [])) + len(reviewed_candidates))
-    analysis["manual_confirm_candidate_count"] = max(
-        0,
-        int(analysis.get("candidate_count") or 0) - int(analysis.get("auto_apply_candidate_count") or 0),
+    analysis.update(
+        summarize_cut_analysis_candidate_metrics(
+            analysis.get("accepted_cuts"),
+            reviewed_candidates,
+        )
     )
     analysis["multimodal_trim_review_summary"] = {
         "reviewed": bool(review.get("reviewed")),
@@ -148,6 +164,7 @@ def apply_multimodal_trim_review_to_cut_analysis(
         "accepted_count": int(review.get("accepted_count") or 0),
         "rejected_count": int(review.get("rejected_count") or 0),
         "pending_count": int(review.get("pending_count") or 0),
+        "unsure_count": int(review.get("unsure_count") or 0),
         "vetoed_candidate_count": vetoed_candidate_count,
         "provider": str(review.get("provider") or "").strip() or None,
         "model": str(review.get("model") or "").strip() or None,
@@ -169,8 +186,11 @@ def build_multimodal_trim_review_payload(
         if not isinstance(item, dict):
             continue
         reason = str(item.get("reason") or "").strip()
-        review_required = bool(item.get("multimodal_review_required"))
-        if not review_required and reason not in _DEFAULT_REVIEW_REASONS:
+        review_trigger = rule_multimodal_review_trigger(
+            reason,
+            explicit_review_required=bool(item.get("multimodal_review_required")),
+        )
+        if review_trigger is None:
             continue
         pending.append(
             {
@@ -187,7 +207,7 @@ def build_multimodal_trim_review_payload(
                 ][:4],
                 "multimodal_keep_priority": str(item.get("multimodal_keep_priority") or "").strip() or None,
                 "multimodal_confidence": round(float(item.get("multimodal_confidence", 0.0) or 0.0), 3),
-                "review_trigger": "visual_protection" if review_required else "semantic_uncertainty",
+                "review_trigger": review_trigger,
                 "review_state": "pending",
             }
         )
@@ -198,6 +218,7 @@ def build_multimodal_trim_review_payload(
         "reviewed": False,
         "candidate_count": len(pending),
         "pending_count": len(pending),
+        "unsure_count": 0,
         "accepted_count": 0,
         "rejected_count": 0,
         "candidates": pending,
@@ -604,13 +625,15 @@ async def review_multimodal_trim_review_payload(
         base_payload["reviewed"] = False
         base_payload["disabled"] = True
         return base_payload
-    if source_path is None or not source_path.exists():
+    resolved_source_path = _resolve_multimodal_review_source_path(source_path)
+    if resolved_source_path is None:
         base_payload["reviewed"] = False
         base_payload["error"] = "multimodal_trim_review_source_missing"
         return base_payload
     if not candidates:
         base_payload["reviewed"] = False
         base_payload["pending_count"] = 0
+        base_payload["unsure_count"] = 0
         base_payload["accepted_count"] = 0
         base_payload["rejected_count"] = 0
         base_payload["decisions"] = []
@@ -636,7 +659,7 @@ async def review_multimodal_trim_review_payload(
     error_code: str | None = None
     try:
         decisions, summaries, used_split_fallback = await _review_multimodal_candidates_resilient(
-            source_path=source_path,
+            source_path=resolved_source_path,
             source_meta=normalized_meta,
             candidates=queued_candidates,
             timeout_sec=review_timeout_sec,
@@ -647,20 +670,20 @@ async def review_multimodal_trim_review_payload(
         error_code = "multimodal_trim_review_timeout"
         logger.warning(
             "Multimodal trim review timed out for %s",
-            normalized_meta.get("source_name") or source_path,
+            normalized_meta.get("source_name") or resolved_source_path,
         )
     except ValueError as exc:
         error_code = "multimodal_trim_review_failed"
         logger.warning(
             "Multimodal trim review produced an unusable payload for %s: %s",
-            normalized_meta.get("source_name") or source_path,
+            normalized_meta.get("source_name") or resolved_source_path,
             str(exc).strip(),
         )
     except Exception:
         error_code = "multimodal_trim_review_failed"
         logger.exception(
             "Multimodal trim review failed for %s",
-            normalized_meta.get("source_name") or source_path,
+            normalized_meta.get("source_name") or resolved_source_path,
         )
 
     min_confidence = float(getattr(settings, "multimodal_trim_review_min_confidence", 0.72) or 0.72)
@@ -669,6 +692,7 @@ async def review_multimodal_trim_review_payload(
     accepted_count = 0
     rejected_count = 0
     pending_count = 0
+    unsure_count = 0
     for candidate in candidates:
         payload_item = dict(candidate)
         candidate_id = str(payload_item.get("candidate_id") or "").strip()
@@ -688,7 +712,7 @@ async def review_multimodal_trim_review_payload(
                 rejected_count += 1
             else:
                 payload_item["review_state"] = "unsure"
-                pending_count += 1
+                unsure_count += 1
         reviewed_candidates.append(payload_item)
 
     reviewed_payload = {
@@ -699,6 +723,7 @@ async def review_multimodal_trim_review_payload(
         "accepted_count": accepted_count,
         "rejected_count": rejected_count,
         "pending_count": pending_count,
+        "unsure_count": unsure_count,
         "summary": "；".join(dict.fromkeys(summary for summary in summaries if summary))[:500] or None,
     }
     if decisions:

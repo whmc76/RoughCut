@@ -122,8 +122,8 @@
           "target_size": { "width": 1440, "height": 1080 }
         }
       ],
-      "supports_declaration": false,
-      "default_declaration": "",
+      "supports_declaration": true,
+      "default_declaration": "个人观点，仅供参考",
       "supports_scheduled_publish": true,
       "publish_scheme": {
         "entry_url": "https://cp.kuaishou.com/article/publish/video",
@@ -140,6 +140,7 @@
           { "key": "cover_slot_select_4_3", "label": "选择 4:3 封面槽位", "result_key": "cover_slot_4_3_selected" },
           { "key": "cover_upload", "label": "上传 4:3 自定义封面", "result_key": "cover_ready" },
           { "key": "cover_confirm", "label": "确认封面上传", "result_key": "cover_confirmed" },
+          { "key": "declaration", "label": "设置作者声明", "result_key": "declaration_ready" },
           { "key": "collection", "label": "加入合集", "result_key": "collection_ready" },
           { "key": "schedule", "label": "设置定时发布", "result_key": "schedule_ready" },
           { "key": "final_publish", "label": "点击发布", "result_key": "publish_submitted" }
@@ -149,6 +150,7 @@
           "body_with_embedded_tags": true,
           "main_cover_slot": "landscape_4_3",
           "pk_cover_mutation_allowed": false,
+          "declaration_required": true,
           "collection_strategy_required": true,
           "schedule_required": true
         }
@@ -190,33 +192,52 @@
       "requires_custom_cover_policy": true,
       "required_cover_slots": [
         {
-          "slot": "portrait_9_16",
-          "label": "9:16 竖版母版",
-          "matrix_key": "portrait_9_16",
-          "target_size": { "width": 1080, "height": 1920 }
+          "slot": "landscape_4_3",
+          "label": "视频号动态封面（4:3）",
+          "matrix_key": "landscape_4_3",
+          "target_size": { "width": 1440, "height": 1080 }
+        },
+        {
+          "slot": "portrait_3_4",
+          "label": "个人主页卡片封面（3:4）",
+          "matrix_key": "portrait_3_4",
+          "target_size": { "width": 1080, "height": 1440 }
         }
       ],
       "supports_declaration": false,
       "default_declaration": "",
       "supports_scheduled_publish": true,
-      "manual_handoff_only": true,
-      "manual_publish_entry_url": "https://channels.weixin.qq.com/login.html",
-      "manual_publish_reason": "视频号暂不支持自动一键发布，需要人工登录后继续发布。",
+      "skip_explicit_visibility_entry": true,
       "publish_scheme": {
         "entry_url": "https://channels.weixin.qq.com/platform/post/create",
         "draft_resume_policy": "discard_existing_draft",
         "cover_asset_policy": "upload_prebuilt_asset_only",
         "allow_field_edits_while_processing": true,
+        "stop_when_current_page_already_correct": true,
+        "upload_processing_blocks_final_publish_only": true,
         "projects": [
           { "key": "media_upload", "label": "上传视频", "result_key": "media_attached" },
-          { "key": "cover_upload", "label": "上传 9:16 自定义封面", "result_key": "cover_ready" },
           { "key": "title", "label": "填写标题", "result_key": "title_ready" },
           { "key": "body", "label": "填写描述", "result_key": "body_ready" },
+          { "key": "tags", "label": "填写标签/话题", "result_key": "tags_ready" },
           { "key": "collection", "label": "加入合集", "result_key": "collection_ready" },
+          { "key": "original_statement", "label": "设置原创声明/原创类型", "result_key": "original_statement_ready" },
+          { "key": "cover_upload_4_3", "label": "上传视频号动态封面 4:3", "result_key": "cover_4_3_ready" },
+          { "key": "cover_upload_3_4", "label": "上传个人主页卡片封面 3:4", "result_key": "cover_3_4_ready" },
           { "key": "visibility", "label": "设置可见范围", "result_key": "visibility_ready" },
           { "key": "schedule", "label": "设置定时发布", "result_key": "schedule_ready" },
           { "key": "final_publish", "label": "提交发布", "result_key": "publish_submitted" }
-        ]
+        ],
+        "completion_requirements": {
+          "video_attached": true,
+          "title_required": true,
+          "body_required": true,
+          "tags_required": true,
+          "collection_strategy_required": true,
+          "main_cover_slot": "landscape_4_3",
+          "secondary_cover_slot": "portrait_3_4",
+          "schedule_required": true
+        }
       }
     },
     "xiaohongshu": {
@@ -299,7 +320,7 @@
         "cover_asset_policy": "upload_prebuilt_asset_only",
         "allow_field_edits_while_processing": true,
         "projects": [
-          { "key": "media_upload", "label": "上传视频", "result_key": "media_attached" },
+          { "key": "link_share", "label": "附加 YouTube 链接", "result_key": "link_ready" },
           { "key": "body", "label": "填写文案", "result_key": "body_ready" },
           { "key": "visibility", "label": "确认公开发送", "result_key": "visibility_ready" },
           { "key": "final_publish", "label": "点击发布", "result_key": "publish_submitted" }

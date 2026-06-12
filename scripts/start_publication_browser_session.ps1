@@ -1,11 +1,14 @@
 param(
     [string]$ChromePath = "C:\Program Files\Google\Chrome\Application\chrome.exe",
+    [string]$CreatorProfileId = "",
+    [string]$Platform = "",
+    [string]$ProfilesJson = "",
     [string]$UserDataDir = "",
     [string]$ProfileDirectory = "",
-    [int]$RemoteDebuggingPort = 9222,
+    [string]$BridgeExtensionPath = "",
     [string[]]$OpenUrl = @(),
+    [switch]$DisableBridgeExtension,
     [switch]$NoDefaultUrls,
-    [switch]$AllowDefaultUserDataDir,
     [switch]$DryRun
 )
 
@@ -13,6 +16,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+
+if ([string]::IsNullOrWhiteSpace($ProfilesJson)) {
+    $ProfilesJson = Join-Path $repoRoot "data\avatar_materials\profiles.json"
+}
 
 function Get-DefaultPublicationUserDataDir {
     $configured = [Environment]::GetEnvironmentVariable("ROUGHCUT_PUBLICATION_BROWSER_USER_DATA_DIR", "Process")
@@ -46,11 +53,49 @@ function Get-DefaultPublicationProfileDirectory {
     return "Profile 2"
 }
 
-function Get-DefaultPublicationUrls {
-    @(
-        "https://creator.douyin.com/creator-micro/content/post/video",
-        "https://creator.xiaohongshu.com/publish"
+function Resolve-CreatorPublicationBrowserBinding {
+    param(
+        [string]$ProfilesJsonPath,
+        [string]$ResolvedCreatorProfileId,
+        [string]$ResolvedPlatform
     )
+    if ([string]::IsNullOrWhiteSpace($ResolvedCreatorProfileId) -or -not (Test-Path -LiteralPath $ProfilesJsonPath)) {
+        return $null
+    }
+    $payload = Get-Content -LiteralPath $ProfilesJsonPath -Raw | ConvertFrom-Json
+    $profiles = @($payload)
+    $profile = $profiles | Where-Object { [string]($_.id) -eq $ResolvedCreatorProfileId } | Select-Object -First 1
+    if (-not $profile) {
+        throw "Creator profile not found: $ResolvedCreatorProfileId"
+    }
+    $credentials = @($profile.creator_profile.publishing.platform_credentials)
+    if (-not $credentials.Count) {
+        return $null
+    }
+    $normalizedPlatform = [string]$ResolvedPlatform
+    if ([string]::IsNullOrWhiteSpace($normalizedPlatform)) {
+        $normalizedPlatform = ""
+    }
+    $normalizedPlatform = $normalizedPlatform.Trim().ToLowerInvariant()
+    $credential = $null
+    if ($normalizedPlatform) {
+        $credential = $credentials | Where-Object { [string]($_.platform).Trim().ToLowerInvariant() -eq $normalizedPlatform } | Select-Object -First 1
+    }
+    if (-not $credential) {
+        $credential = $credentials | Where-Object { $_.enabled -eq $true -and [string]($_.status).Trim().ToLowerInvariant() -eq "logged_in" } | Select-Object -First 1
+    }
+    if (-not $credential) {
+        return $null
+    }
+    return $credential.browser_binding
+}
+
+function Get-DefaultPublicationUrls {
+    @()
+}
+
+function Get-DefaultPublicationBridgeExtensionPath {
+    return (Join-Path $repoRoot "browser\publication-bridge-extension")
 }
 
 function Normalize-ProfilePath {
@@ -96,35 +141,24 @@ function Get-PublicationBrowserProfileId {
     return "browser-profile:${normalizedBrowser}:$digest"
 }
 
-function Test-IsDefaultChromeUserDataDir {
-    param(
-        [string]$ResolvedUserDataDir
-    )
-    $defaultRoots = @(
-        (Join-Path $env:LOCALAPPDATA "Google\Chrome\User Data"),
-        (Join-Path $env:LOCALAPPDATA "Chromium\User Data"),
-        (Join-Path $env:LOCALAPPDATA "Microsoft\Edge\User Data")
-    ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { Normalize-ProfilePath $_ }
-    $normalized = Normalize-ProfilePath $ResolvedUserDataDir
-    return $defaultRoots -contains $normalized
-}
-
 function Get-LaunchArguments {
     param(
         [string]$ResolvedUserDataDir,
         [string]$ResolvedProfileDirectory,
-        [int]$ResolvedRemoteDebuggingPort,
+        [string]$ResolvedBridgeExtensionPath,
+        [bool]$DisableResolvedBridgeExtension,
         [string[]]$ResolvedUrls
     )
 
     $arguments = @(
-        "--remote-debugging-port=$ResolvedRemoteDebuggingPort",
         "--user-data-dir=$ResolvedUserDataDir",
         "--profile-directory=$ResolvedProfileDirectory",
         "--no-first-run",
-        "--no-default-browser-check",
-        "--remote-allow-origins=*"
+        "--no-default-browser-check"
     )
+    if (-not $DisableResolvedBridgeExtension -and -not [string]::IsNullOrWhiteSpace($ResolvedBridgeExtensionPath)) {
+        $arguments += "--load-extension=$ResolvedBridgeExtensionPath"
+    }
     foreach ($url in $ResolvedUrls) {
         if ([string]::IsNullOrWhiteSpace($url)) {
             continue
@@ -140,20 +174,47 @@ if ([string]::IsNullOrWhiteSpace($UserDataDir)) {
 if ([string]::IsNullOrWhiteSpace($ProfileDirectory)) {
     $ProfileDirectory = Get-DefaultPublicationProfileDirectory
 }
+if ([string]::IsNullOrWhiteSpace($BridgeExtensionPath)) {
+    $BridgeExtensionPath = Get-DefaultPublicationBridgeExtensionPath
+}
+if (-not [string]::IsNullOrWhiteSpace($CreatorProfileId)) {
+    $browserBinding = Resolve-CreatorPublicationBrowserBinding -ProfilesJsonPath $ProfilesJson -ResolvedCreatorProfileId $CreatorProfileId.Trim() -ResolvedPlatform $Platform
+    if ($browserBinding) {
+        if ([string]::IsNullOrWhiteSpace($UserDataDir) -or $UserDataDir -eq (Get-DefaultPublicationUserDataDir)) {
+            $resolvedBindingUserDataDir = [string]$browserBinding.user_data_dir
+            if (-not [string]::IsNullOrWhiteSpace($resolvedBindingUserDataDir)) {
+                $UserDataDir = $resolvedBindingUserDataDir
+            }
+        }
+        if ([string]::IsNullOrWhiteSpace($ProfileDirectory) -or $ProfileDirectory -eq (Get-DefaultPublicationProfileDirectory)) {
+            $resolvedBindingProfileDirectory = [string]$browserBinding.profile_directory
+            if (-not [string]::IsNullOrWhiteSpace($resolvedBindingProfileDirectory)) {
+                $ProfileDirectory = $resolvedBindingProfileDirectory
+            }
+        }
+    }
+}
 if (-not (Test-Path -LiteralPath $ChromePath)) {
     throw "Chrome executable not found: $ChromePath"
 }
 
 $normalizedUserDataDir = Normalize-ProfilePath $UserDataDir
 $normalizedProfileDirectory = $ProfileDirectory.Trim()
+$normalizedBridgeExtensionPath = Normalize-ProfilePath $BridgeExtensionPath
 New-Item -ItemType Directory -Force -Path $normalizedUserDataDir | Out-Null
 $profileId = Get-PublicationBrowserProfileId -Browser "chrome" -ResolvedUserDataDir $normalizedUserDataDir -ResolvedProfileDirectory $ProfileDirectory
-if (-not $AllowDefaultUserDataDir -and (Test-IsDefaultChromeUserDataDir -ResolvedUserDataDir $normalizedUserDataDir)) {
-    throw (
-        "Unsafe publication browser launch blocked: default Chrome User Data root cannot be used for CDP publication " +
-        "sessions on current Chrome versions. Use a dedicated non-default runtime profile root, or pass " +
-        "-AllowDefaultUserDataDir only for explicit manual debugging."
-    )
+
+if (-not $DisableBridgeExtension) {
+    if ([string]::IsNullOrWhiteSpace($normalizedBridgeExtensionPath)) {
+        throw "Publication bridge extension path is empty."
+    }
+    if (-not (Test-Path -LiteralPath $normalizedBridgeExtensionPath)) {
+        throw "Publication bridge extension directory not found: $normalizedBridgeExtensionPath"
+    }
+    $bridgeManifestPath = Join-Path $normalizedBridgeExtensionPath "manifest.json"
+    if (-not (Test-Path -LiteralPath $bridgeManifestPath)) {
+        throw "Publication bridge extension manifest not found: $bridgeManifestPath"
+    }
 }
 
 $resolvedUrls = @()
@@ -171,19 +232,21 @@ $resolvedUrls = @($resolvedUrls | Select-Object -Unique)
 $arguments = Get-LaunchArguments `
     -ResolvedUserDataDir $normalizedUserDataDir `
     -ResolvedProfileDirectory $normalizedProfileDirectory `
-    -ResolvedRemoteDebuggingPort $RemoteDebuggingPort `
+    -ResolvedBridgeExtensionPath $normalizedBridgeExtensionPath `
+    -DisableResolvedBridgeExtension $DisableBridgeExtension.IsPresent `
     -ResolvedUrls $resolvedUrls
 
 if ($DryRun) {
     [pscustomobject]@{
         chrome_path = $ChromePath
-        remote_debugging_port = $RemoteDebuggingPort
         user_data_dir = $normalizedUserDataDir
         profile_directory = $normalizedProfileDirectory
         profile_id = $profileId
+        bridge_extension_path = $(if ($DisableBridgeExtension) { "" } else { $normalizedBridgeExtensionPath })
+        bridge_extension_enabled = (-not $DisableBridgeExtension.IsPresent)
         urls = $resolvedUrls
         argument_list = $arguments
-        note = "Default launches persist on a stable dedicated publication profile root unless ROUGHCUT_PUBLICATION_BROWSER_USER_DATA_DIR / PROFILE_DIRECTORY overrides are set."
+        note = "Bridge-mode publication launches reuse the real Chrome profile bound by RoughCut, auto-load the publication bridge extension, and open explicit start pages in new tabs."
     } | ConvertTo-Json -Depth 6
     return
 }

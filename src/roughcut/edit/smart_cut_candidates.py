@@ -8,7 +8,15 @@ from roughcut.edit.low_signal_text import (
     low_signal_subtitle_is_contextually_isolated,
     subtitle_signal_score,
 )
+from roughcut.edit.rule_registry import (
+    build_rule_candidate_id,
+    rule_default_risk_level,
+)
 from roughcut.edit.smart_cut_rules import normalize_smart_cut_rules_payload
+from roughcut.edit.subtitle_surfaces import (
+    subtitle_canonical_rule_text as _subtitle_canonical_rule_text,
+    subtitle_raw_rule_text as _subtitle_raw_rule_text,
+)
 from roughcut.review.video_understanding import normalize_video_understanding_segment_hints
 
 
@@ -20,6 +28,24 @@ _HESITATION_FILLERS = {"嗯", "呃", "额", "呃呃", "嗯嗯"}
 _SINGLE_PARTICLE_FILLERS = {"啊", "呀", "呢", "吧", "嘛", "哦", "喔", "哎", "唉", "诶", "欸", "嗯", "呃", "额"}
 SMART_CUT_RULE_CANDIDATE_STAGE = "manual_editor_smart_cut_rules"
 _MULTIMODAL_REVIEW_POSITIVE_ROLES = {"comparison", "detail_showcase", "demo", "hook", "cta", "transition"}
+_SMART_CUT_MATCH_SURFACE_RAW = "raw"
+_SMART_CUT_MATCH_SURFACE_CANONICAL = "canonical"
+
+
+def _safe_round_time(value: Any, default: float = 0.0) -> float:
+    try:
+        return round(float(value), 3)
+    except (TypeError, ValueError):
+        return default
+
+
+def _smart_cut_rule_id(reason: str, start: float, end: float, source_text: str = "") -> str:
+    return build_rule_candidate_id(
+        reason=reason,
+        start=_safe_round_time(start),
+        end=_safe_round_time(end),
+        match_surface=source_text,
+    )
 
 
 def _parse_term_list(value: Any) -> list[str]:
@@ -29,27 +55,51 @@ def _parse_term_list(value: Any) -> list[str]:
 
 
 def _subtitle_text(item: dict[str, Any]) -> str:
-    for key in ("transcript_text", "text_final", "text_norm", "text_raw"):
-        text = str(item.get(key) or "").strip()
-        if text:
-            return text
-    return ""
+    return _subtitle_canonical_rule_text(item)
 
 
 def _subtitle_semantic_text(item: dict[str, Any]) -> str:
-    for key in ("text_final", "timing_text", "text_norm", "transcript_text", "text_raw"):
-        text = str(item.get(key) or "").strip()
-        if text:
-            return text
-    return ""
+    return _subtitle_canonical_rule_text(item)
 
 
 def _subtitle_spoken_rule_text(item: dict[str, Any]) -> str:
-    for key in ("transcript_text", "text_raw", "text_norm", "text_final"):
-        text = str(item.get(key) or "").strip()
-        if text:
-            return text
-    return ""
+    return _subtitle_raw_rule_text(item)
+
+
+def _smart_cut_candidate_payload(
+    *,
+    reason: str,
+    start: float,
+    end: float,
+    score: float,
+    source_text: str,
+    rule_id_suffix: str,
+    risk_level_key: str,
+    match_surface_layer: str,
+    source: dict[str, Any] | None = None,
+    filler_mode: str | None = None,
+    detail: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "start": start,
+        "end": end,
+        "reason": reason,
+        "candidate_stage": SMART_CUT_RULE_CANDIDATE_STAGE,
+        "rule_id": _smart_cut_rule_id(reason, start, end, rule_id_suffix),
+        "risk_level": rule_default_risk_level(risk_level_key) or "medium",
+        "match_surface_layer": match_surface_layer,
+        "auto_applied": False,
+        "score": score,
+        "source_text": source_text,
+        "match_surface": rule_id_suffix,
+    }
+    if filler_mode is not None:
+        payload["filler_mode"] = filler_mode
+    if detail:
+        payload.update(detail)
+    if source:
+        payload.update(source)
+    return payload
 
 
 def _timed_chars(item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -76,6 +126,16 @@ def _timed_chars(item: dict[str, Any]) -> list[dict[str, Any]]:
 def _subtitle_timing_supported_rule_text(item: dict[str, Any]) -> str:
     timed_text = "".join(str(char.get("text") or "") for char in _timed_chars(item)).strip()
     return timed_text
+
+
+def _subtitle_rule_match_text_and_layer(item: dict[str, Any]) -> tuple[str, str]:
+    timed_text = _subtitle_timing_supported_rule_text(item)
+    if timed_text:
+        return timed_text, _SMART_CUT_MATCH_SURFACE_RAW
+    spoken_text = _subtitle_spoken_rule_text(item)
+    if spoken_text:
+        return spoken_text, _SMART_CUT_MATCH_SURFACE_RAW
+    return _subtitle_semantic_text(item), _SMART_CUT_MATCH_SURFACE_CANONICAL
 
 
 def _subtitle_range(item: dict[str, Any]) -> tuple[float, float]:
@@ -296,6 +356,25 @@ def _meaningful_timed_ranges_for_pause(
         subtitle_overlap = min(end, subtitle_end) - max(start, subtitle_start)
         if subtitle_overlap <= 0.08:
             continue
+        spoken_meaningful_text = _smart_cut_meaningful_text(_subtitle_spoken_rule_text(subtitle), fillers)
+        timed_meaningful_text = _smart_cut_meaningful_text(
+            _subtitle_timing_supported_rule_text(subtitle),
+            fillers,
+        )
+        if spoken_meaningful_text and (
+            not timed_meaningful_text
+            or (
+                len(spoken_meaningful_text) > len(timed_meaningful_text)
+                and timed_meaningful_text in spoken_meaningful_text
+            )
+        ):
+            ranges.append(
+                (
+                    round(max(start, subtitle_start), 3),
+                    round(min(end, subtitle_end), 3),
+                )
+            )
+            continue
         for unit in _timed_units(subtitle):
             if not _smart_cut_meaningful_text(str(unit.get("text") or ""), fillers):
                 continue
@@ -362,7 +441,7 @@ def _range_overlaps_subtitle_speech(
         overlap = min(end, subtitle_end) - max(start, subtitle_start)
         if overlap <= 0.08:
             continue
-        text = _subtitle_text(subtitle)
+        text = _subtitle_spoken_rule_text(subtitle)
         if _smart_cut_meaningful_text(text, fillers):
             return True
     return False
@@ -379,7 +458,7 @@ def _range_overlaps_untrusted_subtitle_speech(
         overlap = min(end, subtitle_end) - max(start, subtitle_start)
         if overlap <= 0.08:
             continue
-        text = _subtitle_text(subtitle)
+        text = _subtitle_spoken_rule_text(subtitle)
         if _smart_cut_meaningful_text(text, fillers) and not _subtitle_has_usable_timed_units(subtitle):
             return True
     return False
@@ -392,7 +471,7 @@ def _audio_range_overlaps_protected_visual_subtitle(
 ) -> bool:
     start, end = _subtitle_range(silence)
     for subtitle in _subtitles_sorted(subtitles):
-        text = _subtitle_text(subtitle)
+        text = _subtitle_spoken_rule_text(subtitle)
         if not _VISUAL_SHOWCASE_TEXT_RE.search(text):
             continue
         if len(_smart_cut_meaningful_text(text, fillers)) < 2:
@@ -411,7 +490,7 @@ def _audio_range_broadly_overlaps_subtitle_speech(
 ) -> bool:
     start, end = _subtitle_range(silence)
     for subtitle in _subtitles_sorted(subtitles):
-        text = _subtitle_text(subtitle)
+        text = _subtitle_spoken_rule_text(subtitle)
         if len(_smart_cut_meaningful_text(text, fillers)) < 2:
             continue
         subtitle_start, subtitle_end = _subtitle_range(subtitle)
@@ -431,7 +510,7 @@ def _subtitle_bounded_pause_ranges(
     candidates: list[tuple[float, float]] = []
     relevant = [
         subtitle for subtitle in _subtitles_sorted(subtitles)
-        if len(_smart_cut_meaningful_text(_subtitle_text(subtitle), fillers)) >= 2
+        if len(_smart_cut_meaningful_text(_subtitle_spoken_rule_text(subtitle), fillers)) >= 2
     ]
     for index in range(1, len(relevant)):
         previous = relevant[index - 1]
@@ -501,7 +580,7 @@ def build_smart_cut_rule_candidates(
     for subtitle_index, subtitle in enumerate(normalized_subtitles):
         if not isinstance(subtitle, dict):
             continue
-        text = _subtitle_timing_supported_rule_text(subtitle) or _subtitle_spoken_rule_text(subtitle)
+        text, rule_match_surface_layer = _subtitle_rule_match_text_and_layer(subtitle)
         if not text:
             continue
         semantic_text = _subtitle_semantic_text(subtitle) or text
@@ -526,16 +605,17 @@ def build_smart_cut_rule_candidates(
                     continue
                 seen.add(key)
                 candidates.append(
-                    {
-                        "start": timed[0],
-                        "end": timed[1],
-                        "reason": "filler_word",
-                        "candidate_stage": SMART_CUT_RULE_CANDIDATE_STAGE,
-                        "auto_applied": False,
-                        "score": 0.92 if mode == "standalone" else 0.72,
-                        "source_text": term,
-                        "filler_mode": mode,
-                    }
+                    _smart_cut_candidate_payload(
+                        reason="filler_word",
+                        start=timed[0],
+                        end=timed[1],
+                        score=0.92 if mode == "standalone" else 0.72,
+                        source_text=term,
+                        rule_id_suffix=term,
+                        risk_level_key="filler_word",
+                        match_surface_layer=rule_match_surface_layer,
+                        filler_mode=mode,
+                    )
                 )
         for term in catchphrase_terms:
             for start_char, end_char in _iter_term_matches(text, term):
@@ -547,50 +627,56 @@ def build_smart_cut_rule_candidates(
                     continue
                 seen.add(key)
                 candidates.append(
-                    {
-                        "start": timed[0],
-                        "end": timed[1],
-                        "reason": "catchphrase_phrase",
-                        "candidate_stage": SMART_CUT_RULE_CANDIDATE_STAGE,
-                        "auto_applied": False,
-                        "score": 0.74,
-                        "source_text": term,
-                    }
+                    _smart_cut_candidate_payload(
+                        reason="catchphrase_phrase",
+                        start=timed[0],
+                        end=timed[1],
+                        score=0.74,
+                        source_text=term,
+                        rule_id_suffix=term,
+                        risk_level_key="catchphrase_phrase",
+                        match_surface_layer=rule_match_surface_layer,
+                    )
                 )
         if bool(rules.get("smartDeleteEnabled")):
             subtitle_start, subtitle_end = _subtitle_range(subtitle)
             duration = subtitle_end - subtitle_start
             compact_text = compact_subtitle_text(semantic_text)
-            if (
+            multimodal_fields = _multimodal_review_fields(
+                subtitle_start,
+                subtitle_end,
+                multimodal_segment_hints=multimodal_segment_hints,
+            )
+            low_signal = (
                 duration >= 0.18
                 and duration <= 4.5
                 and len(compact_text) >= 5
-                and low_signal_subtitle_is_contextually_isolated(
+                and subtitle_signal_score(semantic_text, content_profile=content_profile) <= 0.15
+            )
+            if low_signal and (
+                low_signal_subtitle_is_contextually_isolated(
                     semantic_text,
                     previous_text=previous_text,
                     next_text=next_text,
                     content_profile=content_profile,
                 )
-                and subtitle_signal_score(semantic_text, content_profile=content_profile) <= 0.15
+                or bool(multimodal_fields.get("multimodal_review_required"))
             ):
                 key = ("low_signal_subtitle", subtitle_start, subtitle_end, semantic_text, "")
                 if key not in seen:
                     seen.add(key)
                     candidates.append(
-                        {
-                            "start": subtitle_start,
-                            "end": subtitle_end,
-                            "reason": "low_signal_subtitle",
-                            "candidate_stage": SMART_CUT_RULE_CANDIDATE_STAGE,
-                            "auto_applied": False,
-                            "score": 0.62,
-                            "source_text": semantic_text,
-                            **_multimodal_review_fields(
-                                subtitle_start,
-                                subtitle_end,
-                                multimodal_segment_hints=multimodal_segment_hints,
-                            ),
-                        }
+                        _smart_cut_candidate_payload(
+                            reason="low_signal_subtitle",
+                            start=subtitle_start,
+                            end=subtitle_end,
+                            score=0.62,
+                            source_text=semantic_text,
+                            rule_id_suffix=compact_text,
+                            risk_level_key="low_signal_subtitle",
+                            match_surface_layer=_SMART_CUT_MATCH_SURFACE_CANONICAL,
+                            detail=multimodal_fields,
+                        )
                     )
     if bool(rules.get("pauseEnabled")):
         low_signal_terms = sorted(dict.fromkeys([*catchphrase_terms, *filler_terms]), key=lambda item: (-len(item), item))
@@ -603,14 +689,16 @@ def build_smart_cut_rule_candidates(
                     continue
                 seen.add(key)
                 candidates.append(
-                    {
-                        "start": start,
-                        "end": end,
-                        "reason": "silence",
-                        "candidate_stage": SMART_CUT_RULE_CANDIDATE_STAGE,
-                        "auto_applied": False,
-                        "score": 0.81,
-                    }
+                    _smart_cut_candidate_payload(
+                        reason="silence",
+                        start=start,
+                        end=end,
+                        score=0.81,
+                        source_text="silence",
+                        rule_id_suffix="silence",
+                        risk_level_key="silence",
+                        match_surface_layer=_SMART_CUT_MATCH_SURFACE_RAW,
+                    )
                 )
     return sorted(
         candidates,

@@ -1,5 +1,9 @@
 from roughcut.review.content_profile import (
+    _build_profile_summary,
+    _build_subtitle_signal_blob,
+    _collect_identity_subtitle_snippets,
     apply_source_identity_constraints,
+    build_transcript_excerpt,
     extract_source_identity_constraints,
 )
 
@@ -128,3 +132,74 @@ def test_source_identity_rewrites_conflicting_edc_visible_text() -> None:
     assert constrained["subject_model"] == "EDC17"
     assert constrained["subject_type"] == "EDC手电"
     assert "EDC37" not in constrained["visible_text"]
+
+
+def test_content_profile_semantic_excerpt_and_snippets_use_canonical_surface() -> None:
+    subtitle_items = [
+        {
+            "start_time": 0.0,
+            "end_time": 1.0,
+            "text_raw": "那个 EDC 折刀",
+            "text_norm": "这是 MAXACE 美杜莎4",
+            "text_final": "",
+            "display_suppressed_reason": "standalone_filler",
+        },
+        {
+            "start_time": 1.0,
+            "end_time": 2.0,
+            "text_raw": "看一下细节",
+            "text_norm": "看一下细节",
+            "text_final": "看一下细节",
+        },
+    ]
+
+    excerpt = build_transcript_excerpt(subtitle_items)
+    subtitle_blob = _build_subtitle_signal_blob(subtitle_items)
+    snippets = _collect_identity_subtitle_snippets(
+        "MAXACE",
+        "美杜莎4",
+        subtitle_items=subtitle_items,
+        glossary_terms=[],
+    )
+
+    assert "这是 MAXACE 美杜莎4" in excerpt
+    assert "EDC 折刀" not in subtitle_blob
+    assert snippets == ["[0.0-1.0] 这是 MAXACE 美杜莎4"]
+
+
+def test_build_profile_summary_avoids_generic_packaging_phrase_for_specific_product() -> None:
+    profile = {
+        "subject_brand": "NOC",
+        "subject_model": "MT34",
+        "subject_type": "EDC折刀",
+        "subject_domain": "EDC刀具",
+        "content_kind": "unboxing",
+        "video_theme": "产品开箱与上手体验",
+        "transcript_excerpt": "这次重点看锆合金版本、快开手感和背夹设计。",
+    }
+
+    summary = _build_profile_summary(profile)
+
+    assert "适合后续做搜索校验、字幕纠错和剪辑包装" not in summary
+    assert "适合后续做信息核对、字幕复核和图文包装" in summary
+    assert "NOC MT34" in summary
+
+
+def test_build_profile_summary_uses_detail_phrase_when_available() -> None:
+    profile = {
+        "subject_brand": "NOC",
+        "subject_model": "MT34",
+        "subject_type": "EDC折刀",
+        "subject_domain": "EDC刀具",
+        "content_kind": "unboxing",
+        "video_theme": "产品开箱与上手体验",
+        "content_understanding": {
+            "semantic_facts": {
+                "aspect_candidates": ["锆合金版本", "快开手感", "背夹设计"],
+            }
+        },
+    }
+
+    summary = _build_profile_summary(profile)
+
+    assert "重点提到" in summary

@@ -53,6 +53,36 @@ def test_materialize_host_directory_skips_publication_runtime_subtree(tmp_path, 
     assert not (materialized_dir / "smart-copy" / "_publication_runtime").exists()
 
 
+def test_materialize_host_directory_prunes_stale_smart_copy_when_source_has_none(tmp_path, monkeypatch) -> None:
+    source_dir = tmp_path / "maxace蜂巢3顶配开箱"
+    source_dir.mkdir()
+    (source_dir / "clip.mp4").write_bytes(b"video")
+
+    host_output_root = tmp_path / "runtime"
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", str(host_output_root))
+
+    first = codex_host_bridge.materialize_host_directory(
+        {
+            "folder_path": str(source_dir),
+            "container_output_root": "/app/data",
+        }
+    )
+    materialized_dir = Path(first["host_folder_path"])
+    stale_smart_copy = materialized_dir / "smart-copy" / "_meta"
+    stale_smart_copy.mkdir(parents=True)
+    (stale_smart_copy / "smart-copy.json").write_text("{}", encoding="utf-8")
+
+    second = codex_host_bridge.materialize_host_directory(
+        {
+            "folder_path": str(source_dir),
+            "container_output_root": "/app/data",
+        }
+    )
+
+    assert Path(second["host_folder_path"]) == materialized_dir
+    assert not (materialized_dir / "smart-copy").exists()
+
+
 def test_open_host_path_maps_runtime_mount_and_opens_on_host(tmp_path, monkeypatch) -> None:
     host_output_root = tmp_path / "runtime"
     target = host_output_root / "output" / "smart-copy"

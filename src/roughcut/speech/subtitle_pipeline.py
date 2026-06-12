@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from roughcut.db.models import Artifact, SubtitleItem
+from roughcut.edit.subtitle_surfaces import subtitle_canonical_rule_text
 from roughcut.media.subtitle_spans import drop_redundant_synthetic_word_payloads
 from roughcut.providers.transcription.base import TranscriptResult
 from roughcut.review.model_identity import model_numbers_conflict
@@ -17,7 +18,7 @@ ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER = "transcript_fact_layer"
 ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER = "canonical_transcript_layer"
 ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER = "subtitle_projection_layer"
 CANONICAL_TRANSCRIPT_ALIGNMENT_ENGINE_VERSION = "20260607_alignment_v3"
-SUBTITLE_PROJECTION_SEGMENTATION_ENGINE_VERSION = "20260607_readability_v10"
+SUBTITLE_PROJECTION_SEGMENTATION_ENGINE_VERSION = "20260608_readability_v17"
 SUBTITLE_PROJECTION_SPLIT_PROFILE_VERSION = "20260607_landscape_v2"
 
 
@@ -84,6 +85,7 @@ class TranscriptSourceSegment:
     text_raw: str
     text_norm: str | None
     text_final: str | None
+    display_suppressed_reason: str | None
     speaker: str | None
     words: tuple[TranscriptFactWord, ...]
 
@@ -97,6 +99,7 @@ class TranscriptSourceSegment:
             "text_raw": self.text_raw,
             "text_norm": self.text_norm,
             "text_final": self.text_final,
+            "display_suppressed_reason": self.display_suppressed_reason,
             "speaker": self.speaker,
             "word_count": len(self.words),
             "words": [word.as_dict() for word in self.words],
@@ -272,12 +275,19 @@ def build_transcript_fact_layer(transcript_segments: list[Any]) -> TranscriptFac
     return TranscriptFactLayer(
         segments=tuple(
             _build_transcript_fact_segment(
-                index=int(getattr(row, "segment_index", index) or index),
-                start=float(getattr(row, "start_time", 0.0) or 0.0),
-                end=float(getattr(row, "end_time", 0.0) or 0.0),
-                text=str(getattr(row, "text", "") or ""),
-                speaker=getattr(row, "speaker", None),
-                raw_words=drop_redundant_synthetic_word_payloads(list(getattr(row, "words_json", None) or [])),
+                index=int(_row_value(row, "segment_index", _row_value(row, "index", index)) or index),
+                start=float(_row_value(row, "start_time", _row_value(row, "start", 0.0)) or 0.0),
+                end=float(_row_value(row, "end_time", _row_value(row, "end", 0.0)) or 0.0),
+                text=str(
+                    _row_value(row, "text_canonical", None)
+                    or _row_value(row, "text_norm", None)
+                    or _row_value(row, "text", "")
+                    or ""
+                ),
+                speaker=_row_value(row, "speaker", None),
+                raw_words=drop_redundant_synthetic_word_payloads(
+                    list(_row_value(row, "words_json", None) or _row_value(row, "words", None) or [])
+                ),
             )
             for index, row in enumerate(list(transcript_segments or []))
         )
@@ -386,24 +396,38 @@ def _coerce_word_payload(raw_word: Any) -> dict[str, Any] | None:
 
 def _looks_like_transcript_segments(rows: list[Any] | None) -> bool:
     for row in list(rows or []):
+        if isinstance(row, dict):
+            if any(field in row for field in ("text_raw", "text_norm", "text_final")):
+                return False
+            continue
         if any(hasattr(row, field) for field in ("text_raw", "text_norm", "text_final")):
             return False
-    return any(hasattr(row, "text") for row in list(rows or []))
+    return any(
+        (isinstance(row, dict) and "text" in row)
+        or hasattr(row, "text")
+        for row in list(rows or [])
+    )
+
+
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(key, default)
+    return getattr(row, key, default)
 
 
 def _build_transcript_source_segment_from_subtitle_item(item: Any, *, index: int) -> TranscriptSourceSegment:
-    raw_source_index = getattr(item, "item_index", None)
+    raw_source_index = _row_value(item, "item_index", None)
     if raw_source_index is None:
         raw_source_index = index
-    source_id = str(getattr(item, "id", "") or "") or None
-    text_raw = str(getattr(item, "text_raw", "") or "")
-    text_norm = getattr(item, "text_norm", None)
-    text_final = getattr(item, "text_final", None)
-    start = float(getattr(item, "start_time", 0.0) or 0.0)
-    end = float(getattr(item, "end_time", 0.0) or 0.0)
+    source_id = str(_row_value(item, "id", "") or "") or None
+    text_raw = str(_row_value(item, "text_raw", "") or "")
+    text_norm = _row_value(item, "text_norm", None)
+    text_final = _row_value(item, "text_final", None)
+    start = float(_row_value(item, "start_time", 0.0) or 0.0)
+    end = float(_row_value(item, "end_time", 0.0) or 0.0)
     words = tuple(
         _build_transcript_fact_words(
-            list(getattr(item, "words", None) or getattr(item, "words_json", None) or [])
+            list(_row_value(item, "words", None) or _row_value(item, "words_json", None) or [])
         )
     )
     return TranscriptSourceSegment(
@@ -415,23 +439,24 @@ def _build_transcript_source_segment_from_subtitle_item(item: Any, *, index: int
         text_raw=text_raw,
         text_norm=text_norm,
         text_final=text_final,
+        display_suppressed_reason=_row_value(item, "display_suppressed_reason", None),
         speaker=None,
         words=words,
     )
 
 
 def _build_transcript_source_segment_from_transcript_segment(segment: Any, *, index: int) -> TranscriptSourceSegment:
-    raw_source_index = getattr(segment, "index", None)
+    raw_source_index = _row_value(segment, "index", None)
     if raw_source_index is None:
-        raw_source_index = getattr(segment, "segment_index", None)
+        raw_source_index = _row_value(segment, "segment_index", None)
     if raw_source_index is None:
         raw_source_index = index
-    source_id = str(getattr(segment, "id", "") or getattr(segment, "segment_index", raw_source_index) or raw_source_index) or None
-    text = str(getattr(segment, "text", "") or "")
-    start = float(getattr(segment, "start", 0.0) or getattr(segment, "start_time", 0.0) or 0.0)
-    end = float(getattr(segment, "end", 0.0) or getattr(segment, "end_time", 0.0) or 0.0)
+    source_id = str(_row_value(segment, "id", "") or _row_value(segment, "segment_index", raw_source_index) or raw_source_index) or None
+    text = str(_row_value(segment, "text", "") or "")
+    start = float(_row_value(segment, "start", 0.0) or _row_value(segment, "start_time", 0.0) or 0.0)
+    end = float(_row_value(segment, "end", 0.0) or _row_value(segment, "end_time", 0.0) or 0.0)
     words = tuple(
-        _build_transcript_fact_words(list(getattr(segment, "words", None) or getattr(segment, "words_json", None) or []))
+        _build_transcript_fact_words(list(_row_value(segment, "words", None) or _row_value(segment, "words_json", None) or []))
     )
     return TranscriptSourceSegment(
         index=int(raw_source_index),
@@ -440,9 +465,10 @@ def _build_transcript_source_segment_from_transcript_segment(segment: Any, *, in
         start=start,
         end=end,
         text_raw=text,
-        text_norm=getattr(segment, "text_norm", None),
-        text_final=getattr(segment, "text_final", None),
-        speaker=getattr(segment, "speaker", None),
+        text_norm=_row_value(segment, "text_norm", None) or _row_value(segment, "text_canonical", None),
+        text_final=_row_value(segment, "text_final", None),
+        display_suppressed_reason=_row_value(segment, "display_suppressed_reason", None),
+        speaker=_row_value(segment, "speaker", None),
         words=words,
     )
 
@@ -462,9 +488,9 @@ def _normalize_transcript_source_segments(
             sorted(
                 list(transcript_segments or []),
                 key=lambda current: (
-                    float(getattr(current, "start", getattr(current, "start_time", 0.0)) or 0.0),
-                    float(getattr(current, "end", getattr(current, "end_time", 0.0)) or 0.0),
-                    int(getattr(current, "index", getattr(current, "segment_index", 0)) or 0),
+                    float(_row_value(current, "start", _row_value(current, "start_time", 0.0)) or 0.0),
+                    float(_row_value(current, "end", _row_value(current, "end_time", 0.0)) or 0.0),
+                    int(_row_value(current, "index", _row_value(current, "segment_index", 0)) or 0),
                 ),
             )
         ):
@@ -477,9 +503,9 @@ def _normalize_transcript_source_segments(
         sorted(
             list(subtitle_items or []),
             key=lambda current: (
-                float(getattr(current, "start_time", 0.0) or 0.0),
-                float(getattr(current, "end_time", 0.0) or 0.0),
-                int(getattr(current, "item_index", 0) or 0),
+                float(_row_value(current, "start_time", 0.0) or 0.0),
+                float(_row_value(current, "end_time", 0.0) or 0.0),
+                int(_row_value(current, "item_index", 0) or 0),
             ),
         )
     ):
@@ -539,7 +565,14 @@ def _build_canonical_transcript_layer_from_source_segments(
         accepted_corrections = tuple(payload for payload in item_corrections if payload["status"] == "accepted")
         pending_corrections = tuple(payload for payload in item_corrections if payload["status"] == "pending")
         text_raw = str(source_segment.text_raw or "")
-        canonical_text = str(source_segment.text_final or source_segment.text_norm or text_raw)
+        canonical_text = subtitle_canonical_rule_text(
+            {
+                "text_raw": source_segment.text_raw,
+                "text_norm": source_segment.text_norm,
+                "text_final": source_segment.text_final,
+                "display_suppressed_reason": source_segment.display_suppressed_reason,
+            }
+        )
         canonical_text = _apply_accepted_corrections(canonical_text, accepted_corrections)
         canonical_words = _build_canonical_transcript_words(
             canonical_text,
@@ -1067,18 +1100,23 @@ def _extract_reference_words_for_timespan(
 def _build_segmentation_adapters_from_transcript_segments(transcript_segments: list[Any]) -> list[SimpleNamespace]:
     adapters: list[SimpleNamespace] = []
     for index, segment in enumerate(list(transcript_segments or [])):
-        start = float(getattr(segment, "start_time", getattr(segment, "start", 0.0)) or 0.0)
-        end = float(getattr(segment, "end_time", getattr(segment, "end", start)) or start)
+        start = float(_row_value(segment, "start_time", _row_value(segment, "start", 0.0)) or 0.0)
+        end = float(_row_value(segment, "end_time", _row_value(segment, "end", start)) or start)
         raw_words = drop_redundant_synthetic_word_payloads(
-            list(getattr(segment, "words_json", None) or getattr(segment, "words", None) or [])
+            list(_row_value(segment, "words_json", None) or _row_value(segment, "words", None) or [])
         )
         words_json = [word.as_dict() for word in _build_transcript_fact_words(raw_words)]
         adapters.append(
             SimpleNamespace(
-                segment_index=int(getattr(segment, "segment_index", getattr(segment, "index", index)) or index),
+                segment_index=int(_row_value(segment, "segment_index", _row_value(segment, "index", index)) or index),
                 start_time=start,
                 end_time=max(start, end),
-                text=str(getattr(segment, "text", "") or ""),
+                text=str(
+                    _row_value(segment, "text_canonical", None)
+                    or _row_value(segment, "text_norm", None)
+                    or _row_value(segment, "text", "")
+                    or ""
+                ),
                 words_json=words_json,
             )
         )
@@ -1110,7 +1148,7 @@ def _build_projection_entries_from_transcript_words(
             source_id=None,
             text_raw=str(entry.text_raw or ""),
             text_norm=str(entry.text_norm or ""),
-            text_final=str(entry.text_raw or ""),
+            text_final=None,
             words=tuple(dict(word) for word in tuple(entry.words or ()) if isinstance(word, dict)),
         )
         for index, entry in enumerate(result.entries)

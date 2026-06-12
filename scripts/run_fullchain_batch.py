@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import multiprocessing
 import concurrent.futures
+import threading
+import os
 import json
 import sys
 import time
@@ -22,11 +25,17 @@ from roughcut.creative.modes import resolve_live_batch_enhancement_modes
 from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline, TranscriptSegment
 from roughcut.media.output import get_cover_manifest_path
 from roughcut.db.session import get_session_factory
-from roughcut.pipeline.orchestrator import PIPELINE_STEPS
+from roughcut.pipeline.orchestrator import MAX_ATTEMPTS, PIPELINE_STEPS
+from roughcut.pipeline.render_diagnostics import (
+    classify_avatar_runtime_reason_category as _shared_classify_avatar_runtime_reason_category,
+    classify_render_failure_reason as _shared_classify_render_failure_reason,
+    normalize_render_step_summary_for_reporting as _shared_normalize_render_step_summary_for_reporting,
+)
 from roughcut.pipeline.live_readiness import build_live_readiness_summary, collect_job_issue_codes
 from roughcut.pipeline.quality import assess_job_quality
 from roughcut.pipeline.steps import run_step_sync
 from roughcut.runtime_health import build_readiness_payload
+from roughcut.edit.refine_decisions import resolve_refine_keep_segments_for_timeline
 from roughcut.review.final_review_state import mark_final_review_approved
 from roughcut.review.content_profile import apply_content_profile_feedback
 from roughcut.review.content_profile_memory import record_content_profile_feedback_memory
@@ -37,9 +46,200 @@ from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_SUBTITLE_PROJECTION_
 from roughcut.watcher.folder_watcher import create_jobs_for_inventory_paths
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
+_BATCH_STEP_TIMEOUT_SECONDS = 1800.0
+_BATCH_STEP_TIMEOUT_MIN_SECONDS = 1.0
+_BATCH_STEP_TIMEOUT_SECONDS_BY_STEP = {
+    "render": 300.0,
+}
+_BATCH_STEP_TIMEOUT_STRATEGY = "thread"
+_BATCH_STEP_TIMEOUT_STRATEGY_BY_STEP = {
+    "render": "process",
+}
+_BATCH_STEP_TIMEOUT_STRATEGIES = {"thread", "process"}
+
+
+def _resolve_batch_step_timeout_seconds(step_name: str) -> float:
+    default_timeout_seconds = _BATCH_STEP_TIMEOUT_SECONDS
+    default_raw = str(os.getenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS", "")).strip()
+    if default_raw:
+        try:
+            default_timeout_seconds = float(default_raw)
+        except ValueError:
+            default_timeout_seconds = _BATCH_STEP_TIMEOUT_SECONDS
+    normalized_step = str(step_name or "").strip().lower()
+    step_timeout_seconds = _BATCH_STEP_TIMEOUT_SECONDS_BY_STEP.get(normalized_step, default_timeout_seconds)
+    if default_raw:
+        step_timeout_seconds = default_timeout_seconds
+    step_override_env = f"ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS_{normalized_step.upper()}"
+    step_override_raw = str(os.getenv(step_override_env, "")).strip()
+    if step_override_raw:
+        try:
+            step_timeout_seconds = float(step_override_raw)
+        except ValueError:
+            pass
+    return max(_BATCH_STEP_TIMEOUT_MIN_SECONDS, float(step_timeout_seconds))
+
+
+def _run_step_sync_with_timeout(step_name: str, job_id: str, timeout_seconds: float) -> None:
+    if timeout_seconds <= 0:
+        run_step_sync(step_name, job_id)
+        return
+
+    strategy = _resolve_batch_step_timeout_strategy(step_name)
+    if strategy == "process":
+        _run_step_sync_with_timeout_in_process(step_name, job_id, timeout_seconds)
+    else:
+        _run_step_sync_with_timeout_in_thread(step_name, job_id, timeout_seconds)
+
+
+def _resolve_batch_step_timeout_strategy(step_name: str) -> str:
+    normalized_step = str(step_name or "").strip().lower()
+    strategy_raw = str(os.getenv("ROUGHCUT_BATCH_STEP_TIMEOUT_STRATEGY", _BATCH_STEP_TIMEOUT_STRATEGY)).strip().lower()
+    if strategy_raw not in _BATCH_STEP_TIMEOUT_STRATEGIES:
+        strategy_raw = _BATCH_STEP_TIMEOUT_STRATEGY
+
+    strategy = _BATCH_STEP_TIMEOUT_STRATEGY_BY_STEP.get(normalized_step, strategy_raw)
+    if strategy not in _BATCH_STEP_TIMEOUT_STRATEGIES:
+        return _BATCH_STEP_TIMEOUT_STRATEGY
+
+    step_strategy = str(os.getenv(f"ROUGHCUT_BATCH_STEP_TIMEOUT_STRATEGY_{normalized_step.upper()}", "")).strip().lower()
+    if step_strategy in _BATCH_STEP_TIMEOUT_STRATEGIES:
+        return step_strategy
+    return strategy
+
+
+def _run_step_sync_with_timeout_in_thread(step_name: str, job_id: str, timeout_seconds: float) -> None:
+    error_holder: list[BaseException] = []
+
+    def _runner() -> None:
+        try:
+            run_step_sync(step_name, job_id)
+        except BaseException as exc:
+            error_holder.append(exc)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    if thread.is_alive():
+        exc = TimeoutError(f"步骤 {step_name} 执行超过 {float(timeout_seconds):.1f} 秒")
+        setattr(
+            exc,
+            "__batch_step_execution_metadata__",
+            {
+                "sync_runner_timeout_strategy": "thread",
+                "sync_runner_timeout_seconds": float(timeout_seconds),
+                "sync_runner_step_name": str(step_name).strip().lower(),
+            },
+        )
+        raise exc
+    if error_holder:
+        exc = error_holder[0]
+        raise exc
+
+
+def _run_step_sync_process_worker(step_name: str, job_id: str, result_queue: multiprocessing.Queue) -> None:
+    import traceback
+
+    try:
+        run_step_sync(step_name, job_id)
+        result_queue.put({"status": "ok"})
+    except BaseException as exc:
+        result_queue.put(
+            {
+                "status": "error",
+                "type": type(exc).__name__,
+                "message": str(exc),
+                "traceback": traceback.format_exc(),
+            }
+        )
+
+
+def _run_step_sync_with_timeout_in_process(step_name: str, job_id: str, timeout_seconds: float) -> None:
+    ctx = multiprocessing.get_context("spawn")
+    result_queue: multiprocessing.Queue = ctx.Queue()
+    process = ctx.Process(target=_run_step_sync_process_worker, args=(step_name, job_id, result_queue))
+    process.start()
+    process.join(timeout_seconds)
+    if process.is_alive():
+        worker_pid = process.pid
+        process.terminate()
+        process.join(5)
+        reap_method = "terminate"
+        if process.is_alive():
+            process.kill()
+            process.join(1)
+            reap_method = "kill"
+        metadata = {
+            "sync_runner_timeout_strategy": "process",
+            "sync_runner_timeout_seconds": float(timeout_seconds),
+            "sync_runner_step_name": str(step_name).strip().lower(),
+            "sync_runner_worker_pid": worker_pid,
+            "sync_runner_reap_method": reap_method,
+            "sync_runner_process_exit_code": process.exitcode,
+        }
+        exc = TimeoutError(f"步骤 {step_name} 执行超过 {float(timeout_seconds):.1f} 秒")
+        setattr(exc, "__batch_step_execution_metadata__", metadata)
+        raise exc
+
+    try:
+        payload = result_queue.get_nowait()
+    except Exception:
+        payload = None
+
+    if process.exitcode == 0:
+        if payload and payload.get("status") == "ok":
+            return
+        if payload and payload.get("status") == "error":
+            exc = RuntimeError(f"{payload.get('type')}: {payload.get('message')}")
+            setattr(exc, "__batch_worker_traceback__", payload.get("traceback"))
+            setattr(
+                exc,
+                "__batch_step_execution_metadata__",
+                {
+                    "sync_runner_timeout_strategy": "process",
+                    "sync_runner_step_name": str(step_name).strip().lower(),
+                    "sync_runner_process_exit_code": process.exitcode,
+                },
+            )
+            raise exc
+        raise RuntimeError(f"步骤 {step_name} 执行结果无效（exit=0）")
+
+    if payload and payload.get("status") == "error":
+        exc = RuntimeError(f"{payload.get('type')}: {payload.get('message')}")
+        setattr(exc, "__batch_worker_traceback__", payload.get("traceback"))
+        setattr(
+            exc,
+            "__batch_step_execution_metadata__",
+            {
+                "sync_runner_timeout_strategy": "process",
+                "sync_runner_step_name": str(step_name).strip().lower(),
+                "sync_runner_process_exit_code": process.exitcode,
+            },
+        )
+        raise exc
+    exc = RuntimeError(f"步骤 {step_name} 子进程异常退出: exit_code={process.exitcode}")
+    setattr(
+        exc,
+        "__batch_step_execution_metadata__",
+        {
+            "sync_runner_timeout_strategy": "process",
+            "sync_runner_step_name": str(step_name).strip().lower(),
+            "sync_runner_process_exit_code": process.exitcode,
+        },
+    )
+    raise exc
 
 
 def _configure_local_event_loop_policy() -> None:
+    # Selector loops do not support asyncio subprocess APIs used by render (ffmpeg
+    # execution path). Keep default Proactor behavior unless explicitly forced.
+    #
+    # Set ROUGHCUT_FORCE_SELECTOR_EVENT_LOOP=1 only when reproducing known
+    # Windows asyncpg-specific noise in environments that never require subprocess.
+    force_selector = str(os.getenv("ROUGHCUT_FORCE_SELECTOR_EVENT_LOOP", "")).strip().lower() in {"1", "true", "yes", "on"}
+    if not force_selector:
+        return
+
     # asyncpg on Windows can emit Proactor InvalidStateError noise when this script
     # repeatedly opens and tears down short-lived event loops via asyncio.run().
     if sys.platform != "win32":
@@ -93,10 +293,12 @@ class JobRunReport:
     content_profile: dict[str, Any] | None
     steps: list[StepRun]
     notes: list[str]
+    step_sync_runner_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
+    render_diagnostics: dict[str, Any] = field(default_factory=dict)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run a full-chain RoughCut batch on unedited local videos.")
+    parser = argparse.ArgumentParser(description="Run a full-chain ROUGHCUT batch on unedited local videos.")
     parser.add_argument("--source-dir", type=Path, default=ROOT / "watch")
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--channel-profile", default="edc_tactical")
@@ -286,10 +488,12 @@ def main() -> None:
         "channel_profile": args.channel_profile,
         "language": args.language,
         "output_dir": args.output_dir,
+        "stop_after": args.stop_after,
         "enhancement_modes": enhancement_modes,
         "job_count": len(reports),
         "success_count": sum(1 for report in reports if report.status == "done"),
-        "failed_count": sum(1 for report in reports if report.status != "done"),
+        "partial_count": sum(1 for report in reports if report.status == "partial"),
+        "failed_count": sum(1 for report in reports if report.status == "failed"),
         "jobs": [asdict(report) for report in reports],
     }
     golden_source_names = resolve_golden_source_names(
@@ -572,8 +776,9 @@ def run_job(job_id: str, item: dict[str, Any], *, stop_after: str | None = None)
             continue
         mark_step(job_id, step_name, "running")
         started = time.perf_counter()
+        step_timeout_seconds = _resolve_batch_step_timeout_seconds(step_name)
         try:
-            run_step_sync(step_name, job_id)
+            _run_step_sync_with_timeout(step_name, job_id, step_timeout_seconds)
             mark_step(job_id, step_name, "done")
             current_steps[step_name] = "done"
             detail = read_step_detail(job_id, step_name)
@@ -588,10 +793,39 @@ def run_job(job_id: str, item: dict[str, Any], *, stop_after: str | None = None)
             if stop_after == step_name:
                 status = "partial"
                 break
+        except TimeoutError as exc:
+            status = "failed"
+            error_text = f"{type(exc).__name__}: {exc}"
+            metadata_updates = getattr(exc, "__batch_step_execution_metadata__", None)
+            mark_step(
+                job_id,
+                step_name,
+                "failed",
+                error=error_text,
+                terminal_failure=True,
+                metadata_updates=metadata_updates,
+            )
+            step_runs.append(
+                StepRun(
+                    step=step_name,
+                    status="failed",
+                    elapsed_seconds=round(time.perf_counter() - started, 3),
+                    error=error_text,
+                )
+            )
+            break
         except Exception as exc:
             status = "failed"
             error_text = f"{type(exc).__name__}: {exc}"
-            mark_step(job_id, step_name, "failed", error=error_text)
+            failure_metadata = getattr(exc, "__batch_step_execution_metadata__", None)
+            mark_step(
+                job_id,
+                step_name,
+                "failed",
+                error=error_text,
+                terminal_failure=True,
+                metadata_updates=failure_metadata,
+            )
             step_runs.append(
                 StepRun(
                     step=step_name,
@@ -602,9 +836,12 @@ def run_job(job_id: str, item: dict[str, Any], *, stop_after: str | None = None)
             )
             break
 
-    if status in {"done", "failed"}:
-        finalize_job(job_id, status)
-    collected = asyncio.run(collect_job_report(job_id, item, step_runs, status))
+    if status == "partial":
+        stop_job_after_requested_step(job_id, stopped_after=stop_after or "")
+    elif status in {"done", "failed"}:
+        failure_error = next((item.error for item in reversed(step_runs) if item.error), None)
+        finalize_job(job_id, status, error=failure_error)
+    collected = asyncio.run(collect_job_report(job_id, item, step_runs, status, stop_after=stop_after))
     return collected
 
 
@@ -618,7 +855,25 @@ def load_step_statuses(job_id: str) -> dict[str, str]:
     return asyncio.run(_load())
 
 
-def mark_step(job_id: str, step_name: str, status: str, *, error: str | None = None) -> None:
+def _sync_runner_attempt_value(current_attempt: int | None, *, status: str, terminal_failure: bool) -> int:
+    attempt = max(0, int(current_attempt or 0))
+    normalized = str(status or "").strip().lower()
+    if normalized == "running":
+        return max(1, attempt)
+    if normalized == "failed" and terminal_failure:
+        return max(MAX_ATTEMPTS, attempt)
+    return attempt
+
+
+def mark_step(
+    job_id: str,
+    step_name: str,
+    status: str,
+    *,
+    error: str | None = None,
+    terminal_failure: bool = False,
+    metadata_updates: dict[str, Any] | None = None,
+) -> None:
     async def _update() -> None:
         factory = get_session_factory()
         async with factory() as session:
@@ -629,14 +884,30 @@ def mark_step(job_id: str, step_name: str, status: str, *, error: str | None = N
             )
             step = result.scalar_one()
             now = datetime.now(timezone.utc)
+            metadata = dict(step.metadata_ or {})
             step.status = status
+            step.attempt = _sync_runner_attempt_value(
+                step.attempt,
+                status=status,
+                terminal_failure=terminal_failure,
+            )
             if status == "running":
                 step.started_at = now
                 step.finished_at = None
                 step.error_message = None
+                metadata.pop("sync_runner_terminal_failure", None)
             elif status in {"done", "failed", "cancelled"}:
                 step.finished_at = now
                 step.error_message = error
+                if status == "failed" and terminal_failure:
+                    metadata["sync_runner_terminal_failure"] = True
+                    metadata["detail"] = str(error or metadata.get("detail") or "").strip()
+                elif status in {"done", "cancelled"}:
+                    metadata.pop("sync_runner_terminal_failure", None)
+                if isinstance(metadata_updates, dict):
+                    metadata.update(metadata_updates)
+            metadata["updated_at"] = now.isoformat()
+            step.metadata_ = metadata
             await session.commit()
 
     asyncio.run(_update())
@@ -727,7 +998,7 @@ def auto_approve_final_review(job_id: str) -> None:
     asyncio.run(_approve())
 
 
-def finalize_job(job_id: str, status: str) -> None:
+def finalize_job(job_id: str, status: str, *, error: str | None = None) -> None:
     async def _finalize() -> None:
         factory = get_session_factory()
         async with factory() as session:
@@ -735,11 +1006,199 @@ def finalize_job(job_id: str, status: str) -> None:
             now = datetime.now(timezone.utc)
             job.status = status
             job.updated_at = now
-            if status != "done":
-                job.error_message = job.error_message or "Batch full-chain run failed"
+            if status == "done":
+                job.error_message = None
+            else:
+                job.error_message = str(error or job.error_message or "Batch full-chain run failed").strip()
             await session.commit()
 
     asyncio.run(_finalize())
+
+
+def stop_job_after_requested_step(job_id: str, *, stopped_after: str) -> None:
+    async def _stop() -> None:
+        factory = get_session_factory()
+        async with factory() as session:
+            job_uuid = uuid.UUID(job_id)
+            job = await session.get(Job, job_uuid)
+            if job is None:
+                return
+            result = await session.execute(select(JobStep).where(JobStep.job_id == job_uuid))
+            steps = result.scalars().all()
+            now = datetime.now(timezone.utc)
+            detail = (
+                f"批量回归在 {stopped_after} 后按 stop_after 主动停止，保留当前工件用于评估。"
+                if stopped_after
+                else "批量回归按 stop_after 主动停止，保留当前工件用于评估。"
+            )
+            for step in steps:
+                metadata = dict(step.metadata_ or {})
+                metadata["updated_at"] = now.isoformat()
+                if step.status == "pending":
+                    step.status = "skipped"
+                    step.finished_at = now
+                    metadata["detail"] = detail
+                    step.metadata_ = metadata
+                elif step.status == "running":
+                    step.status = "cancelled"
+                    step.error_message = "Stopped after requested step"
+                    step.finished_at = now
+                    metadata["detail"] = detail
+                    step.metadata_ = metadata
+            # Use a terminal job status so the orchestrator cannot continue the chain,
+            # while the external batch report still records this run as `partial`.
+            job.status = "cancelled"
+            job.error_message = detail
+            job.updated_at = now
+            await session.commit()
+
+    asyncio.run(_stop())
+
+
+def _build_step_sync_runner_metadata(steps: list[JobStep]) -> dict[str, dict[str, Any]]:
+    return {
+        str(step.step_name): {
+            str(key): value
+            for key, value in dict(step.metadata_ or {}).items()
+            if str(key).startswith("sync_runner_")
+        }
+        for step in steps
+        if step.step_name and any(
+            str(key).startswith("sync_runner_")
+            for key in dict(step.metadata_ or {}).keys()
+        )
+    }
+
+
+def _build_render_diagnostics(
+    render_payload: dict[str, Any],
+    steps: list[JobStep],
+) -> dict[str, Any]:
+    diagnostics: dict[str, Any] = {}
+    avatar_result = render_payload.get("avatar_result") if isinstance(render_payload, dict) else None
+    if isinstance(avatar_result, dict) and avatar_result:
+        avatar_summary = _normalize_avatar_render_result_for_reporting(avatar_result)
+        if avatar_summary:
+            diagnostics["avatar_result"] = avatar_summary
+
+    cover_result = render_payload.get("cover_result") if isinstance(render_payload, dict) else None
+    if isinstance(cover_result, dict) and cover_result:
+        cover_summary = _normalize_cover_render_result_for_reporting(cover_result)
+        if cover_summary:
+            diagnostics["cover_result"] = cover_summary
+
+    render_step = next((step for step in steps if str(step.step_name) == "render"), None)
+    if render_step is not None:
+        render_step_summary: dict[str, Any] = {}
+        status = str(render_step.status or "").strip()
+        if status:
+            render_step_summary["status"] = status
+        detail = ""
+        metadata = render_step.metadata_ if isinstance(render_step.metadata_, dict) else {}
+        if isinstance(metadata, dict):
+            detail = str(metadata.get("detail") or "").strip()
+        if detail:
+            render_step_summary["detail"] = detail
+        error = str(render_step.error_message or "").strip()
+        if error:
+            render_step_summary["error"] = error
+        sync_runner = {
+            str(key): value
+            for key, value in metadata.items()
+            if str(key).startswith("sync_runner_")
+        }
+        if sync_runner:
+            render_step_summary["sync_runner"] = sync_runner
+        if render_step_summary:
+            diagnostics["render_step"] = _normalize_render_step_summary_for_reporting(render_step_summary)
+    return diagnostics
+
+
+def _merge_render_runtime_payloads(
+    render_payload: dict[str, Any] | None,
+    runtime_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    merged = dict(render_payload or {}) if isinstance(render_payload, dict) else {}
+    runtime = runtime_payload if isinstance(runtime_payload, dict) else {}
+    for key in ("avatar_result", "cover_result"):
+        value = runtime.get(key)
+        if isinstance(value, dict) and value:
+            merged[key] = dict(value)
+    return merged
+
+
+def _classify_avatar_runtime_reason_category(reason: str) -> str | None:
+    return _shared_classify_avatar_runtime_reason_category(reason)
+
+
+def _normalize_avatar_render_result_for_reporting(
+    avatar_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    source = avatar_result if isinstance(avatar_result, dict) else {}
+    if not source:
+        return {}
+    avatar_summary: dict[str, Any] = {}
+    for key in ("status", "reason", "detail", "retryable", "profile_name"):
+        value = source.get(key)
+        if value not in (None, "", []):
+            avatar_summary[key] = value
+    reason = str(source.get("reason") or "").strip()
+    reason_category = str(source.get("reason_category") or "").strip()
+    if reason and not reason_category:
+        reason_category = _classify_avatar_runtime_reason_category(reason) or ""
+    if reason_category:
+        avatar_summary["reason_category"] = reason_category
+    error_metadata = source.get("error_metadata")
+    if isinstance(error_metadata, dict) and error_metadata:
+        avatar_summary["error_metadata"] = dict(error_metadata)
+    return avatar_summary
+
+
+def _normalize_cover_render_result_for_reporting(
+    cover_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    source = cover_result if isinstance(cover_result, dict) else {}
+    if not source:
+        return {}
+    cover_summary: dict[str, Any] = {}
+    for key in ("status", "reason", "detail", "cover_path", "variant_count", "selection_review_recommended"):
+        value = source.get(key)
+        if value not in (None, "", []):
+            cover_summary[key] = value
+    return cover_summary
+
+
+def _classify_render_failure_reason(
+    *,
+    error: str,
+    detail: str = "",
+    sync_runner: dict[str, Any] | None = None,
+) -> tuple[str | None, list[str]]:
+    return _shared_classify_render_failure_reason(
+        error=error,
+        detail=detail,
+        sync_runner=sync_runner,
+    )
+
+
+def _normalize_render_diagnostics_for_reporting(
+    diagnostics: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload = dict(diagnostics or {}) if isinstance(diagnostics, dict) else {}
+    avatar_result = dict(payload.get("avatar_result") or {}) if isinstance(payload.get("avatar_result"), dict) else {}
+    if avatar_result:
+        payload["avatar_result"] = _normalize_avatar_render_result_for_reporting(avatar_result)
+
+    render_step = dict(payload.get("render_step") or {}) if isinstance(payload.get("render_step"), dict) else {}
+    if render_step:
+        payload["render_step"] = _normalize_render_step_summary_for_reporting(render_step)
+    return payload
+
+
+def _normalize_render_step_summary_for_reporting(
+    render_step: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return _shared_normalize_render_step_summary_for_reporting(render_step)
 
 
 async def collect_job_report(
@@ -747,6 +1206,8 @@ async def collect_job_report(
     item: dict[str, Any],
     step_runs: list[StepRun],
     status: str,
+    *,
+    stop_after: str | None = None,
 ) -> JobRunReport:
     factory = get_session_factory()
     async with factory() as session:
@@ -783,6 +1244,10 @@ async def collect_job_report(
         )
         artifacts = artifact_result.scalars().all()
         render_artifact = next((artifact for artifact in artifacts if artifact.artifact_type == "render_outputs"), None)
+        render_runtime_artifact = next(
+            (artifact for artifact in artifacts if artifact.artifact_type == "render_runtime_diagnostics"),
+            None,
+        )
         packaging_artifact = next((artifact for artifact in artifacts if artifact.artifact_type == "platform_packaging_md"), None)
         subtitle_quality_artifact = next(
             (artifact for artifact in artifacts if artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT),
@@ -815,11 +1280,31 @@ async def collect_job_report(
             .order_by(Timeline.created_at.desc(), Timeline.id.desc())
         )
         editorial_timeline = timeline_result.scalars().first()
+        refine_decision_plan_artifact = next(
+            (artifact for artifact in artifacts if artifact.artifact_type == "refine_decision_plan"),
+            None,
+        )
 
-    keep_ratio = compute_keep_ratio(editorial_timeline.data_json if editorial_timeline else None)
+    refine_decision_plan = (
+        refine_decision_plan_artifact.data_json
+        if refine_decision_plan_artifact and isinstance(refine_decision_plan_artifact.data_json, dict)
+        else None
+    )
+    keep_ratio = compute_effective_keep_ratio(
+        editorial_timeline.data_json if editorial_timeline else None,
+        refine_decision_plan=refine_decision_plan,
+        editorial_timeline_id=str(editorial_timeline.id) if editorial_timeline else "",
+        editorial_timeline_version=int(editorial_timeline.version or 0) if editorial_timeline else 0,
+    )
     output_path = str(render_output.output_path) if render_output and render_output.output_path else None
     output_duration = probe_duration(Path(output_path)) if output_path else 0.0
     render_payload = render_artifact.data_json if render_artifact and isinstance(render_artifact.data_json, dict) else {}
+    render_runtime_payload = (
+        render_runtime_artifact.data_json
+        if render_runtime_artifact and isinstance(render_runtime_artifact.data_json, dict)
+        else {}
+    )
+    render_payload = _merge_render_runtime_payloads(render_payload, render_runtime_payload)
     cover_path = str(render_payload.get("cover") or "").strip() or None
     platform_doc = str(packaging_artifact.storage_path or "").strip() if packaging_artifact else None
     if not platform_doc and output_path:
@@ -849,6 +1334,8 @@ async def collect_job_report(
         corrections=corrections,
         completion_candidate=(status == "done"),
     )
+    step_sync_runner_metadata = _build_step_sync_runner_metadata(steps)
+    render_diagnostics = _build_render_diagnostics(render_payload, steps)
     subtitle_projection_data = (
         subtitle_projection_artifact.data_json
         if subtitle_projection_artifact and isinstance(subtitle_projection_artifact.data_json, dict)
@@ -857,6 +1344,21 @@ async def collect_job_report(
     effective_subtitle_count = len(list(subtitle_projection_data.get("entries") or [])) or len(subtitles)
     live_stage_validations = build_live_stage_validations(
         step_statuses={step.step_name: step.status for step in steps},
+        step_details={
+            str(step.step_name): str(((step.metadata_ or {}).get("detail") if isinstance(step.metadata_, dict) else "") or "")
+            for step in steps
+        },
+        step_errors={
+            str(step.step_name): str(step.error_message or "")
+            for step in steps
+        },
+        step_metadata={
+            str(step.step_name): dict(step.metadata_ or {})
+            for step in steps
+            if isinstance(step.metadata_, dict)
+        },
+        run_status=status,
+        stop_after=stop_after,
         transcript_segment_count=len(transcript_segments),
         subtitle_count=effective_subtitle_count,
         keep_ratio=keep_ratio,
@@ -903,6 +1405,8 @@ async def collect_job_report(
         quality_issue_codes=list(quality_assessment.get("issue_codes") or []),
         live_stage_validations=live_stage_validations,
         content_profile=profile_artifact.data_json if profile_artifact else None,
+        step_sync_runner_metadata=step_sync_runner_metadata,
+        render_diagnostics=render_diagnostics,
         steps=step_runs,
         notes=notes,
     )
@@ -924,9 +1428,73 @@ def compute_keep_ratio(editorial_timeline: dict[str, Any] | None) -> float:
     return (kept / total) if total > 0 else 0.0
 
 
+def compute_effective_keep_ratio(
+    editorial_timeline: dict[str, Any] | None,
+    *,
+    refine_decision_plan: dict[str, Any] | None = None,
+    editorial_timeline_id: str = "",
+    editorial_timeline_version: int = 0,
+) -> float:
+    fallback_ratio = compute_keep_ratio(editorial_timeline)
+    if not isinstance(editorial_timeline, dict):
+        return fallback_ratio
+    timeline_segments = [dict(item) for item in list(editorial_timeline.get("segments") or []) if isinstance(item, dict)]
+    if not timeline_segments:
+        return fallback_ratio
+    total = 0.0
+    for segment in timeline_segments:
+        start = float(segment.get("start", 0.0) or 0.0)
+        end = float(segment.get("end", 0.0) or 0.0)
+        total += max(0.0, end - start)
+    if total <= 0:
+        return fallback_ratio
+    resolved_keep_segments = resolve_refine_keep_segments_for_timeline(
+        refine_decision_plan,
+        editorial_timeline_id=editorial_timeline_id,
+        editorial_timeline_version=editorial_timeline_version,
+        fallback_segments=timeline_segments,
+    )
+    if not resolved_keep_segments:
+        return fallback_ratio
+    kept = 0.0
+    for segment in resolved_keep_segments:
+        start = float(segment.get("start", 0.0) or 0.0)
+        end = float(segment.get("end", start) or start)
+        kept += max(0.0, end - start)
+    return (kept / total) if total > 0 else fallback_ratio
+
+
+def classify_step_issue_codes(step_name: str, *, error: str, detail: str = "") -> list[str]:
+    normalized_error = str(error or "").strip().lower()
+    normalized_detail = str(detail or "").strip().lower()
+    haystack = f"{normalized_error}\n{normalized_detail}".strip()
+    if not haystack:
+        return []
+    if step_name == "probe":
+        if "filenotfounderror" in haystack or "no such file" in haystack:
+            return ["source_file_missing"]
+        if "missing video stream" in haystack or "no usable video stream" in haystack:
+            return ["missing_video_stream"]
+        if "ffprobe failed" in haystack:
+            return ["media_probe_failed"]
+        return ["probe_failed"]
+    if step_name == "extract_audio":
+        if "filenotfounderror" in haystack or "no such file" in haystack:
+            return ["source_file_missing"]
+        if "noaudiostreamerror" in haystack or "无音轨" in haystack:
+            return ["missing_audio_stream"]
+        return ["extract_audio_failed"]
+    return [f"{step_name}_failed"]
+
+
 def build_live_stage_validations(
     *,
     step_statuses: dict[str, str],
+    step_details: dict[str, str] | None,
+    step_errors: dict[str, str] | None,
+    step_metadata: dict[str, dict[str, Any]] | None,
+    run_status: str,
+    stop_after: str | None,
     transcript_segment_count: int,
     subtitle_count: int,
     keep_ratio: float,
@@ -959,6 +1527,16 @@ def build_live_stage_validations(
         )
         if code in issue_codes
     ]
+    profile_review_mode = str((profile or {}).get("review_mode") or "").strip().lower()
+    profile_confirmed = bool((profile or {}).get("manual_confirmed")) or profile_review_mode in {
+        "manual_confirmed",
+        "auto_confirmed",
+    }
+    content_profile_passed = bool(profile) and not profile_issue_codes and (
+        step_statuses.get("content_profile") == "done"
+        or step_statuses.get("summary_review") == "done"
+        or profile_confirmed
+    )
     subtitle_quality_blocking = bool(subtitle_quality_report.get("blocking"))
     subtitle_quality_warnings = list(subtitle_quality_report.get("warning_reasons") or [])
     pending_term_count = int((subtitle_term_resolution_patch.get("metrics") or {}).get("pending_count") or 0)
@@ -968,23 +1546,160 @@ def build_live_stage_validations(
     has_consistency_step = "subtitle_consistency_review" in step_statuses
     has_summary_review_step = "summary_review" in step_statuses
     has_final_review_step = "final_review" in step_statuses
+    stage_to_step = {
+        "probe": "probe",
+        "transcribe": "transcribe",
+        "subtitle_postprocess": "subtitle_postprocess",
+        "subtitle_term_resolution": "subtitle_term_resolution",
+        "subtitle_consistency_review": "subtitle_consistency_review",
+        "content_profile": "content_profile",
+        "summary_review": "summary_review",
+        "edit_plan": "edit_plan",
+        "render": "render",
+        "final_review": "final_review",
+        "platform_package": "platform_package",
+    }
+    pipeline_step_order = {step_name: index for index, step_name in enumerate(PIPELINE_STEPS)}
+    stop_after_index = pipeline_step_order.get(str(stop_after or "").strip())
+    first_failed_step_name = next(
+        (
+            step_name
+            for step_name in PIPELINE_STEPS
+            if step_statuses.get(step_name) == "failed"
+        ),
+        None,
+    )
+    first_failed_step_index = pipeline_step_order.get(first_failed_step_name) if first_failed_step_name else None
+    step_details = {str(key): str(value or "") for key, value in dict(step_details or {}).items()}
+    step_errors = {str(key): str(value or "") for key, value in dict(step_errors or {}).items()}
+    step_metadata = {
+        str(key): dict(value or {})
+        for key, value in dict(step_metadata or {}).items()
+        if isinstance(value, dict)
+    }
+    probe_detail = step_details.get("probe", "")
+    probe_error = step_errors.get("probe", "")
+    transcribe_detail = step_details.get("transcribe", "")
+    subtitle_postprocess_detail = step_details.get("subtitle_postprocess", "")
+    edit_plan_metadata = dict(step_metadata.get("edit_plan") or {})
+    edit_plan_audio_rebuilt = bool(edit_plan_metadata.get("audio_artifact_rebuilt"))
+    no_audio_transcribe = "无音轨" in transcribe_detail and "跳过转写" in transcribe_detail
+    no_audio_subtitle_postprocess = "0 段 -> 0 条" in subtitle_postprocess_detail and no_audio_transcribe
+    empty_transcribe_completed = step_statuses.get("transcribe") == "done" and transcript_segment_count <= 0 and "共 0 段" in transcribe_detail
+    empty_subtitle_postprocess_completed = (
+        step_statuses.get("subtitle_postprocess") == "done"
+        and subtitle_count <= 0
+        and "0 段 -> 0 条" in subtitle_postprocess_detail
+    )
+
+    def _stage_skipped(stage: str) -> bool:
+        if str(run_status or "").strip().lower() != "partial" or stop_after_index is None:
+            return False
+        mapped_step = stage_to_step.get(stage)
+        if not mapped_step:
+            return False
+        mapped_index = pipeline_step_order.get(mapped_step)
+        if mapped_index is None:
+            return False
+        return mapped_index > stop_after_index
+
+    def _skipped_validation(stage: str) -> LiveStageValidation:
+        return LiveStageValidation(
+            stage=stage,
+            status="skipped",
+            summary=f"{stage} 因 stop_after 未执行",
+            issue_codes=[],
+        )
+
+    def _blocked_validation(stage: str) -> LiveStageValidation | None:
+        mapped_step = stage_to_step.get(stage)
+        mapped_index = pipeline_step_order.get(mapped_step) if mapped_step else None
+        if (
+            first_failed_step_name is None
+            or first_failed_step_index is None
+            or mapped_index is None
+            or mapped_index <= first_failed_step_index
+            or step_statuses.get(mapped_step) not in {"pending", "skipped", "cancelled"}
+        ):
+            return None
+        return LiveStageValidation(
+            stage=stage,
+            status="skipped",
+            summary=f"{stage} 因上游 {first_failed_step_name} 失败未执行",
+            issue_codes=[],
+        )
+
     validations = [
         LiveStageValidation(
-            stage="transcribe",
-            status="pass" if step_statuses.get("transcribe") == "done" and transcript_segment_count > 0 else "fail",
-            summary=f"ASR 产出 {transcript_segment_count} 条 transcript segment",
-            issue_codes=["missing_transcript"] if transcript_segment_count <= 0 else [],
+            stage="probe",
+            status=(
+                "pass"
+                if step_statuses.get("probe") == "done"
+                else "warn"
+                if step_statuses.get("probe") in {"skipped", "cancelled"}
+                else "fail"
+            ),
+            summary=(
+                probe_error
+                or probe_detail
+                or "媒体探测完成"
+                if step_statuses.get("probe") == "done"
+                else probe_error
+                or probe_detail
+                or "媒体探测失败"
+            ),
+            issue_codes=(
+                classify_step_issue_codes("probe", error=probe_error, detail=probe_detail)
+                if step_statuses.get("probe") == "failed"
+                else []
+            ),
         ),
-        LiveStageValidation(
+        _blocked_validation("transcribe") or LiveStageValidation(
+            stage="transcribe",
+            status=(
+                "pass"
+                if step_statuses.get("transcribe") == "done" and (transcript_segment_count > 0 or no_audio_transcribe)
+                else "warn"
+                if empty_transcribe_completed
+                else "fail"
+            ),
+            summary=(
+                transcribe_detail
+                if no_audio_transcribe and transcribe_detail
+                else transcribe_detail
+                if empty_transcribe_completed and transcribe_detail
+                else f"ASR 产出 {transcript_segment_count} 条 transcript segment"
+            ),
+            issue_codes=(
+                []
+                if (transcript_segment_count > 0 or no_audio_transcribe)
+                else ["empty_transcript_completed"]
+                if empty_transcribe_completed
+                else ["missing_transcript"]
+            ),
+        ),
+        _skipped_validation("subtitle_postprocess") if _stage_skipped("subtitle_postprocess") else _blocked_validation("subtitle_postprocess") or LiveStageValidation(
             stage="subtitle_postprocess",
             status=(
                 "fail"
-                if step_statuses.get("subtitle_postprocess") != "done" or subtitle_count <= 0 or subtitle_quality_blocking
+                if step_statuses.get("subtitle_postprocess") != "done"
+                or subtitle_quality_blocking
+                else "pass"
+                if no_audio_subtitle_postprocess
+                else "warn"
+                if empty_subtitle_postprocess_completed
                 else "warn"
                 if subtitle_quality_warnings
+                else "fail"
+                if subtitle_count <= 0
                 else "pass"
             ),
             summary=(
+                subtitle_postprocess_detail
+                if no_audio_subtitle_postprocess and subtitle_postprocess_detail
+                else subtitle_postprocess_detail
+                if empty_subtitle_postprocess_completed and subtitle_postprocess_detail
+                else
                 f"字幕后处理产出 {subtitle_count} 条字幕，基础质检阻断 {len(subtitle_quality_report.get('blocking_reasons') or [])} 项"
                 if subtitle_quality_blocking
                 else f"字幕后处理产出 {subtitle_count} 条字幕"
@@ -992,12 +1707,14 @@ def build_live_stage_validations(
             issue_codes=(
                 list(subtitle_quality_report.get("blocking_reasons") or [])
                 if subtitle_quality_blocking
+                else ["empty_subtitles_completed"]
+                if empty_subtitle_postprocess_completed
                 else ["missing_subtitles"]
-                if subtitle_count <= 0
+                if subtitle_count <= 0 and not no_audio_subtitle_postprocess
                 else list(subtitle_quality_warnings)
             ),
         ),
-        LiveStageValidation(
+        _skipped_validation("subtitle_term_resolution") if _stage_skipped("subtitle_term_resolution") else _blocked_validation("subtitle_term_resolution") or LiveStageValidation(
             stage="subtitle_term_resolution",
             status=(
                 "fail"
@@ -1012,7 +1729,7 @@ def build_live_stage_validations(
             ),
             issue_codes=["subtitle_terms_pending"] if pending_term_count > 0 else [],
         ),
-        LiveStageValidation(
+        _skipped_validation("subtitle_consistency_review") if _stage_skipped("subtitle_consistency_review") else _blocked_validation("subtitle_consistency_review") or LiveStageValidation(
             stage="subtitle_consistency_review",
             status=(
                 "fail"
@@ -1037,13 +1754,13 @@ def build_live_stage_validations(
                 else list(subtitle_consistency_warnings)
             ),
         ),
-        LiveStageValidation(
+        _skipped_validation("content_profile") if _stage_skipped("content_profile") else _blocked_validation("content_profile") or LiveStageValidation(
             stage="content_profile",
-            status="pass" if step_statuses.get("content_profile") == "done" and profile and not profile_issue_codes else "fail",
-            summary="内容画像已通过 live 质量门禁" if profile and not profile_issue_codes else "内容画像存在质量问题",
+            status="pass" if content_profile_passed else "fail",
+            summary="内容画像已通过 live 质量门禁" if content_profile_passed else "内容画像存在质量问题",
             issue_codes=profile_issue_codes,
         ),
-        LiveStageValidation(
+        _skipped_validation("summary_review") if _stage_skipped("summary_review") else _blocked_validation("summary_review") or LiveStageValidation(
             stage="summary_review",
             status="pass" if not has_summary_review_step or step_statuses.get("summary_review") == "done" else "fail",
             summary=(
@@ -1055,19 +1772,29 @@ def build_live_stage_validations(
             ),
             issue_codes=[] if not has_summary_review_step or step_statuses.get("summary_review") == "done" else ["summary_review_pending"],
         ),
-        LiveStageValidation(
+        _skipped_validation("edit_plan") if _stage_skipped("edit_plan") else _blocked_validation("edit_plan") or LiveStageValidation(
             stage="edit_plan",
-            status="pass" if step_statuses.get("edit_plan") == "done" and keep_ratio > 0 else "fail",
-            summary=f"剪辑保留比 {keep_ratio:.0%}" if keep_ratio > 0 else "剪辑保留段为空或未生成",
-            issue_codes=["empty_edit_plan"] if keep_ratio <= 0 else [],
+            status=(
+                "fail"
+                if not (step_statuses.get("edit_plan") == "done" and keep_ratio > 0)
+                else "pass"
+            ),
+            summary=(
+                "剪辑保留段为空或未生成"
+                if keep_ratio <= 0
+                else f"剪辑保留比 {keep_ratio:.0%}；音频派生文件缺失，已从源视频重建"
+                if edit_plan_audio_rebuilt
+                else f"剪辑保留比 {keep_ratio:.0%}"
+            ),
+            issue_codes=["empty_edit_plan"] if keep_ratio <= 0 else ["audio_artifact_rebuilt"] if edit_plan_audio_rebuilt else [],
         ),
-        LiveStageValidation(
+        _skipped_validation("render") if _stage_skipped("render") else _blocked_validation("render") or LiveStageValidation(
             stage="render",
             status="pass" if step_statuses.get("render") == "done" and "subtitle_sync_issue" not in issue_codes else "fail",
             summary="导出成片字幕同步正常" if "subtitle_sync_issue" not in issue_codes else "导出层存在字幕同步/结构问题",
             issue_codes=["subtitle_sync_issue"] if "subtitle_sync_issue" in issue_codes else [],
         ),
-        LiveStageValidation(
+        _skipped_validation("final_review") if _stage_skipped("final_review") else _blocked_validation("final_review") or LiveStageValidation(
             stage="final_review",
             status="pass" if not has_final_review_step or step_statuses.get("final_review") == "done" else "fail",
             summary=(
@@ -1079,7 +1806,7 @@ def build_live_stage_validations(
             ),
             issue_codes=[] if not has_final_review_step or step_statuses.get("final_review") == "done" else ["final_review_pending"],
         ),
-        LiveStageValidation(
+        _skipped_validation("platform_package") if _stage_skipped("platform_package") else _blocked_validation("platform_package") or LiveStageValidation(
             stage="platform_package",
             status="pass" if step_statuses.get("platform_package") == "done" and platform_doc and Path(platform_doc).exists() else "fail",
             summary="平台包装文案已导出" if platform_doc and Path(platform_doc).exists() else "平台包装文案未导出",
@@ -1131,9 +1858,12 @@ def build_job_notes(
         score = quality_assessment.get("score")
         if grade and score is not None:
             notes.append(f"质量分 {grade} {float(score):.1f}")
-    failing_stages = [item.stage for item in live_stage_validations if item.status != "pass"]
+    failing_stages = [item.stage for item in live_stage_validations if item.status == "fail"]
+    warning_stages = [item.stage for item in live_stage_validations if item.status == "warn"]
     if failing_stages:
         notes.append("live校验失败: " + "、".join(failing_stages[:4]))
+    elif warning_stages:
+        notes.append("live校验告警: " + "、".join(warning_stages[:4]))
     elif live_stage_validations:
         notes.append("live校验通过")
     return notes
@@ -1273,7 +2003,66 @@ def render_markdown(summary: dict[str, Any]) -> str:
                     )
                 )
             )
+        render_diagnostics = job.get("render_diagnostics") if isinstance(job.get("render_diagnostics"), dict) else {}
+        if render_diagnostics:
+            avatar_result = (
+                render_diagnostics.get("avatar_result")
+                if isinstance(render_diagnostics.get("avatar_result"), dict)
+                else {}
+            )
+            render_step = (
+                render_diagnostics.get("render_step")
+                if isinstance(render_diagnostics.get("render_step"), dict)
+                else {}
+            )
+            if avatar_result:
+                avatar_parts = [
+                    f"{key}={avatar_result[key]}"
+                    for key in ("status", "reason", "reason_category", "retryable", "profile_name")
+                    if key in avatar_result
+                ]
+                if avatar_result.get("detail"):
+                    avatar_parts.append(f"detail={avatar_result['detail']}")
+                if avatar_result.get("error_metadata"):
+                    avatar_parts.append(
+                        "error_metadata=" + json.dumps(avatar_result["error_metadata"], ensure_ascii=False, sort_keys=True)
+                    )
+                lines.append("- render_avatar: " + ", ".join(avatar_parts))
+            cover_result = (
+                render_diagnostics.get("cover_result")
+                if isinstance(render_diagnostics.get("cover_result"), dict)
+                else {}
+            )
+            if cover_result:
+                cover_parts = [
+                    f"{key}={cover_result[key]}"
+                    for key in ("status", "reason", "variant_count", "selection_review_recommended")
+                    if key in cover_result
+                ]
+                if cover_result.get("detail"):
+                    cover_parts.append(f"detail={cover_result['detail']}")
+                lines.append("- render_cover: " + ", ".join(cover_parts))
+            if render_step:
+                render_step_parts = [
+                    f"{key}={render_step[key]}"
+                    for key in ("status", "reason", "detail", "error")
+                    if key in render_step
+                ]
+                if render_step.get("issue_codes"):
+                    render_step_parts.append("issue_codes=" + ",".join(render_step["issue_codes"]))
+                if render_step.get("sync_runner"):
+                    render_step_parts.append(
+                        "sync_runner="
+                        + json.dumps(render_step["sync_runner"], ensure_ascii=False, sort_keys=True)
+                    )
+                lines.append("- render_step: " + ", ".join(render_step_parts))
         if job.get("steps"):
+            step_sync_metadata = {
+                str(step_name): metadata
+                for step_name, metadata in dict(
+                    job.get("step_sync_runner_metadata") or {}
+                ).items()
+            }
             lines.append("- steps:")
             for item in job["steps"]:
                 step_line = f"  - {item['step']}: {item['status']} ({item['elapsed_seconds']}s)"
@@ -1281,6 +2070,12 @@ def render_markdown(summary: dict[str, Any]) -> str:
                     step_line += f" | {item['detail']}"
                 if item.get("error"):
                     step_line += f" | error={item['error']}"
+                sync_metadata = step_sync_metadata.get(str(item["step"]) if isinstance(item, dict) else "")
+                if sync_metadata:
+                    sync_metadata_text = ", ".join(
+                        f"{key}={sync_metadata[key]}" for key in sorted(sync_metadata)
+                    )
+                    step_line += f" | sync_runner={{{sync_metadata_text}}}"
                 lines.append(step_line)
         if job.get("notes"):
             lines.append("- notes: " + " / ".join(job["notes"]))

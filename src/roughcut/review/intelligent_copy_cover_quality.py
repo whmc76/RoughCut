@@ -26,6 +26,7 @@ def assess_cover_publish_readiness(
     blocking_reasons: list[str] = []
     warnings: list[str] = []
     backend = str(metadata.get("backend") or request.get("backend") or "").strip().lower()
+    effective_source = _effective_cover_source(cover_generation)
     trusted_master_output_path = _resolve_trusted_master_output_path(
         cover_generation_metadata=cover_generation,
         request_payload=request,
@@ -33,6 +34,20 @@ def assess_cover_publish_readiness(
 
     request_status = _normalized_status(request.get("status"))
     metadata_status = _normalized_status(metadata.get("status"))
+    request_status = _resolve_effective_cover_status(
+        status=request_status,
+        backend=backend,
+        payload=request,
+        output_path=path,
+        counterpart_status=metadata_status,
+    )
+    metadata_status = _resolve_effective_cover_status(
+        status=metadata_status,
+        backend=backend,
+        payload=metadata,
+        output_path=path,
+        counterpart_status=request_status,
+    )
 
     if backend in {"", "codex_builtin"}:
         if not request:
@@ -52,6 +67,8 @@ def assess_cover_publish_readiness(
             label="封面生成元数据",
             pending_reason="封面生成元数据仍标记为等待图片生成完成",
         )
+    if effective_source == "reference_cover_fallback":
+        blocking_reasons.append("封面当前仅为参考帧占位图，正式生图尚未完成")
 
     if path is None:
         blocking_reasons.append("封面输出路径缺失")
@@ -117,6 +134,28 @@ def assess_cover_publish_readiness(
     }
 
 
+def _effective_cover_source(cover_generation_metadata: dict[str, Any] | None) -> str:
+    if not isinstance(cover_generation_metadata, dict):
+        return ""
+    source = str(cover_generation_metadata.get("source") or "").strip().lower()
+    if source:
+        group_generation = (
+            cover_generation_metadata.get("group_generation")
+            if isinstance(cover_generation_metadata.get("group_generation"), dict)
+            else {}
+        )
+        nested_source = str(group_generation.get("source") or "").strip().lower()
+        if source == "cover_group_reuse" and nested_source:
+            return nested_source
+        return source
+    group_generation = (
+        cover_generation_metadata.get("group_generation")
+        if isinstance(cover_generation_metadata.get("group_generation"), dict)
+        else {}
+    )
+    return str(group_generation.get("source") or "").strip().lower()
+
+
 def _image_generation_metadata(cover_generation_metadata: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(cover_generation_metadata, dict):
         return {}
@@ -149,6 +188,51 @@ def _append_status_blockers(
         blocking_reasons.append(f"{label}缺少 status=completed")
         return
     blocking_reasons.append(f"{label}状态不是 completed：status={status}")
+
+
+def _resolve_effective_cover_status(
+    *,
+    status: str,
+    backend: str,
+    payload: dict[str, Any] | None,
+    output_path: Path | None,
+    counterpart_status: str,
+) -> str:
+    normalized = str(status or "").strip().lower()
+    if normalized == "completed":
+        return "completed"
+    if counterpart_status == "completed" and _cover_output_exists(output_path):
+        return "completed"
+    if normalized in {"pending", "pending_codex_imagegen", "queued", "running", "in_progress"}:
+        if backend in {"", "codex_builtin"} and _cover_payload_has_completion_evidence(payload) and _cover_output_exists(output_path):
+            return "completed"
+    return normalized
+
+
+def _cover_output_exists(output_path: Path | None) -> bool:
+    if output_path is None:
+        return False
+    try:
+        return output_path.exists() and output_path.is_file()
+    except OSError:
+        return False
+
+
+def _cover_payload_has_completion_evidence(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    for field in (
+        "completed_at",
+        "result_path",
+        "bitmap_title_contract_verified_at",
+        "bitmap_unexpected_text_checked_at",
+        "compare_subject_contract_checked_at",
+    ):
+        if str(payload.get(field) or "").strip():
+            return True
+    if bool(payload.get("post_title_overlay_applied")) or bool(payload.get("generated_by_codex_bridge")):
+        return True
+    return False
 
 
 def _check_output_path_matches_request(
