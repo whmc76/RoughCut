@@ -11,9 +11,11 @@ from fastapi import HTTPException
 from roughcut.api import jobs as jobs_module
 from roughcut.pipeline import steps as pipeline_steps_module
 from roughcut.api.jobs import ManualEditorApplyIn
+from roughcut.edit import render_plan as render_plan_module
 from roughcut.api.jobs import (
     _apply_manual_subtitle_overrides,
     _annotate_manual_projected_subtitle_sources,
+    _build_activity_decisions,
     _manual_editor_align_source_rows_to_asr_words,
     _attach_manual_editor_words_to_subtitles,
     _build_editorial_segments_from_keep_segments,
@@ -58,6 +60,7 @@ from roughcut.api.jobs import (
     _manual_editor_preview_assets_response,
     _manual_editor_base_keep_segment_dicts,
     _manual_editor_build_refine_decision_plan_from_render_plan,
+    _manual_editor_editorial_context,
     _manual_editor_projection_rows_as_source_rows,
     _load_manual_editor_cut_analysis_payload,
     _load_manual_editor_source_subtitle_dicts,
@@ -68,6 +71,8 @@ from roughcut.api.jobs import (
     _manual_editor_source_fallback_projection_items,
     _manual_editor_normalize_word_payloads_for_text,
     _manual_editor_packaging_plan_from_render_plan,
+    _manual_editor_render_plan_context,
+    _manual_video_transform_from_render_plan,
     _manual_editor_projected_subtitles_have_duplicate_source_overlap,
     _manual_editor_projection_baseline_rows,
     _manual_editor_projection_should_use_source_fallback,
@@ -98,9 +103,31 @@ from roughcut.edit.cut_analysis import (
 )
 from roughcut.edit.editorial_timeline import (
     build_editorial_segments_from_keep_segments as build_shared_editorial_segments_from_keep_segments,
+    editorial_cut_segments,
+    editorial_timeline_analysis,
+    editorial_timeline_segments,
+    editorial_timeline_subtitle_projection,
     resolve_editorial_keep_segments,
 )
-from roughcut.edit.packaging_timeline import packaging_timeline_assets
+from roughcut.edit.render_plan import (
+    render_plan_ai_director,
+    render_plan_automatic_gate,
+    render_plan_avatar_commentary,
+    render_plan_cover,
+    render_plan_delivery,
+    render_plan_loudness,
+    render_plan_manual_editor,
+    render_plan_video_transform,
+    render_plan_voice_processing,
+    render_plan_workflow_preset,
+)
+from roughcut.edit.packaging_timeline import (
+    packaging_timeline_asset_plan,
+    packaging_timeline_assets,
+    packaging_timeline_has_editing_accents,
+    packaging_timeline_has_packaging_assets,
+    packaging_timeline_transitions,
+)
 from roughcut.edit.strategy_decisions import STRATEGY_CANDIDATE_DECISION_SCHEMA_VERSION
 from roughcut.edit.strategy_profile import (
     DEFAULT_STRATEGY_TYPE,
@@ -160,11 +187,17 @@ from roughcut.pipeline.steps import (
     _load_latest_subtitle_payloads,
     _load_source_subtitle_payloads_for_projection_validation,
     _map_editing_accents_to_packaged_timeline,
+    _resolve_editorial_analysis_payload,
+    _runtime_packaging_context,
+    _runtime_render_plan_context,
+    _variant_timeline_editorial_context,
     _resolve_packaged_timeline_mapping_context,
+    _resolve_transition_overlap_offsets,
     _map_subtitles_to_packaged_timeline,
     _project_canonical_transcript_to_timeline,
     _resolve_packaged_render_variant,
     _subtitle_section_profile_for_time,
+    _validate_variant_timeline_bundle,
     _manual_editor_subtitle_items_from_editorial,
     _merge_render_runtime_result,
     _normalize_subtitle_event,
@@ -181,6 +214,8 @@ from roughcut.pipeline.steps import (
     _resolve_packaging_trailing_gap_allowance,
     _resolve_keep_segments_from_refine_plan,
     _resolve_projection_split_profile,
+    _resegment_packaged_subtitles,
+    _rewrite_packaged_subtitle_copy,
     _subtitle_item_payload,
     _subtitle_projection_entry_payload,
     _should_keep_existing_subtitle_projection,
@@ -259,6 +294,274 @@ async def test_packaged_timeline_mapping_reuses_intro_and_insert_probe_context(
     assert subtitles
     assert accents["emphasis_overlays"]
     assert probe_calls == ["intro.mp4", "insert.mp4"]
+    assert timeline_mapping["section_profile_context"] == {
+        "subtitles": {},
+        "timeline_analysis": {},
+    }
+
+
+@pytest.mark.asyncio
+async def test_packaged_timeline_mapping_accepts_normalized_packaging_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe_calls: list[str] = []
+
+    async def _fake_probe_media_duration(path: Path) -> float:
+        probe_calls.append(path.name)
+        if path.name == "intro.mp4":
+            return 1.2
+        if path.name == "insert.mp4":
+            return 0.8
+        raise AssertionError(f"unexpected probe path: {path}")
+
+    monkeypatch.setattr("roughcut.pipeline.steps._probe_media_duration", _fake_probe_media_duration)
+
+    render_plan = {
+        "editing_accents": {"transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12}},
+        "packaging": {
+            "intro": {"path": "intro.mp4"},
+            "insert": {"path": "insert.mp4", "insert_after_sec": 2.0},
+        },
+    }
+    keep_segments = [{"start": 0.0, "end": 3.0}, {"start": 4.0, "end": 7.0}]
+
+    timeline_mapping = await _resolve_packaged_timeline_mapping_context(
+        render_plan,
+        keep_segments=keep_segments,
+    )
+
+    assert timeline_mapping["intro_duration_sec"] == 1.2
+    assert timeline_mapping["effective_insert_duration_sec"] == 0.8
+    assert timeline_mapping["insert_after_sec"] == 3.2
+    assert probe_calls == ["intro.mp4", "insert.mp4"]
+
+
+@pytest.mark.asyncio
+async def test_packaged_timeline_mapping_reuses_local_normalized_packaging_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe_calls: list[str] = []
+
+    async def _fake_probe_media_duration(path: Path) -> float:
+        probe_calls.append(path.name)
+        if path.name == "intro.mp4":
+            return 1.2
+        if path.name == "insert.mp4":
+            return 0.8
+        raise AssertionError(f"unexpected probe path: {path}")
+
+    monkeypatch.setattr("roughcut.pipeline.steps._probe_media_duration", _fake_probe_media_duration)
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "packaging_timeline_asset_plan",
+        lambda _payload, _name: (_ for _ in ()).throw(AssertionError("should reuse local packaging payload")),
+    )
+
+    timeline_mapping = await _resolve_packaged_timeline_mapping_context(
+        {
+            "packaging": {
+                "intro": {"path": "intro.mp4"},
+                "insert": {"path": "insert.mp4", "insert_after_sec": 2.0},
+            },
+            "editing_accents": {
+                "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+            },
+        },
+        keep_segments=[{"start": 0.0, "end": 3.0}, {"start": 4.0, "end": 7.0}],
+    )
+
+    assert timeline_mapping["intro_duration_sec"] == 1.2
+    assert timeline_mapping["effective_insert_duration_sec"] == 0.8
+    assert timeline_mapping["insert_after_sec"] == 3.2
+    assert probe_calls == ["intro.mp4", "insert.mp4"]
+
+
+@pytest.mark.asyncio
+async def test_packaged_timeline_mapping_reuses_local_transitions_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, Any] = {}
+
+    def _capture_transition_offsets(_render_plan, *, keep_segments, transitions=None):
+        observed["render_plan"] = _render_plan
+        observed["keep_segments"] = keep_segments
+        observed["transitions"] = transitions
+        return [(3.0, 0.12)]
+
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_resolve_transition_overlap_offsets",
+        _capture_transition_offsets,
+    )
+
+    timeline_mapping = await _resolve_packaged_timeline_mapping_context(
+        {
+            "editing_accents": {
+                "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+            },
+            "packaging": {},
+        },
+        keep_segments=[{"start": 0.0, "end": 3.0}, {"start": 4.0, "end": 7.0}],
+    )
+
+    assert timeline_mapping["transition_offsets"] == [(3.0, 0.12)]
+    assert observed["render_plan"] is None
+    assert observed["keep_segments"] == [{"start": 0.0, "end": 3.0}, {"start": 4.0, "end": 7.0}]
+    assert observed["transitions"] == {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12}
+
+
+@pytest.mark.asyncio
+async def test_packaged_timeline_mapping_reuses_local_packaging_timeline_for_section_profile_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_packaging_timelines: list[dict[str, Any]] = []
+
+    async def _fake_probe_media_duration(_path: Path) -> float:
+        return 0.0
+
+    def _capture_section_profile_context(
+        _render_plan: dict[str, Any] | None,
+        *,
+        packaging_timeline: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        assert isinstance(packaging_timeline, dict)
+        captured_packaging_timelines.append(dict(packaging_timeline))
+        return {"subtitles": {}, "timeline_analysis": {}}
+
+    monkeypatch.setattr("roughcut.pipeline.steps._probe_media_duration", _fake_probe_media_duration)
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_packaged_subtitle_section_profile_context",
+        _capture_section_profile_context,
+    )
+
+    timeline_mapping = await _resolve_packaged_timeline_mapping_context(
+        {
+            "packaging": {},
+            "editing_accents": {
+                "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+            },
+            "subtitles": {"style": "clean_white"},
+        },
+        keep_segments=[{"start": 0.0, "end": 3.0}, {"start": 4.0, "end": 7.0}],
+    )
+
+    assert timeline_mapping["section_profile_context"] == {"subtitles": {}, "timeline_analysis": {}}
+    assert captured_packaging_timelines == [
+        {
+            "timeline_analysis": {},
+            "editing_skill": {},
+            "section_choreography": {},
+            "subtitles": {"style": "clean_white"},
+            "packaging": {
+                "intro": None,
+                "outro": None,
+                "insert": None,
+                "watermark": None,
+                "music": None,
+            },
+            "editing_accents": {
+                "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+            },
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_packaged_timeline_mapping_reuses_passed_packaging_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    probe_calls: list[str] = []
+    observed: dict[str, Any] = {}
+
+    async def _fake_probe_media_duration(path: Path) -> float:
+        probe_calls.append(path.name)
+        if path.name == "intro.mp4":
+            return 1.2
+        if path.name == "insert.mp4":
+            return 0.8
+        raise AssertionError(f"unexpected probe path: {path}")
+
+    def _capture_transition_offsets(_render_plan, *, keep_segments, transitions=None):
+        observed["render_plan"] = _render_plan
+        observed["keep_segments"] = keep_segments
+        observed["transitions"] = transitions
+        return [(3.0, 0.12)]
+
+    monkeypatch.setattr("roughcut.pipeline.steps._probe_media_duration", _fake_probe_media_duration)
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "resolve_packaging_timeline_payload",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse passed packaging context")),
+    )
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_resolve_transition_overlap_offsets",
+        _capture_transition_offsets,
+    )
+
+    timeline_mapping = await _resolve_packaged_timeline_mapping_context(
+        None,
+        keep_segments=[{"start": 0.0, "end": 3.0}, {"start": 4.0, "end": 7.0}],
+        packaging_context={
+            "packaging_timeline": {
+                "timeline_analysis": {"hook_end_sec": 1.5},
+                "subtitles": {"section_profiles": [{"role": "hook", "start_sec": 0.0, "end_sec": 1.5}]},
+            },
+            "assets": {
+                "intro": {"path": "intro.mp4"},
+                "insert": {"path": "insert.mp4", "insert_after_sec": 2.0},
+            },
+            "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+            "section_profile_context": {
+                "subtitles": {"section_profiles": [{"role": "hook", "start_sec": 0.0, "end_sec": 1.5}]},
+                "timeline_analysis": {"hook_end_sec": 1.5},
+            },
+        },
+    )
+
+    assert timeline_mapping["transition_offsets"] == [(3.0, 0.12)]
+    assert timeline_mapping["intro_duration_sec"] == 1.2
+    assert timeline_mapping["effective_insert_duration_sec"] == 0.8
+    assert timeline_mapping["insert_after_sec"] == 3.2
+    assert observed["render_plan"] is None
+    assert observed["keep_segments"] == [{"start": 0.0, "end": 3.0}, {"start": 4.0, "end": 7.0}]
+    assert observed["transitions"] == {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12}
+    assert timeline_mapping["section_profile_context"] == {
+        "subtitles": {"section_profiles": [{"role": "hook", "start_sec": 0.0, "end_sec": 1.5}]},
+        "timeline_analysis": {"hook_end_sec": 1.5},
+    }
+    assert probe_calls == ["intro.mp4", "insert.mp4"]
+
+
+@pytest.mark.asyncio
+async def test_map_editing_accents_to_packaged_timeline_reuses_passed_timeline_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_resolve_packaged_timeline_mapping_context",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should reuse passed timeline mapping")),
+    )
+
+    mapped = await _map_editing_accents_to_packaged_timeline(
+        {
+            "emphasis_overlays": [{"start_time": 1.0, "end_time": 1.4, "text": "demo"}],
+            "sound_effects": [{"start_time": 1.2, "duration_sec": 0.1, "frequency": 880}],
+        },
+        None,
+        keep_segments=[{"start": 0.0, "end": 3.0}],
+        timeline_mapping={
+            "transition_offsets": [],
+            "intro_duration_sec": 1.0,
+            "insert_plan": None,
+            "insert_after_sec": 0.0,
+            "effective_insert_duration_sec": 0.0,
+        },
+    )
+
+    assert mapped["emphasis_overlays"] == [{"start_time": 2.0, "end_time": 2.4, "text": "demo"}]
+    assert mapped["sound_effects"] == [{"start_time": 2.2, "duration_sec": 0.1, "frequency": 880}]
 
 
 @pytest.mark.asyncio
@@ -275,18 +578,42 @@ async def test_packaging_trailing_gap_allowance_reuses_shared_outro_duration_pro
 
     packaged_plan = {"packaging_timeline": {"packaging": {"outro": {"path": "shared-outro.mp4"}}}}
     ai_effect_plan = {"packaging_timeline": {"packaging": {"outro": {"path": "shared-outro.mp4"}}}}
+    packaged_outro_plan = {"path": "shared-outro.mp4"}
+    ai_effect_outro_plan = {"path": "shared-outro.mp4"}
 
-    packaged_duration = await _resolve_packaging_trailing_gap_allowance(packaged_plan)
+    packaged_duration = await _resolve_packaging_trailing_gap_allowance(packaged_plan, outro_plan=packaged_outro_plan)
     ai_effect_duration = (
         packaged_duration
-        if str((((packaged_plan.get("packaging_timeline") or {}).get("packaging") or {}).get("outro") or {}).get("path") or "").strip()
-        == str((((ai_effect_plan.get("packaging_timeline") or {}).get("packaging") or {}).get("outro") or {}).get("path") or "").strip()
-        else await _resolve_packaging_trailing_gap_allowance(ai_effect_plan)
+        if str((packaged_outro_plan or {}).get("path") or "").strip()
+        == str((ai_effect_outro_plan or {}).get("path") or "").strip()
+        else await _resolve_packaging_trailing_gap_allowance(ai_effect_plan, outro_plan=ai_effect_outro_plan)
     )
 
     assert packaged_duration == 1.6
     assert ai_effect_duration == 1.6
     assert probe_calls == ["shared-outro.mp4"]
+
+
+@pytest.mark.asyncio
+async def test_packaging_trailing_gap_allowance_reuses_passed_outro_plan_without_render_plan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "packaging_timeline_asset_plan",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should reuse provided outro plan")),
+    )
+
+    async def _fake_probe(path: Path) -> SimpleNamespace:
+        return SimpleNamespace(duration=1.2 if path.name == "shared-outro.mp4" else 0.0)
+
+    monkeypatch.setattr("roughcut.pipeline.steps.probe", _fake_probe)
+
+    duration = await _resolve_packaging_trailing_gap_allowance(
+        outro_plan={"path": "shared-outro.mp4"},
+    )
+
+    assert duration == 1.2
 
 
 def test_resolve_packaged_render_variant_reuses_duration_driven_timeline_and_single_subtitle_source() -> None:
@@ -713,6 +1040,130 @@ def test_manual_editor_packaging_plan_reads_nested_packaging_timeline() -> None:
     }
 
 
+def test_manual_editor_packaging_plan_reuses_local_normalized_packaging_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        jobs_module,
+        "_manual_editor_render_plan_context",
+        lambda _payload: {
+            "packaging_timeline": {
+                "subtitles": {"style": "clean_white", "motion_style": "motion_slide"},
+                "packaging": {
+                    "intro": {"path": "shared-intro.mp4"},
+                    "music": {"path": "shared-music.mp3"},
+                },
+                "editing_accents": {"style": "smart_effect_punch"},
+            },
+            "cover": {"style": "hero", "title_style": "strong"},
+            "delivery": {},
+        },
+    )
+
+    assert _manual_editor_packaging_plan_from_render_plan(
+        {
+            "packaging_timeline": {
+                "subtitles": {"style": "clean_white", "motion_style": "motion_slide"},
+                "packaging": {
+                    "intro": {"path": "shared-intro.mp4"},
+                    "music": {"path": "shared-music.mp3"},
+                },
+                "editing_accents": {"style": "smart_effect_punch"},
+            },
+            "cover": {"style": "hero", "title_style": "strong"},
+        }
+    ) == {
+        "subtitle_style": "clean_white",
+        "subtitle_motion_style": "motion_slide",
+        "smart_effect_style": "smart_effect_punch",
+        "cover_style": "hero",
+        "title_style": "strong",
+        "intro": {"path": "shared-intro.mp4"},
+        "outro": None,
+        "insert": None,
+        "watermark": None,
+        "music": {"path": "shared-music.mp3"},
+        "export_resolution_mode": "source",
+        "export_resolution_preset": "1080p",
+        "export_frame_rate_mode": "source",
+        "export_frame_rate_preset": "30",
+    }
+
+
+def test_manual_editor_packaging_plan_reuses_caller_render_plan_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        jobs_module,
+        "_manual_editor_render_plan_context",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse caller render plan context")),
+    )
+
+    assert _manual_editor_packaging_plan_from_render_plan(
+        None,
+        render_plan_context={
+            "packaging_timeline": {
+                "subtitles": {"style": "clean_white", "motion_style": "motion_slide"},
+                "packaging": {"intro": {"path": "shared-intro.mp4"}},
+                "editing_accents": {"style": "smart_effect_punch"},
+            },
+            "cover": {"style": "hero", "title_style": "strong"},
+            "delivery": {"resolution_mode": "preset", "resolution_preset": "1080p"},
+        },
+    ) == {
+        "subtitle_style": "clean_white",
+        "subtitle_motion_style": "motion_slide",
+        "smart_effect_style": "smart_effect_punch",
+        "cover_style": "hero",
+        "title_style": "strong",
+        "intro": {"path": "shared-intro.mp4"},
+        "outro": None,
+        "insert": None,
+        "watermark": None,
+        "music": None,
+        "export_resolution_mode": "preset",
+        "export_resolution_preset": "1080p",
+        "export_frame_rate_mode": "source",
+        "export_frame_rate_preset": "30",
+    }
+
+
+def test_manual_editor_packaging_plan_reuses_caller_packaging_timeline_cover_and_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        jobs_module,
+        "_manual_editor_render_plan_context",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse caller packaging timeline / cover / delivery")),
+    )
+
+    assert _manual_editor_packaging_plan_from_render_plan(
+        None,
+        packaging_timeline={
+            "subtitles": {"style": "clean_white", "motion_style": "motion_slide"},
+            "packaging": {"intro": {"path": "shared-intro.mp4"}},
+            "editing_accents": {"style": "smart_effect_punch"},
+        },
+        cover={"style": "hero", "title_style": "strong"},
+        delivery={"resolution_mode": "preset", "resolution_preset": "1080p"},
+    ) == {
+        "subtitle_style": "clean_white",
+        "subtitle_motion_style": "motion_slide",
+        "smart_effect_style": "smart_effect_punch",
+        "cover_style": "hero",
+        "title_style": "strong",
+        "intro": {"path": "shared-intro.mp4"},
+        "outro": None,
+        "insert": None,
+        "watermark": None,
+        "music": None,
+        "export_resolution_mode": "preset",
+        "export_resolution_preset": "1080p",
+        "export_frame_rate_mode": "source",
+        "export_frame_rate_preset": "30",
+    }
+
+
 def test_packaging_timeline_assets_accept_normalized_payload_directly() -> None:
     assert packaging_timeline_assets(
         {
@@ -732,6 +1183,197 @@ def test_packaging_timeline_assets_accept_normalized_payload_directly() -> None:
     }
 
 
+def test_packaging_timeline_asset_plan_accepts_nested_and_normalized_payloads() -> None:
+    assert packaging_timeline_asset_plan(
+        {
+            "packaging_timeline": {
+                "packaging": {
+                    "outro": {"path": "outro.mp4"},
+                }
+            }
+        },
+        "outro",
+    ) == {"path": "outro.mp4"}
+    assert packaging_timeline_asset_plan(
+        {
+            "packaging": {
+                "music": {"path": "music.mp3"},
+            }
+        },
+        "music",
+    ) == {"path": "music.mp3"}
+
+
+def test_packaging_timeline_asset_plan_returns_safe_copy() -> None:
+    payload = {
+        "packaging": {
+            "intro": {"path": "intro.mp4", "gain_db": -6.0},
+        }
+    }
+
+    intro_plan = packaging_timeline_asset_plan(payload, "intro")
+    intro_plan["gain_db"] = -12.0
+
+    assert packaging_timeline_asset_plan(payload, "intro") == {"path": "intro.mp4", "gain_db": -6.0}
+    assert packaging_timeline_asset_plan(payload, "") is None
+    assert packaging_timeline_asset_plan(None, "intro") is None
+
+
+def test_packaging_timeline_asset_plan_reuses_local_packaging_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from roughcut.edit import packaging_timeline as packaging_timeline_module
+
+    monkeypatch.setattr(
+        packaging_timeline_module,
+        "packaging_timeline_assets",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local packaging payload")),
+    )
+
+    assert packaging_timeline_asset_plan(
+        {
+            "packaging": {
+                "music": {"path": "music.mp3"},
+            }
+        },
+        "music",
+    ) == {"path": "music.mp3"}
+
+
+def test_packaging_timeline_transitions_accept_nested_and_normalized_payloads() -> None:
+    assert packaging_timeline_transitions(
+        {
+            "packaging_timeline": {
+                "editing_accents": {
+                    "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+                }
+            }
+        }
+    ) == {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12}
+    assert packaging_timeline_transitions(
+        {
+            "editing_accents": {
+                "transitions": {"enabled": False, "boundary_indexes": [], "duration_sec": 0.2},
+            }
+        }
+    ) == {"enabled": False, "boundary_indexes": [], "duration_sec": 0.2}
+
+
+def test_packaging_timeline_transitions_returns_safe_copy() -> None:
+    payload = {
+        "editing_accents": {
+            "transitions": {"enabled": True, "boundary_indexes": [1], "duration_sec": 0.16},
+        }
+    }
+
+    transitions = packaging_timeline_transitions(payload)
+    transitions["boundary_indexes"].append(2)
+    transitions["duration_sec"] = 0.24
+
+    assert packaging_timeline_transitions(payload) == {
+        "enabled": True,
+        "boundary_indexes": [1],
+        "duration_sec": 0.16,
+    }
+    assert packaging_timeline_transitions({}) == {}
+    assert packaging_timeline_transitions(None) == {}
+
+
+def test_packaging_timeline_transitions_reuse_local_accents_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from roughcut.edit import packaging_timeline as packaging_timeline_module
+
+    monkeypatch.setattr(
+        packaging_timeline_module,
+        "packaging_timeline_editing_accents",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local editing accents payload")),
+    )
+
+    assert packaging_timeline_transitions(
+        {
+            "editing_accents": {
+                "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+            }
+        }
+    ) == {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12}
+
+
+def test_packaging_timeline_presence_helpers_support_nested_and_normalized_payloads() -> None:
+    nested_payload = {
+        "packaging_timeline": {
+            "packaging": {
+                "intro": {"path": "intro.mp4"},
+            },
+            "editing_accents": {
+                "transitions": {"boundary_indexes": [0]},
+            },
+        }
+    }
+    normalized_payload = {
+        "packaging": {
+            "music": {"path": "music.mp3"},
+        },
+        "editing_accents": {
+            "emphasis_overlays": [{"start_time": 0.5, "end_time": 1.0, "text": "demo"}],
+        },
+    }
+
+    assert packaging_timeline_has_packaging_assets(nested_payload) is True
+    assert packaging_timeline_has_editing_accents(nested_payload) is True
+    assert packaging_timeline_has_packaging_assets(normalized_payload) is True
+    assert packaging_timeline_has_editing_accents(normalized_payload) is True
+
+
+def test_packaging_timeline_presence_helpers_default_false_for_empty_payloads() -> None:
+    assert packaging_timeline_has_packaging_assets({}) is False
+    assert packaging_timeline_has_packaging_assets(None) is False
+    assert packaging_timeline_has_editing_accents({}) is False
+    assert packaging_timeline_has_editing_accents(
+        {"packaging_timeline": {"editing_accents": {"transitions": {"boundary_indexes": []}}}}
+    ) is False
+
+
+def test_packaging_timeline_has_packaging_assets_reuses_local_packaging_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from roughcut.edit import packaging_timeline as packaging_timeline_module
+
+    monkeypatch.setattr(
+        packaging_timeline_module,
+        "packaging_timeline_assets",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local packaging payload")),
+    )
+
+    assert packaging_timeline_has_packaging_assets(
+        {
+            "packaging": {
+                "intro": {"path": "intro.mp4"},
+            }
+        }
+    ) is True
+
+
+def test_packaging_timeline_has_editing_accents_reuses_local_accents_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from roughcut.edit import packaging_timeline as packaging_timeline_module
+
+    monkeypatch.setattr(
+        packaging_timeline_module,
+        "packaging_timeline_transitions",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local accents transitions")),
+    )
+
+    assert packaging_timeline_has_editing_accents(
+        {
+            "editing_accents": {
+                "transitions": {"boundary_indexes": [0]},
+            }
+        }
+    ) is True
+
+
 def test_subtitle_section_profile_for_time_reads_nested_packaging_timeline_payload() -> None:
     assert _subtitle_section_profile_for_time(
         {
@@ -745,6 +1387,498 @@ def test_subtitle_section_profile_for_time_reads_nested_packaging_timeline_paylo
         },
         1.0,
     ) == {"role": "hook", "start_sec": 0.0, "end_sec": 2.0}
+
+
+def test_subtitle_section_profile_for_time_reuses_local_normalized_packaging_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "packaging_timeline_subtitles",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local subtitles payload")),
+    )
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "packaging_timeline_analysis",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local timeline_analysis payload")),
+    )
+
+    assert _subtitle_section_profile_for_time(
+        {
+            "subtitles": {
+                "section_profiles": [
+                    {"role": "hook", "start_sec": 0.0, "end_sec": 2.0},
+                ]
+            },
+            "timeline_analysis": {
+                "section_directives": [
+                    {"role": "bridge", "start_sec": 2.0, "end_sec": 4.0},
+                ]
+            },
+        },
+        3.0,
+    ) == {"role": "bridge", "start_sec": 2.0, "end_sec": 4.0}
+
+
+def test_subtitle_section_profile_for_time_reuses_shared_section_profile_context_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "resolve_packaging_timeline_payload",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should resolve section profile context via shared helper")),
+    )
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_packaged_subtitle_section_profile_context",
+        lambda _render_plan: {
+            "subtitles": {
+                "section_profiles": [
+                    {"role": "hook", "start_sec": 0.0, "end_sec": 1.2},
+                ]
+            },
+            "timeline_analysis": {},
+        },
+    )
+
+    assert _subtitle_section_profile_for_time({}, 0.8) == {
+        "role": "hook",
+        "start_sec": 0.0,
+        "end_sec": 1.2,
+    }
+
+
+def test_rewrite_packaged_subtitle_copy_reuses_local_section_profile_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_contexts: list[dict[str, Any]] = []
+
+    def _capture_profile(
+        _render_plan: dict[str, Any],
+        _time_sec: float,
+        *,
+        section_profile_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        assert _render_plan is None
+        assert isinstance(section_profile_context, dict)
+        captured_contexts.append(section_profile_context)
+        return None
+
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_subtitle_section_profile_for_time",
+        _capture_profile,
+    )
+
+    rewritten = _rewrite_packaged_subtitle_copy(
+        [
+            {"start_time": 0.0, "end_time": 1.0, "text_final": "第一句"},
+            {"start_time": 1.0, "end_time": 2.0, "text_final": "第二句"},
+        ],
+        render_plan={"packaging_timeline": {"subtitles": {"section_profiles": []}}},
+    )
+
+    assert [item["text_final"] for item in rewritten] == ["第一句", "第二句"]
+    assert len(captured_contexts) == 2
+    assert captured_contexts[0] is captured_contexts[1]
+
+
+def test_resegment_packaged_subtitles_reuses_local_section_profile_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_contexts: list[dict[str, Any]] = []
+
+    def _capture_profile(
+        _render_plan: dict[str, Any],
+        _time_sec: float,
+        *,
+        section_profile_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        assert _render_plan is None
+        assert isinstance(section_profile_context, dict)
+        captured_contexts.append(section_profile_context)
+        return None
+
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_subtitle_section_profile_for_time",
+        _capture_profile,
+    )
+
+    resegmented = _resegment_packaged_subtitles(
+        [
+            {"start_time": 0.0, "end_time": 1.0, "text_final": "第一句"},
+            {"start_time": 1.0, "end_time": 2.0, "text_final": "第二句"},
+        ],
+        render_plan={"packaging_timeline": {"subtitles": {"section_profiles": []}}},
+    )
+
+    assert [item["text_final"] for item in resegmented] == ["第一句", "第二句"]
+    assert len(captured_contexts) == 2
+    assert captured_contexts[0] is captured_contexts[1]
+
+
+@pytest.mark.asyncio
+async def test_map_subtitles_to_packaged_timeline_reuses_local_section_profile_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_contexts: list[dict[str, Any]] = []
+
+    def _capture_rewrite(
+        subtitle_items: list[dict[str, Any]],
+        *,
+        render_plan: dict[str, Any] | None,
+        section_profile_context: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        assert render_plan is None
+        assert isinstance(section_profile_context, dict)
+        captured_contexts.append(section_profile_context)
+        return [dict(item) for item in subtitle_items]
+
+    def _capture_resegment(
+        subtitle_items: list[dict[str, Any]],
+        *,
+        render_plan: dict[str, Any] | None,
+        section_profile_context: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        assert render_plan is None
+        assert isinstance(section_profile_context, dict)
+        captured_contexts.append(section_profile_context)
+        return [dict(item) for item in subtitle_items]
+
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_rewrite_packaged_subtitle_copy",
+        _capture_rewrite,
+    )
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_resegment_packaged_subtitles",
+        _capture_resegment,
+    )
+
+    subtitles = await _map_subtitles_to_packaged_timeline(
+        [{"start_time": 0.0, "end_time": 1.0, "text_final": "第一句"}],
+        None,
+        timeline_mapping={
+            "transition_offsets": [],
+            "intro_duration_sec": 0.0,
+            "insert_plan": None,
+            "insert_after_sec": 0.0,
+            "effective_insert_duration_sec": 0.0,
+        },
+    )
+
+    assert [item["text_final"] for item in subtitles] == ["第一句"]
+    assert len(captured_contexts) == 2
+    assert captured_contexts[0] is captured_contexts[1]
+
+
+@pytest.mark.asyncio
+async def test_map_subtitles_to_packaged_timeline_reuses_section_profile_context_from_timeline_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "resolve_packaging_timeline_payload",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse section profile context from timeline mapping")),
+    )
+
+    subtitles = await _map_subtitles_to_packaged_timeline(
+        [{"start_time": 0.0, "end_time": 1.0, "text_final": "第一句"}],
+        {},
+        timeline_mapping={
+            "transition_offsets": [],
+            "intro_duration_sec": 0.0,
+            "insert_plan": None,
+            "insert_after_sec": 0.0,
+            "effective_insert_duration_sec": 0.0,
+            "section_profile_context": {"subtitles": {}, "timeline_analysis": {}},
+        },
+    )
+
+    assert [item["text_final"] for item in subtitles] == ["第一句"]
+
+
+@pytest.mark.asyncio
+async def test_map_subtitles_to_packaged_timeline_reuses_shared_section_profile_context_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_payloads: list[dict[str, Any]] = []
+
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "resolve_packaging_timeline_payload",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should resolve section profile context via shared helper")),
+    )
+
+    def _capture_section_profile_context(render_plan: dict[str, Any] | None) -> dict[str, Any]:
+        captured_payloads.append(dict(render_plan or {}))
+        return {"subtitles": {}, "timeline_analysis": {}}
+
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_packaged_subtitle_section_profile_context",
+        _capture_section_profile_context,
+    )
+
+    subtitles = await _map_subtitles_to_packaged_timeline(
+        [{"start_time": 0.0, "end_time": 1.0, "text_final": "第一句"}],
+        {"packaging_timeline": {"subtitles": {"style": "clean_white"}}},
+        timeline_mapping={
+            "transition_offsets": [],
+            "intro_duration_sec": 0.0,
+            "insert_plan": None,
+            "insert_after_sec": 0.0,
+            "effective_insert_duration_sec": 0.0,
+        },
+    )
+
+    assert [item["text_final"] for item in subtitles] == ["第一句"]
+    assert captured_payloads == [{"packaging_timeline": {"subtitles": {"style": "clean_white"}}}]
+
+
+def test_runtime_packaging_context_reads_nested_packaging_timeline_payload() -> None:
+    assert _runtime_packaging_context(
+        {
+            "packaging_timeline": {
+                "packaging": {
+                    "intro": {"path": "intro.mp4"},
+                    "music": {"path": "music.mp3"},
+                },
+                "editing_accents": {
+                    "style": "smart_effect_punch",
+                    "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+                },
+            }
+        }
+    ) == {
+        "packaging_timeline": {
+            "timeline_analysis": {},
+            "editing_skill": {},
+            "section_choreography": {},
+            "subtitles": {},
+            "packaging": {
+                "intro": {"path": "intro.mp4"},
+                "outro": None,
+                "insert": None,
+                "watermark": None,
+                "music": {"path": "music.mp3"},
+            },
+            "editing_accents": {
+                "style": "smart_effect_punch",
+                "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+            },
+        },
+        "assets": {
+            "intro": {"path": "intro.mp4"},
+            "outro": None,
+            "insert": None,
+            "watermark": None,
+            "music": {"path": "music.mp3"},
+        },
+        "editing_accents": {
+            "style": "smart_effect_punch",
+            "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+        },
+        "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+        "section_choreography": {},
+        "subtitles": {},
+        "section_profile_context": {
+            "subtitles": {},
+            "timeline_analysis": {},
+        },
+        "has_packaging": True,
+        "has_packaging_assets": True,
+        "has_editing_accents": True,
+    }
+
+
+def test_runtime_packaging_context_reuses_local_normalized_packaging_payload() -> None:
+    assert not hasattr(pipeline_steps_module, "packaging_timeline_assets")
+    assert not hasattr(pipeline_steps_module, "packaging_timeline_editing_accents")
+    assert not hasattr(pipeline_steps_module, "packaging_timeline_has_packaging_assets")
+    assert not hasattr(pipeline_steps_module, "packaging_timeline_has_editing_accents")
+
+    assert _runtime_packaging_context(
+        {
+            "packaging": {
+                "outro": {"path": "outro.mp4"},
+            },
+            "editing_accents": {
+                "transitions": {"enabled": False, "boundary_indexes": [], "duration_sec": 0.12},
+                "emphasis_overlays": [{"start_time": 0.5, "end_time": 1.0, "text": "demo"}],
+            },
+        }
+    ) == {
+        "packaging_timeline": {
+            "timeline_analysis": {},
+            "editing_skill": {},
+            "section_choreography": {},
+            "subtitles": {},
+            "packaging": {
+                "intro": None,
+                "outro": {"path": "outro.mp4"},
+                "insert": None,
+                "watermark": None,
+                "music": None,
+            },
+            "editing_accents": {
+                "transitions": {"enabled": False, "boundary_indexes": [], "duration_sec": 0.12},
+                "emphasis_overlays": [{"start_time": 0.5, "end_time": 1.0, "text": "demo"}],
+            },
+        },
+        "assets": {
+            "intro": None,
+            "outro": {"path": "outro.mp4"},
+            "insert": None,
+            "watermark": None,
+            "music": None,
+        },
+        "editing_accents": {
+            "transitions": {"enabled": False, "boundary_indexes": [], "duration_sec": 0.12},
+            "emphasis_overlays": [{"start_time": 0.5, "end_time": 1.0, "text": "demo"}],
+        },
+        "transitions": {"enabled": False, "boundary_indexes": [], "duration_sec": 0.12},
+        "section_choreography": {},
+        "subtitles": {},
+        "section_profile_context": {
+            "subtitles": {},
+            "timeline_analysis": {},
+        },
+        "has_packaging": True,
+        "has_packaging_assets": True,
+        "has_editing_accents": True,
+    }
+
+
+def test_runtime_packaging_context_reuses_local_packaging_timeline_for_section_profile_context_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_packaging_timelines: list[dict[str, Any]] = []
+
+    def _capture_section_profile_context(
+        _render_plan: dict[str, Any] | None,
+        *,
+        packaging_timeline: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        assert isinstance(packaging_timeline, dict)
+        captured_packaging_timelines.append(dict(packaging_timeline))
+        return {
+            "subtitles": {"style": "clean_white"},
+            "timeline_analysis": {"hook_end_sec": 1.5},
+        }
+
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_packaged_subtitle_section_profile_context",
+        _capture_section_profile_context,
+    )
+
+    runtime_context = _runtime_packaging_context(
+        {
+            "packaging": {
+                "outro": {"path": "outro.mp4"},
+            },
+            "subtitles": {"style": "clean_white"},
+            "timeline_analysis": {"hook_end_sec": 1.5},
+            "editing_accents": {
+                "transitions": {"enabled": False, "boundary_indexes": [], "duration_sec": 0.12},
+            },
+        }
+    )
+
+    assert runtime_context["section_profile_context"] == {
+        "subtitles": {"style": "clean_white"},
+        "timeline_analysis": {"hook_end_sec": 1.5},
+    }
+    assert captured_packaging_timelines == [runtime_context["packaging_timeline"]]
+
+
+def test_runtime_render_plan_context_reads_render_plan_once() -> None:
+    assert _runtime_render_plan_context(
+        {
+            "automatic_gate": {"blocking": True},
+            "manual_editor": {
+                "change_scope": "subtitle_only",
+                "video_transform": {"rotation_manual": True, "rotation_cw": 90},
+            },
+            "delivery": {"frame_rate_mode": "specified", "frame_rate_preset": "50"},
+            "voice_processing": {"noise_reduction": False},
+            "loudness": {"target_lufs": -14.0, "peak_limit": -1.0},
+            "avatar_commentary": {"mode": "segmented_audio_passthrough"},
+            "cover": {"style": "hero", "title_style": "strong"},
+        }
+    ) == {
+        "automatic_gate": {"blocking": True},
+        "manual_editor": {
+            "change_scope": "subtitle_only",
+            "video_transform": {"rotation_manual": True, "rotation_cw": 90},
+        },
+        "delivery": {"frame_rate_mode": "specified", "frame_rate_preset": "50"},
+        "video_transform": {
+            "rotation_manual": True,
+            "rotation_cw": 90,
+            "aspect_ratio": "source",
+            "resolution_mode": "source",
+            "resolution_preset": "1080p",
+        },
+        "avatar_plan": {"mode": "segmented_audio_passthrough"},
+        "voice_processing": {"noise_reduction": False},
+        "loudness": {"target_lufs": -14.0, "peak_limit": -1.0},
+        "cover": {"style": "hero", "title_style": "strong"},
+    }
+
+
+def test_resolve_transition_overlap_offsets_reuses_local_normalized_packaging_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "resolve_packaging_timeline_payload",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse shared packaging_timeline_transitions helper")),
+    )
+
+    assert _resolve_transition_overlap_offsets(
+        {
+            "editing_accents": {
+                "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+            }
+        },
+        keep_segments=[
+            {"start": 0.0, "end": 3.0},
+            {"start": 4.0, "end": 7.0},
+        ],
+    ) == [(3.0, 0.12)]
+
+
+def test_resolve_transition_overlap_offsets_reuses_shared_transition_reader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "packaging_timeline_transitions",
+        lambda _payload: {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+    )
+
+    assert _resolve_transition_overlap_offsets(
+        {"editing_accents": {"transitions": {"enabled": False}}},
+        keep_segments=[
+            {"start": 0.0, "end": 3.0},
+            {"start": 4.0, "end": 7.0},
+        ],
+    ) == [(3.0, 0.12)]
+
+
+def test_resolve_transition_overlap_offsets_reuses_passed_transitions() -> None:
+    assert _resolve_transition_overlap_offsets(
+        None,
+        keep_segments=[
+            {"start": 0.0, "end": 3.0},
+            {"start": 4.0, "end": 7.0},
+        ],
+        transitions={"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+    ) == [(3.0, 0.12)]
 
 
 def test_pipeline_steps_exports_packaging_timeline_resolver_for_render_runtime() -> None:
@@ -768,6 +1902,61 @@ def test_shared_editorial_keep_segments_resolve_prefers_matching_refine_plan() -
     ) == [{"start": 2.0, "end": 6.0}]
 
 
+def test_resolve_editorial_keep_segments_reuses_local_editorial_segments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from roughcut.edit import editorial_timeline as editorial_timeline_module
+
+    monkeypatch.setattr(
+        editorial_timeline_module,
+        "editorial_keep_segments",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local editorial segments")),
+    )
+
+    assert resolve_editorial_keep_segments(
+        editorial_timeline_payload={
+            "segments": [
+                {"type": "keep", "start": 1.0, "end": 3.0},
+                {"type": "cut", "start": 3.0, "end": 5.0},
+                {"type": "keep", "start": 5.0, "end": 6.5},
+            ]
+        },
+        prefer_refine_plan=False,
+        upper_bound=8.0,
+        merge_gap_sec=0.0,
+        minimum_duration_sec=0.0,
+    ) == [
+        {"start": 1.0, "end": 3.0},
+        {"start": 5.0, "end": 6.5},
+    ]
+
+
+def test_resolve_refine_keep_segments_for_timeline_reuses_local_fallback_segments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from roughcut.edit import editorial_timeline as editorial_timeline_module
+
+    monkeypatch.setattr(
+        editorial_timeline_module,
+        "editorial_keep_segments",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local fallback segments")),
+    )
+
+    assert resolve_refine_keep_segments_for_timeline(
+        None,
+        editorial_timeline_id="timeline-1",
+        editorial_timeline_version=3,
+        fallback_segments=[
+            {"type": "keep", "start": 1.0, "end": 3.0},
+            {"type": "cut", "start": 3.0, "end": 5.0},
+            {"type": "keep", "start": 5.0, "end": 6.5},
+        ],
+    ) == [
+        {"start": 1.0, "end": 3.0},
+        {"start": 5.0, "end": 6.5},
+    ]
+
+
 def test_shared_editorial_segments_builder_supports_reason_overrides() -> None:
     assert build_shared_editorial_segments_from_keep_segments(
         [{"start": 1.0, "end": 3.0}],
@@ -779,6 +1968,292 @@ def test_shared_editorial_segments_builder_supports_reason_overrides() -> None:
         {"start": 1.0, "end": 3.0, "type": "keep", "reason": "editorial_keep"},
         {"start": 3.0, "end": 4.0, "type": "cut", "reason": "editorial_cut"},
     ]
+
+
+def test_shared_editorial_timeline_helpers_return_safe_copies() -> None:
+    payload = {
+        "segments": [{"type": "keep", "start": 1.0, "end": 3.0}],
+        "analysis": {"accepted_cuts": [{"start": 0.0, "end": 1.0, "reason": "silence"}]},
+    }
+
+    segments = editorial_timeline_segments(payload)
+    analysis = editorial_timeline_analysis(payload)
+    segments[0]["start"] = 9.0
+    analysis["accepted_cuts"][0]["reason"] = "mutated"
+
+    assert payload["segments"][0]["start"] == 1.0
+    assert payload["analysis"]["accepted_cuts"][0]["reason"] == "silence"
+
+
+def test_shared_editorial_cut_segments_accept_current_and_legacy_types() -> None:
+    payload = {
+        "segments": [
+            {"type": "keep", "start": 0.0, "end": 1.0},
+            {"type": "cut", "start": 1.0, "end": 2.0, "reason": "silence"},
+            {"type": "remove", "start": 2.0, "end": 3.5, "reason": "legacy_remove"},
+        ]
+    }
+
+    cut_segments = editorial_cut_segments(payload)
+    cut_segments[0]["reason"] = "mutated"
+
+    assert editorial_cut_segments(payload) == [
+        {"type": "cut", "start": 1.0, "end": 2.0, "reason": "silence"},
+        {"type": "remove", "start": 2.0, "end": 3.5, "reason": "legacy_remove"},
+    ]
+
+
+def test_shared_editorial_cut_segments_reuse_local_segments_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from roughcut.edit import editorial_timeline as editorial_timeline_module
+
+    monkeypatch.setattr(
+        editorial_timeline_module,
+        "editorial_timeline_segments",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local segments payload")),
+    )
+
+    assert editorial_cut_segments(
+        {
+            "segments": [
+                {"type": "keep", "start": 0.0, "end": 1.0},
+                {"type": "cut", "start": 1.0, "end": 2.0, "reason": "silence"},
+            ]
+        }
+    ) == [
+        {"type": "cut", "start": 1.0, "end": 2.0, "reason": "silence"},
+    ]
+
+
+def test_shared_editorial_subtitle_projection_returns_safe_copy() -> None:
+    payload = {
+        "subtitle_projection": {
+            "items": [{"index": 0, "start_time": 1.0, "end_time": 2.0, "text_final": "demo"}],
+            "overrides": [{"index": 0, "text_final": "override"}],
+        }
+    }
+
+    projection = editorial_timeline_subtitle_projection(payload)
+    assert projection is not None
+    projection["items"][0]["text_final"] = "mutated"
+
+    assert editorial_timeline_subtitle_projection(payload) == {
+        "items": [{"index": 0, "start_time": 1.0, "end_time": 2.0, "text_final": "demo"}],
+        "overrides": [{"index": 0, "text_final": "override"}],
+    }
+    assert editorial_timeline_subtitle_projection({}) is None
+
+
+def test_activity_decisions_edit_plan_summary_counts_cut_and_remove_segments() -> None:
+    editorial_timeline = SimpleNamespace(
+        timeline_type="editorial",
+        data_json={
+            "segments": [
+                {"type": "keep", "start": 0.0, "end": 1.0},
+                {"type": "cut", "start": 1.0, "end": 2.0, "reason": "silence"},
+                {"type": "remove", "start": 3.0, "end": 4.5, "reason": "legacy_remove"},
+            ]
+        },
+        created_at=datetime(2026, 6, 12, tzinfo=timezone.utc),
+    )
+
+    decisions = _build_activity_decisions([], [editorial_timeline], [], None)
+    edit_plan = next(item for item in decisions if item["kind"] == "edit_plan")
+
+    assert edit_plan["summary"] == "建议移除 2 段，共 2.5 秒"
+    assert edit_plan["detail"] == "legacy_remove 1 段；silence 1 段"
+
+
+def test_render_plan_helpers_return_defaults_and_safe_copies() -> None:
+    payload = {
+        "workflow_preset": "knowledge_explainer",
+        "automatic_gate": {"blocking": True},
+        "manual_editor": {"video_transform": {"aspect_ratio": "9:16"}},
+        "delivery": {"resolution_mode": "fixed", "resolution_preset": "720p"},
+        "loudness": {"target_lufs": -14.0, "peak_limit": -1.0},
+        "voice_processing": {"noise_reduction": False},
+        "cover": {"style": "dramatic", "title_style": "dense"},
+        "avatar_commentary": {"mode": "segmented_audio_passthrough"},
+        "ai_director": {"enabled": True},
+    }
+
+    gate = render_plan_automatic_gate(payload)
+    manual_editor = render_plan_manual_editor(payload)
+    delivery = render_plan_delivery(payload)
+    loudness = render_plan_loudness(payload)
+    voice_processing = render_plan_voice_processing(payload)
+    cover = render_plan_cover(payload)
+    avatar = render_plan_avatar_commentary(payload)
+    ai_director = render_plan_ai_director(payload)
+
+    gate["blocking"] = False
+    manual_editor["video_transform"]["aspect_ratio"] = "1:1"
+    delivery["resolution_preset"] = "1080p"
+    loudness["target_lufs"] = -20.0
+    voice_processing["noise_reduction"] = True
+    cover["style"] = "clean"
+    avatar["mode"] = "mutated"
+    ai_director["enabled"] = False
+
+    assert render_plan_workflow_preset(payload) == "knowledge_explainer"
+    assert render_plan_workflow_preset({}, default="fallback") == "fallback"
+    assert payload["automatic_gate"]["blocking"] is True
+    assert payload["manual_editor"]["video_transform"]["aspect_ratio"] == "9:16"
+    assert payload["delivery"]["resolution_preset"] == "720p"
+    assert payload["loudness"]["target_lufs"] == -14.0
+    assert payload["voice_processing"]["noise_reduction"] is False
+    assert payload["cover"]["style"] == "dramatic"
+    assert payload["avatar_commentary"]["mode"] == "segmented_audio_passthrough"
+    assert payload["ai_director"]["enabled"] is True
+
+
+def test_render_plan_video_transform_merges_manual_editor_and_delivery_defaults() -> None:
+    payload = {
+        "manual_editor": {"video_transform": {"rotation_manual": True, "rotation_cw": 90, "aspect_ratio": "9:16"}},
+        "delivery": {"aspect_ratio": "1:1", "resolution_mode": "fixed", "resolution_preset": "720p"},
+    }
+
+    video_transform = render_plan_video_transform(payload)
+    video_transform["resolution_preset"] = "1080p"
+
+    assert render_plan_video_transform(payload) == {
+        "rotation_manual": True,
+        "rotation_cw": 90,
+        "aspect_ratio": "9:16",
+        "resolution_mode": "fixed",
+        "resolution_preset": "720p",
+    }
+
+
+def test_render_plan_video_transform_reuses_local_render_plan_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        render_plan_module,
+        "render_plan_manual_editor",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local manual_editor payload")),
+    )
+    monkeypatch.setattr(
+        render_plan_module,
+        "render_plan_delivery",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local delivery payload")),
+    )
+
+    assert render_plan_video_transform(
+        {
+            "manual_editor": {"video_transform": {"rotation_manual": True, "rotation_cw": 90}},
+            "delivery": {"aspect_ratio": "1:1", "resolution_mode": "fixed", "resolution_preset": "720p"},
+        }
+    ) == {
+        "rotation_manual": True,
+        "rotation_cw": 90,
+        "aspect_ratio": "1:1",
+        "resolution_mode": "fixed",
+        "resolution_preset": "720p",
+    }
+
+
+def test_manual_editor_render_plan_context_reads_render_plan_once() -> None:
+    context = _manual_editor_render_plan_context(
+        {
+            "workflow_preset": "knowledge_explainer",
+            "packaging_timeline": {
+                "editing_skill": {"key": "knowledge_explainer"},
+                "subtitles": {"version": 3},
+            },
+            "manual_editor": {"video_transform": {"rotation_manual": True, "rotation_cw": 90}},
+            "loudness": {"target_lufs": -18.0},
+            "voice_processing": {"noise_reduction": True},
+            "ai_director": {"enabled": True},
+            "avatar_commentary": {"mode": "segmented_audio_passthrough"},
+        }
+    )
+
+    assert context == {
+        "packaging_timeline": {
+            "timeline_analysis": {},
+            "editing_skill": {"key": "knowledge_explainer"},
+            "section_choreography": {},
+            "subtitles": {"version": 3},
+            "packaging": {
+                "intro": None,
+                "outro": None,
+                "insert": None,
+                "watermark": None,
+                "music": None,
+            },
+            "editing_accents": {},
+        },
+        "workflow_preset": "knowledge_explainer",
+        "cover": {},
+        "delivery": {},
+        "video_transform": {
+            "rotation_manual": True,
+            "rotation_cw": 90,
+            "aspect_ratio": "source",
+            "resolution_mode": "source",
+            "resolution_preset": "1080p",
+        },
+        "loudness": {"target_lufs": -18.0},
+        "voice_processing": {"noise_reduction": True},
+        "ai_director_plan": {"enabled": True},
+        "avatar_commentary_plan": {"mode": "segmented_audio_passthrough"},
+    }
+
+
+def test_manual_video_transform_from_render_plan_reuses_caller_render_plan_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        jobs_module,
+        "_manual_editor_render_plan_context",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse caller render plan context")),
+    )
+
+    assert _manual_video_transform_from_render_plan(
+        None,
+        render_plan_context={
+            "video_transform": {
+                "rotation_manual": True,
+                "rotation_cw": 90,
+                "aspect_ratio": "9:16",
+                "resolution_mode": "specified",
+                "resolution_preset": "1440p",
+            }
+        },
+    ) == {
+        "rotation_manual": True,
+        "rotation_cw": 90,
+        "aspect_ratio": "9:16",
+        "resolution_mode": "specified",
+        "resolution_preset": "1440p",
+    }
+
+
+def test_manual_video_transform_from_render_plan_reuses_caller_video_transform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        jobs_module,
+        "_manual_editor_render_plan_context",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse caller video_transform")),
+    )
+
+    assert _manual_video_transform_from_render_plan(
+        None,
+        video_transform={
+            "rotation_manual": True,
+            "rotation_cw": 90,
+            "aspect_ratio": "9:16",
+            "resolution_mode": "specified",
+            "resolution_preset": "1440p",
+        },
+    ) == {
+        "rotation_manual": True,
+        "rotation_cw": 90,
+        "aspect_ratio": "9:16",
+        "resolution_mode": "specified",
+        "resolution_preset": "1440p",
+    }
 
 
 def test_manual_segments_build_otio_style_tracks() -> None:
@@ -1126,6 +2601,84 @@ async def test_load_manual_editor_cut_analysis_payload_passes_content_profile(
     assert captured["content_profile"] == content_profile
 
 
+def test_manual_editor_editorial_context_reads_projection_analysis_and_keep_segments_once() -> None:
+    context = _manual_editor_editorial_context(
+        {
+            "segments": [
+                {"type": "keep", "start": 0.0, "end": 1.0},
+                {"type": "keep", "start": 1.5, "end": 2.5},
+            ],
+            "subtitle_projection": {
+                "mode": "ripple_keep_segments",
+                "items": [{"start_time": 0.0, "end_time": 1.0, "text_final": "第一句"}],
+            },
+            "analysis": {
+                "accepted_cuts": [{"start": 2.0, "end": 3.0, "reason": "silence"}],
+            },
+        }
+    )
+
+    assert context == {
+        "subtitle_projection": {
+            "mode": "ripple_keep_segments",
+            "items": [{"start_time": 0.0, "end_time": 1.0, "text_final": "第一句"}],
+        },
+        "editorial_analysis": {
+            "accepted_cuts": [{"start": 2.0, "end": 3.0, "reason": "silence"}],
+        },
+        "raw_keep_segments": [
+            {"start": 0.0, "end": 1.0},
+            {"start": 1.5, "end": 2.5},
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_load_manual_editor_cut_analysis_payload_reuses_passed_editorial_analysis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    async def _fake_load_latest_optional_artifact(*args: object, **kwargs: object) -> None:
+        return None
+
+    def _capture_manual_editor_cut_analysis_payload(
+        artifact_payload: dict[str, Any] | None,
+        editorial_analysis: dict[str, Any] | None,
+        **kwargs: object,
+    ) -> dict[str, object]:
+        captured["artifact_payload"] = artifact_payload
+        captured["editorial_analysis"] = editorial_analysis
+        captured["kwargs"] = dict(kwargs)
+        return {"schema": "cut_analysis.v1"}
+
+    monkeypatch.setattr(jobs_module, "_load_latest_optional_artifact", _fake_load_latest_optional_artifact)
+    monkeypatch.setattr(
+        jobs_module,
+        "editorial_timeline_analysis",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse passed editorial analysis")),
+    )
+    monkeypatch.setattr(
+        jobs_module,
+        "_manual_editor_cut_analysis_payload",
+        _capture_manual_editor_cut_analysis_payload,
+    )
+
+    await _load_manual_editor_cut_analysis_payload(
+        SimpleNamespace(),
+        job=SimpleNamespace(id=uuid4(), source_name="demo.mp4", job_flow_mode="manual"),
+        editorial_timeline_payload={"analysis": {"accepted_cuts": []}},
+        editorial_analysis={"accepted_cuts": [{"start": 2.0, "end": 3.0, "reason": "silence"}]},
+        source_subtitles=[{"start_time": 0.0, "end_time": 1.0, "text_final": "然后呢"}],
+        smart_cut_rules={"smartDeleteEnabled": True},
+    )
+
+    assert captured["artifact_payload"] is None
+    assert captured["editorial_analysis"] == {
+        "accepted_cuts": [{"start": 2.0, "end": 3.0, "reason": "silence"}],
+    }
+
+
 def test_manual_editor_build_refine_decision_plan_from_render_plan_reuses_shared_contract() -> None:
     payload = _manual_editor_build_refine_decision_plan_from_render_plan(
         keep_segments=[{"start": 0.0, "end": 5.0}],
@@ -1152,6 +2705,39 @@ def test_manual_editor_build_refine_decision_plan_from_render_plan_reuses_shared
     assert payload["candidate_summary"]["auto_apply"] == 1
     assert payload["candidate_summary"]["manual_confirm"] == 2
     assert payload["candidate_summary"]["risk_levels"] == {}
+
+
+def test_manual_editor_build_refine_decision_plan_from_render_plan_reuses_passed_audio_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _build_refine_decision_plan_from_render_plan(**kwargs):
+        captured.update(kwargs)
+        return {"schema": "refine_decision_plan.v1"}
+
+    monkeypatch.setattr(
+        jobs_module,
+        "build_refine_decision_plan_from_render_plan",
+        _build_refine_decision_plan_from_render_plan,
+    )
+
+    payload = _manual_editor_build_refine_decision_plan_from_render_plan(
+        keep_segments=[{"start": 0.0, "end": 5.0}],
+        source_duration_sec=12.0,
+        subtitle_fingerprint="fp-1",
+        render_plan_data={"loudness": {"target_lufs": -18.0}},
+        render_plan_version=7,
+        cut_analysis={},
+        audio_defaults={"target_lufs": -16.0, "noise_reduction": True},
+        video_transform={"rotation_cw": 90},
+        smart_cut_rules={"pauseEnabled": True},
+        mode="manual_refine",
+    )
+
+    assert payload == {"schema": "refine_decision_plan.v1"}
+    assert captured["audio_defaults"] == {"target_lufs": -16.0, "noise_reduction": True}
+    assert captured["render_plan_data"] is None
 
 
 def test_cut_analysis_payload_adds_backend_smart_cut_rule_candidates() -> None:
@@ -2153,6 +3739,100 @@ def test_variant_timeline_bundle_carries_refine_decision_plan() -> None:
     }
 
 
+def test_variant_timeline_bundle_reuses_local_packaging_timeline_analysis_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_validate_variant_timeline_bundle",
+        lambda _bundle, *, packaging_timeline=None: {"status": "ok", "issues": []},
+    )
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "packaging_timeline_analysis",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local packaging timeline analysis payload")),
+    )
+
+    bundle = _build_variant_timeline_bundle(
+        editorial_timeline_id="timeline-1",
+        render_plan_timeline_id="timeline-2",
+        keep_segments=[{"start": 1.0, "end": 3.0}],
+        editorial_analysis={},
+        cut_analysis={},
+        refine_decision_plan={},
+        render_plan={"timeline_analysis": {"hook_end_sec": 2.5}},
+        variants={"plain": {"segments": []}},
+    )
+
+    assert bundle["timeline_rules"]["diagnostics"]["review_flags"] == {
+        "review_recommended": False,
+        "review_reasons": [],
+        "hook_end_sec": 2.5,
+        "cta_start_sec": None,
+    }
+
+
+def test_variant_timeline_bundle_reuses_passed_packaging_timeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_validate_variant_timeline_bundle",
+        lambda _bundle, *, packaging_timeline=None: {"status": "ok", "issues": []},
+    )
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "build_packaging_timeline_payload",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse passed packaging timeline")),
+    )
+
+    bundle = _build_variant_timeline_bundle(
+        editorial_timeline_id="timeline-1",
+        render_plan_timeline_id="timeline-2",
+        keep_segments=[{"start": 1.0, "end": 3.0}],
+        editorial_analysis={},
+        cut_analysis={},
+        refine_decision_plan={},
+        render_plan=None,
+        packaging_timeline={"timeline_analysis": {"hook_end_sec": 2.5}},
+        variants={"plain": {"segments": []}},
+    )
+
+    assert bundle["timeline_rules"]["packaging_timeline"] == {"timeline_analysis": {"hook_end_sec": 2.5}}
+    assert bundle["timeline_rules"]["diagnostics"]["review_flags"]["hook_end_sec"] == 2.5
+
+
+def test_variant_timeline_bundle_reuses_local_packaging_timeline_for_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _validate(_bundle: dict[str, Any], *, packaging_timeline: dict[str, Any] | None = None) -> dict[str, Any]:
+        captured["packaging_timeline"] = packaging_timeline
+        return {"status": "ok", "issues": []}
+
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_validate_variant_timeline_bundle",
+        _validate,
+    )
+
+    bundle = _build_variant_timeline_bundle(
+        editorial_timeline_id="timeline-1",
+        render_plan_timeline_id="timeline-2",
+        keep_segments=[{"start": 1.0, "end": 3.0}],
+        editorial_analysis={},
+        cut_analysis={},
+        refine_decision_plan={},
+        render_plan=None,
+        packaging_timeline={"timeline_analysis": {"hook_end_sec": 2.5}},
+        variants={"plain": {"segments": []}},
+    )
+
+    assert captured["packaging_timeline"] == {"timeline_analysis": {"hook_end_sec": 2.5}}
+    assert bundle["validation"] == {"status": "ok", "issues": []}
+
+
 def test_variant_timeline_bundle_allows_diagnostics_only_payload_without_render_variants() -> None:
     bundle = _build_variant_timeline_bundle(
         editorial_timeline_id="timeline-1",
@@ -2191,6 +3871,214 @@ def test_variant_timeline_bundle_allows_diagnostics_only_payload_without_render_
         "timeout": False,
     }
     assert bundle["validation"] == {"status": "ok", "issues": []}
+
+
+def test_resolve_editorial_analysis_payload_reuses_caller_analysis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "editorial_timeline_analysis",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse caller analysis payload")),
+    )
+
+    resolved = _resolve_editorial_analysis_payload(
+        {"analysis": {"ignored": True}},
+        analysis={"accepted_cuts": [{"start": 1.0, "end": 2.0, "reason": "silence"}]},
+    )
+    resolved["accepted_cuts"][0]["reason"] = "mutated"
+
+    assert _resolve_editorial_analysis_payload(
+        {"analysis": {"ignored": True}},
+        analysis={"accepted_cuts": [{"start": 1.0, "end": 2.0, "reason": "silence"}]},
+    ) == {
+        "accepted_cuts": [{"start": 1.0, "end": 2.0, "reason": "silence"}]
+    }
+
+
+def test_variant_timeline_editorial_context_reuses_local_payload_readers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def _analysis(payload: dict[str, object]) -> dict[str, object]:
+        calls.append(("analysis", str(payload.get("label") or "")))
+        return {"label": payload.get("label")}
+
+    def _segments(payload: dict[str, object]) -> list[dict[str, object]]:
+        calls.append(("segments", str(payload.get("label") or "")))
+        return [{"label": payload.get("label")}]
+
+    monkeypatch.setattr(pipeline_steps_module, "editorial_timeline_analysis", _analysis)
+    monkeypatch.setattr(pipeline_steps_module, "editorial_timeline_segments", _segments)
+
+    context = _variant_timeline_editorial_context(
+        {"label": "plain"},
+        packaged_editorial_timeline={"label": "packaged"},
+    )
+
+    assert context == {
+        "analysis": {"label": "plain"},
+        "plain_segments": [{"label": "plain"}],
+        "packaged_segments": [{"label": "packaged"}],
+    }
+    assert sorted(calls) == [
+        ("analysis", "plain"),
+        ("segments", "packaged"),
+        ("segments", "plain"),
+    ]
+
+
+def test_variant_timeline_editorial_context_reuses_caller_plain_segments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def _analysis(payload: dict[str, object]) -> dict[str, object]:
+        calls.append(("analysis", str(payload.get("label") or "")))
+        return {"label": payload.get("label")}
+
+    def _segments(payload: dict[str, object]) -> list[dict[str, object]]:
+        calls.append(("segments", str(payload.get("label") or "")))
+        return [{"label": payload.get("label")}]
+
+    monkeypatch.setattr(pipeline_steps_module, "editorial_timeline_analysis", _analysis)
+    monkeypatch.setattr(pipeline_steps_module, "editorial_timeline_segments", _segments)
+
+    context = _variant_timeline_editorial_context(
+        {"label": "plain"},
+        packaged_editorial_timeline={"label": "packaged"},
+        plain_segments=[{"label": "provided"}],
+    )
+
+    assert context == {
+        "analysis": {"label": "plain"},
+        "plain_segments": [{"label": "provided"}],
+        "packaged_segments": [{"label": "packaged"}],
+    }
+    assert calls == [
+        ("analysis", "plain"),
+        ("segments", "packaged"),
+    ]
+
+
+def test_variant_timeline_editorial_context_reuses_caller_analysis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "editorial_timeline_analysis",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse caller analysis")),
+    )
+
+    context = _variant_timeline_editorial_context(
+        {"label": "plain"},
+        analysis={"accepted_cuts": [{"start": 1.0, "end": 2.0, "reason": "silence"}]},
+        packaged_editorial_timeline={"label": "packaged"},
+        plain_segments=[{"label": "provided"}],
+    )
+
+    assert context["analysis"] == {"accepted_cuts": [{"start": 1.0, "end": 2.0, "reason": "silence"}]}
+
+
+def test_validate_variant_timeline_bundle_reuses_local_normalized_packaging_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "packaging_timeline_analysis",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local timeline_analysis payload")),
+    )
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "packaging_timeline_editing_skill",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local editing_skill payload")),
+    )
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "packaging_timeline_section_choreography",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse local section_choreography payload")),
+    )
+    assert not hasattr(pipeline_steps_module, "packaging_timeline_assets")
+    assert not hasattr(pipeline_steps_module, "packaging_timeline_editing_accents")
+
+    assert _validate_variant_timeline_bundle(
+        {
+            "variants": {
+                "plain": {
+                    "media": {"duration_sec": 3.0},
+                    "subtitle_events": [{"start_time": 0.0, "end_time": 1.0, "text": "demo"}],
+                }
+            },
+            "timeline_rules": {
+                "timeline_analysis": {},
+                "editing_skill": {"key": "knowledge_explainer"},
+                "section_choreography": {"sections": [{"start_sec": 0.0, "end_sec": 3.0}]},
+                "packaging": {"intro": {"path": "intro.mp4"}},
+                "editing_accents": {"style": "smart_effect_punch"},
+            },
+        }
+    ) == {"status": "ok", "issues": []}
+
+
+def test_validate_variant_timeline_bundle_reuses_passed_packaging_timeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "resolve_packaging_timeline_payload",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse passed packaging timeline")),
+    )
+
+    assert _validate_variant_timeline_bundle(
+        {
+            "variants": {
+                "plain": {
+                    "media": {"duration_sec": 3.0},
+                    "subtitle_events": [{"start_time": 0.0, "end_time": 1.0, "text": "demo"}],
+                }
+            },
+            "timeline_rules": {"diagnostics": {}},
+        },
+        packaging_timeline={
+            "timeline_analysis": {},
+            "editing_skill": {"key": "knowledge_explainer"},
+            "section_choreography": {"sections": [{"start_sec": 0.0, "end_sec": 3.0}]},
+            "packaging": {"intro": {"path": "intro.mp4"}},
+            "editing_accents": {"style": "smart_effect_punch"},
+        },
+    ) == {"status": "ok", "issues": []}
+
+
+def test_validate_variant_timeline_bundle_reuses_nested_bundle_packaging_timeline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "resolve_packaging_timeline_payload",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse nested bundle packaging timeline")),
+    )
+
+    assert _validate_variant_timeline_bundle(
+        {
+            "variants": {
+                "plain": {
+                    "media": {"duration_sec": 3.0},
+                    "subtitle_events": [{"start_time": 0.0, "end_time": 1.0, "text": "demo"}],
+                }
+            },
+            "timeline_rules": {
+                "packaging_timeline": {
+                    "timeline_analysis": {},
+                    "editing_skill": {"key": "knowledge_explainer"},
+                    "section_choreography": {"sections": [{"start_sec": 0.0, "end_sec": 3.0}]},
+                    "packaging": {"intro": {"path": "intro.mp4"}},
+                    "editing_accents": {"style": "smart_effect_punch"},
+                },
+                "diagnostics": {},
+            },
+        }
+    ) == {"status": "ok", "issues": []}
 
 
 def test_edit_review_bundle_payload_carries_cut_analysis_and_refine_decision_plan() -> None:
@@ -3673,6 +5561,31 @@ def test_refine_decision_plan_from_render_plan_reuses_shared_defaults() -> None:
     assert payload["video_transform"] == {"rotation_cw": 90}
     assert payload["candidate_summary"]["total"] == 1
     assert payload["render_plan_version"] == 5
+
+
+def test_refine_decision_plan_from_render_plan_reuses_passed_audio_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from roughcut.edit import refine_decisions as refine_decisions_module
+
+    monkeypatch.setattr(
+        refine_decisions_module,
+        "refine_plan_audio_defaults",
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse passed audio defaults")),
+    )
+
+    payload = build_refine_decision_plan_from_render_plan(
+        keep_segments=[{"start": 0.0, "end": 8.0}],
+        source_duration_sec=8.0,
+        mode="manual_refine",
+        render_plan_data={"loudness": {"target_lufs": -18.0}},
+        audio_defaults={"target_lufs": -16.0, "noise_reduction": True},
+        cut_analysis={},
+        video_transform={"rotation_cw": 90},
+    )
+
+    assert payload["audio_defaults"] == {"target_lufs": -16.0, "noise_reduction": True}
+    assert payload["video_transform"] == {"rotation_cw": 90}
 
 
 def test_refine_decision_plan_payload_inherits_strategy_profile_from_cut_analysis() -> None:
@@ -6790,6 +8703,48 @@ async def test_edited_subtitle_projection_keeps_fallback_text_instead_of_canonic
     )
 
     assert [item["text_final"] for item in projected] == ["最近这三次NOC的发售太难了"]
+
+
+@pytest.mark.asyncio
+async def test_edited_subtitle_projection_prefers_current_projection_entries_over_collapsed_fallback_source() -> None:
+    projected = await _build_edited_subtitle_projection(
+        None,
+        job_id=uuid4(),
+        keep_segments=[
+            {"start": 1.56, "end": 5.85},
+            {"start": 6.08, "end": 8.0},
+        ],
+        projection_data={
+            "transcript_layer": "subtitle_item",
+            "split_profile": {"max_chars": 30, "max_duration": 5.0},
+            "entries": [
+                {
+                    "index": 0,
+                    "start_time": 1.6,
+                    "end_time": 4.0,
+                    "text_final": "第一条",
+                },
+                {
+                    "index": 1,
+                    "start_time": 6.1,
+                    "end_time": 7.4,
+                    "text_final": "第二条",
+                },
+            ],
+        },
+        fallback_subtitles=[
+            {
+                "index": 0,
+                "start_time": 1.6,
+                "end_time": 7.4,
+                "text_final": "被压扁的一整条源字幕",
+            }
+        ],
+    )
+
+    assert [item["text_final"] for item in projected] == ["第一条", "第二条"]
+    assert projected[0]["start_time"] == pytest.approx(0.04)
+    assert projected[1]["start_time"] == pytest.approx(4.31)
 
 
 def test_project_canonical_transcript_to_timeline_prefers_explicit_canonical_surface_from_segmentation(

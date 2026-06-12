@@ -32,6 +32,60 @@ _AI_SMART_EFFECT_STYLE_VARIANTS = {
 }
 
 
+def _render_plan_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return payload if isinstance(payload, dict) else {}
+
+
+def render_plan_workflow_preset(payload: dict[str, Any] | None, *, default: str = "unboxing_standard") -> str:
+    return str(_render_plan_payload(payload).get("workflow_preset") or default)
+
+
+def render_plan_loudness(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return copy.deepcopy(_render_plan_payload(payload).get("loudness") or {})
+
+
+def render_plan_voice_processing(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return copy.deepcopy(_render_plan_payload(payload).get("voice_processing") or {})
+
+
+def render_plan_delivery(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return copy.deepcopy(_render_plan_payload(payload).get("delivery") or {})
+
+
+def render_plan_cover(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return copy.deepcopy(_render_plan_payload(payload).get("cover") or {})
+
+
+def render_plan_manual_editor(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return copy.deepcopy(_render_plan_payload(payload).get("manual_editor") or {})
+
+
+def render_plan_automatic_gate(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return copy.deepcopy(_render_plan_payload(payload).get("automatic_gate") or {})
+
+
+def render_plan_avatar_commentary(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return copy.deepcopy(_render_plan_payload(payload).get("avatar_commentary") or {})
+
+
+def render_plan_ai_director(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return copy.deepcopy(_render_plan_payload(payload).get("ai_director") or {})
+
+
+def render_plan_video_transform(payload: dict[str, Any] | None) -> dict[str, Any]:
+    plan = _render_plan_payload(payload)
+    manual_editor = copy.deepcopy(plan.get("manual_editor") or {})
+    delivery = copy.deepcopy(plan.get("delivery") or {})
+    video_transform = copy.deepcopy(manual_editor.get("video_transform") or {})
+    if "aspect_ratio" not in video_transform:
+        video_transform["aspect_ratio"] = delivery.get("aspect_ratio") or "source"
+    if "resolution_mode" not in video_transform:
+        video_transform["resolution_mode"] = delivery.get("resolution_mode") or "source"
+    if "resolution_preset" not in video_transform:
+        video_transform["resolution_preset"] = delivery.get("resolution_preset") or "1080p"
+    return video_transform
+
+
 def build_render_plan(
     editorial_timeline_id: uuid.UUID,
     *,

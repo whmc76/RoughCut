@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import bisect
+import copy
 import hashlib
 import logging
 import os
@@ -78,12 +79,14 @@ from roughcut.edit.cut_analysis import (
 )
 from roughcut.edit.editorial_timeline import (
     build_editorial_segments_from_keep_segments as build_shared_editorial_segments_from_keep_segments,
+    editorial_cut_segments,
+    editorial_timeline_analysis,
+    editorial_timeline_subtitle_projection,
     normalize_keep_segments_payloads,
     resolve_editorial_keep_segments,
 )
 from roughcut.edit.packaging_timeline import (
     packaging_timeline_analysis,
-    packaging_timeline_assets,
     packaging_timeline_editing_accents,
     packaging_timeline_editing_skill,
     packaging_timeline_subtitles,
@@ -103,6 +106,16 @@ from roughcut.edit.refine_decisions import (
     build_refine_decision_plan_from_render_plan,
     build_refine_decision_plan_payload,
     normalize_refine_decision_plan_strategy_metadata,
+)
+from roughcut.edit.render_plan import (
+    render_plan_ai_director,
+    render_plan_avatar_commentary,
+    render_plan_cover,
+    render_plan_delivery,
+    render_plan_loudness,
+    render_plan_voice_processing,
+    render_plan_video_transform,
+    render_plan_workflow_preset,
 )
 from roughcut.edit.multimodal_trim_review import (
     ARTIFACT_TYPE_MULTIMODAL_TRIM_REVIEW,
@@ -2111,6 +2124,7 @@ async def _load_manual_editor_cut_analysis_payload(
     *,
     job: Job,
     editorial_timeline_payload: dict[str, Any] | None,
+    editorial_analysis: dict[str, Any] | None = None,
     source_subtitles: list[dict[str, Any]] | None = None,
     smart_cut_rules: dict[str, Any] | None = None,
     content_profile: dict[str, Any] | None = None,
@@ -2120,16 +2134,16 @@ async def _load_manual_editor_cut_analysis_payload(
         job_id=job.id,
         artifact_types=(ARTIFACT_TYPE_CUT_ANALYSIS,),
     )
-    editorial_analysis = (
-        editorial_timeline_payload.get("analysis")
-        if isinstance(editorial_timeline_payload, dict) and isinstance(editorial_timeline_payload.get("analysis"), dict)
-        else None
+    resolved_editorial_analysis = (
+        copy.deepcopy(editorial_analysis)
+        if isinstance(editorial_analysis, dict)
+        else editorial_timeline_analysis(editorial_timeline_payload) or None
     )
     return _manual_editor_cut_analysis_payload(
         current_cut_analysis_artifact.data_json
         if current_cut_analysis_artifact and isinstance(current_cut_analysis_artifact.data_json, dict)
         else None,
-        editorial_analysis,
+        resolved_editorial_analysis,
         source_name=str(job.source_name or ""),
         job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
         source_subtitles=source_subtitles,
@@ -2183,6 +2197,7 @@ def _manual_editor_build_refine_decision_plan_from_render_plan(
     render_plan_data: dict[str, Any] | None,
     render_plan_version: int | None,
     cut_analysis: dict[str, Any] | None,
+    audio_defaults: dict[str, Any] | None = None,
     video_transform: dict[str, Any] | None,
     smart_cut_rules: dict[str, Any] | None,
     mode: str,
@@ -2190,14 +2205,20 @@ def _manual_editor_build_refine_decision_plan_from_render_plan(
     editorial_timeline_id: str | None = None,
     editorial_timeline_version: int | None = None,
 ) -> dict[str, Any]:
+    resolved_render_plan_data = (
+        None
+        if isinstance(audio_defaults, dict)
+        else (render_plan_data if isinstance(render_plan_data, dict) else None)
+    )
     return build_refine_decision_plan_from_render_plan(
         keep_segments=keep_segments,
         source_duration_sec=source_duration_sec,
         mode=mode,
         subtitle_fingerprint=subtitle_fingerprint,
-        render_plan_data=render_plan_data if isinstance(render_plan_data, dict) else {},
+        render_plan_data=resolved_render_plan_data,
         render_plan_version=render_plan_version,
         cut_analysis=cut_analysis,
+        audio_defaults=audio_defaults,
         video_transform=video_transform,
         smart_cut_rules=smart_cut_rules,
         note=note,
@@ -2206,29 +2227,80 @@ def _manual_editor_build_refine_decision_plan_from_render_plan(
     )
 
 
-def _manual_editor_packaging_plan_from_render_plan(render_plan: dict[str, Any] | None) -> dict[str, Any]:
-    payload = dict(render_plan or {}) if isinstance(render_plan, dict) else {}
-    packaging_timeline = resolve_packaging_timeline_payload(payload)
-    subtitles = dict(packaging_timeline.get("subtitles") or {})
-    packaging_assets = packaging_timeline_assets(packaging_timeline)
-    cover = dict(payload.get("cover") or {})
-    delivery = dict(payload.get("delivery") or {})
-    editing_accents = packaging_timeline_editing_accents(packaging_timeline)
+def _manual_editor_editorial_context(
+    editorial_timeline_payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload = editorial_timeline_payload if isinstance(editorial_timeline_payload, dict) else {}
+    return {
+        "subtitle_projection": editorial_timeline_subtitle_projection(payload),
+        "editorial_analysis": editorial_timeline_analysis(payload) or None,
+        "raw_keep_segments": _manual_keep_segments_from_editorial_payload(payload),
+    }
+
+
+def _manual_editor_packaging_plan_from_render_plan(
+    render_plan: dict[str, Any] | None = None,
+    *,
+    render_plan_context: dict[str, Any] | None = None,
+    packaging_timeline: dict[str, Any] | None = None,
+    cover: dict[str, Any] | None = None,
+    delivery: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    resolved_packaging_timeline = dict(packaging_timeline) if isinstance(packaging_timeline, dict) else None
+    resolved_cover = dict(cover) if isinstance(cover, dict) else None
+    resolved_delivery = dict(delivery) if isinstance(delivery, dict) else None
+    if (
+        resolved_packaging_timeline is None
+        or resolved_cover is None
+        or resolved_delivery is None
+    ):
+        resolved_render_plan_context = (
+            render_plan_context if isinstance(render_plan_context, dict) else _manual_editor_render_plan_context(render_plan)
+        )
+        if resolved_packaging_timeline is None:
+            resolved_packaging_timeline = dict(resolved_render_plan_context.get("packaging_timeline") or {})
+        if resolved_cover is None:
+            resolved_cover = dict(resolved_render_plan_context.get("cover") or {})
+        if resolved_delivery is None:
+            resolved_delivery = dict(resolved_render_plan_context.get("delivery") or {})
+    packaging_assets = dict((resolved_packaging_timeline or {}).get("packaging") or {})
+    subtitles = dict((resolved_packaging_timeline or {}).get("subtitles") or {})
+    editing_accents = dict((resolved_packaging_timeline or {}).get("editing_accents") or {})
+    intro_plan = dict(packaging_assets.get("intro") or {}) or None
+    outro_plan = dict(packaging_assets.get("outro") or {}) or None
+    insert_plan = dict(packaging_assets.get("insert") or {}) or None
+    watermark_plan = dict(packaging_assets.get("watermark") or {}) or None
+    music_plan = dict(packaging_assets.get("music") or {}) or None
     return {
         "subtitle_style": str(subtitles.get("style") or "bold_yellow_outline"),
         "subtitle_motion_style": str(subtitles.get("motion_style") or "motion_static"),
         "smart_effect_style": str(editing_accents.get("style") or "smart_effect_commercial"),
-        "cover_style": str(cover.get("style") or "preset_default"),
-        "title_style": str(cover.get("title_style") or "preset_default"),
-        "intro": packaging_assets.get("intro"),
-        "outro": packaging_assets.get("outro"),
-        "insert": packaging_assets.get("insert"),
-        "watermark": packaging_assets.get("watermark"),
-        "music": packaging_assets.get("music"),
-        "export_resolution_mode": str(delivery.get("resolution_mode") or "source"),
-        "export_resolution_preset": str(delivery.get("resolution_preset") or "1080p"),
-        "export_frame_rate_mode": str(delivery.get("frame_rate_mode") or "source"),
-        "export_frame_rate_preset": str(delivery.get("frame_rate_preset") or "30"),
+        "cover_style": str((resolved_cover or {}).get("style") or "preset_default"),
+        "title_style": str((resolved_cover or {}).get("title_style") or "preset_default"),
+        "intro": intro_plan,
+        "outro": outro_plan,
+        "insert": insert_plan,
+        "watermark": watermark_plan,
+        "music": music_plan,
+        "export_resolution_mode": str((resolved_delivery or {}).get("resolution_mode") or "source"),
+        "export_resolution_preset": str((resolved_delivery or {}).get("resolution_preset") or "1080p"),
+        "export_frame_rate_mode": str((resolved_delivery or {}).get("frame_rate_mode") or "source"),
+        "export_frame_rate_preset": str((resolved_delivery or {}).get("frame_rate_preset") or "30"),
+    }
+
+
+def _manual_editor_render_plan_context(render_plan: dict[str, Any] | None) -> dict[str, Any]:
+    payload = dict(render_plan or {}) if isinstance(render_plan, dict) else {}
+    return {
+        "packaging_timeline": resolve_packaging_timeline_payload(payload),
+        "workflow_preset": render_plan_workflow_preset(payload),
+        "cover": render_plan_cover(payload),
+        "delivery": render_plan_delivery(payload),
+        "video_transform": render_plan_video_transform(payload),
+        "loudness": render_plan_loudness(payload),
+        "voice_processing": render_plan_voice_processing(payload),
+        "ai_director_plan": render_plan_ai_director(payload),
+        "avatar_commentary_plan": render_plan_avatar_commentary(payload),
     }
 
 
@@ -5435,15 +5507,19 @@ def _manual_editor_stored_projection_matches_subtitles(
     )
 
 
-def _manual_video_transform_from_render_plan(render_plan: dict[str, Any] | None) -> dict[str, Any]:
-    payload = dict((render_plan or {}).get("manual_editor", {}).get("video_transform") or {})
-    delivery = dict((render_plan or {}).get("delivery") or {})
-    if "aspect_ratio" not in payload:
-        payload["aspect_ratio"] = delivery.get("aspect_ratio") or "source"
-    if "resolution_mode" not in payload:
-        payload["resolution_mode"] = delivery.get("resolution_mode") or "source"
-    if "resolution_preset" not in payload:
-        payload["resolution_preset"] = delivery.get("resolution_preset") or "1080p"
+def _manual_video_transform_from_render_plan(
+    render_plan: dict[str, Any] | None,
+    *,
+    render_plan_context: dict[str, Any] | None = None,
+    video_transform: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if isinstance(video_transform, dict):
+        payload = dict(video_transform)
+    else:
+        resolved_render_plan_context = (
+            render_plan_context if isinstance(render_plan_context, dict) else _manual_editor_render_plan_context(render_plan)
+        )
+        payload = dict(resolved_render_plan_context.get("video_transform") or {})
     normalized = _manual_video_transform_payload(payload)
     normalized["rotation_manual"] = bool(payload.get("rotation_manual"))
     return normalized
@@ -6370,9 +6446,11 @@ async def _build_manual_editor_session(
     )
     media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
     source_duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
+    editorial_payload = editorial_timeline.data_json if isinstance(editorial_timeline.data_json, dict) else None
+    editorial_context = _manual_editor_editorial_context(editorial_payload)
 
     resolved_base_keep_segment_dicts = _manual_editor_base_keep_segment_dicts(
-        editorial_timeline.data_json if isinstance(editorial_timeline.data_json, dict) else None,
+        editorial_payload,
         refine_plan_payload=(
             refine_decision_plan_artifact.data_json
             if refine_decision_plan_artifact and isinstance(refine_decision_plan_artifact.data_json, dict)
@@ -6390,11 +6468,15 @@ async def _build_manual_editor_session(
     if source_duration_sec <= 0.0:
         source_duration_sec = max((segment.end for segment in raw_base_keep_segments), default=0.0)
 
-    subtitle_projection = (editorial_timeline.data_json or {}).get("subtitle_projection")
+    subtitle_projection = editorial_context["subtitle_projection"]
     subtitle_overrides: list[dict[str, Any]] = []
     manual_projection_items: list[dict[str, Any]] = []
     render_plan_data = render_plan_timeline.data_json if render_plan_timeline and isinstance(render_plan_timeline.data_json, dict) else {}
-    base_video_transform = _manual_video_transform_from_render_plan(render_plan_data)
+    render_plan_context = _manual_editor_render_plan_context(render_plan_data)
+    base_video_transform = _manual_video_transform_from_render_plan(
+        None,
+        render_plan_context=render_plan_context,
+    )
     video_transform = base_video_transform
     if isinstance(subtitle_projection, dict):
         subtitle_overrides = _manual_subtitle_override_payloads(
@@ -6435,7 +6517,8 @@ async def _build_manual_editor_session(
     cut_analysis_payload = await _load_manual_editor_cut_analysis_payload(
         session,
         job=job,
-        editorial_timeline_payload=editorial_timeline.data_json if isinstance(editorial_timeline.data_json, dict) else None,
+        editorial_timeline_payload=None,
+        editorial_analysis=editorial_context["editorial_analysis"],
         source_subtitles=source_subtitle_dicts,
         smart_cut_rules=current_smart_cut_rules,
         content_profile=content_profile,
@@ -6457,6 +6540,7 @@ async def _build_manual_editor_session(
         else None
     )
     if baseline_editorial_timeline.id != editorial_timeline.id:
+        baseline_editorial_context = _manual_editor_editorial_context(baseline_editorial_payload)
         resolved_base_keep_segment_dicts = _manual_editor_base_keep_segment_dicts(
             baseline_editorial_payload,
             refine_plan_payload=None,
@@ -6471,7 +6555,7 @@ async def _build_manual_editor_session(
         ]
         if source_duration_sec <= 0.0:
             source_duration_sec = max((segment.end for segment in raw_base_keep_segments), default=0.0)
-        subtitle_projection = (baseline_editorial_payload or {}).get("subtitle_projection")
+        subtitle_projection = baseline_editorial_context["subtitle_projection"]
         subtitle_overrides = []
         manual_projection_items = []
         if isinstance(subtitle_projection, dict):
@@ -6642,8 +6726,8 @@ async def _build_manual_editor_session(
         render_plan_version=int(render_plan_timeline.version) if render_plan_timeline is not None else None,
         cut_analysis=cut_analysis_payload,
         audio_defaults={
-            **dict(render_plan_data.get("loudness") or {}),
-            **dict(render_plan_data.get("voice_processing") or {}),
+            **dict(render_plan_context.get("loudness") or {}),
+            **dict(render_plan_context.get("voice_processing") or {}),
         },
         video_transform=video_transform,
         smart_cut_rules=smart_cut_rules,
@@ -6956,11 +7040,13 @@ async def save_manual_editor_draft(
     media_meta_artifact = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
     media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
     source_duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
+    editorial_payload = editorial_timeline.data_json if isinstance(editorial_timeline.data_json, dict) else {}
+    editorial_context = _manual_editor_editorial_context(editorial_payload)
     if source_duration_sec <= 0.0:
         source_duration_sec = max(
             (
                 float(segment.get("end", 0.0) or 0.0)
-                for segment in _manual_keep_segments_from_editorial_payload(editorial_timeline.data_json or {})
+                for segment in list(editorial_context.get("raw_keep_segments") or [])
             ),
             default=0.0,
         )
@@ -7030,7 +7116,8 @@ async def save_manual_editor_draft(
     current_cut_analysis_payload = await _load_manual_editor_cut_analysis_payload(
         session,
         job=job,
-        editorial_timeline_payload=editorial_timeline.data_json if isinstance(editorial_timeline.data_json, dict) else None,
+        editorial_timeline_payload=None,
+        editorial_analysis=editorial_context["editorial_analysis"],
         source_subtitles=current_source_subtitles,
         smart_cut_rules=smart_cut_rules,
         content_profile=content_profile,
@@ -7062,6 +7149,8 @@ async def save_manual_editor_draft(
             data_json=reviewed_multimodal_trim_review_payload,
         )
     )
+    render_plan_data = render_plan_timeline.data_json if isinstance(render_plan_timeline.data_json, dict) else {}
+    render_plan_context = _manual_editor_render_plan_context(render_plan_data)
     session.add(
         Artifact(
             job_id=job.id,
@@ -7071,9 +7160,13 @@ async def save_manual_editor_draft(
                 source_duration_sec=source_duration_sec,
                 mode="manual_refine",
                 subtitle_fingerprint=subtitle_fingerprint,
-                render_plan_data=render_plan_timeline.data_json if isinstance(render_plan_timeline.data_json, dict) else {},
+                render_plan_data=None,
                 render_plan_version=int(render_plan_timeline.version or 1) if render_plan_timeline is not None else None,
                 cut_analysis=current_cut_analysis_payload,
+                audio_defaults={
+                    **dict(render_plan_context.get("loudness") or {}),
+                    **dict(render_plan_context.get("voice_processing") or {}),
+                },
                 video_transform=video_transform,
                 smart_cut_rules=smart_cut_rules,
                 note=str(request.note or "").strip() or None,
@@ -7152,7 +7245,10 @@ async def apply_manual_editor_timeline(
     media_meta_artifact = await _load_latest_optional_artifact(session, job_id=job.id, artifact_types=("media_meta",))
     media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
     source_duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
-    raw_previous_keep_segments = _manual_keep_segments_from_editorial_payload(editorial_timeline.data_json or {})
+    previous_editorial_payload = editorial_timeline.data_json if isinstance(editorial_timeline.data_json, dict) else {}
+    previous_editorial_context = _manual_editor_editorial_context(previous_editorial_payload)
+    previous_editorial_analysis = previous_editorial_context["editorial_analysis"]
+    raw_previous_keep_segments = list(previous_editorial_context.get("raw_keep_segments") or [])
     if source_duration_sec <= 0.0:
         source_duration_sec = max(
             (
@@ -7177,7 +7273,8 @@ async def apply_manual_editor_timeline(
     baseline_cut_analysis_payload = await _load_manual_editor_cut_analysis_payload(
         session,
         job=job,
-        editorial_timeline_payload=editorial_timeline.data_json if isinstance(editorial_timeline.data_json, dict) else None,
+        editorial_timeline_payload=None,
+        editorial_analysis=previous_editorial_analysis,
         source_subtitles=source_subtitle_dicts,
         smart_cut_rules=smart_cut_rules,
         content_profile=content_profile,
@@ -7235,11 +7332,16 @@ async def apply_manual_editor_timeline(
         remapped_subtitles,
         clean_text=False,
     )
+    previous_render_plan_context = _manual_editor_render_plan_context(previous_render_plan)
+    previous_video_transform = _manual_video_transform_from_render_plan(
+        None,
+        render_plan_context=previous_render_plan_context,
+    )
     change_plan = _manual_editor_change_plan(
         previous_keep_segments=previous_keep_segments,
         next_keep_segments=requested_keep_segments,
         subtitle_overrides=subtitle_override_payloads,
-        previous_video_transform=_manual_video_transform_from_render_plan(previous_render_plan),
+        previous_video_transform=previous_video_transform,
         next_video_transform=video_transform,
     )
     change_contract = _manual_editor_change_contract(change_plan)
@@ -7255,8 +7357,11 @@ async def apply_manual_editor_timeline(
             video_summary=video_summary,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
-    previous_packaging_timeline = resolve_packaging_timeline_payload(previous_render_plan)
+    previous_packaging_timeline = previous_render_plan_context["packaging_timeline"]
     editing_skill = packaging_timeline_editing_skill(previous_packaging_timeline)
+    previous_editing_accents = packaging_timeline_editing_accents(previous_packaging_timeline)
+    previous_subtitles = packaging_timeline_subtitles(previous_packaging_timeline)
+    previous_smart_effect_style = str(previous_editing_accents.get("style") or "smart_effect_commercial")
     output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in remapped_subtitles), default=0.0)
     if change_plan["timeline_changed"]:
         timeline_analysis = infer_timeline_analysis(
@@ -7270,11 +7375,10 @@ async def apply_manual_editor_timeline(
             subtitle_items=remapped_subtitles,
             timeline_analysis=timeline_analysis,
             editing_skill=editing_skill,
-            style=str(packaging_timeline_editing_accents(previous_packaging_timeline).get("style") or "smart_effect_commercial"),
+            style=previous_smart_effect_style,
         )
     else:
         timeline_analysis = packaging_timeline_analysis(previous_packaging_timeline)
-        previous_editing_accents = packaging_timeline_editing_accents(previous_packaging_timeline)
         editing_accents = (
             dict(previous_editing_accents)
             if isinstance(previous_editing_accents, dict)
@@ -7299,7 +7403,10 @@ async def apply_manual_editor_timeline(
             timeline_analysis=timeline_analysis,
         )
     else:
-        packaging_plan = _manual_editor_packaging_plan_from_render_plan(previous_render_plan)
+        packaging_plan = _manual_editor_packaging_plan_from_render_plan(
+            None,
+            render_plan_context=previous_render_plan_context,
+        )
     editorial_segments = _build_editorial_segments_from_keep_segments(
         effective_keep_segments,
         source_duration_sec=source_duration_sec,
@@ -7359,9 +7466,8 @@ async def apply_manual_editor_timeline(
     current_cut_analysis_payload = await _load_manual_editor_cut_analysis_payload(
         session,
         job=job,
-        editorial_timeline_payload=manual_editorial_timeline.data_json
-        if isinstance(manual_editorial_timeline.data_json, dict)
-        else None,
+        editorial_timeline_payload=None,
+        editorial_analysis=dict(editorial_payload.get("analysis") or {}),
         source_subtitles=source_subtitle_dicts,
         smart_cut_rules=smart_cut_rules,
         content_profile=content_profile,
@@ -7401,7 +7507,6 @@ async def apply_manual_editor_timeline(
         )
     )
 
-    previous_video_transform = _manual_video_transform_from_render_plan(previous_render_plan)
     resolution_transform_changed = (
         previous_video_transform.get("resolution_mode") != video_transform.get("resolution_mode")
         or previous_video_transform.get("resolution_preset") != video_transform.get("resolution_preset")
@@ -7425,11 +7530,16 @@ async def apply_manual_editor_timeline(
         "frame_rate_mode": export_frame_rate_mode,
         "frame_rate_preset": export_frame_rate_preset,
     }
+    previous_loudness = previous_render_plan_context["loudness"]
+    previous_voice_processing = previous_render_plan_context["voice_processing"]
 
     rebuilt_render_plan = build_render_plan(
         editorial_timeline_id=manual_editorial_timeline.id,
-        workflow_preset=str(previous_render_plan.get("workflow_preset") or job.workflow_template or "unboxing_standard"),
-        subtitle_version=int((packaging_timeline_subtitles(previous_render_plan).get("version") or 1)),
+        workflow_preset=(
+            str(previous_render_plan_context["workflow_preset"] or "").strip()
+            or str(job.workflow_template or "unboxing_standard")
+        ),
+        subtitle_version=int((previous_subtitles.get("version") or 1)),
         subtitle_style=str(packaging_plan.get("subtitle_style") or "bold_yellow_outline"),
         subtitle_motion_style=str(packaging_plan.get("subtitle_motion_style") or "motion_static"),
         smart_effect_style=str(packaging_plan.get("smart_effect_style") or "smart_effect_commercial"),
@@ -7439,9 +7549,9 @@ async def apply_manual_editor_timeline(
             else str(packaging_plan.get("cover_style") or "")
         ),
         title_style=str(packaging_plan.get("title_style") or "preset_default"),
-        target_lufs=float((previous_render_plan.get("loudness") or {}).get("target_lufs") or -16.0),
-        peak_limit=float((previous_render_plan.get("loudness") or {}).get("peak_limit") or -2.0),
-        noise_reduction=bool((previous_render_plan.get("voice_processing") or {}).get("noise_reduction", True)),
+        target_lufs=float((previous_loudness.get("target_lufs") or -16.0)),
+        peak_limit=float((previous_loudness.get("peak_limit") or -2.0)),
+        noise_reduction=bool(previous_voice_processing.get("noise_reduction", True)),
         intro=packaging_plan.get("intro"),
         outro=packaging_plan.get("outro"),
         insert=packaging_plan.get("insert"),
@@ -7451,16 +7561,19 @@ async def apply_manual_editor_timeline(
         editing_skill=editing_skill,
         editing_accents=editing_accents,
         creative_profile=_job_creative_profile(job),
-        ai_director_plan=previous_render_plan.get("ai_director"),
-        avatar_commentary_plan=previous_render_plan.get("avatar_commentary"),
+        ai_director_plan=previous_render_plan_context["ai_director_plan"],
+        avatar_commentary_plan=previous_render_plan_context["avatar_commentary_plan"],
         export_resolution_mode=export_resolution_mode,
         export_resolution_preset=export_resolution_preset,
         export_frame_rate_mode=export_frame_rate_mode,
         export_frame_rate_preset=export_frame_rate_preset,
     )
     rebuilt_render_plan["delivery"] = {
-        **dict(rebuilt_render_plan.get("delivery") or {}),
         "aspect_ratio": str(effective_video_transform.get("aspect_ratio") or "source"),
+        "resolution_mode": export_resolution_mode,
+        "resolution_preset": export_resolution_preset,
+        "frame_rate_mode": export_frame_rate_mode,
+        "frame_rate_preset": export_frame_rate_preset,
     }
     render_video_transform = {
         **effective_video_transform,
@@ -7486,9 +7599,13 @@ async def apply_manual_editor_timeline(
                 source_duration_sec=source_duration_sec,
                 mode="manual_refine",
                 subtitle_fingerprint=subtitle_fingerprint,
-                render_plan_data=rebuilt_render_plan,
+                render_plan_data=None,
                 render_plan_version=int(manual_render_plan.version or 1),
                 cut_analysis=current_cut_analysis_payload,
+                audio_defaults={
+                    **dict(previous_loudness or {}),
+                    **dict(previous_voice_processing or {}),
+                },
                 video_transform=render_video_transform,
                 smart_cut_rules=smart_cut_rules,
                 note=str(request.note or "").strip() or None,
@@ -9405,13 +9522,10 @@ def _build_activity_decisions(
 
     editorial = next((timeline for timeline in timelines if timeline.timeline_type == "editorial"), None)
     if editorial and editorial.data_json:
-        remove_segments = [
-            segment for segment in editorial.data_json.get("segments", [])
-            if segment.get("type") == "remove"
-        ]
-        total_cut = sum(float(segment.get("end", 0) or 0) - float(segment.get("start", 0) or 0) for segment in remove_segments)
+        cut_segments = editorial_cut_segments(editorial.data_json)
+        total_cut = sum(float(segment.get("end", 0) or 0) - float(segment.get("start", 0) or 0) for segment in cut_segments)
         reasons: dict[str, int] = {}
-        for segment in remove_segments:
+        for segment in cut_segments:
             reason = str(segment.get("reason") or "other")
             reasons[reason] = reasons.get(reason, 0) + 1
         detail = "；".join(f"{reason} {count} 段" for reason, count in sorted(reasons.items())) or "无删减建议"
@@ -9421,7 +9535,7 @@ def _build_activity_decisions(
                 "step_name": "edit_plan",
                 "title": "剪辑决策",
                 "status": "done",
-                "summary": f"建议移除 {len(remove_segments)} 段，共 {total_cut:.1f} 秒",
+                "summary": f"建议移除 {len(cut_segments)} 段，共 {total_cut:.1f} 秒",
                 "detail": detail,
                 "updated_at": _iso_or_none(editorial.created_at),
             }

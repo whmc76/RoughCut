@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 
@@ -50,6 +51,41 @@ def editorial_keep_segments(payload: dict[str, Any] | None) -> list[dict[str, fl
             if isinstance(item, dict) and item.get("type") == "keep"
         ]
     )
+
+
+def editorial_timeline_segments(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    return [
+        copy.deepcopy(item)
+        for item in list(payload.get("segments") or [])
+        if isinstance(item, dict)
+    ]
+
+
+def editorial_cut_segments(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    return [
+        copy.deepcopy(item)
+        for item in list(payload.get("segments") or [])
+        if isinstance(item, dict) and str(item.get("type") or "").strip() in {"cut", "remove"}
+    ]
+
+
+def editorial_timeline_subtitle_projection(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    subtitle_projection = payload.get("subtitle_projection")
+    if not isinstance(subtitle_projection, dict):
+        return None
+    return copy.deepcopy(subtitle_projection)
+
+
+def editorial_timeline_analysis(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return copy.deepcopy(payload.get("analysis") or {})
 
 
 def build_editorial_segments_from_keep_segments(
@@ -113,7 +149,13 @@ def resolve_refine_keep_segments_for_timeline(
         resolved = normalize_keep_segments_payloads(list(plan.get("keep_segments") or []))
         if resolved:
             return resolved
-    return editorial_keep_segments({"segments": list(fallback_segments or [])})
+    return normalize_keep_segments_payloads(
+        [
+            item
+            for item in list(fallback_segments or [])
+            if isinstance(item, dict) and item.get("type") == "keep"
+        ]
+    )
 
 
 def resolve_editorial_keep_segments(
@@ -141,8 +183,13 @@ def resolve_editorial_keep_segments(
                 merge_gap_sec=merge_gap_sec,
                 minimum_duration_sec=minimum_duration_sec,
             )
+    editorial_segments = [
+        item
+        for item in list((editorial_timeline_payload or {}).get("segments") or [])
+        if isinstance(item, dict) and item.get("type") == "keep"
+    ] if isinstance(editorial_timeline_payload, dict) else []
     return normalize_keep_segments_payloads(
-        editorial_keep_segments(editorial_timeline_payload),
+        editorial_segments,
         upper_bound=upper_bound,
         merge_gap_sec=merge_gap_sec,
         minimum_duration_sec=minimum_duration_sec,

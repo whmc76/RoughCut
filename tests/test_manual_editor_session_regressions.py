@@ -307,6 +307,188 @@ def test_manual_editor_session_fallbacks_without_projection_artifact(tmp_path) -
         asyncio.run(engine.dispose())
 
 
+def test_manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults(tmp_path, monkeypatch) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    captured_video_transforms: list[dict] = []
+    captured_render_plan_contexts: list[dict] = []
+    render_plan_payloads: list[object] = []
+    cut_analysis_editorial_payloads: list[object] = []
+
+    monkeypatch.setattr(
+        jobs_api,
+        "_manual_editor_render_plan_context",
+        lambda _payload: {
+            "video_transform": {
+                "rotation_manual": True,
+                "rotation_cw": 90,
+                "aspect_ratio": "9:16",
+                "resolution_mode": "specified",
+                "resolution_preset": "1440p",
+            },
+            "loudness": {"target_lufs": -18.0},
+            "voice_processing": {"noise_reduction": True},
+        },
+    )
+
+    def _capture_manual_video_transform(
+        _render_plan: dict | None,
+        *,
+        render_plan_context: dict | None = None,
+        video_transform: dict | None = None,
+    ) -> dict:
+        render_plan_payloads.append(_render_plan)
+        assert isinstance(render_plan_context, dict)
+        assert video_transform is None
+        captured_render_plan_contexts.append(dict(render_plan_context))
+        captured_video_transforms.append(dict(render_plan_context.get("video_transform") or {}))
+        return dict(render_plan_context.get("video_transform") or {})
+
+    monkeypatch.setattr(
+        jobs_api,
+        "_manual_video_transform_from_render_plan",
+        _capture_manual_video_transform,
+    )
+
+    async def _capture_cut_analysis_payload(_session, **kwargs):
+        cut_analysis_editorial_payloads.append(kwargs.get("editorial_timeline_payload"))
+        return build_cut_analysis_payload(
+            editorial_analysis=dict(kwargs.get("editorial_analysis") or {}),
+            source_name="context_reuse.mp4",
+            job_flow_mode="auto",
+            source_subtitles=[],
+            smart_cut_rules=None,
+            content_profile=None,
+        )
+
+    monkeypatch.setattr(
+        jobs_api,
+        "_load_manual_editor_cut_analysis_payload",
+        _capture_cut_analysis_payload,
+    )
+
+    async def _run() -> None:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            source_path = tmp_path / "context_reuse.mp4"
+            source_path.write_bytes(b"video")
+            job = Job(
+                id=uuid.uuid4(),
+                source_path=str(source_path),
+                source_name="context_reuse.mp4",
+                status="awaiting_manual_edit",
+            )
+            job.steps = [
+                JobStep(
+                    job_id=job.id,
+                    step_name=step_name,
+                    status=status,
+                    metadata_=metadata,
+                )
+                for step_name, status, metadata in _required_step_entries(job.id)
+            ]
+            session.add(job)
+            session.add(
+                Timeline(
+                    job_id=job.id,
+                    timeline_type="editorial",
+                    version=1,
+                    data_json={
+                        "segments": [{"type": "keep", "start": 0.0, "end": 1.2, "reason": "manual_editor_keep"}],
+                    },
+                )
+            )
+            session.add(
+                Timeline(
+                    job_id=job.id,
+                    timeline_type="render_plan",
+                    version=1,
+                    data_json={
+                        "manual_editor": {
+                            "video_transform": {
+                                "rotation_manual": True,
+                                "rotation_cw": 90,
+                                "aspect_ratio": "9:16",
+                                "resolution_mode": "specified",
+                                "resolution_preset": "1440p",
+                            }
+                        },
+                        "loudness": {"target_lufs": -18.0},
+                        "voice_processing": {"noise_reduction": True},
+                    },
+                )
+            )
+            session.add_all(
+                [
+                    Artifact(
+                        job_id=job.id,
+                        artifact_type="media_meta",
+                        data_json={"duration_sec": 1.2},
+                    ),
+                    SubtitleItem(
+                        job_id=job.id,
+                        version=1,
+                        item_index=0,
+                        start_time=0.0,
+                        end_time=1.2,
+                        text_raw="这是备选字幕行",
+                        text_norm="这是备选字幕行",
+                        text_final="这是备选字幕行",
+                    ),
+                    TranscriptSegment(
+                        job_id=job.id,
+                        version=1,
+                        segment_index=0,
+                        start_time=0.0,
+                        end_time=1.2,
+                        text="这是备选字幕行",
+                        words_json=[{"word": "这是备选字幕行", "start": 0.0, "end": 1.2}],
+                    ),
+                ]
+            )
+            await session.commit()
+
+            session_payload = await jobs_api._build_manual_editor_session(job=job, session=session)
+
+            assert captured_video_transforms == [
+                {
+                    "rotation_manual": True,
+                    "rotation_cw": 90,
+                    "aspect_ratio": "9:16",
+                    "resolution_mode": "specified",
+                    "resolution_preset": "1440p",
+                }
+            ]
+            assert captured_render_plan_contexts == [
+                {
+                    "video_transform": {
+                        "rotation_manual": True,
+                        "rotation_cw": 90,
+                        "aspect_ratio": "9:16",
+                        "resolution_mode": "specified",
+                        "resolution_preset": "1440p",
+                    },
+                    "loudness": {"target_lufs": -18.0},
+                    "voice_processing": {"noise_reduction": True},
+                }
+            ]
+            assert render_plan_payloads == [None]
+            assert cut_analysis_editorial_payloads == [None]
+            assert session_payload.base_video_transform.rotation_cw == 90
+            assert session_payload.base_video_transform.aspect_ratio == "9:16"
+            assert session_payload.refine_decision_plan["audio_defaults"] == {
+                "target_lufs": -18.0,
+                "noise_reduction": True,
+            }
+
+    try:
+        asyncio.run(_run())
+    finally:
+        asyncio.run(engine.dispose())
+
+
 def test_manual_editor_session_fallbacks_to_source_when_projection_is_suspicious(tmp_path) -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
 
@@ -736,6 +918,25 @@ def test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_on
         music_plan_calls: list[dict[str, object]] = []
         timeline_analysis_calls: list[dict[str, object]] = []
         editing_accents_calls: list[dict[str, object]] = []
+        packaging_helper_calls: dict[str, list[dict[str, object]]] = {
+            "editing_skill": [],
+            "editing_accents": [],
+            "timeline_analysis": [],
+            "subtitles": [],
+        }
+        packaging_helper_calls: dict[str, list[dict[str, object]]] = {
+            "editing_skill": [],
+            "editing_accents": [],
+            "timeline_analysis": [],
+            "subtitles": [],
+        }
+        video_transform_render_payloads: list[object] = []
+        video_transform_inputs: list[dict[str, object]] = []
+        packaging_plan_render_payloads: list[object] = []
+        packaging_plan_inputs: list[dict[str, object]] = []
+        refine_render_plan_payloads: list[object] = []
+        captured_editorial_analyses: list[dict[str, object] | None] = []
+        captured_editorial_payloads: list[object] = []
         cut_payload = build_cut_analysis_payload(
             editorial_analysis={
                 "accepted_cuts": [
@@ -763,6 +964,11 @@ def test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_on
             return None, {}
 
         async def _fake_load_cut_analysis_payload(_session, **_kwargs):
+            captured_editorial_payloads.append(_kwargs.get("editorial_timeline_payload"))
+            editorial_analysis = _kwargs.get("editorial_analysis")
+            captured_editorial_analyses.append(
+                dict(editorial_analysis) if isinstance(editorial_analysis, dict) else editorial_analysis
+            )
             return dict(cut_payload)
 
         async def _fake_review_multimodal(payload, **_kwargs):
@@ -782,6 +988,36 @@ def test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_on
 
         async def _fake_execute_job_rerun_plan(_session, *, job, steps, plan, via):
             rerun_plans.append(plan)
+
+        original_packaging_plan_from_render_plan = jobs_api._manual_editor_packaging_plan_from_render_plan
+        original_manual_video_transform_from_render_plan = jobs_api._manual_video_transform_from_render_plan
+        original_manual_editor_build_refine_decision_plan = jobs_api._manual_editor_build_refine_decision_plan_from_render_plan
+
+        def _capture_packaging_plan(render_plan, **kwargs):
+            packaging_plan_render_payloads.append(render_plan)
+            packaging_plan_inputs.append(
+                {
+                    "packaging_timeline": kwargs.get("packaging_timeline"),
+                    "cover": kwargs.get("cover"),
+                    "delivery": kwargs.get("delivery"),
+                    "render_plan_context": kwargs.get("render_plan_context"),
+                }
+            )
+            return original_packaging_plan_from_render_plan(render_plan, **kwargs)
+
+        def _capture_manual_video_transform(render_plan, **kwargs):
+            video_transform_render_payloads.append(render_plan)
+            video_transform_inputs.append(
+                {
+                    "render_plan_context": kwargs.get("render_plan_context"),
+                    "video_transform": kwargs.get("video_transform"),
+                }
+            )
+            return original_manual_video_transform_from_render_plan(render_plan, **kwargs)
+
+        def _capture_refine_decision_plan(**kwargs):
+            refine_render_plan_payloads.append(kwargs.get("render_plan_data"))
+            return original_manual_editor_build_refine_decision_plan(**kwargs)
 
         monkeypatch.setattr(jobs_api, "_load_manual_editor_aligned_source_subtitle_dicts", _fake_load_source_subtitles)
         monkeypatch.setattr(jobs_api, "_load_manual_editor_preferred_downstream_profile", _fake_load_profile)
@@ -815,6 +1051,9 @@ def test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_on
         monkeypatch.setattr(pipeline_steps, "_plan_insert_asset_slot", _fake_insert_asset_slot)
         monkeypatch.setattr(pipeline_steps, "_plan_music_entry", _fake_plan_music_entry)
         monkeypatch.setattr(jobs_api, "build_render_plan", lambda **_kwargs: {"delivery": {}, "subtitles": {"version": 1}})
+        monkeypatch.setattr(jobs_api, "_manual_editor_packaging_plan_from_render_plan", _capture_packaging_plan)
+        monkeypatch.setattr(jobs_api, "_manual_video_transform_from_render_plan", _capture_manual_video_transform)
+        monkeypatch.setattr(jobs_api, "_manual_editor_build_refine_decision_plan_from_render_plan", _capture_refine_decision_plan)
         monkeypatch.setattr(jobs_api, "_record_manual_subtitle_replacement_memory", _fake_noop)
         monkeypatch.setattr(jobs_api, "_persist_manual_video_summary_evidence", _fake_noop)
         monkeypatch.setattr(jobs_api, "_persist_manual_video_summary_source_context", _fake_noop)
@@ -924,10 +1163,54 @@ def test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_on
             assert music_plan_calls == []
             assert timeline_analysis_calls == []
             assert editing_accents_calls == []
+            assert video_transform_render_payloads == [None]
+            assert len(video_transform_inputs) == 1
+            assert video_transform_inputs[0]["video_transform"] is None
+            assert video_transform_inputs[0]["render_plan_context"] is not None
+            assert video_transform_inputs[0]["render_plan_context"]["video_transform"] == {
+                "aspect_ratio": "source",
+                "resolution_mode": "source",
+                "resolution_preset": "1080p",
+            }
+            assert video_transform_inputs[0]["render_plan_context"]["loudness"] == {"target_lufs": -18.0}
+            assert video_transform_inputs[0]["render_plan_context"]["voice_processing"] == {"noise_reduction": True}
+            assert packaging_plan_render_payloads == [None]
+            assert len(packaging_plan_inputs) == 1
+            assert packaging_plan_inputs[0]["packaging_timeline"] is None
+            assert packaging_plan_inputs[0]["cover"] is None
+            assert packaging_plan_inputs[0]["delivery"] is None
+            assert packaging_plan_inputs[0]["render_plan_context"] is not None
+            assert packaging_plan_inputs[0]["render_plan_context"]["packaging_timeline"] == {
+                "timeline_analysis": {},
+                "editing_skill": {},
+                "section_choreography": {},
+                "subtitles": {"version": 1},
+                "packaging": {
+                    "intro": None,
+                    "outro": None,
+                    "insert": None,
+                    "watermark": None,
+                    "music": None,
+                },
+                "editing_accents": {},
+            }
+            assert packaging_plan_inputs[0]["render_plan_context"]["cover"] == {}
+            assert packaging_plan_inputs[0]["render_plan_context"]["delivery"] == {}
+            assert packaging_plan_inputs[0]["render_plan_context"]["loudness"] == {"target_lufs": -18.0}
+            assert packaging_plan_inputs[0]["render_plan_context"]["voice_processing"] == {"noise_reduction": True}
+            assert refine_render_plan_payloads == [None]
+            assert captured_editorial_payloads == [None, None]
             assert rerun_plans and rerun_plans[-1].issue_codes == ["manual_subtitle_edit"]
             assert refine_payload.get("keep_segments") == [{"start": 0.0, "end": 1.0}, {"start": 1.3, "end": 5.0}]
             assert editorial_payload.get("analysis", {}).get("manual_editor", {}).get("change_scope") == "subtitle_only"
             assert editorial_payload.get("subtitle_projection", {}).get("items", [{}])[0].get("text_final") == "修改后的字幕"
+            assert captured_editorial_analyses[0] == {
+                "schema": CUT_ANALYSIS_SCHEMA_VERSION,
+                "accepted_cuts": [],
+                "rule_candidates": [],
+            }
+            assert captured_editorial_analyses[-1] is not None
+            assert captured_editorial_analyses[-1].get("manual_editor", {}).get("change_scope") == "subtitle_only"
 
     try:
         asyncio.run(_run())
@@ -946,6 +1229,13 @@ def test_manual_editor_apply_shrinks_no_material_change_to_platform_package_reru
             await conn.run_sync(Base.metadata.create_all)
 
         rerun_plans: list[object] = []
+        captured_refine_audio_defaults: list[dict[str, object]] = []
+        packaging_helper_calls: dict[str, list[dict[str, object]]] = {
+            "editing_skill": [],
+            "editing_accents": [],
+            "timeline_analysis": [],
+            "subtitles": [],
+        }
 
         async def _fake_load_source_subtitles(_session, *, job):
             return [
@@ -993,10 +1283,68 @@ def test_manual_editor_apply_shrinks_no_material_change_to_platform_package_reru
         monkeypatch.setattr(jobs_api, "review_multimodal_trim_review_payload", _fake_noop)
         monkeypatch.setattr(jobs_api, "apply_multimodal_trim_review_to_cut_analysis", lambda payload, _review: payload)
         monkeypatch.setattr(jobs_api, "resolve_packaging_plan_for_job", lambda *_args, **_kwargs: {})
+        original_packaging_timeline_editing_skill = jobs_api.packaging_timeline_editing_skill
+        original_packaging_timeline_editing_accents = jobs_api.packaging_timeline_editing_accents
+        original_packaging_timeline_analysis = jobs_api.packaging_timeline_analysis
+        original_packaging_timeline_subtitles = jobs_api.packaging_timeline_subtitles
+        monkeypatch.setattr(
+            jobs_api,
+            "packaging_timeline_editing_skill",
+            lambda payload: (
+                packaging_helper_calls["editing_skill"].append(dict(payload or {}))
+                or original_packaging_timeline_editing_skill(payload)
+            ),
+        )
+        monkeypatch.setattr(
+            jobs_api,
+            "packaging_timeline_editing_accents",
+            lambda payload: (
+                packaging_helper_calls["editing_accents"].append(dict(payload or {}))
+                or original_packaging_timeline_editing_accents(payload)
+            ),
+        )
+        monkeypatch.setattr(
+            jobs_api,
+            "packaging_timeline_analysis",
+            lambda payload: (
+                packaging_helper_calls["timeline_analysis"].append(dict(payload or {}))
+                or original_packaging_timeline_analysis(payload)
+            ),
+        )
+        monkeypatch.setattr(
+            jobs_api,
+            "packaging_timeline_subtitles",
+            lambda payload: (
+                packaging_helper_calls["subtitles"].append(dict(payload or {}))
+                or original_packaging_timeline_subtitles(payload)
+            ),
+        )
         monkeypatch.setattr(pipeline_steps, "_job_creative_profile", lambda _job: {})
         monkeypatch.setattr(pipeline_steps, "_plan_insert_asset_slot", _fake_noop)
         monkeypatch.setattr(pipeline_steps, "_plan_music_entry", _fake_noop)
-        monkeypatch.setattr(jobs_api, "build_render_plan", lambda **_kwargs: {"delivery": {}, "subtitles": {"version": 1}})
+        original_render_plan_delivery = jobs_api.render_plan_delivery
+        monkeypatch.setattr(
+            jobs_api,
+            "render_plan_delivery",
+            lambda payload: (
+                (_ for _ in ()).throw(AssertionError("should not reread rebuilt render-plan delivery"))
+                if isinstance(payload, dict) and payload.get("__rebuilt__")
+                else original_render_plan_delivery(payload)
+            ),
+        )
+        monkeypatch.setattr(
+            jobs_api,
+            "build_render_plan",
+            lambda **_kwargs: {"__rebuilt__": True, "delivery": {"should_not": "be_read"}, "subtitles": {"version": 1}},
+        )
+        monkeypatch.setattr(
+            jobs_api,
+            "build_refine_decision_plan_from_render_plan",
+            lambda **kwargs: (
+                captured_refine_audio_defaults.append(dict(kwargs.get("audio_defaults") or {}))
+                or {"schema": "refine_decision_plan.v1", "audio_defaults": dict(kwargs.get("audio_defaults") or {})}
+            ),
+        )
         monkeypatch.setattr(jobs_api, "_record_manual_subtitle_replacement_memory", _fake_noop)
         monkeypatch.setattr(jobs_api, "_persist_manual_video_summary_evidence", _fake_noop)
         monkeypatch.setattr(jobs_api, "_persist_manual_video_summary_source_context", _fake_noop)
@@ -1084,6 +1432,435 @@ def test_manual_editor_apply_shrinks_no_material_change_to_platform_package_reru
             assert rerun_plans and rerun_plans[-1].rerun_start_step == "platform_package"
             assert rerun_plans[-1].rerun_steps == ["platform_package"]
             assert rerun_plans[-1].issue_codes == ["manual_editor_no_material_change"]
+            assert captured_refine_audio_defaults == [{"target_lufs": -18.0, "noise_reduction": True}]
+            assert len(packaging_helper_calls["editing_skill"]) == 1
+            assert len(packaging_helper_calls["editing_accents"]) == 1
+            assert len(packaging_helper_calls["timeline_analysis"]) == 1
+            assert len(packaging_helper_calls["subtitles"]) == 1
+
+    try:
+        asyncio.run(_run())
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_manual_editor_draft_reuses_editorial_analysis_context_for_cut_analysis_loader(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+
+    async def _run() -> None:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        captured_editorial_analyses: list[dict[str, object] | None] = []
+        captured_refine_render_payloads: list[object] = []
+        captured_refine_audio_defaults: list[dict[str, object]] = []
+        captured_editorial_payloads: list[object] = []
+        captured_render_plan_context_payloads: list[dict[str, object]] = []
+
+        async def _fake_load_source_subtitles(_session, *, job):
+            return [
+                {
+                    "index": 0,
+                    "start_time": 0.0,
+                    "end_time": 5.0,
+                    "text_raw": "原始字幕",
+                    "text_norm": "原始字幕",
+                    "text_final": "原始字幕",
+                }
+            ]
+
+        async def _fake_load_cut_analysis_payload(_session, *, editorial_analysis=None, **_kwargs):
+            captured_editorial_payloads.append(_kwargs.get("editorial_timeline_payload"))
+            captured_editorial_analyses.append(dict(editorial_analysis) if isinstance(editorial_analysis, dict) else editorial_analysis)
+            return {
+                "schema": CUT_ANALYSIS_SCHEMA_VERSION,
+                "accepted_cuts": [],
+                "rule_candidates": [],
+            }
+
+        async def _fake_noop(*_args, **_kwargs):
+            return None
+
+        async def _fake_profile(*_args, **_kwargs):
+            return None, {}
+
+        async def _fake_review(*_args, **_kwargs):
+            return {}
+
+        monkeypatch.setattr(jobs_api, "_load_manual_editor_aligned_source_subtitle_dicts", _fake_load_source_subtitles)
+        monkeypatch.setattr(jobs_api, "_load_manual_editor_cut_analysis_payload", _fake_load_cut_analysis_payload)
+        monkeypatch.setattr(jobs_api, "_load_manual_editor_preferred_downstream_profile", _fake_profile)
+        monkeypatch.setattr(jobs_api, "review_multimodal_trim_review_payload", _fake_review)
+        monkeypatch.setattr(jobs_api, "apply_multimodal_trim_review_to_cut_analysis", lambda payload, _review: payload)
+        monkeypatch.setattr(
+            jobs_api,
+            "_manual_editor_render_plan_context",
+            lambda _payload: (
+                captured_render_plan_context_payloads.append(dict(_payload or {}))
+                or {
+                    "loudness": {"target_lufs": -18.0},
+                    "voice_processing": {"noise_reduction": True},
+                }
+            ),
+        )
+        monkeypatch.setattr(jobs_api, "_persist_manual_video_summary_evidence", _fake_noop)
+        monkeypatch.setattr(jobs_api, "_persist_manual_video_summary_source_context", _fake_noop)
+        monkeypatch.setattr(
+            jobs_api,
+            "_manual_editor_build_refine_decision_plan_from_render_plan",
+            lambda **_kwargs: (
+                captured_refine_render_payloads.append(_kwargs.get("render_plan_data"))
+                or captured_refine_audio_defaults.append(dict(_kwargs.get("audio_defaults") or {}))
+                or {"schema": "refine_decision_plan.v1"}
+            ),
+        )
+
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            source_path = tmp_path / "draft-demo.mp4"
+            source_path.write_bytes(b"video")
+            job = Job(
+                id=uuid.uuid4(),
+                source_path=str(source_path),
+                source_name="draft-demo.mp4",
+                status="awaiting_manual_edit",
+            )
+            job.steps = [
+                JobStep(
+                    job_id=job.id,
+                    step_name=step_name,
+                    status=status,
+                    metadata_=metadata,
+                )
+                for step_name, status, metadata in _required_step_entries(job.id)
+            ]
+            session.add(job)
+            session.add(
+                Timeline(
+                    job_id=job.id,
+                    timeline_type="editorial",
+                    version=1,
+                    data_json={
+                        "segments": [
+                            {"type": "keep", "start": 0.0, "end": 5.0, "reason": "manual_editor_keep"},
+                        ],
+                        "analysis": {
+                            "schema": CUT_ANALYSIS_SCHEMA_VERSION,
+                            "accepted_cuts": [],
+                            "rule_candidates": [],
+                        },
+                    },
+                )
+            )
+            session.add(
+                Timeline(
+                    job_id=job.id,
+                    timeline_type="render_plan",
+                    version=1,
+                    data_json={
+                        "manual_editor": {},
+                        "loudness": {"target_lufs": -18.0},
+                        "voice_processing": {"noise_reduction": True},
+                        "subtitles": {"version": 1},
+                    },
+                )
+            )
+            session.add(Artifact(job_id=job.id, artifact_type="media_meta", data_json={"duration_sec": 5.0}))
+            await session.commit()
+
+            editorial_timeline = await jobs_api._load_latest_timeline_by_type(session, job_id=job.id, timeline_type="editorial")
+            render_plan_timeline = await jobs_api._load_latest_timeline_by_type(session, job_id=job.id, timeline_type="render_plan")
+            source_subtitles = await _fake_load_source_subtitles(session, job=job)
+            subtitle_fingerprint = jobs_api._manual_editor_subtitle_fingerprint(source_subtitles)
+
+            result = await jobs_api.save_manual_editor_draft(
+                job.id,
+                jobs_api.ManualEditorApplyIn(
+                    keep_segments=[{"start": 0.0, "end": 5.0}],
+                    base_timeline_id=str(editorial_timeline.id),
+                    base_timeline_version=int(editorial_timeline.version or 1),
+                    base_render_plan_version=int(render_plan_timeline.version or 1),
+                    base_subtitle_fingerprint=subtitle_fingerprint,
+                ),
+                session=session,
+            )
+
+            assert result.keep_segment_count == 1
+            assert captured_editorial_analyses == [
+                {
+                    "schema": CUT_ANALYSIS_SCHEMA_VERSION,
+                    "accepted_cuts": [],
+                    "rule_candidates": [],
+                }
+            ]
+            assert captured_editorial_payloads == [None]
+            assert captured_refine_render_payloads == [None]
+            assert captured_refine_audio_defaults == [{"target_lufs": -18.0, "noise_reduction": True}]
+            assert captured_render_plan_context_payloads == [
+                {
+                    "manual_editor": {},
+                    "loudness": {"target_lufs": -18.0},
+                    "voice_processing": {"noise_reduction": True},
+                    "subtitles": {"version": 1},
+                }
+            ]
+
+    try:
+        asyncio.run(_run())
+    finally:
+        asyncio.run(engine.dispose())
+
+
+def test_manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+
+    async def _run() -> None:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        rerun_plans: list[object] = []
+        multimodal_review_calls: list[dict[str, object]] = []
+        packaging_resolve_calls: list[dict[str, object]] = []
+        insert_plan_calls: list[dict[str, object]] = []
+        music_plan_calls: list[dict[str, object]] = []
+        timeline_analysis_calls: list[dict[str, object]] = []
+        editing_accents_calls: list[dict[str, object]] = []
+        packaging_helper_calls: dict[str, list[dict[str, object]]] = {
+            "editing_skill": [],
+            "editing_accents": [],
+            "timeline_analysis": [],
+            "subtitles": [],
+        }
+
+        async def _fake_load_source_subtitles(_session, *, job):
+            return [
+                {
+                    "index": 0,
+                    "start_time": 0.0,
+                    "end_time": 5.0,
+                    "text_raw": "原始字幕",
+                    "text_norm": "原始字幕",
+                    "text_final": "原始字幕",
+                    "projection_source": "transcript_segment",
+                }
+            ]
+
+        async def _fake_load_profile(_session, *, job_id):
+            return None, {}
+
+        async def _fake_load_cut_analysis_payload(_session, **_kwargs):
+            return build_cut_analysis_payload(
+                editorial_analysis={
+                    "accepted_cuts": [],
+                    "rule_candidates": [],
+                },
+                source_name="apply-demo.mp4",
+                job_flow_mode="auto",
+            )
+
+        async def _fake_review_multimodal(payload, **_kwargs):
+            multimodal_review_calls.append(dict(payload))
+            return payload
+
+        async def _fake_insert_asset_slot(**_kwargs):
+            insert_plan_calls.append(dict(_kwargs))
+            return None
+
+        async def _fake_plan_music_entry(**_kwargs):
+            music_plan_calls.append(dict(_kwargs))
+            return None
+
+        async def _fake_noop(*_args, **_kwargs):
+            return None
+
+        async def _fake_execute_job_rerun_plan(_session, *, job, steps, plan, via):
+            rerun_plans.append(plan)
+
+        monkeypatch.setattr(jobs_api, "_load_manual_editor_aligned_source_subtitle_dicts", _fake_load_source_subtitles)
+        monkeypatch.setattr(jobs_api, "_load_manual_editor_preferred_downstream_profile", _fake_load_profile)
+        monkeypatch.setattr(jobs_api, "_load_manual_editor_cut_analysis_payload", _fake_load_cut_analysis_payload)
+        monkeypatch.setattr(jobs_api, "validate_projected_subtitles_against_source", lambda subtitles, **_kwargs: SimpleNamespace(
+            mismatch_detected=False,
+            fallback_used=False,
+            subtitles=list(subtitles),
+            changed=False,
+            input_count=len(subtitles),
+            output_count=len(subtitles),
+        ))
+        monkeypatch.setattr(jobs_api, "review_multimodal_trim_review_payload", _fake_review_multimodal)
+        monkeypatch.setattr(jobs_api, "apply_multimodal_trim_review_to_cut_analysis", lambda payload, _review: payload)
+        monkeypatch.setattr(
+            jobs_api,
+            "resolve_packaging_plan_for_job",
+            lambda *_args, **_kwargs: (packaging_resolve_calls.append(dict(_kwargs)) or {}),
+        )
+        original_packaging_timeline_editing_skill = jobs_api.packaging_timeline_editing_skill
+        original_packaging_timeline_editing_accents = jobs_api.packaging_timeline_editing_accents
+        original_packaging_timeline_analysis = jobs_api.packaging_timeline_analysis
+        original_packaging_timeline_subtitles = jobs_api.packaging_timeline_subtitles
+        monkeypatch.setattr(
+            jobs_api,
+            "packaging_timeline_editing_skill",
+            lambda payload: (
+                packaging_helper_calls["editing_skill"].append(dict(payload or {}))
+                or original_packaging_timeline_editing_skill(payload)
+            ),
+        )
+        monkeypatch.setattr(
+            jobs_api,
+            "packaging_timeline_editing_accents",
+            lambda payload: (
+                packaging_helper_calls["editing_accents"].append(dict(payload or {}))
+                or original_packaging_timeline_editing_accents(payload)
+            ),
+        )
+        monkeypatch.setattr(
+            jobs_api,
+            "packaging_timeline_analysis",
+            lambda payload: (
+                packaging_helper_calls["timeline_analysis"].append(dict(payload or {}))
+                or original_packaging_timeline_analysis(payload)
+            ),
+        )
+        monkeypatch.setattr(
+            jobs_api,
+            "packaging_timeline_subtitles",
+            lambda payload: (
+                packaging_helper_calls["subtitles"].append(dict(payload or {}))
+                or original_packaging_timeline_subtitles(payload)
+            ),
+        )
+        monkeypatch.setattr(
+            jobs_api,
+            "infer_timeline_analysis",
+            lambda *_args, **_kwargs: (timeline_analysis_calls.append(dict(_kwargs)) or {"pace": "tight"}),
+        )
+        monkeypatch.setattr(
+            jobs_api,
+            "build_smart_editing_accents",
+            lambda **_kwargs: (editing_accents_calls.append(dict(_kwargs)) or {"style": str(_kwargs.get("style") or "")}),
+        )
+        monkeypatch.setattr(pipeline_steps, "_job_creative_profile", lambda _job: {})
+        monkeypatch.setattr(pipeline_steps, "_plan_insert_asset_slot", _fake_insert_asset_slot)
+        monkeypatch.setattr(pipeline_steps, "_plan_music_entry", _fake_plan_music_entry)
+        monkeypatch.setattr(jobs_api, "_record_manual_subtitle_replacement_memory", _fake_noop)
+        monkeypatch.setattr(jobs_api, "_persist_manual_video_summary_evidence", _fake_noop)
+        monkeypatch.setattr(jobs_api, "_persist_manual_video_summary_source_context", _fake_noop)
+        monkeypatch.setattr(jobs_api, "touch_runtime_refresh_hold", lambda **_kwargs: None)
+        monkeypatch.setattr(jobs_api, "execute_job_rerun_plan", _fake_execute_job_rerun_plan)
+        monkeypatch.setattr(jobs_api, "export_to_otio", lambda _payload: None)
+
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            source_path = tmp_path / "apply-demo.mp4"
+            source_path.write_bytes(b"video")
+            job = Job(
+                id=uuid.uuid4(),
+                source_path=str(source_path),
+                source_name="apply-demo.mp4",
+                status="awaiting_manual_edit",
+            )
+            job.steps = [
+                JobStep(
+                    job_id=job.id,
+                    step_name=step_name,
+                    status=status,
+                    metadata_=metadata,
+                )
+                for step_name, status, metadata in _required_step_entries(job.id)
+            ]
+            session.add(job)
+            session.add(
+                Timeline(
+                    job_id=job.id,
+                    timeline_type="editorial",
+                    version=1,
+                    data_json={
+                        "source": str(source_path),
+                        "segments": [
+                            {"type": "keep", "start": 0.0, "end": 1.0, "reason": "manual_editor_keep"},
+                            {"type": "keep", "start": 1.3, "end": 5.0, "reason": "manual_editor_keep"},
+                        ],
+                        "analysis": {
+                            "schema": CUT_ANALYSIS_SCHEMA_VERSION,
+                            "accepted_cuts": [],
+                            "rule_candidates": [],
+                        },
+                    },
+                )
+            )
+            session.add(
+                Timeline(
+                    job_id=job.id,
+                    timeline_type="render_plan",
+                    version=1,
+                    data_json={
+                        "manual_editor": {},
+                        "loudness": {"target_lufs": -18.0},
+                        "voice_processing": {"noise_reduction": True},
+                        "packaging_timeline": {
+                            "subtitles": {"version": 1},
+                            "timeline_analysis": {"pace": "legacy"},
+                            "editing_skill": {"pace": "tight"},
+                            "editing_accents": {"style": "smart_effect_punch"},
+                        },
+                    },
+                )
+            )
+            session.add(Artifact(job_id=job.id, artifact_type="media_meta", data_json={"duration_sec": 5.0}))
+            await session.commit()
+
+            editorial_timeline = await jobs_api._load_latest_timeline_by_type(session, job_id=job.id, timeline_type="editorial")
+            render_plan_timeline = await jobs_api._load_latest_timeline_by_type(session, job_id=job.id, timeline_type="render_plan")
+            source_subtitles = await _fake_load_source_subtitles(session, job=job)
+            subtitle_fingerprint = jobs_api._manual_editor_subtitle_fingerprint(source_subtitles)
+
+            result = await jobs_api.apply_manual_editor_timeline(
+                job.id,
+                jobs_api.ManualEditorApplyIn(
+                    keep_segments=[{"start": 0.0, "end": 5.0}],
+                    base_timeline_id=str(editorial_timeline.id),
+                    base_timeline_version=int(editorial_timeline.version or 1),
+                    base_render_plan_version=int(render_plan_timeline.version or 1),
+                    base_subtitle_fingerprint=subtitle_fingerprint,
+                ),
+                session=session,
+            )
+
+            render_plan_result = await session.execute(
+                select(Timeline)
+                .where(Timeline.job_id == job.id, Timeline.timeline_type == "render_plan")
+                .order_by(Timeline.version.desc(), Timeline.id.desc())
+            )
+            latest_render_plan = render_plan_result.scalars().first()
+            latest_render_plan_payload = (
+                latest_render_plan.data_json
+                if latest_render_plan and isinstance(latest_render_plan.data_json, dict)
+                else {}
+            )
+
+            assert result.change_scope == "timeline"
+            assert result.render_strategy == "full_timeline_render"
+            assert result.keep_segment_count == 1
+            assert multimodal_review_calls != []
+            assert len(packaging_resolve_calls) == 1
+            assert len(insert_plan_calls) == 1
+            assert len(music_plan_calls) == 1
+            assert len(timeline_analysis_calls) == 1
+            assert len(editing_accents_calls) == 1
+            assert editing_accents_calls[0]["style"] == "smart_effect_punch"
+            assert len(packaging_helper_calls["editing_skill"]) == 1
+            assert len(packaging_helper_calls["editing_accents"]) == 1
+            assert len(packaging_helper_calls["subtitles"]) == 1
+            assert rerun_plans and rerun_plans[-1].issue_codes == ["manual_timeline_edit"]
+            assert rerun_plans[-1].rerun_steps == ["render", "final_review", "platform_package"]
+            assert latest_render_plan_payload.get("editing_accents", {}).get("style") == "smart_effect_punch"
 
     try:
         asyncio.run(_run())

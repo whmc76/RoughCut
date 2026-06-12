@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 from contextlib import suppress
 import functools
 import json
@@ -15,11 +16,17 @@ from typing import Any, Callable
 
 from roughcut.config import get_settings
 from roughcut.edit.editorial_timeline import editorial_keep_segments, normalize_keep_segments_payloads
+from roughcut.edit.render_plan import (
+    render_plan_avatar_commentary,
+    render_plan_delivery,
+    render_plan_loudness,
+    render_plan_manual_editor,
+    render_plan_video_transform,
+    render_plan_voice_processing,
+)
 from roughcut.edit.packaging_timeline import (
-    packaging_timeline_assets,
-    packaging_timeline_editing_accents,
-    packaging_timeline_section_choreography,
-    packaging_timeline_subtitles,
+    packaging_timeline_asset_plan,
+    resolve_packaging_timeline_payload,
 )
 from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.packaging.library import (
@@ -68,12 +75,26 @@ _DEFAULT_PEAK_LIMIT_DB = -2.0
 _DEFAULT_LRA = 10.0
 
 
-def _render_packaging_context(render_plan: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+def _render_packaging_context(render_plan: dict[str, Any] | None) -> dict[str, Any]:
+    packaging_timeline = resolve_packaging_timeline_payload(render_plan)
+    assets = copy.deepcopy(packaging_timeline.get("packaging") or {})
+    editing_accents = copy.deepcopy(packaging_timeline.get("editing_accents") or {})
     return {
-        "assets": packaging_timeline_assets(render_plan),
-        "editing_accents": packaging_timeline_editing_accents(render_plan),
-        "section_choreography": packaging_timeline_section_choreography(render_plan),
-        "subtitles": packaging_timeline_subtitles(render_plan),
+        "assets": assets,
+        "editing_accents": editing_accents,
+        "has_packaging_assets": any(assets.get(key) for key in ("intro", "outro", "insert", "watermark", "music")),
+        "section_choreography": copy.deepcopy(packaging_timeline.get("section_choreography") or {}),
+        "subtitles": copy.deepcopy(packaging_timeline.get("subtitles") or {}),
+    }
+
+
+def _render_runtime_plan_context(render_plan: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "delivery": render_plan_delivery(render_plan),
+        "video_transform": render_plan_video_transform(render_plan),
+        "avatar_plan": render_plan_avatar_commentary(render_plan),
+        "voice_processing": render_plan_voice_processing(render_plan),
+        "loudness": render_plan_loudness(render_plan),
     }
 
 
@@ -480,7 +501,7 @@ def _ffmpeg_encoder_available(encoder_name: str) -> bool:
 
 async def render_video(
     source_path: Path,
-    render_plan: dict,
+    render_plan: dict[str, Any] | None,
     editorial_timeline: dict,
     output_path: Path,
     keep_segments: list[dict[str, Any]] | None = None,
@@ -489,6 +510,8 @@ async def render_video(
     synthesize_subtitle_unit_accents: bool = True,
     progress_callback: Callable[[float], None] | None = None,
     debug_dir: Path | None = None,
+    packaging_context: dict[str, Any] | None = None,
+    runtime_plan_context: dict[str, Any] | None = None,
 ) -> Path:
     """
     Render video according to editorial_timeline and render_plan.
@@ -511,7 +534,14 @@ async def render_video(
     except Exception:
         source_duration = 0.0
 
-    packaging_enabled = any(render_plan.get(key) for key in ("intro", "outro", "insert", "watermark", "music"))
+    resolved_packaging_context = (
+        packaging_context if isinstance(packaging_context, dict) else _render_packaging_context(render_plan)
+    )
+    resolved_runtime_plan_context = (
+        runtime_plan_context if isinstance(runtime_plan_context, dict) else _render_runtime_plan_context(render_plan)
+    )
+    packaging_assets = resolved_packaging_context["assets"]
+    packaging_enabled = bool(resolved_packaging_context.get("has_packaging_assets"))
     base_output_path = output_path if not packaging_enabled else output_path.with_name(f"{output_path.stem}.base{output_path.suffix}")
 
     keep_segments = _resolve_render_keep_segments(
@@ -523,9 +553,10 @@ async def render_video(
 
     source_info = _probe_video_stream(source_path)
     _write_debug_json(debug_dir, "source.ffprobe.json", source_info)
+    render_delivery = resolved_runtime_plan_context["delivery"]
     target_fps = _resolve_delivery_frame_rate(
         source_fps=float(source_info.get("fps", 0.0) or 0.0),
-        delivery=render_plan.get("delivery") or {},
+        delivery=render_delivery,
     )
     target_fps_expr = _ffmpeg_fps_expr(target_fps) if target_fps > 0 else None
     prefer_hardware_encoder = not _prefer_software_encoder_for_source(
@@ -535,8 +566,7 @@ async def render_video(
 
     from roughcut.media.rotation import RotationDecision, detect_video_rotation_decision
 
-    manual_editor_meta = render_plan.get("manual_editor") if isinstance(render_plan.get("manual_editor"), dict) else {}
-    manual_video_transform = manual_editor_meta.get("video_transform") if isinstance(manual_editor_meta.get("video_transform"), dict) else {}
+    manual_video_transform = resolved_runtime_plan_context["video_transform"]
     manual_rotation_cw = _normalize_rotation_cw(manual_video_transform.get("rotation_cw") if manual_video_transform and manual_video_transform.get("rotation_manual") else None)
     rotation_decision = (
         RotationDecision(rotation_cw=manual_rotation_cw, confidence=1.0, source="manual_editor", reason="manual_editor_video_transform")
@@ -555,7 +585,7 @@ async def render_video(
     render_w, render_h = _resolve_delivery_resolution(
         expected_width=expected_w,
         expected_height=expected_h,
-        delivery=render_plan.get("delivery") or {},
+        delivery=render_delivery,
     )
 
     _write_debug_json(
@@ -578,10 +608,10 @@ async def render_video(
     )
 
     filter_parts: list[str] = []
-    packaging_context = _render_packaging_context(render_plan)
-    editing_accents = packaging_context["editing_accents"]
-    section_choreography = packaging_context["section_choreography"]
-    subtitles_plan = packaging_context["subtitles"]
+    editing_accents = resolved_packaging_context["editing_accents"]
+    section_choreography = resolved_packaging_context["section_choreography"]
+    subtitles_plan = resolved_packaging_context["subtitles"]
+    avatar_plan = resolved_runtime_plan_context["avatar_plan"]
     choreographed_subtitles = _build_choreographed_subtitle_items(
         subtitle_items,
         subtitles_plan=subtitles_plan,
@@ -608,10 +638,12 @@ async def render_video(
         output_label="vcolor",
     )
 
+    render_voice_processing = resolved_runtime_plan_context["voice_processing"]
+    render_loudness = resolved_runtime_plan_context["loudness"]
     audio_filter = _build_master_audio_filter_chain(
         input_label=audio_label,
-        voice_processing=render_plan.get("voice_processing") or {},
-        loudness=render_plan.get("loudness") or {},
+        voice_processing=render_voice_processing,
+        loudness=render_loudness,
         output_label="afinal",
         allow_noise_reduction=True,
         include_declipping=True,
@@ -622,7 +654,7 @@ async def render_video(
     audio_label = "afinal"
     audio_map = f"[{audio_label}]"
 
-    if video_transform_accents.get("emphasis_overlays") and _should_apply_smart_effect_video_transforms(render_plan.get("avatar_commentary") or {}):
+    if video_transform_accents.get("emphasis_overlays") and _should_apply_smart_effect_video_transforms(avatar_plan):
         smart_effect_filters, video_label = _build_smart_effect_video_filters(
             video_label,
             video_transform_accents,
@@ -654,15 +686,19 @@ async def render_video(
     )
     if needs_timed_overlays and not packaging_enabled:
         overlay_filter_parts, overlay_video_label, overlay_audio_label = await _build_timed_overlay_filter_chain(
-            render_plan=render_plan,
+            render_plan=None,
             subtitle_items=subtitle_items,
             overlay_plan=overlay_plan,
+            choreographed_subtitles=choreographed_subtitles,
             output_path=output_path,
             render_w=render_w,
             render_h=render_h,
             video_label=video_label,
             audio_label=audio_label,
             debug_dir=debug_dir,
+            subtitles_plan=subtitles_plan,
+            packaging_context=None,
+            avatar_plan=avatar_plan,
         )
         if overlay_filter_parts:
             filter_parts.extend(overlay_filter_parts)
@@ -712,12 +748,14 @@ async def render_video(
     if packaging_enabled:
         packaged = await _apply_packaging_plan(
             base_output_path,
-            render_plan=render_plan,
+            render_plan=None,
             output_path=output_path,
             expected_width=render_w,
             expected_height=render_h,
             target_fps=target_fps,
             debug_dir=debug_dir,
+            packaging_context=None,
+            packaging_assets=packaging_assets,
         )
         await _normalize_rendered_output(
             packaged,
@@ -737,11 +775,17 @@ async def render_video(
         await _apply_timed_overlays_to_video(
             current_output,
             output_path=overlay_output_path,
-            render_plan=render_plan,
+            render_plan=None,
             subtitle_items=subtitle_items,
             overlay_editing_accents=overlay_plan,
+            overlay_plan=overlay_plan,
+            choreographed_subtitles=choreographed_subtitles,
             synthesize_subtitle_unit_accents=synthesize_subtitle_unit_accents,
             debug_dir=debug_dir,
+            subtitles_plan=subtitles_plan,
+            section_choreography=section_choreography,
+            packaging_context=None,
+            avatar_plan=avatar_plan,
         )
         if overlay_output_path != output_path:
             _finalize_output_file(overlay_output_path, output_path)
@@ -760,9 +804,10 @@ def _build_segment_filter_chain(
     subtitle_items: list[dict[str, Any]] | None = None,
 ) -> tuple[list[str], str, str]:
     parts: list[str] = []
+    transitions = dict(editing_accents.get("transitions") or {})
     transition_map = _resolve_transition_map(
         keep_segments,
-        editing_accents.get("transitions") or {},
+        transitions,
         section_choreography=section_choreography,
         subtitle_items=subtitle_items,
     )
@@ -792,7 +837,7 @@ def _build_segment_filter_chain(
         transition_duration = transition_map.get(boundary_index)
         if transition_duration is not None:
             offset = max(0.0, current_duration - transition_duration)
-            transition_name = str((editing_accents.get("transitions") or {}).get("transition") or "fade").strip() or "fade"
+            transition_name = str(transitions.get("transition") or "fade").strip() or "fade"
             parts.append(
                 f"[{current_video}][{next_video}]xfade=transition={transition_name}:duration={transition_duration}:offset={offset}[{output_video}]"
             )
@@ -1568,23 +1613,52 @@ async def _apply_timed_overlays_to_video(
     source_path: Path,
     *,
     output_path: Path,
-    render_plan: dict[str, Any],
+    render_plan: dict[str, Any] | None = None,
     subtitle_items: list[dict] | None,
     overlay_editing_accents: dict[str, Any] | None,
+    overlay_plan: dict[str, Any] | None = None,
+    choreographed_subtitles: list[dict[str, Any]] | None = None,
     synthesize_subtitle_unit_accents: bool = True,
     debug_dir: Path | None,
+    subtitles_plan: dict[str, Any] | None = None,
+    section_choreography: dict[str, Any] | None = None,
+    packaging_context: dict[str, Any] | None = None,
+    avatar_plan: dict[str, Any] | None = None,
 ) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     source_info = _probe_video_stream(source_path)
     render_w = int(source_info.get("display_width") or source_info.get("width") or 0)
     render_h = int(source_info.get("display_height") or source_info.get("height") or 0)
-    packaging_context = _render_packaging_context(render_plan)
-    overlay_plan = _build_overlay_only_editing_accents(
-        overlay_editing_accents,
-        subtitle_items=subtitle_items,
-        section_choreography=packaging_context["section_choreography"],
-        synthesize_subtitle_unit_accents=synthesize_subtitle_unit_accents,
+    resolved_packaging_context = (
+        packaging_context
+        if isinstance(packaging_context, dict)
+        else (
+            _render_packaging_context(render_plan)
+            if not (isinstance(subtitles_plan, dict) and isinstance(section_choreography, dict))
+            else {}
+        )
+    )
+    resolved_subtitles_plan = (
+        dict(subtitles_plan)
+        if isinstance(subtitles_plan, dict)
+        else dict(resolved_packaging_context.get("subtitles") or {})
+    )
+    resolved_section_choreography = (
+        dict(section_choreography)
+        if isinstance(section_choreography, dict)
+        else dict(resolved_packaging_context.get("section_choreography") or {})
+    )
+    resolved_avatar_plan = avatar_plan if isinstance(avatar_plan, dict) else render_plan_avatar_commentary(render_plan)
+    resolved_overlay_plan = (
+        dict(overlay_plan)
+        if isinstance(overlay_plan, dict)
+        else _build_overlay_only_editing_accents(
+            overlay_editing_accents,
+            subtitle_items=subtitle_items,
+            section_choreography=resolved_section_choreography,
+            synthesize_subtitle_unit_accents=synthesize_subtitle_unit_accents,
+        )
     )
     filter_parts: list[str] = []
     video_label = _append_delivery_color_filter(
@@ -1594,9 +1668,10 @@ async def _apply_timed_overlays_to_video(
         output_label="vcolor",
     )
     filter_parts, video_label, audio_label = await _build_timed_overlay_filter_chain(
-        render_plan=render_plan,
+        render_plan=None,
         subtitle_items=subtitle_items,
-        overlay_plan=overlay_plan,
+        overlay_plan=resolved_overlay_plan,
+        choreographed_subtitles=choreographed_subtitles,
         output_path=output_path,
         render_w=render_w,
         render_h=render_h,
@@ -1604,6 +1679,9 @@ async def _apply_timed_overlays_to_video(
         audio_label="0:a",
         debug_dir=debug_dir,
         initial_filter_parts=filter_parts,
+        subtitles_plan=resolved_subtitles_plan,
+        packaging_context=None,
+        avatar_plan=resolved_avatar_plan,
     )
 
     if not filter_parts:
@@ -1661,9 +1739,10 @@ def _resolve_render_keep_segments(
 
 async def _build_timed_overlay_filter_chain(
     *,
-    render_plan: dict[str, Any],
+    render_plan: dict[str, Any] | None = None,
     subtitle_items: list[dict] | None,
     overlay_plan: dict[str, Any] | None,
+    choreographed_subtitles: list[dict[str, Any]] | None = None,
     output_path: Path,
     render_w: int,
     render_h: int,
@@ -1671,38 +1750,54 @@ async def _build_timed_overlay_filter_chain(
     audio_label: str,
     debug_dir: Path | None,
     initial_filter_parts: list[str] | None = None,
+    subtitles_plan: dict[str, Any] | None = None,
+    packaging_context: dict[str, Any] | None = None,
+    avatar_plan: dict[str, Any] | None = None,
 ) -> tuple[list[str], str, str]:
     from roughcut.media.subtitles import escape_path_for_ffmpeg_filter, write_ass_file
 
     settings = get_settings()
     overlay_plan = overlay_plan or {}
-    packaging_context = _render_packaging_context(render_plan)
-    subtitles_plan = packaging_context["subtitles"]
-    choreographed_subtitles = _build_choreographed_subtitle_items(
-        subtitle_items,
-        subtitles_plan=subtitles_plan,
-    ) if subtitle_items and subtitles_plan else []
+    resolved_packaging_context = (
+        packaging_context
+        if isinstance(packaging_context, dict)
+        else (_render_packaging_context(render_plan) if not isinstance(subtitles_plan, dict) else {})
+    )
+    resolved_subtitles_plan = (
+        dict(subtitles_plan)
+        if isinstance(subtitles_plan, dict)
+        else dict(resolved_packaging_context.get("subtitles") or {})
+    )
+    resolved_avatar_plan = avatar_plan if isinstance(avatar_plan, dict) else render_plan_avatar_commentary(render_plan)
+    resolved_choreographed_subtitles = (
+        [dict(item) for item in choreographed_subtitles]
+        if isinstance(choreographed_subtitles, list)
+        else _build_choreographed_subtitle_items(
+            subtitle_items,
+            subtitles_plan=resolved_subtitles_plan,
+        ) if subtitle_items and resolved_subtitles_plan else []
+    )
 
     filter_parts: list[str] = list(initial_filter_parts or [])
 
-    if subtitle_items and subtitles_plan:
+    if subtitle_items and resolved_subtitles_plan:
         subtitle_margin_override = await _resolve_subtitle_margin_with_avatar(
             expected_width=render_w,
             expected_height=render_h,
-            avatar_plan=render_plan.get("avatar_commentary") or {},
+            avatar_plan=resolved_avatar_plan,
         )
         ass_path = output_path.parent / f"{output_path.stem}.subtitle.ass"
         write_ass_file(
-            choreographed_subtitles,
+            resolved_choreographed_subtitles,
             ass_path,
-            style_name=str(subtitles_plan.get("style") or "bold_yellow_outline"),
+            style_name=str(resolved_subtitles_plan.get("style") or "bold_yellow_outline"),
             font_name=settings.subtitle_font,
             font_size=settings.subtitle_font_size,
             text_color_rgb=settings.subtitle_color,
             outline_color_rgb=settings.subtitle_outline_color,
             outline_width=settings.subtitle_outline_width,
             margin_v_override=subtitle_margin_override,
-            motion_style=str(subtitles_plan.get("motion_style") or "motion_static"),
+            motion_style=str(resolved_subtitles_plan.get("motion_style") or "motion_static"),
             play_res_x=render_w,
             play_res_y=render_h,
         )
@@ -2147,18 +2242,29 @@ async def _resolve_subtitle_margin_with_avatar(
 async def _apply_packaging_plan(
     source_path: Path,
     *,
-    render_plan: dict,
+    render_plan: dict[str, Any] | None = None,
     output_path: Path,
     expected_width: int,
     expected_height: int,
     debug_dir: Path | None,
     target_fps: float = 0.0,
+    packaging_context: dict[str, Any] | None = None,
+    packaging_assets: dict[str, Any] | None = None,
 ) -> Path:
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
         current_path = _stage_packaging_source(source_path, tmp)
-        packaging_assets = packaging_timeline_assets(render_plan)
-        insert_plan = packaging_assets.get("insert")
+        resolved_packaging_assets = (
+            dict(packaging_assets)
+            if isinstance(packaging_assets, dict)
+            else dict(
+                (
+                    packaging_context if isinstance(packaging_context, dict) else _render_packaging_context(render_plan)
+                ).get("assets")
+                or {}
+            )
+        )
+        insert_plan = resolved_packaging_assets.get("insert")
         if insert_plan:
             current_path = await _apply_insert_clip(
                 current_path,
@@ -2169,22 +2275,26 @@ async def _apply_packaging_plan(
                 output_path=tmp / "inserted.mp4",
                 debug_dir=debug_dir,
             )
-        if packaging_assets.get("intro") or packaging_assets.get("outro"):
+        intro_plan = resolved_packaging_assets.get("intro")
+        outro_plan = resolved_packaging_assets.get("outro")
+        if intro_plan or outro_plan:
             current_path = await _apply_intro_outro(
                 current_path,
-                intro_plan=packaging_assets.get("intro"),
-                outro_plan=packaging_assets.get("outro"),
+                intro_plan=intro_plan,
+                outro_plan=outro_plan,
                 expected_width=expected_width,
                 expected_height=expected_height,
                 target_fps=target_fps,
                 output_path=tmp / "with_bookends.mp4",
                 debug_dir=debug_dir,
             )
-        if packaging_assets.get("music") or packaging_assets.get("watermark"):
+        music_plan = resolved_packaging_assets.get("music")
+        watermark_plan = resolved_packaging_assets.get("watermark")
+        if music_plan or watermark_plan:
             current_path = await _apply_music_and_watermark(
                 current_path,
-                music_plan=packaging_assets.get("music"),
-                watermark_plan=packaging_assets.get("watermark"),
+                music_plan=music_plan,
+                watermark_plan=watermark_plan,
                 expected_width=expected_width,
                 expected_height=expected_height,
                 output_path=tmp / "packaged.mp4",

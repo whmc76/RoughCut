@@ -2,100 +2,33 @@
 
 日期：2026-06-12
 
-## 目标
+## 1. 目标
 
-本方案把 RoughCut 从“信息密度型口播/开箱链路”升级为“通用自动剪辑发布引擎”的第一阶段实现。
+本轮正式重构的目标很具体：
 
-第一阶段只做一件事：把当前已经收口的自动剪辑主链标定为 `information_density` 策略，并把候选、裁决、时间线、包装编排的边界显式化。
+- 把当前已闭合的口播/开箱自动剪辑主链正式收口为 `information_density` 基线；
+- 把“剪辑决策”和“包装编排”在代码、artifact、执行出口三个层面彻底分层；
+- 在不改行为语义的前提下，把主链里对同一事实的重复恢复收回共享 helper 或同函数内一次解析复用；
+- 为后续 `step_demonstration / experience_and_mood / event_highlight / narrative_assembly` 留出稳定扩展位。
 
-本阶段不追求新增 vlog、高光、录屏、多素材成片能力；也不重开已经闭合的 `C1-C5` 框架问题。
+本轮不是为了马上支持所有题材，而是为了把第一条真实可用链路改造成通用底座。
 
-## 当前前提
+## 2. 当前结论
 
-依据：
+已经具备正式重构条件，可以直接推进，不需要先等待别的题材实现完。
 
-- `docs/2026-06-12-final-closure-audit.md`
-- `docs/2026-06-12-final-completion-audit-matrix.md`
-- `docs/design/2026-06-11-universal-auto-edit-strategy-boundaries.md`
+成立前提只有两个：
 
-当前判断：
+1. 当前 `information_density` 链路已经有可回放的真实基线；
+2. 不允许并行写 `src/roughcut/pipeline/steps.py`、`src/roughcut/api/jobs.py`、`src/roughcut/media/render.py` 这三个主链文件。
 
-- `C1-C5` 在当前 narrowed scope 下已经足够闭合，可以作为新重构的基线。
-- 剩余 render provider 类样本属于可选 breadth，不阻塞通用策略重构。
-- `C6` 智能删减质量增强仍然延后，不能作为本次重构入口。
+详细已落地切片、回归结果、anchor 目录统一记录在 `docs/agent-current-state.md`。本文件只保留执行方案、顺序、边界和验收。
 
-## 执行状态
+## 3. 策略类型与产品映射
 
-当前文档不再只是启动前方案，也作为本轮重构的执行基线。
+核心架构只认“策略类型”，不直接认“题材名”。
 
-| 阶段 | 状态 | 当前结论 |
-|---|---|---|
-| Phase 0：基线冻结 | 已完成当前切片收口 | focused regression 已通过，manual-editor real-job apply semantics anchor 已通过，当前切片可继续向下推进 |
-| Phase 1：Strategy Profile 合同 | 已落地 | 已新增 `strategy_profile.py`，默认把旧 payload 归一到 `information_density`，并写入 `cut_analysis / refine_decision_plan / manual-editor` 相关出口 |
-| Phase 2：Candidate Producer 协议 | 已落地 | 现有规则候选已补齐 `producer_id / strategy_applicability` metadata，但尚未把策略真正接入裁决 |
-| Phase 3：Strategy Decision / Risk Gate | 已落地首切片 | 已新增共享 strategy decision helper，`cut_analysis` 内的 auto-apply / manual-confirm 判断已统一收口，当前仍保持 `information_density` 行为等价 |
-| Phase 4：Editorial Timeline 显式化 | 已落地首切片 | 已新增共享 editorial-timeline helper，统一 keep-segment normalize / build / resolve；render 与 manual-editor 开始复用，行为保持不变 |
-| Phase 5：Packaging Timeline / Effect Plan 隔离 | 已落地首切片 | 已新增共享 packaging-timeline helper，并把 variant bundle 从平铺包装字段收成单个 `packaging_timeline` payload；当前仍保持读取兼容与行为不变 |
-| Phase 6：Preset 层 | 未开始 | 产品 preset 只做入口映射，不得分叉核心流水线 |
-| Phase 7：第二策略域准备 | 未开始 | 只有在 `information_density` 等价迁移闭合后，才允许进入 `step_demonstration` |
-
-## 正式启动结论
-
-当前已经具备正式重构条件，可以直接开始，不需要为了“先等所有未来题材方案想清楚”而继续空转。
-
-原因只有三条：
-
-1. 当前 `information_density` 链路已经有可回放、可验证、可对比的闭合基线。
-2. 第一阶段重构的目标是收边界、收合同、收读取路径，不是同时扩到第二种剪辑策略。
-3. 当前工作树里的未提交改动本身就是这轮重构的首批切片，继续沿同一条主线推进成本最低。
-
-但有一个边界必须守住：
-
-- 不要让另一个并行线程继续同时改 `src/roughcut/pipeline/steps.py`、`src/roughcut/api/jobs.py`、`src/roughcut/media/render.py` 这类主链文件；如果还有别的线程在动这些文件，应先停在只读/待合并状态，再沿当前线程继续推进。
-
-## 总体原则
-
-### 1. 行为等价优先
-
-第一阶段必须保持当前口播/开箱自动剪辑结果基本等价。
-
-允许变化：
-
-- artifact 中增加内部策略 metadata；
-- helper 命名更清晰；
-- 旧 payload 增加向后兼容字段；
-- 报告内部可读性提升。
-
-不允许变化：
-
-- 低风险自动删减数量无故变化；
-- manual editor 看到的候选和 accepted cuts 无故变化；
-- render 输入 keep/remove timeline 无故变化；
-- golden / scorecard 口径被新策略字段重新解释。
-
-### 2. 先抽合同，再扩能力
-
-先把当前能力收进这些合同：
-
-```text
-Strategy Profile
-Candidate Producer
-Strategy Decision / Risk Gate
-Editorial Timeline
-Packaging Timeline / Effect Plan
-Publication Package
-```
-
-再考虑新增：
-
-- screen activity evidence
-- scenic / ambient evidence
-- highlight candidate
-- narrative assembly
-
-### 3. 策略类型和视频形态分离
-
-代码里第一层只认策略类型：
+### 3.1 策略类型
 
 - `information_density`
 - `step_demonstration`
@@ -103,21 +36,34 @@ Publication Package
 - `event_highlight`
 - `narrative_assembly`
 
-口播、开箱、录屏、vlog、直播、多素材合集是产品 preset 或识别结果，不是核心分支名。
+### 3.2 常见视频形态到策略类型的映射
 
-### 4. 剪辑时间线和包装时间线分离
+| 常见视频形态 | 主策略类型 | 核心剪辑逻辑 |
+|---|---|---|
+| 口播、开箱、知识讲解、测评 | `information_density` | 提升表达效率，压缩废话与无效停顿 |
+| 录屏讲解、软件教学、操作演示 | `step_demonstration` | 保步骤完整，可跟随，压缩无效等待 |
+| vlog、旅行、探店、美食体验 | `experience_and_mood` | 保留体验段落、环境声、节奏与空间感 |
+| 发布会高光、比赛集锦、活动精华 | `event_highlight` | 发现峰值片段，排序成可传播切片 |
+| 多素材叙事、故事向拼接、合集成片 | `narrative_assembly` | 组织素材关系与叙事结构，不是单素材删减 |
 
-必须区分：
+### 3.3 preset 的位置
 
-- `Source Timeline`：原始素材事实，不可改写。
-- `Editorial Timeline`：保留、删除、压缩、重排、高光等剪辑决策。
-- `Packaging Timeline / Effect Plan`：片头片尾、转场、特效、BGM、平台裁切、字幕样式等包装编排。
+`talking_head`、`unboxing_review`、`knowledge_explainer`、`screen_tutorial`、`travel_vlog` 这类名字都应该是产品 preset。
 
-包装编排可以影响最终输出时间轴，但不能反向偷偷改变 `Editorial Timeline` 的保留/删除决策。
+preset 只负责：
 
-## 目标架构
+- 选择默认 `strategy_type`；
+- 提供局部参数；
+- 指定默认包装偏好。
 
-第一阶段重构完成后的主链结构固定为：
+preset 不负责：
+
+- 分叉核心流水线；
+- 在 render、manual-editor 或 review 层偷偷实现另一套策略。
+
+## 4. 固定主链
+
+正式重构后的主链固定为：
 
 ```text
 Source Timeline
@@ -128,488 +74,301 @@ Source Timeline
   -> Render Variants / Publication Package
 ```
 
-模块职责固定如下：
+### 4.1 分层职责
 
-| 层 | 职责 | 不允许做的事 |
+| 层 | 负责什么 | 不允许做什么 |
 |---|---|---|
-| `Source Timeline` | 保留原始素材时间事实、转写事实、画面事实 | 推断最终删减 |
-| `Candidate Producers` | 产出候选动作和证据 | 直接改最终时间线 |
-| `Strategy Decision / Risk Gate` | 按策略决定 `auto_apply / manual_confirm / block / ignore` | 写包装特效计划 |
-| `Editorial Timeline` | 固化保留/删除/压缩后的剪辑决策 | 偷偷读取包装字段再二次改剪辑 |
-| `Packaging Timeline / Effect Plan` | 追加 intro/outro/insert/transition/bgm/subtitle-style 等包装编排 | 回写 `Editorial Timeline` |
-| `Render / Publication` | 消费 editorial + packaging，生成 variant 和发布物料 | 再发明新的剪辑策略分支 |
+| `Source Timeline` | 原始素材、ASR、视觉、音频、内容画像事实 | 直接下最终删减结论 |
+| `Candidate Producers` | 产出 cut / keep / trim / highlight / reorder 候选与证据 | 直接写最终时间线 |
+| `Strategy Decision / Risk Gate` | 按策略把候选裁成 `auto_apply / manual_confirm / block / ignore` | 写包装特效计划 |
+| `Editorial Timeline` | 固化 keep / cut / compress / reorder / highlight 等剪辑决策 | 回读包装再改剪辑 |
+| `Packaging Timeline / Effect Plan` | intro / outro / insert / transition / bgm / subtitles / crop 等包装编排 | 回写 editorial keep / cut |
+| `Render / Publication` | 消费 editorial + packaging，输出变体和发布物料 | 重新发明策略规则 |
 
-这套结构的关键不是“多一层抽象”，而是把将来不同题材的差异压到 `Strategy Profile + Candidate Producers + Decision Gate`，而不是散落在 render、manual-editor、scorecard 里。
+### 4.2 包装能力与剪辑能力的边界
 
-## 分阶段实现
+必须明确区分：
 
-## Phase 0：基线冻结
+- 剪辑能力：决定保留什么、删除什么、压缩什么、重排什么；
+- 包装能力：决定保留下来的内容如何呈现。
 
-目标：确保重构从一个可回放状态开始。
+包装确实会影响最终输出时间轴，例如片头片尾、转场、insert、BGM 卡点、平台裁切。但这些影响必须被隔离在 `Packaging Timeline / Effect Plan`，不能反向篡改 `Editorial Timeline` 的删减结论。
 
-动作：
+正确顺序固定为：
 
-1. 确认当前进行中的收口线程已经停在 completed/idle。
-2. 记录当前 `git status --short`。
-3. 跑最小基线验证：
+1. 先产出 `Editorial Timeline`；
+2. 再基于 editorial 生成 `Packaging Timeline / Effect Plan`；
+3. render 只消费这两层合同，不在运行时再发明新的删减规则。
 
-```powershell
-PYTHONPATH=src python -m pytest tests/test_rule_registry.py tests/test_source_timeline_contract.py -q
-PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "auto_refine or frontend_managed_auto_cuts or cut_analysis_candidate" -q
-PYTHONPATH=src python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -q
-```
+## 5. 本轮范围
 
-退出条件：
+本轮只做 `information_density` 的行为等价迁移。
 
-- 没有 in-progress thread 正在改 `steps.py / api/jobs.py / subtitle_pipeline.py / run_fullchain_batch.py`。
-- 当前 failing tests 若存在，必须被记录为重构前已存在，而不是本次引入。
+本轮允许：
 
-## Phase 1：Strategy Profile 合同
+- 调整 helper 边界；
+- 合并重复 reader；
+- 收平 caller / callee context 传递；
+- 让 manual-editor、bundle、render 三个出口消费同一份合同。
 
-目标：引入策略合同，但不改变当前行为。
+本轮禁止：
 
-新增建议：
+- 新增 `step_demonstration`、`experience_and_mood`、`event_highlight`、`narrative_assembly` 的完整实现；
+- 重开已经闭合的 `C1-C5` 框架问题；
+- 为抽象而新增 registry、facade、report schema；
+- 为了“未来可能有用”重写 packaging 算法或 render 流程。
 
-- `src/roughcut/edit/strategy_profile.py`
+## 6. 当前代码基线
 
-核心类型：
+本轮以当前 June 12 代码状态为基线，以下事实已经成立：
 
-```python
-StrategyType = Literal[
-    "information_density",
-    "step_demonstration",
-    "experience_and_mood",
-    "event_highlight",
-    "narrative_assembly",
-]
-```
+- `Phase 0`：`information_density` 已有 focused regressions + 真实 anchor 基线；
+- `Phase 1`：strategy metadata 已落地；
+- `Phase 2`：candidate producer metadata 已落地；
+- `Phase 3`：统一 strategy decision / risk gate 首切片已落地；
+- `Phase 4`：editorial helper 已落地，并进入 consumer sweep；
+- `Phase 5`：packaging helper 已落地，并进入 consumer sweep。
 
-第一版只启用：
+本轮不再做“重新设计未来架构”，而是把当前闭合主链收成稳定合同。
 
-```json
-{
-  "strategy_type": "information_density",
-  "auto_apply_policy": "current_conservative_default",
-  "speech_priority": "high",
-  "visual_priority": "medium",
-  "silence_policy": "trim_unvoiced_gaps",
-  "packaging_policy": "current_default"
-}
-```
+## 7. 当前共享合同
 
-接入点：
+本轮所有代码变更都应围绕现有合同推进，不再额外发明并行协议。
 
-- `run_edit_plan(...)`
-- `cut_analysis` payload
-- `refine_decision_plan` metadata
-- manual-editor session payload
+### 7.1 Editorial 合同
 
-约束：
-
-- 不新增 scorecard 主指标。
-- 不让 strategy 字段参与裁决，先只透传 metadata。
-
-验证：
-
-- 当前 golden case 的 keep/remove timeline 不应因为 strategy metadata 改变。
-- manual editor 候选数量不应变化。
-
-## Phase 2：Candidate Producer 协议
-
-目标：把现有规则输出收口成候选生产器协议，但先不改生成逻辑。
-
-现有能力映射：
-
-| 当前来源 | Candidate Producer |
-|---|---|
-| filler rules | `speech_filler_candidate_producer` |
-| catchphrase rules | `speech_catchphrase_candidate_producer` |
-| pause / silence | `pause_trim_candidate_producer` |
-| repeated speech | `repeated_speech_candidate_producer` |
-| smart delete / low signal | `semantic_trim_candidate_producer` |
-
-建议最小协议：
-
-```json
-{
-  "candidate_id": "...",
-  "producer_id": "speech_filler_candidate_producer",
-  "action": "delete|trim|keep|highlight|chapter|reorder",
-  "start": 12.3,
-  "end": 18.6,
-  "strategy_applicability": ["information_density"],
-  "risk_level": "low|medium|high",
-  "confidence": 0.86,
-  "match_surface": "raw|canonical|display|screen|vision|audio",
-  "evidence": {}
-}
-```
-
-接入方式：
-
-- 复用现有 `src/roughcut/edit/rule_registry.py`。
-- 不创建第二套规则注册表。
-- 在 `cut_analysis` / `smart_cut_candidates` 的出口归一化 producer metadata。
-
-主要文件：
-
-- `src/roughcut/edit/rule_registry.py`
-- `src/roughcut/edit/cut_analysis.py`
-- `src/roughcut/edit/smart_cut_candidates.py`
-- `src/roughcut/edit/refine_decisions.py`
-- `src/roughcut/api/jobs.py`
-
-退出条件：
-
-- 规则卡片计数、candidate 计数、manual editor 高亮计数不变。
-- legacy candidate payload 仍可被读取。
-
-## Phase 3：Strategy Decision / Risk Gate
-
-目标：把“是否自动应用”从规则散点判断迁到统一策略裁决层。
-
-第一版只实现：
-
-```text
-information_density strategy + current conservative policy
-```
-
-裁决输入：
-
-- candidate list
-- rule registry metadata
-- source timeline contract
-- current strategy profile
-- manual override / accepted cuts
-
-裁决输出：
-
-```json
-{
-  "decision_id": "...",
-  "candidate_id": "...",
-  "decision": "auto_apply|manual_confirm|block|ignore",
-  "strategy_type": "information_density",
-  "reason": "...",
-  "risk_level": "low|medium|high",
-  "evidence": {}
-}
-```
-
-主要落点：
-
-- `src/roughcut/edit/refine_decisions.py`
-- `src/roughcut/edit/timeline_contract.py`
-- `src/roughcut/api/jobs.py`
-
-退出条件：
-
-- 当前 auto mode 的 low-risk 自动删减集合不变。
-- manual editor 的 frontend-managed auto cuts 集合不变。
-- `verify_manual_editor_apply_semantics.py --json` 继续通过当前 4 条 contract anchors。
-
-## Phase 4：Editorial Timeline 显式化
-
-目标：把现有 keep/remove/refine timeline 明确命名为 `Editorial Timeline`，但不重写 render。
-
-第一阶段不拆数据库模型，只做 helper 和 payload alias：
-
-```text
-refine_decision_plan.keep_segments
-editorial_timeline.keep_segments
-render_plan.keep_segments
-```
-
-必须保持同源。
-
-建议新增：
+主要来源：
 
 - `src/roughcut/edit/editorial_timeline.py`
+- `editorial_timeline_segments(...)`
+- `editorial_timeline_analysis(...)`
+- `editorial_timeline_subtitle_projection(...)`
+- 已有 shared editorial readers
 
-职责：
+要求：
 
-- normalize keep/remove segments
-- derive removed segments
-- attach decision provenance
-- expose compatibility view for render/manual-editor
+- keep / cut / subtitle projection / analysis 只通过 editorial helper 读取；
+- 不再在消费者本地直读旧字段并拼半套 editorial 事实。
 
-禁止：
+### 7.2 Packaging 合同
 
-- 在 render 阶段重新判断删减。
-- 在 manual editor save 时绕过 shared editorial helper。
-- 为包装转场或 BGM 改写 editorial keep/remove。
+主要来源：
 
-退出条件：
+- `src/roughcut/edit/packaging_timeline.py`
+- `resolve_packaging_timeline_payload(...)`
+- `build_packaging_timeline_payload(...)`
+- `packaging_timeline_asset_plan(...)`
+- `packaging_timeline_transitions(...)`
+- 其他已落地 `packaging_timeline_*` readers
 
-- render 输入 keep segments 与重构前一致。
-- manual editor subtitle-only / no-material-change 合同不变。
+要求：
 
-## Phase 5：Packaging Timeline / Effect Plan 隔离
+- 包装资产、编辑强调、转场、section choreography、subtitle style 等都通过共享 helper 读取；
+- 不再在 `steps.py / render.py / api/jobs.py` 手拆 nested payload。
 
-目标：把会影响输出时间轴的包装编排从剪辑决策中隔离出来。
+### 7.3 Render-plan 合同
 
-第一版只做命名和读取边界，不重写所有包装逻辑。
-
-归入 `Packaging Timeline / Effect Plan`：
-
-- intro / outro
-- insert clips
-- transition events
-- BGM / sound effect events
-- emphasis / pulse / overlay accents
-- subtitles style and layout
-- platform crop / aspect adaptation
-
-主要文件：
+主要来源：
 
 - `src/roughcut/edit/render_plan.py`
+- `render_plan_*` readers
+- 本地 execution context helpers，例如：
+  - `src/roughcut/api/jobs.py::_manual_editor_render_plan_context(...)`
+  - `src/roughcut/pipeline/steps.py::_runtime_render_plan_context(...)`
+  - `src/roughcut/media/render.py::_render_runtime_plan_context(...)`
+
+要求：
+
+- 同一执行函数里的 render-plan 子事实优先一次恢复，随后本地复用；
+- caller 已有 context 时，callee 优先消费调用方上下文，不再内部重算。
+
+## 8. 正式实施批次
+
+### Batch A：Phase 4/5 consumer sweep
+
+这是当前主工作包，目标是把主链里还没收平的事实读取路径继续收掉。
+
+主文件固定为：
+
 - `src/roughcut/pipeline/steps.py`
 - `src/roughcut/media/render.py`
-- `src/roughcut/media/output.py`
-- `src/roughcut/publication_packaging.py`
-
-原则：
-
-- 包装计划消费 `Editorial Timeline`。
-- 包装计划可以生成自己的 output timeline。
-- 包装计划不能回写 editorial keep/remove。
-
-退出条件：
-
-- plain / packaged / ai_effect / avatar variants 的输出路径和字幕映射不变。
-- `render_outputs` payload 兼容旧消费者。
-- audit pack 能同时看见 editorial decision 与 packaging effects。
-
-## Phase 6：Preset 层
-
-目标：把常见视频形态映射到策略 profile，但暂不新增复杂能力。
-
-第一批 preset：
-
-| Preset | strategy_type |
-|---|---|
-| `talking_head` | `information_density` |
-| `unboxing_review` | `information_density` |
-| `knowledge_explainer` | `information_density` |
-
-只作为产品/配置入口，不作为核心分支。
-
-延后 preset：
-
-- `screen_tutorial`
-- `vlog_travel`
-- `event_highlight`
-- `narrative_assembly`
-
-## Phase 7：第二策略域准备
-
-只有当 `information_density` 行为等价迁移完成后，才允许进入第二策略域。
-
-推荐第二策略：
-
-```text
-step_demonstration
-```
-
-原因：
-
-- 与当前语音/字幕链路最接近。
-- 只需要增加 screen activity / OCR / UI state evidence。
-- 不需要先解决 vlog 的视觉美感判断。
-
-第一批新增 evidence：
-
-- screen change
-- cursor / keyboard activity
-- OCR text change
-- UI state transition
-- long idle with no speech
-
-禁止：
-
-- 不得把 no-speech 直接等同于 delete。
-- 不得在 evidence 层直接生成 final timeline。
-
-## 文件影响面
-
-### 第一批可动文件
-
-- `src/roughcut/edit/rule_registry.py`
-- `src/roughcut/edit/cut_analysis.py`
-- `src/roughcut/edit/smart_cut_candidates.py`
-- `src/roughcut/edit/refine_decisions.py`
-- `src/roughcut/edit/timeline_contract.py`
 - `src/roughcut/api/jobs.py`
-- `src/roughcut/pipeline/steps.py`
 
-### 第二批可动文件
+执行原则：
 
-- `src/roughcut/edit/render_plan.py`
-- `src/roughcut/media/render.py`
-- `src/roughcut/media/output.py`
-- `src/roughcut/pipeline/quality.py`
-- `scripts/run_auto_edit_recovery_golden_set.py`
-- `scripts/build_batch_output_scorecard.py`
+- 只收“第一坏层”的重复事实恢复；
+- 优先处理 live path；
+- 优先处理 caller 已有 context、callee 又重算一次的边界；
+- 优先处理同函数内多次恢复同一 payload 子事实的点。
 
-### 暂不主动触碰
+完成标准：
 
-- publication adapter runtime
-- browser publication bridge
-- cover generation prompt logic
-- platform-specific upload code
-- frontend broad UI redesign
+- keep / cut / projection / analysis 全部通过 editorial helper 或同函数单次解析；
+- packaging assets / transitions / subtitle style / editing accents 全部通过 packaging helper 或同函数单次解析；
+- render-plan 已有 helper 能覆盖的事实，不再在消费者本地再拼一遍。
 
-除非它们被第一阶段策略 metadata 或 packaging timeline compatibility 明确阻塞。
+### Batch B：三个执行出口对齐
 
-## 测试矩阵
+目标是把三个真正产出结果的出口，拉到同一份策略合同上：
 
-### 单元 / 合同测试
+- `api/jobs.py::apply_manual_editor_timeline(...)`
+- `pipeline/steps.py::_build_variant_timeline_bundle(...)`
+- `pipeline/steps.py::run_render(...)` + `media/render.py::render_video(...)`
 
-每个 phase 必须有最小定向回归：
+完成标准：
 
-- strategy profile 默认值
-- candidate producer metadata compatibility
-- risk gate decision compatibility
-- editorial timeline keep/remove compatibility
-- packaging timeline does not mutate editorial timeline
+- 每个出口都能明确说出自己在消费哪一层合同；
+- 不再出现“helper 已存在，但出口仍局部重建半套事实”的分叉；
+- manual-editor / bundle / render 对 `information_density` 的行为保持等价。
 
-### 当前必须复跑的现有测试
+### Batch C：根因优先
 
-```powershell
-PYTHONPATH=src python -m pytest tests/test_rule_registry.py tests/test_source_timeline_contract.py -q
-PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -q
-PYTHONPATH=src python -m pytest tests/test_run_auto_edit_recovery_golden_set.py -q
-PYTHONPATH=src python -m pytest tests/test_run_fullchain_batch.py -q
-```
+如果 consumer cleanup 暴露真实回归，只修第一坏层，不做症状补丁。
 
-### 真实样本验证
+执行格式固定为：
 
-第一阶段至少复跑一个信息密度型 anchor：
+1. 先写症状；
+2. 再写第一坏层；
+3. 再写根因；
+4. 再写为什么现在暴露。
 
-```powershell
-python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor
-```
+已经闭合、不得重开的点：
 
-验收：
+- `subtitle_sync_issue`
+- `resolve_packaging_timeline_payload(...)` import gap
 
-- job terminal state 正常；
-- `edit_plan` 能完成；
-- keep ratio 与重构前同量级；
-- auto-apply / manual-confirm / multimodal-pending 数量无异常漂移；
-- manual-editor contract 不退化。
+### Batch D：最小验证 + 真实 anchor
 
-## 切换策略
+每个窄切片都必须带最小验证。
 
-### 默认策略
+规则固定为：
 
-所有旧 job、旧 API、旧 CLI 默认：
+- helper / editorial-only / manual-editor 语义切片：`py_compile` + focused pytest + `edit_plan` anchor；
+- render / runtime 切片：`py_compile` + focused pytest + `render` anchor。
 
-```text
-strategy_type = information_density
-```
+通过标准固定为：
 
-### 兼容原则
+- focused regressions 通过；
+- `live_readiness=pass`；
+- `required_checks=4/4`。
 
-- 旧 artifact 没有 strategy metadata 时，按 `information_density` 读取。
-- 新 artifact 写 strategy metadata，但旧消费者可以忽略。
-- 任何策略字段都不得成为旧 job 回放失败原因。
+当前仍允许保留的非阻断项只有：
 
-### 回滚方式
+- `reference_high_risk_not_reproduced`
 
-每个 phase 必须能通过删除新 metadata / helper facade 回到旧行为。
+### Batch E：preset 层前的停手条件
 
-不允许一次性改动：
+只有在下面条件成立后，才允许进入 preset 映射或下一策略域：
 
-- candidate generation
-- risk gate
-- render plan
-- packaging plan
-- scorecard
+1. `steps.py / api/jobs.py / render.py` 主链高价值 consumer 的重复事实恢复已基本收平；
+2. manual-editor、bundle、render 三个出口已经对齐到共享合同；
+3. `information_density` 基线在 focused regression 和真实 anchor 上继续等价。
 
-## 已落地首切片
+## 9. 当前执行顺序
 
-截至当前执行状态，第一轮代码切片已经落地，范围仍控制在“只补合同，不改行为”：
+当前不再从零开始，而是从已落地基线继续往前切。
 
-1. 已新增 `src/roughcut/edit/strategy_profile.py`。
-2. 已把旧 payload 默认归一到 `information_density`。
-3. 已在 `cut_analysis / refine_decision_plan` 内透传 `strategy_type / strategy_profile`。
-4. 已给当前 rule candidates 归一 `producer_id / strategy_applicability` metadata。
-5. 已新增首个共享 `strategy_decisions` helper，并让 `cut_analysis` 的 auto-apply / manual-confirm 判断从散点逻辑收口到统一决策层。
-6. 已新增 `editorial_timeline` helper，并把 keep-segment normalize / build / resolve 收口到共享入口。
-7. 已新增 `packaging_timeline` helper，并把 variant bundle 的包装字段收成单个 `packaging_timeline` payload。
-8. 已开始让 manual-editor、render-start 检查、scorecard 摘要复用 packaging helper，而不是继续平铺读取 render-plan 字段。
+接下来的执行顺序固定为：
 
-本轮明确没有做：
+1. 先继续 `src/roughcut/pipeline/steps.py` 的剩余 consumer sweep；
+2. 再处理 `src/roughcut/media/render.py` 的 caller / callee context handoff；
+3. 最后回到 `src/roughcut/api/jobs.py` 收剩余 manual-editor apply / rebuild 局部重建点。
 
-- 新 preset UI；
-- 新视频类型；
-- 新 scorecard 指标；
-- packaging timeline 拆分；
-- render plan schema 大改。
+说明：
 
-## 下一执行顺序
+- 这里说的是“优先扫描顺序”，不是一次同时大改三份文件；
+- 每次只落一个窄切片；
+- 一刀只改一个真实重复事实恢复点。
 
-在不扩需求的前提下，后续顺序固定为：
+## 10. 当前优先切片
 
-1. 先收掉 `Phase 5` 剩余的 render-plan 平铺读取点，尤其是 `pipeline/steps.py` 内 packaged timeline mapping、transition overlap、intro/insert/outro trailing-gap 这些还可能直接读 flat fields 的位置。
-2. 再继续收掉 `Phase 4` / `Phase 5` 剩余的重复 reconstruction 入口，要求 keep/remove 只能通过 `editorial_timeline` helper，包装/effect 只能通过 `packaging_timeline` helper。
-3. 给每个新增共享 helper 补最小回归，重点覆盖：legacy flat payload 兼容、nested payload 优先级、manual-editor roundtrip、render packaged mapping。
-4. 跑 targeted tests 加一个真实 anchor replay，确认 `information_density` 的 keep/remove、managed auto cuts、subtitle-only change scope 没有漂移。
-5. 只有在 `Phase 5` 行为等价迁移闭合后，才进入 `Phase 6` preset 映射；preset 只做入口映射，不得再引入隐藏分支。
+以下是已经收敛出的下一批优先切片，按顺序执行。
 
-当前已完成到：
+### Slice 1：`steps.py` bundle / validation 邻域
 
-1. `Phase 0` 当前切片基线验证。
-2. `Phase 1` strategy metadata。
-3. `Phase 2` candidate producer metadata。
-4. `Phase 3` 在 `cut_analysis` 层的首个共享 decision slice。
-5. `Phase 4` 在 keep/remove 事实层的首个共享 editorial helper slice。
-6. `Phase 5` 在 packaging/effect 读取边界的首个共享 helper slice。
+目标：
 
-当前正在执行的代码切片应限定为：
+- 继续收平 `variant_timeline_bundle` 及其校验链对 editorial / packaging 事实的重复恢复；
+- 让 bundle builder 和 validator 优先消费已经标准化的本地 facts，而不是再从嵌套 payload 读回一遍。
 
-1. `pipeline/steps.py` 中剩余的 flat packaging consumer 收口。
-2. render/manual-editor/bundle 的 helper 消费对齐。
-3. 对应 focused regression 与一个真实 job anchor 复验。
+重点位置：
 
-禁止跳步进入：
+- `src/roughcut/pipeline/steps.py::_build_variant_timeline_bundle(...)`
+- `src/roughcut/pipeline/steps.py::_validate_variant_timeline_bundle(...)`
+- 它们的直接 caller
 
-- `step_demonstration` 新证据接入；
-- `experience_and_mood / event_highlight / narrative_assembly` 新策略实现；
-- 包装特效编排大改；
-- scorecard / golden schema 再扩张。
+完成标准：
 
-## 风险与控制
+- bundle 产出层不再做低价值的 payload 回读；
+- validation 只校验 bundle 当前合同，不临时发明另一套 reader 路径。
 
-| 风险 | 控制 |
-|---|---|
-| 新策略字段改变旧行为 | Phase 1 只透传 metadata，不参与裁决 |
-| 候选协议变成第二套规则注册表 | 复用 `RuleDefinition`，producer metadata 只做外层归一化 |
-| 包装时间线误改剪辑时间线 | 明确 `Packaging Timeline` 只能消费 `Editorial Timeline` |
-| 并行线程互相覆盖主链文件 | 当前主链文件只保留一条编码线程；其它线程最多做只读审阅或后续合并 |
-| golden/scorecard 再次膨胀 | 不新增主指标；只有真实失败解释不了时才扩字段 |
-| 多题材扩展过早 | 第二策略域必须等 `information_density` 等价迁移完成 |
+### Slice 2：`render.py` runtime handoff 邻域
 
-## 完成标准
+目标：
 
-第一阶段完成时应满足：
+- 继续检查 `render_video(...)` 与下游 helper 之间，是否还存在 caller 已有 context、callee 又局部重算的 live path；
+- 只处理真实重复恢复点，不做 render 算法改版。
 
-1. 当前链路可被明确标记为 `information_density`。
-2. 旧 job / 旧 artifact / 旧 manual-editor flow 兼容。
-3. candidate 输出具备 producer metadata，但现有规则计数不漂移。
-4. risk gate 可读取 strategy profile，但默认行为与当前一致。
-5. editorial timeline 和 packaging timeline 的边界在代码 helper / artifact metadata 中可见。
-6. 至少一个真实信息密度型 anchor 通过 `edit_plan` replay。
+重点位置：
 
-## 后续路线
+- `src/roughcut/media/render.py::render_video(...)`
+- timed overlay / packaging apply / avatar 分支相关 helper
 
-完成第一阶段后，再进入：
+完成标准：
 
-1. `step_demonstration` evidence 接入；
-2. screen activity candidate producer；
-3. 包装编排 timeline 独立 artifact；
-4. `experience_and_mood` 的视觉/环境声保护；
-5. `event_highlight` 的高光候选；
-6. `narrative_assembly` 的多素材结构组装。
+- runtime 主链能用已有 context 的地方都直接透传；
+- 下游 helper 的 fallback 只保留给非主链调用场景。
 
-每一步都必须先新增 evidence / candidate，再交给 strategy gate 裁决，不能直接写最终时间线。
+### Slice 3：`api/jobs.py` manual-editor apply 邻域
+
+目标：
+
+- 在 rebuild-delivery slice 之后，继续收掉 `apply_manual_editor_timeline(...)` 中仍残留的 same-function render-plan / packaging / editorial 子事实局部重建点；
+- 保持 manual-editor 的 apply 语义、rerun 语义和 subtitle-only 语义不变。
+
+重点位置：
+
+- `src/roughcut/api/jobs.py::apply_manual_editor_timeline(...)`
+- 紧邻的 manual-editor helper consumers
+
+完成标准：
+
+- manual-editor 出口只消费共享合同或本地一次解析事实；
+- 不再出现“前面刚算过，后面又从 rebuilt payload 读回来”的模式。
+
+## 11. 不动点
+
+以下内容本轮明确不动：
+
+- `step_demonstration` 的 screen activity / OCR / cursor evidence；
+- `experience_and_mood` 的风景保留与氛围节奏判断；
+- `event_highlight` 的峰值检测与高光排序；
+- `narrative_assembly` 的多素材结构编排；
+- packaging timeline 的大改版；
+- scorecard / golden schema 的再扩张；
+- 为了抽象而新增新的 registry / facade / orchestrator 层。
+
+## 12. 验收标准
+
+本轮正式重构结束时，至少满足：
+
+1. 当前链路可以明确标记为 `information_density`；
+2. 旧 job、旧 artifact、旧 manual-editor flow 继续兼容；
+3. editorial 和 packaging 的边界在代码和 artifact 中都可见；
+4. manual-editor、bundle、render 三个出口消费同一份共享合同；
+5. 至少一个真实 `information_density` anchor 持续通过；
+6. 没有为了重构便利，把包装能力重新塞回剪辑能力层。
+
+## 13. 下一阶段入口
+
+只有在本轮验收标准成立后，才进入下一阶段。
+
+推荐的下一策略域仍然是：
+
+- `step_demonstration`
+
+原因不是它“更容易”，而是它离现有链路最近：
+
+- 仍然高度依赖语音、字幕和时间轴；
+- 只是在证据层新增 screen activity / OCR / UI state；
+- 不需要先解决 `experience_and_mood` 对视觉美感、环境声和节奏保护的问题。

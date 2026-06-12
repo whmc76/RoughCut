@@ -59,16 +59,21 @@ from roughcut.edit.cut_analysis import (
     cut_analysis_accepted_cuts,
     cut_analysis_effective_applied_cuts,
 )
-from roughcut.edit.editorial_timeline import resolve_refine_keep_segments_for_timeline
+from roughcut.edit.editorial_timeline import (
+    editorial_timeline_analysis,
+    editorial_timeline_segments,
+    editorial_timeline_subtitle_projection,
+    resolve_refine_keep_segments_for_timeline,
+)
 from roughcut.edit.otio_export import export_to_otio
 from roughcut.edit.packaging_timeline import (
     build_packaging_timeline_payload,
+    packaging_timeline_asset_plan,
     packaging_timeline_analysis,
-    packaging_timeline_assets,
-    packaging_timeline_editing_accents,
     packaging_timeline_editing_skill,
     packaging_timeline_section_choreography,
     packaging_timeline_subtitles,
+    packaging_timeline_transitions,
     resolve_packaging_timeline_payload,
 )
 from roughcut.edit.presets import normalize_workflow_template_name
@@ -92,6 +97,14 @@ from roughcut.edit.render_plan import (
     build_plain_render_plan,
     build_render_plan,
     build_smart_editing_accents,
+    render_plan_automatic_gate,
+    render_plan_avatar_commentary,
+    render_plan_cover,
+    render_plan_delivery,
+    render_plan_loudness,
+    render_plan_manual_editor,
+    render_plan_video_transform,
+    render_plan_voice_processing,
     save_render_plan,
 )
 from roughcut.edit.skills import apply_review_focus_overrides, resolve_editing_skill
@@ -4563,12 +4576,33 @@ async def _build_edited_subtitle_projection(
     projection_data: dict[str, Any] | None,
     fallback_subtitles: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    projection_payload = projection_data if isinstance(projection_data, dict) else {}
+    transcript_layer = str(projection_payload.get("transcript_layer") or "").strip() or "subtitle_projection"
+    projection_entries = [
+        {
+            **_subtitle_projection_entry_payload(entry),
+            "projection_source": str(entry.get("projection_source") or transcript_layer),
+        }
+        for entry in list(projection_payload.get("entries") or [])
+        if isinstance(entry, dict)
+    ]
+    cleaned_projection_entries = preserve_subtitle_payloads(projection_entries, drop_empty=True)
+    split_profile = (
+        projection_payload.get("split_profile")
+        if isinstance(projection_payload.get("split_profile"), dict)
+        else {}
+    )
+    if cleaned_projection_entries and not _projection_has_suspicious_subtitle_timing(
+        cleaned_projection_entries,
+        split_profile=split_profile,
+    ):
+        return remap_subtitles_to_timeline(cleaned_projection_entries, keep_segments)
     return remap_subtitles_to_timeline(fallback_subtitles, keep_segments)
 
 
 def _manual_editor_subtitle_items_from_editorial(editorial_timeline: dict[str, Any] | None) -> list[dict[str, Any]]:
-    subtitle_projection = (editorial_timeline or {}).get("subtitle_projection")
-    if not isinstance(subtitle_projection, dict):
+    subtitle_projection = editorial_timeline_subtitle_projection(editorial_timeline)
+    if not subtitle_projection:
         return []
     items: list[dict[str, Any]] = []
     for index, item in enumerate(list(subtitle_projection.get("items") or [])):
@@ -9039,15 +9073,12 @@ async def run_edit_plan(job_id: str) -> dict:
 
         editorial_timeline = await save_editorial_timeline(job.id, decision, session)
 
-        # Export OTIO
-        try:
-            otio_str = export_to_otio(decision.to_dict())
-            editorial_timeline.otio_data = otio_str
-        except Exception:
-            pass  # OTIO optional
-
         packaging_plan = resolve_packaging_plan_for_job(str(job.id), content_profile=content_profile)
-        keep_segments = [segment for segment in decision.to_dict().get("segments", []) if segment.get("type") == "keep"]
+        keep_segments = [
+            {"start": segment.start, "end": segment.end, "type": segment.type, "reason": segment.reason}
+            for segment in decision.segments
+            if segment.type == "keep"
+        ]
         subtitle_projection_repair: dict[str, Any] = {}
         remapped_subtitles = await _build_edited_subtitle_projection(
             session,
@@ -9158,9 +9189,10 @@ async def run_edit_plan(job_id: str) -> dict:
             automatic_gate=automatic_gate,
             subtitle_projection_repair=subtitle_projection_repair,
         )
-        editorial_timeline.data_json = decision.to_dict()
+        decision_payload = decision.to_dict()
+        editorial_timeline.data_json = decision_payload
         try:
-            editorial_timeline.otio_data = export_to_otio(decision.to_dict())
+            editorial_timeline.otio_data = export_to_otio(decision_payload)
         except Exception:
             pass  # OTIO optional
         render_plan_dict["automatic_gate"] = automatic_gate
@@ -9219,10 +9251,15 @@ async def run_edit_plan(job_id: str) -> dict:
             editorial_timeline_id=editorial_timeline.id,
             render_plan_timeline_id=render_plan_dict.get("timeline_id"),
             keep_segments=keep_segments,
-            editorial_analysis=(editorial_timeline.data_json or {}).get("analysis") or {},
+            editorial_analysis=(
+                decision.analysis
+                if isinstance(decision.analysis, dict)
+                else _resolve_editorial_analysis_payload(decision_payload)
+            ),
             cut_analysis=cut_analysis_payload,
             refine_decision_plan=refine_decision_plan_payload,
-            render_plan=render_plan_dict,
+            render_plan=None,
+            packaging_timeline=build_packaging_timeline_payload(render_plan_dict),
             variants={},
         )
         session.add(
@@ -9237,7 +9274,7 @@ async def run_edit_plan(job_id: str) -> dict:
                     source_timeline_contract=source_timeline_contract,
                     subtitle_source_projection_validation=subtitle_source_projection_validation,
                     automatic_gate=automatic_gate,
-                    edit_decision=decision.to_dict(),
+                    edit_decision=decision_payload,
                     full_subtitles=[dict(item) for item in subtitle_dicts],
                     edited_subtitles=[dict(item) for item in remapped_subtitles],
                     cut_analysis=cut_analysis_payload,
@@ -9350,8 +9387,9 @@ async def run_render(job_id: str) -> dict:
             if cut_analysis_artifact and isinstance(cut_analysis_artifact.data_json, dict)
             else None
         )
-        packaging_timeline = resolve_packaging_timeline_payload(render_plan_timeline.data_json)
-        automatic_gate = dict(render_plan_timeline.data_json.get("automatic_gate") or {})
+        render_plan_context = _runtime_render_plan_context(render_plan_timeline.data_json)
+        packaging_context = _runtime_packaging_context(render_plan_timeline.data_json)
+        automatic_gate = render_plan_context["automatic_gate"]
         if bool(automatic_gate.get("blocking")):
             blocking_reasons = ", ".join(
                 str(item) for item in list(automatic_gate.get("blocking_reasons") or [])
@@ -9359,15 +9397,11 @@ async def run_render(job_id: str) -> dict:
             raise RuntimeError(
                 f"render blocked by automatic gate: {blocking_reasons or 'source_timeline_contract_blocking'}"
             )
-        packaging_assets = packaging_timeline_assets(packaging_timeline)
-        has_packaging = any(packaging_assets.get(key) for key in ("intro", "outro", "insert", "watermark", "music"))
-        editing_accents = packaging_timeline_editing_accents(packaging_timeline)
-        has_editing_accents = bool(
-            (editing_accents.get("transitions") or {}).get("boundary_indexes")
-            or editing_accents.get("emphasis_overlays")
-            or editing_accents.get("sound_effects")
-        )
-        manual_editor_meta = render_plan_timeline.data_json.get("manual_editor") or {}
+        packaging_assets = packaging_context["assets"]
+        has_packaging = bool(packaging_context["has_packaging"])
+        editing_accents = packaging_context["editing_accents"]
+        has_editing_accents = bool(packaging_context["has_editing_accents"])
+        manual_editor_meta = render_plan_context["manual_editor"]
         manual_subtitle_only_render = manual_editor_is_subtitle_only_render(
             manual_editor_meta if isinstance(manual_editor_meta, dict) else None
         )
@@ -9504,6 +9538,7 @@ async def run_render(job_id: str) -> dict:
             _ensure_render_blocking_heartbeat(detail=detail, progress=progress)
 
         try:
+            plain_editorial_segments = editorial_timeline_segments(editorial_timeline.data_json)
             await _refresh_render_progress(
                 detail=(
                     "先渲染素版，再生成包装版"
@@ -9525,7 +9560,7 @@ async def run_render(job_id: str) -> dict:
                 refine_decision_plan_payload,
                 editorial_timeline_id=str(editorial_timeline.id),
                 editorial_timeline_version=int(editorial_timeline.version or 1),
-                fallback_segments=list(editorial_timeline.data_json.get("segments", []) or []),
+                fallback_segments=plain_editorial_segments,
             )
             if reusable_plain_path is not None and reusable_plain_path.exists():
                 await _refresh_render_progress(
@@ -9581,36 +9616,41 @@ async def run_render(job_id: str) -> dict:
                 subtitle_items=remapped_subtitles,
                 reuse_bound_assets=manual_subtitle_only_render,
             )
+            ai_effect_packaging_context = _runtime_packaging_context(ai_effect_render_plan)
+            ai_effect_runtime_plan_context = _runtime_render_plan_context(ai_effect_render_plan)
             packaged_timeline_mapping = await _resolve_packaged_timeline_mapping_context(
-                render_plan_timeline.data_json,
+                None,
                 keep_segments=keep_segments,
+                packaging_context=packaging_context,
             )
             packaged_subtitles = await _map_subtitles_to_packaged_timeline(
                 remapped_subtitles,
-                render_plan_timeline.data_json,
+                None,
                 keep_segments=keep_segments,
                 timeline_mapping=packaged_timeline_mapping,
             )
+            packaged_editing_accents = editing_accents
+            ai_effect_editing_accents = ai_effect_packaging_context["editing_accents"]
+            ai_effect_timeline_mapping = await _resolve_packaged_timeline_mapping_context(
+                None,
+                keep_segments=keep_segments,
+                packaging_context=ai_effect_packaging_context,
+            )
             final_overlay_accents = await _map_editing_accents_to_packaged_timeline(
-                packaging_timeline_editing_accents(render_plan_timeline.data_json),
-                render_plan_timeline.data_json,
+                packaged_editing_accents,
+                None,
                 keep_segments=keep_segments,
                 timeline_mapping=packaged_timeline_mapping,
             )
             ai_effect_overlay_accents = await _map_editing_accents_to_packaged_timeline(
-                packaging_timeline_editing_accents(ai_effect_render_plan),
-                ai_effect_render_plan,
+                ai_effect_editing_accents,
+                None,
                 keep_segments=keep_segments,
+                timeline_mapping=ai_effect_timeline_mapping,
             )
-            packaged_transition_offsets = _resolve_transition_overlap_offsets(
-                render_plan_timeline.data_json,
-                keep_segments=keep_segments,
-            )
-            ai_effect_transition_offsets = _resolve_transition_overlap_offsets(
-                ai_effect_render_plan,
-                keep_segments=keep_segments,
-            )
-            avatar_plan = render_plan_timeline.data_json.get("avatar_commentary") or {}
+            packaged_transition_offsets = list(packaged_timeline_mapping.get("transition_offsets") or [])
+            ai_effect_transition_offsets = list(ai_effect_timeline_mapping.get("transition_offsets") or [])
+            avatar_plan = dict(render_plan_context["avatar_plan"] or {})
             if (
                 "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
                 and str(avatar_plan.get("mode") or "") == "segmented_audio_passthrough"
@@ -9829,23 +9869,27 @@ async def run_render(job_id: str) -> dict:
                 ai_effect_render_plan["avatar_commentary"] = avatar_plan
             await render_video(
                 source_path=packaged_source_path,
-                render_plan=ai_effect_render_plan,
+                render_plan=None,
                 editorial_timeline=packaged_editorial_timeline,
                 output_path=tmp_ai_effect_mp4,
                 subtitle_items=packaged_subtitles,
                 overlay_editing_accents=ai_effect_overlay_accents,
                 synthesize_subtitle_unit_accents=not manual_subtitle_only_render,
                 debug_dir=debug_dir / "ai_effect_variant",
+                packaging_context=ai_effect_packaging_context,
+                runtime_plan_context=ai_effect_runtime_plan_context,
             )
             await render_video(
                 source_path=packaged_source_path,
-                render_plan=render_plan_timeline.data_json,
+                render_plan=None,
                 editorial_timeline=packaged_editorial_timeline,
                 output_path=tmp_packaged_mp4,
                 subtitle_items=packaged_subtitles,
                 overlay_editing_accents=final_overlay_accents,
                 synthesize_subtitle_unit_accents=not manual_subtitle_only_render,
                 debug_dir=debug_dir / "packaged",
+                packaging_context=packaging_context,
+                runtime_plan_context=render_plan_context,
             )
             packaged_meta = await _probe_with_retry(tmp_packaged_mp4)
             ai_effect_meta = await _probe_with_retry(tmp_ai_effect_mp4)
@@ -9962,13 +10006,21 @@ async def run_render(job_id: str) -> dict:
                 write_srt_file(packaged_subtitles, local_avatar_srt)
             write_srt_file(packaged_subtitles, local_ai_effect_srt)
             plain_subtitle_sync = _compute_subtitle_sync_check(local_plain_mp4, local_plain_srt)
-            packaged_outro_path = str(
-                (packaging_timeline_assets(render_plan_timeline.data_json).get("outro") or {}).get("path") or ""
-            ).strip()
-            ai_effect_outro_path = str(
-                (packaging_timeline_assets(ai_effect_render_plan).get("outro") or {}).get("path") or ""
-            ).strip()
-            packaged_outro_duration = await _resolve_packaging_trailing_gap_allowance(render_plan_timeline.data_json)
+            packaged_outro_plan = (
+                dict((packaging_assets or {}).get("outro") or {})
+                if isinstance(packaging_assets, dict)
+                else None
+            )
+            ai_effect_outro_plan = (
+                dict((ai_effect_packaging_context["assets"] or {}).get("outro") or {})
+                if isinstance(ai_effect_packaging_context.get("assets"), dict)
+                else None
+            )
+            packaged_outro_path = str((packaged_outro_plan or {}).get("path") or "").strip()
+            ai_effect_outro_path = str((ai_effect_outro_plan or {}).get("path") or "").strip()
+            packaged_outro_duration = await _resolve_packaging_trailing_gap_allowance(
+                outro_plan=packaged_outro_plan,
+            )
             packaged_subtitle_sync = _compute_subtitle_sync_check(
                 local_packaged_mp4,
                 local_packaged_srt,
@@ -9990,7 +10042,9 @@ async def run_render(job_id: str) -> dict:
                     packaging_allowance_sec=(
                         packaged_outro_duration
                         if packaged_outro_path and packaged_outro_path == ai_effect_outro_path
-                        else await _resolve_packaging_trailing_gap_allowance(ai_effect_render_plan)
+                        else await _resolve_packaging_trailing_gap_allowance(
+                            outro_plan=ai_effect_outro_plan,
+                        )
                     ),
                 ),
             )
@@ -10011,13 +10065,14 @@ async def run_render(job_id: str) -> dict:
 
             # Extract cover frame from the plain render so burned subtitles never leak into thumbnails.
             try:
+                render_cover = dict(render_plan_context["cover"] or {})
                 cover_variants = await extract_cover_frame(
                     _select_cover_source_video(tmp_plain_mp4),
                     local_cover,
                     seek_sec=await _get_cover_seek(job.id),
                     content_profile=content_profile,
-                    cover_style=(render_plan_timeline.data_json.get("cover") or {}).get("style"),
-                    title_style=(render_plan_timeline.data_json.get("cover") or {}).get("title_style"),
+                    cover_style=render_cover.get("style"),
+                    title_style=render_cover.get("title_style"),
                 )
                 cover_selection = load_cover_selection_summary(local_cover)
                 cover_result = {
@@ -10102,14 +10157,22 @@ async def run_render(job_id: str) -> dict:
         "output_name": out_name,
         "variants": dict(serialized_variant_paths),
     }
+    editorial_analysis = editorial_timeline_analysis(editorial_timeline.data_json)
+    variant_editorial_context = _variant_timeline_editorial_context(
+        editorial_timeline.data_json,
+        analysis=editorial_analysis,
+        packaged_editorial_timeline=packaged_editorial_timeline,
+        plain_segments=plain_editorial_segments,
+    )
     variant_timeline_bundle = _build_variant_timeline_bundle(
         editorial_timeline_id=editorial_timeline.id,
         render_plan_timeline_id=render_plan_timeline.id,
         keep_segments=keep_segments,
-        editorial_analysis=(editorial_timeline.data_json or {}).get("analysis") or {},
+        editorial_analysis=variant_editorial_context["analysis"],
         cut_analysis=cut_analysis_payload,
         refine_decision_plan=refine_decision_plan_payload,
-        render_plan=render_plan_timeline.data_json,
+        render_plan=None,
+        packaging_timeline=packaging_context["packaging_timeline"],
         variants={
             "plain": _build_variant_timeline_entry(
                 media_path=local_plain_mp4,
@@ -10117,7 +10180,7 @@ async def run_render(job_id: str) -> dict:
                 media_meta=plain_meta,
                 subtitle_events=remapped_subtitles,
                 transition_offsets=[],
-                segments=editorial_timeline.data_json.get("segments") or [],
+                segments=variant_editorial_context["plain_segments"],
                 quality_check=variant_subtitle_sync_checks["plain"] or {},
             ),
             "packaged": _build_variant_timeline_entry(
@@ -10126,7 +10189,7 @@ async def run_render(job_id: str) -> dict:
                 media_meta=packaged_meta,
                 subtitle_events=packaged_subtitles,
                 transition_offsets=packaged_transition_offsets,
-                segments=packaged_editorial_timeline.get("segments") or [],
+                segments=variant_editorial_context["packaged_segments"],
                 overlay_events=final_overlay_accents,
                 quality_check=variant_subtitle_sync_checks["packaged"] or {},
             ),
@@ -10136,7 +10199,7 @@ async def run_render(job_id: str) -> dict:
                 media_meta=ai_effect_meta,
                 subtitle_events=packaged_subtitles,
                 transition_offsets=ai_effect_transition_offsets,
-                segments=packaged_editorial_timeline.get("segments") or [],
+                segments=variant_editorial_context["packaged_segments"],
                 overlay_events=ai_effect_overlay_accents,
                 quality_check=variant_subtitle_sync_checks["ai_effect"] or {},
             ),
@@ -10274,7 +10337,7 @@ async def run_platform_package(job_id: str) -> dict:
                 refine_decision_plan_payload,
                 editorial_timeline_id=str(editorial_timeline.id),
                 editorial_timeline_version=int(editorial_timeline.version or 1),
-                fallback_segments=list((editorial_timeline.data_json or {}).get("segments", []) or []),
+                fallback_segments=plain_editorial_segments,
             )
             subtitle_dicts = await _validated_subtitle_projection_for_timeline(
                 session,
@@ -10535,11 +10598,102 @@ def _subtitle_text(item: dict[str, Any]) -> str:
     return subtitle_display_rule_text(item)
 
 
+def _resolve_editorial_analysis_payload(
+    editorial_timeline_payload: dict[str, Any] | None,
+    *,
+    analysis: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if isinstance(analysis, dict):
+        return copy.deepcopy(analysis)
+    editorial_payload = editorial_timeline_payload if isinstance(editorial_timeline_payload, dict) else {}
+    return editorial_timeline_analysis(editorial_payload)
+
+
+def _variant_timeline_editorial_context(
+    editorial_timeline_payload: dict[str, Any] | None,
+    *,
+    analysis: dict[str, Any] | None = None,
+    packaged_editorial_timeline: dict[str, Any] | None = None,
+    plain_segments: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    editorial_payload = editorial_timeline_payload if isinstance(editorial_timeline_payload, dict) else {}
+    packaged_payload = (
+        packaged_editorial_timeline
+        if isinstance(packaged_editorial_timeline, dict)
+        else editorial_payload
+    )
+    resolved_plain_segments = (
+        copy.deepcopy(list(plain_segments))
+        if isinstance(plain_segments, list)
+        else editorial_timeline_segments(editorial_payload)
+    )
+    return {
+        "analysis": _resolve_editorial_analysis_payload(editorial_payload, analysis=analysis),
+        "plain_segments": resolved_plain_segments,
+        "packaged_segments": (
+            copy.deepcopy(resolved_plain_segments)
+            if packaged_payload is editorial_payload and isinstance(plain_segments, list)
+            else editorial_timeline_segments(packaged_payload)
+        ),
+    }
+
+
+def _runtime_packaging_context(render_plan: dict[str, Any] | None) -> dict[str, Any]:
+    packaging_timeline = resolve_packaging_timeline_payload(render_plan)
+    assets = dict(packaging_timeline.get("packaging") or {})
+    editing_accents = dict(packaging_timeline.get("editing_accents") or {})
+    transitions = dict((editing_accents or {}).get("transitions") or {})
+    section_choreography = packaging_timeline_section_choreography(packaging_timeline)
+    subtitles = packaging_timeline_subtitles(packaging_timeline)
+    section_profile_context = _packaged_subtitle_section_profile_context(
+        None,
+        packaging_timeline=packaging_timeline,
+    )
+    has_packaging_assets = any(assets.get(key) for key in ("intro", "outro", "insert", "watermark", "music"))
+    return {
+        "packaging_timeline": packaging_timeline,
+        "assets": assets,
+        "editing_accents": editing_accents,
+        "transitions": transitions,
+        "section_choreography": section_choreography,
+        "subtitles": subtitles,
+        "section_profile_context": section_profile_context,
+        "has_packaging": has_packaging_assets,
+        "has_packaging_assets": has_packaging_assets,
+        "has_editing_accents": bool(
+            transitions.get("boundary_indexes")
+            or editing_accents.get("emphasis_overlays")
+            or editing_accents.get("sound_effects")
+        ),
+    }
+
+
+def _runtime_render_plan_context(render_plan: dict[str, Any] | None) -> dict[str, Any]:
+    return {
+        "automatic_gate": render_plan_automatic_gate(render_plan),
+        "manual_editor": render_plan_manual_editor(render_plan),
+        "delivery": render_plan_delivery(render_plan),
+        "video_transform": render_plan_video_transform(render_plan),
+        "avatar_plan": render_plan_avatar_commentary(render_plan),
+        "voice_processing": render_plan_voice_processing(render_plan),
+        "loudness": render_plan_loudness(render_plan),
+        "cover": render_plan_cover(render_plan),
+    }
+
+
 def _subtitle_section_profile_for_time(
-    render_plan: dict[str, Any],
+    render_plan: dict[str, Any] | None,
     time_sec: float,
+    *,
+    section_profile_context: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    subtitles = packaging_timeline_subtitles(render_plan)
+    if isinstance(section_profile_context, dict):
+        subtitles = dict(section_profile_context.get("subtitles") or {})
+        timeline_analysis = dict(section_profile_context.get("timeline_analysis") or {})
+    else:
+        resolved_section_profile_context = _packaged_subtitle_section_profile_context(render_plan)
+        subtitles = dict(resolved_section_profile_context.get("subtitles") or {})
+        timeline_analysis = dict(resolved_section_profile_context.get("timeline_analysis") or {})
     for profile in list((subtitles.get("section_profiles") or [])):
         if not isinstance(profile, dict):
             continue
@@ -10547,13 +10701,29 @@ def _subtitle_section_profile_for_time(
         end_sec = float(profile.get("end_sec", start_sec) or start_sec)
         if start_sec - 1e-6 <= time_sec <= end_sec + 1e-6:
             return profile
-    directive = _section_directive_for_time(packaging_timeline_analysis(render_plan), time_sec)
+    directive = _section_directive_for_time(timeline_analysis, time_sec)
     if not isinstance(directive, dict):
         return None
     return {
         "role": str(directive.get("role") or ""),
         "start_sec": float(directive.get("start_sec", 0.0) or 0.0),
         "end_sec": float(directive.get("end_sec", 0.0) or 0.0),
+    }
+
+
+def _packaged_subtitle_section_profile_context(
+    render_plan: dict[str, Any] | None,
+    *,
+    packaging_timeline: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    normalized_packaging_timeline = (
+        dict(packaging_timeline)
+        if isinstance(packaging_timeline, dict)
+        else resolve_packaging_timeline_payload(render_plan)
+    )
+    return {
+        "subtitles": dict(normalized_packaging_timeline.get("subtitles") or {}),
+        "timeline_analysis": dict(normalized_packaging_timeline.get("timeline_analysis") or {}),
     }
 
 
@@ -10664,8 +10834,13 @@ def _rewrite_cta_subtitle_text(text: str) -> str:
 def _rewrite_packaged_subtitle_copy(
     subtitle_items: list[dict[str, Any]],
     *,
-    render_plan: dict[str, Any],
+    render_plan: dict[str, Any] | None = None,
+    section_profile_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    if isinstance(section_profile_context, dict):
+        resolved_section_profile_context = section_profile_context
+    else:
+        resolved_section_profile_context = _packaged_subtitle_section_profile_context(render_plan)
     rewritten_items: list[dict[str, Any]] = []
     for item in subtitle_items:
         rewritten = dict(item)
@@ -10677,7 +10852,11 @@ def _rewrite_packaged_subtitle_copy(
             float(rewritten.get("start_time", 0.0) or 0.0)
             + float(rewritten.get("end_time", rewritten.get("start_time", 0.0)) or 0.0)
         ) / 2.0
-        profile = _subtitle_section_profile_for_time(render_plan, midpoint)
+        profile = _subtitle_section_profile_for_time(
+            None,
+            midpoint,
+            section_profile_context=resolved_section_profile_context,
+        )
         if not isinstance(profile, dict):
             rewritten_items.append(rewritten)
             continue
@@ -10827,14 +11006,23 @@ def _allocate_subtitle_unit_durations(
 def _resegment_packaged_subtitles(
     subtitle_items: list[dict[str, Any]],
     *,
-    render_plan: dict[str, Any],
+    render_plan: dict[str, Any] | None = None,
+    section_profile_context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
+    if isinstance(section_profile_context, dict):
+        resolved_section_profile_context = section_profile_context
+    else:
+        resolved_section_profile_context = _packaged_subtitle_section_profile_context(render_plan)
     resegmented: list[dict[str, Any]] = []
     for item in subtitle_items:
         original_start = float(item.get("start_time", 0.0) or 0.0)
         original_end = max(original_start, float(item.get("end_time", original_start) or original_start))
         midpoint = (original_start + original_end) / 2.0
-        profile = _subtitle_section_profile_for_time(render_plan, midpoint)
+        profile = _subtitle_section_profile_for_time(
+            None,
+            midpoint,
+            section_profile_context=resolved_section_profile_context,
+        )
         role = str((profile or {}).get("role") or "").strip().lower()
         texts = _resolve_resegmented_subtitle_texts(item, role=role)
         if len(texts) <= 1:
@@ -11356,7 +11544,7 @@ async def _plan_insert_asset_slot(
 
 async def _map_subtitles_to_packaged_timeline(
     subtitle_items: list[dict],
-    render_plan: dict,
+    render_plan: dict[str, Any] | None = None,
     *,
     keep_segments: list[dict[str, Any]] | None = None,
     timeline_mapping: dict[str, Any] | None = None,
@@ -11402,18 +11590,23 @@ async def _map_subtitles_to_packaged_timeline(
                 insert_duration=added_insert_duration,
             )
 
+    section_profile_context = dict(timeline_mapping.get("section_profile_context") or {})
+    if not section_profile_context:
+        section_profile_context = _packaged_subtitle_section_profile_context(render_plan)
     return _resegment_packaged_subtitles(
         _rewrite_packaged_subtitle_copy(
             mapped,
-            render_plan=render_plan,
+            render_plan=None,
+            section_profile_context=section_profile_context,
         ),
-        render_plan=render_plan,
+        render_plan=None,
+        section_profile_context=section_profile_context,
     )
 
 
 async def _map_editing_accents_to_packaged_timeline(
     editing_accents: dict[str, Any] | None,
-    render_plan: dict,
+    render_plan: dict[str, Any] | None = None,
     *,
     keep_segments: list[dict[str, Any]] | None = None,
     timeline_mapping: dict[str, Any] | None = None,
@@ -11497,21 +11690,35 @@ async def _resolve_packaged_timeline_mapping_context(
     render_plan: dict[str, Any] | None,
     *,
     keep_segments: list[dict[str, Any]],
+    packaging_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    plan = render_plan or {}
-    packaging_assets = packaging_timeline_assets(plan)
+    if isinstance(packaging_context, dict):
+        packaging_timeline = dict(packaging_context.get("packaging_timeline") or {})
+        packaging_assets = dict(packaging_context.get("assets") or {})
+        transitions = dict(packaging_context.get("transitions") or {})
+        section_profile_context = dict(packaging_context.get("section_profile_context") or {})
+    else:
+        plan = render_plan or {}
+        packaging_timeline = resolve_packaging_timeline_payload(plan)
+        packaging_assets = dict(packaging_timeline.get("packaging") or {})
+        transitions = dict(((packaging_timeline.get("editing_accents") or {}).get("transitions")) or {})
+        section_profile_context = _packaged_subtitle_section_profile_context(
+            None,
+            packaging_timeline=packaging_timeline,
+        )
     transition_offsets = _resolve_transition_overlap_offsets(
-        plan,
+        None,
         keep_segments=keep_segments,
+        transitions=transitions,
     )
 
     intro_duration = 0.0
-    intro_plan = packaging_assets.get("intro")
+    intro_plan = dict(packaging_assets.get("intro") or {}) or None
     intro_path = str((intro_plan or {}).get("path") or "").strip()
     if intro_path:
         intro_duration = max(0.0, float(await _probe_media_duration(Path(intro_path)) or 0.0))
 
-    insert_plan = packaging_assets.get("insert")
+    insert_plan = dict(packaging_assets.get("insert") or {}) or None
     insert_path = str((insert_plan or {}).get("path") or "").strip()
     effective_insert_duration = 0.0
     if insert_path and isinstance(insert_plan, dict):
@@ -11527,6 +11734,7 @@ async def _resolve_packaged_timeline_mapping_context(
         "insert_plan": insert_plan if insert_path else None,
         "insert_after_sec": float(((insert_plan or {}).get("insert_after_sec", 0.0) or 0.0)) + intro_duration,
         "effective_insert_duration_sec": effective_insert_duration,
+        "section_profile_context": section_profile_context,
     }
 
 
@@ -11545,9 +11753,13 @@ def _build_full_length_variant_timeline(duration_sec: float) -> dict[str, Any]:
     }
 
 
-async def _resolve_packaging_trailing_gap_allowance(render_plan: dict[str, Any] | None) -> float:
-    outro_plan = packaging_timeline_assets(render_plan).get("outro")
-    outro_path = str((outro_plan or {}).get("path") or "").strip()
+async def _resolve_packaging_trailing_gap_allowance(
+    render_plan: dict[str, Any] | None = None,
+    *,
+    outro_plan: dict[str, Any] | None = None,
+) -> float:
+    resolved_outro_plan = outro_plan if isinstance(outro_plan, dict) else packaging_timeline_asset_plan(render_plan, "outro")
+    outro_path = str((resolved_outro_plan or {}).get("path") or "").strip()
     if not outro_path:
         return 0.0
     try:
@@ -12581,13 +12793,19 @@ def _build_variant_timeline_bundle(
     editorial_analysis: dict[str, Any] | None = None,
     cut_analysis: dict[str, Any] | None = None,
     refine_decision_plan: dict[str, Any] | None = None,
-    render_plan: dict[str, Any],
+    render_plan: dict[str, Any] | None = None,
+    packaging_timeline: dict[str, Any] | None = None,
     variants: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     cloned_editorial_analysis = _clone_json_like(editorial_analysis or {})
     cloned_cut_analysis = _clone_json_like(cut_analysis or {})
     cloned_refine_decision_plan = _clone_json_like(refine_decision_plan or {})
-    packaging_timeline = build_packaging_timeline_payload(render_plan)
+    resolved_packaging_timeline = (
+        dict(packaging_timeline)
+        if isinstance(packaging_timeline, dict)
+        else build_packaging_timeline_payload(render_plan)
+    )
+    packaging_timeline_analysis_payload = dict(resolved_packaging_timeline.get("timeline_analysis") or {})
     bundle = {
         "timeline_rules": {
             "editorial_timeline_id": str(editorial_timeline_id or "").strip() or None,
@@ -12596,17 +12814,20 @@ def _build_variant_timeline_bundle(
             "editorial_analysis": cloned_editorial_analysis,
             "cut_analysis": cloned_cut_analysis,
             "refine_decision_plan": cloned_refine_decision_plan,
-            "packaging_timeline": packaging_timeline,
+            "packaging_timeline": resolved_packaging_timeline,
             "diagnostics": _build_variant_timeline_diagnostics(
                 editorial_analysis=cloned_editorial_analysis,
                 cut_analysis=cloned_cut_analysis,
                 refine_decision_plan=cloned_refine_decision_plan,
-                timeline_analysis=packaging_timeline.get("timeline_analysis") or {},
+                timeline_analysis=packaging_timeline_analysis_payload,
             ),
         },
         "variants": {name: dict(payload) for name, payload in variants.items() if isinstance(payload, dict)},
     }
-    bundle["validation"] = _validate_variant_timeline_bundle(bundle)
+    bundle["validation"] = _validate_variant_timeline_bundle(
+        bundle,
+        packaging_timeline=resolved_packaging_timeline,
+    )
     return bundle
 
 
@@ -12884,7 +13105,11 @@ def _clone_json_like(value: Any) -> Any:
     return value
 
 
-def _validate_variant_timeline_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
+def _validate_variant_timeline_bundle(
+    bundle: dict[str, Any],
+    *,
+    packaging_timeline: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     issues: list[str] = []
     variants = bundle.get("variants")
     if not isinstance(variants, dict):
@@ -12916,7 +13141,14 @@ def _validate_variant_timeline_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
 
     timeline_rules = bundle.get("timeline_rules")
     if isinstance(timeline_rules, dict):
-        timeline_analysis = packaging_timeline_analysis(timeline_rules)
+        normalized_packaging_timeline = (
+            dict(packaging_timeline)
+            if isinstance(packaging_timeline, dict)
+            else dict(timeline_rules.get("packaging_timeline") or {})
+            if isinstance(timeline_rules.get("packaging_timeline"), dict)
+            else resolve_packaging_timeline_payload(timeline_rules)
+        )
+        timeline_analysis = dict(normalized_packaging_timeline.get("timeline_analysis") or {})
         if isinstance(timeline_analysis, dict):
             previous_section_end: float | None = None
             for section_index, section in enumerate(timeline_analysis.get("semantic_sections") or [], start=1):
@@ -12960,14 +13192,14 @@ def _validate_variant_timeline_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
                 if previous_action_end is not None and start_sec < previous_action_end - 1e-6:
                     issues.append(f"timeline_analysis: section actions are not monotonic at index {action_index}")
                 previous_action_end = max(previous_action_end or end_sec, end_sec)
-        editing_skill = packaging_timeline_editing_skill(timeline_rules)
+        editing_skill = dict(normalized_packaging_timeline.get("editing_skill") or {})
         if isinstance(editing_skill, dict):
             if not str(editing_skill.get("key") or "").strip():
                 issues.append("editing_skill: key missing")
             section_policy = editing_skill.get("section_policy")
             if section_policy is not None and not isinstance(section_policy, dict):
                 issues.append("editing_skill: section_policy is not a dict")
-        section_choreography = packaging_timeline_section_choreography(timeline_rules)
+        section_choreography = dict(normalized_packaging_timeline.get("section_choreography") or {})
         if isinstance(section_choreography, dict):
             previous_section_end: float | None = None
             for section_index, section in enumerate(section_choreography.get("sections") or [], start=1):
@@ -12984,10 +13216,10 @@ def _validate_variant_timeline_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
                 if previous_section_end is not None and start_sec < previous_section_end - 1e-6:
                     issues.append(f"section_choreography: sections are not monotonic at index {section_index}")
                 previous_section_end = max(previous_section_end or end_sec, end_sec)
-        packaging_assets = packaging_timeline_assets(timeline_rules)
+        packaging_assets = dict(normalized_packaging_timeline.get("packaging") or {})
         if not isinstance(packaging_assets, dict):
             issues.append("packaging_timeline: packaging assets payload is not a dict")
-        editing_accents = packaging_timeline_editing_accents(timeline_rules)
+        editing_accents = dict(normalized_packaging_timeline.get("editing_accents") or {})
         if not isinstance(editing_accents, dict):
             issues.append("packaging_timeline: editing_accents payload is not a dict")
         diagnostics = timeline_rules.get("diagnostics")
@@ -13013,17 +13245,22 @@ def _resolve_transition_overlap_offsets(
     render_plan: dict[str, Any] | None,
     *,
     keep_segments: list[dict[str, Any]],
+    transitions: dict[str, Any] | None = None,
 ) -> list[tuple[float, float]]:
     if len(keep_segments) < 2:
         return []
 
-    transitions = (packaging_timeline_editing_accents(render_plan).get("transitions") or {})
-    if not transitions.get("enabled"):
+    resolved_transitions = (
+        dict(transitions)
+        if isinstance(transitions, dict)
+        else packaging_timeline_transitions(render_plan)
+    )
+    if not resolved_transitions.get("enabled"):
         return []
 
-    raw_duration = float(transitions.get("duration_sec") or 0.12)
+    raw_duration = float(resolved_transitions.get("duration_sec") or 0.12)
     requested_indexes: list[int] = []
-    for raw_index in transitions.get("boundary_indexes") or []:
+    for raw_index in resolved_transitions.get("boundary_indexes") or []:
         try:
             index = int(raw_index)
         except (TypeError, ValueError):

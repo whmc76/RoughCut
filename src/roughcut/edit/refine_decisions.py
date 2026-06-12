@@ -234,6 +234,7 @@ def build_refine_decision_plan_from_render_plan(
     render_plan_data: dict[str, Any] | None = None,
     render_plan_version: int | None = None,
     cut_analysis: dict[str, Any] | None = None,
+    audio_defaults: dict[str, Any] | None = None,
     video_transform: dict[str, Any] | None = None,
     smart_cut_rules: dict[str, Any] | None = None,
     note: str | None = None,
@@ -248,7 +249,11 @@ def build_refine_decision_plan_from_render_plan(
         subtitle_fingerprint=subtitle_fingerprint,
         render_plan_version=render_plan_version,
         cut_analysis=cut_analysis,
-        audio_defaults=refine_plan_audio_defaults(render_plan_data),
+        audio_defaults=(
+            dict(audio_defaults)
+            if isinstance(audio_defaults, dict)
+            else refine_plan_audio_defaults(render_plan_data)
+        ),
         video_transform=video_transform,
         smart_cut_rules=smart_cut_rules,
         note=note,

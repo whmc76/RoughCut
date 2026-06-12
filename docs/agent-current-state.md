@@ -9,6 +9,173 @@ Drive the universal auto-edit strategy refactor from the now-closed `information
 ## Current Workstream
 
 - Use `docs/design/2026-06-12-universal-auto-edit-strategy-implementation-plan.md` as the execution source of truth for this refactor.
+- The formal implementation plan has now been rewritten into a shorter execution document: it fixes the product taxonomy around strategy types, hard-separates `Editorial Timeline` from `Packaging Timeline / Effect Plan`, and keeps this round strictly inside the `information_density` behavior-preserving migration.
+- The execution plan now only keeps scope, batches, current slice order, invariants, and acceptance rules. Detailed landed-slice history and anchor evidence stay in this state file.
+- The formal implementation plan remains fixed around one execution rule: start immediately on the current thread, but do not allow parallel writes on `src/roughcut/pipeline/steps.py`, `src/roughcut/api/jobs.py`, or `src/roughcut/media/render.py`.
+- `Batch E` stop conditions are now met for the current `information_density` round: the three execution exits now consume shared editorial / packaging / render-plan contracts directly at their high-value boundaries, the latest focused regressions across `manual_editor_helpers + manual_editor_session_regressions + render_frame_rate_unification` still keep the main refactor slices green except for two unrelated pre-existing helper regressions outside the touched exit paths, and the authoritative three-exit closure smoke rerun passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-three-exit-alignment-closure-smoke-rerun/20260612-191333` with `live_readiness=pass`, `stable_run_count=1`, and `required_checks=4/4`.
+- The two failures from the broader combined pytest run (`424 passed, 2 failed`) are currently outside this refactor’s touched exit paths: `tests/test_manual_editor_helpers.py::test_manual_editor_split_long_rows_rebalances_flashlight_ascii_model_boundaries` targets `src/roughcut/api/jobs.py::_manual_editor_split_long_subtitle_rows(...)`, and `tests/test_manual_editor_helpers.py::test_should_keep_existing_projection_rejects_material_content_drift` targets `src/roughcut/pipeline/steps.py::_should_keep_existing_subtitle_projection(...)`. Those helper areas were not part of the current three-exit contract migration slices, so they are tracked as pre-existing unrelated regressions rather than blockers for this round’s closure.
+- A further narrow `pipeline/steps.py` render-exit regression fix has now landed inside `run_render(...)`: the final variant-bundle assembly no longer references a nonexistent in-scope `decision` object when preparing `variant_editorial_context`. The render exit now restores `editorial_analysis` from the current `editorial_timeline.data_json` through `editorial_timeline_analysis(...)`, then passes that shared contract into `_variant_timeline_editorial_context(...)`.
+- Observed symptom for that regression: the first three-exit closure smoke at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-three-exit-alignment-closure-smoke/20260612-190907` failed during `render` with `RuntimeError: NameError: name 'decision' is not defined`, even though `required_checks=4/4` and subtitle/render artifacts were otherwise healthy.
+- First bad layer: the `run_render(...)` variant-editorial-context callsite near the final variant-bundle/export handoff. Root cause: the earlier caller-analysis cleanup pattern from `run_edit_plan(...)` was over-applied to `run_render(...)`, where no in-memory `decision` object exists. It surfaced only now because previous focused regressions and `edit_plan` anchors did not execute that render-exit tail branch.
+- Focused verification for that render-exit regression fix passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "variant_timeline_editorial_context_reuses_caller_analysis or variant_timeline_bundle_reuses_local_packaging_timeline_for_validation or edit_review_bundle_payload_carries_cut_analysis_and_refine_decision_plan" -q` (`3 passed`).
+- The first closure smoke run above is not authoritative because it captured the now-fixed `decision` NameError. The authoritative rerun passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-three-exit-alignment-closure-smoke-rerun/20260612-191333` with `status=partial` by design, `quality_score=100.0`, `output_duration_sec=23.3`, `live_readiness=pass`, `stable_run_count=1`, and `required_checks=4/4`.
+- A further narrow `api/jobs.py` manual-editor apply consumer cleanup has now landed inside `apply_manual_editor_timeline(...)`: once the apply path already has normalized `previous_render_plan_context["packaging_timeline"]`, it no longer hand-deserializes sibling `editing_skill / editing_accents / subtitles / timeline_analysis` facts locally. That exit now consumes existing shared `packaging_timeline_editing_skill(...)`, `packaging_timeline_editing_accents(...)`, `packaging_timeline_subtitles(...)`, and `packaging_timeline_analysis(...)` readers directly.
+- Root cause for that slice: the first bad layer was same-function packaging-timeline fact recovery inside `apply_manual_editor_timeline(...)`. The apply path already held one normalized packaging-timeline contract, but still split four sibling subfacts out of that payload locally even though the shared packaging reader layer already owned those contracts. This was not a visible behavior bug, but it left the manual-editor exit with one more helper-bypass consumer path.
+- Focused verification for that manual-editor apply consumer slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_session_regressions.py -k "manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun or manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change or reuse_timeline_effect_plan" -q` (`2 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-editor-apply-packaging-helper-consumer-anchor/20260612-190846` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `stable_run_count=1`, and `required_checks=4/4`.
+- A further narrow `pipeline/steps.py` edit-plan exit cleanup has now landed inside `run_edit_plan(...)`: the exit no longer serializes the same final `decision` contract multiple times across stale OTIO export, editorial timeline overwrite, and edit-review bundle assembly. The early OTIO export that was immediately superseded later in the same function is gone, `keep_segments` now come directly from `decision.segments`, and the final decision payload is materialized once after projection/gate analysis attachment, then reused for `editorial_timeline.data_json`, OTIO export, and `edit_review_bundle`.
+- Root cause for that slice: the first bad layer was the final artifact handoff zone inside `run_edit_plan(...)`. The function already had one authoritative in-memory `decision` object, but still reserialized it repeatedly at the exit boundary and even emitted one OTIO export before the final gate/projection analysis was attached, only to overwrite that export later in the same function. This was not a visible behavior bug, but it left the `edit_plan` exit with one more local half-contract rebuild and one stale intermediate artifact serialization point.
+- Focused verification for that edit-plan decision-payload reuse slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "edit_review_bundle_payload_carries_cut_analysis_and_refine_decision_plan or variant_timeline_editorial_context_reuses_caller_analysis or variant_timeline_bundle_reuses_local_packaging_timeline_for_validation" -q` (`3 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-edit-plan-decision-payload-reuse-anchor/20260612-190252` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `stable_run_count=1`, and `required_checks=4/4`.
+- A further narrow `pipeline/steps.py` variant-editorial-context cleanup has now landed across the `run_edit_plan(...)` variant-bundle callsite and `_variant_timeline_editorial_context(...)`: once `run_edit_plan(...)` already holds authoritative `decision.analysis`, it no longer makes the helper reopen editorial analysis from `editorial_timeline.data_json`. The caller now passes `analysis=decision.analysis` directly, and the helper keeps payload-based editorial-analysis recovery only as a fallback for callers that do not already hold the shared analysis contract.
+- Root cause for that slice: the first bad layer was the handoff from `run_edit_plan(...)` into `_variant_timeline_editorial_context(...)`. The edit-plan runtime already had one authoritative editorial-analysis object in hand from the current decision, but still invoked the helper in a way that forced a reread from the editorial timeline payload before the same facts were forwarded into the variant bundle. This was not a behavior bug, but it left one more same-analysis caller/callee roundtrip in the shared bundle exit path.
+- Focused verification for that variant-editorial-context slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "variant_timeline_editorial_context_reuses_caller_analysis or variant_timeline_editorial_context_reuses_local_payload_readers or variant_timeline_bundle_reuses_local_packaging_timeline_for_validation" -q` (`3 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-variant-editorial-context-analysis-handoff-anchor/20260612-185654` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `stable_run_count=1`, and `required_checks=4/4`.
+- A further narrow `pipeline/steps.py` variant-bundle validation cleanup has now landed across `_build_variant_timeline_bundle(...)` and `_validate_variant_timeline_bundle(...)`: once the bundle builder has already materialized authoritative `resolved_packaging_timeline`, it no longer makes validation re-read that same payload back out of `bundle["timeline_rules"]`. The caller now passes `packaging_timeline=resolved_packaging_timeline` directly, and validation keeps the bundled payload lookup only as a fallback for callers that do not already hold the normalized packaging facts.
+- Root cause for that slice: the first bad layer was the handoff from `_build_variant_timeline_bundle(...)` into `_validate_variant_timeline_bundle(...)`. The bundle builder already had the authoritative normalized packaging timeline in hand for diagnostics and bundling, but still invoked validation in a way that forced the callee to reopen the same payload from `timeline_rules`. This was not a behavior bug, but it left one more direct-subfact-plus-bundled-payload roundtrip in the shared variant-bundle exit path.
+- Focused verification for that variant-bundle validation slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "variant_timeline_bundle_reuses_local_packaging_timeline_for_validation or variant_timeline_bundle_reuses_local_packaging_timeline_analysis_payload or variant_timeline_bundle_reuses_passed_packaging_timeline" -q` (`4 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-variant-bundle-validation-packaging-context-anchor/20260612-185457` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `stable_run_count=1`, and `required_checks=4/4`.
+- A further narrow `api/jobs.py` manual-editor draft context cleanup has now landed inside `save_manual_editor_draft(...)`: the draft-save path no longer re-reads `loudness` and `voice_processing` separately from `render_plan_data` after it already has the current render-plan payload in hand. It now materializes one shared `render_plan_context` and sources refine-plan `audio_defaults` from that context object.
+- Root cause for that slice: the first bad layer was same-function render-plan recovery inside `save_manual_editor_draft(...)`. The draft path already had one authoritative render-plan payload in hand, but still rebuilt `audio_defaults` through separate `render_plan_loudness(...)` and `render_plan_voice_processing(...)` reads from the same payload. This was not a behavior bug, but it left another repeated render-plan fact reconstruction point in the manual-editor draft exit path instead of one local context recovery.
+- Focused verification for that manual-editor draft context slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_session_regressions.py -k "manual_editor_draft_reuses_editorial_analysis_context_for_cut_analysis_loader or manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults or reuse_timeline_effect_plan" -q` (`2 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-editor-draft-render-plan-context-direct-handoff-anchor/20260612-185331` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `stable_run_count=1`, and `required_checks=4/4`.
+- A further narrow `api/jobs.py` manual-editor session context cleanup has now landed inside `_build_manual_editor_session(...)`: that session builder no longer re-reads `video_transform`, `loudness`, and `voice_processing` separately from `render_plan_data` after the same function has already restored the current render-plan payload. It now materializes one shared `render_plan_context`, reuses that context to recover `base_video_transform`, and also sources refine-plan `audio_defaults` from the same context object.
+- Root cause for that slice: the first bad layer was same-function render-plan recovery inside `_build_manual_editor_session(...)`. The session path already had one authoritative render-plan payload in hand, but still answered `base_video_transform` through one direct helper read and `audio_defaults` through two more direct helper reads from the same payload. This was not a behavior bug, but it left the manual-editor session exit with another repeated render-plan fact reconstruction point instead of one local context recovery.
+- Focused verification for that manual-editor session context slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_session_regressions.py -k "manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults or reuse_timeline_effect_plan or manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change" -q` (`2 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-editor-session-render-plan-context-direct-handoff-anchor/20260612-184940` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `stable_run_count=1`, and `required_checks=4/4`.
+- A further narrow `api/jobs.py` manual-editor apply video-transform handoff cleanup has now landed across `apply_manual_editor_timeline(...)` and `_manual_video_transform_from_render_plan(...)`: once the manual-editor apply path has already materialized one authoritative `previous_render_plan_context`, it no longer re-splits just the `video_transform` subpayload before recovering the previous transform contract. The live apply path now passes `render_plan_context=previous_render_plan_context` directly, and the helper remains responsible for projecting `video_transform` from that shared render-plan context.
+- Root cause for that slice: the first bad layer was the previous-video-transform handoff inside `apply_manual_editor_timeline(...)`. The caller already had a shared render-plan context object in hand for `packaging_timeline / video_transform / loudness / voice_processing`, but still reopened that same context locally and forwarded only `video_transform` into `_manual_video_transform_from_render_plan(...)`. This was not a behavior bug, but it left another same-context fan-out in the manual-editor exit path.
+- Focused verification for that manual-editor video-transform context handoff slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_session_regressions.py -k "reuse_timeline_effect_plan or manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults or manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change" -q` (`2 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-editor-apply-video-transform-context-handoff-anchor/20260612-184749` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `stable_run_count=1`, and `required_checks=4/4`.
+- A further narrow `api/jobs.py` manual-editor apply handoff cleanup has now landed across `apply_manual_editor_timeline(...)` and `_manual_editor_packaging_plan_from_render_plan(...)`: when the `subtitle_only / reuse_timeline_effect_plan` branch already has one authoritative `previous_render_plan_context`, the caller no longer re-splits that same context into `packaging_timeline / cover / delivery` before rebuilding the packaging plan. The live apply path now passes `render_plan_context=previous_render_plan_context` directly, and the helper remains responsible for projecting the needed packaging/cover/delivery facts from that one shared contract.
+- Root cause for that slice: the first bad layer was the packaging-plan handoff inside `apply_manual_editor_timeline(...)`. The manual-editor apply path had already recovered one shared render-plan context object for `video_transform / packaging_timeline / loudness / voice_processing / avatar`, but the reuse-packaging branch still reopened that same context locally and forwarded three sibling subpayloads into `_manual_editor_packaging_plan_from_render_plan(...)`. This was not a behavior bug, but it left the manual-editor exit with another same-context fan-out instead of consuming the shared contract directly.
+- Focused verification for that manual-editor render-plan-context handoff slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_session_regressions.py -k "reuse_timeline_effect_plan or manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults or manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change" -q` (`2 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-editor-apply-render-plan-context-handoff-anchor/20260612-184520` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `stable_run_count=1`, and `required_checks=4/4`.
+- A further narrow `media/render.py` live overlay caller cleanup has now landed across `render_video(...)` and `_apply_timed_overlays_to_video(...)`: once the packaged render branch has already materialized authoritative `subtitles_plan`, `section_choreography`, and `avatar_plan`, it no longer also forwards the full `packaging_context` into the overlay apply helper. The live caller now hands off only those direct overlay subfacts, while `_apply_timed_overlays_to_video(...)` keeps `packaging_context` strictly as a fallback contract for callers that did not already resolve subtitle/choreography facts.
+- Root cause for that slice: the first bad layer was the packaged-overlay handoff inside `render_video(...)`. The render runtime already had the authoritative overlay-facing facts in hand for subtitle choreography and timed overlay synthesis, but still forwarded the whole packaging context object into `_apply_timed_overlays_to_video(...)` even though that helper only needs the parent payload when those direct subfacts are absent. This was not a behavior bug, but it left one more direct-subfact-plus-parent-payload roundtrip on the main packaged render path.
+- Focused verification for that packaged overlay handoff slice passed via `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_render_frame_rate_unification.py -k "render_video_reuses_passed_packaging_assets_and_runtime_contexts or apply_timed_overlays_reuses_passed_packaging_context_and_avatar_plan or apply_timed_overlays_reuses_passed_subtitles_plan_and_section_choreography or render_video_reuses_passed_subtitles_plan_for_direct_overlay_helper" -q` (`4 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-render-overlay-packaging-context-direct-handoff-anchor/20260612-183958` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `stable_run_count=1`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further narrow `media/render.py` live caller cleanup has now landed across `render_video(...)` and `_apply_packaging_plan(...)`: once `render_video(...)` has already materialized authoritative `packaging_assets`, the packaged render branch no longer also forwards the full `packaging_context` into `_apply_packaging_plan(...)`. The live caller now hands off only `packaging_assets`, and the callee keeps `packaging_context` strictly as a fallback contract for non-live callers that did not already resolve asset subfacts.
+- Root cause for that slice: the first bad layer was the packaged render handoff inside `render_video(...)`. The runtime already had `packaging_assets = resolved_packaging_context["assets"]` in hand for branch selection, but still forwarded the whole packaging context object into `_apply_packaging_plan(...)` even though that helper only needs the full context when `packaging_assets` are absent. This was not a behavior bug, but it left one more direct-subfact-plus-parent-payload roundtrip on the main packaged render path.
+- Focused verification for that direct packaging-assets handoff slice passed via `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_render_frame_rate_unification.py -k "apply_packaging_plan_reuses_passed_packaging_context or apply_packaging_plan_reuses_passed_packaging_assets or render_video_reuses_passed_packaging_assets_and_runtime_contexts or render_video_reuses_passed_subtitles_plan_for_direct_overlay_helper" -q` (`4 passed`).
+- Live verification for that slice first saw another transient stop-after state-sync wobble at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-render-packaging-assets-direct-handoff-anchor/20260612-182959`: `required_checks=4/4`, `quality_score=100.0`, and the final job payload showed `subtitle_consistency_review` as `done`/non-blocking, but the emitted `live_stage_validations` row was recorded as `fail`, which dropped `stable_run_count` to `0`. Recomputing `build_live_stage_validations(...)` locally from that saved `batch_report.json` reproduced the expected `subtitle_consistency_review=pass`, so the first attempt is not authoritative for this slice.
+- The authoritative real `render` anchor rerun passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-render-packaging-assets-direct-handoff-anchor-rerun/20260612-183455` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `stable_run_count=1`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further narrow `media/render.py` packaging-assets handoff cleanup has now landed across `render_video(...)` and `_apply_packaging_plan(...)`: the live render path no longer passes only `packaging_context` and then makes `_apply_packaging_plan(...)` extract the same `assets` subfact back out of that context. The caller now passes its already-resolved `packaging_assets` directly, and the callee only reconstructs packaging assets when the caller did not provide them.
+- Root cause for that slice: the first bad layer was the handoff from `render_video(...)` into `_apply_packaging_plan(...)`. The render runtime already had authoritative `packaging_assets = packaging_context["assets"]` locally for branch selection, but the packaging apply helper still reopened the same context and re-extracted those same asset subplans before applying insert/bookend/music/watermark steps. This was not a behavior bug, but it left one more caller/callee packaging-subfact roundtrip in the live render branch.
+- Focused verification for that render packaging-assets handoff slice passed via `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_render_frame_rate_unification.py -k "apply_packaging_plan or render_packaging_context or apply_timed_overlays_reuses_passed_packaging_context_and_avatar_plan" -q` (`7 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-render-packaging-assets-handoff-anchor/20260612-160502` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further narrow `render` runtime-context handoff cleanup has now landed across `src/roughcut/media/render.py::render_video(...)` and `src/roughcut/pipeline/steps.py::run_render(...)`: the live packaged and ai-effect render branches no longer rebuild render/runtime facts inside `render_video(...)` after `run_render(...)` has already materialized them. The caller now passes shared `packaging_context` and `runtime_plan_context` through directly, and the `steps.py` runtime helpers now expose the same render-facing contract fields that `render_video(...)` consumes.
+- Root cause for that slice: the first bad layer was the handoff from `run_render(...)` into `render_video(...)`. The runtime caller already had authoritative packaging/runtime context objects, but the callee still reopened those facts from `render_plan`. Once the direct handoff was enabled, verification exposed that the `steps.py` helpers were carrying same-named but narrower local contracts (`automatic_gate/manual_editor/cover` and `assets/editing_accents/transitions`) while `render_video(...)` requires the render-facing fields (`delivery/video_transform/voice_processing/loudness` and `section_choreography/subtitles/has_packaging_assets`). This was not a pre-existing behavior bug because `render_video(...)` used to self-recover those facts, but it was the first broken boundary as soon as the duplicate recovery was removed.
+- Focused verification for that render runtime-context slice passed via `python -m py_compile src/roughcut/pipeline/steps.py src/roughcut/media/render.py tests/test_render_frame_rate_unification.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_render_frame_rate_unification.py tests/test_manual_editor_helpers.py -k "runtime_packaging_context or runtime_render_plan_context_reads_render_plan_once or render_video_reuses_passed_packaging_and_runtime_contexts or apply_packaging_plan or render_runtime_plan_context or render_packaging_context" -q` (`12 passed`).
+- The authoritative real `render` anchor rerun for that slice passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-render-runtime-context-handoff-anchor-rerun2/20260612-162249` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further narrow timed-overlay subfact handoff cleanup has now landed across `src/roughcut/media/render.py::render_video(...)`, `_apply_timed_overlays_to_video(...)`, and `_build_timed_overlay_filter_chain(...)`: the live timed-overlay helper chain no longer reopens `subtitles / section_choreography` from `packaging_context` after `render_video(...)` has already materialized those local facts. The caller now passes `subtitles_plan` and `section_choreography` through directly, and the downstream helpers only fall back to `packaging_context` when those subfacts are not already available from the caller.
+- Root cause for that slice: the first bad layer was the timed-overlay helper handoff inside `render_video(...)`. The render runtime already had authoritative `subtitles_plan` and `section_choreography` locally for subtitle choreography and overlay synthesis, but `_apply_timed_overlays_to_video(...)` and `_build_timed_overlay_filter_chain(...)` still treated `packaging_context` as the source of truth and re-extracted those same subfacts again. This was not a visible behavior bug, but it left another hot-path caller/callee packaging-subfact roundtrip inside the live overlay render branch.
+- Focused verification for that timed-overlay subfact slice passed via `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_render_frame_rate_unification.py -k "timed_overlay_filter_chain_reuses_passed_subtitles_plan or apply_timed_overlays_reuses_passed_subtitles_plan_and_section_choreography or timed_overlay_filter_chain_reuses_passed_packaging_context_and_avatar_plan or apply_timed_overlays_reuses_passed_packaging_context_and_avatar_plan or apply_timed_overlays_reuses_passed_overlay_plan or apply_timed_overlays_reuses_passed_choreographed_subtitles or timed_overlay_filter_chain_reuses_passed_choreographed_subtitles" -q` (`7 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-timed-overlay-subfact-handoff-anchor/20260612-163051` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further narrow `api/jobs.py` editorial-context follow-on has now landed across `_manual_editor_editorial_context(...)`, `save_manual_editor_draft(...)`, and `apply_manual_editor_timeline(...)`: the manual-editor draft/apply paths no longer recover editorial `analysis` through the shared helper and then reopen raw keep segments from the same editorial payload separately. The shared editorial context now carries `raw_keep_segments`, and both consumers reuse that one local context for duration fallback and baseline keep-segment recovery.
+- Root cause for that slice: the first bad layer was the manual-editor editorial-payload recovery boundary in `api/jobs.py`. The code already had a shared `_manual_editor_editorial_context(...)` seam for editorial facts, but draft/apply still split the same payload between helper-based recovery for `subtitle_projection / analysis` and direct `_manual_keep_segments_from_editorial_payload(...)` reads for raw keep segments. This was not a behavior bug, but it left the manual-editor edit-plan path with another same-payload reader fan-out.
+- Focused verification for that editorial-context keep-segments slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py -k "manual_editor_editorial_context_reads_projection_analysis_and_keep_segments_once or manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope or manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun or manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change" -q` (`4 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-editor-editorial-context-keep-segments-anchor/20260612-163810` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow `api/jobs.py` manual-editor draft cut-analysis handoff cleanup has now landed in `save_manual_editor_draft(...)`: the draft-save path no longer rebuilds editorial `analysis` inside `_load_manual_editor_cut_analysis_payload(...)` after it has already restored the same fact through `_manual_editor_editorial_context(...)`. The caller now passes `editorial_payload` and `editorial_context["editorial_analysis"]` straight through to the cut-analysis loader.
+- Root cause for that slice: the first bad layer was the handoff from `save_manual_editor_draft(...)` into `_load_manual_editor_cut_analysis_payload(...)`. The draft-save path already had one shared editorial context object in hand, but still called the loader in a way that forced a reread of editorial `analysis` from the same payload. This was not a behavior bug, but it left the draft save path with the same caller/callee editorial-analysis roundtrip that had already been removed from the manual-editor apply path.
+- Focused verification for that manual-editor draft editorial-analysis slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_session_regressions.py tests/test_manual_editor_helpers.py -k "manual_editor_draft_reuses_editorial_analysis_context_for_cut_analysis_loader or manual_editor_editorial_context_reads_projection_analysis_and_keep_segments_once or manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope or manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun" -q` (`4 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-editor-draft-editorial-analysis-handoff-anchor/20260612-164216` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow render post-check handoff cleanup has now landed in `src/roughcut/pipeline/steps.py`: the render-stage subtitle-sync post-check no longer passes full `render_plan` payloads into `_resolve_packaging_trailing_gap_allowance(...)` after the caller has already materialized `packaged_outro_plan / ai_effect_outro_plan`. The helper now accepts an omitted `render_plan` and only falls back to `packaging_timeline_asset_plan(...)` when the caller did not provide `outro_plan`.
+- Root cause for that slice: the first bad layer was the handoff from the render post-check branch into `_resolve_packaging_trailing_gap_allowance(...)`. The caller already had the authoritative outro asset subplans in hand from `packaging_context["assets"]`, but still called the helper with full render-plan payloads, leaving a needless caller/callee packaging-contract roundtrip even though the helper did not need to reopen packaging assets in the common path.
+- Focused verification for that packaging-trailing-gap slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "packaging_trailing_gap_allowance or runtime_packaging_context or packaged_timeline_mapping" -q` (`11 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-packaging-trailing-gap-handoff-anchor/20260612-164445` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further narrow manual-editor refine-plan handoff cleanup has now landed in `src/roughcut/api/jobs.py::_manual_editor_build_refine_decision_plan_from_render_plan(...)`: when the caller already provides authoritative `audio_defaults`, the helper no longer forwards full `render_plan_data` into `build_refine_decision_plan_from_render_plan(...)` just to leave that payload unused. It now passes `render_plan_data=None` in that branch and only forwards the render-plan payload when audio defaults truly need to be derived downstream.
+- Root cause for that slice: the first bad layer was the handoff from the manual-editor draft/apply callers into the refine-plan helper. Those callers had already extracted `loudness + voice_processing` into `audio_defaults`, but the shared helper still forwarded the full render-plan payload into the downstream builder even though that builder only consults `render_plan_data` when `audio_defaults` are absent. This was not a behavior bug, but it left another low-value payload roundtrip on the manual-editor edit-plan path.
+- Focused verification for that manual-editor refine-plan handoff slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py -k "manual_editor_build_refine_decision_plan_from_render_plan_reuses_passed_audio_defaults or manual_editor_draft_reuses_editorial_analysis_context_for_cut_analysis_loader or manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun or manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change" -q` (`4 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-editor-refine-handoff-anchor/20260612-165021` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow packaged-subtitle helper handoff cleanup has now landed in `src/roughcut/pipeline/steps.py`: once `_map_subtitles_to_packaged_timeline(...)` has a resolved `section_profile_context`, it no longer keeps passing full `render_plan` payloads into `_rewrite_packaged_subtitle_copy(...)` and `_resegment_packaged_subtitles(...)`. Those helper signatures now accept an optional `render_plan`, and the caller passes `render_plan=None` when the section-profile context is already resolved locally.
+- Root cause for that slice: the first bad layer was the handoff inside `_map_subtitles_to_packaged_timeline(...)`. The caller had already resolved one authoritative `section_profile_context` object, but still carried the full render-plan payload through the downstream packaged-subtitle helpers even though those helpers only need `render_plan` for their own fallback context recovery. This was not a behavior bug, but it left another low-value packaging-payload roundtrip in the live packaged subtitle path.
+- Focused verification for that packaged-subtitle helper handoff slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "map_subtitles_to_packaged_timeline or rewrite_packaged_subtitle_copy_reuses_local_section_profile_context or resegment_packaged_subtitles_reuses_local_section_profile_context or subtitle_section_profile_for_time" -q` (`8 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-packaged-subtitle-helper-handoff-anchor/20260612-165237` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further narrow packaged-accents helper handoff cleanup has now landed in `src/roughcut/pipeline/steps.py`: once `_map_editing_accents_to_packaged_timeline(...)` receives a caller-provided `timeline_mapping`, it no longer requires full `render_plan` payloads to accompany that call. The helper signature now accepts optional `render_plan`, and the live render path passes `None` in the packaged/ai-effect branches where mapping facts are already resolved locally.
+- Root cause for that slice: the first bad layer was the handoff from `run_render(...)` into `_map_editing_accents_to_packaged_timeline(...)`. The caller had already materialized authoritative packaged/ai-effect timeline mappings, but still carried full render-plan payloads into a helper that only needs those payloads for its own fallback mapping recovery. This was not a behavior bug, but it left another low-value packaging-payload roundtrip in the live packaged-accents path.
+- Focused verification for that packaged-accents helper handoff slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "map_editing_accents_to_packaged_timeline_reuses_passed_timeline_mapping or packaged_timeline_mapping or packaging_trailing_gap_allowance" -q` (`9 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-packaged-accents-helper-handoff-anchor/20260612-165612` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further narrow packaged-subtitles caller handoff cleanup has now landed in `src/roughcut/pipeline/steps.py`: once `run_render(...)` has already resolved `packaged_timeline_mapping`, the live packaged-subtitle branch no longer carries `render_plan_timeline.data_json` into `_map_subtitles_to_packaged_timeline(...)`. That helper signature now accepts optional `render_plan`, and the live render path passes `None` in the branch where all required packaged-timeline facts are already present in `timeline_mapping`.
+- Root cause for that slice: the first bad layer was the handoff from `run_render(...)` into `_map_subtitles_to_packaged_timeline(...)`. The caller already had authoritative packaged timeline mapping facts in hand, but still passed the full render-plan payload into a helper that only needs it for fallback mapping recovery. This was not a behavior bug, but it left another low-value payload roundtrip in the live packaged subtitles path.
+- Focused verification for that packaged-subtitles caller handoff slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "map_subtitles_to_packaged_timeline or rewrite_packaged_subtitle_copy_reuses_local_section_profile_context or resegment_packaged_subtitles_reuses_local_section_profile_context or packaged_timeline_mapping" -q` (`11 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260613-packaged-subtitles-caller-handoff-anchor/20260612-170132` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further narrow `api/jobs.py` manual-editor apply editorial-analysis handoff cleanup has now landed across `apply_manual_editor_timeline(...)` and `_load_manual_editor_cut_analysis_payload(...)`: the apply path no longer lets the cut-analysis loader reread editorial `analysis` from the previous and freshly-built manual editorial payloads when that fact is already available locally in the caller. The caller now passes `previous_editorial_analysis` from the base editorial timeline and `editorial_payload["analysis"]` from the just-built manual editorial payload straight through to the loader.
+- Root cause for that slice: the first bad layer was the handoff from `apply_manual_editor_timeline(...)` into `_load_manual_editor_cut_analysis_payload(...)`. The apply path already had authoritative editorial-analysis facts both before rebuilding and immediately after constructing the new manual editorial payload, but the loader still recovered those same facts again from the payload dicts. This was not a behavior bug, but it left the manual-editor apply出口 with another same-payload editorial-analysis roundtrip.
+- Focused verification for that manual-editor apply editorial-analysis slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py -k "load_manual_editor_cut_analysis_payload or manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope or manual_editor_editorial_context" -q` (`5 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-apply-editorial-analysis-context-anchor/20260612-160136` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow `api/jobs.py` manual-editor editorial-context cleanup has now landed across `_manual_editor_editorial_context(...)`, `_load_manual_editor_cut_analysis_payload(...)`, and `_build_manual_editor_session(...)`: the manual-editor session path no longer reads `subtitle_projection` from the current editorial payload in one place and then lets `_load_manual_editor_cut_analysis_payload(...)` reread `analysis` from the same payload again. The session builder now restores one local editorial context for the current/baseline payloads and passes caller-provided `editorial_analysis` through to the cut-analysis loader when that fact is already available.
+- Root cause for that slice: the first bad layer was the editorial-fact recovery boundary inside `_build_manual_editor_session(...)`. The session builder already needed current editorial payload facts locally, but it still split subtitle-projection recovery in the caller from editorial-analysis recovery inside `_load_manual_editor_cut_analysis_payload(...)`. This was not a behavior bug, but it left the manual-editor session export path with another same-payload reader fan-out and a caller/callee fact roundtrip.
+- Focused verification for that manual-editor editorial-context slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py -k "manual_editor_editorial_context or load_manual_editor_cut_analysis_payload or manual_editor_session_ready_for_realistic_job or manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults" -q` (`6 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-editorial-context-anchor/20260612-155808` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow `steps.py` runtime packaging-context cleanup has now landed across `_packaged_subtitle_section_profile_context(...)`, `_runtime_packaging_context(...)`, and `_resolve_packaged_timeline_mapping_context(...)`: the shared packaged-subtitle section-profile helper now accepts an optional caller-provided normalized `packaging_timeline`, and the live runtime packaging context plus packaged mapping fallback both pass their already-resolved packaging payload through directly instead of making the helper normalize the same payload again.
+- Root cause for that slice: the first bad layer was the handoff inside the `steps.py` packaging-runtime helper chain. After the earlier packaged-subtitle cleanup, the live render path already held a normalized `packaging_timeline`, but `_runtime_packaging_context(...)` still rebuilt the same `section_profile_context` inline while `_resolve_packaged_timeline_mapping_context(...)` called the shared helper in a way that re-normalized the already-resolved payload. This was not a behavior bug, but it left the live runtime path with one more duplicated packaged subtitle fact recovery and a fallback helper roundtrip.
+- Focused verification for that runtime section-profile-context slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "packaged_timeline_mapping or runtime_packaging_context or packaged_subtitle_section_profile_context" -q` (`9 passed`).
+- A first interactive anchor attempt at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-runtime-section-profile-context-helper-anchor/20260612-154748` was interrupted by shell control flow before summary flush and is not the authoritative result for this slice.
+- The authoritative real `render` anchor rerun passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-runtime-section-profile-context-helper-anchor-rerun/20260612-155004` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further narrow `steps.py` packaged-subtitle fallback cleanup has now landed across `_subtitle_section_profile_for_time(...)`, `_rewrite_packaged_subtitle_copy(...)`, `_resegment_packaged_subtitles(...)`, `_map_subtitles_to_packaged_timeline(...)`, and `_resolve_packaged_timeline_mapping_context(...)`: those related fallback paths no longer each reconstruct their own `{subtitles, timeline_analysis}` section-profile context directly from `resolve_packaging_timeline_payload(render_plan)`. They now share `_packaged_subtitle_section_profile_context(...)`, while still preferring caller-provided `section_profile_context` when it already exists.
+- Root cause for that slice: the first bad layer was the packaged subtitle helper chain itself. The live packaged-subtitle path already had one stable conceptual fact, "subtitle section-profile context", but the fallback branch for each nearby helper rebuilt that same two-field context independently from the same normalized packaging payload. This was not a behavior bug, but it left the packaged subtitle runtime chain with multiple local reader variants for the same packaging subfact.
+- Focused verification for that packaged-subtitle helper slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "subtitle_section_profile_for_time or map_subtitles_to_packaged_timeline or rewrite_packaged_subtitle_copy or resegment_packaged_subtitles" -q` (`8 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-packaged-subtitle-section-profile-helper-anchor/20260612-154006` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow manual-editor refine-plan cleanup has now landed across `src/roughcut/edit/refine_decisions.py` and `src/roughcut/api/jobs.py`: `build_refine_decision_plan_from_render_plan(...)` and `_manual_editor_build_refine_decision_plan_from_render_plan(...)` now accept optional caller-provided `audio_defaults`, and the manual-editor apply rebuild branch passes its already-resolved `previous_loudness + previous_voice_processing` facts through directly instead of rebuilding the same audio defaults back out of `rebuilt_render_plan`.
+- Root cause for that slice: the first bad layer was the handoff from `apply_manual_editor_timeline(...)` into the refine-plan builder after render-plan rebuild. The manual-editor apply path already held the authoritative audio defaults locally and wrote those same facts into `rebuilt_render_plan`, but the downstream refine-plan helper still recovered `audio_defaults` back out of the rebuilt payload. This was not a behavior bug, but it left another caller/callee fact roundtrip in the manual-editor rebuild path.
+- Focused verification for that refine-audio-defaults slice passed via `python -m py_compile src/roughcut/edit/refine_decisions.py src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py -k "refine_decision_plan_from_render_plan or manual_editor_build_refine_decision_plan_from_render_plan or manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun" -q` (`6 passed`).
+- Live verification for that slice first hit the same transient `manual_editor_ready` stop-after sequencing wobble seen in an earlier manual-editor anchor: `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-refine-audio-defaults-context-anchor/20260612-152946` failed `required_checks` only because `manual_editor_ready` reported the stop-after partial state. The rerun at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-refine-audio-defaults-context-anchor-rerun/20260612-153018` is the authoritative result for this slice: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A same-contract follow-on has also been landed in the manual-editor draft-save path inside `src/roughcut/api/jobs.py`: after the helper gained caller-provided `audio_defaults`, the draft-save refine-plan artifact write now also hoists one local `render_plan_data / render_plan_context` and passes merged `loudness + voice_processing` defaults through directly instead of making the helper recover them again from the render-plan payload. This follow-on stayed within the same contract slice and was kept to compile + focused helper regression coverage.
+- A further narrow `steps.py` runtime-mapping cleanup has now landed across `src/roughcut/pipeline/steps.py::_runtime_packaging_context(...)`, `_resolve_packaged_timeline_mapping_context(...)`, and the `run_render(...)` live path: the runtime caller no longer materializes `packaging_context / ai_effect_packaging_context` and then makes `_resolve_packaged_timeline_mapping_context(...)` re-read `transitions / packaging assets / subtitles / timeline_analysis` back out of `packaging_timeline`. The runtime packaging context now carries `transitions` and `section_profile_context`, and the packaged/ai-effect mapping calls pass that existing context through directly.
+- Root cause for that slice: the first bad layer was the handoff from `run_render(...)` into `_resolve_packaged_timeline_mapping_context(...)`. The runtime caller already had normalized packaging context objects in hand, but the callee still recovered the same transition, packaging, and subtitle-analysis subfacts again from the normalized packaging payload. This was not a behavior bug, but it left another hot-path caller/callee context split in the live render mapping chain.
+- Focused verification for that runtime-packaging-context mapping slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "runtime_packaging_context or packaged_timeline_mapping or resolve_transition_overlap_offsets" -q` (`10 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-runtime-packaging-context-mapping-anchor/20260612-152000` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further narrow `steps.py` transition-reader cleanup has now landed in `src/roughcut/pipeline/steps.py::_resolve_transition_overlap_offsets(...)`: the fallback reader path no longer hand-deserializes `editing_accents.transitions` from `resolve_packaging_timeline_payload(render_plan)`. It now reuses the already-landed shared `packaging_timeline_transitions(...)` helper, while still honoring caller-provided `transitions` when present.
+- Root cause for that slice: the first bad layer was `_resolve_transition_overlap_offsets(...)` itself. Even after the shared transition reader existed, the helper still kept a local fallback that rebuilt the same transition subfact directly from the normalized packaging payload. This was not a behavior bug, but it left one more stable packaging reader bypass inside the packaged timeline mapping path.
+- Focused verification for that transition-reader helper slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "resolve_transition_overlap_offsets or packaged_timeline_mapping or packaging_timeline_transitions" -q` (`10 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-transition-reader-helper-anchor/20260612-151148` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further narrow `steps.py` bundle/validation cleanup has now landed in `src/roughcut/pipeline/steps.py`: `_build_variant_timeline_bundle(...)` no longer hands a fully resolved local `packaging_timeline` into a bundle that `_validate_variant_timeline_bundle(...)` immediately re-normalizes back out of nested `timeline_rules`. The validator now accepts an optional caller-provided `packaging_timeline`, and the bundle builder passes its already-resolved local packaging payload through directly.
+- Root cause for that slice: the first bad layer was the handoff between `_build_variant_timeline_bundle(...)` and `_validate_variant_timeline_bundle(...)`. The builder had already materialized the normalized packaging payload for diagnostics and bundle output, but the validator still re-entered `resolve_packaging_timeline_payload(...)` against the just-built bundle contract. This was not a behavior bug, but it left another low-value duplicate fact recovery inside the `variant_timeline_bundle` production path.
+- Focused verification for that bundle-validation context slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "variant_timeline_bundle or validate_variant_timeline_bundle" -q` (`7 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-variant-bundle-validation-context-anchor/20260612-150843` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- The `apply_manual_editor_timeline(...)` `previous_video_transform` duplicate-fact recovery slice is now landed: the function hoists `previous_render_plan_context` once, derives `previous_video_transform` once through `_manual_video_transform_from_render_plan(..., render_plan_context=...)`, and reuses that fact for both `_manual_editor_change_plan(...)` and the later packaging/rerender branch.
+- Focused verification for that slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py -k "manual_video_transform_from_render_plan or manual_editor_render_plan_context or manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change or manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun" -q` (`4 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-video-transform-context-anchor/20260612-141147` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A follow-on `api/jobs.py` consumer cleanup has now also landed in `_build_manual_editor_session(...)`: that session builder no longer mixes `_manual_video_transform_from_render_plan(render_plan_data)` with ad hoc `render_plan_data.get("loudness") / get("voice_processing")` reads from the same payload. It now hoists `render_plan_context = _manual_editor_render_plan_context(render_plan_data)` once, derives `base_video_transform` through `_manual_video_transform_from_render_plan(..., render_plan_context=render_plan_context)`, and reuses that same context for `audio_defaults`.
+- Root cause for that slice: the first bad layer was `_build_manual_editor_session(...)`, which already had a shared `render_plan` recovery seam available but still split one consumer between helper-based recovery and direct payload reads. This was not a functional bug, but it left the manual-editor session export path outside the same shared `render_plan` contract already used by apply/rebuild consumers.
+- Focused verification for that session-context slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_session_regressions.py -k "manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults or manual_editor_session_ready_for_realistic_job or manual_editor_session_fallbacks_without_projection_artifact" -q` (`3 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-session-render-plan-context-anchor/20260612-141602` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow render-stage consumer cleanup has now landed in `src/roughcut/pipeline/steps.py` across `_rewrite_packaged_subtitle_copy(...)` and `_resegment_packaged_subtitles(...)`: both loops no longer force `_subtitle_section_profile_for_time(...)` to rediscover the same `subtitles / timeline_analysis` facts from `render_plan` on every subtitle item. Each function now resolves one local `section_profile_context` and passes it into `_subtitle_section_profile_for_time(...)` for per-item reuse.
+- Root cause for that slice: the first bad layer was the packaged subtitle runtime path itself. `_subtitle_section_profile_for_time(...)` had a valid shared recovery path, but the surrounding packaged subtitle copy/resegment loops kept calling it with only the raw `render_plan`, so the same section-profile facts were recovered repeatedly inside one render-stage function. This was not a behavior bug, but it left hot-path consumer reuse unfinished in the live packaged subtitle branch.
+- Focused verification for that packaged subtitle section-profile slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "subtitle_section_profile_for_time or rewrite_packaged_subtitle_copy_reuses_local_section_profile_context or resegment_packaged_subtitles_reuses_local_section_profile_context or packaged_timeline_mapping" -q` (`7 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-packaged-subtitle-section-profile-context-anchor/20260612-141929` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A follow-on render-runtime caller/callee cleanup has now also landed in `src/roughcut/media/render.py`: the packaging-enabled overlay path no longer makes `_apply_timed_overlays_to_video(...)` rebuild the same overlay-only accent plan that `render_video(...)` has already materialized earlier in the same call. `_apply_timed_overlays_to_video(...)` now accepts an optional caller-provided `overlay_plan`, and `render_video(...)` passes its existing local `overlay_plan` into the packaging-enabled branch.
+- Root cause for that slice: the first bad layer was the packaging-enabled timed-overlay handoff inside `render_video(...)`. The caller had already resolved `overlay_plan = _build_overlay_only_editing_accents(...)`, but the callee `_apply_timed_overlays_to_video(...)` still re-ran `_build_overlay_only_editing_accents(...)` against the same payload. This was not a visible behavior bug, but it left one repeated runtime fact recovery in the live packaging+overlay render path.
+- Focused verification for that overlay-plan reuse slice passed via `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_render_frame_rate_unification.py -k "apply_timed_overlays_reuses_passed_overlay_plan or apply_timed_overlays_reuses_passed_packaging_context_and_avatar_plan or timed_overlay_filter_chain_reuses_passed_packaging_context_and_avatar_plan or apply_packaging_plan" -q` (`5 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-overlay-plan-context-reuse-anchor/20260612-142650` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further render-stage packaged subtitle cleanup has now also landed in `src/roughcut/pipeline/steps.py::_map_subtitles_to_packaged_timeline(...)`: that one call chain no longer lets `_rewrite_packaged_subtitle_copy(...)` and `_resegment_packaged_subtitles(...)` each rediscover the same packaged subtitle `section_profile_context` independently from the same `render_plan`. `_map_subtitles_to_packaged_timeline(...)` now resolves that context once and passes it through both helper calls.
+- Root cause for that slice: the first bad layer was `_map_subtitles_to_packaged_timeline(...)` itself. The prior helper cleanup had already made each helper reuse its own local `section_profile_context`, but the caller still invoked two helpers back-to-back against the same `render_plan`, causing the same packaged subtitle section-profile facts to be recovered twice in one render-stage function.
+- Focused verification for that map-subtitles section-profile slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "map_subtitles_to_packaged_timeline_reuses_local_section_profile_context or rewrite_packaged_subtitle_copy_reuses_local_section_profile_context or resegment_packaged_subtitles_reuses_local_section_profile_context or packaged_timeline_mapping" -q` (`6 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-map-subtitles-section-profile-context-anchor/20260612-143310` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further render-runtime caller/callee cleanup has now also landed in `src/roughcut/media/render.py` across `render_video(...)`, `_apply_timed_overlays_to_video(...)`, and `_build_timed_overlay_filter_chain(...)`: the timed-overlay subtitle path no longer rebuilds the same `choreographed_subtitles` from raw subtitle rows after `render_video(...)` has already materialized them earlier in the same call. The caller now passes `choreographed_subtitles` through both the non-packaging and packaging-enabled timed-overlay branches, and the downstream helpers fall back to local choreography only when the caller does not provide them.
+- Root cause for that slice: the first bad layer was the timed-overlay subtitle handoff inside `render_video(...)`. The render runtime had already resolved `choreographed_subtitles` for segment filters and video-transform accents, but the timed-overlay helper chain still regenerated the same subtitle choreography from `subtitle_items + subtitles_plan` later in the same render call. This was not a visible behavior bug, but it left a repeated hot-path recovery in the live overlay render branch.
+- Focused verification for that choreographed-subtitles reuse slice passed via `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_render_frame_rate_unification.py -k "timed_overlay_filter_chain_reuses_passed_choreographed_subtitles or apply_timed_overlays_reuses_passed_choreographed_subtitles or apply_timed_overlays_reuses_passed_overlay_plan or apply_timed_overlays_reuses_passed_packaging_context_and_avatar_plan or timed_overlay_filter_chain_reuses_passed_packaging_context_and_avatar_plan" -q` (`5 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-choreographed-subtitles-context-anchor/20260612-143908` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further render-stage packaged subtitle cleanup has now also landed in `src/roughcut/pipeline/steps.py`: `timeline_mapping` now carries packaged subtitle `section_profile_context`, and `_map_subtitles_to_packaged_timeline(...)` reuses that context instead of rediscovering `subtitles / timeline_analysis` from the same `render_plan` after `timeline_mapping` has already been built from it.
+- Root cause for that slice: the first bad layer was the handoff between `_resolve_packaged_timeline_mapping_context(...)` and `_map_subtitles_to_packaged_timeline(...)`. The mapping builder had already resolved the relevant packaged subtitle section-profile facts from `packaging_timeline`, but the downstream subtitle mapper still re-read the same facts from `render_plan` again before delegating to `_rewrite_packaged_subtitle_copy(...)` and `_resegment_packaged_subtitles(...)`.
+- Focused verification for that timeline-mapping section-profile slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "packaged_timeline_mapping or map_subtitles_to_packaged_timeline_reuses_section_profile_context_from_timeline_mapping or map_subtitles_to_packaged_timeline_reuses_local_section_profile_context" -q` (`5 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-timeline-mapping-section-profile-context-anchor/20260612-144443` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further packaged-mapping cleanup has now also landed in `src/roughcut/pipeline/steps.py::_resolve_packaged_timeline_mapping_context(...)`: that helper no longer resolves local `transitions` from `packaging_timeline` and then makes `_resolve_transition_overlap_offsets(...)` rediscover the same transition subfact from the same payload. `_resolve_transition_overlap_offsets(...)` now accepts optional caller-provided `transitions`, and the mapping-context builder passes its already-resolved local transitions through directly.
+- Root cause for that slice: the first bad layer was `_resolve_packaged_timeline_mapping_context(...)` itself. The function already had the local `packaging_timeline` and its `editing_accents.transitions` subfact in hand, but still called `_resolve_transition_overlap_offsets(...)` in a way that forced that helper to recover the same transition payload again from the same normalized packaging data.
+- Focused verification for that transition-context reuse slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "resolve_transition_overlap_offsets or packaged_timeline_mapping_reuses_local_transitions_context or packaged_timeline_mapping" -q` (`6 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-transition-context-reuse-anchor/20260612-144945` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further render-stage bundle cleanup has now also landed in `src/roughcut/pipeline/steps.py::_build_variant_timeline_bundle(...)`: the render-path caller no longer makes that helper rebuild `packaging_timeline` from `render_plan` after `run_render(...)` has already materialized `packaging_context["packaging_timeline"]`. `_build_variant_timeline_bundle(...)` now accepts optional caller-provided `packaging_timeline`, and the render-stage bundle path passes its existing packaging payload through directly.
+- Root cause for that slice: the first bad layer was the handoff into `_build_variant_timeline_bundle(...)` from the live render path. The caller already had the normalized packaging payload in `packaging_context`, but the bundle helper still rebuilt the same packaging-timeline facts from `render_plan`, leaving one more repeated recovery in the render-stage artifact assembly path.
+- Focused verification for that variant-bundle packaging-context slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_helpers.py -k "variant_timeline_bundle_reuses_passed_packaging_timeline or variant_timeline_bundle_reuses_local_packaging_timeline_analysis_payload or variant_timeline_bundle_carries_refine_decision_plan" -q` (`3 passed`).
+- The corresponding real `render` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-variant-bundle-packaging-context-anchor/20260612-145636` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `output_duration_sec=23.3`, and `required_checks=4/4`.
+- A further narrow manual-editor apply cleanup has now also landed in `src/roughcut/api/jobs.py`: the rebuild branch no longer calls `render_plan_delivery(rebuilt_render_plan)` immediately after `build_render_plan(...)` just to read back the same export facts it already has in local `export_resolution_* / export_frame_rate_* / effective_video_transform`. The code now writes the rebuilt `delivery` payload directly from those already-resolved local facts.
+- Root cause for that slice: the first bad layer was the same-function rebuild segment inside `apply_manual_editor_timeline(...)`. The function had already resolved the target delivery contract locally before building the new render plan, but then immediately re-read `delivery` back out of the freshly built payload. This was not a behavior bug, but it left one more low-value repeated fact recovery in the manual-editor apply path.
+- Focused verification for that rebuilt-delivery slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py` and `$env:PYTHONPATH='src'; python -m pytest tests/test_manual_editor_session_regressions.py -k "manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun or manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change" -q` (`2 passed`).
+- The corresponding real `edit_plan` anchor also passed at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-rebuilt-delivery-context-anchor/20260612-150211` with `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- The next code-bearing slice should now move back to the remaining `steps.py / render.py / api/jobs.py` consumer sweep, starting from the next real duplicate-fact recovery point rather than expanding framework surface.
+- The formal implementation plan has now been refreshed to match the real June 12 code baseline: `subtitle_sync_issue` is closed, the packaging-presence helper slice is already landed, and the next code-bearing slice is the remaining `Phase 4/5` consumer sweep starting from manual-editor apply duplicate fact recovery in `src/roughcut/api/jobs.py`.
+- The formal implementation plan has now also been tightened into a code-grounded work-package sequence: first hoist duplicated editorial facts inside `src/roughcut/pipeline/steps.py::variant_timeline_bundle`, then continue the remaining `steps.py / render.py / api/jobs.py` consumer sweep, and only after that revisit preset-layer work.
 - Treat the current chain as the `information_density` baseline, not as the long-term product boundary.
 - Keep the refactor behavior-preserving until the strategy-contract migration is complete; metadata and helper boundaries may change, but current keep/remove decisions must stay equivalent.
 - Stop expanding report schemas, golden metadata, and new registries unless a real replay proves they are required for this strategy migration.
@@ -18,9 +185,143 @@ Drive the universal auto-edit strategy refactor from the now-closed `information
 - `Phase 5` helper coverage has now reached `variant_timeline_bundle`, `manual-editor/apply` packaging-plan recovery, render-start packaging/effect presence checks, and batch scorecard transition/effect summaries.
 - `Phase 5` shared packaging helper has now also been hardened to accept already-normalized `packaging_timeline` payloads directly, so nested packaging assets are no longer lost when helper consumers pass normalized payloads instead of full render plans.
 - `Phase 5` consumer cleanup has now been extended from `pipeline/steps.py` into `media/render.py`, `api/jobs.py`, and the subtitle section-profile consumer path, so nested packaging payloads are now read through shared packaging helpers across the main render/manual-editor consumption chain.
+- `Phase 4` shared editorial helper coverage has now also been extended beyond keep-segment resolution into shared `segments / analysis` readers, and the main render/manual-editor path no longer needs to hand-read those fields from `editorial_timeline.data_json` at the highest-value remaining consumer points.
 - The formal execution source of truth now also states that the refactor can proceed immediately from the current baseline; do not wait for future strategy design before continuing the behavior-preserving migration.
-- The next code-bearing slice is to keep replacing remaining duplicate keep/remove and packaging reconstruction points with the shared helpers, with the latest `Phase 5` cut having removed the remaining high-value flat `outro/editing_accents` consumers in `src/roughcut/pipeline/steps.py` and the normalized-payload packaging-helper loss in `src/roughcut/edit/packaging_timeline.py`.
+- The next code-bearing slice is to keep replacing remaining duplicate keep/remove and packaging reconstruction points with the shared helpers, without adding a new abstraction layer.
+- The next concrete `Phase 4/5` cut is now fixed as: manual-editor apply duplicate packaging-fact recovery, then the remaining low-value consumer sweep in `steps.py / render.py`, then focused regressions plus one real `edit_plan` anchor replay.
+- The first formal implementation batch is now fixed as: remaining shared-helper consumer cleanup, then any real first-bad-layer regression that cleanup exposes, then focused regressions plus one real anchor replay.
+- The current follow-on cleanup after the subtitle projection fix has now landed as a narrow `Phase 4` consumer slice: `src/roughcut/edit/editorial_timeline.py` exports shared `editorial_timeline_segments(...)` and `editorial_timeline_analysis(...)`, and the main `variant_timeline_bundle` / render fallback-segment / manual-editor cut-analysis consumers in `steps.py` and `api/jobs.py` now read through those helpers instead of direct `data_json.get(...)` calls.
+- That editorial-helper cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-editorial-helper-cleanup-anchor/20260612-093816`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A follow-on `render_plan` runtime-consumer cleanup has now also landed without expanding schema scope: `src/roughcut/edit/render_plan.py` exports shared readers for `workflow_preset / automatic_gate / manual_editor / delivery / loudness / voice_processing / cover / avatar_commentary / ai_director`, and the main render/live/manual-editor rebuild consumers in `steps.py`, `media/render.py`, and `api/jobs.py` now read those fields through shared helpers instead of re-reading the flat payload ad hoc.
+- That `render_plan` helper cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-plan-helper-anchor/20260612-094545`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A narrower follow-on fact-recovery cleanup has now landed for `manual_editor.video_transform + delivery` merging: `src/roughcut/edit/render_plan.py` exports shared `render_plan_video_transform(...)`, and both `src/roughcut/api/jobs.py::_manual_video_transform_from_render_plan(...)` and the render-runtime manual-rotation path in `src/roughcut/media/render.py` now reuse that shared recovery instead of rebuilding the same merged fact locally.
+- That `video_transform` helper cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-video-transform-helper-anchor/20260612-095102`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- The next narrow `Phase 5` execution-branch cleanup has now also landed: `src/roughcut/edit/packaging_timeline.py` exports shared `packaging_timeline_has_packaging_assets(...)` and `packaging_timeline_has_editing_accents(...)`, and the main render-start / runtime packaging branch points in `src/roughcut/pipeline/steps.py` and `src/roughcut/media/render.py` now reuse those helpers instead of rebuilding the same presence judgments locally.
+- Focused verification for that packaging-presence slice passed via `python -m py_compile src/roughcut/edit/packaging_timeline.py src/roughcut/pipeline/steps.py src/roughcut/media/render.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaging_timeline or render_plan_video_transform or shared_editorial or edited_subtitle_projection" -q` (`12 passed`).
+- That packaging-presence helper cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-packaging-presence-helper-anchor/20260612-095945`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `required_checks=4/4`, and the only remaining mismatch code is still `reference_high_risk_not_reproduced`.
+- A follow-on `Phase 4` consumer cleanup has now also landed in `src/roughcut/api/jobs.py::_build_activity_decisions(...)`: the user-facing edit-plan summary no longer hand-reads only legacy `type="remove"` segments. `src/roughcut/edit/editorial_timeline.py` now exports shared `editorial_cut_segments(...)`, which accepts both current `type="cut"` and legacy `type="remove"` segment shapes, and the activity summary consumer now reads through that helper.
+- Root cause for that slice: the observed symptom was that user-visible edit-plan summaries could undercount or hide removed ranges when the editorial timeline came from the current shared builder. The first bad layer was `_build_activity_decisions(...)` in `api/jobs.py`, which only counted `remove` segments while the shared editorial builder emits `cut` segments. It surfaced now because the ongoing Phase 4 helper migration has made the shared `cut` contract more common across the main chain, exposing the stale legacy-only consumer.
+- Focused verification for that editorial-cut-summary slice passed via `python -m py_compile src/roughcut/edit/editorial_timeline.py src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "shared_editorial or activity_decisions_edit_plan_summary or packaging_timeline_presence_helpers" -q` (`7 passed`).
+- That editorial-cut-summary cleanup has also been revalidated with a fresh edit-plan anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-editorial-cut-summary-helper-anchor/20260612-100708`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A subsequent `Phase 5` packaging-asset consumer cleanup has now also landed: `src/roughcut/edit/packaging_timeline.py` exports shared `packaging_timeline_asset_plan(...)`, and the remaining high-value asset-subplan reads in `src/roughcut/pipeline/steps.py`, `src/roughcut/media/render.py`, and `src/roughcut/api/jobs.py` now reuse that helper instead of repeatedly hand-reading `packaging_timeline_assets(...).get("intro/outro/insert/music/watermark")`.
+- Scope of that slice: render/runtime packaging application (`insert / intro / outro / music / watermark`), packaged/ai-effect subtitle trailing-gap allowance via shared `outro` lookup, and manual-editor packaging-plan reconstruction now all read packaging asset subplans through the same helper contract.
+- Focused verification for that packaging-asset-plan slice passed via `python -m py_compile src/roughcut/edit/packaging_timeline.py src/roughcut/pipeline/steps.py src/roughcut/media/render.py src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaging_timeline_asset_plan or packaging_timeline_presence_helpers or manual_editor_packaging_plan_from_render_plan or shared_editorial or activity_decisions_edit_plan_summary" -q` (`9 passed`).
+- That packaging-asset-plan cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-packaging-asset-plan-helper-anchor/20260612-101142`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `required_checks=4/4`, and the remaining mismatch code is still only `reference_high_risk_not_reproduced`.
+- A further `Phase 5` consumer sweep has now removed two remaining reader bypasses without adding a new abstraction layer: `src/roughcut/api/jobs.py::_manual_editor_packaging_plan_from_render_plan(...)` now reads subtitle config through existing `packaging_timeline_subtitles(...)`, and `src/roughcut/pipeline/steps.py::_build_variant_timeline_bundle(...)` now reads diagnostics input through existing `packaging_timeline_analysis(...)` instead of hand-reading nested payload keys directly.
+- This cut was intentionally kept as a consumer-alignment cleanup only: no new schema, no new helper family, and no packaging/render behavior rewrite. The goal was to eliminate direct nested payload reads where shared readers already existed.
+- Focused verification for that existing-reader consumer slice passed via `python -m py_compile src/roughcut/api/jobs.py src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_packaging_plan_reads_nested_packaging_timeline or variant_timeline_bundle_carries_refine_decision_plan or variant_timeline_bundle_allows_diagnostics_only_payload_without_render_variants or packaging_timeline_asset_plan" -q` (`5 passed`).
+- That existing-reader consumer cleanup has also been revalidated with a fresh edit-plan anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-existing-reader-consumer-anchor/20260612-101806`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A follow-on packaged-timeline mapping cleanup has now also landed in `src/roughcut/pipeline/steps.py::_resolve_packaged_timeline_mapping_context(...)`: intro/insert asset reads in that mapping builder now reuse shared `packaging_timeline_asset_plan(...)` instead of re-reading a local `packaging_assets` dict directly. This keeps the packaged subtitle/accent time-shift path aligned with the same packaging-asset reader already used elsewhere in render/runtime/manual-editor consumers.
+- Scope of that slice: only the packaged mapping context reader path changed. No timing formula, overlap logic, or insert-duration math was rewritten. The goal was to remove one more high-value consumer that still rebuilt `intro / insert` asset access locally even after the shared asset reader had landed.
+- Focused verification for that packaged-mapping asset-reader slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaged_timeline_mapping or packaging_trailing_gap_allowance or packaging_timeline_asset_plan" -q` (`5 passed`).
+- That packaged-mapping asset-reader cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-packaged-mapping-asset-reader-anchor/20260612-102025`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `required_checks=4/4`, and the remaining mismatch code is still only `reference_high_risk_not_reproduced`.
+- A follow-on `Phase 4` editorial consumer cleanup has now also landed for `subtitle_projection`: `src/roughcut/edit/editorial_timeline.py` exports shared `editorial_timeline_subtitle_projection(...)`, and the remaining manual-editor/render consumers in `src/roughcut/api/jobs.py` and `src/roughcut/pipeline/steps.py` now read subtitle projection data through that helper instead of hand-reading nested `editorial_timeline["subtitle_projection"]` payloads directly.
+- Scope of that slice: only subtitle-projection reader alignment changed. No subtitle remap algorithm, override semantics, or suspicious-timing gate was rewritten. The goal was to remove one more shared editorial fact that was still being deserialized ad hoc in multiple main-chain consumers.
+- Focused verification for that editorial subtitle-projection reader slice passed via `python -m py_compile src/roughcut/edit/editorial_timeline.py src/roughcut/api/jobs.py src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "shared_editorial_subtitle_projection or manual_editor_projection_items_are_authoritative_for_render or manual_editor_projection_items_accept_start_end_keys or manual_editor_projection_items_do_not_backfill_canonical_from_display_surface" -q` (`4 passed`).
+- That editorial subtitle-projection reader cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-editorial-subtitle-projection-reader-anchor/20260612-102922`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `required_checks=4/4`, and the remaining mismatch code is still only `reference_high_risk_not_reproduced`.
+- A further narrow `Phase 5` consumer cleanup has now landed in `src/roughcut/api/jobs.py::apply_manual_editor_timeline(...)`: the manual-editor apply chain no longer re-reads `packaging_timeline.editing_accents` twice from the same `previous_packaging_timeline`. The function now hoists `previous_editing_accents` and `previous_smart_effect_style` once, then reuses them across both the `timeline_changed` rebuild branch and the reuse branch.
+- Scope of that slice: same-function duplicate fact recovery only. No new helper family, no packaging algorithm rewrite, and no manual-editor rerun-policy change. The goal was to remove one more high-value consumer that still rebuilt the same packaging fact locally inside a main-chain execution path.
+- Focused verification for that manual-editor apply style-reuse slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope or manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun or manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change" -q` (`3 passed`).
+- The new targeted regression `tests/test_manual_editor_session_regressions.py::test_manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change` now fixes the previously uncovered branch: when `timeline_changed=True`, `build_smart_editing_accents(...)` must inherit the previous render-plan `editing_accents.style` (for example `smart_effect_punch`) instead of guessing a new style locally.
+- Live verification for that slice first saw a transient stop-after sequencing wobble at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-apply-style-anchor/20260612-104109`: `manual_editor_ready` failed because `edit_plan` was recorded as `cancelled` while `render` was only `skipped`. The rerun at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-apply-style-anchor-rerun/20260612-104224` is the authoritative result for this slice: `status=partial` by design, `live_readiness=pass`, `required_checks=4/4`, and `manual_editor_apply_semantics_ok=true`.
+- A further narrow `Phase 5` packaging consumer cleanup has now landed in `src/roughcut/edit/packaging_timeline.py` and `src/roughcut/pipeline/steps.py`: shared `packaging_timeline_transitions(...)` now owns the `editing_accents.transitions` subfact, and `_resolve_transition_overlap_offsets(...)` no longer hand-deserializes that nested payload locally from `packaging_timeline_editing_accents(...)`.
+- Scope of that slice: only the transition subfact reader path changed. No transition math, overlap formula, or packaged subtitle/accent mapping logic was rewritten. The goal was to remove one more stable packaging subfact that was still being unpacked ad hoc in a main render/mapping consumer even after the shared packaging helper layer had landed.
+- Focused verification for that transition-reader slice passed via `python -m py_compile src/roughcut/edit/packaging_timeline.py src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaging_timeline_transitions or packaging_timeline_presence_helpers or packaged_timeline_mapping" -q` (`6 passed`).
+- `tests/test_manual_editor_helpers.py` now also covers `packaging_timeline_transitions(...)` directly for nested payloads, normalized payloads, and safe-copy behavior, so the transition reader contract is no longer only indirectly protected through packaged mapping tests.
+- That transition-reader cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-packaging-transitions-reader-anchor/20260612-104537`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `required_checks=4/4`, and the remaining mismatch code is still only `reference_high_risk_not_reproduced`.
+- A further narrow render-runtime consumer cleanup has now landed in `src/roughcut/media/render.py::run_render(...)`: the function no longer reads packaging assets once through `packaging_timeline_assets(render_plan)` and then immediately rebuilds the same packaging fact set again through `_render_packaging_context(render_plan)`. It now resolves `packaging_context` once near the top, reuses `packaging_context["assets"]` for `packaging_assets`, and continues to reuse the same context for `editing_accents / section_choreography / subtitles`.
+- Scope of that slice: same-function duplicate fact recovery only. No packaging enablement rule, subtitle choreography logic, overlay synthesis, or FFmpeg filter formula changed. The goal was to remove one more high-value runtime consumer that still rebuilt the same packaging fact set twice inside the main render path.
+- Focused verification for that render-packaging-context reuse slice passed via `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py` and `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "render_packaging_context or segment_filters_force_target_frame_rate_before_concat or ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only" -q` (`3 passed`).
+- That render-packaging-context cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-packaging-context-anchor/20260612-105119`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `required_checks=4/4`, and the remaining mismatch code is still only `reference_high_risk_not_reproduced`.
+- A further narrow render-runtime cleanup has now landed in `src/roughcut/media/render.py::_render_packaging_context(...)` and `run_render(...)`: the local render packaging context now also carries `has_packaging_assets`, and `run_render(...)` no longer re-queries `packaging_timeline_has_packaging_assets(render_plan)` after it has already materialized the same packaging context. This keeps the runtime packaging-presence branch aligned with the same single local context object already used for `assets / editing_accents / section_choreography / subtitles`.
+- Scope of that slice: same-function duplicate fact recovery only. No packaging-presence semantics changed, and no render-path branch conditions were broadened or narrowed. The goal was to remove one more duplicate packaging fact read inside the live render path without adding a new global abstraction layer.
+- Focused verification for that render packaging-enabled context slice passed via `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py` and `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "render_packaging_context or segment_filters_force_target_frame_rate_before_concat or ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only" -q` (`3 passed`).
+- `tests/test_render_frame_rate_unification.py::test_render_packaging_context_reads_nested_packaging_timeline_payload` now also asserts `context["has_packaging_assets"] is True`, so the local render packaging-context contract is explicitly pinned instead of only being exercised indirectly through `run_render(...)`.
+- That render packaging-enabled context cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-packaging-enabled-context-anchor/20260612-105754`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `required_checks=4/4`, and the remaining mismatch code is still only `reference_high_risk_not_reproduced`.
+- A further narrow render-runtime cleanup has now landed in `src/roughcut/media/render.py::_build_segment_filter_chain(...)`: the function no longer re-reads `editing_accents["transitions"]` twice. It now hoists `transitions = dict(editing_accents.get("transitions") or {})` once, uses that shared subfact both for `_resolve_transition_map(...)` and for the later `xfade` transition-name resolution, and leaves all existing transition math untouched.
+- Scope of that slice: same-function duplicate subfact recovery only. No transition enablement logic, offset math, concat/xfade decision rule, or FFmpeg graph structure changed. The goal was to remove one more repeated nested payload read inside the render segment-chain builder without introducing any new shared helper family.
+- Focused verification for that render transition-config slice passed via `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py` and `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "segment_filters or render_packaging_context or ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only" -q` (`4 passed`).
+- `tests/test_render_frame_rate_unification.py::test_segment_filters_reuse_transition_config_for_xfade` now explicitly pins that one configured transition payload drives the `xfade` expression (`transition=wipeleft:duration=0.18:offset=0.82`), so this branch is no longer only covered by the no-transition case.
+- That render transition-config cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-transition-config-anchor/20260612-110323`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `required_checks=4/4`, and the remaining mismatch code is still only `reference_high_risk_not_reproduced`.
+- A further narrow `Phase 5` consumer cleanup has now landed in `src/roughcut/pipeline/steps.py` around packaged subtitle-sync validation: the render-stage trailing-gap allowance helper no longer has to rediscover the same `outro` asset plan after the caller has already resolved it. `_resolve_packaging_trailing_gap_allowance(...)` now accepts an optional pre-resolved `outro_plan`, and the packaged/ai-effect subtitle-sync path reuses the locally resolved `packaged_outro_plan / ai_effect_outro_plan` instead of re-reading those facts through the helper.
+- Scope of that slice: same-function duplicate fact recovery only. No trailing-gap thresholds, subtitle-sync warning rules, outro-duration probe logic, or packaged/ai-effect comparison semantics changed. The goal was to remove one more repeated packaging asset recovery point inside the render-stage verification path without expanding the packaging helper surface unnecessarily.
+- Focused verification for that trailing-gap reader slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaging_trailing_gap_allowance or packaged_timeline_mapping or packaging_timeline_asset_plan" -q` (`5 passed`).
+- `tests/test_manual_editor_helpers.py::test_packaging_trailing_gap_allowance_reuses_shared_outro_duration_probe` now passes explicit pre-resolved `outro_plan` payloads into `_resolve_packaging_trailing_gap_allowance(...)`, so the helper contract is pinned at the same level where the caller now reuses that fact.
+- That trailing-gap reader cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-packaging-trailing-gap-reader-anchor/20260612-110820`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `required_checks=4/4`, and the remaining mismatch code is still only `reference_high_risk_not_reproduced`.
+- A further narrow `Phase 5` consumer cleanup has now landed in `src/roughcut/pipeline/steps.py` around packaged/ai-effect subtitle/accent mapping: the render-stage variant builder no longer re-reads `packaging_timeline_editing_accents(...)` inline at each `_map_editing_accents_to_packaged_timeline(...)` call. It now hoists `packaged_editing_accents` and `ai_effect_editing_accents` once, then reuses those local facts across the packaged and ai-effect mapping branches.
+- Scope of that slice: same-function duplicate fact recovery only. No accent remap algorithm, insert/introduction time shift, subtitle mapping logic, or ai-effect event structure changed. The goal was to remove one more repeated packaging subfact read inside the highest-value render-stage variant assembly path without adding a new helper family.
+- Focused verification for that packaged-editing-accents reader slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaged_timeline_mapping or packaging_trailing_gap_allowance or packaging_timeline_transitions" -q` (`5 passed`).
+- That packaged-editing-accents cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-packaged-editing-accents-reader-anchor/20260612-111259`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `required_checks=4/4`, and the remaining mismatch code is still only `reference_high_risk_not_reproduced`.
+- A follow-on refinement on the same render-stage variant assembly path has now also landed in `src/roughcut/pipeline/steps.py`: the packaged branch no longer re-resolves `packaging_timeline_editing_accents(render_plan_timeline.data_json)` after the same function has already loaded `editing_accents = packaging_timeline_editing_accents(packaging_timeline)` near the top of the render step. `packaged_editing_accents` now directly reuses that earlier resolved `editing_accents`, while the ai-effect branch still reads its own derived plan once.
+- Scope of that follow-on slice: same-function duplicate fact recovery only. No accent payload shape, packaged mapping math, or variant runtime behavior changed. The goal was to finish removing the remaining duplicate packaged-editing-accent read from that one render-stage function rather than leaving a second local reconstruction behind after the first cleanup.
+- Focused verification for that packaged-editing-accents reuse slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaged_timeline_mapping or packaging_trailing_gap_allowance or packaging_timeline_transitions" -q` (`5 passed`).
+- That packaged-editing-accents reuse cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-packaged-editing-accents-reuse-anchor/20260612-111806`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `required_checks=4/4`, and the remaining mismatch code is still only `reference_high_risk_not_reproduced`.
+- A further narrow render-runtime consumer cleanup has now also landed in `src/roughcut/media/render.py::_apply_packaging_plan(...)`: that function no longer re-reads the same packaging asset subplans five times through repeated `packaging_timeline_asset_plan(render_plan, "...")` calls. It now resolves `_render_packaging_context(render_plan)` once, reuses `packaging_context["assets"]`, and reads `insert / intro / outro / music / watermark` from that one local fact set.
+- Scope of that slice: same-function duplicate fact recovery only. No packaging execution order, intro/outro timing, insert application, music/watermark behavior, or output-file finalization changed. The goal was to finish one more high-value runtime consumer that still rebuilt packaging asset access locally inside the main render application path.
+- Focused verification for that apply-packaging-plan context slice passed via `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py` and `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "apply_packaging_plan or render_packaging_context or segment_filters or ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only" -q` (`5 passed`).
+- `tests/test_render_frame_rate_unification.py::test_apply_packaging_plan_reuses_nested_packaging_asset_context` now explicitly pins that nested `packaging_timeline.packaging` payloads are reused coherently across insert, bookend, music, and watermark application, so `_apply_packaging_plan(...)` is no longer only indirectly covered through wider render runs.
+- That apply-packaging-plan context cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-apply-packaging-plan-context-anchor/20260612-112400`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, `required_checks=4/4`, and the only remaining mismatch code is still `reference_high_risk_not_reproduced`.
+- A further narrow render-stage consumer cleanup has now also landed in `src/roughcut/pipeline/steps.py`: the live subtitle-sync verification path no longer re-reads the packaged `outro` asset plan from `render_plan_timeline.data_json` after the same function has already materialized `packaging_assets = packaging_timeline_assets(packaging_timeline)`. The packaged branch now reuses that existing `packaging_assets["outro"]`, and the ai-effect branch similarly hoists `ai_effect_packaging_assets = packaging_timeline_assets(ai_effect_render_plan)` once and reuses its `outro` subplan later in the same function.
+- Scope of that slice: same-function duplicate fact recovery only. No subtitle-sync warning thresholds, trailing-gap allowance math, packaged/ai-effect comparison logic, or variant render order changed. The goal was to remove one more repeated packaging asset recovery point from the main render-stage runtime path without adding a new helper layer.
+- Focused verification for that render outro-asset reuse slice passed via `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaging_trailing_gap_allowance or packaged_timeline_mapping or packaging_timeline_asset_plan" -q` (`5 passed`).
+- That render outro-asset reuse cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-outro-asset-reuse-anchor/20260612-113352`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow render-runtime consumer cleanup has now also landed in `src/roughcut/media/render.py` across `render_video(...)`, `_apply_timed_overlays_to_video(...)`, and `_build_timed_overlay_filter_chain(...)`: the timed-overlay path no longer re-materializes the same packaging context and avatar plan at each helper hop. `render_video(...)` now hoists `avatar_plan = render_plan_avatar_commentary(render_plan)` once beside its existing `packaging_context`, passes both into `_build_timed_overlay_filter_chain(...)`, and `_apply_timed_overlays_to_video(...)` likewise passes its already-resolved `packaging_context` plus one resolved avatar plan into the timed-overlay helper instead of making that helper rediscover the same facts locally.
+- Scope of that slice: shared render-path duplicate fact recovery only. No ASS subtitle styling, timed-overlay filter graph, subtitle margin math, packaging enablement branch, or FFmpeg encode behavior changed. The goal was to remove one more repeated fact-recovery chain from the live render overlay path without introducing another abstraction layer.
+- Focused verification for that timed-overlay context reuse slice passed via `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py` and `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "timed_overlay_filter_chain_reuses_passed_packaging_context_and_avatar_plan or apply_packaging_plan or render_packaging_context or segment_filters or ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only" -q` (`6 passed`).
+- `tests/test_render_frame_rate_unification.py::test_timed_overlay_filter_chain_reuses_passed_packaging_context_and_avatar_plan` now pins that `_build_timed_overlay_filter_chain(...)` can consume caller-provided `packaging_context` and `avatar_plan` directly, so the timed-overlay helper contract is no longer only exercised through wider render runs.
+- That timed-overlay context reuse cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-timed-overlay-context-anchor/20260612-113913`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow `Phase 5` manual-editor consumer cleanup has now also landed in `src/roughcut/api/jobs.py::_manual_editor_packaging_plan_from_render_plan(...)`: that function no longer re-reads `intro / outro / insert / watermark / music` through five repeated `packaging_timeline_asset_plan(...)` calls after it has already resolved the same `packaging_timeline`. It now materializes `packaging_assets = packaging_timeline_assets(packaging_timeline)` once, derives safe local copies of the five asset subplans, and reuses that one fact set in the packaging-plan response returned to manual-editor apply/rebuild consumers.
+- Scope of that slice: same-function duplicate fact recovery only. No manual-editor rerun policy, packaging-plan field names, default subtitle/effect styles, or delivery export defaults changed. The goal was to remove one more repeated packaging asset reconstruction point from the main manual-editor packaging recovery path without adding another helper family.
+- Focused verification for that manual-editor packaging-assets reuse slice passed via `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_packaging_plan_reads_nested_packaging_timeline or manual_editor_packaging_plan_reuses_shared_packaging_assets or packaging_timeline_assets_accept_normalized_payload_directly or packaging_timeline_asset_plan_accepts_nested_and_normalized_payloads" -q` (`4 passed`).
+- `tests/test_manual_editor_helpers.py::test_manual_editor_packaging_plan_reuses_shared_packaging_assets` now pins that `_manual_editor_packaging_plan_from_render_plan(...)` actually consumes `packaging_timeline_assets(...)` as its shared asset source, so this consumer path is no longer only indirectly protected through nested-payload equality checks.
+- That manual-editor packaging-assets reuse cleanup has also been revalidated with a fresh edit-plan anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-packaging-assets-anchor/20260612-114558`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow render-runtime consumer cleanup has now also landed in `src/roughcut/media/render.py` across `render_video(...)` and `_apply_timed_overlays_to_video(...)`: the packaging-enabled overlay application path no longer forces `_apply_timed_overlays_to_video(...)` to re-resolve the same packaging context and avatar plan that `render_video(...)` already materialized earlier in the same call. `render_video(...)` now passes its existing `packaging_context` and `avatar_plan` into `_apply_timed_overlays_to_video(...)`, and that helper now accepts optional caller-provided `packaging_context / avatar_plan`, falling back to local recovery only when the caller does not provide them.
+- Scope of that slice: shared render-path duplicate fact recovery only. No overlay filter graph, subtitle styling, section choreography rules, packaging branch conditions, or FFmpeg execution semantics changed. The goal was to remove one more repeated fact-recovery hop from the live packaging+overlay render path without introducing another framework layer.
+- Focused verification for that apply-timed-overlays context reuse slice passed via `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py` and `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "apply_timed_overlays_reuses_passed_packaging_context_and_avatar_plan or timed_overlay_filter_chain_reuses_passed_packaging_context_and_avatar_plan or apply_packaging_plan or render_packaging_context or segment_filters or ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only" -q` (`7 passed`).
+- `tests/test_render_frame_rate_unification.py::test_apply_timed_overlays_reuses_passed_packaging_context_and_avatar_plan` now pins that `_apply_timed_overlays_to_video(...)` can reuse caller-provided `packaging_context` and `avatar_plan` directly, so this render helper contract is no longer only covered indirectly through wider render runs.
+- That apply-timed-overlays context reuse cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-apply-timed-overlays-context-anchor/20260612-114814`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow render-runtime entry cleanup has now also landed in `src/roughcut/media/render.py::_render_packaging_context(...)`: that common render packaging reader no longer resolves `assets` once and then immediately re-derives packaging presence by calling `packaging_timeline_has_packaging_assets(...)`, which itself re-reads the same assets. `_render_packaging_context(...)` now materializes `assets` and `editing_accents` once and computes `has_packaging_assets` inline from the already-resolved asset dict.
+- Scope of that slice: shared render-entry duplicate fact recovery only. No packaging-presence contract, packaging asset shape, editing accent shape, or runtime branch semantics changed. The goal was to remove one more repeated packaging fact recovery from the main render-path context builder rather than only cleaning it up at downstream consumers.
+- Focused verification for that render packaging-presence inline slice passed via `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py` and `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "render_packaging_context or apply_timed_overlays_reuses_passed_packaging_context_and_avatar_plan or timed_overlay_filter_chain_reuses_passed_packaging_context_and_avatar_plan or apply_packaging_plan or segment_filters or ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only" -q` (`8 passed`).
+- `tests/test_render_frame_rate_unification.py::test_render_packaging_context_reuses_local_assets_for_presence` now pins that `roughcut.media.render` no longer imports `packaging_timeline_has_packaging_assets`, and that `_render_packaging_context(...)` still reports `has_packaging_assets=True` from the locally reused `assets` payload.
+- That render packaging-presence inline cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-packaging-presence-inline-anchor/20260612-115159`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow shared-helper cleanup has now also landed in `src/roughcut/edit/packaging_timeline.py::packaging_timeline_has_editing_accents(...)`: that helper no longer resolves `editing_accents` once and then immediately calls `packaging_timeline_transitions(...)`, which re-resolves the same `editing_accents` payload again. It now derives `transitions` directly from the already-resolved local `accents` payload and keeps the same truthiness contract for `boundary_indexes / emphasis_overlays / sound_effects`.
+- Scope of that slice: shared helper duplicate fact recovery only. No packaging transition contract, editing-accent shape, or render/manual-editor branch semantics changed. The goal was to remove one more redundant nested fact recovery from the packaging helper layer itself, not just from its consumers.
+- Focused verification for that editing-accents presence inline slice passed via `python -m py_compile src/roughcut/edit/packaging_timeline.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaging_timeline_transitions or packaging_timeline_presence_helpers or packaging_timeline_has_editing_accents_reuses_local_accents_payload" -q` (`5 passed`).
+- `tests/test_manual_editor_helpers.py::test_packaging_timeline_has_editing_accents_reuses_local_accents_payload` now pins that `packaging_timeline_has_editing_accents(...)` no longer needs to call `packaging_timeline_transitions(...)` to answer the presence question, so the helper’s local reuse contract is explicitly covered.
+- That editing-accents presence inline cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-editing-accents-presence-inline-anchor/20260612-115620`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow shared-helper cleanup has now also landed in `src/roughcut/edit/render_plan.py::render_plan_video_transform(...)`: that helper no longer recovers `manual_editor` and `delivery` by calling `render_plan_manual_editor(...)` and `render_plan_delivery(...)` separately, which each re-read the same render-plan payload. It now resolves the base render-plan payload once, copies `manual_editor` and `delivery` locally, and derives the merged `video_transform` defaults from those local facts.
+- Scope of that slice: shared helper duplicate fact recovery only. No `video_transform` merge contract, manual rotation semantics, delivery fallback fields, or render/manual-editor consumers changed. The goal was to remove one more repeated render-plan subpayload reconstruction point from a high-value shared helper without broadening the helper surface.
+- Focused verification for that render-plan video-transform local-payload slice passed via `python -m py_compile src/roughcut/edit/render_plan.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "render_plan_video_transform_merges_manual_editor_and_delivery_defaults or render_plan_video_transform_reuses_local_render_plan_payload or manual_editor_packaging_plan_reads_nested_packaging_timeline" -q` (`3 passed`).
+- `tests/test_manual_editor_helpers.py::test_render_plan_video_transform_reuses_local_render_plan_payload` now pins that `render_plan_video_transform(...)` no longer needs to call `render_plan_manual_editor(...)` or `render_plan_delivery(...)` internally, so the helper’s local payload reuse contract is explicitly covered.
+- That render-plan video-transform local-payload cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-plan-video-transform-local-payload-anchor/20260612-120048`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow shared-helper cleanup has now also landed in `src/roughcut/edit/packaging_timeline.py::packaging_timeline_asset_plan(...)`: that helper no longer resolves a single asset subplan by first calling `packaging_timeline_assets(...)`, which re-resolves the whole packaging payload before extracting one key. It now resolves the normalized `packaging` payload once locally and deep-copies only the requested asset subplan.
+- Scope of that slice: shared helper duplicate fact recovery only. No packaging asset-plan contract, nested/normalized payload compatibility, or consumer-facing asset shapes changed. The goal was to remove one more redundant whole-payload reconstruction from a helper that sits on the hot path for render/manual-editor packaging consumers.
+- Focused verification for that asset-plan local-packaging slice passed via `python -m py_compile src/roughcut/edit/packaging_timeline.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaging_timeline_asset_plan or packaging_timeline_presence_helpers or packaging_timeline_has_editing_accents_reuses_local_accents_payload" -q` (`6 passed`).
+- `tests/test_manual_editor_helpers.py::test_packaging_timeline_asset_plan_reuses_local_packaging_payload` now pins that `packaging_timeline_asset_plan(...)` no longer needs to call `packaging_timeline_assets(...)` internally, so the helper’s local packaging-payload reuse contract is explicitly covered.
+- That asset-plan local-packaging cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-asset-plan-local-packaging-anchor/20260612-120501`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow shared-helper cleanup has now also landed in `src/roughcut/edit/packaging_timeline.py::packaging_timeline_has_packaging_assets(...)` and `packaging_timeline_transitions(...)`: those helpers no longer answer one packaging fact by first calling a sibling helper that re-resolves the same normalized payload. `packaging_timeline_has_packaging_assets(...)` now derives presence directly from one locally resolved `packaging` payload, and `packaging_timeline_transitions(...)` now derives the `transitions` subfact directly from one locally resolved `editing_accents` payload.
+- Scope of that slice: shared helper duplicate fact recovery only. No packaging-asset presence contract, transitions contract, nested/normalized payload compatibility, or downstream render/manual-editor branch semantics changed. The goal was to keep collapsing the helper layer toward one local payload read per fact instead of chaining helper-on-helper reconstruction.
+- Focused verification for that local packaging/transitions helper slice passed via `python -m py_compile src/roughcut/edit/packaging_timeline.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaging_timeline_transitions or packaging_timeline_presence_helpers or packaging_timeline_has_packaging_assets_reuses_local_packaging_payload or packaging_timeline_has_editing_accents_reuses_local_accents_payload" -q` (`7 passed`).
+- `tests/test_manual_editor_helpers.py::test_packaging_timeline_has_packaging_assets_reuses_local_packaging_payload` and `tests/test_manual_editor_helpers.py::test_packaging_timeline_transitions_reuse_local_accents_payload` now pin that those helpers no longer need to call `packaging_timeline_assets(...)` or `packaging_timeline_editing_accents(...)` internally, so the local payload reuse contract is explicitly covered at the helper boundary.
+- That local packaging/transitions helper cleanup has also been live-reverified with a fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-transitions-local-accents-anchor/20260612-121131`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow shared-helper cleanup has now also landed in `src/roughcut/edit/editorial_timeline.py::editorial_cut_segments(...)`: that helper no longer derives cut/remove segments by first calling `editorial_timeline_segments(...)`, which deep-copies the entire segments array before the helper throws most of it away. It now reads the local `segments` payload once and deep-copies only the `type in {"cut", "remove"}` rows that the caller actually asked for.
+- Scope of that slice: shared helper duplicate fact recovery only. No editorial cut-segment contract, current/legacy type compatibility, or edit-plan summary semantics changed. The goal was to remove one more whole-list reconstruction from a shared editorial helper that feeds user-facing summaries and downstream checks.
+- Focused verification for that editorial cut-segments local-payload slice passed via `python -m py_compile src/roughcut/edit/editorial_timeline.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "shared_editorial_cut_segments or activity_decisions_edit_plan_summary or shared_editorial_timeline_helpers_return_safe_copies" -q` (`4 passed`).
+- `tests/test_manual_editor_helpers.py::test_shared_editorial_cut_segments_reuse_local_segments_payload` now pins that `editorial_cut_segments(...)` no longer needs to call `editorial_timeline_segments(...)` internally, so the helper’s local segments-payload reuse contract is explicitly covered.
+- That editorial cut-segments local-payload cleanup has also been revalidated with a fresh edit-plan anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-editorial-cut-segments-local-payload-anchor/20260612-121550`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
+- A further narrow shared-helper cleanup has now also landed in `src/roughcut/edit/editorial_timeline.py::resolve_refine_keep_segments_for_timeline(...)`: that helper no longer routes its fallback path through `editorial_keep_segments({"segments": ...})`, which rebuilds a wrapper dict and re-scans the whole payload shape just to recover keep rows from an already-available `fallback_segments` list. It now filters the local fallback list for `type="keep"` rows directly and normalizes those rows in place.
+- Scope of that slice: shared helper duplicate fact recovery only. No refine-plan precedence contract, fallback keep-segment semantics, or downstream edit-plan/render keep resolution behavior changed. The goal was to remove one more wrapper-level reconstruction from the shared editorial keep-resolution path without widening the helper surface.
+- Focused verification for that refine-keep fallback local-segments slice passed via `python -m py_compile src/roughcut/edit/editorial_timeline.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "resolve_refine_keep_segments_for_timeline or shared_editorial_keep_segments_resolve_prefers_matching_refine_plan or shared_editorial_cut_segments or activity_decisions_edit_plan_summary" -q` (`6 passed`).
+- `tests/test_manual_editor_helpers.py::test_resolve_refine_keep_segments_for_timeline_reuses_local_fallback_segments` now pins that `resolve_refine_keep_segments_for_timeline(...)` no longer needs to call `editorial_keep_segments(...)` in the fallback path, so the local fallback-segment reuse contract is explicitly covered.
+- That refine-keep fallback local-segments cleanup has also been revalidated with a fresh edit-plan anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-refine-keep-fallback-local-segments-anchor/20260612-121754`; result: `status=partial` by design, `quality_score=100.0`, `live_readiness=pass`, and `required_checks=4/4`.
 - A fresh anchor replay has now revalidated the current refactor baseline on `noc_mt34_short_done` via `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-phase5`; result: `status=partial` by design, `required_checks=4/4`, `manual_editor_apply_semantics_ok=true`, `live_readiness=pass`.
+- A render-stage anchor replay on the same case first exposed a real runtime regression in `src/roughcut/pipeline/steps.py`: `run_render(...)` referenced `resolve_packaging_timeline_payload(...)` without importing it, causing `RuntimeError: NameError: name 'resolve_packaging_timeline_payload' is not defined` during `render`. That import gap is now fixed, and the rerun at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-anchor-rerun/20260612-091027` completed through `render` with real packaged outputs and `render_diagnostics_summary.failed_render_job_count=0`.
+- The render-stage `subtitle_sync_issue` is now root-caused and fixed at the shared projection helper boundary rather than in packaging/render serialization. Observed symptom: plain/packaged/avatar/ai_effect SRTs all started at `4.45s` with `subtitle_leading_gap_large`. First bad layer: `src/roughcut/pipeline/steps.py::_build_edited_subtitle_projection(...)`. Root cause: the helper ignored current `projection_data["entries"]` and remapped collapsed fallback source subtitles instead; on this anchor the fallback source basis had already been compressed into a single long row, so render remap preserved the wrong segmentation and timing. Why it surfaced now: the refactor had tightened helper reuse and source-basis loading, which made the projection helper's "ignore current projection rows" behavior visible in the live render chain.
+- `_build_edited_subtitle_projection(...)` now prefers current projection entries when they exist and are not timing-suspicious, and only falls back to source subtitles when no usable projection layer is available.
+- Focused regressions passed via `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "edited_subtitle_projection" -q` and `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`.
+- A fresh render-stage anchor replay at `output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-anchor-after-projection-fix-rerun/20260612-093133` is now green again for the live subtitle path: `live_readiness=pass`, `required_checks=4/4`, all variant subtitle sync checks `status=ok`, plain SRT first cue starts at `0.04s`, and the latest `variant_timeline_bundle` plain subtitle events also start at `0.04s`.
+- Current remaining non-blocking evidence gap on that anchor is narrowed back to `risk_alignment.mismatch_codes=["reference_high_risk_not_reproduced"]`; do not reopen `subtitle_sync_issue` or misclassify it as a remaining packaging-helper failure.
 - Do not start `step_demonstration`, `experience_and_mood`, `event_highlight`, or `narrative_assembly` implementation before `information_density` strategy migration is closed.
 - Treat publication work as parked context in `docs/publication-agent-ledger.md`; it is not the active objective for this thread.
 - Avoid parallel coding on `src/roughcut/pipeline/steps.py`, `src/roughcut/api/jobs.py`, and `src/roughcut/media/render.py`; if another thread is still touching those files, treat it as read-only or merge-later context instead of active concurrent implementation.
@@ -32,7 +333,9 @@ Drive the universal auto-edit strategy refactor from the now-closed `information
 - Continue replacing duplicated keep/remove reconstruction with the shared editorial helper instead of adding new per-surface utilities.
 - Continue replacing duplicated packaging/effect extraction with the shared packaging helper instead of re-reading render-plan flat fields ad hoc.
 - Keep sweeping for any residual low-value flat packaging reads after the packaged-timeline mapping cleanup, but do not reopen `Phase 5` with a new abstraction layer unless a real consumer still bypasses the shared helper.
+- Keep the next cleanup slice narrow: execution-path booleans and remaining consumer reads are in scope; new strategy registries, report schemas, and packaging sub-frameworks are not.
 - Keep at least one fresh anchor replay in the loop after each meaningful `Phase 4/5` consumer cleanup; the current short-anchor replay is green again, but a later wider render-stage anchor is still useful before claiming the strategy migration closed.
+- Treat the current render-stage live issue set as two separate follow-ups: `subtitle_sync_issue` under render-output quality, and `reference_high_risk_not_reproduced` under risk/evidence reproduction. Do not misclassify either one as a remaining packaging-helper contract failure.
 - Extend the shared strategy-decision slice only where it removes real duplicate judgment points; do not create a parallel decision framework beside current payloads.
 - Keep one real manual-editor anchor in the loop whenever `cut_analysis / refine_decision_plan / timeline` behavior changes.
 - Keep provider-class render failures (`avatar_full_track_provider_response_error / avatar_full_track_busy_exhausted / avatar_full_track_slot_timeout`) as optional future evidence capture only if they reappear in real runs; do not reopen render diagnostics/report frameworks preemptively.
@@ -4448,3 +4751,829 @@ Drive the universal auto-edit strategy refactor from the now-closed `information
     - `C3` 不再应标注为 `near closure`；
     - 对本轮策略收缩后的阶段 B 范围，`C3` 应视为 `closed for current scope`；
     - 剩余只该等新的真实误删/误分桶样本触发，而不是继续扩张规则框架。
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `Phase 4` 的 editorial helper consumer sweep，又收掉一处 keep-segment 重复恢复：
+  - 第一坏层在 `src/roughcut/edit/editorial_timeline.py::resolve_editorial_keep_segments(...)`；
+  - 旧逻辑在非 refine 分支会先调用 `editorial_keep_segments(...)` 把 `editorial_timeline_payload["segments"]` 归一成 keep rows，再立刻把结果送进 `normalize_keep_segments_payloads(...)` 叠加 `upper_bound / merge_gap / minimum_duration`，等于同一批 keep segments 走了两次共享归一；
+  - 这不是行为 bug，但它延续了当前 consumer sweep 正在收掉的“同函数内重复恢复同一事实”的结构味道，也让 keep-resolution 边界继续依赖 helper-on-helper 跳转。
+  - 已落地修复：
+    - `resolve_editorial_keep_segments(...)` 现在直接从本地 `editorial_timeline_payload["segments"]` 过滤 `type == "keep"` 的事实行，再一次性走 `normalize_keep_segments_payloads(...)`；
+    - refine plan 优先级、keep merge 语义、legacy timeline 兼容性均保持不变，只收掉重复恢复。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_resolve_editorial_keep_segments_reuses_local_editorial_segments`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/edit/editorial_timeline.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "resolve_editorial_keep_segments or resolve_refine_keep_segments_for_timeline or shared_editorial_cut_segments or activity_decisions_edit_plan_summary" -q`（`6 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-editorial-keep-segments-local-payload-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-editorial-keep-segments-local-payload-anchor/20260612-122105`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `Phase 5` 的 render runtime consumer sweep，又收掉一处 packaging-context 重复恢复：
+  - 第一坏层在 `src/roughcut/media/render.py::_render_packaging_context(...)`；
+  - 旧逻辑会在同一个 runtime helper 里连续调用 `packaging_timeline_assets(...)`、`packaging_timeline_editing_accents(...)`、`packaging_timeline_section_choreography(...)`、`packaging_timeline_subtitles(...)`，这些 reader 都会各自再次归一同一份 `render_plan/packaging_timeline`；
+  - 这不是功能错误，但它继续保留了当前 refactor 正在收掉的“同函数重复恢复同一包装事实”结构味道，也让 render runtime path 对 shared helper 的消费停在 helper fan-out，而不是一次归一后本地复用。
+  - 已落地修复：
+    - `_render_packaging_context(...)` 现在先走一次 `resolve_packaging_timeline_payload(...)`；
+    - 然后直接从本地 normalized payload 复用 `packaging / editing_accents / section_choreography / subtitles`；
+    - `has_packaging_assets` 仍按同一份本地 `assets` 判断，行为保持不变。
+  - 新增回归：
+    - `tests/test_render_frame_rate_unification.py::test_render_packaging_context_reuses_local_normalized_packaging_payload`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py`
+    - `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "render_packaging_context" -q`（`3 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-packaging-context-local-payload-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-packaging-context-local-payload-anchor/20260612-122520`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `Phase 5` 的 manual-editor packaging consumer sweep，又收掉一处包装事实重复恢复：
+  - 第一坏层在 `src/roughcut/api/jobs.py::_manual_editor_packaging_plan_from_render_plan(...)`；
+  - 旧逻辑已经先把 `render_plan` 归一成 `packaging_timeline`，但随后仍通过 `packaging_timeline_assets(...)`、`packaging_timeline_subtitles(...)`、`packaging_timeline_editing_accents(...)` 再把同一份 normalized payload 拆回一遍；
+  - 这不是功能错误，但它让 manual-editor rebuild 链继续停留在 helper-on-helper fan-out，而不是一次归一后在本地复用已得到的包装事实。
+  - 已落地修复：
+    - `_manual_editor_packaging_plan_from_render_plan(...)` 现在直接从本地 normalized `packaging_timeline` 读取 `packaging / subtitles / editing_accents`；
+    - `cover / delivery` 仍继续走现有 shared render-plan readers，manual-editor packaging plan shape 与默认值保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_packaging_plan_reuses_local_normalized_packaging_payload`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py src/roughcut/media/render.py tests/test_render_frame_rate_unification.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "manual_editor_packaging_plan" -q`（`2 passed`）
+    - `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "render_packaging_context" -q`（`3 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-packaging-plan-local-payload-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-packaging-plan-local-payload-anchor/20260612-123035`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `Phase 5` 的 variant bundle validation consumer sweep，又收掉一处 normalized payload 重复恢复：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::_validate_variant_timeline_bundle(...)`；
+  - 旧逻辑在 `timeline_rules` 已经可被 `resolve_packaging_timeline_payload(...)` 统一解释的前提下，仍分别通过 `packaging_timeline_editing_skill(...)`、`packaging_timeline_section_choreography(...)`、`packaging_timeline_assets(...)`、`packaging_timeline_editing_accents(...)` 再把同一份 packaging payload 读取四次；
+  - 这不是功能错误，但它让 variant bundle validation 继续保留 helper fan-out，而不是一次归一后本地复用事实层。
+  - 已落地修复：
+    - `_validate_variant_timeline_bundle(...)` 现在先拿一次 `normalized_packaging_timeline`；
+    - `editing_skill / section_choreography / packaging / editing_accents` 直接从本地 normalized payload 读取；
+    - `timeline_analysis` 仍复用现有 shared reader，验证语义不变。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_validate_variant_timeline_bundle_reuses_local_normalized_packaging_payload`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "validate_variant_timeline_bundle or variant_timeline_bundle_allows_diagnostics_only_payload_without_render_variants or variant_timeline_bundle_carries_refine_decision_plan" -q`（`3 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-variant-bundle-validation-local-payload-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-variant-bundle-validation-local-payload-anchor/20260612-123446`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `Phase 5` 的 manual-editor apply consumer sweep，又收掉一处 normalized packaging payload 重复恢复：
+  - 第一坏层在 `src/roughcut/api/jobs.py::apply_manual_editor_timeline(...)`；
+  - 旧逻辑已经先拿到 `previous_packaging_timeline = resolve_packaging_timeline_payload(previous_render_plan)`，但随后仍通过 `packaging_timeline_editing_skill(...)`、`packaging_timeline_editing_accents(...)`、`packaging_timeline_analysis(...)` 再把同一份 normalized payload 读回一遍；
+  - 这不是功能错误，但它让 manual-editor apply 主链继续保留 helper-on-helper fan-out，也让 `timeline_changed=true/false` 两条分支都没直接复用本地包装事实。
+  - 已落地修复：
+    - `apply_manual_editor_timeline(...)` 现在直接从本地 `previous_packaging_timeline` 读取 `editing_skill / editing_accents / timeline_analysis`；
+    - `previous_smart_effect_style`、timeline unchanged 分支的 `timeline_analysis`、以及 timeline changed 分支的 `editing_skill` 依赖都改为本地 payload 复用；
+    - manual-editor apply 语义、rerun 语义、packaging replan 条件均保持不变。
+  - focused 回归：
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun`
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun or manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change" -q`（`2 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-apply-local-packaging-payload-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-apply-local-packaging-payload-anchor/20260612-123838`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 同一条 `manual-editor apply consumer sweep` 又继续收掉最后一处 subtitle payload fan-out：
+  - 第一坏层仍在 `src/roughcut/api/jobs.py::apply_manual_editor_timeline(...)`；
+  - 上一刀之后，该函数仍残留一处 `packaging_timeline_subtitles(previous_render_plan)`，只为了在 rebuild render plan 时取 `subtitle_version`；
+  - 这意味着同一函数已经拿到 `previous_packaging_timeline["subtitles"]` 的前提下，仍然保留了一条多余 reader 跳转。
+  - 已落地修复：
+    - `previous_subtitles = dict(previous_packaging_timeline.get("subtitles") or {})` 现在在本地一次取出；
+    - rebuild render plan 时的 `subtitle_version` 直接复用 `previous_subtitles["version"]`；
+    - `jobs.py` 顶部已清掉彻底不再使用的 packaging subtitle/asset reader import。
+  - focused 回归：
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun`
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun or manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change" -q`（`2 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-apply-subtitle-version-local-payload-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-apply-subtitle-version-local-payload-anchor/20260612-124143`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `steps.py` helper consumer sweep，又收掉一处 subtitle-section profile 的重复包装读取：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::_subtitle_section_profile_for_time(...)`；
+  - 旧逻辑会对同一个 `render_plan` 先走 `packaging_timeline_subtitles(...)`，随后又走 `packaging_timeline_analysis(...)`，两者都要各自重新归一同一份 packaging payload；
+  - 这不是功能错误，但它继续保留了“同 helper 内对同一份 packaging payload 做 reader fan-out”的结构噪音。
+  - 已落地修复：
+    - `_subtitle_section_profile_for_time(...)` 现在先统一 `resolve_packaging_timeline_payload(render_plan)`；
+    - 再直接从本地 normalized payload 读取 `subtitles` 与 `timeline_analysis`；
+    - section profile 优先级和 directive fallback 语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_subtitle_section_profile_for_time_reuses_local_normalized_packaging_payload`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "subtitle_section_profile_for_time" -q`（`2 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-subtitle-section-profile-local-payload-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-subtitle-section-profile-local-payload-anchor/20260612-124407`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 同一轮 `steps.py` helper consumer sweep` 又收掉一处 variant bundle diagnostics fan-out：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::_build_variant_timeline_bundle(...)`；
+  - 旧逻辑已经先构造了 `packaging_timeline = build_packaging_timeline_payload(render_plan)`，但在拼 `diagnostics` 时仍通过 `packaging_timeline_analysis(packaging_timeline)` 再次读取同一份 normalized payload；
+  - 这不是功能错误，但它继续保留了 bundle builder 内部的单点 reader 跳转。
+  - 已落地修复：
+    - `_build_variant_timeline_bundle(...)` 现在直接从本地 `packaging_timeline["timeline_analysis"]` 构造 `packaging_timeline_analysis_payload`；
+    - `diagnostics` 构建直接复用本地 payload，`validation` 语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_variant_timeline_bundle_reuses_local_packaging_timeline_analysis_payload`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "variant_timeline_bundle_carries_refine_decision_plan or variant_timeline_bundle_reuses_local_packaging_timeline_analysis_payload or variant_timeline_bundle_allows_diagnostics_only_payload_without_render_variants" -q`（`3 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-variant-bundle-diagnostics-local-payload-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-variant-bundle-diagnostics-local-payload-anchor/20260612-124648`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 同一条 `variant bundle validation consumer sweep` 又收掉一处 `timeline_analysis` reader fan-out：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::_validate_variant_timeline_bundle(...)`；
+  - 旧逻辑已经先拿到 `normalized_packaging_timeline = resolve_packaging_timeline_payload(timeline_rules)`，但 `timeline_analysis` 仍继续通过 `packaging_timeline_analysis(timeline_rules)` 再读一遍；
+  - 这不是功能错误，但它让 validation helper 继续保留“已归一后仍走 reader”这一层冗余。
+  - 已落地修复：
+    - `_validate_variant_timeline_bundle(...)` 现在直接从本地 `normalized_packaging_timeline["timeline_analysis"]` 读取；
+    - 其余 `editing_skill / section_choreography / packaging / editing_accents` 的本地复用保持不变。
+  - focused 回归：
+    - `tests/test_manual_editor_helpers.py::test_validate_variant_timeline_bundle_reuses_local_normalized_packaging_payload`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "validate_variant_timeline_bundle or variant_timeline_bundle_reuses_local_packaging_timeline_analysis_payload" -q`（`2 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-variant-bundle-validation-analysis-local-payload-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-variant-bundle-validation-analysis-local-payload-anchor/20260612-124824`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `steps.py` runtime helper consumer sweep，又收掉一处 transition reader fan-out：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::_resolve_transition_overlap_offsets(...)`；
+  - 旧逻辑会对同一份 `render_plan` 再调一次 `packaging_timeline_transitions(...)`，即使这条 helper 只需要 `editing_accents.transitions` 这一小块事实；
+  - 这不是功能错误，但它让 packaged subtitle/accent 映射链上的 transition helper 继续保留 reader 跳转。
+  - 已落地修复：
+    - `_resolve_transition_overlap_offsets(...)` 现在先统一 `resolve_packaging_timeline_payload(render_plan)`；
+    - 然后直接从本地 `editing_accents.transitions` 读取 transition 配置；
+    - 边界索引过滤、时长裁剪、offset 计算语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_resolve_transition_overlap_offsets_reuses_local_normalized_packaging_payload`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "resolve_transition_overlap_offsets or packaged_timeline_mapping" -q`（`3 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-transition-offsets-local-payload-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-transition-offsets-local-payload-anchor/20260612-125046`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `steps.py` runtime consumer sweep，又把 run_render 起始段和 ai_effect 分支的包装事实恢复集中到一个本地 helper：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::run_render(...)` 的 runtime packaging fact recovery；
+  - 旧逻辑一方面在 render-start 处分别走 `packaging_timeline_assets(...) / packaging_timeline_editing_accents(...) / packaging_timeline_has_packaging_assets(...) / packaging_timeline_has_editing_accents(...)`，另一方面在 `ai_effect_render_plan` 分支又重复走一遍 `packaging_timeline_assets(...) / packaging_timeline_editing_accents(...)`；
+  - 这不是功能错误，但它让 runtime 主链保留了多处同构的 packaging reader fan-out，也让 `run_render` 局部事实恢复继续散着长。
+  - 已落地修复：
+    - 新增本地 `_runtime_packaging_context(...)`，只负责一次性归一 `render_plan/packaging_timeline` 并返回 `packaging_timeline / assets / editing_accents / has_packaging / has_editing_accents`；
+    - `run_render(...)` 起始段现在复用这一个本地 runtime context；
+    - `ai_effect_render_plan` 分支也复用同一个 runtime context，不再单独重读 `assets/editing_accents`。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_runtime_packaging_context_reads_nested_packaging_timeline_payload`
+    - `tests/test_manual_editor_helpers.py::test_runtime_packaging_context_reuses_local_normalized_packaging_payload`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "runtime_packaging_context or resolve_transition_overlap_offsets or packaged_timeline_mapping" -q`（`5 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-runtime-packaging-context-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-runtime-packaging-context-anchor/20260612-125545`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 上述 `runtime packaging context` 切片继续做了窄扫尾，把 run_render 内剩余挂名变量也收平：
+  - 第一坏层仍在 `src/roughcut/pipeline/steps.py::run_render(...)`；
+  - 上一刀之后，`packaging_timeline` 局部变量已经不再被后续使用，`ai_effect_packaging_assets` 也只剩下为 `outro` 读取服务的一次中转；
+  - 这不是功能错误，但它让 runtime helper 已经落地后，主链上仍残留两处“已经有 context 却继续多存一层局部别名”的噪音。
+  - 已落地修复：
+    - 删除未再使用的 `packaging_timeline` 局部变量；
+    - `ai_effect_outro_plan` 现在直接从 `ai_effect_packaging_context["assets"]` 读取；
+    - `run_render(...)` 对 `_runtime_packaging_context(...)` 的消费更完整，行为保持不变。
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "runtime_packaging_context or packaging_trailing_gap_allowance or packaged_timeline_mapping" -q`（`5 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-runtime-packaging-context-followup-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-runtime-packaging-context-followup-anchor/20260612-130113`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `steps.py` runtime helper consumer sweep，又收掉一处 packaged timeline mapping 的局部 payload 重复恢复：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::_resolve_packaged_timeline_mapping_context(...)`；
+  - 旧逻辑会对同一份 `render_plan` 一边先调 `_resolve_transition_overlap_offsets(...)`，一边又通过 `packaging_timeline_asset_plan(...)` 读两次 `intro/insert` 子计划；这些 reader 最终都会各自再归一同一份 packaging payload；
+  - 这不是功能错误，但它让 packaged timeline mapping helper 继续保留“单 helper 内多次恢复同一包装事实”的结构噪音。
+  - 已落地修复：
+    - `_resolve_packaged_timeline_mapping_context(...)` 现在先统一 `resolve_packaging_timeline_payload(render_plan)`；
+    - transition offsets 直接复用 normalized payload；
+    - `intro_plan / insert_plan` 直接从本地 `packaging` 子 payload 读取，不再走 `packaging_timeline_asset_plan(...)`。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_packaged_timeline_mapping_reuses_local_normalized_packaging_payload`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaged_timeline_mapping or resolve_transition_overlap_offsets" -q`（`4 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-packaged-mapping-local-payload-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-packaged-mapping-local-payload-anchor/20260612-130622`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `steps.py` runtime bundle consumer sweep，又收掉一处 variant timeline editorial facts 的重复恢复：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::run_render(...)` 收尾阶段的 `variant_timeline_bundle` 构造段；
+  - 旧逻辑会在同一段代码里分别调用 `editorial_timeline_analysis(editorial_timeline.data_json)`、`editorial_timeline_segments(editorial_timeline.data_json)`，以及两次 `editorial_timeline_segments(packaged_editorial_timeline)`；
+  - 这不是功能错误，但它让 render runtime 收尾继续保留同一 editorial payload 的重复 reader fan-out，也让 plain / packaged / ai_effect variant 的 facts 不能从单一局部上下文复用。
+  - 已落地修复：
+    - 新增本地 `_variant_timeline_editorial_context(...)`，只负责一次性恢复 `analysis / plain_segments / packaged_segments`；
+    - `run_render(...)` 的 `variant_timeline_bundle` 构造现在统一复用这一个本地 editorial context；
+    - plain / packaged / ai_effect 的 variant timeline entry 构造逻辑保持不变，只收掉局部重复读取。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_variant_timeline_editorial_context_reuses_local_payload_readers`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "variant_timeline_editorial_context or variant_timeline_bundle" -q`（`5 passed`）
+  - 同轮顺手修正：
+    - `tests/test_manual_editor_helpers.py::test_validate_variant_timeline_bundle_reuses_local_normalized_packaging_payload` 之前还在 monkeypatch 已删除的 `packaging_timeline_assets / packaging_timeline_editing_accents` import；现在改为显式断言这些旧 reader 已不再暴露于 `pipeline_steps_module`。
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-variant-editorial-context-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-variant-editorial-context-anchor/20260612-131641`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `steps.py` runtime editorial consumer sweep，又把同一份 plain editorial segments 在 `run_render(...)` 内做了单次恢复复用：
+  - 第一坏层仍在 `src/roughcut/pipeline/steps.py::run_render(...)`；
+  - 上一刀之后，`variant_timeline_bundle` 收尾段虽然已经通过 `_variant_timeline_editorial_context(...)` 统一了 plain / packaged editorial facts，但同一个 `run_render(...)` 仍在更早的 `resolved_keep_segments` 和更晚的 manual-editor subtitle projection fallback 两处各自再走 `editorial_timeline_segments(editorial_timeline.data_json)`；
+  - 这不是功能错误，但它让同一个 runtime 主链仍保留三处 plain editorial segments 的重复恢复，违背当前“同函数内一次解析、多处复用”的收口目标。
+  - 已落地修复：
+    - `run_render(...)` 现在在 runtime 主链内先一次恢复 `plain_editorial_segments = editorial_timeline_segments(editorial_timeline.data_json)`；
+    - `resolved_keep_segments`、manual-editor subtitle projection fallback、以及 `_variant_timeline_editorial_context(...)` 三处统一复用这一个本地 plain segments；
+    - `_variant_timeline_editorial_context(...)` 现在支持接收调用方已解析的 `plain_segments`，避免 helper 内部再读一次同一 payload。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_variant_timeline_editorial_context_reuses_caller_plain_segments`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "variant_timeline_editorial_context or resolve_refine_keep_segments_for_timeline or variant_timeline_bundle" -q`（`8 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-run-render-plain-editorial-segments-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-run-render-plain-editorial-segments-anchor/20260612-132356`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `steps.py` edit-plan consumer sweep，又收掉一处 `decision.analysis` 的重复恢复：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::run_edit_plan(...)` 的 `variant_timeline_bundle` 构造段；
+  - 旧逻辑已经在当前作用域持有 `decision.analysis`，并用它构建 `cut_analysis_payload`，但随后仍通过 `editorial_timeline_analysis(editorial_timeline.data_json)` 再把同一份 editorial analysis 从刚保存的 timeline payload 读回一遍；
+  - 这不是功能错误，但它让 edit-plan 主链保留了一个低价值的 editorial reader 回跳，也让 `run_edit_plan(...)` 没有直接复用当前最权威的本地 decision facts。
+  - 已落地修复：
+    - 新增本地 `_resolve_editorial_analysis_payload(...)`，优先复用调用方已提供的 `analysis`，否则才回退到 `editorial_timeline_analysis(...)`；
+    - `_variant_timeline_editorial_context(...)` 也改为经由这个 helper 读取 analysis，避免 analysis 读法再次分叉；
+    - `run_edit_plan(...)` 的 `variant_timeline_bundle` 构造现在直接复用当前 `decision.analysis`，不再回读已保存的 editorial payload。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_resolve_editorial_analysis_payload_reuses_caller_analysis`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "resolve_editorial_analysis_payload or variant_timeline_editorial_context or variant_timeline_bundle" -q`（`7 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-edit-plan-editorial-analysis-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-edit-plan-editorial-analysis-anchor/20260612-133041`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `render.py` runtime consumer sweep，又把 `render_video(...)` 内的 render-plan 多 reader fan-out 收成一个本地 context：
+  - 第一坏层在 `src/roughcut/media/render.py::render_video(...)`；
+  - 旧逻辑会在同一个 runtime 函数里分别调用 `render_plan_delivery(render_plan)`、`render_plan_video_transform(render_plan)`、`render_plan_avatar_commentary(render_plan)`、`render_plan_voice_processing(render_plan)`、`render_plan_loudness(render_plan)`；
+  - 这不是功能错误，但它让 render 主链继续保留“同一 payload 在同一函数里分散恢复多块 render-plan 事实”的结构噪音，也不利于后续继续收 runtime 合同边界。
+  - 已落地修复：
+    - 新增本地 `_render_runtime_plan_context(...)`，只负责一次性恢复 `delivery / video_transform / avatar_plan / voice_processing / loudness`；
+    - `render_video(...)` 现在统一复用这一个 runtime plan context；
+    - 编码参数、旋转判断、字幕/overlay、音频滤镜行为保持不变。
+  - 新增回归：
+    - `tests/test_render_frame_rate_unification.py::test_render_runtime_plan_context_reads_render_plan_once`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py`
+    - `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "render_runtime_plan_context or render_packaging_context or ai_effect_render_plan_reuses_bound_assets_for_manual_subtitle_only or segment_filters_force_target_frame_rate_before_concat" -q`（`6 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-runtime-plan-context-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-runtime-plan-context-anchor/20260612-133427`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `api/jobs.py` manual-editor apply consumer sweep，又把 `previous_render_plan` 的多 reader fan-out 收成一个本地 context：
+  - 第一坏层在 `src/roughcut/api/jobs.py::apply_manual_editor_timeline(...)`；
+  - 旧逻辑一方面先走 `resolve_packaging_timeline_payload(previous_render_plan)`，另一方面又分别调用 `render_plan_loudness(previous_render_plan)`、`render_plan_voice_processing(previous_render_plan)`、`render_plan_workflow_preset(previous_render_plan)`、`render_plan_ai_director(previous_render_plan)`、`render_plan_avatar_commentary(previous_render_plan)`；
+  - 这不是功能错误，但它让 manual-editor apply 主链继续保留“同一 previous render plan payload 在同一函数里分散恢复多块事实”的结构噪音。
+  - 已落地修复：
+    - 新增本地 `_manual_editor_render_plan_context(...)`，一次性恢复 `packaging_timeline / workflow_preset / loudness / voice_processing / ai_director_plan / avatar_commentary_plan`；
+    - `apply_manual_editor_timeline(...)` 现在统一复用这个本地 context；
+    - workflow preset fallback、音量配置、降噪配置、creative plan 透传语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_render_plan_context_reads_render_plan_once`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py -k "manual_editor_render_plan_context or manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change or manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun" -q`（`3 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-render-plan-context-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-render-plan-context-anchor/20260612-133950`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `api/jobs.py` manual-editor helper consumer sweep，又把 `_manual_editor_packaging_plan_from_render_plan(...)` 对同一 render plan 的分散读取收回现有 context：
+  - 第一坏层在 `src/roughcut/api/jobs.py::_manual_editor_packaging_plan_from_render_plan(...)`；
+  - 旧逻辑会在这个 helper 里分别走 `resolve_packaging_timeline_payload(payload)`、`render_plan_cover(payload)`、`render_plan_delivery(payload)`，对同一份 render plan payload 分散恢复包装、封面、导出配置事实；
+  - 这不是功能错误，但它让 manual-editor 包装计划恢复路径在已有 `_manual_editor_render_plan_context(...)` 落地后，仍保留一条局部 reader 分叉。
+  - 已落地修复：
+    - `_manual_editor_render_plan_context(...)` 现在一并恢复 `cover / delivery`；
+    - `_manual_editor_packaging_plan_from_render_plan(...)` 现在统一复用这个 context，不再自己分散读取 `packaging_timeline / cover / delivery`；
+    - packaging-plan 输出字段与默认值语义保持不变。
+  - focused 验证：
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py -k "manual_editor_packaging_plan or manual_editor_render_plan_context or manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change or manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun" -q`（`5 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-packaging-plan-context-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-packaging-plan-context-anchor/20260612-134224`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `steps.py` runtime consumer sweep，又把 `run_render(...)` 内的 render-plan reader fan-out 收成一个本地 context：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::run_render(...)`；
+  - 旧逻辑会在这个 runtime 函数里分别调用 `render_plan_automatic_gate(render_plan_timeline.data_json)`、`render_plan_manual_editor(render_plan_timeline.data_json)`、`render_plan_avatar_commentary(render_plan_timeline.data_json)`、`render_plan_cover(render_plan_timeline.data_json)`；
+  - 这不是功能错误，但它让 `run_render(...)` 继续保留“同一 render plan payload 在同一函数里分散恢复多块运行时事实”的结构噪音。
+  - 已落地修复：
+    - 新增本地 `_runtime_render_plan_context(...)`，一次性恢复 `automatic_gate / manual_editor / avatar_plan / cover`；
+    - `run_render(...)` 现在统一复用这个 context；
+    - 自动 gate、manual subtitle-only 判定、avatar 分支、cover 导出语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_runtime_render_plan_context_reads_render_plan_once`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "runtime_render_plan_context or runtime_packaging_context or variant_timeline_editorial_context" -q`（`5 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-steps-runtime-render-plan-context-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-steps-runtime-render-plan-context-anchor/20260612-134513`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `api/jobs.py` helper consumer sweep，又把 manual-editor packaging-plan helper 对同一 context 的重复恢复收平：
+  - 第一坏层仍在 `src/roughcut/api/jobs.py::_manual_editor_packaging_plan_from_render_plan(...)` 与 `apply_manual_editor_timeline(...)` 的衔接边界；
+  - 上一刀之后，`apply_manual_editor_timeline(...)` 已经先拿到 `previous_render_plan_context`，但 `_manual_editor_packaging_plan_from_render_plan(previous_render_plan)` 默认仍会再次内部恢复一次同样的 context；
+  - 这不是功能错误，但它让 caller 已有 context 的前提下，manual-editor packaging-plan helper 仍保留一条低价值重复恢复路径。
+  - 已落地修复：
+    - `_manual_editor_packaging_plan_from_render_plan(...)` 现在接受可选 `render_plan_context`；
+    - `apply_manual_editor_timeline(...)` 在 reuse packaging-plan 分支直接传入已有 `previous_render_plan_context`；
+    - 包装计划字段与默认值语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_packaging_plan_reuses_caller_render_plan_context`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py -k "manual_editor_packaging_plan or manual_editor_render_plan_context or manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline_change or manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun" -q`（`6 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-packaging-plan-context-reuse-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-manual-editor-packaging-plan-context-reuse-anchor/20260612-135033`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `render.py` caller/callee consumer sweep，又收掉一处 packaging-context 的双重恢复：
+  - 第一坏层在 `src/roughcut/media/render.py::render_video(...)` 与 `_apply_packaging_plan(...)` 的衔接边界；
+  - 旧逻辑已经在 `render_video(...)` 内先拿到 `packaging_context = _render_packaging_context(render_plan)`，但进入 `_apply_packaging_plan(...)` 后又会再次 `_render_packaging_context(render_plan)`；
+  - 这不是功能错误，但它让 render runtime 链继续保留“caller 已有 context，callee 再重算一遍”的低价值重复恢复。
+  - 已落地修复：
+    - `_apply_packaging_plan(...)` 现在接受可选 `packaging_context`；
+    - `render_video(...)` 在包装分支直接传入已有 `packaging_context`；
+    - intro/outro/insert/music/watermark 的消费逻辑与封装顺序保持不变。
+  - 新增回归：
+    - `tests/test_render_frame_rate_unification.py::test_apply_packaging_plan_reuses_passed_packaging_context`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py`
+    - `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "apply_packaging_plan or render_runtime_plan_context or render_packaging_context" -q`（`6 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-packaging-context-reuse-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-render-packaging-context-reuse-anchor/20260612-135335`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-12: 通用自动剪辑策略重构继续推进 `steps.py` runtime mapping consumer sweep，又收掉一处 packaged/ai-effect timeline mapping 的重复恢复：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::run_render(...)`；
+  - 旧逻辑已经先构建 `packaged_timeline_mapping`，但随后仍单独再次计算 `packaged_transition_offsets`；同时 `ai_effect_overlay_accents` 在未传 `timeline_mapping` 的情况下，也会在 helper 内部再次恢复一遍 ai-effect mapping；
+  - 这不是功能错误，但它让 packaged / ai-effect runtime 映射链继续保留“同一 mapping facts 已有却仍重复恢复”的结构噪音。
+  - 已落地修复：
+    - `packaged_timeline_mapping` 现在直接基于本地 `packaging_context["packaging_timeline"]` 构建；
+    - 新增 `ai_effect_timeline_mapping`，由本地 `ai_effect_packaging_context["packaging_timeline"]` 构建；
+    - `final_overlay_accents / ai_effect_overlay_accents` 统一复用对应 `timeline_mapping`；
+    - `packaged_transition_offsets / ai_effect_transition_offsets` 直接复用 mapping 内的 `transition_offsets`，不再单独再算一遍。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_map_editing_accents_to_packaged_timeline_reuses_passed_timeline_mapping`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaged_timeline_mapping or map_editing_accents_to_packaged_timeline or runtime_render_plan_context" -q`（`5 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260612-run-render-timeline-mapping-reuse-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260612-run-render-timeline-mapping-reuse-anchor/20260612-140057`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `api/jobs.py` helper consumer sweep，又收掉一处 manual-editor packaging-plan 的冗余 payload 传递：
+  - 第一坏层仍在 `src/roughcut/api/jobs.py::apply_manual_editor_timeline(...)` 与 `_manual_editor_packaging_plan_from_render_plan(...)` 的衔接边界；
+  - 旧逻辑已经在 `apply_manual_editor_timeline(...)` 内先拿到 `previous_render_plan_context`，但 subtitle-only / no-replan 分支仍把整份 `previous_render_plan` 继续传进 `_manual_editor_packaging_plan_from_render_plan(...)`，让 helper 在 caller 已具备权威 context 的前提下还保留一条低价值 render-plan payload 陪跑路径；
+  - 这不是功能错误，但它让 manual-editor apply 主链继续混着传“完整 plan”和“已解析 context”两种合同，边界不够干净，也不利于后续继续把包装能力与时间线剪辑能力拆清。
+  - 已落地修复：
+    - `_manual_editor_packaging_plan_from_render_plan(...)` 现在接受可选 `render_plan=None`，只要 caller 已提供 `render_plan_context` 就不再要求整份 render plan payload；
+    - `apply_manual_editor_timeline(...)` 在复用既有 packaging-plan 的分支改为传 `None + previous_render_plan_context`，不再把 `previous_render_plan` 再带一遍；
+    - packaging-plan 输出字段与 manual-editor apply 语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py -k "manual_editor_packaging_plan_reuses_caller_render_plan_context or manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope or manual_editor_draft_reuses_editorial_analysis_context_for_cut_analysis_loader" -q`（`3 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-editor-packaging-plan-handoff-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-editor-packaging-plan-handoff-anchor/20260612-170701`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `media/render.py` overlay helper consumer sweep，又收掉一处 timed-overlay 链的冗余 render-plan handoff：
+  - 第一坏层在 `src/roughcut/media/render.py::render_video(...)` / `_apply_timed_overlays_to_video(...)` / `_build_timed_overlay_filter_chain(...)` 的衔接边界；
+  - 旧逻辑已经在 overlay live path 里先拿到 `packaging_context / subtitles_plan / section_choreography / avatar_plan / overlay_plan / choreographed_subtitles`，但 caller 仍把整份 `render_plan` 继续传入下游 helper，让 callee 在 common path 里保留一条“完整 render-plan payload 陪跑”的低价值合同；
+  - 这不是功能错误，但它让 timed-overlay 渲染链继续混着传“已解析上下文”和“完整 render plan”两套事实来源，不利于把包装编排消费边界继续收紧。
+  - 已落地修复：
+    - `_build_timed_overlay_filter_chain(...)` 与 `_apply_timed_overlays_to_video(...)` 现在都接受可选 `render_plan=None`；
+    - `render_video(...)` 在无包装和有包装的 overlay 分支里都改为直接传 `None`，仅透传已解析的 `packaging_context / subtitles_plan / section_choreography / avatar_plan / overlay_plan / choreographed_subtitles`；
+    - timed-overlay 字幕渲染、avatar margin、overlay accent 合成和包装时序保持不变。
+  - 新增回归：
+    - `tests/test_render_frame_rate_unification.py::test_render_video_reuses_passed_packaging_and_runtime_contexts`
+    - `tests/test_render_frame_rate_unification.py::test_apply_timed_overlays_reuses_passed_packaging_context_and_avatar_plan`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py`
+    - `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "render_video_reuses_passed_packaging_and_runtime_contexts or timed_overlay_filter_chain_reuses_passed_packaging_context_and_avatar_plan or timed_overlay_filter_chain_reuses_passed_subtitles_plan or apply_timed_overlays_reuses_passed_packaging_context_and_avatar_plan or apply_timed_overlays_reuses_passed_subtitles_plan_and_section_choreography or apply_timed_overlays_reuses_passed_choreographed_subtitles or apply_timed_overlays_reuses_passed_overlay_plan" -q`（`7 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-overlay-render-plan-handoff-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-overlay-render-plan-handoff-anchor/20260612-171145`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `media/render.py` packaging helper consumer sweep，又收掉一处 packaging 链的冗余 render-plan handoff：
+  - 第一坏层在 `src/roughcut/media/render.py::render_video(...)` 与 `_apply_packaging_plan(...)` 的衔接边界；
+  - 旧逻辑已经在包装 live path 里先拿到 `packaging_context` 和 `packaging_assets`，但 caller 仍把整份 `render_plan` 继续传入 `_apply_packaging_plan(...)`，让 callee 在 common path 里保留一条“完整 render-plan payload 陪跑”的低价值合同；
+  - 这不是功能错误，但它让包装渲染链继续混着传“已解析包装事实”和“完整 render plan”两套来源，也让包装能力边界没有像 overlay 链那样彻底收紧。
+  - 已落地修复：
+    - `_apply_packaging_plan(...)` 现在接受可选 `render_plan=None`；
+    - `render_video(...)` 在包装分支直接传 `None`，只透传已解析的 `packaging_context / packaging_assets`；
+    - insert / intro / outro / music / watermark 的消费顺序和渲染行为保持不变。
+  - 新增回归：
+    - `tests/test_render_frame_rate_unification.py::test_render_video_reuses_passed_packaging_and_runtime_contexts`
+    - `tests/test_render_frame_rate_unification.py::test_apply_packaging_plan_reuses_passed_packaging_context`
+    - `tests/test_render_frame_rate_unification.py::test_apply_packaging_plan_reuses_passed_packaging_assets`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py`
+    - `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "render_video_reuses_passed_packaging_and_runtime_contexts or apply_packaging_plan_reuses_passed_packaging_context or apply_packaging_plan_reuses_passed_packaging_assets or apply_packaging_plan_reuses_nested_packaging_asset_context" -q`（`4 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-packaging-render-plan-handoff-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-packaging-render-plan-handoff-anchor/20260612-171657`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `steps.py -> render.py` caller/callee consumer sweep，又收掉一处 render-video 调用边界的冗余 render-plan handoff：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::run_render(...)` 与 `src/roughcut/media/render.py::render_video(...)` 的 packaged / ai-effect 调用边界；
+  - 旧逻辑已经在 `run_render(...)` 内先拿到完整的 `packaging_context / runtime_plan_context`，并且 `render_video(...)` 内部的 overlay 与 packaging helper 链也已经都支持在 common path 下不再依赖完整 `render_plan`，但 packaged / ai-effect 分支仍把整份 `ai_effect_render_plan` 或 `render_plan_timeline.data_json` 继续传入 `render_video(...)`；
+  - 这不是功能错误，但它让 render 主出口继续混着传“完整 plan”和“已解析 runtime context”两套合同，也让前面已经收掉的 helper handoff 没有向上真正闭环到调用边界。
+  - 已落地修复：
+    - `render_video(...)` 现在接受可选 `render_plan=None`；
+    - `run_render(...)` 的 packaged / ai-effect 两个 live 分支改为直接传 `None`，只透传 `packaging_context / runtime_plan_context`；
+    - plain render 分支仍保留 `plain_render_plan`，因为该分支没有预先透传完整 context。
+  - 新增回归：
+    - `tests/test_render_frame_rate_unification.py::test_render_video_reuses_passed_packaging_and_runtime_contexts`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/media/render.py src/roughcut/pipeline/steps.py tests/test_render_frame_rate_unification.py`
+    - `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "render_video_reuses_passed_packaging_and_runtime_contexts or apply_packaging_plan_reuses_passed_packaging_context or apply_packaging_plan_reuses_passed_packaging_assets or apply_timed_overlays_reuses_passed_packaging_context_and_avatar_plan" -q`（`4 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-render-video-callsite-handoff-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-render-video-callsite-handoff-anchor/20260612-172134`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `api/jobs.py` manual-editor helper consumer sweep，又收掉一处 video-transform helper 的冗余 render-plan handoff：
+  - 第一坏层在 `src/roughcut/api/jobs.py::_build_manual_editor_session(...)` / `apply_manual_editor_timeline(...)` 与 `_manual_video_transform_from_render_plan(...)` 的衔接边界；
+  - 旧逻辑已经在 manual-editor session/apply 主链里先拿到权威的 `render_plan_context`，但两个 caller 仍把整份 `render_plan_data / previous_render_plan` 继续传进 `_manual_video_transform_from_render_plan(...)`，让 helper 在 common path 里保留一条“完整 render-plan payload 陪跑”的低价值合同；
+  - 这不是功能错误，但它让 manual-editor 视频变换恢复链继续混着传“已解析上下文”和“完整 render plan”，也让 `_manual_editor_render_plan_context(...)` 已经收好的边界没有完全闭环到 helper 调用层。
+  - 已落地修复：
+    - `_build_manual_editor_session(...)` 现在在已有 `render_plan_context` 的分支传 `None` 给 `_manual_video_transform_from_render_plan(...)`；
+    - `apply_manual_editor_timeline(...)` 现在在已有 `previous_render_plan_context` 的分支也传 `None`；
+    - video transform 归一化、rotation_manual 标记和后续 manual-editor 变更比较语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults`
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py -k "manual_video_transform_from_render_plan_reuses_caller_render_plan_context or manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults or manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" -q`（`3 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-video-transform-handoff-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-video-transform-handoff-anchor/20260612-172729`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `api/jobs.py` manual-editor refine helper consumer sweep，又收掉一处 refine-plan 的冗余 render-plan handoff：
+  - 第一坏层在 `src/roughcut/api/jobs.py::save_manual_editor_draft(...)` / `apply_manual_editor_timeline(...)` 与 `_manual_editor_build_refine_decision_plan_from_render_plan(...)` 的衔接边界；
+  - 旧逻辑已经在 draft/apply 主链里先拿到权威的 `audio_defaults`，而 `_manual_editor_build_refine_decision_plan_from_render_plan(...)` 也早已在 `audio_defaults` 存在时不再消费 `render_plan_data`，但两个 caller 仍继续把整份 `render_plan_data / rebuilt_render_plan` 传进去；
+  - 这不是功能错误，但它让 manual-editor refine 合同继续保留一条 caller 层的低价值 payload 陪跑路径，也让 helper 内部已经收掉的冗余没有真正闭环到 live caller。
+  - 已落地修复：
+    - `save_manual_editor_draft(...)` 现在在已有 `audio_defaults` 的分支传 `render_plan_data=None`；
+    - `apply_manual_editor_timeline(...)` 现在在已有 `audio_defaults` 的分支也传 `render_plan_data=None`；
+    - refine-plan 的 keep segments、video_transform、smart_cut_rules 和 audio_defaults 语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_draft_reuses_editorial_analysis_context_for_cut_analysis_loader`
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py -k "manual_editor_build_refine_decision_plan_from_render_plan_reuses_passed_audio_defaults or manual_editor_draft_reuses_editorial_analysis_context_for_cut_analysis_loader or manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" -q`（`3 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-refine-render-plan-handoff-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-refine-render-plan-handoff-anchor/20260612-173010`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `steps.py` variant-bundle consumer sweep，又收掉一处 render-stage diagnostics bundle 的冗余 render-plan handoff：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::run_render(...)` 与 `_build_variant_timeline_bundle(...)` 的衔接边界；
+  - 旧逻辑已经在 render live path 里先拿到权威的 `packaging_context["packaging_timeline"]`，但 caller 仍继续把整份 `render_plan_timeline.data_json` 传进 `_build_variant_timeline_bundle(...)`，让 helper 在 common path 里保留一条“完整 render-plan payload 陪跑”的低价值合同；
+  - 这不是功能错误，但它让 render-stage 诊断 bundle 继续混着传“已解析 packaging_timeline”和“完整 render plan”，也让 `packaging_timeline` 作为包装边界事实源的合同没有完全闭环到 caller。
+  - 已落地修复：
+    - `_build_variant_timeline_bundle(...)` 现在接受可选 `render_plan=None`；
+    - `run_render(...)` 的 live caller 在已持有 `packaging_timeline` 时改为传 `render_plan=None`；
+    - helper 仅在未提供 `packaging_timeline` 时才回退到 `build_packaging_timeline_payload(render_plan)`，diagnostics / validation / variants 语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_variant_timeline_bundle_reuses_passed_packaging_timeline`
+    - `tests/test_manual_editor_helpers.py::test_variant_timeline_bundle_reuses_local_packaging_timeline_for_validation`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "variant_timeline_bundle_carries_refine_decision_plan or variant_timeline_bundle_reuses_local_packaging_timeline_analysis_payload or variant_timeline_bundle_reuses_passed_packaging_timeline or variant_timeline_bundle_reuses_local_packaging_timeline_for_validation or variant_timeline_bundle_allows_diagnostics_only_payload_without_render_variants" -q`（`6 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-variant-bundle-render-plan-handoff-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-variant-bundle-render-plan-handoff-anchor/20260612-173221`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `steps.py` auto edit-plan consumer sweep，又收掉同一个 diagnostics bundle 在自动链上的冗余 render-plan handoff：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::run_edit_plan(...)` 与 `_build_variant_timeline_bundle(...)` 的衔接边界；
+  - 旧逻辑已经在 auto edit-plan 主链里持有权威的 `render_plan_dict`，而 `variant_timeline_bundle` 实际只需要其中的 `packaging_timeline` 来构建 `timeline_rules.packaging_timeline` 与 diagnostics，但 caller 仍继续把整份 `render_plan_dict` 传进 helper；
+  - 这不是功能错误，但它让 auto edit-plan 诊断 bundle 也继续保留一条“完整 render-plan payload 陪跑”的低价值合同，和 render live path 的同类边界不一致。
+  - 已落地修复：
+    - `run_edit_plan(...)` 现在先本地 `build_packaging_timeline_payload(render_plan_dict)`；
+    - 调用 `_build_variant_timeline_bundle(...)` 时改为传 `render_plan=None` 与该 `packaging_timeline`；
+    - auto edit-plan 的 cut_analysis / refine_decision_plan / diagnostics / validation 语义保持不变。
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "variant_timeline_bundle_carries_refine_decision_plan or variant_timeline_bundle_reuses_local_packaging_timeline_analysis_payload or variant_timeline_bundle_reuses_passed_packaging_timeline or variant_timeline_bundle_reuses_local_packaging_timeline_for_validation or variant_timeline_bundle_allows_diagnostics_only_payload_without_render_variants" -q`（`6 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-auto-variant-bundle-handoff-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-auto-variant-bundle-handoff-anchor/20260612-173851`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `api/jobs.py` manual-editor cut-analysis consumer sweep，又收掉一处 cut-analysis loader 的冗余 editorial payload handoff：
+  - 第一坏层在 `src/roughcut/api/jobs.py::_build_manual_editor_session(...)` / `save_manual_editor_draft(...)` / `apply_manual_editor_timeline(...)` 与 `_load_manual_editor_cut_analysis_payload(...)` 的衔接边界；
+  - 旧逻辑已经在三个 live caller 里先拿到权威的 `editorial_analysis`，而 `_load_manual_editor_cut_analysis_payload(...)` 也只会在 `editorial_analysis` 缺失时才回退读取 `editorial_timeline_payload`，但 caller 仍继续把整份 editorial payload 传进去；
+  - 这不是功能错误，但它让 manual-editor cut-analysis 合同继续保留一条 caller 层的低价值 editorial payload 陪跑路径，也让前面已经收掉的 editorial-analysis handoff 没有完全闭环到 loader 调用层。
+  - 已落地修复：
+    - `_build_manual_editor_session(...)` 现在在已有 `editorial_context["editorial_analysis"]` 的分支传 `editorial_timeline_payload=None`；
+    - `save_manual_editor_draft(...)` 与 `apply_manual_editor_timeline(...)` 在各自已有 `editorial_analysis` 的分支也都改为传 `None`；
+    - cut-analysis 构造、manual-editor change_scope、draft/refine 语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults`
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_draft_reuses_editorial_analysis_context_for_cut_analysis_loader`
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults or manual_editor_draft_reuses_editorial_analysis_context_for_cut_analysis_loader or manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" -q`（`3 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-cut-analysis-handoff-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-cut-analysis-handoff-anchor/20260612-174157`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `steps.py` packaged-subtitle subhelper sweep，又收掉一处 section-profile lookup 的冗余 render-plan handoff：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::_rewrite_packaged_subtitle_copy(...)` / `_resegment_packaged_subtitles(...)` 与 `_subtitle_section_profile_for_time(...)` 的衔接边界；
+  - 旧逻辑已经在两个 packaged-subtitle subhelper 里先拿到权威的 `section_profile_context`，但调用 `_subtitle_section_profile_for_time(...)` 时仍继续把 `render_plan` 一路带下去；
+  - 这不是功能错误，但它让 packaged subtitle 改写/重分段链继续保留一条内部 helper 的低价值 payload 陪跑路径，也和外层 `map_subtitles_to_packaged_timeline(...)` 已经收好的 `section_profile_context` 合同不一致。
+  - 已落地修复：
+    - `_rewrite_packaged_subtitle_copy(...)` 与 `_resegment_packaged_subtitles(...)` 在已有 `resolved_section_profile_context` 时，调用 `_subtitle_section_profile_for_time(...)` 统一改为传 `render_plan=None`；
+    - hook/detail/cta subtitle rewrite、resegmentation、unit role 和时长分配语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_rewrite_packaged_subtitle_copy_reuses_local_section_profile_context`
+    - `tests/test_manual_editor_helpers.py::test_resegment_packaged_subtitles_reuses_local_section_profile_context`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "rewrite_packaged_subtitle_copy_reuses_local_section_profile_context or resegment_packaged_subtitles_reuses_local_section_profile_context or map_subtitles_to_packaged_timeline_reuses_local_section_profile_context or map_subtitles_to_packaged_timeline_reuses_section_profile_context_from_timeline_mapping or map_subtitles_to_packaged_timeline_reuses_shared_section_profile_context_helper" -q`（`5 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-section-profile-subhelper-handoff-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-section-profile-subhelper-handoff-anchor/20260612-174421`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `steps.py` variant-bundle validation 邻域，又收掉一处 bundle 到 validator 的冗余 packaging-timeline handoff：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::_build_variant_timeline_bundle(...)` 与 `_validate_variant_timeline_bundle(...)` 的衔接边界；
+  - 旧逻辑已经在 bundle 内部把权威的 `resolved_packaging_timeline` 写进 `timeline_rules.packaging_timeline`，但调用 validator 时仍把同一份对象再额外作为 `packaging_timeline` 参数传一遍；
+  - 这不是功能错误，但它让 variant bundle 的验证链继续混着传“bundle 当前合同”和“bundle 外的并行 packaging payload”，也让 validation 邻域没有完全以内嵌 bundle 合同为事实源闭环。
+  - 已落地修复：
+    - `_build_variant_timeline_bundle(...)` 现在直接调用 `_validate_variant_timeline_bundle(bundle)`，不再重复透传 `packaging_timeline`；
+    - `_validate_variant_timeline_bundle(...)` 现在在 `timeline_rules.packaging_timeline` 已存在时优先复用该嵌套包装合同，只在 bundle 未携带该合同的兼容路径下才回退到显式传参或 `resolve_packaging_timeline_payload(...)`；
+    - variant diagnostics / validation / render bundle 语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_variant_timeline_bundle_reuses_local_packaging_timeline_for_validation`
+    - `tests/test_manual_editor_helpers.py::test_validate_variant_timeline_bundle_reuses_nested_bundle_packaging_timeline`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "variant_timeline_bundle_reuses_local_packaging_timeline_for_validation or validate_variant_timeline_bundle_reuses_nested_bundle_packaging_timeline or validate_variant_timeline_bundle_reuses_passed_packaging_timeline or variant_timeline_bundle_reuses_passed_packaging_timeline or variant_timeline_bundle_reuses_local_packaging_timeline_analysis_payload" -q`（`5 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-variant-validation-packaging-handoff-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-variant-validation-packaging-handoff-anchor/20260612-175139`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `steps.py` packaged-timeline mapping 邻域，又收掉一处 transition helper 的冗余 packaging-timeline handoff：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::_resolve_packaged_timeline_mapping_context(...)` 与 `_resolve_transition_overlap_offsets(...)` 的衔接边界；
+  - 旧逻辑已经在 packaged timeline mapping 里先拿到权威的 `transitions`，但调用 transition overlap helper 时仍把 `packaging_timeline` 一起带下去；
+  - 这不是功能错误，但它让 packaged subtitle / accents mapping 链继续保留一条“已解析 transitions + 整份 packaging_timeline 陪跑”的低价值合同，也让 transition helper 的 fallback 逻辑没有收紧到真正只给缺省调用场景使用。
+  - 已落地修复：
+    - `_resolve_packaged_timeline_mapping_context(...)` 现在在已有 `transitions` 的 common path 下，调用 `_resolve_transition_overlap_offsets(...)` 统一改为传 `render_plan=None`；
+    - transition boundary index、duration clamp、intro / insert timing mapping、subtitle / accent 映射语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_packaged_timeline_mapping_reuses_local_transitions_context`
+    - `tests/test_manual_editor_helpers.py::test_packaged_timeline_mapping_reuses_passed_packaging_context`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "packaged_timeline_mapping_reuses_local_transitions_context or packaged_timeline_mapping_reuses_passed_packaging_context or resolve_transition_overlap_offsets_reuses_passed_transitions or resolve_transition_overlap_offsets_reuses_local_normalized_packaging_payload or packaged_timeline_mapping_reuses_local_packaging_timeline_for_section_profile_context" -q`（`5 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-transition-offsets-handoff-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-transition-offsets-handoff-anchor/20260612-175926`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `api/jobs.py` manual-editor apply 邻域，又收掉一处 packaging-plan helper 的冗余 render-plan-context handoff：
+  - 第一坏层在 `src/roughcut/api/jobs.py::apply_manual_editor_timeline(...)` 与 `_manual_editor_packaging_plan_from_render_plan(...)` 的衔接边界；
+  - 旧逻辑已经在 manual-editor apply 主链里先拿到权威的 `previous_packaging_timeline`，并且同一作用域里也已持有 `cover / delivery` 子事实，但在 `subtitle_only` / `reuse_timeline_effect_plan` 的 common path 下，caller 仍继续把整份 `previous_render_plan_context` 传进 packaging-plan helper；
+  - 这不是功能错误，但它让 manual-editor packaging fallback 链继续混着传“已解析包装子事实”和“完整 render-plan context”，也让 helper 的 fallback 逻辑没有收紧到真正只给缺省调用场景使用。
+  - 已落地修复：
+    - `_manual_editor_packaging_plan_from_render_plan(...)` 现在接受可选 `packaging_timeline / cover / delivery`；
+    - `apply_manual_editor_timeline(...)` 在已有这些权威子事实的分支下，直接传它们并把 `render_plan_context` 留空；
+    - subtitle_style / smart_effect_style / intro/outro/insert/music/watermark / export delivery 语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_manual_editor_packaging_plan_reuses_caller_packaging_timeline_cover_and_delivery`
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py -k "manual_editor_packaging_plan_reuses_caller_packaging_timeline_cover_and_delivery or manual_editor_packaging_plan_reuses_caller_render_plan_context or manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope or manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun" -q`（`4 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-packaging-subfact-handoff-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-packaging-subfact-handoff-anchor/20260612-180607`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `api/jobs.py` manual-editor draft 邻域，又收掉一处 refine audio-defaults 的冗余 render-plan-context recovery：
+  - 第一坏层在 `src/roughcut/api/jobs.py::save_manual_editor_draft(...)` 与 `_manual_editor_render_plan_context(...)` 的衔接边界；
+  - 旧逻辑已经在 draft-save 主链里只需要 `loudness + voice_processing` 两个子事实来构造 `audio_defaults`，但仍先构出整份 `render_plan_context`；
+  - 这不是功能错误，但它让 draft-save 路径继续为了一个很窄的 refine 子合同去恢复完整 render-plan context，也让 `packaging_timeline / cover / delivery / avatar / ai_director` 这些无关子事实在 common path 上陪跑。
+  - 已落地修复：
+    - `save_manual_editor_draft(...)` 现在直接用 `render_plan_loudness(render_plan_data)` 与 `render_plan_voice_processing(render_plan_data)` 组装 `audio_defaults`；
+    - draft-save 的 refine 决策计划、cut-analysis、subtitle 保存语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_draft_reuses_editorial_analysis_context_for_cut_analysis_loader`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "manual_editor_draft_reuses_editorial_analysis_context_for_cut_analysis_loader or manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope or manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun" -q`（`3 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-draft-audio-defaults-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-draft-audio-defaults-anchor/20260612-180915`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `api/jobs.py` manual-editor session 邻域，又收掉一处 refine audio-defaults 的冗余 render-plan-context recovery：
+  - 第一坏层在 `src/roughcut/api/jobs.py::_build_manual_editor_session(...)` 与 `_manual_editor_render_plan_context(...)` 的衔接边界；
+  - 旧逻辑已经在 session 主链里只需要 `loudness + voice_processing` 两个子事实来构造 `refine_decision_plan.audio_defaults`，但仍复用了整份 `render_plan_context`；
+  - 这不是功能错误，但它让 session 路径继续为了一个很窄的 refine 子合同，把 `packaging_timeline / cover / delivery / ai_director / avatar` 等无关子事实一起恢复出来。
+  - 已落地修复：
+    - `_build_manual_editor_session(...)` 现在仍通过 `render_plan_context` 供 `base_video_transform` 复用，但 `audio_defaults` 已改为直接使用 `render_plan_loudness(render_plan_data)` 与 `render_plan_voice_processing(render_plan_data)`；
+    - manual-editor session 的 base video transform、cut-analysis、refine plan 语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_session_regressions.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_session_regressions.py -k "manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults or manual_editor_draft_reuses_editorial_analysis_context_for_cut_analysis_loader or manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" -q`（`3 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-session-audio-defaults-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-session-audio-defaults-anchor/20260612-181219`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `api/jobs.py` manual-video-transform helper 邻域，又收掉一处 video-transform subfact 的冗余 render-plan-context handoff：
+  - 第一坏层在 `src/roughcut/api/jobs.py::_build_manual_editor_session(...)` / `apply_manual_editor_timeline(...)` 与 `_manual_video_transform_from_render_plan(...)` 的衔接边界；
+  - 旧逻辑已经在 session/apply 主链里各自持有权威的 `video_transform` 子事实来源，但 helper 调用仍继续透传整份 `render_plan_context`；
+  - 这不是功能错误，但它让 manual video transform 恢复链继续混着传“直接 video_transform 子事实”和“完整 render-plan context”，也让 helper 的 fallback 逻辑没有收紧到真正只给缺省调用场景使用。
+  - 已落地修复：
+    - `_manual_video_transform_from_render_plan(...)` 现在接受可选 `video_transform`；
+    - `_build_manual_editor_session(...)` 直接传 `render_plan_video_transform(render_plan_data)`；
+    - `apply_manual_editor_timeline(...)` 在已有 `previous_render_plan_context["video_transform"]` 的分支下直接透传该子事实；
+    - video transform 归一化、rotation_manual 标记和 change-scope 比较语义保持不变。
+  - 新增回归：
+    - `tests/test_manual_editor_helpers.py::test_manual_video_transform_from_render_plan_reuses_caller_video_transform`
+    - `tests/test_manual_editor_session_regressions.py::test_manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/api/jobs.py tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py tests/test_manual_editor_session_regressions.py -k "manual_video_transform_from_render_plan_reuses_caller_video_transform or manual_video_transform_from_render_plan_reuses_caller_render_plan_context or manual_editor_session_reuses_render_plan_context_for_video_transform_and_audio_defaults or manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_only_change_scope" -q`（`4 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-video-transform-subfact-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-manual-video-transform-subfact-anchor/20260612-181544`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `steps.py` auto edit-plan caller 邻域，又收掉一处 variant-bundle 的冗余 editorial-analysis payload handoff：
+  - 第一坏层在 `src/roughcut/pipeline/steps.py::run_edit_plan(...)` 与 `_build_variant_timeline_bundle(...)` 的衔接边界；
+  - 旧逻辑已经在 auto edit-plan 主链里持有权威的 `decision.analysis`，但在构建 `variant_timeline_bundle` 前仍额外走了一层 `_resolve_editorial_analysis_payload(...)`；
+  - 这不是功能错误，但它让 auto edit-plan caller 继续保留一条“已有 analysis 子事实 + editorial payload fallback helper”并存的低价值合同，也和同类 caller cleanup 的方向不一致。
+  - 已落地修复：
+    - `run_edit_plan(...)` 现在在 `decision.analysis` 已是 `dict` 的 common path 下，直接把该子事实传给 `_build_variant_timeline_bundle(...)`；
+    - 只有在 `decision.analysis` 缺失或非 `dict` 的兼容路径下，才回退到 `_resolve_editorial_analysis_payload(editorial_timeline.data_json)`；
+    - variant bundle、edit review bundle、cut-analysis、refine plan 语义保持不变。
+  - focused 验证：
+    - `python -m py_compile src/roughcut/pipeline/steps.py tests/test_manual_editor_helpers.py`
+    - `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "resolve_editorial_analysis_payload_reuses_caller_analysis or variant_timeline_bundle_carries_refine_decision_plan or variant_timeline_bundle_reuses_local_packaging_timeline_analysis_payload or variant_timeline_bundle_reuses_passed_packaging_timeline or variant_timeline_bundle_reuses_local_packaging_timeline_for_validation" -q`（`6 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after edit_plan --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-edit-plan-editorial-analysis-caller-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-edit-plan-editorial-analysis-caller-anchor/20260612-181927`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-13: 通用自动剪辑策略重构继续推进 `media/render.py` overlay caller 邻域，又收掉一处 timed-overlay filter helper 的冗余 packaging-context handoff：
+  - 第一坏层在 `src/roughcut/media/render.py::render_video(...)` / `_apply_timed_overlays_to_video(...)` 与 `_build_timed_overlay_filter_chain(...)` 的衔接边界；
+  - 旧逻辑已经在两个 live caller 里先拿到权威的 `subtitles_plan`，但调用 timed-overlay filter helper 时仍把 `packaging_context` 一并带下去；
+  - 这不是功能错误，但它让 overlay filter helper 链继续混着传“直接字幕子事实”和“完整 packaging context”，也让 helper 的 fallback 逻辑没有收紧到真正只给缺省调用场景使用。
+  - 已落地修复：
+    - `render_video(...)` 的 non-packaging timed-overlay 分支现在在已有 `subtitles_plan` 时，调用 `_build_timed_overlay_filter_chain(...)` 改为传 `packaging_context=None`；
+    - `_apply_timed_overlays_to_video(...)` 在已解析 `resolved_subtitles_plan` 的分支也统一改为传 `packaging_context=None`；
+    - overlay filter chain、subtitle ass 生成、avatar margin、overlay render 语义保持不变。
+  - 新增回归：
+    - `tests/test_render_frame_rate_unification.py::test_render_video_reuses_passed_subtitles_plan_for_direct_overlay_helper`
+    - `tests/test_render_frame_rate_unification.py::test_apply_timed_overlays_reuses_passed_packaging_context_and_avatar_plan`
+  - focused 验证：
+    - `python -m py_compile src/roughcut/media/render.py tests/test_render_frame_rate_unification.py`
+    - `PYTHONPATH=src python -m pytest tests/test_render_frame_rate_unification.py -k "apply_timed_overlays_reuses_passed_packaging_context_and_avatar_plan or timed_overlay_filter_chain_reuses_passed_packaging_context_and_avatar_plan or render_video_reuses_passed_subtitles_plan_for_direct_overlay_helper or render_video_reuses_passed_packaging_and_runtime_contexts" -q`（`4 passed`）
+  - 真实 anchor：
+    - `python scripts/run_auto_edit_recovery_golden_set.py --manifest docs/golden-jobs/auto-edit-recovery-golden-slice.v1.json --case-id noc_mt34_short_done --stop-after render --report-dir output/test/auto-edit-recovery-golden/strategy-refactor-20260613-overlay-subtitles-plan-handoff-anchor`
+    - 结果：`run_dir=output/test/auto-edit-recovery-golden/strategy-refactor-20260613-overlay-subtitles-plan-handoff-anchor/20260612-182346`
+    - `status=partial`，`quality_score=100.0`
+    - `live_readiness.status=pass`
+    - `required_checks.required_checks_contract_passed=4/4`

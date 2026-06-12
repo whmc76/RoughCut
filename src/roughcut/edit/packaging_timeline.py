@@ -89,5 +89,36 @@ def packaging_timeline_assets(payload: dict[str, Any] | None) -> dict[str, Any]:
     return dict(resolve_packaging_timeline_payload(payload).get("packaging") or {})
 
 
+def packaging_timeline_asset_plan(
+    payload: dict[str, Any] | None,
+    asset_name: str,
+) -> Any:
+    asset_key = str(asset_name or "").strip()
+    if not asset_key:
+        return None
+    packaging = dict(resolve_packaging_timeline_payload(payload).get("packaging") or {})
+    return copy.deepcopy(packaging.get(asset_key))
+
+
 def packaging_timeline_editing_accents(payload: dict[str, Any] | None) -> dict[str, Any]:
     return dict(resolve_packaging_timeline_payload(payload).get("editing_accents") or {})
+
+
+def packaging_timeline_transitions(payload: dict[str, Any] | None) -> dict[str, Any]:
+    editing_accents = dict(resolve_packaging_timeline_payload(payload).get("editing_accents") or {})
+    return copy.deepcopy(editing_accents.get("transitions") or {})
+
+
+def packaging_timeline_has_packaging_assets(payload: dict[str, Any] | None) -> bool:
+    packaging = dict(resolve_packaging_timeline_payload(payload).get("packaging") or {})
+    return any(packaging.get(key) for key in ("intro", "outro", "insert", "watermark", "music"))
+
+
+def packaging_timeline_has_editing_accents(payload: dict[str, Any] | None) -> bool:
+    accents = packaging_timeline_editing_accents(payload)
+    transitions = copy.deepcopy(accents.get("transitions") or {})
+    return bool(
+        transitions.get("boundary_indexes")
+        or accents.get("emphasis_overlays")
+        or accents.get("sound_effects")
+    )
