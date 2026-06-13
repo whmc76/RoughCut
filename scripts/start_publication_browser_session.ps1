@@ -16,6 +16,20 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$cleanupWorkspaceRuntime = [Environment]::GetEnvironmentVariable("ROUGHCUT_SKIP_WORKSPACE_RUNTIME_CLEANUP", "Process")
+if ([string]::IsNullOrWhiteSpace($cleanupWorkspaceRuntime)) {
+    $cleanupWorkspaceRuntime = [Environment]::GetEnvironmentVariable("ROUGHCUT_SKIP_WORKSPACE_RUNTIME_CLEANUP", "User")
+}
+if ([string]::IsNullOrWhiteSpace($cleanupWorkspaceRuntime)) {
+    $cleanupWorkspaceRuntime = [Environment]::GetEnvironmentVariable("ROUGHCUT_SKIP_WORKSPACE_RUNTIME_CLEANUP", "Machine")
+}
+$skipWorkspaceRuntimeCleanup = @("1", "true", "yes") -contains ([string]$cleanupWorkspaceRuntime).Trim().ToLowerInvariant()
+if (-not $skipWorkspaceRuntimeCleanup) {
+    $cleanupScript = Join-Path $repoRoot "scripts\cleanup_workspace_runtime.ps1"
+    if (Test-Path -LiteralPath $cleanupScript) {
+        & $cleanupScript -Quiet
+    }
+}
 
 if ([string]::IsNullOrWhiteSpace($ProfilesJson)) {
     $ProfilesJson = Join-Path $repoRoot "data\avatar_materials\profiles.json"

@@ -15,7 +15,10 @@ from roughcut.edit.low_signal_text import (
     looks_like_noise_subtitle as _looks_like_noise_subtitle,
     subtitle_signal_score as _subtitle_signal_score,
 )
+from roughcut.edit.local_highlight_candidates import build_local_highlight_candidates
+from roughcut.edit.local_multi_material_candidates import build_local_multi_material_candidates
 from roughcut.edit.skills import apply_review_focus_overrides, resolve_editing_skill
+from roughcut.edit.strategy_profile import build_strategy_profile_payload, infer_strategy_type
 from roughcut.edit.subtitle_surfaces import (
     subtitle_canonical_rule_text,
     subtitle_display_rule_text,
@@ -373,6 +376,12 @@ def build_edit_decision(
         resolved_skill,
         review_focus=(editing_skill or {}).get("review_focus"),
     )
+    resolved_strategy_profile = build_strategy_profile_payload(
+        strategy_type=infer_strategy_type(
+            workflow_template=str((content_profile or {}).get("workflow_template") or ""),
+            content_profile=content_profile,
+        )
+    )
     effective_min_silence_to_cut = max(0.12, float(resolved_skill.get("silence_floor_sec", min_silence_to_cut) or min_silence_to_cut))
     normalized_subtitles = _normalize_subtitle_items(subtitle_items or [])
     normalized_transcript = _normalize_transcript_segments(transcript_segments or [])
@@ -480,6 +489,8 @@ def build_edit_decision(
             "scene_boundary_count": len(scene_points),
             "transcript_segment_count": len(normalized_transcript),
             "effective_min_silence_to_cut": round(effective_min_silence_to_cut, 3),
+            "strategy_type": str(resolved_strategy_profile.get("strategy_type") or ""),
+            "strategy_profile": resolved_strategy_profile,
             "silence_segments": [
                 {
                     "start": round(max(0.0, silence.start), 3),
@@ -574,6 +585,12 @@ def infer_timeline_analysis(
         resolved_skill,
         review_focus=(editing_skill or {}).get("review_focus"),
     )
+    resolved_strategy_profile = build_strategy_profile_payload(
+        strategy_type=infer_strategy_type(
+            workflow_template=str((content_profile or {}).get("workflow_template") or ""),
+            content_profile=content_profile,
+        )
+    )
     total_duration = float(duration or 0.0)
     if total_duration <= 0.0 and normalized:
         total_duration = max(float(item.get("end_time", 0.0) or 0.0) for item in normalized)
@@ -585,7 +602,11 @@ def infer_timeline_analysis(
             "section_directives": [],
             "section_actions": [],
             "editing_skill": resolved_skill,
+            "strategy_type": str(resolved_strategy_profile.get("strategy_type") or ""),
+            "strategy_profile": resolved_strategy_profile,
             "emphasis_candidates": [],
+            "highlight_candidates": [],
+            "multi_material_candidates": [],
         }
 
     annotated = []
@@ -624,6 +645,22 @@ def infer_timeline_analysis(
     cta_start_sec = float(cta_candidates[0]["start_sec"]) if cta_candidates else None
 
     emphasis_candidates = _build_emphasis_candidates(annotated)
+    highlight_candidates = build_local_highlight_candidates(
+        annotated_items=annotated,
+        sections=sections,
+        emphasis_candidates=emphasis_candidates,
+        multimodal_segment_hints=multimodal_segment_hints,
+        content_profile=content_profile,
+        editing_skill=resolved_skill,
+        duration=total_duration,
+    )
+    multi_material_candidates = build_local_multi_material_candidates(
+        content_profile=content_profile,
+        local_asset_inventory={
+            "has_primary_video": True,
+            "auxiliary_video_count": max(0, len(list((content_profile or {}).get("merged_source_names") or [])) - 1),
+        },
+    )
     return {
         "hook_end_sec": round(hook_end_sec, 3),
         "cta_start_sec": round(cta_start_sec, 3) if cta_start_sec is not None else None,
@@ -639,7 +676,11 @@ def infer_timeline_analysis(
             multimodal_segment_hints=multimodal_segment_hints,
         ),
         "editing_skill": resolved_skill,
+        "strategy_type": str(resolved_strategy_profile.get("strategy_type") or ""),
+        "strategy_profile": resolved_strategy_profile,
         "emphasis_candidates": emphasis_candidates,
+        "highlight_candidates": highlight_candidates,
+        "multi_material_candidates": multi_material_candidates,
         "multimodal_segment_hints": multimodal_segment_hints,
     }
 

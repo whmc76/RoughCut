@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from roughcut.edit.presets import get_workflow_preset, normalize_workflow_template_name
 from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.db.models import Timeline
+from roughcut.edit.local_audio_cues import normalize_local_music_plan
+from roughcut.edit.local_insert_plan import normalize_local_insert_plan
 from roughcut.packaging.library import resolve_insert_transition_overlap
 
 _DEFAULT_SMART_EFFECT_STYLE = "smart_effect_commercial"
@@ -104,6 +106,7 @@ def build_render_plan(
     insert: dict | None = None,
     watermark: dict | None = None,
     music: dict | None = None,
+    focus_plan: dict[str, Any] | None = None,
     timeline_analysis: dict[str, Any] | None = None,
     editing_skill: dict[str, Any] | None = None,
     editing_accents: dict | None = None,
@@ -127,7 +130,10 @@ def build_render_plan(
         timeline_analysis=resolved_timeline_analysis,
         editing_skill=resolved_editing_skill,
     )
-    bound_insert = _bind_insert_to_section_choreography(insert, section_choreography=section_choreography)
+    bound_insert = _bind_insert_to_section_choreography(
+        normalize_local_insert_plan(insert),
+        section_choreography=section_choreography,
+    )
     bound_subtitles = _bind_subtitles_to_choreography(
         {
             "style": subtitle_style,
@@ -175,7 +181,10 @@ def build_render_plan(
         "outro": outro,
         "insert": bound_insert,
         "watermark": watermark,
-        "music": _bind_music_to_choreography(music, section_choreography=section_choreography, insert=bound_insert),
+        "music": normalize_local_music_plan(
+            _bind_music_to_choreography(music, section_choreography=section_choreography, insert=bound_insert)
+        ),
+        "focus": copy.deepcopy(focus_plan or {}) if isinstance(focus_plan, dict) and focus_plan else None,
         "timeline_analysis": resolved_timeline_analysis,
         "editing_skill": resolved_editing_skill,
         "section_choreography": section_choreography,

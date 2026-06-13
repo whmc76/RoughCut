@@ -18,6 +18,7 @@ from sqlalchemy.orm import selectinload
 
 from roughcut.config import get_settings
 from roughcut.pipeline.live_readiness import load_live_readiness_snapshot
+from roughcut.storage.runtime_cleanup import cleanup_workspace_runtime_files, workspace_runtime_cleanup_targets
 
 
 logging.basicConfig(
@@ -236,6 +237,38 @@ def doctor(json_output: bool):
             click.echo(f"[{item.status.upper()}] {item.name}: {item.detail}")
     if any(item.critical and item.status == "fail" for item in checks):
         raise SystemExit(1)
+
+
+@cli.command("cleanup-runtime")
+@click.option("--dry-run", is_flag=True, default=False, help="List disposable workspace runtime directories without deleting them")
+@click.option("--json-output", "json_output", is_flag=True, default=False, help="Print machine-readable JSON")
+def cleanup_runtime(dry_run: bool, json_output: bool):
+    """Remove disposable workspace runtime/debug scratch directories."""
+    repo_root = _repo_root()
+    targets = [path for path in workspace_runtime_cleanup_targets(repo_root)]
+    existing_targets = [path for path in targets if path.exists()]
+    removed_targets = existing_targets if dry_run else cleanup_workspace_runtime_files(repo_root)
+
+    payload = {
+        "repo_root": str(repo_root),
+        "dry_run": dry_run,
+        "targets": [str(path) for path in targets],
+        "existing_targets": [str(path) for path in existing_targets],
+        "removed_targets": [str(path) for path in removed_targets],
+    }
+    if json_output:
+        click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+        return
+    if dry_run:
+        for path in existing_targets:
+            click.echo(f"[would-remove] {path}")
+        if not existing_targets:
+            click.echo("[ok] no disposable workspace runtime directories found")
+        return
+    for path in removed_targets:
+        click.echo(f"[removed] {path}")
+    if not removed_targets:
+        click.echo("[ok] no disposable workspace runtime directories found")
 
 
 @cli.command()

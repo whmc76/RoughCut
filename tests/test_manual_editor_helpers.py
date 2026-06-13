@@ -124,6 +124,8 @@ from roughcut.edit.render_plan import (
 from roughcut.edit.packaging_timeline import (
     packaging_timeline_asset_plan,
     packaging_timeline_assets,
+    packaging_timeline_chapter_cards,
+    packaging_timeline_focus_events,
     packaging_timeline_has_editing_accents,
     packaging_timeline_has_packaging_assets,
     packaging_timeline_transitions,
@@ -1015,6 +1017,7 @@ def test_manual_editor_packaging_plan_reads_nested_packaging_timeline() -> None:
                 "subtitles": {"style": "clean_white", "motion_style": "motion_slide"},
                 "packaging": {
                     "intro": {"path": "intro.mp4"},
+                    "insert": {"asset_id": "insert-a", "path": "insert.mp4", "insert_target_duration_sec": 1.23456},
                     "music": {"path": "music.mp3"},
                 },
                 "editing_accents": {"style": "smart_effect_punch"},
@@ -1030,9 +1033,36 @@ def test_manual_editor_packaging_plan_reads_nested_packaging_timeline() -> None:
         "title_style": "strong",
         "intro": {"path": "intro.mp4"},
         "outro": None,
-        "insert": None,
+        "insert": {
+            "asset_id": "insert-a",
+            "path": "insert.mp4",
+            "insert_target_duration_sec": 1.235,
+            "candidate_assets": [
+                {
+                    "asset_id": "insert-a",
+                    "path": "insert.mp4",
+                    "original_name": "",
+                    "insert_archetype": "",
+                    "insert_motion_profile": "",
+                    "insert_transition_style": "",
+                    "insert_target_duration_sec": 1.235,
+                    "selection_score": 0.0,
+                    "selection_reasons": [],
+                }
+            ],
+        },
         "watermark": None,
-        "music": {"path": "music.mp3"},
+        "music": {
+            "path": "music.mp3",
+            "audio_cues": [
+                {
+                    "kind": "bgm_entry",
+                    "time_sec": 0.0,
+                    "reason": "",
+                    "review_recommended": False,
+                }
+            ],
+        },
         "export_resolution_mode": "preset",
         "export_resolution_preset": "1080p",
         "export_frame_rate_mode": "source",
@@ -1051,6 +1081,7 @@ def test_manual_editor_packaging_plan_reuses_local_normalized_packaging_payload(
                 "subtitles": {"style": "clean_white", "motion_style": "motion_slide"},
                 "packaging": {
                     "intro": {"path": "shared-intro.mp4"},
+                    "insert": {"asset_id": "shared-insert", "path": "shared-insert.mp4"},
                     "music": {"path": "shared-music.mp3"},
                 },
                 "editing_accents": {"style": "smart_effect_punch"},
@@ -1066,6 +1097,7 @@ def test_manual_editor_packaging_plan_reuses_local_normalized_packaging_payload(
                 "subtitles": {"style": "clean_white", "motion_style": "motion_slide"},
                 "packaging": {
                     "intro": {"path": "shared-intro.mp4"},
+                    "insert": {"asset_id": "shared-insert", "path": "shared-insert.mp4"},
                     "music": {"path": "shared-music.mp3"},
                 },
                 "editing_accents": {"style": "smart_effect_punch"},
@@ -1080,9 +1112,35 @@ def test_manual_editor_packaging_plan_reuses_local_normalized_packaging_payload(
         "title_style": "strong",
         "intro": {"path": "shared-intro.mp4"},
         "outro": None,
-        "insert": None,
+        "insert": {
+            "asset_id": "shared-insert",
+            "path": "shared-insert.mp4",
+            "candidate_assets": [
+                {
+                    "asset_id": "shared-insert",
+                    "path": "shared-insert.mp4",
+                    "original_name": "",
+                    "insert_archetype": "",
+                    "insert_motion_profile": "",
+                    "insert_transition_style": "",
+                    "insert_target_duration_sec": 0.0,
+                    "selection_score": 0.0,
+                    "selection_reasons": [],
+                }
+            ],
+        },
         "watermark": None,
-        "music": {"path": "shared-music.mp3"},
+        "music": {
+            "path": "shared-music.mp3",
+            "audio_cues": [
+                {
+                    "kind": "bgm_entry",
+                    "time_sec": 0.0,
+                    "reason": "",
+                    "review_recommended": False,
+                }
+            ],
+        },
         "export_resolution_mode": "source",
         "export_resolution_preset": "1080p",
         "export_frame_rate_mode": "source",
@@ -1201,7 +1259,17 @@ def test_packaging_timeline_asset_plan_accepts_nested_and_normalized_payloads() 
             }
         },
         "music",
-    ) == {"path": "music.mp3"}
+    ) == {
+        "path": "music.mp3",
+        "audio_cues": [
+            {
+                "kind": "bgm_entry",
+                "time_sec": 0.0,
+                "reason": "",
+                "review_recommended": False,
+            }
+        ],
+    }
 
 
 def test_packaging_timeline_asset_plan_returns_safe_copy() -> None:
@@ -1237,7 +1305,17 @@ def test_packaging_timeline_asset_plan_reuses_local_packaging_payload(
             }
         },
         "music",
-    ) == {"path": "music.mp3"}
+    ) == {
+        "path": "music.mp3",
+        "audio_cues": [
+            {
+                "kind": "bgm_entry",
+                "time_sec": 0.0,
+                "reason": "",
+                "review_recommended": False,
+            }
+        ],
+    }
 
 
 def test_packaging_timeline_transitions_accept_nested_and_normalized_payloads() -> None:
@@ -1644,8 +1722,9 @@ def test_runtime_packaging_context_reads_nested_packaging_timeline_payload() -> 
             "packaging_timeline": {
                 "packaging": {
                     "intro": {"path": "intro.mp4"},
-                    "music": {"path": "music.mp3"},
+                    "music": {"path": "music.mp3", "enter_sec": 4.2, "timing_summary": {"review_recommended": False}},
                 },
+                "focus": {"focus_events": [{"event_type": "hook_focus", "start_time": 0.0, "end_time": 2.0, "text": "先讲结论"}]},
                 "editing_accents": {
                     "style": "smart_effect_punch",
                     "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
@@ -1663,11 +1742,26 @@ def test_runtime_packaging_context_reads_nested_packaging_timeline_payload() -> 
                 "outro": None,
                 "insert": None,
                 "watermark": None,
-                "music": {"path": "music.mp3"},
+                "music": {
+                    "path": "music.mp3",
+                    "enter_sec": 4.2,
+                    "timing_summary": {"review_recommended": False},
+                    "audio_cues": [
+                        {
+                            "kind": "bgm_entry",
+                            "time_sec": 4.2,
+                            "reason": "",
+                            "review_recommended": False,
+                        }
+                    ],
+                },
             },
             "editing_accents": {
                 "style": "smart_effect_punch",
                 "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+            },
+            "focus": {
+                "focus_events": [{"event_type": "hook_focus", "start_time": 0.0, "end_time": 2.0, "text": "先讲结论"}]
             },
         },
         "assets": {
@@ -1675,7 +1769,19 @@ def test_runtime_packaging_context_reads_nested_packaging_timeline_payload() -> 
             "outro": None,
             "insert": None,
             "watermark": None,
-            "music": {"path": "music.mp3"},
+            "music": {
+                "path": "music.mp3",
+                "enter_sec": 4.2,
+                "timing_summary": {"review_recommended": False},
+                "audio_cues": [
+                    {
+                        "kind": "bgm_entry",
+                        "time_sec": 4.2,
+                        "reason": "",
+                        "review_recommended": False,
+                    }
+                ],
+            },
         },
         "editing_accents": {
             "style": "smart_effect_punch",
@@ -1684,6 +1790,17 @@ def test_runtime_packaging_context_reads_nested_packaging_timeline_payload() -> 
         "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
         "section_choreography": {},
         "subtitles": {},
+        "focus": {
+            "focus_events": [{"event_type": "hook_focus", "start_time": 0.0, "end_time": 2.0, "text": "先讲结论"}]
+        },
+        "audio_cues": [
+            {
+                "kind": "bgm_entry",
+                "time_sec": 4.2,
+                "reason": "",
+                "review_recommended": False,
+            }
+        ],
         "section_profile_context": {
             "subtitles": {},
             "timeline_analysis": {},
@@ -1742,6 +1859,8 @@ def test_runtime_packaging_context_reuses_local_normalized_packaging_payload() -
         "transitions": {"enabled": False, "boundary_indexes": [], "duration_sec": 0.12},
         "section_choreography": {},
         "subtitles": {},
+        "focus": None,
+        "audio_cues": [],
         "section_profile_context": {
             "subtitles": {},
             "timeline_analysis": {},
@@ -3045,6 +3164,118 @@ def test_cut_analysis_payload_keeps_reviewed_rule_candidate_out_of_rule_auto_app
         "auto_apply": {"low": 0, "medium": 0, "high": 0},
         "manual_confirm": {"low": 1, "medium": 0, "high": 0},
     }
+
+
+def test_cut_analysis_payload_integrates_highlight_candidates_through_strategy_decision_gate() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={
+            "strategy_type": "event_highlight",
+            "highlight_candidates": [
+                {
+                    "start_sec": 2.4,
+                    "end_sec": 8.9,
+                    "role": "detail",
+                    "score": 1.27,
+                    "reasons": ["命中 detail 段候选窗口", "窗口内存在强调候选"],
+                    "source_item_indexes": [1, 2],
+                    "source_emphasis_indexes": [0],
+                }
+            ],
+        },
+        source_name="highlight-demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[],
+        smart_cut_rules={},
+    )
+
+    candidate = next(item for item in payload["rule_candidates"] if item["reason"] == "highlight_window")
+    assert candidate["candidate_stage"] == "highlight_window_selection"
+    assert candidate["auto_applied"] is False
+    assert candidate["risk_level"] == "medium"
+    assert candidate["strategy_decision"]["decision"] == "manual_confirm"
+    assert candidate["strategy_decision"]["strategy_type"] == "event_highlight"
+    assert candidate["recommendation_reasons"] == ["命中 detail 段候选窗口", "窗口内存在强调候选"]
+    assert candidate["provenance"] == {
+        "producer": "local_highlight_candidates",
+        "source_item_indexes": [1, 2],
+        "source_emphasis_indexes": [0],
+    }
+    assert payload["auto_apply_candidate_count"] == 0
+    assert payload["manual_confirm_candidate_count"] == 1
+    assert payload["candidate_risk_summary"] == {
+        "total": {"low": 0, "medium": 1, "high": 0},
+        "auto_apply": {"low": 0, "medium": 0, "high": 0},
+        "manual_confirm": {"low": 0, "medium": 1, "high": 0},
+    }
+    assert "highlight_window_selection" in payload["candidate_sources"]
+
+
+def test_cut_analysis_payload_integrates_multi_material_candidates_only_for_narrative_strategy() -> None:
+    gated_payload = build_cut_analysis_payload(
+        editorial_analysis={
+            "strategy_type": "information_density",
+            "multi_material_candidates": [
+                {
+                    "source_name": "detail-cut.mp4",
+                    "role": "detail_support",
+                    "score": 1.02,
+                    "reasons": ["检测到辅助上传素材 detail-cut.mp4"],
+                    "suggested_operation": "insert_into_detail_window",
+                    "primary_source_name": "main.mp4",
+                    "order_index": 1,
+                }
+            ],
+        },
+        source_name="commentary-demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[],
+        smart_cut_rules={},
+    )
+    assert not any(item["reason"] == "multi_material_candidate" for item in gated_payload["rule_candidates"])
+
+    payload = build_cut_analysis_payload(
+        editorial_analysis={
+            "strategy_type": "narrative_assembly",
+            "multi_material_candidates": [
+                {
+                    "source_name": "detail-cut.mp4",
+                    "role": "detail_support",
+                    "score": 1.02,
+                    "reasons": ["检测到辅助上传素材 detail-cut.mp4", "素材名更像细节或特写补充镜头"],
+                    "suggested_operation": "insert_into_detail_window",
+                    "primary_source_name": "main.mp4",
+                    "order_index": 1,
+                }
+            ],
+        },
+        source_name="commentary-demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[],
+        smart_cut_rules={},
+    )
+
+    candidate = next(item for item in payload["rule_candidates"] if item["reason"] == "multi_material_candidate")
+    assert candidate["candidate_stage"] == "multi_material_assembly"
+    assert candidate["auto_applied"] is False
+    assert candidate["risk_level"] == "high"
+    assert candidate["strategy_decision"]["decision"] == "manual_confirm"
+    assert candidate["strategy_decision"]["strategy_type"] == "narrative_assembly"
+    assert candidate["recommendation_reasons"] == ["检测到辅助上传素材 detail-cut.mp4", "素材名更像细节或特写补充镜头"]
+    assert candidate["provenance"] == {
+        "producer": "local_multi_material_candidates",
+        "role": "detail_support",
+        "primary_source_name": "main.mp4",
+        "suggested_operation": "insert_into_detail_window",
+        "order_index": 1,
+    }
+    assert payload["auto_apply_candidate_count"] == 0
+    assert payload["manual_confirm_candidate_count"] == 1
+    assert payload["candidate_risk_summary"] == {
+        "total": {"low": 0, "medium": 0, "high": 1},
+        "auto_apply": {"low": 0, "medium": 0, "high": 0},
+        "manual_confirm": {"low": 0, "medium": 0, "high": 1},
+    }
+    assert "multi_material_assembly" in payload["candidate_sources"]
 
 
 def test_cut_analysis_payload_attaches_strategy_decision_metadata_to_auto_apply_candidate() -> None:

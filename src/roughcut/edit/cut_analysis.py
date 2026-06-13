@@ -29,6 +29,8 @@ from roughcut.edit.smart_cut_rules import normalize_smart_cut_rules_payload
 
 ARTIFACT_TYPE_CUT_ANALYSIS = "cut_analysis"
 CUT_ANALYSIS_SCHEMA_VERSION = "cut_analysis.v1"
+HIGHLIGHT_RECOMMENDATION_STAGE = "highlight_window_selection"
+MULTI_MATERIAL_RECOMMENDATION_STAGE = "multi_material_assembly"
 
 
 def _safe_float_time(value: Any, default: float = 0.0) -> float:
@@ -260,6 +262,97 @@ def _resolved_candidate_item(
     return normalized
 
 
+def _highlight_recommendation_candidates(
+    items: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for index, item in enumerate(_dict_items(items)):
+        try:
+            start_sec = round(max(0.0, float(item.get("start_sec", 0.0) or 0.0)), 3)
+            end_sec = round(max(start_sec, float(item.get("end_sec", start_sec) or start_sec)), 3)
+        except (TypeError, ValueError):
+            continue
+        role = str(item.get("role") or "").strip().lower() or "body"
+        reasons = [str(reason).strip() for reason in list(item.get("reasons") or []) if str(reason).strip()]
+        score = round(float(item.get("score", 0.0) or 0.0), 3)
+        candidates.append(
+            {
+                "index": index,
+                "start": start_sec,
+                "end": end_sec,
+                "reason": "highlight_window",
+                "risk_level": "medium",
+                "candidate_stage": HIGHLIGHT_RECOMMENDATION_STAGE,
+                "producer_id": "highlight_window_candidate_producer",
+                "strategy_applicability": ["event_highlight"],
+                "match_surface": role,
+                "match_surface_layer": "semantic",
+                "source_text": role,
+                "score": score,
+                "auto_applied": False,
+                "recommendation_reasons": reasons,
+                "provenance": {
+                    "producer": "local_highlight_candidates",
+                    "source_item_indexes": [int(value) for value in list(item.get("source_item_indexes") or [])],
+                    "source_emphasis_indexes": [int(value) for value in list(item.get("source_emphasis_indexes") or [])],
+                },
+            }
+        )
+    return candidates
+
+
+def _multi_material_recommendation_candidates(
+    items: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for index, item in enumerate(_dict_items(items)):
+        source_name = str(item.get("source_name") or "").strip()
+        if not source_name:
+            continue
+        role = str(item.get("role") or "").strip().lower() or "detail_support"
+        reasons = [str(reason).strip() for reason in list(item.get("reasons") or []) if str(reason).strip()]
+        score = round(float(item.get("score", 0.0) or 0.0), 3)
+        candidates.append(
+            {
+                "index": index,
+                "start": 0.0,
+                "end": 0.0,
+                "reason": "multi_material_candidate",
+                "risk_level": "high",
+                "candidate_stage": MULTI_MATERIAL_RECOMMENDATION_STAGE,
+                "producer_id": "multi_material_candidate_producer",
+                "strategy_applicability": ["narrative_assembly"],
+                "match_surface": source_name,
+                "match_surface_layer": "semantic",
+                "source_text": source_name,
+                "score": score,
+                "auto_applied": False,
+                "recommendation_reasons": reasons,
+                "provenance": {
+                    "producer": "local_multi_material_candidates",
+                    "role": role,
+                    "primary_source_name": str(item.get("primary_source_name") or "").strip() or None,
+                    "suggested_operation": str(item.get("suggested_operation") or "").strip() or None,
+                    "order_index": int(item.get("order_index", 0) or 0),
+                },
+            }
+        )
+    return candidates
+
+
+def _strategy_recommendation_candidates(
+    analysis: dict[str, Any],
+    *,
+    strategy_type: str,
+) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    if strategy_type == "event_highlight":
+        candidates.extend(_highlight_recommendation_candidates(analysis.get("highlight_candidates")))
+    if strategy_type == "narrative_assembly":
+        candidates.extend(_multi_material_recommendation_candidates(analysis.get("multi_material_candidates")))
+    return candidates
+
+
 def cut_analysis_accepted_cuts(
     payload: dict[str, Any] | None,
     *,
@@ -425,6 +518,18 @@ def build_cut_analysis_payload(
                     strategy_profile=normalized_strategy_profile,
                 )
             )
+    strategy_recommendation_candidates = [
+        _resolved_candidate_item(
+            item,
+            job_flow_mode=normalized_job_flow_mode,
+            accepted_cut=False,
+            strategy_profile=normalized_strategy_profile,
+        )
+        for item in _strategy_recommendation_candidates(
+            analysis,
+            strategy_type=strategy_type,
+        )
+    ]
     silence_segments = _dict_items(analysis.get("silence_segments"))
     smart_cut_rule_candidates = build_smart_cut_rule_candidates(
         source_subtitles,
@@ -520,7 +625,7 @@ def build_cut_analysis_payload(
                 )
                 merged_rule_candidates.append(normalized_candidate)
         existing_keys[key] = 1
-    rule_candidates = [*retained_rule_candidates, *merged_rule_candidates]
+    rule_candidates = [*retained_rule_candidates, *merged_rule_candidates, *strategy_recommendation_candidates]
     candidate_sources = sorted(
         {
             str(item.get("candidate_stage") or "accepted_cut").strip() or "accepted_cut"

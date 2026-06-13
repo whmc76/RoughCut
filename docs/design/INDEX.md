@@ -6,6 +6,8 @@
 
 | 日期 | 标题 | 定位 | 文件 |
 |------|------|------|------|
+| 2026-06-13 | Uploaded-Material-Only Optimization Execution Plan | 上传素材闭环优化升级执行主计划 | [2026-06-13-uploaded-material-only-optimization-execution-plan.md](./2026-06-13-uploaded-material-only-optimization-execution-plan.md) |
+| 2026-06-13 | Uploaded-Material-Only Optimization Plan | 上传素材内闭环剪辑优化升级计划 | [2026-06-13-uploaded-material-only-optimization-plan.md](./2026-06-13-uploaded-material-only-optimization-plan.md) |
 | 2026-06-12 | Universal Auto Edit Strategy Implementation Plan | 通用自动剪辑策略重构实现方案 | [2026-06-12-universal-auto-edit-strategy-implementation-plan.md](./2026-06-12-universal-auto-edit-strategy-implementation-plan.md) |
 | 2026-06-11 | Universal Auto Edit Strategy Boundaries | 通用自动剪辑发布引擎与类型化剪辑策略边界 | [2026-06-11-universal-auto-edit-strategy-boundaries.md](./2026-06-11-universal-auto-edit-strategy-boundaries.md) |
 | 2026-06-08 | Auto Edit Quality Recovery Architecture | 当前自动剪辑质量恢复主方案 | [2026-06-08-auto-edit-quality-recovery-architecture.md](./2026-06-08-auto-edit-quality-recovery-architecture.md) |

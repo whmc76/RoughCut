@@ -65,12 +65,19 @@ from roughcut.edit.editorial_timeline import (
     editorial_timeline_subtitle_projection,
     resolve_refine_keep_segments_for_timeline,
 )
+from roughcut.edit.local_audio_cues import plan_local_music_entry, score_local_music_entry_candidates
+from roughcut.edit.local_focus_plan import build_local_focus_plan
+from roughcut.edit.local_insert_plan import plan_local_insert_slot
 from roughcut.edit.otio_export import export_to_otio
 from roughcut.edit.packaging_timeline import (
     build_packaging_timeline_payload,
     packaging_timeline_asset_plan,
     packaging_timeline_analysis,
     packaging_timeline_editing_skill,
+    packaging_timeline_focus_plan,
+    packaging_timeline_insert_plan,
+    packaging_timeline_local_audio_cues,
+    packaging_timeline_music_plan,
     packaging_timeline_section_choreography,
     packaging_timeline_subtitles,
     packaging_timeline_transitions,
@@ -160,7 +167,6 @@ from roughcut.llm_cache import (
 from roughcut.naming import AVATAR_CAPABILITY_GENERATION, normalize_avatar_capability_status
 from roughcut.packaging.library import (
     list_packaging_assets,
-    rank_insert_candidates_for_section,
     resolve_insert_added_duration,
     resolve_insert_effective_duration,
     resolve_insert_transition_overlap,
@@ -9141,6 +9147,10 @@ async def run_edit_plan(job_id: str) -> dict:
             content_profile=content_profile,
             timeline_analysis=packaged_timeline_analysis,
         )
+        focus_plan = build_local_focus_plan(
+            content_profile=content_profile,
+            timeline_analysis=packaged_timeline_analysis,
+        )
 
         render_plan_dict = build_render_plan(
             editorial_timeline_id=editorial_timeline.id,
@@ -9159,6 +9169,7 @@ async def run_edit_plan(job_id: str) -> dict:
             insert=packaging_plan.get("insert"),
             watermark=packaging_plan.get("watermark"),
             music=packaging_plan.get("music"),
+            focus_plan=focus_plan,
             timeline_analysis=packaged_timeline_analysis,
             editing_skill=editing_skill,
             editing_accents=build_smart_editing_accents(
@@ -10641,10 +10652,13 @@ def _variant_timeline_editorial_context(
 def _runtime_packaging_context(render_plan: dict[str, Any] | None) -> dict[str, Any]:
     packaging_timeline = resolve_packaging_timeline_payload(render_plan)
     assets = dict(packaging_timeline.get("packaging") or {})
+    assets["music"] = packaging_timeline_music_plan(packaging_timeline)
     editing_accents = dict(packaging_timeline.get("editing_accents") or {})
     transitions = dict((editing_accents or {}).get("transitions") or {})
     section_choreography = packaging_timeline_section_choreography(packaging_timeline)
     subtitles = packaging_timeline_subtitles(packaging_timeline)
+    focus = packaging_timeline_focus_plan(packaging_timeline)
+    audio_cues = packaging_timeline_local_audio_cues(packaging_timeline)
     section_profile_context = _packaged_subtitle_section_profile_context(
         None,
         packaging_timeline=packaging_timeline,
@@ -10657,6 +10671,8 @@ def _runtime_packaging_context(render_plan: dict[str, Any] | None) -> dict[str, 
         "transitions": transitions,
         "section_choreography": section_choreography,
         "subtitles": subtitles,
+        "focus": focus,
+        "audio_cues": audio_cues,
         "section_profile_context": section_profile_context,
         "has_packaging": has_packaging_assets,
         "has_packaging_assets": has_packaging_assets,
@@ -11055,49 +11071,7 @@ def _score_music_entry_candidates(
     *,
     content_profile: dict | None,
 ) -> list[dict[str, Any]]:
-    workflow_template = str((content_profile or {}).get("workflow_template") or "").strip()
-    scored: list[dict[str, Any]] = []
-    for index, item in enumerate(subtitle_items):
-        end_time = float(item.get("end_time", 0.0) or 0.0)
-        if end_time < 1.5 or end_time > 18.0:
-            continue
-        text = _subtitle_text(item)
-        next_item = subtitle_items[index + 1] if index + 1 < len(subtitle_items) else None
-        next_start = float(next_item.get("start_time", end_time) or end_time) if next_item else end_time
-        gap = max(0.0, next_start - end_time)
-
-        score = 0.28
-        reasons: list[str] = []
-        if 3.0 <= end_time <= 8.5:
-            score += 0.24
-            reasons.append("位于开场钩子之后的自然进入区间")
-        elif 2.0 <= end_time <= 12.0:
-            score += 0.12
-        if gap >= 0.35:
-            score += 0.2
-            reasons.append("后面有明显停顿")
-        elif gap >= 0.18:
-            score += 0.1
-        if text.endswith(("。", "！", "？", "；", ".", "!", "?", ";")):
-            score += 0.14
-            reasons.append("句子在这里收束")
-        if len(text) >= 10:
-            score += 0.08
-        if _workflow_template_subject_domain(workflow_template) == "gear" and 5.0 <= end_time <= 14.0:
-            score += 0.08
-            reasons.append("适合在主体介绍后进入 BGM")
-
-        scored.append(
-            {
-                "index": index,
-                "enter_sec": round(end_time, 2),
-                "score": round(min(score, 0.99), 3),
-                "reasons": reasons,
-            }
-        )
-
-    scored.sort(key=lambda item: (-float(item["score"]), float(item["enter_sec"])))
-    return scored
+    return score_local_music_entry_candidates(subtitle_items, content_profile=content_profile)
 
 
 def _build_timing_summary(
@@ -11151,72 +11125,12 @@ async def _plan_music_entry(
     content_profile: dict | None,
     timeline_analysis: dict[str, Any] | None = None,
 ) -> dict | None:
-    if not music_plan:
-        return None
-    if not subtitle_items:
-        music_plan["enter_sec"] = 0.0
-        music_plan["entry_reason"] = "没有可用字幕，背景音乐从开头进入。"
-        music_plan["timing_summary"] = {
-            "selected_score": 0.0,
-            "runner_up_score": 0.0,
-            "score_gap": 0.0,
-            "review_recommended": True,
-            "review_reason": "缺少字幕节奏信息，建议确认 BGM 进入点。",
-        }
-        return music_plan
-
-    settings = get_settings()
-    hook_end_sec = float((timeline_analysis or {}).get("hook_end_sec") or 0.0)
-    cta_start_sec = (timeline_analysis or {}).get("cta_start_sec")
-    rankings = [
-        dict(item) for item in _score_music_entry_candidates(subtitle_items, content_profile=content_profile)
-        if float(item.get("enter_sec", 0.0) or 0.0) >= max(0.0, hook_end_sec - 0.05)
-        and (
-            cta_start_sec is None
-            or float(item.get("enter_sec", 0.0) or 0.0) <= max(float(hook_end_sec), float(cta_start_sec) - 0.35)
-        )
-    ]
-    allowed_rankings: list[dict[str, Any]] = []
-    for item in rankings:
-        directive = _section_directive_for_time(timeline_analysis, float(item.get("enter_sec", 0.0) or 0.0))
-        if directive is None:
-            allowed_rankings.append(item)
-            continue
-        if not bool(directive.get("music_entry_allowed", True)):
-            continue
-        item["score"] = round(
-            min(0.99, float(item.get("score", 0.0) or 0.0) + float(directive.get("music_entry_bonus", 0.08) or 0.08)),
-            3,
-        )
-        reasons = list(item.get("reasons") or [])
-        reasons.append(f"落在 {str(directive.get('role') or '主体')} 段的安全音乐区间")
-        item["reasons"] = reasons
-        allowed_rankings.append(item)
-    if allowed_rankings:
-        allowed_rankings.sort(key=lambda item: (-float(item["score"]), float(item["enter_sec"])))
-        rankings = allowed_rankings
-    if not rankings:
-        fallback_sec = round(float(subtitle_items[0].get("end_time", 0.0) or 0.0), 2)
-        music_plan["enter_sec"] = max(0.0, fallback_sec)
-        music_plan["entry_reason"] = "缺少可靠停顿点，回退到第一句结束后进入背景音乐。"
-        music_plan["timing_summary"] = _build_timing_summary(
-            [],
-            review_gap=float(settings.packaging_selection_review_gap),
-            min_score=float(settings.packaging_selection_min_score),
-            low_confidence_reason="缺少可靠停顿点，建议确认 BGM 进入点。",
-        )
-        return music_plan
-
-    chosen = rankings[0]
-    music_plan["enter_sec"] = float(chosen["enter_sec"])
-    music_plan["entry_reason"] = "；".join(chosen.get("reasons") or []) or "选择了最自然的语义停顿点进入背景音乐。"
-    music_plan["timing_summary"] = _build_timing_summary(
-        rankings,
-        review_gap=float(settings.packaging_selection_review_gap),
-        min_score=float(settings.packaging_selection_min_score),
-        low_confidence_reason="BGM 候选进入点分差过小或信号不足，建议确认。",
+    return await plan_local_music_entry(
+        music_plan=music_plan,
+        subtitle_items=subtitle_items,
+        content_profile=content_profile,
+        timeline_analysis=timeline_analysis,
     )
-    return music_plan
 
 
 async def _plan_insert_asset_slot(
@@ -11228,318 +11142,14 @@ async def _plan_insert_asset_slot(
     timeline_analysis: dict[str, Any] | None = None,
     allow_llm: bool = True,
 ) -> dict | None:
-    if not insert_plan:
-        return None
-    settings = get_settings()
-    if not subtitle_items:
-        insert_plan["insert_after_sec"] = 0.0
-        insert_plan["reason"] = "没有可用字幕，默认插入到开头。"
-        insert_plan["timing_summary"] = _build_timing_summary(
-            [],
-            review_gap=float(settings.packaging_selection_review_gap),
-            min_score=float(settings.packaging_selection_min_score),
-            low_confidence_reason="缺少字幕节奏信息，建议确认插入位置。",
-        )
-        return insert_plan
-
-    hook_end_sec = float((timeline_analysis or {}).get("hook_end_sec") or 0.0)
-    cta_start_sec = (timeline_analysis or {}).get("cta_start_sec")
-    semantic_sections = list((timeline_analysis or {}).get("semantic_sections") or [])
-    section_directives = list((timeline_analysis or {}).get("section_directives") or [])
-    section_actions = list((timeline_analysis or {}).get("section_actions") or [])
-    resolved_editing_skill = (timeline_analysis or {}).get("editing_skill") or {}
-
-    candidates = [
-        item for item in subtitle_items
-        if float(item.get("end_time", 0.0) or 0.0) > max(8.0, hook_end_sec + 0.15)
-        and (
-            cta_start_sec is None
-            or float(item.get("end_time", 0.0) or 0.0) < float(cta_start_sec) - 0.4
-        )
-    ]
-    detail_starts = {
-        round(float(section.get("start_sec", 0.0) or 0.0), 2)
-        for section in semantic_sections
-        if str(section.get("role") or "") in {"detail", "body"}
-    }
-    allowed_windows = [
-        {
-            "index": int(section.get("index", -1) or -1),
-            "role": str(section.get("role") or ""),
-            "start_sec": float(section.get("start_sec", 0.0) or 0.0),
-            "end_sec": float(section.get("end_sec", 0.0) or 0.0),
-            "priority": float(section.get("insert_priority", 0.0) or 0.0),
-            "anchor_sec": float(
-                section.get(
-                    "anchor_sec",
-                    (float(section.get("start_sec", 0.0) or 0.0) + float(section.get("end_sec", 0.0) or 0.0)) / 2.0,
-                )
-                or 0.0
-            ),
-        }
-        for section in section_directives
-        if isinstance(section, dict) and bool(section.get("insert_allowed"))
-    ]
-    action_windows = [
-        {
-            "index": int(action.get("index", -1) or -1),
-            "role": str(action.get("role") or ""),
-            "start_sec": float(action.get("start_sec", 0.0) or 0.0),
-            "end_sec": float(action.get("end_sec", 0.0) or 0.0),
-            "priority": float(action.get("action_priority", 0.0) or 0.0),
-            "anchor_sec": float(action.get("broll_anchor_sec", action.get("start_sec", 0.0)) or 0.0),
-            "packaging_intent": str(action.get("packaging_intent") or ""),
-        }
-        for action in section_actions
-        if isinstance(action, dict) and bool(action.get("broll_allowed"))
-    ]
-
-    def _windows_containing_time(windows: list[dict[str, float | int | str]], time_sec: float) -> list[dict[str, float | int | str]]:
-        return [
-            window
-            for window in windows
-            if float(window.get("start_sec", 0.0) or 0.0) - 1e-6 <= time_sec <= float(window.get("end_sec", 0.0) or 0.0) + 1e-6
-        ]
-
-    def _nearest_window(windows: list[dict[str, float | int | str]], time_sec: float) -> dict[str, float | int | str] | None:
-        if not windows:
-            return None
-        return sorted(
-            windows,
-            key=lambda window: (
-                -float(window.get("priority", 0.0) or 0.0),
-                abs(time_sec - float(window.get("anchor_sec", 0.0) or 0.0)),
-                float(window.get("start_sec", 0.0) or 0.0),
-            ),
-        )[0]
-
-    preferred_insert_windows: list[dict[str, float | int | str]] = []
-
-    def _apply_insert_window(plan: dict, chosen_sec: float) -> dict:
-        primary_windows = preferred_insert_windows or action_windows or allowed_windows
-        primary_match = _nearest_window(_windows_containing_time(primary_windows, chosen_sec), chosen_sec)
-        selected_window = primary_match or _nearest_window(primary_windows, chosen_sec)
-        if not selected_window:
-            plan["insert_after_sec"] = round(float(chosen_sec), 3)
-            return plan
-
-        window_start = float(selected_window.get("start_sec", chosen_sec) or chosen_sec)
-        window_end = float(selected_window.get("end_sec", chosen_sec) or chosen_sec)
-        window_anchor = float(selected_window.get("anchor_sec", chosen_sec) or chosen_sec)
-        if window_end < window_start:
-            window_start, window_end = window_end, window_start
-        resolved_sec = float(chosen_sec)
-        if resolved_sec < window_start - 1e-6 or resolved_sec > window_end + 1e-6:
-            resolved_sec = window_anchor
-        resolved_sec = max(window_start, min(resolved_sec, window_end))
-        plan["insert_after_sec"] = round(resolved_sec, 3)
-        plan["insert_section_role"] = str(selected_window.get("role") or "")
-        plan["insert_packaging_intent"] = str(selected_window.get("packaging_intent") or "")
-        if int(selected_window.get("index", -1) or -1) >= 0:
-            plan["insert_section_index"] = int(selected_window.get("index", -1) or -1)
-        plan["broll_window"] = {
-            "start_sec": round(window_start, 3),
-            "end_sec": round(window_end, 3),
-            "anchor_sec": round(max(window_start, min(window_anchor, window_end)), 3),
-            "priority": round(float(selected_window.get("priority", 0.0) or 0.0), 3),
-        }
-        return plan
-
-    def _apply_insert_asset_strategy(plan: dict) -> dict:
-        candidate_assets = list(plan.get("candidate_assets") or [])
-        if not candidate_assets:
-            if plan.get("asset_id") and plan.get("path"):
-                candidate_assets = [
-                    {
-                        "asset_id": str(plan.get("asset_id") or ""),
-                        "path": str(plan.get("path") or ""),
-                        "original_name": str(plan.get("original_name") or ""),
-                        "insert_archetype": str(plan.get("insert_archetype") or ""),
-                        "insert_motion_profile": str(plan.get("insert_motion_profile") or ""),
-                        "insert_transition_style": str(plan.get("insert_transition_style") or ""),
-                        "insert_target_duration_sec": float(plan.get("insert_target_duration_sec", 0.0) or 0.0),
-                        "selection_score": 0.0,
-                        "selection_reasons": [],
-                    }
-                ]
-            else:
-                return plan
-
-        rankings = rank_insert_candidates_for_section(
-            candidate_assets,
-            section_role=str(plan.get("insert_section_role") or ""),
-            packaging_intent=str(plan.get("insert_packaging_intent") or ""),
-            content_profile=content_profile,
-            editing_skill=resolved_editing_skill if isinstance(resolved_editing_skill, dict) else None,
-        )
-        if not rankings:
-            return plan
-        selected = dict(rankings[0]["candidate"])
-        plan["asset_id"] = str(selected.get("asset_id") or plan.get("asset_id") or "")
-        plan["path"] = str(selected.get("path") or plan.get("path") or "")
-        plan["original_name"] = str(selected.get("original_name") or plan.get("original_name") or "")
-        plan["insert_archetype"] = str(selected.get("insert_archetype") or plan.get("insert_archetype") or "generic_broll")
-        plan["insert_motion_profile"] = str(selected.get("insert_motion_profile") or plan.get("insert_motion_profile") or "balanced_hold")
-        plan["insert_transition_style"] = str(selected.get("insert_transition_style") or plan.get("insert_transition_style") or "straight_cut")
-        plan["insert_target_duration_sec"] = round(float(selected.get("insert_target_duration_sec", 0.0) or 0.0), 3)
-        plan["insert_strategy_summary"] = {
-            "selected_asset_id": plan["asset_id"],
-            "selected_score": round(float(rankings[0].get("score", 0.0) or 0.0), 3),
-            "reasons": list(rankings[0].get("reasons") or []),
-        }
-        return plan
-    if detail_starts:
-        prioritized = [
-            item for item in candidates
-            if round(float(item.get("start_time", 0.0) or 0.0), 2) in detail_starts
-            or round(float(item.get("end_time", 0.0) or 0.0), 2) in detail_starts
-        ]
-        if prioritized:
-            candidates = prioritized
-    elif action_windows:
-        action_windows.sort(key=lambda item: (-float(item.get("priority", 0.0) or 0.0), float(item.get("start_sec", 0.0) or 0.0)))
-        top_priority = float(action_windows[0].get("priority", 0.0) or 0.0)
-        preferred_windows = [
-            window
-            for window in action_windows
-            if abs(float(window.get("priority", 0.0) or 0.0) - top_priority) < 1e-6
-        ]
-        prioritized = [
-            item for item in candidates
-            if any(
-                float(window.get("start_sec", 0.0) or 0.0) - 1e-6
-                <= float(item.get("end_time", 0.0) or 0.0)
-                <= float(window.get("end_sec", 0.0) or 0.0) + 1e-6
-                for window in preferred_windows
-            )
-        ]
-        if prioritized:
-            preferred_insert_windows = preferred_windows
-            candidates = sorted(
-                prioritized,
-                key=lambda item: min(
-                    abs(float(item.get("end_time", 0.0) or 0.0) - float(window.get("anchor_sec", 0.0) or 0.0))
-                    for window in preferred_windows
-                ),
-            )
-    elif allowed_windows:
-        allowed_windows.sort(key=lambda item: (-float(item.get("priority", 0.0) or 0.0), float(item.get("start_sec", 0.0) or 0.0)))
-        prioritized = [
-            item for item in candidates
-            if any(
-                float(window.get("start_sec", 0.0) or 0.0) - 1e-6
-                <= float(item.get("end_time", 0.0) or 0.0)
-                <= float(window.get("end_sec", 0.0) or 0.0) + 1e-6
-                for window in allowed_windows
-            )
-        ]
-        if prioritized:
-            top_priority = max(
-                (
-                    float(window.get("priority", 0.0) or 0.0)
-                    for window in allowed_windows
-                    if any(
-                        float(window.get("start_sec", 0.0) or 0.0) - 1e-6
-                        <= float(item.get("end_time", 0.0) or 0.0)
-                        <= float(window.get("end_sec", 0.0) or 0.0) + 1e-6
-                        for item in prioritized
-                    )
-                ),
-                default=0.0,
-            )
-            preferred_insert_windows = [
-                window
-                for window in allowed_windows
-                if abs(float(window.get("priority", 0.0) or 0.0) - top_priority) < 1e-6
-            ]
-            candidates = [
-                item for item in prioritized
-                if any(
-                    float(window.get("start_sec", 0.0) or 0.0) - 1e-6
-                    <= float(item.get("end_time", 0.0) or 0.0)
-                    <= float(window.get("end_sec", 0.0) or 0.0) + 1e-6
-                    and abs(float(window.get("priority", 0.0) or 0.0) - top_priority) < 1e-6
-                    for window in allowed_windows
-                )
-            ] or prioritized
-    if not candidates:
-        first = subtitle_items[min(len(subtitle_items) - 1, max(0, len(subtitle_items) // 2))]
-        insert_plan["insert_after_sec"] = float(first.get("end_time", 0.0) or 0.0)
-        insert_plan["reason"] = "字幕太短，回退到中间位置插入。"
-        insert_plan["timing_summary"] = _build_timing_summary(
-            [],
-            review_gap=float(settings.packaging_selection_review_gap),
-            min_score=float(settings.packaging_selection_min_score),
-            low_confidence_reason="字幕太短，建议确认插入位置。",
-        )
-        return _apply_insert_asset_strategy(_apply_insert_window(insert_plan, float(insert_plan["insert_after_sec"] or 0.0)))
-
-    transcript_excerpt = "\n".join(
-        f"[{float(item.get('start_time', 0.0)):.1f}-{float(item.get('end_time', 0.0)):.1f}] "
-        f"{_subtitle_text(item)}"
-        for item in candidates[:48]
+    return await plan_local_insert_slot(
+        job_id=job_id,
+        insert_plan=insert_plan,
+        subtitle_items=subtitle_items,
+        content_profile=content_profile,
+        timeline_analysis=timeline_analysis,
+        allow_llm=allow_llm,
     )
-    fallback = candidates[0] if action_windows else candidates[len(candidates) // 2]
-    fallback_sec = float(fallback.get("end_time", 0.0) or 0.0)
-    fallback_plan = dict(insert_plan)
-    fallback_plan["insert_after_sec"] = fallback_sec
-    fallback_plan["reason"] = "回退到中间自然停顿。"
-    fallback_plan["timing_summary"] = _build_timing_summary(
-        [],
-        review_gap=float(settings.packaging_selection_review_gap),
-        min_score=float(settings.packaging_selection_min_score),
-        low_confidence_reason="插入点回退到默认停顿，建议确认。",
-    )
-
-    if not allow_llm:
-        return _apply_insert_asset_strategy(_apply_insert_window(fallback_plan, float(fallback_plan["insert_after_sec"] or 0.0)))
-
-    try:
-        provider = get_reasoning_provider()
-        prompt = (
-            "你在给一条中文短视频安排一段植入素材的插入点。"
-            "请根据字幕节奏和内容结构，找一个最自然、不打断关键论点的位置。"
-            "优先选择一句话讲完之后、下一个话题开始之前；不要插在开场 8 秒内，也不要插在结尾收束段。"
-            "如果视频主题是开箱评测，优先放在产品基础介绍讲完、进入细节体验之前。"
-            "输出 JSON："
-            '{"insert_after_sec":0.0,"reason":""}'
-            f"\n视频信息：{json.dumps(content_profile or {}, ensure_ascii=False)}"
-            f"\n候选字幕（已映射到剪后时间轴）：\n{transcript_excerpt}"
-            f"\n如果拿不准，就返回 {fallback_sec:.1f} 附近的自然停顿。"
-        )
-        with track_usage_operation("render.insert_slot"):
-            response = await provider.complete(
-                [
-                    Message(role="system", content="你是短视频植入编排助手，只输出 JSON。"),
-                    Message(role="user", content=prompt),
-                ],
-                temperature=0.1,
-                max_tokens=300,
-                json_mode=True,
-            )
-        data = response.as_json()
-        chosen = float(data.get("insert_after_sec", fallback_sec) or fallback_sec)
-        max_sec = float(candidates[-1].get("end_time", fallback_sec) or fallback_sec)
-        insert_plan = _apply_insert_window(insert_plan, chosen)
-        insert_plan["insert_after_sec"] = round(
-            max(8.0, min(float(insert_plan.get("insert_after_sec", fallback_sec) or fallback_sec), max_sec)),
-            3,
-        )
-        insert_plan["reason"] = str(data.get("reason") or "").strip() or "LLM 选择了较自然的转场点。"
-        rankings = [
-            {"score": 0.78, "enter_sec": insert_plan["insert_after_sec"]},
-            {"score": 0.7, "enter_sec": fallback_sec},
-        ]
-        insert_plan["timing_summary"] = _build_timing_summary(
-            rankings,
-            review_gap=float(settings.packaging_selection_review_gap),
-            min_score=float(settings.packaging_selection_min_score),
-            low_confidence_reason="插入点候选分差过小或语义证据不足，建议确认。",
-        )
-        return _apply_insert_asset_strategy(insert_plan)
-    except Exception:
-        fallback_plan["reason"] = "LLM 未返回可靠结果，回退到中间自然停顿。"
-        return _apply_insert_asset_strategy(_apply_insert_window(fallback_plan, float(fallback_plan["insert_after_sec"] or 0.0)))
 
 
 async def _map_subtitles_to_packaged_timeline(
@@ -11700,7 +11310,6 @@ async def _resolve_packaged_timeline_mapping_context(
     else:
         plan = render_plan or {}
         packaging_timeline = resolve_packaging_timeline_payload(plan)
-        packaging_assets = dict(packaging_timeline.get("packaging") or {})
         transitions = dict(((packaging_timeline.get("editing_accents") or {}).get("transitions")) or {})
         section_profile_context = _packaged_subtitle_section_profile_context(
             None,
@@ -11713,12 +11322,12 @@ async def _resolve_packaged_timeline_mapping_context(
     )
 
     intro_duration = 0.0
-    intro_plan = dict(packaging_assets.get("intro") or {}) or None
+    intro_plan = packaging_timeline_asset_plan(packaging_timeline, "intro")
     intro_path = str((intro_plan or {}).get("path") or "").strip()
     if intro_path:
         intro_duration = max(0.0, float(await _probe_media_duration(Path(intro_path)) or 0.0))
 
-    insert_plan = dict(packaging_assets.get("insert") or {}) or None
+    insert_plan = packaging_timeline_insert_plan(packaging_timeline)
     insert_path = str((insert_plan or {}).get("path") or "").strip()
     effective_insert_duration = 0.0
     if insert_path and isinstance(insert_plan, dict):

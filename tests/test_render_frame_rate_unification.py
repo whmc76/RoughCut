@@ -202,9 +202,10 @@ def test_render_packaging_context_reads_nested_packaging_timeline_payload() -> N
                 "subtitles": {"style": "clean_white", "motion_style": "motion_slide"},
                 "section_choreography": {"sections": [{"start_time": 0.0, "end_time": 5.0}]},
                 "editing_accents": {"style": "smart_effect_punch"},
+                "focus": {"focus_events": [{"event_type": "hook_focus", "start_time": 0.0, "end_time": 2.0, "text": "先讲结论"}]},
                 "packaging": {
                     "intro": {"path": "intro.mp4"},
-                    "music": {"path": "music.mp3"},
+                    "music": {"path": "music.mp3", "enter_sec": 4.2, "timing_summary": {"review_recommended": False}},
                 },
             }
         }
@@ -215,7 +216,10 @@ def test_render_packaging_context_reads_nested_packaging_timeline_payload() -> N
     assert context["editing_accents"]["style"] == "smart_effect_punch"
     assert context["has_packaging_assets"] is True
     assert context["assets"]["intro"] == {"path": "intro.mp4"}
-    assert context["assets"]["music"] == {"path": "music.mp3"}
+    assert context["assets"]["music"]["path"] == "music.mp3"
+    assert context["focus"]["focus_events"][0]["event_type"] == "hook_focus"
+    assert context["assets"]["music"]["audio_cues"][0]["kind"] == "bgm_entry"
+    assert context["audio_cues"][0]["kind"] == "bgm_entry"
 
 
 def test_render_packaging_context_reuses_local_assets_for_presence() -> None:
@@ -267,6 +271,8 @@ def test_render_packaging_context_reuses_local_normalized_packaging_payload(
         },
         "editing_accents": {"style": "smart_effect_punch"},
         "has_packaging_assets": True,
+        "focus": None,
+        "audio_cues": [],
         "section_choreography": {"sections": [{"start_sec": 0.0, "end_sec": 2.0}]},
         "subtitles": {"style": "clean_white"},
     }
@@ -458,8 +464,37 @@ async def test_apply_packaging_plan_reuses_nested_packaging_asset_context(
     assert calls[0][1]["insert_plan"] == {"path": "insert.mp4"}
     assert calls[1][1]["intro_plan"] == {"path": "intro.mp4"}
     assert calls[1][1]["outro_plan"] == {"path": "outro.mp4"}
-    assert calls[2][1]["music_plan"] == {"path": "music.mp3"}
+    assert calls[2][1]["music_plan"] == {
+        "path": "music.mp3",
+        "audio_cues": [
+            {
+                "kind": "bgm_entry",
+                "time_sec": 0.0,
+                "reason": "",
+                "review_recommended": False,
+            }
+        ],
+    }
     assert calls[2][1]["watermark_plan"] == {"path": "watermark.png"}
+
+
+def test_render_packaging_context_normalizes_nested_insert_payload() -> None:
+    context = _render_packaging_context(
+        {
+            "packaging_timeline": {
+                "packaging": {
+                    "insert": {
+                        "asset_id": "insert-a",
+                        "path": "insert.mp4",
+                        "insert_target_duration_sec": 1.23456,
+                    }
+                }
+            }
+        }
+    )
+
+    assert context["assets"]["insert"]["insert_target_duration_sec"] == 1.235
+    assert context["assets"]["insert"]["candidate_assets"][0]["asset_id"] == "insert-a"
 
 
 @pytest.mark.asyncio

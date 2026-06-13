@@ -77,6 +77,14 @@ from roughcut.edit.cut_analysis import (
     cut_analysis_rule_candidates,
     cut_analysis_silence_segments,
 )
+from roughcut.edit.capability_orchestrator import build_capability_orchestration_payload
+from roughcut.edit.product_controls import (
+    build_product_controls_payload,
+    normalize_automation_level,
+    normalize_edit_mode,
+    normalize_material_usage,
+    workflow_template_for_edit_mode,
+)
 from roughcut.edit.editorial_timeline import (
     build_editorial_segments_from_keep_segments as build_shared_editorial_segments_from_keep_segments,
     editorial_cut_segments,
@@ -85,10 +93,14 @@ from roughcut.edit.editorial_timeline import (
     normalize_keep_segments_payloads,
     resolve_editorial_keep_segments,
 )
+from roughcut.edit.local_asset_inventory import build_uploaded_material_inventory
+from roughcut.edit.local_focus_plan import build_local_focus_plan
 from roughcut.edit.packaging_timeline import (
     packaging_timeline_analysis,
+    packaging_timeline_asset_plan,
     packaging_timeline_editing_accents,
     packaging_timeline_editing_skill,
+    packaging_timeline_insert_plan,
     packaging_timeline_subtitles,
     resolve_packaging_timeline_payload,
 )
@@ -134,6 +146,7 @@ from roughcut.edit.smart_cut_rules import (
     default_smart_cut_rules_payload,
     normalize_smart_cut_rules_payload,
 )
+from roughcut.edit.strategy_profile import build_strategy_profile_payload, infer_strategy_type, normalize_strategy_type
 from roughcut.edit.subtitle_surfaces import (
     subtitle_canonical_rule_text,
     subtitle_display_rule_text,
@@ -723,6 +736,85 @@ def _ensure_content_understanding_payload(profile: dict[str, Any] | None) -> dic
         }
     )
     enriched["content_understanding"] = content_understanding
+    return enriched
+
+
+def _build_content_profile_local_asset_inventory(job: Job | None, profile: dict[str, Any] | None) -> dict[str, Any]:
+    payload = profile if isinstance(profile, dict) else {}
+    fallback_merged_source_names = _resolve_job_merged_source_names(job) if job is not None and hasattr(job, "steps") else []
+    merged_source_candidates = payload.get("merged_source_names") if isinstance(payload.get("merged_source_names"), list) else None
+    merged_source_names = [
+        str(item).strip()
+        for item in (merged_source_candidates if merged_source_candidates is not None else fallback_merged_source_names)
+        if str(item).strip()
+    ]
+    packaging_snapshot = getattr(job, "packaging_snapshot_json", None) if job is not None else None
+    return build_uploaded_material_inventory(
+        has_primary_video=job is not None,
+        merged_source_names=merged_source_names,
+        packaging_snapshot=packaging_snapshot if isinstance(packaging_snapshot, dict) else None,
+    )
+
+
+def _infer_content_profile_strategy_type(
+    profile: dict[str, Any] | None,
+    *,
+    local_asset_inventory: dict[str, Any] | None = None,
+) -> str:
+    payload = profile if isinstance(profile, dict) else {}
+    return infer_strategy_type(
+        strategy_profile=payload.get("strategy_profile") if isinstance(payload.get("strategy_profile"), dict) else None,
+        workflow_template=str(payload.get("workflow_template") or "").strip() or None,
+        content_profile=payload,
+        local_asset_inventory=local_asset_inventory,
+    )
+
+
+def _attach_content_profile_capability_orchestration(
+    profile: dict[str, Any] | None,
+    *,
+    job: Job | None,
+) -> dict[str, Any] | None:
+    payload = _ensure_content_understanding_payload(profile)
+    if not isinstance(payload, dict):
+        return payload
+    enriched = dict(payload)
+    local_asset_inventory = _build_content_profile_local_asset_inventory(job, enriched)
+    job_source_context = (
+        _extract_job_source_context_from_steps(getattr(job, "steps", []) or [])
+        if job is not None and hasattr(job, "steps")
+        else {}
+    )
+    source_context = enriched.get("source_context") if isinstance(enriched.get("source_context"), dict) else {}
+    requested_product_controls = (
+        dict(source_context.get("product_controls") or {})
+        if isinstance(source_context.get("product_controls"), dict)
+        else dict(job_source_context.get("product_controls") or {})
+        if isinstance(job_source_context.get("product_controls"), dict)
+        else {}
+    )
+    strategy_profile = build_strategy_profile_payload(
+        strategy_type=_infer_content_profile_strategy_type(
+            enriched,
+            local_asset_inventory=local_asset_inventory,
+        )
+    )
+    product_controls = build_product_controls_payload(
+        requested_product_controls,
+        strategy_type=strategy_profile.get("strategy_type"),
+        content_kind=enriched.get("content_kind"),
+        local_asset_inventory=local_asset_inventory,
+        job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
+    )
+    enriched["product_controls"] = product_controls
+    enriched["capability_orchestration"] = build_capability_orchestration_payload(
+        strategy_profile=strategy_profile,
+        workflow_template=str(getattr(job, "workflow_template", "") or enriched.get("workflow_template") or "").strip() or None,
+        content_profile=enriched,
+        local_asset_inventory=local_asset_inventory,
+        job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
+        product_controls=product_controls,
+    )
     return enriched
 
 
@@ -1346,6 +1438,9 @@ async def create_job(
     job_flow_mode: str | None = Form(None),
     workflow_mode: str | None = Form(None),
     enhancement_modes: list[str] | None = Form(None),
+    edit_mode: str | None = Form(None),
+    automation_level: str | None = Form(None),
+    material_usage: str | None = Form(None),
     output_dir: str | None = Form(None),
     video_description: str | None = Form(None),
     session: AsyncSession = Depends(get_session),
@@ -1362,6 +1457,10 @@ async def create_job(
         workflow_mode = normalize_workflow_mode(workflow_mode or settings.default_job_workflow_mode)
         output_dir = str(output_dir or "").strip() or None
         video_description = _normalize_video_description(video_description)
+        edit_mode = normalize_edit_mode(edit_mode)
+        automation_level = normalize_automation_level(automation_level)
+        material_usage = normalize_material_usage(material_usage)
+        workflow_template = workflow_template_for_edit_mode(edit_mode) or workflow_template
         enhancement_modes = normalize_enhancement_modes(
             enhancement_modes if enhancement_modes is not None else settings.default_job_enhancement_modes,
         )
@@ -1386,6 +1485,11 @@ async def create_job(
             uploaded_files=uploaded_files,
             source_name=source_name,
             video_description=video_description,
+            product_controls={
+                "edit_mode": edit_mode,
+                "automation_level": automation_level,
+                "material_usage": material_usage,
+            },
         )
 
         job_id = uuid.uuid4()
@@ -1541,10 +1645,17 @@ def _build_job_source_context(
     video_description: str | None,
     merged_source_names: list[str] | None = None,
     allow_related_profiles: bool = False,
+    product_controls: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     source_context: dict[str, Any] = {}
     if video_description:
         source_context["video_description"] = video_description
+    if isinstance(product_controls, dict) and product_controls:
+        source_context["product_controls"] = {
+            "edit_mode": normalize_edit_mode(product_controls.get("edit_mode")),
+            "automation_level": normalize_automation_level(product_controls.get("automation_level")),
+            "material_usage": normalize_material_usage(product_controls.get("material_usage")),
+        }
     resolved_merged_source_names = [
         str(item).strip()
         for item in (merged_source_names or [])
@@ -1796,13 +1907,16 @@ async def initialize_job(
             if str(item).strip()
         ],
         allow_related_profiles=bool(existing_source_context.get("allow_related_profiles")),
+        product_controls=body.model_dump(include={"edit_mode", "automation_level", "material_usage"}, exclude_none=True)
+        or existing_source_context.get("product_controls"),
     )
+    resolved_workflow_template = workflow_template_for_edit_mode(body.edit_mode) or body.workflow_template
 
     job.status = "pending"
     job.error_message = None
     job.updated_at = now
     job.language = body.language
-    job.workflow_template = body.workflow_template
+    job.workflow_template = resolved_workflow_template
     job.job_flow_mode = body.job_flow_mode
     job.workflow_mode = body.workflow_mode
     job.enhancement_modes = body.enhancement_modes
@@ -2263,14 +2377,13 @@ def _manual_editor_packaging_plan_from_render_plan(
             resolved_cover = dict(resolved_render_plan_context.get("cover") or {})
         if resolved_delivery is None:
             resolved_delivery = dict(resolved_render_plan_context.get("delivery") or {})
-    packaging_assets = dict((resolved_packaging_timeline or {}).get("packaging") or {})
     subtitles = dict((resolved_packaging_timeline or {}).get("subtitles") or {})
     editing_accents = dict((resolved_packaging_timeline or {}).get("editing_accents") or {})
-    intro_plan = dict(packaging_assets.get("intro") or {}) or None
-    outro_plan = dict(packaging_assets.get("outro") or {}) or None
-    insert_plan = dict(packaging_assets.get("insert") or {}) or None
-    watermark_plan = dict(packaging_assets.get("watermark") or {}) or None
-    music_plan = dict(packaging_assets.get("music") or {}) or None
+    intro_plan = packaging_timeline_asset_plan(resolved_packaging_timeline, "intro")
+    outro_plan = packaging_timeline_asset_plan(resolved_packaging_timeline, "outro")
+    insert_plan = packaging_timeline_insert_plan(resolved_packaging_timeline)
+    watermark_plan = packaging_timeline_asset_plan(resolved_packaging_timeline, "watermark")
+    music_plan = packaging_timeline_asset_plan(resolved_packaging_timeline, "music")
     return {
         "subtitle_style": str(subtitles.get("style") or "bold_yellow_outline"),
         "subtitle_motion_style": str(subtitles.get("motion_style") or "motion_static"),
@@ -7557,6 +7670,10 @@ async def apply_manual_editor_timeline(
         insert=packaging_plan.get("insert"),
         watermark=packaging_plan.get("watermark"),
         music=packaging_plan.get("music"),
+        focus_plan=build_local_focus_plan(
+            content_profile=content_profile,
+            timeline_analysis=timeline_analysis,
+        ),
         timeline_analysis=timeline_analysis,
         editing_skill=editing_skill,
         editing_accents=editing_accents,
@@ -7690,10 +7807,10 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
     settings = get_settings()
     if isinstance(draft, dict):
         draft = apply_current_content_profile_review_policy(draft, settings=settings)
-        draft = _ensure_content_understanding_payload(draft)
+        draft = _attach_content_profile_capability_orchestration(draft, job=job)
     if isinstance(final, dict):
         final = apply_current_content_profile_review_policy(final, settings=settings)
-        final = _ensure_content_understanding_payload(final)
+        final = _attach_content_profile_capability_orchestration(final, job=job)
     reviewed_subtitle_excerpt = await _build_current_reviewed_subtitle_excerpt(job_id, session)
     if reviewed_subtitle_excerpt:
         if isinstance(draft, dict):
@@ -7742,6 +7859,7 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
         **evidence,
         workflow_mode=str(getattr(job, "workflow_mode", "") or "standard_edit"),
         enhancement_modes=list(getattr(job, "enhancement_modes", []) or []),
+        product_controls=(active_profile.get("product_controls") if isinstance(active_profile, dict) else {}) or {},
         draft=draft,
         final=final,
         memory=memory,
@@ -8074,8 +8192,8 @@ async def confirm_content_profile(
     automation_review = final_profile.get("automation_review") if isinstance(final_profile, dict) else {}
     identity_review = final_profile.get("identity_review") if isinstance(final_profile, dict) else None
     evidence = await _load_content_profile_review_evidence(job_id, session)
-    draft_profile = _ensure_content_understanding_payload(draft_artifact.data_json)
-    final_profile = _ensure_content_understanding_payload(final_profile)
+    draft_profile = _attach_content_profile_capability_orchestration(draft_artifact.data_json, job=job)
+    final_profile = _attach_content_profile_capability_orchestration(final_profile, job=job)
 
     return ContentProfileReviewOut(
         job_id=str(job_id),

@@ -26,6 +26,10 @@ from roughcut.edit.render_plan import (
 )
 from roughcut.edit.packaging_timeline import (
     packaging_timeline_asset_plan,
+    packaging_timeline_focus_plan,
+    packaging_timeline_insert_plan,
+    packaging_timeline_local_audio_cues,
+    packaging_timeline_music_plan,
     resolve_packaging_timeline_payload,
 )
 from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
@@ -78,11 +82,15 @@ _DEFAULT_LRA = 10.0
 def _render_packaging_context(render_plan: dict[str, Any] | None) -> dict[str, Any]:
     packaging_timeline = resolve_packaging_timeline_payload(render_plan)
     assets = copy.deepcopy(packaging_timeline.get("packaging") or {})
+    assets["insert"] = packaging_timeline_insert_plan(packaging_timeline)
+    assets["music"] = packaging_timeline_music_plan(packaging_timeline)
     editing_accents = copy.deepcopy(packaging_timeline.get("editing_accents") or {})
     return {
         "assets": assets,
         "editing_accents": editing_accents,
         "has_packaging_assets": any(assets.get(key) for key in ("intro", "outro", "insert", "watermark", "music")),
+        "focus": packaging_timeline_focus_plan(packaging_timeline),
+        "audio_cues": packaging_timeline_local_audio_cues(packaging_timeline),
         "section_choreography": copy.deepcopy(packaging_timeline.get("section_choreography") or {}),
         "subtitles": copy.deepcopy(packaging_timeline.get("subtitles") or {}),
     }

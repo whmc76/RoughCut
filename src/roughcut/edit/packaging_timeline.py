@@ -3,11 +3,14 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from roughcut.edit.local_audio_cues import normalize_local_music_plan
+from roughcut.edit.local_insert_plan import normalize_local_insert_plan
+
 
 def _normalize_packaging_timeline_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
     source = payload if isinstance(payload, dict) else {}
     packaging_assets = source.get("packaging") if isinstance(source.get("packaging"), dict) else {}
-    return {
+    normalized = {
         "timeline_analysis": copy.deepcopy(source.get("timeline_analysis") or {}),
         "editing_skill": copy.deepcopy(source.get("editing_skill") or {}),
         "section_choreography": copy.deepcopy(source.get("section_choreography") or {}),
@@ -15,17 +18,20 @@ def _normalize_packaging_timeline_payload(payload: dict[str, Any] | None) -> dic
         "packaging": {
             "intro": copy.deepcopy(packaging_assets.get("intro")),
             "outro": copy.deepcopy(packaging_assets.get("outro")),
-            "insert": copy.deepcopy(packaging_assets.get("insert")),
+            "insert": normalize_local_insert_plan(packaging_assets.get("insert")),
             "watermark": copy.deepcopy(packaging_assets.get("watermark")),
-            "music": copy.deepcopy(packaging_assets.get("music")),
+            "music": normalize_local_music_plan(packaging_assets.get("music")),
         },
         "editing_accents": copy.deepcopy(source.get("editing_accents") or {}),
     }
+    if isinstance(source.get("focus"), dict) and source.get("focus"):
+        normalized["focus"] = copy.deepcopy(source.get("focus") or {})
+    return normalized
 
 
 def build_packaging_timeline_payload(render_plan: dict[str, Any] | None) -> dict[str, Any]:
     payload = render_plan if isinstance(render_plan, dict) else {}
-    return {
+    normalized = {
         "timeline_analysis": copy.deepcopy(payload.get("timeline_analysis") or {}),
         "editing_skill": copy.deepcopy(payload.get("editing_skill") or {}),
         "section_choreography": copy.deepcopy(payload.get("section_choreography") or {}),
@@ -33,12 +39,15 @@ def build_packaging_timeline_payload(render_plan: dict[str, Any] | None) -> dict
         "packaging": {
             "intro": copy.deepcopy(payload.get("intro")),
             "outro": copy.deepcopy(payload.get("outro")),
-            "insert": copy.deepcopy(payload.get("insert")),
+            "insert": normalize_local_insert_plan(payload.get("insert")),
             "watermark": copy.deepcopy(payload.get("watermark")),
-            "music": copy.deepcopy(payload.get("music")),
+            "music": normalize_local_music_plan(payload.get("music")),
         },
         "editing_accents": copy.deepcopy(payload.get("editing_accents") or {}),
     }
+    if isinstance(payload.get("focus"), dict) and payload.get("focus"):
+        normalized["focus"] = copy.deepcopy(payload.get("focus") or {})
+    return normalized
 
 
 def resolve_packaging_timeline_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -97,11 +106,47 @@ def packaging_timeline_asset_plan(
     if not asset_key:
         return None
     packaging = dict(resolve_packaging_timeline_payload(payload).get("packaging") or {})
-    return copy.deepcopy(packaging.get(asset_key))
+    plan = copy.deepcopy(packaging.get(asset_key))
+    if asset_key == "music":
+        return normalize_local_music_plan(plan)
+    if asset_key == "insert":
+        return normalize_local_insert_plan(plan)
+    return plan
+
+
+def packaging_timeline_insert_plan(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    plan = packaging_timeline_asset_plan(payload, "insert")
+    return dict(plan) if isinstance(plan, dict) else None
+
+
+def packaging_timeline_music_plan(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    plan = packaging_timeline_asset_plan(payload, "music")
+    return dict(plan) if isinstance(plan, dict) else None
 
 
 def packaging_timeline_editing_accents(payload: dict[str, Any] | None) -> dict[str, Any]:
     return dict(resolve_packaging_timeline_payload(payload).get("editing_accents") or {})
+
+
+def packaging_timeline_focus_plan(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    focus = resolve_packaging_timeline_payload(payload).get("focus")
+    return copy.deepcopy(focus) if isinstance(focus, dict) else None
+
+
+def packaging_timeline_focus_events(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    return [
+        dict(item)
+        for item in list((packaging_timeline_focus_plan(payload) or {}).get("focus_events") or [])
+        if isinstance(item, dict)
+    ]
+
+
+def packaging_timeline_chapter_cards(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    return [
+        dict(item)
+        for item in list((packaging_timeline_focus_plan(payload) or {}).get("chapter_cards") or [])
+        if isinstance(item, dict)
+    ]
 
 
 def packaging_timeline_transitions(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -122,3 +167,24 @@ def packaging_timeline_has_editing_accents(payload: dict[str, Any] | None) -> bo
         or accents.get("emphasis_overlays")
         or accents.get("sound_effects")
     )
+
+
+def packaging_timeline_local_audio_cues(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    music_plan = packaging_timeline_music_plan(payload)
+    music_cues = [
+        dict(item)
+        for item in list((music_plan or {}).get("audio_cues") or [])
+        if isinstance(item, dict)
+    ]
+    sound_effects = [
+        {
+            "kind": "sfx_overlay",
+            "time_sec": round(float(item.get("start_time", 0.0) or 0.0), 3),
+            "duration_sec": round(float(item.get("duration_sec", 0.0) or 0.0), 3),
+            "frequency": float(item.get("frequency", 0.0) or 0.0),
+            "volume": float(item.get("volume", 0.0) or 0.0),
+        }
+        for item in list((packaging_timeline_editing_accents(payload) or {}).get("sound_effects") or [])
+        if isinstance(item, dict)
+    ]
+    return [*music_cues, *sound_effects]

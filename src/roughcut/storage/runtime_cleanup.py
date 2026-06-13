@@ -9,6 +9,35 @@ from roughcut.providers.avatar.heygem import _detect_shared_root
 from roughcut.storage.s3 import get_storage, job_key
 
 
+def workspace_runtime_cleanup_targets(repo_root: Path | None = None) -> tuple[Path, ...]:
+    root = (repo_root or Path(__file__).resolve().parents[3]).resolve()
+    return (
+        root / ".external-services",
+        root / "tmp",
+        root / "frontend" / ".codex-logs",
+        root / "debug_artifacts",
+        root / "debug_out",
+    )
+
+
+def cleanup_workspace_runtime_files(repo_root: Path | None = None) -> list[Path]:
+    root = (repo_root or Path(__file__).resolve().parents[3]).resolve()
+    removed: list[Path] = []
+    for target in workspace_runtime_cleanup_targets(root):
+        try:
+            resolved = target.resolve(strict=False)
+        except Exception:
+            resolved = target
+        if not _is_relative_to(resolved, root):
+            continue
+        if not resolved.exists():
+            continue
+        shutil.rmtree(resolved, ignore_errors=True)
+        if not resolved.exists():
+            removed.append(resolved)
+    return removed
+
+
 def cleanup_job_runtime_files(
     job_id: str,
     *,

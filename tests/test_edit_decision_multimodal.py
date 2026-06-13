@@ -1,4 +1,4 @@
-from roughcut.edit.decisions import _build_range_evidence, infer_timeline_analysis
+from roughcut.edit.decisions import _build_range_evidence, build_edit_decision, infer_timeline_analysis
 
 
 def _subtitle(text: str, *, start: float, end: float) -> dict:
@@ -134,3 +134,69 @@ def test_multimodal_drop_hint_raises_removal_signal() -> None:
     assert guided_evidence.retake_score > baseline_evidence.retake_score
     assert guided_evidence.multimodal_keep_priority == "drop"
     assert "multimodal_drop_signal" in guided_evidence.tags
+
+
+def test_tutorial_timeline_analysis_infers_step_demonstration_strategy() -> None:
+    analysis = infer_timeline_analysis(
+        [
+            _subtitle("先把素材拖进时间线。", start=0.0, end=2.0),
+            _subtitle("然后检查每一步操作。", start=2.0, end=5.0),
+        ],
+        duration=5.0,
+        content_profile={
+            "workflow_template": "tutorial_standard",
+            "content_kind": "tutorial",
+            "subject_type": "Premiere 教程",
+        },
+    )
+
+    assert analysis["strategy_type"] == "step_demonstration"
+    assert analysis["strategy_profile"]["strategy_type"] == "step_demonstration"
+
+
+def test_build_edit_decision_keeps_tutorial_strategy_metadata_for_downstream_steps() -> None:
+    decision = build_edit_decision(
+        source_path="demo.mp4",
+        duration=5.0,
+        silence_segments=[],
+        subtitle_items=[
+            _subtitle("先把素材拖进时间线。", start=0.0, end=2.0),
+            _subtitle("然后检查每一步操作。", start=2.0, end=5.0),
+        ],
+        content_profile={
+            "workflow_template": "tutorial_standard",
+            "content_kind": "tutorial",
+            "subject_type": "Premiere 教程",
+        },
+    )
+
+    assert decision.analysis["strategy_type"] == "step_demonstration"
+    assert decision.analysis["strategy_profile"]["strategy_type"] == "step_demonstration"
+
+
+def test_build_edit_decision_prefers_confirmed_gameplay_profile_over_stale_content_understanding() -> None:
+    decision = build_edit_decision(
+        source_path="demo.mp4",
+        duration=13.8,
+        silence_segments=[],
+        subtitle_items=[
+            _subtitle("先看这一波关键操作。", start=0.0, end=3.0),
+            _subtitle("这里是最值得保留的高光片段。", start=3.1, end=8.2),
+            _subtitle("最后再看结尾处理。", start=8.4, end=13.8),
+        ],
+        content_profile={
+            "workflow_template": "gameplay_highlight",
+            "content_kind": "gameplay",
+            "content_understanding": {"video_type": "unboxing"},
+            "product_controls": {
+                "effective": {
+                    "edit_mode": "highlight",
+                    "automation_level": "standard",
+                    "material_usage": "all_uploaded",
+                }
+            },
+        },
+    )
+
+    assert decision.analysis["strategy_type"] == "event_highlight"
+    assert decision.analysis["strategy_profile"]["strategy_type"] == "event_highlight"

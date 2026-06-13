@@ -71,6 +71,11 @@ data/intelligent_copy/
 .hydra-host-dev/
 /3305
 /tmp-dedupe-video.mp4
+/.external-services/
+/tmp/
+/debug_artifacts/
+/debug_out/
+/frontend/.codex-logs/
 
 # Generated artifact runs kept locally during publication/manual-editor debugging
 artifacts/*manual-editor*.json

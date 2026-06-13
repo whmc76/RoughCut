@@ -12,6 +12,11 @@ from roughcut.creative.modes import (
     normalize_workflow_mode,
 )
 from roughcut.api.options import normalize_job_language, normalize_workflow_template
+from roughcut.edit.product_controls import (
+    normalize_automation_level,
+    normalize_edit_mode,
+    normalize_material_usage,
+)
 
 
 # ── Jobs ──────────────────────────────────────────────────────────────────────
@@ -37,6 +42,9 @@ class JobCreate(BaseModel):
     job_flow_mode: str = JOB_FLOW_MODE_AUTO
     workflow_mode: str = DEFAULT_WORKFLOW_MODE
     enhancement_modes: list[str] = Field(default_factory=list)
+    edit_mode: str = "auto"
+    automation_level: str = "standard"
+    material_usage: str = "all_uploaded"
     output_dir: str | None = None
     video_description: str | None = None
 
@@ -70,6 +78,21 @@ class JobCreate(BaseModel):
         if isinstance(value, (list, tuple, set)):
             return normalize_enhancement_modes(list(value))
         raise ValueError("enhancement_modes must be a list of strings")
+
+    @field_validator("edit_mode", mode="before")
+    @classmethod
+    def validate_edit_mode(cls, value: Any) -> str:
+        return normalize_edit_mode(value)
+
+    @field_validator("automation_level", mode="before")
+    @classmethod
+    def validate_automation_level(cls, value: Any) -> str:
+        return normalize_automation_level(value)
+
+    @field_validator("material_usage", mode="before")
+    @classmethod
+    def validate_material_usage(cls, value: Any) -> str:
+        return normalize_material_usage(value)
 
     @field_validator("output_dir", mode="before")
     @classmethod
@@ -372,6 +395,7 @@ class ContentProfileReviewOut(BaseModel):
     entity_resolution_trace: dict[str, Any] = Field(default_factory=dict)
     workflow_mode: str
     enhancement_modes: list[str] = Field(default_factory=list)
+    product_controls: dict[str, Any] = Field(default_factory=dict)
     draft: dict[str, Any] | None
     final: dict[str, Any] | None
     memory: dict[str, Any] | None = None
