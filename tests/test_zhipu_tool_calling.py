@@ -69,6 +69,7 @@ async def test_zhipu_complete_with_tools_builds_function_payload_and_parses_tool
     payload = dict(captured["json_payload"] or {})
     assert payload["tools"][0]["function"]["name"] == "web_search"
     assert payload["tool_choice"] == "auto"
+    assert "max_tokens" not in payload
     assert len(response.tool_calls) == 1
     assert response.tool_calls[0].name == "web_search"
     assert response.tool_calls[0].arguments == {"query": "GLM-5.2"}

@@ -23,18 +23,18 @@ def test_zhipu_mcp_catalog_exposes_required_servers() -> None:
 
 
 def test_zhipu_low_effort_does_not_force_thinking() -> None:
-    assert _should_enable_zhipu_thinking(effort="low", max_tokens=1024, model="glm-5.1") is False
-    assert _should_enable_zhipu_thinking(effort="medium", max_tokens=64, model="glm-5.1") is False
-    assert _should_enable_zhipu_thinking(effort="high", max_tokens=512, model="glm-5.1") is True
-    assert _should_enable_zhipu_thinking(effort="max", max_tokens=512, model="glm-5.1") is True
-    assert _should_enable_zhipu_thinking(effort="high", max_tokens=4096, json_mode=True, model="glm-5.1") is False
+    assert _should_enable_zhipu_thinking(effort="low", model="glm-5.1") is False
+    assert _should_enable_zhipu_thinking(effort="medium", model="glm-5.1") is True
+    assert _should_enable_zhipu_thinking(effort="high", model="glm-5.1") is True
+    assert _should_enable_zhipu_thinking(effort="max", model="glm-5.1") is True
+    assert _should_enable_zhipu_thinking(effort="high", json_mode=True, model="glm-5.1") is False
 
 
 def test_zhipu_glm_5_2_keeps_low_as_non_thinking_and_max_as_complex_thinking() -> None:
-    assert _should_enable_zhipu_thinking(effort="minimal", max_tokens=1024, model="glm-5.2[1m]") is False
-    assert _should_enable_zhipu_thinking(effort="low", max_tokens=1024, model="glm-5.2[1m]") is False
-    assert _should_enable_zhipu_thinking(effort="medium", max_tokens=1024, model="glm-5.2[1m]") is True
-    assert _should_enable_zhipu_thinking(effort="max", max_tokens=1024, model="glm-5.2[1m]") is True
+    assert _should_enable_zhipu_thinking(effort="minimal", model="glm-5.2[1m]") is False
+    assert _should_enable_zhipu_thinking(effort="low", model="glm-5.2[1m]") is False
+    assert _should_enable_zhipu_thinking(effort="medium", model="glm-5.2[1m]") is True
+    assert _should_enable_zhipu_thinking(effort="max", model="glm-5.2[1m]") is True
 
 
 def test_zhipu_request_context_provides_traceable_ids() -> None:

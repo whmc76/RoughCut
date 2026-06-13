@@ -40,12 +40,13 @@ async def test_zhipu_reasoning_json_mode_sets_response_format_and_disables_think
     payload = dict(captured["json_payload"] or {})
     assert response.content == '{"ok":true}'
     assert payload["response_format"] == {"type": "json_object"}
+    assert "max_tokens" not in payload
     assert payload["thinking"] == {"type": "disabled"}
     assert str(payload["user_id"]).startswith("roughcut-")
 
 
 @pytest.mark.asyncio
-async def test_zhipu_reasoning_default_max_tokens_matches_glm_capacity(monkeypatch) -> None:
+async def test_zhipu_reasoning_omits_max_tokens_by_default_for_official_server_default(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     async def fake_post_zhipu_json(*, url, headers, json_payload, timeout_sec, max_attempts):
@@ -70,5 +71,5 @@ async def test_zhipu_reasoning_default_max_tokens_matches_glm_capacity(monkeypat
     payload = dict(captured["json_payload"] or {})
     assert response.content == "ok"
     assert payload["model"] == "glm-5.2[1m]"
-    assert payload["max_tokens"] == 65536
+    assert "max_tokens" not in payload
     assert captured["timeout_sec"] == 600
