@@ -14,8 +14,8 @@ import roughcut.config as config_mod
 from roughcut.config import _normalize_settings, get_settings
 from roughcut.providers.image_generation import CodexImageGenerationPending, generate_edited_cover_image
 from roughcut.providers.reasoning.base import Message, ReasoningResponse
-from roughcut.providers.reasoning.minimax_reasoning import MiniMaxReasoningProvider
 from roughcut.providers.reasoning.openai_reasoning import OpenAIReasoningProvider
+from roughcut.providers.reasoning.zhipu_reasoning import ZhipuReasoningProvider
 
 
 REPORT_ROOT = Path("logs/model-route-benchmarks")
@@ -82,8 +82,8 @@ def _build_provider(spec: ModelSpec):
     ):
         if spec.provider == "openai":
             return OpenAIReasoningProvider()
-        if spec.provider == "minimax":
-            return MiniMaxReasoningProvider(model=spec.model)
+        if spec.provider == "zhipu":
+            return ZhipuReasoningProvider(model=spec.model)
     raise ValueError(f"Unsupported provider: {spec.provider}")
 
 
@@ -98,7 +98,7 @@ async def _run_text_case(spec: ModelSpec, case: BenchmarkCase) -> dict[str, Any]
             llm_routing_mode="bundled",
         ):
             provider = _build_provider(spec)
-            max_tokens = max(case.max_tokens, 2400) if spec.provider == "minimax" else case.max_tokens
+            max_tokens = max(case.max_tokens, 2400) if spec.provider == "zhipu" else case.max_tokens
             response = await provider.complete(
                 [
                     Message(role="system", content=case.system_prompt),
@@ -243,7 +243,7 @@ def _evaluate_analysis(slug: str, payload: dict[str, Any], text: str) -> list[di
 def _build_models() -> list[ModelSpec]:
     return [
         ModelSpec(key="openai_gpt55_low", provider="openai", model="gpt-5.5", effort="low"),
-        ModelSpec(key="minimax_m27", provider="minimax", model="MiniMax-M2.7", effort="medium"),
+        ModelSpec(key="zhipu_glm52_1m", provider="zhipu", model="glm-5.2[1m]", effort="max"),
     ]
 
 

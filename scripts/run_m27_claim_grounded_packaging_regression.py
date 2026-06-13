@@ -61,12 +61,12 @@ def temporary_settings(**updates: Any):
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run MiniMax M2.7 claim-grounded platform packaging regression.")
+    parser = argparse.ArgumentParser(description="Run GLM-5.2 claim-grounded platform packaging regression.")
     parser.add_argument("--job-id", action="append", default=[], help="Specific job id to evaluate. Can be repeated.")
     parser.add_argument("--limit", type=int, default=5)
     parser.add_argument("--report-dir", type=Path, default=REPORT_ROOT)
-    parser.add_argument("--provider", default="minimax")
-    parser.add_argument("--model", default="MiniMax-M2.7")
+    parser.add_argument("--provider", default="zhipu")
+    parser.add_argument("--model", default="glm-5.2[1m]")
     parser.add_argument("--max-subtitles", type=int, default=80)
     parser.add_argument(
         "--platform",
@@ -297,7 +297,7 @@ def summarize_runs(runs: list[RegressionRun]) -> dict[str, Any]:
 
 def render_markdown(report: dict[str, Any]) -> str:
     lines = [
-        "# MiniMax M2.7 Claim-Grounded Packaging Regression",
+        "# GLM-5.2 Claim-Grounded Packaging Regression",
         "",
         f"- created_at: {report.get('created_at')}",
         f"- model: {report.get('provider')}/{report.get('model')}",

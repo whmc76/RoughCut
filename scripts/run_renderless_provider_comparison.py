@@ -136,7 +136,7 @@ def main() -> None:
 
     providers = [
         ProviderSpec(provider="openai", model="gpt-5.5", label="OpenAI GPT-5.5 low"),
-        ProviderSpec(provider="minimax", model="MiniMax-M2.7", label="MiniMax M2.7"),
+        ProviderSpec(provider="zhipu", model="glm-5.2[1m]", label="Zhipu GLM-5.2 1M max"),
     ]
     samples: list[dict[str, Any]] = []
     for source in sources:

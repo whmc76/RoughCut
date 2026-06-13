@@ -10,8 +10,8 @@ from typing import Any
 import roughcut.config as config_mod
 from roughcut.config import get_settings
 from roughcut.providers.reasoning.base import Message, ReasoningResponse
-from roughcut.providers.reasoning.minimax_reasoning import MiniMaxReasoningProvider
 from roughcut.providers.reasoning.ollama_reasoning import OllamaReasoningProvider
+from roughcut.providers.reasoning.zhipu_reasoning import ZhipuReasoningProvider
 
 
 REPORT_DIR = Path("logs/llm-benchmarks")
@@ -51,8 +51,8 @@ def _build_provider(spec: ProviderSpec):
         reasoning_model=spec.model,
         **spec.extra_settings,
     )
-    if spec.provider == "minimax":
-        return MiniMaxReasoningProvider(), settings
+    if spec.provider == "zhipu":
+        return ZhipuReasoningProvider(model=spec.model), settings
     if spec.provider == "ollama":
         return OllamaReasoningProvider(), settings
     raise ValueError(f"Unsupported provider: {spec.provider}")
@@ -320,9 +320,9 @@ async def main() -> None:
     cases = _build_cases()
     providers = [
         ProviderSpec(
-            name="MiniMax-M2.5",
-            provider="minimax",
-            model="MiniMax-M2.5",
+            name="GLM-5.2 1M",
+            provider="zhipu",
+            model="glm-5.2[1m]",
             extra_settings={},
         ),
         ProviderSpec(

@@ -5,7 +5,7 @@ from roughcut.providers.zhipu_compat import DEFAULT_ZHIPU_MCP_HTTP_BASE_URL, bui
 from roughcut.providers.reasoning.zhipu_reasoning import _should_enable_zhipu_thinking
 
 
-def test_zhipu_provider_defaults_to_glm_5_1() -> None:
+def test_zhipu_provider_defaults_to_glm_5_2() -> None:
     assert normalize_reasoning_model_for_provider("zhipu", "") == DEFAULT_ZHIPU_REASONING_MODEL
 
 
@@ -23,10 +23,18 @@ def test_zhipu_mcp_catalog_exposes_required_servers() -> None:
 
 
 def test_zhipu_low_effort_does_not_force_thinking() -> None:
-    assert _should_enable_zhipu_thinking(effort="low", max_tokens=1024) is False
-    assert _should_enable_zhipu_thinking(effort="medium", max_tokens=64) is False
-    assert _should_enable_zhipu_thinking(effort="high", max_tokens=512) is True
-    assert _should_enable_zhipu_thinking(effort="high", max_tokens=4096, json_mode=True) is False
+    assert _should_enable_zhipu_thinking(effort="low", max_tokens=1024, model="glm-5.1") is False
+    assert _should_enable_zhipu_thinking(effort="medium", max_tokens=64, model="glm-5.1") is False
+    assert _should_enable_zhipu_thinking(effort="high", max_tokens=512, model="glm-5.1") is True
+    assert _should_enable_zhipu_thinking(effort="max", max_tokens=512, model="glm-5.1") is True
+    assert _should_enable_zhipu_thinking(effort="high", max_tokens=4096, json_mode=True, model="glm-5.1") is False
+
+
+def test_zhipu_glm_5_2_keeps_low_as_non_thinking_and_max_as_complex_thinking() -> None:
+    assert _should_enable_zhipu_thinking(effort="minimal", max_tokens=1024, model="glm-5.2[1m]") is False
+    assert _should_enable_zhipu_thinking(effort="low", max_tokens=1024, model="glm-5.2[1m]") is False
+    assert _should_enable_zhipu_thinking(effort="medium", max_tokens=1024, model="glm-5.2[1m]") is True
+    assert _should_enable_zhipu_thinking(effort="max", max_tokens=1024, model="glm-5.2[1m]") is True
 
 
 def test_zhipu_request_context_provides_traceable_ids() -> None:

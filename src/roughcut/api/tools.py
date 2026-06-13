@@ -18,7 +18,7 @@ import httpx
 from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 
-from roughcut.config import DEFAULT_MINIMAX_REASONING_MODEL, DEFAULT_OUTPUT_ROOT, get_settings, uses_codex_auth_helper
+from roughcut.config import DEFAULT_OUTPUT_ROOT, DEFAULT_ZHIPU_REASONING_MODEL, get_settings, uses_codex_auth_helper
 from roughcut.docker_gpu_guard import hold_managed_gpu_services_async
 from roughcut.providers.avatar.heygem import HeyGemAvatarProvider
 from roughcut.providers.factory import get_reasoning_provider
@@ -269,12 +269,13 @@ async def _complete_tts_oralization(prompt_messages: list[Message]):
     openai_key = str(getattr(settings, "openai_api_key", "") or "").strip()
     uses_codex_bridge = uses_codex_auth_helper(settings) and not openai_key
     if uses_codex_bridge:
-        minimax_key = str(getattr(settings, "minimax_api_key", "") or "").strip()
-        if not minimax_key:
+        zhipu_key = str(getattr(settings, "zhipu_api_key", "") or "").strip()
+        zhipu_helper = str(getattr(settings, "zhipu_api_key_helper", "") or "").strip()
+        if not zhipu_key and not zhipu_helper:
             raise RuntimeError("口语化改写需要可直接调用的轻量文案模型；当前只有 Codex bridge，短文本改写不再使用 Codex agent")
-        from roughcut.providers.reasoning.minimax_reasoning import MiniMaxReasoningProvider
+        from roughcut.providers.reasoning.zhipu_reasoning import ZhipuReasoningProvider
 
-        return await MiniMaxReasoningProvider(model=DEFAULT_MINIMAX_REASONING_MODEL).complete(
+        return await ZhipuReasoningProvider(model=DEFAULT_ZHIPU_REASONING_MODEL).complete(
             prompt_messages,
             temperature=0.35,
             max_tokens=1800,

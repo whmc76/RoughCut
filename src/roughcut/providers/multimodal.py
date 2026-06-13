@@ -722,7 +722,8 @@ async def _complete_zhipu_multimodal(
         **build_zhipu_request_context(),
     }
     effort = str(getattr(settings, "active_reasoning_effort", "low") or "low").strip().lower()
-    enable_thinking = (not json_mode) and effort in {"medium", "high"} and int(max_tokens) >= 256
+    thinking_efforts = {"medium", "high", "xhigh", "max", "ultracode"}
+    enable_thinking = (not json_mode) and effort in thinking_efforts and int(max_tokens) >= 256
     payload["thinking"] = {"type": "enabled" if enable_thinking else "disabled"}
     if json_mode:
         payload["messages"] = [

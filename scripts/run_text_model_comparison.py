@@ -35,7 +35,7 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 DEFAULT_VIDEO_ROOT = ROOT / "data" / "avatar_materials" / "profiles"
 REPORT_ROOT = ROOT / "output" / "test" / "model-text-compare"
 CODEX_MODEL = "gpt-5.5"
-MINIMAX_MODEL = "MiniMax-M2.7"
+MINIMAX_MODEL = "glm-5.2[1m]"
 
 
 @dataclass
@@ -387,7 +387,7 @@ async def run_minimax_bundle(*, sample: SampleInput) -> ModelArtifacts:
     visual_prompt = build_visual_notes_prompt(sample)
     with temporary_settings(
         llm_mode="performance",
-        reasoning_provider="minimax",
+        reasoning_provider="zhipu",
         reasoning_model=MINIMAX_MODEL,
     ):
         visual_notes = await complete_with_images(

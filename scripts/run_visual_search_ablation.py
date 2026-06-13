@@ -244,7 +244,7 @@ def run_codex_variant(
 async def run_minimax_ablation(*, sample: SampleInput) -> ModelAblationReport:
     with temporary_settings(
         llm_mode="performance",
-        reasoning_provider="minimax",
+        reasoning_provider="zhipu",
         reasoning_model=MINIMAX_MODEL,
     ):
         text_only = await run_variant_with_timing_async(lambda: run_minimax_variant(sample=sample, use_images=False, use_search=False))

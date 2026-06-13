@@ -5606,8 +5606,6 @@ async def _select_intelligent_copy_highlight_candidate(
                     [final_sheet_path],
                     max_tokens=180,
                     json_mode=True,
-                    preferred_provider="minimax",
-                    preferred_model="minimax-m3",
                 ),
                 timeout=_resolve_cover_source_multimodal_timeout("final_rank"),
             )
@@ -5852,8 +5850,6 @@ async def _rank_cover_reference_candidates_for_generation(
                 review_paths,
                 max_tokens=220,
                 json_mode=True,
-                preferred_provider="minimax",
-                preferred_model="minimax-m3",
             ),
             timeout=_resolve_cover_source_multimodal_timeout("full_frame_review"),
         )
@@ -6158,8 +6154,6 @@ async def _reselect_cover_source_from_full_frame_review(
                 [final_sheet_path, *review_paths],
                 max_tokens=220,
                 json_mode=True,
-                preferred_provider="minimax",
-                preferred_model="minimax-m3",
             ),
             timeout=_resolve_cover_source_multimodal_timeout("full_frame_review"),
         )
@@ -6224,8 +6218,6 @@ async def _select_cover_source_shortlist_numbers_from_sheet(
             [sheet_path],
             max_tokens=260,
             json_mode=True,
-            preferred_provider="minimax",
-            preferred_model="minimax-m3",
         ),
         timeout=_resolve_cover_source_multimodal_timeout("shortlist"),
     )
@@ -6349,8 +6341,6 @@ async def _reselect_cover_source_after_hard_contract_violation(
                 [final_sheet_path],
                 max_tokens=180,
                 json_mode=True,
-                preferred_provider="minimax",
-                preferred_model="minimax-m3",
             ),
             timeout=_resolve_cover_source_multimodal_timeout("correction"),
         )
@@ -7348,8 +7338,6 @@ async def _run_cover_visual_json_verification(
                     [output_path],
                     max_tokens=max_tokens,
                     json_mode=True,
-                    preferred_provider="minimax",
-                    preferred_model="minimax-m3",
                 ),
                 timeout=timeout_sec,
             )

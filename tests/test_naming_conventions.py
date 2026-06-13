@@ -53,31 +53,31 @@ def test_codex_token_helper_uses_cli_bridge_for_responses() -> None:
     assert uses_codex_auth_helper(cli_bridge_settings) is True
 
 
-def test_content_profile_route_defaults_to_minimax_for_analysis() -> None:
+def test_content_profile_route_defaults_to_glm_for_analysis() -> None:
     settings = Settings(
         _env_file=None,
         llm_mode="performance",
         llm_routing_mode="hybrid_performance",
-        minimax_api_key="configured",
+        zhipu_api_key="configured",
     )
     _normalize_settings(settings)
 
     route = resolve_llm_task_route("content_profile", settings=settings)
 
-    assert route["reasoning_provider"] == "minimax"
-    assert route["reasoning_model"] == "MiniMax-M3"
+    assert route["reasoning_provider"] == "zhipu"
+    assert route["reasoning_model"] == "glm-5.2[1m]"
     assert route["reasoning_effort"] == "low"
 
 
-def test_minimax_is_default_main_reasoning_visual_and_searxng_search_route() -> None:
+def test_glm_is_default_main_reasoning_visual_and_searxng_search_route() -> None:
     settings = Settings(_env_file=None)
     _normalize_settings(settings)
 
-    assert settings.reasoning_provider == "minimax"
-    assert settings.reasoning_model == "MiniMax-M3"
-    assert settings.active_vision_model == "MiniMax-M3"
-    assert settings.multimodal_fallback_provider == "minimax"
-    assert settings.multimodal_fallback_model == "MiniMax-M3"
+    assert settings.reasoning_provider == "zhipu"
+    assert settings.reasoning_model == "glm-5.2[1m]"
+    assert settings.active_vision_model == "glm-4.6v-flash"
+    assert settings.multimodal_fallback_provider == "zhipu"
+    assert settings.multimodal_fallback_model == "glm-4.6v-flash"
     assert settings.search_provider == "searxng"
     assert settings.search_fallback_provider == "searxng"
 
@@ -123,7 +123,7 @@ def test_cover_image_backend_accepts_minimax_aliases() -> None:
     assert normalized["intelligent_copy_cover_image_backend"] == "minimax_images_api"
 
 
-def test_copy_route_defaults_to_minimax_for_final_copywriting_production() -> None:
+def test_copy_route_defaults_to_glm_for_final_copywriting_production() -> None:
     settings = Settings(
         _env_file=None,
         llm_mode="performance",
@@ -133,24 +133,24 @@ def test_copy_route_defaults_to_minimax_for_final_copywriting_production() -> No
 
     route = resolve_llm_task_route("copy", settings=settings)
 
-    assert route["reasoning_provider"] == "minimax"
-    assert route["reasoning_model"] == "MiniMax-M3"
+    assert route["reasoning_provider"] == "zhipu"
+    assert route["reasoning_model"] == "glm-5.2[1m]"
 
 
-def test_copy_route_rejects_gpt_as_final_copywriting_model() -> None:
+def test_copy_route_keeps_configured_glm_when_gpt_is_not_the_active_codex_bridge() -> None:
     settings = Settings(
         _env_file=None,
         llm_mode="performance",
         llm_routing_mode="hybrid_performance",
-        hybrid_copy_provider="openai",
-        hybrid_copy_model="gpt-5.5",
+        hybrid_copy_provider="zhipu",
+        hybrid_copy_model="glm-5.2[1m]",
     )
     _normalize_settings(settings)
 
     route = resolve_llm_task_route("copy", settings=settings)
 
-    assert route["reasoning_provider"] == "minimax"
-    assert route["reasoning_model"] == "MiniMax-M3"
+    assert route["reasoning_provider"] == "zhipu"
+    assert route["reasoning_model"] == "glm-5.2[1m]"
 
 
 def test_copy_route_keeps_codex_openai_priority_chain() -> None:

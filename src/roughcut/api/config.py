@@ -1011,8 +1011,11 @@ def patch_config(body: ConfigPatch):
     for key in ("reasoning_effort", "backup_reasoning_effort"):
         if key in updates:
             effort = str(updates[key] or "").strip().lower()
-            if effort not in {"minimal", "low", "medium", "high"}:
-                raise HTTPException(status_code=400, detail=f"{key} must be minimal, low, medium, or high")
+            if effort not in {"minimal", "low", "medium", "high", "xhigh", "max", "ultracode"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{key} must be minimal, low, medium, high, xhigh, max, or ultracode",
+                )
             updates[key] = effort
     for key in ("backup_search_provider",):
         if key in updates:
@@ -1197,10 +1200,13 @@ def patch_config(body: ConfigPatch):
             updates[key] = str(updates[key] or "").strip()
     if "intelligent_copy_cover_codex_runner_effort" in updates:
         effort = str(updates["intelligent_copy_cover_codex_runner_effort"] or "").strip().lower()
-        if effort not in {"minimal", "low", "medium", "high"}:
+        if effort not in {"minimal", "low", "medium", "high", "xhigh", "max", "ultracode"}:
             raise HTTPException(
                 status_code=400,
-                detail="intelligent_copy_cover_codex_runner_effort must be minimal, low, medium, or high",
+                detail=(
+                    "intelligent_copy_cover_codex_runner_effort must be minimal, low, medium, "
+                    "high, xhigh, max, or ultracode"
+                ),
             )
         updates["intelligent_copy_cover_codex_runner_effort"] = effort
     if "intelligent_copy_cover_image_timeout_sec" in updates:

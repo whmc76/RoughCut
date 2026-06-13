@@ -136,27 +136,27 @@ MULTIMODAL_FALLBACK_PROVIDER_VALUES: tuple[str, ...] = MULTIMODAL_PROVIDER_VALUE
 HYBRID_REASONING_PROVIDER_VALUES: tuple[str, ...] = REASONING_PROVIDER_VALUES
 LLM_ROUTING_MODE_VALUES: tuple[str, ...] = ("bundled", "hybrid_performance")
 HYBRID_SEARCH_MODE_VALUES: tuple[str, ...] = ("off", "entity_gated", "follow_provider")
-REASONING_EFFORT_VALUES: tuple[str, ...] = ("minimal", "low", "medium", "high")
+REASONING_EFFORT_VALUES: tuple[str, ...] = ("minimal", "low", "medium", "high", "xhigh", "max", "ultracode")
 DEFAULT_MINIMAX_REASONING_MODEL = "MiniMax-M3"
-DEFAULT_REASONING_PROVIDER = "minimax"
-DEFAULT_REASONING_MODEL = DEFAULT_MINIMAX_REASONING_MODEL
-DEFAULT_BACKUP_REASONING_PROVIDER = "minimax"
-DEFAULT_BACKUP_REASONING_MODEL = DEFAULT_MINIMAX_REASONING_MODEL
-DEFAULT_BACKUP_VISION_MODEL = DEFAULT_MINIMAX_REASONING_MODEL
-DEFAULT_HYBRID_ANALYSIS_PROVIDER = "minimax"
-DEFAULT_HYBRID_ANALYSIS_MODEL = DEFAULT_MINIMAX_REASONING_MODEL
-DEFAULT_HYBRID_COPY_PROVIDER = "minimax"
-DEFAULT_HYBRID_COPY_MODEL = DEFAULT_MINIMAX_REASONING_MODEL
 DEFAULT_SEARCH_PROVIDER = "searxng"
 DEFAULT_SEARCH_FALLBACK_PROVIDER = "searxng"
 DEFAULT_BACKUP_SEARCH_PROVIDER = "searxng"
 DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER = "searxng"
-DEFAULT_MULTIMODAL_FALLBACK_PROVIDER = "minimax"
-DEFAULT_MULTIMODAL_FALLBACK_MODEL = DEFAULT_MINIMAX_REASONING_MODEL
 DEFAULT_MODEL_SEARCH_HELPER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "codex_model_search_helper.py"
-DEFAULT_ZHIPU_REASONING_MODEL = "glm-5.1"
+DEFAULT_ZHIPU_REASONING_MODEL = "glm-5.2[1m]"
 DEFAULT_ZHIPU_VISION_MODEL = "glm-4.6v-flash"
 DEFAULT_ZHIPU_SEARCH_ENGINE = "search_pro"
+DEFAULT_REASONING_PROVIDER = "zhipu"
+DEFAULT_REASONING_MODEL = DEFAULT_ZHIPU_REASONING_MODEL
+DEFAULT_BACKUP_REASONING_PROVIDER = "zhipu"
+DEFAULT_BACKUP_REASONING_MODEL = DEFAULT_ZHIPU_REASONING_MODEL
+DEFAULT_BACKUP_VISION_MODEL = DEFAULT_ZHIPU_VISION_MODEL
+DEFAULT_HYBRID_ANALYSIS_PROVIDER = "zhipu"
+DEFAULT_HYBRID_ANALYSIS_MODEL = DEFAULT_ZHIPU_REASONING_MODEL
+DEFAULT_HYBRID_COPY_PROVIDER = "zhipu"
+DEFAULT_HYBRID_COPY_MODEL = DEFAULT_ZHIPU_REASONING_MODEL
+DEFAULT_MULTIMODAL_FALLBACK_PROVIDER = "zhipu"
+DEFAULT_MULTIMODAL_FALLBACK_MODEL = DEFAULT_ZHIPU_VISION_MODEL
 MINIMAX_REASONING_MODEL_ALIASES: dict[str, str] = {
     "minimax-m3": "MiniMax-M3",
     "minimax-m2.7": "MiniMax-M3",
@@ -483,7 +483,7 @@ class Settings(BaseSettings):
     hybrid_analysis_search_mode: str = "entity_gated"  # off | entity_gated | follow_provider
     hybrid_copy_provider: str = DEFAULT_HYBRID_COPY_PROVIDER
     hybrid_copy_model: str = DEFAULT_HYBRID_COPY_MODEL
-    hybrid_copy_effort: str = "high"
+    hybrid_copy_effort: str = "max"
     hybrid_copy_search_mode: str = "follow_provider"  # off | entity_gated | follow_provider
     multimodal_fallback_provider: str = DEFAULT_MULTIMODAL_FALLBACK_PROVIDER
     multimodal_fallback_model: str = DEFAULT_MULTIMODAL_FALLBACK_MODEL
@@ -594,7 +594,7 @@ class Settings(BaseSettings):
     # Vision model (for rotation detection, cover selection)
     # Set to a vision-capable model name, e.g. "llava:13b" or "moondream" for Ollama,
     # "gpt-4o" for OpenAI. Empty string = attempt with reasoning_model.
-    vision_model: str = ""
+    vision_model: str = DEFAULT_ZHIPU_VISION_MODEL
 
     # Subtitle style (burned into video) — neon/fluorescent: black text + green glow
     subtitle_font: str = "Microsoft YaHei"
@@ -1560,12 +1560,20 @@ def resolve_llm_task_route(task_name: str, *, settings: Settings | None = None) 
         ).strip().lower()
         if active_provider == "openai" and uses_codex_auth_helper(current):
             return {}
-        selected_provider = "minimax"
+        selected_provider = str(
+            getattr(current, "hybrid_copy_provider", DEFAULT_HYBRID_COPY_PROVIDER)
+            or DEFAULT_HYBRID_COPY_PROVIDER
+        ).strip().lower()
+        if selected_provider not in HYBRID_REASONING_PROVIDER_VALUES:
+            selected_provider = DEFAULT_HYBRID_COPY_PROVIDER
         selected_model = str(
             getattr(current, "hybrid_copy_model", DEFAULT_HYBRID_COPY_MODEL)
             or DEFAULT_HYBRID_COPY_MODEL
         ).strip()
-        if selected_model.lower().startswith("gpt-") or selected_model.lower().startswith("o"):
+        if (
+            selected_provider == "minimax"
+            and (selected_model.lower().startswith("gpt-") or selected_model.lower().startswith("o"))
+        ):
             selected_model = DEFAULT_MINIMAX_REASONING_MODEL
         route = {
             "reasoning_provider": selected_provider,

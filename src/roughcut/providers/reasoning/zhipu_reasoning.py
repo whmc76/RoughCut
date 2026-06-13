@@ -7,7 +7,8 @@ from roughcut.providers.zhipu_compat import normalize_zhipu_base_url
 from roughcut.providers.zhipu_http import build_zhipu_headers, build_zhipu_request_context, post_zhipu_json
 from roughcut.usage import record_usage_event
 
-_ZHIPU_REASONING_TIMEOUT_SECONDS = 120
+_ZHIPU_REASONING_TIMEOUT_SECONDS = 600
+_ZHIPU_DEFAULT_MAX_OUTPUT_TOKENS = 65536
 
 
 class ZhipuReasoningProvider(ReasoningProvider):
@@ -27,11 +28,16 @@ class ZhipuReasoningProvider(ReasoningProvider):
         messages: list[Message],
         *,
         temperature: float = 0.3,
-        max_tokens: int = 4096,
+        max_tokens: int = _ZHIPU_DEFAULT_MAX_OUTPUT_TOKENS,
         json_mode: bool = False,
     ) -> ReasoningResponse:
         effort = str(getattr(get_settings(), "active_reasoning_effort", "low") or "low").strip().lower()
-        enable_thinking = _should_enable_zhipu_thinking(effort=effort, max_tokens=max_tokens, json_mode=json_mode)
+        enable_thinking = _should_enable_zhipu_thinking(
+            model=self._model,
+            effort=effort,
+            max_tokens=max_tokens,
+            json_mode=json_mode,
+        )
         data = await self._request_completion(
             messages=messages,
             temperature=temperature,
@@ -80,11 +86,16 @@ class ZhipuReasoningProvider(ReasoningProvider):
         tools: list[ToolDefinition],
         tool_choice: str = "auto",
         temperature: float = 0.3,
-        max_tokens: int = 4096,
+        max_tokens: int = _ZHIPU_DEFAULT_MAX_OUTPUT_TOKENS,
         json_mode: bool = False,
     ) -> ReasoningResponse:
         effort = str(getattr(get_settings(), "active_reasoning_effort", "low") or "low").strip().lower()
-        enable_thinking = _should_enable_zhipu_thinking(effort=effort, max_tokens=max_tokens, json_mode=json_mode)
+        enable_thinking = _should_enable_zhipu_thinking(
+            model=self._model,
+            effort=effort,
+            max_tokens=max_tokens,
+            json_mode=json_mode,
+        )
         data = await self._request_completion(
             messages=messages,
             temperature=temperature,
@@ -241,8 +252,16 @@ def _extract_tool_calls(message: object) -> list[ToolCall]:
     return parsed
 
 
-def _should_enable_zhipu_thinking(*, effort: str, max_tokens: int, json_mode: bool = False) -> bool:
+def _should_enable_zhipu_thinking(
+    *,
+    effort: str,
+    max_tokens: int,
+    json_mode: bool = False,
+    model: str = "",
+) -> bool:
     if json_mode:
         return False
     normalized_effort = str(effort or "").strip().lower()
-    return normalized_effort in {"medium", "high"} and int(max_tokens) >= 256
+    if int(max_tokens) < 256:
+        return False
+    return normalized_effort in {"medium", "high", "xhigh", "max", "ultracode"}

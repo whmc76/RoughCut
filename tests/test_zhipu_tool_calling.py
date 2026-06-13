@@ -9,7 +9,7 @@ class _DummySettings:
     zhipu_api_key = "demo-key"
     zhipu_api_key_helper = ""
     zhipu_base_url = "https://open.bigmodel.cn/api/paas/v4"
-    active_reasoning_model = "glm-5.1"
+    active_reasoning_model = "glm-5.2[1m]"
     active_reasoning_effort = "low"
 
 
@@ -20,7 +20,7 @@ async def test_zhipu_complete_with_tools_builds_function_payload_and_parses_tool
     async def fake_post_zhipu_json(*, url, headers, json_payload, timeout_sec, max_attempts):
         captured["json_payload"] = json_payload
         return {
-            "model": "glm-5.1",
+            "model": "glm-5.2[1m]",
             "choices": [
                 {
                     "message": {
@@ -31,7 +31,7 @@ async def test_zhipu_complete_with_tools_builds_function_payload_and_parses_tool
                                 "type": "function",
                                 "function": {
                                     "name": "web_search",
-                                    "arguments": '{"query":"GLM-5.1"}',
+                                    "arguments": '{"query":"GLM-5.2"}',
                                 },
                             }
                         ],
@@ -50,7 +50,7 @@ async def test_zhipu_complete_with_tools_builds_function_payload_and_parses_tool
 
     provider = ZhipuReasoningProvider()
     response = await provider.complete_with_tools(
-        [Message(role="user", content="查一下 GLM-5.1")],
+        [Message(role="user", content="查一下 GLM-5.2")],
         tools=[
             ToolDefinition(
                 name="web_search",
@@ -71,4 +71,4 @@ async def test_zhipu_complete_with_tools_builds_function_payload_and_parses_tool
     assert payload["tool_choice"] == "auto"
     assert len(response.tool_calls) == 1
     assert response.tool_calls[0].name == "web_search"
-    assert response.tool_calls[0].arguments == {"query": "GLM-5.1"}
+    assert response.tool_calls[0].arguments == {"query": "GLM-5.2"}
