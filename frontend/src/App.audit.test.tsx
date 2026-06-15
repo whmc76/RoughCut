@@ -36,11 +36,10 @@ vi.mock("./pages/ToolsPage", () => ({
   AsrToolPage: () => <main data-testid="route-tools-asr">ASR route</main>,
   AvatarToolPage: () => <main data-testid="route-tools-avatar">Avatar route</main>,
 }));
-vi.mock("./pages/PackagingPage", () => ({ PackagingPage: () => <main data-testid="route-packaging">Packaging route</main> }));
-vi.mock("./pages/StyleLabPage", () => ({ StyleLabPage: () => <main data-testid="route-style-lab">Style lab route</main> }));
-vi.mock("./pages/StyleTemplatesPage", () => ({ StyleTemplatesPage: () => <main data-testid="route-style-templates">Style templates route</main> }));
-vi.mock("./pages/CreativeModesPage", () => ({ CreativeModesPage: () => <main data-testid="route-creative-modes">Creative modes route</main> }));
-vi.mock("./pages/CreatorProfilesPage", () => ({ CreatorProfilesPage: () => <main data-testid="route-creator-profiles">Creator profiles route</main> }));
+vi.mock("./pages/CreatorCardsPage", () => ({ CreatorCardsPage: () => <main data-testid="route-creator-cards">Creator cards route</main> }));
+vi.mock("./pages/TaskStrategiesPage", () => ({ TaskStrategiesPage: () => <main data-testid="route-task-strategies">Task strategies route</main> }));
+vi.mock("./pages/VisualPlansPage", () => ({ VisualPlansPage: () => <main data-testid="route-visual-plans">Visual plans route</main> }));
+vi.mock("./pages/PublicationManagementPage", () => ({ PublicationManagementPage: () => <main data-testid="route-publication-management">Publication management route</main> }));
 vi.mock("./pages/MemoryPage", () => ({ MemoryPage: () => <main data-testid="route-memory">Memory route</main> }));
 vi.mock("./pages/GlossaryPage", () => ({ GlossaryPage: () => <main data-testid="route-glossary">Glossary route</main> }));
 vi.mock("./pages/SettingsPage", () => ({ SettingsPage: () => <main data-testid="route-settings">Settings route</main> }));
@@ -55,11 +54,10 @@ const routes = [
   ["/tools/tts", "route-tools-tts"],
   ["/tools/asr", "route-tools-asr"],
   ["/tools/avatar", "route-tools-avatar"],
-  ["/packaging", "route-packaging"],
-  ["/style-lab", "route-style-lab"],
-  ["/style-templates", "route-style-templates"],
-  ["/creative-modes", "route-creative-modes"],
-  ["/creator-profiles", "route-creator-profiles"],
+  ["/creator-cards", "route-creator-cards"],
+  ["/task-strategies", "route-task-strategies"],
+  ["/visual-plans", "route-visual-plans"],
+  ["/publication-management", "route-publication-management"],
   ["/memory", "route-memory"],
   ["/glossary", "route-glossary"],
   ["/settings", "route-settings"],
@@ -107,7 +105,7 @@ describe("App route and navigation audit", () => {
     expect(screen.getByText("创作资产")).toBeInTheDocument();
     expect(screen.getByText("系统")).toBeInTheDocument();
 
-    for (const label of ["概览", "剪辑制片", "自动任务", "智能发布", "百宝箱", "风格实验", "包装素材", "风格模板", "创作模式", "创作者档案", "系统设置", "记忆", "术语表", "控制台"]) {
+    for (const label of ["概览", "剪辑制片", "自动任务", "智能发布", "百宝箱", "创作者卡片库", "任务策略库", "智能视觉方案", "智能发布管理", "系统设置", "记忆", "术语表", "控制台"]) {
       expect(screen.getByRole("link", { name: new RegExp(label) })).toBeInTheDocument();
     }
   });

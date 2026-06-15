@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 
 import type { AvatarMaterialLibrary, Config, PackagingLibrary } from "../../types";
 import { api } from "../../api";
-import { ConfigProfileSwitcher } from "../configProfiles/ConfigProfileSwitcher";
 import { findStylePreset, smartEffectPresets } from "../../stylePresets";
 
 type JobReviewConfigSectionProps = {
@@ -43,10 +43,17 @@ export function JobReviewConfigSection({
       <div className="notice compact-top">
         这里会提示资源是否齐全、服务是否可用，以及是否会自动降级。
       </div>
-      <ConfigProfileSwitcher
-        compact
-        description="切换方案后，当前任务会按最新方案审核。"
-      />
+      <div className="toolbar compact-top">
+        <Link className="button ghost button-sm" to="/task-strategies">
+          打开任务策略库
+        </Link>
+        <Link className="button ghost button-sm" to="/visual-plans">
+          打开智能视觉方案
+        </Link>
+        <Link className="button ghost button-sm" to="/publication-management">
+          打开智能发布管理
+        </Link>
+      </div>
 
       <article className="review-config-card top-gap">
         <div className="stat-label">审核就绪检查</div>

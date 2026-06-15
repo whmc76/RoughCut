@@ -60,15 +60,6 @@ vi.mock("../components/ui/PanelHeader", () => ({
   ),
 }));
 
-vi.mock("../features/configProfiles/ConfigProfileSwitcher", () => ({
-  ConfigProfileSwitcher: ({ title, description }: { title?: string; description?: string }) => (
-    <section>
-      <strong>{title ?? "方案"}</strong>
-      {description ? <p>{description}</p> : null}
-    </section>
-  ),
-}));
-
 vi.mock("../features/settings/SettingsOverviewPanel", () => ({
   SettingsOverviewPanel: () => <div data-testid="settings-overview-panel">settings overview</div>,
 }));

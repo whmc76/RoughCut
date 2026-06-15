@@ -40,6 +40,10 @@ export type Job = {
   source_name: string;
   merged_source_names?: string[];
   video_description?: string | null;
+  creator_card_id?: string | null;
+  task_brief?: string | null;
+  execution_mode?: string;
+  platform_targets?: string[];
   content_subject?: string | null;
   content_summary?: string | null;
   quality_score?: number | null;
@@ -87,6 +91,132 @@ export type Job = {
   created_at: string;
   updated_at: string;
   steps: JobStep[];
+};
+
+export type CreatorAsset = {
+  id: string;
+  creator_card_id: string;
+  asset_type: string;
+  original_name: string;
+  stored_path: string;
+  metadata_json?: Record<string, unknown> | null;
+  created_at: string;
+};
+
+export type CreatorPreference = {
+  id: string;
+  creator_card_id: string;
+  preference_type: string;
+  natural_language_rule: string;
+  structured_payload?: Record<string, unknown> | null;
+  source: string;
+  version: number;
+  created_at: string;
+};
+
+export type CreatorCard = {
+  id: string;
+  name: string;
+  positioning?: string | null;
+  content_domains: string[];
+  audience?: string | null;
+  default_platforms: string[];
+  natural_language_profile?: string | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+  assets: CreatorAsset[];
+  preferences: CreatorPreference[];
+};
+
+export type CreatorCardList = {
+  items: CreatorCard[];
+};
+
+export type PlanVersion = {
+  id: string;
+  version: number;
+  operation: string;
+  prompt?: string | null;
+  payload_json: Record<string, unknown>;
+  created_at: string;
+};
+
+export type CreatorTaskStrategy = {
+  id: string;
+  creator_card_id: string;
+  name: string;
+  strategy_type: string;
+  summary?: string | null;
+  strategy_payload_json: Record<string, unknown>;
+  status: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  versions: PlanVersion[];
+};
+
+export type CreatorTaskStrategyList = {
+  items: CreatorTaskStrategy[];
+};
+
+export type CreatorVisualPlan = {
+  id: string;
+  creator_card_id: string;
+  name: string;
+  summary?: string | null;
+  visual_payload_json: Record<string, unknown>;
+  status: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+  versions: PlanVersion[];
+};
+
+export type CreatorVisualPlanList = {
+  items: CreatorVisualPlan[];
+};
+
+export type CreatorPlatformBinding = {
+  id: string;
+  platform: string;
+  credential_ref?: string | null;
+  binding_payload_json?: Record<string, unknown> | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type CreatorPublicationProfile = {
+  id: string;
+  creator_card_id: string;
+  status: string;
+  publication_payload_json: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  bindings: CreatorPlatformBinding[];
+  versions: PlanVersion[];
+};
+
+export type JobAgentPlan = {
+  id: string;
+  job_id: string;
+  creator_card_id?: string | null;
+  task_strategy_id?: string | null;
+  visual_plan_id?: string | null;
+  publication_profile_id?: string | null;
+  status: string;
+  plan_payload_json: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+};
+
+export type JobAgentDecision = {
+  kind: string;
+  title: string;
+  summary: string;
+  detail?: string | null;
+  status: string;
+  version: number;
 };
 
 export type JobDownloadFile = {
@@ -1294,6 +1424,28 @@ export type CreativeModeDefinition = {
   default_delivery?: string;
 };
 
+export type SmartCutRuleDefinition = {
+  reason: string;
+  kind: string;
+  risk_level: string;
+  match_surface_layer: string;
+  label: string;
+  auto_apply_in_auto_mode: boolean;
+  frontend_managed_auto_cut: boolean;
+  speech_explicit_cut: boolean;
+  speech_review_cut: boolean;
+  pause_cut: boolean;
+  multimodal_review_cut: boolean;
+  llm_review_cut: boolean;
+};
+
+export type CapabilityDefinition = {
+  key: string;
+  label: string;
+  layer: string;
+  description: string;
+};
+
 export type Config = {
   persistence: {
     settings_store: string;
@@ -1523,6 +1675,8 @@ export type ConfigOptions = {
   workflow_templates: SelectOption[];
   workflow_modes: SelectOption[];
   enhancement_modes: SelectOption[];
+  smart_cut_rules: SmartCutRuleDefinition[];
+  capability_catalog: CapabilityDefinition[];
   transcription_dialects: SelectOption[];
   avatar_providers: SelectOption[];
   voice_providers: SelectOption[];

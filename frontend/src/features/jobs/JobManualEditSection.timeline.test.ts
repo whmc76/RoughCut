@@ -16,6 +16,7 @@ import {
   buildVisibleSubtitleRows,
   buildSourceTranscriptSubtitlesForTimeline,
   buildOutputWaveformBars,
+  findActiveTranscriptTokenIndex,
   findSubtitleIndexNearOutputTime,
   buildSmartCutRulePreviews,
   intersectInferredPausesWithAudioSilence,
@@ -1436,6 +1437,57 @@ describe("manual editor timeline mapping", () => {
       cutKind: "filler",
       suggestionKind: null,
     }));
+  });
+
+  it("prefers the next transcript token at an exact subtitle boundary", () => {
+    const tokens = buildTranscriptTokens(
+      [
+        {
+          index: 205,
+          start_time: 613.955,
+          end_time: 617.304,
+          text_final: "简单了嘛，太简单了。",
+          alignment_tokens: [
+            { text: "简", start: 613.955, end: 614.373 },
+            { text: "单", start: 614.373, end: 614.792 },
+            { text: "了", start: 614.792, end: 615.21 },
+            { text: "嘛", start: 615.21, end: 615.629 },
+            { text: "太", start: 615.629, end: 616.048 },
+            { text: "简", start: 616.048, end: 616.467 },
+            { text: "单", start: 616.467, end: 616.886 },
+            { text: "了", start: 616.886, end: 617.304 },
+          ],
+        },
+        {
+          index: 206,
+          start_time: 617.304,
+          end_time: 621.77,
+          text_final: "然后就导致没有什么嗯手法可言。",
+          alignment_tokens: [
+            { text: "然", start: 617.304, end: 617.583 },
+            { text: "后", start: 617.583, end: 617.863 },
+            { text: "就", start: 617.863, end: 618.421 },
+            { text: "导", start: 618.421, end: 618.7 },
+            { text: "致", start: 618.7, end: 618.979 },
+            { text: "没", start: 618.979, end: 619.258 },
+            { text: "有", start: 619.258, end: 619.537 },
+            { text: "什", start: 619.537, end: 619.817 },
+            { text: "么", start: 619.817, end: 620.096 },
+            { text: "嗯", start: 620.096, end: 620.375 },
+            { text: "手", start: 620.375, end: 620.654 },
+            { text: "法", start: 620.654, end: 620.933 },
+            { text: "可", start: 620.933, end: 621.212 },
+            { text: "言", start: 621.212, end: 621.77 },
+          ],
+        },
+      ],
+      [{ start: 600, end: 630 }],
+      [],
+    );
+
+    const activeIndex = findActiveTranscriptTokenIndex(tokens, 617.304);
+    expect(activeIndex).toBeGreaterThanOrEqual(0);
+    expect(tokens[activeIndex]?.text).toBe("然");
   });
 
   it("keeps full-text editing on source transcript even when projected subtitles look cleaner", () => {

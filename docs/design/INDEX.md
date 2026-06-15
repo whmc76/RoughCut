@@ -6,6 +6,9 @@
 
 | 日期 | 标题 | 定位 | 文件 |
 |------|------|------|------|
+| 2026-06-13 | Creator-Agent Asset Workspace Closure Note | 创作者 Agent 资产工作台重构验证记录与收口结论 | [2026-06-13-creator-agent-asset-workspace-closure-note.md](./2026-06-13-creator-agent-asset-workspace-closure-note.md) |
+| 2026-06-13 | Creator-Agent Asset Workspace Closure Checklist | 创作者 Agent 资产工作台重构收口清单与验收口径 | [2026-06-13-creator-agent-asset-workspace-closure-checklist.md](./2026-06-13-creator-agent-asset-workspace-closure-checklist.md) |
+| 2026-06-13 | Creator-Agent Asset Workspace Execution Plan | 创作者 Agent 资产工作台、创建任务页与任务流程页重构执行计划 | [2026-06-13-creator-agent-asset-workspace-execution-plan.md](./2026-06-13-creator-agent-asset-workspace-execution-plan.md) |
 | 2026-06-13 | Uploaded-Material-Only Optimization Execution Plan | 上传素材闭环优化升级执行主计划 | [2026-06-13-uploaded-material-only-optimization-execution-plan.md](./2026-06-13-uploaded-material-only-optimization-execution-plan.md) |
 | 2026-06-13 | Uploaded-Material-Only Optimization Plan | 上传素材内闭环剪辑优化升级计划 | [2026-06-13-uploaded-material-only-optimization-plan.md](./2026-06-13-uploaded-material-only-optimization-plan.md) |
 | 2026-06-12 | Universal Auto Edit Strategy Implementation Plan | 通用自动剪辑策略重构实现方案 | [2026-06-12-universal-auto-edit-strategy-implementation-plan.md](./2026-06-12-universal-auto-edit-strategy-implementation-plan.md) |

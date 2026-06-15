@@ -46,6 +46,13 @@ class Job(Base):
     output_dir: Mapped[str | None] = mapped_column(Text)
     job_flow_mode: Mapped[str] = mapped_column(Text, nullable=False, default="auto", server_default="auto")
     config_profile_id: Mapped[uuid.UUID | None] = mapped_column(UUID_TYPE, ForeignKey("config_profiles.id", ondelete="SET NULL"))
+    creator_card_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("creator_cards.id", ondelete="SET NULL"),
+    )
+    task_brief: Mapped[str | None] = mapped_column(Text)
+    execution_mode: Mapped[str] = mapped_column(Text, nullable=False, default="auto", server_default="auto")
+    platform_targets_json: Mapped[list[str]] = mapped_column(JSON_TYPE, nullable=False, default=list, server_default="[]")
     config_profile_snapshot_json: Mapped[dict | None] = mapped_column(JSON_TYPE)
     packaging_snapshot_json: Mapped[dict | None] = mapped_column(JSON_TYPE)
     language: Mapped[str] = mapped_column(Text, default="zh-CN")
@@ -69,6 +76,17 @@ class Job(Base):
     publication_attempts: Mapped[list[PublicationAttempt]] = relationship(
         "PublicationAttempt", back_populates="job", cascade="all, delete-orphan"
     )
+    creator_card: Mapped[CreatorCard | None] = relationship("CreatorCard", back_populates="jobs")
+    agent_plan: Mapped[JobAgentPlan | None] = relationship(
+        "JobAgentPlan",
+        back_populates="job",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+    @property
+    def platform_targets(self) -> list[str]:
+        return list(self.platform_targets_json or [])
 
 class JobStep(Base):
     __tablename__ = "job_steps"
@@ -503,3 +521,241 @@ class PackagingAsset(Base):
     content_type: Mapped[str] = mapped_column(Text, nullable=False)
     watermark_preprocessed: Mapped[bool | None] = mapped_column(Boolean)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+
+class CreatorCard(Base):
+    __tablename__ = "creator_cards"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    positioning: Mapped[str | None] = mapped_column(Text)
+    content_domains: Mapped[list[str]] = mapped_column(JSON_TYPE, nullable=False, default=list, server_default="[]")
+    audience: Mapped[str | None] = mapped_column(Text)
+    default_platforms: Mapped[list[str]] = mapped_column(JSON_TYPE, nullable=False, default=list, server_default="[]")
+    natural_language_profile: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="draft", server_default="draft")
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+    assets: Mapped[list[CreatorAsset]] = relationship(
+        "CreatorAsset",
+        back_populates="creator_card",
+        cascade="all, delete-orphan",
+    )
+    preferences: Mapped[list[CreatorPreference]] = relationship(
+        "CreatorPreference",
+        back_populates="creator_card",
+        cascade="all, delete-orphan",
+    )
+    task_strategies: Mapped[list[CreatorTaskStrategy]] = relationship(
+        "CreatorTaskStrategy",
+        back_populates="creator_card",
+        cascade="all, delete-orphan",
+    )
+    visual_plans: Mapped[list[CreatorVisualPlan]] = relationship(
+        "CreatorVisualPlan",
+        back_populates="creator_card",
+        cascade="all, delete-orphan",
+    )
+    publication_profile: Mapped[CreatorPublicationProfile | None] = relationship(
+        "CreatorPublicationProfile",
+        back_populates="creator_card",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    jobs: Mapped[list[Job]] = relationship("Job", back_populates="creator_card")
+
+
+class CreatorAsset(Base):
+    __tablename__ = "creator_assets"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    creator_card_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("creator_cards.id", ondelete="CASCADE"))
+    asset_type: Mapped[str] = mapped_column(Text, nullable=False)
+    original_name: Mapped[str] = mapped_column(Text, nullable=False)
+    stored_path: Mapped[str] = mapped_column(Text, nullable=False)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON_TYPE)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    creator_card: Mapped[CreatorCard] = relationship("CreatorCard", back_populates="assets")
+
+
+class CreatorPreference(Base):
+    __tablename__ = "creator_preferences"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    creator_card_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("creator_cards.id", ondelete="CASCADE"))
+    preference_type: Mapped[str] = mapped_column(Text, nullable=False)
+    natural_language_rule: Mapped[str] = mapped_column(Text, nullable=False)
+    structured_payload: Mapped[dict | None] = mapped_column(JSON_TYPE)
+    source: Mapped[str] = mapped_column(Text, nullable=False, default="manual", server_default="manual")
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    creator_card: Mapped[CreatorCard] = relationship("CreatorCard", back_populates="preferences")
+
+
+class CreatorTaskStrategy(Base):
+    __tablename__ = "creator_task_strategies"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    creator_card_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("creator_cards.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    strategy_type: Mapped[str] = mapped_column(Text, nullable=False, default="generic", server_default="generic")
+    summary: Mapped[str | None] = mapped_column(Text)
+    strategy_payload_json: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="draft", server_default="draft")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+    creator_card: Mapped[CreatorCard] = relationship("CreatorCard", back_populates="task_strategies")
+    versions: Mapped[list[TaskStrategyVersion]] = relationship(
+        "TaskStrategyVersion",
+        back_populates="strategy",
+        cascade="all, delete-orphan",
+        order_by="TaskStrategyVersion.version",
+    )
+
+
+class TaskStrategyVersion(Base):
+    __tablename__ = "task_strategy_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    strategy_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("creator_task_strategies.id", ondelete="CASCADE"))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation: Mapped[str] = mapped_column(Text, nullable=False, default="generate", server_default="generate")
+    prompt: Mapped[str | None] = mapped_column(Text)
+    payload_json: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    strategy: Mapped[CreatorTaskStrategy] = relationship("CreatorTaskStrategy", back_populates="versions")
+
+
+class CreatorVisualPlan(Base):
+    __tablename__ = "creator_visual_plans"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    creator_card_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("creator_cards.id", ondelete="CASCADE"))
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text)
+    visual_payload_json: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="draft", server_default="draft")
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+    creator_card: Mapped[CreatorCard] = relationship("CreatorCard", back_populates="visual_plans")
+    versions: Mapped[list[VisualPlanVersion]] = relationship(
+        "VisualPlanVersion",
+        back_populates="visual_plan",
+        cascade="all, delete-orphan",
+        order_by="VisualPlanVersion.version",
+    )
+
+
+class VisualPlanVersion(Base):
+    __tablename__ = "visual_plan_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    visual_plan_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("creator_visual_plans.id", ondelete="CASCADE"))
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation: Mapped[str] = mapped_column(Text, nullable=False, default="generate", server_default="generate")
+    prompt: Mapped[str | None] = mapped_column(Text)
+    payload_json: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    visual_plan: Mapped[CreatorVisualPlan] = relationship("CreatorVisualPlan", back_populates="versions")
+
+
+class CreatorPublicationProfile(Base):
+    __tablename__ = "creator_publication_profiles"
+    __table_args__ = (UniqueConstraint("creator_card_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    creator_card_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("creator_cards.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="draft", server_default="draft")
+    publication_payload_json: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+    creator_card: Mapped[CreatorCard] = relationship("CreatorCard", back_populates="publication_profile")
+    bindings: Mapped[list[CreatorPlatformBinding]] = relationship(
+        "CreatorPlatformBinding",
+        back_populates="publication_profile",
+        cascade="all, delete-orphan",
+    )
+    versions: Mapped[list[PublicationProfileVersion]] = relationship(
+        "PublicationProfileVersion",
+        back_populates="publication_profile",
+        cascade="all, delete-orphan",
+        order_by="PublicationProfileVersion.version",
+    )
+
+
+class CreatorPlatformBinding(Base):
+    __tablename__ = "creator_platform_bindings"
+    __table_args__ = (UniqueConstraint("publication_profile_id", "platform"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    publication_profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("creator_publication_profiles.id", ondelete="CASCADE"),
+    )
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    credential_ref: Mapped[str | None] = mapped_column(Text)
+    binding_payload_json: Mapped[dict | None] = mapped_column(JSON_TYPE)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+    publication_profile: Mapped[CreatorPublicationProfile] = relationship(
+        "CreatorPublicationProfile",
+        back_populates="bindings",
+    )
+
+
+class PublicationProfileVersion(Base):
+    __tablename__ = "publication_profile_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    publication_profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("creator_publication_profiles.id", ondelete="CASCADE"),
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation: Mapped[str] = mapped_column(Text, nullable=False, default="refine", server_default="refine")
+    prompt: Mapped[str | None] = mapped_column(Text)
+    payload_json: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+
+    publication_profile: Mapped[CreatorPublicationProfile] = relationship(
+        "CreatorPublicationProfile",
+        back_populates="versions",
+    )
+
+
+class JobAgentPlan(Base):
+    __tablename__ = "job_agent_plans"
+    __table_args__ = (UniqueConstraint("job_id"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, primary_key=True, default=_uuid)
+    job_id: Mapped[uuid.UUID] = mapped_column(UUID_TYPE, ForeignKey("jobs.id", ondelete="CASCADE"))
+    creator_card_id: Mapped[uuid.UUID | None] = mapped_column(UUID_TYPE, ForeignKey("creator_cards.id", ondelete="SET NULL"))
+    task_strategy_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("creator_task_strategies.id", ondelete="SET NULL"),
+    )
+    visual_plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("creator_visual_plans.id", ondelete="SET NULL"),
+    )
+    publication_profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID_TYPE,
+        ForeignKey("creator_publication_profiles.id", ondelete="SET NULL"),
+    )
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="draft", server_default="draft")
+    plan_payload_json: Mapped[dict] = mapped_column(JSON_TYPE, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMPTZ, server_default=func.now(), onupdate=func.now())
+
+    job: Mapped[Job] = relationship("Job", back_populates="agent_plan")

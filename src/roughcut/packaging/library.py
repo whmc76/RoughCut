@@ -16,6 +16,7 @@ import numpy as np
 from sqlalchemy import select
 
 from roughcut.config import DEFAULT_OUTPUT_ROOT, DEFAULT_PACKAGING_ASSET_ROOT, DEFAULT_PROJECT_ROOT, get_settings
+from roughcut.creator_asset_runtime import normalize_creator_asset_category, resolve_creator_asset_path
 from roughcut.edit.presets import normalize_workflow_template_name
 from roughcut.review.domain_glossaries import detect_glossary_domains, normalize_subject_domain, select_primary_subject_domain
 from roughcut.state_store import PACKAGING_CONFIG_KEY, run_db_operation
@@ -558,7 +559,12 @@ def reset_packaging_config() -> dict[str, Any]:
     return state["config"]
 
 
-def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, Any] | None = None) -> dict[str, Any]:
+def resolve_packaging_plan_for_job(
+    job_id: str,
+    *,
+    content_profile: dict[str, Any] | None = None,
+    creator_assets: list[dict[str, Any] | Any] | None = None,
+) -> dict[str, Any]:
     state = _load_state()
     config = dict(DEFAULT_CONFIG)
     job_packaging_snapshot = _load_job_packaging_snapshot(job_id)
@@ -611,6 +617,15 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
     insert = _resolve_insert_asset(assets_by_id, config, job_id, content_profile=content_profile)
     watermark = _resolve_single_asset(assets_by_id, config.get("watermark_asset_id"), expected_type="watermark")
     music = _resolve_music_asset(assets_by_id, config, job_id, content_profile=content_profile)
+    creator_packaging_assets = _resolve_creator_packaging_assets(
+        creator_assets or [],
+        job_id=job_id,
+        content_profile=content_profile,
+    )
+    intro = creator_packaging_assets.get("intro") or intro
+    outro = creator_packaging_assets.get("outro") or outro
+    watermark = creator_packaging_assets.get("watermark") or watermark
+    music = creator_packaging_assets.get("music") or music
 
     if watermark:
         watermark.update(
@@ -655,6 +670,104 @@ def resolve_packaging_plan_for_job(job_id: str, *, content_profile: dict[str, An
         "export_frame_rate_mode": config["export_frame_rate_mode"],
         "export_frame_rate_preset": config["export_frame_rate_preset"],
     }
+
+
+def _resolve_creator_packaging_assets(
+    creator_assets: list[dict[str, Any] | Any],
+    *,
+    job_id: str,
+    content_profile: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any] | None]:
+    assets_by_id = _creator_packaging_assets_by_id(creator_assets)
+    intro = _resolve_single_asset(
+        assets_by_id,
+        _latest_packaging_asset_id(assets_by_id, expected_type="intro"),
+        expected_type="intro",
+    )
+    outro = _resolve_single_asset(
+        assets_by_id,
+        _latest_packaging_asset_id(assets_by_id, expected_type="outro"),
+        expected_type="outro",
+    )
+    watermark = _resolve_single_asset(
+        assets_by_id,
+        _latest_packaging_asset_id(assets_by_id, expected_type="watermark"),
+        expected_type="watermark",
+    )
+    music_ids = [asset_id for asset_id, asset in assets_by_id.items() if asset.get("asset_type") == "music"]
+    music = (
+        _resolve_music_asset(
+            assets_by_id,
+            {
+                "music_asset_ids": music_ids,
+                "music_selection_mode": "random",
+            },
+            job_id,
+            content_profile=content_profile,
+        )
+        if music_ids
+        else None
+    )
+    return {
+        "intro": intro,
+        "outro": outro,
+        "watermark": watermark,
+        "music": music,
+    }
+
+
+def _creator_packaging_assets_by_id(creator_assets: list[dict[str, Any] | Any]) -> dict[str, dict[str, Any]]:
+    normalized: dict[str, dict[str, Any]] = {}
+    for item in creator_assets:
+        asset = item if isinstance(item, dict) else {
+            "id": getattr(item, "id", None),
+            "asset_type": getattr(item, "asset_type", None),
+            "original_name": getattr(item, "original_name", None),
+            "stored_path": getattr(item, "stored_path", None),
+            "created_at": getattr(item, "created_at", None),
+            "metadata_json": getattr(item, "metadata_json", None),
+        }
+        mapped_type = _packaging_asset_type_from_creator_asset(asset.get("asset_type"))
+        if not mapped_type:
+            continue
+        resolved_path = resolve_creator_asset_path(asset.get("stored_path"))
+        if not resolved_path.exists() or not resolved_path.is_file():
+            continue
+        asset_id = f"creator:{asset.get('id')}"
+        normalized[asset_id] = {
+            "id": asset_id,
+            "asset_type": mapped_type,
+            "original_name": str(asset.get("original_name") or resolved_path.name),
+            "path": resolved_path.as_posix(),
+            "created_at": asset.get("created_at"),
+            "content_type": str((asset.get("metadata_json") or {}).get("content_type") or ""),
+        }
+    return normalized
+
+
+def _packaging_asset_type_from_creator_asset(asset_type: Any) -> str | None:
+    category = normalize_creator_asset_category(asset_type)
+    if category == "intro":
+        return "intro"
+    if category == "outro":
+        return "outro"
+    if category == "logo":
+        return "watermark"
+    if category == "music_library":
+        return "music"
+    return None
+
+
+def _latest_packaging_asset_id(assets_by_id: dict[str, dict[str, Any]], *, expected_type: str) -> str | None:
+    candidates = [
+        asset
+        for asset in assets_by_id.values()
+        if str(asset.get("asset_type") or "").strip().lower() == expected_type
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda asset: str(asset.get("created_at") or ""), reverse=True)
+    return str(candidates[0].get("id") or "") or None
 
 
 def resolve_style_template_bundle_key(config: dict[str, Any] | None) -> str | None:

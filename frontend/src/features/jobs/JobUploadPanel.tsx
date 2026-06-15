@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { UploadForm } from "./constants";
-import type { SelectOption } from "../../types";
+import type { CapabilityDefinition, CreatorCard, SelectOption, SmartCutRuleDefinition } from "../../types";
 import { CheckboxField } from "../../components/forms/CheckboxField";
 import { Field } from "../../components/forms/Field";
 import { SelectField } from "../../components/forms/SelectField";
@@ -14,7 +14,11 @@ type JobUploadPanelProps = {
   workflowTemplateOptions: SelectOption[];
   workflowModeOptions: SelectOption[];
   enhancementOptions: SelectOption[];
+  smartCutRules?: SmartCutRuleDefinition[];
+  capabilityCatalog?: CapabilityDefinition[];
   outputDirHistory?: string[];
+  creatorCards?: CreatorCard[];
+  agentMode?: boolean;
   onChange: (next: UploadForm) => void;
 };
 
@@ -35,13 +39,49 @@ function jobFlowModeOptions(t: (key: string) => string): SelectOption[] {
   ];
 }
 
+const FALLBACK_AGENT_CAPABILITIES: CapabilityDefinition[] = [
+  {
+    key: "voice_enhancement",
+    label: "人声增强",
+    layer: "audio",
+    description: "响度、口播清晰度和声音一致性由 Agent 在音频处理与渲染阶段按任务需要编排。",
+  },
+  {
+    key: "dynamic_subtitle_packaging",
+    label: "动态字幕特效包装",
+    layer: "packaging",
+    description: "跟随智能视觉方案生成字幕动效、重点强调、转场和画面包装节奏。",
+  },
+];
+
+function smartCutRuleDisplayLabel(rule: SmartCutRuleDefinition): string {
+  if (rule.kind === "filler") return "去水词/语气词";
+  if (rule.kind === "catchphrase") return "口头禅清理";
+  if (rule.kind === "repeated") return "重复口误";
+  if (rule.kind === "pause") return "停顿压缩";
+  if (rule.kind === "smart_delete") return rule.label.replace(/^规则候选：/, "");
+  return rule.label;
+}
+
+function capabilityLayerLabel(layer: string): string {
+  if (layer === "editorial") return "剪辑";
+  if (layer === "packaging") return "包装";
+  if (layer === "candidate") return "候选";
+  if (layer === "audio") return "音频";
+  return layer || "能力";
+}
+
 export function JobUploadPanel({
   upload,
   languageOptions,
   workflowTemplateOptions,
   workflowModeOptions,
   enhancementOptions,
+  smartCutRules = [],
+  capabilityCatalog = [],
   outputDirHistory = [],
+  creatorCards = [],
+  agentMode = false,
   onChange,
 }: JobUploadPanelProps) {
   const { t } = useI18n();
@@ -119,32 +159,66 @@ export function JobUploadPanel({
         </section>
 
         <section className="job-upload-settings-card">
-          <div className="jobs-form-section-title">任务参数</div>
+          <div className="jobs-form-section-title">{agentMode ? "任务上下文" : "任务参数"}</div>
           <div className="form-grid job-upload-field-grid">
+            {agentMode ? (
+              <>
+                <SelectField
+                  label="创作者卡片"
+                  value={upload.creatorCardId}
+                  onChange={(event) => onChange({ ...upload, creatorCardId: event.target.value })}
+                  options={[
+                    { value: "", label: "暂不绑定创作者" },
+                    ...creatorCards.map((creator) => ({ value: creator.id, label: creator.name })),
+                  ]}
+                />
+                <SelectField
+                  label="执行方式"
+                  value={upload.executionMode}
+                  onChange={(event) => {
+                    const nextExecutionMode = event.target.value;
+                    onChange({
+                      ...upload,
+                      executionMode: nextExecutionMode,
+                      jobFlowMode: nextExecutionMode === "smart_assist" ? "smart_assist" : "auto",
+                    });
+                  }}
+                  options={[
+                    { value: "auto", label: "全自动" },
+                    { value: "plan_first", label: "先生成方案" },
+                    { value: "smart_assist", label: "智能辅助" },
+                  ]}
+                />
+              </>
+            ) : null}
             <SelectField
               label={t("jobs.upload.language")}
               value={upload.language}
               onChange={(event) => onChange({ ...upload, language: event.target.value })}
               options={languageOptions}
             />
-            <SelectField
-              label={t("jobs.upload.workflowTemplate")}
-              value={upload.workflowTemplate}
-              onChange={(event) => onChange({ ...upload, workflowTemplate: event.target.value })}
-              options={workflowTemplateOptions}
-            />
-            <SelectField
-              label={t("jobs.upload.jobFlowMode")}
-              value={upload.jobFlowMode}
-              onChange={(event) => onChange({ ...upload, jobFlowMode: event.target.value })}
-              options={jobFlowModeOptions(t)}
-            />
-            <SelectField
-              label={t("jobs.upload.workflowMode")}
-              value={upload.workflowMode}
-              onChange={(event) => onChange({ ...upload, workflowMode: event.target.value })}
-              options={workflowModeOptions}
-            />
+            {!agentMode ? (
+              <>
+                <SelectField
+                  label={t("jobs.upload.workflowTemplate")}
+                  value={upload.workflowTemplate}
+                  onChange={(event) => onChange({ ...upload, workflowTemplate: event.target.value })}
+                  options={workflowTemplateOptions}
+                />
+                <SelectField
+                  label={t("jobs.upload.jobFlowMode")}
+                  value={upload.jobFlowMode}
+                  onChange={(event) => onChange({ ...upload, jobFlowMode: event.target.value })}
+                  options={jobFlowModeOptions(t)}
+                />
+                <SelectField
+                  label={t("jobs.upload.workflowMode")}
+                  value={upload.workflowMode}
+                  onChange={(event) => onChange({ ...upload, workflowMode: event.target.value })}
+                  options={workflowModeOptions}
+                />
+              </>
+            ) : null}
             <div className="output-dir-field job-upload-output-field">
               <label>
                 <span>{t("jobs.upload.outputDir")}</span>
@@ -179,30 +253,129 @@ export function JobUploadPanel({
         </section>
       </div>
 
-      <div className="upload-enhancement-panel top-gap">
-        <div className="jobs-form-section-title">{t("jobs.upload.enhancements")}</div>
-        <div className="checklist-grid top-gap">
-          {enhancementOptions.map((option) => {
-            const checked = upload.enhancementModes.includes(option.value);
-            return (
-              <CheckboxField
-                key={option.value}
-                className="job-upload-enhancement-option"
-                label={option.label}
-                checked={checked}
-                onChange={(event) =>
-                  onChange({
-                    ...upload,
-                    enhancementModes: event.target.checked
-                      ? [...upload.enhancementModes, option.value]
-                      : upload.enhancementModes.filter((item) => item !== option.value),
-                  })
-                }
-              />
-            );
-          })}
+      {!agentMode ? (
+        <div className="upload-enhancement-panel top-gap">
+          <div className="jobs-form-section-title">{t("jobs.upload.enhancements")}</div>
+          <div className="checklist-grid top-gap">
+            {enhancementOptions.map((option) => {
+              const checked = upload.enhancementModes.includes(option.value);
+              return (
+                <CheckboxField
+                  key={option.value}
+                  className="job-upload-enhancement-option"
+                  label={option.label}
+                  checked={checked}
+                  onChange={(event) =>
+                    onChange({
+                      ...upload,
+                      enhancementModes: event.target.checked
+                        ? [...upload.enhancementModes, option.value]
+                        : upload.enhancementModes.filter((item) => item !== option.value),
+                    })
+                  }
+                />
+              );
+            })}
+          </div>
         </div>
-      </div>
+      ) : null}
+      {agentMode ? (
+        <div className="upload-enhancement-panel job-upload-capability-panel top-gap">
+          <div className="jobs-form-section-title">智能剪辑规则与增强能力</div>
+          <div className="job-upload-capability-summary muted">
+            创建后会由创作者卡片、任务想法和执行方式生成 Agent 方案；下面列出本次可用的规则和能力。
+          </div>
+          <div className="job-upload-capability-columns">
+            <section className="job-upload-capability-group">
+              <div className="job-upload-capability-group-head">
+                <strong>增强能力</strong>
+                <span>{enhancementOptions.length} 项</span>
+              </div>
+              <div className="job-upload-enhancement-list">
+                {enhancementOptions.map((option) => {
+                  const checked = upload.enhancementModes.includes(option.value);
+                  return (
+                    <CheckboxField
+                      key={option.value}
+                      className="job-upload-enhancement-option"
+                      label={option.label}
+                      checked={checked}
+                      onChange={(event) =>
+                        onChange({
+                          ...upload,
+                          enhancementModes: event.target.checked
+                            ? [...upload.enhancementModes, option.value]
+                            : upload.enhancementModes.filter((item) => item !== option.value),
+                        })
+                      }
+                    />
+                  );
+                })}
+              </div>
+            </section>
+            <section className="job-upload-capability-group">
+              <div className="job-upload-capability-group-head">
+                <strong>智能剪辑规则</strong>
+                <span>{smartCutRules.length} 条</span>
+              </div>
+              <div className="job-upload-rule-chip-grid">
+                {smartCutRules.map((rule) => (
+                  <span key={rule.reason} className="job-upload-rule-chip" title={rule.label}>
+                    {smartCutRuleDisplayLabel(rule)}
+                  </span>
+                ))}
+              </div>
+            </section>
+            <section className="job-upload-capability-group">
+              <div className="job-upload-capability-group-head">
+                <strong>Agent 编排能力</strong>
+                <span>{capabilityCatalog.length + FALLBACK_AGENT_CAPABILITIES.length} 项</span>
+              </div>
+              <div className="job-upload-capability-card-list">
+                {[...capabilityCatalog, ...FALLBACK_AGENT_CAPABILITIES].map((capability) => (
+                  <article key={capability.key} className="job-upload-capability-card">
+                    <div>
+                      <strong>{capability.label}</strong>
+                      <span>{capabilityLayerLabel(capability.layer)}</span>
+                    </div>
+                    <p>{capability.description}</p>
+                  </article>
+                ))}
+              </div>
+            </section>
+          </div>
+        </div>
+      ) : null}
+      {agentMode ? (
+        <>
+          <Field label="本条任务想法" className="job-upload-description-field">
+            <textarea
+              className="input"
+              rows={5}
+              value={upload.taskBrief}
+              onChange={(event) => onChange({ ...upload, taskBrief: event.target.value })}
+              placeholder="例如：新品开箱和老款对比，突出升级点和适合谁。"
+            />
+          </Field>
+          <Field label="平台目标" className="job-upload-description-field">
+            <input
+              className="input"
+              type="text"
+              value={upload.platformTargets.join(", ")}
+              onChange={(event) =>
+                onChange({
+                  ...upload,
+                  platformTargets: event.target.value
+                    .split(",")
+                    .map((item) => item.trim())
+                    .filter(Boolean),
+                })
+              }
+              placeholder="留空表示跟随创作者默认平台，例如：bilibili, douyin"
+            />
+          </Field>
+        </>
+      ) : null}
       <Field label={t("jobs.upload.videoDescription")} className="job-upload-description-field">
         <textarea
           className="input"

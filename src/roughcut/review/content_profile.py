@@ -1905,6 +1905,79 @@ def assess_content_profile_automation(
     }
 
 
+def _backfill_subject_type_from_identity_review_entities(
+    profile: dict[str, Any],
+    *,
+    identity_review: dict[str, Any] | None,
+) -> dict[str, Any]:
+    guarded = dict(profile or {})
+    current_subject_type = str(guarded.get("subject_type") or "").strip()
+    if current_subject_type and not _is_generic_subject_type(current_subject_type):
+        return guarded
+
+    evidence_bundle = (
+        dict((identity_review or {}).get("evidence_bundle") or {})
+        if isinstance((identity_review or {}).get("evidence_bundle"), dict)
+        else {}
+    )
+    entities = [
+        dict(item)
+        for item in list(evidence_bundle.get("graph_confirmed_entities") or [])
+        if isinstance(item, dict)
+    ]
+    if not entities:
+        return guarded
+
+    current_brand = str(guarded.get("subject_brand") or "").strip()
+    current_model = str(guarded.get("subject_model") or "").strip()
+    current_subject_domain = str(guarded.get("subject_domain") or "").strip()
+    mapped_brand = _mapped_brand_for_model(current_model)
+    best_entity: dict[str, Any] | None = None
+    best_score = 0
+
+    for entity in entities:
+        candidate_subject_type = str(entity.get("subject_type") or "").strip()
+        if not candidate_subject_type or _is_generic_subject_type(candidate_subject_type):
+            continue
+        candidate_brand = str(entity.get("brand") or "").strip()
+        candidate_model = str(entity.get("model") or "").strip()
+        candidate_domain = str(entity.get("subject_domain") or "").strip() or _subject_domain_from_subject_type(candidate_subject_type)
+
+        score = 0
+        if current_model and candidate_model:
+            if _identity_values_match(current_model, candidate_model):
+                score += 6
+            else:
+                score -= 4
+        if current_brand and candidate_brand:
+            if _identity_values_match(current_brand, candidate_brand):
+                score += 4
+            else:
+                score -= 3
+        if mapped_brand and candidate_brand and _identity_values_match(mapped_brand, candidate_brand):
+            score += 2
+        if current_subject_domain and candidate_domain:
+            if current_subject_domain == candidate_domain:
+                score += 2
+            else:
+                score -= 1
+        if score > best_score:
+            best_score = score
+            best_entity = entity
+
+    if best_entity is None or best_score < 4:
+        return guarded
+
+    guarded["subject_type"] = str(best_entity.get("subject_type") or "").strip()
+    if not str(guarded.get("subject_domain") or "").strip():
+        candidate_domain = str(best_entity.get("subject_domain") or "").strip() or _subject_domain_from_subject_type(
+            str(best_entity.get("subject_type") or "").strip()
+        )
+        if candidate_domain:
+            guarded["subject_domain"] = candidate_domain
+    return guarded
+
+
 def apply_identity_review_guard(
     profile: dict[str, Any],
     *,
@@ -1945,6 +2018,10 @@ def apply_identity_review_guard(
             if not str(guarded.get(key) or "").strip() and str(identity_seed.get(key) or "").strip():
                 guarded[key] = str(identity_seed.get(key) or "").strip()
                 identity_backfilled = True
+        guarded = _backfill_subject_type_from_identity_review_entities(
+            guarded,
+            identity_review=identity_review,
+        )
         current_search_queries = [str(item).strip() for item in (guarded.get("search_queries") or []) if str(item).strip()]
         replacement_queries = [str(item).strip() for item in (identity_seed.get("search_queries") or []) if str(item).strip()]
         if (

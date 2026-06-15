@@ -61,6 +61,10 @@ export type UploadForm = {
   jobFlowMode: string;
   workflowMode: string;
   enhancementModes: string[];
+  creatorCardId: string;
+  executionMode: string;
+  platformTargets: string[];
+  taskBrief: string;
   outputDir: string;
   videoDescription: string;
 };

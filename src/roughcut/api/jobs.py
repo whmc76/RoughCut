@@ -5,6 +5,7 @@ import base64
 import bisect
 import copy
 import hashlib
+import json
 import logging
 import os
 import re
@@ -35,6 +36,10 @@ from roughcut.api.schemas import (
     ContentProfileMemoryStatsOut,
     ContentProfileConfirmIn,
     ContentProfileReviewOut,
+    JobAgentDecisionOut,
+    JobAgentPlanApplyIn,
+    JobAgentPlanOut,
+    JobAgentPlanRefineIn,
     JobActivityOut,
     JobInitializeIn,
     JobOut,
@@ -44,20 +49,27 @@ from roughcut.api.schemas import (
     ReportOut,
     ReviewApplyRequest,
     TokenUsageReportOut,
+    normalize_execution_mode,
     normalize_job_flow_mode,
+    resolve_job_flow_mode_from_execution_mode,
 )
 from roughcut.avatar import get_avatar_material_profile, list_avatar_material_profiles
-from roughcut.config import get_settings
+from roughcut.config import get_settings, llm_task_route
 from roughcut.config import apply_runtime_overrides
 from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
 from roughcut.db.models import (
     Artifact,
+    CreatorCard,
+    CreatorPublicationProfile,
+    CreatorTaskStrategy,
+    CreatorVisualPlan,
     ContentProfileCorrection,
     ContentProfileKeywordStat,
     FactClaim,
     FactEvidence,
     GlossaryTerm,
     Job,
+    JobAgentPlan,
     JobStep,
     RenderOutput,
     ReviewAction,
@@ -112,6 +124,10 @@ from roughcut.edit.rule_registry import (
     rule_match_surface_layer,
 )
 from roughcut.host.file_manager import can_open_in_file_manager, describe_file_manager_target, open_in_file_manager
+from roughcut.production_readiness import (
+    insert_plan_output_fallback_reasons,
+    projection_output_fallback_reasons,
+)
 from roughcut.edit.refine_decisions import (
     ARTIFACT_TYPE_REFINE_DECISION_PLAN,
     REFINE_DECISION_PLAN_SCHEMA_VERSION,
@@ -208,6 +224,8 @@ from roughcut.media.subtitle_spans import (
     word_payloads_have_collapsed_timing,
 )
 from roughcut.publication_intelligence import generate_publication_scheme
+from roughcut.providers.factory import get_reasoning_provider
+from roughcut.providers.reasoning.base import Message
 from roughcut.media.subtitle_fingerprint import subtitle_payload_fingerprint
 from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER
 from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER
@@ -265,7 +283,10 @@ from roughcut.review.content_profile_review_stats import (
 from roughcut.review.domain_glossaries import detect_glossary_domains, resolve_builtin_glossary_terms
 from roughcut.review.subtitle_memory import build_subtitle_review_memory
 from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
-from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
+from roughcut.review.subtitle_quality import (
+    ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
+    subtitle_items_have_output_fallback_alignment,
+)
 from roughcut.review.subtitle_review_actions import (
     build_subtitle_candidate_action,
     build_subtitle_consistency_action,
@@ -327,6 +348,7 @@ _LIST_PREVIEW_ARTIFACT_TYPES = (
     QUALITY_ARTIFACT_TYPE,
     "variant_timeline_bundle",
     "render_outputs",
+    "platform_packaging_md",
     "avatar_commentary_plan",
 )
 
@@ -888,6 +910,8 @@ def _manual_editor_projection_has_suspicious_subtitle_timing(
     *,
     split_profile: dict[str, Any],
 ) -> bool:
+    if subtitle_items_have_output_fallback_alignment(entries):
+        return True
     max_chars = int(split_profile.get("max_chars") or 30)
     max_duration = float(split_profile.get("max_duration") or 5.0)
     duration_limit = max(8.0, max_duration * 1.6)
@@ -932,6 +956,20 @@ def _manual_editor_subtitle_projection_entry_payload(entry: dict[str, Any]) -> d
         "display_suppressed_reason": entry.get("display_suppressed_reason"),
         "projection_source": entry.get("projection_source"),
     }
+    for key in (
+        "source_index",
+        "source_indexes",
+        "source_fragment_index",
+        "source_fragment_count",
+        "source_overlap_start_time",
+        "source_overlap_end_time",
+        "source_text_full",
+        "timing_text",
+        "transcript_text",
+        "transcript_text_raw",
+    ):
+        if key in entry:
+            payload[key] = entry.get(key)
     words = drop_redundant_synthetic_word_payloads(list(entry.get("words") or entry.get("words_json") or []))
     if words:
         payload["words"] = words
@@ -982,6 +1020,25 @@ async def _load_manual_editor_latest_subtitle_projection_entries(
     if projection_entries and _manual_editor_projection_data_is_current(projection_data):
         return projection_entries, projection_data
     if projection_entries:
+        canonical_layer = await _load_latest_current_canonical_transcript_data(
+            session,
+            job_id=job_id,
+        )
+        rebuilt_projection_entries, rebuilt_projection_data = await _manual_editor_rebuild_projection_entries_from_canonical_layer(
+            session,
+            job_id=job_id,
+            canonical_layer=canonical_layer,
+            projection_data=projection_data,
+            fallback_items=fallback_items,
+        )
+        if rebuilt_projection_entries:
+            merged_projection_data = {
+                **dict(projection_data or {}),
+                **rebuilt_projection_data,
+                "rebuilt_from_canonical_fallback": True,
+                "projection_refresh_required": True,
+            }
+            return rebuilt_projection_entries, merged_projection_data
         return projection_entries, {
             **dict(projection_data or {}),
             "projection_refresh_required": True,
@@ -1003,16 +1060,6 @@ async def _load_manual_editor_latest_subtitle_projection_entries(
             **rebuilt_projection_data,
             "rebuilt_from_canonical_fallback": True,
         }
-        if _manual_editor_projection_data_is_current(merged_projection_data):
-            session.add(
-                Artifact(
-                    job_id=job_id,
-                    step_id=getattr(projection_artifact, "step_id", None),
-                    artifact_type=ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER,
-                    data_json=merged_projection_data,
-                )
-            )
-            session.info["manual_editor_projection_cache_refreshed"] = True
         return rebuilt_projection_entries, merged_projection_data
     if projection_entries:
         return projection_entries, projection_data
@@ -1031,12 +1078,19 @@ async def _load_manual_editor_latest_subtitle_payloads(
         job_id=job_id,
         fallback_items=None,
     )
+    projection_refresh_required = bool(projection_data.get("projection_refresh_required"))
     if subtitle_dicts:
         cleaned_subtitles = preserve_subtitle_payloads(subtitle_dicts, drop_empty=drop_empty)
         split_profile = projection_data.get("split_profile") if isinstance(projection_data.get("split_profile"), dict) else {}
-        if not fallback_to_items or not _manual_editor_projection_has_suspicious_subtitle_timing(
-            cleaned_subtitles,
-            split_profile=split_profile,
+        if (
+            not projection_refresh_required
+            and (
+                not fallback_to_items
+                or not _manual_editor_projection_has_suspicious_subtitle_timing(
+                    cleaned_subtitles,
+                    split_profile=split_profile,
+                )
+            )
         ):
             return cleaned_subtitles, projection_data
     elif not fallback_to_items:
@@ -1342,6 +1396,7 @@ async def _build_current_reviewed_subtitle_excerpt(
 async def list_jobs(
     limit: int = 50,
     offset: int = 0,
+    include_history: bool = False,
     session: AsyncSession = Depends(get_session),
 ):
     result = await session.execute(
@@ -1368,6 +1423,8 @@ async def list_jobs(
         for job in jobs:
             set_committed_value(job, "artifacts", artifacts_by_job.get(job.id, []))
     _attach_job_previews(jobs, lightweight=True)
+    if not include_history:
+        jobs = _collapse_jobs_for_primary_queue(jobs)
     return jobs
 
 
@@ -1438,6 +1495,10 @@ async def create_job(
     job_flow_mode: str | None = Form(None),
     workflow_mode: str | None = Form(None),
     enhancement_modes: list[str] | None = Form(None),
+    creator_card_id: str | None = Form(None),
+    task_brief: str | None = Form(None),
+    execution_mode: str | None = Form(None),
+    platform_targets: list[str] | None = Form(None),
     edit_mode: str | None = Form(None),
     automation_level: str | None = Form(None),
     material_usage: str | None = Form(None),
@@ -1453,10 +1514,20 @@ async def create_job(
     try:
         language = normalize_job_language(language)
         workflow_template = normalize_workflow_template(workflow_template)
+        execution_mode_explicit = execution_mode is not None and bool(str(execution_mode).strip())
         job_flow_mode = normalize_job_flow_mode(job_flow_mode)
         workflow_mode = normalize_workflow_mode(workflow_mode or settings.default_job_workflow_mode)
         output_dir = str(output_dir or "").strip() or None
         video_description = _normalize_video_description(video_description)
+        task_brief = _normalize_video_description(task_brief)
+        execution_mode = normalize_execution_mode(execution_mode)
+        job_flow_mode = resolve_job_flow_mode_from_execution_mode(
+            job_flow_mode,
+            execution_mode,
+            execution_mode_explicit=execution_mode_explicit,
+        )
+        parsed_creator_card_id = uuid.UUID(str(creator_card_id).strip()) if str(creator_card_id or "").strip() else None
+        normalized_platform_targets = [str(item).strip() for item in list(platform_targets or []) if str(item).strip()]
         edit_mode = normalize_edit_mode(edit_mode)
         automation_level = normalize_automation_level(automation_level)
         material_usage = normalize_material_usage(material_usage)
@@ -1466,6 +1537,10 @@ async def create_job(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if parsed_creator_card_id is not None:
+        creator_exists = await session.get(CreatorCard, parsed_creator_card_id)
+        if creator_exists is None:
+            raise HTTPException(status_code=422, detail="creator_card_id does not exist")
 
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_root = Path(tmpdir)
@@ -1484,7 +1559,7 @@ async def create_job(
         source_context = _build_job_source_context(
             uploaded_files=uploaded_files,
             source_name=source_name,
-            video_description=video_description,
+            video_description=task_brief or video_description,
             product_controls={
                 "edit_mode": edit_mode,
                 "automation_level": automation_level,
@@ -1509,6 +1584,10 @@ async def create_job(
             workflow_mode=workflow_mode,
             enhancement_modes=enhancement_modes,
             output_dir=output_dir,
+            creator_card_id=parsed_creator_card_id,
+            task_brief=task_brief,
+            execution_mode=execution_mode,
+            platform_targets_json=normalized_platform_targets,
         )
         session.add(job)
 
@@ -1520,6 +1599,8 @@ async def create_job(
                     "source_context": source_context,
                 }
             session.add(step)
+
+        await _ensure_job_agent_plan(session, job)
 
         await session.commit()
         await session.refresh(job)
@@ -1538,6 +1619,190 @@ def _normalize_video_description(value: str | None) -> str | None:
     if not normalized:
         return None
     return normalized[:4000]
+
+
+JOB_AGENT_PLAN_REVISION_ARTIFACT_TYPE = "job_agent_plan_revision"
+
+
+async def _resolve_job_agent_plan_dependencies(
+    session: AsyncSession,
+    job: Job,
+) -> tuple[CreatorCard | None, CreatorTaskStrategy | None, CreatorVisualPlan | None, CreatorPublicationProfile | None]:
+    creator = await session.get(CreatorCard, job.creator_card_id) if job.creator_card_id else None
+    task_strategy: CreatorTaskStrategy | None = None
+    visual_plan: CreatorVisualPlan | None = None
+    publication_profile: CreatorPublicationProfile | None = None
+    if creator is not None:
+        task_strategy_result = await session.execute(
+            select(CreatorTaskStrategy)
+            .where(
+                CreatorTaskStrategy.creator_card_id == creator.id,
+                CreatorTaskStrategy.is_active.is_(True),
+            )
+            .order_by(CreatorTaskStrategy.updated_at.desc())
+        )
+        task_strategy = task_strategy_result.scalars().first()
+        visual_plan_result = await session.execute(
+            select(CreatorVisualPlan)
+            .where(
+                CreatorVisualPlan.creator_card_id == creator.id,
+                CreatorVisualPlan.is_active.is_(True),
+            )
+            .order_by(CreatorVisualPlan.updated_at.desc())
+        )
+        visual_plan = visual_plan_result.scalars().first()
+        publication_result = await session.execute(
+            select(CreatorPublicationProfile)
+            .where(CreatorPublicationProfile.creator_card_id == creator.id)
+            .order_by(CreatorPublicationProfile.updated_at.desc())
+        )
+        publication_profile = publication_result.scalars().first()
+    return creator, task_strategy, visual_plan, publication_profile
+
+
+def _build_job_agent_plan_payload(
+    job: Job,
+    *,
+    creator: CreatorCard | None,
+    task_strategy: CreatorTaskStrategy | None,
+    visual_plan: CreatorVisualPlan | None,
+    publication_profile: CreatorPublicationProfile | None,
+) -> dict[str, Any]:
+    task_brief_text = str(job.task_brief or getattr(job, "video_description", "") or "").strip()
+    creator_name = str(getattr(creator, "name", "") or "").strip()
+    strategy_payload = dict(getattr(task_strategy, "strategy_payload_json", {}) or {})
+    visual_payload = dict(getattr(visual_plan, "visual_payload_json", {}) or {})
+    publication_payload = dict(getattr(publication_profile, "publication_payload_json", {}) or {})
+    execution_mode = str(job.execution_mode or "auto").strip() or "auto"
+    stage_rows = [
+        {
+            "key": "material_understanding",
+            "label": "素材理解",
+            "summary": "读取素材、文件名和任务想法，确认这条内容的主体与主线。",
+        },
+        {
+            "key": "task_strategy",
+            "label": "任务策略",
+            "summary": strategy_payload.get("intent") or "根据创作者定位选择默认剪辑策略。",
+        },
+        {
+            "key": "visual_plan",
+            "label": "视觉包装",
+            "summary": visual_payload.get("cover_direction") or "根据创作者定位生成视觉与文案方案。",
+        },
+        {
+            "key": "publication_plan",
+            "label": "发布物料",
+            "summary": publication_payload.get("publication_mode") or "根据创作者默认平台准备发布物料。",
+        },
+    ]
+    return {
+        "creator": {
+            "id": str(creator.id) if creator is not None else None,
+            "name": creator_name or None,
+            "positioning": str(getattr(creator, "positioning", "") or getattr(creator, "natural_language_profile", "") or "").strip() or None,
+        },
+        "task_brief": task_brief_text,
+        "execution_mode": execution_mode,
+        "platform_targets": list(job.platform_targets_json or []),
+        "task_strategy": {
+            "id": str(task_strategy.id) if task_strategy is not None else None,
+            "name": str(getattr(task_strategy, "name", "") or "").strip() or "兼容默认策略",
+            "summary": str(getattr(task_strategy, "summary", "") or strategy_payload.get("intent") or "未绑定创作者策略，沿用兼容默认策略。").strip(),
+            "payload": strategy_payload,
+        },
+        "visual_plan": {
+            "id": str(visual_plan.id) if visual_plan is not None else None,
+            "name": str(getattr(visual_plan, "name", "") or "").strip() or "兼容默认视觉",
+            "summary": str(getattr(visual_plan, "summary", "") or visual_payload.get("agent_reason") or "未绑定创作者视觉方案，沿用兼容默认视觉。").strip(),
+            "payload": visual_payload,
+        },
+        "publication_plan": {
+            "id": str(publication_profile.id) if publication_profile is not None else None,
+            "summary": str(publication_payload.get("agent_reason") or "未绑定创作者发布管理，沿用兼容发布配置。").strip(),
+            "payload": publication_payload,
+        },
+        "stages": stage_rows,
+        "why": [
+            f"创作者：{creator_name}" if creator_name else "未绑定创作者，当前任务使用兼容默认路径。",
+            f"执行方式：{execution_mode}",
+            f"任务想法：{task_brief_text or '未填写'}",
+        ],
+    }
+
+
+async def _record_job_agent_plan_revision(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+    plan_payload: dict[str, Any],
+    prompt: str | None,
+    operation: str,
+) -> None:
+    session.add(
+        Artifact(
+            job_id=job_id,
+            artifact_type=JOB_AGENT_PLAN_REVISION_ARTIFACT_TYPE,
+            data_json={
+                "operation": operation,
+                "prompt": prompt,
+                "plan_payload": plan_payload,
+            },
+        )
+    )
+
+
+async def _ensure_job_agent_plan(
+    session: AsyncSession,
+    job: Job,
+    *,
+    regenerate: bool = False,
+) -> JobAgentPlan:
+    result = await session.execute(select(JobAgentPlan).where(JobAgentPlan.job_id == job.id))
+    plan = result.scalar_one_or_none()
+    creator, task_strategy, visual_plan, publication_profile = await _resolve_job_agent_plan_dependencies(session, job)
+    payload = _build_job_agent_plan_payload(
+        job,
+        creator=creator,
+        task_strategy=task_strategy,
+        visual_plan=visual_plan,
+        publication_profile=publication_profile,
+    )
+    if plan is None:
+        plan = JobAgentPlan(
+            job_id=job.id,
+            creator_card_id=creator.id if creator is not None else None,
+            task_strategy_id=task_strategy.id if task_strategy is not None else None,
+            visual_plan_id=visual_plan.id if visual_plan is not None else None,
+            publication_profile_id=publication_profile.id if publication_profile is not None else None,
+            status="ready",
+            plan_payload_json=payload,
+        )
+        session.add(plan)
+        await session.flush()
+        await _record_job_agent_plan_revision(
+            session,
+            job_id=job.id,
+            plan_payload=payload,
+            prompt=str(job.task_brief or getattr(job, "video_description", "") or "").strip() or None,
+            operation="generate",
+        )
+        return plan
+    if regenerate:
+        plan.creator_card_id = creator.id if creator is not None else None
+        plan.task_strategy_id = task_strategy.id if task_strategy is not None else None
+        plan.visual_plan_id = visual_plan.id if visual_plan is not None else None
+        plan.publication_profile_id = publication_profile.id if publication_profile is not None else None
+        plan.plan_payload_json = payload
+        plan.status = "ready"
+        await _record_job_agent_plan_revision(
+            session,
+            job_id=job.id,
+            plan_payload=payload,
+            prompt="regenerate",
+            operation="regenerate",
+        )
+    return plan
 
 
 def _normalize_uploaded_sources(
@@ -1722,6 +1987,138 @@ async def get_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_session
         raise HTTPException(status_code=404, detail="Job not found")
     _attach_job_preview(job)
     return job
+
+
+@router.get("/{job_id}/agent-plan", response_model=JobAgentPlanOut)
+async def get_job_agent_plan(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    job = await session.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    plan = await _ensure_job_agent_plan(session, job)
+    await session.commit()
+    await session.refresh(plan)
+    return plan
+
+
+@router.post("/{job_id}/agent-plan/refine", response_model=JobAgentPlanOut)
+async def refine_job_agent_plan(
+    job_id: uuid.UUID,
+    body: JobAgentPlanRefineIn,
+    session: AsyncSession = Depends(get_session),
+):
+    job = await session.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    plan = await _ensure_job_agent_plan(session, job)
+    payload = dict(plan.plan_payload_json or {})
+    target = str(body.target or "general").strip() or "general"
+    adjustments = dict(payload.get("adjustments") or {})
+    target_adjustments = list(adjustments.get(target) or [])
+    target_adjustments.append(body.prompt.strip())
+    adjustments[target] = target_adjustments
+    payload["adjustments"] = adjustments
+    payload["why"] = [*list(payload.get("why") or []), f"调整 {target}：{body.prompt.strip()}"]
+    if target == "visual":
+        visual_plan = dict(payload.get("visual_plan") or {})
+        visual_plan["summary"] = f"{visual_plan.get('summary') or ''} 调整：{body.prompt.strip()}".strip()
+        payload["visual_plan"] = visual_plan
+    elif target == "publication":
+        publication_plan = dict(payload.get("publication_plan") or {})
+        publication_plan["summary"] = f"{publication_plan.get('summary') or ''} 调整：{body.prompt.strip()}".strip()
+        payload["publication_plan"] = publication_plan
+    else:
+        strategy_plan = dict(payload.get("task_strategy") or {})
+        strategy_plan["summary"] = f"{strategy_plan.get('summary') or ''} 调整：{body.prompt.strip()}".strip()
+        payload["task_strategy"] = strategy_plan
+    plan.plan_payload_json = payload
+    plan.status = "refined"
+    await _record_job_agent_plan_revision(
+        session,
+        job_id=job.id,
+        plan_payload=payload,
+        prompt=body.prompt.strip(),
+        operation=f"refine:{target}",
+    )
+    await session.commit()
+    await session.refresh(plan)
+    return plan
+
+
+@router.post("/{job_id}/agent-plan/apply", response_model=JobAgentPlanOut)
+async def apply_job_agent_plan(
+    job_id: uuid.UUID,
+    body: JobAgentPlanApplyIn | None = None,
+    session: AsyncSession = Depends(get_session),
+):
+    job = await session.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    plan = await _ensure_job_agent_plan(session, job)
+    payload = dict(plan.plan_payload_json or {})
+    if body and body.selected_strategy_id is not None:
+        plan.task_strategy_id = body.selected_strategy_id
+    if body and body.selected_visual_plan_id is not None:
+        plan.visual_plan_id = body.selected_visual_plan_id
+    if body and body.selected_publication_profile_id is not None:
+        plan.publication_profile_id = body.selected_publication_profile_id
+    payload["applied_at"] = datetime.now(timezone.utc).isoformat()
+    plan.plan_payload_json = payload
+    plan.status = "applied"
+    await _record_job_agent_plan_revision(
+        session,
+        job_id=job.id,
+        plan_payload=payload,
+        prompt=None,
+        operation="apply",
+    )
+    await session.commit()
+    await session.refresh(plan)
+    return plan
+
+
+@router.get("/{job_id}/agent-decisions", response_model=list[JobAgentDecisionOut])
+async def get_job_agent_decisions(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+    job = await session.get(Job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+    plan = await _ensure_job_agent_plan(session, job)
+    await session.commit()
+    payload = dict(plan.plan_payload_json or {})
+    items = [
+        JobAgentDecisionOut(
+            kind="creator",
+            title="创作者卡片",
+            summary=str(((payload.get("creator") or {}).get("name")) or "未绑定创作者"),
+            detail=((payload.get("creator") or {}).get("positioning")),
+            status=plan.status,
+            version=1,
+        ),
+        JobAgentDecisionOut(
+            kind="task_strategy",
+            title="任务策略",
+            summary=str(((payload.get("task_strategy") or {}).get("name")) or "兼容默认策略"),
+            detail=((payload.get("task_strategy") or {}).get("summary")),
+            status=plan.status,
+            version=1,
+        ),
+        JobAgentDecisionOut(
+            kind="visual_plan",
+            title="智能视觉方案",
+            summary=str(((payload.get("visual_plan") or {}).get("name")) or "兼容默认视觉"),
+            detail=((payload.get("visual_plan") or {}).get("summary")),
+            status=plan.status,
+            version=1,
+        ),
+        JobAgentDecisionOut(
+            kind="publication_plan",
+            title="智能发布管理",
+            summary=str(((payload.get("publication_plan") or {}).get("summary")) or "兼容默认发布配置"),
+            detail=f"平台目标：{' / '.join(list(payload.get('platform_targets') or [])) or '跟随创作者默认平台'}",
+            status=plan.status,
+            version=1,
+        ),
+    ]
+    return items
 
 
 @router.post("/{job_id}/cancel", response_model=JobOut)
@@ -4138,6 +4535,26 @@ def _manual_editor_projection_rows_as_source_rows(
             end_time = float(item.get("end_time", item.get("end", start_time)) or start_time)
         except (TypeError, ValueError):
             continue
+        row_start_time = start_time
+        row_end_time = end_time
+        source_start_time = _coerce_timing_value(item.get("source_overlap_start_time"))
+        source_end_time = _coerce_timing_value(item.get("source_overlap_end_time"))
+        if (
+            source_start_time is not None
+            and source_end_time is not None
+            and source_end_time > source_start_time
+        ):
+            start_time = source_start_time
+            end_time = source_end_time
+        preserve_projection_words = not (
+            source_start_time is not None
+            and source_end_time is not None
+            and source_end_time > source_start_time
+            and (
+                abs(start_time - row_start_time) > 0.02
+                or abs(end_time - row_end_time) > 0.02
+            )
+        )
         text_raw = subtitle_raw_rule_text(item)
         text_norm = subtitle_canonical_rule_text(item)
         text_final = subtitle_display_rule_text(item)
@@ -4159,7 +4576,7 @@ def _manual_editor_projection_rows_as_source_rows(
                     dict(word)
                     for word in drop_redundant_synthetic_word_payloads(list(item.get("words") or []))
                     if isinstance(word, dict)
-                ],
+                ] if preserve_projection_words else [],
                 "display_suppressed_reason": str(item.get("display_suppressed_reason") or "").strip() or None,
                 "projection_source": str(item.get("projection_source") or transcript_layer),
                 "segmentation_locked": True,
@@ -4173,6 +4590,25 @@ def _manual_editor_projection_rows_as_source_rows(
         )
     )
     return rows
+
+
+def _manual_editor_projection_rows_are_output_timeline_rows(
+    projected_subtitles: list[dict[str, Any]],
+) -> bool:
+    for item in projected_subtitles:
+        if not isinstance(item, dict):
+            continue
+        source_start = _coerce_timing_value(item.get("source_overlap_start_time"))
+        source_end = _coerce_timing_value(item.get("source_overlap_end_time"))
+        if source_start is None or source_end is None or source_end <= source_start:
+            continue
+        row_start = _coerce_timing_value(item.get("start_time", item.get("start")))
+        row_end = _coerce_timing_value(item.get("end_time", item.get("end")))
+        if row_start is None or row_end is None or row_end <= row_start:
+            continue
+        if abs(row_start - source_start) > 0.02 or abs(row_end - source_end) > 0.02:
+            return True
+    return False
 
 
 async def _load_manual_editor_source_subtitle_dicts(
@@ -4195,6 +4631,7 @@ async def _load_manual_editor_source_subtitle_dicts(
     else:
         latest_projection_rows = list(latest_projection_rows)
         latest_projection_data = dict(latest_projection_data)
+    projection_fallback_source_rows: list[dict[str, Any]] = []
     if latest_projection_rows:
         cleaned_projection_rows = preserve_subtitle_payloads(latest_projection_rows, drop_empty=True)
         split_profile = (
@@ -4203,16 +4640,14 @@ async def _load_manual_editor_source_subtitle_dicts(
             else {}
         )
         transcript_layer = str(latest_projection_data.get("transcript_layer") or "").strip()
-        rebuilt_from_canonical_fallback = bool(latest_projection_data.get("rebuilt_from_canonical_fallback"))
         if (
             transcript_layer not in {"", "subtitle_item"}
-            and not rebuilt_from_canonical_fallback
             and not _manual_editor_projection_has_suspicious_subtitle_timing(
                 cleaned_projection_rows,
                 split_profile=split_profile,
             )
         ):
-            return _manual_editor_projection_rows_as_source_rows(
+            projection_fallback_source_rows = _manual_editor_projection_rows_as_source_rows(
                 cleaned_projection_rows,
                 projection_data=latest_projection_data,
             )
@@ -4299,9 +4734,14 @@ async def _load_manual_editor_source_subtitle_dicts(
                 subtitle_item_rows,
             )
         )
-    return _manual_editor_choose_source_subtitle_rows(
+    chosen_rows = _manual_editor_choose_source_subtitle_rows(
         source_row_candidates,
     )
+    if chosen_rows:
+        return chosen_rows
+    if projection_fallback_source_rows:
+        return projection_fallback_source_rows
+    return []
 
 
 def _manual_editor_subtitle_payload(item: dict[str, Any], *, index: int) -> ManualEditorSubtitleOut:
@@ -5108,6 +5548,7 @@ def _normalize_manual_keep_segments(
     segments: list[dict[str, Any]] | list[ManualEditorSegmentIn],
     *,
     source_duration_sec: float,
+    merge_gap_sec: float = MANUAL_EDITOR_MICRO_CUT_HEAL_SEC,
 ) -> list[dict[str, float]]:
     raw_payloads: list[dict[str, Any]] = []
     for raw_item in segments or []:
@@ -5118,7 +5559,7 @@ def _normalize_manual_keep_segments(
     normalized = normalize_keep_segments_payloads(
         raw_payloads,
         upper_bound=max(0.0, float(source_duration_sec or 0.0)),
-        merge_gap_sec=MANUAL_EDITOR_MICRO_CUT_HEAL_SEC,
+        merge_gap_sec=max(0.0, float(merge_gap_sec or 0.0)),
         minimum_duration_sec=0.05,
     )
     if not normalized:
@@ -5243,6 +5684,71 @@ def _manual_editor_deleted_ranges_from_keep_segments(
     return deleted_ranges
 
 
+def _manual_editor_keep_segments_from_deleted_ranges(
+    deleted_ranges: list[dict[str, float]],
+    *,
+    source_duration_sec: float,
+) -> list[dict[str, float]]:
+    keep_segments: list[dict[str, float]] = []
+    cursor = 0.0
+    for deleted_range in deleted_ranges:
+        start = max(0.0, min(source_duration_sec, float(deleted_range.get("start", 0.0) or 0.0)))
+        end = max(start, min(source_duration_sec, float(deleted_range.get("end", start) or start)))
+        if start > cursor + 0.02:
+            keep_segments.append({"start": round(cursor, 3), "end": round(start, 3)})
+        cursor = max(cursor, end)
+    if source_duration_sec > cursor + 0.02:
+        keep_segments.append({"start": round(cursor, 3), "end": round(source_duration_sec, 3)})
+    return keep_segments
+
+
+def _manual_editor_subtract_ranges(
+    ranges: list[dict[str, float]],
+    subtract_ranges: list[dict[str, float]],
+) -> list[dict[str, float]]:
+    resolved: list[dict[str, float]] = []
+    ordered_subtract_ranges = sorted(
+        [
+            {
+                "start": float(item.get("start", 0.0) or 0.0),
+                "end": float(item.get("end", 0.0) or 0.0),
+            }
+            for item in subtract_ranges
+            if float(item.get("end", item.get("start", 0.0)) or 0.0)
+            > float(item.get("start", 0.0) or 0.0) + 0.02
+        ],
+        key=lambda item: (item["start"], item["end"]),
+    )
+    for range_item in ranges:
+        pieces = [
+            {
+                "start": float(range_item.get("start", 0.0) or 0.0),
+                "end": float(range_item.get("end", 0.0) or 0.0),
+            }
+        ]
+        for subtract_item in ordered_subtract_ranges:
+            next_pieces: list[dict[str, float]] = []
+            for piece in pieces:
+                overlap_start = max(piece["start"], subtract_item["start"])
+                overlap_end = min(piece["end"], subtract_item["end"])
+                if overlap_end <= overlap_start + 0.02:
+                    next_pieces.append(piece)
+                    continue
+                if overlap_start > piece["start"] + 0.02:
+                    next_pieces.append({"start": piece["start"], "end": overlap_start})
+                if overlap_end < piece["end"] - 0.02:
+                    next_pieces.append({"start": overlap_end, "end": piece["end"]})
+            pieces = next_pieces
+            if not pieces:
+                break
+        resolved.extend(
+            {"start": round(piece["start"], 3), "end": round(piece["end"], 3)}
+            for piece in pieces
+            if piece["end"] > piece["start"] + 0.02
+        )
+    return resolved
+
+
 def _manual_editor_range_overlaps_any(
     range_item: dict[str, float],
     ranges: list[dict[str, float]],
@@ -5265,8 +5771,16 @@ def _manual_editor_restore_frontend_managed_auto_cuts(
     source_duration_sec: float,
 ) -> list[dict[str, float]]:
     if source_duration_sec <= 0.05:
-        return _normalize_manual_keep_segments(keep_segments, source_duration_sec=source_duration_sec)
-    normalized_keep_segments = _normalize_manual_keep_segments(keep_segments, source_duration_sec=source_duration_sec)
+        return _normalize_manual_keep_segments(
+            keep_segments,
+            source_duration_sec=source_duration_sec,
+            merge_gap_sec=0.0,
+        )
+    normalized_keep_segments = _normalize_manual_keep_segments(
+        keep_segments,
+        source_duration_sec=source_duration_sec,
+        merge_gap_sec=0.0,
+    )
     deleted_ranges = _manual_editor_deleted_ranges_from_keep_segments(
         normalized_keep_segments,
         source_duration_sec=source_duration_sec,
@@ -5277,13 +5791,12 @@ def _manual_editor_restore_frontend_managed_auto_cuts(
     )
     if not managed_ranges:
         return normalized_keep_segments
-    managed_deleted_ranges = [
-        deleted_range for deleted_range in deleted_ranges if _manual_editor_range_overlaps_any(deleted_range, managed_ranges)
-    ]
-    return _normalize_manual_keep_segments(
-        [*normalized_keep_segments, *managed_ranges, *managed_deleted_ranges],
+    remaining_deleted_ranges = _manual_editor_subtract_ranges(deleted_ranges, managed_ranges)
+    restored_keep_segments = _manual_editor_keep_segments_from_deleted_ranges(
+        remaining_deleted_ranges,
         source_duration_sec=source_duration_sec,
     )
+    return restored_keep_segments or normalized_keep_segments
 
 
 def _manual_editor_apply_frontend_managed_auto_cuts(
@@ -5294,12 +5807,21 @@ def _manual_editor_apply_frontend_managed_auto_cuts(
     current_keep_segments: list[Any] | None = None,
 ) -> list[dict[str, float]]:
     if source_duration_sec <= 0.05:
-        return _normalize_manual_keep_segments(keep_segments, source_duration_sec=source_duration_sec)
-    normalized_keep_segments = _normalize_manual_keep_segments(keep_segments, source_duration_sec=source_duration_sec)
+        return _normalize_manual_keep_segments(
+            keep_segments,
+            source_duration_sec=source_duration_sec,
+            merge_gap_sec=0.0,
+        )
+    normalized_keep_segments = _normalize_manual_keep_segments(
+        keep_segments,
+        source_duration_sec=source_duration_sec,
+        merge_gap_sec=0.0,
+    )
     current_deleted_ranges = _manual_editor_deleted_ranges_from_keep_segments(
         _normalize_manual_keep_segments(
             current_keep_segments if current_keep_segments is not None else keep_segments,
             source_duration_sec=source_duration_sec,
+            merge_gap_sec=0.0,
         ),
         source_duration_sec=source_duration_sec,
     )
@@ -5333,7 +5855,11 @@ def _manual_editor_apply_frontend_managed_auto_cuts(
                 break
         if cursor < keep_end - 0.02:
             resolved.append({"start": round(cursor, 3), "end": round(keep_end, 3)})
-    return _normalize_manual_keep_segments(resolved, source_duration_sec=source_duration_sec)
+    return _normalize_manual_keep_segments(
+        resolved,
+        source_duration_sec=source_duration_sec,
+        merge_gap_sec=0.0,
+    )
 
 
 def _manual_editor_draft_matches_base(
@@ -5547,6 +6073,11 @@ def _manual_editor_timeline_matches_current_subtitles(
         draft_created_at=timeline_created_at,
         latest_subtitle_created_at=latest_subtitle_revision_created_at,
     )
+    timeline_is_newer_than_subtitles = False
+    if timeline_created_at is not None and latest_subtitle_revision_created_at is not None:
+        timeline_is_newer_than_subtitles = _coerce_utc_datetime(timeline_created_at) > _coerce_utc_datetime(
+            latest_subtitle_revision_created_at
+        )
     if timeline_fingerprint:
         current_fingerprints = {
             str(value or "").strip()
@@ -5566,6 +6097,8 @@ def _manual_editor_timeline_matches_current_subtitles(
             and _manual_editor_subtitle_basis_family(timeline_basis) in current_bases
             and not subtitles_are_stale
         ):
+            return True
+        if timeline_is_newer_than_subtitles:
             return True
         return False
     return not subtitles_are_stale
@@ -6536,6 +7069,8 @@ def _manual_editor_authoritative_projection_items(
     source_subtitles: list[dict[str, Any]],
     keep_segments: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    if _manual_editor_projection_rows_are_output_timeline_rows(projected_subtitles):
+        return _manual_editor_projection_baseline_rows(projected_subtitles, source_subtitles)
     return remap_subtitles_to_timeline(
         _manual_editor_projection_baseline_rows(projected_subtitles, source_subtitles),
         keep_segments,
@@ -6572,7 +7107,7 @@ async def _build_manual_editor_session(
         editorial_timeline_id=str(editorial_timeline.id),
         editorial_timeline_version=int(editorial_timeline.version or 1),
         source_duration_sec=source_duration_sec,
-        prefer_refine_plan=False,
+        prefer_refine_plan=True,
     )
     raw_base_keep_segments = [
         _manual_editor_segment_payload(segment, index=index)
@@ -6656,11 +7191,15 @@ async def _build_manual_editor_session(
         baseline_editorial_context = _manual_editor_editorial_context(baseline_editorial_payload)
         resolved_base_keep_segment_dicts = _manual_editor_base_keep_segment_dicts(
             baseline_editorial_payload,
-            refine_plan_payload=None,
+            refine_plan_payload=(
+                refine_decision_plan_artifact.data_json
+                if refine_decision_plan_artifact and isinstance(refine_decision_plan_artifact.data_json, dict)
+                else None
+            ),
             editorial_timeline_id=str(baseline_editorial_timeline.id),
             editorial_timeline_version=int(baseline_editorial_timeline.version or 1),
             source_duration_sec=source_duration_sec,
-            prefer_refine_plan=False,
+            prefer_refine_plan=True,
         )
         raw_base_keep_segments = [
             _manual_editor_segment_payload(segment, index=index)
@@ -6794,6 +7333,7 @@ async def _build_manual_editor_session(
                 normalized_draft_keep_segments = _normalize_manual_keep_segments(
                     raw_draft_keep_segments,
                     source_duration_sec=source_duration_sec,
+                    merge_gap_sec=0.0,
                 ) if raw_draft_keep_segments else []
                 normalized_draft_keep_segments = _manual_editor_restore_frontend_managed_auto_cuts(
                     normalized_draft_keep_segments,
@@ -6862,19 +7402,16 @@ async def _build_manual_editor_session(
         manual_projection_suspicious=manual_projection_suspicious,
     )
     keep_segment_payloads = [segment.model_dump(include={"start", "end"}) for segment in keep_segments]
-    authoritative_projection_items = _manual_editor_authoritative_projection_items(
-        projected_subtitles=raw_subtitle_dicts,
-        source_subtitles=source_subtitle_dicts,
-        keep_segments=keep_segment_payloads,
-    )
-    source_fallback_projection_items = _manual_editor_source_fallback_projection_items(
+    source_projection_items = _manual_editor_source_fallback_projection_items(
         source_subtitle_dicts,
         keep_segment_payloads,
     )
+    display_projection_basis = "source_timeline_projection"
     if manual_projection_items and not draft_active and not manual_projection_suspicious:
         projected_subtitles = manual_projection_items
+        display_projection_basis = "manual_projection_override"
     else:
-        projected_subtitles = list(authoritative_projection_items)
+        projected_subtitles = list(source_projection_items)
         if subtitle_overrides:
             base_output_duration_sec = max((float(item.get("end_time", 0.0) or 0.0) for item in projected_subtitles), default=0.0)
             projected_subtitles = _apply_manual_subtitle_overrides(
@@ -6887,18 +7424,6 @@ async def _build_manual_editor_session(
         clean_text=False,
         collapse_repeats=False,
     )
-    source_projection_fallback_applied = _manual_editor_should_apply_source_projection_fallback(
-        projected_subtitles,
-        source_subtitles=source_subtitle_dicts,
-        keep_segments=keep_segment_payloads,
-        manual_projection_items=manual_projection_items,
-        raw_projection_rows=raw_subtitle_dicts,
-        projection_data=_projection_data,
-        draft_active=draft_active,
-        manual_projection_suspicious=manual_projection_suspicious,
-    )
-    if source_projection_fallback_applied and source_fallback_projection_items:
-        projected_subtitles = list(source_fallback_projection_items)
     projected_subtitles = _clean_manual_editor_subtitle_projection(
         projected_subtitles,
         clean_text=False,
@@ -6917,20 +7442,17 @@ async def _build_manual_editor_session(
         clean_text=False,
     )
     projection_diagnostics = {
-        "projection_refresh_required": bool(_projection_data.get("projection_refresh_required")),
-        "rebuilt_from_canonical_fallback": bool(_projection_data.get("rebuilt_from_canonical_fallback")),
+        "projection_refresh_required": False,
+        "rebuilt_from_canonical_fallback": False,
         "manual_projection_suspicious": bool(manual_projection_suspicious),
-        "source_projection_fallback_applied": bool(source_projection_fallback_applied),
-        "source_projection_fallback_reason": (
-            "validation_blocking_or_duplicate_overlap"
-            if source_projection_fallback_applied
-            else None
-        ),
+        "source_projection_fallback_applied": False,
+        "source_projection_fallback_reason": None,
+        "display_projection_basis": display_projection_basis,
         "projection_validation_fallback_used": bool(getattr(projection_validation, "fallback_used", False)),
         "projection_validation_mismatch_detected": bool(getattr(projection_validation, "mismatch_detected", False)),
         "validated_projection_count": len(validated_projected_subtitles),
         "display_projection_count": len(projected_subtitles),
-        "source_fallback_projection_count": len(source_fallback_projection_items),
+        "source_fallback_projection_count": len(source_projection_items),
         "source_row_split_diagnostics": _manual_editor_source_row_split_diagnostics(source_subtitle_dicts),
         "projection_validation": (
             projection_validation.model_dump()
@@ -6940,10 +7462,21 @@ async def _build_manual_editor_session(
             else None
         ),
     }
-    source_path = _resolve_manual_editor_source_path(job)
+    projection_fallback_reasons = projection_output_fallback_reasons(
+        projection_diagnostics,
+        include_refresh_required=True,
+    )
     status_detail = _manual_editor_detail_for_job_status(str(job.status or ""))
     prerequisite_detail = _manual_editor_prerequisite_detail(list(job.steps or []))
     session_detail = status_detail or prerequisite_detail
+    if projection_fallback_reasons:
+        projection_contract_locked = True
+        fallback_detail = (
+            "字幕投影仍处于 fallback/待刷新状态，不能作为正式可编辑基线："
+            + ", ".join(projection_fallback_reasons)
+        )
+        session_detail = fallback_detail if session_detail is None else f"{session_detail}；{fallback_detail}"
+    source_path = _resolve_manual_editor_source_path(job)
     return ManualEditorSessionOut(
         job_id=str(job.id),
         timeline_id=str(editorial_timeline.id),
@@ -7163,7 +7696,11 @@ async def save_manual_editor_draft(
             ),
             default=0.0,
         )
-    keep_segments = _normalize_manual_keep_segments(request.keep_segments, source_duration_sec=source_duration_sec)
+    keep_segments = _normalize_manual_keep_segments(
+        request.keep_segments,
+        source_duration_sec=source_duration_sec,
+        merge_gap_sec=0.0,
+    )
     current_source_subtitles = await _load_manual_editor_aligned_source_subtitle_dicts(session, job=job)
     _content_profile_artifact, content_profile = await _load_manual_editor_preferred_downstream_profile(
         session,
@@ -7397,7 +7934,11 @@ async def apply_manual_editor_timeline(
         analysis_payload=baseline_cut_analysis_payload,
         source_duration_sec=source_duration_sec,
     )
-    requested_keep_segments = _normalize_manual_keep_segments(request.keep_segments, source_duration_sec=source_duration_sec)
+    requested_keep_segments = _normalize_manual_keep_segments(
+        request.keep_segments,
+        source_duration_sec=source_duration_sec,
+        merge_gap_sec=0.0,
+    )
     effective_keep_segments = _manual_editor_apply_frontend_managed_auto_cuts(
         requested_keep_segments,
         analysis_payload=baseline_cut_analysis_payload,
@@ -7519,6 +8060,24 @@ async def apply_manual_editor_timeline(
         packaging_plan = _manual_editor_packaging_plan_from_render_plan(
             None,
             render_plan_context=previous_render_plan_context,
+        )
+    projection_blocking_reasons = projection_output_fallback_reasons(subtitle_projection_repair)
+    if projection_blocking_reasons:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "manual editor apply produced a fallback subtitle projection result and was blocked from "
+                "mutating the production timeline/render plan: " + ", ".join(projection_blocking_reasons)
+            ),
+        )
+    insert_fallback_reasons = insert_plan_output_fallback_reasons(packaging_plan.get("insert"))
+    if insert_fallback_reasons:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "manual editor apply produced a fallback packaging plan result and was blocked from mutating "
+                "the production timeline/render plan: " + ", ".join(insert_fallback_reasons)
+            ),
         )
     editorial_segments = _build_editorial_segments_from_keep_segments(
         effective_keep_segments,
@@ -7677,6 +8236,7 @@ async def apply_manual_editor_timeline(
         timeline_analysis=timeline_analysis,
         editing_skill=editing_skill,
         editing_accents=editing_accents,
+        content_profile=content_profile,
         creative_profile=_job_creative_profile(job),
         ai_director_plan=previous_render_plan_context["ai_director_plan"],
         avatar_commentary_plan=previous_render_plan_context["avatar_commentary_plan"],
@@ -8322,6 +8882,7 @@ async def get_job_publication_plan(
     )
     existing_attempts = await list_publication_attempts(session, job_id=str(job_id))
     platform_options = await _resolve_job_publication_platform_options(
+        session=session,
         job=job,
         render_output=render_output,
         packaging=packaging,
@@ -8372,6 +8933,7 @@ async def publish_job_to_bound_platforms(
     )
     existing_attempts = await list_publication_attempts(session, job_id=str(job_id))
     platform_options = await _resolve_job_publication_platform_options(
+        session=session,
         job=job,
         render_output=render_output,
         packaging=packaging,
@@ -8436,6 +8998,235 @@ def _normalize_publish_platform_options_payload(value: Any) -> dict[str, dict[st
     return normalized
 
 
+def _merge_publish_platform_options(
+    base: dict[str, dict[str, Any]],
+    override: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    merged = {platform: dict(options) for platform, options in base.items()}
+    for platform, options in override.items():
+        current = dict(merged.get(platform) or {})
+        for key, value in options.items():
+            if key == "platform_specific_overrides" and isinstance(value, dict):
+                nested = dict(current.get("platform_specific_overrides") or {}) if isinstance(current.get("platform_specific_overrides"), dict) else {}
+                nested.update(value)
+                current["platform_specific_overrides"] = nested
+            else:
+                current[key] = value
+        merged[platform] = current
+    return merged
+
+
+def _job_collection_strategy_match_text(job: Job) -> str:
+    values = [
+        getattr(job, "task_brief", ""),
+        getattr(job, "source_name", ""),
+        getattr(job, "source_path", ""),
+        getattr(job, "output_dir", ""),
+    ]
+    platform_targets = getattr(job, "platform_targets_json", None)
+    if isinstance(platform_targets, list):
+        values.extend(str(item or "") for item in platform_targets)
+    return " ".join(str(item or "") for item in values)
+
+
+def _collection_strategy_candidates(collection_strategy: dict[str, Any]) -> list[str]:
+    candidates = [
+        str(item).strip()
+        for item in (collection_strategy.get("candidate_collections") or [])
+        if str(item).strip()
+    ]
+    for rule in collection_strategy.get("rules") or []:
+        if not isinstance(rule, dict):
+            continue
+        collection_name = str(rule.get("collection_name") or "").strip()
+        if collection_name and collection_name not in candidates:
+            candidates.append(collection_name)
+    fallback = str(collection_strategy.get("default_collection_name") or "").strip()
+    if fallback and fallback not in candidates:
+        candidates.append(fallback)
+    return candidates
+
+
+def _fallback_collection_name_from_natural_strategy(
+    collection_strategy: dict[str, Any],
+    job: Job,
+) -> tuple[str, dict[str, Any] | None]:
+    match_text = _job_collection_strategy_match_text(job).casefold()
+    for rule in collection_strategy.get("rules") or []:
+        if not isinstance(rule, dict):
+            continue
+        collection_name = str(rule.get("collection_name") or "").strip()
+        if not collection_name:
+            continue
+        evidence_text = " ".join(
+            [
+                str(rule.get("natural_language_rule") or ""),
+                " ".join(str(item or "") for item in (rule.get("examples") or [])),
+            ]
+        ).casefold()
+        evidence_terms = [
+            term
+            for term in re.split(r"[\s,，、/；;。:.：()（）]+", evidence_text)
+            if len(term.strip()) >= 2
+        ]
+        if any(term in match_text for term in evidence_terms):
+            return collection_name, rule
+    fallback = str(collection_strategy.get("default_collection_name") or "").strip()
+    return fallback, None
+
+
+def _collection_name_from_rule_strategy(
+    collection_strategy: dict[str, Any],
+    job: Job,
+) -> tuple[str, dict[str, Any]]:
+    collection_name, matched_rule = _fallback_collection_name_from_natural_strategy(collection_strategy, job)
+    if not collection_name:
+        return "", {"source": "empty_rule_result"}
+    return collection_name, {
+        "source": "rule_based",
+        "matched_rule": matched_rule or {},
+        "selection_mode": "rule_match" if matched_rule else "default_collection_name",
+    }
+
+
+async def _collection_name_from_llm_strategy(
+    collection_strategy: dict[str, Any],
+    job: Job,
+) -> tuple[str, dict[str, Any]]:
+    candidates = _collection_strategy_candidates(collection_strategy)
+    if not candidates:
+        return "", {"source": "empty_candidates"}
+    rules = [
+        {
+            "collection_name": str(rule.get("collection_name") or "").strip(),
+            "natural_language_rule": str(rule.get("natural_language_rule") or "").strip(),
+            "examples": [str(item) for item in (rule.get("examples") or [])],
+        }
+        for rule in (collection_strategy.get("rules") or [])
+        if isinstance(rule, dict) and str(rule.get("collection_name") or "").strip()
+    ]
+    prompt = f"""
+你是 RoughCut 的发布合集分类器。请根据视频任务信息，从候选合集中选择唯一一个最合适的合集。
+
+分类依据：
+{collection_strategy.get("classification_basis") or "根据任务想法、素材文件名、路径、标题、简介和标签理解视频主题。"}
+
+候选合集：
+{json.dumps(candidates, ensure_ascii=False)}
+
+自然语言规则：
+{json.dumps(rules, ensure_ascii=False)}
+
+任务信息：
+{_job_collection_strategy_match_text(job)}
+
+只返回 JSON：
+{{
+  "collection_name": "必须是候选合集之一；无法判断时返回兜底合集",
+  "reason": "一句话说明为什么"
+}}
+""".strip()
+    try:
+        with llm_task_route("publication", search_enabled=False, settings=get_settings()):
+            response = await get_reasoning_provider().complete(
+                [Message(role="user", content=prompt)],
+                temperature=0.0,
+                max_tokens=300,
+                json_mode=True,
+            )
+        payload = response.as_json()
+        collection_name = str((payload or {}).get("collection_name") or "").strip()
+        if collection_name in candidates:
+            return collection_name, {
+                "source": "llm",
+                "model": response.model,
+                "reason": str((payload or {}).get("reason") or "").strip(),
+                "usage": response.usage,
+            }
+    except Exception as exc:
+        fallback, matched_rule = _fallback_collection_name_from_natural_strategy(collection_strategy, job)
+        return fallback, {
+            "source": "natural_rule_fallback",
+            "error": f"{type(exc).__name__}: {exc}",
+            "matched_rule": matched_rule or {},
+        }
+    fallback, matched_rule = _fallback_collection_name_from_natural_strategy(collection_strategy, job)
+    return fallback, {
+        "source": "natural_rule_fallback",
+        "error": "llm_returned_invalid_collection",
+        "matched_rule": matched_rule or {},
+    }
+
+
+async def _platform_options_from_job_collection_strategy(
+    collection_strategy: Any,
+    job: Job,
+    target_platforms: Any = None,
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(collection_strategy, dict):
+        return {}
+    mode = str(collection_strategy.get("mode") or "").strip()
+    if mode not in {"rule_based", "llm_classify"}:
+        return {}
+    if mode == "rule_based":
+        collection_name, classification = _collection_name_from_rule_strategy(collection_strategy, job)
+    else:
+        collection_name, classification = await _collection_name_from_llm_strategy(collection_strategy, job)
+        if str((classification or {}).get("source") or "").strip() != "llm":
+            return {}
+    if not collection_name:
+        return {}
+    platforms = [
+        platform
+        for platform in (normalize_publication_platform(item) for item in (target_platforms or []))
+        if platform
+    ]
+    options: dict[str, dict[str, Any]] = {}
+    for platform in platforms:
+        options[platform] = {
+            "collection_name": collection_name,
+            "platform_specific_overrides": {
+                "collection_management": {
+                    "status": "select_existing",
+                    "target_collection_name": collection_name,
+                    "selected_collection_name": collection_name,
+                    "selection_source": "creator_collection_strategy",
+                },
+                "collection_strategy": {
+                    "mode": mode,
+                    "source": collection_strategy.get("source") or "creator_publication_profile",
+                    "classification": classification,
+                },
+            },
+        }
+    return options
+
+
+async def _job_agent_publication_profile_options(
+    session: AsyncSession,
+    job: Job,
+) -> dict[str, dict[str, Any]]:
+    result = await session.execute(
+        select(JobAgentPlan)
+        .where(JobAgentPlan.job_id == job.id)
+    )
+    plan = result.scalar_one_or_none()
+    if plan is None or plan.publication_profile_id is None:
+        return {}
+    profile = await session.get(CreatorPublicationProfile, plan.publication_profile_id)
+    if profile is None:
+        return {}
+    payload = profile.publication_payload_json if isinstance(profile.publication_payload_json, dict) else {}
+    profile_options = _normalize_publish_platform_options_payload(payload.get("platform_options"))
+    target_platforms = list(payload.get("default_platforms") or []) or list(profile_options.keys())
+    strategy_options = await _platform_options_from_job_collection_strategy(
+        payload.get("collection_strategy"),
+        job,
+        target_platforms,
+    )
+    return _merge_publish_platform_options(profile_options, strategy_options)
+
+
 def _derive_job_publication_folder_path(job: Job, render_output: RenderOutput | None) -> str:
     candidates = [
         str(getattr(job, "source_path", "") or "").strip(),
@@ -8457,6 +9248,7 @@ def _derive_job_publication_folder_path(job: Job, render_output: RenderOutput | 
 
 async def _resolve_job_publication_platform_options(
     *,
+    session: AsyncSession,
     job: Job,
     render_output: RenderOutput | None,
     packaging: dict[str, Any] | None,
@@ -8468,8 +9260,9 @@ async def _resolve_job_publication_platform_options(
     explicit_options = _normalize_publish_platform_options_payload(requested_platform_options)
     if explicit_options:
         return explicit_options
+    profile_options = await _job_agent_publication_profile_options(session, job)
     if not creator_profile:
-        return {}
+        return profile_options
     base_plan = build_publication_plan(
         job=job,
         render_output=render_output,
@@ -8480,7 +9273,7 @@ async def _resolve_job_publication_platform_options(
         existing_attempts=existing_attempts,
     )
     if not list(base_plan.get("targets") or []):
-        return {}
+        return profile_options
     folder_path = _derive_job_publication_folder_path(job, render_output)
     scheme = await generate_publication_scheme(
         plan=base_plan,
@@ -8489,7 +9282,8 @@ async def _resolve_job_publication_platform_options(
         browser="chrome",
         force_probe=False,
     )
-    return _normalize_publish_platform_options_payload(scheme.get("platform_options"))
+    scheme_options = _normalize_publish_platform_options_payload(scheme.get("platform_options"))
+    return _merge_publish_platform_options(scheme_options, profile_options)
 
 
 def _dispatch_publication_worker_tick(created_count: int) -> None:
@@ -10364,7 +11158,69 @@ def _attach_job_preview(job: Job, *, lightweight: bool = False) -> None:
     job.publication_summary = publication_preview["summary"]
     job.queue_task_kind = _resolve_job_queue_task_kind(job)
     job.queue_thumbnail_source = "cover" if _resolve_job_queue_cover_path(job) else "content_profile"
+    _reconcile_job_preview_terminal_status(job)
     job.progress_percent = _calculate_job_progress_percent(job)
+
+
+def _collapse_jobs_for_primary_queue(jobs: list[Job]) -> list[Job]:
+    collapsed: list[Job] = []
+    seen_keys: set[tuple[str, str, str, str]] = set()
+    for job in jobs:
+        family_key = _job_queue_family_key(job)
+        if family_key in seen_keys:
+            continue
+        seen_keys.add(family_key)
+        collapsed.append(job)
+    return collapsed
+
+
+def _job_queue_family_key(job: Job) -> tuple[str, str, str, str]:
+    identity = (
+        str(getattr(job, "file_hash", "") or "").strip().lower()
+        or str(getattr(job, "source_path", "") or "").strip().lower()
+        or str(getattr(job, "source_name", "") or "").strip().lower()
+    )
+    workflow_template = str(getattr(job, "workflow_template", "") or "").strip().lower()
+    output_dir = str(getattr(job, "output_dir", "") or "").strip().lower()
+    task_kind = str(getattr(job, "queue_task_kind", "") or "").strip().lower()
+    return (identity, workflow_template, output_dir, task_kind)
+
+
+def _reconcile_job_preview_terminal_status(job: Job) -> None:
+    normalized_status = str(getattr(job, "status", "") or "").strip().lower()
+    if normalized_status == "done":
+        return
+    render_step = _find_step(list(getattr(job, "steps", None) or []), "render")
+    if render_step is None or str(render_step.status or "").strip().lower() != "done":
+        return
+    artifacts = list(getattr(job, "artifacts", None) or [])
+    render_outputs_artifact = next(
+        (
+            artifact
+            for artifact in artifacts
+            if str(getattr(artifact, "artifact_type", "") or "").strip() == "render_outputs"
+            and isinstance(getattr(artifact, "data_json", None), dict)
+        ),
+        None,
+    )
+    render_outputs = dict(getattr(render_outputs_artifact, "data_json", None) or {})
+    packaged_mp4 = str(
+        render_outputs.get("packaged_mp4")
+        or render_outputs.get("output_path")
+        or ((render_outputs.get("local") or {}).get("packaged_mp4") if isinstance(render_outputs.get("local"), dict) else "")
+        or ""
+    ).strip()
+    if not packaged_mp4:
+        return
+    platform_step = _find_step(list(getattr(job, "steps", None) or []), "platform_package")
+    has_packaging_artifact = any(
+        str(getattr(artifact, "artifact_type", "") or "").strip() == "platform_packaging_md"
+        for artifact in artifacts
+    )
+    if platform_step is not None and str(platform_step.status or "").strip().lower() != "done" and not has_packaging_artifact:
+        return
+    job.status = "done"
+    job.error_message = None
 
 
 def _resolve_job_queue_task_kind(job: Job) -> str:
@@ -11312,19 +12168,18 @@ async def _ensure_content_profile_thumbnail(job: Job, *, index: int) -> Path:
     cache_dir = _content_profile_thumbnail_cache_dir(job.id)
     cache_dir.mkdir(parents=True, exist_ok=True)
     cached = cache_dir / f"profile_{index:02d}.jpg"
-    if cached.exists() and not _should_retry_placeholder_thumbnail(cached):
+    if cached.exists() and not _is_content_profile_placeholder_thumbnail(cached):
         return cached
 
     lock = _CONTENT_PROFILE_THUMBNAIL_LOCKS.setdefault(f"{job.id}:{index}", asyncio.Lock())
     async with lock:
-        if cached.exists() and not _should_retry_placeholder_thumbnail(cached):
+        if cached.exists() and not _is_content_profile_placeholder_thumbnail(cached):
             return cached
         with tempfile.TemporaryDirectory() as tmpdir:
             try:
                 source_path = await _resolve_job_source(job, tmpdir)
             except FileNotFoundError:
-                _write_content_profile_placeholder_thumbnail(job, cached, index=index)
-                return cached
+                raise FileNotFoundError(f"Unable to resolve source media for job {job.id}")
             loop = asyncio.get_running_loop()
             async with _CONTENT_PROFILE_THUMBNAIL_GENERATION_SEMAPHORE:
                 success = await loop.run_in_executor(
@@ -11336,10 +12191,9 @@ async def _ensure_content_profile_thumbnail(job: Job, *, index: int) -> Path:
                     3,
                 )
             if not success:
-                _write_content_profile_placeholder_thumbnail(job, cached, index=index)
-                return cached
+                raise RuntimeError(f"Unable to extract content profile thumbnail for job {job.id}")
         if not cached.exists():
-            _write_content_profile_placeholder_thumbnail(job, cached, index=index)
+            raise RuntimeError(f"Unable to materialize content profile thumbnail for job {job.id}")
     return cached
 
 

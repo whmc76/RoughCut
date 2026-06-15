@@ -1,14 +1,21 @@
+import json
+
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from roughcut.api import avatar_materials
 from roughcut.api.avatar_materials import (
     _build_material_checks,
     _build_profile_runtime_state,
     _derive_runtime_preview_capability,
 )
-from roughcut.avatar.materials import build_creator_profile_dashboard, normalize_creator_profile
+from roughcut.avatar.materials import build_creator_profile_dashboard, normalize_avatar_material_profile, normalize_creator_profile
 from roughcut.naming import (
     AVATAR_CAPABILITY_GENERATION,
     AVATAR_CAPABILITY_PREVIEW,
     AVATAR_CAPABILITY_VOICE,
 )
+from roughcut.pipeline.steps import _pick_avatar_profile_speaking_video_path
 
 
 def test_material_checks_reject_role_kind_mismatch() -> None:
@@ -74,12 +81,19 @@ def test_profile_runtime_state_does_not_ready_voice_when_voice_file_blocks() -> 
     assert state["capability_status"][AVATAR_CAPABILITY_PREVIEW] == "missing"
 
 
-def test_creator_dashboard_counts_only_ready_materials() -> None:
+def test_creator_dashboard_counts_only_ready_materials(tmp_path, monkeypatch) -> None:
+    material_root = tmp_path / "avatar_materials"
+    profile_dir = material_root / "profiles" / "creator"
+    profile_dir.mkdir(parents=True)
+    voice_path = profile_dir / "voice.m4a"
+    voice_path.write_bytes(b"voice")
+    monkeypatch.setenv("ROUGHCUT_AVATAR_MATERIALS_DIR", str(material_root))
+
     dashboard = build_creator_profile_dashboard(
         {
             "files": [
                 {"role": "speaking_video", "kind": "audio", "checks": []},
-                {"role": "voice_sample", "kind": "audio", "checks": []},
+                {"role": "voice_sample", "kind": "audio", "path": str(voice_path), "checks": []},
                 {
                     "role": "portrait_photo",
                     "kind": "image",
@@ -95,6 +109,84 @@ def test_creator_dashboard_counts_only_ready_materials() -> None:
         "voice_samples": 1,
     }
     assert dashboard["section_status"]["materials"] is False
+
+
+def test_normalize_avatar_material_profile_repairs_stale_file_paths(tmp_path, monkeypatch) -> None:
+    material_root = tmp_path / "avatar_materials"
+    profile_dir = material_root / "profiles" / "creator"
+    profile_dir.mkdir(parents=True)
+    actual_video = profile_dir / "_.mp4"
+    actual_video.write_bytes(b"video")
+    monkeypatch.setenv("ROUGHCUT_AVATAR_MATERIALS_DIR", str(material_root))
+
+    normalized = normalize_avatar_material_profile(
+        {
+            "profile_dir": str(profile_dir),
+            "files": [
+                {
+                    "role": "speaking_video",
+                    "kind": "video",
+                    "path": str(profile_dir / "_1-_-20260313-151353.mp4"),
+                    "checks": [],
+                }
+            ],
+        }
+    )
+
+    assert normalized["files"][0]["path"] == str(actual_video.resolve())
+
+
+def test_creator_dashboard_requires_existing_material_path(tmp_path, monkeypatch) -> None:
+    material_root = tmp_path / "avatar_materials"
+    profile_dir = material_root / "profiles" / "creator"
+    profile_dir.mkdir(parents=True)
+    monkeypatch.setenv("ROUGHCUT_AVATAR_MATERIALS_DIR", str(material_root))
+
+    dashboard = build_creator_profile_dashboard(
+        {
+            "files": [
+                {
+                    "role": "speaking_video",
+                    "kind": "video",
+                    "path": str(profile_dir / "missing.mp4"),
+                    "checks": [],
+                },
+                {
+                    "role": "voice_sample",
+                    "kind": "audio",
+                    "path": str(profile_dir / "missing.m4a"),
+                    "checks": [],
+                },
+            ]
+        }
+    )
+
+    assert dashboard["material_counts"]["speaking_videos"] == 0
+    assert dashboard["material_counts"]["voice_samples"] == 0
+    assert dashboard["section_status"]["materials"] is False
+
+
+def test_pick_avatar_profile_speaking_video_path_uses_resolved_material_path(tmp_path, monkeypatch) -> None:
+    material_root = tmp_path / "avatar_materials"
+    profile_dir = material_root / "profiles" / "creator"
+    profile_dir.mkdir(parents=True)
+    actual_video = profile_dir / "_.mp4"
+    actual_video.write_bytes(b"video")
+    monkeypatch.setenv("ROUGHCUT_AVATAR_MATERIALS_DIR", str(material_root))
+
+    selected = _pick_avatar_profile_speaking_video_path(
+        {
+            "files": [
+                {
+                    "role": "speaking_video",
+                    "kind": "video",
+                    "path": str(profile_dir / "_1-_-20260313-151353.mp4"),
+                }
+            ]
+        }
+    )
+
+    assert selected == actual_video.resolve()
 
 
 def test_creator_profile_preserves_cover_packaging_scheme() -> None:
@@ -113,3 +205,55 @@ def test_creator_profile_preserves_cover_packaging_scheme() -> None:
     assert profile["publishing"]["cover_style"] == "edc_cinematic_hero"
     assert profile["publishing"]["cover_style_label"] == "EDC 电影英雄封面"
     assert profile["publishing"]["cover_packaging_scheme"] == "edc_cinematic_hero"
+
+
+def test_delete_avatar_material_file_removes_record_and_disk_file(tmp_path, monkeypatch) -> None:
+    material_root = tmp_path / "avatar_materials"
+    profile_dir = material_root / "profiles" / "creator"
+    profile_dir.mkdir(parents=True)
+    file_path = profile_dir / "voice.m4a"
+    file_path.write_bytes(b"voice")
+    (material_root / "profiles.json").write_text(
+        json.dumps(
+            [
+                {
+                    "id": "profile-1",
+                    "display_name": "FAS",
+                    "profile_dir": str(profile_dir),
+                    "training_provider": "heygem",
+                    "training_api_available": False,
+                    "created_at": "2026-06-13T00:00:00Z",
+                    "files": [
+                        {
+                            "id": "file-1",
+                            "role": "voice_sample",
+                            "kind": "audio",
+                            "original_name": "voice.m4a",
+                            "path": str(file_path),
+                            "content_type": "audio/mp4",
+                            "checks": [],
+                        }
+                    ],
+                    "preview_runs": [{"id": "preview-1"}],
+                }
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    async def unavailable() -> bool:
+        return False
+
+    monkeypatch.setenv("ROUGHCUT_AVATAR_MATERIALS_DIR", str(material_root))
+    monkeypatch.setattr(avatar_materials, "is_heygem_training_available", unavailable)
+    monkeypatch.setattr(avatar_materials, "is_heygem_preview_available", unavailable)
+    app = FastAPI()
+    app.include_router(avatar_materials.router)
+
+    response = TestClient(app).delete("/avatar-materials/profiles/profile-1/files/file-1")
+
+    assert response.status_code == 200
+    assert not file_path.exists()
+    payload = response.json()
+    assert payload["profiles"][0]["files"] == []
+    assert payload["profiles"][0]["preview_runs"] == []

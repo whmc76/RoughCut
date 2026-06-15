@@ -9,7 +9,7 @@ class _DummySettings:
     zhipu_api_key = "demo-key"
     zhipu_api_key_helper = ""
     zhipu_base_url = "https://open.bigmodel.cn/api/paas/v4"
-    active_reasoning_model = "glm-5.2[1m]"
+    active_reasoning_model = "glm-5.2"
     active_reasoning_effort = "low"
 
 
@@ -20,7 +20,7 @@ async def test_zhipu_complete_with_tools_builds_function_payload_and_parses_tool
     async def fake_post_zhipu_json(*, url, headers, json_payload, timeout_sec, max_attempts):
         captured["json_payload"] = json_payload
         return {
-            "model": "glm-5.2[1m]",
+            "model": "glm-5.2",
             "choices": [
                 {
                     "message": {

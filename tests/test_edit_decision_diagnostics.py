@@ -1,5 +1,14 @@
-from roughcut.edit.decisions import EditDecision, EditSegment
-from roughcut.pipeline.steps import _apply_llm_cut_review_to_decision, _build_variant_timeline_diagnostics
+from roughcut.edit.decisions import EditDecision, EditSegment, build_edit_decision
+from roughcut.edit.multimodal_trim_review import build_multimodal_trim_review_payload
+from roughcut.pipeline.steps import (
+    _apply_llm_cut_review_to_decision,
+    _attach_semantic_timeline_analysis_summary,
+    _build_waste_segment_discovery_subtitle_context_windows,
+    _build_variant_timeline_diagnostics,
+    _merge_waste_segment_candidates_into_cut_analysis,
+    _normalize_waste_segment_discovery_candidates,
+    SEMANTIC_TIMELINE_ANALYSIS_STAGE,
+)
 from roughcut.pipeline.steps import _should_review_cut_with_llm
 from roughcut.review.telegram_bot import _coerce_subtitle_event_to_item, _extract_subtitle_items_from_report, _load_full_subtitle_review_lines
 from roughcut.media.variant_timeline_bundle import (
@@ -139,6 +148,162 @@ def test_variant_diagnostics_include_refine_decision_summary() -> None:
 def test_llm_review_gate_uses_rule_registry_risk_contract() -> None:
     assert _should_review_cut_with_llm({"reason": "catchphrase_phrase", "risk_level": "high"}) is True
     assert _should_review_cut_with_llm({"reason": "catchphrase_phrase", "risk_level": "low"}) is False
+
+
+def test_llm_waste_discovery_candidates_merge_into_cut_analysis() -> None:
+    candidates = _normalize_waste_segment_discovery_candidates(
+        {
+            "candidates": [
+                {
+                    "start": 10.0,
+                    "end": 18.0,
+                    "reason": "failed_attempt",
+                    "confidence": 0.88,
+                    "summary": "前面开合失败，后面才成功",
+                    "evidence": ["重复尝试", "后面成功展示"],
+                },
+                {
+                    "start": 20.0,
+                    "end": 21.0,
+                    "reason": "keyword_only",
+                    "confidence": 0.99,
+                },
+                {
+                    "start": 30.0,
+                    "end": 35.0,
+                    "reason": "off_topic_interruption",
+                    "confidence": 0.2,
+                },
+            ]
+        },
+        duration=60.0,
+        min_confidence=0.68,
+        max_candidates=8,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["reason"] == "failed_attempt"
+    assert candidates[0]["candidate_stage"] == SEMANTIC_TIMELINE_ANALYSIS_STAGE
+    assert candidates[0]["semantic_role"] == "waste_candidate"
+    assert candidates[0]["semantic_source"] == "llm_waste_segment_discovery"
+    assert candidates[0]["multimodal_review_required"] is True
+
+    cut_analysis = _merge_waste_segment_candidates_into_cut_analysis(
+        {"accepted_cuts": [], "rule_candidates": [], "candidate_sources": []},
+        candidates,
+    )
+
+    assert cut_analysis["manual_confirm_candidate_count"] == 1
+    assert cut_analysis["candidate_sources"] == [SEMANTIC_TIMELINE_ANALYSIS_STAGE]
+    assert cut_analysis["waste_segment_discovery_summary"]["added_count"] == 1
+    assert cut_analysis["waste_segment_discovery_summary"]["stage"] == SEMANTIC_TIMELINE_ANALYSIS_STAGE
+
+
+def test_waste_discovery_subtitle_context_windows_cover_full_timeline() -> None:
+    subtitles = [
+        {
+            "item_index": index,
+            "start_time": float(index * 3),
+            "end_time": float(index * 3 + 2),
+            "text_final": f"字幕 {index}",
+        }
+        for index in range(316)
+    ]
+
+    windows = _build_waste_segment_discovery_subtitle_context_windows(subtitles, max_items=160)
+
+    assert len(windows) == 3
+    assert windows[0][0]["index"] == 0
+    assert windows[-1][-1]["index"] == 315
+    assert windows[1][0]["index"] < windows[0][-1]["index"]
+
+
+def test_llm_waste_discovery_candidates_flow_to_multimodal_review() -> None:
+    cut_analysis = _merge_waste_segment_candidates_into_cut_analysis(
+        {"accepted_cuts": [], "rule_candidates": []},
+        [
+            {
+                "start": 10.0,
+                "end": 18.0,
+                "reason": "failed_attempt",
+                "risk_level": "high",
+                "score": 0.88,
+                "candidate_stage": SEMANTIC_TIMELINE_ANALYSIS_STAGE,
+                "semantic_role": "waste_candidate",
+                "semantic_source": "llm_waste_segment_discovery",
+                "source_text": "前面开合失败，后面才成功",
+                "multimodal_review_required": True,
+            }
+        ],
+    )
+
+    payload = build_multimodal_trim_review_payload(cut_analysis, source_name="demo.mp4")
+
+    assert payload["candidate_count"] == 1
+    assert payload["candidates"][0]["reason"] == "failed_attempt"
+    assert payload["candidates"][0]["review_trigger"] == "visual_protection"
+
+
+def test_semantic_timeline_summary_counts_unified_candidate_roles() -> None:
+    cut_analysis = _attach_semantic_timeline_analysis_summary(
+        {
+            "rule_candidates": [
+                {
+                    "start": 10.0,
+                    "end": 18.0,
+                    "reason": "failed_attempt",
+                    "candidate_stage": SEMANTIC_TIMELINE_ANALYSIS_STAGE,
+                    "semantic_role": "waste_candidate",
+                },
+                {
+                    "start": 30.0,
+                    "end": 42.0,
+                    "reason": "highlight_window",
+                    "candidate_stage": SEMANTIC_TIMELINE_ANALYSIS_STAGE,
+                    "semantic_role": "highlight_candidate",
+                },
+            ]
+        }
+    )
+
+    summary = cut_analysis["semantic_timeline_analysis_summary"]
+    assert summary["stage"] == SEMANTIC_TIMELINE_ANALYSIS_STAGE
+    assert summary["subtitle_cleanup_required"] is True
+    assert summary["waste_candidate_count"] == 1
+    assert summary["highlight_candidate_count"] == 1
+
+
+def test_build_edit_decision_consumes_precomputed_semantic_timeline() -> None:
+    decision = build_edit_decision(
+        source_path="demo.mp4",
+        duration=12.0,
+        silence_segments=[],
+        subtitle_items=[
+            {"start_time": 1.0, "end_time": 2.0, "text": "清理后的字幕"},
+        ],
+        timeline_analysis={
+            "stage": SEMANTIC_TIMELINE_ANALYSIS_STAGE,
+            "hook_end_sec": 9.5,
+            "cta_start_sec": None,
+            "semantic_sections": [],
+            "section_directives": [],
+            "section_actions": [],
+            "editing_skill": {},
+            "strategy_type": "event_highlight",
+            "strategy_profile": {"strategy_type": "event_highlight"},
+            "emphasis_candidates": [],
+            "highlight_candidates": [
+                {"start_sec": 4.0, "end_sec": 8.0, "role": "detail", "score": 1.0}
+            ],
+            "multi_material_candidates": [],
+        },
+    )
+
+    assert decision.analysis["stage"] == SEMANTIC_TIMELINE_ANALYSIS_STAGE
+    assert decision.analysis["hook_end_sec"] == 9.5
+    assert decision.analysis["highlight_candidates"] == [
+        {"start_sec": 4.0, "end_sec": 8.0, "role": "detail", "score": 1.0}
+    ]
 
 
 def test_apply_llm_cut_review_demotes_unsure_cut_to_manual_candidate() -> None:

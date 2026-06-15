@@ -14,11 +14,23 @@ const EMPTY_UPLOAD: UploadForm = {
   jobFlowMode: "auto",
   workflowMode: "standard_edit",
   enhancementModes: [],
+  creatorCardId: "",
+  executionMode: "auto",
+  platformTargets: [],
+  taskBrief: "",
   outputDir: "",
   videoDescription: "",
 };
 
-type PendingInitializationForm = Omit<UploadForm, "files">;
+type PendingInitializationForm = {
+  language: string;
+  workflowTemplate: string;
+  jobFlowMode: string;
+  workflowMode: string;
+  enhancementModes: string[];
+  outputDir: string;
+  videoDescription: string;
+};
 
 const EMPTY_PENDING_INITIALIZATION: PendingInitializationForm = {
   language: "zh-CN",
@@ -209,6 +221,11 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     queryFn: () => api.listJobs(JOBS_PAGE_SIZE, jobsPage * JOBS_PAGE_SIZE),
     refetchInterval: 8_000,
   });
+  const creatorCards = useQuery({
+    queryKey: ["creator-cards"],
+    queryFn: api.listCreatorCards,
+    enabled: isCreateOpen,
+  });
 
   useEffect(() => {
     const items = jobs.data;
@@ -264,6 +281,18 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     queryFn: () => api.getJobActivity(selectedJobId!),
     enabled: Boolean(selectedJobId),
     refetchInterval: selectedJobId ? 5_000 : false,
+  });
+  const agentPlan = useQuery({
+    queryKey: ["job-agent-plan", selectedJobId],
+    queryFn: () => api.getJobAgentPlan(selectedJobId!),
+    enabled: Boolean(selectedJobId),
+    refetchInterval: selectedJobId ? 10_000 : false,
+  });
+  const agentDecisions = useQuery({
+    queryKey: ["job-agent-decisions", selectedJobId],
+    queryFn: () => api.getJobAgentDecisions(selectedJobId!),
+    enabled: Boolean(selectedJobId),
+    refetchInterval: selectedJobId ? 10_000 : false,
   });
   const selectedJobSnapshot = detail.data ?? selectedJobPreview;
   const reviewStep = resolveJobReviewStep(selectedJobSnapshot, activity.data);
@@ -440,6 +469,8 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
       void queryClient.invalidateQueries({ queryKey: ["job-report", selectedJobId] });
       void queryClient.invalidateQueries({ queryKey: ["job-timeline", selectedJobId] });
       void queryClient.invalidateQueries({ queryKey: ["job-content-profile", selectedJobId] });
+      void queryClient.invalidateQueries({ queryKey: ["job-agent-plan", selectedJobId] });
+      void queryClient.invalidateQueries({ queryKey: ["job-agent-decisions", selectedJobId] });
     }
   };
 
@@ -478,6 +509,8 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
       await queryClient.removeQueries({ queryKey: ["job-report", jobId] });
       await queryClient.removeQueries({ queryKey: ["job-timeline", jobId] });
       await queryClient.removeQueries({ queryKey: ["job-content-profile", jobId] });
+      await queryClient.removeQueries({ queryKey: ["job-agent-plan", jobId] });
+      await queryClient.removeQueries({ queryKey: ["job-agent-decisions", jobId] });
     },
   });
   const uploadJob = useMutation({
@@ -491,6 +524,10 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
         upload.enhancementModes,
         upload.outputDir,
         upload.videoDescription,
+        upload.creatorCardId || undefined,
+        upload.taskBrief,
+        upload.executionMode,
+        upload.platformTargets,
       ),
     onSuccess: async (job) => {
       setStoredOutputDirHistory((prev) => {
@@ -582,6 +619,16 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
       api.finalReviewDecision(selectedJobId!, payload),
     onSuccess: refreshAll,
   });
+  const refineAgentPlan = useMutation({
+    mutationFn: async (payload: { prompt: string; target?: string }) =>
+      api.refineJobAgentPlan(selectedJobId!, payload),
+    onSuccess: refreshAll,
+  });
+  const applyAgentPlan = useMutation({
+    mutationFn: async (payload: { selected_strategy_id?: string; selected_visual_plan_id?: string; selected_publication_profile_id?: string }) =>
+      api.applyJobAgentPlan(selectedJobId!, payload),
+    onSuccess: refreshAll,
+  });
   const searchMatchedJobs = useMemo(() => {
     const needle = keyword.trim().toLowerCase();
     const visibleJobs = !needle
@@ -633,6 +680,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     queueStats,
     upload,
     setUpload,
+    creatorCards,
     outputDirHistory,
     pendingInitialization,
     setPendingInitialization,
@@ -641,6 +689,8 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     jobs,
     detail,
     activity,
+    agentPlan,
+    agentDecisions,
     report,
     tokenUsage,
     timeline,
@@ -660,6 +710,8 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     applyReview,
     rerunSubtitleDecision,
     finalReviewDecision,
+    refineAgentPlan,
+    applyAgentPlan,
     filteredJobs,
     selectedJob,
     reviewStep,

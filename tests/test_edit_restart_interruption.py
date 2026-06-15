@@ -127,6 +127,29 @@ def test_standalone_interruption_cue_becomes_cut_candidate() -> None:
     assert cuts == [(1.2, 1.5, "restart_cue")]
 
 
+def test_waste_clip_semantics_are_not_decided_by_direct_text_matching() -> None:
+    decision = build_edit_decision(
+        "demo.mp4",
+        duration=12.0,
+        silence_segments=[],
+        subtitle_items=[
+            _subtitle(0, 0.0, 2.0, "这里打不开我再试一下"),
+            _subtitle(1, 2.4, 4.2, "还是不行有点卡住"),
+            _subtitle(2, 4.8, 6.0, "这次打开了"),
+            _subtitle(3, 6.2, 7.0, "等一下我接个电话"),
+            _subtitle(4, 7.4, 9.0, "继续看右边这个结构"),
+        ],
+        content_profile={"content_kind": "unboxing"},
+    )
+
+    reasons = {
+        str(cut.get("reason") or "")
+        for cut in decision.analysis["manual_editor_rule_candidates"]
+    }
+    assert "failed_attempt" not in reasons
+    assert "off_topic_interruption" not in reasons
+
+
 def test_visual_showcase_silence_is_preserved() -> None:
     decision = build_edit_decision(
         "demo.mp4",

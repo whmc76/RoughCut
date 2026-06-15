@@ -23,7 +23,48 @@ _COLOR_SHIFTING_SMART_EFFECT_STYLES = {
     "smart_effect_glitch",
     "smart_effect_cinematic",
     "smart_effect_atmosphere",
+    "smart_effect_glitch_ai",
+    "smart_effect_cinematic_ai",
+    "smart_effect_atmosphere_ai",
 }
+_PRODUCT_FIDELITY_TERMS = {
+    "unboxing",
+    "product",
+    "product_review",
+    "product_showcase",
+    "review",
+    "showcase",
+    "gear",
+    "hardware",
+    "edc",
+    "tool",
+    "knife",
+    "flashlight",
+    "camera",
+    "phone",
+    "keyboard",
+    "开箱",
+    "拆箱",
+    "产品",
+    "展示",
+    "测评",
+    "评测",
+    "实拍",
+    "对比",
+    "参数",
+    "细节",
+    "外观",
+    "手电",
+}
+_CONTENT_PROFILE_EFFECT_POLICY_KEYS = (
+    "content_kind",
+    "video_type",
+    "video_theme",
+    "subject_domain",
+    "subject_type",
+    "summary",
+    "hook_line",
+)
 _AI_SMART_EFFECT_STYLE_VARIANTS = {
     "smart_effect_commercial": "smart_effect_commercial_ai",
     "smart_effect_punch": "smart_effect_punch_ai",
@@ -110,6 +151,7 @@ def build_render_plan(
     timeline_analysis: dict[str, Any] | None = None,
     editing_skill: dict[str, Any] | None = None,
     editing_accents: dict | None = None,
+    content_profile: dict[str, Any] | None = None,
     creative_profile: dict[str, Any] | None = None,
     ai_director_plan: dict[str, Any] | None = None,
     avatar_commentary_plan: dict[str, Any] | None = None,
@@ -119,10 +161,15 @@ def build_render_plan(
     export_frame_rate_preset: str = "30",
 ) -> dict:
     preset = get_workflow_preset(workflow_preset)
-    preserve_color = _should_preserve_smart_effect_color(workflow_preset=preset.name)
+    content_effect_policy = build_content_effect_policy(
+        workflow_preset=preset.name,
+        content_profile=content_profile,
+    )
+    preserve_color = bool(content_effect_policy.get("preserve_color"))
     resolved_effect_style = _resolve_workflow_smart_effect_style(
         smart_effect_style,
         workflow_preset=preset.name,
+        preserve_color=preserve_color,
     )
     resolved_timeline_analysis = timeline_analysis or {}
     resolved_editing_skill = editing_skill or {}
@@ -148,9 +195,13 @@ def build_render_plan(
         resolved_editing_accents["style"] = _resolve_workflow_smart_effect_style(
             str(resolved_editing_accents.get("style") or resolved_effect_style),
             workflow_preset=preset.name,
+            preserve_color=preserve_color,
         )
         if preserve_color:
             resolved_editing_accents["preserve_color"] = True
+            resolved_editing_accents["suppress_full_frame_color_flash"] = bool(
+                content_effect_policy.get("disallow_full_frame_color_flash")
+            )
     else:
         resolved_editing_accents = {
             "style": resolved_effect_style,
@@ -165,6 +216,11 @@ def build_render_plan(
         }
         if preserve_color:
             resolved_editing_accents["preserve_color"] = True
+            resolved_editing_accents["suppress_full_frame_color_flash"] = bool(
+                content_effect_policy.get("disallow_full_frame_color_flash")
+            )
+    if content_effect_policy:
+        resolved_editing_accents["effect_policy"] = copy.deepcopy(content_effect_policy)
     return {
         "editorial_timeline_id": str(editorial_timeline_id),
         "workflow_preset": preset.name,
@@ -189,6 +245,7 @@ def build_render_plan(
         "editing_skill": resolved_editing_skill,
         "section_choreography": section_choreography,
         "creative_profile": creative_profile,
+        "content_effect_policy": content_effect_policy,
         "ai_director": ai_director_plan,
         "avatar_commentary": avatar_commentary_plan,
         "editing_accents": resolved_editing_accents,
@@ -300,8 +357,16 @@ def build_ai_effect_render_plan(
     ai_plan = copy.deepcopy(render_plan)
     ai_plan["avatar_commentary"] = None
     workflow_preset = str(ai_plan.get("workflow_preset") or "").strip()
-    preserve_color = bool((ai_plan.get("editing_accents") or {}).get("preserve_color")) or _should_preserve_smart_effect_color(
-        workflow_preset=workflow_preset
+    effect_policy = (
+        ai_plan.get("content_effect_policy")
+        if isinstance(ai_plan.get("content_effect_policy"), dict)
+        else build_content_effect_policy(
+            workflow_preset=workflow_preset,
+            content_profile=ai_plan.get("content_profile") if isinstance(ai_plan.get("content_profile"), dict) else None,
+        )
+    )
+    preserve_color = bool((ai_plan.get("editing_accents") or {}).get("preserve_color")) or bool(
+        (effect_policy or {}).get("preserve_color")
     )
     resolved_timeline_analysis = timeline_analysis or (ai_plan.get("timeline_analysis") if isinstance(ai_plan.get("timeline_analysis"), dict) else {})
     resolved_editing_skill = editing_skill or (ai_plan.get("editing_skill") if isinstance(ai_plan.get("editing_skill"), dict) else {})
@@ -325,6 +390,7 @@ def build_ai_effect_render_plan(
     base_effect_style = _resolve_workflow_smart_effect_style(
         str((ai_plan.get("editing_accents") or {}).get("style") or ""),
         workflow_preset=workflow_preset,
+        preserve_color=preserve_color,
     )
     subtitles = copy.deepcopy(ai_plan.get("subtitles") or {})
     if subtitles:
@@ -429,12 +495,79 @@ def _should_preserve_smart_effect_color(*, workflow_preset: str | None) -> bool:
     return normalized in _UNBOXING_WORKFLOW_PRESETS
 
 
-def _resolve_workflow_smart_effect_style(style: str, *, workflow_preset: str | None) -> str:
+def build_content_effect_policy(
+    *,
+    workflow_preset: str | None,
+    content_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    content_class = _resolve_content_effect_class(content_profile)
+    preserve_color = _should_preserve_smart_effect_color(workflow_preset=workflow_preset) or content_class == "product_fidelity"
+    return {
+        "content_class": content_class or "general",
+        "preserve_color": preserve_color,
+        "disallow_full_frame_color_shift": preserve_color,
+        "disallow_full_frame_color_flash": preserve_color,
+        "allow_overlay_text": True,
+        "allow_subtitle_motion": True,
+        "allow_local_audio_cues": True,
+        "allowed_effects": (
+            ["subtitle_motion", "text_emphasis_overlay", "local_audio_cue", "clean_transition"]
+            if preserve_color
+            else ["subtitle_motion", "text_emphasis_overlay", "local_audio_cue", "color_flash", "stylized_transition"]
+        ),
+        "blocked_effects": (
+            ["global_color_shift", "full_frame_color_flash", "global_zoom_crop"]
+            if preserve_color
+            else []
+        ),
+    }
+
+
+def _resolve_content_effect_class(content_profile: dict[str, Any] | None) -> str | None:
+    if not isinstance(content_profile, dict):
+        return None
+    values = list(_iter_content_policy_texts(content_profile))
+    normalized_blob = " ".join(value.lower() for value in values)
+    if any(term in normalized_blob for term in _PRODUCT_FIDELITY_TERMS):
+        return "product_fidelity"
+    return None
+
+
+def _iter_content_policy_texts(content_profile: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in _CONTENT_PROFILE_EFFECT_POLICY_KEYS:
+        value = content_profile.get(key)
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip())
+    for nested_key in ("content_understanding", "video_global", "topic_fact_confirmation"):
+        nested = content_profile.get(nested_key)
+        if not isinstance(nested, dict):
+            continue
+        for key in _CONTENT_PROFILE_EFFECT_POLICY_KEYS:
+            value = nested.get(key)
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip())
+    entities = content_profile.get("entities")
+    if isinstance(entities, list):
+        for entity in entities:
+            if not isinstance(entity, dict):
+                continue
+            for key in ("kind", "name", "category", "type"):
+                value = entity.get(key)
+                if isinstance(value, str) and value.strip():
+                    values.append(value.strip())
+    return values
+
+
+def _resolve_workflow_smart_effect_style(
+    style: str,
+    *,
+    workflow_preset: str | None,
+    preserve_color: bool | None = None,
+) -> str:
     normalized = _normalize_smart_effect_style(style)
-    if (
-        _should_preserve_smart_effect_color(workflow_preset=workflow_preset)
-        and normalized in _COLOR_SHIFTING_SMART_EFFECT_STYLES
-    ):
+    should_preserve = _should_preserve_smart_effect_color(workflow_preset=workflow_preset) if preserve_color is None else preserve_color
+    if should_preserve and normalized in _COLOR_SHIFTING_SMART_EFFECT_STYLES:
         return _DEFAULT_SMART_EFFECT_STYLE
     return normalized
 

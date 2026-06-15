@@ -49,6 +49,29 @@ def get_session_factory() -> async_sessionmaker[AsyncSession]:
     return _session_factory
 
 
+async def reset_session_state() -> None:
+    global _engine, _engine_loop_id, _session_factory
+    engine = _engine
+    _engine = None
+    _engine_loop_id = None
+    _session_factory = None
+    if engine is not None:
+        await engine.dispose()
+
+
+def reset_session_state_sync() -> None:
+    global _engine, _engine_loop_id, _session_factory
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(reset_session_state())
+        return
+    # Callers should use the async variant when already inside an event loop.
+    _engine = None
+    _engine_loop_id = None
+    _session_factory = None
+
+
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     factory = get_session_factory()
     async with factory() as session:

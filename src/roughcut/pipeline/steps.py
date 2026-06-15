@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 import asyncio
 import hashlib
+import httpx
 import json
 import logging
 import math
@@ -28,10 +29,12 @@ from typing import Any, Callable
 
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import selectinload
 from sqlalchemy.pool import NullPool
 
-from roughcut.avatar import list_avatar_material_profiles
+from roughcut.avatar import list_avatar_material_profiles, resolve_avatar_material_path
 from roughcut.config import get_settings, llm_task_route, normalize_transcription_settings, should_enable_task_search
+from roughcut.creator_asset_runtime import pick_creator_avatar_presenter_asset, resolve_creator_asset_path
 from roughcut.creative import (
     ai_director_mode_enabled,
     avatar_mode_enabled,
@@ -42,8 +45,20 @@ from roughcut.creative import (
 )
 from roughcut.creative.avatar import refine_avatar_commentary_segments_for_media_duration
 from roughcut.docker_gpu_guard import _acquire_operation_lock, _release_operation_lock
-from roughcut.db.models import Artifact, GlossaryTerm, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline, TranscriptSegment
-from roughcut.db.session import get_session_factory
+from roughcut.db.models import (
+    Artifact,
+    CreatorCard,
+    CreatorPreference,
+    GlossaryTerm,
+    Job,
+    JobStep,
+    RenderOutput,
+    SubtitleCorrection,
+    SubtitleItem,
+    Timeline,
+    TranscriptSegment,
+)
+from roughcut.db.session import get_session_factory, reset_session_state_sync
 from roughcut.edit.decisions import (
     EditDecision,
     EditSegment,
@@ -58,6 +73,7 @@ from roughcut.edit.cut_analysis import (
     build_cut_analysis_payload,
     cut_analysis_accepted_cuts,
     cut_analysis_effective_applied_cuts,
+    summarize_cut_analysis_candidate_metrics,
 )
 from roughcut.edit.editorial_timeline import (
     editorial_timeline_analysis,
@@ -165,6 +181,12 @@ from roughcut.llm_cache import (
     save_cached_json,
 )
 from roughcut.naming import AVATAR_CAPABILITY_GENERATION, normalize_avatar_capability_status
+from roughcut.production_readiness import (
+    insert_plan_output_fallback_reasons,
+    platform_packaging_output_fallback_reasons,
+    projection_output_fallback_reasons,
+    render_output_blocking_reasons,
+)
 from roughcut.packaging.library import (
     list_packaging_assets,
     resolve_insert_added_duration,
@@ -173,9 +195,11 @@ from roughcut.packaging.library import (
     resolve_packaging_plan_for_job,
 )
 from roughcut.edit.rule_registry import rule_requires_llm_review
-from roughcut.prompts.edit_decision import build_high_risk_cut_review_prompt
+from roughcut.prompts.edit_decision import build_high_risk_cut_review_prompt, build_waste_segment_discovery_prompt
 from roughcut.providers.factory import get_avatar_provider, get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message, extract_json_text
+from roughcut.providers.zhipu_compat import resolve_zhipu_reasoning_base_url
+from roughcut.providers.zhipu_http import provider_cooldown_remaining_seconds_for_url, zhipu_response_diagnostics
 from roughcut.providers.transcription.base import TranscriptResult
 from roughcut.providers.transcription.chunking import (
     build_audio_chunk_specs,
@@ -185,6 +209,7 @@ from roughcut.providers.transcription.chunking import (
 )
 from roughcut.pipeline.quality import _compute_subtitle_sync_check, evaluate_profile_identity_gate
 from roughcut.review.content_profile import (
+    _resolve_content_understanding_timeout_seconds,
     apply_source_identity_constraints,
     apply_content_profile_feedback,
     apply_identity_review_guard,
@@ -243,6 +268,8 @@ from roughcut.review.subtitle_quality import (
     build_subtitle_alignment_source_metrics,
     build_subtitle_quality_report,
     build_subtitle_quality_report_from_items,
+    subtitle_items_have_output_fallback_alignment,
+    subtitle_quality_report_has_output_fallback,
 )
 from roughcut.review.subtitle_term_resolution import (
     ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH,
@@ -850,7 +877,377 @@ def _resolve_edit_decision_llm_review_timeout_seconds(settings: object, *, candi
         configured_timeout = _EDIT_PLAN_CUT_REVIEW_TIMEOUT_SEC
     configured_timeout = max(10.0, configured_timeout)
     scaled_timeout = 8.0 + max(1, int(candidate_count)) * 6.0
-    return max(configured_timeout, scaled_timeout)
+    timeout_budget = max(configured_timeout, scaled_timeout)
+    active_provider = str(getattr(settings, "active_reasoning_provider", "") or "").strip().lower()
+    if active_provider == "zhipu":
+        timeout_budget = max(timeout_budget, 90.0)
+        base_url = resolve_zhipu_reasoning_base_url(
+            base_url=str(getattr(settings, "zhipu_base_url", "") or ""),
+            coding_base_url=str(getattr(settings, "zhipu_coding_base_url", "") or ""),
+            model=str(getattr(settings, "active_reasoning_model", "") or ""),
+        )
+        cooldown_budget = provider_cooldown_remaining_seconds_for_url(base_url)
+        if cooldown_budget > 0.0:
+            timeout_budget += cooldown_budget + 10.0
+    return timeout_budget
+
+
+_WASTE_SEGMENT_DISCOVERY_REASONS = {
+    "failed_attempt",
+    "restart_retake",
+    "rollback_instruction",
+    "off_topic_interruption",
+    "long_non_dialogue",
+}
+SEMANTIC_TIMELINE_ANALYSIS_STAGE = "semantic_timeline_analysis"
+SEMANTIC_TIMELINE_ANALYSIS_SCHEMA_VERSION = "semantic_timeline_analysis.v1"
+
+
+def _build_waste_segment_discovery_subtitle_context(
+    subtitle_items: list[dict[str, Any]],
+    *,
+    max_items: int,
+) -> list[dict[str, Any]]:
+    ordered = sorted(
+        [dict(item) for item in subtitle_items if isinstance(item, dict)],
+        key=lambda item: (
+            float(item.get("start_time", 0.0) or 0.0),
+            float(item.get("end_time", 0.0) or 0.0),
+        ),
+    )
+    if max_items > 0:
+        ordered = ordered[:max_items]
+    return [
+        {
+            "index": int(item.get("index", item.get("item_index", index)) or index),
+            "start": round(float(item.get("start_time", 0.0) or 0.0), 3),
+            "end": round(float(item.get("end_time", item.get("start_time", 0.0)) or item.get("start_time", 0.0) or 0.0), 3),
+            "text": subtitle_display_rule_text(item),
+        }
+        for index, item in enumerate(ordered)
+    ]
+
+
+def _build_waste_segment_discovery_subtitle_context_windows(
+    subtitle_items: list[dict[str, Any]],
+    *,
+    max_items: int,
+) -> list[list[dict[str, Any]]]:
+    context = _build_waste_segment_discovery_subtitle_context(
+        subtitle_items,
+        max_items=0,
+    )
+    if not context:
+        return []
+    if max_items <= 0 or len(context) <= max_items:
+        return [context]
+    overlap = min(max(8, max_items // 10), max_items - 1)
+    step = max(1, max_items - overlap)
+    windows: list[list[dict[str, Any]]] = []
+    start_index = 0
+    while start_index < len(context):
+        window = context[start_index : start_index + max_items]
+        if window:
+            windows.append(window)
+        if start_index + max_items >= len(context):
+            break
+        start_index += step
+    return windows
+
+
+def _normalize_waste_segment_discovery_candidates(
+    payload: dict[str, Any] | None,
+    *,
+    duration: float,
+    min_confidence: float,
+    max_candidates: int,
+) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[str, float, float]] = set()
+    for raw in list(payload.get("candidates") or []):
+        if not isinstance(raw, dict):
+            continue
+        reason = str(raw.get("reason") or "").strip()
+        if reason not in _WASTE_SEGMENT_DISCOVERY_REASONS:
+            continue
+        try:
+            start = max(0.0, min(float(duration or 0.0), float(raw.get("start", 0.0) or 0.0)))
+            end = max(start, min(float(duration or 0.0), float(raw.get("end", start) or start)))
+            confidence = max(0.0, min(1.0, float(raw.get("confidence", 0.0) or 0.0)))
+        except (TypeError, ValueError):
+            continue
+        if end - start < 0.18 or confidence < min_confidence:
+            continue
+        key = (reason, round(start, 3), round(end, 3))
+        if key in seen:
+            continue
+        seen.add(key)
+        evidence = [str(item).strip() for item in list(raw.get("evidence") or []) if str(item).strip()]
+        summary = str(raw.get("summary") or "").strip()
+        candidates.append(
+            {
+                "start": round(start, 4),
+                "end": round(end, 4),
+                "reason": reason,
+                "risk_level": "high",
+                "score": round(confidence, 4),
+                "auto_applied": False,
+                "candidate_stage": SEMANTIC_TIMELINE_ANALYSIS_STAGE,
+                "semantic_role": "waste_candidate",
+                "semantic_source": "llm_waste_segment_discovery",
+                "source_text": summary or reason,
+                "match_surface": summary or reason,
+                "match_surface_layer": "raw",
+                "multimodal_review_required": reason in {"failed_attempt", "off_topic_interruption", "long_non_dialogue"},
+                "llm_discovery": {
+                    "confidence": round(confidence, 3),
+                    "summary": summary,
+                    "evidence": evidence[:6],
+                },
+            }
+        )
+        if max_candidates > 0 and len(candidates) >= max_candidates:
+            break
+    return candidates
+
+
+def _merge_waste_segment_candidates_into_cut_analysis(
+    cut_analysis: dict[str, Any],
+    candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    if not candidates:
+        return cut_analysis
+    analysis = dict(cut_analysis)
+    existing = [dict(item) for item in list(analysis.get("rule_candidates") or []) if isinstance(item, dict)]
+    seen = {
+        (
+            str(item.get("reason") or "").strip(),
+            round(float(item.get("start", 0.0) or 0.0), 3),
+            round(float(item.get("end", 0.0) or 0.0), 3),
+        )
+        for item in existing
+    }
+    merged = list(existing)
+    added = 0
+    for candidate in candidates:
+        key = (
+            str(candidate.get("reason") or "").strip(),
+            round(float(candidate.get("start", 0.0) or 0.0), 3),
+            round(float(candidate.get("end", 0.0) or 0.0), 3),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(dict(candidate))
+        added += 1
+    analysis["rule_candidates"] = merged
+    analysis.update(summarize_cut_analysis_candidate_metrics(analysis.get("accepted_cuts"), merged))
+    sources = {
+        str(item.get("candidate_stage") or "accepted_cut").strip() or "accepted_cut"
+        for item in [*list(analysis.get("accepted_cuts") or []), *merged]
+        if isinstance(item, dict)
+    }
+    analysis["candidate_sources"] = sorted(sources)
+    analysis["waste_segment_discovery_summary"] = {
+        "enabled": True,
+        "candidate_count": len(candidates),
+        "added_count": added,
+        "stage": SEMANTIC_TIMELINE_ANALYSIS_STAGE,
+        "semantic_source": "llm_waste_segment_discovery",
+    }
+    return analysis
+
+
+def _attach_semantic_timeline_analysis_summary(cut_analysis: dict[str, Any]) -> dict[str, Any]:
+    analysis = dict(cut_analysis)
+    candidates = [dict(item) for item in list(analysis.get("rule_candidates") or []) if isinstance(item, dict)]
+    waste_count = sum(1 for item in candidates if str(item.get("semantic_role") or "") == "waste_candidate")
+    highlight_count = sum(
+        1
+        for item in candidates
+        if str(item.get("reason") or "") == "highlight_window"
+        or str(item.get("semantic_role") or "") == "highlight_candidate"
+    )
+    boundary_count = sum(1 for item in candidates if str(item.get("semantic_role") or "") == "segment_boundary")
+    analysis["semantic_timeline_analysis_summary"] = {
+        "schema_version": SEMANTIC_TIMELINE_ANALYSIS_SCHEMA_VERSION,
+        "stage": SEMANTIC_TIMELINE_ANALYSIS_STAGE,
+        "subtitle_cleanup_required": True,
+        "waste_candidate_count": waste_count,
+        "highlight_candidate_count": highlight_count,
+        "segment_boundary_candidate_count": boundary_count,
+    }
+    return analysis
+
+
+async def _maybe_discover_waste_segments_with_llm(
+    *,
+    job_id: uuid.UUID,
+    source_name: str,
+    cut_analysis: dict[str, Any],
+    subtitle_items: list[dict[str, Any]],
+    content_profile: dict[str, Any] | None,
+    duration: float,
+) -> dict[str, Any]:
+    settings = get_settings()
+    if not bool(getattr(settings, "edit_decision_waste_discovery_enabled", True)):
+        updated = dict(cut_analysis)
+        updated["waste_segment_discovery_summary"] = {"enabled": False}
+        return updated
+    try:
+        max_subtitles = max(0, int(getattr(settings, "edit_decision_waste_discovery_max_subtitles", 160) or 160))
+    except (TypeError, ValueError):
+        max_subtitles = 160
+    subtitle_windows = _build_waste_segment_discovery_subtitle_context_windows(
+        subtitle_items,
+        max_items=max_subtitles,
+    )
+    if not subtitle_windows:
+        updated = dict(cut_analysis)
+        updated["waste_segment_discovery_summary"] = {"enabled": True, "candidate_count": 0}
+        return updated
+    try:
+        timeout_sec = max(10.0, float(getattr(settings, "edit_decision_waste_discovery_timeout_sec", 45) or 45))
+    except (TypeError, ValueError):
+        timeout_sec = 45.0
+    try:
+        max_candidates = max(0, int(getattr(settings, "edit_decision_waste_discovery_max_candidates", 8) or 8))
+    except (TypeError, ValueError):
+        max_candidates = 8
+    try:
+        min_confidence = max(0.0, min(1.0, float(getattr(settings, "edit_decision_waste_discovery_min_confidence", 0.68) or 0.68)))
+    except (TypeError, ValueError):
+        min_confidence = 0.68
+    try:
+        all_candidates: list[dict[str, Any]] = []
+        summaries: list[str] = []
+        source_meta_base = {
+            "job_id": str(job_id),
+            "source_name": str(source_name or "").strip(),
+            "subject_brand": str((content_profile or {}).get("subject_brand") or "").strip(),
+            "subject_model": str((content_profile or {}).get("subject_model") or "").strip(),
+            "subject_type": str((content_profile or {}).get("subject_type") or "").strip(),
+            "content_kind": str((content_profile or {}).get("content_kind") or "").strip(),
+        }
+        with llm_task_route("edit_plan", search_enabled=False, settings=settings):
+            provider = get_reasoning_provider()
+            for window_index, subtitle_context in enumerate(subtitle_windows):
+                first_item = subtitle_context[0] if subtitle_context else {}
+                last_item = subtitle_context[-1] if subtitle_context else {}
+                source_meta = {
+                    **source_meta_base,
+                    "window_index": window_index,
+                    "window_count": len(subtitle_windows),
+                    "window_start": first_item.get("start"),
+                    "window_end": last_item.get("end"),
+                }
+                prompt_messages = build_waste_segment_discovery_prompt(
+                    source_meta=source_meta,
+                    subtitle_context=subtitle_context,
+                )
+                messages = [Message(role=str(item["role"]), content=str(item["content"])) for item in prompt_messages]
+                with track_usage_operation("edit_plan.waste_segment_discovery"):
+                    response = await _complete_reasoning_with_timeout(
+                        provider,
+                        messages,
+                        temperature=0.1,
+                        max_tokens=1400,
+                        json_mode=True,
+                        timeout_sec=timeout_sec,
+                    )
+                payload = json.loads(extract_json_text(str(getattr(response, "content", "") or getattr(response, "raw_content", "") or "")))
+                window_candidates = _normalize_waste_segment_discovery_candidates(
+                    payload,
+                    duration=duration,
+                    min_confidence=min_confidence,
+                    max_candidates=max_candidates,
+                )
+                for candidate in window_candidates:
+                    candidate.setdefault("llm_discovery", {})
+                    if isinstance(candidate.get("llm_discovery"), dict):
+                        candidate["llm_discovery"]["window_index"] = window_index
+                        candidate["llm_discovery"]["window_count"] = len(subtitle_windows)
+                    all_candidates.append(candidate)
+                summary_text = str(payload.get("summary") or "").strip()
+                if summary_text:
+                    summaries.append(summary_text)
+                if max_candidates > 0 and len(all_candidates) >= max_candidates:
+                    break
+        deduped_candidates: list[dict[str, Any]] = []
+        seen_candidates: set[tuple[str, float, float]] = set()
+        for candidate in all_candidates:
+            key = (
+                str(candidate.get("reason") or "").strip(),
+                round(float(candidate.get("start", 0.0) or 0.0), 3),
+                round(float(candidate.get("end", 0.0) or 0.0), 3),
+            )
+            if key in seen_candidates:
+                continue
+            seen_candidates.add(key)
+            deduped_candidates.append(candidate)
+            if max_candidates > 0 and len(deduped_candidates) >= max_candidates:
+                break
+        candidates = deduped_candidates
+        if not candidates:
+            updated = dict(cut_analysis)
+            updated["waste_segment_discovery_summary"] = {
+                "enabled": True,
+                "reviewed": True,
+                "candidate_count": 0,
+                "added_count": 0,
+                "stage": SEMANTIC_TIMELINE_ANALYSIS_STAGE,
+                "semantic_source": "llm_waste_segment_discovery",
+                "provider": str(get_settings().active_reasoning_provider or ""),
+                "model": str(get_settings().active_reasoning_model or ""),
+                "summary": " | ".join(summaries[:4]),
+                "window_count": len(subtitle_windows),
+            }
+            return updated
+        updated = _merge_waste_segment_candidates_into_cut_analysis(cut_analysis, candidates)
+        summary = dict(updated.get("waste_segment_discovery_summary") or {})
+        summary.update(
+            {
+                "reviewed": True,
+                "provider": str(get_settings().active_reasoning_provider or ""),
+                "model": str(get_settings().active_reasoning_model or ""),
+                "summary": " | ".join(summaries[:4]),
+                "window_count": len(subtitle_windows),
+            }
+        )
+        updated["waste_segment_discovery_summary"] = summary
+        return updated
+    except Exception as exc:
+        logger.warning("LLM waste segment discovery failed during edit_plan for job %s: %s", job_id, str(exc).strip())
+        updated = dict(cut_analysis)
+        updated["waste_segment_discovery_summary"] = {
+            "enabled": True,
+            "reviewed": False,
+            "candidate_count": 0,
+            "error": "llm_waste_segment_discovery_failed",
+        }
+        return updated
+
+
+async def _maybe_enrich_cut_analysis_with_semantic_timeline_analysis(
+    *,
+    job_id: uuid.UUID,
+    source_name: str,
+    cut_analysis: dict[str, Any],
+    subtitle_items: list[dict[str, Any]],
+    content_profile: dict[str, Any] | None,
+    duration: float,
+) -> dict[str, Any]:
+    enriched = await _maybe_discover_waste_segments_with_llm(
+        job_id=job_id,
+        source_name=source_name,
+        cut_analysis=cut_analysis,
+        subtitle_items=subtitle_items,
+        content_profile=content_profile,
+        duration=duration,
+    )
+    return _attach_semantic_timeline_analysis_summary(enriched)
 
 
 async def _complete_reasoning_with_timeout(
@@ -1229,14 +1626,29 @@ async def _maybe_review_edit_decision_cuts_with_llm(
             "fallback": "deterministic_evidence",
         }
         return decision
-    except Exception:
+    except Exception as exc:
         logger.exception("LLM cut review failed during edit_plan for job %s", job_id)
-        decision.analysis["llm_cut_review"] = {
+        failure_payload: dict[str, Any] = {
             "reviewed": False,
             "candidate_count": len(candidates),
             "error": "llm_cut_review_failed",
             "fallback": "deterministic_evidence",
         }
+        if isinstance(exc, httpx.HTTPStatusError) and getattr(exc, "response", None) is not None:
+            diagnostics = zhipu_response_diagnostics(exc.response)
+            if diagnostics.get("status_code") is not None:
+                failure_payload["upstream_status"] = diagnostics["status_code"]
+            if diagnostics.get("error_code"):
+                failure_payload["upstream_error_code"] = diagnostics["error_code"]
+            if diagnostics.get("error_message"):
+                failure_payload["upstream_error_message"] = diagnostics["error_message"]
+            if diagnostics.get("retry_after_seconds") is not None:
+                failure_payload["retry_after_seconds"] = diagnostics["retry_after_seconds"]
+            if diagnostics.get("x_log_id"):
+                failure_payload["x_log_id"] = diagnostics["x_log_id"]
+            if diagnostics.get("body_excerpt"):
+                failure_payload["upstream_body_excerpt"] = diagnostics["body_excerpt"]
+        decision.analysis["llm_cut_review"] = failure_payload
         return decision
 
 
@@ -2273,6 +2685,55 @@ async def _set_step_progress(
     await session.commit()
 
 
+_STEP_RUNTIME_BUDGET_METADATA_KEYS = (
+    "runtime_budget_phase",
+    "runtime_budget_sec",
+    "runtime_budget_started_at",
+)
+
+
+async def _set_step_runtime_budget(
+    session,
+    step: JobStep | None,
+    *,
+    phase: str,
+    timeout_sec: float,
+) -> None:
+    if step is None:
+        return
+    metadata = dict(step.metadata_ or {})
+    now = datetime.now(timezone.utc)
+    metadata["updated_at"] = now.isoformat()
+    elapsed_seconds = _compute_step_elapsed_seconds(step, now=now)
+    if elapsed_seconds is not None:
+        metadata["elapsed_seconds"] = round(elapsed_seconds, 3)
+    metadata["runtime_budget_phase"] = str(phase or "").strip()
+    metadata["runtime_budget_sec"] = max(1.0, float(timeout_sec))
+    metadata["runtime_budget_started_at"] = now.isoformat()
+    step.metadata_ = metadata
+    await session.commit()
+
+
+async def _clear_step_runtime_budget(session, step: JobStep | None) -> None:
+    if step is None:
+        return
+    metadata = dict(step.metadata_ or {})
+    changed = False
+    for key in _STEP_RUNTIME_BUDGET_METADATA_KEYS:
+        if key in metadata:
+            metadata.pop(key, None)
+            changed = True
+    if not changed:
+        return
+    now = datetime.now(timezone.utc)
+    metadata["updated_at"] = now.isoformat()
+    elapsed_seconds = _compute_step_elapsed_seconds(step, now=now)
+    if elapsed_seconds is not None:
+        metadata["elapsed_seconds"] = round(elapsed_seconds, 3)
+    step.metadata_ = metadata
+    await session.commit()
+
+
 def _build_content_profile_learning_fingerprint(
     *,
     feedback_source: str,
@@ -2867,6 +3328,7 @@ async def _build_canonical_refresh_projection(
     subtitle_items: list[SubtitleItem],
     canonical_transcript_layer: Any,
     projection_data: dict[str, Any] | None,
+    allow_display_baseline_preserved: bool = False,
 ) -> tuple[Any, dict[str, Any], dict[str, Any]]:
     effective_projection_data = dict(projection_data or {})
     split_profile = (
@@ -2928,18 +3390,42 @@ async def _build_canonical_refresh_projection(
         source_name=source_name,
         content_profile={},
     )
+    canonical_output_fallback_detected = subtitle_quality_report_has_output_fallback(
+        canonical_quality_report
+    )
+    hybrid_output_fallback_detected = subtitle_quality_report_has_output_fallback(
+        hybrid_quality_report
+    )
+    existing_output_fallback_detected = (
+        subtitle_quality_report_has_output_fallback(existing_quality_report)
+        or subtitle_items_have_output_fallback_alignment(existing_projection_items)
+    )
+    force_display_baseline_for_output_fallback = (
+        bool(existing_projection_items)
+        and not existing_output_fallback_detected
+        and (
+            canonical_output_fallback_detected
+            or hybrid_output_fallback_detected
+        )
+    )
     preferred_basis = None
     if _display_boundary_hybrid_candidate_worth_adding(
         canonical_quality_report=canonical_quality_report,
         hybrid_quality_report=hybrid_quality_report,
     ):
         preferred_basis = "canonical_display_boundary_hybrid"
-    keep_existing_projection = _should_keep_existing_subtitle_projection(
-        existing_quality_report=existing_quality_report,
-        refreshed_quality_report=canonical_quality_report,
-        canonical_transcript_layer=canonical_transcript_layer,
-        existing_projection_items=existing_projection_items,
-        refreshed_projection_items=canonical_projection_items,
+    # Canonical transcript segmentation is the single projection authority.
+    # Legacy subtitle-item baselines are only eligible when a caller explicitly
+    # opts into that compatibility path.
+    keep_existing_projection = force_display_baseline_for_output_fallback or (
+        bool(allow_display_baseline_preserved)
+        and _should_keep_existing_subtitle_projection(
+            existing_quality_report=existing_quality_report,
+            refreshed_quality_report=canonical_quality_report,
+            canonical_transcript_layer=canonical_transcript_layer,
+            existing_projection_items=existing_projection_items,
+            refreshed_projection_items=canonical_projection_items,
+        )
     )
     candidate_pool = _build_projection_candidate_pool(
         canonical_projection_items=canonical_projection_items,
@@ -2952,6 +3438,8 @@ async def _build_canonical_refresh_projection(
         existing_projection_analysis=existing_projection_analysis,
         existing_quality_report=existing_quality_report,
         allow_display_baseline_preserved=keep_existing_projection,
+        suppress_canonical_refresh=canonical_output_fallback_detected,
+        suppress_hybrid_projection=hybrid_output_fallback_detected,
     )
     selected_candidate, correction_score_report = _select_projection_candidate(
         candidates=candidate_pool,
@@ -2959,7 +3447,7 @@ async def _build_canonical_refresh_projection(
         canonical_transcript_layer=canonical_transcript_layer,
         preferred_basis=(
             "display_baseline_preserved"
-            if keep_existing_projection
+            if force_display_baseline_for_output_fallback or keep_existing_projection
             else preferred_basis
         ),
     )
@@ -2971,10 +3459,15 @@ async def _build_canonical_refresh_projection(
     correction_score_report = {
         **dict(correction_score_report or {}),
         "selected_basis": projection_basis,
+        "canonical_output_fallback_detected": canonical_output_fallback_detected,
+        "hybrid_output_fallback_detected": hybrid_output_fallback_detected,
+        "existing_output_fallback_detected": existing_output_fallback_detected,
+        "output_fallback_guard_applied": force_display_baseline_for_output_fallback,
         "selection_policy": _projection_selection_policy(
             selected_basis=projection_basis,
             canonical_projection_items=canonical_projection_items,
             keep_existing_projection=keep_existing_projection,
+            output_fallback_guard_applied=force_display_baseline_for_output_fallback,
         ),
     }
     subtitle_quality_report["correction_score"] = correction_score_report
@@ -2995,8 +3488,11 @@ def _projection_selection_policy(
     selected_basis: str,
     canonical_projection_items: list[Any],
     keep_existing_projection: bool,
+    output_fallback_guard_applied: bool = False,
 ) -> str:
     if selected_basis == "display_baseline_preserved":
+        if output_fallback_guard_applied:
+            return "display_baseline_preserved_for_output_fallback_guard"
         if canonical_projection_items and keep_existing_projection:
             return "display_baseline_preserved_for_quality_guard"
         return "display_baseline_preserved_as_legacy_fallback"
@@ -3074,21 +3570,26 @@ def _build_projection_candidate_pool(
     existing_projection_analysis: Any,
     existing_quality_report: dict[str, Any],
     allow_display_baseline_preserved: bool = False,
+    suppress_canonical_refresh: bool = False,
+    suppress_hybrid_projection: bool = False,
 ) -> list[dict[str, Any]]:
     # Canonical transcript segmentation is the only segmentation authority.
     # Projection may preserve or display it, but it must not compete with a
     # second local resegmentation candidate in the automatic pipeline.
-    candidate_pool = [
-        {
-            "basis": "canonical_refresh",
-            "transcript_layer": "canonical_transcript",
-            "items": canonical_projection_items,
-            "analysis": projection_analysis,
-            "quality_report": canonical_quality_report,
-        },
-    ]
+    candidate_pool: list[dict[str, Any]] = []
+    if not suppress_canonical_refresh:
+        candidate_pool.append(
+            {
+                "basis": "canonical_refresh",
+                "transcript_layer": "canonical_transcript",
+                "items": canonical_projection_items,
+                "analysis": projection_analysis,
+                "quality_report": canonical_quality_report,
+            }
+        )
     if (
-        canonical_projection_items
+        not suppress_hybrid_projection
+        and canonical_projection_items
         and hybrid_projection_items
         and _display_boundary_hybrid_candidate_worth_adding(
             canonical_quality_report=canonical_quality_report,
@@ -3108,7 +3609,7 @@ def _build_projection_candidate_pool(
                 "quality_report": hybrid_quality_report,
             }
         )
-    if allow_display_baseline_preserved or not canonical_projection_items:
+    if allow_display_baseline_preserved or not candidate_pool:
         candidate_pool.append(
             {
                 "basis": "display_baseline_preserved",
@@ -4554,6 +5055,8 @@ def _projection_has_suspicious_subtitle_timing(
     *,
     split_profile: dict[str, Any],
 ) -> bool:
+    if subtitle_items_have_output_fallback_alignment(entries):
+        return True
     max_chars = int(split_profile.get("max_chars") or 30)
     max_duration = float(split_profile.get("max_duration") or 5.0)
     duration_limit = max(8.0, max_duration * 1.6)
@@ -4853,8 +5356,10 @@ async def _load_latest_subtitle_payloads(
         job_id=job_id,
         fallback_items=None,
     )
+    projection_is_current = subtitle_projection_data_is_current(projection_data)
+    projection_rebuild_rejected = False
     if subtitle_dicts:
-        if not subtitle_projection_data_is_current(projection_data):
+        if not projection_is_current:
             rebuilt_subtitles, rebuilt_projection_data = await _rebuild_current_subtitle_projection_entries(
                 session,
                 job_id=job_id,
@@ -4872,9 +5377,21 @@ async def _load_latest_subtitle_payloads(
                     split_profile=rebuilt_split_profile,
                 ):
                     return rebuilt_subtitles, rebuilt_projection_data
+                projection_rebuild_rejected = True
+            else:
+                projection_rebuild_rejected = True
         cleaned_subtitles = preserve_subtitle_payloads(subtitle_dicts, drop_empty=drop_empty)
         split_profile = projection_data.get("split_profile") if isinstance(projection_data.get("split_profile"), dict) else {}
-        if not fallback_to_items or not _projection_has_suspicious_subtitle_timing(cleaned_subtitles, split_profile=split_profile):
+        if (
+            not projection_rebuild_rejected
+            and (
+                not fallback_to_items
+                or not _projection_has_suspicious_subtitle_timing(
+                    cleaned_subtitles,
+                    split_profile=split_profile,
+                )
+            )
+        ):
             return cleaned_subtitles, projection_data
     elif not fallback_to_items:
         return [], projection_data
@@ -6135,6 +6652,10 @@ async def _warm_manual_editor_preview_assets_for_job(
 ) -> dict[str, Any] | None:
     if str(getattr(job, "job_flow_mode", "") or "").strip() != "smart_assist":
         return None
+    preview_timeout_sec = max(
+        30.0,
+        float(getattr(get_settings(), "manual_editor_preview_runtime_timeout_sec", 300) or 300),
+    )
     source_path = _resolve_local_preview_source(job)
     if source_path is None:
         await _set_step_progress(
@@ -6157,19 +6678,53 @@ async def _warm_manual_editor_preview_assets_for_job(
     await _set_step_progress(
         session,
         step,
-        detail="预生成手动调整轻量预览代理",
+        detail=f"预生成手动调整轻量预览代理（最多 {int(round(preview_timeout_sec))}s）",
         progress=0.93,
-        metadata_updates={"manual_editor_preview_assets": queued_payload},
+        metadata_updates={
+            "manual_editor_preview_assets": queued_payload,
+            "manual_editor_preview_timeout_sec": preview_timeout_sec,
+        },
     )
     try:
-        async with _maintain_step_heartbeat(step, detail="预生成手动调整轻量预览代理", progress=0.93):
-            payload = await asyncio.to_thread(
-                ensure_manual_editor_preview_assets,
-                job_id=job.id,
-                source_path=source_path,
-                duration_sec=float(duration_sec or 0.0),
-                asset_dir=asset_dir,
-            )
+        await _set_step_runtime_budget(
+            session,
+            step,
+            phase="manual_editor_preview_assets",
+            timeout_sec=preview_timeout_sec,
+        )
+        try:
+            async with _maintain_step_heartbeat(
+                step,
+                detail=f"预生成手动调整轻量预览代理（最多 {int(round(preview_timeout_sec))}s）",
+                progress=0.93,
+            ):
+                payload = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        ensure_manual_editor_preview_assets,
+                        job_id=job.id,
+                        source_path=source_path,
+                        duration_sec=float(duration_sec or 0.0),
+                        asset_dir=asset_dir,
+                    ),
+                    timeout=preview_timeout_sec,
+                )
+        finally:
+            await _clear_step_runtime_budget(session, step)
+    except asyncio.TimeoutError:
+        await _set_step_progress(
+            session,
+            step,
+            detail=f"轻量预览代理预生成超时（{int(round(preview_timeout_sec))}s），进入编辑器时仍可按需生成",
+            progress=0.96,
+            metadata_updates={
+                "manual_editor_preview_assets": {
+                    "status": "failed",
+                    "stage": "timeout",
+                    "error": f"manual_editor_preview_timeout>{preview_timeout_sec:.1f}s",
+                }
+            },
+        )
+        return None
     except Exception as exc:
         logger.exception("Manual editor preview asset prewarm failed for job %s", job.id)
         await _set_step_progress(
@@ -6355,6 +6910,10 @@ def _merge_render_runtime_result(
                 merged[key] = copy.deepcopy(value)
         return merged
     merged = copy.deepcopy(previous)
+    if current_status in {"done", "success"}:
+        for stale_key in ("reason", "retryable", "error_metadata"):
+            if stale_key not in current:
+                merged.pop(stale_key, None)
     merged.update(current)
     return merged
 
@@ -7926,7 +8485,16 @@ async def run_content_profile(job_id: str) -> dict:
             )
             with tempfile.TemporaryDirectory() as tmpdir:
                 source_path = await _resolve_source(job, tmpdir, expected_hash=job.file_hash)
-                await _set_step_progress(session, step, detail="抽取画面并分析主题、主体与处理模板", progress=0.55)
+                content_understanding_timeout_sec = _resolve_content_understanding_timeout_seconds()
+                await _set_step_progress(
+                    session,
+                    step,
+                    detail=f"抽取画面并分析主题、主体与处理模板（最多 {int(round(content_understanding_timeout_sec))}s）",
+                    progress=0.55,
+                    metadata_updates={
+                        "content_understanding_timeout_sec": content_understanding_timeout_sec,
+                    },
+                )
                 usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
                 initial_search_enabled = should_enable_task_search(
                     "content_profile",
@@ -7934,22 +8502,31 @@ async def run_content_profile(job_id: str) -> dict:
                     profile=seeded_profile or None,
                     settings=settings,
                 )
-                async with _maintain_step_heartbeat(step):
-                    with llm_task_route("content_profile", search_enabled=initial_search_enabled, settings=settings):
-                        with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
-                            content_profile = await infer_content_profile(
-                                source_path=source_path,
-                                source_name=job.source_name,
-                                subtitle_items=subtitle_dicts,
-                                transcript_items=transcript_dicts,
-                                transcript_evidence=transcript_evidence,
-                                workflow_template=job.workflow_template,
-                                user_memory=user_memory,
-                                glossary_terms=effective_glossary_terms,
-                                include_research=initial_search_enabled,
-                                copy_style=copy_style,
-                                source_context=source_context,
-                            )
+                await _set_step_runtime_budget(
+                    session,
+                    step,
+                    phase="content_understanding",
+                    timeout_sec=content_understanding_timeout_sec,
+                )
+                try:
+                    async with _maintain_step_heartbeat(step):
+                        with llm_task_route("content_profile", search_enabled=initial_search_enabled, settings=settings):
+                            with track_step_usage(job_id=job.id, step_id=step.id, step_name="content_profile"):
+                                content_profile = await infer_content_profile(
+                                    source_path=source_path,
+                                    source_name=job.source_name,
+                                    subtitle_items=subtitle_dicts,
+                                    transcript_items=transcript_dicts,
+                                    transcript_evidence=transcript_evidence,
+                                    workflow_template=job.workflow_template,
+                                    user_memory=user_memory,
+                                    glossary_terms=effective_glossary_terms,
+                                    include_research=initial_search_enabled,
+                                    copy_style=copy_style,
+                                    source_context=source_context,
+                                )
+                finally:
+                    await _clear_step_runtime_budget(session, step)
                 usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
                 usage_baseline = _usage_delta(usage_after, usage_before)
                 save_cached_json(
@@ -8651,6 +9228,8 @@ async def run_avatar_commentary(job_id: str) -> dict:
             artifact_types=("ai_director_plan",),
         )
         ai_director_plan = director_artifact.data_json if director_artifact and director_artifact.data_json else {}
+        creator_card = await _load_job_creator_card(session, job)
+        avatar_binding = _resolve_creator_avatar_binding(creator_card)
 
         await _set_step_progress(
             session,
@@ -8667,6 +9246,7 @@ async def run_avatar_commentary(job_id: str) -> dict:
             subtitle_items=subtitle_dicts,
             content_profile=content_profile,
             ai_director_plan=ai_director_plan,
+            presenter_id=str((avatar_binding or {}).get("presenter_id") or "").strip() or None,
         )
         packaging_config = dict((list_packaging_assets().get("config") or {}))
         voice_execution: dict[str, Any] | None = None
@@ -8674,25 +9254,11 @@ async def run_avatar_commentary(job_id: str) -> dict:
         render_executed_in_mode = False
         avatar_segments = list(plan.get("segments") or [])
         if plan.get("mode") == "full_track_audio_passthrough":
-            avatar_profile = _select_default_avatar_profile()
-            avatar_video_path = _pick_avatar_profile_speaking_video_path(avatar_profile)
-            if avatar_profile and avatar_video_path:
-                plan["integration_mode"] = "picture_in_picture"
-                plan["avatar_profile_id"] = str(avatar_profile.get("id") or "")
-                plan["avatar_profile_name"] = str(avatar_profile.get("display_name") or "")
-                plan["presenter_id"] = str(avatar_video_path)
-                plan["overlay_position"] = str(packaging_config.get("avatar_overlay_position") or "bottom_right")
-                plan["overlay_scale"] = float(
-                    packaging_config.get("avatar_overlay_scale") or plan.get("overlay_scale") or 0.22
-                )
-                plan["overlay_corner_radius"] = int(packaging_config.get("avatar_overlay_corner_radius") or 0)
-                plan["overlay_border_width"] = int(packaging_config.get("avatar_overlay_border_width") or 0)
-                plan["overlay_border_color"] = str(packaging_config.get("avatar_overlay_border_color") or "#F4E4B8")
-                plan["overlay_margin"] = 28
-                render_request = dict(plan.get("render_request") or {})
-                render_request["presenter_id"] = str(avatar_video_path)
-                render_request["layout_template"] = plan.get("layout_template")
-                plan["render_request"] = render_request
+            _apply_avatar_presenter_binding_to_plan(
+                plan,
+                binding=avatar_binding,
+                packaging_config=packaging_config,
+            )
             plan["dubbing_execution"] = {
                 "provider": "passthrough",
                 "status": "skipped",
@@ -8705,25 +9271,11 @@ async def run_avatar_commentary(job_id: str) -> dict:
             }
         elif plan.get("mode") == "segmented_audio_passthrough" and avatar_segments:
             audio_artifact = await _load_latest_artifact(session, job.id, "audio_wav")
-            avatar_profile = _select_default_avatar_profile()
-            avatar_video_path = _pick_avatar_profile_speaking_video_path(avatar_profile)
-            if avatar_profile and avatar_video_path:
-                plan["integration_mode"] = "picture_in_picture"
-                plan["avatar_profile_id"] = str(avatar_profile.get("id") or "")
-                plan["avatar_profile_name"] = str(avatar_profile.get("display_name") or "")
-                plan["presenter_id"] = str(avatar_video_path)
-                plan["overlay_position"] = str(packaging_config.get("avatar_overlay_position") or "bottom_right")
-                plan["overlay_scale"] = float(
-                    packaging_config.get("avatar_overlay_scale") or plan.get("overlay_scale") or 0.22
-                )
-                plan["overlay_corner_radius"] = int(packaging_config.get("avatar_overlay_corner_radius") or 0)
-                plan["overlay_border_width"] = int(packaging_config.get("avatar_overlay_border_width") or 0)
-                plan["overlay_border_color"] = str(packaging_config.get("avatar_overlay_border_color") or "#F4E4B8")
-                plan["overlay_margin"] = 28
-                render_request = dict(plan.get("render_request") or {})
-                render_request["presenter_id"] = str(avatar_video_path)
-                render_request["layout_template"] = plan.get("layout_template")
-                plan["render_request"] = render_request
+            _apply_avatar_presenter_binding_to_plan(
+                plan,
+                binding=avatar_binding,
+                packaging_config=packaging_config,
+            )
             try:
                 await _set_step_progress(session, step, detail="切分原声并逐段生成数字人口播", progress=0.84)
                 with tempfile.TemporaryDirectory() as tmpdir:
@@ -9045,6 +9597,15 @@ async def run_edit_plan(job_id: str) -> dict:
             ),
             review_focus=review_rerun_focus,
         )
+        await _set_step_progress(session, step, detail="基于清理后字幕生成统一语义时间线", progress=0.68)
+        semantic_timeline_analysis = infer_timeline_analysis(
+            decision_subtitles,
+            content_profile=content_profile,
+            duration=duration,
+            editing_skill=editing_skill,
+        )
+        semantic_timeline_analysis["stage"] = SEMANTIC_TIMELINE_ANALYSIS_STAGE
+        semantic_timeline_analysis["subtitle_source_basis"] = _source_subtitle_basis(decision_subtitles)
         decision = build_edit_decision(
             source_path=job.source_path,
             duration=duration,
@@ -9054,6 +9615,7 @@ async def run_edit_plan(job_id: str) -> dict:
             transcript_segments=transcript_segment_dicts,
             scene_boundaries=scene_boundaries,
             editing_skill=editing_skill,
+            timeline_analysis=semantic_timeline_analysis,
         )
         decision = await _maybe_review_edit_decision_cuts_with_llm(
             job_id=job.id,
@@ -9079,7 +9641,12 @@ async def run_edit_plan(job_id: str) -> dict:
 
         editorial_timeline = await save_editorial_timeline(job.id, decision, session)
 
-        packaging_plan = resolve_packaging_plan_for_job(str(job.id), content_profile=content_profile)
+        creator_card = await _load_job_creator_card(session, job)
+        packaging_plan = resolve_packaging_plan_for_job(
+            str(job.id),
+            content_profile=content_profile,
+            creator_assets=list(getattr(creator_card, "assets", []) or []),
+        )
         keep_segments = [
             {"start": segment.start, "end": segment.end, "type": segment.type, "reason": segment.reason}
             for segment in decision.segments
@@ -9104,6 +9671,15 @@ async def run_edit_plan(job_id: str) -> dict:
             apply_repair=True,
             diagnostics_slot=subtitle_projection_repair,
         )
+        projection_blocking_reasons = projection_output_fallback_reasons(
+            subtitle_projection_repair,
+            include_refresh_required=False,
+        )
+        if projection_blocking_reasons:
+            raise RuntimeError(
+                "edit_plan_blocked_by_projection_fallback: "
+                + ", ".join(projection_blocking_reasons)
+            )
         subtitle_source_projection_validation = _build_source_transcript_projection_validation(
             remapped_subtitles=remapped_subtitles,
             transcript_segments=transcript_segment_dicts,
@@ -9141,6 +9717,12 @@ async def run_edit_plan(job_id: str) -> dict:
                     timeline_analysis=packaged_timeline_analysis,
                     allow_llm=False,
                 )
+        insert_fallback_reasons = insert_plan_output_fallback_reasons(packaging_plan.get("insert"))
+        if insert_fallback_reasons:
+            raise RuntimeError(
+                "edit_plan_blocked_by_insert_fallback: "
+                + ", ".join(insert_fallback_reasons)
+            )
         packaging_plan["music"] = await _plan_music_entry(
             music_plan=packaging_plan.get("music"),
             subtitle_items=remapped_subtitles,
@@ -9179,6 +9761,7 @@ async def run_edit_plan(job_id: str) -> dict:
                 editing_skill=editing_skill,
                 style=str(packaging_plan.get("smart_effect_style") or "smart_effect_rhythm"),
             ),
+            content_profile=content_profile,
             export_resolution_mode=str(packaging_plan.get("export_resolution_mode") or "source"),
             export_resolution_preset=str(packaging_plan.get("export_resolution_preset") or "1080p"),
             export_frame_rate_mode=str(packaging_plan.get("export_frame_rate_mode") or "source"),
@@ -9220,6 +9803,14 @@ async def run_edit_plan(job_id: str) -> dict:
             source_subtitles=edit_source_subtitles,
             smart_cut_rules=smart_cut_rules,
             content_profile=content_profile,
+        )
+        cut_analysis_payload = await _maybe_enrich_cut_analysis_with_semantic_timeline_analysis(
+            job_id=job.id,
+            source_name=str(job.source_name or ""),
+            cut_analysis=cut_analysis_payload,
+            subtitle_items=edit_source_subtitles,
+            content_profile=content_profile,
+            duration=float(duration or 0.0),
         )
         multimodal_trim_review_payload = build_multimodal_trim_review_payload(
             cut_analysis_payload,
@@ -9992,6 +10583,15 @@ async def run_render(job_id: str) -> dict:
                 and local_avatar_srt is not None
                 and avatar_meta is not None
             )
+            if avatar_outputs_ready and isinstance(avatar_result, dict):
+                avatar_result = {
+                    **avatar_result,
+                    "status": "done",
+                    "output_path": str(local_avatar_mp4),
+                }
+                avatar_result.pop("reason", None)
+                avatar_result.pop("retryable", None)
+                avatar_result.pop("error_metadata", None)
 
             await _copy_file_with_retry(tmp_plain_mp4, local_plain_mp4)
             if avatar_outputs_ready:
@@ -10086,13 +10686,22 @@ async def run_render(job_id: str) -> dict:
                     title_style=render_cover.get("title_style"),
                 )
                 cover_selection = load_cover_selection_summary(local_cover)
+                cover_fallback_generated = bool((cover_selection or {}).get("fallback_generated"))
+                cover_fallback_reason = str((cover_selection or {}).get("fallback_reason") or "cover_generation_fallback").strip()
                 cover_result = {
-                    "status": "done",
-                    "detail": "封面图已生成。",
+                    "status": "blocked" if cover_fallback_generated else "done",
+                    "detail": (
+                        "封面图生成落到 fallback，已阻止其作为正式产出。"
+                        if cover_fallback_generated
+                        else "封面图已生成。"
+                    ),
                     "cover_path": str(local_cover),
                     "variant_count": len(cover_variants),
                     "selection_review_recommended": bool((cover_selection or {}).get("review_recommended")),
+                    "fallback_generated": cover_fallback_generated,
                 }
+                if cover_fallback_generated:
+                    cover_result["reason"] = cover_fallback_reason
             except Exception:
                 logger.exception("Cover export failed for job %s", job_id)
                 cover_result = {
@@ -10110,6 +10719,16 @@ async def run_render(job_id: str) -> dict:
                 avatar_result=avatar_result,
                 cover_result=cover_result,
             )
+            render_blocking_reasons = render_output_blocking_reasons(
+                avatar_result=avatar_result,
+                cover_result=cover_result,
+                subtitle_projection_repair=subtitle_projection_repair,
+            )
+            if render_blocking_reasons:
+                raise RuntimeError(
+                    "render_blocked_by_fallback_output: "
+                    + ", ".join(render_blocking_reasons)
+                )
         except Exception:
             async with get_session_factory()() as failure_session:
                 render_output = await failure_session.get(RenderOutput, render_output_id)
@@ -10370,7 +10989,8 @@ async def run_platform_package(job_id: str) -> dict:
         renderless_mode = not bool(render_output and render_output.output_path)
 
     packaging_config = (list_packaging_assets().get("config") or {})
-    author_profile = _select_default_avatar_profile()
+    creator_card = await _load_job_creator_card(session, job)
+    author_profile = _build_creator_author_profile(creator_card)
     copy_style = str(
         packaging_config.get("copy_style")
         or (content_profile or {}).get("copy_style")
@@ -10449,6 +11069,15 @@ async def run_platform_package(job_id: str) -> dict:
     )
     packaging_cache_key = build_cache_key(packaging_cache_namespace, packaging_cache_fingerprint)
     cached_packaging_entry = load_cached_entry(packaging_cache_namespace, packaging_cache_key)
+    cached_packaging_result = dict(cached_packaging_entry.get("result") or {}) if cached_packaging_entry else None
+    if cached_packaging_result is not None:
+        cached_packaging_result["fact_sheet"] = fact_sheet
+        if platform_packaging_output_fallback_reasons(
+            cached_packaging_result,
+            renderless_mode=renderless_mode,
+        ):
+            cached_packaging_entry = None
+            cached_packaging_result = None
     packaging_cache_metadata = build_cache_metadata(
         packaging_cache_namespace,
         packaging_cache_key,
@@ -10456,8 +11085,7 @@ async def run_platform_package(job_id: str) -> dict:
         usage_baseline=(cached_packaging_entry or {}).get("usage_baseline"),
     )
     if cached_packaging_entry:
-        packaging = dict(cached_packaging_entry.get("result") or {})
-        packaging["fact_sheet"] = fact_sheet
+        packaging = cached_packaging_result or {}
     else:
         usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
         copy_search_enabled = should_enable_task_search(
@@ -10479,13 +11107,14 @@ async def run_platform_package(job_id: str) -> dict:
                 )
         usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
         usage_baseline = _usage_delta(usage_after, usage_before)
-        save_cached_json(
-            packaging_cache_namespace,
-            packaging_cache_key,
-            fingerprint=packaging_cache_fingerprint,
-            result=packaging,
-            usage_baseline=usage_baseline,
-        )
+        if not platform_packaging_output_fallback_reasons(packaging, renderless_mode=renderless_mode):
+            save_cached_json(
+                packaging_cache_namespace,
+                packaging_cache_key,
+                fingerprint=packaging_cache_fingerprint,
+                result=packaging,
+                usage_baseline=usage_baseline,
+            )
 
     if renderless_mode:
         project_dir = get_output_project_dir(
@@ -10503,6 +11132,15 @@ async def run_platform_package(job_id: str) -> dict:
         if renderless_mode:
             packaging["generation_note"] = "No finished render output was available; packaging was generated from content profile and subtitles only."
         packaging["subtitle_projection_repair"] = dict(subtitle_projection_repair)
+    packaging_blocking_reasons = platform_packaging_output_fallback_reasons(
+        packaging,
+        renderless_mode=renderless_mode,
+    )
+    if packaging_blocking_reasons:
+        raise RuntimeError(
+            "platform_package_blocked_by_fallback_output: "
+            + ", ".join(packaging_blocking_reasons)
+        )
     save_platform_packaging_markdown(output_md, packaging)
 
     async with get_session_factory()() as session:
@@ -10533,6 +11171,8 @@ async def run_platform_package(job_id: str) -> dict:
             if fact_sheet_cache_metadata is not None:
                 _set_step_cache_metadata(current_step, "platform_fact_sheet", fact_sheet_cache_metadata)
             _set_step_cache_metadata(current_step, "subtitle_projection_repair", dict(subtitle_projection_repair))
+            current_step.status = "done"
+            current_step.finished_at = datetime.now(timezone.utc)
             await _set_step_progress(session, current_step, detail="平台文案已生成", progress=1.0)
         await session.commit()
 
@@ -11591,7 +12231,10 @@ async def _render_full_track_avatar_video(
 ) -> Path | None:
     presenter_id = str(avatar_plan.get("presenter_id") or "").strip()
     if not presenter_id:
-        return None
+        raise AvatarFullTrackRenderError(
+            "avatar_full_track_presenter_missing",
+            reason_code="avatar_full_track_presenter_missing",
+        )
 
     audio_drive_path = source_plain_video_path.with_name(f"{source_plain_video_path.stem}.avatar_drive.wav")
     await extract_audio(source_plain_video_path, audio_drive_path)
@@ -11623,7 +12266,14 @@ async def _render_full_track_avatar_video(
     )
     segments = list(render_execution.get("segments") or [])
     if not segments:
-        return None
+        raise AvatarFullTrackRenderError(
+            str(render_execution.get("reason") or render_execution.get("status") or "avatar_full_track_segments_missing"),
+            reason_code="avatar_full_track_segments_missing",
+            metadata={
+                "provider_status": str(render_execution.get("status") or "").strip().lower() or None,
+                "provider_reason": str(render_execution.get("reason") or "").strip() or None,
+            },
+        )
     first_segment = segments[0] or {}
     if str(first_segment.get("status") or "") != "success":
         raise AvatarFullTrackRenderError(
@@ -11706,6 +12356,28 @@ def _resolve_avatar_full_track_call_timeout_seconds() -> float:
     return max(10.0, value)
 
 
+def _resolve_avatar_full_track_execution_timeout_seconds(
+    *,
+    provider: Any,
+    render_request: dict[str, Any],
+) -> float:
+    configured_timeout_seconds = _resolve_avatar_full_track_call_timeout_seconds()
+    provider_timeout_seconds: float | None = None
+    estimate_timeout = getattr(provider, "estimate_render_timeout_seconds", None)
+    if callable(estimate_timeout):
+        try:
+            estimated = estimate_timeout(request=render_request)
+        except Exception:
+            estimated = None
+        try:
+            provider_timeout_seconds = float(estimated) if estimated is not None else None
+        except (TypeError, ValueError):
+            provider_timeout_seconds = None
+    if provider_timeout_seconds is None:
+        return float(configured_timeout_seconds)
+    return max(float(configured_timeout_seconds), max(10.0, provider_timeout_seconds))
+
+
 def _resolve_avatar_full_track_slot_timeout_seconds() -> float:
     raw_value = os.getenv(
         "ROUGHCUT_AVATAR_FULL_TRACK_SLOT_TIMEOUT_SECONDS",
@@ -11767,16 +12439,20 @@ async def _execute_avatar_full_track_render_request(
     render_request: dict[str, Any],
 ) -> dict[str, Any]:
     async with _hold_avatar_full_track_slot(job_id=job_id):
+        provider = get_avatar_provider()
         last_error: Exception | None = None
         attempt = 0
         busy_waited_seconds = 0.0
         busy_max_wait_seconds = _resolve_avatar_full_track_busy_max_wait_seconds()
-        call_timeout_seconds = _resolve_avatar_full_track_call_timeout_seconds()
+        call_timeout_seconds = _resolve_avatar_full_track_execution_timeout_seconds(
+            provider=provider,
+            render_request=render_request,
+        )
         while True:
             try:
                 render_execution = await asyncio.wait_for(
                     asyncio.to_thread(
-                        get_avatar_provider().execute_render,
+                        provider.execute_render,
                         job_id=job_id,
                         request=render_request,
                     ),
@@ -12958,8 +13634,41 @@ def _shift_time_for_transition_overlaps(
     return max(0.0, shifted)
 
 
-def _select_default_avatar_profile() -> dict[str, Any] | None:
-    profiles = list_avatar_material_profiles()
+async def _load_job_creator_card(session, job: Job) -> CreatorCard | None:
+    creator_card_id = getattr(job, "creator_card_id", None)
+    if not creator_card_id:
+        return None
+    stmt = (
+        select(CreatorCard)
+        .options(
+            selectinload(CreatorCard.assets),
+            selectinload(CreatorCard.preferences),
+        )
+        .where(CreatorCard.id == creator_card_id)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+def _creator_legacy_avatar_profile_ids(creator: CreatorCard | None) -> list[str]:
+    if creator is None:
+        return []
+    profile_ids: list[str] = []
+    for preference in list(getattr(creator, "preferences", []) or []):
+        if str(getattr(preference, "source", "") or "").strip() != "legacy_avatar_profile":
+            continue
+        payload = getattr(preference, "structured_payload", None) or {}
+        legacy_profile_id = str(payload.get("legacy_profile_id") or "").strip()
+        if legacy_profile_id and legacy_profile_id not in profile_ids:
+            profile_ids.append(legacy_profile_id)
+    return profile_ids
+
+
+def _select_creator_bound_avatar_profile(creator: CreatorCard | None) -> dict[str, Any] | None:
+    legacy_profile_ids = set(_creator_legacy_avatar_profile_ids(creator))
+    if not legacy_profile_ids:
+        return None
+    profiles = [profile for profile in list_avatar_material_profiles() if str(profile.get("id") or "") in legacy_profile_ids]
     if not profiles:
         return None
     candidates = []
@@ -12981,13 +13690,121 @@ def _select_default_avatar_profile() -> dict[str, Any] | None:
     return candidates[0][2]
 
 
+def _resolve_creator_avatar_binding(creator: CreatorCard | None) -> dict[str, Any] | None:
+    if creator is None:
+        return None
+
+    creator_asset = pick_creator_avatar_presenter_asset(list(getattr(creator, "assets", []) or []))
+    if creator_asset is not None:
+        presenter_path = resolve_creator_asset_path(creator_asset.get("stored_path"))
+        if presenter_path.exists():
+            return {
+                "source": "creator_asset",
+                "presenter_id": presenter_path.as_posix(),
+                "creator_card_id": str(getattr(creator, "id", "") or ""),
+                "creator_card_name": str(getattr(creator, "name", "") or ""),
+                "creator_asset_id": str(creator_asset.get("id") or ""),
+                "creator_asset_type": str(creator_asset.get("asset_type") or ""),
+                "avatar_profile_id": None,
+                "avatar_profile_name": str(getattr(creator, "name", "") or ""),
+            }
+
+    avatar_profile = _select_creator_bound_avatar_profile(creator)
+    avatar_video_path = _pick_avatar_profile_speaking_video_path(avatar_profile)
+    if avatar_profile and avatar_video_path:
+        return {
+            "source": "legacy_avatar_profile",
+            "presenter_id": avatar_video_path.as_posix(),
+            "creator_card_id": str(getattr(creator, "id", "") or ""),
+            "creator_card_name": str(getattr(creator, "name", "") or ""),
+            "creator_asset_id": None,
+            "creator_asset_type": None,
+            "avatar_profile_id": str(avatar_profile.get("id") or ""),
+            "avatar_profile_name": str(avatar_profile.get("display_name") or avatar_profile.get("presenter_alias") or ""),
+        }
+    return None
+
+
+def _apply_avatar_presenter_binding_to_plan(
+    plan: dict[str, Any],
+    *,
+    binding: dict[str, Any] | None,
+    packaging_config: dict[str, Any],
+) -> None:
+    if not binding:
+        plan["avatar_binding"] = {
+            "status": "missing",
+            "reason": "creator_avatar_binding_missing",
+        }
+        return
+    presenter_id = str(binding.get("presenter_id") or "").strip()
+    if not presenter_id:
+        plan["avatar_binding"] = {
+            **binding,
+            "status": "missing",
+            "reason": "creator_avatar_presenter_missing",
+        }
+        return
+    plan["integration_mode"] = "picture_in_picture"
+    plan["avatar_profile_id"] = str(binding.get("avatar_profile_id") or "")
+    plan["avatar_profile_name"] = str(binding.get("avatar_profile_name") or "")
+    plan["presenter_id"] = presenter_id
+    plan["creator_card_id"] = str(binding.get("creator_card_id") or "")
+    plan["creator_card_name"] = str(binding.get("creator_card_name") or "")
+    plan["avatar_binding"] = {
+        **binding,
+        "status": "bound",
+    }
+    plan["overlay_position"] = str(packaging_config.get("avatar_overlay_position") or "bottom_right")
+    plan["overlay_scale"] = float(
+        packaging_config.get("avatar_overlay_scale") or plan.get("overlay_scale") or 0.22
+    )
+    plan["overlay_corner_radius"] = int(packaging_config.get("avatar_overlay_corner_radius") or 0)
+    plan["overlay_border_width"] = int(packaging_config.get("avatar_overlay_border_width") or 0)
+    plan["overlay_border_color"] = str(packaging_config.get("avatar_overlay_border_color") or "#F4E4B8")
+    plan["overlay_margin"] = 28
+    render_request = dict(plan.get("render_request") or {})
+    render_request["presenter_id"] = presenter_id
+    render_request["layout_template"] = plan.get("layout_template")
+    plan["render_request"] = render_request
+
+
+def _build_creator_author_profile(creator: CreatorCard | None) -> dict[str, Any] | None:
+    if creator is None:
+        return None
+    public_name = str(getattr(creator, "name", "") or "").strip()
+    positioning_text = str(getattr(creator, "positioning", "") or "").strip()
+    natural_language_profile = str(getattr(creator, "natural_language_profile", "") or "").strip()
+    default_platforms = [str(item).strip() for item in list(getattr(creator, "default_platforms", []) or []) if str(item).strip()]
+    content_domains = [str(item).strip() for item in list(getattr(creator, "content_domains", []) or []) if str(item).strip()]
+    return {
+        "display_name": public_name,
+        "creator_profile": {
+            "identity": {
+                "public_name": public_name,
+                "bio": natural_language_profile or None,
+            },
+            "positioning": {
+                "creator_focus": positioning_text or None,
+                "expertise": content_domains,
+                "audience": str(getattr(creator, "audience", "") or "").strip() or None,
+                "style": natural_language_profile or None,
+            },
+            "publishing": {
+                "primary_platform": default_platforms[0] if default_platforms else None,
+                "active_platforms": default_platforms,
+            },
+        },
+    }
+
+
 def _pick_avatar_profile_speaking_video_path(profile: dict[str, Any] | None) -> Path | None:
     if not profile:
         return None
     for file_record in profile.get("files") or []:
         if str(file_record.get("role") or "") != "speaking_video":
             continue
-        path = Path(str(file_record.get("path") or ""))
+        path = resolve_avatar_material_path(file_record.get("path"))
         if path.exists():
             return path
     return None
@@ -13033,10 +13850,8 @@ def _record_source_integrity(
 
 def run_step_sync(step_name: str, job_id: str) -> dict:
     """Synchronous entry point for Celery tasks."""
-    # Force-reset engine singleton so asyncpg doesn't reuse connections from a previous event loop
-    import roughcut.db.session as _sess
-    _sess._engine = None
-    _sess._session_factory = None
+    # Dispose loop-bound asyncpg connections before starting a fresh event loop.
+    reset_session_state_sync()
 
     step_map = {
         "probe": run_probe,

@@ -36,12 +36,44 @@ def normalize_job_flow_mode(value: Any) -> str:
         raise ValueError(f"job_flow_mode must be one of: {', '.join(sorted(JOB_FLOW_MODES))}")
     return normalized
 
+
+def normalize_execution_mode(value: Any) -> str:
+    normalized = str(value or "auto").strip().lower()
+    if normalized in {"default", "automatic", "full_auto"}:
+        return "auto"
+    if normalized in {"assist", "smart", "smart_assist"}:
+        return "smart_assist"
+    if normalized in {"plan", "plan_first", "proposal"}:
+        return "plan_first"
+    if normalized not in {"auto", "smart_assist", "plan_first"}:
+        raise ValueError("execution_mode must be one of: auto, smart_assist, plan_first")
+    return normalized
+
+
+def resolve_job_flow_mode_from_execution_mode(
+    job_flow_mode: Any,
+    execution_mode: Any,
+    *,
+    execution_mode_explicit: bool,
+) -> str:
+    normalized_job_flow_mode = normalize_job_flow_mode(job_flow_mode)
+    if not execution_mode_explicit:
+        return normalized_job_flow_mode
+    normalized_execution_mode = normalize_execution_mode(execution_mode)
+    if normalized_execution_mode == "smart_assist":
+        return JOB_FLOW_MODE_SMART_ASSIST
+    return JOB_FLOW_MODE_AUTO
+
 class JobCreate(BaseModel):
     language: str = "zh-CN"
     workflow_template: str | None = None
     job_flow_mode: str = JOB_FLOW_MODE_AUTO
     workflow_mode: str = DEFAULT_WORKFLOW_MODE
     enhancement_modes: list[str] = Field(default_factory=list)
+    creator_card_id: uuid.UUID | None = None
+    task_brief: str | None = None
+    execution_mode: str = "auto"
+    platform_targets: list[str] = Field(default_factory=list)
     edit_mode: str = "auto"
     automation_level: str = "standard"
     material_usage: str = "all_uploaded"
@@ -101,6 +133,30 @@ class JobCreate(BaseModel):
             return None
         normalized = str(value).strip()
         return normalized or None
+
+    @field_validator("task_brief", mode="before")
+    @classmethod
+    def validate_task_brief(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized[:4000] or None
+
+    @field_validator("execution_mode", mode="before")
+    @classmethod
+    def validate_execution_mode(cls, value: Any) -> str:
+        return normalize_execution_mode(value)
+
+    @field_validator("platform_targets", mode="before")
+    @classmethod
+    def validate_platform_targets(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        raise ValueError("platform_targets must be a list of strings")
 
     @field_validator("video_description", mode="before")
     @classmethod
@@ -162,6 +218,10 @@ class JobOut(BaseModel):
     job_flow_mode: str = JOB_FLOW_MODE_AUTO
     workflow_mode: str
     enhancement_modes: list[str] = Field(default_factory=list)
+    creator_card_id: uuid.UUID | None = None
+    task_brief: str | None = None
+    execution_mode: str = "auto"
+    platform_targets: list[str] = Field(default_factory=list)
     auto_review_mode_enabled: bool = False
     auto_review_status: str | None = None
     auto_review_summary: str | None = None
@@ -177,6 +237,226 @@ class JobOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     steps: list[JobStepOut] = []
+
+
+class CreatorAssetOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    creator_card_id: uuid.UUID
+    asset_type: str
+    original_name: str
+    stored_path: str
+    metadata_json: dict[str, Any] | None = None
+    created_at: datetime
+
+
+class CreatorPreferenceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    creator_card_id: uuid.UUID
+    preference_type: str
+    natural_language_rule: str
+    structured_payload: dict[str, Any] | None = None
+    source: str
+    version: int
+    created_at: datetime
+
+
+class CreatorCardIn(BaseModel):
+    name: str
+    positioning: str | None = None
+    content_domains: list[str] = Field(default_factory=list)
+    audience: str | None = None
+    default_platforms: list[str] = Field(default_factory=list)
+    natural_language_profile: str | None = None
+    status: str = "draft"
+
+
+class CreatorCardPatch(BaseModel):
+    name: str | None = None
+    positioning: str | None = None
+    content_domains: list[str] | None = None
+    audience: str | None = None
+    default_platforms: list[str] | None = None
+    natural_language_profile: str | None = None
+    status: str | None = None
+
+
+class CreatorCardOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    positioning: str | None = None
+    content_domains: list[str] = Field(default_factory=list)
+    audience: str | None = None
+    default_platforms: list[str] = Field(default_factory=list)
+    natural_language_profile: str | None = None
+    status: str
+    created_at: datetime
+    updated_at: datetime
+    assets: list[CreatorAssetOut] = Field(default_factory=list)
+    preferences: list[CreatorPreferenceOut] = Field(default_factory=list)
+
+
+class CreatorCardListOut(BaseModel):
+    items: list[CreatorCardOut] = Field(default_factory=list)
+
+
+class CreatorCardRefineIn(BaseModel):
+    prompt: str
+    preference_type: str = "profile_refine"
+
+
+class PlanVersionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    version: int
+    operation: str
+    prompt: str | None = None
+    payload_json: dict[str, Any]
+    created_at: datetime
+
+
+class TaskStrategyGenerateIn(BaseModel):
+    prompt: str
+    strategy_type: str = "generic"
+    candidate_count: int = 3
+
+
+class TaskStrategyRefineIn(BaseModel):
+    prompt: str
+
+
+class CreatorTaskStrategyOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    creator_card_id: uuid.UUID
+    name: str
+    strategy_type: str
+    summary: str | None = None
+    strategy_payload_json: dict[str, Any]
+    status: str
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+    versions: list[PlanVersionOut] = Field(default_factory=list)
+
+
+class CreatorTaskStrategyListOut(BaseModel):
+    items: list[CreatorTaskStrategyOut] = Field(default_factory=list)
+
+
+class VisualPlanGenerateIn(BaseModel):
+    prompt: str
+    candidate_count: int = 3
+
+
+class VisualPlanRefineIn(BaseModel):
+    prompt: str
+
+
+class CreatorVisualPlanOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    creator_card_id: uuid.UUID
+    name: str
+    summary: str | None = None
+    visual_payload_json: dict[str, Any]
+    status: str
+    is_active: bool
+    created_at: datetime
+    updated_at: datetime
+    versions: list[PlanVersionOut] = Field(default_factory=list)
+
+
+class CreatorVisualPlanListOut(BaseModel):
+    items: list[CreatorVisualPlanOut] = Field(default_factory=list)
+
+
+class CreatorPlatformBindingIn(BaseModel):
+    platform: str
+    credential_ref: str | None = None
+    binding_payload_json: dict[str, Any] | None = None
+
+
+class CreatorSocialAutoUploadBindingIn(BaseModel):
+    platform: str
+    browser: str | None = "chrome"
+    account_name: str | None = None
+
+
+class CreatorPlatformBindingOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    platform: str
+    credential_ref: str | None = None
+    binding_payload_json: dict[str, Any] | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class PublicationProfilePatch(BaseModel):
+    status: str | None = None
+    publication_payload_json: dict[str, Any] | None = None
+
+
+class PublicationProfileRefineIn(BaseModel):
+    prompt: str
+
+
+class CreatorPublicationProfileOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    creator_card_id: uuid.UUID
+    status: str
+    publication_payload_json: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+    bindings: list[CreatorPlatformBindingOut] = Field(default_factory=list)
+    versions: list[PlanVersionOut] = Field(default_factory=list)
+
+
+class JobAgentPlanRefineIn(BaseModel):
+    prompt: str
+    target: str | None = None
+
+
+class JobAgentPlanApplyIn(BaseModel):
+    selected_strategy_id: uuid.UUID | None = None
+    selected_visual_plan_id: uuid.UUID | None = None
+    selected_publication_profile_id: uuid.UUID | None = None
+
+
+class JobAgentPlanOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    job_id: uuid.UUID
+    creator_card_id: uuid.UUID | None = None
+    task_strategy_id: uuid.UUID | None = None
+    visual_plan_id: uuid.UUID | None = None
+    publication_profile_id: uuid.UUID | None = None
+    status: str
+    plan_payload_json: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
+class JobAgentDecisionOut(BaseModel):
+    kind: str
+    title: str
+    summary: str
+    detail: str | None = None
+    status: str = "ready"
+    version: int = 1
 
 
 class JobActivityCurrentStepOut(BaseModel):

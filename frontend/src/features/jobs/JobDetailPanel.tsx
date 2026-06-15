@@ -1,7 +1,11 @@
+import { useState } from "react";
+
 import type {
   AvatarMaterialLibrary,
   Config,
   ContentProfileReview,
+  JobAgentDecision,
+  JobAgentPlan,
   Job,
   JobActivity,
   JobTimeline,
@@ -145,6 +149,8 @@ type JobDetailPanelProps = {
   selectedJob?: Job;
   isLoading: boolean;
   activity?: JobActivity;
+  agentPlan?: JobAgentPlan;
+  agentDecisions?: JobAgentDecision[];
   report?: Report;
   tokenUsage?: TokenUsageReport;
   timeline?: JobTimeline;
@@ -172,6 +178,8 @@ type JobDetailPanelProps = {
   isConfirmingProfile: boolean;
   isInitializing: boolean;
   isApplyingReview: boolean;
+  isRefiningAgentPlan?: boolean;
+  isApplyingAgentPlan?: boolean;
   isTriggeringSubtitleRerun?: boolean;
   pendingRerunStartStep?: string | null;
   pendingRerunIssueCode?: string | null;
@@ -197,6 +205,12 @@ type JobDetailPanelProps = {
   onRestart: () => void;
   onDelete: () => void;
   onApplyReview: (targetId: string, action: "accepted" | "rejected") => void;
+  onRefineAgentPlan?: (prompt: string, target?: string) => void;
+  onApplyAgentPlan?: (payload: {
+    selected_strategy_id?: string;
+    selected_visual_plan_id?: string;
+    selected_publication_profile_id?: string;
+  }) => void;
   onTriggerSubtitleRerun?: (decision: NonNullable<JobActivity["decisions"]>[number]) => void;
 };
 
@@ -207,6 +221,8 @@ export function JobDetailPanel({
   selectedJob,
   isLoading,
   activity,
+  agentPlan,
+  agentDecisions,
   report,
   tokenUsage,
   timeline,
@@ -226,6 +242,8 @@ export function JobDetailPanel({
   isConfirmingProfile,
   isInitializing,
   isApplyingReview,
+  isRefiningAgentPlan = false,
+  isApplyingAgentPlan = false,
   isTriggeringSubtitleRerun = false,
   pendingRerunStartStep = null,
   pendingRerunIssueCode = null,
@@ -243,9 +261,13 @@ export function JobDetailPanel({
   onRestart,
   onDelete,
   onApplyReview,
+  onRefineAgentPlan,
+  onApplyAgentPlan,
   onTriggerSubtitleRerun,
 }: JobDetailPanelProps) {
   const { t } = useI18n();
+  const [agentAdjustPrompt, setAgentAdjustPrompt] = useState("");
+  const [agentAdjustTarget, setAgentAdjustTarget] = useState("visual");
   const isReviewMode = selectedJob?.status === "needs_review";
   const isAwaitingInitialization = Boolean(selectedJob?.awaiting_initialization || selectedJob?.status === "awaiting_init");
   const isAwaitingManualEdit = Boolean(selectedJob?.awaiting_manual_edit || selectedJob?.status === "awaiting_manual_edit");
@@ -329,6 +351,8 @@ export function JobDetailPanel({
 
   const currentStepProgressPercent =
     typeof currentStep?.progress === "number" ? Math.round(currentStep.progress * 100) : null;
+  const agentPlanPayload = agentPlan?.plan_payload_json ?? {};
+  const agentStages = Array.isArray(agentPlanPayload.stages) ? agentPlanPayload.stages : [];
 
   return (
     <aside className={classNames("panel detail-panel", className)}>
@@ -459,6 +483,148 @@ export function JobDetailPanel({
               </article>
             </section>
           ) : null}
+
+          <section className="detail-block">
+            <div className="detail-key">Agent 决策驾驶舱</div>
+            <div className="timeline-list">
+              <div className="timeline-item">
+                <strong>当前阶段</strong>
+                <div className="muted compact-top">
+                  {currentStep ? `${currentStep.label}${currentStepProgressPercent != null ? ` · ${currentStepProgressPercent}%` : ""}` : "等待进入流程"}
+                </div>
+              </div>
+              <div className="timeline-item">
+                <strong>计划状态</strong>
+                <div className="muted compact-top">{agentPlan?.status || "pending"}</div>
+              </div>
+              <div className="timeline-item">
+                <strong>执行方式</strong>
+                <div className="muted compact-top">
+                  {selectedJob.execution_mode === "smart_assist"
+                    ? "智能辅助"
+                    : selectedJob.execution_mode === "plan_first"
+                      ? "先生成方案"
+                      : "全自动"}
+                </div>
+              </div>
+              <div className="timeline-item">
+                <strong>人工介入</strong>
+                <div className="muted compact-top">
+                  {isAwaitingManualEdit ? "等待手动调整" : isReviewMode ? "当前处于审核路径" : "当前无需人工介入"}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section className="detail-block">
+            <div className="detail-key">Agent 决策摘要</div>
+            <div className="timeline-list">
+              <div className="timeline-item">
+                <strong>创作者卡片</strong>
+                <div className="muted compact-top">
+                  {agentPlanPayload.creator?.name
+                    ? `${agentPlanPayload.creator.name}${agentPlanPayload.creator.positioning ? ` · ${agentPlanPayload.creator.positioning}` : ""}`
+                    : selectedJob.creator_card_id
+                      ? `已绑定 ${selectedJob.creator_card_id}`
+                      : "未绑定创作者，当前任务走兼容默认路径。"}
+                </div>
+              </div>
+              <div className="timeline-item">
+                <strong>任务策略</strong>
+                <div className="muted compact-top">{agentPlanPayload.task_strategy?.summary || "未生成任务策略摘要。"}</div>
+              </div>
+              <div className="timeline-item">
+                <strong>智能视觉方案</strong>
+                <div className="muted compact-top">{agentPlanPayload.visual_plan?.summary || "未生成视觉方案摘要。"}</div>
+              </div>
+              <div className="timeline-item">
+                <strong>智能发布管理</strong>
+                <div className="muted compact-top">
+                  {agentPlanPayload.publication_plan?.summary || "未生成发布管理摘要。"}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          {agentStages.length ? (
+            <section className="detail-block">
+              <div className="detail-key">流程轨道</div>
+              <div className="timeline-list">
+                {agentStages.map((stage, index) => (
+                  <div key={`${stage.key || index}`} className="timeline-item">
+                    <strong>{stage.label || stage.key || `阶段 ${index + 1}`}</strong>
+                    <div className="muted compact-top">{stage.summary || "暂无说明。"}</div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          {agentDecisions?.length ? (
+            <section className="detail-block">
+              <div className="detail-key">当前候选决策</div>
+              <div className="timeline-list">
+                {agentDecisions.map((decision) => (
+                  <div key={decision.kind} className="timeline-item">
+                    <strong>{decision.title}</strong>
+                    <div className="compact-top">{decision.summary}</div>
+                    {decision.detail ? <div className="muted compact-top">{decision.detail}</div> : null}
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          <section className="detail-block">
+            <div className="detail-key">自然语言调整</div>
+            <div className="form-grid">
+              <label>
+                <span>调整目标</span>
+                <select className="input" value={agentAdjustTarget} onChange={(event) => setAgentAdjustTarget(event.target.value)}>
+                  <option value="strategy">任务策略</option>
+                  <option value="visual">视觉方案</option>
+                  <option value="publication">发布管理</option>
+                </select>
+              </label>
+            </div>
+            <label className="compact-top">
+              <span>调整说明</span>
+              <textarea
+                className="input"
+                rows={3}
+                value={agentAdjustPrompt}
+                onChange={(event) => setAgentAdjustPrompt(event.target.value)}
+                placeholder="例如：标题更克制，封面不要像广告，抖音前三秒更直接。"
+              />
+            </label>
+            <div className="toolbar compact-top">
+              <button
+                type="button"
+                className="button"
+                disabled={!agentAdjustPrompt.trim() || !onRefineAgentPlan || isRefiningAgentPlan}
+                onClick={() => {
+                  onRefineAgentPlan?.(agentAdjustPrompt, agentAdjustTarget);
+                  setAgentAdjustPrompt("");
+                }}
+              >
+                {isRefiningAgentPlan ? "调整中" : "提交调整"}
+              </button>
+              <button
+                type="button"
+                className="button ghost"
+                disabled={!onApplyAgentPlan || isApplyingAgentPlan}
+                onClick={() =>
+                  onApplyAgentPlan?.({
+                    selected_strategy_id: agentPlan?.task_strategy_id || undefined,
+                    selected_visual_plan_id: agentPlan?.visual_plan_id || undefined,
+                    selected_publication_profile_id: agentPlan?.publication_profile_id || undefined,
+                  })
+                }
+              >
+                {isApplyingAgentPlan ? "应用中" : "应用当前计划"}
+              </button>
+            </div>
+          </section>
 
           <section className="detail-block">
             <div className="detail-key">{t("jobs.detail.creativeMode")}</div>

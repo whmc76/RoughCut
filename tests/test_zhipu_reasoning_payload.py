@@ -9,7 +9,7 @@ class _DummySettings:
     zhipu_api_key = "demo-key"
     zhipu_api_key_helper = ""
     zhipu_base_url = "https://open.bigmodel.cn/api/paas/v4"
-    active_reasoning_model = "glm-5.2[1m]"
+    active_reasoning_model = "glm-5.2"
     active_reasoning_effort = "high"
 
 
@@ -22,7 +22,7 @@ async def test_zhipu_reasoning_json_mode_sets_response_format_and_disables_think
         captured["headers"] = headers
         captured["json_payload"] = json_payload
         return {
-            "model": "glm-5.2[1m]",
+            "model": "glm-5.2",
             "choices": [{"message": {"content": '{"ok":true}'}}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1},
         }
@@ -53,7 +53,7 @@ async def test_zhipu_reasoning_omits_max_tokens_by_default_for_official_server_d
         captured["json_payload"] = json_payload
         captured["timeout_sec"] = timeout_sec
         return {
-            "model": "glm-5.2[1m]",
+            "model": "glm-5.2",
             "choices": [{"message": {"content": "ok"}}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1},
         }
@@ -70,6 +70,6 @@ async def test_zhipu_reasoning_omits_max_tokens_by_default_for_official_server_d
 
     payload = dict(captured["json_payload"] or {})
     assert response.content == "ok"
-    assert payload["model"] == "glm-5.2[1m]"
+    assert payload["model"] == "glm-5.2"
     assert "max_tokens" not in payload
     assert captured["timeout_sec"] == 600

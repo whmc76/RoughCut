@@ -10,7 +10,7 @@ import uuid
 from datetime import datetime, timezone
 
 from roughcut.config import apply_in_memory_runtime_overrides, get_settings, normalize_transcription_provider_name
-from roughcut.db.session import get_session_factory
+from roughcut.db.session import get_session_factory, reset_session_state_sync
 from roughcut.pipeline.celery_app import celery_app
 from roughcut.pipeline.steps import run_step_sync
 from roughcut.publication import run_publication_worker_once
@@ -35,16 +35,10 @@ _TERMINAL_JOB_STATUSES = {"done", "failed", "cancelled", "needs_review"}
 
 
 def _reset_db_session_state() -> None:
-    import roughcut.db.session as _sess
-
-    engine = getattr(_sess, "_engine", None)
-    if engine is not None:
-        try:
-            asyncio.run(engine.dispose())
-        except Exception:
-            pass
-    _sess._engine = None
-    _sess._session_factory = None
+    try:
+        reset_session_state_sync()
+    except Exception:
+        pass
 
 
 def _coerce_utc(value: datetime) -> datetime:

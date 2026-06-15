@@ -30,6 +30,8 @@ export const avatarMaterialsApi = {
   },
   deleteAvatarMaterialProfile: (profileId: string) =>
     request<AvatarMaterialLibrary>(`/avatar-materials/profiles/${profileId}`, { method: "DELETE" }),
+  deleteAvatarMaterialFile: (profileId: string, fileId: string) =>
+    request<AvatarMaterialLibrary>(`/avatar-materials/profiles/${profileId}/files/${fileId}`, { method: "DELETE" }),
   generateAvatarMaterialPreview: (profileId: string, script: string) =>
     request<AvatarMaterialLibrary>(`/avatar-materials/profiles/${profileId}/preview`, {
       method: "POST",

@@ -72,6 +72,11 @@ from roughcut.providers.image_generation import (
 )
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.factory import get_reasoning_provider
+from roughcut.production_readiness import (
+    intelligent_copy_cover_brief_fallback_reasons,
+    intelligent_copy_material_context_fallback_reasons,
+    platform_packaging_output_fallback_reasons,
+)
 from roughcut.providers.reasoning.base import Message, extract_json_text
 from roughcut.review.intelligent_copy_cover_quality import assess_cover_publish_readiness
 from roughcut.review.content_profile import (
@@ -788,7 +793,6 @@ async def generate_intelligent_copy(
     markdown_path = smart_copy_platform_packaging_markdown_path(material_dir)
     platform_packaging_json_path = smart_copy_platform_packaging_json_path(material_dir)
     json_path = smart_copy_material_json_path(material_dir)
-    save_platform_packaging_markdown(markdown_path, packaging)
     cover_source = cover_context["cover_source"]
     cover_reference_paths = list(cover_context.get("cover_reference_paths") or [])
     cover_source_manifest = dict(cover_context["cover_source_manifest"] or {})
@@ -799,6 +803,30 @@ async def generate_intelligent_copy(
         copy_brief=copy_brief,
         content_profile=content_profile,
     )
+    readiness_blocking_reasons = intelligent_copy_material_context_fallback_reasons(
+        packaging=packaging,
+        cover_brief=cover_brief,
+    )
+    if readiness_blocking_reasons:
+        warnings = list(inspection.get("warnings") or [])
+        if stale_existing_result_detected:
+            warnings.append("已忽略与当前视频/字幕不匹配的旧 smart-copy 结果，当前物料已按最新输入重新生成。")
+        return _build_intelligent_copy_readiness_blocked_result(
+            folder_path=display_folder_path,
+            material_dir=material_dir,
+            inspection=inspection,
+            copy_style=resolved_copy_style,
+            requested_platforms=selected_platform_keys,
+            blocking_reasons=readiness_blocking_reasons,
+            use_existing_cover=use_existing_cover,
+            content_profile=content_profile,
+            packaging=packaging,
+            cover_source=cover_source,
+            cover_reference_paths=cover_reference_paths,
+            cover_source_manifest=cover_source_manifest,
+            warnings=warnings,
+        )
+    save_platform_packaging_markdown(markdown_path, packaging)
     base_result = {
         "folder_path": display_folder_path,
         "material_dir": str(material_dir),
@@ -1311,6 +1339,26 @@ async def rerender_existing_intelligent_copy_cover_groups(
     cover_reference_paths = list(context.get("cover_reference_paths") or [])
     cover_brief: dict[str, Any] = context["cover_brief"]
     cover_source_manifest = context["cover_source_manifest"]
+    readiness_blocking_reasons = intelligent_copy_material_context_fallback_reasons(
+        packaging=packaging,
+        cover_brief=cover_brief,
+    )
+    if readiness_blocking_reasons:
+        return _build_intelligent_copy_readiness_blocked_result(
+            folder_path=str(context["inspection"].get("folder_path") or folder_path),
+            material_dir=material_dir,
+            inspection=context["inspection"],
+            copy_style=str(existing_result.get("copy_style") or "attention_grabbing"),
+            requested_platforms=selected_platform_keys,
+            blocking_reasons=readiness_blocking_reasons,
+            use_existing_cover=False,
+            content_profile=content_profile,
+            packaging=packaging,
+            cover_source=cover_source,
+            cover_reference_paths=cover_reference_paths,
+            cover_source_manifest=cover_source_manifest,
+            warnings=list(existing_result.get("warnings") or []),
+        )
 
     platform_items = existing_result.get("platforms") if isinstance(existing_result.get("platforms"), list) else []
     existing_item_map = {
@@ -1493,6 +1541,30 @@ async def refresh_existing_intelligent_copy_cover_current_state(
     cover_source = context["cover_source"]
     cover_brief: dict[str, Any] = context["cover_brief"]
     cover_source_manifest = context["cover_source_manifest"]
+    readiness_blocking_reasons = intelligent_copy_material_context_fallback_reasons(
+        packaging=packaging,
+        cover_brief=cover_brief,
+    )
+    if readiness_blocking_reasons:
+        return _build_intelligent_copy_readiness_blocked_result(
+            folder_path=str(context["inspection"].get("folder_path") or folder_path),
+            material_dir=material_dir,
+            inspection=context["inspection"],
+            copy_style=str(existing_result.get("copy_style") or "attention_grabbing"),
+            requested_platforms=all_platform_keys,
+            blocking_reasons=readiness_blocking_reasons,
+            use_existing_cover=bool(existing_result.get("use_existing_cover")),
+            content_profile=(
+                dict(existing_result.get("content_profile_summary") or {})
+                if isinstance(existing_result.get("content_profile_summary"), dict)
+                else {}
+            ),
+            packaging=packaging,
+            cover_source=cover_source,
+            cover_reference_paths=list(context.get("cover_reference_paths") or []),
+            cover_source_manifest=cover_source_manifest,
+            warnings=list(existing_result.get("warnings") or []),
+        )
 
     cover_group_cache = _restore_standard_cover_matrix_group_cache_from_disk(material_dir=material_dir)
     _refresh_cover_group_cache_status(cache=cover_group_cache, material_dir=material_dir)
@@ -1664,6 +1736,51 @@ def upgrade_existing_intelligent_copy_result(
         platform_keys=selected_platform_keys,
         fallback_result=existing_result,
     )
+    persisted_cover_brief = (
+        dict(existing_result.get("cover_brief") or {})
+        if isinstance(existing_result.get("cover_brief"), dict)
+        else {}
+    )
+    readiness_blocking_reasons = intelligent_copy_material_context_fallback_reasons(
+        packaging=packaging,
+        cover_brief=persisted_cover_brief,
+    )
+    if readiness_blocking_reasons:
+        return _build_intelligent_copy_readiness_blocked_result(
+            folder_path=str(folder_path),
+            material_dir=material_dir,
+            inspection=inspect_intelligent_copy_folder(folder_path),
+            copy_style=str(existing_result.get("copy_style") or "attention_grabbing"),
+            requested_platforms=selected_platform_keys,
+            blocking_reasons=readiness_blocking_reasons,
+            use_existing_cover=bool(existing_result.get("use_existing_cover")),
+            content_profile=(
+                dict(existing_result.get("content_profile_summary") or {})
+                if isinstance(existing_result.get("content_profile_summary"), dict)
+                else {}
+            ),
+            packaging=packaging,
+            cover_source=_resolve_existing_material_cover_path(
+                existing_result.get("cover_source_path"),
+                material_dir=material_dir,
+            ),
+            cover_reference_paths=[
+                path
+                for item in (existing_result.get("cover_reference_paths") or [])
+                for path in (
+                    [_resolve_existing_material_cover_path(item, material_dir=material_dir)]
+                    if str(item or "").strip()
+                    else []
+                )
+                if path is not None
+            ],
+            cover_source_manifest=(
+                dict(existing_result.get("cover_source_manifest") or {})
+                if isinstance(existing_result.get("cover_source_manifest"), dict)
+                else {}
+            ),
+            warnings=list(existing_result.get("warnings") or []),
+        )
     resolved_platform_options = _resolve_upgrade_platform_options(
         packaging=packaging,
         existing_result=existing_result,
@@ -1842,6 +1959,51 @@ def promote_platform_preview_to_intelligent_copy_result(
         platform_keys=all_platform_keys,
         fallback_result=existing_result,
     )
+    persisted_cover_brief = (
+        dict(existing_result.get("cover_brief") or {})
+        if isinstance(existing_result.get("cover_brief"), dict)
+        else {}
+    )
+    readiness_blocking_reasons = intelligent_copy_material_context_fallback_reasons(
+        packaging=existing_packaging,
+        cover_brief=persisted_cover_brief,
+    )
+    if readiness_blocking_reasons:
+        return _build_intelligent_copy_readiness_blocked_result(
+            folder_path=str(folder_path),
+            material_dir=material_dir,
+            inspection=inspect_intelligent_copy_folder(folder_path),
+            copy_style=str(existing_result.get("copy_style") or "attention_grabbing"),
+            requested_platforms=all_platform_keys,
+            blocking_reasons=readiness_blocking_reasons,
+            use_existing_cover=bool(existing_result.get("use_existing_cover")),
+            content_profile=(
+                dict(existing_result.get("content_profile_summary") or {})
+                if isinstance(existing_result.get("content_profile_summary"), dict)
+                else {}
+            ),
+            packaging=existing_packaging,
+            cover_source=_resolve_existing_material_cover_path(
+                existing_result.get("cover_source_path"),
+                material_dir=material_dir,
+            ),
+            cover_reference_paths=[
+                path
+                for item in (existing_result.get("cover_reference_paths") or [])
+                for path in (
+                    [_resolve_existing_material_cover_path(item, material_dir=material_dir)]
+                    if str(item or "").strip()
+                    else []
+                )
+                if path is not None
+            ],
+            cover_source_manifest=(
+                dict(existing_result.get("cover_source_manifest") or {})
+                if isinstance(existing_result.get("cover_source_manifest"), dict)
+                else {}
+            ),
+            warnings=list(existing_result.get("warnings") or []),
+        )
     resolved_platform_options = _resolve_upgrade_platform_options(
         packaging=existing_packaging,
         existing_result=existing_result,
@@ -3116,6 +3278,127 @@ def _merge_resume_packaging(
     return merged
 
 
+def _build_blocked_intelligent_copy_contract(
+    *,
+    requested_platforms: list[str],
+    blocking_reasons: list[str],
+) -> dict[str, Any]:
+    platform_scope = {
+        "requested_platforms": list(requested_platforms),
+        "covered_platforms": [],
+        "missing_requested_platforms": list(requested_platforms),
+    }
+    platform_entries = {
+        platform_key: {
+            "status": "blocked",
+            "basic_publish_ready": False,
+            "one_click_publish_ready": False,
+            "manual_handoff_only": False,
+            "blocking_reasons": list(blocking_reasons),
+        }
+        for platform_key in requested_platforms
+    }
+    return {
+        "status": "blocked",
+        "basic_publish_ready": False,
+        "one_click_publish_ready": False,
+        "manual_handoff_platforms": [],
+        "blocking_reasons": list(blocking_reasons),
+        "platform_scope": platform_scope,
+        "platforms": platform_entries,
+    }
+
+
+def _build_blocked_intelligent_copy_generation_contract(
+    *,
+    requested_platforms: list[str],
+    blocking_reasons: list[str],
+) -> dict[str, Any]:
+    platform_scope = {
+        "requested_platforms": list(requested_platforms),
+        "covered_platforms": [],
+        "missing_requested_platforms": list(requested_platforms),
+    }
+    platform_entries = {
+        platform_key: {
+            "status": "blocked",
+            "generation_ready": False,
+            "blocking_reasons": list(blocking_reasons),
+        }
+        for platform_key in requested_platforms
+    }
+    return {
+        "status": "blocked",
+        "generation_ready": False,
+        "blocking_reasons": list(blocking_reasons),
+        "platform_scope": platform_scope,
+        "platforms": platform_entries,
+    }
+
+
+def _build_intelligent_copy_readiness_blocked_result(
+    *,
+    folder_path: str,
+    material_dir: Path,
+    inspection: dict[str, Any],
+    copy_style: str,
+    requested_platforms: list[str],
+    blocking_reasons: list[str],
+    use_existing_cover: bool,
+    content_profile: dict[str, Any] | None,
+    packaging: dict[str, Any] | None = None,
+    cover_source: Path | None = None,
+    cover_reference_paths: list[Path] | None = None,
+    cover_source_manifest: dict[str, Any] | None = None,
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    packaging_payload = packaging if isinstance(packaging, dict) else {}
+    packaging_reasons = platform_packaging_output_fallback_reasons(
+        packaging_payload,
+        renderless_mode=False,
+    )
+    contract = _build_blocked_intelligent_copy_contract(
+        requested_platforms=requested_platforms,
+        blocking_reasons=blocking_reasons,
+    )
+    generation_contract = _build_blocked_intelligent_copy_generation_contract(
+        requested_platforms=requested_platforms,
+        blocking_reasons=blocking_reasons,
+    )
+    return {
+        "folder_path": str(folder_path),
+        "material_dir": str(material_dir),
+        "markdown_path": str(smart_copy_platform_packaging_markdown_path(material_dir)),
+        "platform_packaging_json_path": str(smart_copy_platform_packaging_json_path(material_dir)),
+        "json_path": str(smart_copy_material_json_path(material_dir)),
+        "status": "blocked",
+        "publish_ready": False,
+        "one_click_publish_ready": False,
+        "manual_handoff_ready": False,
+        "manual_handoff_targets": [],
+        "blocking_reasons": list(blocking_reasons),
+        "warnings": list(warnings or []),
+        "copy_style": str(copy_style or "").strip() or "attention_grabbing",
+        "inspection": inspection,
+        "cover_source_path": str(cover_source) if cover_source else None,
+        "cover_reference_paths": [str(path) for path in (cover_reference_paths or [])],
+        "cover_source_manifest": dict(cover_source_manifest or {}),
+        "use_existing_cover": bool(use_existing_cover),
+        "highlights": (
+            dict(packaging_payload.get("highlights") or {})
+            if not packaging_reasons
+            else {}
+        ),
+        "generation_repair_trace": list(packaging_payload.get("generation_repair_trace") or []),
+        "content_profile_summary": _content_profile_summary(content_profile or {}),
+        "platforms": [],
+        "material_generation_status": "blocked",
+        "material_generation_ready": False,
+        "material_generation_contract": generation_contract,
+        "material_contract": contract,
+    }
+
+
 def _collect_reusable_platform_materials(
     payload: dict[str, Any] | None,
     *,
@@ -3670,7 +3953,11 @@ async def _resolve_restored_cover_brief(
         if isinstance(existing_payload.get("cover_brief"), dict)
         else {}
     )
-    if any(str(persisted.get(key) or "").strip() for key in ("cover_title", "product_identity", "selling_angle", "visual_brief")):
+    persisted_has_payload = any(
+        str(persisted.get(key) or "").strip()
+        for key in ("cover_title", "product_identity", "selling_angle", "visual_brief")
+    )
+    if persisted_has_payload and not intelligent_copy_cover_brief_fallback_reasons(persisted):
         return _normalize_cover_brief_payload(persisted, fallback=fallback)
     return await _maybe_await(_build_intelligent_cover_brief(
         video_path=video_path,

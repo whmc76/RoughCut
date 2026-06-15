@@ -512,6 +512,29 @@ def test_manual_editor_suspicious_timing_uses_display_surface_contract() -> None
     )
 
 
+def test_manual_editor_suspicious_timing_rejects_output_fallback_alignment() -> None:
+    assert _manual_editor_projection_has_suspicious_subtitle_timing(
+        [
+            {
+                "start_time": 0.0,
+                "end_time": 2.0,
+                "text_raw": "正常字幕",
+                "text_norm": "正常字幕",
+                "text_final": "正常字幕",
+                "words": [
+                    {
+                        "word": "正常",
+                        "start": 0.0,
+                        "end": 1.0,
+                        "alignment": {"source": "postprocess_text_fallback"},
+                    }
+                ],
+            }
+        ],
+        split_profile={"max_chars": 30, "max_duration": 5.0},
+    )
+
+
 def test_pipeline_suspicious_timing_uses_display_surface_contract() -> None:
     assert not _projection_has_suspicious_subtitle_timing(
         [
@@ -523,6 +546,29 @@ def test_pipeline_suspicious_timing_uses_display_surface_contract() -> None:
                 "text_norm": "啊",
                 "text_final": "",
                 "display_suppressed_reason": "standalone_filler",
+            }
+        ],
+        split_profile={"max_chars": 30, "max_duration": 5.0},
+    )
+
+
+def test_pipeline_suspicious_timing_rejects_output_fallback_alignment() -> None:
+    assert _projection_has_suspicious_subtitle_timing(
+        [
+            {
+                "start_time": 0.0,
+                "end_time": 2.0,
+                "text_raw": "正常字幕",
+                "text_norm": "正常字幕",
+                "text_final": "正常字幕",
+                "words": [
+                    {
+                        "word": "正常",
+                        "start": 0.0,
+                        "end": 1.0,
+                        "alignment": {"source": "canonical_segment_fallback"},
+                    }
+                ],
             }
         ],
         split_profile={"max_chars": 30, "max_duration": 5.0},

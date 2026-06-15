@@ -361,12 +361,6 @@
             "platform_label": "B站",
             "account_label": "FAS · Chrome",
             "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:bilibili",
-            "status": "logged_in",
-            "enabled": true,
-            "adapter": "browser_agent",
-            "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
-            "last_error": null,
             "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
             "browser_binding": {
               "browser": "chrome",
@@ -374,8 +368,15 @@
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": null,
               "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
-            }
+            },
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null
           },
           {
             "id": "e5588d6ef8fc4726bf1e3b1eb06c5a8b",
@@ -383,12 +384,6 @@
             "platform_label": "小红书",
             "account_label": "FAS · Chrome",
             "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:xiaohongshu",
-            "status": "logged_in",
-            "enabled": true,
-            "adapter": "browser_agent",
-            "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
-            "last_error": null,
             "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
             "browser_binding": {
               "browser": "chrome",
@@ -396,8 +391,15 @@
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": null,
               "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
-            }
+            },
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null
           },
           {
             "id": "e4572d771c9748218502c7dd7f000653",
@@ -405,12 +407,6 @@
             "platform_label": "抖音",
             "account_label": "FAS · Chrome",
             "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:douyin",
-            "status": "logged_in",
-            "enabled": true,
-            "adapter": "browser_agent",
-            "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
-            "last_error": null,
             "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
             "browser_binding": {
               "browser": "chrome",
@@ -418,8 +414,15 @@
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": null,
               "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
-            }
+            },
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null
           },
           {
             "id": "2f2c9087bb3e4041b171a7ff0194acf1",
@@ -427,12 +430,6 @@
             "platform_label": "快手",
             "account_label": "FAS · Chrome",
             "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:kuaishou",
-            "status": "logged_in",
-            "enabled": true,
-            "adapter": "browser_agent",
-            "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
-            "last_error": null,
             "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
             "browser_binding": {
               "browser": "chrome",
@@ -440,8 +437,15 @@
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": null,
               "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
-            }
+            },
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null
           },
           {
             "id": "eb99653c03cc47888081422f53bfcd60",
@@ -449,12 +453,6 @@
             "platform_label": "视频号",
             "account_label": "FAS · Chrome",
             "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:wechat-channels",
-            "status": "logged_in",
-            "enabled": true,
-            "adapter": "browser_agent",
-            "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
-            "last_error": null,
             "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
             "browser_binding": {
               "browser": "chrome",
@@ -462,8 +460,15 @@
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": null,
               "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
-            }
+            },
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null
           },
           {
             "id": "db437af2d30c467f84b9fafed826a4c8",
@@ -471,12 +476,6 @@
             "platform_label": "头条号",
             "account_label": "FAS · Chrome",
             "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:toutiao",
-            "status": "logged_in",
-            "enabled": true,
-            "adapter": "browser_agent",
-            "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
-            "last_error": null,
             "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
             "browser_binding": {
               "browser": "chrome",
@@ -484,8 +483,15 @@
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": null,
               "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
-            }
+            },
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null
           },
           {
             "id": "8a4a60e148ac4059a4febf4a0edd5519",
@@ -493,12 +499,6 @@
             "platform_label": "YouTube",
             "account_label": "FAS · Chrome",
             "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:youtube",
-            "status": "logged_in",
-            "enabled": true,
-            "adapter": "browser_agent",
-            "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
-            "last_error": null,
             "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
             "browser_binding": {
               "browser": "chrome",
@@ -506,8 +506,15 @@
               "profile_directory": "Profile 2",
               "profile_name": "FAS_EDC",
               "profile_email": "fas.galactic@gmail.com",
+              "cdp_base_url": null,
               "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2"
-            }
+            },
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ C:/Users/28687/AppData/Local/Google/Chrome/User Data。",
+            "last_error": null
           },
           {
             "id": "6abd7e2ca16f49728b8656d4de3ada1c",
@@ -515,12 +522,6 @@
             "platform_label": "X",
             "account_label": "FAS · Chrome",
             "credential_ref": "browser-agent:chrome:d2d15bc6d77a47b79cf20a79b56596c2:x",
-            "status": "logged_in",
-            "enabled": true,
-            "adapter": "browser_agent",
-            "verified_at": "2026-05-21T17:49:09.489146+00:00",
-            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ E:/WorkSpace/RoughCut/data/runtime/publication-browser-profile-stable/chrome-user-data。",
-            "last_error": null,
             "browser_profile_id": "browser-profile:chrome:5748ec82429e20a77ac7",
             "browser_binding": {
               "browser": "chrome",
@@ -530,7 +531,13 @@
               "profile_email": "fas.galactic@gmail.com",
               "cdp_base_url": "http://127.0.0.1:9222",
               "profile_id": "browser-profile:chrome:5748ec82429e20a77ac7"
-            }
+            },
+            "status": "logged_in",
+            "enabled": true,
+            "adapter": "browser_agent",
+            "verified_at": "2026-05-21T17:49:09.489146+00:00",
+            "notes": "由智能发布页根据用户选择的Chrome本地浏览器会话引用自动匹配；未读取或保存平台密码、Cookie 或浏览器凭证。 已绑定真实浏览器 profile：Profile 2 @ E:/WorkSpace/RoughCut/data/runtime/publication-browser-profile-stable/chrome-user-data。",
+            "last_error": null
           }
         ]
       },
@@ -542,73 +549,24 @@
       "archive_notes": null
     },
     "profile_dir": "data\\avatar_materials\\profiles\\FAS_d2d15bc6",
-    "training_status": "ready_for_manual_training",
+    "training_status": "needs_more_material",
     "training_provider": "heygem",
-    "training_api_available": true,
-    "next_action": "素材已通过基础预检，声音采样也已完成预处理，可以直接生成脚本驱动的数字人预览样片。",
+    "training_api_available": false,
+    "next_action": "先补齐讲话视频片段或修复阻塞项，再导入 HeyGem 训练。",
     "capability_status": {
-      "heygem_avatar": "ready",
+      "avatar_generation": "missing",
       "voice_clone": "ready",
-      "portrait_reference": "ready",
-      "preview": "ready"
+      "portrait_reference": "missing",
+      "preview": "missing"
     },
-    "blocking_issues": [],
-    "warnings": [],
+    "blocking_issues": [
+      "至少需要 1 个讲话视频片段，当前档案还不能进入 HeyGem 数字人训练。"
+    ],
+    "warnings": [
+      "还没有肖像照，建议补 3 到 10 张正脸图片用于形象核验。"
+    ],
     "created_at": "2026-03-26T07:52:57.313770+00:00",
     "files": [
-      {
-        "id": "de90c4d1149941be94bacc2877f81746",
-        "original_name": "_.mp4",
-        "stored_name": "_.mp4",
-        "kind": "video",
-        "role": "speaking_video",
-        "role_label": "讲话视频片段",
-        "pipeline_target": "heygem_avatar",
-        "content_type": "video/mp4",
-        "size_bytes": 87348509,
-        "path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\_.mp4",
-        "created_at": "2026-03-26T07:52:57.098978+00:00",
-        "probe": {
-          "duration": 69.752993,
-          "width": 1080,
-          "height": 1080,
-          "fps": 30.0,
-          "video_codec": "hevc",
-          "audio_codec": "aac",
-          "audio_sample_rate": 44100,
-          "audio_channels": 2,
-          "format_name": "mov,mp4,m4a,3gp,3g2,mj2",
-          "bit_rate": 10018037
-        },
-        "artifacts": null,
-        "checks": [
-          {
-            "level": "ok",
-            "message": "讲话视频片段基础参数达标，可进入 HeyGem 人工复核。"
-          }
-        ]
-      },
-      {
-        "id": "6e5828056ed24f339ca8da4a5deeb6c9",
-        "original_name": "_.png",
-        "stored_name": "_.png",
-        "kind": "image",
-        "role": "portrait_photo",
-        "role_label": "肖像照",
-        "pipeline_target": "avatar_identity",
-        "content_type": "image/png",
-        "size_bytes": 12460769,
-        "path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\_.png",
-        "created_at": "2026-03-26T07:52:57.107548+00:00",
-        "probe": null,
-        "artifacts": null,
-        "checks": [
-          {
-            "level": "ok",
-            "message": "肖像照已入库，可用于形象核验和模板管理。"
-          }
-        ]
-      },
       {
         "id": "1f417f6c17a84b08bb7ce1d414a347ed",
         "original_name": "_.m4a",
@@ -653,48 +611,31 @@
         ]
       }
     ],
-    "preview_runs": [
-      {
-        "id": "8ab62636b25b4b6ba8398467ddfb371a",
-        "status": "completed",
-        "script": "大家好，我是FAS。现在这是一条 RoughCut 自动生成的创作者数字人预览样片，主要用于检查音色一致性、口型同步和讲话镜头稳定性。",
-        "task_code": "avatar-preview-8ab626-0",
-        "source_voice_file_id": "1f417f6c17a84b08bb7ce1d414a347ed",
-        "source_video_file_id": "de90c4d1149941be94bacc2877f81746",
-        "output_path": "data\\avatar_materials\\profiles\\FAS_d2d15bc6\\previews\\8ab62636b25b4b6ba8398467ddfb371a.mp4",
-        "output_size_bytes": 13086852,
-        "duration_sec": 18.0,
-        "width": 1080,
-        "height": 1080,
-        "preview_mode": "source_audio_direct",
-        "fallback_reason": null,
-        "created_at": "2026-03-26T07:59:33Z"
-      }
-    ],
+    "preview_runs": [],
     "profile_dashboard": {
-      "completeness_score": 50,
+      "completeness_score": 33,
       "section_status": {
         "identity": false,
         "positioning": false,
         "publishing": true,
         "publication_credentials": true,
         "business": false,
-        "materials": true
+        "materials": false
       },
       "material_counts": {
-        "speaking_videos": 1,
-        "portrait_photos": 1,
+        "speaking_videos": 0,
+        "portrait_photos": 0,
         "voice_samples": 1
       },
       "strengths": [
         "渠道侧信息已具备复用价值",
-        "已绑定可复用的平台发布凭据",
-        "数字人口播素材链路已打通"
+        "已绑定可复用的平台发布凭据"
       ],
       "next_steps": [
         "补充作者名、身份标题或简介，先把对外身份讲清楚。",
         "补充内容定位、受众和表达风格，方便平台文案按策略生成。",
-        "补充联系方式或合作备注，方便归档为完整创作者档案。"
+        "补充联系方式或合作备注，方便归档为完整创作者档案。",
+        "至少补齐讲话视频和声音采样，才能稳定生成数字人预览。"
       ]
     }
   }

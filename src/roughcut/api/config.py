@@ -49,8 +49,9 @@ from roughcut.config_profiles import (
     delete_config_profile,
     update_config_profile,
 )
-from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
-from roughcut.creative.modes import build_mode_catalog
+from roughcut.creative.modes import build_mode_catalog, normalize_enhancement_modes, normalize_workflow_mode
+from roughcut.edit.capabilities import build_capability_catalog
+from roughcut.edit.rule_registry import build_rule_catalog
 from roughcut.providers.zhipu_tools import get_mcp_server_catalog as get_zhipu_mcp_server_catalog
 from roughcut.speech.dialects import DEFAULT_TRANSCRIPTION_DIALECT, normalize_transcription_dialect
 
@@ -468,6 +469,8 @@ class ConfigOptionsOut(BaseModel):
     workflow_templates: list[dict[str, str]]
     workflow_modes: list[dict[str, str]]
     enhancement_modes: list[dict[str, str]]
+    smart_cut_rules: list[dict[str, Any]]
+    capability_catalog: list[dict[str, str]]
     transcription_dialects: list[dict[str, str]]
     avatar_providers: list[dict[str, str]]
     voice_providers: list[dict[str, str]]
@@ -878,6 +881,8 @@ def get_config_options():
         workflow_templates=build_workflow_template_options(),
         workflow_modes=build_workflow_mode_options(),
         enhancement_modes=build_enhancement_mode_options(),
+        smart_cut_rules=build_rule_catalog(),
+        capability_catalog=build_capability_catalog(),
         transcription_dialects=build_transcription_dialect_options(),
         avatar_providers=build_avatar_provider_options(),
         voice_providers=build_voice_provider_options(),

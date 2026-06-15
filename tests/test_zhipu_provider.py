@@ -1,12 +1,13 @@
 from roughcut.config import DEFAULT_ZHIPU_REASONING_MODEL, normalize_reasoning_model_for_provider
 from roughcut.api.config import _redact_secret_map
 from roughcut.providers.zhipu_http import build_zhipu_request_context
-from roughcut.providers.zhipu_compat import DEFAULT_ZHIPU_MCP_HTTP_BASE_URL, build_zhipu_mcp_server_catalog
+from roughcut.providers.zhipu_compat import DEFAULT_ZHIPU_CODING_BASE_URL, DEFAULT_ZHIPU_MCP_HTTP_BASE_URL, build_zhipu_mcp_server_catalog, resolve_zhipu_reasoning_base_url
 from roughcut.providers.reasoning.zhipu_reasoning import _should_enable_zhipu_thinking
 
 
 def test_zhipu_provider_defaults_to_glm_5_2() -> None:
     assert normalize_reasoning_model_for_provider("zhipu", "") == DEFAULT_ZHIPU_REASONING_MODEL
+    assert normalize_reasoning_model_for_provider("zhipu", "glm-5.2[1m]") == DEFAULT_ZHIPU_REASONING_MODEL
 
 
 def test_zhipu_mcp_catalog_exposes_required_servers() -> None:
@@ -31,10 +32,10 @@ def test_zhipu_low_effort_does_not_force_thinking() -> None:
 
 
 def test_zhipu_glm_5_2_keeps_low_as_non_thinking_and_max_as_complex_thinking() -> None:
-    assert _should_enable_zhipu_thinking(effort="minimal", model="glm-5.2[1m]") is False
-    assert _should_enable_zhipu_thinking(effort="low", model="glm-5.2[1m]") is False
-    assert _should_enable_zhipu_thinking(effort="medium", model="glm-5.2[1m]") is True
-    assert _should_enable_zhipu_thinking(effort="max", model="glm-5.2[1m]") is True
+    assert _should_enable_zhipu_thinking(effort="minimal", model="glm-5.2") is False
+    assert _should_enable_zhipu_thinking(effort="low", model="glm-5.2") is False
+    assert _should_enable_zhipu_thinking(effort="medium", model="glm-5.2") is True
+    assert _should_enable_zhipu_thinking(effort="max", model="glm-5.2") is True
 
 
 def test_zhipu_request_context_provides_traceable_ids() -> None:
@@ -42,6 +43,14 @@ def test_zhipu_request_context_provides_traceable_ids() -> None:
 
     assert len(str(payload["request_id"])) >= 6
     assert str(payload["user_id"]).startswith("roughcut-")
+
+
+def test_zhipu_glm_5_x_reasoning_uses_coding_base_url() -> None:
+    assert resolve_zhipu_reasoning_base_url(
+        base_url="https://open.bigmodel.cn/api/paas/v4",
+        coding_base_url="",
+        model="glm-5.2",
+    ) == DEFAULT_ZHIPU_CODING_BASE_URL
 
 
 def test_redact_secret_map_masks_sensitive_keys() -> None:

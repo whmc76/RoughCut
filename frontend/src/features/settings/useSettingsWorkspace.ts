@@ -21,11 +21,11 @@ function normalizeBundledForm(form: SettingsForm): SettingsForm {
   nextForm.backup_reasoning_model = String(nextForm.backup_reasoning_model ?? "gpt-5.4-mini").trim() || "gpt-5.4-mini";
   nextForm.backup_reasoning_effort = String(nextForm.backup_reasoning_effort ?? "medium").trim() || "medium";
   nextForm.backup_vision_model = String(nextForm.backup_vision_model ?? "gpt-5.4-mini").trim() || "gpt-5.4-mini";
-  nextForm.backup_search_provider = String(nextForm.backup_search_provider ?? "auto").trim() || "auto";
-  nextForm.backup_search_fallback_provider = String(nextForm.backup_search_fallback_provider ?? "openai").trim() || "openai";
+  nextForm.backup_search_provider = String(nextForm.backup_search_provider ?? "searxng").trim() || "searxng";
+  nextForm.backup_search_fallback_provider = String(nextForm.backup_search_fallback_provider ?? "searxng").trim() || "searxng";
   nextForm.backup_model_search_helper = String(nextForm.backup_model_search_helper ?? "").trim();
-  nextForm.search_provider = "auto";
-  nextForm.search_fallback_provider = String(nextForm.search_fallback_provider ?? "openai").trim() || "openai";
+  nextForm.search_provider = "searxng";
+  nextForm.search_fallback_provider = String(nextForm.search_fallback_provider ?? "searxng").trim() || "searxng";
   nextForm.multimodal_fallback_provider = String(nextForm.multimodal_fallback_provider ?? "openai").trim() || "openai";
   nextForm.multimodal_fallback_model = String(nextForm.multimodal_fallback_model ?? "gpt-5.4-mini").trim() || "gpt-5.4-mini";
   nextForm.model_search_helper = String(nextForm.model_search_helper ?? "").trim();
@@ -46,8 +46,8 @@ function buildSettingsForm(config: NonNullable<ReturnType<typeof api.getConfig> 
     backup_reasoning_model: config.backup_reasoning_model ?? "gpt-5.4-mini",
     backup_reasoning_effort: config.backup_reasoning_effort ?? "medium",
     backup_vision_model: config.backup_vision_model ?? "gpt-5.4-mini",
-    backup_search_provider: config.backup_search_provider ?? "auto",
-    backup_search_fallback_provider: config.backup_search_fallback_provider ?? "openai",
+    backup_search_provider: config.backup_search_provider ?? "searxng",
+    backup_search_fallback_provider: config.backup_search_fallback_provider ?? "searxng",
     backup_model_search_helper: config.backup_model_search_helper ?? "",
     local_reasoning_model: config.local_reasoning_model,
     local_vision_model: config.local_vision_model,

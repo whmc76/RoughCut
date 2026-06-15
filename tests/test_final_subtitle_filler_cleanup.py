@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from roughcut.media.output import write_srt_file
-from roughcut.media.subtitles import split_subtitle_display_text, write_ass_file
+from roughcut.media.subtitles import split_subtitle_display_item, split_subtitle_display_text, write_ass_file
 from roughcut.media.subtitle_text import (
     clean_final_subtitle_text,
     clean_subtitle_payloads,
@@ -407,6 +407,87 @@ def test_write_ass_file_splits_long_dialogues_instead_of_truncating(tmp_path: Pa
     assert len(dialogue_lines) >= 2
     assert "…" not in "\n".join(dialogue_lines)
     assert "很多兄弟一样" in "\n".join(dialogue_lines)
+
+
+def test_split_subtitle_display_item_uses_word_timed_boundaries_for_display_segments() -> None:
+    segments = split_subtitle_display_item(
+        start_time=0.0,
+        end_time=12.0,
+        text="甲乙丙丁戊己",
+        subtitle_item={
+            "start_time": 0.0,
+            "end_time": 12.0,
+            "text_final": "甲乙丙丁戊己",
+            "words": [
+                {"word": "甲", "start": 0.0, "end": 1.0},
+                {"word": "乙", "start": 1.0, "end": 2.0},
+                {"word": "丙", "start": 2.0, "end": 6.0},
+                {"word": "丁", "start": 6.0, "end": 7.0},
+                {"word": "戊", "start": 7.0, "end": 8.0},
+                {"word": "己", "start": 8.0, "end": 12.0},
+            ],
+        },
+        max_duration_sec=4.0,
+        max_chars=2,
+    )
+
+    assert [segment["text"] for segment in segments] == ["甲乙", "丙丁", "戊己"]
+    assert [(segment["start_time"], segment["end_time"]) for segment in segments] == [
+        (0.0, 2.0),
+        (2.0, 7.0),
+        (7.0, 12.0),
+    ]
+
+
+def test_write_srt_file_uses_faithful_source_surface_when_display_text_omits_words(tmp_path: Path) -> None:
+    output_path = tmp_path / "faithful.srt"
+
+    write_srt_file(
+        [
+            {
+                "start_time": 0.0,
+                "end_time": 3.0,
+                "text_final": "去伤人的重中之重",
+                "transcript_text": "这个去伤人的这个重中之重",
+                "words": [
+                    {"word": "这个", "start": 0.0, "end": 0.4},
+                    {"word": "去伤人的", "start": 0.4, "end": 1.3},
+                    {"word": "这个", "start": 1.3, "end": 1.7},
+                    {"word": "重中之重", "start": 1.7, "end": 3.0},
+                ],
+            }
+        ],
+        output_path,
+    )
+
+    content = output_path.read_text(encoding="utf-8-sig")
+    assert "这个去伤人的这个重中之重" in content
+    assert "去伤人的重中之重" not in content
+
+
+def test_write_srt_file_keeps_numeric_display_surface_when_it_matches_spoken_numbers(tmp_path: Path) -> None:
+    output_path = tmp_path / "numbers.srt"
+
+    write_srt_file(
+        [
+            {
+                "start_time": 0.0,
+                "end_time": 2.0,
+                "text_final": "10000流明啊",
+                "transcript_text": "一万流明啊",
+                "words": [
+                    {"word": "一万", "start": 0.0, "end": 0.8},
+                    {"word": "流明", "start": 0.8, "end": 1.5},
+                    {"word": "啊", "start": 1.5, "end": 2.0},
+                ],
+            }
+        ],
+        output_path,
+    )
+
+    content = output_path.read_text(encoding="utf-8-sig")
+    assert "10000流明啊" in content
+    assert "一万流明啊" not in content
 
 
 def test_split_subtitle_display_text_splits_oversized_chinese_token_before_latin_token() -> None:

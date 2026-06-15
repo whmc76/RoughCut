@@ -54,7 +54,7 @@ class HeyGemAvatarProvider(AvatarProvider):
             "submit_endpoint": base_url + "/easy/submit",
             "query_endpoint": base_url + "/easy/query",
             "job_id": job_id,
-            "presenter_id": plan.get("presenter_id") or settings.avatar_presenter_id,
+            "presenter_id": plan.get("presenter_id"),
             "layout_template": plan.get("layout_template") or settings.avatar_layout_template,
             "segments": [
                 {
@@ -157,6 +157,12 @@ class HeyGemAvatarProvider(AvatarProvider):
             "failed_count": failed_count,
             "segments": results,
         }
+
+    def estimate_render_timeout_seconds(self, *, request: dict[str, Any]) -> float | None:
+        segments = list(request.get("segments") or [])
+        if not segments:
+            return _TASK_TIMEOUT_MIN_SECONDS
+        return float(sum(_resolve_task_timeout_seconds(segment) for segment in segments))
 
     def _execute_segment(
         self,

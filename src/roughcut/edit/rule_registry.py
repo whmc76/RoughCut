@@ -104,6 +104,28 @@ _RULE_DEFINITIONS: dict[str, RuleDefinition] = {
         speech_explicit_cut=True,
         llm_review_cut=True,
     ),
+    "failed_attempt": RuleDefinition(
+        reason="failed_attempt",
+        kind="smart_delete",
+        risk_level="high",
+        match_surface_layer="raw",
+        label="失败尝试废片",
+        frontend_managed_auto_cut=True,
+        speech_explicit_cut=True,
+        multimodal_review_cut=True,
+        llm_review_cut=True,
+    ),
+    "off_topic_interruption": RuleDefinition(
+        reason="off_topic_interruption",
+        kind="smart_delete",
+        risk_level="high",
+        match_surface_layer="raw",
+        label="离题/打断废片",
+        frontend_managed_auto_cut=True,
+        speech_explicit_cut=True,
+        multimodal_review_cut=True,
+        llm_review_cut=True,
+    ),
     "noise_subtitle": RuleDefinition(
         reason="noise_subtitle",
         kind="smart_delete",
@@ -199,6 +221,26 @@ def _reason_set_from_metadata(
 
 def get_rule_definition(reason: str) -> RuleDefinition | None:
     return _RULE_DEFINITIONS.get(str(reason or "").strip())
+
+
+def build_rule_catalog() -> list[dict[str, object]]:
+    return [
+        {
+            "reason": definition.reason,
+            "kind": definition.kind,
+            "risk_level": definition.risk_level,
+            "match_surface_layer": definition.match_surface_layer,
+            "label": definition.label,
+            "auto_apply_in_auto_mode": definition.auto_apply_in_auto_mode,
+            "frontend_managed_auto_cut": definition.frontend_managed_auto_cut,
+            "speech_explicit_cut": definition.speech_explicit_cut,
+            "speech_review_cut": definition.speech_review_cut,
+            "pause_cut": definition.pause_cut,
+            "multimodal_review_cut": definition.multimodal_review_cut,
+            "llm_review_cut": definition.llm_review_cut,
+        }
+        for definition in _RULE_DEFINITIONS.values()
+    ]
 
 
 def rule_kind(reason: str) -> str | None:

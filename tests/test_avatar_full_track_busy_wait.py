@@ -12,8 +12,11 @@ from roughcut.pipeline.steps import (
     _AVATAR_FULL_TRACK_SLOT_TIMEOUT_SECONDS,
     AvatarFullTrackRenderError,
     _avatar_full_track_error_payload,
+    _merge_render_runtime_result,
+    _render_full_track_avatar_video,
     _resolve_avatar_full_track_busy_max_wait_seconds,
     _resolve_avatar_full_track_call_timeout_seconds,
+    _resolve_avatar_full_track_execution_timeout_seconds,
     _resolve_avatar_full_track_slot_timeout_seconds,
     _execute_avatar_full_track_render_request,
     _hold_avatar_full_track_slot,
@@ -48,6 +51,20 @@ def test_resolve_avatar_full_track_call_timeout_has_minimum(monkeypatch: pytest.
     monkeypatch.setenv("ROUGHCUT_AVATAR_FULL_TRACK_CALL_TIMEOUT_SECONDS", "5")
 
     assert _resolve_avatar_full_track_call_timeout_seconds() == 10.0
+
+
+def test_resolve_avatar_full_track_execution_timeout_uses_provider_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ROUGHCUT_AVATAR_FULL_TRACK_CALL_TIMEOUT_SECONDS", raising=False)
+
+    provider = SimpleNamespace(estimate_render_timeout_seconds=lambda *, request: 640.0)
+
+    assert (
+        _resolve_avatar_full_track_execution_timeout_seconds(
+            provider=provider,
+            render_request={"request_id": "test"},
+        )
+        == 640.0
+    )
 
 
 def test_resolve_avatar_full_track_slot_timeout_uses_default_when_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -130,10 +147,16 @@ async def test_execute_avatar_full_track_render_request_respects_call_timeout(mo
         yield
 
     monkeypatch.setattr("roughcut.pipeline.steps._hold_avatar_full_track_slot", fake_hold_avatar_full_track_slot)
-    monkeypatch.setattr("roughcut.pipeline.steps.get_avatar_provider", lambda: SimpleNamespace(execute_render=fake_execute_render))
     monkeypatch.setattr(
-        "roughcut.pipeline.steps._resolve_avatar_full_track_call_timeout_seconds",
-        lambda: 0.05,
+        "roughcut.pipeline.steps.get_avatar_provider",
+        lambda: SimpleNamespace(
+            execute_render=fake_execute_render,
+            estimate_render_timeout_seconds=lambda *, request: 0.05,
+        ),
+    )
+    monkeypatch.setattr(
+        "roughcut.pipeline.steps._resolve_avatar_full_track_execution_timeout_seconds",
+        lambda *, provider, render_request: 0.05,
     )
 
     with pytest.raises(AvatarFullTrackRenderError, match="avatar_full_track_call_timeout") as exc_info:
@@ -179,3 +202,42 @@ def test_avatar_full_track_error_payload_preserves_reason_and_metadata() -> None
         "retryable": True,
         "error_metadata": {"call_timeout_seconds": 45.0},
     }
+
+
+def test_merge_render_runtime_result_clears_stale_error_fields_after_success() -> None:
+    merged = _merge_render_runtime_result(
+        {
+            "status": "degraded",
+            "reason": "avatar_full_track_call_timeout",
+            "retryable": True,
+            "error_metadata": {"call_timeout_seconds": 180.0},
+            "output_path": "C:/temp/avatar.mp4",
+        },
+        {
+            "status": "done",
+            "detail": "数字人口播已作为画中画写入成片。",
+            "output_path": "E:/output/avatar.mp4",
+        },
+    )
+
+    assert merged == {
+        "status": "done",
+        "detail": "数字人口播已作为画中画写入成片。",
+        "output_path": "E:/output/avatar.mp4",
+    }
+
+
+@pytest.mark.asyncio
+async def test_render_full_track_avatar_video_raises_typed_error_when_presenter_missing(tmp_path) -> None:
+    source_plain_video_path = tmp_path / "plain.mp4"
+    source_plain_video_path.write_bytes(b"")
+
+    with pytest.raises(AvatarFullTrackRenderError, match="avatar_full_track_presenter_missing") as exc_info:
+        await _render_full_track_avatar_video(
+            job_id="job-id",
+            avatar_plan={},
+            source_plain_video_path=source_plain_video_path,
+            debug_dir=None,
+        )
+
+    assert exc_info.value.reason_code == "avatar_full_track_presenter_missing"

@@ -365,6 +365,7 @@ def build_edit_decision(
     transcript_segments: list[dict] | None = None,
     scene_boundaries: list[SceneBoundary | dict[str, Any] | float] | None = None,
     editing_skill: dict[str, Any] | None = None,
+    timeline_analysis: dict[str, Any] | None = None,
     min_silence_to_cut: float = 0.5,
     cut_fillers: bool = True,
 ) -> EditDecision:
@@ -392,11 +393,15 @@ def build_edit_decision(
     scene_points = _normalize_scene_points(scene_boundaries or [])
 
     candidates: list[CutCandidate] = []
-    timeline_analysis = infer_timeline_analysis(
-        enriched_subtitles,
-        content_profile=content_profile,
-        duration=duration,
-        editing_skill=resolved_skill,
+    timeline_analysis = (
+        dict(timeline_analysis)
+        if isinstance(timeline_analysis, dict)
+        else infer_timeline_analysis(
+            enriched_subtitles,
+            content_profile=content_profile,
+            duration=duration,
+            editing_skill=resolved_skill,
+        )
     )
     candidates.extend(
         _build_silence_cut_candidates(
@@ -3169,6 +3174,8 @@ def _cut_reason_priority(reason: str) -> int:
     priorities = {
         "rollback_instruction": 5,
         "restart_retake": 5,
+        "failed_attempt": 5,
+        "off_topic_interruption": 5,
         "restart_cue": 4,
         "noise_subtitle": 4,
         "low_signal_subtitle": 4,

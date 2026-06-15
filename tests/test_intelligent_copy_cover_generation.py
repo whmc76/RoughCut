@@ -3974,6 +3974,169 @@ async def test_generate_intelligent_copy_passes_selected_platforms_to_packaging(
 
 
 @pytest.mark.asyncio
+async def test_generate_intelligent_copy_blocks_fallback_packaging_from_formal_output(tmp_path, monkeypatch) -> None:
+    source_dir = tmp_path / "MAXACE 美杜莎4 顶配次顶配开箱"
+    source_dir.mkdir()
+    video_path = source_dir / "MAXACE 美杜莎4 顶配次顶配开箱.mp4"
+    subtitle_path = source_dir / "MAXACE 美杜莎4 顶配次顶配开箱.srt"
+    video_path.write_bytes(b"video")
+    subtitle_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nMAXACE 美杜莎4 到货了\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        ic,
+        "inspect_intelligent_copy_folder",
+        lambda _folder: {
+            "folder_path": str(source_dir),
+            "material_dir": str(source_dir / "smart-copy"),
+            "video_file": str(video_path),
+            "subtitle_file": str(subtitle_path),
+            "cover_file": None,
+            "extra_video_files": [],
+            "extra_subtitle_files": [],
+            "extra_cover_files": [],
+            "warnings": [],
+        },
+    )
+    monkeypatch.setattr(ic, "_load_subtitle_items", lambda _path: [{"text_final": "MAXACE 美杜莎4 到货了"}])
+    monkeypatch.setattr(ic, "list_packaging_assets", lambda: {"config": {}})
+    monkeypatch.setattr(
+        ic,
+        "_build_intelligent_copy_fast_profile",
+        lambda **_kwargs: {"subject_model": "MAXACE 美杜莎4", "subject_type": "EDC折刀"},
+    )
+    monkeypatch.setattr(ic, "_build_intelligent_copy_brief", lambda **_kwargs: {"topic_subject": "MAXACE 美杜莎4"})
+
+    async def fake_generate_platform_packaging(**_kwargs):
+        return {
+            "highlights": {"product": "MAXACE 美杜莎4"},
+            "generation_repair_trace": [{"status": "deterministic_fallback", "reason": "llm timeout"}],
+            "platforms": {
+                "douyin": {
+                    "titles": ["MAXACE美杜莎4到货了"],
+                    "description": "MAXACE美杜莎4到货了，顶配和次顶配一起看。",
+                    "tags": ["MAXACE", "美杜莎4"],
+                },
+            },
+        }
+
+    async def fake_build_cover_brief(**_kwargs):
+        return {
+            "cover_title": "MAXACE美杜莎4到货了",
+            "video_type": "开箱体验",
+            "product_identity": "MAXACE 美杜莎4",
+            "selling_angle": "顶配次顶配对比",
+            "visual_brief": "主体真实，标题居中。",
+            "strategy_source": "llm",
+        }
+
+    async def fake_prepare_cover_source(**_kwargs):
+        return None
+
+    monkeypatch.setattr(ic, "generate_platform_packaging", fake_generate_platform_packaging)
+    monkeypatch.setattr(ic, "_build_intelligent_cover_brief", fake_build_cover_brief)
+    monkeypatch.setattr(ic, "_prepare_intelligent_copy_cover_source", fake_prepare_cover_source)
+    monkeypatch.setattr(
+        ic,
+        "save_platform_packaging_markdown",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should block before writing markdown")),
+    )
+    monkeypatch.setattr(
+        ic,
+        "_render_or_reuse_platform_cover_group",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("should block before rendering cover")),
+    )
+    monkeypatch.setattr(
+        ic,
+        "_write_platform_material_files",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("should block before writing platform files")),
+    )
+
+    result = await ic.generate_intelligent_copy(str(source_dir), platforms=["douyin"])
+
+    assert result["status"] == "blocked"
+    assert result["platforms"] == []
+    assert result["publish_ready"] is False
+    assert "platform_packaging_deterministic_fallback" in result["blocking_reasons"]
+    assert not (source_dir / "smart-copy" / "platform-packaging.md").exists()
+    assert not (source_dir / "smart-copy" / "smart-copy.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_generate_intelligent_copy_blocks_fallback_cover_brief_from_formal_output(tmp_path, monkeypatch) -> None:
+    source_dir = tmp_path / "MAXACE 美杜莎4 顶配次顶配开箱"
+    source_dir.mkdir()
+    video_path = source_dir / "MAXACE 美杜莎4 顶配次顶配开箱.mp4"
+    subtitle_path = source_dir / "MAXACE 美杜莎4 顶配次顶配开箱.srt"
+    video_path.write_bytes(b"video")
+    subtitle_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nMAXACE 美杜莎4 到货了\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        ic,
+        "inspect_intelligent_copy_folder",
+        lambda _folder: {
+            "folder_path": str(source_dir),
+            "material_dir": str(source_dir / "smart-copy"),
+            "video_file": str(video_path),
+            "subtitle_file": str(subtitle_path),
+            "cover_file": None,
+            "extra_video_files": [],
+            "extra_subtitle_files": [],
+            "extra_cover_files": [],
+            "warnings": [],
+        },
+    )
+    monkeypatch.setattr(ic, "_load_subtitle_items", lambda _path: [{"text_final": "MAXACE 美杜莎4 到货了"}])
+    monkeypatch.setattr(ic, "list_packaging_assets", lambda: {"config": {}})
+    monkeypatch.setattr(
+        ic,
+        "_build_intelligent_copy_fast_profile",
+        lambda **_kwargs: {"subject_model": "MAXACE 美杜莎4", "subject_type": "EDC折刀"},
+    )
+    monkeypatch.setattr(ic, "_build_intelligent_copy_brief", lambda **_kwargs: {"topic_subject": "MAXACE 美杜莎4"})
+
+    async def fake_generate_platform_packaging(**_kwargs):
+        return {
+            "highlights": {"product": "MAXACE 美杜莎4"},
+            "platforms": {
+                "douyin": {
+                    "titles": ["MAXACE美杜莎4到货了"],
+                    "description": "MAXACE美杜莎4到货了，顶配和次顶配一起看。",
+                    "tags": ["MAXACE", "美杜莎4"],
+                },
+            },
+        }
+
+    async def fake_build_cover_brief(**_kwargs):
+        return {
+            "cover_title": "MAXACE美杜莎4到货了",
+            "video_type": "开箱体验",
+            "product_identity": "MAXACE 美杜莎4",
+            "selling_angle": "顶配次顶配对比",
+            "visual_brief": "主体真实，标题居中。",
+            "strategy_source": "fallback",
+        }
+
+    async def fake_prepare_cover_source(**_kwargs):
+        return None
+
+    monkeypatch.setattr(ic, "generate_platform_packaging", fake_generate_platform_packaging)
+    monkeypatch.setattr(ic, "_build_intelligent_cover_brief", fake_build_cover_brief)
+    monkeypatch.setattr(ic, "_prepare_intelligent_copy_cover_source", fake_prepare_cover_source)
+    monkeypatch.setattr(
+        ic,
+        "save_platform_packaging_markdown",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should block before writing markdown")),
+    )
+
+    result = await ic.generate_intelligent_copy(str(source_dir), platforms=["douyin"])
+
+    assert result["status"] == "blocked"
+    assert result["platforms"] == []
+    assert "intelligent_copy_cover_brief_fallback" in result["blocking_reasons"]
+    assert not (source_dir / "smart-copy" / "platform-packaging.md").exists()
+
+
+@pytest.mark.asyncio
 async def test_generate_intelligent_copy_drains_pending_cover_group_requests(tmp_path, monkeypatch) -> None:
     source_dir = tmp_path / "MAXACE 美杜莎4 顶配次顶配开箱"
     source_dir.mkdir()
@@ -4631,6 +4794,45 @@ async def test_resolve_restored_cover_brief_tolerates_missing_existing_result(mo
 
     assert brief["cover_title"] == "MAXACE美杜莎4双版开箱"
     assert captured["packaging"] == {"highlights": {"product": "MAXACE 美杜莎4"}}
+
+
+@pytest.mark.asyncio
+async def test_resolve_restored_cover_brief_rebuilds_persisted_fallback_payload(monkeypatch, tmp_path) -> None:
+    calls = {"count": 0}
+
+    async def fake_build_cover_brief(**_kwargs):
+        calls["count"] += 1
+        return {
+            "cover_title": "MAXACE美杜莎4双版开箱",
+            "video_type": "开箱体验",
+            "product_identity": "MAXACE 美杜莎4",
+            "selling_angle": "顶配次顶配对比",
+            "visual_brief": "双主体同框，突出金属质感",
+            "strategy_source": "llm",
+        }
+
+    monkeypatch.setattr(ic, "_build_intelligent_cover_brief", fake_build_cover_brief)
+
+    brief = await ic._resolve_restored_cover_brief(
+        {
+            "cover_brief": {
+                "cover_title": "兜底封面标题",
+                "product_identity": "MAXACE 美杜莎4",
+                "selling_angle": "兜底卖点",
+                "visual_brief": "兜底视觉描述",
+                "strategy_source": "fallback",
+            }
+        },
+        video_path=tmp_path / "video.mp4",
+        subtitle_items=[{"text_final": "MAXACE 美杜莎4 到货了"}],
+        content_profile={"subject_model": "美杜莎4", "subject_type": "EDC折刀"},
+        copy_brief={"topic_subject": "MAXACE 美杜莎4"},
+        packaging={"highlights": {"product": "MAXACE 美杜莎4"}},
+    )
+
+    assert calls["count"] == 1
+    assert brief["cover_title"] == "MAXACE美杜莎4双版开箱"
+    assert brief["strategy_source"] == "llm"
 
 
 @pytest.mark.asyncio
@@ -6180,6 +6382,104 @@ def test_upgrade_existing_intelligent_copy_result_reannotates_persisted_single_s
 
     assert result["cover_brief"]["strategy_axes"]["content_scheme"]["key"] == "unboxing_single_subject_v1"
     assert result["cover_brief"]["strategy_axes"]["subject_fidelity_scheme"]["key"] == "generic_subject_fidelity_v1"
+
+
+def test_upgrade_existing_intelligent_copy_result_blocks_persisted_fallback_contracts(tmp_path, monkeypatch) -> None:
+    source_dir = tmp_path / "maxace蜂巢3顶配开箱"
+    source_dir.mkdir(parents=True)
+    video_path = source_dir / "maxace蜂巢3顶配开箱.mp4"
+    subtitle_path = source_dir / "maxace蜂巢3顶配开箱.srt"
+    video_path.write_bytes(b"video")
+    subtitle_path.write_text("1\n00:00:00,000 --> 00:00:01,000\nMAXACE 蜂巢3 顶配到货了\n", encoding="utf-8")
+    material_dir = source_dir / "smart-copy"
+    material_dir.mkdir(parents=True)
+    smart_copy_path = ic.smart_copy_material_json_path(material_dir)
+    smart_copy_path.parent.mkdir(parents=True, exist_ok=True)
+    original_payload = {
+        "folder_path": str(source_dir),
+        "material_dir": str(material_dir),
+        "markdown_path": str(ic.smart_copy_platform_packaging_markdown_path(material_dir)),
+        "json_path": str(smart_copy_path),
+        "copy_style": "attention_grabbing",
+        "content_profile_summary": {
+            "subject_brand": "MAXACE",
+            "subject_model": "蜂巢3顶配",
+            "subject_type": "EDC折刀",
+        },
+        "cover_brief": {
+            "cover_title": "maxace蜂巢3顶配开箱",
+            "product_identity": "maxace蜂巢3顶配EDC折刀",
+            "selling_angle": "细节做工与上手质感",
+            "visual_brief": "主体真实，突出做工细节。",
+            "video_type": "开箱",
+            "strategy_source": "fallback",
+        },
+        "platforms": [
+            {
+                "key": "bilibili",
+                "label": "B站",
+                "has_title": True,
+                "title_label": "标题",
+                "body_label": "简介",
+                "tag_label": "标签",
+                "constraints": {"title_limit": 80, "body_limit": 250, "tag_limit": 10, "tag_style": "hashtags_space"},
+                "titles": ["maxace蜂巢3顶配开箱"],
+                "primary_title": "maxace蜂巢3顶配开箱",
+                "title_copy_all": "1. maxace蜂巢3顶配开箱",
+                "body": "这期主要看细节做工和上手质感。",
+                "tags": ["maxace", "蜂巢3顶配"],
+                "tags_copy": "#maxace #蜂巢3顶配",
+                "full_copy": "maxace蜂巢3顶配开箱\n\n这期主要看细节做工和上手质感。\n\n#maxace #蜂巢3顶配",
+                "cover_path": None,
+                "publish_ready": False,
+                "blocking_reasons": [],
+            }
+        ],
+    }
+    smart_copy_path.write_text(
+        json.dumps(original_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    platform_packaging_path = ic.smart_copy_platform_packaging_json_path(material_dir)
+    platform_packaging_path.parent.mkdir(parents=True, exist_ok=True)
+    platform_packaging_path.write_text(
+        json.dumps(
+            {
+                "highlights": {"product": "MAXACE 蜂巢3顶配"},
+                "generation_repair_trace": [{"status": "deterministic_fallback", "reason": "llm timeout"}],
+                "platforms": {"bilibili": {}},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        ic,
+        "inspect_intelligent_copy_folder",
+        lambda _folder: {
+            "folder_path": str(source_dir),
+            "material_dir": str(material_dir),
+            "video_file": str(video_path),
+            "subtitle_file": str(subtitle_path),
+            "cover_file": None,
+            "extra_video_files": [],
+            "extra_subtitle_files": [],
+            "extra_cover_files": [],
+            "warnings": [],
+        },
+    )
+
+    result = ic.upgrade_existing_intelligent_copy_result(str(source_dir), platforms=["bilibili"])
+
+    assert result["status"] == "blocked"
+    assert result["publish_ready"] is False
+    assert result["platforms"] == []
+    assert "platform_packaging_deterministic_fallback" in result["blocking_reasons"]
+    assert "intelligent_copy_cover_brief_fallback" in result["blocking_reasons"]
+    assert json.loads(smart_copy_path.read_text(encoding="utf-8")) == original_payload
+    assert json.loads(platform_packaging_path.read_text(encoding="utf-8"))["generation_repair_trace"][0]["status"] == "deterministic_fallback"
 
 
 def test_resolve_cover_canvas_fit_mode_prefers_blur_fill_for_large_ratio_mismatch(tmp_path) -> None:

@@ -2,7 +2,6 @@ import { useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { PageHeader } from "../components/ui/PageHeader";
-import { ConfigProfileSwitcher } from "../features/configProfiles/ConfigProfileSwitcher";
 import { JobCreateModal } from "../features/jobs/JobCreateModal";
 import { JobDetailModal } from "../features/jobs/JobDetailModal";
 import { JobDetailPanel } from "../features/jobs/JobDetailPanel";
@@ -377,16 +376,12 @@ export function JobsPage() {
                 workflowTemplateOptions={workflowTemplateOptions}
                 workflowModeOptions={workflowModeOptions}
                 enhancementOptions={enhancementOptions}
+                smartCutRules={workspace.options.data?.smart_cut_rules ?? []}
+                capabilityCatalog={workspace.options.data?.capability_catalog ?? []}
                 outputDirHistory={workspace.outputDirHistory}
+                creatorCards={workspace.creatorCards.data?.items ?? []}
+                agentMode
                 onChange={workspace.setUpload}
-              />
-            </section>
-
-            <section className="jobs-create-modal-panel">
-              <ConfigProfileSwitcher
-                compact
-                title="剪辑方案"
-                description="这里决定新任务默认按哪套方案创建。"
               />
             </section>
           </div>
@@ -427,6 +422,8 @@ export function JobsPage() {
           selectedJob={workspace.selectedJob}
           isLoading={workspace.detail.isLoading}
           activity={workspace.activity.data}
+          agentPlan={workspace.agentPlan.data}
+          agentDecisions={workspace.agentDecisions.data}
           report={workspace.report.data}
           tokenUsage={workspace.tokenUsage.data}
           timeline={workspace.timeline.data}
@@ -446,6 +443,8 @@ export function JobsPage() {
           isConfirmingProfile={workspace.confirmProfile.isPending}
           isInitializing={workspace.initializeJob.isPending}
           isApplyingReview={workspace.applyReview.isPending}
+          isRefiningAgentPlan={workspace.refineAgentPlan.isPending}
+          isApplyingAgentPlan={workspace.applyAgentPlan.isPending}
           isTriggeringSubtitleRerun={workspace.rerunSubtitleDecision.isPending}
           pendingRerunStartStep={pendingSubtitleRerun?.rerunStartStep ?? null}
           pendingRerunIssueCode={pendingSubtitleRerun?.issueCode ?? null}
@@ -489,6 +488,8 @@ export function JobsPage() {
           onRestart={() => workspace.selectedJob && confirmAndRestartJob(workspace.selectedJob.id)}
           onDelete={() => workspace.selectedJob && confirmAndDeleteJob(workspace.selectedJob.id)}
           onApplyReview={confirmAndApplyReview}
+          onRefineAgentPlan={(prompt, target) => workspace.refineAgentPlan.mutate({ prompt, target })}
+          onApplyAgentPlan={(payload) => workspace.applyAgentPlan.mutate(payload)}
           onTriggerSubtitleRerun={triggerSubtitleRerun}
         />
       </JobDetailModal>

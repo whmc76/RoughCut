@@ -1296,9 +1296,16 @@ def _build_smart_effect_video_filters(
         return [], video_label
 
     style = str(editing_accents.get("style") or "smart_effect_rhythm")
+    effect_policy = editing_accents.get("effect_policy") if isinstance(editing_accents.get("effect_policy"), dict) else {}
+    preserve_color = bool(editing_accents.get("preserve_color")) or bool(effect_policy.get("preserve_color"))
+    suppress_full_frame_color_flash = bool(editing_accents.get("suppress_full_frame_color_flash")) or bool(
+        effect_policy.get("disallow_full_frame_color_flash")
+    )
+    if suppress_full_frame_color_flash:
+        return [], video_label
     tokens = _resolve_smart_effect_video_tokens(
         style,
-        preserve_color=bool(editing_accents.get("preserve_color")),
+        preserve_color=preserve_color,
     )
     zoom_size = f"{expected_width}x{expected_height}"
     zoom_fps_expr = target_fps_expr or "30000/1001"

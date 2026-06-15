@@ -697,6 +697,40 @@ async def replace_avatar_material_file(
     return await get_avatar_materials()
 
 
+@router.delete("/profiles/{profile_id}/files/{file_id}", response_model=AvatarMaterialLibraryOut)
+async def remove_avatar_material_file(profile_id: str, file_id: str):
+    try:
+        profile = get_avatar_material_profile(profile_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Avatar material profile not found") from exc
+
+    files = list(profile.get("files") or [])
+    file_idx = next((index for index, item in enumerate(files) if str(item.get("id")) == str(file_id)), -1)
+    if file_idx < 0:
+        raise HTTPException(status_code=404, detail="Avatar material file not found")
+
+    removed_file = files.pop(file_idx)
+    _unlink_avatar_material_file_paths(removed_file)
+
+    training_api_available = await is_heygem_training_available()
+    preview_service_available = await is_heygem_preview_available()
+    profile_state = _build_profile_runtime_state_from_files(
+        files=files,
+        training_api_available=training_api_available,
+        preview_service_available=preview_service_available,
+    )
+    profile["files"] = files
+    profile["training_api_available"] = training_api_available
+    profile["training_status"] = profile_state["training_status"]
+    profile["capability_status"] = profile_state["capability_status"]
+    profile["next_action"] = profile_state["next_action"]
+    profile["blocking_issues"] = profile_state["blocking_issues"]
+    profile["warnings"] = profile_state["warnings"]
+    profile["preview_runs"] = []
+    save_avatar_material_profile(profile)
+    return await get_avatar_materials()
+
+
 @router.patch("/profiles/{profile_id}", response_model=AvatarMaterialLibraryOut)
 async def update_avatar_material_profile(profile_id: str, payload: AvatarMaterialProfileUpdate):
     try:
@@ -928,6 +962,71 @@ def _build_profile_runtime_state(
             else "先补齐讲话视频片段或修复阻塞项，再导入 HeyGem 训练。"
         ),
     }
+
+
+def _build_profile_runtime_state_from_files(
+    *,
+    files: list[dict[str, Any]],
+    training_api_available: bool,
+    preview_service_available: bool,
+) -> dict[str, Any]:
+    speaking_video_count = 0
+    portrait_photo_count = 0
+    voice_sample_count = 0
+    blocking_issues: list[str] = []
+    warnings: list[str] = []
+    for item in files:
+        resolved_role = str(item.get("role") or "")
+        if resolved_role == "speaking_video":
+            speaking_video_count += 1
+            _merge_checks(item, blocking_issues, warnings)
+        elif resolved_role == "portrait_photo":
+            portrait_photo_count += 1
+            _merge_checks(item, blocking_issues, warnings)
+        elif resolved_role == "voice_sample":
+            voice_sample_count += 1
+            _merge_checks(item, blocking_issues, warnings)
+    return _build_profile_runtime_state(
+        speaking_video_count=speaking_video_count,
+        portrait_photo_count=portrait_photo_count,
+        voice_sample_count=voice_sample_count,
+        training_api_available=training_api_available,
+        preview_service_available=preview_service_available,
+        blocking_issues=blocking_issues,
+        warnings=warnings,
+    )
+
+
+def _iter_avatar_material_file_paths(file_record: dict[str, Any]):
+    yield file_record.get("path")
+    artifacts = file_record.get("artifacts")
+    if isinstance(artifacts, dict):
+        for value in artifacts.values():
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, list):
+                for item in value:
+                    if isinstance(item, str):
+                        yield item
+            elif isinstance(value, dict):
+                for item in value.values():
+                    if isinstance(item, str):
+                        yield item
+
+
+def _unlink_avatar_material_file_paths(file_record: dict[str, Any]) -> None:
+    seen: set[str] = set()
+    for raw_path in _iter_avatar_material_file_paths(file_record):
+        path_key = str(raw_path or "").strip()
+        if not path_key or path_key in seen:
+            continue
+        seen.add(path_key)
+        try:
+            path = resolve_avatar_material_path(path_key)
+        except Exception:
+            continue
+        if path.exists() and path.is_file():
+            path.unlink(missing_ok=True)
 
 
 def _derive_runtime_preview_capability(

@@ -58,10 +58,12 @@ def test_auto_review_is_not_a_selectable_enhancement_mode() -> None:
 
     assert "auto_review" not in {item["value"] for item in options}
     assert "auto_review" not in {item["key"] for item in catalog["enhancement_modes"]}
+    assert "ai_director" not in {item["value"] for item in options}
+    assert "ai_director" not in {item["key"] for item in catalog["enhancement_modes"]}
 
 
 def test_legacy_auto_review_enhancement_mode_is_dropped_from_new_configs() -> None:
-    assert normalize_enhancement_modes(["avatar_commentary", "auto_review", "ai_effects"]) == [
+    assert normalize_enhancement_modes(["avatar_commentary", "auto_review", "ai_effects", "ai_director"]) == [
         "avatar_commentary",
         "ai_effects",
     ]

@@ -12,7 +12,8 @@ from roughcut.usage import track_usage_operation
 
 
 def ai_director_mode_enabled(enhancement_modes: list[str] | tuple[str, ...] | None) -> bool:
-    return "ai_director" in set(enhancement_modes or [])
+    _ = enhancement_modes
+    return False
 
 
 async def build_ai_director_plan(

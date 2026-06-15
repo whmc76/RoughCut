@@ -29,7 +29,7 @@ from roughcut.edit.smart_cut_rules import normalize_smart_cut_rules_payload
 
 ARTIFACT_TYPE_CUT_ANALYSIS = "cut_analysis"
 CUT_ANALYSIS_SCHEMA_VERSION = "cut_analysis.v1"
-HIGHLIGHT_RECOMMENDATION_STAGE = "highlight_window_selection"
+HIGHLIGHT_RECOMMENDATION_STAGE = "semantic_timeline_analysis"
 MULTI_MATERIAL_RECOMMENDATION_STAGE = "multi_material_assembly"
 
 
@@ -283,6 +283,8 @@ def _highlight_recommendation_candidates(
                 "reason": "highlight_window",
                 "risk_level": "medium",
                 "candidate_stage": HIGHLIGHT_RECOMMENDATION_STAGE,
+                "semantic_role": "highlight_candidate",
+                "semantic_source": "local_highlight_candidates",
                 "producer_id": "highlight_window_candidate_producer",
                 "strategy_applicability": ["event_highlight"],
                 "match_surface": role,

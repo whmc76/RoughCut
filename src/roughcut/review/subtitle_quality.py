@@ -171,6 +171,40 @@ def build_subtitle_alignment_source_metrics(subtitle_items: Sequence[Any]) -> di
     }
 
 
+def subtitle_alignment_source_metrics_has_output_fallback(
+    metrics: Mapping[str, Any] | None,
+) -> bool:
+    payload = metrics if isinstance(metrics, Mapping) else {}
+    source_counts = payload.get("source_counts")
+    if not isinstance(source_counts, Mapping):
+        return False
+    try:
+        return int(source_counts.get("fallback") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def subtitle_quality_report_has_output_fallback(
+    report: Mapping[str, Any] | None,
+) -> bool:
+    payload = report if isinstance(report, Mapping) else {}
+    metrics = payload.get("metrics")
+    if not isinstance(metrics, Mapping):
+        return False
+    alignment_source = metrics.get("alignment_source")
+    if not isinstance(alignment_source, Mapping):
+        return False
+    return subtitle_alignment_source_metrics_has_output_fallback(alignment_source)
+
+
+def subtitle_items_have_output_fallback_alignment(
+    subtitle_items: Sequence[Any],
+) -> bool:
+    return subtitle_alignment_source_metrics_has_output_fallback(
+        build_subtitle_alignment_source_metrics(subtitle_items)
+    )
+
+
 def _is_allowed_short_utterance(text: str, duration: float | None) -> bool:
     candidate = str(text or "").strip()
     if not candidate or not _ALLOWED_SHORT_UTTERANCE_RE.match(candidate):

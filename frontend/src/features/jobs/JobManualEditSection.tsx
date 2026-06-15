@@ -3857,6 +3857,55 @@ export function buildTranscriptTokens(subtitles: JobManualEditSubtitle[], segmen
   return mergeTranscriptTokensInDisplayOrder(charTokens, pauseTokens);
 }
 
+function transcriptTokenMatchesSourceTime(token: TranscriptToken, sourceTime: number, toleranceSec = 0.015) {
+  if (token.kind === "pause") {
+    return transcriptPauseRangesForToken(token).some((range) => (
+      sourceTime >= range.start - toleranceSec
+      && sourceTime <= range.end + toleranceSec
+    ));
+  }
+  return sourceTime >= token.start - toleranceSec && sourceTime <= token.end + toleranceSec;
+}
+
+export function findActiveTranscriptTokenIndex(tokens: TranscriptToken[], sourceTime: number, toleranceSec = 0.015) {
+  let bestIndex = -1;
+  let bestStart = Number.NEGATIVE_INFINITY;
+  let bestKindRank = -1;
+  let bestSpan = Number.POSITIVE_INFINITY;
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (!transcriptTokenMatchesSourceTime(token, sourceTime, toleranceSec)) continue;
+    const tokenStart = token.kind === "pause"
+      ? Math.min(...transcriptPauseRangesForToken(token).map((range) => range.start))
+      : token.start;
+    const tokenEnd = token.kind === "pause"
+      ? Math.max(...transcriptPauseRangesForToken(token).map((range) => range.end))
+      : token.end;
+    const tokenSpan = Math.max(0, tokenEnd - tokenStart);
+    const tokenKindRank = token.kind === "pause"
+      ? 0
+      : isTranscriptTimedChar(token.text)
+        ? 2
+        : 1;
+    if (
+      tokenStart > bestStart + 0.0005
+      || (
+        Math.abs(tokenStart - bestStart) <= 0.0005
+        && (
+          tokenKindRank > bestKindRank
+          || (tokenKindRank === bestKindRank && tokenSpan < bestSpan - 0.0005)
+        )
+      )
+    ) {
+      bestIndex = index;
+      bestStart = tokenStart;
+      bestKindRank = tokenKindRank;
+      bestSpan = tokenSpan;
+    }
+  }
+  return bestIndex;
+}
+
 function mergeTranscriptVisiblePauseRanges(ranges: KeepSegment[], tokens: TranscriptToken[]): MergedTranscriptPauseRange[] {
   const sorted = ranges
     .map((range) => ({
@@ -5788,11 +5837,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
     [currentSourceTime, projection.ranges],
   );
   const activeTranscriptTokenIndex = useMemo(
-    () => transcriptTokens.findIndex((token) => (
-      token.kind === "pause"
-        ? transcriptPauseRangesForToken(token).some((range) => currentSourceTime >= range.start - 0.015 && currentSourceTime <= range.end + 0.015)
-        : currentSourceTime >= token.start - 0.015 && currentSourceTime <= token.end + 0.015
-    )),
+    () => findActiveTranscriptTokenIndex(transcriptTokens, currentSourceTime),
     [currentSourceTime, transcriptTokens],
   );
 

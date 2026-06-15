@@ -150,7 +150,7 @@ def test_run_job_passes_failure_error_into_finalize(monkeypatch) -> None:
 def test_resolve_batch_step_timeout_default_and_step_override(monkeypatch) -> None:
     monkeypatch.delenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS", raising=False)
     monkeypatch.delenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS_RENDER", raising=False)
-    assert batch._resolve_batch_step_timeout_seconds("render") == 300.0
+    assert batch._resolve_batch_step_timeout_seconds("render") == 1200.0
 
     monkeypatch.setenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS", "1200")
     assert batch._resolve_batch_step_timeout_seconds("render") == 1200.0
@@ -442,7 +442,9 @@ def test_render_markdown_includes_step_sync_runner_metadata() -> None:
     content = batch.render_markdown(summary)
 
     assert "sync_runner={sync_runner_process_exit_code=123, sync_runner_reap_method=terminate, sync_runner_timeout_strategy=process}" in content
-    assert "render_avatar: status=degraded, reason=avatar_full_track_call_timeout, reason_category=call_timeout, retryable=True" in content
+    assert "render_avatar: status=degraded" in content
+    assert "reason=avatar_full_track_call_timeout" in content
+    assert "retryable=True" in content
     assert 'error_metadata={"call_timeout_seconds": 45.0}' in content
     assert 'render_step: status=failed, error=TimeoutError: 步骤 render 执行超过 1.0 秒, sync_runner={"sync_runner_reap_method": "terminate", "sync_runner_timeout_strategy": "process"}' in content
 

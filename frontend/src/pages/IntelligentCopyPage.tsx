@@ -83,7 +83,7 @@ export function IntelligentCopyPage() {
         description={t("smartCopy.page.description")}
         actions={
           <div className="toolbar">
-            <Link className="button ghost" to="/creator-profiles">
+            <Link className="button ghost" to="/publication-management">
               {t("smartCopy.publish.configureAccounts")}
             </Link>
           </div>
@@ -490,7 +490,7 @@ export function IntelligentCopyPage() {
             <PanelHeader
               title={t("smartCopy.publish.accountTitle")}
               description={t("smartCopy.publish.accountDescription")}
-              actions={<Link className="button ghost" to="/creator-profiles">{t("smartCopy.publish.configureAccounts")}</Link>}
+              actions={<Link className="button ghost" to="/publication-management">{t("smartCopy.publish.configureAccounts")}</Link>}
             />
             <div className="form-grid">
               <label>

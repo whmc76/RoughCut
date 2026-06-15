@@ -19,6 +19,7 @@ def build_avatar_commentary_plan(
     subtitle_items: list[dict[str, Any]],
     content_profile: dict[str, Any] | None,
     ai_director_plan: dict[str, Any] | None = None,
+    presenter_id: str | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     effective_content_profile = apply_source_identity_constraints(
@@ -35,7 +36,7 @@ def build_avatar_commentary_plan(
         "provider": settings.avatar_provider,
         "voice_provider": settings.voice_provider,
         "source_name": source_name,
-        "presenter_id": settings.avatar_presenter_id,
+        "presenter_id": str(presenter_id or "").strip(),
         "layout_template": settings.avatar_layout_template,
         "safe_margin": settings.avatar_safe_margin,
         "overlay_scale": settings.avatar_overlay_scale,

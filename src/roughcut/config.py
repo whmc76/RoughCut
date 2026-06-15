@@ -143,7 +143,7 @@ DEFAULT_SEARCH_FALLBACK_PROVIDER = "searxng"
 DEFAULT_BACKUP_SEARCH_PROVIDER = "searxng"
 DEFAULT_BACKUP_SEARCH_FALLBACK_PROVIDER = "searxng"
 DEFAULT_MODEL_SEARCH_HELPER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "codex_model_search_helper.py"
-DEFAULT_ZHIPU_REASONING_MODEL = "glm-5.2[1m]"
+DEFAULT_ZHIPU_REASONING_MODEL = "glm-5.2"
 DEFAULT_ZHIPU_VISION_MODEL = "glm-4.6v-flash"
 DEFAULT_ZHIPU_SEARCH_ENGINE = "search_pro"
 DEFAULT_REASONING_PROVIDER = "zhipu"
@@ -161,6 +161,9 @@ MINIMAX_REASONING_MODEL_ALIASES: dict[str, str] = {
     "minimax-m3": "MiniMax-M3",
     "minimax-m2.7": "MiniMax-M3",
     "minimax-m2.7-highspeed": "MiniMax-M3",
+}
+ZHIPU_REASONING_MODEL_ALIASES: dict[str, str] = {
+    "glm-5.2[1m]": "glm-5.2",
 }
 
 
@@ -419,6 +422,7 @@ class Settings(BaseSettings):
     transcribe_runtime_timeout_sec: int = 900
     edit_plan_scene_detection_timeout_sec: int = 180
     edit_plan_scene_detection_frame_skip: int = 2
+    manual_editor_preview_runtime_timeout_sec: int = 300
     render_dispatch_concurrency: int = 1
     render_step_stale_timeout_sec: int = 5400
     render_step_prepackaging_stale_timeout_sec: int = 1500
@@ -646,6 +650,11 @@ class Settings(BaseSettings):
     edit_decision_llm_review_max_candidates: int = 6
     edit_decision_llm_review_timeout_sec: int = 30
     edit_decision_llm_review_min_confidence: float = 0.72
+    edit_decision_waste_discovery_enabled: bool = True
+    edit_decision_waste_discovery_max_subtitles: int = 160
+    edit_decision_waste_discovery_max_candidates: int = 8
+    edit_decision_waste_discovery_timeout_sec: int = 45
+    edit_decision_waste_discovery_min_confidence: float = 0.68
     multimodal_trim_review_enabled: bool = True
     multimodal_trim_review_max_candidates: int = 4
     multimodal_trim_review_timeout_sec: int = 20
@@ -814,6 +823,8 @@ def normalize_reasoning_model_for_provider(provider: object, model: object) -> s
     model_value = str(model or "").strip()
     if not model_value:
         return DEFAULT_ZHIPU_REASONING_MODEL if normalized_provider == "zhipu" else ""
+    if normalized_provider == "zhipu":
+        return ZHIPU_REASONING_MODEL_ALIASES.get(model_value.lower(), model_value)
     if normalized_provider != "minimax":
         return model_value
     return MINIMAX_REASONING_MODEL_ALIASES.get(model_value.lower(), model_value)

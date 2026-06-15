@@ -1,4 +1,5 @@
 from roughcut.review.content_profile import (
+    _backfill_subject_type_from_identity_review_entities,
     _build_profile_summary,
     _build_subtitle_signal_blob,
     _collect_identity_subtitle_snippets,
@@ -203,3 +204,35 @@ def test_build_profile_summary_uses_detail_phrase_when_available() -> None:
     summary = _build_profile_summary(profile)
 
     assert "重点提到" in summary
+
+
+def test_backfill_subject_type_from_graph_confirmed_entity_when_brand_model_match() -> None:
+    patched = _backfill_subject_type_from_identity_review_entities(
+        {
+            "subject_brand": "NOC",
+            "subject_model": "MT34",
+            "subject_type": "",
+            "subject_domain": "",
+        },
+        identity_review={
+            "evidence_bundle": {
+                "graph_confirmed_entities": [
+                    {
+                        "brand": "NOC",
+                        "model": "MT34 / S06mini",
+                        "subject_type": "EDC折刀",
+                        "subject_domain": "edc",
+                    },
+                    {
+                        "brand": "未知品牌",
+                        "model": "别的型号",
+                        "subject_type": "EDC手电",
+                        "subject_domain": "edc",
+                    },
+                ]
+            }
+        },
+    )
+
+    assert patched["subject_type"] == "EDC折刀"
+    assert patched["subject_domain"] == "edc"

@@ -300,6 +300,25 @@ def sanitize_filename(name: str) -> str:
 
 def normalize_avatar_material_profile(profile: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(profile or {})
+    profile_dir = resolve_avatar_material_path(normalized.get("profile_dir"))
+    if profile_dir and str(profile_dir) != "__roughcut_missing_avatar_material__":
+        normalized["profile_dir"] = str(profile_dir)
+    files: list[dict[str, Any]] = []
+    for file_record in list(normalized.get("files") or []):
+        item = dict(file_record or {})
+        resolved_path = resolve_avatar_material_path(item.get("path"))
+        if resolved_path and resolved_path.exists():
+            item["path"] = str(resolved_path)
+        files.append(item)
+    normalized["files"] = files
+    preview_runs: list[dict[str, Any]] = []
+    for preview_run in list(normalized.get("preview_runs") or []):
+        item = dict(preview_run or {})
+        resolved_output_path = resolve_avatar_material_path(item.get("output_path"))
+        if resolved_output_path and resolved_output_path.exists():
+            item["output_path"] = str(resolved_output_path)
+        preview_runs.append(item)
+    normalized["preview_runs"] = preview_runs
     normalized["personal_info"] = normalize_avatar_personal_info(
         normalized.get("personal_info"),
         display_name=str(normalized.get("display_name") or "").strip(),
@@ -537,6 +556,9 @@ def _avatar_material_file_ready(file: dict[str, Any], role: str) -> bool:
     if str(file.get("role") or "") != role:
         return False
     if not avatar_material_role_matches_kind(file.get("role"), file.get("kind")):
+        return False
+    resolved_path = resolve_avatar_material_path(file.get("path"))
+    if not resolved_path.exists():
         return False
     return not any(
         str(check.get("level") or "").strip().lower() == "error"

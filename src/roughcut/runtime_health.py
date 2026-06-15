@@ -91,8 +91,9 @@ async def _check_search_ready() -> tuple[bool, str]:
 
 
 async def build_readiness_payload() -> dict:
-    checks: dict[str, dict[str, str]] = {}
-    ready = True
+    checks: dict[str, dict[str, object]] = {}
+    blocking_ready = True
+    warning_checks: list[str] = []
 
     for name, probe in (
         ("database", _check_database_ready),
@@ -101,13 +102,19 @@ async def build_readiness_payload() -> dict:
         ("search", _check_search_ready),
     ):
         ok, detail = await probe()
+        blocking = name in {"database", "redis", "storage"}
         checks[name] = {
             "status": "ok" if ok else "failed",
             "detail": detail,
+            "blocking": blocking,
         }
-        ready = ready and ok
+        if blocking:
+            blocking_ready = blocking_ready and ok
+        elif not ok:
+            warning_checks.append(name)
 
     return {
-        "status": "ready" if ready else "degraded",
+        "status": "ready" if blocking_ready else "degraded",
         "checks": checks,
+        "warning_checks": warning_checks,
     }

@@ -285,6 +285,7 @@ async def plan_local_insert_slot(
     fallback_plan = dict(resolved_insert)
     fallback_plan["insert_after_sec"] = fallback_sec
     fallback_plan["reason"] = "回退到中间自然停顿。"
+    fallback_plan["selection_source"] = "deterministic_fallback"
     fallback_plan["timing_summary"] = _build_timing_summary(
         [],
         review_gap=float(settings.packaging_selection_review_gap),
@@ -331,6 +332,7 @@ async def plan_local_insert_slot(
             3,
         )
         resolved_insert["reason"] = str(data.get("reason") or "").strip() or "LLM 选择了较自然的转场点。"
+        resolved_insert["selection_source"] = "llm"
         rankings = [
             {"score": 0.78, "enter_sec": resolved_insert["insert_after_sec"]},
             {"score": 0.7, "enter_sec": fallback_sec},

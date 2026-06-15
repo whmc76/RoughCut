@@ -21,7 +21,7 @@ _WORKFLOW_MODES: Final[dict[str, dict[str, object]]] = {
         "pipeline_outline": [
             "读取源视频并完成转写、字幕后处理",
             "生成内容画像、剪辑决策和包装计划",
-            "根据可选增强能力叠加数字人或 AI 导演策略",
+            "根据可选增强能力叠加数字人、智能剪辑特效或多平台适配",
         ],
         "delivery_scope": "立即可用于任务创建",
     },
@@ -128,9 +128,10 @@ _ENHANCEMENT_MODES: Final[dict[str, dict[str, object]]] = {
         "key": "ai_director",
         "kind": "enhancement",
         "status": "active",
+        "selectable": False,
         "title": "AI 导演",
         "tagline": "基于画面、题材和原台词结构自动润色、补叙或重配音，提升逻辑与情绪。",
-        "summary": "可做台词校正、桥段补强、语气优化与配音重建，强调爆款叙事方法论。",
+        "summary": "能力设计尚未定稿，暂不开放任务创建或默认配置选择。",
         "suitable_for": ["知识科普", "故事化旁白", "剧情剪辑", "信息密度不足的视频"],
         "pipeline_outline": [
             "识别原台词结构、镜头节奏和视频题材",
@@ -138,7 +139,7 @@ _ENHANCEMENT_MODES: Final[dict[str, dict[str, object]]] = {
             "用 IndexTTS2、RunningHub 或其他真实语音克隆服务完成重配音并回贴时间线",
         ],
         "providers": ["IndexTTS2", "RunningHub API", "其他语音克隆 API"],
-        "default_delivery": "先完成模式建模、任务挂载和后续提示词上下文注入",
+        "default_delivery": "暂不启用；待产品和执行合同明确后再开放。",
     },
 }
 
@@ -229,7 +230,8 @@ def build_job_creative_profile(*, workflow_mode: str, enhancement_modes: list[st
         "execution_state": execution_state,
         "implementation_notes": [
             "长文本转视频当前只保留方案与接口占位，不进入现有已有视频主流程。",
-            "多平台版本适配、数字人解说、智能剪辑特效与 AI 导演当前作为通用增强能力挂载到标准成片任务。",
+            "多平台版本适配、数字人解说、智能剪辑特效当前作为通用增强能力挂载到标准成片任务。",
+            "AI 导演能力暂未开放选择和执行，待方案定稿后再启用。",
             "TTS 方案优先支持 IndexTTS2 与 RunningHub 这类真实服务。",
             "素材库策略要求走较新素材，不使用老旧缓存素材。",
         ],

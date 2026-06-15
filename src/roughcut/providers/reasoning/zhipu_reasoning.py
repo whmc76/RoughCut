@@ -3,7 +3,7 @@ from __future__ import annotations
 from roughcut.config import DEFAULT_ZHIPU_REASONING_MODEL, get_settings
 from roughcut.providers.auth import resolve_credential
 from roughcut.providers.reasoning.base import Message, ReasoningProvider, ReasoningResponse, ToolCall, ToolDefinition, strip_reasoning_tags
-from roughcut.providers.zhipu_compat import normalize_zhipu_base_url
+from roughcut.providers.zhipu_compat import resolve_zhipu_reasoning_base_url
 from roughcut.providers.zhipu_http import build_zhipu_headers, build_zhipu_request_context, post_zhipu_json
 from roughcut.usage import record_usage_event
 
@@ -19,8 +19,12 @@ class ZhipuReasoningProvider(ReasoningProvider):
             helper_command=settings.zhipu_api_key_helper,
             provider_name="Zhipu",
         )
-        self._base_url = normalize_zhipu_base_url(settings.zhipu_base_url)
         self._model = model or settings.active_reasoning_model or DEFAULT_ZHIPU_REASONING_MODEL
+        self._base_url = resolve_zhipu_reasoning_base_url(
+            base_url=settings.zhipu_base_url,
+            coding_base_url=getattr(settings, "zhipu_coding_base_url", ""),
+            model=self._model,
+        )
 
     async def complete(
         self,

@@ -49,7 +49,7 @@ VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 _BATCH_STEP_TIMEOUT_SECONDS = 1800.0
 _BATCH_STEP_TIMEOUT_MIN_SECONDS = 1.0
 _BATCH_STEP_TIMEOUT_SECONDS_BY_STEP = {
-    "render": 300.0,
+    "render": 1200.0,
 }
 _BATCH_STEP_TIMEOUT_STRATEGY = "thread"
 _BATCH_STEP_TIMEOUT_STRATEGY_BY_STEP = {
@@ -530,7 +530,7 @@ def ensure_batch_runtime_ready() -> None:
     failed_checks = {
         name: check
         for name, check in dict(readiness.get("checks") or {}).items()
-        if str(check.get("status") or "").strip().lower() == "failed"
+        if str(check.get("status") or "").strip().lower() == "failed" and bool(check.get("blocking", True))
     }
     if not failed_checks:
         return

@@ -23,9 +23,7 @@ from typing import Any
 
 from roughcut.config import get_settings
 from roughcut.cover_title_contract import normalize_cover_title_line_contract as _shared_normalize_cover_title_line_contract
-from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
-from roughcut.media.subtitles import split_subtitle_display_item
-from roughcut.media.subtitle_text import clean_final_subtitle_text
+from roughcut.media.subtitles import build_serialization_subtitle_item, split_subtitle_display_item
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import extract_json_text
 from roughcut.review.content_profile import (
@@ -398,24 +396,9 @@ async def extract_cover_frame(
             selected_rankings = [item for item in ranked_candidates[:variant_count] if int(item.get("index", -1)) < len(candidates)]
             selected = [candidates[int(item["index"])] for item in selected_rankings]
             if not selected:
-                selected_rankings = [{"index": 0, "score": 0.0, "reason": "", "source": "fallback"}]
-                selected = [candidates[0]]
-            if len(selected) < variant_count:
-                chosen_indices = {int(item.get("index", -1)) for item in selected_rankings}
-                for idx, candidate in enumerate(candidates):
-                    if idx in chosen_indices:
-                        continue
-                    selected.append(candidate)
-                    selected_rankings.append(
-                        {
-                            "index": idx,
-                            "score": 0.0,
-                            "reason": "",
-                            "source": "fallback_fill",
-                        }
-                    )
-                    if len(selected) >= variant_count:
-                        break
+                raise RuntimeError("cover_candidate_ranking_returned_no_formal_selection")
+            if any(str(item.get("source") or "").strip().lower().startswith("fallback") for item in selected_rankings):
+                raise RuntimeError("cover_candidate_ranking_used_fallback_source")
 
             title_variants = await _generate_cover_title_variants(
                 selected,
@@ -461,31 +444,12 @@ async def extract_cover_frame(
             )
 
         return outputs
-    except Exception:
-        logger.exception("Cover generation failed for %s, falling back to a basic extracted frame", video_path)
-        await _extract_frame(video_path, output_path, seek_sec)
-        if fallback_title:
-            try:
-                await _overlay_title_layout(output_path, fallback_title, resolved_cover_style, resolved_title_style)
-            except Exception:
-                logger.debug("Fallback cover title overlay failed for %s", output_path, exc_info=True)
-        _write_cover_variant_manifest(
-            output_path,
-            selected=[{"seek": seek_sec, "preview": None}],
-            title_variants=[
-                {
-                    "strategy_key": "fallback",
-                    "strategy_label": "基础兜底",
-                    "reason": "cover_generation_fallback",
-                    "title_style": resolved_title_style,
-                    "title": fallback_title,
-                }
-            ],
-            outputs=[output_path],
-            rankings=[{"index": 0, "score": 0.0, "reason": "cover_generation_fallback", "source": "fallback"}],
-            selection_summary={},
-        )
-        return [output_path]
+    except Exception as exc:
+        logger.exception("Cover generation failed for %s; blocking fallback cover output", video_path)
+        raise RuntimeError(
+            "cover_generation_fallback_blocked: "
+            + (str(exc or "").strip() or exc.__class__.__name__)
+        ) from exc
 
 
 def _probe_duration(video_path: Path) -> float:
@@ -997,6 +961,7 @@ def _write_cover_variant_manifest(
                 "title_style": plan.get("title_style") or "",
                 "title": plan.get("title") or None,
                 "score": _normalize_cover_score(ranking.get("score"), fallback=0.0),
+                "ranking_source": str(ranking.get("source") or "").strip(),
                 "rank": idx + 1,
                 "is_primary": idx == 0,
                 "review_recommended": bool(selection_summary.get("review_recommended")) if idx == 0 else False,
@@ -1018,6 +983,12 @@ def load_cover_selection_summary(output_path: Path) -> dict[str, Any] | None:
     if not isinstance(payload, list) or not payload:
         return None
     primary = next((item for item in payload if item.get("is_primary")), payload[0])
+    ranking_source = str(primary.get("ranking_source") or "").strip().lower()
+    fallback_reason = str(primary.get("reason") or "").strip()
+    fallback_generated = bool(
+        ranking_source.startswith("fallback")
+        or fallback_reason == "cover_generation_fallback"
+    )
     return {
         "enabled": get_settings().auto_select_cover_variant,
         "review_recommended": bool(primary.get("review_recommended")),
@@ -1025,6 +996,9 @@ def load_cover_selection_summary(output_path: Path) -> dict[str, Any] | None:
         "selected_score": _normalize_cover_score(primary.get("score"), fallback=0.0),
         "score_gap": _normalize_cover_score(primary.get("score_gap_to_next"), fallback=0.0),
         "review_reason": str(primary.get("review_reason") or "").strip(),
+        "fallback_generated": fallback_generated,
+        "fallback_reason": fallback_reason if fallback_generated else "",
+        "ranking_source": ranking_source,
     }
 
 
@@ -2283,7 +2257,7 @@ def write_srt_file(subtitle_items: list[dict], output_path: Path) -> Path:
     ordered_items = sorted(normalized_items, key=_subtitle_srt_sort_key)
     lines: list[str] = []
     for item in ordered_items:
-        text = clean_final_subtitle_text(subtitle_display_rule_text(item))
+        serialization_item, text = build_serialization_subtitle_item(item)
         if not text:
             continue
         start_time = float(item["start_time"])
@@ -2292,6 +2266,7 @@ def write_srt_file(subtitle_items: list[dict], output_path: Path) -> Path:
             start_time=start_time,
             end_time=end_time,
             text=text,
+            subtitle_item=serialization_item,
         ):
             start = _srt_time(segment["start_time"])
             end = _srt_time(segment["end_time"])

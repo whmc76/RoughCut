@@ -5,12 +5,14 @@ from pathlib import Path
 from types import SimpleNamespace
 import uuid
 
+import httpx
 import pytest
 
 from roughcut.edit.decisions import EditDecision
 from roughcut.llm_cache import save_cached_json
 from roughcut.pipeline.steps import (
     _resolve_transcribe_no_progress_timeout_seconds,
+    _resolve_edit_decision_llm_review_timeout_seconds,
     _maybe_review_edit_decision_cuts_with_llm,
     _resolve_transcribe_runtime_timeout_seconds,
 )
@@ -77,6 +79,25 @@ def test_resolve_transcribe_no_progress_timeout_scales_for_single_request_audio(
     timeout = _resolve_transcribe_no_progress_timeout_seconds(settings, audio_path=audio_path)
 
     assert timeout == 698.75
+
+
+def test_resolve_edit_decision_llm_review_timeout_scales_for_zhipu_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = SimpleNamespace(
+        edit_decision_llm_review_timeout_sec=30,
+        active_reasoning_provider="zhipu",
+        zhipu_base_url="https://open.bigmodel.cn/api/paas/v4",
+    )
+
+    monkeypatch.setattr(
+        "roughcut.pipeline.steps.provider_cooldown_remaining_seconds_for_url",
+        lambda _url: 25.0,
+    )
+
+    timeout = _resolve_edit_decision_llm_review_timeout_seconds(settings, candidate_count=2)
+
+    assert timeout == 125.0
 
 
 @pytest.mark.asyncio
@@ -254,3 +275,62 @@ async def test_llm_cut_review_reuses_compatible_cross_job_cache(
     assert result.analysis["llm_cut_review"]["reviewed"] is True
     assert result.analysis["llm_cut_review"]["cached"] is True
     assert result.analysis["llm_cut_review"]["summary"] == "cached review"
+
+
+@pytest.mark.asyncio
+async def test_llm_cut_review_surfaces_upstream_zhipu_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decision = EditDecision(source="unit-test")
+    settings = SimpleNamespace(
+        edit_decision_llm_review_enabled=True,
+        edit_decision_llm_review_min_confidence=0.72,
+        active_reasoning_provider="zhipu",
+        active_reasoning_model="glm-5.2",
+    )
+    request = httpx.Request("POST", "https://example.com/chat/completions")
+    response = httpx.Response(
+        429,
+        request=request,
+        headers={"retry-after-ms": "25", "x-log-id": "trace-123"},
+        json={"error": {"code": "1113", "message": "余额不足或无可用资源包,请充值。"}},
+    )
+
+    monkeypatch.setattr("roughcut.pipeline.steps.get_settings", lambda: settings)
+    monkeypatch.setattr("roughcut.pipeline.steps.llm_task_route", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(
+        "roughcut.pipeline.steps._build_edit_decision_llm_review_candidates",
+        lambda **kwargs: [{"candidate_id": "cut-1"}],
+    )
+    monkeypatch.setattr(
+        "roughcut.pipeline.steps.build_high_risk_cut_review_prompt",
+        lambda **kwargs: [{"role": "system", "content": "review"}],
+    )
+    monkeypatch.setattr("roughcut.pipeline.steps.get_reasoning_provider", lambda: object())
+
+    async def raise_http_error(*args, **kwargs):
+        raise httpx.HTTPStatusError("429", request=request, response=response)
+
+    monkeypatch.setattr("roughcut.pipeline.steps._complete_reasoning_with_timeout", raise_http_error)
+
+    result = await _maybe_review_edit_decision_cuts_with_llm(
+        job_id=uuid.uuid4(),
+        source_name="sample.mp4",
+        decision=decision,
+        subtitle_items=[],
+        transcript_segments=[],
+        content_profile={},
+    )
+
+    assert result.analysis["llm_cut_review"] == {
+        "reviewed": False,
+        "candidate_count": 1,
+        "error": "llm_cut_review_failed",
+        "fallback": "deterministic_evidence",
+        "upstream_status": 429,
+        "upstream_error_code": "1113",
+        "upstream_error_message": "余额不足或无可用资源包,请充值。",
+        "retry_after_seconds": 0.025,
+        "x_log_id": "trace-123",
+        "upstream_body_excerpt": '{"error":{"code":"1113","message":"余额不足或无可用资源包,请充值。"}}',
+    }

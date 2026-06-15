@@ -20,6 +20,18 @@ def normalize_zhipu_coding_base_url(base_url: str) -> str:
     return value or DEFAULT_ZHIPU_CODING_BASE_URL
 
 
+def resolve_zhipu_reasoning_base_url(
+    *,
+    base_url: str,
+    coding_base_url: str,
+    model: str,
+) -> str:
+    normalized_model = str(model or "").strip().lower()
+    if normalized_model.startswith("glm-5."):
+        return normalize_zhipu_coding_base_url(coding_base_url)
+    return normalize_zhipu_base_url(base_url)
+
+
 def normalize_zhipu_mcp_http_base_url(base_url: str) -> str:
     value = str(base_url or "").strip().rstrip("/")
     return value or DEFAULT_ZHIPU_MCP_HTTP_BASE_URL

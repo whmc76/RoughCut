@@ -39,6 +39,25 @@ def test_update_step_status_ignores_missing_job(task_status_session_factory):
     assert not tasks._update_step_status(missing_job_id, "transcribe", "running", task_id="stale-task")
 
 
+def test_reset_session_state_sync_disposes_cached_engine(monkeypatch: pytest.MonkeyPatch) -> None:
+    disposed: list[str] = []
+
+    class FakeEngine:
+        async def dispose(self) -> None:
+            disposed.append("disposed")
+
+    monkeypatch.setattr(db_session, "_engine", FakeEngine())
+    monkeypatch.setattr(db_session, "_engine_loop_id", 123)
+    monkeypatch.setattr(db_session, "_session_factory", object())
+
+    db_session.reset_session_state_sync()
+
+    assert disposed == ["disposed"]
+    assert db_session._engine is None
+    assert db_session._engine_loop_id is None
+    assert db_session._session_factory is None
+
+
 def test_update_step_retry_waiting_ignores_missing_job(task_status_session_factory):
     missing_job_id = str(uuid.uuid4())
 

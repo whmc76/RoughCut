@@ -22,3 +22,8 @@ class AvatarProvider(ABC):
     ) -> dict[str, Any]:
         """Execute a provider-specific render request."""
         raise NotImplementedError(f"Avatar provider {request.get('provider')} must implement execute_render()")
+
+    def estimate_render_timeout_seconds(self, *, request: dict[str, Any]) -> float | None:
+        """Return an optional provider-specific wall-clock budget for execute_render()."""
+        del request
+        return None

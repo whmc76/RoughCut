@@ -15,11 +15,13 @@ from roughcut.edit.subtitle_surfaces import (
     subtitle_raw_rule_text,
 )
 from roughcut.media.subtitle_spans import (
+    build_subtitle_span_alignment,
     drop_redundant_synthetic_word_payloads,
     normalize_subtitle_items_for_timeline_projection,
     split_text_by_timed_span_units,
 )
-from roughcut.media.subtitle_text import clean_final_subtitle_text
+from roughcut.media.subtitle_text import clean_final_subtitle_text, normalize_source_transcript_text
+from roughcut.speech.subtitle_segmentation import normalize_display_numbers
 
 _SUBTITLE_FONT_SCALE = 1.0
 _WRAP_NO_SPLIT_ENDINGS = (
@@ -1199,6 +1201,7 @@ def split_subtitle_display_item(
     start_time: float,
     end_time: float,
     text: str,
+    subtitle_item: dict[str, Any] | None = None,
     max_duration_sec: float = 6.0,
     max_chars: int = 32,
 ) -> list[dict[str, Any]]:
@@ -1211,6 +1214,16 @@ def split_subtitle_display_item(
     pieces = split_subtitle_display_text(text, max_chars=target_chars)
     if len(pieces) <= 1:
         return [{"start_time": start_time, "end_time": end_time, "text": text}]
+
+    if subtitle_item:
+        aligned_segments = _split_subtitle_display_item_with_timed_alignment(
+            subtitle_item=subtitle_item,
+            start_time=float(start_time),
+            end_time=float(end_time),
+            pieces=pieces,
+        )
+        if aligned_segments is not None:
+            return aligned_segments
 
     weights = [max(1, len(piece.replace(" ", ""))) for piece in pieces]
     total_weight = sum(weights) or len(pieces)
@@ -1226,6 +1239,175 @@ def split_subtitle_display_item(
         segments.append({"start_time": round(cursor, 3), "end_time": round(next_cursor, 3), "text": piece})
         cursor = next_cursor
     return segments
+
+
+def resolve_subtitle_serialization_text(item: dict[str, Any]) -> str:
+    if str((item or {}).get("display_suppressed_reason") or "").strip():
+        return ""
+    display_text = clean_final_subtitle_text(subtitle_display_rule_text(item))
+    source_text = _subtitle_serialization_source_text(item)
+    if not display_text:
+        return source_text
+    if not source_text:
+        return display_text
+
+    normalized_source_display = clean_final_subtitle_text(normalize_display_numbers(source_text))
+    if _compact_subtitle_text(normalized_source_display) == _compact_subtitle_text(display_text):
+        return display_text
+
+    display_key = _compact_subtitle_text(display_text)
+    source_key = _compact_subtitle_text(source_text)
+    if len(display_key) >= 4 and len(source_key) >= 4:
+        common_length = _subtitle_common_subsequence_length(source_key, display_key)
+        source_missing_units = len(source_key) - common_length
+        display_coverage = common_length / max(1, len(display_key))
+        source_coverage = common_length / max(1, len(source_key))
+        if display_coverage >= 0.98 and source_missing_units >= 2:
+            return source_text
+        if source_missing_units >= 2 and source_coverage >= 0.68:
+            return source_text
+        if display_coverage < 0.72 and len(source_key) > len(display_key):
+            return source_text
+    if len(display_key) >= 4 and len(source_key) >= 4 and display_key in source_key and len(source_key) - len(display_key) >= 2:
+        return source_text
+
+    alignment_item = dict(item)
+    alignment_item["projection_text"] = display_text
+    alignment_item["text_final"] = display_text
+    alignment = build_subtitle_span_alignment(alignment_item)
+    unmatched_edge_units = len(_subtitle_display_units(alignment.unmatched_prefix)) + len(
+        _subtitle_display_units(alignment.unmatched_suffix)
+    )
+    if alignment.matched_ratio >= 0.82 and unmatched_edge_units <= 2:
+        return display_text
+
+    if len(display_key) < 4 or len(source_key) < 4:
+        return display_text
+
+    return display_text
+
+
+def build_serialization_subtitle_item(item: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    serialization_text = resolve_subtitle_serialization_text(item)
+    if not serialization_text:
+        return dict(item), ""
+    payload = dict(item)
+    payload["projection_text"] = serialization_text
+    payload["text_final"] = serialization_text
+    if "display_source_text" in payload:
+        payload["display_source_text"] = serialization_text
+    return payload, serialization_text
+
+
+def _subtitle_serialization_source_text(item: dict[str, Any]) -> str:
+    words = _normalized_subtitle_words(item)
+    if words:
+        transcript_hint = str(
+            (item or {}).get("transcript_text")
+            or (item or {}).get("text_raw")
+            or (item or {}).get("text_norm")
+            or ""
+        ).strip()
+        joiner = " " if " " in transcript_hint else ""
+        word_text = joiner.join(str(word.get("word") or "").strip() for word in words if str(word.get("word") or "").strip())
+        cleaned_word_text = normalize_source_transcript_text(word_text)
+        if cleaned_word_text:
+            return cleaned_word_text
+    for candidate in (
+        str((item or {}).get("transcript_text") or "").strip(),
+        str((item or {}).get("text_norm") or "").strip(),
+        str((item or {}).get("text_raw") or "").strip(),
+    ):
+        cleaned_candidate = normalize_source_transcript_text(candidate)
+        if cleaned_candidate:
+            return cleaned_candidate
+    return ""
+
+
+def _split_subtitle_display_item_with_timed_alignment(
+    *,
+    subtitle_item: dict[str, Any],
+    start_time: float,
+    end_time: float,
+    pieces: list[str],
+) -> list[dict[str, Any]] | None:
+    alignment = build_subtitle_span_alignment(subtitle_item)
+    if not alignment.units or alignment.matched_ratio < 0.72:
+        return None
+    piece_unit_counts = [len(_subtitle_display_units(piece)) for piece in pieces]
+    total_piece_units = sum(piece_unit_counts)
+    if total_piece_units <= 0:
+        return None
+
+    total_aligned_units = len(alignment.units)
+    segments: list[dict[str, Any]] = []
+    cursor = 0
+    for index, (piece, piece_unit_count) in enumerate(zip(pieces, piece_unit_counts)):
+        if not piece_unit_count:
+            continue
+        remaining_segments = len(pieces) - index
+        remaining_units = total_aligned_units - cursor
+        if remaining_units <= 0:
+            return None
+        if index == len(pieces) - 1:
+            next_cursor = total_aligned_units
+        else:
+            ideal_end = round(total_aligned_units * sum(piece_unit_counts[: index + 1]) / total_piece_units)
+            next_cursor = max(cursor + 1, ideal_end)
+            next_cursor = min(next_cursor, total_aligned_units - (remaining_segments - 1))
+        slice_units = alignment.units[cursor:next_cursor]
+        if not slice_units:
+            return None
+        segment_start = max(float(start_time), float(slice_units[0].start))
+        segment_end = min(float(end_time), float(slice_units[-1].end))
+        if segment_end <= segment_start:
+            return None
+        segments.append(
+            {
+                "start_time": round(segment_start, 3),
+                "end_time": round(segment_end, 3),
+                "text": piece,
+            }
+        )
+        cursor = next_cursor
+
+    if not segments:
+        return None
+    segments[0]["start_time"] = round(float(start_time), 3)
+    segments[-1]["end_time"] = round(float(end_time), 3)
+    previous_end = float(segments[0]["start_time"])
+    for segment in segments:
+        segment_start = max(previous_end, float(segment["start_time"]))
+        segment_end = max(segment_start + 0.001, float(segment["end_time"]))
+        segment["start_time"] = round(segment_start, 3)
+        segment["end_time"] = round(min(float(end_time), segment_end), 3)
+        previous_end = float(segment["end_time"])
+    if any(float(segment["end_time"]) <= float(segment["start_time"]) for segment in segments):
+        return None
+    return segments
+
+
+def _compact_subtitle_text(value: str) -> str:
+    return re.sub(r"[\s，,。.!！?？、；;：:“”\"'‘’（）()[\]【】]+", "", str(value or ""))
+
+
+def _subtitle_common_subsequence_length(left: str, right: str) -> int:
+    left_chars = list(str(left or ""))
+    right_chars = list(str(right or ""))
+    if not left_chars or not right_chars:
+        return 0
+    previous = [0] * (len(right_chars) + 1)
+    for left_char in left_chars:
+        diagonal = 0
+        for right_index, right_char in enumerate(right_chars):
+            saved = previous[right_index + 1]
+            previous[right_index + 1] = (
+                diagonal + 1
+                if left_char == right_char
+                else max(previous[right_index + 1], previous[right_index])
+            )
+            diagonal = saved
+    return previous[-1]
 
 
 def split_subtitle_display_text(text: str, *, max_chars: int) -> list[str]:
@@ -1365,13 +1547,14 @@ def write_ass_file(
             play_res_x=play_res_x,
             font_size=int(style_definition["font_size"]),
         )
-        text = clean_final_subtitle_text(subtitle_display_rule_text(item))
+        serialization_item, text = build_serialization_subtitle_item(item)
         if not text:
             continue
         for display_segment in split_subtitle_display_item(
             start_time=float(item["start_time"]),
             end_time=float(item["end_time"]),
             text=str(text),
+            subtitle_item=serialization_item,
             max_chars=max_chars_per_line * 2,
         ):
             segment_text = str(display_segment["text"])

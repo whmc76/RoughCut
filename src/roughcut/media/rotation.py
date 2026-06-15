@@ -83,7 +83,16 @@ async def detect_video_rotation_decision(source_path: Path) -> RotationDecision:
             reason="Unable to probe source duration",
         )
 
-    metadata_rotation = _rotation_from_metadata(source_path)
+    metadata_summary = _probe_rotation_metadata_summary(source_path)
+    metadata_rotation = int(metadata_summary.get("rotation_cw") or 0)
+    if metadata_rotation == 0 and not bool(metadata_summary.get("has_display_matrix")):
+        return RotationDecision(
+            rotation_cw=0,
+            source="metadata_zero",
+            confidence=0.92,
+            reason="Source metadata already reports upright orientation",
+            metadata_rotation_cw=0,
+        )
 
     with tempfile.TemporaryDirectory() as tmpdir:
         frames = _extract_raw_frames(source_path, duration, Path(tmpdir), count=_VISION_FRAME_COUNT)
@@ -192,6 +201,10 @@ _ROTATION_PROMPT = (
 # ── Metadata fallback ─────────────────────────────────────────────────────────
 
 def _rotation_from_metadata(source_path: Path) -> int:
+    return int(_probe_rotation_metadata_summary(source_path).get("rotation_cw") or 0)
+
+
+def _probe_rotation_metadata_summary(source_path: Path) -> dict[str, object]:
     """
     Read clockwise rotation from Display Matrix side-data or 'rotate' tag.
     Used only as fallback when no vision model is available.
@@ -199,6 +212,10 @@ def _rotation_from_metadata(source_path: Path) -> int:
     Display Matrix 'rotation' in ffprobe = degrees to apply for correct display.
     e.g. rotation=-90 → apply -90° (CCW) → normalize to 270° CW.
     """
+    summary = {
+        "rotation_cw": 0,
+        "has_display_matrix": False,
+    }
     try:
         import json as _json
         r = subprocess.run(
@@ -211,16 +228,20 @@ def _rotation_from_metadata(source_path: Path) -> int:
             if stream.get("codec_type") != "video":
                 continue
             for sd in stream.get("side_data_list", []):
+                if sd.get("side_data_type") == "Display Matrix":
+                    summary["has_display_matrix"] = True
                 if "rotation" in sd:
                     raw = int(sd["rotation"])  # -90 → 270° CW
-                    return int(raw % 360)
+                    summary["rotation_cw"] = int(raw % 360)
+                    return summary
             rot_tag = stream.get("tags", {}).get("rotate", "0")
             rot = int(rot_tag)
             if rot != 0:
-                return int(rot % 360)
+                summary["rotation_cw"] = int(rot % 360)
+                return summary
     except Exception:
-        pass
-    return 0
+        return summary
+    return summary
 
 
 def _parse_rotation(text: str) -> int:

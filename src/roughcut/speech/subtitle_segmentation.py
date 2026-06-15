@@ -992,7 +992,58 @@ _BOUNDARY_FORBIDDEN_DAMAGE_FLAGS = frozenset(
         "predicate_phrase",
         "reason_preamble",
         "suffix_particle_continuation",
+        "subject_clause_restart",
+        "demonstrative_modifier_phrase",
+        "classifier_noun_phrase",
     }
+)
+_SUBJECT_CLAUSE_RESTART_TAILS = (
+    "你",
+    "我",
+    "他",
+    "她",
+    "它",
+    "我们",
+    "你们",
+    "他们",
+    "她们",
+    "咱们",
+    "大家",
+)
+_SUBJECT_CLAUSE_RESTART_PREFIXES = (
+    "可以",
+    "也可以",
+    "都可以",
+    "就可以",
+    "还能",
+    "也能",
+    "都能",
+    "会",
+    "也会",
+    "都会",
+    "要",
+    "也要",
+    "就要",
+    "得",
+    "就得",
+    "需要",
+    "就需要",
+)
+_DEMONSTRATIVE_MODIFIER_PREFIXES = (
+    "这个版本",
+    "那个版本",
+    "这一版",
+    "那一版",
+    "这个",
+    "那个",
+    "这把",
+    "那把",
+    "这款",
+    "那款",
+    "这边",
+    "那边",
+    "这种",
+    "那种",
 )
 _BOUNDARY_WORD_CONTINUATION_FLAGS = frozenset(
     {
@@ -1010,6 +1061,9 @@ _BOUNDARY_SEMANTIC_DAMAGE_WEIGHTS = {
     "pronoun_modifier_phrase": 6.0,
     "predicate_phrase": 6.0,
     "reason_preamble": 8.0,
+    "subject_clause_restart": 8.0,
+    "demonstrative_modifier_phrase": 7.0,
+    "classifier_noun_phrase": 7.0,
     "repeated_model_suffix": 7.0,
     "honor_transition_phrase": 7.0,
     "possessive_phrase": 7.0,
@@ -1037,6 +1091,9 @@ _BOUNDARY_BREAK_DAMAGE_WEIGHTS = {
     "bare_determiner_phrase": 42.0,
     "pronoun_modifier_phrase": 36.0,
     "predicate_phrase": 38.0,
+    "subject_clause_restart": 44.0,
+    "demonstrative_modifier_phrase": 40.0,
+    "classifier_noun_phrase": 40.0,
     "repeated_model_suffix": 44.0,
     "possessive_phrase": 42.0,
     "soft_fragmentary_tail": 12.0,
@@ -1062,6 +1119,9 @@ _BOUNDARY_WORD_CANDIDATE_DAMAGE_WEIGHTS = {
     "measure_phrase_split": 18.0,
     "nominal_phrase": 12.0,
     "predicate_phrase": 14.0,
+    "subject_clause_restart": 16.0,
+    "demonstrative_modifier_phrase": 14.0,
+    "classifier_noun_phrase": 14.0,
     "model_token": 16.0,
     "honor_transition_phrase": 18.0,
     "protected_term": 12.0,
@@ -1074,6 +1134,9 @@ _BOUNDARY_PAIR_DAMAGE_WEIGHTS = {
     "generic_word": 18.0,
     "predicate_phrase": 18.0,
     "reason_preamble": 20.0,
+    "subject_clause_restart": 22.0,
+    "demonstrative_modifier_phrase": 20.0,
+    "classifier_noun_phrase": 20.0,
     "repeated_model_suffix": 24.0,
     "honor_transition_phrase": 24.0,
     "possessive_phrase": 22.0,
@@ -3538,6 +3601,12 @@ def _collect_boundary_damage_flags(left_text: str, right_text: str, *, left_core
         flags.add("predicate_phrase")
     if _boundary_splits_reason_preamble(left_text, right_text):
         flags.add("reason_preamble")
+    if _boundary_splits_subject_clause_restart(left_text, right_text):
+        flags.add("subject_clause_restart")
+    if _boundary_splits_demonstrative_modifier_phrase(left_text, right_text):
+        flags.add("demonstrative_modifier_phrase")
+    if _boundary_splits_classifier_noun_phrase(left_text, right_text):
+        flags.add("classifier_noun_phrase")
     if _boundary_starts_with_suffix_particle_continuation(left_text, right_text):
         flags.add("suffix_particle_continuation")
     if _boundary_splits_repeated_model_suffix(left_text, right_text):
@@ -3782,6 +3851,43 @@ def _boundary_splits_reason_preamble(left: str, right: str) -> bool:
             if any(rest.startswith(prefix) for prefix in _REASON_PREAMBLE_PREFIXES):
                 return True
     return any(stripped_right.startswith(prefix) for prefix in _REASON_PREAMBLE_PREFIXES)
+
+
+def _boundary_splits_subject_clause_restart(left: str, right: str) -> bool:
+    left_text = _strip_boundary_trailing_punctuation(left) or str(left or "").strip()
+    right_text = _strip_boundary_leading_particles(right) or str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    if _left_has_explicit_clause_break(str(left or "").strip()):
+        return False
+    if not any(left_text.endswith(token) for token in _SUBJECT_CLAUSE_RESTART_TAILS):
+        return False
+    return any(right_text.startswith(prefix) for prefix in _SUBJECT_CLAUSE_RESTART_PREFIXES)
+
+
+def _boundary_splits_demonstrative_modifier_phrase(left: str, right: str) -> bool:
+    left_text = _strip_boundary_trailing_punctuation(left) or str(left or "").strip()
+    right_text = _strip_boundary_leading_particles(right) or str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    if _left_has_explicit_clause_break(str(left or "").strip()):
+        return False
+    compact_left = _SEGMENTATION_COMPACT_PUNCT_RE.sub("", left_text)
+    if len(compact_left) < 2 or len(compact_left) > 8:
+        return False
+    return any(right_text.startswith(prefix) for prefix in _DEMONSTRATIVE_MODIFIER_PREFIXES)
+
+
+def _boundary_splits_classifier_noun_phrase(left: str, right: str) -> bool:
+    left_text = _strip_boundary_trailing_punctuation(left) or str(left or "").strip()
+    right_text = _strip_boundary_leading_particles(right) or str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    if _left_has_explicit_clause_break(str(left or "").strip()):
+        return False
+    if not re.search(r"(?:一个|这个|那个|这把|那把|这款|那款|这种|那种)[\u4e00-\u9fffA-Za-z0-9]{1,4}$", left_text):
+        return False
+    return _starts_with_nominal_head(right_text)
 
 
 def _boundary_splits_bare_determiner_phrase(left: str, right: str) -> bool:

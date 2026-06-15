@@ -1,5 +1,7 @@
 import type {
   ContentProfileReview,
+  JobAgentDecision,
+  JobAgentPlan,
   Job,
   JobActivity,
   JobDownloadFiles,
@@ -126,6 +128,10 @@ export const jobsApi = {
     enhancementModes: string[] = [],
     outputDir?: string,
     videoDescription?: string,
+    creatorCardId?: string,
+    taskBrief?: string,
+    executionMode?: string,
+    platformTargets: string[] = [],
   ) => {
     const formData = new FormData();
     files.forEach((file) => formData.append("files", file));
@@ -135,11 +141,23 @@ export const jobsApi = {
     if (workflowMode) formData.append("workflow_mode", workflowMode);
     if (outputDir?.trim()) formData.append("output_dir", outputDir.trim());
     if (videoDescription?.trim()) formData.append("video_description", videoDescription.trim());
+    if (creatorCardId) formData.append("creator_card_id", creatorCardId);
+    if (taskBrief?.trim()) formData.append("task_brief", taskBrief.trim());
+    if (executionMode) formData.append("execution_mode", executionMode);
+    platformTargets.forEach((platform) => formData.append("platform_targets", platform));
     enhancementModes.forEach((mode) => formData.append("enhancement_modes", mode));
     return requestForm<Job>("/jobs", formData);
   },
   getJob: (jobId: string) => request<Job>(`/jobs/${jobId}`),
   getJobActivity: (jobId: string) => request<JobActivity>(`/jobs/${jobId}/activity`),
+  getJobAgentPlan: (jobId: string) => request<JobAgentPlan>(`/jobs/${jobId}/agent-plan`),
+  refineJobAgentPlan: (jobId: string, body: { prompt: string; target?: string }) =>
+    request<JobAgentPlan>(`/jobs/${jobId}/agent-plan/refine`, { method: "POST", body: JSON.stringify(body) }),
+  applyJobAgentPlan: (
+    jobId: string,
+    body: { selected_strategy_id?: string; selected_visual_plan_id?: string; selected_publication_profile_id?: string },
+  ) => request<JobAgentPlan>(`/jobs/${jobId}/agent-plan/apply`, { method: "POST", body: JSON.stringify(body) }),
+  getJobAgentDecisions: (jobId: string) => request<JobAgentDecision[]>(`/jobs/${jobId}/agent-decisions`),
   getJobTokenUsage: (jobId: string) => request<TokenUsageReport>(`/jobs/${jobId}/token-usage`),
   getJobReport: (jobId: string) => request<Report>(`/jobs/${jobId}/report`),
   getJobTimeline: (jobId: string) => request<JobTimeline>(`/jobs/${jobId}/timeline`),
