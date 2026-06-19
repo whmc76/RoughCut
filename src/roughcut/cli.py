@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import uuid
 from dataclasses import asdict, dataclass
@@ -403,6 +404,158 @@ def watcher(path: str, workflow_template: str | None, language: str):
     asyncio.run(watch_directory(path, workflow_template=workflow_template, language=language))
 
 
+@cli.group()
+def remix():
+    """Build script-driven source-footage remix outputs."""
+
+
+def _run_script_footage_remix(
+    *,
+    source_root: Path | None,
+    episodes: str,
+    production_manifest: Path | None,
+    task_status: str,
+    output_dir: Path | None,
+    api_base: str,
+    qwen3_asr_base: str,
+    creator_profile: str,
+    creator_profile_path: Path | None,
+    tts_provider: str,
+    tts_timeout_sec: float,
+    tts_poll_sec: float,
+    force: bool,
+    force_tts: bool,
+    skip_tts_asr_align: bool,
+    skip_source_asr_index: bool,
+) -> None:
+    """Run the script-footage remix builder."""
+    repo_root = _repo_root()
+    script_path = repo_root / "scripts" / "build_script_footage_remix_samples.py"
+    if not script_path.exists():
+        raise click.ClickException(f"Script-footage remix builder not found: {script_path}")
+    manifest_payload: dict[str, Any] = {}
+    if production_manifest is not None:
+        manifest_path = production_manifest if production_manifest.is_absolute() else repo_root / production_manifest
+        try:
+            loaded_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            raise click.ClickException(f"Cannot read production manifest: {manifest_path}: {exc}") from exc
+        if isinstance(loaded_manifest, dict):
+            manifest_payload = loaded_manifest
+    if source_root is None:
+        if production_manifest is None:
+            raise click.ClickException("--source-root is required when --production-manifest is not set.")
+        manifest_source_root = str(manifest_payload.get("source_root") or "").strip()
+        if not manifest_source_root:
+            raise click.ClickException("Production manifest missing source_root")
+        source_root = Path(manifest_source_root)
+    if not str(creator_profile or "").strip():
+        creator_profile = str(manifest_payload.get("creator_profile") or "").strip()
+    resolved_output_dir = output_dir or repo_root / "output" / "script-footage-remix-full-script-samples"
+    command = [
+        sys.executable,
+        str(script_path),
+        "--source-root",
+        str(source_root),
+        "--episodes",
+        str(episodes),
+        "--output-dir",
+        str(resolved_output_dir),
+        "--api-base",
+        str(api_base),
+        "--qwen3-asr-base",
+        str(qwen3_asr_base),
+        "--creator-profile",
+        str(creator_profile),
+        "--tts-provider",
+        str(tts_provider),
+        "--tts-timeout-sec",
+        str(tts_timeout_sec),
+        "--tts-poll-sec",
+        str(tts_poll_sec),
+    ]
+    if production_manifest is not None:
+        command.extend(["--production-manifest", str(production_manifest), "--task-status", str(task_status)])
+    if creator_profile_path is not None:
+        command.extend(["--creator-profile-path", str(creator_profile_path)])
+    if skip_tts_asr_align:
+        command.append("--skip-tts-asr-align")
+    if skip_source_asr_index:
+        command.append("--skip-source-asr-index")
+    if force:
+        command.append("--force")
+    if force_tts:
+        command.append("--force-tts")
+    click.echo(" ".join(command))
+    result = subprocess.run(command, cwd=repo_root, check=False)
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
+
+
+def _script_footage_options(command):
+    command = click.option("--skip-source-asr-index", is_flag=True, default=False, help="Debug only: skip Source-ASR clip positioning index.")(command)
+    command = click.option("--skip-tts-asr-align", is_flag=True, default=False, help="Debug only: skip TTS-ASR subtitle alignment.")(command)
+    command = click.option("--force-tts", is_flag=True, default=False, help="Regenerate TTS audio even when cached narration exists.")(command)
+    command = click.option("--force", is_flag=True, default=False, help="Regenerate existing intermediate and output artifacts.")(command)
+    command = click.option("--tts-poll-sec", default=3.0, type=float, show_default=True, help="Polling interval for TTS API runs.")(command)
+    command = click.option("--tts-timeout-sec", default=300.0, type=float, show_default=True, help="Maximum time to wait for one TTS API run.")(command)
+    command = click.option("--tts-provider", type=click.Choice(["moss_tts_local", "cosyvoice3"]), default="moss_tts_local", show_default=True)(command)
+    command = click.option("--creator-profile-path", type=click.Path(path_type=Path), default=None, help="Explicit creator profile JSON path.")(command)
+    command = click.option("--creator-profile", default="", help="Creator profile slug bound to this remix task.")(command)
+    command = click.option("--qwen3-asr-base", default="http://127.0.0.1:30230", show_default=True, help="Qwen3-ASR service base URL.")(command)
+    command = click.option("--api-base", default="http://127.0.0.1:38471", show_default=True, help="RoughCut API base for MOSS/CosyVoice TTS.")(command)
+    command = click.option("--output-dir", type=click.Path(path_type=Path), default=None, help="Output directory for renders and reports.")(command)
+    command = click.option("--task-status", default="pending", show_default=True, type=click.Choice(["pending", "blocked_missing_script", "done", "all"]), help="Task status to read from --production-manifest.")(command)
+    command = click.option("--production-manifest", type=click.Path(path_type=Path), default=None, help="Formal production task manifest; pending tasks define episode order.")(command)
+    command = click.option("--episodes", default="1", show_default=True, help="Comma-separated episode numbers when no production manifest is supplied.")(command)
+    command = click.option(
+        "--source-root",
+        type=click.Path(path_type=Path),
+        default=None,
+        help="Source root containing scripts and source footage. Required unless --production-manifest has source_root.",
+    )(command)
+    return command
+
+
+@remix.command("script-footage")
+@_script_footage_options
+def remix_script_footage(
+    source_root: Path | None,
+    episodes: str,
+    production_manifest: Path | None,
+    task_status: str,
+    output_dir: Path | None,
+    api_base: str,
+    qwen3_asr_base: str,
+    creator_profile: str,
+    creator_profile_path: Path | None,
+    tts_provider: str,
+    tts_timeout_sec: float,
+    tts_poll_sec: float,
+    force: bool,
+    force_tts: bool,
+    skip_tts_asr_align: bool,
+    skip_source_asr_index: bool,
+):
+    """Run the generic script-footage remix chain."""
+    _run_script_footage_remix(
+        source_root=source_root,
+        episodes=episodes,
+        production_manifest=production_manifest,
+        task_status=task_status,
+        output_dir=output_dir,
+        api_base=api_base,
+        qwen3_asr_base=qwen3_asr_base,
+        creator_profile=creator_profile,
+        creator_profile_path=creator_profile_path,
+        tts_provider=tts_provider,
+        tts_timeout_sec=tts_timeout_sec,
+        tts_poll_sec=tts_poll_sec,
+        force=force,
+        force_tts=force_tts,
+        skip_tts_asr_align=skip_tts_asr_align,
+        skip_source_asr_index=skip_source_asr_index,
+    )
 @cli.command()
 @click.option(
     "--queue",

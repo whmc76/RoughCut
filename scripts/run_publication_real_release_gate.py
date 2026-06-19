@@ -3962,6 +3962,7 @@ def _build_expected_platform_manifest(
     for platform in platforms:
         normalized_platform = _normalize(platform).lower().replace("_", "-")
         entry = normalized_packaging.get(normalized_platform) if isinstance(normalized_packaging.get(normalized_platform), dict) else {}
+        has_explicit_declaration = bool(_normalize(entry.get("declaration") or entry.get("content_declaration")))
         normalized_entry = _coerce_platform_packaging_entry(
             normalized_platform,
             dict(entry),
@@ -4662,6 +4663,7 @@ def _build_platform_packaging(
     for platform in platforms:
         normalized_platform = _normalize(platform).lower().replace("_", "-")
         entry = normalized_packaging.get(normalized_platform) if isinstance(normalized_packaging.get(normalized_platform), dict) else {}
+        has_explicit_declaration = bool(_normalize(entry.get("declaration") or entry.get("content_declaration")))
         normalized_entry = _coerce_platform_packaging_entry(
             normalized_platform,
             dict(entry),
@@ -4700,7 +4702,7 @@ def _build_platform_packaging(
             platform_payload["category"] = category
         if collection is not None:
             platform_payload["collection"] = collection
-        if declaration:
+        if declaration and has_explicit_declaration:
             platform_payload["declaration"] = declaration
         if visibility_or_publish_mode:
             platform_payload["visibility_or_publish_mode"] = visibility_or_publish_mode

@@ -12,6 +12,7 @@ from typing import Any
 from roughcut.config import get_settings
 from roughcut.providers.auth import resolve_credential
 from roughcut.providers.zhipu_compat import build_zhipu_mcp_server_catalog
+from roughcut.utils.asyncio_subprocess import close_asyncio_subprocess_transport
 
 
 class ZhipuVisionMCPError(RuntimeError):
@@ -72,6 +73,7 @@ class _StdioMCPClient:
                 await stderr_task
             except asyncio.CancelledError:
                 pass
+        await close_asyncio_subprocess_transport(process)
 
     async def call_tool(self, *, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         payload = await self._request("tools/call", {"name": name, "arguments": arguments})
@@ -242,6 +244,51 @@ async def analyze_images_with_mcp(
                 )
             )
     return results
+
+
+async def analyze_video_with_mcp(
+    video_path: Path | str,
+    *,
+    prompt: str,
+    timeout_sec: int = 180,
+) -> VisionMCPAnalysisResult:
+    settings = get_settings()
+    api_key = resolve_credential(
+        mode=settings.zhipu_auth_mode,
+        direct_value=settings.zhipu_api_key,
+        helper_command=settings.zhipu_api_key_helper,
+        provider_name="Zhipu",
+    )
+    catalog = build_zhipu_mcp_server_catalog(api_key=api_key, mcp_http_base_url=settings.zhipu_mcp_http_base_url)
+    vision = catalog["vision"]
+    env = os.environ.copy()
+    env.update(dict(vision.env or {}))
+    env.setdefault("Z_AI_API_KEY", api_key)
+    env.setdefault("Z_AI_MODE", "ZHIPU")
+
+    normalized_path = Path(str(video_path).strip())
+    if not str(normalized_path):
+        raise ZhipuVisionMCPError("video path is empty")
+
+    command, args = _resolve_internal_command(vision.command or "npx", list(vision.args))
+    async with _StdioMCPClient(
+        command=command,
+        args=args,
+        env=env,
+        timeout_sec=timeout_sec,
+    ) as client:
+        response = await client.call_tool(
+            name="analyze_video",
+            arguments={
+                "video_source": str(normalized_path),
+                "prompt": prompt,
+            },
+        )
+    return VisionMCPAnalysisResult(
+        image_path=str(normalized_path),
+        content=_extract_tool_text(response),
+        raw=response,
+    )
 
 
 def _resolve_internal_command(command: str, args: list[str]) -> tuple[str, list[str]]:

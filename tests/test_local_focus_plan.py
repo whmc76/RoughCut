@@ -86,3 +86,20 @@ def test_packaging_timeline_focus_readers_return_shared_focus_contract() -> None
     assert packaging_timeline_focus_plan(packaging_timeline) is not None
     assert packaging_timeline_focus_events(packaging_timeline)[0]["event_type"] == "screen_focus"
     assert packaging_timeline_chapter_cards(packaging_timeline)[0]["title"] == "开场重点"
+
+
+def test_build_render_plan_omits_cover_by_default_and_keeps_explicit_cover_opt_in() -> None:
+    default_plan = build_render_plan("00000000-0000-0000-0000-000000000000")
+    explicit_plan = build_render_plan(
+        "00000000-0000-0000-0000-000000000000",
+        include_cover=True,
+        cover_style="hero",
+        title_style="strong",
+    )
+
+    assert "cover" not in default_plan
+    assert explicit_plan["cover"] == {
+        "style": "hero",
+        "title_style": "strong",
+        "variant_count": 5,
+    }

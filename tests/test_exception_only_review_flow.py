@@ -562,47 +562,5 @@ async def test_summary_review_quality_issue_records_advisory_without_auto_rerun(
         await engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_final_review_auto_advances_when_quality_gate_passes(monkeypatch) -> None:
-    job = Job(id=uuid.uuid4(), source_name="source.mp4", status="processing")
-    final_review_step = JobStep(job_id=job.id, step_name="final_review", status="pending")
-
-    async def fake_assess(*_args, **_kwargs):
-        return "done"
-
-    monkeypatch.setattr(orchestrator, "_assess_and_maybe_rerun_job", fake_assess)
-
-    outcome = await orchestrator._auto_advance_final_review_after_render(
-        None,
-        job=job,
-        steps=[final_review_step],
-        final_review_step=final_review_step,
-    )
-
-    assert outcome == "advanced"
-    assert final_review_step.status == "done"
-    assert final_review_step.metadata_["exception_only_auto_approved"] is True
-    assert job.status == "processing"
-
-
-@pytest.mark.asyncio
-async def test_final_review_records_quality_advisory_and_continues(monkeypatch) -> None:
-    job = Job(id=uuid.uuid4(), source_name="source.mp4", status="processing")
-    final_review_step = JobStep(job_id=job.id, step_name="final_review", status="pending")
-    async def fake_assess(*_args, **_kwargs):
-        return "needs_review"
-
-    monkeypatch.setattr(orchestrator, "_assess_and_maybe_rerun_job", fake_assess)
-
-    outcome = await orchestrator._auto_advance_final_review_after_render(
-        None,
-        job=job,
-        steps=[final_review_step],
-        final_review_step=final_review_step,
-    )
-
-    assert outcome == "advanced"
-    assert final_review_step.status == "done"
-    assert final_review_step.metadata_["exception_gate"] is True
-    assert final_review_step.metadata_["manual_adjustment_advisory"] is True
-    assert job.status == "processing"
+def test_final_review_auto_advance_hook_is_removed_from_editing_orchestrator() -> None:
+    assert not hasattr(orchestrator, "_auto_advance_final_review_after_render")

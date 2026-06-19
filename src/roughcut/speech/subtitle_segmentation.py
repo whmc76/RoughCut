@@ -2672,21 +2672,29 @@ def _resolve_subtitle_entry_sequence(
     max_duration: float,
     allow_window_refine: bool,
 ) -> list[SubtitleEntry]:
-    merged = _merge_continuation_entries(entries, max_chars=max_chars, max_duration=max_duration)
+    merged = _merge_orphan_single_character_entries(entries, max_chars=max_chars, max_duration=max_duration)
+    merged = _merge_continuation_entries(merged, max_chars=max_chars, max_duration=max_duration)
+    merged = _merge_orphan_single_character_entries(merged, max_chars=max_chars, max_duration=max_duration)
     merged = _merge_short_chain_entries(merged, max_chars=max_chars, max_duration=max_duration)
+    merged = _merge_orphan_single_character_entries(merged, max_chars=max_chars, max_duration=max_duration)
     merged = _merge_same_source_segment_micro_fragments(merged, max_chars=max_chars, max_duration=max_duration)
     rebalanced = _rebalance_semantic_boundaries(merged, max_chars=max_chars, max_duration=max_duration)
     resolved = _merge_continuation_entries(rebalanced, max_chars=max_chars, max_duration=max_duration)
     resolved = _merge_short_chain_entries(resolved, max_chars=max_chars, max_duration=max_duration)
+    resolved = _merge_orphan_single_character_entries(resolved, max_chars=max_chars, max_duration=max_duration)
     resolved = _merge_same_source_segment_micro_fragments(resolved, max_chars=max_chars, max_duration=max_duration)
     if allow_window_refine:
         resolved = _refine_low_confidence_windows(resolved, max_chars=max_chars, max_duration=max_duration)
         resolved = _merge_continuation_entries(resolved, max_chars=max_chars, max_duration=max_duration)
+        resolved = _merge_orphan_single_character_entries(resolved, max_chars=max_chars, max_duration=max_duration)
         resolved = _merge_short_chain_entries(resolved, max_chars=max_chars, max_duration=max_duration)
+        resolved = _merge_orphan_single_character_entries(resolved, max_chars=max_chars, max_duration=max_duration)
         resolved = _merge_same_source_segment_micro_fragments(resolved, max_chars=max_chars, max_duration=max_duration)
         resolved = _rebalance_semantic_boundaries(resolved, max_chars=max_chars, max_duration=max_duration)
         resolved = _merge_continuation_entries(resolved, max_chars=max_chars, max_duration=max_duration)
+        resolved = _merge_orphan_single_character_entries(resolved, max_chars=max_chars, max_duration=max_duration)
         resolved = _merge_short_chain_entries(resolved, max_chars=max_chars, max_duration=max_duration)
+        resolved = _merge_orphan_single_character_entries(resolved, max_chars=max_chars, max_duration=max_duration)
         resolved = _merge_same_source_segment_micro_fragments(resolved, max_chars=max_chars, max_duration=max_duration)
     resolved = _split_readability_overflow_entries(
         resolved,
@@ -2698,6 +2706,7 @@ def _resolve_subtitle_entry_sequence(
         max_chars=max_chars,
         max_duration=max_duration,
     )
+    resolved = _merge_orphan_single_character_entries(resolved, max_chars=max_chars, max_duration=max_duration)
     return _cleanup_subtitle_entries(resolved)
 
 
@@ -4282,6 +4291,137 @@ def _merge_subtitle_entries(left: SubtitleEntry, right: SubtitleEntry) -> Subtit
         f"{left.text_raw}{right.text_raw}",
         words=tuple(left.words or ()) + tuple(right.words or ()),
     )
+
+
+_ORPHAN_SINGLE_CJK_PREFER_RIGHT = {"你", "我", "他", "她", "它", "这", "那", "把", "给", "就", "再", "才"}
+
+
+def _merge_orphan_single_character_entries(
+    entries: list[SubtitleEntry],
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> list[SubtitleEntry]:
+    if len(entries) <= 1:
+        return entries
+
+    merged: list[SubtitleEntry] = []
+    index = 0
+    while index < len(entries):
+        current = entries[index]
+        current_text = str(current.text_raw or "").strip()
+        if not _is_orphan_single_cjk_subtitle_text(current_text):
+            merged.append(
+                SubtitleEntry(
+                    index=len(merged),
+                    start=current.start,
+                    end=current.end,
+                    text_raw=current.text_raw,
+                    text_norm=current.text_norm,
+                    words=tuple(current.words or ()),
+                )
+            )
+            index += 1
+            continue
+
+        right_candidate = entries[index + 1] if index + 1 < len(entries) else None
+        if right_candidate is not None and _can_merge_orphan_single_character(
+            current,
+            right_candidate,
+            max_chars=max_chars,
+            max_duration=max_duration,
+        ):
+            right_text = str(right_candidate.text_raw or "").strip()
+            right_starts_good_break = any(right_text.startswith(prefix) for prefix in _GOOD_BREAK_PREFIXES)
+            if current_text in _ORPHAN_SINGLE_CJK_PREFER_RIGHT and not right_starts_good_break:
+                merged.append(
+                    _make_subtitle_entry(
+                        len(merged),
+                        current.start,
+                        right_candidate.end,
+                        f"{current_text}{right_text}",
+                        words=tuple(current.words or ()) + tuple(right_candidate.words or ()),
+                    )
+                )
+                index += 2
+                continue
+
+        if merged:
+            previous = merged[-1]
+            if _can_merge_orphan_single_character(
+                previous,
+                current,
+                max_chars=max_chars,
+                max_duration=max_duration,
+            ):
+                merged[-1] = _make_subtitle_entry(
+                    len(merged) - 1,
+                    previous.start,
+                    current.end,
+                    f"{previous.text_raw}{current_text}",
+                    words=tuple(previous.words or ()) + tuple(current.words or ()),
+                )
+                index += 1
+                continue
+
+        if right_candidate is not None and _can_merge_orphan_single_character(
+            current,
+            right_candidate,
+            max_chars=max_chars,
+            max_duration=max_duration,
+        ):
+            right_text = str(right_candidate.text_raw or "").strip()
+            merged.append(
+                _make_subtitle_entry(
+                    len(merged),
+                    current.start,
+                    right_candidate.end,
+                    f"{current_text}{right_text}",
+                    words=tuple(current.words or ()) + tuple(right_candidate.words or ()),
+                )
+            )
+            index += 2
+            continue
+
+        merged.append(
+            SubtitleEntry(
+                index=len(merged),
+                start=current.start,
+                end=current.end,
+                text_raw=current.text_raw,
+                text_norm=current.text_norm,
+                words=tuple(current.words or ()),
+            )
+        )
+        index += 1
+
+    return _reindex_subtitle_entries(merged)
+
+
+def _is_orphan_single_cjk_subtitle_text(text: str) -> bool:
+    stripped = str(text or "").strip().strip("，,。.!！？；;：:、 ")
+    return bool(re.fullmatch(r"[\u4e00-\u9fff]", stripped))
+
+
+def _can_merge_orphan_single_character(
+    left: SubtitleEntry,
+    right: SubtitleEntry,
+    *,
+    max_chars: int,
+    max_duration: float,
+) -> bool:
+    left_text = str(left.text_raw or "").strip()
+    right_text = str(right.text_raw or "").strip()
+    if not left_text or not right_text:
+        return False
+    if left_text[-1] in _HARD_BREAK_CHARS:
+        return False
+    gap = max(0.0, float(right.start) - float(left.end))
+    if gap > 0.22:
+        return False
+    combined_text = f"{left_text}{right_text}"
+    combined_duration = max(0.0, float(right.end) - float(left.start))
+    return len(combined_text) <= max_chars + 2 and combined_duration <= max_duration + 0.8
 
 
 def _score_break_boundary(left: str, right: str, *, index: int, target: int) -> float:

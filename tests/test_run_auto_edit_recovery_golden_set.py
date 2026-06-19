@@ -1028,9 +1028,9 @@ def test_summarize_render_diagnostics_aggregates_failed_and_degraded_jobs() -> N
         "failed_render_job_count": 1,
         "failed_render_job_ids": ["job-fail"],
         "failed_render_reasons": {"render_failed": 1},
-        "cover_degraded_job_count": 1,
-        "cover_degraded_job_ids": ["job-fail"],
-        "cover_degraded_reasons": {"cover_export_failed": 1},
+        "cover_degraded_job_count": 0,
+        "cover_degraded_job_ids": [],
+        "cover_degraded_reasons": {},
         "avatar_degraded_job_count": 1,
         "avatar_degraded_job_ids": ["job-avatar"],
         "avatar_degraded_reasons": {"avatar_full_track_call_timeout": 1},
@@ -1052,11 +1052,6 @@ def test_summarize_render_outputs_preserves_avatar_failure_payload() -> None:
                         "retryable": True,
                         "error_metadata": {"slot_timeout_seconds": 120.0},
                     },
-                    "cover_result": {
-                        "status": "degraded",
-                        "reason": "cover_export_failed",
-                        "detail": "cover export failed",
-                    },
                     "cover": "E:/cover.png",
                 },
             },
@@ -1072,12 +1067,6 @@ def test_summarize_render_outputs_preserves_avatar_failure_payload() -> None:
             "retryable": True,
             "error_metadata": {"slot_timeout_seconds": 120.0},
         },
-        "cover_result": {
-            "status": "degraded",
-            "reason": "cover_export_failed",
-            "detail": "cover export failed",
-        },
-        "cover": "E:/cover.png",
     }
 
 
@@ -1118,10 +1107,10 @@ def test_summarize_render_outputs_prefers_runtime_avatar_reason_and_adds_categor
         "retryable": True,
         "error_metadata": {"call_timeout_seconds": 180.0},
     }
-    assert summary["cover"] == "E:/cover.png"
+    assert "cover" not in summary
 
 
-def test_summarize_render_outputs_supports_runtime_only_failed_render_jobs() -> None:
+def test_summarize_render_outputs_ignores_runtime_cover_payload() -> None:
     summary = summarize_render_outputs(
         [
             {
@@ -1153,12 +1142,6 @@ def test_summarize_render_outputs_supports_runtime_only_failed_render_jobs() -> 
             "detail": "call timeout",
             "retryable": True,
             "error_metadata": {"call_timeout_seconds": 180.0},
-        },
-        "cover_result": {
-            "status": "done",
-            "detail": "cover generated",
-            "cover_path": "E:/cover.png",
-            "variant_count": 5,
         },
     }
 
@@ -1623,7 +1606,7 @@ def test_manual_editor_apply_semantics_payload_reuses_subtitle_only_contract() -
     assert payload["change_scope"] == "subtitle_only"
     assert payload["render_strategy"] == "reuse_timeline_effect_plan"
     assert payload["rerun_start_step"] == "render"
-    assert payload["rerun_steps"] == ["render", "final_review", "platform_package"]
+    assert payload["rerun_steps"] == ["render"]
 
 
 def test_manual_editor_apply_semantics_payload_keeps_no_material_change_rerun_shrunk() -> None:
@@ -1643,8 +1626,8 @@ def test_manual_editor_apply_semantics_payload_keeps_no_material_change_rerun_sh
     assert payload["ok"] is True
     assert payload["change_scope"] == "no_material_change"
     assert payload["render_strategy"] == "metadata_refresh_render"
-    assert payload["rerun_start_step"] == "platform_package"
-    assert payload["rerun_steps"] == ["platform_package"]
+    assert payload["rerun_start_step"] == ""
+    assert payload["rerun_steps"] == []
 
 
 def test_manual_editor_apply_semantics_payload_rejects_inconsistent_contract() -> None:

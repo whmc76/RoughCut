@@ -172,6 +172,102 @@ def test_interrupted_tool_run_requeues_when_loaded(monkeypatch: pytest.MonkeyPat
     assert tools._get_run_stage(restored, "request")["status"] == "pending"
 
 
+def test_stale_interrupted_tool_run_fails_instead_of_blocking_queue(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(tools, "_RUN_STORE_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(tools, "_RUNS", {})
+    monkeypatch.setattr(tools, "_RUNS_LOADED", False)
+    run = tools._create_run("tts", request={"text": "测试", "mode": "moss_direct_tts"})
+    tools._update_run_stage(run["run_id"], "request", detail="Submitting request", progress=0.5)
+    run["updated_at"] = "2026-01-01T00:00:00+00:00"
+    tools._persist_run(run)
+
+    monkeypatch.setattr(tools, "_RUNS", {})
+    monkeypatch.setattr(tools, "_RUNS_LOADED", False)
+    tools._ensure_runs_loaded()
+
+    restored = tools._RUNS[run["run_id"]]
+    assert restored["status"] == "failed"
+    assert "recovery window" in restored["error"]
+    assert tools._queue_position(run["run_id"]) is None
+
+
+def test_refreshed_stale_tool_run_still_expires(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(tools, "_RUN_STORE_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(tools, "_RUNS", {})
+    monkeypatch.setattr(tools, "_RUNS_LOADED", False)
+    run = tools._create_run("tts", request={"text": "测试", "mode": "moss_direct_tts"})
+    run["created_at"] = "2026-01-01T00:00:00+00:00"
+    run["updated_at"] = datetime.now(timezone.utc).isoformat()
+    tools._persist_run(run)
+
+    monkeypatch.setattr(tools, "_RUNS", {})
+    monkeypatch.setattr(tools, "_RUNS_LOADED", False)
+    tools._ensure_runs_loaded()
+
+    assert tools._RUNS[run["run_id"]]["status"] == "failed"
+
+
+def test_dispatched_tool_run_leaves_queue(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(tools, "_RUN_STORE_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(tools, "_RUNS", {})
+    monkeypatch.setattr(tools, "_RUNS_LOADED", False)
+    run = tools._create_run("tts", request={"text": "测试", "mode": "moss_direct_tts"})
+
+    tools._mark_run_dispatched(run)
+
+    assert run["status"] == "running"
+    assert tools._queue_position(run["run_id"]) is None
+
+
+def test_equivalent_active_tts_run_is_reused(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(tools, "_RUN_STORE_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(tools, "_RUNS", {})
+    monkeypatch.setattr(tools, "_RUNS_LOADED", False)
+    request = {"text": "测试", "mode": "moss_direct_tts", "reference_path": "/tmp/ref.wav"}
+    run = tools._create_run("tts", request=request)
+    tools._mark_run_dispatched(run)
+
+    assert tools._find_equivalent_active_run("tts", dict(request)) is run
+    assert tools._find_equivalent_active_run("tts", {**request, "text": "另一段"}) is None
+
+
+def test_equivalent_running_run_is_preferred_over_newer_queued_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(tools, "_RUN_STORE_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(tools, "_RUNS", {})
+    monkeypatch.setattr(tools, "_RUNS_LOADED", False)
+    request = {"text": "测试", "mode": "moss_direct_tts"}
+    running = tools._create_run("tts", request=request)
+    tools._mark_run_dispatched(running)
+    queued = tools._create_run("tts", request=request)
+
+    assert tools._find_equivalent_active_run("tts", dict(request)) is running
+    assert queued["status"] == "queued"
+
+
+def test_equivalent_queued_duplicates_are_cancelled_when_reusing_active_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(tools, "_RUN_STORE_ROOT", tmp_path / "runs")
+    monkeypatch.setattr(tools, "_RUNS", {})
+    monkeypatch.setattr(tools, "_RUNS_LOADED", False)
+    request = {"text": "测试", "mode": "moss_direct_tts"}
+    running = tools._create_run("tts", request=request)
+    tools._mark_run_dispatched(running)
+    queued = tools._create_run("tts", request=request)
+
+    tools._cancel_equivalent_queued_duplicates("tts", request, keep_run_id=running["run_id"])
+
+    assert queued["status"] == "cancelled"
+    assert tools._queue_position(queued["run_id"]) is None
+
+
 def test_moss_tts_local_form_data_sends_duration_and_sampling_fields() -> None:
     data = tools._build_moss_tts_local_form_data(
         text="测试 MOSS TTS。",

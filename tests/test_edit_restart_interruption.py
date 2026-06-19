@@ -1,6 +1,7 @@
 from roughcut.edit.decisions import (
     build_edit_decision,
     _collect_rollback_instruction_cuts,
+    _collect_repeated_attempt_retake_candidates,
     _collect_restart_cue_cuts,
     _collect_restart_retake_cuts,
     _is_rollback_instruction_text,
@@ -112,6 +113,72 @@ def test_interruption_between_retake_lines_becomes_cut_candidate() -> None:
     )
 
     assert cuts == [(0.0, 2.0, "restart_retake")]
+
+
+def test_repeated_failed_demo_attempts_keep_final_success_as_candidate() -> None:
+    candidates = _collect_repeated_attempt_retake_candidates(
+        [
+            _subtitle(0, 0.0, 1.0, "我试一下这个快拆扣"),
+            _subtitle(1, 1.2, 2.2, "这里没扣上好像有点卡住"),
+            _subtitle(2, 2.6, 3.4, "再试一下"),
+            _subtitle(3, 3.8, 5.4, "这样就很轻松扣上到位了"),
+        ],
+        content_profile={"content_kind": "unboxing"},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].start == 0.0
+    assert candidates[0].end == 3.8
+    assert candidates[0].reason == "restart_retake"
+    assert candidates[0].evidence["cluster_type"] == "failed_demo_attempt"
+    assert "keep_final_attempt" in candidates[0].evidence["tags"]
+
+
+def test_progressive_spoken_line_retake_keeps_final_clean_line_as_candidate() -> None:
+    candidates = _collect_repeated_attempt_retake_candidates(
+        [
+            _subtitle(0, 0.0, 0.8, "这个前置快开"),
+            _subtitle(1, 1.0, 1.9, "这个前置快开其实"),
+            _subtitle(2, 2.1, 4.0, "这个前置快开其实是最爽的一个开法"),
+        ],
+        content_profile={"content_kind": "unboxing"},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].start == 0.0
+    assert candidates[0].end == 2.1
+    assert candidates[0].evidence["cluster_type"] == "progressive_line_retake"
+
+
+def test_self_correction_retake_handles_action_words_without_failed_demo_label() -> None:
+    candidates = _collect_repeated_attempt_retake_candidates(
+        [
+            _subtitle(0, 719.129, 721.408, "拇指这还有个弹"),
+            _subtitle(1, 721.408, 725.508, "开啊 就是你用这个指甲直接去"),
+            _subtitle(2, 725.508, 727.786, "你用指甲卡住"),
+            _subtitle(3, 727.786, 730.064, "这个大拇指的这个"),
+            _subtitle(4, 730.064, 733.254, "不是 你用大拇指的指甲去卡"),
+        ],
+        content_profile={"content_kind": "unboxing"},
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].start == 719.129
+    assert candidates[0].end == 730.064
+    assert candidates[0].evidence["cluster_type"] == "progressive_line_retake"
+
+
+def test_sequential_product_explanation_is_not_treated_as_retake_cluster() -> None:
+    candidates = _collect_repeated_attempt_retake_candidates(
+        [
+            _subtitle(0, 0.0, 1.0, "先看一下肩带这个位置"),
+            _subtitle(1, 1.2, 2.4, "再看一下外袋容量"),
+            _subtitle(2, 2.7, 4.0, "最后看背面的贴合效果"),
+        ],
+        content_profile={"content_kind": "unboxing"},
+    )
+
+    assert candidates == []
 
 
 def test_standalone_interruption_cue_becomes_cut_candidate() -> None:

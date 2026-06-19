@@ -321,6 +321,40 @@ def test_write_srt_file_serializes_final_text_without_punctuation(tmp_path: Path
     assert "，" not in content
 
 
+def test_write_srt_file_merges_orphan_single_cjk_cue_to_next_phrase(tmp_path: Path) -> None:
+    output_path = tmp_path / "subtitle.srt"
+
+    write_srt_file(
+        [
+            {"index": 0, "start_time": 274.987, "end_time": 277.358, "text_final": "要一只手按着这个包"},
+            {"index": 1, "start_time": 277.387, "end_time": 277.543, "text_final": "它"},
+            {"index": 2, "start_time": 277.543, "end_time": 280.026, "text_final": "拉上以后"},
+            {"index": 3, "start_time": 280.026, "end_time": 281.505, "text_final": "你再给它手动的去锁紧"},
+        ],
+        output_path,
+    )
+
+    content = output_path.read_text(encoding="utf-8-sig")
+    assert "它拉上以后" in content
+    assert "\n它\n" not in content
+
+
+def test_write_srt_file_sorts_projection_items_before_timeline_validation(tmp_path: Path) -> None:
+    output_path = tmp_path / "subtitle.srt"
+
+    write_srt_file(
+        [
+            {"index": 2, "start_time": 1.0, "end_time": 2.0, "text_final": "第二句"},
+            {"index": 1, "start_time": 0.0, "end_time": 1.0, "text_final": "第一句"},
+        ],
+        output_path,
+    )
+
+    content = output_path.read_text(encoding="utf-8-sig")
+    assert "1\n00:00:00,000 --> 00:00:01,000\n第一句" in content
+    assert "2\n00:00:01,000 --> 00:00:02,000\n第二句" in content
+
+
 def test_write_srt_file_splits_overlong_display_cues(tmp_path: Path) -> None:
     output_path = tmp_path / "subtitle.srt"
 
@@ -407,6 +441,30 @@ def test_write_ass_file_splits_long_dialogues_instead_of_truncating(tmp_path: Pa
     assert len(dialogue_lines) >= 2
     assert "…" not in "\n".join(dialogue_lines)
     assert "很多兄弟一样" in "\n".join(dialogue_lines)
+
+
+def test_write_ass_file_uses_explicit_semantic_wrap_without_verb_complement_tail(tmp_path: Path) -> None:
+    output_path = tmp_path / "subtitle.ass"
+
+    write_ass_file(
+        [
+            {
+                "start_time": 167.74,
+                "end_time": 171.168,
+                "text_final": "比如说我刚才我想把这个拉回来嘛",
+            },
+        ],
+        output_path,
+        play_res_x=1920,
+        play_res_y=1080,
+    )
+
+    content = output_path.read_text(encoding="utf-8-sig")
+    dialogue_lines = [line for line in content.splitlines() if line.startswith("Dialogue:")]
+    assert "WrapStyle: 2" in content
+    assert len(dialogue_lines) == 1
+    assert "拉\\N回来嘛" not in dialogue_lines[0]
+    assert "拉回来嘛" in dialogue_lines[0]
 
 
 def test_split_subtitle_display_item_uses_word_timed_boundaries_for_display_segments() -> None:

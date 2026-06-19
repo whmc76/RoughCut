@@ -573,6 +573,7 @@ def build_smart_cut_rule_candidates(
     rules = normalize_smart_cut_rules_payload(smart_cut_rules)
     filler_terms = _parse_term_list(rules.get("fillers")) if bool(rules.get("fillerEnabled")) else []
     catchphrase_terms = _parse_term_list(rules.get("catchphrases")) if bool(rules.get("catchphraseEnabled")) else []
+    disabled_smart_delete_reasons = {str(reason or "").strip() for reason in list(rules.get("disabledSmartDeleteReasons") or [])}
     normalized_subtitles = _subtitles_sorted(list(subtitles or []))
     multimodal_segment_hints = _multimodal_segment_hints(normalized_subtitles, content_profile)
     candidates: list[dict[str, Any]] = []
@@ -653,7 +654,7 @@ def build_smart_cut_rule_candidates(
                 and len(compact_text) >= 5
                 and subtitle_signal_score(semantic_text, content_profile=content_profile) <= 0.15
             )
-            if low_signal and (
+            if "low_signal_subtitle" not in disabled_smart_delete_reasons and low_signal and (
                 low_signal_subtitle_is_contextually_isolated(
                     semantic_text,
                     previous_text=previous_text,

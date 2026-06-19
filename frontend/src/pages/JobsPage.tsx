@@ -1,6 +1,8 @@
-import { useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
 
+import { api } from "../api";
 import { PageHeader } from "../components/ui/PageHeader";
 import { JobCreateModal } from "../features/jobs/JobCreateModal";
 import { JobDetailModal } from "../features/jobs/JobDetailModal";
@@ -10,8 +12,10 @@ import { JobPublicationPanel } from "../features/jobs/JobPublicationPanel";
 import { JobQueueTable } from "../features/jobs/JobQueueTable";
 import { JobReviewOverlay } from "../features/jobs/JobReviewOverlay";
 import { JobUploadPanel } from "../features/jobs/JobUploadPanel";
+import type { JobCreateEntryMode } from "../features/jobs/constants";
 import type { JobQueueFilter } from "../features/jobs/useJobWorkspace";
-import { resolveJobReviewStep, type JobReviewStep, useJobWorkspace } from "../features/jobs/useJobWorkspace";
+import type { RemixProductionTask } from "../types";
+import { MATERIAL_ENHANCEMENT_OPTIONS, resolveJobReviewStep, type JobReviewStep, type JobTaskKindFilter, useJobWorkspace } from "../features/jobs/useJobWorkspace";
 import { useI18n } from "../i18n";
 import { classNames } from "../utils";
 
@@ -23,20 +27,83 @@ const QUEUE_FILTER_META: Record<JobQueueFilter, { label: string; description: st
   attention: { label: "待处理事项", description: "失败、待核对、已取消等需要人工介入的任务。" },
 };
 
+const TASK_KIND_FILTER_META: Array<{ key: JobTaskKindFilter; label: string }> = [
+  { key: "all", label: "全部标签" },
+  { key: "edit", label: "剪辑任务" },
+  { key: "remix_production", label: "影视二创" },
+  { key: "publication", label: "发布任务" },
+];
+
+function remixTaskLabel(task: RemixProductionTask) {
+  return `S${String(task.season).padStart(2, "0")}E${String(task.episode).padStart(2, "0")} · ${task.title}`;
+}
+
 export function JobsPage() {
   const { t } = useI18n();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [createOpen, setCreateOpen] = useState(false);
+  const [remixProductionOpen, setRemixProductionOpen] = useState(false);
+  const [createEntryMode, setCreateEntryMode] = useState<JobCreateEntryMode>("source_edit");
   const [reviewNotice, setReviewNotice] = useState<string | null>(null);
   const [reviewNoticeTone, setReviewNoticeTone] = useState<"success" | "error">("success");
   const [pendingSubtitleRerun, setPendingSubtitleRerun] = useState<{ rerunStartStep: string | null; issueCode: string | null } | null>(null);
   const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [publicationJobId, setPublicationJobId] = useState<string | null>(null);
+  const [previewJobId, setPreviewJobId] = useState<string | null>(null);
   const [downloadJobId, setDownloadJobId] = useState<string | null>(null);
   const [reviewOverlayOpen, setReviewOverlayOpen] = useState(false);
   const [reviewStepOverride, setReviewStepOverride] = useState<JobReviewStep | null>(null);
+  const [taskKindFilter, setTaskKindFilter] = useState<JobTaskKindFilter>("all");
   const queueStageRef = useRef<HTMLElement | null>(null);
-  const workspace = useJobWorkspace({ isCreateOpen: createOpen });
+  const remixTaskCreationAttemptedRef = useRef(false);
+  const remixProductionTasks = useQuery({
+    queryKey: ["remix-production-tasks"],
+    queryFn: () => api.getRemixProductionTasks(),
+    staleTime: 15_000,
+  });
+  const remixQueueJobs = useMemo(() => [], []);
+  const workspace = useJobWorkspace({
+    isCreateOpen: createOpen,
+    additionalJobs: remixQueueJobs,
+    taskKindFilter,
+  });
+  const createMissingRemixProductionJobs = useMutation({
+    mutationFn: async (tasks: RemixProductionTask[]) => {
+      const created = [];
+      for (const task of tasks) {
+        created.push(await api.createRemixProductionTaskJob(task.season, task.episode));
+      }
+      return created;
+    },
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["jobs"] }),
+        queryClient.invalidateQueries({ queryKey: ["remix-production-tasks"] }),
+        queryClient.invalidateQueries({ queryKey: ["jobs-usage-summary"] }),
+        queryClient.invalidateQueries({ queryKey: ["jobs-usage-trend"] }),
+      ]);
+    },
+  });
+  const startRemixProductionJob = useMutation({
+    mutationFn: (payload: { jobId: string; force?: boolean }) => api.startRemixProductionJob(payload.jobId, Boolean(payload.force)),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["jobs"] }),
+        queryClient.invalidateQueries({ queryKey: ["remix-production-tasks"] }),
+        queryClient.invalidateQueries({ queryKey: ["jobs-usage-summary"] }),
+        queryClient.invalidateQueries({ queryKey: ["jobs-usage-trend"] }),
+      ]);
+    },
+  });
+
+  useEffect(() => {
+    if (!remixProductionTasks.data || remixTaskCreationAttemptedRef.current) return;
+    const missingJobTasks = (remixProductionTasks.data.pending_tasks ?? []).filter((task) => !task.job_id);
+    if (!missingJobTasks.length) return;
+    remixTaskCreationAttemptedRef.current = true;
+    createMissingRemixProductionJobs.mutate(missingJobTasks);
+  }, [createMissingRemixProductionJobs, remixProductionTasks.data]);
   const selectedReviewJob =
     workspace.filteredJobs.find((job) => job.id === workspace.selectedJobId)
     ?? workspace.selectedJob;
@@ -55,8 +122,32 @@ export function JobsPage() {
     ?? (workspace.selectedJob?.id === publicationJobId ? workspace.selectedJob : null);
   const downloadJob = workspace.filteredJobs.find((job) => job.id === downloadJobId)
     ?? (workspace.selectedJob?.id === downloadJobId ? workspace.selectedJob : null);
+  const previewJob = workspace.filteredJobs.find((job) => job.id === previewJobId)
+    ?? (workspace.selectedJob?.id === previewJobId ? workspace.selectedJob : null);
   const showPublicationModal = Boolean(publicationJobId && publicationJob);
+  const showPreviewModal = Boolean(previewJobId && previewJob);
   const showReviewOverlay = Boolean(reviewOverlayOpen && workspace.selectedJobId && isReviewContext && reviewStep);
+  const createModalTitle = createEntryMode === "film_remix" ? "影视二创" : "原片剪辑";
+  const remixSummary = remixProductionTasks.data?.summary;
+  const remixPendingTasks = remixProductionTasks.data?.pending_tasks ?? [];
+
+  const openCreateModal = (mode: JobCreateEntryMode) => {
+    setCreateEntryMode(mode);
+    if (mode === "film_remix") {
+      workspace.setUpload((prev) => ({
+        ...prev,
+        jobFlowMode: "auto",
+        executionMode: "auto",
+        workflowMode: prev.taskBrief.trim() ? "remix_llm_plan" : "remix_auto_commentary",
+        enhancementModes: Array.from(new Set([...prev.enhancementModes, "ai_effects", "multi_platform_adaptation"])),
+        selectedAgentCapabilityKeys: prev.selectedAgentCapabilityKeys.length
+          ? prev.selectedAgentCapabilityKeys
+          : ["highlight_window_selection", "multi_material_assembly", "chapter_cards", "local_audio_cues", "speech_density_trim"],
+      }));
+    }
+    setCreateOpen(true);
+  };
+
   const triggerSubtitleRerun = (decision: { issue_codes?: string[]; rerun_start_step?: string | null }) => {
     const issueCode = decision.issue_codes?.[0] || null;
     const rerunStartStep = decision.rerun_start_step || null;
@@ -108,6 +199,14 @@ export function JobsPage() {
     setReviewOverlayOpen(false);
     setReviewStepOverride(null);
     setPublicationJobId(jobId);
+  };
+
+  const openJobPreview = (jobId: string) => {
+    setDetailModalOpen(false);
+    setReviewOverlayOpen(false);
+    setReviewStepOverride(null);
+    setPublicationJobId(null);
+    setPreviewJobId(jobId);
   };
 
   const openJobDownload = (jobId: string) => {
@@ -185,6 +284,15 @@ export function JobsPage() {
     queueStageRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
   };
 
+  const openRemixProductionQueue = () => {
+    setRemixProductionOpen(true);
+    void remixProductionTasks.refetch();
+  };
+
+  const startRemixProduction = (jobId: string, force = false) => {
+    startRemixProductionJob.mutate({ jobId, force });
+  };
+
   const confirmReviewProfile = () => {
     workspace.confirmProfile.mutate(undefined, {
       onSuccess: async () => {
@@ -232,8 +340,11 @@ export function JobsPage() {
             <button type="button" className="button jobs-header-subtle-button" onClick={workspace.refreshAll}>
               {t("jobs.page.refresh")}
             </button>
-            <button type="button" className="button primary jobs-header-create-button" onClick={() => setCreateOpen(true)}>
-              创建任务
+            <button type="button" className="button jobs-header-source-edit-button" onClick={() => openCreateModal("source_edit")}>
+              原片剪辑
+            </button>
+            <button type="button" className="button primary jobs-header-create-button" onClick={() => openCreateModal("film_remix")}>
+              影视二创
             </button>
           </div>
         }
@@ -246,7 +357,7 @@ export function JobsPage() {
               <span className="jobs-dashboard-eyebrow">任务队列仪表盘</span>
               <h3>把任务流转和处理压力收在一个面板里</h3>
             </div>
-            <p>{workspace.keyword.trim() ? `搜索“${workspace.keyword.trim()}”后的统计` : "当前页任务队列统计"}</p>
+            <p>{workspace.keyword.trim() ? `搜索“${workspace.keyword.trim()}”后的统计` : "当前标签任务统计"}</p>
           </div>
           <div className="jobs-dashboard-metrics">
             {[
@@ -309,6 +420,26 @@ export function JobsPage() {
           </div>
         </div>
         <p className="jobs-queue-stage-note">{queueFilterMeta.description}</p>
+        <div className="jobs-task-kind-filter" aria-label="任务标签筛选">
+          {TASK_KIND_FILTER_META.map((item) => (
+            <button
+              key={item.key}
+              type="button"
+              className={classNames("mode-chip-button", taskKindFilter === item.key && "is-active")}
+              onClick={() => {
+                setTaskKindFilter(item.key);
+                workspace.setQueueFilter("all");
+              }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        {taskKindFilter === "remix_production" ? (
+          <p className="jobs-queue-stage-note">
+            珍妮斯 baby · 布鲁伊育儿二创：待生产 {remixSummary?.pending_count ?? 0} 集，路径缺失 {remixSummary?.pending_file_missing_count ?? 0}。
+          </p>
+        ) : null}
 
         <JobQueueTable
           jobs={workspace.filteredJobs}
@@ -323,15 +454,19 @@ export function JobsPage() {
           isOpeningFolder={workspace.openFolder.isPending}
           isCancelling={workspace.cancelJob.isPending}
           isRestarting={workspace.restartJob.isPending}
+          isStartingRemixProduction={startRemixProductionJob.isPending}
           isDeleting={workspace.deleteJob.isPending}
           onSelect={openJobDetail}
           onOpenReview={openJobReview}
           onPublish={openJobPublication}
+          onPreview={openJobPreview}
           onOpenFolder={(jobId) => workspace.openFolder.mutate(jobId)}
           onDownload={openJobDownload}
           onCancel={confirmAndCancelJob}
           onRestart={confirmAndRestartJob}
+          onStartRemixProduction={startRemixProduction}
           onDelete={confirmAndDeleteJob}
+          onOpenRemixProduction={openRemixProductionQueue}
         />
       </section>
 
@@ -340,10 +475,66 @@ export function JobsPage() {
           {t("jobs.actions.restartFailed").replace("{error}", workspace.restartError)}
         </div>
       ) : null}
+      {workspace.openFolder.isError ? (
+        <div className="notice notice-error">
+          打开文件夹失败：{workspace.openFolder.error instanceof Error ? workspace.openFolder.error.message : "系统没有返回具体原因。"}
+        </div>
+      ) : null}
       {reviewNotice ? <div className={reviewNoticeClass}>{reviewNotice}</div> : null}
 
       <JobCreateModal
+        open={remixProductionOpen}
+        title="影视二创生产清单"
+        onClose={() => setRemixProductionOpen(false)}
+      >
+        <section className="jobs-create-modal-content jobs-remix-production-modal-content">
+          <div className="jobs-stage-head">
+            <div>
+              <h3>珍妮斯 baby · 布鲁伊正式生产队列</h3>
+              <p>这里读取的是创作者档案绑定的二创生产 manifest，不进入普通原片剪辑流水线。</p>
+            </div>
+            <div className="jobs-stage-meta">
+              <span>待生产</span>
+              <strong>{remixSummary?.pending_count ?? 0} 集</strong>
+            </div>
+          </div>
+
+          {remixProductionTasks.isError ? (
+            <div className="notice notice-error">
+              读取失败：{remixProductionTasks.error instanceof Error ? remixProductionTasks.error.message : "未知错误"}
+            </div>
+          ) : null}
+
+          <div className="jobs-remix-production-command">
+            <span>正式生产命令</span>
+            <code>{remixProductionTasks.data?.execution.command || "正在读取..."}</code>
+          </div>
+
+          <div className="jobs-remix-production-grid single">
+            <section className="jobs-remix-production-panel">
+              <div className="jobs-remix-production-panel-head">
+                <strong>待生产任务</strong>
+                <span>{remixPendingTasks.length} 集</span>
+              </div>
+              <div className="jobs-remix-production-task-list">
+                {remixPendingTasks.map((task) => (
+                  <article key={`${task.season}-${task.episode}`} className="jobs-remix-production-task">
+                    <strong>{remixTaskLabel(task)}</strong>
+                    <span>{task.script_path}</span>
+                  </article>
+                ))}
+                {!remixPendingTasks.length && !remixProductionTasks.isLoading ? (
+                  <p className="muted">当前没有待生产任务。</p>
+                ) : null}
+              </div>
+            </section>
+          </div>
+        </section>
+      </JobCreateModal>
+
+      <JobCreateModal
         open={createOpen}
+        title={createModalTitle}
         onClose={() => setCreateOpen(false)}
         actions={
           <button
@@ -357,17 +548,6 @@ export function JobsPage() {
         }
       >
         <section className="jobs-create-modal-content">
-          <div className="jobs-stage-head jobs-create-modal-head">
-            <div>
-              <h3>创建任务</h3>
-              <p>先填写新任务，再按需调整剪辑方案。</p>
-            </div>
-            <div className="jobs-stage-meta">
-              <span>创建流程</span>
-              <strong>{workspace.upload.files.length > 0 ? `已选 ${workspace.upload.files.length} 个素材` : "等待选择素材"}</strong>
-            </div>
-          </div>
-
           <div className="jobs-create-modal-grid">
             <section className="jobs-create-modal-panel">
               <JobUploadPanel
@@ -376,11 +556,13 @@ export function JobsPage() {
                 workflowTemplateOptions={workflowTemplateOptions}
                 workflowModeOptions={workflowModeOptions}
                 enhancementOptions={enhancementOptions}
+                materialEnhancementOptions={MATERIAL_ENHANCEMENT_OPTIONS}
                 smartCutRules={workspace.options.data?.smart_cut_rules ?? []}
                 capabilityCatalog={workspace.options.data?.capability_catalog ?? []}
                 outputDirHistory={workspace.outputDirHistory}
                 creatorCards={workspace.creatorCards.data?.items ?? []}
                 agentMode
+                createEntryMode={createEntryMode}
                 onChange={workspace.setUpload}
               />
             </section>
@@ -493,6 +675,53 @@ export function JobsPage() {
           onTriggerSubtitleRerun={triggerSubtitleRerun}
         />
       </JobDetailModal>
+
+      <JobCreateModal
+        open={showPreviewModal}
+        title={previewJob?.source_name ?? "成片预览"}
+        onClose={() => setPreviewJobId(null)}
+      >
+        <section className="jobs-create-modal-content job-video-preview-modal">
+          <div className="jobs-stage-head">
+            <div>
+              <h3>成片预览</h3>
+              <p>{previewJob?.source_name}</p>
+            </div>
+            <div className="jobs-stage-meta">
+              <span>状态</span>
+              <strong>{previewJob?.status === "done" ? "可播放" : "不可播放"}</strong>
+            </div>
+          </div>
+          {previewJob ? (
+            <>
+              <video
+                key={previewJob.id}
+                className="job-video-preview-player"
+                src={api.jobRenderedFileUrl(previewJob.id)}
+                controls
+                preload="metadata"
+                playsInline
+              />
+              <div className="toolbar job-video-preview-actions">
+                <button
+                  className="button ghost button-sm"
+                  type="button"
+                  onClick={() => window.open(api.jobRenderedFileUrl(previewJob.id), "_blank", "noopener,noreferrer")}
+                >
+                  新窗口打开
+                </button>
+                <button
+                  className="button button-sm"
+                  type="button"
+                  onClick={() => setDownloadJobId(previewJob.id)}
+                >
+                  {t("jobs.actions.download")}
+                </button>
+              </div>
+            </>
+          ) : null}
+        </section>
+      </JobCreateModal>
 
       <JobReviewOverlay
         open={showReviewOverlay}

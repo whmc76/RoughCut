@@ -29,6 +29,30 @@ def variant_timeline_diagnostics(bundle: dict[str, Any] | None) -> dict[str, Any
     return dict(diagnostics) if isinstance(diagnostics, dict) else {}
 
 
+def variant_validation_status(bundle: dict[str, Any] | None) -> str:
+    payload = resolve_effective_variant_timeline_bundle(bundle)
+    validation = payload.get("validation") if isinstance(payload, dict) else None
+    if not isinstance(validation, dict):
+        return ""
+    return str(validation.get("status") or "").strip()
+
+
+def variant_validation_issues(bundle: dict[str, Any] | None) -> list[str]:
+    payload = resolve_effective_variant_timeline_bundle(bundle)
+    validation = payload.get("validation") if isinstance(payload, dict) else None
+    if not isinstance(validation, dict):
+        return []
+    return [str(item).strip() for item in list(validation.get("issues") or []) if str(item).strip()]
+
+
+def variant_subtitle_timeline_issues(bundle: dict[str, Any] | None) -> list[str]:
+    return [
+        issue
+        for issue in variant_validation_issues(bundle)
+        if "subtitle event" in issue or "subtitle events" in issue
+    ]
+
+
 def variant_review_flags(bundle: dict[str, Any] | None) -> dict[str, Any]:
     diagnostics = variant_timeline_diagnostics(bundle)
     review_flags = diagnostics.get("review_flags")

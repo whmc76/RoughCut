@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import shutil
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,6 +20,94 @@ def _build_fake_validation(repaired_payload: list[dict[str, object]]) -> SimpleN
         input_count=1,
         output_count=len(repaired_payload),
     )
+
+
+@pytest.mark.asyncio
+async def test_resolve_audio_artifact_rebuilds_missing_storage_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    job_id = uuid.uuid4()
+    source_path = tmp_path / "source.mov"
+    source_path.write_bytes(b"video")
+    stored_root = tmp_path / "stored"
+    artifact = SimpleNamespace(storage_path=f"jobs/{job_id}/audio.wav")
+    job = SimpleNamespace(id=job_id, source_path=str(source_path), source_name="source.mov")
+    step = SimpleNamespace(
+        metadata_={},
+        step_name="transcribe",
+        started_at=None,
+        finished_at=None,
+    )
+
+    class FakeSession:
+        async def commit(self) -> None:
+            return None
+
+    class FakeStorage:
+        async def async_upload_file(self, local_path: Path, key: str) -> str:
+            target = self.resolve_path(key)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(local_path, target)
+            return key
+
+        def resolve_path(self, key: str) -> Path:
+            return stored_root / str(key).removeprefix("jobs/")
+
+    async def fake_resolve_storage_reference(*args, **kwargs):
+        raise FileNotFoundError("missing-audio")
+
+    async def fake_resolve_source(_job, _tmpdir: str) -> Path:
+        return source_path
+
+    async def fake_extract_audio(_source: Path, output_path: Path) -> Path:
+        output_path.write_bytes(b"wav")
+        return output_path
+
+    monkeypatch.setattr(pipeline_steps, "_resolve_storage_reference", fake_resolve_storage_reference)
+    monkeypatch.setattr(pipeline_steps, "_resolve_source", fake_resolve_source)
+    monkeypatch.setattr(pipeline_steps, "extract_audio", fake_extract_audio)
+    monkeypatch.setattr(pipeline_steps, "get_storage", lambda: FakeStorage())
+
+    rebuilt = await pipeline_steps._resolve_audio_artifact_or_rebuild(
+        FakeSession(),
+        job=job,
+        step=step,
+        audio_artifact=artifact,
+        tmpdir=str(tmp_path),
+    )
+
+    assert rebuilt is not None
+    assert rebuilt.read_bytes() == b"wav"
+    assert artifact.storage_path == f"jobs/{job_id}/audio.wav"
+    assert (stored_root / str(job_id) / "audio.wav").read_bytes() == b"wav"
+    assert step.metadata_["audio_artifact_rebuilt"] is True
+    assert step.metadata_["has_audio"] is True
+
+
+def test_subtitle_projection_repair_summary_does_not_treat_annotation_only_changes_as_repair() -> None:
+    validation = SimpleNamespace(
+        mismatch_detected=False,
+        fallback_used=False,
+        changed=True,
+        input_count=1,
+        output_count=1,
+    )
+
+    assert pipeline_steps._subtitle_projection_repair_summary(
+        validation=validation,
+        apply_repair=True,
+    ) == {
+        "repair_requested": True,
+        "repair_applied": False,
+        "mismatch_detected": False,
+        "fallback_used": False,
+        "changed": True,
+        "annotation_changed": True,
+        "input_count": 1,
+        "output_count": 1,
+        "repair_mode": None,
+    }
 
 
 @pytest.mark.asyncio
@@ -68,6 +158,7 @@ async def test_validated_subtitle_projection_for_timeline_without_repair_keeps_p
         "mismatch_detected": True,
         "fallback_used": False,
         "changed": True,
+        "annotation_changed": False,
         "input_count": 1,
         "output_count": 1,
         "repair_mode": None,
@@ -116,6 +207,7 @@ async def test_validated_subtitle_projection_for_timeline_with_repair_uses_valid
         "mismatch_detected": True,
         "fallback_used": False,
         "changed": True,
+        "annotation_changed": False,
         "input_count": 1,
         "output_count": 1,
         "repair_mode": "projection_annotation_repair",

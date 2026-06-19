@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import "@testing-library/jest-dom/vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -11,10 +11,23 @@ import { SettingsPage } from "./SettingsPage";
 
 const jobWorkspaceMock = vi.hoisted(() => vi.fn());
 const settingsWorkspaceMock = vi.hoisted(() => vi.fn());
+const apiMock = vi.hoisted(() => ({
+  getRemixProductionTasks: vi.fn(),
+  createRemixProductionTaskJob: vi.fn(),
+  startRemixProductionJob: vi.fn(),
+}));
+
+vi.mock("../api", () => ({
+  api: apiMock,
+}));
 
 vi.mock("../features/jobs/useJobWorkspace", () => ({
-  useJobWorkspace: () => jobWorkspaceMock(),
+  useJobWorkspace: (options: unknown) => jobWorkspaceMock(options),
   resolveJobReviewStep: () => null,
+  MATERIAL_ENHANCEMENT_OPTIONS: [
+    { value: "voice_enhancement", label: "人声增强" },
+    { value: "loudness_normalization", label: "响度统一" },
+  ],
 }));
 
 vi.mock("../features/settings/useSettingsWorkspace", () => ({
@@ -85,7 +98,16 @@ vi.mock("../features/settings/CreativeSettingsPanel", () => ({
 }));
 
 vi.mock("../features/jobs/JobQueueTable", () => ({
-  JobQueueTable: () => <div data-testid="job-queue-table">job queue table</div>,
+  JobQueueTable: ({ jobs, onOpenRemixProduction }: { jobs?: Array<{ id: string; source_name: string }>; onOpenRemixProduction?: (jobId: string) => void }) => (
+    <div data-testid="job-queue-table">
+      job queue table
+      {(jobs ?? []).map((job) => (
+        <button key={job.id} type="button" onClick={() => onOpenRemixProduction?.(job.id)}>
+          {job.source_name}
+        </button>
+      ))}
+    </div>
+  ),
 }));
 
 vi.mock("../features/jobs/JobDetailModal", () => ({
@@ -143,10 +165,19 @@ function buildJobWorkspaceMock(overrides: Record<string, unknown> = {}) {
       jobFlowMode: "auto",
       workflowMode: "standard_edit",
       enhancementModes: [],
+      selectedSmartCutRuleReasons: [],
+      materialEnhancementModes: [],
+      selectedAgentCapabilityKeys: [],
+      hyperframesOptions: {},
+      creatorCardId: "",
+      executionMode: "auto",
+      platformTargets: [],
+      taskBrief: "",
       outputDir: "",
       videoDescription: "",
     },
     setUpload: vi.fn(),
+    creatorCards: { data: { items: [] } },
     outputDirHistory: [],
     pendingInitialization: {
       language: "zh-CN",
@@ -163,6 +194,8 @@ function buildJobWorkspaceMock(overrides: Record<string, unknown> = {}) {
     jobs: { isLoading: false, isFetching: false, isError: false, error: null, data: [] },
     detail: { isLoading: false, data: undefined },
     activity: { data: undefined },
+    agentPlan: { data: undefined },
+    agentDecisions: { data: undefined },
     report: { data: undefined },
     tokenUsage: { data: undefined },
     timeline: { data: undefined },
@@ -182,6 +215,8 @@ function buildJobWorkspaceMock(overrides: Record<string, unknown> = {}) {
     applyReview: { isPending: false, mutate: vi.fn() },
     rerunSubtitleDecision: { isPending: false, mutate: vi.fn() },
     finalReviewDecision: { isPending: false, mutate: vi.fn() },
+    refineAgentPlan: { isPending: false, mutate: vi.fn() },
+    applyAgentPlan: { isPending: false, mutate: vi.fn() },
     filteredJobs: [],
     selectedJob: undefined,
     reviewStep: null,
@@ -234,10 +269,46 @@ beforeEach(() => {
   window.localStorage.clear();
   window.localStorage.setItem("roughcut.ui.locale", "zh-CN");
   document.documentElement.lang = "zh-CN";
+  apiMock.getRemixProductionTasks.mockResolvedValue({
+    schema: "roughcut.remix.production_tasks.v1",
+    id: "jenny_baby_bluey_script_footage_remix_pending_20260619",
+    manifest_path: "E:/WorkSpace/RoughCut/data/remix_production_tasks/jenny_baby_bluey_pending.json",
+    creator_profile: "jenny_baby",
+    task_binding_id: "bluey_script_footage_remix",
+    source_root: "F:/布鲁伊育儿节目",
+    created_at: "2026-06-19",
+    selection_policy: {},
+    execution: {
+      command: "python -m roughcut.cli remix script-footage --production-manifest data/remix_production_tasks/jenny_baby_bluey_pending.json",
+      pending_episode_csv: "2,3",
+      pending_count: 2,
+      blocked_missing_script_count: 1,
+    },
+    summary: {
+      task_count: 2,
+      pending_count: 2,
+      blocked_missing_script_count: 0,
+      completed_by_user_count: 1,
+      pending_file_missing_count: 0,
+    },
+    completed_by_user: [{ status: "done", season: 2, episode: 1, title: "跳舞模式" }],
+    pending_tasks: [
+      { status: "pending", season: 2, episode: 2, title: "仓储超市", script_path: "F:/布鲁伊育儿节目/布鲁伊第二季新风格育儿文案_第1-5集.md" },
+      { status: "pending", season: 2, episode: 3, title: "羽毛魔杖", script_path: "F:/布鲁伊育儿节目/布鲁伊第二季新风格育儿文案_第1-5集.md" },
+    ],
+    blocked_missing_script_tasks: [],
+    tasks: [],
+  });
+  apiMock.createRemixProductionTaskJob.mockResolvedValue({ id: "00000000-0000-0000-0000-000000000002" });
+  apiMock.startRemixProductionJob.mockResolvedValue({
+    job_id: "00000000-0000-0000-0000-000000000001",
+    status: "started",
+    detail: "started",
+    command: [],
+  });
   jobWorkspaceMock.mockReturnValue(buildJobWorkspaceMock());
   settingsWorkspaceMock.mockReturnValue(buildSettingsWorkspaceMock());
 });
-
 afterEach(() => {
   cleanup();
 });
@@ -252,11 +323,78 @@ describe("JobsPage audit interactions", () => {
       </I18nProvider>,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
-    expect(screen.getByRole("dialog", { name: "创建任务" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "原片剪辑" }));
+    expect(screen.getByRole("dialog", { name: "原片剪辑" })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "关闭任务详情" }));
-    expect(screen.queryByRole("dialog", { name: "创建任务" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "原片剪辑" })).not.toBeInTheDocument();
+  });
+
+  it("filters the shared task list by film remix tasks", async () => {
+    const setQueueFilter = vi.fn();
+    jobWorkspaceMock.mockReturnValue(buildJobWorkspaceMock({
+      setQueueFilter,
+    }));
+
+    renderWithQueryClient(
+      <I18nProvider>
+        <MemoryRouter initialEntries={["/jobs"]}>
+          <JobsPage />
+        </MemoryRouter>
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "影视二创" })[1]);
+    expect(setQueueFilter).toHaveBeenCalledWith("all");
+    await waitFor(() => {
+      expect(jobWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({
+        taskKindFilter: "remix_production",
+        additionalJobs: [],
+      }));
+    });
+    await waitFor(() => expect(apiMock.createRemixProductionTaskJob).toHaveBeenCalledWith(2, 2));
+    expect(apiMock.createRemixProductionTaskJob).toHaveBeenCalledWith(2, 3);
+    expect(screen.queryByRole("dialog", { name: "影视二创" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("任务说明")).not.toBeInTheDocument();
+  });
+
+  it("opens the film remix create modal from the header action", () => {
+    const setUpload = vi.fn();
+    jobWorkspaceMock.mockReturnValue(buildJobWorkspaceMock({
+      setUpload,
+      options: {
+        data: {
+          job_languages: [{ value: "zh-CN", label: "简体中文" }],
+          workflow_templates: [{ value: "", label: "自动匹配" }],
+          workflow_modes: [
+            { value: "remix_auto_commentary", label: "影视二创 · 自动精简解说" },
+            { value: "remix_llm_plan", label: "影视二创 · 智能方案编排" },
+            { value: "script_footage_remix", label: "影视二创 · 按脚本文案讲解插入" },
+          ],
+          enhancement_modes: [
+            { value: "ai_effects", label: "智能剪辑特效" },
+            { value: "multi_platform_adaptation", label: "多平台版本适配" },
+          ],
+          smart_cut_rules: [],
+          capability_catalog: [],
+        },
+      },
+    }));
+
+    renderWithQueryClient(
+      <I18nProvider>
+        <MemoryRouter initialEntries={["/jobs"]}>
+          <JobsPage />
+        </MemoryRouter>
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getAllByRole("button", { name: "影视二创" })[0]);
+
+    expect(screen.getByRole("dialog", { name: "影视二创" })).toBeInTheDocument();
+    expect(screen.getByText("影视二创模式")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /自动精简解说/ })).toHaveClass("is-active");
+    expect(setUpload).toHaveBeenCalledWith(expect.any(Function));
   });
 
   it("opens the manual editor after creating a smart assist task", () => {
@@ -271,6 +409,14 @@ describe("JobsPage audit interactions", () => {
         jobFlowMode: "smart_assist",
         workflowMode: "standard_edit",
         enhancementModes: [],
+        selectedSmartCutRuleReasons: [],
+        materialEnhancementModes: [],
+        selectedAgentCapabilityKeys: [],
+        hyperframesOptions: {},
+        creatorCardId: "",
+        executionMode: "auto",
+        platformTargets: [],
+        taskBrief: "",
         outputDir: "",
         videoDescription: "",
       },
@@ -288,14 +434,82 @@ describe("JobsPage audit interactions", () => {
       </I18nProvider>,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "创建任务" }));
+    fireEvent.click(screen.getByRole("button", { name: "原片剪辑" }));
     fireEvent.click(screen.getByRole("button", { name: "上传并创建任务" }));
 
     expect(uploadJobMutate).toHaveBeenCalledTimes(1);
     expect(screen.getByText("Manual editor route")).toBeInTheDocument();
   });
-});
 
+  it("renders selectable smart cut rules and Agent capabilities in the create task modal", () => {
+    jobWorkspaceMock.mockReturnValue(buildJobWorkspaceMock({
+      upload: {
+        files: [],
+        language: "zh-CN",
+        workflowTemplate: "",
+        jobFlowMode: "auto",
+        workflowMode: "standard_edit",
+        enhancementModes: ["multi_platform_adaptation"],
+        selectedSmartCutRuleReasons: ["filler_word"],
+        materialEnhancementModes: ["voice_enhancement"],
+        selectedAgentCapabilityKeys: ["speech_density_trim"],
+        hyperframesOptions: {},
+        creatorCardId: "",
+        executionMode: "auto",
+        platformTargets: [],
+        taskBrief: "",
+        outputDir: "",
+        videoDescription: "",
+      },
+      options: {
+        data: {
+          job_languages: [{ value: "zh-CN", label: "简体中文" }],
+          workflow_templates: [{ value: "", label: "自动匹配" }],
+          workflow_modes: [{ value: "standard_edit", label: "标准成片" }],
+          enhancement_modes: [{ value: "multi_platform_adaptation", label: "多平台版本适配" }],
+          smart_cut_rules: [
+            {
+              reason: "filler_word",
+              kind: "filler",
+              risk_level: "low",
+              match_surface_layer: "raw",
+              label: "规则候选：口头填充音",
+              auto_apply_in_auto_mode: true,
+              frontend_managed_auto_cut: true,
+              speech_explicit_cut: true,
+              speech_review_cut: false,
+              pause_cut: false,
+              multimodal_review_cut: false,
+              llm_review_cut: false,
+            },
+          ],
+          capability_catalog: [
+            {
+              key: "speech_density_trim",
+              label: "智能自动剪辑",
+              layer: "editorial",
+              description: "Single editorial authority for speech cleanup, pacing compression, and low-risk smart delete candidates.",
+            },
+          ],
+        },
+      },
+    }));
+
+    renderWithQueryClient(
+      <I18nProvider>
+        <MemoryRouter initialEntries={["/jobs"]}>
+          <JobsPage />
+        </MemoryRouter>
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "原片剪辑" }));
+
+    expect(screen.queryByLabelText("去水词/语气词")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("智能自动剪辑")).toBeChecked();
+    expect(screen.getByText("智能自动剪辑的唯一剪辑入口；手动编辑器只暴露语气词、重复、停顿阈值和智能删减等参数覆盖。")).toBeInTheDocument();
+  });
+});
 describe("SettingsPage audit interactions", () => {
   it("renders hidden secondary entry points and navigates to a hidden route", () => {
     renderWithQueryClient(

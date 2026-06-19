@@ -40,6 +40,51 @@ _WORKFLOW_MODES: Final[dict[str, dict[str, object]]] = {
         ],
         "delivery_scope": "规划中，暂不开放任务创建",
     },
+    "remix_auto_commentary": {
+        "key": "remix_auto_commentary",
+        "kind": "workflow",
+        "status": "active",
+        "title": "影视二创 · 自动精简解说",
+        "tagline": "用户只给原片时，自动理解剧情、提炼观点、生成精简解说并剪辑包装。",
+        "summary": "这是影视二创的默认模式。没有用户文字输入时，系统根据原片 ASR、画面和题材自动生成短解说、定位重点片段、生成 TTS、字幕和包装。",
+        "suitable_for": ["批量二创", "无成稿脚本", "快速生产解说版", "需要自动提炼剧情重点的影视动画原片"],
+        "pipeline_outline": [
+            "Source-ASR 和画面理解识别剧情、角色、场景和可讲解主题",
+            "LLM 自动生成精简解说脚本和剪辑结构",
+            "TTS、字幕、Hyperframes 包装和原片重点片段组合输出",
+        ],
+        "delivery_scope": "影视二创默认创建模式",
+    },
+    "remix_llm_plan": {
+        "key": "remix_llm_plan",
+        "kind": "workflow",
+        "status": "active",
+        "title": "影视二创 · 智能方案编排",
+        "tagline": "用户输入想法、方向或半成稿时，由 LLM 分析意图并编排剪辑方案。",
+        "summary": "当用户填写文字但没有明确选择完整脚本模式时使用。文本会被当作剪辑方案、风格要求或半成稿，由 LLM 判断如何生成解说、选镜头和安排包装。",
+        "suitable_for": ["有剪辑要求", "有主题方向", "半成稿脚本", "需要按用户方案组织剧情重点"],
+        "pipeline_outline": [
+            "LLM 区分用户文字中的脚本、主题、禁忌、结构和风格要求",
+            "根据原片 ASR 和画面证据生成剪辑编排与解说策略",
+            "按方案生成 TTS、字幕、原片插入和 Hyperframes 包装",
+        ],
+        "delivery_scope": "影视二创有文字输入时的智能编排模式",
+    },
+    "script_footage_remix": {
+        "key": "script_footage_remix",
+        "kind": "workflow",
+        "status": "active",
+        "title": "影视二创 · 按脚本文案讲解插入",
+        "tagline": "完整保留用户成稿脚本，按文案主题定位原片画面，并按意图插入原片声画片段。",
+        "summary": "适用于用户已经提供打磨好的解说文案。默认不压缩文案，不删句，只通过 TTS-ASR 对齐字幕、Source-ASR 定位原片剧情点。",
+        "suitable_for": ["完整成稿文案", "文案引用原片", "育儿/科普解读脚本", "需要保留用户脚本文字的二创"],
+        "pipeline_outline": [
+            "完整文案进入 TTS，不自动精简或改写",
+            "TTS-ASR 对齐字幕时间戳，Source-ASR 定位原片剧情段落",
+            "LLM 只在文案语义需要时插入完整原片声画桥段",
+        ],
+        "delivery_scope": "影视二创脚本保真模式",
+    },
 }
 
 _ENHANCEMENT_MODES: Final[dict[str, dict[str, object]]] = {

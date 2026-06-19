@@ -123,7 +123,7 @@ async def test_openai_codex_helper_multimodal_uses_host_bridge(tmp_path, monkeyp
     )
 
     assert result == "{\"ok\":true}"
-    assert calls[0]["url"] == "http://host.docker.internal:38695/v1/codex/exec"
+    assert calls[0]["url"] == "http://127.0.0.1:38695/v1/codex/exec"
     assert calls[0]["headers"]["Authorization"] == "Bearer token-1"
     assert calls[0]["json"]["images"] == [str(image_path)]
 

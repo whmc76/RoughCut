@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../../api";
-import type { Job, JobActivity } from "../../types";
+import type { CapabilityDefinition, Job, JobActivity, SelectOption } from "../../types";
 import { maybeNotify } from "../../utils/browserNotifications";
 import { normalizeKeywordList } from "./contentProfile";
 import type { UploadForm } from "./constants";
@@ -14,6 +14,17 @@ const EMPTY_UPLOAD: UploadForm = {
   jobFlowMode: "auto",
   workflowMode: "standard_edit",
   enhancementModes: [],
+  selectedSmartCutRuleReasons: [],
+  materialEnhancementModes: [],
+  selectedAgentCapabilityKeys: [],
+  hyperframesOptions: {
+    smart_effects: true,
+    subtitle_emphasis: true,
+    sound_cues: true,
+    progress_bar: true,
+    chapter_cards: true,
+    unified_subtitle_style: true,
+  },
   creatorCardId: "",
   executionMode: "auto",
   platformTargets: [],
@@ -44,7 +55,12 @@ const EMPTY_PENDING_INITIALIZATION: PendingInitializationForm = {
 
 const JOBS_PAGE_SIZE = 20;
 const OUTPUT_DIR_HISTORY_STORAGE_KEY = "roughcut.jobs.outputDirHistory";
+const CREATE_TASK_PREFERENCES_STORAGE_KEY = "roughcut.jobs.createTaskPreferences";
 const OUTPUT_DIR_HISTORY_LIMIT = 8;
+export const MATERIAL_ENHANCEMENT_OPTIONS: SelectOption[] = [
+  { value: "voice_enhancement", label: "人声增强" },
+  { value: "loudness_normalization", label: "响度统一" },
+];
 
 const JOB_STATUS_GROUP_PRIORITY: Record<string, number> = {
   awaiting_init: 1,
@@ -62,6 +78,7 @@ const JOB_STATUS_NOTIFY = {
 };
 const JOB_TYPE_LABEL: Record<string, string> = {
   publication: "发布任务",
+  remix_production: "影视二创",
   edit: "剪辑任务",
 };
 
@@ -70,9 +87,12 @@ function jobTaskTypeLabel(job: Pick<Job, "queue_task_kind" | "source_name">): st
 }
 
 export type JobQueueFilter = "all" | "pending" | "running" | "done" | "attention";
+export type JobTaskKindFilter = "all" | NonNullable<Job["queue_task_kind"]>;
 
 type UseJobWorkspaceOptions = {
   isCreateOpen?: boolean;
+  additionalJobs?: Job[];
+  taskKindFilter?: JobTaskKindFilter;
 };
 
 export type JobReviewStep = "summary_review" | "final_review";
@@ -136,7 +156,7 @@ function isPendingJob(status: string) {
 }
 
 function isAttentionJob(status: string) {
-  return status === "needs_review" || status === "awaiting_manual_edit" || status === "failed" || status === "cancelled";
+  return status === "needs_review" || status === "awaiting_manual_edit" || status === "failed" || status === "cancelled" || status === "blocked_missing_script";
 }
 
 function matchesQueueFilter(status: string, filter: JobQueueFilter) {
@@ -151,6 +171,87 @@ function matchesQueueFilter(status: string, filter: JobQueueFilter) {
 function sameStringArray(left: string[], right: string[]) {
   if (left.length !== right.length) return false;
   return left.every((item, index) => item === right[index]);
+}
+
+function matchesTaskKindFilter(job: Job, filter: JobTaskKindFilter) {
+  if (filter === "all") return true;
+  return (job.queue_task_kind ?? "edit") === filter;
+}
+
+function sameBoolRecord(left: Record<string, boolean>, right: Record<string, boolean>) {
+  const keys = [...new Set([...Object.keys(left), ...Object.keys(right)])];
+  return keys.every((key) => Boolean(left[key]) === Boolean(right[key]));
+}
+
+function normalizedUniqueStrings(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => String(item ?? "").trim()).filter(Boolean))];
+}
+
+function optionValues(options: Array<Pick<SelectOption, "value">>): string[] {
+  return options.map((option) => String(option.value ?? "").trim()).filter(Boolean);
+}
+
+function capabilityKeys(capabilities: CapabilityDefinition[]): string[] {
+  return capabilities.map((capability) => String(capability.key ?? "").trim()).filter(Boolean);
+}
+
+type StoredCreateTaskPreferences = {
+  workflowMode?: string;
+  enhancementModes?: string[];
+  selectedSmartCutRuleReasons?: string[];
+  materialEnhancementModes?: string[];
+  selectedAgentCapabilityKeys?: string[];
+  hyperframesOptions?: Record<string, boolean>;
+};
+
+function readStoredCreateTaskPreferences(): StoredCreateTaskPreferences {
+  if (typeof window === "undefined") return {};
+  try {
+    const raw = window.localStorage.getItem(CREATE_TASK_PREFERENCES_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    const payload = parsed as Record<string, unknown>;
+    return {
+      workflowMode: String(payload.workflowMode ?? "").trim() || undefined,
+      enhancementModes: Array.isArray(payload.enhancementModes) ? normalizedUniqueStrings(payload.enhancementModes) : undefined,
+      selectedSmartCutRuleReasons: Array.isArray(payload.selectedSmartCutRuleReasons)
+        ? normalizedUniqueStrings(payload.selectedSmartCutRuleReasons)
+        : undefined,
+      materialEnhancementModes: Array.isArray(payload.materialEnhancementModes)
+        ? normalizedUniqueStrings(payload.materialEnhancementModes)
+        : undefined,
+      selectedAgentCapabilityKeys: Array.isArray(payload.selectedAgentCapabilityKeys)
+        ? normalizedUniqueStrings(payload.selectedAgentCapabilityKeys)
+        : undefined,
+      hyperframesOptions: payload.hyperframesOptions && typeof payload.hyperframesOptions === "object" && !Array.isArray(payload.hyperframesOptions)
+        ? Object.fromEntries(
+          Object.entries(payload.hyperframesOptions as Record<string, unknown>).map(([key, value]) => [key, Boolean(value)]),
+        )
+        : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
+function writeStoredCreateTaskPreferences(upload: UploadForm) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      CREATE_TASK_PREFERENCES_STORAGE_KEY,
+      JSON.stringify({
+        workflowMode: upload.workflowMode,
+        enhancementModes: upload.enhancementModes,
+        selectedSmartCutRuleReasons: upload.selectedSmartCutRuleReasons,
+        materialEnhancementModes: upload.materialEnhancementModes,
+        selectedAgentCapabilityKeys: upload.selectedAgentCapabilityKeys,
+        hyperframesOptions: upload.hyperframesOptions,
+      }),
+    );
+  } catch {
+    // Local storage is only a convenience for restoring the next create-task form.
+  }
 }
 
 function normalizeOutputDir(value: string | null | undefined): string {
@@ -196,7 +297,11 @@ function compareJobs(a: { status: string; updated_at: string }, b: { status: str
   return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
 }
 
-export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions = {}) {
+export function useJobWorkspace({
+  isCreateOpen = false,
+  additionalJobs = [],
+  taskKindFilter = "all",
+}: UseJobWorkspaceOptions = {}) {
   const queryClient = useQueryClient();
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const previousJobStatusRef = useRef<Map<string, string>>(new Map());
@@ -205,6 +310,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
   const [jobsPage, setJobsPage] = useState(0);
   const [upload, setUpload] = useState<UploadForm>(EMPTY_UPLOAD);
   const [storedOutputDirHistory, setStoredOutputDirHistory] = useState<string[]>(readStoredOutputDirHistory);
+  const [storedCreateTaskPreferences] = useState<StoredCreateTaskPreferences>(readStoredCreateTaskPreferences);
   const [pendingInitialization, setPendingInitialization] = useState<PendingInitializationForm>(EMPTY_PENDING_INITIALIZATION);
   const [contentDraft, setContentDraft] = useState<Record<string, unknown>>({});
   const [reviewWorkflowMode, setReviewWorkflowMode] = useState("standard_edit");
@@ -214,6 +320,10 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
   const previousUploadDefaultsRef = useRef({
     workflowMode: EMPTY_UPLOAD.workflowMode,
     enhancementModes: EMPTY_UPLOAD.enhancementModes,
+    selectedSmartCutRuleReasons: EMPTY_UPLOAD.selectedSmartCutRuleReasons,
+    materialEnhancementModes: EMPTY_UPLOAD.materialEnhancementModes,
+    selectedAgentCapabilityKeys: EMPTY_UPLOAD.selectedAgentCapabilityKeys,
+    hyperframesOptions: EMPTY_UPLOAD.hyperframesOptions,
   });
 
   const jobs = useQuery({
@@ -358,12 +468,39 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     (contentSource as Record<string, unknown> | null)?.search_queries ?? contentFallbackSource?.search_queries,
   );
   const inheritedUploadDefaults: UploadForm = useMemo(
-    () => ({
-      ...EMPTY_UPLOAD,
-      workflowMode: config.data?.default_job_workflow_mode ?? EMPTY_UPLOAD.workflowMode,
-      enhancementModes: config.data?.default_job_enhancement_modes ?? EMPTY_UPLOAD.enhancementModes,
-    }),
-    [config.data?.default_job_workflow_mode, config.data?.default_job_enhancement_modes],
+    () => {
+      const availableMaterialEnhancementModes = optionValues(MATERIAL_ENHANCEMENT_OPTIONS);
+      const availableAgentCapabilityKeys = capabilityKeys(options.data?.capability_catalog ?? []);
+      const storedMaterialEnhancementModes = normalizedUniqueStrings(storedCreateTaskPreferences.materialEnhancementModes)
+        .filter((mode) => availableMaterialEnhancementModes.includes(mode));
+      const storedAgentCapabilityKeys = normalizedUniqueStrings(storedCreateTaskPreferences.selectedAgentCapabilityKeys)
+        .filter((key) => !availableAgentCapabilityKeys.length || availableAgentCapabilityKeys.includes(key));
+      return {
+        ...EMPTY_UPLOAD,
+        workflowMode:
+          storedCreateTaskPreferences.workflowMode
+          ?? config.data?.default_job_workflow_mode
+          ?? EMPTY_UPLOAD.workflowMode,
+        enhancementModes:
+          storedCreateTaskPreferences.enhancementModes
+          ?? config.data?.default_job_enhancement_modes
+          ?? EMPTY_UPLOAD.enhancementModes,
+        selectedSmartCutRuleReasons: [],
+        materialEnhancementModes: storedMaterialEnhancementModes.length || storedCreateTaskPreferences.materialEnhancementModes
+          ? storedMaterialEnhancementModes
+          : availableMaterialEnhancementModes,
+        selectedAgentCapabilityKeys: storedAgentCapabilityKeys.length || storedCreateTaskPreferences.selectedAgentCapabilityKeys
+          ? storedAgentCapabilityKeys
+          : availableAgentCapabilityKeys,
+        hyperframesOptions: storedCreateTaskPreferences.hyperframesOptions ?? EMPTY_UPLOAD.hyperframesOptions,
+      };
+    },
+    [
+      config.data?.default_job_workflow_mode,
+      config.data?.default_job_enhancement_modes,
+      options.data?.capability_catalog,
+      storedCreateTaskPreferences,
+    ],
   );
 
   useEffect(() => {
@@ -404,18 +541,30 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     const nextDefaults = {
       workflowMode: inheritedUploadDefaults.workflowMode,
       enhancementModes: inheritedUploadDefaults.enhancementModes,
+      selectedSmartCutRuleReasons: inheritedUploadDefaults.selectedSmartCutRuleReasons,
+      materialEnhancementModes: inheritedUploadDefaults.materialEnhancementModes,
+      selectedAgentCapabilityKeys: inheritedUploadDefaults.selectedAgentCapabilityKeys,
+      hyperframesOptions: inheritedUploadDefaults.hyperframesOptions,
     };
 
     setUpload((prev) => {
       const followsPreviousDefaults =
         prev.workflowMode === previousDefaults.workflowMode
-        && sameStringArray(prev.enhancementModes, previousDefaults.enhancementModes);
+        && sameStringArray(prev.enhancementModes, previousDefaults.enhancementModes)
+        && sameStringArray(prev.selectedSmartCutRuleReasons, previousDefaults.selectedSmartCutRuleReasons)
+        && sameStringArray(prev.materialEnhancementModes, previousDefaults.materialEnhancementModes)
+        && sameStringArray(prev.selectedAgentCapabilityKeys, previousDefaults.selectedAgentCapabilityKeys)
+        && sameBoolRecord(prev.hyperframesOptions, previousDefaults.hyperframesOptions);
 
       return followsPreviousDefaults
         ? {
           ...prev,
           workflowMode: nextDefaults.workflowMode,
           enhancementModes: nextDefaults.enhancementModes,
+          selectedSmartCutRuleReasons: nextDefaults.selectedSmartCutRuleReasons,
+          materialEnhancementModes: nextDefaults.materialEnhancementModes,
+          selectedAgentCapabilityKeys: nextDefaults.selectedAgentCapabilityKeys,
+          hyperframesOptions: nextDefaults.hyperframesOptions,
         }
         : prev;
     });
@@ -522,6 +671,10 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
         upload.jobFlowMode,
         upload.workflowMode,
         upload.enhancementModes,
+        upload.selectedSmartCutRuleReasons,
+        upload.materialEnhancementModes,
+        upload.selectedAgentCapabilityKeys,
+        upload.hyperframesOptions,
         upload.outputDir,
         upload.videoDescription,
         upload.creatorCardId || undefined,
@@ -535,6 +688,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
         writeStoredOutputDirHistory(next);
         return next;
       });
+      writeStoredCreateTaskPreferences(upload);
       setUpload(inheritedUploadDefaults);
       setSelectedJobId(job.id);
       await Promise.all([
@@ -631,15 +785,16 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
   });
   const searchMatchedJobs = useMemo(() => {
     const needle = keyword.trim().toLowerCase();
+    const allJobs = [...(jobs.data ?? []), ...additionalJobs];
     const visibleJobs = !needle
-      ? jobs.data ?? []
-      : (jobs.data ?? []).filter((job) =>
-        [job.source_name, job.content_subject, job.content_summary, job.video_description, job.status].some((field) =>
+      ? allJobs
+      : allJobs.filter((job) =>
+        [job.source_name, job.content_subject, job.content_summary, job.video_description, job.status, job.task_brief].some((field) =>
           String(field ?? "").toLowerCase().includes(needle),
         ),
     );
-    return [...visibleJobs].sort(compareJobs);
-  }, [jobs.data, keyword]);
+    return [...visibleJobs].filter((job) => matchesTaskKindFilter(job, taskKindFilter)).sort(compareJobs);
+  }, [additionalJobs, jobs.data, keyword, taskKindFilter]);
   const queueStats = useMemo(() => ({
     total: searchMatchedJobs.length,
     pending: searchMatchedJobs.filter((job) => isPendingJob(job.status)).length,
@@ -649,6 +804,7 @@ export function useJobWorkspace({ isCreateOpen = false }: UseJobWorkspaceOptions
     needsReview: searchMatchedJobs.filter((job) => job.status === "needs_review").length,
     failed: searchMatchedJobs.filter((job) => job.status === "failed").length,
     cancelled: searchMatchedJobs.filter((job) => job.status === "cancelled").length,
+    blockedMissingScript: searchMatchedJobs.filter((job) => job.status === "blocked_missing_script").length,
   }), [searchMatchedJobs]);
   const filteredJobs = useMemo(
     () => searchMatchedJobs.filter((job) => matchesQueueFilter(job.status, queueFilter)),

@@ -381,6 +381,76 @@ def test_subtitle_text_still_vetoes_vad_silence_when_transcript_words_are_synthe
     assert not any(cut["reason"] == "silence" for cut in decision.analysis["accepted_cuts"])
 
 
+def test_showcase_pause_with_subtitle_overlap_is_not_auto_cut_as_silence() -> None:
+    decision = build_edit_decision(
+        "mt34-demo.mp4",
+        duration=930.0,
+        silence_segments=[SilenceSegment(start=905.43, end=907.53)],
+        subtitle_items=[
+            {
+                "index": 242,
+                "start_time": 903.345,
+                "end_time": 906.658,
+                "text_final": "弹就行了然后也很轻松。",
+            },
+            {
+                "index": 243,
+                "start_time": 906.658,
+                "end_time": 911.628,
+                "text_final": "然后这个大拇指推这个前指嗯大拇指推",
+            },
+        ],
+        transcript_segments=[
+            {
+                "index": 0,
+                "start": 892.0,
+                "end": 920.0,
+                "text": "这个快开柱也是很轻松，然后这个大拇指推这个前指。",
+                "words": [
+                    {
+                        "word": "很轻松",
+                        "start": 904.8,
+                        "end": 905.4,
+                        "alignment": {"source": "roughcut_synthesized"},
+                        "raw_payload": {"source": "roughcut_synthesized"},
+                    }
+                ],
+            }
+        ],
+        content_profile={"content_kind": "unboxing", "workflow_template": "edc_tactical"},
+    )
+
+    silence_cuts = [cut for cut in decision.analysis["accepted_cuts"] if cut["reason"] == "silence"]
+
+    assert silence_cuts == []
+
+
+def test_showcase_pause_guard_does_not_depend_on_transcript_overlap() -> None:
+    decision = build_edit_decision(
+        "mt34-demo.mp4",
+        duration=930.0,
+        silence_segments=[SilenceSegment(start=905.43, end=907.53)],
+        subtitle_items=[
+            {
+                "index": 242,
+                "start_time": 903.345,
+                "end_time": 906.658,
+                "text_final": "弹就行了然后也很轻松。",
+            },
+            {
+                "index": 243,
+                "start_time": 906.658,
+                "end_time": 911.628,
+                "text_final": "然后这个大拇指推这个前指嗯大拇指推",
+            },
+        ],
+        transcript_segments=[],
+        content_profile={"content_kind": "unboxing", "workflow_template": "edc_tactical"},
+    )
+
+    assert not any(cut["reason"] == "silence" for cut in decision.analysis["accepted_cuts"])
+
+
 def test_partial_subtitle_row_silence_does_not_veto_when_text_row_mostly_remains() -> None:
     decision = build_edit_decision(
         "demo.mp4",

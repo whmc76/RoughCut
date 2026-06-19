@@ -18,6 +18,7 @@ export const STEP_LABELS: Record<string, string> = {
   avatar_commentary: "数字人",
   edit_plan: "剪辑",
   render: "渲染",
+  script_footage_remix: "影视二创",
   final_review: "成片异常门",
   platform_package: "文案",
 };
@@ -61,6 +62,10 @@ export type UploadForm = {
   jobFlowMode: string;
   workflowMode: string;
   enhancementModes: string[];
+  selectedSmartCutRuleReasons: string[];
+  materialEnhancementModes: string[];
+  selectedAgentCapabilityKeys: string[];
+  hyperframesOptions: Record<string, boolean>;
   creatorCardId: string;
   executionMode: string;
   platformTargets: string[];
@@ -68,6 +73,8 @@ export type UploadForm = {
   outputDir: string;
   videoDescription: string;
 };
+
+export type JobCreateEntryMode = "source_edit" | "film_remix";
 
 export const RESTARTABLE_JOB_STATUSES = ["done", "running", "processing", "awaiting_manual_edit", "needs_review", "cancelled", "failed"] as const;
 
@@ -77,6 +84,7 @@ function normalizeJobStatus(status: string): string {
 
 export const RESTART_UNAVAILABLE_REASONS: Record<string, string> = {
   pending: "jobs.actions.restartUnavailableReason.pending",
+  blocked_missing_script: "jobs.actions.restartUnavailableReason.pending",
   done: "",
   running: "",
   processing: "",
@@ -106,22 +114,28 @@ export function jobStatusLabel(job: Pick<Job, "status" | "publication_status">):
   if (job.status === "failed") return "失败";
   if (job.status === "cancelled") return "已取消";
   if (job.status === "needs_review") return "待核对";
+  if (job.status === "blocked_missing_script") return "缺文案";
   return job.status;
 }
 
 export function jobStatusTone(job: Pick<Job, "status" | "publication_status">): string {
   if (job.status === "done" && job.publication_status === "published") return "published";
+  if (job.status === "blocked_missing_script") return "failed";
   return job.status;
 }
 
 export const WORKFLOW_MODE_LABELS: Record<string, string> = {
   standard_edit: "标准成片",
   long_text_to_video: "长文本转视频",
+  remix_auto_commentary: "二创自动精简解说",
+  remix_llm_plan: "二创智能方案编排",
+  script_footage_remix: "二创按脚本文案讲解插入",
 };
 
 export const JOB_FLOW_MODE_LABELS: Record<string, string> = {
   auto: "自动模式",
   smart_assist: "智能辅助模式",
+  remix_production: "二创生产",
 };
 
 export const ENHANCEMENT_MODE_LABELS: Record<string, string> = {

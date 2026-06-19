@@ -93,6 +93,7 @@ def build_video_understanding_payload(
             "source_context": source_context,
             "ocr_evidence": _build_ocr_evidence(ocr_profile, candidate),
             "visual_semantic_evidence": visual_semantic_evidence,
+            "visual_timeline_events": _dict_list(visual_semantic_evidence.get("timeline_events"), limit=16),
             "visual_hints": visual_hints,
             "evidence_spans": _dict_list(content_understanding.get("evidence_spans"), limit=12),
             "speech_visual_alignment_issues": [],
@@ -365,6 +366,7 @@ def _build_segment_understanding(
                 "confidence": max(0.28, fallback_confidence or 0.0),
             }
         )
+    raw_segments.extend(_visual_timeline_event_segments(visual_semantic_evidence))
     if not raw_segments and narrative_structure:
         for index, section in enumerate(narrative_structure[:4]):
             role = _resolve_segment_role(section.get("label"), text=section.get("summary"))
@@ -385,6 +387,37 @@ def _build_segment_understanding(
             "review": {"confidence": {"segment_roles": fallback_confidence}},
         }
     )
+
+
+def _visual_timeline_event_segments(visual_semantic_evidence: Mapping[str, Any]) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    for index, event in enumerate(_dict_list(visual_semantic_evidence.get("timeline_events"), limit=16)):
+        role = _resolve_segment_role(event.get("role") or event.get("type"), text=event.get("summary") or event.get("evidence"))
+        keep_priority = _resolve_segment_keep_priority(
+            role=role,
+            explicit=event.get("keep_priority"),
+            text=event.get("summary") or event.get("evidence"),
+        )
+        start = _coerce_float(event.get("start") or event.get("start_sec"))
+        end = _coerce_float(event.get("end") or event.get("end_sec"))
+        if start is None:
+            continue
+        if end is None or end <= start:
+            end = start + _default_segment_duration(role)
+        summary = _text(event.get("summary") or event.get("evidence"))
+        segments.append(
+            {
+                "segment_id": str(event.get("segment_id") or f"visual_event_{index + 1}"),
+                "start": round(max(0.0, start), 3),
+                "end": round(max(start + 0.6, end), 3),
+                "text": summary,
+                "role": role or "body",
+                "keep_priority": keep_priority,
+                "reason_tags": _string_list(event.get("reason_tags"), limit=8) or _segment_reason_tags(role=role, raw_type=event.get("role")),
+                "confidence": max(0.34, _float_value(event.get("confidence"))),
+            }
+        )
+    return segments[:16]
 
 
 def _build_review_confidence(

@@ -147,8 +147,8 @@ def build_markdown(snapshot: dict[str, Any], confirm_payload: dict[str, Any]) ->
             checklist_items.append(f"当前根因：`probe` 失败，错误为 `{probe_row.get('error')}`。")
     elif artifact_counts.get("content_profile_final", 0) <= 0:
         checklist_items.append("先完成人工确认并写回 `content_profile_final`。")
-    if not probe_failed and any(step.get("step_name") == "final_review" and step.get("status") != "done" for step in snapshot.get("step_status") or []):
-        checklist_items.append("继续推进 `edit_plan / render / final_review / platform_package`。")
+    if not probe_failed and any(step.get("step_name") == "render" and step.get("status") != "done" for step in snapshot.get("step_status") or []):
+        checklist_items.append("继续推进 `edit_plan / render`。")
     if issues and not probe_failed:
         checklist_items.append("优先处理自动审核识别出的阻塞项，再继续下游生产。")
     if not checklist_items:

@@ -67,7 +67,7 @@ export type Job = {
   avatar_delivery_summary?: string | null;
   publication_status?: string;
   publication_summary?: string | null;
-  queue_task_kind?: "edit" | "publication";
+  queue_task_kind?: "edit" | "publication" | "remix_production";
   queue_thumbnail_source?: "cover" | "content_profile";
   status: string;
   language: string;
@@ -91,6 +91,49 @@ export type Job = {
   created_at: string;
   updated_at: string;
   steps: JobStep[];
+};
+
+export type RemixProductionTask = {
+  status: string;
+  season: number;
+  episode: number;
+  title: string;
+  script_path?: string;
+  source_video_path?: string;
+  blocker?: string;
+  job_id?: string;
+  job_status?: string;
+  job_updated_at?: string;
+  job_progress_percent?: number;
+  output_path?: string;
+};
+
+export type RemixProductionTasks = {
+  schema: string;
+  id: string;
+  manifest_path: string;
+  creator_profile: string;
+  task_binding_id: string;
+  source_root: string;
+  created_at: string;
+  selection_policy: Record<string, unknown>;
+  execution: {
+    command?: string;
+    pending_episode_csv?: string;
+    pending_count?: number;
+    blocked_missing_script_count?: number;
+  };
+  summary: {
+    task_count: number;
+    pending_count: number;
+    blocked_missing_script_count: number;
+    completed_by_user_count: number;
+    pending_file_missing_count: number;
+  };
+  completed_by_user: RemixProductionTask[];
+  pending_tasks: RemixProductionTask[];
+  blocked_missing_script_tasks: RemixProductionTask[];
+  tasks: RemixProductionTask[];
 };
 
 export type CreatorAsset = {

@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from roughcut.api.schemas import (
     IntelligentCopyGenerateIn,
@@ -43,7 +44,7 @@ from roughcut.api.schemas import (
 from roughcut.avatar import get_avatar_material_profile, list_avatar_material_profiles
 from roughcut.config import get_settings
 from roughcut.host.codex_proxy import resolve_codex_proxy_sibling_url, resolve_codex_proxy_token
-from roughcut.db.models import Job, RenderOutput
+from roughcut.db.models import CreatorCard, CreatorPublicationProfile, Job, RenderOutput
 from roughcut.db.session import get_session
 from roughcut.host.file_manager import can_open_in_file_manager, describe_file_manager_target, open_in_file_manager
 from roughcut.intelligent_copy_layout import (
@@ -71,7 +72,10 @@ from roughcut.publication_packaging import (
     normalize_publication_packaging_payload,
 )
 from roughcut.publication_intelligence import generate_publication_scheme, modify_publication_scheme
-from roughcut.providers.image_generation import mark_codex_imagegen_request_completed
+from roughcut.providers.image_generation import (
+    codex_imagegen_result_path_is_allowed,
+    mark_codex_imagegen_request_completed,
+)
 from roughcut.review.intelligent_copy import (
     generate_intelligent_copy,
     inspect_intelligent_copy_folder,
@@ -419,6 +423,8 @@ def complete_imagegen_request(body: IntelligentCopyImagegenCompleteIn):
     output_path = Path(str(payload.get("output_path") or "")).expanduser()
     if not output_path.is_absolute():
         output_path = material_dir / output_path
+    if not codex_imagegen_result_path_is_allowed(result_path, output_path=output_path):
+        raise HTTPException(status_code=400, detail="Codex 生成图片路径不属于当前输出文件或 Codex generated_images 目录。")
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(result_path, output_path)
@@ -1305,6 +1311,11 @@ async def _load_intelligent_publish_inputs(
     if packaging is None and task_snapshot is not None:
         packaging = _load_intelligent_copy_packaging_from_task_snapshot(task_snapshot)
     creator_profile = _resolve_intelligent_publish_creator_profile(creator_profile_id)
+    creator_profile = await _merge_creator_card_publication_bindings(
+        session=session,
+        creator_profile=creator_profile,
+        creator_profile_id=creator_profile_id,
+    )
     if materialize_job:
         job = await _get_or_create_intelligent_publish_job(session, video_path=publish_video_path, folder_path=processing_folder)
         render_output = await _get_or_create_intelligent_publish_render_output(session, job=job, video_path=publish_video_path)
@@ -1420,7 +1431,13 @@ async def _resolve_publish_source_media_path(*, video_path: Path) -> Path:
         if bool(runtime_compatibility.get("compatible")):
             return runtime_path.resolve()
 
-    await _transcode_publication_runtime_media(source_path=source_path, runtime_path=runtime_path)
+    try:
+        await _transcode_publication_runtime_media(source_path=source_path, runtime_path=runtime_path)
+    except RuntimeError as exc:
+        reasons = "；".join(str(item).strip() for item in (compatibility.get("reasons") or []) if str(item).strip())
+        detail = str(exc or "").strip()
+        suffix = f"；转码失败：{detail}" if detail else ""
+        raise RuntimeError(f"发布源媒体不满足发布兼容要求：{reasons or '无法生成兼容发布副本'}{suffix}") from exc
     runtime_meta = await probe_media(runtime_path)
     runtime_compatibility = publication_upload_compatibility(runtime_meta)
     if not bool(runtime_compatibility.get("compatible")):
@@ -1510,6 +1527,132 @@ def _resolve_intelligent_publish_creator_profile(creator_profile_id: str | None)
             raise HTTPException(status_code=404, detail="Creator profile not found") from exc
     profiles = list_avatar_material_profiles()
     return next((profile for profile in profiles if active_publication_credentials(profile)), profiles[0] if profiles else None)
+
+
+async def _merge_creator_card_publication_bindings(
+    *,
+    session: AsyncSession,
+    creator_profile: dict[str, Any] | None,
+    creator_profile_id: str | None,
+) -> dict[str, Any] | None:
+    base_profile = dict(creator_profile or {})
+    creator = await _find_publication_creator_card_for_profile(
+        session=session,
+        creator_profile=base_profile,
+        creator_profile_id=creator_profile_id,
+    )
+    if creator is None or creator.publication_profile is None:
+        return creator_profile
+    bindings = _creator_card_publication_credentials(creator.publication_profile)
+    if not bindings:
+        return creator_profile
+
+    creator_payload = (
+        dict(base_profile.get("creator_profile"))
+        if isinstance(base_profile.get("creator_profile"), dict)
+        else {}
+    )
+    publishing = (
+        dict(creator_payload.get("publishing"))
+        if isinstance(creator_payload.get("publishing"), dict)
+        else {}
+    )
+    existing_credentials = [
+        item
+        for item in (publishing.get("platform_credentials") or [])
+        if isinstance(item, dict)
+    ]
+    merged_by_platform = {
+        str(item.get("platform") or "").strip().lower(): dict(item)
+        for item in existing_credentials
+        if str(item.get("platform") or "").strip()
+    }
+    for binding in bindings:
+        platform = str(binding.get("platform") or "").strip().lower()
+        if platform:
+            merged_by_platform[platform] = binding
+    publishing["platform_credentials"] = list(merged_by_platform.values())
+    if "active_platforms" not in publishing:
+        publishing["active_platforms"] = [item["platform"] for item in bindings if item.get("platform")]
+    creator_payload["publishing"] = publishing
+    base_profile["creator_profile"] = creator_payload
+    if not str(base_profile.get("id") or "").strip():
+        base_profile["id"] = str(creator.id)
+    if not str(base_profile.get("display_name") or "").strip():
+        base_profile["display_name"] = creator.name
+    base_profile["creator_card_id"] = str(creator.id)
+    return base_profile
+
+
+async def _find_publication_creator_card_for_profile(
+    *,
+    session: AsyncSession,
+    creator_profile: dict[str, Any],
+    creator_profile_id: str | None,
+) -> CreatorCard | None:
+    normalized_id = str(creator_profile_id or "").strip()
+    candidate_uuid = None
+    if normalized_id:
+        try:
+            candidate_uuid = uuid.UUID(normalized_id)
+        except ValueError:
+            candidate_uuid = None
+    if candidate_uuid is not None:
+        result = await session.execute(
+            select(CreatorCard)
+            .where(CreatorCard.id == candidate_uuid)
+            .options(selectinload(CreatorCard.publication_profile).selectinload(CreatorPublicationProfile.bindings))
+        )
+        creator = result.scalar_one_or_none()
+        if creator is not None:
+            return creator
+
+    candidate_names = [
+        str(creator_profile.get("display_name") or "").strip(),
+        str(creator_profile.get("name") or "").strip(),
+    ]
+    compatible = creator_profile.get("creator_card_compatible")
+    if isinstance(compatible, dict):
+        candidate_names.append(str(compatible.get("name") or "").strip())
+    for name in dict.fromkeys(item for item in candidate_names if item):
+        result = await session.execute(
+            select(CreatorCard)
+            .where(CreatorCard.name == name)
+            .options(selectinload(CreatorCard.publication_profile).selectinload(CreatorPublicationProfile.bindings))
+            .limit(1)
+        )
+        creator = result.scalar_one_or_none()
+        if creator is not None:
+            return creator
+    return None
+
+
+def _creator_card_publication_credentials(profile: CreatorPublicationProfile) -> list[dict[str, Any]]:
+    credentials: list[dict[str, Any]] = []
+    for binding in profile.bindings or []:
+        payload = binding.binding_payload_json if isinstance(binding.binding_payload_json, dict) else {}
+        platform = str(binding.platform or payload.get("platform") or "").strip().lower()
+        credential_ref = str(binding.credential_ref or payload.get("credential_ref") or "").strip()
+        if not platform or not credential_ref:
+            continue
+        status = str(payload.get("status") or "").strip().lower().replace("-", "_")
+        if status == "login_confirmed":
+            status = "logged_in"
+        credentials.append(
+            {
+                "id": str(binding.id),
+                "platform": platform,
+                "credential_ref": credential_ref,
+                "account_label": str(payload.get("account_label") or platform).strip(),
+                "browser_profile_id": str(payload.get("browser_profile_id") or "").strip() or credential_ref,
+                "browser_binding": payload.get("browser_binding") if isinstance(payload.get("browser_binding"), dict) else {},
+                "status": status or "unverified",
+                "enabled": bool(payload.get("enabled", True)),
+                "adapter": str(payload.get("adapter") or "").strip() or ("social_auto_upload" if credential_ref.startswith("social-auto-upload:") else ""),
+                "notes": str(payload.get("notes") or "").strip() or None,
+            }
+        )
+    return credentials
 
 
 def _resolve_frontend_local_image_path(raw_path: str) -> Path:

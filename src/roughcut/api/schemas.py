@@ -209,7 +209,7 @@ class JobOut(BaseModel):
     avatar_delivery_summary: str | None = None
     publication_status: str = "unpublished"
     publication_summary: str | None = None
-    queue_task_kind: Literal["edit", "publication"] = "edit"
+    queue_task_kind: Literal["edit", "publication", "remix_production"] = "edit"
     queue_thumbnail_source: Literal["cover", "content_profile"] = "content_profile"
     status: str
     language: str
@@ -389,6 +389,7 @@ class CreatorSocialAutoUploadBindingIn(BaseModel):
     platform: str
     browser: str | None = "chrome"
     account_name: str | None = None
+    login_confirmed: bool = False
 
 
 class CreatorPlatformBindingOut(BaseModel):
@@ -1018,8 +1019,8 @@ class PackagingConfigOut(BaseModel):
     copy_style: str = "attention_grabbing"
     music_volume: float = 0.12
     watermark_position: str = "top_left"
-    watermark_opacity: float = 0.82
-    watermark_scale: float = 0.16
+    watermark_opacity: float = 0.28
+    watermark_scale: float = 0.10
     avatar_overlay_position: str = "top_right"
     avatar_overlay_scale: float = 0.18
     avatar_overlay_corner_radius: int = 26

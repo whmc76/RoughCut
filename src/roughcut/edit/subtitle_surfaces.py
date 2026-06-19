@@ -99,8 +99,8 @@ def subtitle_surface_item_dict(
     has_explicit_canonical = any(key in payload for key in _CANONICAL_SURFACE_KEYS)
     has_explicit_display = "text_final" in payload or any(key in payload for key in _DISPLAY_SURFACE_KEYS)
     has_any_explicit_surface = has_explicit_raw or has_explicit_canonical or has_explicit_display
-    raw_text = subtitle_raw_explicit_text(payload) if has_explicit_raw else ""
-    canonical_text = subtitle_canonical_explicit_text(payload) if has_explicit_canonical else ""
+    raw_text = subtitle_raw_rule_text(payload) if has_explicit_raw or has_explicit_canonical else ""
+    canonical_text = subtitle_canonical_rule_text(payload) if has_any_explicit_surface else ""
     display_text = subtitle_display_rule_text(payload) if has_explicit_display else ""
     if not has_any_explicit_surface:
         return {

@@ -241,7 +241,7 @@ def _normalize_multimodal_review_decision(
     except (TypeError, ValueError):
         confidence = 0.0
     evidence = [str(item).strip() for item in list(payload.get("evidence") or []) if str(item).strip()]
-    return {
+    decision = {
         "candidate_id": candidate_id,
         "verdict": verdict,
         "confidence": round(confidence, 3),
@@ -249,6 +249,76 @@ def _normalize_multimodal_review_decision(
         "evidence": evidence[:4],
         "summary": str(payload.get("summary") or "").strip(),
     }
+    source = str(payload.get("source") or "").strip()
+    if source:
+        decision["source"] = source
+    return decision
+
+
+def _deterministic_boundary_trim_decision(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    reason = str(candidate.get("reason") or "").strip()
+    source_text = str(candidate.get("source_text") or "").strip()
+    if reason != "timing_trim" or source_text:
+        return None
+    try:
+        start = max(0.0, float(candidate.get("start", 0.0) or 0.0))
+        end = max(start, float(candidate.get("end", start) or start))
+    except (TypeError, ValueError):
+        return None
+    duration = max(0.0, end - start)
+    if duration > 1.5:
+        return None
+    candidate_id = str(candidate.get("candidate_id") or "").strip()
+    if not candidate_id:
+        return None
+    return {
+        "candidate_id": candidate_id,
+        "verdict": "cut",
+        "confidence": 0.86,
+        "reason": "无口播文本的短边界微修剪，按确定性边界规则收口。",
+        "evidence": [f"duration={duration:.3f}s", "source_text_empty", "reason=timing_trim"],
+        "summary": "短边界无口播候选已按规则收口，无需视觉复核。",
+        "source": "deterministic_boundary_trim",
+    }
+
+
+def _deterministic_failed_attempt_decision(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    reason = str(candidate.get("reason") or "").strip()
+    if reason != "failed_attempt":
+        return None
+    source_text = str(candidate.get("source_text") or "").strip()
+    if not source_text:
+        return None
+    try:
+        start = max(0.0, float(candidate.get("start", 0.0) or 0.0))
+        end = max(start, float(candidate.get("end", start) or start))
+    except (TypeError, ValueError):
+        return None
+    duration = max(0.0, end - start)
+    if duration > 20.0:
+        return None
+    failed_markers = ("失败", "错误", "无效", "没成功", "没打开", "没甩开", "等会儿再来")
+    replacement_markers = ("随后", "后面", "之后", "随即", "重新", "正确", "完整展示", "成功")
+    if not any(marker in source_text for marker in failed_markers):
+        return None
+    if not any(marker in source_text for marker in replacement_markers):
+        return None
+    candidate_id = str(candidate.get("candidate_id") or "").strip()
+    if not candidate_id:
+        return None
+    return {
+        "candidate_id": candidate_id,
+        "verdict": "cut",
+        "confidence": 0.88,
+        "reason": "文本语义已确认失败尝试且随后有正确/完整展示，按废片发现结果收口。",
+        "evidence": [f"duration={duration:.3f}s", "reason=failed_attempt", "replacement_success_mentioned"],
+        "summary": "失败尝试候选已按语义证据收口，无需等待视觉复核。",
+        "source": "deterministic_failed_attempt",
+    }
+
+
+def _deterministic_multimodal_review_decision(candidate: dict[str, Any]) -> dict[str, Any] | None:
+    return _deterministic_boundary_trim_decision(candidate) or _deterministic_failed_attempt_decision(candidate)
 
 
 def _review_source_meta(payload: dict[str, Any], source_meta: dict[str, Any] | None) -> dict[str, Any]:
@@ -481,6 +551,7 @@ async def _review_multimodal_candidate_batch(
         temp_dir = Path(temp_dir_str)
         prompt_candidates: list[dict[str, Any]] = []
         image_paths: list[Path] = []
+        skipped_frame_missing: list[dict[str, Any]] = []
         for batch_index, (candidate, _cache_key) in enumerate(unresolved, start=1):
             candidate_dir = temp_dir / f"candidate_{batch_index}"
             candidate_dir.mkdir(parents=True, exist_ok=True)
@@ -490,7 +561,15 @@ async def _review_multimodal_candidate_batch(
                 temp_dir=candidate_dir,
             )
             if not frame_paths:
-                raise RuntimeError("multimodal_trim_review_frame_missing")
+                skipped_frame_missing.append(
+                    {
+                        "candidate_id": str(candidate.get("candidate_id") or "").strip(),
+                        "start": round(float(candidate.get("start", 0.0) or 0.0), 3),
+                        "end": round(float(candidate.get("end", 0.0) or 0.0), 3),
+                        "reason": "multimodal_trim_review_frame_missing",
+                    }
+                )
+                continue
             first_frame_index = len(image_paths) + 1
             image_paths.extend(frame_paths)
             prompt_candidates.append(
@@ -505,6 +584,11 @@ async def _review_multimodal_candidate_batch(
                     "frame_indices": [first_frame_index, len(image_paths)],
                 }
             )
+        if not prompt_candidates:
+            return decisions, {
+                "decisions": list(raw_decisions_by_id.values()),
+                "skipped_frame_missing": skipped_frame_missing,
+            }
         prompt = build_multimodal_trim_review_batch_prompt(
             source_meta=source_meta,
             candidates=prompt_candidates,
@@ -564,6 +648,7 @@ async def _review_multimodal_candidate_batch(
         return decisions, {
             "summary": str(review_payload.get("summary") or "").strip(),
             "decisions": list(raw_decisions_by_id.values()),
+            "skipped_frame_missing": skipped_frame_missing,
         }
 
 
@@ -585,6 +670,9 @@ async def _review_multimodal_candidates_resilient(
         batch_summary = str((raw_payload or {}).get("summary") or "").strip()
         if batch_summary:
             summaries.append(batch_summary)
+        skipped_frame_missing = list((raw_payload or {}).get("skipped_frame_missing") or [])
+        if skipped_frame_missing:
+            summaries.append(f"多模态候选缺少预览帧 {len(skipped_frame_missing)} 条，已保留为待复核。")
         for decision in decisions:
             summary = str((decision or {}).get("summary") or "").strip()
             if summary:
@@ -643,7 +731,16 @@ async def review_multimodal_trim_review_payload(
         max_candidates = max(0, int(getattr(settings, "multimodal_trim_review_max_candidates", 4) or 4))
     except (TypeError, ValueError):
         max_candidates = 4
-    queued_candidates = sorted(candidates, key=_review_candidate_priority, reverse=True)
+    deterministic_decisions: list[dict[str, Any]] = []
+    model_review_candidates: list[dict[str, Any]] = []
+    for candidate in candidates:
+        deterministic_decision = _deterministic_multimodal_review_decision(candidate)
+        if deterministic_decision is not None:
+            deterministic_decisions.append(deterministic_decision)
+        else:
+            model_review_candidates.append(candidate)
+
+    queued_candidates = sorted(model_review_candidates, key=_review_candidate_priority, reverse=True)
     if max_candidates > 0:
         queued_candidates = queued_candidates[:max_candidates]
     total_frame_count = sum(len(_candidate_frame_timestamps(candidate)) for candidate in queued_candidates)
@@ -654,37 +751,46 @@ async def review_multimodal_trim_review_payload(
     )
     normalized_meta = _review_source_meta(base_payload, source_meta)
 
-    decisions: list[dict[str, Any]] = []
-    summaries: list[str] = []
+    decisions: list[dict[str, Any]] = list(deterministic_decisions)
+    summaries: list[str] = [
+        str(item.get("summary") or "").strip()
+        for item in deterministic_decisions
+        if str(item.get("summary") or "").strip()
+    ]
     error_code: str | None = None
-    try:
-        decisions, summaries, used_split_fallback = await _review_multimodal_candidates_resilient(
-            source_path=resolved_source_path,
-            source_meta=normalized_meta,
-            candidates=queued_candidates,
-            timeout_sec=review_timeout_sec,
-        )
-        if used_split_fallback and len(decisions) < len(queued_candidates):
+    model_review_decision_count = 0
+    if queued_candidates:
+        try:
+            model_decisions, model_summaries, used_split_fallback = await _review_multimodal_candidates_resilient(
+                source_path=resolved_source_path,
+                source_meta=normalized_meta,
+                candidates=queued_candidates,
+                timeout_sec=review_timeout_sec,
+            )
+            model_review_decision_count = len(model_decisions)
+            decisions.extend(model_decisions)
+            summaries.extend(model_summaries)
+            if used_split_fallback and len(model_decisions) < len(queued_candidates):
+                error_code = "multimodal_trim_review_timeout"
+        except (asyncio.TimeoutError, TimeoutError):
             error_code = "multimodal_trim_review_timeout"
-    except (asyncio.TimeoutError, TimeoutError):
-        error_code = "multimodal_trim_review_timeout"
-        logger.warning(
-            "Multimodal trim review timed out for %s",
-            normalized_meta.get("source_name") or resolved_source_path,
-        )
-    except ValueError as exc:
-        error_code = "multimodal_trim_review_failed"
-        logger.warning(
-            "Multimodal trim review produced an unusable payload for %s: %s",
-            normalized_meta.get("source_name") or resolved_source_path,
-            str(exc).strip(),
-        )
-    except Exception:
-        error_code = "multimodal_trim_review_failed"
-        logger.exception(
-            "Multimodal trim review failed for %s",
-            normalized_meta.get("source_name") or resolved_source_path,
-        )
+            logger.warning(
+                "Multimodal trim review timed out for %s",
+                normalized_meta.get("source_name") or resolved_source_path,
+            )
+        except ValueError as exc:
+            error_code = "multimodal_trim_review_failed"
+            logger.warning(
+                "Multimodal trim review produced an unusable payload for %s: %s",
+                normalized_meta.get("source_name") or resolved_source_path,
+                str(exc).strip(),
+            )
+        except Exception:
+            error_code = "multimodal_trim_review_failed"
+            logger.exception(
+                "Multimodal trim review failed for %s",
+                normalized_meta.get("source_name") or resolved_source_path,
+            )
 
     min_confidence = float(getattr(settings, "multimodal_trim_review_min_confidence", 0.72) or 0.72)
     decisions_by_id = {str(item.get("candidate_id") or "").strip(): item for item in decisions if str(item.get("candidate_id") or "").strip()}
@@ -726,7 +832,7 @@ async def review_multimodal_trim_review_payload(
         "unsure_count": unsure_count,
         "summary": "；".join(dict.fromkeys(summary for summary in summaries if summary))[:500] or None,
     }
-    if decisions:
+    if model_review_decision_count > 0:
         reviewed_payload["provider"] = str(getattr(settings, "active_reasoning_provider", "") or "").strip() or None
         reviewed_payload["model"] = str(getattr(settings, "active_vision_model", "") or "").strip() or None
     if error_code:

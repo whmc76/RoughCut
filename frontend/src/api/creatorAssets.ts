@@ -85,9 +85,33 @@ export const creatorAssetsApi = {
     }),
   bindSocialAutoUploadLogin: (
     creatorId: string,
-    body: { platform: string; browser?: string; account_name?: string },
+    body: { platform: string; browser?: string; account_name?: string; login_confirmed?: boolean },
   ) =>
     request<CreatorPublicationProfile>(`/creator-cards/${creatorId}/platform-bindings/social-auto-upload`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  startSocialAutoUploadLogin: (
+    creatorId: string,
+    body: { platform: string; browser?: string; account_name?: string },
+  ) =>
+    request<Record<string, unknown>>(`/creator-cards/${creatorId}/platform-bindings/social-auto-upload/login`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  checkSocialAutoUploadLogin: (
+    creatorId: string,
+    body: { platform: string; browser?: string; account_name?: string },
+  ) =>
+    request<Record<string, unknown>>(`/creator-cards/${creatorId}/platform-bindings/social-auto-upload/login-status`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  openSocialAutoUploadDashboard: (
+    creatorId: string,
+    body: { platform: string; browser?: string },
+  ) =>
+    request<Record<string, unknown>>(`/creator-cards/${creatorId}/platform-bindings/social-auto-upload/dashboard`, {
       method: "POST",
       body: JSON.stringify(body),
     }),

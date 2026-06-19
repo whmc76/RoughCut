@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from difflib import SequenceMatcher
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -193,12 +194,18 @@ _RETAKE_MAX_GAP_SEC = 4.5
 _RETAKE_MAX_WINDOW_ITEMS = 4
 _RETAKE_MIN_PREFIX_LEN = 4
 _RETAKE_MAX_FRAGMENT_CHARS = 24
+_RETAKE_CLUSTER_MAX_GAP_SEC = 3.8
+_RETAKE_CLUSTER_MAX_ITEMS = 5
+_RETAKE_CLUSTER_MAX_CUT_SEC = 22.0
+_RETAKE_CLUSTER_MIN_CUT_SEC = 0.7
+_RETAKE_CLUSTER_MIN_SIMILARITY = 0.58
 _MAX_REPEATED_SPEECH_COPY_GAP_SEC = 0.45
 _SHOWCASE_CONTEXT_MAX_GAP_SEC = 0.55
 _SHOWCASE_CONTEXT_APPRECIATION_MAX_GAP_SEC = 1.2
 _VISUAL_SHOWCASE_GAP_MIN_SEC = 0.45
 _VISUAL_SHOWCASE_GAP_MAX_SEC = 8.0
 _VISUAL_SHOWCASE_LONG_GAP_MIN_SEC = 3.2
+_SHOWCASE_PAUSE_GUARD_MAX_SEC = 10.0
 _LONG_INVALID_NO_DIALOGUE_MIN_SEC = 1.2
 _SILENCE_CUT_SCORE_THRESHOLD = 0.32
 _SILENCE_DURATION_SCORE_BASE = 0.22
@@ -213,6 +220,90 @@ _SYNTHETIC_WORD_ALIGNMENT_SOURCES = {
     "provider_missing",
     "roughcut_synthesized",
 }
+_ATTEMPT_FAILURE_CUES = (
+    "没成功",
+    "没开",
+    "没打开",
+    "打不开",
+    "没拉开",
+    "没扣上",
+    "没挂上",
+    "没插上",
+    "没对上",
+    "没到位",
+    "不对",
+    "不太对",
+    "不行",
+    "不顺",
+    "不太顺",
+    "有点卡住",
+    "卡住了",
+    "卡壳",
+    "失败",
+    "尴尬",
+    "算了",
+)
+_RETAKE_SELF_CORRECTION_PREFIXES = (
+    "不是",
+    "不是不是",
+    "不对",
+    "准确说",
+    "应该是",
+    "换句话说",
+)
+_ATTEMPT_RETRY_CUES = (
+    "再试",
+    "再来",
+    "重新",
+    "重来",
+    "再弄",
+    "再拉",
+    "再开",
+    "再扣",
+    "试一下",
+    "试试",
+    "来一遍",
+    "这次",
+)
+_ATTEMPT_SUCCESS_CUES = (
+    "成功",
+    "好了",
+    "可以了",
+    "打开了",
+    "扣上了",
+    "挂上了",
+    "插上了",
+    "到位",
+    "顺了",
+    "很顺",
+    "轻松",
+    "顺滑",
+    "这样就",
+    "这就",
+)
+_ATTEMPT_DEMO_OBJECT_CUES = (
+    "拉链",
+    "扣",
+    "卡扣",
+    "磁吸",
+    "快拆",
+    "快开",
+    "肩带",
+    "刀",
+    "锁",
+    "包",
+    "仓",
+    "盖",
+    "插",
+    "挂",
+    "拉",
+    "开",
+    "关",
+    "装",
+    "取",
+    "抽",
+    "弹",
+)
 _SCENE_SNAP_TOLERANCE_SEC = 0.24
 _MIN_CUT_DURATION_SEC = 0.08
 _MIN_PARTIAL_SUBTITLE_CUT_DURATION_SEC = 0.18
@@ -431,6 +522,9 @@ def build_edit_decision(
                     *_collect_restart_cue_cuts(enriched_subtitles, content_profile=content_profile),
                 ]
             )
+        )
+        manual_editor_rule_candidates.extend(
+            _collect_repeated_attempt_retake_candidates(enriched_subtitles, content_profile=content_profile)
         )
         manual_editor_rule_candidates.extend(
             _collect_rollback_instruction_cuts(enriched_subtitles, content_profile=content_profile)
@@ -941,6 +1035,9 @@ def _score_silence_cut(
     if range_evidence.protection_score >= 0.72:
         score -= min(0.38, range_evidence.protection_score * 0.18)
         signals.append(f"evidence_protect={range_evidence.protection_score:.2f}")
+    if _silence_range_should_keep_showcase_pause(range_evidence):
+        score = min(score - 0.68, _SILENCE_CUT_SCORE_THRESHOLD - 0.01)
+        signals.append("showcase_pause_guard")
     if range_evidence.removal_score >= 0.72:
         score += min(0.22, range_evidence.removal_score * 0.14)
         signals.append(f"evidence_remove={range_evidence.removal_score:.2f}")
@@ -1038,6 +1135,9 @@ def _build_range_evidence(
     if _editing_skill_has_creative_tag(timeline_analysis, {"detail_focus", "closeup_focus", "practical_demo", "workflow_breakdown"}):
         visual_score += 0.12
         tags.append("creative_visual_priority")
+    if _content_profile_implies_showcase_context(content_profile):
+        visual_score += 0.14
+        tags.append("showcase_profile")
     positive_multimodal = float(multimodal_signal.get("positive_score", 0.0) or 0.0)
     negative_multimodal = float(multimodal_signal.get("negative_score", 0.0) or 0.0)
     if positive_multimodal > 0.0:
@@ -1123,6 +1223,89 @@ def _build_range_evidence(
         tags=list(dict.fromkeys(tags)),
         previous_text=previous_text,
         next_text=next_text,
+    )
+
+
+def _silence_range_should_keep_showcase_pause(range_evidence: EditRangeEvidence) -> bool:
+    duration = max(0.0, float(range_evidence.duration_sec or 0.0))
+    if duration < _VISUAL_SHOWCASE_GAP_MIN_SEC or duration > _SHOWCASE_PAUSE_GUARD_MAX_SEC:
+        return False
+    tags = {str(tag).strip() for tag in list(range_evidence.tags or []) if str(tag).strip()}
+    if "multimodal_drop_signal" in tags:
+        return False
+    if range_evidence.multimodal_role in _MULTIMODAL_NEGATIVE_ROLES and range_evidence.multimodal_score < -0.2:
+        return False
+    if range_evidence.retake_score >= 0.72 and "restart_cue_context" in tags:
+        return False
+
+    has_showcase_context = (
+        range_evidence.visual_showcase_score >= 0.42
+        or "visual_context" in tags
+        or "creative_visual_priority" in tags
+        or "scene_activity" in tags
+        or "showcase_profile" in tags
+    )
+    has_language_or_transcript = (
+        range_evidence.subtitle_count > 0
+        or range_evidence.transcript_count > 0
+        or "language_signal" in tags
+        or "transcript_present" in tags
+    )
+    if range_evidence.subtitle_count > 0 and has_showcase_context:
+        return True
+    if has_showcase_context and has_language_or_transcript and range_evidence.protection_score >= 0.62:
+        return True
+    if (
+        range_evidence.subtitle_count > 0
+        and range_evidence.language_score >= 0.32
+        and range_evidence.protection_score >= 0.54
+    ):
+        return True
+    if (
+        range_evidence.transcript_count > 0
+        and range_evidence.transcript_coverage >= 0.25
+        and has_showcase_context
+        and range_evidence.protection_score >= 0.54
+    ):
+        return True
+    return False
+
+
+def _content_profile_implies_showcase_context(content_profile: dict | None) -> bool:
+    profile = content_profile or {}
+    text = _compact_subtitle_text(
+        " ".join(
+            str(profile.get(key) or "")
+            for key in (
+                "content_kind",
+                "workflow_template",
+                "subject_domain",
+                "subject_type",
+                "video_theme",
+            )
+        )
+    ).lower()
+    if not text:
+        return False
+    return any(
+        token in text
+        for token in (
+            "unboxing",
+            "edc",
+            "tactical",
+            "product",
+            "review",
+            "demo",
+            "开箱",
+            "测评",
+            "评测",
+            "展示",
+            "演示",
+            "上手",
+            "刀",
+            "包",
+            "工具",
+        )
     )
 
 
@@ -2888,6 +3071,188 @@ def _collect_restart_retake_cuts(
                 cuts.append((fragment_start, next_start, "restart_retake"))
             break
     return cuts
+
+
+def _collect_repeated_attempt_retake_candidates(
+    subtitle_items: list[dict],
+    *,
+    content_profile: dict | None,
+) -> list[CutCandidate]:
+    ordered = sorted(
+        subtitle_items,
+        key=lambda item: (
+            float(item.get("start_time", 0.0) or 0.0),
+            float(item.get("end_time", 0.0) or 0.0),
+        ),
+    )
+    candidates: list[CutCandidate] = []
+    for start_index in range(0, max(0, len(ordered) - 1)):
+        for end_index in range(start_index + 1, min(len(ordered), start_index + _RETAKE_CLUSTER_MAX_ITEMS)):
+            first_start = float(ordered[start_index].get("start_time", 0.0) or 0.0)
+            final_start = float(ordered[end_index].get("start_time", 0.0) or 0.0)
+            if final_start - first_start > _RETAKE_CLUSTER_MAX_CUT_SEC:
+                break
+            if not _retake_cluster_has_contiguous_timing(ordered, start_index=start_index, end_index=end_index):
+                break
+            verdict = _classify_repeated_attempt_retake_cluster(
+                ordered[start_index:end_index + 1],
+                content_profile=content_profile,
+            )
+            if not verdict:
+                continue
+            cut_start = first_start
+            cut_end = final_start
+            if cut_end - cut_start < _RETAKE_CLUSTER_MIN_CUT_SEC:
+                continue
+            candidates.append(
+                CutCandidate(
+                    start=max(0.0, cut_start),
+                    end=max(cut_start, cut_end),
+                    reason="restart_retake",
+                    score=float(verdict.get("score", 0.78) or 0.78),
+                    hard=False,
+                    signals=[
+                        "asr_sequence_cluster",
+                        str(verdict.get("signal") or "repeated_attempt_retake"),
+                    ],
+                    evidence={
+                        "cluster_type": str(verdict.get("cluster_type") or ""),
+                        "subtitle_count": end_index - start_index + 1,
+                        "kept_final_text": _semantic_subtitle_text(ordered[end_index])[:80],
+                        "removed_text": " / ".join(
+                            _semantic_subtitle_text(item)[:36]
+                            for item in ordered[start_index:end_index]
+                        )[:180],
+                        "tags": ["retake_cluster", "keep_final_attempt"],
+                    },
+                )
+            )
+            break
+    return _dedupe_retake_cluster_candidates(candidates)
+
+
+def _retake_cluster_has_contiguous_timing(
+    ordered: list[dict],
+    *,
+    start_index: int,
+    end_index: int,
+) -> bool:
+    for left, right in zip(ordered[start_index:end_index], ordered[start_index + 1:end_index + 1]):
+        left_end = float(left.get("end_time", 0.0) or 0.0)
+        right_start = float(right.get("start_time", 0.0) or 0.0)
+        if right_start - left_end > _RETAKE_CLUSTER_MAX_GAP_SEC:
+            return False
+    return True
+
+
+def _classify_repeated_attempt_retake_cluster(
+    cluster: list[dict],
+    *,
+    content_profile: dict | None,
+) -> dict[str, Any] | None:
+    texts = [_semantic_subtitle_text(item) for item in cluster]
+    compacts = [_normalized_retake_cluster_text(text) for text in texts]
+    if len([text for text in compacts if text]) < 2:
+        return None
+    if _looks_like_failed_demo_attempt_cluster(compacts):
+        return {
+            "cluster_type": "failed_demo_attempt",
+            "signal": "failed_demo_retry_until_success",
+            "score": 0.86,
+        }
+    if _looks_like_progressive_retake_cluster(texts, compacts, content_profile=content_profile):
+        return {
+            "cluster_type": "progressive_line_retake",
+            "signal": "progressive_repeated_line_until_clean",
+            "score": 0.82,
+        }
+    return None
+
+
+def _normalized_retake_cluster_text(text: str) -> str:
+    compact = _strip_restart_prefix(_compact_subtitle_text(text))
+    compact = FILLER_PATTERN.sub("", compact)
+    return _compact_subtitle_text(compact)
+
+
+def _looks_like_failed_demo_attempt_cluster(compacts: list[str]) -> bool:
+    if len(compacts) < 2:
+        return False
+    joined_before_final = "".join(compacts[:-1])
+    joined_all = "".join(compacts)
+    final = compacts[-1]
+    has_failure_or_retry = (
+        any(cue in joined_before_final for cue in _ATTEMPT_FAILURE_CUES)
+        or sum(1 for text in compacts[:-1] if any(cue in text for cue in _ATTEMPT_RETRY_CUES)) >= 2
+    )
+    if not has_failure_or_retry:
+        return False
+    has_demo_object = any(cue in joined_all for cue in _ATTEMPT_DEMO_OBJECT_CUES)
+    has_success_or_final_demo = any(cue in final for cue in _ATTEMPT_SUCCESS_CUES) or (
+        has_demo_object and _subtitle_retake_similarity(joined_before_final[-24:], final) >= 0.34
+    )
+    return bool(has_demo_object and has_success_or_final_demo)
+
+
+def _looks_like_progressive_retake_cluster(
+    texts: list[str],
+    compacts: list[str],
+    *,
+    content_profile: dict | None,
+) -> bool:
+    first = compacts[0]
+    final = compacts[-1]
+    if len(first) < _RETAKE_MIN_PREFIX_LEN or len(final) < len(first) + 3:
+        return False
+    if len(first) > _RETAKE_MAX_FRAGMENT_CHARS:
+        return False
+    prefix_len = _common_prefix_len(first, final)
+    similarity = _subtitle_retake_similarity(first, final)
+    has_progressive_prefix = prefix_len >= min(len(first), 8) and prefix_len >= _RETAKE_MIN_PREFIX_LEN
+    has_near_copy = similarity >= _RETAKE_CLUSTER_MIN_SIMILARITY
+    if not (has_progressive_prefix or has_near_copy):
+        return _looks_like_self_correction_retake_cluster(compacts)
+    if any(_is_restart_cue_text(text) for text in texts[:-1]):
+        return True
+    if len(compacts) >= 3 and len(first) <= 14 and len(final) >= len(first) + 5:
+        return True
+    if _looks_like_incomplete_tail(texts[0]) and _subtitle_signal_score(texts[-1], content_profile=content_profile) >= 1.0:
+        return True
+    return False
+
+
+def _looks_like_self_correction_retake_cluster(compacts: list[str]) -> bool:
+    if len(compacts) < 3:
+        return False
+    final = compacts[-1]
+    if not any(final.startswith(prefix) for prefix in _RETAKE_SELF_CORRECTION_PREFIXES):
+        return False
+    joined = "".join(compacts)
+    return any(cue in joined for cue in _ATTEMPT_DEMO_OBJECT_CUES)
+
+
+def _subtitle_retake_similarity(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    return float(SequenceMatcher(None, left, right).ratio())
+
+
+def _common_prefix_len(left: str, right: str) -> int:
+    count = 0
+    for left_char, right_char in zip(left, right):
+        if left_char != right_char:
+            break
+        count += 1
+    return count
+
+
+def _dedupe_retake_cluster_candidates(candidates: list[CutCandidate]) -> list[CutCandidate]:
+    selected: list[CutCandidate] = []
+    for candidate in sorted(candidates, key=lambda item: (item.start, -(item.end - item.start), -item.score)):
+        if any(min(candidate.end, kept.end) - max(candidate.start, kept.start) > 0.05 for kept in selected):
+            continue
+        selected.append(candidate)
+    return selected
 
 
 def _collect_restart_cue_cuts(

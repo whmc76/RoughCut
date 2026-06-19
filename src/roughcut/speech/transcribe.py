@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import date, datetime
 import math
+import os
 import re
 import uuid
 from pathlib import Path
@@ -32,6 +33,28 @@ from roughcut.speech.subtitle_pipeline import (
     ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER,
     build_transcript_fact_layer_from_result,
 )
+
+ARTIFACT_TYPE_ASR_QUALITY_GATE = "asr_quality_gate"
+
+
+class AsrQualityGateError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempts: list[dict[str, str]],
+        rejected_attempts: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.rejected_attempts = rejected_attempts
+        self.payload = {
+            "status": "rejected",
+            "reason": "asr_quality_gate",
+            "message": message,
+            "attempts": attempts,
+            "rejected_attempts": rejected_attempts,
+        }
 
 _TRANSCRIPT_TAIL_CTA_NOISE_RE = re.compile(
     r"(感谢观看|请不吝点赞|打赏支持|"
@@ -89,6 +112,7 @@ _ASR_REPEAT_ALLOWED_CHARS = frozenset(
     "试看想听说讲问找拿用摸擦敲聊闻尝轻慢快小大多少点微静悄渐晃摇拉推按翻搓揉洗刷切削划扫"
 )
 _ASR_REPEAT_ALLOWED_PREFIXES = frozenset(("开开箱", "一点点"))
+_ASR_NO_TIMING_ADVISORY_DUPLICATES = frozenset(("哈哈", "嘿嘿", "呵呵", "嘻嘻", "哼哼", "哒哒", "啦啦"))
 
 
 def _is_brand_like_term(term: dict) -> bool:
@@ -206,19 +230,41 @@ def _normalize_knife_material_surface_text(text: str) -> str:
 def _append_quality_fallbacks(provider_plan: list[tuple[str, str]]) -> list[tuple[str, str]]:
     expanded: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
+    allow_non_qwen_fallbacks = str(os.getenv("ROUGHCUT_ASR_ENABLE_NON_QWEN_FALLBACKS") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     for provider, model in provider_plan:
         item = (provider, model)
         if item not in seen:
             expanded.append(item)
             seen.add(item)
+        if not allow_non_qwen_fallbacks:
+            continue
+        provider_key = str(provider or "").strip().lower()
+        model_key = str(model or "").strip().lower()
+        if provider_key == _LOCAL_ASR_PROVIDER and "qwen3-asr" in model_key:
+            for fallback_model in (
+                "faster-whisper-large-v3-beam5-nohot",
+            ):
+                fallback_item = (provider, fallback_model)
+                if fallback_item not in seen:
+                    expanded.append(fallback_item)
+                    seen.add(fallback_item)
     return expanded
 
 
-def _result_quality_text_units(result: TranscriptResult) -> list[tuple[str, str]]:
+def _result_quality_units(result: TranscriptResult) -> list[dict[str, Any]]:
     model = str(getattr(result, "model", "") or "").strip().lower()
     if "qwen3-asr" in model:
         segment_units = [
-            (f"segment:{index}", str(getattr(seg, "text", "") or "").strip())
+            {
+                "unit": f"segment:{index}",
+                "text": str(getattr(seg, "text", "") or "").strip(),
+                "words": list(getattr(seg, "words", None) or []),
+            }
             for index, seg in enumerate(result.raw_segments or result.segments or [])
             if str(getattr(seg, "text", "") or "").strip()
         ]
@@ -234,64 +280,299 @@ def _result_quality_text_units(result: TranscriptResult) -> list[tuple[str, str]
                 continue
             text = str(chunk.get("text") or chunk.get("raw_text") or "").strip()
             if text:
-                units.append((f"chunk:{index}", text))
+                units.append({"unit": f"chunk:{index}", "text": text, "words": []})
     if units:
         return units
 
     for index, seg in enumerate(result.raw_segments or result.segments or []):
         text = str(getattr(seg, "raw_text", None) or getattr(seg, "text", "") or "").strip()
         if text:
-            units.append((f"segment:{index}", text))
+            units.append(
+                {
+                    "unit": f"segment:{index}",
+                    "text": text,
+                    "words": list(getattr(seg, "words", None) or []),
+                }
+            )
     return units
 
 
-def _find_suspicious_asr_duplicate_samples(text: str, *, sample_limit: int = 4) -> list[str]:
+def _result_quality_text_units(result: TranscriptResult) -> list[tuple[str, str]]:
+    return [
+        (str(unit.get("unit") or ""), str(unit.get("text") or ""))
+        for unit in _result_quality_units(result)
+    ]
+
+
+def _compact_asr_timing_text(text: str) -> str:
+    return re.sub(r"\s+", "", str(text or ""))
+
+
+def _word_text(word: WordTiming) -> str:
+    return str(getattr(word, "word", "") or "").strip()
+
+
+def _word_start(word: WordTiming) -> float:
+    try:
+        return float(getattr(word, "start", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _word_end(word: WordTiming) -> float:
+    try:
+        return float(getattr(word, "end", _word_start(word)) or _word_start(word))
+    except (TypeError, ValueError):
+        return _word_start(word)
+
+
+def _word_duration(word: WordTiming) -> float:
+    return max(0.0, _word_end(word) - _word_start(word))
+
+
+def _build_compact_word_char_index(words: list[WordTiming]) -> tuple[str, list[int]]:
+    compact_parts: list[str] = []
+    char_word_indices: list[int] = []
+    for word_index, word in enumerate(list(words or [])):
+        word_text = _compact_asr_timing_text(_word_text(word))
+        if not word_text:
+            continue
+        compact_parts.append(word_text)
+        char_word_indices.extend([word_index] * len(word_text))
+    return "".join(compact_parts), char_word_indices
+
+
+def _word_indices_for_duplicate_span(
+    *,
+    compact_text: str,
+    match_start: int,
+    match_end: int,
+    words: list[WordTiming],
+) -> list[int]:
+    if not words:
+        return []
+    compact_words, char_word_indices = _build_compact_word_char_index(words)
+    if not compact_words or not char_word_indices:
+        return []
+    if len(compact_words) == len(compact_text):
+        raw_indices = char_word_indices[match_start:match_end]
+    else:
+        sample = compact_text[match_start:match_end]
+        word_pos = compact_words.find(sample)
+        if word_pos < 0:
+            return []
+        raw_indices = char_word_indices[word_pos: word_pos + len(sample)]
+    ordered: list[int] = []
+    for word_index in raw_indices:
+        if word_index not in ordered:
+            ordered.append(word_index)
+    return ordered
+
+
+def _classify_duplicate_timing(
+    *,
+    compact_text: str,
+    match_start: int,
+    match_end: int,
+    words: list[WordTiming],
+) -> dict[str, Any]:
+    word_indices = _word_indices_for_duplicate_span(
+        compact_text=compact_text,
+        match_start=match_start,
+        match_end=match_end,
+        words=words,
+    )
+    if not word_indices:
+        duplicate_text = compact_text[match_start:match_end]
+        if duplicate_text in _ASR_NO_TIMING_ADVISORY_DUPLICATES:
+            return {
+                "classification": "advisory",
+                "reason": "duplicate_text_without_word_timestamps_but_common_laughter_or_sound",
+                "word_count": 0,
+            }
+        return {
+            "classification": "confirmed_noise",
+            "reason": "duplicate_text_without_usable_word_timestamps",
+            "word_count": 0,
+        }
+
+    matched_words = [words[index] for index in word_indices if 0 <= index < len(words)]
+    starts = [_word_start(word) for word in matched_words]
+    ends = [_word_end(word) for word in matched_words]
+    durations = [_word_duration(word) for word in matched_words]
+    if not matched_words or not starts or not ends:
+        return {
+            "classification": "confirmed_noise",
+            "reason": "duplicate_text_without_usable_word_timestamps",
+            "word_count": 0,
+        }
+
+    rounded_starts = {round(value, 2) for value in starts}
+    zero_duration_count = sum(1 for value in durations if value <= 0.025)
+    non_monotonic = any(starts[index] < starts[index - 1] - 0.015 for index in range(1, len(starts)))
+    span = max(0.0, max(ends) - min(starts))
+    duplicate_text = compact_text[match_start:match_end]
+    char_rate = len(duplicate_text) / span if span > 0.0 else math.inf
+
+    timing_summary = {
+        "word_count": len(matched_words),
+        "start": round(min(starts), 3),
+        "end": round(max(ends), 3),
+        "span_sec": round(span, 3),
+        "zero_duration_count": zero_duration_count,
+        "unique_start_count": len(rounded_starts),
+        "char_rate": round(char_rate, 3) if math.isfinite(char_rate) else None,
+    }
+    if duplicate_text in _ASR_NO_TIMING_ADVISORY_DUPLICATES and len(matched_words) <= 2:
+        return {
+            **timing_summary,
+            "classification": "advisory",
+            "reason": "duplicate_common_laughter_or_sound_with_limited_timing_evidence",
+        }
+    if len(matched_words) >= 2 and (
+        len(rounded_starts) <= 1
+        or zero_duration_count > 0 and span <= 0.16
+        or non_monotonic
+        or char_rate >= 24.0 and span <= 0.22
+    ):
+        return {
+            **timing_summary,
+            "classification": "confirmed_noise",
+            "reason": "duplicate_timing_collapsed_or_jittered",
+        }
+    if span >= max(0.12, len(duplicate_text) * 0.045) and zero_duration_count == 0 and not non_monotonic:
+        return {
+            **timing_summary,
+            "classification": "likely_real_speech",
+            "reason": "duplicate_has_plausible_word_timing",
+        }
+    return {
+        **timing_summary,
+        "classification": "advisory",
+        "reason": "duplicate_timing_ambiguous",
+    }
+
+
+def _find_suspicious_asr_duplicate_findings(
+    text: str,
+    *,
+    words: list[WordTiming] | None = None,
+    sample_limit: int = 4,
+) -> list[dict[str, Any]]:
     compact = re.sub(r"\s+", "", str(text or ""))
     if not compact:
         return []
 
-    samples: list[str] = []
+    findings: list[dict[str, Any]] = []
     seen_spans: set[tuple[int, int]] = set()
 
-    def add_sample(start: int, end: int) -> None:
-        if len(samples) >= sample_limit:
+    def add_finding(start: int, end: int, *, kind: str) -> None:
+        if len(findings) >= sample_limit:
             return
         span = (start, end)
         if span in seen_spans:
             return
         seen_spans.add(span)
-        samples.append(compact[max(0, start - 6): min(len(compact), end + 10)])
+        timing = _classify_duplicate_timing(
+            compact_text=compact,
+            match_start=start,
+            match_end=end,
+            words=list(words or []),
+        )
+        findings.append(
+            {
+                "sample": compact[max(0, start - 6): min(len(compact), end + 10)],
+                "duplicate_text": compact[start:end],
+                "kind": kind,
+                "classification": timing.pop("classification"),
+                "timing_reason": timing.pop("reason"),
+                "timing": timing,
+            }
+        )
 
     for match in _ASR_FUNCTION_STUTTER_RE.finditer(compact):
-        add_sample(match.start(), match.end())
+        add_finding(match.start(), match.end(), kind="function_stutter")
 
     for match in _ASR_PREFIX_STUTTER_RE.finditer(compact):
         char = match.group("char")
         prefix = compact[match.start(): match.start() + 3]
         if char in _ASR_REPEAT_ALLOWED_CHARS or prefix in _ASR_REPEAT_ALLOWED_PREFIXES:
             continue
-        add_sample(match.start(), match.end())
+        add_finding(match.start(), match.end(), kind="prefix_stutter")
 
-    return samples
+    return findings
+
+
+def _find_suspicious_asr_duplicate_samples(text: str, *, sample_limit: int = 4) -> list[str]:
+    return [
+        str(finding.get("sample") or "")
+        for finding in _find_suspicious_asr_duplicate_findings(text, sample_limit=sample_limit)
+    ]
 
 
 def analyze_transcript_asr_quality(result: TranscriptResult) -> dict[str, Any]:
-    units = _result_quality_text_units(result)
+    units = _result_quality_units(result)
     affected_units: list[dict[str, Any]] = []
+    advisory_units: list[dict[str, Any]] = []
     suspicious_duplicate_count = 0
-    for unit_id, text in units:
-        samples = _find_suspicious_asr_duplicate_samples(text)
-        if not samples:
+    confirmed_noise_count = 0
+    severe_timing_noise_count = 0
+    likely_real_duplicate_count = 0
+    advisory_duplicate_count = 0
+    for unit in units:
+        unit_id = str(unit.get("unit") or "")
+        text = str(unit.get("text") or "")
+        words = list(unit.get("words") or [])
+        findings = _find_suspicious_asr_duplicate_findings(text, words=words)
+        if not findings:
             continue
-        suspicious_duplicate_count += len(samples)
-        affected_units.append({"unit": unit_id, "samples": samples})
+        noise_findings = [
+            finding
+            for finding in findings
+            if str(finding.get("classification") or "") == "confirmed_noise"
+        ]
+        real_findings = [
+            finding
+            for finding in findings
+            if str(finding.get("classification") or "") == "likely_real_speech"
+        ]
+        ambiguous_findings = [
+            finding
+            for finding in findings
+            if str(finding.get("classification") or "") == "advisory"
+        ]
+        suspicious_duplicate_count += len(noise_findings) + len(ambiguous_findings)
+        confirmed_noise_count += len(noise_findings)
+        severe_timing_noise_count += sum(
+            1
+            for finding in noise_findings
+            if str(finding.get("timing_reason") or "") == "duplicate_timing_collapsed_or_jittered"
+        )
+        likely_real_duplicate_count += len(real_findings)
+        advisory_duplicate_count += len(ambiguous_findings)
+        if noise_findings or ambiguous_findings:
+            affected_units.append(
+                {
+                    "unit": unit_id,
+                    "samples": [str(finding.get("sample") or "") for finding in noise_findings + ambiguous_findings],
+                    "findings": noise_findings + ambiguous_findings,
+                }
+            )
+        if real_findings:
+            advisory_units.append(
+                {
+                    "unit": unit_id,
+                    "samples": [str(finding.get("sample") or "") for finding in real_findings],
+                    "findings": real_findings,
+                }
+            )
 
     unit_count = len(units)
     affected_count = len(affected_units)
     affected_ratio = affected_count / unit_count if unit_count else 0.0
     rejected = (
-        suspicious_duplicate_count >= 3
-        or affected_count >= 3
+        severe_timing_noise_count >= 1
+        or confirmed_noise_count >= 3
     )
     return {
         "rejected": rejected,
@@ -300,17 +581,57 @@ def analyze_transcript_asr_quality(result: TranscriptResult) -> dict[str, Any]:
         "affected_unit_count": affected_count,
         "affected_unit_ratio": round(affected_ratio, 4),
         "suspicious_duplicate_count": suspicious_duplicate_count,
+        "confirmed_noise_duplicate_count": confirmed_noise_count,
+        "severe_timing_noise_count": severe_timing_noise_count,
+        "likely_real_duplicate_count": likely_real_duplicate_count,
+        "advisory_duplicate_count": advisory_duplicate_count,
         "affected_units": affected_units[:8],
+        "advisory_units": advisory_units[:8],
     }
 
 
-def _should_reject_transcription_result(provider_name: str, result: TranscriptResult) -> dict[str, Any] | None:
+def analyze_transcript_temporal_coverage(result: TranscriptResult) -> dict[str, Any]:
+    duration = max(0.0, float(getattr(result, "duration", 0.0) or 0.0))
+    segments = list(result.segments or result.raw_segments or [])
+    covered_end = 0.0
+    for segment in segments:
+        covered_end = max(covered_end, float(getattr(segment, "end", 0.0) or 0.0))
+        for word in list(getattr(segment, "words", None) or []):
+            covered_end = max(covered_end, float(getattr(word, "end", 0.0) or 0.0))
+    trailing_gap = max(0.0, duration - covered_end)
+    coverage_ratio = covered_end / duration if duration > 0.0 else 1.0
+    rejected = bool(
+        duration >= 60.0
+        and segments
+        and trailing_gap > max(18.0, duration * 0.12)
+    )
+    return {
+        "rejected": rejected,
+        "reason": "transcript_temporal_coverage_low",
+        "duration_sec": round(duration, 3),
+        "covered_end_sec": round(covered_end, 3),
+        "trailing_gap_sec": round(trailing_gap, 3),
+        "coverage_ratio": round(coverage_ratio, 4),
+        "segment_count": len(segments),
+    }
+
+
+def _should_reject_transcription_result(
+    provider_name: str,
+    model_name: str,
+    result: TranscriptResult,
+) -> dict[str, Any] | None:
     provider = str(provider_name or result.provider or "").strip().lower()
     if provider != _LOCAL_ASR_PROVIDER:
         return None
-    model = str(result.model or "").strip().lower()
+    coverage_analysis = analyze_transcript_temporal_coverage(result)
+    if coverage_analysis["rejected"]:
+        return coverage_analysis
+    model = str(model_name or result.model or "").strip().lower()
     if "qwen3-asr" not in model:
         return None
+    # Duplicate cleanup is owned by the local ASR provider before TranscriptResult is emitted.
+    # This gate is only a residual assertion so polluted output cannot enter downstream stages.
     analysis = analyze_transcript_asr_quality(result)
     if not analysis["rejected"]:
         return None
@@ -318,6 +639,15 @@ def _should_reject_transcription_result(provider_name: str, result: TranscriptRe
 
 
 def _summarize_asr_quality_rejection(analysis: dict[str, Any]) -> str:
+    reason = str(analysis.get("reason") or "").strip()
+    if reason == "transcript_temporal_coverage_low":
+        return (
+            "asr_quality_gate: rejected low temporal coverage "
+            f"(covered_end={analysis.get('covered_end_sec', 0)}s/"
+            f"duration={analysis.get('duration_sec', 0)}s, "
+            f"trailing_gap={analysis.get('trailing_gap_sec', 0)}s, "
+            f"segments={analysis.get('segment_count', 0)})"
+        )
     samples: list[str] = []
     for unit in analysis.get("affected_units") or []:
         if not isinstance(unit, dict):
@@ -361,7 +691,7 @@ async def execute_transcription_plan(
                 prompt=prompt,
                 progress_callback=progress_callback,
             )
-            rejection = _should_reject_transcription_result(provider_name, result)
+            rejection = _should_reject_transcription_result(provider_name, model_name, result)
             if rejection is not None:
                 rejected_attempts.append(
                     {
@@ -398,6 +728,12 @@ async def execute_transcription_plan(
         f"{item['provider']}/{item['model']}: {item['error']}"
         for item in attempt_errors
     )
+    if rejected_attempts:
+        raise AsrQualityGateError(
+            f"All transcription providers failed: {failure_summary}",
+            attempts=attempt_errors,
+            rejected_attempts=rejected_attempts,
+        )
     raise RuntimeError(f"All transcription providers failed: {failure_summary}")
 
 
@@ -477,6 +813,36 @@ async def persist_empty_transcript_result(
         selected_model="no_audio",
         attempt_errors=[],
     )
+
+
+async def persist_asr_quality_gate_artifact(
+    *,
+    job_id: uuid.UUID,
+    step: JobStep,
+    session: AsyncSession,
+    language: str,
+    prompt: str | None,
+    error: AsrQualityGateError,
+) -> None:
+    prompt_hotwords = extract_prompt_hotwords(prompt)
+    payload = dict(error.payload)
+    payload.update(
+        {
+            "language": language,
+            "prompt": str(prompt or ""),
+            "prompt_hotwords": prompt_hotwords,
+            "prompt_hotword_count": len(prompt_hotwords),
+        }
+    )
+    session.add(
+        Artifact(
+            job_id=job_id,
+            step_id=step.id,
+            artifact_type=ARTIFACT_TYPE_ASR_QUALITY_GATE,
+            data_json=_json_safe_value(payload),
+        )
+    )
+    await session.flush()
 
 
 async def persist_transcript_result(

@@ -100,7 +100,7 @@ async def _mutate_job_for_controlled_failure(*, job_id: str, failure_mode: str) 
 
         steps = (
             await session.execute(
-                select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name.in_(["render", "final_review", "platform_package"]))
+                select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name.in_(["render"]))
             )
         ).scalars().all()
         for step in steps:

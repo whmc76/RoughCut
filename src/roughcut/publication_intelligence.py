@@ -424,8 +424,6 @@ def _build_scheme_from_record(*, plan: dict[str, Any], record: dict[str, Any], f
             publication_policy=publication_policy,
         )
         collection_name = _choose_real_collection_name(capability, target, publication_policy=publication_policy)
-        if collection_management.get("status") != "select_existing":
-            collection_name = ""
         category = _choose_real_category(capability, target, publication_policy=publication_policy)
         effective_scheduled_publish = _capability_supports_effective_scheduled_publish(capability)
         visibility = "scheduled" if effective_scheduled_publish else "draft"
@@ -1498,7 +1496,9 @@ def _choose_real_collection_name(
     policy_collection = _choose_collection_by_policy(publication_policy, suggestions, target)
     if policy_collection:
         return policy_collection
-    if _preferred_collection_name_by_policy(publication_policy, target):
+    preferred_collection = _preferred_collection_name_by_policy(publication_policy, target)
+    platform = _normalize_platform(target.get("platform")) or ""
+    if preferred_collection and platform == "kuaishou":
         return ""
     title = str(target.get("title") or "")
     if re.search(r"edc|手电|装备|gear|flashlight", title, re.IGNORECASE):

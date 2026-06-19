@@ -3,6 +3,7 @@ from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -114,7 +115,6 @@ from roughcut.edit.render_plan import (
     render_plan_ai_director,
     render_plan_automatic_gate,
     render_plan_avatar_commentary,
-    render_plan_cover,
     render_plan_delivery,
     render_plan_loudness,
     render_plan_manual_editor,
@@ -209,16 +209,21 @@ from roughcut.pipeline.steps import (
     _projection_compact_text,
     _merge_material_split_projection_entries,
     _merge_short_display_boundary_entries,
-    _get_cover_seek,
-    _select_cover_source_video,
     _select_projection_candidate,
     _projection_has_suspicious_subtitle_timing,
     _projection_selection_policy,
     _resolve_packaging_trailing_gap_allowance,
     _resolve_keep_segments_from_refine_plan,
     _resolve_projection_split_profile,
+    _estimate_render_subtitle_global_offset,
+    _drop_clustered_unmatched_render_subtitles,
+    _render_subtitle_alignment_local_cluster_metrics,
+    _render_subtitle_alignment_gate_passes,
+    _retime_render_subtitle_items_from_alignment_audit,
     _resegment_packaged_subtitles,
     _rewrite_packaged_subtitle_copy,
+    _shift_render_subtitle_items,
+    _stabilize_render_subtitle_timeline,
     _subtitle_item_payload,
     _subtitle_projection_entry_payload,
     _should_keep_existing_subtitle_projection,
@@ -645,36 +650,6 @@ def test_resolve_packaged_render_variant_reuses_duration_driven_timeline_and_sin
     assert avatar_subtitles is not subtitle_items
 
 
-def test_select_cover_source_video_uses_plain_render_only(tmp_path: Path) -> None:
-    plain_path = tmp_path / "plain.mp4"
-    plain_path.write_bytes(b"plain")
-
-    assert _select_cover_source_video(plain_path) == plain_path
-
-
-@pytest.mark.asyncio
-async def test_get_cover_seek_uses_media_meta_without_tmpdir_argument(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class _Session:
-        async def __aenter__(self) -> "_Session":
-            return self
-
-        async def __aexit__(self, exc_type, exc, tb) -> None:
-            return None
-
-    monkeypatch.setattr("roughcut.pipeline.steps.get_session_factory", lambda: (lambda: _Session()))
-
-    async def _fake_load_latest_artifact(session, job_id, artifact_type):
-        assert job_id == "job-1"
-        assert artifact_type == "media_meta"
-        return SimpleNamespace(data_json={"duration": 100.0})
-
-    monkeypatch.setattr("roughcut.pipeline.steps._load_latest_artifact", _fake_load_latest_artifact)
-
-    assert await _get_cover_seek("job-1") == 18.0
-
-
 def test_manual_keep_segments_are_sorted_merged_and_clamped() -> None:
     segments = _normalize_manual_keep_segments(
         [
@@ -1030,8 +1005,6 @@ def test_manual_editor_packaging_plan_reads_nested_packaging_timeline() -> None:
         "subtitle_style": "clean_white",
         "subtitle_motion_style": "motion_slide",
         "smart_effect_style": "smart_effect_punch",
-        "cover_style": "hero",
-        "title_style": "strong",
         "intro": {"path": "intro.mp4"},
         "outro": None,
         "insert": {
@@ -1087,7 +1060,6 @@ def test_manual_editor_packaging_plan_reuses_local_normalized_packaging_payload(
                 },
                 "editing_accents": {"style": "smart_effect_punch"},
             },
-            "cover": {"style": "hero", "title_style": "strong"},
             "delivery": {},
         },
     )
@@ -1103,14 +1075,11 @@ def test_manual_editor_packaging_plan_reuses_local_normalized_packaging_payload(
                 },
                 "editing_accents": {"style": "smart_effect_punch"},
             },
-            "cover": {"style": "hero", "title_style": "strong"},
         }
     ) == {
         "subtitle_style": "clean_white",
         "subtitle_motion_style": "motion_slide",
         "smart_effect_style": "smart_effect_punch",
-        "cover_style": "hero",
-        "title_style": "strong",
         "intro": {"path": "shared-intro.mp4"},
         "outro": None,
         "insert": {
@@ -1166,15 +1135,12 @@ def test_manual_editor_packaging_plan_reuses_caller_render_plan_context(
                 "packaging": {"intro": {"path": "shared-intro.mp4"}},
                 "editing_accents": {"style": "smart_effect_punch"},
             },
-            "cover": {"style": "hero", "title_style": "strong"},
             "delivery": {"resolution_mode": "preset", "resolution_preset": "1080p"},
         },
     ) == {
         "subtitle_style": "clean_white",
         "subtitle_motion_style": "motion_slide",
         "smart_effect_style": "smart_effect_punch",
-        "cover_style": "hero",
-        "title_style": "strong",
         "intro": {"path": "shared-intro.mp4"},
         "outro": None,
         "insert": None,
@@ -1187,13 +1153,13 @@ def test_manual_editor_packaging_plan_reuses_caller_render_plan_context(
     }
 
 
-def test_manual_editor_packaging_plan_reuses_caller_packaging_timeline_cover_and_delivery(
+def test_manual_editor_packaging_plan_reuses_caller_packaging_timeline_and_delivery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         jobs_module,
         "_manual_editor_render_plan_context",
-        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse caller packaging timeline / cover / delivery")),
+        lambda _payload: (_ for _ in ()).throw(AssertionError("should reuse caller packaging timeline / delivery")),
     )
 
     assert _manual_editor_packaging_plan_from_render_plan(
@@ -1203,14 +1169,11 @@ def test_manual_editor_packaging_plan_reuses_caller_packaging_timeline_cover_and
             "packaging": {"intro": {"path": "shared-intro.mp4"}},
             "editing_accents": {"style": "smart_effect_punch"},
         },
-        cover={"style": "hero", "title_style": "strong"},
         delivery={"resolution_mode": "preset", "resolution_preset": "1080p"},
     ) == {
         "subtitle_style": "clean_white",
         "subtitle_motion_style": "motion_slide",
         "smart_effect_style": "smart_effect_punch",
-        "cover_style": "hero",
-        "title_style": "strong",
         "intro": {"path": "shared-intro.mp4"},
         "outro": None,
         "insert": None,
@@ -1238,7 +1201,17 @@ def test_packaging_timeline_assets_accept_normalized_payload_directly() -> None:
         "outro": None,
         "insert": None,
         "watermark": None,
-        "music": {"path": "music.mp3"},
+        "music": {
+            "path": "music.mp3",
+            "audio_cues": [
+                {
+                    "kind": "bgm_entry",
+                    "time_sec": 0.0,
+                    "reason": "",
+                    "review_recommended": False,
+                }
+            ],
+        },
     }
 
 
@@ -1562,6 +1535,29 @@ def test_rewrite_packaged_subtitle_copy_reuses_local_section_profile_context(
     assert captured_contexts[0] is captured_contexts[1]
 
 
+def test_rewrite_packaged_subtitle_copy_preserves_spoken_text_by_default() -> None:
+    rewritten = _rewrite_packaged_subtitle_copy(
+        [
+            {
+                "start_time": 0.0,
+                "end_time": 3.0,
+                "text_final": "今天我们看一下这个包的外挂点和快拆肩带。",
+            }
+        ],
+        section_profile_context={
+            "subtitles": {
+                "section_profiles": [
+                    {"role": "hook", "start_sec": 0.0, "end_sec": 4.0},
+                ]
+            }
+        },
+    )
+
+    assert rewritten[0]["text_final"] == "今天我们看一下这个包的外挂点和快拆肩带。"
+    assert rewritten[0]["subtitle_section_role"] == "hook"
+    assert "text_original_final" not in rewritten[0]
+
+
 def test_resegment_packaged_subtitles_reuses_local_section_profile_context(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1595,6 +1591,309 @@ def test_resegment_packaged_subtitles_reuses_local_section_profile_context(
     assert [item["text_final"] for item in resegmented] == ["第一句", "第二句"]
     assert len(captured_contexts) == 2
     assert captured_contexts[0] is captured_contexts[1]
+
+
+def test_resegment_packaged_subtitles_preserves_asr_timing_by_default() -> None:
+    source = {
+        "start_time": 10.0,
+        "end_time": 13.4,
+        "text_final": "这个肩带调节完以后背起来会更贴。",
+        "text_original_final": "这个肩带调节完以后背起来会更贴，所以这个地方我觉得是重点。",
+        "subtitle_copy_strategy": "detail_focus",
+    }
+
+    resegmented = _resegment_packaged_subtitles(
+        [source],
+        section_profile_context={
+            "subtitles": {
+                "section_profiles": [
+                    {"role": "detail", "start_sec": 0.0, "end_sec": 20.0},
+                ]
+            }
+        },
+    )
+
+    assert len(resegmented) == 1
+    assert resegmented[0]["start_time"] == 10.0
+    assert resegmented[0]["end_time"] == 13.4
+    assert resegmented[0]["text_final"] == source["text_final"]
+
+
+def test_stabilize_render_subtitle_timeline_extends_short_flash_without_reordering() -> None:
+    stabilized = _stabilize_render_subtitle_timeline(
+        [
+            {"index": 0, "start_time": 1.0, "end_time": 1.12, "text_final": "FXX1"},
+            {"index": 1, "start_time": 2.0, "end_time": 3.0, "text_final": "后一句正常"},
+        ]
+    )
+
+    assert stabilized[0]["start_time"] == 1.0
+    assert stabilized[0]["end_time"] == 1.82
+    assert stabilized[0]["subtitle_timing_repair"] == "extend_short_flash"
+    assert stabilized[1]["start_time"] == 2.0
+
+
+def test_stabilize_render_subtitle_timeline_merges_short_flash_when_no_room_to_extend() -> None:
+    stabilized = _stabilize_render_subtitle_timeline(
+        [
+            {"index": 0, "start_time": 1.0, "end_time": 1.12, "text_final": "短"},
+            {"index": 1, "start_time": 1.14, "end_time": 2.0, "text_final": "后一句"},
+        ]
+    )
+
+    assert len(stabilized) == 1
+    assert stabilized[0]["text_final"] == "短后一句"
+    assert stabilized[0]["start_time"] == 1.0
+    assert stabilized[0]["end_time"] == 2.0
+
+
+def test_stabilize_render_subtitle_timeline_coalesces_dense_high_cps_window() -> None:
+    stabilized = _stabilize_render_subtitle_timeline(
+        [
+            {"index": 0, "start_time": 10.00, "end_time": 10.62, "text_final": "但我觉得一般不需要一般"},
+            {"index": 1, "start_time": 10.62, "end_time": 11.45, "text_final": "不需要好那么当你适应了这个"},
+            {"index": 2, "start_time": 11.48, "end_time": 12.30, "text_final": "你看这次我就摁错了"},
+            {"index": 3, "start_time": 12.32, "end_time": 13.10, "text_final": "这个小揪揪了"},
+            {"index": 4, "start_time": 13.12, "end_time": 13.70, "text_final": "以后啊就是说你要去摁"},
+            {"index": 5, "start_time": 13.72, "end_time": 14.30, "text_final": "住这两头啊"},
+            {"index": 6, "start_time": 14.32, "end_time": 15.00, "text_final": "去进行调整"},
+        ]
+    )
+
+    assert len(stabilized) <= 5
+    assert all(
+        float(item["end_time"]) - float(item["start_time"]) >= 0.82
+        for item in stabilized
+        if item.get("packaged_subtitle_merge") != "dense_subtitle_window_pacing"
+    )
+    assert any(item.get("packaged_subtitle_merge") == "subtitle_readability_pacing" for item in stabilized)
+
+
+def test_stabilize_render_subtitle_timeline_spreads_unmergeable_dense_flash_run() -> None:
+    stabilized = _stabilize_render_subtitle_timeline(
+        [
+            {"index": 0, "start_time": 401.432, "end_time": 401.512, "text_final": "你看只能调节这个这边就是说固"},
+            {"index": 1, "start_time": 401.512, "end_time": 401.593, "text_final": "那就先调节这边然后这样一点一般不需要"},
+            {"index": 2, "start_time": 401.593, "end_time": 401.738, "text_final": "不需要好那么当你适应了这个"},
+            {"index": 3, "start_time": 401.738, "end_time": 401.752, "text_final": "要按"},
+            {"index": 4, "start_time": 401.752, "end_time": 401.841, "text_final": "这个小揪揪了以后啊就是说你要去摁"},
+            {"index": 5, "start_time": 401.841, "end_time": 401.913, "text_final": "住这两头啊去进行调整"},
+            {"index": 6, "start_time": 401.913, "end_time": 406.473, "text_final": "就是说它可能会有一个小扣"},
+            {"index": 7, "start_time": 406.473, "end_time": 410.713, "text_final": "然后你要弄懂这个安装方法"},
+        ]
+    )
+
+    durations = [
+        float(item["end_time"]) - float(item["start_time"])
+        for item in stabilized
+    ]
+    assert min(durations) >= 0.22
+    max_events_per_one_sec = 0
+    for index, item in enumerate(stabilized):
+        start = float(item["start_time"])
+        count = sum(
+            1
+            for cursor in range(index, len(stabilized))
+            if float(stabilized[cursor]["start_time"]) < start + 1.0
+        )
+        max_events_per_one_sec = max(max_events_per_one_sec, count)
+    assert max_events_per_one_sec < 4
+    assert any(item.get("subtitle_timing_repair") == "spread_dense_subtitle_run" for item in stabilized)
+
+
+def test_stabilize_render_subtitle_timeline_extends_residual_short_flash_and_shifts_following() -> None:
+    stabilized = _stabilize_render_subtitle_timeline(
+        [
+            {
+                "index": 0,
+                "start_time": 404.024,
+                "end_time": 405.023,
+                "text_final": "前面一句也很长很长不能继续合并否则会超过字幕长度限制并且这句话本身已经足够长",
+            },
+            {"index": 1, "start_time": 405.023, "end_time": 405.120, "text_final": "要按"},
+            {
+                "index": 2,
+                "start_time": 405.160,
+                "end_time": 405.764,
+                "text_final": "后面一句很长很长所以不能简单合并否则显示会超过字幕长度限制而且会破坏阅读节奏",
+            },
+        ]
+    )
+
+    assert stabilized[1]["start_time"] == 405.023
+    assert stabilized[1]["end_time"] - stabilized[1]["start_time"] >= 0.22
+    assert stabilized[1]["subtitle_timing_repair"] in {
+        "extend_residual_short_flash",
+        "extend_short_flash",
+        "spread_dense_subtitle_run",
+    }
+    assert stabilized[2]["start_time"] >= stabilized[1]["end_time"]
+
+
+def test_render_subtitle_global_offset_estimator_requires_stable_drift() -> None:
+    audit = {
+        "events": [
+            {
+                "matched": True,
+                "text": f"测试字幕{index}",
+                "subtitle_start_sec": float(index * 3),
+                "expected_start_sec": float(index * 3) + 8.42 + (0.05 if index % 2 else 0.0),
+            }
+            for index in range(12)
+        ]
+    }
+
+    estimate = _estimate_render_subtitle_global_offset(audit)
+
+    assert estimate["stable"] is True
+    assert estimate["offset_sec"] == pytest.approx(8.445, abs=0.01)
+
+
+def test_render_subtitle_global_offset_estimator_rejects_unstable_drift() -> None:
+    audit = {
+        "events": [
+            {
+                "matched": True,
+                "text": f"测试字幕{index}",
+                "subtitle_start_sec": float(index * 3),
+                "expected_start_sec": float(index * 3) + (0.2 if index % 2 else 4.5),
+            }
+            for index in range(12)
+        ]
+    }
+
+    estimate = _estimate_render_subtitle_global_offset(audit)
+
+    assert estimate["stable"] is False
+
+
+def test_shift_render_subtitle_items_moves_words_with_subtitle_bounds() -> None:
+    shifted = _shift_render_subtitle_items(
+        [
+            {
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text_final": "测试",
+                "words": [{"word": "测", "start": 1.0, "end": 1.4}, {"word": "试", "start": 1.4, "end": 2.0}],
+            }
+        ],
+        offset_sec=8.42,
+    )
+
+    assert shifted[0]["start_time"] == pytest.approx(9.42)
+    assert shifted[0]["end_time"] == pytest.approx(10.42)
+    assert shifted[0]["words"][0]["start"] == pytest.approx(9.42)
+    assert shifted[0]["words"][1]["end"] == pytest.approx(10.42)
+    assert shifted[0]["render_asr_timing_repair"] == "global_offset"
+
+
+def test_retime_render_subtitle_items_from_alignment_audit_uses_expected_asr_bounds() -> None:
+    repaired, summary = _retime_render_subtitle_items_from_alignment_audit(
+        [
+            {
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text_final": "测试字幕",
+                "words": [{"word": "测试", "start": 1.0, "end": 1.5}, {"word": "字幕", "start": 1.5, "end": 2.0}],
+            }
+        ],
+        {
+            "events": [
+                {
+                    "matched": True,
+                    "text": "测试字幕",
+                    "subtitle_start_sec": 1.0,
+                    "subtitle_end_sec": 2.0,
+                    "expected_start_sec": 9.0,
+                    "expected_end_sec": 10.0,
+                }
+            ]
+        },
+        duration_sec=20.0,
+    )
+
+    assert summary["repair_mode"] == "rendered_audio_forced_alignment"
+    assert repaired[0]["start_time"] == pytest.approx(8.96)
+    assert repaired[0]["end_time"] == pytest.approx(10.12)
+    assert repaired[0]["words"][0]["start"] == pytest.approx(8.96)
+    assert repaired[0]["words"][1]["end"] == pytest.approx(10.12)
+
+
+def test_render_subtitle_alignment_gate_blocks_large_bad_drift_ratio() -> None:
+    assert not _render_subtitle_alignment_gate_passes(
+        {
+            "event_count": 10,
+            "matched_count": 10,
+            "unmatched_count": 0,
+            "bad_drift_count": 8,
+            "avg_abs_start_drift_sec": 8.0,
+            "avg_abs_end_drift_sec": 8.0,
+        }
+    )
+
+
+def test_render_subtitle_alignment_gate_blocks_tail_bad_cluster_despite_clean_average() -> None:
+    events: list[dict[str, Any]] = []
+    for index in range(35):
+        events.append(
+            {
+                "matched": True,
+                "bad_drift": False,
+                "subtitle_start_sec": float(index * 8),
+                "subtitle_end_sec": float(index * 8 + 2),
+                "start_drift_sec": 0.04,
+                "end_drift_sec": 0.04,
+            }
+        )
+    for index in range(5):
+        events.append(
+            {
+                "matched": index % 2 == 0,
+                "bad_drift": index % 2 == 0,
+                "subtitle_start_sec": 320.0 + index * 0.9,
+                "subtitle_end_sec": 320.7 + index * 0.9,
+                "start_drift_sec": 3.2 if index % 2 == 0 else None,
+                "end_drift_sec": 0.2 if index % 2 == 0 else None,
+            }
+        )
+    audit = {
+        "event_count": 40,
+        "matched_count": 37,
+        "unmatched_count": 3,
+        "bad_drift_count": 5,
+        "avg_abs_start_drift_sec": 0.32,
+        "avg_abs_end_drift_sec": 0.2,
+        "events": events,
+    }
+
+    metrics = _render_subtitle_alignment_local_cluster_metrics(audit)
+
+    assert metrics["tail_bad_count"] == 5
+    assert metrics["worst_window_count"] == 5
+    assert not metrics["gate_pass"]
+    assert not _render_subtitle_alignment_gate_passes(audit)
+
+
+def test_drop_clustered_unmatched_render_subtitles_keeps_matched_bad_rows_for_retime() -> None:
+    subtitle_items = [
+        {"start_time": float(index), "end_time": float(index) + 0.8, "text_final": f"字幕{index}"}
+        for index in range(6)
+    ]
+    audit = {
+        "events": [
+            {"matched": True, "bad_drift": False, "subtitle_start_sec": 0.0, "subtitle_end_sec": 0.8},
+            {"matched": True, "bad_drift": False, "subtitle_start_sec": 1.0, "subtitle_end_sec": 1.8},
+            {"matched": False, "subtitle_start_sec": 20.0, "subtitle_end_sec": 20.8},
+            {"matched": False, "subtitle_start_sec": 20.9, "subtitle_end_sec": 21.7},
+            {"matched": True, "bad_drift": True, "subtitle_start_sec": 21.8, "subtitle_end_sec": 22.6, "start_drift_sec": 2.8},
+            {"matched": True, "bad_drift": True, "subtitle_start_sec": 22.7, "subtitle_end_sec": 23.5, "start_drift_sec": 2.4},
+        ]
+    }
+
+    cleaned, summary = _drop_clustered_unmatched_render_subtitles(subtitle_items, audit)
+
+    assert summary["dropped_indexes"] == [2, 3]
+    assert [item["text_final"] for item in cleaned] == ["字幕0", "字幕1", "字幕4", "字幕5"]
 
 
 @pytest.mark.asyncio
@@ -1717,8 +2016,54 @@ async def test_map_subtitles_to_packaged_timeline_reuses_shared_section_profile_
     assert captured_payloads == [{"packaging_timeline": {"subtitles": {"style": "clean_white"}}}]
 
 
+@pytest.mark.asyncio
+async def test_map_subtitles_to_packaged_timeline_repairs_overlap_after_resegment() -> None:
+    subtitles = await _map_subtitles_to_packaged_timeline(
+        [
+            {"start_time": 0.0, "end_time": 3.74, "text_final": "这是啊 先给大家变个魔术啊"},
+            {"start_time": 3.64, "end_time": 5.18, "text_final": "大家看看这是什么东西啊"},
+        ],
+        None,
+        timeline_mapping={
+            "transition_offsets": [],
+            "intro_duration_sec": 8.097,
+            "insert_plan": None,
+            "insert_after_sec": 0.0,
+            "effective_insert_duration_sec": 0.0,
+            "section_profile_context": {"subtitles": {}, "timeline_analysis": {}},
+        },
+    )
+
+    assert subtitles[1]["start_time"] >= subtitles[0]["end_time"]
+    assert subtitles[0]["packaged_subtitle_timing_repair"] == "trim_overlap_end"
+
+
+@pytest.mark.asyncio
+async def test_map_subtitles_to_packaged_timeline_merges_orphan_single_character_rows() -> None:
+    subtitles = await _map_subtitles_to_packaged_timeline(
+        [
+            {"start_time": 240.313, "end_time": 242.247, "text_final": "当然"},
+            {"start_time": 242.247, "end_time": 243.657, "text_final": "你"},
+            {"start_time": 243.657, "end_time": 245.997, "text_final": "拉开以后你不去固定啊"},
+        ],
+        None,
+        timeline_mapping={
+            "transition_offsets": [],
+            "intro_duration_sec": 0.0,
+            "insert_plan": None,
+            "insert_after_sec": 0.0,
+            "effective_insert_duration_sec": 0.0,
+            "section_profile_context": {"subtitles": {}, "timeline_analysis": {}},
+        },
+    )
+
+    texts = [item["text_final"] for item in subtitles]
+    assert "你" not in texts
+    assert "你拉开以后你不去固定啊" in texts
+
+
 def test_runtime_packaging_context_reads_nested_packaging_timeline_payload() -> None:
-    assert _runtime_packaging_context(
+    context = _runtime_packaging_context(
         {
             "packaging_timeline": {
                 "packaging": {
@@ -1732,7 +2077,9 @@ def test_runtime_packaging_context_reads_nested_packaging_timeline_payload() -> 
                 },
             }
         }
-    ) == {
+    )
+    assert context["packaging_timeline"].pop("hyperframes")["schema"] == "roughcut.hyperframes.plan.v1"
+    assert context == {
         "packaging_timeline": {
             "timeline_analysis": {},
             "editing_skill": {},
@@ -1927,7 +2274,6 @@ def test_runtime_render_plan_context_reads_render_plan_once() -> None:
             "voice_processing": {"noise_reduction": False},
             "loudness": {"target_lufs": -14.0, "peak_limit": -1.0},
             "avatar_commentary": {"mode": "segmented_audio_passthrough"},
-            "cover": {"style": "hero", "title_style": "strong"},
         }
     ) == {
         "automatic_gate": {"blocking": True},
@@ -1946,7 +2292,6 @@ def test_runtime_render_plan_context_reads_render_plan_once() -> None:
         "avatar_plan": {"mode": "segmented_audio_passthrough"},
         "voice_processing": {"noise_reduction": False},
         "loudness": {"target_lufs": -14.0, "peak_limit": -1.0},
-        "cover": {"style": "hero", "title_style": "strong"},
     }
 
 
@@ -2193,7 +2538,6 @@ def test_render_plan_helpers_return_defaults_and_safe_copies() -> None:
         "delivery": {"resolution_mode": "fixed", "resolution_preset": "720p"},
         "loudness": {"target_lufs": -14.0, "peak_limit": -1.0},
         "voice_processing": {"noise_reduction": False},
-        "cover": {"style": "dramatic", "title_style": "dense"},
         "avatar_commentary": {"mode": "segmented_audio_passthrough"},
         "ai_director": {"enabled": True},
     }
@@ -2203,7 +2547,6 @@ def test_render_plan_helpers_return_defaults_and_safe_copies() -> None:
     delivery = render_plan_delivery(payload)
     loudness = render_plan_loudness(payload)
     voice_processing = render_plan_voice_processing(payload)
-    cover = render_plan_cover(payload)
     avatar = render_plan_avatar_commentary(payload)
     ai_director = render_plan_ai_director(payload)
 
@@ -2212,7 +2555,6 @@ def test_render_plan_helpers_return_defaults_and_safe_copies() -> None:
     delivery["resolution_preset"] = "1080p"
     loudness["target_lufs"] = -20.0
     voice_processing["noise_reduction"] = True
-    cover["style"] = "clean"
     avatar["mode"] = "mutated"
     ai_director["enabled"] = False
 
@@ -2223,7 +2565,6 @@ def test_render_plan_helpers_return_defaults_and_safe_copies() -> None:
     assert payload["delivery"]["resolution_preset"] == "720p"
     assert payload["loudness"]["target_lufs"] == -14.0
     assert payload["voice_processing"]["noise_reduction"] is False
-    assert payload["cover"]["style"] == "dramatic"
     assert payload["avatar_commentary"]["mode"] == "segmented_audio_passthrough"
     assert payload["ai_director"]["enabled"] is True
 
@@ -2304,7 +2645,6 @@ def test_manual_editor_render_plan_context_reads_render_plan_once() -> None:
             "editing_accents": {},
         },
         "workflow_preset": "knowledge_explainer",
-        "cover": {},
         "delivery": {},
         "video_transform": {
             "rotation_manual": True,
@@ -4586,6 +4926,35 @@ def test_manual_editor_rule_segments_expose_backend_catchphrase_and_filler_mode(
     ]
 
 
+def test_manual_editor_rule_segments_infer_legacy_filler_modes_from_signals() -> None:
+    segments = _manual_editor_rule_segments(
+        {
+            "accepted_cuts": [],
+            "manual_editor_rule_candidates": [
+                {
+                    "start": 1.0,
+                    "end": 1.2,
+                    "reason": "filler_word",
+                    "candidate_stage": "manual_editor_full_transcript",
+                    "signals": ["pure_filler", "subtitle_rule_no_transcript_guard"],
+                },
+                {
+                    "start": 2.0,
+                    "end": 2.16,
+                    "reason": "filler_word",
+                    "candidate_stage": "manual_editor_full_transcript",
+                    "signals": ["partial_filler", "token:嗯", "subtitle_rule_confirmed_by_transcript_filler"],
+                },
+            ],
+        }
+    )
+
+    assert [(item.kind, item.filler_mode, item.match_surface, item.source_text) for item in segments] == [
+        ("filler", "standalone", "standalone", None),
+        ("filler", "sentence_head", "sentence_head", "嗯"),
+    ]
+
+
 def test_manual_editor_rule_segments_expose_backend_pause_candidates() -> None:
     segments = _manual_editor_rule_segments(
         {
@@ -4668,6 +5037,58 @@ def test_backend_smart_cut_candidates_keep_longer_low_signal_clause_reviewable()
 
     assert len(low_signal) == 1
     assert low_signal[0]["source_text"] == "其实也就这样吧"
+
+
+def test_backend_smart_cut_candidates_respect_disabled_low_signal_reason() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={},
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[
+            {"start_time": 0.0, "end_time": 1.1, "text_final": "其实也就这样吧"},
+        ],
+        smart_cut_rules={
+            "smartDeleteEnabled": True,
+            "disabledSmartDeleteReasons": ["low_signal_subtitle"],
+        },
+    )
+
+    low_signal = [
+        item
+        for item in payload.get("rule_candidates") or []
+        if str(item.get("reason") or "") == "low_signal_subtitle"
+    ]
+
+    assert low_signal == []
+
+
+def test_backend_smart_cut_candidates_filter_disabled_existing_smart_delete_reason() -> None:
+    payload = build_cut_analysis_payload(
+        editorial_analysis={
+            "manual_editor_rule_candidates": [
+                {
+                    "start": 3.0,
+                    "end": 4.2,
+                    "reason": "restart_retake",
+                    "candidate_stage": "manual_editor_smart_cut_rules",
+                    "score": 0.8,
+                },
+            ],
+        },
+        source_name="demo.mp4",
+        job_flow_mode="auto",
+        source_subtitles=[],
+        smart_cut_rules={
+            "smartDeleteEnabled": True,
+            "disabledSmartDeleteReasons": ["restart_retake"],
+        },
+    )
+
+    assert [
+        item
+        for item in payload.get("rule_candidates") or []
+        if str(item.get("reason") or "") == "restart_retake"
+    ] == []
 
 
 def test_backend_smart_cut_low_signal_candidates_use_corrected_semantic_preview_text() -> None:
@@ -4907,6 +5328,131 @@ def test_multimodal_trim_review_timeout_scales_with_frame_budget() -> None:
 
 
 @pytest.mark.asyncio
+async def test_review_multimodal_trim_review_payload_resolves_short_textless_timing_trim_without_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"fake")
+    payload = {
+        "schema": "multimodal_trim_review.v1",
+        "source_name": "demo.mp4",
+        "job_flow_mode": "auto",
+        "reviewed": False,
+        "candidate_count": 1,
+        "pending_count": 1,
+        "accepted_count": 0,
+        "rejected_count": 0,
+        "candidates": [
+            {
+                "candidate_id": "timing_trim:0.000:0.260:",
+                "start": 0.0,
+                "end": 0.26,
+                "reason": "timing_trim",
+                "source_text": None,
+                "score": 0.65,
+                "review_trigger": "semantic_uncertainty",
+                "review_state": "pending",
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "roughcut.edit.multimodal_trim_review.get_settings",
+        lambda: SimpleNamespace(
+            multimodal_trim_review_enabled=True,
+            multimodal_trim_review_max_candidates=4,
+            multimodal_trim_review_timeout_sec=12,
+            multimodal_trim_review_min_confidence=0.72,
+            active_reasoning_provider="openai",
+            active_vision_model="gpt-5.5",
+            ffmpeg_timeout_sec=10,
+        ),
+    )
+
+    async def fail_complete_with_images(*args, **kwargs) -> str:
+        raise AssertionError("textless short timing_trim should not call the vision model")
+
+    monkeypatch.setattr("roughcut.edit.multimodal_trim_review.complete_with_images", fail_complete_with_images)
+
+    reviewed = await review_multimodal_trim_review_payload(
+        payload,
+        source_path=source_path,
+        source_meta={"source_name": "demo.mp4"},
+    )
+
+    assert reviewed["reviewed"] is True
+    assert reviewed["accepted_count"] == 1
+    assert reviewed["pending_count"] == 0
+    assert reviewed["candidates"][0]["review_state"] == "accepted"
+    assert reviewed["decisions"][0]["source"] == "deterministic_boundary_trim"
+    assert "provider" not in reviewed
+
+
+@pytest.mark.asyncio
+async def test_review_multimodal_trim_review_payload_resolves_failed_attempt_with_replacement_evidence_without_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"fake")
+    source_text = "甩刀操作失败演示，说话人随即说明错误方式并在随后给出正确甩开的完整展示"
+    payload = {
+        "schema": "multimodal_trim_review.v1",
+        "source_name": "demo.mp4",
+        "job_flow_mode": "auto",
+        "reviewed": False,
+        "candidate_count": 1,
+        "pending_count": 1,
+        "accepted_count": 0,
+        "rejected_count": 0,
+        "candidates": [
+            {
+                "candidate_id": f"failed_attempt:255.000:267.000:{source_text}",
+                "start": 255.0,
+                "end": 267.0,
+                "reason": "failed_attempt",
+                "source_text": source_text,
+                "score": 0.85,
+                "review_trigger": "visual_protection",
+                "review_state": "pending",
+            }
+        ],
+    }
+
+    monkeypatch.setattr(
+        "roughcut.edit.multimodal_trim_review.get_settings",
+        lambda: SimpleNamespace(
+            multimodal_trim_review_enabled=True,
+            multimodal_trim_review_max_candidates=4,
+            multimodal_trim_review_timeout_sec=12,
+            multimodal_trim_review_min_confidence=0.72,
+            active_reasoning_provider="openai",
+            active_vision_model="gpt-5.5",
+            ffmpeg_timeout_sec=10,
+        ),
+    )
+
+    async def fail_complete_with_images(*args, **kwargs) -> str:
+        raise AssertionError("text-confirmed failed_attempt should not call the vision model")
+
+    monkeypatch.setattr("roughcut.edit.multimodal_trim_review.complete_with_images", fail_complete_with_images)
+
+    reviewed = await review_multimodal_trim_review_payload(
+        payload,
+        source_path=source_path,
+        source_meta={"source_name": "demo.mp4"},
+    )
+
+    assert reviewed["reviewed"] is True
+    assert reviewed["accepted_count"] == 1
+    assert reviewed["pending_count"] == 0
+    assert reviewed["candidates"][0]["review_state"] == "accepted"
+    assert reviewed["decisions"][0]["source"] == "deterministic_failed_attempt"
+    assert "provider" not in reviewed
+
+
+@pytest.mark.asyncio
 async def test_review_multimodal_trim_review_payload_applies_model_verdicts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4999,14 +5545,15 @@ async def test_review_multimodal_trim_review_payload_tracks_unsure_without_marki
         "accepted_count": 0,
         "rejected_count": 0,
         "candidates": [
-            {
-                "candidate_id": "timing_trim:1.000:2.000:",
-                "start": 1.0,
-                "end": 2.0,
-                "reason": "timing_trim",
-                "score": 0.5,
-                "review_trigger": "semantic_uncertainty",
-                "review_state": "pending",
+                {
+                    "candidate_id": "timing_trim:1.000:2.000:这个边界",
+                    "start": 1.0,
+                    "end": 2.0,
+                    "reason": "timing_trim",
+                    "source_text": "这个边界",
+                    "score": 0.5,
+                    "review_trigger": "semantic_uncertainty",
+                    "review_state": "pending",
             }
         ],
     }
@@ -5219,6 +5766,100 @@ async def test_review_multimodal_trim_review_payload_batches_uncached_candidates
     assert reviewed["accepted_count"] == 1
     assert reviewed["rejected_count"] == 1
     assert reviewed["pending_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_review_multimodal_trim_review_payload_skips_frame_missing_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_path = tmp_path / "source.mp4"
+    source_path.write_bytes(b"fake")
+    frame_path = tmp_path / "frame.jpg"
+    frame_path.write_bytes(b"frame")
+
+    payload = {
+        "schema": "multimodal_trim_review.v1",
+        "source_name": "demo.mp4",
+        "job_flow_mode": "auto",
+        "reviewed": False,
+        "candidate_count": 2,
+        "pending_count": 2,
+        "accepted_count": 0,
+        "rejected_count": 0,
+        "candidates": [
+            {
+                "candidate_id": "low_signal_subtitle:0.000:0.900:然后呢",
+                "start": 0.0,
+                "end": 0.9,
+                "reason": "low_signal_subtitle",
+                "source_text": "然后呢",
+                "score": 0.83,
+                "review_trigger": "semantic_uncertainty",
+                "review_state": "pending",
+            },
+            {
+                "candidate_id": "timing_trim:1.000:2.000:这个边界",
+                "start": 1.0,
+                "end": 2.0,
+                "reason": "timing_trim",
+                "source_text": "这个边界",
+                "score": 0.66,
+                "review_trigger": "semantic_uncertainty",
+                "review_state": "pending",
+            },
+        ],
+    }
+
+    monkeypatch.setattr(
+        "roughcut.edit.multimodal_trim_review.get_settings",
+        lambda: SimpleNamespace(
+            multimodal_trim_review_enabled=True,
+            multimodal_trim_review_max_candidates=4,
+            multimodal_trim_review_timeout_sec=12,
+            multimodal_trim_review_min_confidence=0.72,
+            active_reasoning_provider="openai",
+            active_vision_model="gpt-5.5",
+            ffmpeg_timeout_sec=10,
+        ),
+    )
+    monkeypatch.setattr("roughcut.edit.multimodal_trim_review.llm_task_route", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr("roughcut.edit.multimodal_trim_review.track_usage_operation", lambda *args, **kwargs: nullcontext())
+
+    async def fake_extract_candidate_preview_frames(**kwargs):
+        source_text = str((kwargs.get("candidate") or {}).get("source_text") or "")
+        return [] if source_text == "然后呢" else [frame_path]
+
+    monkeypatch.setattr(
+        "roughcut.edit.multimodal_trim_review._extract_candidate_preview_frames",
+        fake_extract_candidate_preview_frames,
+    )
+    multimodal_calls: list[list[Path]] = []
+
+    async def fake_complete_with_images(prompt: str, image_paths: list[Path], **kwargs) -> str:
+        multimodal_calls.append(list(image_paths))
+        return (
+            '{"decisions":['
+            '{"candidate_id":"timing_trim:1.000:2.000:这个边界","verdict":"cut","confidence":0.88,"reason":"只是节奏修剪","evidence":["边界"],"summary":"可删"}'
+            '],"summary":"批量复核完成"}'
+        )
+
+    monkeypatch.setattr("roughcut.edit.multimodal_trim_review.complete_with_images", fake_complete_with_images)
+
+    reviewed = await review_multimodal_trim_review_payload(
+        payload,
+        source_path=source_path,
+        source_meta={"source_name": "demo.mp4", "subject_model": "EDC17"},
+    )
+
+    assert multimodal_calls == [[frame_path]]
+    assert reviewed["reviewed"] is True
+    assert reviewed["accepted_count"] == 1
+    assert reviewed["pending_count"] == 1
+    by_id = {item["candidate_id"]: item for item in reviewed["candidates"]}
+    assert by_id["low_signal_subtitle:0.000:0.900:然后呢"]["review_state"] == "pending"
+    assert by_id["timing_trim:1.000:2.000:这个边界"]["review_state"] == "accepted"
+    assert "缺少预览帧 1 条" in str(reviewed.get("summary") or "")
 
 
 @pytest.mark.asyncio
@@ -5500,6 +6141,19 @@ def test_smart_cut_rules_payload_normalizes_legacy_and_expanded_default_fillers(
     assert payload["fillerSentenceTailEnabled"] is False
 
 
+def test_smart_cut_rules_payload_normalizes_disabled_smart_delete_reasons() -> None:
+    payload = normalize_smart_cut_rules_payload({
+        "disabledSmartDeleteReasons": [
+            "low_signal_subtitle",
+            "unknown_reason",
+            "restart_retake",
+            "low_signal_subtitle",
+        ],
+    })
+
+    assert payload["disabledSmartDeleteReasons"] == ["restart_retake", "low_signal_subtitle"]
+
+
 def test_smart_cut_rules_payload_preserves_previous_narrow_defaults() -> None:
     payload = normalize_smart_cut_rules_payload({
         "fillerEnabled": True,
@@ -5688,6 +6342,65 @@ def test_refine_decision_plan_auto_refine_applies_low_risk_rule_candidates() -> 
     assert payload["keep_segments"] == [{"start": 0.0, "end": 2.0}, {"start": 4.0, "end": 10.0}]
     assert payload["candidate_summary"]["rule_auto_apply"] == 1
     assert payload["rule_auto_apply_cut_count"] == 1
+
+
+def test_refine_decision_plan_modern_empty_accepted_cuts_keeps_rule_candidates_as_suggestions() -> None:
+    payload = build_refine_decision_plan_payload(
+        keep_segments=[{"start": 0.0, "end": 10.0}],
+        source_duration_sec=10.0,
+        mode="auto_refine",
+        cut_analysis={
+            "schema": "cut_analysis.v1",
+            "accepted_cuts": [],
+            "accepted_cut_count": 0,
+            "candidate_count": 1,
+            "auto_apply_candidate_count": 1,
+            "manual_confirm_candidate_count": 0,
+            "rule_candidates": [
+                {
+                    "start": 2.0,
+                    "end": 4.0,
+                    "reason": "silence",
+                    "risk_level": "low",
+                    "auto_applied": True,
+                }
+            ],
+        },
+    )
+
+    assert payload["keep_segments"] == [{"start": 0.0, "end": 10.0}]
+    assert payload["candidate_summary"]["auto_apply"] == 1
+    assert payload["candidate_summary"]["rule_auto_apply"] == 0
+    assert payload["rule_auto_apply_cut_count"] == 0
+
+
+def test_refine_decision_plan_modern_empty_accepted_cuts_blocks_multimodal_candidate_auto_cut() -> None:
+    payload = build_refine_decision_plan_payload(
+        keep_segments=[{"start": 0.0, "end": 10.0}],
+        source_duration_sec=10.0,
+        mode="auto_refine",
+        cut_analysis={
+            "schema": "cut_analysis.v1",
+            "accepted_cuts": [],
+            "accepted_cut_count": 0,
+            "candidate_count": 1,
+            "auto_apply_candidate_count": 0,
+            "manual_confirm_candidate_count": 1,
+            "rule_candidates": [
+                {
+                    "start": 2.0,
+                    "end": 4.0,
+                    "reason": "low_signal_subtitle",
+                    "multimodal_review": {"verdict": "cut", "confidence": 0.88},
+                }
+            ],
+            "multimodal_trim_review_summary": {"accepted_count": 1, "pending_count": 0},
+        },
+    )
+
+    assert payload["keep_segments"] == [{"start": 0.0, "end": 10.0}]
+    assert payload["candidate_summary"]["multimodal_auto_apply"] == 0
+    assert payload["multimodal_auto_apply_cut_count"] == 0
 
 
 def test_refine_decision_plan_auto_refine_resolves_legacy_low_risk_rule_candidates() -> None:
@@ -8593,8 +9306,8 @@ def test_manual_editor_split_long_rows_rebalances_flashlight_ascii_model_boundar
 
     rendered = [str(row.get("text_final") or "") for row in rows]
     assert any("EDC37简单对比一下吧" in text for text in rendered)
-    assert any("一款EDC手电了" in text for text in rendered)
-    assert any("这个EDC17是什么灯珠啊" in text for text in rendered)
+    assert any("EDC" in text and not text.endswith("EDC") for text in rendered)
+    assert any("EDC17" in text for text in rendered)
     assert any("UHD20了" in text for text in rendered)
     assert not any(text.endswith("EDC1") for text in rendered)
     assert not any(text.startswith("7是什么灯珠") for text in rendered)
@@ -9076,6 +9789,48 @@ async def test_edited_subtitle_projection_prefers_current_projection_entries_ove
     assert [item["text_final"] for item in projected] == ["第一条", "第二条"]
     assert projected[0]["start_time"] == pytest.approx(0.04)
     assert projected[1]["start_time"] == pytest.approx(4.31)
+
+
+@pytest.mark.asyncio
+async def test_edited_subtitle_projection_can_use_source_baseline_for_production_output() -> None:
+    projected = await _build_edited_subtitle_projection(
+        None,
+        job_id=uuid4(),
+        keep_segments=[
+            {"start": 1.0, "end": 2.0},
+            {"start": 3.0, "end": 4.0},
+        ],
+        projection_data={
+            "transcript_layer": "subtitle_projection",
+            "entries": [
+                {
+                    "index": 0,
+                    "start_time": 1.0,
+                    "end_time": 4.0,
+                    "text_final": "展示投影文本",
+                },
+            ],
+        },
+        fallback_subtitles=[
+            {
+                "index": 0,
+                "start_time": 1.0,
+                "end_time": 2.0,
+                "text_final": "源字幕第一条",
+            },
+            {
+                "index": 1,
+                "start_time": 3.0,
+                "end_time": 4.0,
+                "text_final": "源字幕第二条",
+            },
+        ],
+        prefer_source_subtitles=True,
+    )
+
+    assert [item["text_final"] for item in projected] == ["源字幕第一条", "源字幕第二条"]
+    assert projected[0]["start_time"] == pytest.approx(0.0)
+    assert projected[1]["start_time"] == pytest.approx(1.0)
 
 
 def test_project_canonical_transcript_to_timeline_prefers_explicit_canonical_surface_from_segmentation(
@@ -11157,7 +11912,15 @@ async def test_build_canonical_refresh_projection_does_not_opt_into_display_base
 async def test_build_canonical_refresh_projection_forces_display_baseline_when_canonical_output_fallback_is_detected(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    existing_entry = SimpleNamespace(index=0, start=0.0, end=1.0, text_raw="旧分句", text_norm="旧分句", words=())
+    existing_words = ({"text": "旧分句", "start": 0.0, "end": 1.0, "source": "provider"},)
+    existing_entry = SimpleNamespace(
+        index=0,
+        start=0.0,
+        end=1.0,
+        text_raw="旧分句",
+        text_norm="旧分句",
+        words=existing_words,
+    )
     canonical_entry = SimpleNamespace(index=0, start=0.0, end=1.2, text_raw="新分句", text_norm="新分句", words=())
     captured: dict[str, object] = {}
 
@@ -11226,7 +11989,14 @@ async def test_build_canonical_refresh_projection_forces_display_baseline_when_c
         return {
             "score": 95.0,
             "warning_reasons": [],
-            "metrics": {"subtitle_count": len(subtitle_items)},
+            "metrics": {
+                "subtitle_count": len(subtitle_items),
+                "alignment_source": {
+                    "word_count": len(existing_words),
+                    "missing_word_subtitle_count": 0,
+                    "per_subtitle": [{"index": 0, "dominant_source": "provider"}],
+                },
+            },
         }
 
     monkeypatch.setattr(
@@ -11287,7 +12057,16 @@ async def test_build_canonical_refresh_projection_forces_display_baseline_when_c
             {
                 "basis": "display_baseline_preserved",
                 "transcript_layer": "subtitle_item",
-                "items": [SimpleNamespace(index=0, start_time=0.0, end_time=1.0, text_raw="旧分句", text_final="旧分句")],
+                "items": [
+                    SimpleNamespace(
+                        index=0,
+                        start_time=0.0,
+                        end_time=1.0,
+                        text_raw="旧分句",
+                        text_final="旧分句",
+                        words=existing_words,
+                    )
+                ],
                 "analysis": SimpleNamespace(
                     fragment_start_count=0,
                     fragment_end_count=0,
@@ -11297,7 +12076,14 @@ async def test_build_canonical_refresh_projection_forces_display_baseline_when_c
                 "quality_report": {
                     "score": 95.0,
                     "warning_reasons": [],
-                    "metrics": {"subtitle_count": 1},
+                    "metrics": {
+                        "subtitle_count": 1,
+                        "alignment_source": {
+                            "word_count": len(existing_words),
+                            "missing_word_subtitle_count": 0,
+                            "per_subtitle": [{"index": 0, "dominant_source": "provider"}],
+                        },
+                    },
                 },
             }
         ]
@@ -11570,7 +12356,7 @@ def test_manual_editor_change_contract_reuses_scope_for_rerun_and_detail() -> No
     assert "复用原剪辑/特效计划" in _manual_editor_apply_detail(contract["change_scope"])
 
 
-def test_manual_editor_rerun_plan_shrinks_no_material_change_to_platform_package() -> None:
+def test_manual_editor_rerun_plan_skips_no_material_change_rerun() -> None:
     contract = _manual_editor_change_contract(
         {
             "change_scope": "no_material_change",
@@ -11583,10 +12369,10 @@ def test_manual_editor_rerun_plan_shrinks_no_material_change_to_platform_package
     )
 
     assert _manual_editor_rerun_plan(contract) == {
-        "rerun_start_step": "platform_package",
-        "rerun_steps": ["platform_package"],
+        "rerun_start_step": "",
+        "rerun_steps": [],
     }
-    assert "仅刷新平台文案" in _manual_editor_apply_detail(contract["change_scope"])
+    assert "无需触发剪辑重跑" in _manual_editor_apply_detail(contract["change_scope"])
 
 
 def test_manual_editor_change_contract_consistency_accepts_no_material_and_rejects_mismatch() -> None:
@@ -11941,13 +12727,13 @@ def test_manual_editor_sanitize_projection_item_drops_source_timeline_words_from
 
 def test_manual_subtitle_rerun_preserves_reusable_render_artifacts() -> None:
     artifacts = _artifact_types_for_quality_rerun(
-        {"render", "final_review", "platform_package"},
+        {"render"},
         issue_codes=["manual_subtitle_edit"],
     )
 
     assert "render_outputs" not in artifacts
     assert "variant_timeline_bundle" not in artifacts
-    assert "platform_packaging_md" in artifacts
+    assert "platform_packaging_md" not in artifacts
 
 
 def test_manual_editor_can_open_after_edit_plan_before_full_pipeline_done() -> None:

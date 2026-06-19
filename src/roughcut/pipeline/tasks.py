@@ -32,6 +32,12 @@ _GPU_PRESSURE_TOKENS = (
 )
 _ACTIVE_JOB_STATUSES = {"pending", "processing"}
 _TERMINAL_JOB_STATUSES = {"done", "failed", "cancelled", "needs_review"}
+_TERMINAL_FAILURE_ATTEMPT_FLOOR = 3
+_NON_RETRYABLE_STEP_ERROR_PREFIXES = (
+    "edit_plan_blocked_by_projection_fallback:",
+    "edit_plan_blocked_by_insert_fallback:",
+    "render_blocked_by_fallback_output:",
+)
 
 
 def _reset_db_session_state() -> None:
@@ -53,6 +59,23 @@ def _parse_job_uuid(job_id: str) -> uuid.UUID | None:
     except (TypeError, ValueError):
         logger.warning("Ignoring task with invalid job id job=%s", job_id)
         return None
+
+
+def _is_non_retryable_step_error(exc: BaseException) -> bool:
+    message = str(exc or "").strip()
+    return any(message.startswith(prefix) for prefix in _NON_RETRYABLE_STEP_ERROR_PREFIXES)
+
+
+def _task_retry_budget_exhausted(task) -> bool:
+    try:
+        current_retries = int(getattr(getattr(task, "request", None), "retries", 0) or 0)
+    except (TypeError, ValueError):
+        current_retries = 0
+    try:
+        max_retries = int(getattr(task, "max_retries", 0) or 0)
+    except (TypeError, ValueError):
+        max_retries = 0
+    return current_retries >= max_retries
 
 
 def _can_transition_step(
@@ -131,6 +154,7 @@ def _update_step_status(
     error: str | None = None,
     *,
     task_id: str | None = None,
+    terminal_failure: bool = False,
 ) -> bool:
     """Update job step status in DB (sync)."""
     import asyncio
@@ -174,6 +198,8 @@ def _update_step_status(
                     step.started_at = now
                 elif status in ("done", "failed", "cancelled"):
                     step.finished_at = now
+                if status == "failed" and terminal_failure:
+                    step.attempt = max(int(step.attempt or 0), _TERMINAL_FAILURE_ATTEMPT_FLOOR)
                 elapsed_seconds = None
                 if step.started_at:
                     start_time = _coerce_utc(step.started_at)
@@ -185,6 +211,11 @@ def _update_step_status(
                         "updated_at": now.isoformat(),
                         **({"worker_started_at": now.isoformat()} if status == "running" else {}),
                         **({"elapsed_seconds": round(elapsed_seconds, 3)} if elapsed_seconds is not None else {}),
+                        **(
+                            {"terminal_failure": True, "retryable": False}
+                            if status == "failed" and terminal_failure
+                            else {}
+                        ),
                     },
                     status=status,
                     current_task_id=str(current_task_id or ""),
@@ -572,7 +603,17 @@ def _run_task_step(task, job_id: str, step_name: str, *, retry_countdown: int):
             )
             raise task.retry(exc=exc, countdown=countdown)
         elapsed = time.perf_counter() - started
-        if not _update_step_status(job_id, step_name, "failed", str(exc), task_id=task_id):
+        non_retryable_error = _is_non_retryable_step_error(exc)
+        retry_budget_exhausted = _task_retry_budget_exhausted(task)
+        terminal_failure = non_retryable_error or retry_budget_exhausted
+        if not _update_step_status(
+            job_id,
+            step_name,
+            "failed",
+            str(exc),
+            task_id=task_id,
+            terminal_failure=terminal_failure,
+        ):
             logger.warning(
                 "step failure ignored after execution step=%s job=%s task_id=%s elapsed=%.2fs error=%s",
                 step_name,
@@ -590,6 +631,25 @@ def _run_task_step(task, job_id: str, step_name: str, *, retry_countdown: int):
             elapsed,
             exc,
         )
+        if non_retryable_error:
+            logger.error(
+                "step failed with non-retryable quality gate error step=%s job=%s task_id=%s error=%s",
+                step_name,
+                job_id,
+                task_id,
+                exc,
+            )
+            raise
+        if retry_budget_exhausted:
+            logger.error(
+                "step retry budget exhausted step=%s job=%s task_id=%s retries=%s error=%s",
+                step_name,
+                job_id,
+                task_id,
+                getattr(getattr(task, "request", None), "retries", None),
+                exc,
+            )
+            raise
         raise task.retry(exc=exc, countdown=retry_countdown)
 
 
@@ -661,11 +721,6 @@ def media_edit_plan(self, job_id: str):
 @celery_app.task(name="roughcut.pipeline.tasks.media_render", bind=True, max_retries=2)
 def media_render(self, job_id: str):
     return _run_task_step(self, job_id, "render", retry_countdown=30)
-
-
-@celery_app.task(name="roughcut.pipeline.tasks.llm_platform_package", bind=True, max_retries=2)
-def llm_platform_package(self, job_id: str):
-    return _run_task_step(self, job_id, "platform_package", retry_countdown=20)
 
 
 @celery_app.task(name="roughcut.pipeline.tasks.agent_run_preset", bind=True, max_retries=0)

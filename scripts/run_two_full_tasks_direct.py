@@ -22,7 +22,6 @@ from roughcut.db.session import get_session_factory
 from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
 from run_fullchain_batch import (
     StepRun,
-    auto_approve_final_review,
     auto_confirm_content_profile,
     _resolve_batch_step_timeout_seconds,
     _run_step_sync_with_timeout,
@@ -175,12 +174,6 @@ def run_full_chain(job_id: str) -> tuple[list[StepRun], str]:
         started = time.perf_counter()
         if step_name == "summary_review":
             auto_confirm_content_profile(job_id)
-            step_runs.append(
-                StepRun(step=step_name, status="done", elapsed_seconds=round(time.perf_counter() - started, 3), detail=read_step_detail(job_id, step_name))
-            )
-            continue
-        if step_name == "final_review":
-            auto_approve_final_review(job_id)
             step_runs.append(
                 StepRun(step=step_name, status="done", elapsed_seconds=round(time.perf_counter() - started, 3), detail=read_step_detail(job_id, step_name))
             )

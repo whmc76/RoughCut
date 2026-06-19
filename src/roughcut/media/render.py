@@ -27,18 +27,21 @@ from roughcut.edit.render_plan import (
 from roughcut.edit.packaging_timeline import (
     packaging_timeline_asset_plan,
     packaging_timeline_focus_plan,
+    packaging_timeline_hyperframes,
     packaging_timeline_insert_plan,
     packaging_timeline_local_audio_cues,
     packaging_timeline_music_plan,
     resolve_packaging_timeline_payload,
 )
 from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
+from roughcut import hyperframes
 from roughcut.packaging.library import (
     resolve_insert_effective_duration,
     resolve_insert_motion_behavior,
     resolve_insert_prepare_duration,
     resolve_insert_transition_overlap,
 )
+from roughcut.utils.asyncio_subprocess import close_asyncio_subprocess_transport
 
 
 logger = logging.getLogger(__name__)
@@ -48,6 +51,25 @@ _RENAMED_SMART_EFFECT_STYLE_KEYS = {
     "smart_effect_rhythm": _DEFAULT_SMART_EFFECT_STYLE,
     "smart_effect_ai_impact": "smart_effect_commercial_ai",
 }
+_RENDER_OVERLAY_LABEL_MAX_CJK_CHARS = 8
+_RENDER_OVERLAY_LABEL_MAX_ASCII_CHARS = 14
+_RENDER_OVERLAY_SENTENCE_MARKERS = (
+    "因为",
+    "所以",
+    "然后",
+    "但是",
+    "就是",
+    "这个",
+    "那个",
+    "这里",
+    "那边",
+    "你看",
+    "我们",
+    "可以",
+    "还是",
+    "不太",
+    "不算",
+)
 
 _EXPORT_RESOLUTION_PRESETS: dict[str, tuple[int, int]] = {
     "1080p": (1920, 1080),
@@ -85,9 +107,11 @@ def _render_packaging_context(render_plan: dict[str, Any] | None) -> dict[str, A
     assets["insert"] = packaging_timeline_insert_plan(packaging_timeline)
     assets["music"] = packaging_timeline_music_plan(packaging_timeline)
     editing_accents = copy.deepcopy(packaging_timeline.get("editing_accents") or {})
+    hyperframes_plan = packaging_timeline_hyperframes(packaging_timeline)
     return {
         "assets": assets,
         "editing_accents": editing_accents,
+        "hyperframes": hyperframes_plan,
         "has_packaging_assets": any(assets.get(key) for key in ("intro", "outro", "insert", "watermark", "music")),
         "focus": packaging_timeline_focus_plan(packaging_timeline),
         "audio_cues": packaging_timeline_local_audio_cues(packaging_timeline),
@@ -624,6 +648,24 @@ async def render_video(
         subtitle_items,
         subtitles_plan=subtitles_plan,
     ) if subtitle_items and subtitles_plan else []
+    overlay_plan = _build_overlay_only_editing_accents(
+        overlay_editing_accents if isinstance(overlay_editing_accents, dict) else editing_accents,
+        subtitle_items=subtitle_items,
+        section_choreography=section_choreography,
+        synthesize_subtitle_unit_accents=synthesize_subtitle_unit_accents,
+    )
+    hyperframes_plan = _build_runtime_hyperframes_plan(
+        packaging_context=resolved_packaging_context,
+        render_w=render_w,
+        render_h=render_h,
+        duration_sec=_keep_segments_duration(keep_segments),
+        subtitles_plan=subtitles_plan,
+        subtitle_items=choreographed_subtitles or subtitle_items,
+        overlay_plan=overlay_plan,
+        editing_accents=editing_accents,
+    )
+    editing_accents = hyperframes.effects_from_plan(hyperframes_plan, fallback=editing_accents)
+    overlay_plan = hyperframes.overlay_plan_from_plan(hyperframes_plan, fallback=overlay_plan)
     video_transform_accents = _build_video_transform_editing_accents(
         editing_accents,
         subtitle_items=choreographed_subtitles,
@@ -681,16 +723,11 @@ async def render_video(
         video_label = "vscaled"
         video_map = f"[{video_label}]"
 
-    overlay_plan = _build_overlay_only_editing_accents(
-        overlay_editing_accents if isinstance(overlay_editing_accents, dict) else editing_accents,
-        subtitle_items=subtitle_items,
-        section_choreography=section_choreography,
-        synthesize_subtitle_unit_accents=synthesize_subtitle_unit_accents,
-    )
     needs_timed_overlays = bool(
         subtitle_items
         or overlay_plan.get("emphasis_overlays")
         or overlay_plan.get("sound_effects")
+        or _hyperframes_has_runtime_visual_overlays(hyperframes_plan)
     )
     if needs_timed_overlays and not packaging_enabled:
         overlay_filter_parts, overlay_video_label, overlay_audio_label = await _build_timed_overlay_filter_chain(
@@ -705,6 +742,7 @@ async def render_video(
             audio_label=audio_label,
             debug_dir=debug_dir,
             subtitles_plan=subtitles_plan,
+            hyperframes_plan=hyperframes_plan,
             packaging_context=None,
             avatar_plan=avatar_plan,
         )
@@ -756,7 +794,7 @@ async def render_video(
     if packaging_enabled:
         packaged = await _apply_packaging_plan(
             base_output_path,
-            render_plan=None,
+            render_plan=render_plan,
             output_path=output_path,
             expected_width=render_w,
             expected_height=render_h,
@@ -792,6 +830,7 @@ async def render_video(
             debug_dir=debug_dir,
             subtitles_plan=subtitles_plan,
             section_choreography=section_choreography,
+            hyperframes_plan=hyperframes_plan,
             packaging_context=None,
             avatar_plan=avatar_plan,
         )
@@ -800,6 +839,66 @@ async def render_video(
         current_output = output_path
 
     return current_output
+
+
+async def burn_subtitles_on_rendered_video(
+    source_path: Path,
+    *,
+    output_path: Path,
+    subtitle_items: list[dict[str, Any]] | list[dict] | None,
+    subtitles_plan: dict[str, Any] | None = None,
+    debug_dir: Path | None = None,
+    packaging_context: dict[str, Any] | None = None,
+) -> Path:
+    """Burn final subtitles onto an already-rendered candidate without changing audio."""
+    source_info = _probe_video_stream(source_path)
+    render_w = int(source_info.get("display_width") or source_info.get("width") or 0)
+    render_h = int(source_info.get("display_height") or source_info.get("height") or 0)
+    subtitle_only_options = {
+        key: False
+        for key in hyperframes.HYPERFRAMES_OPTION_KEYS
+    }
+    subtitle_only_options["unified_subtitle_style"] = True
+    base_hyperframes = (
+        packaging_context.get("hyperframes")
+        if isinstance(packaging_context, dict)
+        else None
+    )
+    base_metadata = (
+        base_hyperframes.get("metadata")
+        if hyperframes.is_hyperframes_plan(base_hyperframes)
+        and isinstance(base_hyperframes.get("metadata"), dict)
+        else {}
+    )
+    base_options = (
+        hyperframes.normalize_options(base_metadata.get("options"))
+        if isinstance(base_metadata.get("options"), dict)
+        else {}
+    )
+    if "unified_subtitle_style" in base_options:
+        subtitle_only_options["unified_subtitle_style"] = bool(base_options["unified_subtitle_style"])
+    subtitle_style_plan = hyperframes.build_static_packaging_plan(
+        subtitles_plan=subtitles_plan,
+        editing_accents={},
+        options=subtitle_only_options,
+        source="roughcut.media.render.final_subtitle_burn_in",
+    )
+    return await _apply_timed_overlays_to_video(
+        source_path,
+        output_path=output_path,
+        render_plan=None,
+        subtitle_items=subtitle_items,
+        overlay_editing_accents={},
+        overlay_plan={"emphasis_overlays": [], "sound_effects": []},
+        choreographed_subtitles=None,
+        synthesize_subtitle_unit_accents=False,
+        debug_dir=debug_dir,
+        subtitles_plan=subtitles_plan,
+        section_choreography={},
+        hyperframes_plan=subtitle_style_plan,
+        packaging_context=None,
+        avatar_plan=None,
+    )
 
 
 def _build_segment_filter_chain(
@@ -1253,12 +1352,14 @@ def _build_emphasis_overlay_filters(
     current_video = video_label
     font_name = _escape_drawtext_value(get_settings().subtitle_font)
     style_tokens = _resolve_effect_overlay_tokens(str(editing_accents.get("style") or "smart_effect_rhythm"))
-    for index, overlay in enumerate(editing_accents.get("emphasis_overlays") or []):
+    overlays = _normalize_render_emphasis_overlays(editing_accents.get("emphasis_overlays") or [])
+    for index, overlay in enumerate(overlays):
         text = _escape_drawtext_value(str(overlay.get("text") or ""))
         if not text:
             continue
+        overlay_tokens = _resolve_overlay_drawtext_tokens(style_tokens, overlay)
         start_time = max(0.0, float(overlay.get("start_time") or 0.0))
-        end_time = max(start_time + 0.2, float(overlay.get("end_time") or start_time + 1.0))
+        end_time = max(start_time + 0.85, float(overlay.get("end_time") or start_time + 1.0))
         fade_duration = min(0.12, max((end_time - start_time) / 3, 0.06))
         alpha_expr = (
             f"if(lt(t\\,{start_time})\\,0\\,"
@@ -1271,16 +1372,90 @@ def _build_emphasis_overlay_filters(
             f"[{current_video}]drawtext="
             f"font='{font_name}':"
             f"text='{text}':"
-            f"fontsize={style_tokens['fontsize']}:"
-            f"fontcolor={style_tokens['fontcolor']}:"
+            f"fontsize={overlay_tokens['fontsize']}:"
+            f"fontcolor={overlay_tokens['fontcolor']}:"
             f"alpha='{alpha_expr}':"
-            f"box=1:boxcolor={style_tokens['boxcolor']}:boxborderw={style_tokens['boxborderw']}:"
-            f"borderw={style_tokens['borderw']}:bordercolor={style_tokens['bordercolor']}:"
-            f"x=(w-text_w)/2:y=h*{style_tokens['y_ratio']}"
+            f"box=1:boxcolor={overlay_tokens['boxcolor']}:boxborderw={overlay_tokens['boxborderw']}:"
+            f"borderw={overlay_tokens['borderw']}:bordercolor={overlay_tokens['bordercolor']}:"
+            f"x={overlay_tokens['x_expr']}:y=h*{overlay_tokens['y_ratio']}"
             f"[{output_label}]"
         )
         current_video = output_label
     return parts, current_video
+
+
+def _resolve_overlay_drawtext_tokens(base_tokens: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
+    tokens = dict(base_tokens)
+    tokens.setdefault("x_expr", "(w-text_w)/2")
+    treatment = str(overlay.get("visual_treatment") or "").strip().lower()
+    if treatment == "hook_pop":
+        tokens["fontsize"] = int(tokens["fontsize"] * 1.02)
+        tokens["boxcolor"] = "0x101318@0.46"
+        tokens["bordercolor"] = "0xff8a2a@0.48"
+        tokens["y_ratio"] = min(float(tokens["y_ratio"]), 0.125)
+        tokens["x_expr"] = "(w-text_w)/2"
+    elif treatment == "keyword_sticker":
+        tokens["fontcolor"] = "0xfff4dc"
+        tokens["boxcolor"] = "0x19130f@0.42"
+        tokens["bordercolor"] = "0xffb13d@0.42"
+        tokens["x_expr"] = "w-text_w-w*0.055"
+        tokens["y_ratio"] = max(float(tokens["y_ratio"]), 0.16)
+    elif treatment == "beat_pulse":
+        tokens["fontsize"] = int(tokens["fontsize"] * 0.9)
+        tokens["boxcolor"] = "0x101318@0.34"
+        tokens["bordercolor"] = "0xffffff@0.22"
+        tokens["x_expr"] = "w*0.055"
+        tokens["y_ratio"] = max(float(tokens["y_ratio"]), 0.2)
+    return tokens
+
+
+def _normalize_render_emphasis_overlays(
+    overlays: list[dict[str, Any]] | Any,
+    *,
+    min_duration_sec: float = 0.85,
+    min_spacing_sec: float = 1.8,
+    max_count: int = 14,
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for raw in sorted(
+        [item for item in list(overlays or []) if isinstance(item, dict)],
+        key=lambda item: float(item.get("start_time", 0.0) or 0.0),
+    ):
+        text = _normalize_render_overlay_label_text(str(raw.get("text") or ""))
+        if not text:
+            continue
+        source = str(raw.get("source") or "").strip()
+        if source in {"subtitle_unit", "subtitle_unit_video"}:
+            continue
+        start_time = max(0.0, float(raw.get("start_time", 0.0) or 0.0))
+        if normalized and start_time - float(normalized[-1].get("start_time", 0.0) or 0.0) < min_spacing_sec:
+            continue
+        end_time = max(start_time + min_duration_sec, float(raw.get("end_time", start_time) or start_time))
+        item = dict(raw)
+        item["text"] = text
+        item["start_time"] = round(start_time, 3)
+        item["end_time"] = round(end_time, 3)
+        normalized.append(item)
+        if len(normalized) >= max_count:
+            break
+    return normalized
+
+
+def _normalize_render_overlay_label_text(raw: str) -> str:
+    text = "".join(str(raw or "").split()).strip("，。！？!?、,.；;：:\"'()（）[]【】<>《》")
+    if len(text) < 2:
+        return ""
+    cjk_count = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    ascii_count = sum(1 for ch in text if ch.isascii() and ch.isalnum())
+    if cjk_count and cjk_count > _RENDER_OVERLAY_LABEL_MAX_CJK_CHARS:
+        return ""
+    if not cjk_count and ascii_count > _RENDER_OVERLAY_LABEL_MAX_ASCII_CHARS:
+        return ""
+    if cjk_count >= 5 and any(marker in text for marker in _RENDER_OVERLAY_SENTENCE_MARKERS):
+        return ""
+    if any(mark in text for mark in ("，", "。", "！", "？", ",", ".", "!", "?", "；", ";", "：", ":")):
+        return ""
+    return text
 
 
 def _build_smart_effect_video_filters(
@@ -1400,17 +1575,17 @@ def _build_overlay_only_editing_accents(
     *,
     subtitle_items: list[dict[str, Any]] | None = None,
     section_choreography: dict[str, Any] | None = None,
-    synthesize_subtitle_unit_accents: bool = True,
+    synthesize_subtitle_unit_accents: bool = False,
 ) -> dict[str, Any]:
     base = dict(editing_accents or {})
-    emphasis_overlays = _prune_events_by_choreography_density([
+    emphasis_overlays = _normalize_render_emphasis_overlays(_prune_events_by_choreography_density([
         dict(item)
         for item in base.get("emphasis_overlays") or []
         if _choreography_allows_overlay(
             float((item or {}).get("start_time", 0.0) or 0.0),
             section_choreography=section_choreography,
         )
-    ], section_choreography=section_choreography)
+    ], section_choreography=section_choreography))
     sound_effects = _prune_events_by_choreography_density([
         dict(item)
         for item in base.get("sound_effects") or []
@@ -1431,7 +1606,9 @@ def _build_overlay_only_editing_accents(
     )
     return {
         "style": _normalize_smart_effect_style(str(base.get("style") or "")),
-        "emphasis_overlays": emphasis_overlays + synthesized["emphasis_overlays"],
+        "emphasis_overlays": _normalize_render_emphasis_overlays(
+            emphasis_overlays + synthesized["emphasis_overlays"]
+        ),
         "sound_effects": sound_effects + synthesized["sound_effects"],
     }
 
@@ -1555,10 +1732,10 @@ def _build_video_transform_editing_accents(
     *,
     subtitle_items: list[dict[str, Any]] | None,
     section_choreography: dict[str, Any] | None = None,
-    synthesize_subtitle_unit_accents: bool = True,
+    synthesize_subtitle_unit_accents: bool = False,
 ) -> dict[str, Any]:
     base = dict(editing_accents or {})
-    existing_overlays = [dict(item) for item in base.get("emphasis_overlays") or [] if isinstance(item, dict)]
+    existing_overlays = _normalize_render_emphasis_overlays(base.get("emphasis_overlays") or [])
     synthesized_overlays: list[dict[str, Any]] = []
     if not synthesize_subtitle_unit_accents:
         return {
@@ -1637,6 +1814,7 @@ async def _apply_timed_overlays_to_video(
     debug_dir: Path | None,
     subtitles_plan: dict[str, Any] | None = None,
     section_choreography: dict[str, Any] | None = None,
+    hyperframes_plan: dict[str, Any] | None = None,
     packaging_context: dict[str, Any] | None = None,
     avatar_plan: dict[str, Any] | None = None,
 ) -> Path:
@@ -1675,6 +1853,31 @@ async def _apply_timed_overlays_to_video(
             synthesize_subtitle_unit_accents=synthesize_subtitle_unit_accents,
         )
     )
+    try:
+        source_duration = _probe_duration(source_path)
+    except Exception:
+        source_duration = 0.0
+    base_hyperframes_plan = (
+        resolved_packaging_context.get("hyperframes")
+        if isinstance(resolved_packaging_context, dict)
+        else None
+    )
+    resolved_hyperframes_plan = None
+    if hyperframes.is_hyperframes_plan(hyperframes_plan):
+        resolved_hyperframes_plan = hyperframes_plan
+    elif hyperframes.is_hyperframes_plan(base_hyperframes_plan):
+        resolved_hyperframes_plan = _build_runtime_hyperframes_plan(
+            packaging_context=resolved_packaging_context,
+            render_w=render_w,
+            render_h=render_h,
+            duration_sec=source_duration,
+            subtitles_plan=resolved_subtitles_plan,
+            subtitle_items=choreographed_subtitles or subtitle_items,
+            overlay_plan=resolved_overlay_plan,
+            editing_accents=overlay_editing_accents,
+        )
+    if hyperframes.is_hyperframes_plan(resolved_hyperframes_plan):
+        resolved_overlay_plan = hyperframes.overlay_plan_from_plan(resolved_hyperframes_plan, fallback=resolved_overlay_plan)
     filter_parts: list[str] = []
     video_label = _append_delivery_color_filter(
         filter_parts,
@@ -1695,6 +1898,7 @@ async def _apply_timed_overlays_to_video(
         debug_dir=debug_dir,
         initial_filter_parts=filter_parts,
         subtitles_plan=resolved_subtitles_plan,
+        hyperframes_plan=resolved_hyperframes_plan,
         packaging_context=None,
         avatar_plan=resolved_avatar_plan,
     )
@@ -1711,9 +1915,9 @@ async def _apply_timed_overlays_to_video(
         "-filter_complex",
         ";".join(filter_parts),
         "-map",
-        f"[{video_label}]",
+        _ffmpeg_map_label(video_label),
         "-map",
-        f"[{audio_label}]",
+        _ffmpeg_map_label(audio_label),
         "-shortest",
         str(output_path),
     ]
@@ -1766,6 +1970,7 @@ async def _build_timed_overlay_filter_chain(
     debug_dir: Path | None,
     initial_filter_parts: list[str] | None = None,
     subtitles_plan: dict[str, Any] | None = None,
+    hyperframes_plan: dict[str, Any] | None = None,
     packaging_context: dict[str, Any] | None = None,
     avatar_plan: dict[str, Any] | None = None,
 ) -> tuple[list[str], str, str]:
@@ -1783,6 +1988,8 @@ async def _build_timed_overlay_filter_chain(
         if isinstance(subtitles_plan, dict)
         else dict(resolved_packaging_context.get("subtitles") or {})
     )
+    resolved_hyperframes_plan = hyperframes_plan if hyperframes.is_hyperframes_plan(hyperframes_plan) else None
+    overlay_plan = hyperframes.overlay_plan_from_plan(resolved_hyperframes_plan, fallback=overlay_plan)
     resolved_avatar_plan = avatar_plan if isinstance(avatar_plan, dict) else render_plan_avatar_commentary(render_plan)
     resolved_choreographed_subtitles = (
         [dict(item) for item in choreographed_subtitles]
@@ -1802,17 +2009,27 @@ async def _build_timed_overlay_filter_chain(
             avatar_plan=resolved_avatar_plan,
         )
         ass_path = output_path.parent / f"{output_path.stem}.subtitle.ass"
-        write_ass_file(
+        hyperframes_subtitles = hyperframes.apply_subtitle_style_to_items(
             resolved_choreographed_subtitles,
+            resolved_hyperframes_plan,
+        )
+        write_ass_file(
+            hyperframes_subtitles,
             ass_path,
-            style_name=str(resolved_subtitles_plan.get("style") or "bold_yellow_outline"),
+            style_name=hyperframes.subtitle_style_name(
+                resolved_hyperframes_plan,
+                str(resolved_subtitles_plan.get("style") or "bold_yellow_outline"),
+            ),
             font_name=settings.subtitle_font,
             font_size=settings.subtitle_font_size,
             text_color_rgb=settings.subtitle_color,
             outline_color_rgb=settings.subtitle_outline_color,
             outline_width=settings.subtitle_outline_width,
             margin_v_override=subtitle_margin_override,
-            motion_style=str(resolved_subtitles_plan.get("motion_style") or "motion_static"),
+            motion_style=hyperframes.subtitle_motion_style(
+                resolved_hyperframes_plan,
+                str(resolved_subtitles_plan.get("motion_style") or "motion_static"),
+            ),
             play_res_x=render_w,
             play_res_y=render_h,
         )
@@ -1828,118 +2045,138 @@ async def _build_timed_overlay_filter_chain(
         sfx_filters, audio_label = _build_sound_effect_filters(audio_label, overlay_plan)
         filter_parts.extend(sfx_filters)
 
+    hyperframe_filters, video_label = _build_hyperframes_visual_filters(
+        video_label,
+        resolved_hyperframes_plan,
+        render_w=render_w,
+        render_h=render_h,
+    )
+    filter_parts.extend(hyperframe_filters)
+
     return filter_parts, video_label, audio_label
 
 
 def _resolve_effect_overlay_tokens(style: str) -> dict[str, Any]:
     mapping: dict[str, dict[str, Any]] = {
         _DEFAULT_SMART_EFFECT_STYLE: {
-            "fontsize": 72,
+            "fontsize": 52,
             "fontcolor": "white",
-            "boxcolor": "black@0.45",
-            "boxborderw": 18,
-            "borderw": 2,
-            "bordercolor": "black@0.25",
-            "y_ratio": 0.18,
+            "boxcolor": "black@0.34",
+            "boxborderw": 14,
+            "borderw": 1,
+            "bordercolor": "black@0.18",
+            "y_ratio": 0.14,
+            "x_expr": "(w-text_w)/2",
         },
         "smart_effect_punch": {
-            "fontsize": 86,
+            "fontsize": 56,
             "fontcolor": "white",
-            "boxcolor": "0x3a0505@0.58",
-            "boxborderw": 24,
-            "borderw": 3,
-            "bordercolor": "0xff874d@0.52",
-            "y_ratio": 0.16,
+            "boxcolor": "0x3a0505@0.38",
+            "boxborderw": 16,
+            "borderw": 2,
+            "bordercolor": "0xff874d@0.38",
+            "y_ratio": 0.14,
+            "x_expr": "(w-text_w)/2",
         },
         "smart_effect_glitch": {
-            "fontsize": 78,
+            "fontsize": 54,
             "fontcolor": "0xeef2ff",
-            "boxcolor": "0x11162f@0.6",
-            "boxborderw": 20,
+            "boxcolor": "0x11162f@0.42",
+            "boxborderw": 15,
             "borderw": 2,
-            "bordercolor": "0x6f7fff@0.48",
-            "y_ratio": 0.17,
+            "bordercolor": "0x6f7fff@0.36",
+            "y_ratio": 0.145,
+            "x_expr": "(w-text_w)/2",
         },
         "smart_effect_cinematic": {
-            "fontsize": 68,
+            "fontsize": 50,
             "fontcolor": "0xfff4e8",
-            "boxcolor": "0x120d08@0.4",
-            "boxborderw": 16,
+            "boxcolor": "0x120d08@0.3",
+            "boxborderw": 13,
             "borderw": 1,
-            "bordercolor": "0xe2b471@0.34",
-            "y_ratio": 0.2,
+            "bordercolor": "0xe2b471@0.28",
+            "y_ratio": 0.16,
+            "x_expr": "(w-text_w)/2",
         },
         "smart_effect_atmosphere": {
-            "fontsize": 74,
+            "fontsize": 52,
             "fontcolor": "0xfff6ea",
-            "boxcolor": "0x1a1310@0.46",
-            "boxborderw": 18,
+            "boxcolor": "0x1a1310@0.34",
+            "boxborderw": 14,
             "borderw": 2,
-            "bordercolor": "0xf0c38a@0.34",
-            "y_ratio": 0.19,
+            "bordercolor": "0xf0c38a@0.3",
+            "y_ratio": 0.155,
+            "x_expr": "(w-text_w)/2",
         },
         "smart_effect_minimal": {
-            "fontsize": 62,
+            "fontsize": 46,
             "fontcolor": "white",
-            "boxcolor": "black@0.28",
-            "boxborderw": 12,
+            "boxcolor": "black@0.22",
+            "boxborderw": 10,
             "borderw": 1,
-            "bordercolor": "white@0.12",
-            "y_ratio": 0.2,
+            "bordercolor": "white@0.1",
+            "y_ratio": 0.16,
+            "x_expr": "(w-text_w)/2",
         },
         "smart_effect_commercial_ai": {
-            "fontsize": 92,
+            "fontsize": 58,
             "fontcolor": "0xf8fbff",
-            "boxcolor": "0x111317@0.62",
-            "boxborderw": 28,
-            "borderw": 3,
-            "bordercolor": "0xff6a3d@0.58",
-            "y_ratio": 0.145,
+            "boxcolor": "0x111317@0.42",
+            "boxborderw": 17,
+            "borderw": 2,
+            "bordercolor": "0xff6a3d@0.44",
+            "y_ratio": 0.125,
+            "x_expr": "(w-text_w)/2",
         },
         "smart_effect_punch_ai": {
-            "fontsize": 94,
+            "fontsize": 60,
             "fontcolor": "0xf7fbff",
-            "boxcolor": "0x0b1220@0.68",
-            "boxborderw": 28,
-            "borderw": 3,
-            "bordercolor": "0xff6a3d@0.62",
-            "y_ratio": 0.145,
+            "boxcolor": "0x0b1220@0.44",
+            "boxborderw": 17,
+            "borderw": 2,
+            "bordercolor": "0xff6a3d@0.46",
+            "y_ratio": 0.125,
+            "x_expr": "(w-text_w)/2",
         },
         "smart_effect_glitch_ai": {
-            "fontsize": 90,
+            "fontsize": 58,
             "fontcolor": "0xf5f7ff",
-            "boxcolor": "0x11162f@0.72",
-            "boxborderw": 26,
-            "borderw": 3,
-            "bordercolor": "0x7b8dff@0.6",
-            "y_ratio": 0.15,
+            "boxcolor": "0x11162f@0.48",
+            "boxborderw": 17,
+            "borderw": 2,
+            "bordercolor": "0x7b8dff@0.44",
+            "y_ratio": 0.13,
+            "x_expr": "(w-text_w)/2",
         },
         "smart_effect_cinematic_ai": {
-            "fontsize": 82,
+            "fontsize": 54,
             "fontcolor": "0xfff4e8",
-            "boxcolor": "0x140e09@0.52",
-            "boxborderw": 22,
+            "boxcolor": "0x140e09@0.36",
+            "boxborderw": 15,
             "borderw": 2,
-            "bordercolor": "0xe2b471@0.42",
-            "y_ratio": 0.18,
+            "bordercolor": "0xe2b471@0.34",
+            "y_ratio": 0.15,
+            "x_expr": "(w-text_w)/2",
         },
         "smart_effect_atmosphere_ai": {
-            "fontsize": 86,
+            "fontsize": 56,
             "fontcolor": "0xfff8ef",
-            "boxcolor": "0x18120e@0.56",
-            "boxborderw": 24,
+            "boxcolor": "0x18120e@0.38",
+            "boxborderw": 16,
             "borderw": 2,
-            "bordercolor": "0xf0c38a@0.48",
-            "y_ratio": 0.175,
+            "bordercolor": "0xf0c38a@0.38",
+            "y_ratio": 0.15,
+            "x_expr": "(w-text_w)/2",
         },
         "smart_effect_minimal_ai": {
-            "fontsize": 72,
+            "fontsize": 50,
             "fontcolor": "white",
-            "boxcolor": "black@0.36",
-            "boxborderw": 16,
+            "boxcolor": "black@0.26",
+            "boxborderw": 12,
             "borderw": 1,
-            "bordercolor": "white@0.18",
-            "y_ratio": 0.19,
+            "bordercolor": "white@0.14",
+            "y_ratio": 0.155,
+            "x_expr": "(w-text_w)/2",
         },
     }
     normalized = _normalize_smart_effect_style(style)
@@ -2131,6 +2368,132 @@ def _should_apply_smart_effect_video_transforms(avatar_plan: dict[str, Any]) -> 
     return integration_mode != "picture_in_picture"
 
 
+def _keep_segments_duration(keep_segments: list[dict[str, Any]] | None) -> float:
+    return round(
+        sum(
+            max(0.0, float(segment.get("end", 0.0) or 0.0) - float(segment.get("start", 0.0) or 0.0))
+            for segment in list(keep_segments or [])
+            if isinstance(segment, dict)
+        ),
+        3,
+    )
+
+
+def _build_runtime_hyperframes_plan(
+    *,
+    packaging_context: dict[str, Any] | None,
+    render_w: int,
+    render_h: int,
+    duration_sec: float,
+    subtitles_plan: dict[str, Any] | None,
+    subtitle_items: list[dict[str, Any]] | list[dict] | None,
+    overlay_plan: dict[str, Any] | None,
+    editing_accents: dict[str, Any] | None,
+) -> dict[str, Any]:
+    base_plan = (packaging_context or {}).get("hyperframes") if isinstance(packaging_context, dict) else None
+    base_metadata = base_plan.get("metadata") if hyperframes.is_hyperframes_plan(base_plan) and isinstance(base_plan.get("metadata"), dict) else {}
+    return hyperframes.build_render_plan(
+        width=render_w,
+        height=render_h,
+        duration_sec=duration_sec,
+        subtitles_plan=subtitles_plan,
+        subtitle_items=[dict(item) for item in list(subtitle_items or []) if isinstance(item, dict)],
+        overlay_plan=overlay_plan,
+        editing_accents=editing_accents,
+        focus_plan=(packaging_context or {}).get("focus") if isinstance(packaging_context, dict) else None,
+        audio_cues=(packaging_context or {}).get("audio_cues") if isinstance(packaging_context, dict) else None,
+        options=base_metadata.get("options") if isinstance(base_metadata.get("options"), dict) else None,
+        source="roughcut.media.render",
+    )
+
+
+def _hyperframes_has_runtime_visual_overlays(plan: dict[str, Any] | None) -> bool:
+    if not hyperframes.is_hyperframes_plan(plan):
+        return False
+    if hyperframes.progress_bar_enabled(plan):
+        return True
+    return any(
+        str(element.get("track") or "") in {"chapter_cards", "subtitle_emphasis"}
+        for element in list(plan.get("elements") or [])
+        if isinstance(element, dict)
+    )
+
+
+def _build_hyperframes_visual_filters(
+    video_label: str,
+    plan: dict[str, Any] | None,
+    *,
+    render_w: int,
+    render_h: int,
+) -> tuple[list[str], str]:
+    if not hyperframes.is_hyperframes_plan(plan):
+        return [], video_label
+    parts: list[str] = []
+    current_video = video_label
+    font_name = _escape_drawtext_value(get_settings().subtitle_font)
+    text_elements = [
+        dict(element)
+        for element in list(plan.get("elements") or [])
+        if isinstance(element, dict) and element.get("kind") == "text" and str(element.get("track") or "") in {"chapter_cards", "subtitle_emphasis"}
+    ]
+    for index, element in enumerate(text_elements):
+        text = _escape_drawtext_value(str(element.get("text") or ""))
+        if not text:
+            continue
+        track = str(element.get("track") or "")
+        start_time = max(0.0, float(element.get("start_sec") or 0.0))
+        end_time = max(start_time + 0.4, float(element.get("end_sec") or start_time + 1.2))
+        position = element.get("position") if isinstance(element.get("position"), dict) else {}
+        x = int(position.get("x") or max(28, render_w * 0.04))
+        y = int(position.get("y") or max(34, render_h * 0.08))
+        output_label = f"vhftext{index}"
+        if track == "subtitle_emphasis":
+            x_expr = "(w-text_w)/2"
+            y_expr = f"h*0.18"
+            font_size = max(34, min(72, int(render_h * 0.058)))
+            box_color = "0x101318@0.58"
+            border_color = "0xff8a3d@0.68"
+        elif str(element.get("style") or "") == "bottom_chapter_pill":
+            x_expr = str(x)
+            y_expr = f"h-{max(70, int(render_h * 0.076))}"
+            font_size = max(24, min(42, int(render_h * 0.032)))
+            box_color = "0x111317@0.62"
+            border_color = "0xff8a2a@0.46"
+        else:
+            x_expr = str(x)
+            y_expr = str(y)
+            font_size = max(26, min(48, int(render_h * 0.038)))
+            box_color = "0x101318@0.52"
+            border_color = "0xffffff@0.28"
+        enable_expr = f"between(t\\,{start_time}\\,{end_time})"
+        parts.append(
+            f"[{current_video}]drawtext="
+            f"font='{font_name}':"
+            f"text='{text}':"
+            f"fontsize={font_size}:"
+            f"fontcolor=white:"
+            f"box=1:boxcolor={box_color}:boxborderw={max(12, int(font_size * 0.3))}:"
+            f"borderw=2:bordercolor={border_color}:"
+            f"x={x_expr}:y={y_expr}:"
+            f"enable='{enable_expr}'"
+            f"[{output_label}]"
+        )
+        current_video = output_label
+    if hyperframes.progress_bar_enabled(plan):
+        duration = max(0.01, float(plan.get("duration_sec") or 0.0))
+        bar_h = max(6, min(12, int(render_h * 0.012)))
+        bg_label = "vhfprogressbg"
+        fg_label = "vhfprogress"
+        parts.append(
+            f"[{current_video}]drawbox=x=0:y=ih-{bar_h}:w=iw:h={bar_h}:color=black@0.32:t=fill[{bg_label}]"
+        )
+        parts.append(
+            f"[{bg_label}]drawbox=x=0:y=ih-{bar_h}:w='iw*min(max(t/{duration}\\,0)\\,1)':h={bar_h}:color=0xff8a2a@0.92:t=fill[{fg_label}]"
+        )
+        current_video = fg_label
+    return parts, current_video
+
+
 def _resolve_delivery_resolution(
     *,
     expected_width: int,
@@ -2304,7 +2667,7 @@ async def _apply_packaging_plan(
                 debug_dir=debug_dir,
             )
         music_plan = resolved_packaging_assets.get("music")
-        watermark_plan = resolved_packaging_assets.get("watermark")
+        watermark_plan = resolved_packaging_assets.get("watermark") or _default_dynamic_text_watermark_plan(render_plan)
         if music_plan or watermark_plan:
             current_path = await _apply_music_and_watermark(
                 current_path,
@@ -2624,12 +2987,27 @@ async def _apply_music_and_watermark(
     output_path: Path,
     debug_dir: Path | None,
 ) -> Path:
+    watermark_plan = _normalize_watermark_plan(watermark_plan)
     if not music_plan and not watermark_plan:
         return source_path
     try:
         source_duration = _probe_duration(source_path)
     except Exception:
         source_duration = 0.0
+    if (
+        watermark_plan
+        and watermark_plan.get("path")
+        and await _source_already_contains_image_watermark(
+            source_path,
+            watermark_plan=watermark_plan,
+            expected_width=expected_width,
+            source_duration=source_duration,
+            debug_dir=debug_dir,
+        )
+    ):
+        watermark_plan = None
+        if not music_plan:
+            return source_path
 
     cmd = ["ffmpeg", "-y", "-i", str(source_path)]
     filter_parts: list[str] = []
@@ -2684,19 +3062,47 @@ async def _apply_music_and_watermark(
         audio_map = "[aout]"
         next_input_index += 1
 
-    if watermark_plan:
+    if watermark_plan and watermark_plan.get("path"):
         cmd.extend(["-i", str(watermark_plan["path"])])
-        opacity = float(watermark_plan.get("opacity", 0.82) or 0.82)
-        scale = float(watermark_plan.get("scale", 0.16) or 0.16)
-        overlay_x, overlay_y = _watermark_overlay_position(str(watermark_plan.get("position") or "top_right"))
+        opacity = float(watermark_plan.get("opacity", 0.28) or 0.28)
+        scale = float(watermark_plan.get("scale", 0.10) or 0.10)
+        overlay_x, overlay_y, overlay_eval = _watermark_overlay_position(
+            str(watermark_plan.get("position") or "top_right"),
+            dynamic=bool(watermark_plan.get("dynamic", True)),
+        )
         watermark_width = max(1, int(round(expected_width * scale)))
         watermark_filters = [f"[{next_input_index}:v]scale={watermark_width}:-1", "format=rgba"]
         if not bool(watermark_plan.get("watermark_preprocessed")):
             # Uploaded logo assets are often flattened onto white backgrounds; key near-white tones out at render time.
-            watermark_filters.append("colorkey=0xF8F8F8:0.20:0.08")
+            watermark_filters.extend(
+                [
+                    "colorkey=0xFFFFFF:0.10:0.02",
+                    "colorkey=0xF8F8F8:0.10:0.02",
+                ]
+            )
         watermark_filters.append(f"colorchannelmixer=aa={opacity}[wmfinal]")
         filter_parts.append(",".join(watermark_filters))
-        filter_parts.append(f"[0:v][wmfinal]overlay=x={overlay_x}:y={overlay_y}:format=auto[vout]")
+        filter_parts.append(f"[0:v][wmfinal]overlay=x='{overlay_x}':y='{overlay_y}':eval={overlay_eval}:format=auto[vout]")
+        video_map = "[vout]"
+    elif watermark_plan and watermark_plan.get("text"):
+        opacity = float(watermark_plan.get("opacity", 0.36) or 0.36)
+        scale = float(watermark_plan.get("scale", 0.045) or 0.045)
+        font_size = max(24, int(round(expected_height * scale)))
+        text = _escape_drawtext_value(str(watermark_plan.get("text") or "RoughCut"))
+        font_name = _escape_drawtext_value(get_settings().subtitle_font)
+        overlay_x, overlay_y, overlay_eval = _watermark_text_position(dynamic=bool(watermark_plan.get("dynamic", True)))
+        filter_parts.append(
+            f"[0:v]drawtext="
+            f"font='{font_name}':"
+            f"text='{text}':"
+            f"fontsize={font_size}:"
+            f"fontcolor=white@{opacity:.3f}:"
+            f"box=1:boxcolor=black@{max(0.18, min(opacity * 0.55, 0.36)):.3f}:boxborderw={max(8, int(font_size * 0.28))}:"
+            f"borderw=2:bordercolor=black@{min(opacity + 0.18, 0.72):.3f}:"
+            f"x='{overlay_x}':y='{overlay_y}':"
+            f"alpha='if(lt(t\\,0.4)\\,t/0.4*{opacity:.3f}\\,{opacity:.3f})'"
+            f"[vout]"
+        )
         video_map = "[vout]"
 
     if not filter_parts:
@@ -2729,6 +3135,191 @@ async def _apply_music_and_watermark(
     if result.returncode != 0:
         raise RuntimeError(f"ffmpeg music/watermark packaging failed: {result.stderr[-2000:]}")
     return output_path
+
+
+async def _source_already_contains_image_watermark(
+    source_path: Path,
+    *,
+    watermark_plan: dict,
+    expected_width: int,
+    source_duration: float,
+    debug_dir: Path | None,
+) -> bool:
+    if watermark_plan.get("skip_if_present") is False:
+        return False
+    watermark_path = Path(str(watermark_plan.get("path") or ""))
+    if source_duration <= 0.0 or not watermark_path.is_file():
+        return False
+    try:
+        import cv2  # type: ignore[import-not-found]
+        import numpy as np  # type: ignore[import-not-found]
+    except Exception as exc:
+        _write_debug_text(
+            debug_dir,
+            "packaging.watermark_dedupe.json",
+            json.dumps({"enabled": False, "reason": f"cv_unavailable:{type(exc).__name__}"}, ensure_ascii=False, indent=2),
+        )
+        return False
+
+    template = _cv2_imread_unicode(watermark_path, cv2.IMREAD_UNCHANGED, np)
+    if template is None:
+        _write_debug_text(
+            debug_dir,
+            "packaging.watermark_dedupe.json",
+            json.dumps({"enabled": False, "reason": "watermark_template_unreadable", "path": str(watermark_path)}, ensure_ascii=False, indent=2),
+        )
+        return False
+
+    scale = float(watermark_plan.get("scale", 0.16) or 0.16)
+    rendered_width = max(1, int(round(expected_width * scale)))
+    templates = _build_watermark_match_templates(template, rendered_width=rendered_width, cv2=cv2)
+    if not templates:
+        return False
+
+    threshold = float(watermark_plan.get("existing_match_threshold", 0.72) or 0.72)
+    sample_times = _watermark_detection_sample_times(source_duration)
+    observations: list[dict[str, Any]] = []
+    matched = False
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = Path(tmpdir)
+        for index, sample_time in enumerate(sample_times):
+            frame_path = tmp / f"watermark_probe_{index}.png"
+            result = await _run_process(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-ss",
+                    f"{sample_time:.3f}",
+                    "-i",
+                    str(source_path),
+                    "-frames:v",
+                    "1",
+                    str(frame_path),
+                ],
+                timeout=60,
+            )
+            if result.returncode != 0 or not frame_path.is_file():
+                observations.append({"time": sample_time, "status": "extract_failed"})
+                continue
+            frame = _cv2_imread_unicode(frame_path, cv2.IMREAD_COLOR, np)
+            if frame is None:
+                observations.append({"time": sample_time, "status": "frame_unreadable"})
+                continue
+            score, location = _best_watermark_template_score(frame, templates=templates, position=str(watermark_plan.get("position") or ""), cv2=cv2)
+            observation = {"time": sample_time, "score": round(score, 4), "location": location}
+            observations.append(observation)
+            if score >= threshold:
+                matched = True
+                break
+
+    _write_debug_text(
+        debug_dir,
+        "packaging.watermark_dedupe.json",
+        json.dumps(
+            {
+                "enabled": True,
+                "matched": matched,
+                "threshold": threshold,
+                "watermark_path": str(watermark_path),
+                "observations": observations,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+    )
+    return matched
+
+
+def _cv2_imread_unicode(path: Path, flags: int, np: Any) -> Any:
+    try:
+        data = np.fromfile(str(path), dtype=np.uint8)
+        if data.size == 0:
+            return None
+        import cv2  # type: ignore[import-not-found]
+
+        return cv2.imdecode(data, flags)
+    except Exception:
+        return None
+
+
+def _build_watermark_match_templates(template: Any, *, rendered_width: int, cv2: Any) -> list[Any]:
+    if template is None or getattr(template, "ndim", 0) < 2:
+        return []
+    height, width = template.shape[:2]
+    if width <= 0 or height <= 0:
+        return []
+    templates: list[Any] = []
+    for scale_adjust in (0.92, 1.0, 1.08):
+        target_width = max(8, int(round(rendered_width * scale_adjust)))
+        ratio = target_width / float(width)
+        target_height = max(8, int(round(height * ratio)))
+        resized = cv2.resize(template, (target_width, target_height), interpolation=cv2.INTER_AREA)
+        if getattr(resized, "ndim", 0) == 3 and resized.shape[2] == 4:
+            resized = resized[:, :, :3]
+        elif getattr(resized, "ndim", 0) == 2:
+            resized = cv2.cvtColor(resized, cv2.COLOR_GRAY2BGR)
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+        templates.append(gray)
+    return templates
+
+
+def _watermark_detection_sample_times(source_duration: float) -> list[float]:
+    if source_duration <= 6.0:
+        return [max(0.0, source_duration * 0.5)]
+    last_sample = max(0.0, source_duration - 3.0)
+    candidates = [
+        6.0,
+        30.0,
+        60.0,
+        90.0,
+        120.0,
+        180.0,
+        240.0,
+        source_duration * 0.35,
+        source_duration * 0.50,
+        source_duration * 0.75,
+    ]
+    sample_times: list[float] = []
+    seen: set[int] = set()
+    for candidate in candidates:
+        sample_time = min(max(1.0, float(candidate)), last_sample)
+        bucket = int(round(sample_time * 10))
+        if bucket not in seen:
+            seen.add(bucket)
+            sample_times.append(sample_time)
+    return sample_times
+
+
+def _best_watermark_template_score(frame: Any, *, templates: list[Any], position: str, cv2: Any) -> tuple[float, dict[str, int]]:
+    if frame is None or not templates:
+        return 0.0, {"x": 0, "y": 0}
+    height, width = frame.shape[:2]
+    region_y0 = 0
+    region_y1 = height
+    normalized_position = position.lower()
+    if "top" in normalized_position or not normalized_position:
+        region_y1 = max(1, int(height * 0.35))
+    elif "bottom" in normalized_position:
+        region_y0 = max(0, int(height * 0.65))
+    region = frame[region_y0:region_y1, 0:width]
+    if region.size == 0:
+        return 0.0, {"x": 0, "y": 0}
+    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    best_score = 0.0
+    best_location = {"x": 0, "y": region_y0}
+    for template in templates:
+        template_height, template_width = template.shape[:2]
+        if template_width > gray.shape[1] or template_height > gray.shape[0]:
+            continue
+        result = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
+        _, max_score, _, max_location = cv2.minMaxLoc(result)
+        if float(max_score) > best_score:
+            best_score = float(max_score)
+            best_location = {"x": int(max_location[0]), "y": int(max_location[1] + region_y0)}
+    return best_score, best_location
 
 
 def _build_music_volume_expression(
@@ -2901,14 +3492,95 @@ async def _concat_prepared_bookends(
     return True
 
 
-def _watermark_overlay_position(position: str) -> tuple[str, str]:
+def _normalize_watermark_plan(watermark_plan: dict | None) -> dict | None:
+    if not isinstance(watermark_plan, dict):
+        return None
+    path = str(watermark_plan.get("path") or "").strip()
+    text = str(watermark_plan.get("text") or "").strip()
+    if not path and not text:
+        return None
+    normalized = dict(watermark_plan)
+    if path:
+        normalized["path"] = path
+    else:
+        normalized.pop("path", None)
+    if text:
+        normalized["text"] = text[:24]
+    opacity_default = 0.28 if path else 0.36
+    opacity_min = 0.16 if path else 0.08
+    opacity_max = 0.34 if path else 0.72
+    scale_default = 0.10 if path else 0.045
+    scale_min = 0.06 if path else 0.025
+    scale_max = 0.12 if path else 0.09
+    normalized["opacity"] = max(
+        opacity_min,
+        min(opacity_max, float(normalized.get("opacity", opacity_default) or opacity_default)),
+    )
+    normalized["scale"] = max(scale_min, min(scale_max, float(normalized.get("scale", scale_default) or scale_default)))
+    normalized["position"] = str(normalized.get("position") or "top_right").strip() or "top_right"
+    motion = str(normalized.get("motion") or normalized.get("watermark_motion") or "dynamic_float").strip().lower()
+    normalized["motion"] = motion
+    if "dynamic" not in normalized:
+        normalized["dynamic"] = motion not in {"static", "fixed", "off", "none"}
+    return normalized
+
+
+def _default_dynamic_text_watermark_plan(render_plan: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(render_plan, dict):
+        return None
+    raw_watermark = render_plan.get("watermark")
+    if isinstance(raw_watermark, dict) and raw_watermark.get("enabled") is False:
+        return None
+    creative_profile = render_plan.get("creative_profile") if isinstance(render_plan.get("creative_profile"), dict) else {}
+    content_profile = render_plan.get("content_profile") if isinstance(render_plan.get("content_profile"), dict) else {}
+    text = (
+        str(creative_profile.get("watermark_text") or "").strip()
+        or str(content_profile.get("creator_name") or "").strip()
+    )
+    if not text:
+        return None
+    return {
+        "text": text[:24],
+        "opacity": 0.5,
+        "scale": 0.052,
+        "position": "top_right",
+        "motion": "dynamic_float",
+        "dynamic": True,
+        "source": "default_text_watermark",
+    }
+
+
+def _watermark_overlay_position(position: str, *, dynamic: bool = False) -> tuple[str, str, str]:
+    if dynamic:
+        margin_x = "main_w*0.035"
+        margin_y = "main_h*0.035"
+        travel_x = f"(main_w-overlay_w-({margin_x})*2)"
+        return (
+            f"{margin_x}+{travel_x}*(0.5+0.5*sin(t*0.11))",
+            f"{margin_y}+main_h*0.018*(0.5+0.5*sin(t*0.23))",
+            "frame",
+        )
     mapping = {
-        "top_left": ("24", "24"),
-        "top_right": ("main_w-overlay_w-24", "24"),
-        "bottom_left": ("24", "main_h-overlay_h-24"),
-        "bottom_right": ("main_w-overlay_w-24", "main_h-overlay_h-24"),
+        "top_left": ("24", "24", "init"),
+        "top_right": ("main_w-overlay_w-24", "24", "init"),
+        "bottom_left": ("24", "main_h-overlay_h-24", "init"),
+        "bottom_right": ("main_w-overlay_w-24", "main_h-overlay_h-24", "init"),
     }
     return mapping.get(position, mapping["top_right"])
+
+
+def _watermark_text_position(*, dynamic: bool = False) -> tuple[str, str, str]:
+    if dynamic:
+        margin_x = "w*0.035"
+        margin_y = "h*0.035"
+        travel_x = f"(w-text_w-({margin_x})*2)"
+        return (
+            f"{margin_x}+{travel_x}*(0.5+0.5*sin(t*0.11))",
+            f"{margin_y}+h*0.018*(0.5+0.5*sin(t*0.23))",
+            "frame",
+        )
+    return ("w-text_w-24", "24", "init")
+
 
 
 async def _normalize_rendered_output(
@@ -3003,7 +3675,9 @@ async def _run_process(cmd: list[str], *, timeout: int) -> subprocess.CompletedP
                 process.kill()
             with suppress(Exception):
                 await process.communicate()
+            await close_asyncio_subprocess_transport(process)
             raise subprocess.TimeoutExpired(safe_cmd, timeout) from exc
+        await close_asyncio_subprocess_transport(process)
         return subprocess.CompletedProcess(
             safe_cmd,
             int(process.returncode or 0),
@@ -3045,6 +3719,15 @@ def _finalize_output_file(source_path: Path, target_path: Path) -> None:
         if target_path.exists():
             target_path.unlink()
         shutil.move(str(source_path), str(target_path))
+
+
+def _ffmpeg_map_label(label: str) -> str:
+    value = str(label or "").strip()
+    if ":" in value and not value.startswith("["):
+        return value
+    if value.startswith("[") and value.endswith("]"):
+        return value
+    return f"[{value}]"
 
 
 def _probe_video_stream(path: Path) -> dict[str, Any]:

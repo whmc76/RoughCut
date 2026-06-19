@@ -41,7 +41,7 @@ DEFAULT_KEYWORDS = [
 PROFILE_PRIORITY = ["content_profile_final", "content_profile", "content_profile_draft"]
 FOOD_SIGNALS = ["luckykiss", "kisspod", "kissport", "含片", "益生菌", "零糖", "口气", "薄荷糖"]
 GEAR_SIGNALS = ["工具钳", "战术笔", "弹夹", "装备", "莱德曼", "edc"]
-DELIVERABLE_STEPS = ["summary_review", "final_review", "render", "platform_package"]
+DELIVERABLE_STEPS = ["summary_review", "render"]
 
 
 @dataclass
@@ -257,8 +257,6 @@ def _load_historical_batch_render_diagnostics(
                     score += 2
             if isinstance(diagnostics.get("avatar_result"), dict) and diagnostics.get("avatar_result"):
                 score += 1
-            if isinstance(diagnostics.get("cover_result"), dict) and diagnostics.get("cover_result"):
-                score += 1
             mtime = path.stat().st_mtime
             if score > best_score or (score == best_score and mtime > best_mtime):
                 best_payload = dict(diagnostics)
@@ -322,18 +320,13 @@ def _merge_historical_render_context(
 
     if not merged_summary and diagnostics:
         avatar_result = diagnostics.get("avatar_result") if isinstance(diagnostics.get("avatar_result"), dict) else {}
-        cover_result = diagnostics.get("cover_result") if isinstance(diagnostics.get("cover_result"), dict) else {}
         if avatar_result:
             merged_summary["avatar_result"] = dict(avatar_result)
-        if cover_result:
-            merged_summary["cover_result"] = dict(cover_result)
 
     return merged_status, merged_error, merged_rows, merged_summary
 
 
 def summarize_render_outputs(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
-    from run_fullchain_batch import _normalize_cover_render_result_for_reporting
-
     render_artifact = next(
         (
             item
@@ -378,12 +371,7 @@ def summarize_render_outputs(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
             avatar_summary["error_metadata"] = dict(error_metadata)
         if avatar_summary:
             summary["avatar_result"] = avatar_summary
-    cover_result = runtime_payload.get("cover_result") if isinstance(runtime_payload.get("cover_result"), dict) and runtime_payload.get("cover_result") else payload.get("cover_result")
-    if isinstance(cover_result, dict) and cover_result:
-        cover_summary = _normalize_cover_render_result_for_reporting(cover_result)
-        if cover_summary:
-            summary["cover_result"] = cover_summary
-    for key in ("cover", "final_video", "project_path"):
+    for key in ("final_video", "project_path"):
         value = str(payload.get(key) or "").strip()
         if value:
             summary[key] = value

@@ -247,7 +247,8 @@ function Get-RoughCutRefreshServices {
         "orchestrator",
         "worker-media",
         "worker-llm",
-        "worker-agent"
+        "worker-agent",
+        "worker-publication"
     )
     if ($Mode -eq "full") {
         $services += "watcher"

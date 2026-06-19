@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from scripts import build_batch_output_scorecard as scorecard
 
 
@@ -145,6 +147,231 @@ def test_score_editing_legacy_render_plan_reads_nested_packaging_timeline_transi
     assert "transition_boundaries=3" in result["summary"]
 
 
+def test_score_viewing_experience_penalizes_viewer_facing_polish_issues() -> None:
+    result = scorecard._score_viewing_experience(
+        job={
+            "keep_ratio": 0.96,
+            "output_duration_sec": 240.0,
+            "output_path": "E:/missing.mp4",
+        },
+        render_outputs={
+            "packaged_mp4": "E:/missing.mp4",
+            "quality_checks": {
+                "subtitle_sync": {"status": "warning"},
+            },
+        },
+        subtitle_quality={
+            "warning_reasons": ["短碎句率偏高 2.00%"],
+            "blocking_reasons": [],
+            "metrics": {
+                "short_fragment_count": 6,
+                "generic_word_split_count": 1,
+                "filler_count": 1,
+                "low_signal_count": 0,
+            },
+        },
+        render_plan={
+            "subtitles": {"section_profiles": []},
+            "editing_accents": {
+                "effect_policy": {"preserve_color": False},
+                "emphasis_overlays": [{"text": "a"} for _ in range(12)],
+                "sound_effects": [{"start_time": 1.0} for _ in range(12)],
+                "transitions": {"boundary_indexes": list(range(12))},
+            },
+        },
+        variant_bundle={
+            "variants": {"plain": {"segments": []}},
+            "timeline_rules": {
+                "diagnostics": {
+                    "blocking_high_risk_cut_count": 0,
+                    "high_risk_cuts": [
+                        {"review_priority": "advisory", "blocking": False},
+                        {"review_priority": "advisory", "blocking": False},
+                    ],
+                    "cut_analysis_summary": {"accepted_cut_count": 0},
+                    "refine_decision_summary": {},
+                }
+            },
+        },
+        version_scores=[
+            {"name": "packaged", "score": 62.0, "status": "missing"},
+            {"name": "plain", "score": 96.0, "status": "done"},
+        ],
+        editing_risk_metrics={
+            "high_risk_cut_count": 2,
+            "blocking_high_risk_cuts": False,
+        },
+    )
+
+    assert result["score"] < 90.0
+    assert result["status"] == "fail"
+    assert [component["name"] for component in result["components"]] == [
+        "subtitle_readability",
+        "pacing_and_cut_flow",
+        "visual_polish_and_restraint",
+        "delivery_stability",
+    ]
+    assert any("短碎句" in reason for reason in result["components"][0]["reasons"])
+    assert any("保留比偏高" in reason for reason in result["components"][1]["reasons"])
+    assert any("包装效果未声明保色" in reason for reason in result["components"][2]["reasons"])
+    assert any("字幕同步 warning" in reason for reason in result["components"][3]["reasons"])
+
+
+def test_score_viewing_experience_passes_clean_watching_signals() -> None:
+    result = scorecard._score_viewing_experience(
+        job={"keep_ratio": 0.82, "output_duration_sec": 300.0, "output_path": __file__},
+        render_outputs={
+            "packaged_mp4": __file__,
+            "quality_checks": {
+                "subtitle_sync": {"status": "ok"},
+                "final_render_subtitle_asr_alignment": {
+                    "gate_pass": True,
+                    "audit": {"matched_count": 20, "event_count": 20},
+                },
+            },
+        },
+        subtitle_quality={
+            "warning_reasons": [],
+            "blocking_reasons": [],
+            "metrics": {
+                "short_fragment_count": 1,
+                "generic_word_split_count": 0,
+                "filler_count": 0,
+                "low_signal_count": 0,
+            },
+        },
+        render_plan={
+            "subtitles": {"section_profiles": [{"role": "hook"}, {"role": "body"}]},
+            "editing_accents": {
+                "effect_policy": {"preserve_color": True},
+                "emphasis_overlays": [{"text": "重点"}],
+                "sound_effects": [{"start_time": 1.0}],
+                "transitions": {"boundary_indexes": [1]},
+            },
+        },
+        variant_bundle={
+            "variants": {"plain": {"segments": []}},
+            "timeline_rules": {
+                "diagnostics": {
+                    "blocking_high_risk_cut_count": 0,
+                    "high_risk_cuts": [],
+                    "cut_analysis_summary": {"accepted_cut_count": 4},
+                    "refine_decision_summary": {},
+                }
+            },
+        },
+        version_scores=[{"name": "packaged", "score": 100.0, "status": "done"}],
+        editing_risk_metrics={"high_risk_cut_count": 0, "blocking_high_risk_cuts": False},
+    )
+
+    assert result["score"] >= 95.0
+    assert result["status"] == "pass"
+    assert any("字幕读感干净" in reason for reason in result["components"][0]["reasons"])
+    assert any("最终成片音频 Qwen3" in reason for reason in result["components"][0]["reasons"])
+
+
+def test_score_viewing_experience_blocks_perfect_score_without_final_audio_asr_audit() -> None:
+    result = scorecard._score_viewing_experience(
+        job={"keep_ratio": 0.82, "output_duration_sec": 300.0, "output_path": __file__},
+        render_outputs={
+            "packaged_mp4": __file__,
+            "quality_checks": {"subtitle_sync": {"status": "ok"}},
+        },
+        subtitle_quality={
+            "warning_reasons": [],
+            "blocking_reasons": [],
+            "metrics": {
+                "short_fragment_count": 0,
+                "generic_word_split_count": 0,
+                "filler_count": 0,
+                "low_signal_count": 0,
+            },
+        },
+        render_plan={
+            "subtitles": {"section_profiles": [{"role": "hook"}]},
+            "editing_accents": {"effect_policy": {"preserve_color": True}},
+        },
+        variant_bundle=None,
+        version_scores=[{"name": "packaged", "score": 100.0, "status": "done"}],
+        editing_risk_metrics={"high_risk_cut_count": 0, "blocking_high_risk_cuts": False},
+    )
+
+    subtitle_component = next(item for item in result["components"] if item["name"] == "subtitle_readability")
+    assert subtitle_component["score"] <= 58.0
+    assert any("缺少最终成片音频 Qwen3" in reason for reason in subtitle_component["reasons"])
+
+
+def test_score_viewing_experience_penalizes_failed_final_audio_asr_audit() -> None:
+    result = scorecard._score_viewing_experience(
+        job={"keep_ratio": 0.82, "output_duration_sec": 300.0, "output_path": __file__},
+        render_outputs={
+            "packaged_mp4": __file__,
+            "quality_checks": {
+                "subtitle_sync": {"status": "ok"},
+                "final_render_subtitle_asr_alignment": {
+                    "gate_pass": False,
+                    "audit": {
+                        "event_count": 20,
+                        "matched_count": 14,
+                        "unmatched_count": 6,
+                        "bad_drift_count": 9,
+                        "avg_abs_start_drift_sec": 2.4,
+                        "avg_abs_end_drift_sec": 1.8,
+                    },
+                },
+            },
+        },
+        subtitle_quality={"warning_reasons": [], "blocking_reasons": [], "metrics": {}},
+        render_plan={
+            "subtitles": {"section_profiles": [{"role": "hook"}]},
+            "editing_accents": {"effect_policy": {"preserve_color": True}},
+        },
+        variant_bundle=None,
+        version_scores=[{"name": "packaged", "score": 100.0, "status": "done"}],
+        editing_risk_metrics={"high_risk_cut_count": 0, "blocking_high_risk_cuts": False},
+    )
+
+    subtitle_component = next(item for item in result["components"] if item["name"] == "subtitle_readability")
+    delivery_component = next(item for item in result["components"] if item["name"] == "delivery_stability")
+    assert subtitle_component["score"] <= 44.0
+    assert any("最终成片音频 Qwen3 字幕校准失败" in reason for reason in subtitle_component["reasons"])
+    assert any("最终成片音频 Qwen3 字幕审计未通过" in reason for reason in delivery_component["reasons"])
+
+
+def test_score_viewing_experience_penalizes_variant_subtitle_timeline_validation() -> None:
+    result = scorecard._score_viewing_experience(
+        job={"keep_ratio": 0.82, "output_duration_sec": 300.0, "output_path": __file__},
+        render_outputs={
+            "packaged_mp4": __file__,
+            "quality_checks": {"subtitle_sync": {"status": "ok"}},
+        },
+        subtitle_quality={
+            "warning_reasons": [],
+            "blocking_reasons": [],
+            "metrics": {
+                "short_fragment_count": 0,
+                "generic_word_split_count": 0,
+                "filler_count": 0,
+                "low_signal_count": 0,
+            },
+        },
+        render_plan={"subtitles": {"section_profiles": [{"role": "body"}]}, "editing_accents": {"effect_policy": {"preserve_color": True}}},
+        variant_bundle={
+            "validation": {
+                "status": "warning",
+                "issues": ["packaged: subtitle events are not monotonic at index 14"],
+            },
+            "variants": {"packaged": {"segments": []}},
+        },
+        version_scores=[{"name": "packaged", "score": 100.0, "status": "done"}],
+        editing_risk_metrics={"high_risk_cut_count": 0, "blocking_high_risk_cuts": False},
+    )
+
+    subtitle_component = next(item for item in result["components"] if item["name"] == "subtitle_readability")
+    assert subtitle_component["score"] < 90.0
+    assert any("字幕时间线校验异常" in reason for reason in subtitle_component["reasons"])
+
+
 def test_score_avatar_prefers_runtime_render_diagnostics_when_render_outputs_missing_avatar_result() -> None:
     result = scorecard._score_avatar(
         {
@@ -170,6 +397,38 @@ def test_score_avatar_prefers_runtime_render_diagnostics_when_render_outputs_mis
         "grade": "E",
         "status": "degraded",
         "summary": "avatar_result=degraded:avatar_full_track_call_timeout(call_timeout)；集成模式 picture_in_picture；render_execution=deferred_to_render；未生成独立口播分段，当前为全轨透传/弱插入模式",
+        "provider": "heygem",
+        "voice_provider": "runninghub",
+    }
+
+
+def test_score_avatar_treats_not_configured_skip_as_not_applicable() -> None:
+    result = scorecard._score_avatar(
+        {
+            "integration_mode": "",
+            "provider": "heygem",
+            "voice_provider": "runninghub",
+            "render_execution": {
+                "status": "skipped",
+                "reason": "creator_avatar_binding_missing",
+            },
+        },
+        {},
+        {
+            "avatar_result": {
+                "status": "skipped",
+                "reason": "creator_avatar_binding_missing",
+                "reason_category": "not_configured",
+                "detail": "未配置可用数字人 presenter，跳过数字人渲染；普通成片不受影响。",
+            }
+        },
+    )
+
+    assert result == {
+        "score": None,
+        "grade": "N/A",
+        "status": "not_configured",
+        "summary": "avatar_result=skipped:creator_avatar_binding_missing(not_configured)",
         "provider": "heygem",
         "voice_provider": "runninghub",
     }
@@ -387,7 +646,7 @@ def test_editing_risk_metrics_falls_back_to_legacy_editorial_and_cut_analysis() 
         "llm_reviewed": True,
         "llm_error": "",
         "llm_provider_degraded": False,
-        "blocking_high_risk_cuts": True,
+        "blocking_high_risk_cuts": False,
         "blocking_manual_confirm_heavy": False,
     }
 
@@ -484,6 +743,49 @@ def test_build_version_scores_reads_current_render_quality_check_shape() -> None
     assert "字幕同步质检存在 warning" in result[3]["reasons"]
 
 
+def test_variant_score_penalizes_severe_subtitle_timing_warnings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(scorecard, "_file_exists", lambda _path: True)
+
+    result = scorecard._summarize_variant_score(
+        "packaged",
+        "E:/packaged.mp4",
+        {
+            "status": "warning",
+            "warning_codes": [
+                "subtitle_burst_density_detected",
+                "subtitle_short_flash_detected",
+            ],
+        },
+    )
+
+    assert result["score"] <= 62.0
+    assert "warning_codes=subtitle_burst_density_detected, subtitle_short_flash_detected" in result["reasons"]
+
+
+def test_viewing_experience_penalizes_subtitle_timing_structure_warnings() -> None:
+    result = scorecard._score_viewing_experience(
+        job={"output_duration_sec": 60.0, "output_path": "E:/packaged.mp4", "keep_ratio": 0.7},
+        render_outputs={
+            "packaged_mp4": "E:/packaged.mp4",
+            "quality_checks": {
+                "subtitle_sync": {
+                    "status": "warning",
+                    "warning_codes": ["subtitle_burst_density_detected"],
+                }
+            },
+        },
+        subtitle_quality={"metrics": {}, "warning_reasons": [], "blocking_reasons": []},
+        render_plan={"subtitles": {"section_profiles": [{"role": "detail"}]}},
+        variant_bundle=None,
+        version_scores=[],
+        editing_risk_metrics={},
+    )
+
+    subtitle_component = next(item for item in result["components"] if item["name"] == "subtitle_readability")
+    assert subtitle_component["score"] < 85.0
+    assert any("字幕时间结构异常" in reason for reason in subtitle_component["reasons"])
+
+
 def test_live_readiness_summary_collects_failed_checks() -> None:
     result = scorecard._live_readiness_summary(
         {
@@ -534,6 +836,7 @@ def test_render_markdown_includes_aggregate_and_job_level_editing_risk_metrics()
                     "source_name": "demo.mp4",
                     "output_path": "E:/demo_out.mp4",
                     "overall_video_quality": {"score": 90.0, "grade": "A", "summary": "ok"},
+                    "viewing_experience": {"score": 82.0, "grade": "B", "summary": "观感偏拖"},
                     "subtitle_quality": {"score": 88.0, "grade": "B", "summary": "ok"},
                     "multi_platform_package": {"score": 90.0, "grade": "A", "summary": "ok"},
                     "avatar": {"score": 90.0, "grade": "A", "summary": "ok"},
@@ -567,6 +870,7 @@ def test_render_markdown_includes_aggregate_and_job_level_editing_risk_metrics()
     assert "- gate_passed: false" in content
     assert "- status: blocked" in content
     assert "- failed_checks: required_checks_contract" in content
+    assert "- viewing_experience: 82.0 (B) | 观感偏拖" in content
     assert "- high_risk_cut_count: 3" in content
     assert "- blocking_manual_confirm_job_count: 1" in content
     assert "- auto_apply_candidate_count" not in content

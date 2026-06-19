@@ -72,11 +72,18 @@ INTENT_TITLE_TEMPLATES: dict[str, tuple[str, ...]] = {
         "{topic_subject}开箱上手，先看版本取舍",
         "{topic_subject}这次买 Ultra 还是 Pro 更合理",
     ),
+    "parenting_animation_explainer": (
+        "{topic_subject}，先别急着纠正",
+        "{topic_subject}背后藏着什么需求",
+        "看懂孩子的“我也要”",
+        "{topic_subject}不是坏习惯",
+        "珍妮斯育儿：{focus_0}",
+    ),
     "generic": (
         "{topic_subject}这期重点看什么",
-        "{topic_subject}开箱先看细节",
-        "{topic_subject}这次到底值不值",
-        "{topic_subject}上手体验记录",
+        "{topic_subject}关键画面整理",
+        "{topic_subject}这次讲清楚",
+        "{topic_subject}重点信息记录",
         "{topic_subject}这期主要讲什么",
     ),
 }
@@ -164,9 +171,9 @@ def build_constraint_only_title_candidates(*, topic_subject: str, focus_points: 
     if len(focus) > 2:
         candidates.append(f"{subject}，先看{focus[0]}和{focus[2]}")
     if not candidates:
-        candidates.append(f"{subject}开箱与上手记录")
-    candidates.append(f"{subject}开箱先看细节")
-    candidates.append(f"{subject}上手体验记录")
+        candidates.append(f"{subject}重点信息记录")
+    candidates.append(f"{subject}关键画面整理")
+    candidates.append(f"{subject}这期重点看什么")
     deduped: list[str] = []
     for candidate in candidates:
         if candidate and candidate not in deduped:

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import func, select
@@ -49,6 +51,7 @@ from roughcut.db.models import (
     VisualPlanVersion,
 )
 from roughcut.production_readiness import creator_refine_output_fallback_reasons
+from roughcut.host.codex_proxy import resolve_codex_proxy_sibling_url, resolve_codex_proxy_token
 from roughcut.providers.factory import get_reasoning_provider
 from roughcut.providers.reasoning.base import Message
 from roughcut.publication import (
@@ -56,7 +59,14 @@ from roughcut.publication import (
     normalize_publication_platform,
     platform_label,
 )
-from roughcut.publication_social_auto_upload import SOCIAL_AUTO_UPLOAD_ADAPTER, supports_social_auto_upload_platform
+from roughcut.publication_social_auto_upload import (
+    SOCIAL_AUTO_UPLOAD_ADAPTER,
+    build_social_auto_upload_check_command,
+    build_social_auto_upload_dashboard_command,
+    build_social_auto_upload_login_command,
+    run_social_auto_upload_command,
+    supports_social_auto_upload_platform,
+)
 from roughcut.db.session import get_session
 
 router = APIRouter(prefix="/creator-cards", tags=["creator-assets"])
@@ -829,10 +839,7 @@ def _normalize_publication_browser_or_400(browser: str | None) -> str:
     return normalized
 
 
-def _social_auto_upload_account_name(creator: CreatorCard, browser: str, explicit: str | None = None) -> str:
-    value = str(explicit or "").strip()
-    if value:
-        return value
+def _default_social_auto_upload_account_name(creator: CreatorCard, browser: str) -> str:
     browser_label = {
         "chrome": "Chrome",
         "edge": "Edge",
@@ -841,18 +848,55 @@ def _social_auto_upload_account_name(creator: CreatorCard, browser: str, explici
     return f"{creator.name.strip() or '发布账号'} · {browser_label}"
 
 
+def _social_auto_upload_account_key(*, creator: CreatorCard, platform: str, browser: str) -> str:
+    creator_token = str(creator.id).replace("-", "")[:12]
+    return f"creator-{creator_token}-{platform}-{browser}"
+
+
+def _account_name_from_social_auto_upload_credential_ref(value: Any) -> str:
+    text = str(value or "").strip()
+    prefix = "social-auto-upload:"
+    if not text.startswith(prefix):
+        return ""
+    payload = text[len(prefix):].strip()
+    if not payload:
+        return ""
+    if ":" not in payload:
+        return payload
+    account_name, _platform = payload.rsplit(":", 1)
+    return account_name.strip()
+
+
+def _social_auto_upload_binding_account_name(
+    *,
+    creator: CreatorCard,
+    binding: CreatorPlatformBinding,
+    platform: str,
+    browser: str,
+) -> str:
+    payload = binding.binding_payload_json if isinstance(binding.binding_payload_json, dict) else {}
+    account_name = str(payload.get("account_name") or "").strip()
+    if account_name:
+        return account_name
+    account_name = _account_name_from_social_auto_upload_credential_ref(binding.credential_ref)
+    if account_name:
+        return account_name
+    return _social_auto_upload_account_key(creator=creator, platform=platform, browser=browser)
+
+
 def _social_auto_upload_binding_payload(
     *,
     creator: CreatorCard,
     platform: str,
     browser: str,
     account_name: str,
+    account_label: str,
 ) -> dict[str, Any]:
     browser_profile_id = f"browser-agent:{browser}:{creator.id}:{platform}"
     return {
         "adapter": SOCIAL_AUTO_UPLOAD_ADAPTER,
         "account_name": account_name,
-        "account_label": account_name,
+        "account_label": account_label,
         "platform_label": platform_label(platform),
         "browser": browser,
         "browser_profile_id": browser_profile_id,
@@ -862,10 +906,185 @@ def _social_auto_upload_binding_payload(
             "source": "creator_publication_management",
         },
         "enabled": True,
-        "status": "login_reference_bound",
+        "status": "login_confirmed",
         "binding_source": "social_auto_upload_login_binding",
-        "notes": "绑定 social-auto-upload 登录账号名；不保存平台密码、Cookie 或浏览器凭证。",
+        "notes": "用户已完成 social-auto-upload 登录并确认绑定账号标签；不保存平台密码、Cookie 或浏览器凭证。",
     }
+
+
+def _social_auto_upload_settings_or_400() -> tuple[str, str, int, bool]:
+    settings = get_settings()
+    root = str(getattr(settings, "publication_social_auto_upload_root", "") or "").strip()
+    if not root:
+        raise HTTPException(status_code=400, detail="未配置 publication_social_auto_upload_root，无法打开平台登录窗口。")
+    root_path = Path(root).expanduser()
+    python_executable = str(getattr(settings, "publication_social_auto_upload_python", "") or "python").strip() or "python"
+    timeout_sec = int(getattr(settings, "publication_social_auto_upload_timeout_sec", 1800) or 1800)
+    return root, python_executable, timeout_sec, bool(root_path.exists() and root_path.is_dir())
+
+
+def _spawn_social_auto_upload_login(command: list[str], *, root: str) -> int:
+    popen_kwargs: dict[str, Any] = {
+        "cwd": root,
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+    }
+    if hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    process = subprocess.Popen(command, **popen_kwargs)
+    return int(process.pid)
+
+
+async def _start_social_auto_upload_login_via_host_bridge(
+    *,
+    root: str,
+    python_executable: str,
+    platform: str,
+    account_name: str,
+) -> dict[str, Any] | None:
+    return await _social_auto_upload_host_bridge_request(
+        "/v1/host/social-auto-upload-login",
+        {
+            "root": root,
+            "python_executable": python_executable,
+            "platform": platform,
+            "account_name": account_name,
+        },
+        timeout_sec=15,
+    )
+
+
+async def _open_social_auto_upload_dashboard_via_host_bridge(
+    *,
+    root: str,
+    python_executable: str,
+    platform: str,
+    account_name: str,
+) -> dict[str, Any] | None:
+    return await _social_auto_upload_host_bridge_request(
+        "/v1/host/social-auto-upload-dashboard",
+        {
+            "root": root,
+            "python_executable": python_executable,
+            "platform": platform,
+            "account_name": account_name,
+        },
+        timeout_sec=15,
+    )
+
+
+async def _check_social_auto_upload_login_via_host_bridge(
+    *,
+    root: str,
+    python_executable: str,
+    platform: str,
+    account_name: str,
+    timeout_sec: int,
+) -> dict[str, Any] | None:
+    return await _social_auto_upload_host_bridge_request(
+        "/v1/host/social-auto-upload-check",
+        {
+            "root": root,
+            "python_executable": python_executable,
+            "platform": platform,
+            "account_name": account_name,
+            "timeout_sec": min(max(5, int(timeout_sec or 30)), 120),
+        },
+        timeout_sec=min(max(10, int(timeout_sec or 30) + 5), 130),
+    )
+
+
+async def _run_social_auto_upload_login_check(
+    *,
+    root: str,
+    python_executable: str,
+    platform: str,
+    account_name: str,
+    timeout_sec: int,
+    root_exists: bool,
+) -> dict[str, Any]:
+    command = build_social_auto_upload_check_command(
+        root=root,
+        python_executable=python_executable,
+        platform=platform,
+        account_name=account_name,
+    )
+    check_source = "api_runtime"
+    warning = ""
+    returncode: int | None = None
+    stdout = ""
+    stderr = ""
+    status_value = "login_invalid"
+    if root_exists:
+        result = await run_social_auto_upload_command(
+            command,
+            root=root,
+            timeout_sec=min(max(5, int(timeout_sec or 30)), 120),
+        )
+        returncode = result.returncode
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+        status_value = "login_valid" if result.ok else "login_invalid"
+    else:
+        host_result = await _check_social_auto_upload_login_via_host_bridge(
+            root=root,
+            python_executable=python_executable,
+            platform=platform,
+            account_name=account_name,
+            timeout_sec=min(max(5, int(timeout_sec or 30)), 120),
+        )
+        if host_result:
+            status_value = str(host_result.get("status") or "login_invalid")
+            check_source = str(host_result.get("check_source") or "codex_host_bridge")
+            raw_returncode = host_result.get("returncode")
+            try:
+                returncode = int(raw_returncode) if raw_returncode not in {None, ""} else None
+            except (TypeError, ValueError):
+                returncode = None
+            stdout = str(host_result.get("stdout") or "").strip()
+            stderr = str(host_result.get("stderr") or "").strip()
+            command = [str(item) for item in host_result.get("command") or command]
+        else:
+            status_value = "monitor_unavailable"
+            check_source = "unavailable"
+            warning = f"当前 API 运行环境不可访问 social-auto-upload 根目录，且宿主机桥未返回登录状态：{root}"
+    return {
+        "status": status_value,
+        "command": command,
+        "check_source": check_source,
+        "returncode": returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "warning": warning,
+    }
+
+
+async def _social_auto_upload_host_bridge_request(
+    path: str,
+    payload: dict[str, Any],
+    *,
+    timeout_sec: int,
+) -> dict[str, Any] | None:
+    url = resolve_codex_proxy_sibling_url(path)
+    token = resolve_codex_proxy_token()
+    if not url or not token:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=float(max(3, timeout_sec))) as client:
+            response = await client.post(
+                url,
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            response.raise_for_status()
+            result = response.json()
+    except httpx.HTTPError:
+        return None
+    return result if isinstance(result, dict) else None
 
 
 async def _get_creator_or_404(session: AsyncSession, creator_id: uuid.UUID) -> CreatorCard:
@@ -1513,8 +1732,30 @@ async def bind_social_auto_upload_login(
     if not supports_social_auto_upload_platform(platform):
         raise HTTPException(status_code=400, detail=f"{platform_label(platform)} 暂不支持 social-auto-upload 登录绑定。")
     browser = _normalize_publication_browser_or_400(body.browser)
-    account_name = _social_auto_upload_account_name(creator, browser, body.account_name)
+    account_label = str(body.account_name or "").strip()
+    if not account_label:
+        raise HTTPException(status_code=400, detail="绑定平台前必须填写明确的账号标签，用于区分同平台多账号。")
+    if not bool(body.login_confirmed):
+        raise HTTPException(status_code=409, detail="必须先完成扫码或手动登录，并确认当前平台账号后才能保存绑定。")
     profile = await _get_or_create_publication_profile(session, creator)
+    account_name = _social_auto_upload_account_key(creator=creator, platform=platform, browser=browser)
+    root, python_executable, timeout_sec, root_exists = _social_auto_upload_settings_or_400()
+    check_result = await _run_social_auto_upload_login_check(
+        root=root,
+        python_executable=python_executable,
+        platform=platform,
+        account_name=account_name,
+        timeout_sec=timeout_sec,
+        root_exists=root_exists,
+    )
+    if str(check_result.get("status") or "") != "login_valid":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{platform_label(platform)} 登录态无效，不能保存为已绑定账号。"
+                f" check={check_result.get('status')} stdout={check_result.get('stdout') or ''}"
+            ),
+        )
     result = await session.execute(
         select(CreatorPlatformBinding).where(
             CreatorPlatformBinding.publication_profile_id == profile.id,
@@ -1534,9 +1775,267 @@ async def bind_social_auto_upload_login(
         platform=platform,
         browser=browser,
         account_name=account_name,
+        account_label=account_label,
     )
     await session.commit()
     return await _get_or_create_publication_profile(session, creator)
+
+
+@router.post("/{creator_id}/platform-bindings/social-auto-upload/login")
+async def start_social_auto_upload_login(
+    creator_id: uuid.UUID,
+    body: CreatorSocialAutoUploadBindingIn,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    creator = await _get_creator_or_404(session, creator_id)
+    platform = _normalize_creator_platform_or_400(body.platform)
+    if not supports_social_auto_upload_platform(platform):
+        raise HTTPException(status_code=400, detail=f"{platform_label(platform)} 暂不支持 social-auto-upload 登录绑定。")
+    browser = _normalize_publication_browser_or_400(body.browser)
+    account_label = str(body.account_name or "").strip()
+    if not account_label:
+        raise HTTPException(status_code=400, detail="打开登录窗口前必须填写明确的账号标签，用于区分同平台多账号。")
+    account_name = _social_auto_upload_account_key(creator=creator, platform=platform, browser=browser)
+    root, python_executable, timeout_sec, root_exists = _social_auto_upload_settings_or_400()
+    command = build_social_auto_upload_login_command(
+        python_executable=python_executable,
+        platform=platform,
+        account_name=account_name,
+        headless=False,
+    )
+    status_value = "login_started"
+    pid: int | None = None
+    warning = ""
+    launch_source = "api_runtime"
+    if root_exists:
+        try:
+            pid = _spawn_social_auto_upload_login(command, root=root)
+        except OSError as exc:
+            status_value = "manual_login_required"
+            warning = f"当前 API 运行环境无法直接打开登录窗口：{exc}"
+    else:
+        host_result = await _start_social_auto_upload_login_via_host_bridge(
+            root=root,
+            python_executable=python_executable,
+            platform=platform,
+            account_name=account_name,
+        )
+        if host_result and str(host_result.get("status") or "") == "login_started":
+            status_value = "login_started"
+            launch_source = str(host_result.get("launch_source") or "codex_host_bridge")
+            pid = int(host_result.get("pid") or 0) or None
+            command = [str(item) for item in host_result.get("command") or command]
+        else:
+            status_value = "manual_login_required"
+            launch_source = "manual"
+            warning = f"当前 API 运行环境不可访问 social-auto-upload 根目录：{root}"
+    return {
+        "status": status_value,
+        "platform": platform,
+        "platform_label": platform_label(platform),
+        "browser": browser,
+        "account_name": account_name,
+        "account_label": account_label,
+        "default_account_name": _default_social_auto_upload_account_name(creator, browser),
+        "pid": pid,
+        "command": command,
+        "root": root,
+        "root_exists_in_api_runtime": root_exists,
+        "launch_source": launch_source,
+        "warning": warning,
+        "timeout_sec": timeout_sec,
+        "next_step": "扫码或手动登录完成后，RoughCut 会自动检测登录态并保存绑定；也可以手动点击确认。",
+    }
+
+
+@router.post("/{creator_id}/platform-bindings/social-auto-upload/login-status")
+async def check_social_auto_upload_login_status(
+    creator_id: uuid.UUID,
+    body: CreatorSocialAutoUploadBindingIn,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    creator = await _get_creator_or_404(session, creator_id)
+    platform = _normalize_creator_platform_or_400(body.platform)
+    if not supports_social_auto_upload_platform(platform):
+        raise HTTPException(status_code=400, detail=f"{platform_label(platform)} 暂不支持 social-auto-upload 登录绑定。")
+    browser = _normalize_publication_browser_or_400(body.browser)
+    account_label = str(body.account_name or "").strip()
+    if not account_label:
+        raise HTTPException(status_code=400, detail="检查登录状态前必须填写明确的账号标签。")
+    account_name = _social_auto_upload_account_key(creator=creator, platform=platform, browser=browser)
+    root, python_executable, timeout_sec, root_exists = _social_auto_upload_settings_or_400()
+    command = build_social_auto_upload_check_command(
+        root=root,
+        python_executable=python_executable,
+        platform=platform,
+        account_name=account_name,
+    )
+    check_source = "api_runtime"
+    warning = ""
+    returncode: int | None = None
+    stdout = ""
+    stderr = ""
+    status_value = "login_invalid"
+    if root_exists:
+        result = await run_social_auto_upload_command(
+            command,
+            root=root,
+            timeout_sec=min(max(5, int(timeout_sec or 30)), 120),
+        )
+        returncode = result.returncode
+        stdout = result.stdout.strip()
+        stderr = result.stderr.strip()
+        status_value = "login_valid" if result.ok else "login_invalid"
+    else:
+        host_result = await _check_social_auto_upload_login_via_host_bridge(
+            root=root,
+            python_executable=python_executable,
+            platform=platform,
+            account_name=account_name,
+            timeout_sec=min(max(5, int(timeout_sec or 30)), 120),
+        )
+        if host_result:
+            status_value = str(host_result.get("status") or "login_invalid")
+            check_source = str(host_result.get("check_source") or "codex_host_bridge")
+            raw_returncode = host_result.get("returncode")
+            try:
+                returncode = int(raw_returncode) if raw_returncode not in {None, ""} else None
+            except (TypeError, ValueError):
+                returncode = None
+            stdout = str(host_result.get("stdout") or "").strip()
+            stderr = str(host_result.get("stderr") or "").strip()
+            command = [str(item) for item in host_result.get("command") or command]
+        else:
+            status_value = "monitor_unavailable"
+            check_source = "unavailable"
+            warning = f"当前 API 运行环境不可访问 social-auto-upload 根目录，且宿主机桥未返回登录状态：{root}"
+    return {
+        "status": status_value,
+        "platform": platform,
+        "platform_label": platform_label(platform),
+        "browser": browser,
+        "account_name": account_name,
+        "account_label": account_label,
+        "default_account_name": _default_social_auto_upload_account_name(creator, browser),
+        "command": command,
+        "root": root,
+        "root_exists_in_api_runtime": root_exists,
+        "check_source": check_source,
+        "returncode": returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "warning": warning,
+    }
+
+
+@router.post("/{creator_id}/platform-bindings/social-auto-upload/dashboard")
+async def open_social_auto_upload_dashboard(
+    creator_id: uuid.UUID,
+    body: CreatorSocialAutoUploadBindingIn,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    creator = await _get_creator_or_404(session, creator_id)
+    platform = _normalize_creator_platform_or_400(body.platform)
+    if not supports_social_auto_upload_platform(platform):
+        raise HTTPException(status_code=400, detail=f"{platform_label(platform)} 暂不支持打开 social-auto-upload 后台。")
+    browser = _normalize_publication_browser_or_400(body.browser)
+    profile = await _get_or_create_publication_profile(session, creator)
+    result = await session.execute(
+        select(CreatorPlatformBinding).where(
+            CreatorPlatformBinding.publication_profile_id == profile.id,
+            CreatorPlatformBinding.platform == platform,
+        )
+    )
+    binding = result.scalar_one_or_none()
+    if binding is None:
+        raise HTTPException(status_code=404, detail=f"{platform_label(platform)} 尚未绑定，不能打开后台确认账号。")
+    binding_payload = binding.binding_payload_json if isinstance(binding.binding_payload_json, dict) else {}
+    if str(binding_payload.get("status") or "").strip() != "login_confirmed":
+        raise HTTPException(status_code=409, detail=f"{platform_label(platform)} 绑定尚未确认，请先完成扫码登录。")
+    account_name = _social_auto_upload_binding_account_name(
+        creator=creator,
+        binding=binding,
+        platform=platform,
+        browser=browser,
+    )
+    account_label = str(binding_payload.get("account_label") or binding_payload.get("account_name") or account_name).strip()
+    root, python_executable, timeout_sec, root_exists = _social_auto_upload_settings_or_400()
+    check_result = await _run_social_auto_upload_login_check(
+        root=root,
+        python_executable=python_executable,
+        platform=platform,
+        account_name=account_name,
+        timeout_sec=timeout_sec,
+        root_exists=root_exists,
+    )
+    if str(check_result.get("status") or "") != "login_valid":
+        next_payload = dict(binding_payload)
+        next_payload["status"] = "login_invalid"
+        next_payload["last_login_check"] = {
+            "status": check_result.get("status"),
+            "check_source": check_result.get("check_source"),
+            "returncode": check_result.get("returncode"),
+            "stdout": check_result.get("stdout"),
+            "stderr": check_result.get("stderr"),
+        }
+        binding.binding_payload_json = next_payload
+        await session.commit()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{platform_label(platform)} 登录态无效，已降级为需重新登录确认。"
+                f" check={check_result.get('status')} stdout={check_result.get('stdout') or ''}"
+            ),
+        )
+    command = build_social_auto_upload_dashboard_command(
+        python_executable=python_executable,
+        platform=platform,
+        account_name=account_name,
+        headless=False,
+    )
+    status_value = "dashboard_started"
+    pid: int | None = None
+    warning = ""
+    launch_source = "api_runtime"
+    if root_exists:
+        try:
+            pid = _spawn_social_auto_upload_login(command, root=root)
+        except OSError as exc:
+            status_value = "manual_open_required"
+            warning = f"当前 API 运行环境无法直接打开后台窗口：{exc}"
+    else:
+        host_result = await _open_social_auto_upload_dashboard_via_host_bridge(
+            root=root,
+            python_executable=python_executable,
+            platform=platform,
+            account_name=account_name,
+        )
+        if host_result and str(host_result.get("status") or "") == "dashboard_started":
+            status_value = "dashboard_started"
+            launch_source = str(host_result.get("launch_source") or "codex_host_bridge")
+            pid = int(host_result.get("pid") or 0) or None
+            command = [str(item) for item in host_result.get("command") or command]
+        else:
+            status_value = "manual_open_required"
+            launch_source = "manual"
+            warning = f"当前 API 运行环境不可访问 social-auto-upload 根目录：{root}"
+    return {
+        "status": status_value,
+        "platform": platform,
+        "platform_label": platform_label(platform),
+        "browser": browser,
+        "account_name": account_name,
+        "account_label": account_label,
+        "credential_ref": binding.credential_ref,
+        "pid": pid,
+        "command": command,
+        "root": root,
+        "root_exists_in_api_runtime": root_exists,
+        "launch_source": launch_source,
+        "warning": warning,
+        "timeout_sec": timeout_sec,
+        "next_step": "后台窗口打开后，请人工确认页面头像、昵称和账号归属是否正确。",
+    }
 
 
 @router.delete("/{creator_id}/platform-bindings/{platform}", response_model=CreatorPublicationProfileOut)

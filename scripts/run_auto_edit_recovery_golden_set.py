@@ -1682,19 +1682,16 @@ def summarize_manual_editor_apply_semantics(case_rows: list[dict[str, Any]]) -> 
 
 def summarize_render_diagnostics(reports: list[JobRunReport]) -> dict[str, Any]:
     failed_render_job_ids: list[str] = []
-    cover_degraded_job_ids: list[str] = []
     avatar_degraded_job_ids: list[str] = []
     failed_render_reason_counts: dict[str, int] = {}
-    cover_degraded_reason_counts: dict[str, int] = {}
     avatar_degraded_reason_counts: dict[str, int] = {}
     avatar_degraded_reason_category_counts: dict[str, int] = {}
     evaluated_job_count = 0
     for report in reports:
         diagnostics = report.render_diagnostics if isinstance(report.render_diagnostics, dict) else {}
         render_step = diagnostics.get("render_step") if isinstance(diagnostics.get("render_step"), dict) else {}
-        cover_result = diagnostics.get("cover_result") if isinstance(diagnostics.get("cover_result"), dict) else {}
         avatar_result = diagnostics.get("avatar_result") if isinstance(diagnostics.get("avatar_result"), dict) else {}
-        if not render_step and not cover_result and not avatar_result:
+        if not render_step and not avatar_result:
             continue
         evaluated_job_count += 1
         identifier = str(report.job_id or report.source_name or "").strip()
@@ -1703,11 +1700,6 @@ def summarize_render_diagnostics(reports: list[JobRunReport]) -> dict[str, Any]:
             reason = str(render_step.get("reason") or "").strip()
             if reason:
                 failed_render_reason_counts[reason] = failed_render_reason_counts.get(reason, 0) + 1
-        if str(cover_result.get("status") or "").strip().lower() == "degraded" and identifier:
-            cover_degraded_job_ids.append(identifier)
-            reason = str(cover_result.get("reason") or "").strip()
-            if reason:
-                cover_degraded_reason_counts[reason] = cover_degraded_reason_counts.get(reason, 0) + 1
         if str(avatar_result.get("status") or "").strip().lower() == "degraded" and identifier:
             avatar_degraded_job_ids.append(identifier)
             reason = str(avatar_result.get("reason") or "").strip()
@@ -1723,9 +1715,9 @@ def summarize_render_diagnostics(reports: list[JobRunReport]) -> dict[str, Any]:
         "failed_render_job_count": len(failed_render_job_ids),
         "failed_render_job_ids": failed_render_job_ids,
         "failed_render_reasons": failed_render_reason_counts,
-        "cover_degraded_job_count": len(cover_degraded_job_ids),
-        "cover_degraded_job_ids": cover_degraded_job_ids,
-        "cover_degraded_reasons": cover_degraded_reason_counts,
+        "cover_degraded_job_count": 0,
+        "cover_degraded_job_ids": [],
+        "cover_degraded_reasons": {},
         "avatar_degraded_job_count": len(avatar_degraded_job_ids),
         "avatar_degraded_job_ids": avatar_degraded_job_ids,
         "avatar_degraded_reasons": avatar_degraded_reason_counts,
@@ -1762,13 +1754,11 @@ def render_case_summary_markdown(
                 "## Render Diagnostics Summary",
                 f"- evaluated_job_count: {render_diagnostics_summary.get('evaluated_job_count') or 0}",
                 f"- failed_render_job_count: {render_diagnostics_summary.get('failed_render_job_count') or 0}",
-                f"- cover_degraded_job_count: {render_diagnostics_summary.get('cover_degraded_job_count') or 0}",
                 f"- avatar_degraded_job_count: {render_diagnostics_summary.get('avatar_degraded_job_count') or 0}",
             ]
         )
         for label, key in (
             ("failed_render_reasons", "failed_render_reasons"),
-            ("cover_degraded_reasons", "cover_degraded_reasons"),
             ("avatar_degraded_reasons", "avatar_degraded_reasons"),
             ("avatar_degraded_reason_categories", "avatar_degraded_reason_categories"),
         ):

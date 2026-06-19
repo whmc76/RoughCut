@@ -610,6 +610,7 @@ class Settings(BaseSettings):
     # Cover settings
     cover_candidate_count: int = 10             # frames to sample for best-cover selection
     cover_output_variants: int = 5              # export multiple cover variants for manual selection
+    render_cover_generation_enabled: bool = False  # cover generation belongs to publication by default
     cover_title: str = ""                        # manual cover title override; empty = auto-generate
     cover_title_font_path: str = "C:/Windows/Fonts/msyhbd.ttc"
     auto_select_cover_variant: bool = True

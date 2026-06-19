@@ -127,6 +127,38 @@ def test_resolve_creator_avatar_binding_uses_legacy_profile_bound_to_creator(mon
     assert binding["presenter_id"] == presenter.as_posix()
 
 
+def test_missing_creator_avatar_binding_is_skipped_not_degraded() -> None:
+    plan = {
+        "mode": "full_track_audio_passthrough",
+        "provider": "heygem",
+    }
+
+    pipeline_steps._apply_avatar_presenter_binding_to_plan(
+        plan,
+        binding=None,
+        packaging_config={},
+    )
+    reason = pipeline_steps._avatar_missing_presenter_reason(plan)
+
+    assert reason == "creator_avatar_binding_missing"
+    assert pipeline_steps._avatar_missing_presenter_execution(plan, reason=reason) == {
+        "provider": "heygem",
+        "status": "skipped",
+        "reason": "creator_avatar_binding_missing",
+        "detail": "未配置可用数字人 presenter，跳过数字人渲染；普通成片不受影响。",
+    }
+    assert pipeline_steps._avatar_missing_presenter_runtime_result(plan, reason=reason) == {
+        "enabled": True,
+        "status": "skipped",
+        "reason": "creator_avatar_binding_missing",
+        "reason_category": "not_configured",
+        "mode": "full_track_audio_passthrough",
+        "integration_mode": "",
+        "provider": "heygem",
+        "detail": "未配置可用数字人 presenter，跳过数字人渲染；普通成片不受影响。",
+    }
+
+
 def test_resolve_packaging_plan_for_job_prefers_creator_assets(monkeypatch, tmp_path: Path) -> None:
     intro = tmp_path / "intro.mp4"
     intro.write_bytes(b"intro")
@@ -183,6 +215,43 @@ def test_resolve_packaging_plan_for_job_prefers_creator_assets(monkeypatch, tmp_
     assert plan["outro"]["path"] == outro.as_posix()
     assert plan["watermark"]["path"] == logo.as_posix()
     assert plan["music"]["path"] == music.as_posix()
+
+
+def test_packaging_creator_card_inference_requires_same_source_logo(tmp_path: Path) -> None:
+    logo = tmp_path / "fas-logo.png"
+    logo.write_bytes(b"logo")
+    selected_assets = {
+        "intro": {"开箱片头a.mp4"},
+        "outro": set(),
+        "watermark": set(),
+        "music": {"背景音乐 cozy_cafe_in_rainy_day_serenade a.mp3"},
+    }
+    fas_creator = SimpleNamespace(
+        assets=[
+            SimpleNamespace(asset_type="intro", original_name="开箱片头A.mp4", stored_path=tmp_path / "intro.mp4"),
+            SimpleNamespace(asset_type="logo", original_name="FAS.png", stored_path=logo),
+        ]
+    )
+    unrelated_creator = SimpleNamespace(
+        assets=[
+            SimpleNamespace(asset_type="intro", original_name="开箱片头A.mp4", stored_path=tmp_path / "missing-logo.png"),
+        ]
+    )
+
+    assert (
+        pipeline_steps._score_creator_card_for_selected_packaging_assets(
+            fas_creator,
+            selected_assets=selected_assets,
+        )
+        > 0
+    )
+    assert (
+        pipeline_steps._score_creator_card_for_selected_packaging_assets(
+            unrelated_creator,
+            selected_assets=selected_assets,
+        )
+        == 0
+    )
 
 
 def test_build_creator_author_profile_uses_creator_card_fields() -> None:

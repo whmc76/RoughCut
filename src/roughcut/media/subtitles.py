@@ -32,10 +32,17 @@ _WRAP_NO_SPLIT_ENDINGS = (
 _WRAP_NO_SPLIT_PREFIXES = (
     "的", "了", "呢", "吗", "嘛", "啊", "呀", "着", "把", "给", "在", "向", "和", "与", "及",
     "就", "也", "还", "很", "都", "又", "才", "再", "并", "跟", "让", "被", "地", "得",
-    "起来", "下来", "上来", "下去", "一下", "喜欢",
+    "起来", "下来", "上来", "上去", "下去", "回来", "回去", "过来", "过去", "进去", "出去", "一下", "喜欢",
 )
 _WRAP_GOOD_BREAK_PREFIXES = (
     "但是", "不过", "所以", "然后", "而且", "并且", "如果", "因为", "另外", "同时",
+    "我想", "你看", "你可以", "我们", "它是", "它就",
+)
+_WRAP_ACTION_VERB_TAILS = (
+    "拉", "推", "按", "拽", "拔", "插", "扣", "挂", "放", "拿", "装", "拆", "打开", "关上", "收", "塞",
+)
+_WRAP_VERB_COMPLEMENT_PREFIXES = (
+    "回来", "回去", "起来", "下来", "上来", "上去", "下去", "过来", "过去", "进去", "出去", "一下",
 )
 _KEYWORD_HIGHLIGHT_QUIET_STYLES = {
     "white_minimal",
@@ -53,6 +60,19 @@ _KEYWORD_HIGHLIGHT_PRIORITY_TERMS = (
     "注意",
     "重点",
     "关键",
+    "快拆",
+    "锁定",
+    "容量",
+    "背负",
+    "功能",
+    "演示",
+    "区别",
+    "收纳",
+    "肩带",
+    "刀型",
+    "刃材",
+    "快开",
+    "防滑纹",
     "参数",
     "细节",
     "结论",
@@ -1522,6 +1542,7 @@ def write_ass_file(
         "[Script Info]\n"
         "ScriptType: v4.00+\n"
         "Collisions: Normal\n"
+        "WrapStyle: 2\n"
         f"PlayResX: {play_res_x}\n"
         f"PlayResY: {play_res_y}\n"
         "ScaledBorderAndShadow: yes\n"
@@ -2059,10 +2080,14 @@ def _find_subtitle_wrap_index(text: str, target: int, *, preserve_terms: list[st
             score -= 10
         if any(right.startswith(token) for token in _WRAP_NO_SPLIT_PREFIXES):
             score -= 10
+        if _wrap_boundary_splits_verb_complement(left, right):
+            score -= 18
         if re.match(r"^[，。！？、：；,.!?]", right):
             score -= 12
         if len(right) <= 2:
             score -= 6
+        elif len(right) <= 4 and any(right.startswith(prefix) for prefix in _WRAP_VERB_COMPLEMENT_PREFIXES):
+            score -= 10
         if len(left) <= 2:
             score -= 4
         if len(left) <= len(right) + 2:
@@ -2073,6 +2098,16 @@ def _find_subtitle_wrap_index(text: str, target: int, *, preserve_terms: list[st
             best_score = score
             best_index = index
     return best_index
+
+
+def _wrap_boundary_splits_verb_complement(left: str, right: str) -> bool:
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text:
+        return False
+    return any(left_text.endswith(verb) for verb in _WRAP_ACTION_VERB_TAILS) and any(
+        right_text.startswith(prefix) for prefix in _WRAP_VERB_COMPLEMENT_PREFIXES
+    )
 
 
 def _term_ranges_in_text(text: str, terms: list[str]) -> list[tuple[int, int]]:

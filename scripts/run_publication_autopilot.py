@@ -739,7 +739,11 @@ def _collect_autopilot_verification_report(cycle_reports: list[dict[str, Any]]) 
         if summary_status == "passed":
             raw_report_status = _normalize(report.get("status")).lower()
             report_failures = [str(item).strip() for item in (report.get("failures") or []) if str(item).strip()]
-            if raw_report_status in {"failed", "blocked"} or report_failures:
+            verification_has_summary = bool(
+                isinstance(verification, dict)
+                and _normalize(verification.get("summary_status")).lower()
+            )
+            if report_failures and (raw_report_status in {"failed", "blocked"} or not verification_has_summary):
                 summary_status = "failed"
         for platform in (report.get("stale_draft_platforms") or []):
             normalized_platform = _normalize(platform).lower()
@@ -981,7 +985,7 @@ def _resolve_material_gate_contract(
             contract=contract,
             target_platforms=target_platforms,
         )
-    if target_platforms:
+    if target_platforms and material_platforms:
         return intelligent_copy_review._build_material_contract(
             material_platforms,
             requested_platforms=target_platforms,

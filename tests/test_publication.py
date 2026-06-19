@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import httpx
@@ -22,7 +23,7 @@ from roughcut.api.intelligent_copy import (
 )
 from roughcut.api.schemas import IntelligentCopyGenerateTaskOut, IntelligentCopyResultOut
 from roughcut.api.jobs import _attach_job_preview
-from roughcut.db.models import Artifact, Job, PublicationAttempt
+from roughcut.db.models import Artifact, Job, PublicationAttempt, PublicationAttemptRun
 from roughcut.db.session import Base
 from roughcut.intelligent_copy_layout import (
     smart_copy_material_json_path,
@@ -166,6 +167,13 @@ class _FakeBrowserAgentClientProcessing(_FakeBrowserAgentClient):
                 }
             }
         )
+
+
+class _FakeBrowserAgentClientConnectError(_FakeBrowserAgentClient):
+    async def get(self, url, *, headers):
+        self.gets.append({"url": url, "headers": headers})
+        request = httpx.Request("GET", url)
+        raise httpx.ConnectError("All connection attempts failed", request=request)
 
 
 def test_job_queue_preview_marks_publication_task_and_uses_attempt_cover(tmp_path):
@@ -837,6 +845,22 @@ def test_build_request_payload_uses_shared_default_declaration_for_bilibili():
     assert payload["publication_capability"]["draft_resume_policy"] == "discard_existing_draft"
     assert payload["publication_capability"]["publish_projects"][0]["key"] == "media_upload"
     assert payload["publication_capability"]["publish_projects"][-1]["key"] == "final_publish"
+
+
+def test_build_request_payload_uses_shared_default_declaration_for_xiaohongshu():
+    plan = {"media_path": r"C:\\tmp\\video.mp4"}
+    target = {
+        "platform": "xiaohongshu",
+        "title": "标题",
+        "body": "正文",
+        "tags": ["tag1"],
+        "browser_profile_id": "xhs-profile",
+    }
+
+    payload = publication._build_request_payload(plan=plan, target=target)
+
+    assert payload["declaration"] == "原创声明"
+    assert payload["publication_content_signature"]["fields"]["declaration"] == "原创声明"
 
 
 def test_build_request_payload_exposes_kuaishou_mainline_publish_contract():
@@ -5907,13 +5931,19 @@ def test_publication_plan_defaults_to_stable_platforms_when_not_explicitly_reque
         "xiaohongshu",
         "bilibili",
         "kuaishou",
+        "wechat-channels",
         "toutiao",
         "youtube",
         "x",
     ]
 
 
-def test_publication_plan_routes_wechat_channels_to_manual_handoff(tmp_path):
+def test_publication_plan_routes_wechat_channels_to_social_auto_upload_target(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        publication,
+        "get_settings",
+        lambda: SimpleNamespace(publication_social_auto_upload_platforms="wechat-channels"),
+    )
     media_path = tmp_path / "output.mp4"
     media_path.write_bytes(b"video")
     plan = publication.build_publication_plan(
@@ -5935,10 +5965,9 @@ def test_publication_plan_routes_wechat_channels_to_manual_handoff(tmp_path):
                         {
                             "platform": "wechat-channels",
                             "account_label": "视频号账号",
-                            "credential_ref": "chrome-profile:wechat",
+                            "credential_ref": "social-auto-upload:creator-1-wechat-channels-chrome:wechat-channels",
                             "status": "logged_in",
                             "enabled": True,
-                            "adapter": "browser_agent",
                         }
                     ]
                 }
@@ -5947,15 +5976,14 @@ def test_publication_plan_routes_wechat_channels_to_manual_handoff(tmp_path):
         requested_platforms=["wechat-channels"],
     )
 
-    assert plan["status"] == "manual_handoff"
-    assert plan["publish_ready"] is False
-    assert plan["manual_handoff_ready"] is True
-    assert plan["targets"] == []
-    assert [target["platform"] for target in plan["manual_handoff_targets"]] == ["wechat-channels"]
-    assert plan["manual_handoff_targets"][0]["status"] == "manual_handoff"
-    assert plan["manual_handoff_targets"][0]["login_url"] == "https://channels.weixin.qq.com/login.html"
-    assert "人工登录" in plan["blocked_reasons"][0]
-    assert publication.publication_plan_is_manual_handoff_ready(plan) is True
+    assert plan["status"] == "ready"
+    assert plan["publish_ready"] is True
+    assert plan["manual_handoff_ready"] is False
+    assert [target["platform"] for target in plan["targets"]] == ["wechat-channels"]
+    assert plan["targets"][0]["adapter"] == "social_auto_upload"
+    assert plan["targets"][0]["credential_ref"] == "social-auto-upload:creator-1-wechat-channels-chrome:wechat-channels"
+    assert plan["manual_handoff_targets"] == []
+    assert publication.publication_plan_is_manual_handoff_ready(plan) is False
 
 
 def test_intelligent_publish_gate_response_preserves_manual_handoff_status():
@@ -6870,7 +6898,8 @@ def test_resolve_publication_local_media_path_materializes_existing_unc_path(tmp
 
 
 @pytest.mark.asyncio
-async def test_publication_plan_requires_done_job_local_media_and_bound_credentials(tmp_path):
+async def test_publication_plan_requires_done_job_local_media_and_bound_credentials(tmp_path, monkeypatch):
+    monkeypatch.setattr(publication, "_utc_now", lambda: datetime(2026, 4, 25, 9, 0, tzinfo=timezone.utc))
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     media_path = tmp_path / "output.mp4"
     media_path.write_bytes(b"video")
@@ -6971,7 +7000,8 @@ async def test_publication_plan_requires_done_job_local_media_and_bound_credenti
 
 
 @pytest.mark.asyncio
-async def test_publication_worker_submits_and_reconciles_browser_agent_attempt(tmp_path):
+async def test_publication_worker_submits_and_reconciles_browser_agent_attempt(tmp_path, monkeypatch):
+    monkeypatch.setattr(publication, "_utc_now", lambda: datetime(2026, 4, 25, 9, 0, tzinfo=timezone.utc))
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     media_path = tmp_path / "output.mp4"
     media_path.write_bytes(b"video")
@@ -7055,6 +7085,132 @@ async def test_publication_worker_submits_and_reconciles_browser_agent_attempt(t
 
 
 @pytest.mark.asyncio
+async def test_submit_publication_attempts_auto_defers_second_account_video_to_next_day(tmp_path, monkeypatch):
+    fixed_now = datetime(2026, 6, 19, 8, 30, tzinfo=timezone.utc)
+    monkeypatch.setattr(publication, "_utc_now", lambda: fixed_now)
+    monkeypatch.setattr(
+        publication,
+        "get_settings",
+        lambda: SimpleNamespace(
+            publication_daily_account_limit=1,
+            publication_auto_schedule_local_time="10:00",
+            publication_social_auto_upload_platforms="bilibili,wechat-channels",
+        ),
+    )
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    first_media_path = tmp_path / "first.mp4"
+    second_media_path = tmp_path / "second.mp4"
+    first_media_path.write_bytes(b"first-video")
+    second_media_path.write_bytes(b"second-video")
+    creator_profile = {
+        "id": "creator-janice",
+        "display_name": "珍妮斯baby",
+        "creator_profile": {
+            "publishing": {
+                "platform_credentials": [
+                    {
+                        "platform": "bilibili",
+                        "account_label": "珍妮斯baby · Chrome",
+                        "credential_ref": "social-auto-upload:creator-7be7da2e7d54-bilibili-chrome:bilibili",
+                        "status": "logged_in",
+                        "enabled": True,
+                    }
+                ]
+            }
+        },
+    }
+    packaging = {
+        "platforms": {
+            "bilibili": {
+                "titles": ["标题"],
+                "description": "简介",
+                "tags": ["育儿"],
+            }
+        }
+    }
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            first_job = Job(source_path="first-source.mp4", source_name="first-source.mp4", status="done")
+            second_job = Job(source_path="second-source.mp4", source_name="second-source.mp4", status="done")
+            session.add_all([first_job, second_job])
+            await session.flush()
+
+            first_plan = publication.build_publication_plan(
+                job=first_job,
+                render_output=SimpleNamespace(output_path=str(first_media_path)),
+                platform_packaging=packaging,
+                creator_profile=creator_profile,
+                requested_platforms=["bilibili"],
+            )
+            first = await publication.submit_publication_attempts(session, first_plan)
+            first_attempt = await session.get(PublicationAttempt, first["created_attempts"][0]["id"])
+            assert first_attempt is not None
+            first_attempt.status = "published"
+            first_attempt.run_status = "published"
+            first_attempt.published_at = fixed_now
+            await session.flush()
+
+            second_plan = publication.build_publication_plan(
+                job=second_job,
+                render_output=SimpleNamespace(output_path=str(second_media_path)),
+                platform_packaging=packaging,
+                creator_profile=creator_profile,
+                requested_platforms=["bilibili"],
+            )
+            second = await publication.submit_publication_attempts(session, second_plan)
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+    assert first["created_attempts"][0]["request_payload"]["scheduled_publish_at"] is None
+    assert len(second["created_attempts"]) == 1
+    created = second["created_attempts"][0]
+    assert created["request_payload"]["scheduled_publish_at"] == "2026-06-20T10:00:00+08:00"
+    assert created["scheduled_at"] == "2026-06-20T02:00:00+00:00"
+    assert created["request_payload"]["metadata"]["publication_schedule_policy"]["reason"] == "account_daily_limit_reached"
+    assert second["auto_deferred_targets"] == [
+        {
+            "platform": "bilibili",
+            "account_label": "珍妮斯baby · Chrome",
+            "scheduled_publish_at": "2026-06-20T10:00:00+08:00",
+            "reason": "account_daily_limit_reached",
+        }
+    ]
+    assert "自动顺延" in (created["operator_summary"] or "")
+
+
+def test_publication_schedule_policy_defers_bilibili_when_schedule_too_close(monkeypatch):
+    fixed_now = datetime(2026, 6, 19, 9, 38, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        publication,
+        "get_settings",
+        lambda: SimpleNamespace(
+            publication_daily_account_limit=1,
+            publication_auto_schedule_local_time="10:00",
+        ),
+    )
+    target = {
+        "platform": "bilibili",
+        "account_label": "珍妮斯baby · Chrome",
+        "scheduled_publish_at": "2026-06-19T19:30:00+08:00",
+    }
+
+    updated = publication._apply_publication_account_daily_schedule_policy(
+        target=target,
+        history_attempts=[],
+        newly_planned_targets=[],
+        now=fixed_now,
+    )
+
+    assert updated["scheduled_publish_at"] == "2026-06-20T19:30:00+08:00"
+    assert updated["publication_schedule_policy"]["reason"] == "platform_min_schedule_lead_time"
+    assert updated["publication_schedule_policy"]["min_schedule_lead_seconds"] == 7200
+
+
+@pytest.mark.asyncio
 async def test_publication_worker_requeues_when_browser_agent_task_is_missing(tmp_path):
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     media_path = tmp_path / "output.mp4"
@@ -7124,6 +7280,81 @@ async def test_publication_worker_requeues_when_browser_agent_task_is_missing(tm
     assert attempts[0]["run_status"] == "awaiting_browser_agent"
     assert attempts[0]["provider_task_id"] is None
     assert attempts[0]["error_code"] == "browser_agent_task_missing"
+
+
+@pytest.mark.asyncio
+async def test_publication_worker_requeues_stale_processing_attempt_after_repeated_poll_failure(monkeypatch):
+    fixed_now = datetime(2026, 6, 19, 9, 50, tzinfo=timezone.utc)
+    monkeypatch.setattr(publication, "_utc_now", lambda: fixed_now)
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    fake_client = _FakeBrowserAgentClientConnectError()
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            job = Job(source_path="source.mp4", source_name="source.mp4", status="done")
+            session.add(job)
+            await session.flush()
+            attempt = PublicationAttempt(
+                id="attempt-stale-processing",
+                job_id=job.id,
+                content_id=str(job.id),
+                creator_profile_id="creator-1",
+                creator_profile_name="creator",
+                platform="douyin",
+                platform_label="抖音",
+                account_label="主号",
+                credential_id="chrome-profile:main",
+                idempotency_key="attempt-stale-processing-key",
+                semantic_fingerprint="attempt-stale-processing-fingerprint",
+                adapter=publication.CANONICAL_PUBLICATION_ADAPTER,
+                status="processing",
+                run_status="processing",
+                provider_task_id="task-stale",
+                provider_status="processing",
+                retry_count=0,
+                max_retries=3,
+                request_payload={},
+            )
+            run = PublicationAttemptRun(
+                attempt_id=attempt.id,
+                content_id=attempt.content_id,
+                platform=attempt.platform,
+                adapter=attempt.adapter,
+                execution_mode=publication.BROWSER_AGENT_EXECUTION_MODE,
+                content_kind="video",
+                consumer_id="worker-old",
+                attempt_number=1,
+                status="poll_failed",
+                phase="reconcile",
+                started_at=fixed_now - timedelta(minutes=20),
+                heartbeat_at=fixed_now - timedelta(minutes=10),
+                lease_expires_at=None,
+                provider_task_id="task-stale",
+                provider_status="processing",
+                error_message="All connection attempts failed",
+            )
+            session.add_all([attempt, run])
+            await session.flush()
+
+            tick = await publication.run_publication_worker_once(
+                session,
+                browser_agent_base_url="http://browser-agent.local",
+                auth_token="secret",
+                worker_id="worker-1",
+                http_client=fake_client,
+            )
+            attempts = await publication.list_publication_attempts(session, job_id=str(job.id))
+    finally:
+        await engine.dispose()
+
+    assert tick["reconciled"][0]["status"] == "queued"
+    assert attempts[0]["status"] == "queued"
+    assert attempts[0]["run_status"] == "retry_scheduled"
+    assert attempts[0]["retry_count"] == 1
+    assert attempts[0]["error_code"] == "browser_agent_poll_stale"
+    assert "lease 已过期" in (attempts[0]["error_message"] or "")
 
 
 @pytest.mark.asyncio

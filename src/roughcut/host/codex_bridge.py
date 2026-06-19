@@ -196,14 +196,15 @@ def run_codex_exec(payload: dict[str, Any]) -> dict[str, Any]:
                 last_start_error = exc
                 print(json.dumps({"stage": "run_codex_exec_spawn_error", "command": candidate_command, "error": str(exc)}, ensure_ascii=False), flush=True)
                 continue
-            print(json.dumps({"stage": "run_codex_exec_spawned", "command": candidate_command, "pid": process.pid}, ensure_ascii=False), flush=True)
+            process_pid = getattr(process, "pid", None)
+            print(json.dumps({"stage": "run_codex_exec_spawned", "command": candidate_command, "pid": process_pid}, ensure_ascii=False), flush=True)
             try:
                 stdout_bytes, stderr_bytes = process.communicate(
                     input=prompt.encode("utf-8"),
                     timeout=timeout_sec,
                 )
             except subprocess.TimeoutExpired as exc:
-                print(json.dumps({"stage": "run_codex_exec_timeout", "command": candidate_command, "pid": process.pid, "timeout_sec": timeout_sec}, ensure_ascii=False), flush=True)
+                print(json.dumps({"stage": "run_codex_exec_timeout", "command": candidate_command, "pid": process_pid, "timeout_sec": timeout_sec}, ensure_ascii=False), flush=True)
                 _terminate_process_tree(process)
                 try:
                     stdout_bytes, stderr_bytes = process.communicate(timeout=5)
@@ -224,7 +225,7 @@ def run_codex_exec(payload: dict[str, Any]) -> dict[str, Any]:
             if not stdout:
                 stdout = decode_process_output(stdout_bytes)
             stderr = decode_process_output(stderr_bytes)
-            print(json.dumps({"stage": "run_codex_exec_process_exit", "command": candidate_command, "pid": process.pid, "returncode": process.returncode, "stdout_len": len(stdout), "stderr_len": len(stderr)}, ensure_ascii=False), flush=True)
+            print(json.dumps({"stage": "run_codex_exec_process_exit", "command": candidate_command, "pid": process_pid, "returncode": process.returncode, "stdout_len": len(stdout), "stderr_len": len(stderr)}, ensure_ascii=False), flush=True)
             excerpt = stdout or stderr
             if len(excerpt) > 3500:
                 excerpt = excerpt[:3484].rstrip() + "\n...[truncated]"

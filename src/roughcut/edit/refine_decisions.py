@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from roughcut.edit.cut_analysis import CUT_ANALYSIS_SCHEMA_VERSION
+from roughcut.edit.cut_analysis import CUT_ANALYSIS_SCHEMA_VERSION, cut_analysis_refine_auto_cut_candidates
 from roughcut.edit.editorial_timeline import (
     editorial_keep_segments,
     normalize_keep_segments_payloads,
@@ -11,7 +11,6 @@ from roughcut.edit.editorial_timeline import (
 from roughcut.edit.multimodal_trim_review import (
     multimodal_trim_review_auto_cut_candidates,
 )
-from roughcut.edit.cut_analysis import cut_analysis_rule_candidates
 from roughcut.edit.smart_cut_rules import default_smart_cut_rules_payload, normalize_smart_cut_rules_payload
 from roughcut.edit.strategy_profile import (
     DEFAULT_STRATEGY_TYPE,
@@ -103,6 +102,10 @@ def _apply_remove_ranges_to_keep_segments(
     return _merge_segment_ranges(resolved)
 
 
+def _has_authoritative_accepted_cut_contract(cut_analysis: dict[str, Any] | None) -> bool:
+    return isinstance(cut_analysis, dict) and ("accepted_cuts" in cut_analysis or "accepted_cut_count" in cut_analysis)
+
+
 def _multimodal_auto_refine_keep_segments(
     keep_segments: list[dict[str, Any]] | None,
     cut_analysis: dict[str, Any] | None,
@@ -111,6 +114,8 @@ def _multimodal_auto_refine_keep_segments(
 ) -> tuple[list[dict[str, float]], int]:
     base_keep_segments = normalize_keep_segments_payloads(keep_segments)
     if str(mode or "").strip() != "auto_refine":
+        return base_keep_segments, 0
+    if _has_authoritative_accepted_cut_contract(cut_analysis):
         return base_keep_segments, 0
     auto_cut_candidates = multimodal_trim_review_auto_cut_candidates(cut_analysis)
     if not auto_cut_candidates:
@@ -131,11 +136,7 @@ def _rule_auto_refine_keep_segments(
     base_keep_segments = normalize_keep_segments_payloads(keep_segments)
     if str(mode or "").strip() != "auto_refine":
         return base_keep_segments, 0
-    auto_rule_candidates = [
-        item
-        for item in cut_analysis_rule_candidates(cut_analysis, resolved=True)
-        if isinstance(item, dict) and bool(item.get("auto_applied"))
-    ]
+    auto_rule_candidates = cut_analysis_refine_auto_cut_candidates(cut_analysis)
     if not auto_rule_candidates:
         return base_keep_segments, 0
     remove_ranges = [

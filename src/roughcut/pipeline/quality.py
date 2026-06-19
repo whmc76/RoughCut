@@ -16,6 +16,7 @@ from roughcut.media.variant_timeline_bundle import (
     resolve_effective_variant_timeline_bundle,
     variant_llm_cut_review,
     variant_refine_decision_summary,
+    variant_subtitle_timeline_issues,
 )
 from roughcut.review.content_profile import (
     _content_understanding_detail_terms,
@@ -127,7 +128,16 @@ def collect_editing_risk_gate_signals_from_inputs(
         and llm_cut_review_error in _LLM_CUT_REVIEW_PROVIDER_DEGRADED_ERRORS
     )
     high_risk_cut_count = max(0, int(high_risk_cut_count or 0))
-    blocking_high_risk_cuts = bool(high_risk_cut_count) and not llm_cut_review_provider_degraded and (
+    blocking_high_risk_cuts_list = [
+        item
+        for item in high_risk_cuts
+        if isinstance(item, dict)
+        and item.get("blocking") is not False
+        and str(item.get("review_priority") or "blocking") != "advisory"
+    ]
+    blocking_high_risk_cut_count = len(blocking_high_risk_cuts_list)
+    advisory_high_risk_cut_count = max(0, high_risk_cut_count - blocking_high_risk_cut_count)
+    blocking_high_risk_cuts = bool(blocking_high_risk_cut_count) and not llm_cut_review_provider_degraded and (
         refine_manual_confirm > 0
         or multimodal_pending_count > 0
         or not bool(llm_cut_review.get("reviewed"))
@@ -136,6 +146,9 @@ def collect_editing_risk_gate_signals_from_inputs(
     return {
         "high_risk_cut_count": high_risk_cut_count,
         "high_risk_cuts": high_risk_cuts,
+        "blocking_high_risk_cut_count": blocking_high_risk_cut_count,
+        "blocking_high_risk_cuts_list": blocking_high_risk_cuts_list,
+        "advisory_high_risk_cut_count": advisory_high_risk_cut_count,
         "llm_cut_review": llm_cut_review,
         "llm_cut_review_error": llm_cut_review_error,
         "llm_cut_review_provider_degraded": llm_cut_review_provider_degraded,
@@ -587,17 +600,41 @@ def assess_job_quality(
     )
     if sync_check and sync_check.get("status") == "warning":
         warning_codes = [str(code) for code in sync_check.get("warning_codes") or [] if str(code).strip()]
+        severe_subtitle_timing = bool(
+            {
+                "subtitle_short_flash_detected",
+                "subtitle_burst_density_detected",
+                "subtitle_local_gap_unstable",
+                "subtitle_out_of_bounds",
+                "subtitle_timestamp_disorder",
+                "subtitle_overlap_detected",
+                "subtitle_invalid_range",
+            }.intersection(warning_codes)
+        )
         issues.append(
             QualityIssue(
                 "subtitle_sync_issue",
                 str(sync_check.get("message") or "成片字幕时间轴与视频明显错位"),
-                18.0 if "subtitle_out_of_bounds" in warning_codes else 10.0,
+                28.0 if severe_subtitle_timing else 14.0,
                 auto_fix_step="render",
+                blocking=severe_subtitle_timing,
+            )
+        )
+    subtitle_timeline_issues = variant_subtitle_timeline_issues(variant_bundle)
+    if subtitle_timeline_issues:
+        issues.append(
+            QualityIssue(
+                "subtitle_timeline_validation",
+                f"变体字幕时间线校验失败：{subtitle_timeline_issues[0]}",
+                min(24.0, 10.0 + len(subtitle_timeline_issues) * 4.0),
+                auto_fix_step="render",
+                blocking=True,
             )
         )
     editing_risk_gate = collect_editing_risk_gate_signals(variant_bundle)
     llm_cut_review = dict(editing_risk_gate.get("llm_cut_review") or {})
     high_risk_cuts = list(editing_risk_gate.get("high_risk_cuts") or [])
+    blocking_high_risk_cuts_list = list(editing_risk_gate.get("blocking_high_risk_cuts_list") or [])
     multimodal_trim_review_summary = dict(editing_risk_gate.get("multimodal_trim_review_summary") or {})
     refine_decision_summary = dict(editing_risk_gate.get("refine_decision_summary") or {})
     refine_manual_confirm = int(editing_risk_gate.get("refine_manual_confirm") or 0)
@@ -616,17 +653,17 @@ def assess_job_quality(
                 auto_fix_step="edit_plan",
             )
         )
-    if high_risk_cuts and llm_cut_review_provider_degraded:
+    if blocking_high_risk_cuts_list and llm_cut_review_provider_degraded:
         issues.append(
             QualityIssue(
                 "editing_high_risk_cuts_provider_degraded",
                 (
-                    f"存在 {len(high_risk_cuts)} 个高风险 cut，"
+                    f"存在 {len(blocking_high_risk_cuts_list)} 个阻断级高风险 cut，"
                     f"但 LLM 复核因 provider 波动未完成（error={llm_cut_review_error}）；"
                     f"当前保留确定性证据结果，manual_confirm={refine_manual_confirm}，"
                     f"multimodal_pending={int(multimodal_trim_review_summary.get('pending_count') or 0)}"
                 ),
-                min(8.0, 3.0 + len(high_risk_cuts)),
+                min(8.0, 3.0 + len(blocking_high_risk_cuts_list)),
                 auto_fix_step="edit_plan",
             )
         )
@@ -635,11 +672,11 @@ def assess_job_quality(
             QualityIssue(
                 "editing_high_risk_cuts_blocking",
                 (
-                    f"仍有 {len(high_risk_cuts)} 个高风险 cut 未完成收口，"
+                    f"仍有 {len(blocking_high_risk_cuts_list)} 个阻断级高风险 cut 未完成收口，"
                     f"manual_confirm={refine_manual_confirm}，"
                     f"multimodal_pending={int(multimodal_trim_review_summary.get('pending_count') or 0)}"
                 ),
-                min(18.0, 8.0 + len(high_risk_cuts) * 2.0),
+                min(18.0, 8.0 + len(blocking_high_risk_cuts_list) * 2.0),
                 auto_fix_step="edit_plan",
                 blocking=True,
             )
@@ -736,6 +773,9 @@ def assess_job_quality(
             "step_completion_ratio": round(step_completion_ratio, 3),
             "subtitle_sync": sync_check,
             "high_risk_cut_count": len(high_risk_cuts),
+            "blocking_high_risk_cut_count": int(editing_risk_gate.get("blocking_high_risk_cut_count") or 0),
+            "advisory_high_risk_cut_count": int(editing_risk_gate.get("advisory_high_risk_cut_count") or 0),
+            "blocking_high_risk_cuts": bool(editing_risk_gate.get("blocking_high_risk_cuts")),
             "llm_cut_review": llm_cut_review,
             "multimodal_trim_review_summary": multimodal_trim_review_summary,
             "refine_decision_summary": refine_decision_summary,
@@ -1421,6 +1461,13 @@ def _compute_subtitle_sync_check(
         warning_codes.append("subtitle_duration_gap_large")
     if audio_video_duration_gap > max(0.35, video_duration * 0.02):
         warning_codes.append("audio_video_duration_gap_large")
+    timing_structure = _subtitle_timing_structure_diagnostics(subtitle_ranges, video_duration_sec=video_duration)
+    if int(timing_structure.get("short_flash_count") or 0) > 0:
+        warning_codes.append("subtitle_short_flash_detected")
+    if int(timing_structure.get("burst_window_count") or 0) > 0:
+        warning_codes.append("subtitle_burst_density_detected")
+    if int(timing_structure.get("large_gap_count") or 0) > max(3, int(len(subtitle_ranges) * 0.06)):
+        warning_codes.append("subtitle_local_gap_unstable")
 
     status = "warning" if warning_codes else "ok"
     message = (
@@ -1446,6 +1493,7 @@ def _compute_subtitle_sync_check(
         "subtitle_timestamp_disorder_count": int(subtitle_timeline.get("timestamp_disorder_count") or 0),
         "subtitle_overlap_count": int(subtitle_timeline.get("overlap_count") or 0),
         "subtitle_invalid_range_count": int(subtitle_timeline.get("invalid_range_count") or 0),
+        "subtitle_timing_structure": timing_structure,
         "warning_codes": warning_codes,
     }
 
@@ -1544,6 +1592,59 @@ def _parse_srt_timeline(path: Path) -> dict[str, Any]:
 
 def _parse_srt_ranges(path: Path) -> list[tuple[float, float]]:
     return list(_parse_srt_timeline(path).get("ranges") or [])
+
+
+def _subtitle_timing_structure_diagnostics(
+    ranges: Sequence[tuple[float, float]],
+    *,
+    video_duration_sec: float = 0.0,
+) -> dict[str, Any]:
+    normalized = [
+        (float(start), float(end))
+        for start, end in ranges
+        if float(end) >= float(start)
+    ]
+    if not normalized:
+        return {
+            "event_count": 0,
+            "short_flash_count": 0,
+            "burst_window_count": 0,
+            "max_events_per_one_sec": 0,
+            "large_gap_count": 0,
+        }
+
+    durations = [max(0.0, end - start) for start, end in normalized]
+    gaps = [
+        max(0.0, normalized[index][0] - normalized[index - 1][1])
+        for index in range(1, len(normalized))
+    ]
+    short_flash_count = sum(1 for duration in durations if duration < 0.22)
+    abrupt_flash_count = sum(1 for duration in durations if duration < 0.35)
+    max_events_per_one_sec = 0
+    burst_window_count = 0
+    for index, (start, _end) in enumerate(normalized):
+        count = 0
+        cursor = index
+        while cursor < len(normalized) and normalized[cursor][0] < start + 1.0:
+            count += 1
+            cursor += 1
+        max_events_per_one_sec = max(max_events_per_one_sec, count)
+        if count >= 4:
+            burst_window_count += 1
+    large_gap_threshold = max(2.2, min(6.0, float(video_duration_sec or 0.0) * 0.02))
+    large_gap_count = sum(1 for gap in gaps if gap > large_gap_threshold)
+    median_duration = sorted(durations)[len(durations) // 2]
+    return {
+        "event_count": len(normalized),
+        "short_flash_count": short_flash_count,
+        "abrupt_flash_count": abrupt_flash_count,
+        "max_events_per_one_sec": max_events_per_one_sec,
+        "burst_window_count": burst_window_count,
+        "large_gap_count": large_gap_count,
+        "median_duration_sec": round(median_duration, 3),
+        "min_duration_sec": round(min(durations), 3),
+        "max_gap_sec": round(max(gaps), 3) if gaps else 0.0,
+    }
 
 
 def _parse_srt_timestamp(value: str) -> float | None:

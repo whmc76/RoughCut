@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import httpx
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+from roughcut.host.codex_proxy import resolve_codex_proxy_sibling_url, resolve_codex_proxy_token
 
 
 SOCIAL_AUTO_UPLOAD_ADAPTER = "social_auto_upload"
@@ -17,6 +20,9 @@ SOCIAL_AUTO_UPLOAD_SUPPORTED_PLATFORMS = {
 }
 
 BILIBILI_DEFAULT_DECLARATION = "内容无需标注"
+BILIBILI_DEFAULT_CATEGORY = "生活/亲子"
+BILIBILI_DEFAULT_TID = ""
+SOCIAL_AUTO_UPLOAD_LOCAL_TIMEZONE = timezone(timedelta(hours=8))
 BILIBILI_DECLARATION_ALIASES = {
     "": BILIBILI_DEFAULT_DECLARATION,
     "原创": BILIBILI_DEFAULT_DECLARATION,
@@ -126,7 +132,6 @@ BILIBILI_TID_ROWS: tuple[tuple[str, str, int], ...] = (
     ("生活", "手工", 161),
     ("生活", "绘画", 162),
     ("生活", "日常", 21),
-    ("生活", "亲子", 254),
     ("美食", "美食", 211),
     ("美食", "美食制作", 76),
     ("美食", "美食侦探", 212),
@@ -241,10 +246,29 @@ def social_auto_upload_cli_platform(platform: Any) -> str:
     return SOCIAL_AUTO_UPLOAD_SUPPORTED_PLATFORMS[normalized]
 
 
+def _account_name_from_social_auto_upload_credential_ref(value: Any) -> str:
+    text = str(value or "").strip()
+    prefix = "social-auto-upload:"
+    if not text.startswith(prefix):
+        return ""
+    payload = text[len(prefix):].strip()
+    if not payload:
+        return ""
+    if ":" not in payload:
+        return payload
+    account_name, _platform = payload.rsplit(":", 1)
+    return account_name.strip()
+
+
 def build_social_auto_upload_account_name(attempt: Any) -> str:
+    request_payload = getattr(attempt, "request_payload", None)
+    metadata = request_payload.get("metadata") if isinstance(request_payload, dict) else None
+    metadata = metadata if isinstance(metadata, dict) else {}
     candidates = [
-        getattr(attempt, "account_label", None),
+        _account_name_from_social_auto_upload_credential_ref(metadata.get("credential_ref")),
+        _account_name_from_social_auto_upload_credential_ref(getattr(attempt, "credential_id", None)),
         getattr(attempt, "credential_id", None),
+        getattr(attempt, "account_label", None),
         getattr(attempt, "creator_profile_id", None),
         getattr(attempt, "platform", None),
     ]
@@ -291,6 +315,25 @@ def build_social_auto_upload_login_command(
     return command
 
 
+def build_social_auto_upload_dashboard_command(
+    *,
+    python_executable: str,
+    platform: str,
+    account_name: str,
+    headless: bool,
+) -> list[str]:
+    command = [
+        python_executable,
+        "sau_cli.py",
+        social_auto_upload_cli_platform(platform),
+        "open-dashboard",
+        "--account",
+        account_name,
+    ]
+    command.append("--headless" if headless else "--headed")
+    return command
+
+
 def build_social_auto_upload_upload_command(
     *,
     python_executable: str,
@@ -299,7 +342,7 @@ def build_social_auto_upload_upload_command(
     request_payload: dict[str, Any],
 ) -> list[str]:
     normalized_platform = str(platform or "").strip().lower()
-    title = str(request_payload.get("title") or "").strip()
+    title = _resolve_social_auto_upload_title(request_payload)
     body = str(request_payload.get("body") or "").strip()
     tags = [str(item).strip().lstrip("#") for item in (request_payload.get("hashtags") or []) if str(item).strip()]
     media_items = [item for item in (request_payload.get("media_items") or []) if isinstance(item, dict)]
@@ -321,14 +364,12 @@ def build_social_auto_upload_upload_command(
     ]
     command.extend(["--desc", body or title])
     if normalized_platform == "bilibili":
-        tid = maybe_resolve_bilibili_tid(request_payload)
-        category_display = resolve_bilibili_category_display(request_payload)
+        tid = maybe_resolve_bilibili_tid(request_payload) or BILIBILI_DEFAULT_TID
+        category_display = resolve_bilibili_category_display(request_payload) or BILIBILI_DEFAULT_CATEGORY
         if tid:
             command.extend(["--tid", tid])
         if category_display:
             command.extend(["--category", category_display])
-        if not tid and not category_display:
-            raise ValueError("Bilibili 通过 social-auto-upload 发布时至少需要可用的 category 或 tid。")
     if tags:
         command.extend(["--tags", ",".join(tags)])
     portrait_thumbnail, landscape_thumbnail = _resolve_social_auto_upload_thumbnails(
@@ -374,6 +415,9 @@ def build_social_auto_upload_upload_command(
             command.extend(["--group-chat", group_chat])
         if _resolve_xiaohongshu_original_declaration(request_payload):
             command.append("--original-declaration")
+            original_content_type = _resolve_xiaohongshu_original_content_type(request_payload)
+            if original_content_type:
+                command.extend(["--original-content-type", original_content_type])
     if normalized_platform == "kuaishou":
         declaration = str(request_payload.get("declaration") or "").strip()
         if declaration:
@@ -385,6 +429,30 @@ def build_social_auto_upload_upload_command(
     if scheduled_publish_at:
         command.extend(["--schedule", scheduled_publish_at])
     return command
+
+
+def _resolve_social_auto_upload_title(request_payload: dict[str, Any]) -> str:
+    copy_material = request_payload.get("copy_material")
+    copy_material = copy_material if isinstance(copy_material, dict) else {}
+    title_candidates: list[Any] = [
+        request_payload.get("title"),
+        copy_material.get("primary_title"),
+    ]
+    for source in (request_payload.get("titles"), copy_material.get("titles")):
+        if isinstance(source, list):
+            title_candidates.extend(source)
+    title_candidates.extend(
+        [
+            request_payload.get("body"),
+            request_payload.get("description"),
+            copy_material.get("body"),
+        ]
+    )
+    for candidate in title_candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text[:80]
+    return "视频发布"
 
 
 def _resolve_social_auto_upload_thumbnails(
@@ -501,6 +569,20 @@ def _resolve_xiaohongshu_original_declaration(request_payload: dict[str, Any]) -
         return False
     selected = [str(item).strip() for item in overrides.get("selected_declarations") or [] if str(item).strip()]
     return any("原创" in item for item in selected)
+
+
+def _resolve_xiaohongshu_original_content_type(request_payload: dict[str, Any]) -> str:
+    overrides = request_payload.get("platform_specific_overrides")
+    overrides = overrides if isinstance(overrides, dict) else {}
+    for candidate in (
+        overrides.get("original_content_type"),
+        overrides.get("content_type_declaration"),
+        request_payload.get("original_content_type"),
+    ):
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return "虚构演绎，仅供娱乐"
 
 
 def _resolve_bilibili_declaration(request_payload: dict[str, Any]) -> str:
@@ -660,9 +742,25 @@ async def run_social_auto_upload_command(
     root: str,
     timeout_sec: int,
 ) -> SocialAutoUploadCommandResult:
+    root_path = Path(root).expanduser()
+    if not root_path.exists() or not root_path.is_dir():
+        host_result = await _run_social_auto_upload_command_via_host_bridge(
+            command,
+            root=root,
+            timeout_sec=timeout_sec,
+        )
+        if host_result is not None:
+            return host_result
+        return SocialAutoUploadCommandResult(
+            command=command,
+            returncode=127,
+            stdout="",
+            stderr=f"当前运行环境不可访问 social-auto-upload 根目录，且宿主机桥不可用：{root}",
+        )
+
     process = await asyncio.create_subprocess_exec(
         *command,
-        cwd=str(Path(root).resolve()),
+        cwd=str(root_path.resolve()),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -685,6 +783,45 @@ async def run_social_auto_upload_command(
     )
 
 
+async def _run_social_auto_upload_command_via_host_bridge(
+    command: list[str],
+    *,
+    root: str,
+    timeout_sec: int,
+) -> SocialAutoUploadCommandResult | None:
+    url = resolve_codex_proxy_sibling_url("/v1/host/social-auto-upload-command")
+    token = resolve_codex_proxy_token()
+    if not url or not token:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=float(max(3, int(timeout_sec or 30) + 5))) as client:
+            response = await client.post(
+                url,
+                json={
+                    "root": root,
+                    "command": [str(item) for item in command],
+                    "timeout_sec": max(1, int(timeout_sec or 30)),
+                },
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+            )
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    raw_command = payload.get("command")
+    return SocialAutoUploadCommandResult(
+        command=[str(item) for item in raw_command] if isinstance(raw_command, list) else [str(item) for item in command],
+        returncode=int(payload.get("returncode") or 0),
+        stdout=str(payload.get("stdout") or ""),
+        stderr=str(payload.get("stderr") or ""),
+    )
+
+
 def _normalize_schedule_value(value: Any) -> str:
     text = str(value or "").strip()
     if not text:
@@ -692,6 +829,8 @@ def _normalize_schedule_value(value: Any) -> str:
     parsed = _parse_datetime(text)
     if parsed is None:
         return text
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(SOCIAL_AUTO_UPLOAD_LOCAL_TIMEZONE)
     return parsed.strftime("%Y-%m-%d %H:%M")
 
 

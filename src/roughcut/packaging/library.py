@@ -64,8 +64,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "smart_effect_style": "smart_effect_commercial",
     "music_volume": 0.12,
     "watermark_position": "top_left",
-    "watermark_opacity": 0.82,
-    "watermark_scale": 0.16,
+    "watermark_opacity": 0.28,
+    "watermark_scale": 0.10,
     "avatar_overlay_position": "top_right",
     "avatar_overlay_scale": 0.18,
     "avatar_overlay_corner_radius": 26,
@@ -633,6 +633,8 @@ def resolve_packaging_plan_for_job(
                 "position": config["watermark_position"],
                 "opacity": config["watermark_opacity"],
                 "scale": config["watermark_scale"],
+                "motion": watermark.get("motion") or "dynamic_float",
+                "dynamic": bool(watermark.get("dynamic", True)),
             }
         )
     if music:
@@ -1516,8 +1518,14 @@ def _normalize_config(config: dict[str, Any], assets_by_id: dict[str, dict[str, 
     normalized["export_frame_rate_preset"] = export_frame_rate_preset
 
     normalized["music_volume"] = float(normalized.get("music_volume") or DEFAULT_CONFIG["music_volume"])
-    normalized["watermark_opacity"] = float(normalized.get("watermark_opacity") or DEFAULT_CONFIG["watermark_opacity"])
-    normalized["watermark_scale"] = float(normalized.get("watermark_scale") or DEFAULT_CONFIG["watermark_scale"])
+    normalized["watermark_opacity"] = max(
+        0.16,
+        min(0.34, float(normalized.get("watermark_opacity") or DEFAULT_CONFIG["watermark_opacity"])),
+    )
+    normalized["watermark_scale"] = max(
+        0.06,
+        min(0.12, float(normalized.get("watermark_scale") or DEFAULT_CONFIG["watermark_scale"])),
+    )
     normalized["watermark_position"] = (
         str(normalized.get("watermark_position") or DEFAULT_CONFIG["watermark_position"]).strip()
         or DEFAULT_CONFIG["watermark_position"]

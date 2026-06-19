@@ -24,6 +24,7 @@ from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from statistics import median
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -34,7 +35,11 @@ from sqlalchemy.pool import NullPool
 
 from roughcut.avatar import list_avatar_material_profiles, resolve_avatar_material_path
 from roughcut.config import get_settings, llm_task_route, normalize_transcription_settings, should_enable_task_search
-from roughcut.creator_asset_runtime import pick_creator_avatar_presenter_asset, resolve_creator_asset_path
+from roughcut.creator_asset_runtime import (
+    normalize_creator_asset_category,
+    pick_creator_avatar_presenter_asset,
+    resolve_creator_asset_path,
+)
 from roughcut.creative import (
     ai_director_mode_enabled,
     avatar_mode_enabled,
@@ -122,7 +127,6 @@ from roughcut.edit.render_plan import (
     build_smart_editing_accents,
     render_plan_automatic_gate,
     render_plan_avatar_commentary,
-    render_plan_cover,
     render_plan_delivery,
     render_plan_loudness,
     render_plan_manual_editor,
@@ -144,9 +148,7 @@ from roughcut.edit.timeline import save_editorial_timeline
 from roughcut.media.audio import NoAudioStreamError, extract_audio, extract_audio_clip
 from roughcut.media.output import (
     build_variant_output_path,
-    extract_cover_frame,
     get_output_project_dir,
-    load_cover_selection_summary,
     write_srt_file,
 )
 from roughcut.media.manual_editor_assets import (
@@ -170,7 +172,7 @@ from roughcut.media.subtitle_projection_validation import (
 )
 from roughcut.media.subtitles import remap_subtitles_to_timeline
 from roughcut.media.probe import probe, validate_media
-from roughcut.media.render import render_video
+from roughcut.media.render import burn_subtitles_on_rendered_video, render_video
 from roughcut.media.silence import detect_silence
 from roughcut.llm_cache import (
     build_cache_key,
@@ -183,7 +185,6 @@ from roughcut.llm_cache import (
 from roughcut.naming import AVATAR_CAPABILITY_GENERATION, normalize_avatar_capability_status
 from roughcut.production_readiness import (
     insert_plan_output_fallback_reasons,
-    platform_packaging_output_fallback_reasons,
     projection_output_fallback_reasons,
     render_output_blocking_reasons,
 )
@@ -198,6 +199,7 @@ from roughcut.edit.rule_registry import rule_requires_llm_review
 from roughcut.prompts.edit_decision import build_high_risk_cut_review_prompt, build_waste_segment_discovery_prompt
 from roughcut.providers.factory import get_avatar_provider, get_reasoning_provider, get_voice_provider
 from roughcut.providers.reasoning.base import Message, extract_json_text
+from roughcut.providers.transcription.local_http_asr import LocalHTTPASRProvider
 from roughcut.providers.zhipu_compat import resolve_zhipu_reasoning_base_url
 from roughcut.providers.zhipu_http import provider_cooldown_remaining_seconds_for_url, zhipu_response_diagnostics
 from roughcut.providers.transcription.base import TranscriptResult
@@ -207,7 +209,11 @@ from roughcut.providers.transcription.chunking import (
     resolve_audio_chunk_config,
     should_chunk_audio,
 )
-from roughcut.pipeline.quality import _compute_subtitle_sync_check, evaluate_profile_identity_gate
+from roughcut.pipeline.quality import (
+    _compute_subtitle_sync_check,
+    _subtitle_timing_structure_diagnostics,
+    evaluate_profile_identity_gate,
+)
 from roughcut.review.content_profile import (
     _resolve_content_understanding_timeout_seconds,
     apply_source_identity_constraints,
@@ -233,6 +239,7 @@ from roughcut.review.content_profile_artifacts import persist_content_profile_ar
 from roughcut.review.downstream_context import (
     build_downstream_context,
     resolve_downstream_profile,
+    strip_publication_only_profile_fields,
 )
 from roughcut.review.model_identity import filter_conflicting_model_wrong_forms as _shared_filter_conflicting_model_wrong_forms
 from roughcut.review.domain_glossaries import (
@@ -247,15 +254,6 @@ from roughcut.review.domain_glossaries import (
 )
 from roughcut.review.intelligent_copy_topics import build_intelligent_copy_topic_hints
 from roughcut.review.glossary_engine import apply_glossary_corrections
-from roughcut.review.platform_copy import (
-    build_packaging_fact_sheet,
-    build_packaging_fact_sheet_cache_fingerprint,
-    build_packaging_prompt_brief,
-    build_platform_packaging_cache_fingerprint,
-    generate_platform_packaging,
-    packaging_fact_sheet_cache_allowed,
-    save_platform_packaging_markdown,
-)
 from roughcut.review.evidence_types import build_correction_framework_trace
 from roughcut.review.subtitle_memory import build_subtitle_review_memory, build_transcription_prompt, resolve_transcription_category_scope
 from roughcut.review.transcription_context_prior import infer_transcription_context_prior
@@ -265,10 +263,13 @@ from roughcut.review.subtitle_consistency import (
 )
 from roughcut.review.subtitle_quality import (
     ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
+    apply_subtitle_alignment_quality_guard,
     build_subtitle_alignment_source_metrics,
     build_subtitle_quality_report,
     build_subtitle_quality_report_from_items,
+    subtitle_alignment_source_metrics_has_missing_word_alignment,
     subtitle_items_have_output_fallback_alignment,
+    subtitle_quality_report_has_missing_word_alignment,
     subtitle_quality_report_has_output_fallback,
 )
 from roughcut.review.subtitle_term_resolution import (
@@ -287,6 +288,8 @@ from roughcut.review.subtitle_translation import (
 )
 from roughcut.speech.alignment import tokenize_alignment_text
 from roughcut.review.telegram_bot import get_telegram_review_bot_service
+from roughcut.remix.alignment import audit_subtitle_timing_alignment, normalize_eval_text
+from roughcut.remix.contracts import AsrToken, SubtitleTiming
 from roughcut.speech.postprocess import (
     SubtitleEntry,
     _fragment_window_candidate_is_acceptable,
@@ -313,13 +316,19 @@ from roughcut.speech.subtitle_pipeline import (
     canonical_transcript_data_is_current,
     subtitle_projection_data_is_current,
 )
-from roughcut.speech.transcribe import persist_empty_transcript_result, transcribe_audio
+from roughcut.speech.transcribe import (
+    AsrQualityGateError,
+    persist_asr_quality_gate_artifact,
+    persist_empty_transcript_result,
+    transcribe_audio,
+)
 from roughcut.storage.s3 import get_storage, job_key
 from roughcut.telegram.review_notification_service import enqueue_review_notification
 from roughcut.usage import track_step_usage, track_usage_operation
 
 ARTIFACT_TYPE_TRANSCRIPT_CORRECTION_SCORE_REPORT = "transcript_correction_score_report"
 ARTIFACT_TYPE_RENDER_RUNTIME_DIAGNOSTICS = "render_runtime_diagnostics"
+ARTIFACT_TYPE_RENDER_SUBTITLE_ASR_ALIGNMENT = "render_subtitle_asr_alignment"
 _MANUAL_EDITOR_DRAFT_ARTIFACT_TYPE = "manual_editor_draft"
 
 _AVATAR_SEGMENT_READY_RETRIES = 60
@@ -342,8 +351,6 @@ STEP_LABELS = {
     "avatar_commentary": "数字人解说",
     "edit_plan": "剪辑决策",
     "render": "渲染输出",
-    "final_review": "成片异常门",
-    "platform_package": "平台文案",
 }
 
 _SUBTITLE_COPY_GENERIC_PREFIX_RE = re.compile(
@@ -3353,6 +3360,7 @@ async def _build_canonical_refresh_projection(
         subtitle_items=existing_projection_items,
         source_name=source_name,
         content_profile={},
+        require_word_alignment=True,
     )
     existing_projection_analysis = analyze_subtitle_segmentation(existing_entries)
 
@@ -3377,6 +3385,7 @@ async def _build_canonical_refresh_projection(
         subtitle_items=canonical_projection_items,
         source_name=source_name,
         content_profile={},
+        require_word_alignment=True,
     )
     display_boundary_hybrid_entries = _build_display_boundary_hybrid_projection_entries(
         canonical_entries=projection_entries,
@@ -3389,6 +3398,7 @@ async def _build_canonical_refresh_projection(
         subtitle_items=hybrid_projection_items,
         source_name=source_name,
         content_profile={},
+        require_word_alignment=True,
     )
     canonical_output_fallback_detected = subtitle_quality_report_has_output_fallback(
         canonical_quality_report
@@ -3400,9 +3410,17 @@ async def _build_canonical_refresh_projection(
         subtitle_quality_report_has_output_fallback(existing_quality_report)
         or subtitle_items_have_output_fallback_alignment(existing_projection_items)
     )
+    existing_word_alignment_missing = (
+        subtitle_quality_report_has_missing_word_alignment(existing_quality_report, blocking_only=True)
+        or subtitle_alignment_source_metrics_has_missing_word_alignment(
+            build_subtitle_alignment_source_metrics(existing_projection_items),
+            blocking_only=True,
+        )
+    )
     force_display_baseline_for_output_fallback = (
         bool(existing_projection_items)
         and not existing_output_fallback_detected
+        and not existing_word_alignment_missing
         and (
             canonical_output_fallback_detected
             or hybrid_output_fallback_detected
@@ -3438,8 +3456,8 @@ async def _build_canonical_refresh_projection(
         existing_projection_analysis=existing_projection_analysis,
         existing_quality_report=existing_quality_report,
         allow_display_baseline_preserved=keep_existing_projection,
-        suppress_canonical_refresh=canonical_output_fallback_detected,
-        suppress_hybrid_projection=hybrid_output_fallback_detected,
+        suppress_canonical_refresh=canonical_output_fallback_detected and not existing_word_alignment_missing,
+        suppress_hybrid_projection=hybrid_output_fallback_detected and not existing_word_alignment_missing,
     )
     selected_candidate, correction_score_report = _select_projection_candidate(
         candidates=candidate_pool,
@@ -3462,6 +3480,7 @@ async def _build_canonical_refresh_projection(
         "canonical_output_fallback_detected": canonical_output_fallback_detected,
         "hybrid_output_fallback_detected": hybrid_output_fallback_detected,
         "existing_output_fallback_detected": existing_output_fallback_detected,
+        "existing_word_alignment_missing": existing_word_alignment_missing,
         "output_fallback_guard_applied": force_display_baseline_for_output_fallback,
         "selection_policy": _projection_selection_policy(
             selected_basis=projection_basis,
@@ -4330,13 +4349,40 @@ def _projection_has_material_content_drift(*, baseline_items: list[Any], candida
     candidate_text = _projection_material_text(candidate_items)
     if not baseline_text or not candidate_text:
         return False
+    candidate_item_texts = [
+        normalize_projection_display_text(_subtitle_surface_display_text(item))
+        for item in list(candidate_items or [])
+    ]
+    for token in _projection_split_ascii_model_tokens(candidate_item_texts):
+        if _projection_text_supports_material_token(baseline_text, token):
+            return True
     candidate_tokens = _projection_material_tokens(candidate_text)
     if not candidate_tokens:
         return False
     for token in candidate_tokens:
         if not _projection_text_supports_material_token(baseline_text, token):
             return True
+    baseline_tokens = _projection_material_tokens(baseline_text)
+    for token in baseline_tokens:
+        if not _projection_text_supports_material_token(candidate_text, token):
+            continue
+        if not any(_projection_text_supports_material_token(text, token) for text in candidate_item_texts):
+            return True
     return False
+
+
+def _projection_split_ascii_model_tokens(candidate_item_texts: list[str]) -> set[str]:
+    tokens: set[str] = set()
+    compact_items = [_projection_compact_text(text) for text in candidate_item_texts]
+    for left, right in zip(compact_items, compact_items[1:]):
+        left_match = re.search(r"([A-Z]{2,})$", left)
+        right_match = re.match(r"(\d+[A-Z]*)", right)
+        if not left_match or not right_match:
+            continue
+        token = f"{left_match.group(1)}{right_match.group(1)}"
+        if _MATERIAL_PROJECTION_TOKEN_RE.fullmatch(token):
+            tokens.add(token)
+    return tokens
 
 
 def _projection_material_text(items: list[Any]) -> str:
@@ -4935,6 +4981,66 @@ def _normalize_projected_words_for_segmentation(
     return normalized
 
 
+_CANONICAL_SYNTHETIC_BOUNDARY_PUNCTUATION = "。.!！？"
+
+
+def _strip_synthetic_canonical_boundary_punctuation(
+    entries: list[dict[str, Any]],
+    *,
+    source_text: str,
+) -> list[dict[str, Any]]:
+    if len(entries) < 2 or not source_text:
+        return entries
+    source_compact = re.sub(r"\s+", "", str(source_text or ""))
+    if not source_compact:
+        return entries
+
+    def boundary_text(value: Any) -> str:
+        return re.sub(r"\s+", "", normalize_projection_display_text(str(value or "")))
+
+    def should_strip(left_text: str, right_text: str) -> bool:
+        left = boundary_text(left_text)
+        right = boundary_text(right_text)
+        if not left or not right or left[-1] not in _CANONICAL_SYNTHETIC_BOUNDARY_PUNCTUATION:
+            return False
+        left_core = left.rstrip(_CANONICAL_SYNTHETIC_BOUNDARY_PUNCTUATION)
+        if not left_core:
+            return False
+        punctuation_pattern = r"[，,。.!！？；;：:、…]+"
+        tail_source = re.sub(punctuation_pattern, "", left_core)
+        head = re.sub(punctuation_pattern, "", right)[:4]
+        tail = tail_source[-8:]
+        if not tail or not head:
+            return False
+        for tail_length in range(len(tail), max(1, min(3, len(tail))) - 1, -1):
+            tail_candidate = tail[-tail_length:]
+            search_from = 0
+            while True:
+                position = source_compact.find(tail_candidate, search_from)
+                if position < 0:
+                    break
+                after_tail = source_compact[position + len(tail_candidate):]
+                if after_tail and after_tail[0] in "，,。.!！？；;：:、…":
+                    return False
+                after_significant = re.sub(punctuation_pattern, "", after_tail)
+                if after_significant.startswith(head):
+                    return True
+                search_from = position + 1
+        return False
+
+    cleaned: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        current = dict(entry)
+        if index + 1 < len(entries):
+            next_entry = entries[index + 1]
+            if should_strip(current.get("text_final"), next_entry.get("text_final")):
+                for key in ("text_raw", "text_norm", "text_final"):
+                    value = str(current.get(key) or "")
+                    current[key] = value.rstrip().rstrip(_CANONICAL_SYNTHETIC_BOUNDARY_PUNCTUATION)
+        cleaned.append(current)
+    return cleaned
+
+
 def _project_canonical_transcript_to_timeline(
     canonical_transcript_layer: dict[str, Any] | None,
     keep_segments: list[dict[str, Any]],
@@ -4961,7 +5067,11 @@ def _project_canonical_transcript_to_timeline(
         out_cursor += max(0.0, in_end - in_start)
 
     projected_words: list[dict[str, Any]] = []
+    canonical_source_text_parts: list[str] = []
     for segment_index, segment in enumerate(canonical_segments):
+        segment_text = str(segment.get("text") or "").strip()
+        if segment_text:
+            canonical_source_text_parts.append(segment_text)
         segment_words = [
             dict(word)
             for word in list(segment.get("words") or [])
@@ -5047,7 +5157,10 @@ def _project_canonical_transcript_to_timeline(
                 "projection_source": "canonical_transcript",
             }
         )
-    return projected_entries
+    return _strip_synthetic_canonical_boundary_punctuation(
+        projected_entries,
+        source_text="".join(canonical_source_text_parts) or projected_text,
+    )
 
 
 def _projection_has_suspicious_subtitle_timing(
@@ -5084,7 +5197,10 @@ async def _build_edited_subtitle_projection(
     keep_segments: list[dict[str, Any]],
     projection_data: dict[str, Any] | None,
     fallback_subtitles: list[dict[str, Any]],
+    prefer_source_subtitles: bool = False,
 ) -> list[dict[str, Any]]:
+    if prefer_source_subtitles:
+        return remap_subtitles_to_timeline(fallback_subtitles, keep_segments)
     projection_payload = projection_data if isinstance(projection_data, dict) else {}
     transcript_layer = str(projection_payload.get("transcript_layer") or "").strip() or "subtitle_projection"
     projection_entries = [
@@ -5554,7 +5670,7 @@ def _subtitle_projection_repair_summary(
     changed = bool(getattr(validation, "changed", False))
     input_count = int(getattr(validation, "input_count", 0) or 0)
     output_count = int(getattr(validation, "output_count", 0) or 0)
-    repair_applied = bool(apply_repair and changed)
+    repair_applied = bool(apply_repair and changed and (mismatch_detected or fallback_used))
     if repair_applied and fallback_used:
         repair_mode = "source_fallback_remap"
     elif repair_applied and mismatch_detected:
@@ -5567,6 +5683,7 @@ def _subtitle_projection_repair_summary(
         "mismatch_detected": mismatch_detected,
         "fallback_used": fallback_used,
         "changed": changed,
+        "annotation_changed": bool(changed and not mismatch_detected and not fallback_used),
         "input_count": input_count,
         "output_count": output_count,
         "repair_mode": repair_mode,
@@ -6487,9 +6604,9 @@ async def _finalize_content_profile_review_state(
             draft_profile=manual_review_draft_profile,
             final_profile=final_profile,
             user_feedback=resolved_manual_review_feedback,
-            feedback_source="final_review_feedback",
+            feedback_source="summary_review_feedback",
             observation_type="manual_confirm",
-            context_hint=f"final_review_feedback:{job.workflow_template or 'auto'}",
+            context_hint=f"summary_review_feedback:{job.workflow_template or 'auto'}",
         )
         if review_step is not None:
             _set_summary_review_done_for_manual_profile(
@@ -6787,6 +6904,80 @@ async def _resolve_storage_reference(
     return local_path
 
 
+def _artifact_file_is_readable(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+async def _resolve_audio_artifact_or_rebuild(
+    session,
+    *,
+    job: Job,
+    step: JobStep | None,
+    audio_artifact: Artifact,
+    tmpdir: str,
+    default_name: str = "audio.wav",
+    progress: float = 0.2,
+) -> Path | None:
+    reference = str(audio_artifact.storage_path or "")
+    try:
+        audio_path = await _resolve_storage_reference(
+            reference,
+            tmpdir=tmpdir,
+            default_name=default_name,
+        )
+        if _artifact_file_is_readable(audio_path):
+            return audio_path
+        raise FileNotFoundError(str(audio_path))
+    except FileNotFoundError:
+        logger.warning(
+            "Audio artifact missing; rebuilding from source job=%s storage_path=%s",
+            job.id,
+            reference,
+        )
+        await _set_step_progress(
+            session,
+            step,
+            detail="音频派生文件缺失，正在从源视频重新提取",
+            progress=progress,
+            metadata_updates={
+                "audio_artifact_rebuilt": True,
+                "missing_audio_artifact_path": reference,
+            },
+        )
+        source_for_audio = await _resolve_source(job, tmpdir)
+        rebuilt_audio_path = Path(tmpdir) / default_name
+        try:
+            await extract_audio(source_for_audio, rebuilt_audio_path)
+        except NoAudioStreamError:
+            metadata = dict(step.metadata_ or {}) if step is not None else {}
+            metadata["has_audio"] = False
+            metadata["audio_optional"] = True
+            if step is not None:
+                step.metadata_ = metadata
+                await session.commit()
+            return None
+        if not _artifact_file_is_readable(rebuilt_audio_path):
+            raise FileNotFoundError(str(rebuilt_audio_path))
+        audio_key = job_key(str(job.id), "audio.wav")
+        storage = get_storage()
+        await storage.async_upload_file(rebuilt_audio_path, audio_key)
+        resolve_path = getattr(storage, "resolve_path", None)
+        if callable(resolve_path):
+            stored_audio_path = resolve_path(audio_key)
+            if not _artifact_file_is_readable(stored_audio_path):
+                raise FileNotFoundError(str(stored_audio_path))
+        audio_artifact.storage_path = audio_key
+        metadata = dict(step.metadata_ or {}) if step is not None else {}
+        metadata["has_audio"] = True
+        if step is not None:
+            step.metadata_ = metadata
+        await session.commit()
+        return rebuilt_audio_path
+
+
 async def _get_job_and_step(job_id: str, step_name: str):
     factory = get_session_factory()
     async with factory() as session:
@@ -6853,7 +7044,6 @@ async def _persist_render_runtime_diagnostics(
     job_id: uuid.UUID,
     step_id: uuid.UUID | None,
     avatar_result: dict[str, Any] | None = None,
-    cover_result: dict[str, Any] | None = None,
 ) -> None:
     latest_artifact = await _load_latest_optional_artifact(
         session,
@@ -6869,13 +7059,6 @@ async def _persist_render_runtime_diagnostics(
         )
     elif isinstance(latest_payload.get("avatar_result"), dict):
         payload["avatar_result"] = copy.deepcopy(latest_payload["avatar_result"])
-    if isinstance(cover_result, dict) and cover_result:
-        payload["cover_result"] = _merge_render_runtime_result(
-            latest_payload.get("cover_result"),
-            cover_result,
-        )
-    elif isinstance(latest_payload.get("cover_result"), dict):
-        payload["cover_result"] = copy.deepcopy(latest_payload["cover_result"])
     if not payload:
         return
     session.add(
@@ -7442,6 +7625,11 @@ async def run_extract_audio(job_id: str) -> dict:
             key = job_key(job_id, "audio.wav")
             await _set_step_progress(session, step, detail="上传音频到对象存储", progress=0.8)
             await storage.async_upload_file(audio_path, key)
+            resolve_path = getattr(storage, "resolve_path", None)
+            if callable(resolve_path):
+                stored_audio_path = resolve_path(key)
+                if not _artifact_file_is_readable(stored_audio_path):
+                    raise FileNotFoundError(str(stored_audio_path))
 
         artifact = Artifact(
             job_id=job.id,
@@ -7562,11 +7750,29 @@ async def run_transcribe(job_id: str) -> dict:
             raise ValueError("Artifact not found: audio_wav")
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            audio_path = await _resolve_storage_reference(
-                str(audio_artifact.storage_path or ""),
+            audio_path = await _resolve_audio_artifact_or_rebuild(
+                session,
+                job=job,
+                step=step,
+                audio_artifact=audio_artifact,
                 tmpdir=tmpdir,
                 default_name="audio.wav",
+                progress=0.16,
             )
+            if audio_path is None:
+                await persist_empty_transcript_result(
+                    job_id=job.id,
+                    step=step,
+                    language=job.language,
+                    session=session,
+                    prompt=transcription_prompt,
+                    reason="no_audio_stream",
+                    glossary_terms=effective_glossary_terms,
+                    review_memory=review_memory,
+                )
+                await _set_step_progress(session, step, detail="源视频无音轨，已跳过转写", progress=1.0)
+                await session.commit()
+                return {"segment_count": 0, "duration": 0.0, "has_audio": False}
             transcription_route_label = _describe_transcription_route(
                 provider=settings.transcription_provider,
                 model=settings.transcription_model,
@@ -7785,6 +7991,27 @@ async def run_transcribe(job_id: str) -> dict:
                         },
                     )
                     raise TimeoutError(str(stalled_reason["value"])) from exc
+                raise
+            except AsrQualityGateError as exc:
+                await persist_asr_quality_gate_artifact(
+                    job_id=job.id,
+                    step=step,
+                    session=session,
+                    language=job.language,
+                    prompt=transcription_prompt,
+                    error=exc,
+                )
+                await _set_step_progress(
+                    session,
+                    step,
+                    detail="ASR 质量门拒绝，已保存结构化证据",
+                    progress=float(heartbeat_state["progress"]),
+                    metadata_updates={
+                        "asr_quality_gate_artifact": True,
+                        "asr_quality_gate_rejected_attempt_count": len(exc.rejected_attempts),
+                    },
+                )
+                await session.commit()
                 raise
             finally:
                 accept_progress_updates["value"] = False
@@ -8031,6 +8258,10 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
                 content_profile=content_profile,
             )
             subtitle_quality_report.setdefault("metrics", {})["alignment_source"] = build_subtitle_alignment_source_metrics(entries)
+            subtitle_quality_report = apply_subtitle_alignment_quality_guard(
+                subtitle_quality_report,
+                require_word_alignment=True,
+            )
             subtitle_projection_layer = build_subtitle_projection_layer(
                 items,
                 segmentation_analysis=segmentation_result.analysis,
@@ -8861,6 +9092,7 @@ async def run_glossary_review(job_id: str) -> dict:
         )
 
         content_profile = _apply_identity_gate_to_content_profile(content_profile)
+        content_profile = strip_publication_only_profile_fields(content_profile)
         identity_gate = content_profile.get("verification_gate") if isinstance(content_profile.get("verification_gate"), dict) else {}
 
         artifact = Artifact(
@@ -9264,11 +9496,18 @@ async def run_avatar_commentary(job_id: str) -> dict:
                 "status": "skipped",
                 "reason": "full_track_audio_passthrough",
             }
-            plan["render_execution"] = {
-                "provider": plan.get("provider"),
-                "status": "deferred_to_render",
-                "reason": "full_track_audio_passthrough",
-            }
+            missing_presenter_reason = _avatar_missing_presenter_reason(plan)
+            if missing_presenter_reason:
+                plan["render_execution"] = _avatar_missing_presenter_execution(
+                    plan,
+                    reason=missing_presenter_reason,
+                )
+            else:
+                plan["render_execution"] = {
+                    "provider": plan.get("provider"),
+                    "status": "deferred_to_render",
+                    "reason": "full_track_audio_passthrough",
+                }
         elif plan.get("mode") == "segmented_audio_passthrough" and avatar_segments:
             audio_artifact = await _load_latest_artifact(session, job.id, "audio_wav")
             _apply_avatar_presenter_binding_to_plan(
@@ -9276,69 +9515,81 @@ async def run_avatar_commentary(job_id: str) -> dict:
                 binding=avatar_binding,
                 packaging_config=packaging_config,
             )
-            try:
-                await _set_step_progress(session, step, detail="切分原声并逐段生成数字人口播", progress=0.84)
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    tmp_root = Path(tmpdir)
-                    source_audio_path = await _resolve_storage_reference(
-                        str(audio_artifact.storage_path or ""),
-                        tmpdir=tmpdir,
-                        default_name="avatar_reference.wav",
-                    )
-                    source_audio_meta = await probe(source_audio_path)
-                    source_audio_duration = float(getattr(source_audio_meta, "duration", 0.0) or 0.0)
-                    avatar_segments = refine_avatar_commentary_segments_for_media_duration(
-                        avatar_segments,
-                        subtitle_dicts,
-                        media_duration_sec=source_audio_duration,
-                    )
-                    staged_segments: list[dict[str, Any]] = []
-                    for segment in avatar_segments:
-                        clip_path = tmp_root / f"{segment.get('segment_id')}.wav"
-                        await extract_audio_clip(
-                            source_audio_path,
-                            clip_path,
-                            start_time=float(segment.get("start_time") or 0.0),
-                            end_time=float(segment.get("end_time") or segment.get("start_time") or 0.0),
-                        )
-                        staged_segments.append(
-                            {
-                                **segment,
-                                "audio_url": str(clip_path),
-                            }
-                        )
-                    plan["segments"] = staged_segments
-                    plan["dubbing_execution"] = {
-                        "provider": "passthrough",
-                        "status": "skipped",
-                        "reason": "segmented_audio_passthrough",
-                    }
-                    render_request = dict(plan.get("render_request") or {})
-                    render_request["segments"] = staged_segments
-                    await _set_step_progress(session, step, detail="调用数字人 provider 逐段生成口播", progress=0.92)
-                    render_execution = await asyncio.to_thread(
-                        get_avatar_provider().execute_render,
-                        job_id=str(job.id),
-                        request=render_request,
-                    )
-                    render_execution["segments"] = await _persist_avatar_segment_outputs(
-                        str(job.id),
-                        render_execution.get("segments") if render_execution else None,
-                    )
-                    render_executed_in_mode = True
-                    plan["render_execution"] = render_execution
-                    plan["segments"] = _merge_execution_into_segments(
-                        staged_segments,
-                        render_execution.get("segments") if render_execution else None,
-                        media_key="video",
-                    )
-                    plan["render_request"] = render_request
-            except Exception as exc:
-                plan["render_execution"] = {
-                    "provider": plan.get("provider"),
-                    "status": "failed",
-                    "error": str(exc),
+            missing_presenter_reason = _avatar_missing_presenter_reason(plan)
+            if missing_presenter_reason:
+                plan["dubbing_execution"] = {
+                    "provider": "passthrough",
+                    "status": "skipped",
+                    "reason": "segmented_audio_passthrough",
                 }
+                plan["render_execution"] = _avatar_missing_presenter_execution(
+                    plan,
+                    reason=missing_presenter_reason,
+                )
+            else:
+                try:
+                    await _set_step_progress(session, step, detail="切分原声并逐段生成数字人口播", progress=0.84)
+                    with tempfile.TemporaryDirectory() as tmpdir:
+                        tmp_root = Path(tmpdir)
+                        source_audio_path = await _resolve_storage_reference(
+                            str(audio_artifact.storage_path or ""),
+                            tmpdir=tmpdir,
+                            default_name="avatar_reference.wav",
+                        )
+                        source_audio_meta = await probe(source_audio_path)
+                        source_audio_duration = float(getattr(source_audio_meta, "duration", 0.0) or 0.0)
+                        avatar_segments = refine_avatar_commentary_segments_for_media_duration(
+                            avatar_segments,
+                            subtitle_dicts,
+                            media_duration_sec=source_audio_duration,
+                        )
+                        staged_segments: list[dict[str, Any]] = []
+                        for segment in avatar_segments:
+                            clip_path = tmp_root / f"{segment.get('segment_id')}.wav"
+                            await extract_audio_clip(
+                                source_audio_path,
+                                clip_path,
+                                start_time=float(segment.get("start_time") or 0.0),
+                                end_time=float(segment.get("end_time") or segment.get("start_time") or 0.0),
+                            )
+                            staged_segments.append(
+                                {
+                                    **segment,
+                                    "audio_url": str(clip_path),
+                                }
+                            )
+                        plan["segments"] = staged_segments
+                        plan["dubbing_execution"] = {
+                            "provider": "passthrough",
+                            "status": "skipped",
+                            "reason": "segmented_audio_passthrough",
+                        }
+                        render_request = dict(plan.get("render_request") or {})
+                        render_request["segments"] = staged_segments
+                        await _set_step_progress(session, step, detail="调用数字人 provider 逐段生成口播", progress=0.92)
+                        render_execution = await asyncio.to_thread(
+                            get_avatar_provider().execute_render,
+                            job_id=str(job.id),
+                            request=render_request,
+                        )
+                        render_execution["segments"] = await _persist_avatar_segment_outputs(
+                            str(job.id),
+                            render_execution.get("segments") if render_execution else None,
+                        )
+                        render_executed_in_mode = True
+                        plan["render_execution"] = render_execution
+                        plan["segments"] = _merge_execution_into_segments(
+                            staged_segments,
+                            render_execution.get("segments") if render_execution else None,
+                            media_key="video",
+                        )
+                        plan["render_request"] = render_request
+                except Exception as exc:
+                    plan["render_execution"] = {
+                        "provider": plan.get("provider"),
+                        "status": "failed",
+                        "error": str(exc),
+                    }
         elif avatar_segments:
             try:
                 await _set_step_progress(session, step, detail="为数字人段落生成配音", progress=0.82)
@@ -9513,41 +9764,15 @@ async def run_edit_plan(job_id: str) -> dict:
         )
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            audio_path: Path | None = None
-            try:
-                audio_path = await _resolve_storage_reference(
-                    str(audio_artifact.storage_path or ""),
-                    tmpdir=tmpdir,
-                    default_name="audio.wav",
-                )
-            except FileNotFoundError:
-                logger.warning(
-                    "Audio artifact missing during edit_plan; rebuilding from source job=%s storage_path=%s",
-                    job.id,
-                    audio_artifact.storage_path,
-                )
-                await _set_step_progress(
-                    session,
-                    step,
-                    detail="音频派生文件缺失，正在从源视频重新提取",
-                    progress=0.3,
-                    metadata_updates={"audio_artifact_rebuilt": True},
-                )
-                source_for_audio = await _resolve_source(job, tmpdir)
-                rebuilt_audio_path = Path(tmpdir) / "audio.wav"
-                try:
-                    await extract_audio(source_for_audio, rebuilt_audio_path)
-                except NoAudioStreamError:
-                    audio_path = None
-                    metadata = dict(step.metadata_ or {})
-                    metadata["has_audio"] = False
-                    metadata["audio_optional"] = True
-                    step.metadata_ = metadata
-                else:
-                    audio_key = job_key(str(job.id), "audio.wav")
-                    await get_storage().async_upload_file(rebuilt_audio_path, audio_key)
-                    audio_artifact.storage_path = audio_key
-                    audio_path = rebuilt_audio_path
+            audio_path = await _resolve_audio_artifact_or_rebuild(
+                session,
+                job=job,
+                step=step,
+                audio_artifact=audio_artifact,
+                tmpdir=tmpdir,
+                default_name="audio.wav",
+                progress=0.3,
+            )
             await _set_step_progress(session, step, detail="检测静音和明显废话段", progress=0.5)
             silences = detect_silence(audio_path) if audio_path is not None else []
             scene_boundaries = []
@@ -9641,7 +9866,7 @@ async def run_edit_plan(job_id: str) -> dict:
 
         editorial_timeline = await save_editorial_timeline(job.id, decision, session)
 
-        creator_card = await _load_job_creator_card(session, job)
+        creator_card = await _load_job_packaging_creator_card(session, job)
         packaging_plan = resolve_packaging_plan_for_job(
             str(job.id),
             content_profile=content_profile,
@@ -9659,6 +9884,7 @@ async def run_edit_plan(job_id: str) -> dict:
             keep_segments=keep_segments,
             projection_data=projection_data,
             fallback_subtitles=decision_subtitles,
+            prefer_source_subtitles=True,
         )
         remapped_subtitles = await _validated_subtitle_projection_for_timeline(
             session,
@@ -9667,10 +9893,10 @@ async def run_edit_plan(job_id: str) -> dict:
             keep_segments=keep_segments,
             source_subtitles=decision_subtitles,
             fallback_source_subtitles=decision_subtitles,
-            allow_source_fallback_repair=True,
             apply_repair=True,
             diagnostics_slot=subtitle_projection_repair,
         )
+        remapped_subtitles = _stabilize_render_subtitle_timeline(remapped_subtitles)
         projection_blocking_reasons = projection_output_fallback_reasons(
             subtitle_projection_repair,
             include_refresh_required=False,
@@ -9740,12 +9966,6 @@ async def run_edit_plan(job_id: str) -> dict:
             subtitle_style=str(packaging_plan.get("subtitle_style") or "bold_yellow_outline"),
             subtitle_motion_style=str(packaging_plan.get("subtitle_motion_style") or "motion_static"),
             smart_effect_style=str(packaging_plan.get("smart_effect_style") or "smart_effect_rhythm"),
-            cover_style=(
-                None
-                if str(packaging_plan.get("cover_style") or "preset_default") == "preset_default"
-                else str(packaging_plan.get("cover_style"))
-            ),
-            title_style=str(packaging_plan.get("title_style") or "preset_default"),
             intro=packaging_plan.get("intro"),
             outro=packaging_plan.get("outro"),
             insert=packaging_plan.get("insert"),
@@ -10152,7 +10372,9 @@ async def run_render(job_id: str) -> dict:
             tmp_plain_mp4 = Path(tmpdir) / "output_plain.mp4"
             tmp_avatar_mp4 = Path(tmpdir) / "output_avatar.mp4"
             tmp_ai_effect_mp4 = Path(tmpdir) / "output_ai_effect.mp4"
+            tmp_ai_effect_candidate_mp4 = Path(tmpdir) / "output_ai_effect.candidate.mp4"
             tmp_packaged_mp4 = Path(tmpdir) / "output_packaged.mp4"
+            tmp_packaged_candidate_mp4 = Path(tmpdir) / "output_packaged.candidate.mp4"
             reusable_plain_path = (
                 Path(str(reusable_render_outputs.get("plain_mp4"))).expanduser()
                 if reusable_render_outputs
@@ -10212,6 +10434,28 @@ async def run_render(job_id: str) -> dict:
                     apply_repair=False,
                     diagnostics_slot=subtitle_projection_repair,
                 )
+                remapped_subtitles = _stabilize_render_subtitle_timeline(remapped_subtitles)
+                remapped_subtitles, rendered_audio_alignment = await _repair_subtitles_with_rendered_audio_asr(
+                    video_path=tmp_plain_mp4,
+                    subtitle_items=remapped_subtitles,
+                    language=str(getattr(job, "language", None) or "zh-CN"),
+                    debug_dir=debug_dir / "plain_rendered_audio_subtitle_alignment",
+                    label="plain",
+                )
+                projection_session.add(
+                    Artifact(
+                        job_id=job.id,
+                        step_id=step.id if step else None,
+                        artifact_type=ARTIFACT_TYPE_RENDER_SUBTITLE_ASR_ALIGNMENT,
+                        data_json=rendered_audio_alignment,
+                    )
+                )
+                await projection_session.flush()
+                if str(rendered_audio_alignment.get("status") or "") == "blocked":
+                    raise RuntimeError(
+                        "render_subtitle_asr_alignment_blocked: "
+                        + str(rendered_audio_alignment.get("reason") or "rendered_audio_asr_alignment_failed")
+                    )
             ai_effect_render_plan = build_ai_effect_render_plan(
                 render_plan_timeline.data_json,
                 keep_segments=keep_segments,
@@ -10262,10 +10506,6 @@ async def run_render(job_id: str) -> dict:
                     list(avatar_plan.get("segments") or []),
                 )
             avatar_result: dict[str, Any] | None = None
-            cover_result: dict[str, Any] = {
-                "status": "pending",
-                "detail": "等待生成封面图。",
-            }
             avatar_variant_source_path: Path | None = None
             avatar_variant_duration_sec: float | None = None
             avatar_meta = None
@@ -10301,87 +10541,101 @@ async def run_render(job_id: str) -> dict:
                 "avatar_commentary" in set(getattr(job, "enhancement_modes", []) or [])
                 and str(avatar_plan.get("mode") or "") == "full_track_audio_passthrough"
             ):
-                avatar_result = {
-                    "enabled": True,
-                    "status": "pending",
-                    "mode": str(avatar_plan.get("mode") or ""),
-                    "integration_mode": str(avatar_plan.get("integration_mode") or ""),
-                    "provider": str(avatar_plan.get("provider") or ""),
-                    "detail": "等待渲染阶段处理数字人口播。",
-                }
-                try:
-                    await _refresh_render_progress(
-                        detail="素版已完成，等待数字人口播全轨插槽",
-                        progress=0.42,
+                missing_presenter_reason = _avatar_missing_presenter_reason(avatar_plan)
+                if missing_presenter_reason:
+                    avatar_result = _avatar_missing_presenter_runtime_result(
+                        avatar_plan,
+                        reason=missing_presenter_reason,
                     )
-                    avatar_rendered_path = await _render_full_track_avatar_video(
-                        job_id=str(job.id),
-                        avatar_plan=avatar_plan,
-                        source_plain_video_path=tmp_plain_mp4,
-                        debug_dir=debug_dir / "avatar_full_track",
+                    await _persist_render_runtime_diagnostics(
+                        session,
+                        job_id=job.id,
+                        step_id=step.id if step else None,
+                        avatar_result=avatar_result,
                     )
-                    if avatar_rendered_path is not None and avatar_rendered_path.exists():
-                        pip_output_path = Path(tmpdir) / "output_plain.avatar_pip.mp4"
-                        await _overlay_avatar_picture_in_picture(
-                            base_video_path=tmp_plain_mp4,
-                            avatar_video_path=avatar_rendered_path,
-                            output_path=pip_output_path,
-                            position=str(avatar_plan.get("overlay_position") or "bottom_right"),
-                            scale=float(avatar_plan.get("overlay_scale") or 0.22),
-                            margin=int(avatar_plan.get("overlay_margin") or 28),
-                            safe_margin_ratio=float(avatar_plan.get("safe_margin") or 0.1),
-                            corner_radius=int(avatar_plan.get("overlay_corner_radius") or 0),
-                            border_width=int(avatar_plan.get("overlay_border_width") or 0),
-                            border_color=str(avatar_plan.get("overlay_border_color") or "#F4E4B8"),
+                else:
+                    avatar_result = {
+                        "enabled": True,
+                        "status": "pending",
+                        "mode": str(avatar_plan.get("mode") or ""),
+                        "integration_mode": str(avatar_plan.get("integration_mode") or ""),
+                        "provider": str(avatar_plan.get("provider") or ""),
+                        "detail": "等待渲染阶段处理数字人口播。",
+                    }
+                if not missing_presenter_reason:
+                    try:
+                        await _refresh_render_progress(
+                            detail="素版已完成，等待数字人口播全轨插槽",
+                            progress=0.42,
                         )
-                        avatar_meta = await _probe_with_retry(pip_output_path)
-                        pip_duration = float(avatar_meta.duration or 0.0)
-                        avatar_variant_source_path = pip_output_path
-                        avatar_variant_duration_sec = pip_duration
-                        tmp_avatar_mp4 = avatar_variant_source_path
-                        avatar_result = {
-                            **(avatar_result or {}),
-                            "status": "done",
-                            "detail": "数字人口播已作为画中画写入成片。",
-                            "profile_name": str(avatar_plan.get("avatar_profile_name") or ""),
-                            "output_path": str(pip_output_path),
-                        }
-                    else:
+                        avatar_rendered_path = await _render_full_track_avatar_video(
+                            job_id=str(job.id),
+                            avatar_plan=avatar_plan,
+                            source_plain_video_path=tmp_plain_mp4,
+                            debug_dir=debug_dir / "avatar_full_track",
+                        )
+                        if avatar_rendered_path is not None and avatar_rendered_path.exists():
+                            pip_output_path = Path(tmpdir) / "output_plain.avatar_pip.mp4"
+                            await _overlay_avatar_picture_in_picture(
+                                base_video_path=tmp_plain_mp4,
+                                avatar_video_path=avatar_rendered_path,
+                                output_path=pip_output_path,
+                                position=str(avatar_plan.get("overlay_position") or "bottom_right"),
+                                scale=float(avatar_plan.get("overlay_scale") or 0.22),
+                                margin=int(avatar_plan.get("overlay_margin") or 28),
+                                safe_margin_ratio=float(avatar_plan.get("safe_margin") or 0.1),
+                                corner_radius=int(avatar_plan.get("overlay_corner_radius") or 0),
+                                border_width=int(avatar_plan.get("overlay_border_width") or 0),
+                                border_color=str(avatar_plan.get("overlay_border_color") or "#F4E4B8"),
+                            )
+                            avatar_meta = await _probe_with_retry(pip_output_path)
+                            pip_duration = float(avatar_meta.duration or 0.0)
+                            avatar_variant_source_path = pip_output_path
+                            avatar_variant_duration_sec = pip_duration
+                            tmp_avatar_mp4 = avatar_variant_source_path
+                            avatar_result = {
+                                **(avatar_result or {}),
+                                "status": "done",
+                                "detail": "数字人口播已作为画中画写入成片。",
+                                "profile_name": str(avatar_plan.get("avatar_profile_name") or ""),
+                                "output_path": str(pip_output_path),
+                            }
+                        else:
+                            avatar_result = {
+                                **(avatar_result or {}),
+                                "status": "degraded",
+                                "reason": "missing_avatar_render",
+                                "detail": "没有拿到可用数字人视频，已自动回退普通成片。",
+                            }
+                    except AvatarFullTrackRenderError as exc:
+                        error_payload = _avatar_full_track_error_payload(exc)
+                        logger.warning(
+                            "Avatar overlay degraded to plain render for job %s reason=%s detail=%s",
+                            job_id,
+                            error_payload.get("reason"),
+                            error_payload.get("detail"),
+                        )
                         avatar_result = {
                             **(avatar_result or {}),
                             "status": "degraded",
-                            "reason": "missing_avatar_render",
-                            "detail": "没有拿到可用数字人视频，已自动回退普通成片。",
+                            **error_payload,
+                            "detail": f"数字人渲染未完成，已自动回退普通成片：{error_payload['detail']}",
                         }
-                except AvatarFullTrackRenderError as exc:
-                    error_payload = _avatar_full_track_error_payload(exc)
-                    logger.warning(
-                        "Avatar overlay degraded to plain render for job %s reason=%s detail=%s",
-                        job_id,
-                        error_payload.get("reason"),
-                        error_payload.get("detail"),
+                    except Exception as exc:
+                        logger.exception("Avatar overlay degraded to plain render for job %s", job_id)
+                        error_payload = _avatar_full_track_error_payload(exc)
+                        avatar_result = {
+                            **(avatar_result or {}),
+                            "status": "degraded",
+                            **error_payload,
+                            "detail": f"数字人渲染失败，已自动回退普通成片：{error_payload['detail']}",
+                        }
+                    await _persist_render_runtime_diagnostics(
+                        session,
+                        job_id=job.id,
+                        step_id=step.id if step else None,
+                        avatar_result=avatar_result,
                     )
-                    avatar_result = {
-                        **(avatar_result or {}),
-                        "status": "degraded",
-                        **error_payload,
-                        "detail": f"数字人渲染未完成，已自动回退普通成片：{error_payload['detail']}",
-                    }
-                except Exception as exc:
-                    logger.exception("Avatar overlay degraded to plain render for job %s", job_id)
-                    error_payload = _avatar_full_track_error_payload(exc)
-                    avatar_result = {
-                        **(avatar_result or {}),
-                        "status": "degraded",
-                        **error_payload,
-                        "detail": f"数字人渲染失败，已自动回退普通成片：{error_payload['detail']}",
-                    }
-                await _persist_render_runtime_diagnostics(
-                    session,
-                    job_id=job.id,
-                    step_id=step.id if step else None,
-                    avatar_result=avatar_result,
-                )
             elif (
                 avatar_variant_source_path is None
                 and
@@ -10473,10 +10727,10 @@ async def run_render(job_id: str) -> dict:
                 source_path=packaged_source_path,
                 render_plan=None,
                 editorial_timeline=packaged_editorial_timeline,
-                output_path=tmp_ai_effect_mp4,
-                subtitle_items=packaged_subtitles,
+                output_path=tmp_ai_effect_candidate_mp4,
+                subtitle_items=None,
                 overlay_editing_accents=ai_effect_overlay_accents,
-                synthesize_subtitle_unit_accents=not manual_subtitle_only_render,
+                synthesize_subtitle_unit_accents=False,
                 debug_dir=debug_dir / "ai_effect_variant",
                 packaging_context=ai_effect_packaging_context,
                 runtime_plan_context=ai_effect_runtime_plan_context,
@@ -10485,13 +10739,91 @@ async def run_render(job_id: str) -> dict:
                 source_path=packaged_source_path,
                 render_plan=None,
                 editorial_timeline=packaged_editorial_timeline,
-                output_path=tmp_packaged_mp4,
-                subtitle_items=packaged_subtitles,
+                output_path=tmp_packaged_candidate_mp4,
+                subtitle_items=None,
                 overlay_editing_accents=final_overlay_accents,
-                synthesize_subtitle_unit_accents=not manual_subtitle_only_render,
+                synthesize_subtitle_unit_accents=False,
                 debug_dir=debug_dir / "packaged",
                 packaging_context=packaging_context,
                 runtime_plan_context=render_plan_context,
+            )
+            packaged_subtitles, final_candidate_alignment = await _repair_subtitles_with_rendered_audio_asr(
+                video_path=tmp_packaged_candidate_mp4,
+                subtitle_items=packaged_subtitles,
+                language=str(getattr(job, "language", None) or "zh-CN"),
+                debug_dir=debug_dir / "final_candidate_audio_subtitle_alignment",
+                label="packaged_final_candidate",
+            )
+            session.add(
+                Artifact(
+                    job_id=job.id,
+                    step_id=step.id if step else None,
+                    artifact_type=ARTIFACT_TYPE_RENDER_SUBTITLE_ASR_ALIGNMENT,
+                    data_json={
+                        "status": str(final_candidate_alignment.get("status") or ""),
+                        "repaired": bool(final_candidate_alignment.get("repaired")),
+                        "variant": "packaged",
+                        "phase": "final_candidate_before_burn_in",
+                        "alignment": final_candidate_alignment,
+                    },
+                )
+            )
+            await session.flush()
+            if str(final_candidate_alignment.get("status") or "") == "blocked":
+                raise RuntimeError(
+                    "render_final_candidate_subtitle_asr_alignment_blocked: packaged final candidate "
+                    + str(final_candidate_alignment.get("reason") or "rendered_audio_asr_alignment_failed")
+                )
+            ai_effect_subtitles, ai_effect_candidate_alignment = await _repair_subtitles_with_rendered_audio_asr(
+                video_path=tmp_ai_effect_candidate_mp4,
+                subtitle_items=packaged_subtitles,
+                language=str(getattr(job, "language", None) or "zh-CN"),
+                debug_dir=debug_dir / "ai_effect_candidate_audio_subtitle_alignment",
+                label="ai_effect_final_candidate",
+            )
+            session.add(
+                Artifact(
+                    job_id=job.id,
+                    step_id=step.id if step else None,
+                    artifact_type=ARTIFACT_TYPE_RENDER_SUBTITLE_ASR_ALIGNMENT,
+                    data_json={
+                        "status": str(ai_effect_candidate_alignment.get("status") or ""),
+                        "repaired": bool(ai_effect_candidate_alignment.get("repaired")),
+                        "variant": "ai_effect",
+                        "phase": "final_candidate_before_burn_in",
+                        "alignment": ai_effect_candidate_alignment,
+                    },
+                )
+            )
+            await session.flush()
+            if str(ai_effect_candidate_alignment.get("status") or "") == "blocked":
+                raise RuntimeError(
+                    "render_final_candidate_subtitle_asr_alignment_blocked: ai_effect final candidate "
+                    + str(ai_effect_candidate_alignment.get("reason") or "rendered_audio_asr_alignment_failed")
+                )
+            await burn_subtitles_on_rendered_video(
+                tmp_packaged_candidate_mp4,
+                output_path=tmp_packaged_mp4,
+                subtitle_items=packaged_subtitles,
+                subtitles_plan=(
+                    dict(packaging_context.get("subtitles") or {})
+                    if isinstance(packaging_context.get("subtitles"), dict)
+                    else None
+                ),
+                debug_dir=debug_dir / "packaged_final_burn_in",
+                packaging_context=packaging_context,
+            )
+            await burn_subtitles_on_rendered_video(
+                tmp_ai_effect_candidate_mp4,
+                output_path=tmp_ai_effect_mp4,
+                subtitle_items=ai_effect_subtitles,
+                subtitles_plan=(
+                    dict(ai_effect_packaging_context.get("subtitles") or {})
+                    if isinstance(ai_effect_packaging_context.get("subtitles"), dict)
+                    else None
+                ),
+                debug_dir=debug_dir / "ai_effect_final_burn_in",
+                packaging_context=ai_effect_packaging_context,
             )
             packaged_meta = await _probe_with_retry(tmp_packaged_mp4)
             ai_effect_meta = await _probe_with_retry(tmp_ai_effect_mp4)
@@ -10569,14 +10901,6 @@ async def run_render(job_id: str) -> dict:
                 if avatar_meta is not None
                 else None
             )
-            local_cover = build_variant_output_path(
-                out_dir,
-                out_name,
-                variant_label="封面",
-                extension=".jpg",
-                width=plain_meta.width,
-                height=plain_meta.height,
-            )
             avatar_outputs_ready = (
                 tmp_avatar_mp4.exists()
                 and local_avatar_mp4 is not None
@@ -10605,7 +10929,12 @@ async def run_render(job_id: str) -> dict:
                 render_step = step_result.scalar_one_or_none()
                 render_output = await session.get(RenderOutput, render_output_id)
                 if render_step:
-                    await _set_step_progress(session, render_step, detail="生成字幕文件与封面图", progress=0.75)
+                    await _set_step_progress(
+                        session,
+                        render_step,
+                        detail="生成字幕文件",
+                        progress=0.75,
+                    )
                 if render_output:
                     render_output.progress = 0.75
                     await session.commit()
@@ -10615,7 +10944,7 @@ async def run_render(job_id: str) -> dict:
             write_srt_file(remapped_subtitles, local_plain_srt)
             if avatar_outputs_ready:
                 write_srt_file(packaged_subtitles, local_avatar_srt)
-            write_srt_file(packaged_subtitles, local_ai_effect_srt)
+            write_srt_file(ai_effect_subtitles, local_ai_effect_srt)
             plain_subtitle_sync = _compute_subtitle_sync_check(local_plain_mp4, local_plain_srt)
             packaged_outro_plan = (
                 dict((packaging_assets or {}).get("outro") or {})
@@ -10665,6 +10994,55 @@ async def run_render(job_id: str) -> dict:
                 "avatar": avatar_subtitle_sync,
                 "ai_effect": ai_effect_subtitle_sync,
             }
+            final_render_subtitle_asr_alignment = await _audit_subtitles_against_rendered_audio(
+                video_path=local_packaged_mp4,
+                subtitle_items=packaged_subtitles,
+                language=str(getattr(job, "language", None) or "zh-CN"),
+                debug_dir=debug_dir / "final_rendered_audio_subtitle_alignment",
+                label="packaged_final",
+            )
+            ai_effect_final_render_subtitle_asr_alignment = await _audit_subtitles_against_rendered_audio(
+                video_path=local_ai_effect_mp4,
+                subtitle_items=ai_effect_subtitles,
+                language=str(getattr(job, "language", None) or "zh-CN"),
+                debug_dir=debug_dir / "ai_effect_final_rendered_audio_subtitle_alignment",
+                label="ai_effect_final",
+            )
+            session.add(
+                Artifact(
+                    job_id=job.id,
+                    step_id=step.id if step else None,
+                    artifact_type=ARTIFACT_TYPE_RENDER_SUBTITLE_ASR_ALIGNMENT,
+                    data_json={
+                        "status": "pass" if final_render_subtitle_asr_alignment.get("gate_pass") else "blocked",
+                        "repaired": False,
+                        "variant": "packaged",
+                        "final": final_render_subtitle_asr_alignment,
+                    },
+                )
+            )
+            session.add(
+                Artifact(
+                    job_id=job.id,
+                    step_id=step.id if step else None,
+                    artifact_type=ARTIFACT_TYPE_RENDER_SUBTITLE_ASR_ALIGNMENT,
+                    data_json={
+                        "status": "pass" if ai_effect_final_render_subtitle_asr_alignment.get("gate_pass") else "blocked",
+                        "repaired": bool(ai_effect_candidate_alignment.get("repaired")),
+                        "variant": "ai_effect",
+                        "final": ai_effect_final_render_subtitle_asr_alignment,
+                    },
+                )
+            )
+            await session.flush()
+            if not bool(final_render_subtitle_asr_alignment.get("gate_pass")):
+                raise RuntimeError(
+                    "render_final_subtitle_asr_alignment_blocked: packaged final video subtitle timing failed Qwen3-ASR gate"
+                )
+            if not bool(ai_effect_final_render_subtitle_asr_alignment.get("gate_pass")):
+                raise RuntimeError(
+                    "render_final_subtitle_asr_alignment_blocked: ai_effect final video subtitle timing failed Qwen3-ASR gate"
+                )
             if blocking_sync_issues := _collect_blocking_variant_sync_issues(
                 variant_subtitle_sync_checks,
                 mandatory_variants={"plain", "packaged"},
@@ -10674,54 +11052,14 @@ async def run_render(job_id: str) -> dict:
                     + "; ".join(blocking_sync_issues)
                 )
 
-            # Extract cover frame from the plain render so burned subtitles never leak into thumbnails.
-            try:
-                render_cover = dict(render_plan_context["cover"] or {})
-                cover_variants = await extract_cover_frame(
-                    _select_cover_source_video(tmp_plain_mp4),
-                    local_cover,
-                    seek_sec=await _get_cover_seek(job.id),
-                    content_profile=content_profile,
-                    cover_style=render_cover.get("style"),
-                    title_style=render_cover.get("title_style"),
-                )
-                cover_selection = load_cover_selection_summary(local_cover)
-                cover_fallback_generated = bool((cover_selection or {}).get("fallback_generated"))
-                cover_fallback_reason = str((cover_selection or {}).get("fallback_reason") or "cover_generation_fallback").strip()
-                cover_result = {
-                    "status": "blocked" if cover_fallback_generated else "done",
-                    "detail": (
-                        "封面图生成落到 fallback，已阻止其作为正式产出。"
-                        if cover_fallback_generated
-                        else "封面图已生成。"
-                    ),
-                    "cover_path": str(local_cover),
-                    "variant_count": len(cover_variants),
-                    "selection_review_recommended": bool((cover_selection or {}).get("review_recommended")),
-                    "fallback_generated": cover_fallback_generated,
-                }
-                if cover_fallback_generated:
-                    cover_result["reason"] = cover_fallback_reason
-            except Exception:
-                logger.exception("Cover export failed for job %s", job_id)
-                cover_result = {
-                    "status": "degraded",
-                    "reason": "cover_export_failed",
-                    "detail": "封面导出失败，成片已保留但未产出封面图。",
-                }
-                local_cover = None  # Cover is non-critical
-                cover_variants = []
-                cover_selection = None
             await _persist_render_runtime_diagnostics(
                 session,
                 job_id=job.id,
                 step_id=step.id if step else None,
                 avatar_result=avatar_result,
-                cover_result=cover_result,
             )
             render_blocking_reasons = render_output_blocking_reasons(
                 avatar_result=avatar_result,
-                cover_result=cover_result,
                 subtitle_projection_repair=subtitle_projection_repair,
             )
             if render_blocking_reasons:
@@ -10750,8 +11088,6 @@ async def run_render(job_id: str) -> dict:
     serialized_ai_effect_srt = str(local_ai_effect_srt)
     serialized_avatar_mp4 = str(local_avatar_mp4) if avatar_outputs_ready else None
     serialized_avatar_srt = str(local_avatar_srt) if avatar_outputs_ready else None
-    serialized_cover = str(local_cover) if local_cover else None
-    serialized_cover_variants = [str(path) for path in cover_variants] if local_cover else []
     serialized_variant_paths = {
         "packaged": serialized_packaged_mp4,
         "plain": serialized_plain_mp4,
@@ -10765,6 +11101,10 @@ async def run_render(job_id: str) -> dict:
         "plain_subtitle_sync": variant_subtitle_sync_checks["plain"],
         "avatar_subtitle_sync": variant_subtitle_sync_checks["avatar"],
         "ai_effect_subtitle_sync": variant_subtitle_sync_checks["ai_effect"],
+        "final_render_subtitle_asr_alignment": final_render_subtitle_asr_alignment,
+        "ai_effect_final_render_subtitle_asr_alignment": ai_effect_final_render_subtitle_asr_alignment,
+        "final_candidate_subtitle_asr_alignment": final_candidate_alignment,
+        "ai_effect_candidate_subtitle_asr_alignment": ai_effect_candidate_alignment,
         "subtitle_projection_repair": dict(subtitle_projection_repair),
     }
     render_outputs_payload = {
@@ -10776,9 +11116,6 @@ async def run_render(job_id: str) -> dict:
         "packaged_srt": primary_output_srt,
         "avatar_srt": serialized_avatar_srt,
         "ai_effect_srt": serialized_ai_effect_srt,
-        "cover": serialized_cover,
-        "cover_variants": serialized_cover_variants,
-        "cover_selection": cover_selection,
     }
     local_paths = {
         "mp4": primary_output_path,
@@ -10827,7 +11164,7 @@ async def run_render(job_id: str) -> dict:
                 media_path=local_ai_effect_mp4,
                 srt_path=local_ai_effect_srt,
                 media_meta=ai_effect_meta,
-                subtitle_events=packaged_subtitles,
+                subtitle_events=ai_effect_subtitles,
                 transition_offsets=ai_effect_transition_offsets,
                 segments=variant_editorial_context["packaged_segments"],
                 overlay_events=ai_effect_overlay_accents,
@@ -10863,17 +11200,17 @@ async def run_render(job_id: str) -> dict:
             select(JobStep).where(JobStep.job_id == uuid.UUID(job_id), JobStep.step_name == "render")
         )
         render_step = step_result.scalar_one_or_none()
+        render_outputs_artifact_payload = {
+            **render_outputs_payload,
+            "avatar_result": avatar_result,
+            "quality_checks": render_quality_checks,
+        }
         session.add(
             Artifact(
                 job_id=uuid.UUID(job_id),
                 step_id=render_step.id if render_step else None,
                 artifact_type="render_outputs",
-                data_json={
-                    **render_outputs_payload,
-                    "cover_result": cover_result,
-                    "avatar_result": avatar_result,
-                    "quality_checks": render_quality_checks,
-                },
+                data_json=render_outputs_artifact_payload,
             )
         )
         session.add(
@@ -10885,323 +11222,19 @@ async def run_render(job_id: str) -> dict:
             )
         )
         if render_step:
-            cover_detail = ""
-            if cover_selection:
-                cover_detail = (
-                    "，封面分差接近，可确认首选"
-                    if cover_selection.get("review_recommended")
-                    else "，封面已自动选优"
-                )
             await _set_step_progress(
                 session,
                 render_step,
                 detail=(
-                    f"素版与包装版均已输出{cover_detail}"
+                    "素版与包装版均已输出"
                     if (has_packaging or has_editing_accents)
-                    else f"渲染完成，成片与字幕已输出{cover_detail}"
+                    else "渲染完成，成片与字幕已输出"
                 ),
                 progress=1.0,
             )
         await session.commit()
 
     return {"output_path": primary_output_path, "local": local_paths}
-
-
-async def run_platform_package(job_id: str) -> dict:
-    factory = get_session_factory()
-    async with factory() as session:
-        job = await session.get(Job, uuid.UUID(job_id))
-        settings = get_settings()
-        if not job:
-            raise ValueError(f"Job {job_id} not found")
-
-        step_result = await session.execute(
-            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "platform_package")
-        )
-        step = step_result.scalar_one_or_none()
-        await _set_step_progress(session, step, detail="整理成片信息并生成平台文案", progress=0.2)
-
-        content_profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
-
-        subtitle_dicts, projection_data = await _load_latest_subtitle_payloads(
-            session,
-            job_id=job.id,
-        )
-        source_subtitle_dicts = await _load_edit_plan_source_subtitles(session, job=job)
-        edit_source_subtitles = source_subtitle_dicts or clean_subtitle_payloads(
-            subtitle_dicts,
-            drop_empty=False,
-            collapse_repeats=False,
-            clean_text=False,
-        )
-        decision_subtitles = [dict(item) for item in edit_source_subtitles] or clean_subtitle_payloads(
-            subtitle_dicts,
-            drop_empty=False,
-            collapse_repeats=False,
-            clean_text=False,
-        )
-        editorial_timeline = await _load_latest_timeline(session, job.id, "editorial")
-        refine_decision_plan_artifact = await _load_latest_optional_artifact(
-            session,
-            job_id=job.id,
-            artifact_types=(ARTIFACT_TYPE_REFINE_DECISION_PLAN,),
-        )
-        refine_decision_plan_payload = (
-            refine_decision_plan_artifact.data_json
-            if refine_decision_plan_artifact and isinstance(refine_decision_plan_artifact.data_json, dict)
-            else None
-        )
-        manual_editor_subtitles = _manual_editor_subtitle_items_from_editorial(editorial_timeline.data_json if editorial_timeline else None)
-        subtitle_projection_repair: dict[str, Any] = {
-            "repair_requested": False,
-            "repair_applied": False,
-            "mismatch_detected": False,
-            "fallback_used": False,
-            "changed": False,
-            "input_count": 0,
-            "output_count": 0,
-            "repair_mode": None,
-        }
-        if manual_editor_subtitles:
-            keep_segments = _resolve_keep_segments_from_refine_plan(
-                refine_decision_plan_payload,
-                editorial_timeline_id=str(editorial_timeline.id),
-                editorial_timeline_version=int(editorial_timeline.version or 1),
-                fallback_segments=plain_editorial_segments,
-            )
-            subtitle_dicts = await _validated_subtitle_projection_for_timeline(
-                session,
-                job_id=job.id,
-                projected_subtitles=manual_editor_subtitles,
-                keep_segments=keep_segments,
-                source_subtitles=decision_subtitles,
-                fallback_source_subtitles=decision_subtitles,
-                apply_repair=False,
-                diagnostics_slot=subtitle_projection_repair,
-            )
-
-        render_output_result = await session.execute(
-            select(RenderOutput)
-            .where(RenderOutput.job_id == job.id, RenderOutput.status == "done")
-            .order_by(RenderOutput.created_at.desc())
-        )
-        render_output = render_output_result.scalars().first()
-        renderless_mode = not bool(render_output and render_output.output_path)
-
-    packaging_config = (list_packaging_assets().get("config") or {})
-    creator_card = await _load_job_creator_card(session, job)
-    author_profile = _build_creator_author_profile(creator_card)
-    copy_style = str(
-        packaging_config.get("copy_style")
-        or (content_profile or {}).get("copy_style")
-        or "attention_grabbing"
-    )
-    prompt_brief = build_packaging_prompt_brief(
-        source_name=job.source_name,
-        content_profile=content_profile,
-        subtitle_items=subtitle_dicts,
-    )
-
-    fact_sheet_cache_metadata: dict[str, Any] | None = None
-    if packaging_fact_sheet_cache_allowed(content_profile):
-        fact_sheet_cache_namespace = "platform_package.fact_sheet"
-        fact_sheet_cache_fingerprint = build_packaging_fact_sheet_cache_fingerprint(
-            source_name=job.source_name,
-            content_profile=content_profile,
-            subtitle_items=subtitle_dicts,
-        )
-        fact_sheet_cache_key = build_cache_key(fact_sheet_cache_namespace, fact_sheet_cache_fingerprint)
-        cached_fact_sheet_entry = load_cached_entry(fact_sheet_cache_namespace, fact_sheet_cache_key)
-        fact_sheet_cache_metadata = build_cache_metadata(
-            fact_sheet_cache_namespace,
-            fact_sheet_cache_key,
-            hit=bool(cached_fact_sheet_entry),
-            usage_baseline=(cached_fact_sheet_entry or {}).get("usage_baseline"),
-        )
-        if cached_fact_sheet_entry:
-            fact_sheet = dict(cached_fact_sheet_entry.get("result") or {})
-        else:
-            usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
-            fact_search_enabled = should_enable_task_search(
-                "copy_verify",
-                default_enabled=True,
-                profile=content_profile,
-                settings=settings,
-            )
-            with llm_task_route("copy_verify", search_enabled=fact_search_enabled, settings=settings):
-                with track_step_usage(job_id=job.id, step_id=step.id if step else None, step_name="platform_package"):
-                    fact_sheet = await build_packaging_fact_sheet(
-                        source_name=job.source_name,
-                        content_profile=content_profile,
-                        subtitle_items=subtitle_dicts,
-                    )
-            usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
-            usage_baseline = _usage_delta(usage_after, usage_before)
-            save_cached_json(
-                fact_sheet_cache_namespace,
-                fact_sheet_cache_key,
-                fingerprint=fact_sheet_cache_fingerprint,
-                result=fact_sheet,
-                usage_baseline=usage_baseline,
-            )
-    else:
-        fact_search_enabled = should_enable_task_search(
-            "copy_verify",
-            default_enabled=True,
-            profile=content_profile,
-            settings=settings,
-        )
-        with llm_task_route("copy_verify", search_enabled=fact_search_enabled, settings=settings):
-            with track_step_usage(job_id=job.id, step_id=step.id if step else None, step_name="platform_package"):
-                fact_sheet = await build_packaging_fact_sheet(
-                    source_name=job.source_name,
-                    content_profile=content_profile,
-                    subtitle_items=subtitle_dicts,
-                )
-
-    packaging_cache_namespace = "platform_package.generate"
-    packaging_cache_fingerprint = build_platform_packaging_cache_fingerprint(
-        source_name=job.source_name,
-        prompt_brief=prompt_brief,
-        fact_sheet=fact_sheet,
-        copy_style=copy_style,
-        author_profile=author_profile,
-    )
-    packaging_cache_key = build_cache_key(packaging_cache_namespace, packaging_cache_fingerprint)
-    cached_packaging_entry = load_cached_entry(packaging_cache_namespace, packaging_cache_key)
-    cached_packaging_result = dict(cached_packaging_entry.get("result") or {}) if cached_packaging_entry else None
-    if cached_packaging_result is not None:
-        cached_packaging_result["fact_sheet"] = fact_sheet
-        if platform_packaging_output_fallback_reasons(
-            cached_packaging_result,
-            renderless_mode=renderless_mode,
-        ):
-            cached_packaging_entry = None
-            cached_packaging_result = None
-    packaging_cache_metadata = build_cache_metadata(
-        packaging_cache_namespace,
-        packaging_cache_key,
-        hit=bool(cached_packaging_entry),
-        usage_baseline=(cached_packaging_entry or {}).get("usage_baseline"),
-    )
-    if cached_packaging_entry:
-        packaging = cached_packaging_result or {}
-    else:
-        usage_before = await _read_persisted_step_usage_snapshot(step.id if step else None)
-        copy_search_enabled = should_enable_task_search(
-            "copy",
-            default_enabled=True,
-            profile=content_profile,
-            settings=settings,
-        )
-        with llm_task_route("copy", search_enabled=copy_search_enabled, settings=settings):
-            with track_step_usage(job_id=job.id, step_id=step.id if step else None, step_name="platform_package"):
-                packaging = await generate_platform_packaging(
-                    source_name=job.source_name,
-                    content_profile=content_profile,
-                    subtitle_items=subtitle_dicts,
-                    copy_style=copy_style,
-                    author_profile=author_profile,
-                    prompt_brief=prompt_brief,
-                    fact_sheet=fact_sheet,
-                )
-        usage_after = await _read_persisted_step_usage_snapshot(step.id if step else None)
-        usage_baseline = _usage_delta(usage_after, usage_before)
-        if not platform_packaging_output_fallback_reasons(packaging, renderless_mode=renderless_mode):
-            save_cached_json(
-                packaging_cache_namespace,
-                packaging_cache_key,
-                fingerprint=packaging_cache_fingerprint,
-                result=packaging,
-                usage_baseline=usage_baseline,
-            )
-
-    if renderless_mode:
-        project_dir = get_output_project_dir(
-            job.source_name,
-            job.created_at,
-            content_profile=content_profile,
-            output_dir=job.output_dir,
-        )
-        output_md = project_dir / "platform_packaging_renderless.md"
-    else:
-        output_mp4 = Path(render_output.output_path)
-        output_md = output_mp4.with_name(f"{output_mp4.stem}_publish.md")
-    if isinstance(packaging, dict):
-        packaging["generation_mode"] = "renderless_copy_only" if renderless_mode else "rendered_video"
-        if renderless_mode:
-            packaging["generation_note"] = "No finished render output was available; packaging was generated from content profile and subtitles only."
-        packaging["subtitle_projection_repair"] = dict(subtitle_projection_repair)
-    packaging_blocking_reasons = platform_packaging_output_fallback_reasons(
-        packaging,
-        renderless_mode=renderless_mode,
-    )
-    if packaging_blocking_reasons:
-        raise RuntimeError(
-            "platform_package_blocked_by_fallback_output: "
-            + ", ".join(packaging_blocking_reasons)
-        )
-    save_platform_packaging_markdown(output_md, packaging)
-
-    async with get_session_factory()() as session:
-        step_result = await session.execute(
-            select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "platform_package")
-        )
-        current_step = step_result.scalar_one_or_none()
-        fact_sheet = packaging.get("fact_sheet") if isinstance(packaging, dict) else None
-        if isinstance(fact_sheet, dict):
-            session.add(
-                Artifact(
-                    job_id=job.id,
-                    step_id=current_step.id if current_step else None,
-                    artifact_type="product_fact_sheet",
-                    data_json=fact_sheet,
-                )
-            )
-        artifact = Artifact(
-            job_id=job.id,
-            step_id=current_step.id if current_step else None,
-            artifact_type="platform_packaging_md",
-            storage_path=str(output_md),
-            data_json=packaging,
-        )
-        session.add(artifact)
-        if current_step is not None:
-            _set_step_cache_metadata(current_step, "platform_packaging", packaging_cache_metadata)
-            if fact_sheet_cache_metadata is not None:
-                _set_step_cache_metadata(current_step, "platform_fact_sheet", fact_sheet_cache_metadata)
-            _set_step_cache_metadata(current_step, "subtitle_projection_repair", dict(subtitle_projection_repair))
-            current_step.status = "done"
-            current_step.finished_at = datetime.now(timezone.utc)
-            await _set_step_progress(session, current_step, detail="平台文案已生成", progress=1.0)
-        await session.commit()
-
-    return {"markdown": str(output_md)}
-
-
-async def _get_cover_seek(job_id) -> float:
-    """
-    Determine a good seek time for cover frame extraction.
-    Uses ~18% of video duration, with 6s minimum and 45s maximum.
-    Falls back to 6.0s if no media_meta artifact found.
-    """
-    factory = get_session_factory()
-    async with factory() as session:
-        try:
-            artifact = await _load_latest_artifact(session, job_id, "media_meta")
-        except ValueError:
-            artifact = None
-        if artifact and artifact.data_json:
-            duration = artifact.data_json.get("duration", 60.0)
-            seek = max(6.0, min(45.0, duration * 0.18))
-            return round(seek, 1)
-    return 6.0
-
-
-def _select_cover_source_video(plain_video_path: Path) -> Path:
-    if plain_video_path.exists():
-        return plain_video_path
-    raise FileNotFoundError("Plain render is required for cover extraction")
 
 
 async def _copy_file_with_retry(
@@ -11333,7 +11366,6 @@ def _runtime_render_plan_context(render_plan: dict[str, Any] | None) -> dict[str
         "avatar_plan": render_plan_avatar_commentary(render_plan),
         "voice_processing": render_plan_voice_processing(render_plan),
         "loudness": render_plan_loudness(render_plan),
-        "cover": render_plan_cover(render_plan),
     }
 
 
@@ -11517,6 +11549,11 @@ def _rewrite_packaged_subtitle_copy(
             rewritten_items.append(rewritten)
             continue
         role = str(profile.get("role") or "").strip().lower()
+        if role:
+            rewritten["subtitle_section_role"] = role
+        if not bool(profile.get("allow_spoken_subtitle_copy_rewrite")):
+            rewritten_items.append(rewritten)
+            continue
         clauses = _extract_subtitle_copy_clauses(original_text)
         rewritten_text = ""
         strategy = ""
@@ -11591,6 +11628,8 @@ def _resolve_resegmented_subtitle_texts(
     if not primary_text:
         return []
     original_text = str(item.get("text_original_final") or primary_text)
+    if not bool(item.get("allow_packaged_subtitle_resegment")):
+        return [primary_text]
     if not _packaged_subtitle_copy_rewrite_is_material(original_text, primary_text):
         return [primary_text]
     duration_sec = max(
@@ -11704,6 +11743,440 @@ def _resegment_packaged_subtitles(
     for index, item in enumerate(resegmented):
         item["index"] = index
     return resegmented
+
+
+_PACKAGED_ORPHAN_SINGLE_PREFER_RIGHT = {"你", "我", "他", "她", "它", "这", "那", "把", "给", "就", "再", "才", "一"}
+
+
+def _finalize_packaged_subtitle_timeline(
+    subtitle_items: list[dict[str, Any]],
+    *,
+    max_chars: int = 24,
+) -> list[dict[str, Any]]:
+    merged = _merge_orphan_packaged_subtitle_items(subtitle_items, max_chars=max_chars)
+    monotonic = _stabilize_render_subtitle_timeline(_monotonicize_packaged_subtitle_items(merged))
+    for index, item in enumerate(monotonic):
+        item["index"] = index
+    return monotonic
+
+
+def _stabilize_render_subtitle_timeline(
+    subtitle_items: list[dict[str, Any]],
+    *,
+    min_readable_duration_sec: float = 0.82,
+    guard_sec: float = 0.04,
+    max_chars: int = 34,
+    max_reading_chars_per_sec: float = 17.5,
+) -> list[dict[str, Any]]:
+    """Remove unreadable subtitle flashes before rendering or writing SRT."""
+    items = _monotonicize_packaged_subtitle_items([dict(item) for item in subtitle_items if isinstance(item, dict)])
+    if len(items) <= 1:
+        return items
+
+    merged: list[dict[str, Any]] = []
+    index = 0
+    while index < len(items):
+        current = dict(items[index])
+        start = float(current.get("start_time", 0.0) or 0.0)
+        end = max(start, float(current.get("end_time", start) or start))
+        duration = end - start
+        text_length = len(_compact_packaged_subtitle_text(_packaged_subtitle_text(current)))
+        reading_cps = (float(text_length) / duration) if duration > 0.0 else float("inf")
+        needs_repair = duration < min_readable_duration_sec or reading_cps > max_reading_chars_per_sec
+        if not needs_repair:
+            merged.append(current)
+            index += 1
+            continue
+
+        next_item = items[index + 1] if index + 1 < len(items) else None
+        if next_item is not None and _can_merge_packaged_subtitle_items(current, next_item, max_chars=max_chars):
+            merged.append(_merge_packaged_subtitle_items(current, next_item, reason="subtitle_readability_pacing"))
+            index += 2
+            continue
+        if merged and _can_merge_packaged_subtitle_items(merged[-1], current, max_chars=max_chars):
+            merged[-1] = _merge_packaged_subtitle_items(merged[-1], current, reason="subtitle_readability_pacing")
+            index += 1
+            continue
+
+        next_start = (
+            float(next_item.get("start_time", end + min_readable_duration_sec + guard_sec) or 0.0)
+            if next_item is not None
+            else end + min_readable_duration_sec + guard_sec
+        )
+        extended_end = min(start + min_readable_duration_sec, max(start + 0.08, next_start - guard_sec))
+        current["end_time"] = round(max(end, extended_end), 3)
+        current["subtitle_timing_repair"] = (
+            "extend_short_flash" if duration < min_readable_duration_sec else "extend_high_cps_subtitle"
+        )
+        merged.append(current)
+        index += 1
+
+    stabilized = _monotonicize_packaged_subtitle_items(
+        _coalesce_dense_packaged_subtitle_windows(merged, max_chars=max_chars)
+    )
+    spread = _spread_dense_render_subtitle_runs(
+        stabilized,
+        min_duration_sec=max(0.35, min(0.82, min_readable_duration_sec)),
+        guard_sec=guard_sec,
+    )
+    return _repair_residual_short_render_flashes(spread, min_duration_sec=0.22, guard_sec=guard_sec)
+
+
+def _spread_dense_render_subtitle_runs(
+    subtitle_items: list[dict[str, Any]],
+    *,
+    min_duration_sec: float = 0.82,
+    guard_sec: float = 0.04,
+    min_start_spacing_sec: float = 0.34,
+) -> list[dict[str, Any]]:
+    """Spread dense subtitle clusters after ASR retiming so monotonic clamping cannot create flashes."""
+    items = _monotonicize_packaged_subtitle_items([dict(item) for item in subtitle_items if isinstance(item, dict)])
+    if len(items) <= 1:
+        return items
+
+    index = 0
+    while index < len(items):
+        run_start = index
+        run_end = index
+        first_start = float(items[index].get("start_time", 0.0) or 0.0)
+        while run_end + 1 < len(items):
+            current = items[run_end]
+            next_item = items[run_end + 1]
+            current_start = float(current.get("start_time", 0.0) or 0.0)
+            current_end = float(current.get("end_time", current_start) or current_start)
+            next_start = float(next_item.get("start_time", 0.0) or 0.0)
+            starts_in_first_sec = sum(
+                1
+                for cursor in range(run_start, len(items))
+                if float(items[cursor].get("start_time", 0.0) or 0.0) < first_start + 1.0
+            )
+            burst_near_run_start = starts_in_first_sec >= 4 and next_start < first_start + 1.0
+            current_duration = max(0.0, current_end - current_start)
+            if (
+                current_duration < 0.35
+                or burst_near_run_start
+                or next_start - current_start < min_start_spacing_sec
+            ):
+                run_end += 1
+                continue
+            break
+
+        run_size = run_end - run_start + 1
+        if run_size <= 1:
+            index += 1
+            continue
+
+        boundary_start = float(items[run_start].get("start_time", 0.0) or 0.0)
+        next_boundary = (
+            float(items[run_end + 1].get("start_time", 0.0) or 0.0)
+            if run_end + 1 < len(items)
+            else max(
+                boundary_start + run_size * (min_duration_sec + guard_sec),
+                float(items[run_end].get("end_time", boundary_start) or boundary_start),
+            )
+        )
+        boundary_end = max(
+            boundary_start + run_size * (min_start_spacing_sec + guard_sec),
+            next_boundary - guard_sec,
+        )
+        slot = max(min_start_spacing_sec + guard_sec, (boundary_end - boundary_start) / run_size)
+        for offset, item_index in enumerate(range(run_start, run_end + 1)):
+            item = dict(items[item_index])
+            old_start = float(item.get("start_time", 0.0) or 0.0)
+            old_end = max(old_start + 0.001, float(item.get("end_time", old_start) or old_start))
+            new_start = boundary_start + slot * offset
+            next_start = (
+                boundary_start + slot * (offset + 1)
+                if offset + 1 < run_size
+                else next_boundary
+            )
+            new_end = min(next_start - guard_sec, new_start + max(min_duration_sec, slot - guard_sec))
+            if new_end < new_start + 0.22:
+                new_end = min(next_boundary, new_start + 0.22)
+            item["start_time"] = round(new_start, 3)
+            item["end_time"] = round(max(new_start + 0.22, new_end), 3)
+            item["subtitle_timing_repair"] = "spread_dense_subtitle_run"
+            words = _retime_words_to_new_bounds(
+                list(item.get("words") or []),
+                old_start=old_start,
+                old_end=old_end,
+                new_start=float(item["start_time"]),
+                new_end=float(item["end_time"]),
+            )
+            if words:
+                item["words"] = words
+            items[item_index] = item
+        items = _monotonicize_packaged_subtitle_items(items)
+        index = run_end + 1
+
+    return items
+
+
+def _repair_residual_short_render_flashes(
+    subtitle_items: list[dict[str, Any]],
+    *,
+    min_duration_sec: float = 0.22,
+    guard_sec: float = 0.04,
+) -> list[dict[str, Any]]:
+    items = _monotonicize_packaged_subtitle_items([dict(item) for item in subtitle_items if isinstance(item, dict)])
+    for index, item in enumerate(items):
+        start = float(item.get("start_time", 0.0) or 0.0)
+        end = max(start, float(item.get("end_time", start) or start))
+        if end - start >= min_duration_sec:
+            continue
+        old_start = start
+        old_end = max(start + 0.001, end)
+        target_end = round(start + min_duration_sec, 3)
+        item["end_time"] = target_end
+        item["subtitle_timing_repair"] = "extend_residual_short_flash"
+        words = _retime_words_to_new_bounds(
+            list(item.get("words") or []),
+            old_start=old_start,
+            old_end=old_end,
+            new_start=start,
+            new_end=target_end,
+        )
+        if words:
+            item["words"] = words
+        carry_start = target_end + guard_sec
+        for cursor in range(index + 1, len(items)):
+            next_item = items[cursor]
+            next_start = float(next_item.get("start_time", 0.0) or 0.0)
+            next_end = max(next_start, float(next_item.get("end_time", next_start) or next_start))
+            if next_start >= carry_start:
+                break
+            shift = carry_start - next_start
+            next_item["start_time"] = round(next_start + shift, 3)
+            next_item["end_time"] = round(next_end + shift, 3)
+            if next_item.get("words"):
+                shifted_words: list[dict[str, Any]] = []
+                for word in list(next_item.get("words") or []):
+                    if not isinstance(word, dict):
+                        continue
+                    shifted_word = dict(word)
+                    if shifted_word.get("start") is not None:
+                        shifted_word["start"] = round(float(shifted_word.get("start") or 0.0) + shift, 3)
+                    if shifted_word.get("end") is not None:
+                        shifted_word["end"] = round(float(shifted_word.get("end") or 0.0) + shift, 3)
+                    shifted_words.append(shifted_word)
+                if shifted_words:
+                    next_item["words"] = shifted_words
+            carry_start = float(next_item["end_time"]) + guard_sec
+    return _monotonicize_packaged_subtitle_items(items)
+
+
+def _coalesce_dense_packaged_subtitle_windows(
+    subtitle_items: list[dict[str, Any]],
+    *,
+    max_chars: int,
+    window_sec: float = 5.0,
+    max_items_per_window: int = 5,
+) -> list[dict[str, Any]]:
+    items = _monotonicize_packaged_subtitle_items([dict(item) for item in subtitle_items if isinstance(item, dict)])
+    if len(items) <= max_items_per_window:
+        return items
+
+    changed = True
+    while changed:
+        changed = False
+        index = 0
+        while index < len(items):
+            window_start = float(items[index].get("start_time", 0.0) or 0.0)
+            window_end = window_start + window_sec
+            window_indices = [
+                item_index
+                for item_index in range(index, len(items))
+                if float(items[item_index].get("start_time", 0.0) or 0.0) < window_end
+            ]
+            if len(window_indices) <= max_items_per_window:
+                index += 1
+                continue
+
+            merge_index: int | None = None
+            best_score: tuple[float, float] | None = None
+            for left_index in window_indices[:-1]:
+                if left_index + 1 >= len(items):
+                    continue
+                left = items[left_index]
+                right = items[left_index + 1]
+                if not _can_merge_packaged_subtitle_items(left, right, max_chars=max_chars):
+                    continue
+                left_duration = max(
+                    0.0,
+                    float(left.get("end_time", left.get("start_time", 0.0)) or 0.0)
+                    - float(left.get("start_time", 0.0) or 0.0),
+                )
+                right_duration = max(
+                    0.0,
+                    float(right.get("end_time", right.get("start_time", 0.0)) or 0.0)
+                    - float(right.get("start_time", 0.0) or 0.0),
+                )
+                score = (min(left_duration, right_duration), abs(left_duration - right_duration))
+                if best_score is None or score < best_score:
+                    best_score = score
+                    merge_index = left_index
+            if merge_index is None:
+                index += 1
+                continue
+
+            items[merge_index] = _merge_packaged_subtitle_items(
+                items[merge_index],
+                items[merge_index + 1],
+                reason="dense_subtitle_window_pacing",
+            )
+            del items[merge_index + 1]
+            items = _monotonicize_packaged_subtitle_items(items)
+            changed = True
+            index = max(0, merge_index - max_items_per_window)
+
+    return items
+
+
+def _merge_orphan_packaged_subtitle_items(
+    subtitle_items: list[dict[str, Any]],
+    *,
+    max_chars: int,
+) -> list[dict[str, Any]]:
+    if len(subtitle_items) <= 1:
+        return [dict(item) for item in subtitle_items]
+
+    items = sorted(
+        (dict(item) for item in subtitle_items),
+        key=lambda item: (
+            float(item.get("start_time", 0.0) or 0.0),
+            float(item.get("end_time", item.get("start_time", 0.0)) or 0.0),
+        ),
+    )
+    merged: list[dict[str, Any]] = []
+    index = 0
+    while index < len(items):
+        current = items[index]
+        current_text = _packaged_subtitle_text(current)
+        if not _is_orphan_single_cjk_packaged_text(current_text):
+            merged.append(current)
+            index += 1
+            continue
+
+        next_item = items[index + 1] if index + 1 < len(items) else None
+        if (
+            next_item is not None
+            and _can_merge_packaged_subtitle_items(current, next_item, max_chars=max_chars)
+            and (
+                _compact_packaged_subtitle_text(current_text) in _PACKAGED_ORPHAN_SINGLE_PREFER_RIGHT
+                or not merged
+                or _compact_packaged_subtitle_text(_packaged_subtitle_text(next_item))
+            )
+        ):
+            merged.append(_merge_packaged_subtitle_items(current, next_item))
+            index += 2
+            continue
+
+        if merged and _can_merge_packaged_subtitle_items(merged[-1], current, max_chars=max_chars):
+            merged[-1] = _merge_packaged_subtitle_items(merged[-1], current)
+            index += 1
+            continue
+
+        if next_item is not None and _can_merge_packaged_subtitle_items(current, next_item, max_chars=max_chars):
+            merged.append(_merge_packaged_subtitle_items(current, next_item))
+            index += 2
+            continue
+
+        merged.append(current)
+        index += 1
+
+    return merged
+
+
+def _is_orphan_single_cjk_packaged_text(text: str) -> bool:
+    return bool(re.fullmatch(r"[\u4e00-\u9fff]", _compact_packaged_subtitle_text(text)))
+
+
+def _packaged_subtitle_text(item: dict[str, Any]) -> str:
+    for field_name in ("text_final", "text", "text_raw", "text_norm"):
+        value = str(item.get(field_name) or "").strip()
+        if value:
+            return value
+    return _subtitle_text(item)
+
+
+def _compact_packaged_subtitle_text(text: str) -> str:
+    return re.sub(r"[，。！？；：,.!?;:\s、]+", "", normalize_display_text(str(text or "")))
+
+
+def _can_merge_packaged_subtitle_items(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    max_chars: int,
+) -> bool:
+    left_text = _packaged_subtitle_text(left)
+    right_text = _packaged_subtitle_text(right)
+    if not left_text or not right_text:
+        return False
+    left_start = float(left.get("start_time", 0.0) or 0.0)
+    left_end = float(left.get("end_time", left_start) or left_start)
+    right_start = float(right.get("start_time", 0.0) or 0.0)
+    right_end = float(right.get("end_time", right_start) or right_start)
+    gap = max(0.0, right_start - left_end)
+    if gap > 0.62:
+        return False
+    combined_text = f"{left_text}{right_text}"
+    combined_duration = max(0.0, right_end - left_start)
+    return len(_compact_packaged_subtitle_text(combined_text)) <= max_chars and combined_duration <= 5.2
+
+
+def _merge_packaged_subtitle_items(
+    left: dict[str, Any],
+    right: dict[str, Any],
+    *,
+    reason: str = "orphan_single_cjk",
+) -> dict[str, Any]:
+    merged = dict(left)
+    merged["start_time"] = float(left.get("start_time", 0.0) or 0.0)
+    merged["end_time"] = float(right.get("end_time", right.get("start_time", merged["start_time"])) or merged["start_time"])
+    merged["text_final"] = f"{_packaged_subtitle_text(left)}{_packaged_subtitle_text(right)}"
+    merged["text"] = merged["text_final"]
+    merged["packaged_subtitle_merge"] = reason
+    if left.get("text_original_final") or right.get("text_original_final"):
+        merged["text_original_final"] = "".join(
+            str(item.get("text_original_final") or _packaged_subtitle_text(item) or "")
+            for item in (left, right)
+        )
+    words = list(left.get("words") or []) + list(right.get("words") or [])
+    if words:
+        merged["words"] = words
+    return merged
+
+
+def _monotonicize_packaged_subtitle_items(subtitle_items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for raw_item in sorted(
+        (dict(item) for item in subtitle_items),
+        key=lambda item: (
+            float(item.get("start_time", 0.0) or 0.0),
+            float(item.get("end_time", item.get("start_time", 0.0)) or 0.0),
+        ),
+    ):
+        item = dict(raw_item)
+        start = float(item.get("start_time", 0.0) or 0.0)
+        end = max(start, float(item.get("end_time", start) or start))
+        if normalized:
+            previous = normalized[-1]
+            previous_start = float(previous.get("start_time", 0.0) or 0.0)
+            previous_end = float(previous.get("end_time", previous_start) or previous_start)
+            if start < previous_end:
+                if start > previous_start + 0.18 and previous_end - start <= 0.35:
+                    previous["end_time"] = round(start, 3)
+                    previous["packaged_subtitle_timing_repair"] = "trim_overlap_end"
+                    previous_end = start
+                else:
+                    start = previous_end
+        if end < start + 0.08:
+            end = start + 0.08
+        item["start_time"] = round(start, 3)
+        item["end_time"] = round(end, 3)
+        normalized.append(item)
+    return normalized
 
 
 def _score_music_entry_candidates(
@@ -11843,7 +12316,8 @@ async def _map_subtitles_to_packaged_timeline(
     section_profile_context = dict(timeline_mapping.get("section_profile_context") or {})
     if not section_profile_context:
         section_profile_context = _packaged_subtitle_section_profile_context(render_plan)
-    return _resegment_packaged_subtitles(
+    return _finalize_packaged_subtitle_timeline(
+        _resegment_packaged_subtitles(
         _rewrite_packaged_subtitle_copy(
             mapped,
             render_plan=None,
@@ -11851,6 +12325,7 @@ async def _map_subtitles_to_packaged_timeline(
         ),
         render_plan=None,
         section_profile_context=section_profile_context,
+        )
     )
 
 
@@ -11950,6 +12425,7 @@ async def _resolve_packaged_timeline_mapping_context(
     else:
         plan = render_plan or {}
         packaging_timeline = resolve_packaging_timeline_payload(plan)
+        packaging_assets = dict((packaging_timeline or {}).get("packaging") or {})
         transitions = dict(((packaging_timeline.get("editing_accents") or {}).get("transitions")) or {})
         section_profile_context = _packaged_subtitle_section_profile_context(
             None,
@@ -11962,12 +12438,12 @@ async def _resolve_packaged_timeline_mapping_context(
     )
 
     intro_duration = 0.0
-    intro_plan = packaging_timeline_asset_plan(packaging_timeline, "intro")
+    intro_plan = copy.deepcopy(packaging_assets.get("intro"))
     intro_path = str((intro_plan or {}).get("path") or "").strip()
     if intro_path:
         intro_duration = max(0.0, float(await _probe_media_duration(Path(intro_path)) or 0.0))
 
-    insert_plan = packaging_timeline_insert_plan(packaging_timeline)
+    insert_plan = copy.deepcopy(packaging_assets.get("insert"))
     insert_path = str((insert_plan or {}).get("path") or "").strip()
     effective_insert_duration = 0.0
     if insert_path and isinstance(insert_plan, dict):
@@ -11984,6 +12460,485 @@ async def _resolve_packaged_timeline_mapping_context(
         "insert_after_sec": float(((insert_plan or {}).get("insert_after_sec", 0.0) or 0.0)) + intro_duration,
         "effective_insert_duration_sec": effective_insert_duration,
         "section_profile_context": section_profile_context,
+    }
+
+
+def _render_subtitle_timings_from_items(subtitle_items: list[dict[str, Any]]) -> list[SubtitleTiming]:
+    timings: list[SubtitleTiming] = []
+    for item in subtitle_items or []:
+        if not isinstance(item, dict):
+            continue
+        text = subtitle_display_rule_text(item)
+        if not normalize_eval_text(text):
+            continue
+        try:
+            start = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
+            end = float(item.get("end_time", item.get("end", start)) or start)
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        timings.append(SubtitleTiming(text=text, start_sec=start, end_sec=end))
+    return timings
+
+
+def _render_asr_tokens_from_transcript(result: TranscriptResult) -> list[AsrToken]:
+    tokens: list[AsrToken] = []
+    for segment in list(result.segments or []):
+        words = list(getattr(segment, "words", []) or [])
+        if words:
+            for word in words:
+                text = str(getattr(word, "word", "") or "").strip()
+                if not normalize_eval_text(text):
+                    continue
+                start = float(getattr(word, "start", 0.0) or 0.0)
+                end = float(getattr(word, "end", start) or start)
+                tokens.append(AsrToken(text=text, start_sec=start, end_sec=max(start, end)))
+            continue
+        text = str(getattr(segment, "text", "") or "").strip()
+        chars = list(normalize_eval_text(text))
+        if not chars:
+            continue
+        start = float(getattr(segment, "start", 0.0) or 0.0)
+        end = max(start + 0.001, float(getattr(segment, "end", start) or start))
+        span = end - start
+        for index, char in enumerate(chars):
+            tokens.append(
+                AsrToken(
+                    text=char,
+                    start_sec=start + span * index / len(chars),
+                    end_sec=start + span * (index + 1) / len(chars),
+                )
+            )
+    tokens.sort(key=lambda item: (item.start_sec, item.end_sec))
+    return tokens
+
+
+def _render_subtitle_alignment_gate_passes(audit: dict[str, Any]) -> bool:
+    event_count = max(1, int(audit.get("event_count") or 0))
+    matched_count = int(audit.get("matched_count") or 0)
+    unmatched_count = int(audit.get("unmatched_count") or 0)
+    bad_drift_count = int(audit.get("bad_drift_count") or 0)
+    matched_ratio = matched_count / event_count
+    unmatched_ratio = unmatched_count / event_count
+    bad_ratio = bad_drift_count / event_count
+    avg_start = audit.get("avg_abs_start_drift_sec")
+    avg_end = audit.get("avg_abs_end_drift_sec")
+    avg_start_value = float(avg_start) if avg_start is not None else 999.0
+    avg_end_value = float(avg_end) if avg_end is not None else 999.0
+    return (
+        matched_ratio >= 0.82
+        and unmatched_ratio <= 0.18
+        and bad_ratio <= 0.15
+        and avg_start_value <= 0.65
+        and avg_end_value <= 1.05
+        and bool(_render_subtitle_alignment_local_cluster_metrics(audit).get("gate_pass"))
+    )
+
+
+def _render_subtitle_alignment_local_cluster_metrics(
+    audit: dict[str, Any],
+    *,
+    window_sec: float = 8.0,
+    max_bad_events_per_window: int = 3,
+    tail_ratio: float = 0.8,
+    max_tail_bad_events: int = 4,
+    max_single_start_drift_sec: float = 2.2,
+    max_single_end_drift_sec: float = 2.4,
+) -> dict[str, Any]:
+    events = [dict(item) for item in list(audit.get("events") or []) if isinstance(item, dict)]
+    duration = max([float(item.get("subtitle_end_sec", 0.0) or 0.0) for item in events] + [0.0])
+    bad_events: list[dict[str, Any]] = []
+    max_start = 0.0
+    max_end = 0.0
+    for index, event in enumerate(events):
+        matched = bool(event.get("matched"))
+        start_drift = abs(float(event.get("start_drift_sec", 0.0) or 0.0))
+        end_drift = abs(float(event.get("end_drift_sec", 0.0) or 0.0))
+        max_start = max(max_start, start_drift)
+        max_end = max(max_end, end_drift)
+        if not matched or bool(event.get("bad_drift")):
+            bad_events.append(
+                {
+                    "index": index,
+                    "start": float(event.get("subtitle_start_sec", 0.0) or 0.0),
+                    "end": float(event.get("subtitle_end_sec", 0.0) or 0.0),
+                    "matched": matched,
+                    "bad_drift": bool(event.get("bad_drift")),
+                    "start_drift_sec": round(start_drift, 3),
+                    "end_drift_sec": round(end_drift, 3),
+                }
+            )
+    worst_window_count = 0
+    worst_window_start = 0.0
+    bad_starts = [float(item["start"]) for item in bad_events]
+    for start in bad_starts:
+        count = sum(1 for value in bad_starts if start <= value < start + window_sec)
+        if count > worst_window_count:
+            worst_window_count = count
+            worst_window_start = start
+    tail_start = duration * tail_ratio if duration > 0 else 0.0
+    tail_bad_count = sum(1 for item in bad_events if tail_start > 0 and float(item["start"]) >= tail_start)
+    gate_pass = (
+        worst_window_count <= max_bad_events_per_window
+        and tail_bad_count <= max_tail_bad_events
+        and max_start <= max_single_start_drift_sec
+        and max_end <= max_single_end_drift_sec
+    )
+    return {
+        "gate_pass": gate_pass,
+        "bad_event_count": len(bad_events),
+        "worst_window_count": worst_window_count,
+        "worst_window_start_sec": round(worst_window_start, 3),
+        "window_sec": round(window_sec, 3),
+        "tail_start_sec": round(tail_start, 3),
+        "tail_bad_count": tail_bad_count,
+        "max_single_start_drift_sec": round(max_start, 3),
+        "max_single_end_drift_sec": round(max_end, 3),
+        "bad_event_indexes": [int(item["index"]) for item in bad_events],
+    }
+
+
+def _clustered_unmatched_render_subtitle_indexes(audit: dict[str, Any]) -> set[int]:
+    metrics = _render_subtitle_alignment_local_cluster_metrics(audit)
+    if bool(metrics.get("gate_pass")):
+        return set()
+    events = [dict(item) for item in list(audit.get("events") or []) if isinstance(item, dict)]
+    bad_indexes = {int(index) for index in list(metrics.get("bad_event_indexes") or [])}
+    bad_starts = {
+        index: float(events[index].get("subtitle_start_sec", 0.0) or 0.0)
+        for index in bad_indexes
+        if 0 <= index < len(events)
+    }
+    clustered_indexes: set[int] = set()
+    window_sec = float(metrics.get("window_sec") or 8.0)
+    tail_start = float(metrics.get("tail_start_sec") or 0.0)
+    for index, start in bad_starts.items():
+        neighbors = [
+            other
+            for other, other_start in bad_starts.items()
+            if start <= other_start < start + window_sec
+        ]
+        if len(neighbors) >= 4:
+            clustered_indexes.update(neighbors)
+        if tail_start > 0 and start >= tail_start:
+            clustered_indexes.add(index)
+    return {
+        index
+        for index in clustered_indexes
+        if 0 <= index < len(events) and not bool(events[index].get("matched"))
+    }
+
+
+def _drop_clustered_unmatched_render_subtitles(
+    subtitle_items: list[dict[str, Any]],
+    audit: dict[str, Any],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    drop_indexes = _clustered_unmatched_render_subtitle_indexes(audit)
+    if not drop_indexes:
+        return [dict(item) for item in subtitle_items], {"dropped_unmatched_cluster_count": 0, "dropped_indexes": []}
+    kept = [
+        dict(item)
+        for index, item in enumerate(subtitle_items)
+        if index not in drop_indexes and isinstance(item, dict)
+    ]
+    return kept, {
+        "dropped_unmatched_cluster_count": len(drop_indexes),
+        "dropped_indexes": sorted(drop_indexes),
+    }
+
+
+def _estimate_render_subtitle_global_offset(audit: dict[str, Any]) -> dict[str, Any]:
+    offsets: list[float] = []
+    for event in list(audit.get("events") or []):
+        if not isinstance(event, dict) or not event.get("matched"):
+            continue
+        try:
+            subtitle_start = float(event.get("subtitle_start_sec"))
+            expected_start = float(event.get("expected_start_sec"))
+        except (TypeError, ValueError):
+            continue
+        if len(normalize_eval_text(str(event.get("text") or ""))) < 2:
+            continue
+        offsets.append(expected_start - subtitle_start)
+    if not offsets:
+        return {"stable": False, "sample_count": 0, "offset_sec": 0.0}
+    offset = float(median(offsets))
+    deviations = [abs(value - offset) for value in offsets]
+    stable_count = sum(1 for value in deviations if value <= 1.2)
+    stable_ratio = stable_count / max(1, len(offsets))
+    sorted_deviations = sorted(deviations)
+    p90_index = min(len(sorted_deviations) - 1, max(0, int(round(len(sorted_deviations) * 0.9)) - 1))
+    p90 = sorted_deviations[p90_index]
+    return {
+        "stable": len(offsets) >= 8 and stable_ratio >= 0.72 and p90 <= 1.8,
+        "sample_count": len(offsets),
+        "offset_sec": round(offset, 3),
+        "stable_ratio": round(stable_ratio, 4),
+        "p90_deviation_sec": round(p90, 3),
+    }
+
+
+def _shift_render_subtitle_items(subtitle_items: list[dict[str, Any]], *, offset_sec: float) -> list[dict[str, Any]]:
+    offset = float(offset_sec or 0.0)
+    shifted: list[dict[str, Any]] = []
+    for item in subtitle_items or []:
+        if not isinstance(item, dict):
+            continue
+        next_item = copy.deepcopy(item)
+        start = max(0.0, float(next_item.get("start_time", next_item.get("start", 0.0)) or 0.0) + offset)
+        end = max(start + 0.001, float(next_item.get("end_time", next_item.get("end", start)) or start) + offset)
+        next_item["start_time"] = round(start, 3)
+        next_item["end_time"] = round(end, 3)
+        next_item["render_asr_timing_repair"] = "global_offset"
+        next_item["render_asr_timing_offset_sec"] = round(offset, 3)
+        words: list[dict[str, Any]] = []
+        for word in list(next_item.get("words") or []):
+            if not isinstance(word, dict):
+                continue
+            next_word = dict(word)
+            try:
+                word_start = float(next_word.get("start", 0.0) or 0.0) + offset
+                word_end = float(next_word.get("end", next_word.get("start", 0.0)) or 0.0) + offset
+            except (TypeError, ValueError):
+                words.append(next_word)
+                continue
+            next_word["start"] = round(max(0.0, word_start), 3)
+            next_word["end"] = round(max(next_word["start"], word_end), 3)
+            words.append(next_word)
+        if words:
+            next_item["words"] = words
+        shifted.append(next_item)
+    return shifted
+
+
+def _retime_words_to_new_bounds(
+    words: list[dict[str, Any]],
+    *,
+    old_start: float,
+    old_end: float,
+    new_start: float,
+    new_end: float,
+) -> list[dict[str, Any]]:
+    if not words:
+        return []
+    old_duration = max(0.001, old_end - old_start)
+    new_duration = max(0.001, new_end - new_start)
+    retimed: list[dict[str, Any]] = []
+    for word in words:
+        if not isinstance(word, dict):
+            continue
+        next_word = dict(word)
+        try:
+            word_start = float(next_word.get("start", old_start) or old_start)
+            word_end = float(next_word.get("end", word_start) or word_start)
+        except (TypeError, ValueError):
+            retimed.append(next_word)
+            continue
+        start_ratio = max(0.0, min(1.0, (word_start - old_start) / old_duration))
+        end_ratio = max(start_ratio, min(1.0, (word_end - old_start) / old_duration))
+        next_word["start"] = round(new_start + new_duration * start_ratio, 3)
+        next_word["end"] = round(max(next_word["start"], new_start + new_duration * end_ratio), 3)
+        retimed.append(next_word)
+    return retimed
+
+
+def _retime_render_subtitle_items_from_alignment_audit(
+    subtitle_items: list[dict[str, Any]],
+    audit: dict[str, Any],
+    *,
+    duration_sec: float,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    events = list(audit.get("events") or [])
+    eligible_indexes = [
+        index
+        for index, item in enumerate(subtitle_items or [])
+        if isinstance(item, dict) and normalize_eval_text(subtitle_display_rule_text(item))
+    ]
+    matched_offsets: list[float] = []
+    for event in events:
+        if not isinstance(event, dict) or not event.get("matched"):
+            continue
+        try:
+            matched_offsets.append(float(event["expected_start_sec"]) - float(event["subtitle_start_sec"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+    fallback_offset = float(median(matched_offsets)) if matched_offsets else 0.0
+    repaired = [copy.deepcopy(item) for item in subtitle_items]
+    repaired_count = 0
+    fallback_count = 0
+    max_duration = max(0.001, float(duration_sec or 0.0))
+    for event_index, item_index in enumerate(eligible_indexes):
+        if item_index >= len(repaired):
+            continue
+        item = repaired[item_index]
+        event = events[event_index] if event_index < len(events) and isinstance(events[event_index], dict) else {}
+        old_start = float(item.get("start_time", item.get("start", 0.0)) or 0.0)
+        old_end = max(old_start + 0.001, float(item.get("end_time", item.get("end", old_start)) or old_start))
+        if event.get("matched") and event.get("expected_start_sec") is not None and event.get("expected_end_sec") is not None:
+            new_start = max(0.0, float(event["expected_start_sec"]) - 0.04)
+            new_end = min(max_duration, max(new_start + 0.75, float(event["expected_end_sec"]) + 0.12))
+            repaired_count += 1
+        else:
+            new_start = max(0.0, old_start + fallback_offset)
+            new_end = min(max_duration, max(new_start + 0.75, old_end + fallback_offset))
+            fallback_count += 1
+        item["start_time"] = round(new_start, 3)
+        item["end_time"] = round(max(new_start + 0.001, new_end), 3)
+        item["render_asr_timing_repair"] = "rendered_audio_forced_alignment"
+        item["render_asr_timing_offset_sec"] = round(item["start_time"] - old_start, 3)
+        words = _retime_words_to_new_bounds(
+            list(item.get("words") or []),
+            old_start=old_start,
+            old_end=old_end,
+            new_start=float(item["start_time"]),
+            new_end=float(item["end_time"]),
+        )
+        if words:
+            item["words"] = words
+    return _stabilize_render_subtitle_timeline(repaired), {
+        "repair_mode": "rendered_audio_forced_alignment",
+        "matched_retimed_count": repaired_count,
+        "fallback_retimed_count": fallback_count,
+        "fallback_offset_sec": round(fallback_offset, 3),
+    }
+
+
+async def _audit_subtitles_against_rendered_audio(
+    *,
+    video_path: Path,
+    subtitle_items: list[dict[str, Any]],
+    language: str,
+    debug_dir: Path,
+    label: str,
+) -> dict[str, Any]:
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = debug_dir / f"{label}.subtitle_alignment.wav"
+    await extract_audio(video_path, audio_path)
+    result = await LocalHTTPASRProvider().transcribe(audio_path, language=language)
+    tokens = _render_asr_tokens_from_transcript(result)
+    timings = _render_subtitle_timings_from_items(subtitle_items)
+    audit = audit_subtitle_timing_alignment(
+        timings,
+        tokens,
+        max_start_drift_sec=0.55,
+        max_end_drift_sec=1.0,
+    )
+    local_cluster_metrics = _render_subtitle_alignment_local_cluster_metrics(audit)
+    payload = {
+        "label": label,
+        "video_path": str(video_path),
+        "audio_path": str(audio_path),
+        "provider": result.provider,
+        "model": result.model,
+        "duration_sec": result.duration,
+        "subtitle_event_count": len(timings),
+        "asr_token_count": len(tokens),
+        "asr_text_chars": len(normalize_eval_text("".join(segment.text for segment in result.segments))),
+        "gate_pass": _render_subtitle_alignment_gate_passes(audit),
+        "local_cluster_metrics": local_cluster_metrics,
+        "offset_estimate": _estimate_render_subtitle_global_offset(audit),
+        "audit": audit,
+    }
+    (debug_dir / f"{label}.subtitle_alignment.json").write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return payload
+
+
+async def _repair_subtitles_with_rendered_audio_asr(
+    *,
+    video_path: Path,
+    subtitle_items: list[dict[str, Any]],
+    language: str,
+    debug_dir: Path,
+    label: str,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    before = await _audit_subtitles_against_rendered_audio(
+        video_path=video_path,
+        subtitle_items=subtitle_items,
+        language=language,
+        debug_dir=debug_dir,
+        label=f"{label}.before",
+    )
+    if bool(before.get("gate_pass")):
+        return [dict(item) for item in subtitle_items], {"status": "pass", "repaired": False, "before": before}
+
+    cleaned_subtitles, cluster_drop_summary = _drop_clustered_unmatched_render_subtitles(
+        subtitle_items,
+        dict(before.get("audit") or {}),
+    )
+    retime_audit = dict(before.get("audit") or {})
+    dropped_indexes = set(int(index) for index in list(cluster_drop_summary.get("dropped_indexes") or []))
+    if dropped_indexes:
+        retime_audit["events"] = [
+            dict(event)
+            for index, event in enumerate(list(retime_audit.get("events") or []))
+            if index not in dropped_indexes and isinstance(event, dict)
+        ]
+    forced_aligned_subtitles, forced_alignment_summary = _retime_render_subtitle_items_from_alignment_audit(
+        cleaned_subtitles,
+        retime_audit,
+        duration_sec=float(before.get("duration_sec", 0.0) or 0.0),
+    )
+    forced_after = await _audit_subtitles_against_rendered_audio(
+        video_path=video_path,
+        subtitle_items=forced_aligned_subtitles,
+        language=language,
+        debug_dir=debug_dir,
+        label=f"{label}.forced_alignment",
+    )
+    if bool(forced_after.get("gate_pass")):
+        return forced_aligned_subtitles, {
+            "status": "repaired",
+            "repaired": True,
+            **cluster_drop_summary,
+            **forced_alignment_summary,
+            "before": before,
+            "after": forced_after,
+        }
+
+    offset = dict(before.get("offset_estimate") or {})
+    offset_sec = float(offset.get("offset_sec", 0.0) or 0.0)
+    if not bool(offset.get("stable")) or abs(offset_sec) < 0.35:
+        return [dict(item) for item in subtitle_items], {
+            "status": "blocked",
+            "repaired": False,
+            "reason": "rendered_audio_asr_alignment_unstable",
+            **cluster_drop_summary,
+            "before": before,
+            "forced_alignment": {
+                **forced_alignment_summary,
+                "after": forced_after,
+            },
+        }
+
+    repaired_subtitles = _shift_render_subtitle_items(subtitle_items, offset_sec=offset_sec)
+    after = await _audit_subtitles_against_rendered_audio(
+        video_path=video_path,
+        subtitle_items=repaired_subtitles,
+        language=language,
+        debug_dir=debug_dir,
+        label=f"{label}.after",
+    )
+    if not bool(after.get("gate_pass")):
+        return repaired_subtitles, {
+            "status": "blocked",
+            "repaired": True,
+            "reason": "rendered_audio_asr_alignment_repair_failed_gate",
+            **cluster_drop_summary,
+            "offset_sec": round(offset_sec, 3),
+            "before": before,
+            "after": after,
+        }
+    return repaired_subtitles, {
+        "status": "repaired",
+        "repaired": True,
+        **cluster_drop_summary,
+        "offset_sec": round(offset_sec, 3),
+        "before": before,
+        "after": after,
     }
 
 
@@ -12030,6 +12985,9 @@ def _variant_sync_is_blocking(sync_check: dict[str, Any] | None) -> bool:
             "subtitle_invalid_range",
             "subtitle_trailing_gap_large",
             "subtitle_duration_gap_large",
+            "subtitle_short_flash_detected",
+            "subtitle_burst_density_detected",
+            "subtitle_local_gap_unstable",
         }
     ):
         return True
@@ -12301,9 +13259,9 @@ async def _render_full_track_avatar_video(
 
 _AVATAR_FULL_TRACK_RETRY_DELAYS_SECONDS = (5.0, 10.0, 20.0, 30.0)
 _AVATAR_FULL_TRACK_SLOT_KEY = "avatar_full_track"
-_AVATAR_FULL_TRACK_SLOT_TIMEOUT_SECONDS = 7200
-_AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS = 900.0
-_AVATAR_FULL_TRACK_CALL_TIMEOUT_SECONDS = 180.0
+_AVATAR_FULL_TRACK_SLOT_TIMEOUT_SECONDS = 30.0
+_AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS = 30.0
+_AVATAR_FULL_TRACK_CALL_TIMEOUT_SECONDS = 60.0
 
 
 class AvatarFullTrackRenderError(RuntimeError):
@@ -12375,7 +13333,7 @@ def _resolve_avatar_full_track_execution_timeout_seconds(
             provider_timeout_seconds = None
     if provider_timeout_seconds is None:
         return float(configured_timeout_seconds)
-    return max(float(configured_timeout_seconds), max(10.0, provider_timeout_seconds))
+    return max(10.0, min(float(configured_timeout_seconds), max(10.0, provider_timeout_seconds)))
 
 
 def _resolve_avatar_full_track_slot_timeout_seconds() -> float:
@@ -13116,6 +14074,71 @@ def _build_variant_timeline_bundle(
     return bundle
 
 
+_NON_SPEECH_CUT_TEXT_PLACEHOLDERS = {
+    "",
+    "silence",
+    "silent",
+    "pause",
+    "gap",
+    "vad_gap",
+    "no_speech",
+    "non_speech",
+    "静音",
+    "静默",
+    "停顿",
+    "空白",
+}
+
+
+def _cut_text_has_spoken_content(value: Any) -> bool:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return False
+    compact = re.sub(r"[\s_\-]+", "_", normalized.lower())
+    return compact not in _NON_SPEECH_CUT_TEXT_PLACEHOLDERS
+
+
+def _classify_high_risk_cut_review(item: dict[str, Any], *, compact_evidence: dict[str, Any]) -> dict[str, Any]:
+    reason = str(item.get("reason") or "").strip()
+    source_text = str(item.get("source_text") or "").strip()
+    match_surface = str(item.get("match_surface") or "").strip()
+    risk_level = str(item.get("risk_level") or "").strip().lower()
+    signals = {
+        str(signal).strip()
+        for signal in list(item.get("signals") or [])
+        if str(signal).strip()
+    }
+    evidence_tags = {
+        str(tag).strip()
+        for tag in list(compact_evidence.get("tags") or [])
+        if str(tag).strip()
+    }
+    protection_score = float(compact_evidence.get("protection_score") or 0.0)
+    language_score = float(compact_evidence.get("language_score") or 0.0)
+    explicit_speech_overlap = bool(
+        _cut_text_has_spoken_content(source_text)
+        or _cut_text_has_spoken_content(match_surface)
+        or signals.intersection({"protected_speech_overlap", "protected_subtitle_text_overlap"})
+        or evidence_tags.intersection({"language_context", "subtitle_context", "speech_context"})
+    )
+    explicit_protected_visual_cut = bool(
+        signals.intersection({"protected_visual_cut", "protected_visual_overlap"})
+        or evidence_tags.intersection({"protected_visual_cut", "protected_visual_overlap"})
+        or risk_level in {"high", "critical"}
+    )
+    if reason == "silence" and not explicit_speech_overlap and not explicit_protected_visual_cut:
+        return {
+            "review_priority": "advisory",
+            "blocking": False,
+            "review_reason": "silence_boundary_between_meaningful_keeps",
+        }
+    return {
+        "review_priority": "blocking",
+        "blocking": True,
+        "review_reason": "unresolved_semantic_cut",
+    }
+
+
 def _build_variant_timeline_diagnostics(
     *,
     editorial_analysis: dict[str, Any] | None,
@@ -13154,6 +14177,13 @@ def _build_variant_timeline_diagnostics(
         # Only treat cuts as high-risk when they split two meaningful kept sides.
         if not left_keep_role or not right_keep_role:
             continue
+        compact_evidence = _compact_cut_evidence_payload(item.get("evidence"))
+        review_classification = _classify_high_risk_cut_review(item, compact_evidence=compact_evidence)
+        signals = [
+            str(signal).strip()
+            for signal in list(item.get("signals") or [])
+            if str(signal).strip()
+        ]
         high_risk_cuts.append(
             {
                 "start": round(float(item.get("start", 0.0) or 0.0), 3),
@@ -13167,7 +14197,9 @@ def _build_variant_timeline_diagnostics(
                 "boundary_keep_energy": round(boundary_keep_energy, 3),
                 "left_keep_role": left_keep_role,
                 "right_keep_role": right_keep_role,
-                "evidence": _compact_cut_evidence_payload(item.get("evidence")),
+                "signals": signals[:8],
+                "evidence": compact_evidence,
+                **review_classification,
             }
         )
     raw_llm_cut_review = (editorial_analysis or {}).get("llm_cut_review")
@@ -13195,11 +14227,23 @@ def _build_variant_timeline_diagnostics(
         or 0
     )
     review_reasons: list[str] = []
-    if high_risk_cuts:
-        review_reasons.append("存在贴近高能量保留段的 cut，建议复核边界。")
+    blocking_high_risk_cuts = [
+        item
+        for item in high_risk_cuts
+        if item.get("blocking") is not False and str(item.get("review_priority") or "blocking") != "advisory"
+    ]
+    advisory_high_risk_cuts = [
+        item
+        for item in high_risk_cuts
+        if item.get("blocking") is False or str(item.get("review_priority") or "") == "advisory"
+    ]
+    if blocking_high_risk_cuts:
+        review_reasons.append("存在未收口的高风险 cut，需要人工复核或多模态复核。")
+    elif advisory_high_risk_cuts:
+        review_reasons.append("存在贴近高能量保留段的静默边界 cut，建议抽检边界。")
     if any(
         float(((item.get("evidence") or {}).get("protection_score") or 0.0)) >= 0.72
-        for item in high_risk_cuts
+        for item in blocking_high_risk_cuts
         if isinstance(item.get("evidence"), dict)
     ):
         review_reasons.append("部分 cut 带有展示、语言或语义保护证据，建议重点核对是否误删。")
@@ -13232,6 +14276,8 @@ def _build_variant_timeline_diagnostics(
         },
         "high_energy_keeps": high_energy_keeps[:8],
         "high_risk_cuts": high_risk_cuts[:8],
+        "blocking_high_risk_cut_count": len(blocking_high_risk_cuts),
+        "advisory_high_risk_cut_count": len(advisory_high_risk_cuts),
         "llm_cut_review": llm_cut_review,
         "multimodal_trim_review_summary": multimodal_trim_review_summary,
         "review_flags": {
@@ -13410,12 +14456,14 @@ def _validate_variant_timeline_bundle(
             duration_sec = float(media.get("duration_sec") or 0.0)
 
         previous_end: float | None = None
+        subtitle_ranges: list[tuple[float, float]] = []
         for index, event in enumerate(variant.get("subtitle_events") or [], start=1):
             if not isinstance(event, dict):
                 issues.append(f"{variant_name}: subtitle event {index} is not a dict")
                 continue
             start_time = float(event.get("start_time", event.get("start", 0.0)) or 0.0)
             end_time = float(event.get("end_time", event.get("end", start_time)) or start_time)
+            subtitle_ranges.append((start_time, end_time))
             if end_time < start_time:
                 issues.append(f"{variant_name}: subtitle event {index} has end before start")
             if previous_end is not None and start_time < previous_end - 1e-6:
@@ -13423,6 +14471,22 @@ def _validate_variant_timeline_bundle(
             if duration_sec > 0 and end_time > duration_sec + 0.05:
                 issues.append(f"{variant_name}: subtitle event {index} extends beyond media duration")
             previous_end = max(previous_end or end_time, end_time)
+        timing_structure = _subtitle_timing_structure_diagnostics(
+            subtitle_ranges,
+            video_duration_sec=duration_sec,
+        )
+        if int(timing_structure.get("short_flash_count") or 0) > 0:
+            issues.append(
+                f"{variant_name}: subtitle events contain {timing_structure['short_flash_count']} short flash items"
+            )
+        if int(timing_structure.get("burst_window_count") or 0) > 0:
+            issues.append(
+                f"{variant_name}: subtitle events burst density max={timing_structure['max_events_per_one_sec']}/sec"
+            )
+        if int(timing_structure.get("large_gap_count") or 0) > max(3, int(len(subtitle_ranges) * 0.06)):
+            issues.append(
+                f"{variant_name}: subtitle events have unstable local gaps count={timing_structure['large_gap_count']}"
+            )
 
     timeline_rules = bundle.get("timeline_rules")
     if isinstance(timeline_rules, dict):
@@ -13650,6 +14714,129 @@ async def _load_job_creator_card(session, job: Job) -> CreatorCard | None:
     return result.scalar_one_or_none()
 
 
+async def _load_job_packaging_creator_card(session, job: Job) -> CreatorCard | None:
+    creator = await _load_job_creator_card(session, job)
+    if creator is not None:
+        return creator
+    return await _infer_packaging_creator_card_from_selected_assets(session)
+
+
+async def _infer_packaging_creator_card_from_selected_assets(session) -> CreatorCard | None:
+    selected_assets = _selected_packaging_asset_identity_keys()
+    if not any(selected_assets.values()):
+        return None
+
+    stmt = (
+        select(CreatorCard)
+        .options(selectinload(CreatorCard.assets))
+        .order_by(CreatorCard.updated_at.desc(), CreatorCard.created_at.desc())
+    )
+    result = await session.execute(stmt)
+    candidates: list[tuple[int, str, CreatorCard]] = []
+    for creator in result.scalars().all():
+        score = _score_creator_card_for_selected_packaging_assets(
+            creator,
+            selected_assets=selected_assets,
+        )
+        if score <= 0:
+            continue
+        candidates.append((score, str(getattr(creator, "updated_at", "") or getattr(creator, "created_at", "") or ""), creator))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][2]
+
+
+def _selected_packaging_asset_identity_keys() -> dict[str, set[str]]:
+    try:
+        inventory = list_packaging_assets()
+    except Exception:
+        logger.exception("Failed to inspect packaging assets for creator-card inference")
+        return {}
+    config = inventory.get("config") if isinstance(inventory, dict) else {}
+    assets_by_type = inventory.get("assets") if isinstance(inventory, dict) else {}
+    if not isinstance(config, dict) or not isinstance(assets_by_type, dict):
+        return {}
+
+    assets_by_id = {
+        str(asset.get("id") or ""): asset
+        for assets in assets_by_type.values()
+        for asset in list(assets or [])
+        if isinstance(asset, dict)
+    }
+    selected: dict[str, set[str]] = {"intro": set(), "outro": set(), "watermark": set(), "music": set()}
+    for config_key, asset_type in (
+        ("intro_asset_id", "intro"),
+        ("outro_asset_id", "outro"),
+        ("watermark_asset_id", "watermark"),
+    ):
+        asset = assets_by_id.get(str(config.get(config_key) or ""))
+        _add_packaging_asset_identity_key(selected[asset_type], asset)
+
+    for asset_id in list(config.get("music_asset_ids") or []):
+        asset = assets_by_id.get(str(asset_id or ""))
+        _add_packaging_asset_identity_key(selected["music"], asset)
+    return selected
+
+
+def _score_creator_card_for_selected_packaging_assets(
+    creator: CreatorCard,
+    *,
+    selected_assets: dict[str, set[str]],
+) -> int:
+    score = 0
+    has_watermark = False
+    for asset in list(getattr(creator, "assets", []) or []):
+        packaging_type = _creator_asset_packaging_type(getattr(asset, "asset_type", None))
+        if packaging_type == "watermark" and resolve_creator_asset_path(getattr(asset, "stored_path", None)).is_file():
+            has_watermark = True
+        if not packaging_type:
+            continue
+        identity_key = _packaging_asset_identity_key(getattr(asset, "original_name", None))
+        if not identity_key or identity_key not in selected_assets.get(packaging_type, set()):
+            continue
+        if packaging_type in {"intro", "outro"}:
+            score += 8
+        elif packaging_type == "music":
+            score += 2
+        elif packaging_type == "watermark":
+            score += 5
+    if score <= 0 or not has_watermark:
+        return 0
+    return score + 2
+
+
+def _creator_asset_packaging_type(asset_type: Any) -> str | None:
+    category = normalize_creator_asset_category(asset_type)
+    if category in {"intro", "outro"}:
+        return category
+    if category == "logo":
+        return "watermark"
+    if category == "music_library":
+        return "music"
+    return None
+
+
+def _add_packaging_asset_identity_key(target: set[str], asset: dict[str, Any] | None) -> None:
+    if not isinstance(asset, dict):
+        return
+    for value in (asset.get("original_name"), Path(str(asset.get("path") or "")).name):
+        key = _packaging_asset_identity_key(value)
+        if key:
+            target.add(key)
+
+
+def _packaging_asset_identity_key(value: Any) -> str:
+    text = str(value or "").replace("\\", "/").strip().lower()
+    if not text:
+        return ""
+    name = Path(text).name
+    name = re.sub(r"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}-", "", name)
+    name = re.sub(r"^[0-9a-f]{32}[._-]", "", name)
+    return re.sub(r"\s+", " ", name).strip()
+
+
 def _creator_legacy_avatar_profile_ids(creator: CreatorCard | None) -> list[str]:
     if creator is None:
         return []
@@ -13769,6 +14956,40 @@ def _apply_avatar_presenter_binding_to_plan(
     plan["render_request"] = render_request
 
 
+def _avatar_missing_presenter_reason(plan: dict[str, Any] | None) -> str:
+    payload = plan if isinstance(plan, dict) else {}
+    presenter_id = str(payload.get("presenter_id") or "").strip()
+    if presenter_id:
+        return ""
+    binding = payload.get("avatar_binding") if isinstance(payload.get("avatar_binding"), dict) else {}
+    binding_reason = str(binding.get("reason") or "").strip()
+    if binding_reason:
+        return binding_reason
+    return "creator_avatar_presenter_missing"
+
+
+def _avatar_missing_presenter_execution(plan: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    return {
+        "provider": plan.get("provider"),
+        "status": "skipped",
+        "reason": reason,
+        "detail": "未配置可用数字人 presenter，跳过数字人渲染；普通成片不受影响。",
+    }
+
+
+def _avatar_missing_presenter_runtime_result(plan: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    return {
+        "enabled": True,
+        "status": "skipped",
+        "reason": reason,
+        "reason_category": "not_configured",
+        "mode": str(plan.get("mode") or ""),
+        "integration_mode": str(plan.get("integration_mode") or ""),
+        "provider": str(plan.get("provider") or ""),
+        "detail": "未配置可用数字人 presenter，跳过数字人渲染；普通成片不受影响。",
+    }
+
+
 def _build_creator_author_profile(creator: CreatorCard | None) -> dict[str, Any] | None:
     if creator is None:
         return None
@@ -13868,7 +15089,6 @@ def run_step_sync(step_name: str, job_id: str) -> dict:
         "avatar_commentary": run_avatar_commentary,
         "edit_plan": run_edit_plan,
         "render": run_render,
-        "platform_package": run_platform_package,
     }
     fn = step_map.get(step_name)
     if not fn:

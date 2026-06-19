@@ -61,15 +61,13 @@ def platform_packaging_output_fallback_reasons(
 def render_output_blocking_reasons(
     *,
     avatar_result: Mapping[str, Any] | None,
-    cover_result: Mapping[str, Any] | None,
     subtitle_projection_repair: Mapping[str, Any] | None,
 ) -> list[str]:
+    del avatar_result
     reasons = projection_output_fallback_reasons(
         subtitle_projection_repair,
         include_refresh_required=False,
     )
-    reasons.extend(_runtime_result_blocking_reasons("avatar", avatar_result))
-    reasons.extend(_runtime_result_blocking_reasons("cover", cover_result))
     return _dedupe(reasons)
 
 

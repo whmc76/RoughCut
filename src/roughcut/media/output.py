@@ -1393,6 +1393,78 @@ def _title_style_tokens(
     main_large = _fit_font_size(title_lines.get("main", ""), 154, min_size=98)
     bottom_mid = _fit_font_size(title_lines.get("bottom", ""), 110, min_size=78)
 
+    if style_name == "jenny_children_bubble_stack":
+        return _apply_cross_platform_safe_zone(
+            {
+                "top": {
+                    "size": _fit_font_size(title_lines.get("top", ""), 58, min_size=42),
+                    "fill": "0x6A3D18FF",
+                    "border": "0xFFFFFFFF",
+                    "borderw": 5,
+                    "x": "(w-text_w)/2",
+                    "y": "h*0.075",
+                    "box": True,
+                    "boxcolor": "0xFFF6D6E8",
+                    "boxborderw": 16,
+                    "shadowcolor": "0xF3A63EFF",
+                    "shadowx": 3,
+                    "shadowy": 3,
+                    "safe_width_ratio": 0.56,
+                    "safe_y_expr": "h*0.075",
+                },
+                "main": {
+                    "size": _fit_font_size(title_lines.get("main", ""), 108, min_size=68),
+                    "fill": "0xFFF9E8FF",
+                    "border": "0x2C5AA8FF",
+                    "borderw": 10,
+                    "x": "(w-text_w)/2",
+                    "y": "h*0.205",
+                    "shadowcolor": "0x69C8FFFF",
+                    "shadowx": 4,
+                    "shadowy": 4,
+                    "safe_width_ratio": 0.74,
+                    "safe_y_expr": "h*0.205",
+                    "passes": [
+                        {
+                            "fill": "0x73D2FFFF",
+                            "border": "0x73D2FFFF",
+                            "borderw": 12,
+                            "dx": 4,
+                            "dy": 4,
+                            "shadowcolor": "0x73D2FFFF",
+                            "shadowx": 0,
+                            "shadowy": 0,
+                        },
+                        {
+                            "fill": "0xFFF9E8FF",
+                            "border": "0x2B5DA8FF",
+                            "borderw": 8,
+                            "shadowcolor": "0xF3A63EFF",
+                            "shadowx": 3,
+                            "shadowy": 3,
+                        },
+                    ],
+                },
+                "bottom": {
+                    "size": _fit_font_size(title_lines.get("bottom", ""), 64, min_size=44),
+                    "fill": "0x2D4C6CFF",
+                    "border": "0xFFFFFFFF",
+                    "borderw": 5,
+                    "x": "(w-text_w)/2",
+                    "y": "h*0.805",
+                    "box": True,
+                    "boxcolor": "0xD9F4FFE8",
+                    "boxborderw": 18,
+                    "shadowcolor": "0xF3A63EFF",
+                    "shadowx": 3,
+                    "shadowy": 3,
+                    "safe_width_ratio": 0.62,
+                    "safe_y_expr": "h*0.805",
+                },
+            },
+            title_lines=title_lines,
+        )
+
     if style_name == "cyber_logo_stack":
         return _apply_cross_platform_safe_zone(
             {
@@ -2244,18 +2316,12 @@ def _escape_drawtext(text: str) -> str:
 
 
 def write_srt_file(subtitle_items: list[dict], output_path: Path) -> Path:
-    original_validation_issues = _collect_srt_timeline_issues(
-        subtitle_items,
-        check_overlap=False,
-    )
-    if original_validation_issues:
-        raise ValueError("invalid_subtitle_timeline: " + "; ".join(original_validation_issues))
     normalized_items = _normalize_srt_timeline_for_serialization(subtitle_items)
     validation_issues = _collect_srt_timeline_issues(normalized_items)
     if validation_issues:
         raise ValueError("invalid_subtitle_timeline: " + "; ".join(validation_issues))
     ordered_items = sorted(normalized_items, key=_subtitle_srt_sort_key)
-    lines: list[str] = []
+    display_segments: list[dict[str, Any]] = []
     for item in ordered_items:
         serialization_item, text = build_serialization_subtitle_item(item)
         if not text:
@@ -2268,10 +2334,30 @@ def write_srt_file(subtitle_items: list[dict], output_path: Path) -> Path:
             text=text,
             subtitle_item=serialization_item,
         ):
-            start = _srt_time(segment["start_time"])
-            end = _srt_time(segment["end_time"])
-            i = len(lines) + 1
-            lines.append(f"{i}\n{start} --> {end}\n{segment['text']}\n")
+            display_segments.append(
+                {
+                    "index": len(display_segments),
+                    "start_time": segment["start_time"],
+                    "end_time": segment["end_time"],
+                    "text_final": segment["text"],
+                    "text": segment["text"],
+                }
+            )
+    final_segments = _merge_orphan_srt_cues(display_segments)
+    final_validation_issues = _collect_srt_timeline_issues(final_segments)
+    if final_validation_issues:
+        raise ValueError("invalid_subtitle_timeline: " + "; ".join(final_validation_issues))
+    lines: list[str] = []
+    for segment in sorted(final_segments, key=_subtitle_srt_sort_key):
+        text = _srt_item_text(segment)
+        if not text:
+            continue
+        if _compact_srt_text(text) in _SRT_FILLER_SINGLE_CJK:
+            continue
+        start = _srt_time(float(segment["start_time"]))
+        end = _srt_time(float(segment["end_time"]))
+        i = len(lines) + 1
+        lines.append(f"{i}\n{start} --> {end}\n{text}\n")
     output_path.write_text("\n".join(lines), encoding="utf-8-sig")
     return output_path
 
@@ -2297,7 +2383,9 @@ def _normalize_srt_timeline_for_serialization(
     *,
     max_autofix_overlap_sec: float = 0.35,
 ) -> list[dict[str, Any]]:
-    ordered_items = sorted((dict(item) for item in subtitle_items), key=_subtitle_srt_sort_key)
+    ordered_items = _merge_orphan_srt_cues(
+        sorted((dict(item) for item in subtitle_items), key=_subtitle_srt_sort_key)
+    )
     normalized: list[dict[str, Any]] = []
     previous_end = -1.0
     for item in ordered_items:
@@ -2313,6 +2401,101 @@ def _normalize_srt_timeline_for_serialization(
         normalized.append(item)
         previous_end = max(previous_end, end)
     return normalized
+
+
+_SRT_ORPHAN_SINGLE_PREFER_RIGHT = {"你", "我", "他", "她", "它", "这", "那", "把", "给", "就", "再", "才", "一"}
+_SRT_FILLER_SINGLE_CJK = {"呃", "额", "啊", "嗯", "唔", "哦", "噢", "吧", "嘛"}
+
+
+def _merge_orphan_srt_cues(subtitle_items: list[dict[str, Any]], *, max_chars: int = 24) -> list[dict[str, Any]]:
+    if len(subtitle_items) <= 1:
+        return [dict(item) for item in subtitle_items]
+
+    merged: list[dict[str, Any]] = []
+    index = 0
+    while index < len(subtitle_items):
+        current = dict(subtitle_items[index])
+        current_text = _srt_item_text(current)
+        if not _is_orphan_single_cjk_srt_text(current_text):
+            merged.append(current)
+            index += 1
+            continue
+
+        next_item = dict(subtitle_items[index + 1]) if index + 1 < len(subtitle_items) else None
+        if (
+            next_item is not None
+            and _can_merge_srt_cues(current, next_item, max_chars=max_chars)
+            and (
+                _compact_srt_text(current_text) in _SRT_ORPHAN_SINGLE_PREFER_RIGHT
+                or not merged
+                or _compact_srt_text(_srt_item_text(next_item))
+            )
+        ):
+            merged.append(_merge_srt_cues(current, next_item))
+            index += 2
+            continue
+
+        if merged and _can_merge_srt_cues(merged[-1], current, max_chars=max_chars):
+            merged[-1] = _merge_srt_cues(merged[-1], current)
+            index += 1
+            continue
+
+        if next_item is not None and _can_merge_srt_cues(current, next_item, max_chars=max_chars):
+            merged.append(_merge_srt_cues(current, next_item))
+            index += 2
+            continue
+
+        merged.append(current)
+        index += 1
+
+    return merged
+
+
+def _srt_item_text(item: dict[str, Any]) -> str:
+    for field_name in ("text_final", "text", "text_raw", "text_norm"):
+        value = str(item.get(field_name) or "").strip()
+        if value:
+            return value
+    _, text = build_serialization_subtitle_item(item)
+    return str(text or "").strip()
+
+
+def _compact_srt_text(text: str) -> str:
+    return re.sub(r"[，。！？；：,.!?;:\s、]+", "", str(text or "").strip())
+
+
+def _is_orphan_single_cjk_srt_text(text: str) -> bool:
+    compact = _compact_srt_text(text)
+    return bool(re.fullmatch(r"[\u4e00-\u9fff]", compact)) and compact not in _SRT_FILLER_SINGLE_CJK
+
+
+def _can_merge_srt_cues(left: dict[str, Any], right: dict[str, Any], *, max_chars: int) -> bool:
+    left_text = _srt_item_text(left)
+    right_text = _srt_item_text(right)
+    if not left_text or not right_text:
+        return False
+    left_start, left_end, _ = _subtitle_srt_sort_key(left)
+    right_start, right_end, _ = _subtitle_srt_sort_key(right)
+    gap = max(0.0, right_start - left_end)
+    if gap > 0.62:
+        return False
+    combined_duration = max(0.0, right_end - left_start)
+    combined_text = f"{left_text}{right_text}"
+    return len(_compact_srt_text(combined_text)) <= max_chars and combined_duration <= 5.2
+
+
+def _merge_srt_cues(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(left)
+    left_start, _, _ = _subtitle_srt_sort_key(left)
+    _, right_end, _ = _subtitle_srt_sort_key(right)
+    merged["start_time"] = round(left_start, 3)
+    merged["end_time"] = round(right_end, 3)
+    merged["text_final"] = f"{_srt_item_text(left)}{_srt_item_text(right)}"
+    merged["text"] = merged["text_final"]
+    words = list(left.get("words") or []) + list(right.get("words") or [])
+    if words:
+        merged["words"] = words
+    return merged
 
 
 def _collect_srt_timeline_issues(

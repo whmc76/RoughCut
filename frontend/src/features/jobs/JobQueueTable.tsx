@@ -138,8 +138,18 @@ function canOpenManualEditorFromQueue(job: Job) {
   return job.steps.some((step) => step.step_name === "edit_plan" && step.status === "done");
 }
 
-function queueTaskKindLabel(job: Job) {
-  return job.queue_task_kind === "publication" ? "发布任务" : "剪辑任务";
+function isRemixProductionJob(job: Job) {
+  return job.queue_task_kind === "remix_production";
+}
+
+function isPublicationJob(job: Job) {
+  return job.queue_task_kind === "publication";
+}
+
+function taskKindLabel(job: Job) {
+  if (isPublicationJob(job)) return "发布任务";
+  if (isRemixProductionJob(job)) return "影视二创";
+  return "剪辑任务";
 }
 
 function JobQueueThumbnail({ job }: { job: Job }) {
@@ -190,15 +200,19 @@ type JobQueueTableProps = {
   isOpeningFolder?: boolean;
   isCancelling?: boolean;
   isRestarting?: boolean;
+  isStartingRemixProduction?: boolean;
   isDeleting?: boolean;
   onSelect: (jobId: string) => void;
   onOpenReview?: (jobId: string) => void;
   onPublish?: (jobId: string) => void;
+  onPreview?: (jobId: string) => void;
   onOpenFolder: (jobId: string) => void;
   onDownload: (jobId: string) => void;
   onCancel: (jobId: string) => void;
   onRestart: (jobId: string) => void;
+  onStartRemixProduction?: (jobId: string, force?: boolean) => void;
   onDelete: (jobId: string) => void;
+  onOpenRemixProduction?: (jobId: string) => void;
 };
 
 export function JobQueueTable({
@@ -213,15 +227,19 @@ export function JobQueueTable({
   isOpeningFolder,
   isCancelling,
   isRestarting,
+  isStartingRemixProduction,
   isDeleting,
   onSelect,
   onOpenReview,
   onPublish,
+  onPreview,
   onOpenFolder,
   onDownload,
   onCancel,
   onRestart,
+  onStartRemixProduction,
   onDelete,
+  onOpenRemixProduction,
   onPageChange,
 }: JobQueueTableProps) {
   const { t } = useI18n();
@@ -290,14 +308,16 @@ export function JobQueueTable({
               </tr>
             )}
             {jobs.map((job) => {
-              const isPublicationTask = job.queue_task_kind === "publication";
+              const isPublicationTask = isPublicationJob(job);
+              const isRemixTask = isRemixProductionJob(job);
               const showReviewAction = job.status === "needs_review";
               const highlightedReviewAction = isHighlightedReviewAction(job);
               const { filenameDescription } = splitVideoDescription(job.video_description);
               const cutEvidenceSummary = formatCutEvidenceSummary(job.timeline_diagnostics);
+              const showPreview = job.status === "done";
               const showOpenFolder = job.status === "done";
               const showDownload = job.status === "done" && !isLocalOutputJob(job);
-              const showCancel = hasJobStarted(job) && !isTerminalJob(job);
+              const showCancel = !isRemixTask && hasJobStarted(job) && !isTerminalJob(job);
               const manualEditStatus = awaitingManualEditLabel(job, t);
               const manualEditorReady = canOpenManualEditorFromQueue(job);
 
@@ -307,6 +327,7 @@ export function JobQueueTable({
                   className={classNames(
                     selectedJobId === job.id && "selected-row",
                     isPublicationTask && "job-row-publication",
+                    isRemixTask && "job-row-remix-production",
                   )}
                   onClick={() => onSelect(job.id)}
                 >
@@ -324,7 +345,7 @@ export function JobQueueTable({
                         ) : null}
                         <div className="mode-chip-list compact-top">
                           <span className={classNames("mode-chip", job.queue_task_kind === "publication" ? "publication" : "planned")}>
-                            {queueTaskKindLabel(job)}
+                            {taskKindLabel(job)}
                           </span>
                           <span className="mode-chip planned">{jobFlowModeLabel(job.job_flow_mode || "auto")}</span>
                           <span className="mode-chip">{workflowModeLabel(job.workflow_mode)}</span>
@@ -363,6 +384,7 @@ export function JobQueueTable({
                     <div className="form-stack compact-top">
                       <span className={`status-chip ${jobStatusTone(job)}`}>{reviewStatusLabel(job)}</span>
                       {isPublicationTask ? <span className="status-pill publication">发布任务</span> : null}
+                      {isRemixTask ? <span className="status-pill pending">影视二创</span> : null}
                       {manualEditStatus ? (
                         <span className="status-pill pending">{manualEditStatus}</span>
                       ) : null}
@@ -412,7 +434,34 @@ export function JobQueueTable({
                           <span>一键发布</span>
                         </button>
                       ) : null}
-                      {!isPublicationTask ? (
+                      {isRemixTask ? (
+                        <button
+                          className="button button-sm"
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onOpenRemixProduction?.(job.id);
+                          }}
+                        >
+                          查看队列
+                        </button>
+                      ) : null}
+                      {isRemixTask && ["pending", "failed", "cancelled", "done"].includes(job.status) ? (
+                        <button
+                          className="button primary button-sm job-restart-cta"
+                          type="button"
+                          disabled={isStartingRemixProduction}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onStartRemixProduction?.(job.id, job.status !== "pending");
+                          }}
+                        >
+                          {isStartingRemixProduction
+                            ? "启动中"
+                            : job.status === "pending" ? "开始" : t("jobs.actions.restart")}
+                        </button>
+                      ) : null}
+                      {!isPublicationTask && !isRemixTask ? (
                         <Link
                           className={classNames(
                             "button button-sm",
@@ -425,6 +474,18 @@ export function JobQueueTable({
                         >
                           手动调整
                         </Link>
+                      ) : null}
+                      {showPreview ? (
+                        <button
+                          className="button ghost button-sm"
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onPreview?.(job.id);
+                          }}
+                        >
+                          {t("jobs.actions.preview")}
+                        </button>
                       ) : null}
                       {showOpenFolder ? (
                         <button
@@ -464,31 +525,35 @@ export function JobQueueTable({
                           {isCancelling ? t("jobs.actions.cancelling") : t("jobs.actions.cancel")}
                         </button>
                       ) : null}
-                      <button
-                        className="button primary button-sm job-restart-cta"
-                        type="button"
-                        disabled={isRestarting || !isRestartableJobStatus(job.status)}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onRestart(job.id);
-                        }}
-                        title={isRestartableJobStatus(job.status) ? undefined : t(getRestartUnavailableReason(job.status))}
-                      >
-                        {isRestarting
-                          ? t("jobs.actions.restarting")
-                          : isRestartableJobStatus(job.status) ? t("jobs.actions.restart") : t("jobs.actions.restartUnavailable")}
-                      </button>
-                      <button
-                        className="button danger button-sm"
-                        type="button"
-                        disabled={isDeleting}
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onDelete(job.id);
-                        }}
-                      >
-                        {isDeleting ? t("jobs.actions.deleting") : t("jobs.actions.delete")}
-                      </button>
+                      {!isRemixTask ? (
+                        <>
+                          <button
+                            className="button primary button-sm job-restart-cta"
+                            type="button"
+                            disabled={isRestarting || !isRestartableJobStatus(job.status)}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onRestart(job.id);
+                            }}
+                            title={isRestartableJobStatus(job.status) ? undefined : t(getRestartUnavailableReason(job.status))}
+                          >
+                            {isRestarting
+                              ? t("jobs.actions.restarting")
+                              : isRestartableJobStatus(job.status) ? t("jobs.actions.restart") : t("jobs.actions.restartUnavailable")}
+                          </button>
+                          <button
+                            className="button danger button-sm"
+                            type="button"
+                            disabled={isDeleting}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              onDelete(job.id);
+                            }}
+                          >
+                            {isDeleting ? t("jobs.actions.deleting") : t("jobs.actions.delete")}
+                          </button>
+                        </>
+                      ) : null}
                     </div>
                   </td>
                 </tr>

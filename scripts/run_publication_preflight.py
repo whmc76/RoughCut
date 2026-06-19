@@ -840,7 +840,8 @@ def _build_preflight_recommendations(result: dict[str, Any], *, requested_platfo
             auto_remediable=False,
         )
     probe_inventory = result.get("probe_inventory") if isinstance(result.get("probe_inventory"), dict) else {}
-    if bool(probe_inventory.get("checked")) and _normalize(probe_inventory.get("status")).lower() == "probe_failed":
+    probe_inventory_failed = bool(probe_inventory.get("checked")) and _normalize(probe_inventory.get("status")).lower() == "probe_failed"
+    if probe_inventory_failed:
         _append_preflight_recommendation(
             recommendations,
             seen,
@@ -884,7 +885,7 @@ def _build_preflight_recommendations(result: dict[str, Any], *, requested_platfo
                     operations=["open_publish_tab", "rerun_preflight"],
                     auto_remediable=False,
                 )
-        if "browser-agent" in lowered or "cdp" in lowered:
+        if ("browser-agent" in lowered or "cdp" in lowered) and not probe_inventory_failed:
             _append_preflight_recommendation(
                 recommendations,
                 seen,

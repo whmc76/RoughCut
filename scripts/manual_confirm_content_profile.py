@@ -23,14 +23,13 @@ from sqlalchemy import select
 
 from roughcut.db.models import Artifact, Job, JobStep, SubtitleCorrection, SubtitleItem
 from roughcut.db.session import get_session_factory
-from roughcut.edit.presets import get_workflow_preset
 from roughcut.review.content_profile import (
     apply_content_profile_feedback,
     apply_identity_review_guard,
     assess_content_profile_automation,
-    build_cover_title,
     build_reviewed_transcript_excerpt,
 )
+from roughcut.review.downstream_context import strip_publication_only_profile_fields
 from roughcut.review.content_profile_memory import (
     build_content_profile_memory_cloud,
     load_content_profile_user_memory,
@@ -186,8 +185,6 @@ async def _confirm(args: argparse.Namespace) -> dict[str, Any]:
         except Exception:
             final_profile = _merge_manual_fields(draft_artifact.data_json or {}, payload)
             final_profile["transcript_excerpt"] = reviewed_excerpt
-            preset = get_workflow_preset(str(final_profile.get("preset_name") or job.channel_profile or "unboxing_default"))
-            final_profile["cover_title"] = build_cover_title(final_profile, preset)
             final_profile = apply_identity_review_guard(
                 final_profile,
                 subtitle_items=subtitle_payload,
@@ -205,8 +202,6 @@ async def _confirm(args: argparse.Namespace) -> dict[str, Any]:
 
         final_profile = _merge_manual_fields(final_profile, payload)
         final_profile["transcript_excerpt"] = reviewed_excerpt
-        preset = get_workflow_preset(str(final_profile.get("preset_name") or job.channel_profile or "unboxing_default"))
-        final_profile["cover_title"] = build_cover_title(final_profile, preset)
         final_profile = apply_identity_review_guard(
             final_profile,
             subtitle_items=subtitle_payload,
@@ -214,6 +209,7 @@ async def _confirm(args: argparse.Namespace) -> dict[str, Any]:
             glossary_terms=[],
             source_name=job.source_name,
         )
+        final_profile = strip_publication_only_profile_fields(final_profile)
         final_profile["automation_review"] = assess_content_profile_automation(
             final_profile,
             subtitle_items=subtitle_payload,
