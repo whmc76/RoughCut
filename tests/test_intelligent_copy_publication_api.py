@@ -2,9 +2,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from roughcut.api import intelligent_copy as ic_api
 from roughcut import publication
+from roughcut.db.models import CreatorCard, CreatorPlatformBinding, CreatorPublicationProfile
+from roughcut.db.session import Base
 from roughcut.publication_platform_matrix import platform_skips_explicit_visibility_entry
 
 
@@ -68,6 +71,55 @@ async def test_publish_intelligent_folder_skips_browser_agent_gate_for_social_au
 
     assert result["status"] == "submitted"
     assert [item["platform"] for item in result["created_attempts"]] == ["douyin", "wechat-channels"]
+
+
+@pytest.mark.asyncio
+async def test_intelligent_publish_merges_creator_card_publication_bindings() -> None:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            creator = CreatorCard(name="珍妮斯baby", status="active")
+            session.add(creator)
+            await session.flush()
+            profile = CreatorPublicationProfile(
+                creator_card_id=creator.id,
+                status="draft",
+                publication_payload_json={},
+            )
+            session.add(profile)
+            await session.flush()
+            binding = CreatorPlatformBinding(
+                publication_profile_id=profile.id,
+                platform="bilibili",
+                credential_ref="social-auto-upload:creator-janice-bilibili:bilibili",
+                binding_payload_json={
+                    "status": "login_confirmed",
+                    "enabled": True,
+                    "adapter": "social_auto_upload",
+                    "account_label": "珍妮斯baby · Chrome",
+                    "browser_profile_id": "browser-agent:chrome:janice:bilibili",
+                    "browser_binding": {"browser": "chrome", "profile_id": "browser-agent:chrome:janice:bilibili"},
+                },
+            )
+            session.add(binding)
+            await session.flush()
+
+            merged = await ic_api._merge_creator_card_publication_bindings(
+                session=session,
+                creator_profile={"id": "avatar-profile", "display_name": "珍妮斯baby", "creator_profile": {}},
+                creator_profile_id="avatar-profile",
+            )
+    finally:
+        await engine.dispose()
+
+    credentials = publication.active_publication_credentials(merged)
+    assert [item["platform"] for item in credentials] == ["bilibili"]
+    assert credentials[0]["status"] == "logged_in"
+    assert credentials[0]["adapter"] == "social_auto_upload"
+    assert credentials[0]["credential_ref"] == "social-auto-upload:creator-janice-bilibili:bilibili"
 
 
 @pytest.mark.asyncio

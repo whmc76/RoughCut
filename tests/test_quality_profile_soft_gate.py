@@ -1,5 +1,6 @@
 from roughcut.db.models import Artifact, Job, SubtitleItem
 from roughcut.pipeline.quality import _build_canonical_transcript_text, _build_subtitle_text, assess_job_quality, collect_editing_risk_gate_signals
+from roughcut.review.content_profile import apply_identity_review_guard
 from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT, build_subtitle_quality_report
 
 
@@ -12,6 +13,38 @@ def _subtitle(index: int, text: str) -> SubtitleItem:
         text_norm=text,
         text_final=text,
     )
+
+
+def test_visual_only_brand_does_not_override_source_and_transcript_identity() -> None:
+    profile = {
+        "content_understanding": {"primary_subject": "black plastic device casing"},
+        "subject_brand": "DJI",
+        "subject_model": "",
+        "subject_type": "black plastic device casing",
+        "video_theme": "矩阵千机pro机械玩具的多种配置玩法与拆解体验",
+        "summary": "博主详述矩阵千机pro玩具的多种配置玩法。",
+        "visible_text": "千机pro DJI",
+        "visual_hints": {"subject_brand": "DJI", "visible_text": "DJI"},
+        "identity_extraction": {
+            "resolved": {"subject_brand": "DJI", "subject_model": "", "subject_type": "black plastic device casing"},
+            "sources": {"subject_brand": ["visual_cluster"], "subject_model": [], "subject_type": ["visual_cluster"]},
+            "candidates": {"subject_brand": [{"value": "DJI", "sources": ["visual_cluster"], "selected": True}]},
+        },
+    }
+
+    guarded = apply_identity_review_guard(
+        profile,
+        subtitle_items=[
+            {"start_time": 0.0, "end_time": 1.0, "text_final": "今天介绍矩阵千机pro这个玩具"},
+            {"start_time": 1.0, "end_time": 2.0, "text_final": "千机pro有很多DIY配置"},
+        ],
+        source_name="矩阵 千机pro.MOV",
+    )
+
+    assert guarded["subject_brand"] == ""
+    assert guarded["visual_hints"]["subject_brand"] == "DJI"
+    assert guarded["identity_extraction"]["visual_only_brand_suppressed"]["brand"] == "DJI"
+    assert "DJI" not in " ".join(guarded.get("search_queries") or [])
 
 
 def test_short_hash_named_clip_does_not_fail_on_generic_profile() -> None:
@@ -315,18 +348,18 @@ def test_content_fidelity_loss_still_triggers_transcript_fidelity_warning() -> N
 
 def test_short_fragment_rate_is_warning_not_blocking() -> None:
     subtitles = [
-        {"text_final": "看"},
-        {"text_final": "这里"},
+        {"text_final": "先介"},
+        {"text_final": "绍下"},
         {"text_final": "这个"},
-        {"text_final": "做工"},
-        {"text_final": "细节"},
-        {"text_final": "打开"},
-        {"text_final": "侧面"},
-        {"text_final": "按键"},
-        {"text_final": "亮度"},
-        {"text_final": "尾盖"},
-        {"text_final": "卡扣"},
-        {"text_final": "手感"},
+        {"text_final": "比较"},
+        {"text_final": "还是"},
+        {"text_final": "然后"},
+        {"text_final": "我们给"},
+        {"text_final": "它啊"},
+        {"text_final": "啊去"},
+        {"text_final": "释放"},
+        {"text_final": "挺富"},
+        {"text_final": "一点"},
         {"text_final": "换个角度"},
         {"text_final": "再对比一下"},
         {"text_final": "这款手电的按键和光斑表现都比较直观。"},
@@ -338,6 +371,25 @@ def test_short_fragment_rate_is_warning_not_blocking() -> None:
     assert report["blocking"] is False
     assert report["blocking_reasons"] == []
     assert any("短碎句率过高" in reason for reason in report["warning_reasons"])
+
+
+def test_isolated_complete_short_utterances_do_not_warn_or_penalize() -> None:
+    subtitles = [
+        {"text_final": "今天主要看这款小包的外观和装载。"},
+        {"text_final": "它们都有"},
+        {"text_final": "这一段展示正面和背面的做工细节。"},
+        {"text_final": "小把手"},
+        {"text_final": "你配合这个把手去打开会更顺。"},
+        {"text_final": "我们来看"},
+        {"text_final": "最后再看肩带和卡扣的使用状态。"},
+    ]
+
+    report = build_subtitle_quality_report(subtitle_items=subtitles)
+
+    assert report["blocking"] is False
+    assert report["warning_reasons"] == []
+    assert report["metrics"]["short_fragment_count"] == 0
+    assert report["score"] == 100.0
 
 
 def test_quality_assessment_applies_source_identity_constraints() -> None:
@@ -578,6 +630,36 @@ def test_quality_assessment_flags_multimodal_trim_review_timeout() -> None:
     }
 
 
+def test_quality_assessment_blocks_non_monotonic_variant_subtitle_timeline() -> None:
+    job = Job(
+        source_path="F:/clips/demo.mp4",
+        source_name="demo.mp4",
+        status="done",
+    )
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=[],
+        artifacts=[
+            Artifact(
+                artifact_type="variant_timeline_bundle",
+                data_json={
+                    "validation": {
+                        "status": "warning",
+                        "issues": ["packaged: subtitle events are not monotonic at index 14"],
+                    },
+                    "variants": {"packaged": {"segments": []}},
+                },
+            )
+        ],
+        subtitle_items=[_subtitle(0, "演示开场"), _subtitle(1, "继续说明")],
+        completion_candidate=True,
+    )
+
+    assert "subtitle_timeline_validation" in assessment["issue_codes"]
+    assert any(item["blocking"] for item in assessment["issues"] if item["code"] == "subtitle_timeline_validation")
+
+
 def test_quality_assessment_flags_unresolved_high_risk_cuts_as_blocking() -> None:
     job = Job(
         source_path="F:/clips/demo.mp4",
@@ -676,6 +758,61 @@ def test_quality_assessment_downgrades_high_risk_cut_blocking_when_llm_provider_
     assert all(
         not item["blocking"] for item in assessment["issues"] if item["code"] == "editing_high_risk_cuts_provider_degraded"
     )
+
+
+def test_quality_assessment_does_not_block_advisory_silence_boundary_cuts() -> None:
+    job = Job(
+        source_path="F:/clips/demo.mp4",
+        source_name="demo.mp4",
+        status="done",
+    )
+
+    assessment = assess_job_quality(
+        job=job,
+        steps=[],
+        artifacts=[
+            Artifact(
+                artifact_type="variant_timeline_bundle",
+                data_json={
+                    "variants": {"plain": {"segments": []}},
+                    "timeline_rules": {
+                        "diagnostics": {
+                            "high_risk_cuts": [
+                                {
+                                    "start": 1.0,
+                                    "end": 2.0,
+                                    "reason": "silence",
+                                    "review_priority": "advisory",
+                                    "blocking": False,
+                                }
+                            ],
+                            "llm_cut_review": {
+                                "reviewed": False,
+                                "candidate_count": 1,
+                            },
+                            "multimodal_trim_review_summary": {
+                                "candidate_count": 1,
+                                "pending_count": 1,
+                            },
+                            "refine_decision_summary": {
+                                "mode": "manual_refine",
+                                "candidate_total": 1,
+                                "candidate_manual_confirm": 1,
+                            },
+                        }
+                    },
+                },
+            )
+        ],
+        subtitle_items=[_subtitle(0, "演示开场"), _subtitle(1, "继续说明")],
+        completion_candidate=True,
+    )
+
+    assert assessment["signals"]["high_risk_cut_count"] == 1
+    assert assessment["signals"]["blocking_high_risk_cut_count"] == 0
+    assert assessment["signals"]["advisory_high_risk_cut_count"] == 1
+    assert assessment["signals"]["blocking_high_risk_cuts"] is False
+    assert "editing_high_risk_cuts_blocking" not in assessment["issue_codes"]
 
 
 def test_quality_assessment_flags_manual_confirm_heavy_edit_plan_as_blocking() -> None:

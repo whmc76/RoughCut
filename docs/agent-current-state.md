@@ -4,27 +4,487 @@ This file is the source of truth for the current active task state across long C
 
 ## Current Objective
 
-Drive the `Creator-Agent Asset Workspace` refactor to closure: replace the old five-entry creative-asset configuration model with the new four-entry creator-bound asset workspace, finish the create-job and job-flow dashboard refactors, verify frontend/backend integration, and remove or demote obsolete entrypoints without introducing a second editing pipeline.
+Complete the RoughCut final subtitle authority refactor. The closure standard is `docs/2026-06-19-final-subtitle-authority-refactor.md`.
+
+2026-06-19 follow-up: BOLTBOAT mic-drop / pickup visual-junk handling.
+
+- Observed symptom: a mid-video accidental microphone drop / pickup segment was not identified as junk by visual understanding, so it could survive into the automatic edit.
+- First bad layer: visual understanding ingestion and normalization, before LLM edit decisions. The old profile path sampled only sparse reference frames and treated visual findings mostly as product/scene metadata, not as timed edit events.
+- Root cause fix:
+  - content-profile visual sampling now uses ASR-guided targeted probe windows first, then broad reference frames;
+  - ASR-guided probes cover explicit retake/accident wording, backstage/off-topic cues, and long subtitle gaps; each window extracts timestamped `target_...` frames;
+  - content-profile visual sampling also extracts broad timestamped candidate frames while keeping the MCP image-analysis budget bounded to 8 sampled frames;
+  - MCP image fallback prioritizes ASR-targeted frames before broad reference frames;
+  - Zhipu MCP video analysis is attempted first when the source video path is available, with image-frame fallback;
+  - visual understanding now normalizes `timeline_events` and converts supported accidental actions into `role=junk/retake`, `keep_priority=drop`;
+  - unsupported model labels such as ordinary standing, holding, or interacting with the bag are downgraded to non-drop events unless the text evidence contains a real accident cue.
+- Verification:
+  - `python -m pytest -q tests\test_content_understanding_visual_mcp.py tests\test_video_understanding.py tests\test_edit_decision_multimodal.py` passed with 16 tests.
+  - `python -m py_compile src\roughcut\providers\zhipu_vision_mcp.py src\roughcut\review\content_understanding_visual.py src\roughcut\review\video_understanding.py src\roughcut\review\content_profile.py` passed.
+  - Real BOLTBOAT frame fallback showed the external vision model can over-label normal standing/adjusting as `junk`; the new normalizer downgrades those real returned false positives to `body/medium` or `demo/high`.
+  - Real BOLTBOAT ASR-guided probe using the current final SRT found three long-silence windows and extracted nine `target_long_silence_gap_*` frames in `output/test/asr-guided-boltboat-target-frames`.
+
+2026-06-19 follow-up: MT34 showcase pauses looked like accelerated dragged frame sampling.
+
+- Observed symptom: MT34 v2 kept normal showcase footage, but the finished video felt compressed and jumpy during display sections.
+- First bad layer: render/refine keep-segment authority, not ASR timing, subtitle timing, or frame-rate conversion.
+- Root cause:
+  - the final editorial timeline and `cut_analysis.accepted_cuts` had correctly decided `accepted_cut_count=0`;
+  - `refine_decision_plan` still consumed `rule_candidates.auto_applied=true` and multimodal review candidates as executable cuts;
+  - render therefore rebuilt 213 VAD/silence trim fragments from stale suggestion candidates and compressed the 952.77s source into a much shorter output.
+- Root cause fix:
+  - modern cut-analysis payloads now use `accepted_cuts` as the only render/refine auto-cut authority;
+  - `rule_candidates` remain review suggestions even when a local strategy marks them `auto_applied`;
+  - multimodal review candidates cannot bypass the modern accepted-cut contract when `accepted_cuts=[]`.
+- Live verification:
+  - real MT34 v3 output directory: `data/runtime/output/mt34-newflow-retake-20260619-v3`;
+  - latest refine plan resolved to one keep segment `0.0-952.767`, with `rule_auto_apply_cut_count=0` and `multimodal_auto_apply_cut_count=0`;
+  - final render filtergraphs contain one video trim and one audio trim, `concat_count=0`, `setpts_speed_count=0`;
+  - packaged and AI-effect final Qwen3 forced-alignment gates passed on the rendered audio.
+
+2026-06-19 follow-up: Hyperframes social packaging density / "网感" uplift.
+
+- Observed symptom: subtitles were now aligned and showcase pauses were preserved, but intelligent packaging still felt sparse: too few emphasis captions, weak short-video rhythm, no visible bottom chapter context, and AI-effect packaging did not look meaningfully richer.
+- First bad layer: packaging strategy generation and Hyperframes plan synchronization, not subtitle timing or edit-decision authority.
+- Root cause:
+  - `build_smart_editing_accents` defaulted to conservative transition/overlay counts and spacing, so commercial packaging could output only a few accents;
+  - AI-effect render plans rebuilt `editing_accents` but did not rebuild the static Hyperframes metadata / packaging timeline copy after enrichment;
+  - render-time overlay normalization capped events at 8 and used one visual treatment for all emphasis text;
+  - chapter cards existed as a capability but rendered like top-left cards, not bottom progress/chapter context.
+- Root cause fix:
+  - added `hyperframes_social_retention_v2` strategy metadata and raised default commercial / AI-effect density targets;
+  - expanded overlay scoring toward hook, product-detail, comparison, demo, function, and EDC terms;
+  - preserved visual treatment and transform-intensity metadata through AI-effect overlay normalization;
+  - rebuilt AI-effect Hyperframes and nested packaging timeline after effect enrichment;
+  - changed chapter cards to bottom chapter pills and allowed render-time emphasis normalization to keep up to 14 events;
+  - added visual treatment variants for hook pop, keyword sticker, and beat pulse.
+- Verification:
+  - `python -m pytest -q tests\test_render_frame_rate_unification.py -k "social_packaging_density or rebuilds_hyperframes or render_plan_uses_hyperframes or render_emphasis_overlay_normalization"` passed with 4 tests.
+  - `python -m pytest -q tests\test_hyperframes_options.py` passed with 3 tests.
+  - `python -m pytest -q tests\test_render_frame_rate_unification.py tests\test_hyperframes_options.py tests\test_build_batch_output_scorecard.py -k "hyperframes or ai_effects or subtitle_effects or viewing_experience or render_emphasis_overlay_normalization"` passed with 13 tests.
+  - `python -m py_compile src\roughcut\edit\render_plan.py src\roughcut\hyperframes.py src\roughcut\media\render.py` passed.
+- Live MT34 v4 evidence:
+  - output directory: `data/runtime/output/mt34-hyperframes-social-packaging-20260619-v4`;
+  - real rerun: `manual_avatar_rerun_batch.py --job-id 0e1537e7-b7c6-407c-8127-7d51eaab7b0f --issue-code hyperframes_social_packaging_v2`, completed with `failed_jobs={}`;
+  - packaged and AI-effect MP4s are `1920x1080`, `30000/1001`, duration `968.767800s`;
+  - packaged overlay filter: 6 drawtext overlays plus progress bar;
+  - AI-effect overlay filter: 8 drawtext overlays plus progress bar;
+  - packaged final Qwen3 gate passed: 281/281 matched, 0 unmatched, 0 bad drift, max start/end drift `0.04s/0.23s`;
+  - AI-effect final Qwen3 gate passed: 281/281 matched, 0 unmatched, 1 local bad drift, max start/end drift `0.92s/0.92s`.
+
+2026-06-19 follow-up: emphasis popup contract and universal dynamic watermark.
+
+- Observed symptom: emphasis popup text rendered as a huge top banner containing a long spoken subtitle sentence, visually overlapped with normal subtitles, and the finished video did not show a reusable dynamic watermark.
+- First bad layer: packaging visual contract and final packaging render stage, not ASR/subtitle timing.
+- Root cause:
+  - `emphasis_overlays` accepted compacted spoken lines up to 18 chars, so full subtitle text could become a second subtitle-like popup;
+  - render-time overlay normalization only truncated text and did not reject sentence-like labels from older plans;
+  - final watermark rendering only used static corner placement and did not normalize all watermark plans into a shared dynamic watermark policy;
+  - if no watermark asset was configured, the final packaging stage skipped watermark rendering entirely.
+- Root cause fix:
+  - emphasis popups now extract only short product/action labels such as model tokens, fast拆/锁定/容量/背负/功能 terms, and reject sentence-like spoken lines;
+  - render-time overlay normalization drops long/sentence-like popup text even if it comes from an older persisted plan;
+  - emphasis drawtext styling was reduced from banner scale to short sticker scale with lighter boxes and treatment-specific placement;
+  - EDC/product demo terms were promoted in normal subtitle keyword highlighting so real emphasis appears inside the main subtitles;
+  - watermark plans now default to `dynamic_float`, clamp opacity/scale, and render through a final-stage moving overlay shared by all modes;
+  - custom watermark/logo assets take priority, and formal render plans without a watermark asset receive a low-intrusion moving text watermark fallback.
+- Verification:
+  - `python -m pytest -q tests\test_render_frame_rate_unification.py -k "social_packaging_density or long_spoken_lines or long_sentence_popups or dynamic_watermark or watermark_plan_defaults or render_emphasis_overlay_normalization" tests\test_subtitle_keyword_highlight.py` passed with 6 tests.
+  - `python -m pytest -q tests\test_render_frame_rate_unification.py tests\test_hyperframes_options.py tests\test_final_subtitle_burn_in.py tests\test_subtitle_keyword_highlight.py -k "hyperframes or ai_effects or subtitle_effects or viewing_experience or render_emphasis_overlay_normalization or watermark or keyword_highlight or social_packaging_density or long_spoken_lines or long_sentence_popups or packaging_plan_adds_default"` passed with 19 tests.
+  - `python -m pytest -q tests\test_render_frame_rate_unification.py tests\test_subtitle_keyword_highlight.py` passed with 44 tests.
+  - `python -m py_compile src\roughcut\edit\render_plan.py src\roughcut\media\render.py src\roughcut\media\subtitles.py src\roughcut\packaging\library.py` passed.
+- Live MT34 v7 evidence:
+  - full rerun v6 completed with `failed_jobs={}` after the real render-chain call boundary was fixed to pass `render_plan` into final packaging;
+  - v7 output directory: `data/runtime/output/mt34-hyperframes-social-packaging-20260619-v7`;
+  - final MP4s were produced by applying the fixed final watermark stage to the v6 rendered outputs, preserving the validated subtitles and short overlay labels;
+  - packaged and AI-effect MP4s are `1920x1080`, `30000/1001`, duration `968.767800s`;
+  - debug command confirms dynamic text watermark render: `drawtext`, `RoughCut`, and `sin(t*0.11)` are present in `packaging.music_watermark.ffmpeg.txt`;
+  - frame checks at `00:01:00` and `00:03:53` show no giant spoken-line popup; watermark is visible in the top band and does not overlap the bottom subtitles/progress bar;
+  - job `0e1537e7-b7c6-407c-8127-7d51eaab7b0f` was updated to `status=done` and `output_dir=...mt34-hyperframes-social-packaging-20260619-v7`.
+
+2026-06-19 correction: FAS watermark source-of-truth.
+
+- Observed symptom: MT34 v7 used a generic `RoughCut` text watermark even though the FAS creator card already contained a Logo / 水印 asset and the same packaging setup used FAS intro/music assets.
+- First bad layer: packaging asset resolution before render-plan creation, plus an unsafe render-stage fallback.
+- Root cause:
+  - the MT34 job had `creator_card_id=None`, so edit-plan packaging resolution only used the global packaging config;
+  - the global config selected the FAS intro and music but had `watermark_asset_id=null`;
+  - RoughCut could map creator-card `logo` assets to `watermark`, but did not infer the same creator card from already-selected FAS intro/music when a job was not explicitly creator-bound;
+  - render-stage default text watermark fell back to `RoughCut`, which was an incorrect product decision when brand assets existed.
+- Root cause fix:
+  - edit-plan packaging resolution now calls `_load_job_packaging_creator_card`, which first uses explicit `job.creator_card_id`, otherwise infers a creator card from selected packaging intro/outro/music/watermark identity keys;
+  - inferred creator cards are accepted only when the same card has a usable logo/watermark asset;
+  - render-stage default text watermark no longer writes `RoughCut` unless a real creator/channel watermark text is provided;
+  - image watermark background keying now removes both pure white and near-white flattened logo backgrounds.
+- Verification:
+  - real MT34 packaging inference now resolves creator card `4668c6ac-2168-49ef-99f3-e26badfef99a` and watermark asset `creator:9bb0d529-56eb-411e-a9ba-00ace51e6ee4`;
+  - `python -m pytest -q tests\test_creator_asset_runtime.py tests\test_render_frame_rate_unification.py -k "creator_card_inference or prefers_creator_assets or dynamic_watermark or watermark_plan_defaults or packaging_plan_adds_default"` passed with 5 tests;
+  - `python -m py_compile src\roughcut\pipeline\steps.py src\roughcut\media\render.py` passed;
+  - final MT34 v9 output directory: `data/runtime/output/mt34-hyperframes-social-packaging-20260619-v9`;
+  - v9 final packaged and AI-effect MP4s are `1920x1080`, `30000/1001`, duration `968.767800s`;
+  - v9 debug command uses the FAS image asset path, `colorkey=0xFFFFFF`, `colorkey=0xF8F8F8`, and dynamic `overlay ... sin(t...)`; it contains no `drawtext` or `RoughCut`;
+  - frame checks in `output/mt34-v9-frame-check` show FAS watermark on the output frames.
+
+Current do-not-reopen decisions for this objective:
+
+- Qwen3-ASR remains the authoritative ASR/alignment source. Do not switch to FunASR or faster-whisper as a workaround.
+- Browser-visible burned subtitle drift is a final render-chain defect, not a sidecar subtitle explanation.
+- Cover generation, publishing metadata, and publishing-package decisions stay outside the editing render chain.
+- Final subtitle timing authority is the final rendered audio track. Source-ASR and plain-render timings are evidence, not delivered subtitle authority.
+
+Latest live closure evidence for this objective:
+
+- Report directory: `output/test/final-subtitle-authority-live-20260619-r4`.
+- Output directory: `data/runtime/output/final-subtitle-authority-live-20260619-r4`.
+- Live batch result: 2 jobs, 2 done, 0 failed.
+- ASR evidence: both jobs used `local_http_asr / qwen3-asr-1.7b-forced-aligner`; `fallback_used=false`.
+- FXX1 job `36a39baa-02d5-4bbf-bed5-3a885c1f7f32`:
+  - plain before audit caught severe drift: `worst=8`, `tail=40`, `maxStart=12.234`, `maxEnd=11.249`.
+  - plain forced alignment passed: `worst=1`, `tail=0`, `maxStart=0.04`, `maxEnd=0.14`.
+  - packaged candidate before audit caught remaining drift: `worst=6`, `tail=26`, `maxStart=2.699`, `maxEnd=2.577`.
+  - packaged candidate forced alignment passed: `worst=0`, `tail=0`, `maxStart=0.04`, `maxEnd=0.549`.
+  - final packaged and AI-effect MP4 audits passed: `gate=true`, `local=true`, `worst=2`, `tail=3`, `maxStart=1.208`, `maxEnd=2.072`.
+  - scorecard: overall `100/A`, viewing experience `97.1/A`, subtitle quality `99.3/A`, final Qwen3 subtitle match `151/151`.
+- BOLTBOAT job `c3ec093d-7382-4cba-a01b-ffdf13f2d34c`:
+  - plain before audit caught severe drift: `worst=8`, `tail=50`, `maxStart=28.091`, `maxEnd=28.171`.
+  - plain forced alignment passed: `worst=0`, `tail=0`, `maxStart=0.04`, `maxEnd=0.47`.
+  - packaged candidate before audit caught remaining drift: `worst=1`, `tail=1`, `maxStart=9.623`, `maxEnd=3.297`.
+  - packaged candidate forced alignment passed: `worst=0`, `tail=0`, `maxStart=0.04`, `maxEnd=0.12`.
+  - final packaged and AI-effect MP4 audits passed: `gate=true`, `local=true`, `worst=0`, `tail=0`, `maxStart=0.04`, `maxEnd=0.12`.
+  - scorecard: overall `100/A`, viewing experience `97.6/A`, subtitle quality `100/A`, final Qwen3 subtitle match `186/186`.
+- Live readiness caveat: `live_readiness.gate_passed=false` only because stable run count is `1/3`; all per-job live stages and render end-state stability passed in this run.
+
+## Superseded Previous Objective
+
+Complete the "script commentary + referenced original footage" film/animation remix editing chain optimization. The closure standard is `docs/2026-06-18-script-footage-remix-optimization-goal.md`.
+
+The current goal and closure contract are now explicit:
+
+- Do not mark the task complete from playable MP4s alone; completion requires formal CLI reproduction, per-episode evidence files, QA gates, and the 10-episode batch gate.
+- TTS-ASR and Source-ASR are hard evidence layers with different purposes. Missing or fake ASR evidence blocks completion.
+- User-provided scripts are polished source text. The remix chain must preserve the full script by default; automatic sentence deletion, summarization, character truncation, or target-duration condensation is not allowed.
+- The 2-3 minute duration is a publishing target, not a hard reason to rewrite the script. Over-duration should be reported as a warning while preserving narration content.
+- The final full-script closure directory target is `output/bluey-remix-full-script-samples` for the 1-episode complete sample proof.
+- The final default batch report must have `sample_count >= 1`, `pass_rate >= 0.90`, and `gate_passed=true`; `output/bluey-remix-full-script-batch-10` is retained only as an optional stability stress proof when explicitly requested.
+- The previous 2026-06-18 10-episode batch proof was produced under the old default condensed-script policy. It remains useful as engineering evidence for ASR/render/report plumbing, but it is superseded for final editorial closure until rerun with full-script preservation.
 
 ## Current Workstream
 
-- Use `docs/design/2026-06-13-creator-agent-asset-workspace-execution-plan.md` as the architecture and product-contract source of truth.
-- Use `docs/design/2026-06-13-creator-agent-asset-workspace-closure-checklist.md` as the implementation and closure source of truth.
-- The current code round covers:
-  - creator-bound backend models, migrations, and APIs;
-  - four new creative-asset pages and navigation convergence;
-  - create-job modal refactor to creator/material/brief/execution inputs;
-  - job detail dashboard upgrade to an agent-plan cockpit with natural-language refine entry;
-  - compatibility mapping back into the existing pipeline rather than building a second job system.
-- Remaining closure work must be judged only against the closure checklist:
-  - live API verification on migrated DB;
-  - UI/browser verification for the four new pages and create-job flow;
-  - old-entry cleanup audit and dead-route scan;
-  - closure note evidence capture.
+- Active objective doc: `docs/2026-06-18-script-footage-remix-optimization-goal.md`.
+- Current sample generator: `scripts/build_script_footage_remix_samples.py` (currently untracked in git). Public capability naming is `script-footage`; Bluey may appear only as a concrete task binding, manifest/source data, or historical artifact path.
+- 2026-06-18 latest Bluey S02E01 scene-bridge rerun after user review:
+  - Observed symptom: prior original-footage inserts were too short, appeared mostly in the back half, and missed earlier script passages that described concrete source scenes.
+  - First bad layer: original-footage bridge planning and insertion-time alignment, not TTS, not Source-ASR availability, and not final mux.
+  - Root causes:
+    - LLM intent policy only asked for dialogue/audio quote bridges and capped output to 1-2 short 2-4s clips;
+    - insertion time was initially estimated from script character ratio and trusted rough LLM char offsets before final TTS-ASR subtitle timing;
+    - LLM-returned bridge intents could be out of chronological order, and old alignment applied min-gap ordering before mapping every bridge onto the TTS-ASR timeline.
+  - Fixes:
+    - original bridge policy is now `scene_evidence_bridge_v3`: LLM must identify concrete source scenes/dialogue/plot evidence, prefer front/middle/back coverage, and plan 6-12s complete context bridges;
+    - source mapping LLM now chooses both `source_start_sec` and `duration_sec` from Source-ASR evidence; Source-ASR mapping confidence gate is explicit at `0.6` for scene evidence;
+    - insertion points are aligned after TTS generation using matched script text/context against TTS-ASR subtitle cues, then sorted by aligned time;
+    - QA and batch report fail too-short original bridges via `remix_original_audio_bridge_too_short` / `original_audio_bridge_duration`.
+  - Latest formal CLI rerun:
+    - `$env:PYTHONPATH='src'; python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --episodes 1 --output-dir output\bluey-remix-full-script-samples --qwen3-asr-base http://127.0.0.1:30230 --creator-profile jenny_baby --tts-timeout-sec 900 --force`
+    - stdout: `sample_count=1`, `success_count=1`, `total_output_duration_sec=274.464`.
+    - S02E01 evidence: `original_audio_reference_intent_count=5`, `original_audio_insert_count=5`, `insert_total_duration_sec=50.0`, `original_audio_visual_bridge_count=5`, first bridge at `72.2s`, Source-ASR mapping `mapped_count=5/reviewed_count=5`, subtitle timing audit `pass` with `bad_drift_count=0`, TTS-ASR coverage `0.9803`, output `1920x1080` at `28fps`, batch gate `passed`.
+  - Focused regression:
+    - `python -m py_compile scripts\build_script_footage_remix_samples.py src\roughcut\remix\qa.py src\roughcut\remix\batch_report.py tests\test_remix_quality_contracts.py`
+    - `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py -q --basetemp .tmp\pytest-scene-bridge-order` (`70 passed`).
+- 2026-06-18 follow-up bridge-boundary refinement after user review:
+  - Observed symptom: original-footage sections were much better, but some clips still ended too early and some insertions felt slightly mistimed.
+  - First bad layer: bridge boundary refinement and original-TTS-time insertion contract.
+  - Root causes:
+    - source bridge boundaries used LLM-selected start/duration without deterministic preroll/postroll for dialogue completion;
+    - `insert_at_sec` was accidentally pushed forward by prior bridge durations during alignment/snap, even though it must remain on the original TTS timeline;
+    - low-confidence Source-ASR mappings were allowed to reach the final splice and only failed at QA, which matched the observed "not quite appropriate" clips.
+  - Fixes:
+    - source bridge windows now add deterministic `0.6s` preroll and `2.0s` postroll, capped at `16s`, with boundary refinement fields written to `original_audio_insertions.json`;
+    - `insert_at_sec` now stays on the original TTS timeline; offsets are applied only by audio/video/subtitle shift stages;
+    - low-confidence or unreviewed source mappings are filtered before audio/video insertion; candidate count and final insertion count are recorded separately.
+  - Latest formal CLI rerun:
+    - `$env:PYTHONPATH='src'; python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --episodes 1 --output-dir output\bluey-remix-full-script-samples --qwen3-asr-base http://127.0.0.1:30230 --creator-profile jenny_baby --tts-timeout-sec 900 --force`
+    - stdout: `sample_count=1`, `success_count=1`, `total_output_duration_sec=272.714`.
+    - S02E01 evidence: `candidate_reference_intent_count=4`, `reference_intent_count=3`, `original_audio_insert_count=3`, `insert_total_duration_sec=41.8`, first bridge at `69.16s`, all inserted mappings `llm_reviewed=true`, subtitle timing audit `pass` with `bad_drift_count=0`, QA `warn/passed=true`, batch gate `passed`, output `1920x1080` at `28fps`.
+  - Focused regression:
+    - `python -m py_compile scripts\build_script_footage_remix_samples.py tests\test_remix_quality_contracts.py`
+    - `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py -q --basetemp .tmp\pytest-bridge-filter` (`73 passed`).
+- Previous condensed-script three-sample output: `output/bluey-remix-samples-final` (superseded for final editorial closure).
+- Previous condensed-script 10-episode stability output: `output/bluey-remix-batch-10` (superseded for final editorial closure).
+- Previous three Bluey samples passed the old condensed-script gates:
+  - S02E01 `129.14s`, TTS-ASR coverage `0.9698`, Source-ASR anchors `14`, `subtitle_alignment_source=qwen3_asr_forced_aligner_on_tts`.
+  - S02E02 `136.66s`, TTS-ASR coverage `0.9964`, Source-ASR anchors `14`, `subtitle_alignment_source=qwen3_asr_forced_aligner_on_tts`.
+  - S02E03 `133.74s`, TTS-ASR coverage `0.9855`, Source-ASR anchors `14`, `subtitle_alignment_source=qwen3_asr_forced_aligner_on_tts`.
+- Current architectural direction:
+  - TTS-ASR is used only for final TTS narration subtitle timestamps.
+  - Source-ASR is used only for original-footage plot/topic positioning.
+  - MOSS TTS remains the default voice generation path; CosyVoice3 is explicit AB only.
+  - Qwen3-ASR + ForcedAligner remains the authoritative ASR/alignment path; do not switch to FunASR as a workaround.
+- Current closure state:
+  - Default validation scope was reduced per user direction from "3 sample episodes + required 10-episode batch" to "1 complete episode sample"; 10 episodes remain an explicit optional stability stress run.
+    - `roughcut remix script-footage` now defaults to `--episodes 1`.
+    - `roughcut.remix.batch_report.build_batch_report_payload(...)` now defaults `min_sample_count=1`; explicit stress tests can pass `min_sample_count=10`.
+    - Latest formal CLI default run:
+      - `$env:PYTHONPATH='src'; python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --qwen3-asr-base http://127.0.0.1:30230`
+      - stdout: `sample_count=1`, `success_count=1`, `total_output_duration_sec=226.107`.
+      - `output/bluey-remix-full-script-samples/batch_report.json`: `sample_count=1`, `min_sample_count=1`, `gate_passed=true`, `gate_reason=passed`, `qa_fail_count=0`, `pass_rate=1.0`, `required_evidence_failures=[]`.
+      - S02E01 quality snapshot: `qa_status=warn` only because duration exceeds 180s; `subtitle_text_coverage=1.0`, `subtitle_timing_alignment_status=pass`, `max_subtitle_lines_per_event=2`, `max_subtitle_line_chars=17`, LLM original-audio intent reviewed with `decision=no_insert`, `insert_count=0`.
+    - Regression: `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py -q --basetemp .tmp\pytest-one-episode-default` (`49 passed`).
+  - Full-script retest P0 is complete and the multi-agent review gaps have been closed:
+    - `python -m py_compile scripts\build_script_footage_remix_samples.py src\roughcut\remix\qa.py src\roughcut\remix\batch_report.py tests\test_remix_quality_contracts.py tests\test_remix_cli.py`
+    - `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py -q --basetemp .tmp\pytest-full-script-retest-<timestamp>` (`37 passed`)
+    - This only proves the full-script contract is locked by tests; it does not replace P1-P4 runtime evidence.
+    - Closed review gaps:
+      - Historical note: the original Bluey-specific output default was later superseded by the generic `output/script-footage-remix-full-script-samples` default.
+      - `--force` now also prevents stale `s02eXX_narration.wav` reuse; CLI also exposes `--force-tts`.
+      - `batch_report.json` now includes required evidence paths, can verify those files exist, and requires `qa_fail_count=0` for `gate_passed=true`.
+      - The full-script retest plan P4 now reads `script_footage_remix_sample_report.json` and verifies per-episode evidence files instead of relying only on summary rows.
+  - Full-script retest P1 is complete for S02E01 in `output/bluey-remix-full-script-samples`:
+    - Command: `$env:PYTHONPATH='src'; python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --episodes 1 --output-dir output\bluey-remix-full-script-samples --qwen3-asr-base http://127.0.0.1:30230 --force`
+    - Raw TTS duration: `307.12s`.
+    - Clean narration duration: `226.74s`.
+    - Final MP4 duration: `226.107s`.
+    - QA status: `warn`, `passed=true`.
+    - Only QA issue: `remix_output_duration_out_of_range` warning; this is expected under the full-script contract and is not a hard fail.
+    - TTS-ASR: `status=done`, `canonical_coverage=0.9803`, `canonical_char_count=1013`, `token_count=1996`.
+    - Source-ASR anchors: `14`; scene index `detected` with `91` scenes.
+    - Caption package after subtitle completeness fix: `subtitle_event_count=50`, `subtitle_text_coverage=1.0`, `packaging_event_count=15`, `theme_banner_count=3`, `keyword_sticker_count=3`.
+    - Batch summary for P1-only run: `sample_count=1`, `qa_warn_count=1`, `qa_fail_count=0`, `required_evidence_failures=[]`, `gate_passed=false`, `gate_reason=evaluated_count_below_10:1`.
+  - Full-script retest P2 is complete for S02E01-S02E03 in `output/bluey-remix-full-script-samples`:
+    - Command: `$env:PYTHONPATH='src'; python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --episodes 1,2,3 --output-dir output\bluey-remix-full-script-samples --qwen3-asr-base http://127.0.0.1:30230`
+    - Result: `sample_count=3`, `success_count=3`, `total_output_duration_sec=652.187`.
+    - Batch summary: `qa_pass_count=0`, `qa_warn_count=3`, `qa_fail_count=0`, `accepted_count=3`, `pass_rate=1.0`, `required_evidence_failures=[]`, `gate_passed=false`, `gate_reason=evaluated_count_below_10:3`.
+    - The P2 batch gate is expected to remain false because fewer than 10 samples were evaluated; this is not a quality failure.
+    - Path existence audit against `script_footage_remix_sample_report.json`: `episode_count=3`, `missing_count=0`.
+    - Per-episode evidence:
+      - S02E01 `跳舞模式`: raw TTS `307.12s`, clean narration `226.74s`, final MP4 `226.107s`, TTS-ASR coverage `0.9803`, canonical chars `1013`, subtitle events `50`, subtitle text coverage `1.0`, packaging events `15`, source-ASR exists, QA `warn`/passed.
+      - S02E02 `仓储超市`: raw TTS `273.76s`, clean narration `218.94s`, final MP4 `218.94s`, TTS-ASR coverage `0.9967`, canonical chars `907`, subtitle events `46`, subtitle text coverage `1.0`, packaging events `15`, source-ASR exists, QA `warn`/passed.
+      - S02E03 `羽毛魔杖`: raw TTS `258.8s`, clean narration `207.14s`, final MP4 `207.14s`, TTS-ASR coverage `0.9868`, canonical chars `834`, subtitle events `43`, subtitle text coverage `1.0`, packaging events `15`, source-ASR exists, QA `warn`/passed.
+    - All three warnings are `remix_output_duration_out_of_range`; under the full-script contract this is a warning only and must not trigger script compression.
+  - Full-script retest P3 and P4 are complete for S02E01-S02E10 in `output/bluey-remix-full-script-batch-10`:
+    - Command: `$env:PYTHONPATH='src'; python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --episodes 1,2,3,4,5,6,7,8,9,10 --output-dir output\bluey-remix-full-script-batch-10 --qwen3-asr-base http://127.0.0.1:30230`
+    - Result: `sample_count=10`, `success_count=10`, `total_output_duration_sec=2036.05`.
+    - Batch gate: `qa_pass_count=0`, `qa_warn_count=10`, `qa_fail_count=0`, `accepted_count=10`, `pass_rate=1.0`, `gate_passed=true`, `gate_reason=passed`, `required_evidence_failures=[]`.
+    - Path existence audit against `script_footage_remix_sample_report.json`: `episode_count=10`, `missing_count=0`.
+    - Every episode has `tts_asr_status=done`, source-ASR evidence exists, `topic_count=8`, `subtitle_text_coverage=1.0`, `packaging_event_count=15`, and QA `warn`/passed with only `remix_output_duration_out_of_range`.
+    - Final full-script batch durations and ASR coverage:
+      - S02E01 `226.107s`, TTS-ASR coverage `0.9803`, subtitle events `50`, subtitle text coverage `1.0`, script chars `1281`.
+      - S02E02 `218.94s`, TTS-ASR coverage `0.9967`, subtitle events `46`, subtitle text coverage `1.0`, script chars `1139`.
+      - S02E03 `207.14s`, TTS-ASR coverage `0.9868`, subtitle events `43`, subtitle text coverage `1.0`, script chars `1062`.
+      - S02E04 `192.74s`, TTS-ASR coverage `0.9901`, subtitle events `42`, subtitle text coverage `1.0`, script chars `1018`.
+      - S02E05 `187.36s`, TTS-ASR coverage `0.9807`, subtitle events `35`, subtitle text coverage `1.0`, script chars `979`.
+      - S02E06 `233.7s`, TTS-ASR coverage `0.994`, subtitle events `49`, subtitle text coverage `1.0`, script chars `1236`.
+      - S02E07 `200.143s`, TTS-ASR coverage `0.9762`, subtitle events `40`, subtitle text coverage `1.0`, script chars `1036`.
+      - S02E08 `197.62s`, TTS-ASR coverage `0.9827`, subtitle events `42`, subtitle text coverage `1.0`, script chars `1007`.
+      - S02E09 `187.42s`, TTS-ASR coverage `0.9884`, subtitle events `36`, subtitle text coverage `1.0`, script chars `957`.
+      - S02E10 `184.88s`, TTS-ASR coverage `0.9869`, subtitle events `38`, subtitle text coverage `1.0`, script chars `952`.
+  - Subtitle incompleteness incident fixed after user review:
+    - Observed symptom: the three full-script samples had playable MP4s but visible subtitles omitted parts of several long subtitle chunks.
+    - First bad layer: caption packaging text wrapping, not TTS, not TTS-ASR, and not ffmpeg burn-in.
+    - Root cause: `roughcut.remix.caption_packager.wrap_ass_text(...)` limited subtitle text to two lines and discarded the remaining text when punctuation caused an early first-line break.
+    - Fix: `wrap_ass_text(...)` now wraps until all text is emitted; `subtitle_text_coverage` is written to caption/sample/QA/batch metadata; QA now hard-fails `remix_subtitle_text_incomplete` when visible subtitle coverage is below `1.0`.
+    - Rebuilt artifacts without rerunning TTS/ASR: `output/bluey-remix-full-script-samples` and `output/bluey-remix-full-script-batch-10` ASS files, caption packages, MP4s, review frames, QA reports, sample reports, and batch reports.
+    - Verification: both final output roots now have `min_subtitle_text_coverage=1.0`; `output/bluey-remix-full-script-batch-10/batch_report.json` still has `gate_passed=true`, `gate_reason=passed`, `qa_fail_count=0`, `pass_rate=1.0`.
+    - Regression: `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py -q --basetemp .tmp\pytest-subtitle-final` (`39 passed`).
+  - Subtitle ASR timing audit incident fixed after stricter user review:
+    - Observed symptom: `subtitle_text_coverage=1.0` only proved text was not truncated; it did not prove each subtitle cue matched TTS-ASR timestamps.
+    - First bad layer: TTS-ASR token timeline parsing and subtitle chunk alignment, not MOSS TTS and not source-video ASR.
+    - Root causes:
+      - cached chunked TTS-ASR evidence contained non-monotonic token timestamps at chunk boundaries;
+      - subtitle chunk timing relied on exact text matching and fell back poorly when ASR omitted or changed characters.
+    - Fixes:
+      - `asr_tokens_from_payload(...)` now reconstructs chunked ASR token timelines from `raw.chunks[*].start_sec` and normalizes token order;
+      - `roughcut.remix.alignment.build_asr_aligned_subtitle_timings(...)` now uses full-sequence character LCS mapping instead of chunk-level exact `find`;
+      - `roughcut.remix.alignment.audit_subtitle_timing_alignment(...)` writes per-cue ASR timing audit evidence;
+      - QA hard-fails `remix_subtitle_timing_asr_audit_failed` when subtitle cues are unmatched or drift beyond threshold;
+      - `subtitle_timing_audit_path` is now required batch evidence.
+    - Rebuilt both final roots without rerunning TTS/ASR, rewriting cached monotonic TTS-ASR tokens, ASS, caption packages, MP4s, review frames, QA reports, sample reports, and batch reports.
+    - Final evidence:
+      - `output/bluey-remix-full-script-samples`: `min_subtitle_text_coverage=1.0`, `subtitle_timing_alignment_status=['pass']`, `max_bad_drift=0`, `max_unmatched=0`, `max_start=0.04s`, `max_end=0.12s`, `qa_fail_count=0`.
+      - `output/bluey-remix-full-script-batch-10`: `gate_passed=true`, `gate_reason=passed`, `qa_fail_count=0`, `pass_rate=1.0`, `required_evidence_failures=[]`, `min_subtitle_text_coverage=1.0`, `max_bad_drift=0`, `max_unmatched=0`, `max_start=0.04s`, `max_end=0.12s`.
+    - Visual spot check: three sample review frames show narration subtitles are visible, complete, and the crop removes original subtitles/platform marks. Packaging quality is still basic and should not be considered the final high-quality Jianying-style template.
+    - Regression: `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py -q --basetemp .tmp\pytest-subtitle-asr-final` (`41 passed`).
+    - This is the first valid final closure evidence for the full-script preservation policy. The older condensed-script outputs remain superseded.
+  - Caption packaging visual-gate upgrade after user screenshot review:
+    - Observed symptom: theme banner title text could render outside the blue banner backing plate.
+    - First bad layer: `roughcut.remix.caption_packager.build_reference_style_packaging_events(...)` used independent ASS vector/text coordinates; the machine QA only counted banner/keyword events and did not enforce layout/motion/style metrics.
+    - Fixes:
+      - `wrap_ass_text(...)` now preserves text while keeping chunks that fit the display budget within at most two visible lines;
+      - caption metadata now records `subtitle_style_profile`, max subtitle line count/width, animated subtitle/package counts, motion effect count, and highlight effect count;
+      - QA hard-fails basic/fake packaging via style, line-count, line-width, emphasis, and motion-effect gates;
+      - BlueBanner title final position was moved inside the rendered blue backing plate after actual frame inspection.
+    - Rebuilt evidence:
+      - `output/bluey-remix-full-script-samples`: `min_subtitle_text_coverage=1.0`, `max_lines=2`, `max_line_chars=17`, `min_motion=56`, `min_anim_pkg=18`, `min_emphasis=7`, `qa_fail_count=0`.
+      - `output/bluey-remix-full-script-batch-10`: `gate_passed=true`, `gate_reason=passed`, `qa_fail_count=0`, `pass_rate=1.0`, `max_lines=2`, `max_line_chars=17`, `min_motion=50`, `min_anim_pkg=18`, `min_emphasis=7`.
+      - Visual frame checked: `output/bluey-remix-full-script-samples/s02e02_仓储超市/review_frames/s02e02_banner_check_27200ms.jpg`; title now renders inside the blue banner.
+    - Regression: `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py -q --basetemp .tmp\pytest-banner-fix` (`44 passed`).
+  - Original-audio quote bridge contract updated after user review:
+    - New behavior: LLM reviews the complete script for original-footage audio/dialogue evidence intent. When the script asks the audience to hear original audio, quotes/retells character dialogue, or uses a key original-footage plot moment as evidence, the remix chain pauses TTS, inserts a short 2-4s original-source audio bridge, shifts later TTS subtitles/ASR tokens, and audits the shifted final subtitle timeline.
+    - Do not trigger this feature from keyword rules alone. Generic mentions of original footage, plot, characters, visual evidence, or "look here" remain Source-ASR visual-location signals unless the script is referencing dialogue/sound/key story evidence that benefits from a short original-audio bridge.
+    - New evidence fields: `original_audio_intent_analysis_path`, `original_audio_intent_source`, `original_audio_intent_decision`, `original_audio_intent_confidence`, `original_audio_intent_llm_reviewed`, `original_audio_reference_intent_count`, `original_audio_insert_count`, `original_audio_insert_total_duration_sec`, `original_audio_insertions_path`.
+    - QA hard-fails `remix_original_audio_reference_missing` when LLM-detected reference intent is present but no original-audio bridge is inserted; any positive intent must come from `llm_script_intent` with `llm_reviewed=true`.
+    - Previous Bluey full-script outputs with `decision=no_insert` are superseded for final review because the older prompt was too narrow and only accepted explicit "listen/play original audio" wording.
+    - Regression: `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py -q --basetemp .tmp\pytest-llm-original-audio-intent` (`48 passed`).
+  - 2026-06-18 final 1-episode rerun after original-audio bridge and Jianying-style packaging fixes:
+    - Command: `$env:PYTHONPATH='src'; python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --episodes 1 --output-dir output\bluey-remix-full-script-samples --qwen3-asr-base http://127.0.0.1:30230 --creator-profile jenny_baby --tts-timeout-sec 900 --force`
+    - Result: `sample_count=1`, `success_count=1`, `total_output_duration_sec=247.52`.
+    - `output/bluey-remix-full-script-samples/batch_report.json`: `gate_passed=true`, `gate_reason=passed`, `qa_fail_count=0`, `required_evidence_failures=[]`, `pass_rate=1.0`.
+    - S02E01 uses creator profile `珍妮斯baby`, MOSS voice clone, reference `/app/data/tools/reference-uploads/读绘本试音-2.mp3`, final video `1920x1080`, H.264/AAC, 28fps.
+    - Original-audio bridge evidence: LLM `llm_reviewed=true`, `decision=insert_original_audio`, `reference_intent_count=2`, `insert_count=2`, `insert_total_duration_sec=7.0`, evidence file `output/bluey-remix-full-script-samples/s02e01_跳舞模式/_work/s02e01_original_audio_insertions.json`.
+    - Packaging evidence: Hyperframes `roughcut.hyperframes.plan.v1`, `hyperframes_effect_count=141`, `motion_effect_count=66`, `packaging_audio_cue_count=9`, `subtitle_text_coverage=1.0`, max subtitle lines `2`, max line chars `17`.
+    - Visual check frames:
+      - `output/bluey-remix-full-script-samples/s02e01_跳舞模式/review_frames/s02e01_bubble_check_050200ms.jpg` verifies keyword bubble text is inside the yellow bubble.
+      - `output/bluey-remix-full-script-samples/s02e01_跳舞模式/review_frames/s02e01_banner_check_026300ms.jpg` verifies blue theme banner title is inside the banner.
+    - Root-cause fixes added:
+      - original-audio intent cache now includes `policy_version=dialogue_evidence_v2`;
+      - LLM intent review retries transient failures and falls back only to existing `llm_reviewed=true` reviewed files for the same script;
+      - QA hard-fails `remix_original_audio_intent_not_reviewed` when original-audio intent was not LLM-reviewed, even if the decision says `no_insert`;
+      - batch report marks missing `original_audio_intent_llm_reviewed` as required evidence failure;
+      - keyword bubble text coordinates are anchored inside the bubble shape.
+    - Final focused verification:
+      - `python -m py_compile scripts\build_script_footage_remix_samples.py src\roughcut\remix\caption_packager.py src\roughcut\remix\qa.py src\roughcut\remix\batch_report.py tests\test_remix_quality_contracts.py tests\test_remix_cli.py`
+      - `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py -q --basetemp .tmp\pytest-final-bluey-remix-one` (`56 passed`).
+  - 2026-06-18 follow-up rerun for "sudden blur" and insufficient reference-style packaging:
+    - Observed symptom: final sample had visible source-footage clarity drops between clips and did not match the released reference sample's packaging density.
+    - First bad layer: Bluey sample-specific video encoding contract and caption packaging template, not TTS, ASR, or source selection.
+    - Root cause:
+      - Source is a low-bitrate 1080p file (`~0.73 Mbps` video). The chain cropped `1440x810`, scaled to `1920x1080`, encoded segments at `crf=20 veryfast`, then encoded final subtitles again at `crf=19 veryfast`, causing low-bitrate segments and visible clip-to-clip softness.
+      - Packaging overused blue theme banners and lacked the released sample's large red impact words and frequent inline subtitle emphasis.
+    - Fix:
+      - Segment encode now uses `libx264`, `preset=medium`, `tune=animation`, `crf=14`, `pix_fmt=yuv420p`.
+      - Final subtitle mux now uses `libx264`, `preset=medium`, `tune=animation`, `crf=15`, `pix_fmt=yuv420p`.
+      - Caption package now adds `ImpactWord` ASS style, `impact_words` Hyperframes track, three `impact_hit` cue sounds, and stronger yellow/red inline emphasis.
+    - Formal CLI rerun:
+      - `$env:PYTHONPATH='src'; python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --episodes 1 --output-dir output\bluey-remix-full-script-samples --qwen3-asr-base http://127.0.0.1:30230 --creator-profile jenny_baby --tts-timeout-sec 900 --force`
+      - Result: `sample_count=1`, `success_count=1`, `total_output_duration_sec=248.52`.
+      - Final video: `1920x1080`, `28fps`, H.264/AAC, video bitrate `~4.78 Mbps`, file size `145.01 MB`.
+      - Segment video bitrate floor improved from the previous `~1.14 Mbps` low point to `~2.67 Mbps`; highest-motion segments now reach `~8.87 Mbps`.
+      - Batch gate still passes: `gate_passed=true`, `qa_fail_count=0`, `required_evidence_failures=[]`.
+      - Packaging evidence: `impact_words` track exists, `packaging_audio_cue_count=12`, `hyperframes_effect_count=150`, `motion_effect_count=69`, `emphasis_keyword_count=28`, `subtitle_text_coverage=1.0`.
+      - Review frames for the improved packaging: `output/bluey-remix-reference-review/ours_after_50.35s.jpg`, `output/bluey-remix-reference-review/ours_after_78.35s.jpg`, `output/bluey-remix-reference-review/ours_after_106.35s.jpg`.
+    - Regression:
+      - `python -m py_compile scripts\build_script_footage_remix_samples.py src\roughcut\remix\caption_packager.py src\roughcut\remix\qa.py src\roughcut\remix\batch_report.py tests\test_remix_quality_contracts.py tests\test_remix_cli.py`
+      - `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py -q --basetemp .tmp\pytest-final-clarity-packaging` (`58 passed`).
+  - The formal CLI completed a 10-episode validation under the old condensed-script policy:
+    - `$env:PYTHONPATH='src'; python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --episodes 1,2,3,4,5,6,7,8,9,10 --output-dir output\bluey-remix-batch-10`
+    - Result: `sample_count=10`, `success_count=10`, `total_output_duration_sec=1286.443`.
+  - `output/bluey-remix-batch-10/batch_report.json` now reports `qa_pass_count=10`, `qa_warn_count=0`, `qa_fail_count=0`, `pass_rate=1.0`, `gate_passed=true`, `gate_reason=passed`.
+  - The final two boundary-duration samples now pass after root-cause fixes:
+    - S02E09 `120.5s`, TTS-ASR coverage `0.988`, Source-ASR anchors `14`, scene index `detected` with `69` scenes, packaging events `15`.
+    - S02E10 `120.486s`, TTS-ASR coverage `0.9801`, Source-ASR anchors `14`, scene index `detected` with `93` scenes, packaging events `15`.
+  - Relevant regression verification passed:
+    - `python -m py_compile scripts\build_script_footage_remix_samples.py src\roughcut\api\tools.py src\roughcut\remix\scene_index.py src\roughcut\remix\caption_packager.py tests\test_remix_quality_contracts.py tests\test_tools_tts_text_resolution.py tests\test_remix_cli.py tests\test_scene_detection.py`
+    - `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py tests\test_tools_tts_text_resolution.py tests\test_scene_detection.py -q --basetemp .tmp\pytest-run` (`47 passed`, one pytest cache warning only)
+  - This proof is no longer sufficient for final editorial closure because the default policy now preserves full scripts. The next valid closure run must regenerate or reuse TTS for full script text and accept duration warnings instead of script condensation.
+- 2026-06-18 progress:
+  - Added the first reusable remix core modules:
+    - `src/roughcut/remix/contracts.py`
+    - `src/roughcut/remix/alignment.py`
+    - `src/roughcut/remix/source_selection.py`
+    - `src/roughcut/remix/qa.py`
+  - Added focused regressions in `tests/test_remix_quality_contracts.py`.
+  - Verified with:
+    - `python -m py_compile src\roughcut\remix\__init__.py src\roughcut\remix\contracts.py src\roughcut\remix\alignment.py src\roughcut\remix\source_selection.py src\roughcut\remix\qa.py tests\test_remix_quality_contracts.py`
+    - `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py -q` (`8 passed`)
+- 2026-06-18 follow-up progress:
+  - `scripts/build_script_footage_remix_samples.py` now writes the closure-required per-episode evidence files:
+    - `s02eXX_topic_plan.json`
+    - `s02eXX_edit_plan.json`
+    - `s02eXX_qa_report.json`
+    - `s02eXX_narration_clean.wav`
+  - The script now uses `roughcut.remix.alignment` for TTS-ASR subtitle timing and `roughcut.remix.source_selection` for Source-ASR clip start spacing.
+  - The per-episode QA report now uses `roughcut.remix.qa.evaluate_episode_report(...)`; current three Bluey QA reports are all `pass` with `issue_count=0`.
+  - Verified cached three-episode rebuild with:
+    - `python scripts\build_script_footage_remix_samples.py --source-root "F:\布鲁伊育儿节目" --episodes 1,2,3 --output-dir output\bluey-remix-samples-final`
+    - Result: `sample_count=3`, `success_count=3`, `total_output_duration_sec=399.54`.
+  - Current artifact check shows all three episodes have topic plan, edit plan, QA report, and clean narration WAV under `output/bluey-remix-samples-final`.
+- 2026-06-18 scene-index progress:
+  - Added reusable scene-index contracts in `src/roughcut/remix/scene_index.py`, wrapping existing `roughcut.media.scene.detect_scenes`.
+  - `scripts/build_script_footage_remix_samples.py` now writes `s02eXX_scene_index.json` and includes `scene_match` for every clip in `s02eXX_edit_plan.json`.
+  - `roughcut.remix.qa.evaluate_episode_report(...)` now requires scene-index evidence: detected scene indexes pass, fallback scene indexes warn, missing scene indexes fail.
+  - Focused verification passed:
+    - `python -m py_compile scripts\build_script_footage_remix_samples.py src\roughcut\remix\contracts.py src\roughcut\remix\alignment.py src\roughcut\remix\source_selection.py src\roughcut\remix\scene_index.py src\roughcut\remix\qa.py tests\test_remix_quality_contracts.py`
+    - `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py tests\test_scene_detection.py -q` (`15 passed`)
+  - Cached three-episode rebuild passed again; current detected scene counts are S02E01 `91`, S02E02 `82`, S02E03 `89`, and all three QA reports remain `pass` with `issue_count=0`.
+- 2026-06-18 topic/edit-plan productization progress:
+  - Added reusable script-topic planning in `src/roughcut/remix/script_topics.py`; `scripts/build_script_footage_remix_samples.py` now delegates topic chunking, story keywords, titles, and visual intent to that module.
+  - Added reusable edit-plan contract generation in `src/roughcut/remix/edit_plan.py`; the sample script now only passes episode/source/path/transform inputs and the module writes the stable `roughcut.remix.edit_plan.v1` payload shape.
+  - Current edit-plan contract preserves the required topic-level continuous source-footage semantics: `selection_basis=source_asr_topic_anchor_with_min_gap`, source start/end/duration, segment path, and per-clip `scene_match`.
+  - Focused verification passed:
+    - `python -m py_compile scripts\build_script_footage_remix_samples.py src\roughcut\remix\contracts.py src\roughcut\remix\alignment.py src\roughcut\remix\source_selection.py src\roughcut\remix\scene_index.py src\roughcut\remix\script_topics.py src\roughcut\remix\edit_plan.py src\roughcut\remix\qa.py tests\test_remix_quality_contracts.py`
+    - `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py tests\test_scene_detection.py -q` (`20 passed`)
+  - Cached three-episode rebuild passed again:
+    - `python scripts\build_script_footage_remix_samples.py --source-root "F:\布鲁伊育儿节目" --episodes 1,2,3 --output-dir output\bluey-remix-samples-final`
+    - Result: `sample_count=3`, `success_count=3`, `total_output_duration_sec=399.54`.
+    - Structure check: all three QA reports are `pass`, all three topic plans have `topic_count=8`, all three edit plans use `roughcut.remix.edit_plan.v1`, each has `clip_count=10`, first clip `scene_match.match_type=contains_start`, and `video_transform=1920x1080`.
+- 2026-06-18 formal CLI progress:
+  - Added the formal entrypoint `roughcut remix script-footage` in `src/roughcut/cli.py`; it runs the Bluey sample builder with explicit source root, episodes, output dir, MOSS/CosyVoice provider, Qwen3-ASR base, and debug skip flags.
+  - Added `tests/test_remix_cli.py` to lock the CLI invocation contract.
+  - Focused verification passed:
+    - `python -m py_compile src\roughcut\cli.py tests\test_remix_cli.py`
+    - `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_cli.py tests\test_remix_quality_contracts.py tests\test_scene_detection.py -q` (`21 passed`)
+  - Formal CLI rebuild passed:
+    - `$env:PYTHONPATH='src'; python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --episodes 1,2,3 --output-dir output\bluey-remix-samples-final`
+    - Result: `sample_count=3`, `success_count=3`, `total_output_duration_sec=399.54`.
+- 2026-06-18 caption/review evidence progress:
+  - Added reusable caption packaging in `src/roughcut/remix/caption_packager.py`.
+    - Contract schema: `roughcut.remix.caption_package.v1`.
+    - It now owns ASS styles, bottom subtitles, self watermark, theme banners, keyword stickers, and inline emphasis counts.
+  - Added reusable review-frame manifest generation in `src/roughcut/remix/review_frames.py`.
+    - Contract schema: `roughcut.remix.review_frames.v1`.
+    - Each episode now writes `review_frames/` plus `s02eXX_review_frames.json`.
+  - `scripts/build_script_footage_remix_samples.py` now writes `s02eXX_caption_package.json`, `s02eXX_review_frames.json`, and includes packaging/review metrics in the sample report.
+  - `roughcut.remix.qa.evaluate_episode_report(...)` now hard-gates caption/review evidence:
+    - at least 3 theme banners,
+    - at least 3 keyword stickers,
+    - at least 1 self watermark event,
+    - at least 5 review frames.
+  - `roughcut remix script-footage` now accepts `--force`, but the full forced rebuild was manually terminated after it stayed in the external generation/render path too long without output progress. The successful validation below used cached TTS/ASR evidence and refreshed the newly added caption/review artifacts.
+  - Focused verification passed:
+    - `python -m py_compile scripts\build_script_footage_remix_samples.py src\roughcut\remix\caption_packager.py src\roughcut\remix\review_frames.py src\roughcut\remix\qa.py tests\test_remix_quality_contracts.py`
+    - `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_cli.py tests\test_remix_quality_contracts.py tests\test_scene_detection.py -q` (`25 passed`)
+  - Formal CLI cached rebuild passed:
+    - `$env:PYTHONPATH='src'; python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --episodes 1,2,3 --output-dir output\bluey-remix-samples-final`
+    - Result: `sample_count=3`, `success_count=3`, `total_output_duration_sec=399.54`.
+  - Current three-sample packaging/review evidence:
+    - all three QA reports are `pass` with `issue_count=0`,
+    - all three have `theme_banner_count=3`, `keyword_sticker_count=3`, `watermark_event_count=1`, `review_frame_count=5`,
+    - `ffprobe` confirms S02E01 output is `1920x1080`, `28/1` fps,
+    - review-frame files exist: 3 manifests and 15 JPEG frames total.
+- 2026-06-18 batch-report/methodology progress:
+  - Added reusable batch report generation in `src/roughcut/remix/batch_report.py`.
+    - Contract schema: `roughcut.remix.batch_report.v1`.
+    - It checks sample count, QA pass rate, required evidence fields, ASR evidence, caption package evidence, and review-frame evidence.
+    - It intentionally fails the final gate when fewer than 10 episodes are evaluated, even if all evaluated episodes pass.
+  - `scripts/build_script_footage_remix_samples.py` now writes the closure-required batch/methodology artifacts:
+    - `batch_report.json`
+    - `batch_report.md`
+    - `methodology_report.md`
+  - Added a TTS history reuse fix in `scripts/build_script_footage_remix_samples.py`:
+    - before opening a new MOSS TTS request, the script now searches `data/runtime/tools/runs/*.json` for a completed TTS run with identical normalized script text;
+    - if found, it downloads the completed run's `audio_url` into the current episode output as `s02eXX_narration.wav`;
+    - this addresses the batch-run problem where a new output directory re-generated TTS for scripts already present in the toolbox/history.
+  - Focused verification passed:
+    - `python -m py_compile scripts\build_script_footage_remix_samples.py src\roughcut\remix\batch_report.py tests\test_remix_quality_contracts.py`
+    - `$env:PYTHONPATH='src'; python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py tests\test_scene_detection.py -q` (`29 passed`)
+  - Formal CLI cached rebuild for the existing three samples passed and produced `batch_report.*` plus `methodology_report.md`:
+    - `$env:PYTHONPATH='src'; python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --episodes 1,2,3 --output-dir output\bluey-remix-samples-final`
+    - Result: `sample_count=3`, `success_count=3`, `total_output_duration_sec=399.54`.
+    - `output/bluey-remix-samples-final/batch_report.json` correctly reports `gate_passed=false`, `gate_reason=evaluated_count_below_10:3`.
+  - Final required 10-episode validation passed:
+    - `$env:PYTHONPATH='src'; python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --episodes 1,2,3,4,5,6,7,8,9,10 --output-dir output\bluey-remix-batch-10`
+    - Result: `sample_count=10`, `success_count=10`, `total_output_duration_sec=1286.443`.
+    - `output/bluey-remix-batch-10/batch_report.json` reports `qa_pass_count=10`, `qa_warn_count=0`, `qa_fail_count=0`, `pass_rate=1.0`, `gate_passed=true`, `gate_reason=passed`.
+    - Root-cause fixes made during final validation:
+      - plain narration containing weak prompt words such as `要求` is no longer misclassified as structured TTS prompt text;
+      - MOSS segment pacing now preserves the minimum 120-second output requirement and applies a bounded min-fit slowdown for boundary-duration episodes;
+      - scene indexing now has an ffmpeg-based fallback when PySceneDetect is unavailable, so old `fallback_single_scene` cache entries are refreshed into real `detected` scene indexes;
+      - caption packaging adds a closing emphasis event so boundary-duration episodes maintain packaging density.
+    - Final verification for this slice passed with `47 passed` across `tests/test_remix_quality_contracts.py`, `tests/test_remix_cli.py`, `tests/test_tools_tts_text_resolution.py`, and `tests/test_scene_detection.py`.
 
 ## Archived Notes
 
-The remaining content in this file is historical context from the previous uploaded-material-only optimization round. It is archived for reference only and must not be treated as the active objective or the current closure criteria for this task.
+The remaining content in this file is historical context from previous optimization/refactor rounds. It is archived for reference only and must not be treated as the active objective or the current closure criteria for this task.
 - Scope of that gate integration is intentionally narrow: the new `Phase 6` candidates do not rewrite editorial keep/cut, do not become frontend-managed smart-delete segments, do not create a second render/editorial path, and do not silently auto-apply in `auto` mode. They only become visible inside the same shared cut-analysis candidate contract, with preserved provenance and recommendation reasons from the local candidate producers.
 - Focused verification for that `Phase 6` gate-integration slice passed via `python -m py_compile src/roughcut/edit/cut_analysis.py tests/test_manual_editor_helpers.py` and `PYTHONPATH=src python -m pytest tests/test_manual_editor_helpers.py -k "highlight_candidates_through_strategy_decision_gate or multi_material_candidates_only_for_narrative_strategy or keeps_reviewed_rule_candidate_out_of_rule_auto_apply_bucket or attaches_strategy_decision_metadata_to_auto_apply_candidate" -q` (`4 passed, 387 deselected`), plus `PYTHONPATH=src python -m pytest tests/test_local_highlight_candidates.py tests/test_local_multi_material_candidates.py tests/test_manual_editor_helpers.py -k "cut_analysis_payload_integrates_highlight_candidates_through_strategy_decision_gate or cut_analysis_payload_integrates_multi_material_candidates_only_for_narrative_strategy or cut_analysis_payload_keeps_reviewed_rule_candidate_out_of_rule_auto_apply_bucket or cut_analysis_payload_attaches_strategy_decision_metadata_to_auto_apply_candidate or infer_timeline_analysis_carries_multi_material_candidates_for_narrative_ready_profile or long_gameplay_like_clip_emits_conservative_highlight_candidates" -q` (`6 passed, 391 deselected`). This is now risk-gate evidence rather than analysis-only evidence, but `Phase 6` still lacks a real replay anchor before closure.
 - A first attempted real `Phase 6` highlight anchor using `noc_mt34_short_done` plus `--workflow-template gameplay_highlight` under `output/test/auto-edit-recovery-golden/uploaded-material-phase6-highlight-anchor/20260612-211416` is not authoritative: the golden replay process never produced inspectable report artifacts before manual interruption, so it does not yet prove that a real uploaded-material replay reaches `edit_plan` with `highlight_window_selection` inside `cut_analysis`.
@@ -5642,3 +6102,496 @@ The remaining content in this file is historical context from the previous uploa
     - `status=partial`，`quality_score=100.0`
     - `live_readiness.status=pass`
     - `required_checks.required_checks_contract_passed=4/4`
+
+- 2026-06-18: EDC 五任务字幕错位/断句回归重跑继续推进，完成 subtitle finalization 与批处理卡死修复：
+  - 第一坏层：
+    - BOLTBOAT 的坏层在打包后字幕时间线，重分段后出现 0.1s subtitle overlap，质量评分此前未把 packaged/ai-effect timeline issue 打穿；
+    - FXX1 的坏层在最终 SRT 显示切分后，`split_subtitle_display_item()` 会把已合并的“它拉上以后”再次拆成孤立“它”；
+    - FXX1 单跑卡死的坏层在 `content_profile` 在线核验/内容理解边界，主批处理用线程等待 worker，卡住时无法回收。
+  - 已落地修复：
+    - packaged subtitle timeline 增加共享 finalizer：合并孤立单字、修正非单调事件，并让 scorecard 读取 subtitle timeline validation；
+    - `write_srt_file()` 改为显示切分后再次合并孤立 CJK cue，并过滤 filler 单字，避免最终 SRT/烧录字幕漏出“你/它/呃”等单字；
+    - `content_profile` 在线核验增加 fail-open 超时，`run_fullchain_batch.py` 将 `content_profile` 改为进程隔离执行，超时可回收。
+  - 真实重跑/重渲染结果：
+    - 五任务全量重跑：`output/test/edc-folder-five-subtitle-fix-rerun-20260617-221808`，`success_count=5/5`，全部 Qwen3-ASR，`fallback_used=false`；
+    - BOLTBOAT render 重跑输出：`data/runtime/output/20260616_BOLTBOAT_影蚀_EDC机能包功能演示/..._横版_成片.mp4`，最终 SRT 审计 `overlaps=0`、`singles=0`；
+    - FXX1 单任务重跑报告：`output/test/fxx1-content-profile-timeout-fixed-rerun-20260618-005336`，`success_count=1/1`，`quality_score=100.0 A`，Qwen3-ASR `fallback_used=false`；
+    - FXX1 render 重跑输出：`data/runtime/output/20260616_狐蝠工业_FXX1小副包_FXX1戒备色小副包及新款快拆肩带的上手体验与使用评测/..._横版_成片.mp4`，最终 SRT 审计 `overlaps=0`、`singles=0`，截图问题句保留为完整字幕“比如说我刚才我想把这个拉回来嘛”，单字上下文已合并为“它拉上以后”。
+  - focused 验证：
+    - `python -m pytest tests/test_run_fullchain_batch.py -q`（`49 passed`）
+    - `python -m pytest tests/test_final_subtitle_filler_cleanup.py -q`（`36 passed`）
+    - 内容画像相关现有测试集合中 `tests/test_content_understanding_fusion.py` 仍有 2 个与当前环境中文乱码测试文本相关的既有失败，未作为本轮字幕修复依据。
+
+- 2026-06-18: 字幕错位/闪字幕链路继续收敛，完成剪辑主链路和测试契约对齐：
+  - 观察到的症状：
+    - 成片偶发字幕突然大幅错位，并出现短时间快速闪过多条字幕；
+    - 剪辑流程中仍可见发布/封面/final_review/platform_package 旧阶段残留；
+    - 内容理解 evidence span 丢失时间段，影响后续质量诊断和剪辑依据。
+  - 第一坏层：
+    - canonical projection 在词级 `reference_span_interpolate` 坍缩后虽然回退到段级，但分段器会在非原文边界补句号，把“老大哥天敌”改写为“老大哥。天敌”；
+    - `subtitle_surface_item_dict()` 与 `subtitle_semantic_item_text()` 的契约不一致：只有 `text_final` 的字幕项不能作为 semantic 文本读取，导致 `subtitle_lines=[]`、`timed_focus_spans=[]`；
+    - 编辑主链路仍有旧发布阶段入口/状态/封面参数与 render plan 互相牵连。
+  - 已落地修复：
+    - canonical projection 出口增加原文边界校验，只移除原文无标点处由分段器合成的边界句号，避免回退后再次改写口播；
+    - 字幕 surface 字典统一按 canonical/display rule 补齐 `text_norm`，让 `text_final`-only 字幕项仍可进入语义证据，但不破坏 `display_suppressed_reason` 的显示层规则；
+    - 剪辑主链路移除 cover generation、cover extraction、final_review/platform_package 自动推进与任务入口，发布相关能力保留在智能发布模块；
+    - Codex host bridge 日志不再要求 fake process 暴露 `pid`，Codex imagegen direct-output 判断加入 Windows mtime 容差。
+  - focused/核心验证：
+    - `PYTHONPATH=src python -m pytest tests/test_content_understanding_fusion.py tests/test_final_subtitle_filler_cleanup.py tests/test_subtitle_word_boundary.py -q`（`137 passed`）
+    - `PYTHONPATH=src python -m pytest tests/test_canonical_projection_guards.py tests/test_transcription_quality_gate.py tests/test_subtitle_word_boundary.py -q`（`121 passed`）
+    - `PYTHONPATH=src python -m pytest tests/test_codex_bridge.py tests/test_codex_imagegen_runner.py -q`（`16 passed`）
+    - 剪辑核心扩展套件（21 个关键测试文件，含 render sync、ASR/transcript cleanup、manual editor、fullchain batch、canonical/content understanding）`840 passed, 1 warning`
+  - 全量测试现状：
+    - 修复前全量：`73 failed, 2247 passed, 1 warning`
+    - 当前 `--lf` 剩余：`64 failed, 1 passed`，失败集中在智能发布/封面/发布自动化测试，不属于剪辑主链路残留；不要为了让发布测试变绿而把发布/封面阶段重新接回剪辑流程。
+    - 最终全量 pytest：`64 failed, 2256 passed, 1 warning in 389.90s`；失败文件集中在 `test_intelligent_copy_cover_generation.py`、`test_publication*.py`、`test_intelligent_copy_path_suggestions.py`、`test_intelligent_copy_publish_media.py`、`test_openai_codex_helper_auth.py`。
+
+- 2026-06-18: 继续收敛上条全量 pytest 暴露的智能发布/封面/自动化失败簇，已跑到全量绿：
+  - 观察到的症状：
+    - 智能封面 pending Codex imagegen 请求在旧结果升级时被误判为 publish_ready；
+    - Dreamina web 已选候选被低置信辅助重排覆盖；
+    - 单平台文案快路径只做非空校验，质量不过关时直接打断发布；
+    - host bridge URL 测试契约与 Windows runtime 归一化冲突；
+    - 发布链路存在 browser profile 漂移、默认 adapter 被隐式切到 social-auto-upload、native_topics 被丢弃、receipt_rebind 新建 attempt、autopilot/report/preflight 门禁语义不一致等风险。
+  - 第一坏层：
+    - `intelligent_copy._finalize_cover_request_generation_status()` 只读请求顶层 backend，旧请求把 `codex_builtin` 放在 `image_generation.backend` 时会被当成非 Codex 请求，仅凭输出文件存在就改成 completed；
+    - `platform_copy.generate_platform_packaging()` 的单平台 fast path 没有接入统一质量合同；
+    - `publication.py` 中 adapter/profile/topic/retry/rebind 的状态契约在多个入口重复实现，导致默认主链路和恢复链路互相覆盖；
+    - autopilot/preflight/release-gate 脚本把 warnings、缺失 summary、absent metadata、probe failed recommendation 混在同一失败通道里。
+  - 已落地修复：
+    - Codex imagegen status finalizer 统一读取顶层和嵌套 backend，pending 只有在桥接完成或明确后验生成证据存在时才允许转 completed；
+    - Dreamina 候选一致性重排只有高置信、明显优于网页 runner 选择时才覆盖 `selectedCandidateIndex`；
+    - 单平台文案快路径接入统一质量评估，不达标时降级确定性文案并记录 trace；
+    - 发布计划默认主链路保持 browser-agent，只有未显式 adapter 且平台在配置启用列表时才自动切 social-auto-upload；
+    - release-gate 默认浏览器绑定不再依赖本机 Chrome 目录，默认固定项目 runtime stable profile；
+    - 发布计划保留 native_topics，receipt_rebind 安全恢复复用 active attempt；
+    - material gate 缺 `material_contract`/缺平台物料时 fail closed；autopilot 有 failures 但无 verification summary 时 fail closed，passed 子报告里的 warning 不再误降级；
+    - preflight probe inventory failed 不再重复追加泛化 browser_session_not_ready；real_release_gate 不再凭空补 absent declaration；
+    - 快手 collection policy 未命中真实可选项时交给 post-publish association，B站可使用真实 inventory suggestions fallback。
+  - 验证：
+    - 原失败清单定向回归：`29 passed in 58.04s`
+    - 全量 pytest：`2336 passed in 511.71s (0:08:31)`
+
+- 2026-06-18: EDC 五任务字幕时间戳/断句/多模态复核链路完成 v5 fresh 全量复测：
+  - 观察到的症状：
+    - 质量报告曾在字幕缺少词级覆盖时仍给 100 分，导致“报告通过但成片字幕错位/闪字幕”；
+    - canonical output fallback 时旧 display baseline 可被保留，即使它没有词级时间戳；
+    - 字幕污染审计对包类视频按单词硬判 `开合`/`手电` 为跨品类污染；
+    - 多模态 trim review 把短无文本 `timing_trim`、强文本证据 `failed_attempt` 候选送视觉模型，超时后留下 pending。
+  - 第一坏层：
+    - `subtitle_quality_report` 未把 word alignment coverage 作为阻断质量合同；
+    - `_build_canonical_refresh_projection()` 的 fallback guard 没有校验 display baseline 是否有词级覆盖；
+    - `scripts/audit_batch_subtitles.py` 的品类禁词缺少 EDC 包装载/动作语境；
+    - `multimodal_trim_review` 没有对可由文本/边界确定性收口的候选做前置分流。
+  - 已落地修复：
+    - 字幕质量报告新增 `require_word_alignment` 与 missing-word guard，缺词级覆盖会阻断/降分；
+    - canonical projection 不再允许无词级 display baseline 压过 canonical refresh；
+    - fresh batch 增加 `--fresh-jobs`，避免复测复用旧 job/output；
+    - 视觉-only brand 不再覆盖文件名/ASR 支撑的主体；
+    - 污染审计改为语境判断，包类正常 `开合` 与 EDC 装载 `手电` 不再 critical；
+    - 多模态复核对短无文本 `timing_trim`、有失败+后续正确展示证据的 `failed_attempt` 做确定性收口，避免 timeout/pending。
+  - v5 真实复测：
+    - 报告目录：`output/test/edc-folder-five-fresh-ret-test-20260618-alignment-guard-v5`
+    - 五任务 `success_count=5/5`，全部 Qwen3-ASR `fallback_used=false`，`quality_score=100.0 A`
+    - 最新字幕质量：五条 `missing_word_subtitle_count=0`
+    - 多模态复核：五条 `error=""`、`pending_count=0`
+    - 字幕污染审计：五条 `severity=low`、`blocking_count=0`、`warning_count=0`
+    - live readiness 仅因 `stable_run_count=1` 未达准入，质量、P0、false-success、render end-state 检查均通过。
+  - 验证：
+    - 定向回归：`10 passed`
+    - canonical fallback 相关回归：`2 passed`
+    - 全量 pytest：`2352 passed in 507.33s (0:08:27)`
+
+- 2026-06-18: Bluey 文案引用原片二创链路增加创作者绑定字幕包装风格，儿童视频样式不再作为通用默认：
+  - 观察到的症状：
+    - 用户要求字幕样式更适合儿童视频后，最初实现倾向把儿童风格放进通用默认，边界错误；
+    - 正确边界应为：通用层只提供剪辑能力、Hyperframes 字幕包装能力、质量门和创作者配置读取逻辑；具体审美、赛道、参考语音和字幕风格绑定到创作者档案。
+  - 第一坏层：
+    - `caption_packager` 只有单一全局 `CAPTION_STYLE_PROFILE`，缺少“通用能力支持多 profile，创作者档案选择 profile”的契约；
+    - Bluey 样片 CLI 没有从 `jenny_baby` 创作者档案读取字幕风格默认值。
+  - 已落地修复：
+    - 通用默认恢复为 `jianying_reference_v2`；
+    - 新增受支持的儿童字幕 profile：`children_storybook_v1`，只通过创作者档案或显式参数启用；
+    - `data/creator_profiles/jenny_baby.json` 绑定 `remix_style.caption.subtitle_style_profile=children_storybook_v1`；
+    - Bluey 样片生成链路在未显式传参时从创作者档案读取字幕 profile；
+    - QA 改为校验“受支持的字幕 profile”，不把珍妮斯的儿童风格硬编码成全局要求。
+  - 重新生成样片：
+    - 命令：`PYTHONPATH=src python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --episodes 1 --output-dir output\bluey-remix-full-script-samples --qwen3-asr-base http://127.0.0.1:30230 --creator-profile jenny_baby --tts-timeout-sec 900 --force`
+    - 输出：`output/bluey-remix-full-script-samples/s02e01_跳舞模式/bluey_s02e01_跳舞模式_parenting_remix.mp4`
+    - 抽帧核验：`output/bluey-remix-full-script-samples/s02e01_跳舞模式/qa_frame_creator_caption_style.png`
+  - 证据：
+    - `s02e01_caption_package.json` 顶层 `subtitle_style_profile=children_storybook_v1`；
+    - `subtitle_text_coverage=1`，`source_bridge_count=3`，`hyperframes_effect_count=156`；
+    - `batch_report.json`：`gate_passed=true`，`sample_count=1`，`success_count=1`，`qa_fail_count=0`。
+  - 验证：
+    - `python -m py_compile src\roughcut\remix\caption_packager.py src\roughcut\remix\creator_profile.py src\roughcut\remix\qa.py scripts\build_script_footage_remix_samples.py tests\test_remix_quality_contracts.py`
+    - `PYTHONPATH=src python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py -q --basetemp .tmp\pytest-creator-caption-style`（`74 passed`）
+
+- 2026-06-19: 根据用户提供的已完成 Bluey 清单，建立珍妮斯 baby 正式生产队列：
+  - 输入事实：
+    - 用户确认已做：第二季 1、11、20-22、25、32、34、43-44、46-47、50；第三季 1-3、6-8、10-12、14-19。
+    - `F:\布鲁伊育儿节目` 当前有第二季 52 集文案和第二季 52 集原片，路径均可读。
+    - 同目录下有第三季 26 集原片，但未找到第三季文案文件，因此第三季未做集不能进入可执行生产队列。
+  - 已落地：
+    - 新增正式队列：`data/remix_production_tasks/jenny_baby_bluey_pending.json`。
+    - 可执行 pending 第二季共 39 集，按文案和视频一一对应顺序：`2,3,4,5,6,7,8,9,10,12,13,14,15,16,17,18,19,23,24,26,27,28,29,30,31,33,35,36,37,38,39,40,41,42,45,48,49,51,52`。
+    - 第三季未做但缺文案的 11 集记录为 `blocked_missing_script`：`4,5,9,13,20,21,22,23,24,25,26`，不进入生产执行。
+    - `data/creator_profiles/jenny_baby.json` 的 Bluey 任务绑定新增 `production_manifest_path`，保持个性化生产任务绑定到珍妮斯创作者档案。
+    - `roughcut remix script-footage` 与 `scripts/build_script_footage_remix_samples.py` 新增 `--production-manifest` / `--task-status`，可直接读取正式队列的 pending 任务。
+  - 生产命令：
+    - `$env:PYTHONPATH='src'; python -m roughcut.cli remix script-footage --source-root "F:\布鲁伊育儿节目" --production-manifest data\remix_production_tasks\jenny_baby_bluey_pending.json --task-status pending --output-dir output\bluey-remix-production-jenny-baby --qwen3-asr-base http://127.0.0.1:30230 --creator-profile jenny_baby`
+  - 验证：
+    - manifest 路径校验：`pending_count=39`，`blocked_missing_script_count=11`，`missing_file_count=0`。
+    - `python -m py_compile scripts\build_script_footage_remix_samples.py src\roughcut\cli.py tests\test_remix_cli.py tests\test_remix_quality_contracts.py`
+    - `PYTHONPATH=src python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py -q --basetemp .tmp\pytest-bluey-production-manifest`（`76 passed`）
+
+- 2026-06-19: Bluey 正式生产队列接入工作台可视化，修复“任务已建但用户看不到”：
+  - 观察到的症状：
+    - 工作台“剪辑制片”页只显示普通 jobs 队列，用户看不到珍妮斯 baby Bluey 二创正式生产队列。
+    - 前一轮只生成了 `data/remix_production_tasks/jenny_baby_bluey_pending.json` 与 CLI 入口，未接入工作台 UI 数据源。
+  - 第一坏层：
+    - 工作台列表读取数据库 jobs；Bluey 正式生产队列是创作者绑定的 production manifest，不属于普通 jobs。
+    - 不能直接把 39 条 pending 任务塞进普通 jobs 表，否则 orchestrator 会按通用原片剪辑流水线自动调度，边界错误。
+  - 已落地修复：
+    - 新增只读接口：`GET /api/v1/jobs/remix-production/tasks`，读取珍妮斯 baby Bluey production manifest 并返回 pending、blocked、completed 与统计摘要。
+    - `JobsPage` 新增“影视二创生产队列”卡片和弹窗，点击顶部“影视二创”或卡片“查看队列”可看到 39 条待生产任务与 11 条缺第三季文案阻断项。
+    - 前端类型、API client、交互测试和样式同步更新。
+    - 已重新构建 `frontend/dist`，并把 manifest/profile 同步进当前运行的 `roughcut-api-1` 容器。
+  - 当前运行态验证：
+    - `http://127.0.0.1:38471/api/v1/jobs/remix-production/tasks` 返回 `task_count=50`、`pending_count=39`、`blocked_missing_script_count=11`、`completed_by_user_count=28`、`pending_file_missing_count=0`。
+    - 首条 pending 为 `S02E02 · 仓储超市`，末条 pending 为 `S02E52 · 咖啡馆`。
+  - 回归验证：
+    - `python -m py_compile src\roughcut\api\jobs.py scripts\build_script_footage_remix_samples.py src\roughcut\cli.py tests\test_remix_cli.py tests\test_remix_quality_contracts.py`
+    - `PYTHONPATH=src python -m pytest tests\test_remix_quality_contracts.py tests\test_remix_cli.py -q --basetemp .tmp\pytest-bluey-production-visible`（`76 passed`）
+    - `pnpm --dir frontend run typecheck`
+    - `pnpm --dir frontend exec vitest run src/pages/page-interactions.audit.test.tsx --environment jsdom`（`6 passed`）
+    - `pnpm --dir frontend run build`
+
+- 2026-06-19: 修正 Bluey 二创生产任务的工作台产品模型，取消独立旁路队列：
+  - 观察到的症状：
+    - “影视二创生产队列”单独成卡片，不参与工作台任务数量统计；用户指出所有任务应共享一个任务列表，通过任务标签筛选。
+    - 缺文案的第三季集数被记录为 `blocked_missing_script`，用户明确要求这些没法跑的任务直接删除。
+  - 第一坏层：
+    - 工作台视图模型只统计普通 jobs；二创 manifest 任务被做成旁路区域，而不是统一队列里的任务标签。
+    - manifest 把不可执行项也放进 `tasks`，导致正式生产任务集合混入不能跑的项。
+  - 已落地修复：
+    - `JobsPage/useJobWorkspace` 支持额外队列项和任务标签筛选：`全部标签 / 剪辑任务 / 影视二创 / 发布任务`。
+    - 39 条 Bluey pending 二创任务映射为统一任务列表中的 `queue_task_kind=remix_production`，参与总数、排队中、搜索和标签筛选。
+    - 影视二创行只提供“查看队列/生产命令”入口，不暴露普通 job 的手动调整、重跑、删除，避免误走普通原片剪辑流水线。
+    - 删除 manifest 中 11 条第三季缺文案 `blocked_missing_script` 任务；正式队列现在只保留可执行任务。
+    - 当前运行容器 `roughcut-api-1` 已同步新 manifest。
+  - 当前接口状态：
+    - `task_count=39`，`pending_count=39`，`blocked_missing_script_count=0`，`completed_by_user_count=28`，`pending_file_missing_count=0`。
+  - 验证：
+    - `python -m json.tool data\remix_production_tasks\jenny_baby_bluey_pending.json`
+    - `pnpm --dir frontend run typecheck`
+    - `pnpm --dir frontend exec vitest run src/pages/page-interactions.audit.test.tsx --environment jsdom`（`6 passed`）
+    - `pnpm --dir frontend run build`
+
+
+
+- 2026-06-19: 修正“文案引用原片二创”链路命名，去掉 Bluey 作为公共能力名：
+  - 观察到的症状：
+    - 公共 CLI 和脚本文件名曾直接使用 Bluey 作为能力入口名；用户指出开源后会被误解为 Bluey 专用链路。
+  - 第一坏层：
+    - 能力入口和具体系列绑定混在一起；Bluey 应属于 production manifest / creator profile / source_root 数据，而不是通用剪辑能力名。
+  - 已落地修复：
+    - 删除旧的 Bluey 专用 CLI，不保留隐藏兼容别名。
+    - 公共入口统一为 `python -m roughcut.cli remix script-footage`。
+    - 脚本入口改为 `scripts/build_script_footage_remix_samples.py`。
+    - 通用 CLI 不再默认 `F:\布鲁伊育儿节目`；未提供 `--source-root` 时，只能从 `--production-manifest` 的 `source_root` 读取。
+    - 样片汇总报告文件名改为 `script_footage_remix_sample_report.json/md`。
+    - `data/remix_production_tasks/jenny_baby_bluey_pending.json` 的执行命令已改为 `remix script-footage`；Bluey 只保留在该 manifest 的具体任务绑定和源片路径里。
+
+- 2026-06-19: 修正工作台右上角“影视二创”入口与通用二创模式策略：
+  - 观察到的症状：
+    - 用户点击右上角“影视二创”按钮时没有弹出新建任务悬浮窗口。
+  - 第一坏层：
+    - `JobsPage` 顶部入口被接到任务标签筛选逻辑，而不是新建任务 modal；影视二创创建入口和影视二创标签筛选语义混在一起。
+  - 根因：
+    - 早前为统一任务列表改造时，把二创入口产品语义收窄成“查看/筛选二创任务”，丢失了“创建影视二创任务”的 header action。
+  - 已落地修复：
+    - 右上角“影视二创”按钮恢复为打开新建任务悬浮窗口；任务列表里的“影视二创”标签继续只负责筛选。
+    - 新增通用影视二创模式：`remix_auto_commentary`（自动精简解说）、`remix_llm_plan`（智能方案编排）、`script_footage_remix`（按脚本文案讲解插入）。
+    - 影视二创新建窗默认策略：无用户文本时使用 `remix_auto_commentary`；用户输入文本后自动切到 `remix_llm_plan`；用户显式选择完整脚本文案模式时使用 `script_footage_remix` 并保持不压缩文案。
+    - TTS 默认策略改为：有用户/创作者参考语音时使用参考语音克隆；没有参考语音时使用无参考 TTS，不再把 `jenny_baby` 作为通用默认声音。
+    - CLI 只暴露 `remix script-footage`；旧 `remix bluey-samples` 作为兼容入口已删除，并由测试锁定不可用。
+  - 验证：
+    - `python -m py_compile src\roughcut\creative\modes.py src\roughcut\cli.py src\roughcut\remix\qa.py scripts\build_script_footage_remix_samples.py`
+    - `PYTHONPATH=src python -m pytest tests\test_remix_cli.py tests\test_remix_quality_contracts.py -q --basetemp .tmp\pytest-remix-modes-tts`（`80 passed`）
+    - `pnpm --dir frontend run typecheck`
+    - `pnpm --dir frontend exec vitest run src/pages/page-interactions.audit.test.tsx --environment jsdom`（`7 passed`）
+    - `pnpm --dir frontend run build`
+
+- 2026-06-19: 修正影视二创生产任务被前端伪装成任务行的问题：
+  - 观察到的症状：
+    - 影视二创任务行没有封面、没有开始/重新开始按钮，点击后打开的是“珍妮斯 baby · 布鲁伊正式生产队列”manifest 页面，而不是该视频自己的真实任务阶段。
+  - 第一坏层：
+    - `JobsPage` 把 production manifest 的 pending task 投影成前端假 `Job`，ID 形如 `remix-production:...`，没有数据库 job、step、artifact 和真实状态机。
+  - 根因：
+    - 二创生产清单只适合作为导入来源，不应该直接伪装成统一任务列表里的任务。伪任务既无法用通用封面/详情/启动接口，也不能让普通 orchestrator 调度，否则会误走普通原片剪辑流水线。
+  - 已落地修复：
+    - 新增 `POST /api/v1/jobs/remix-production/tasks/job`，按单集 `season/episode` 创建或更新一个真实 `jobs` 记录，并写入 `content_profile` 与 `script_footage_remix` 阶段。
+    - `GET /api/v1/jobs/remix-production/tasks` 会回填每条 manifest task 对应的 `job_id/job_status/job_progress_percent/output_path`。
+    - 工作台不再注入前端假任务，也不再暴露批量导入/批量上传接口；发现 manifest 中有未创建的 pending 项时，前端逐条调用单集创建接口，等同真实任务一个一个入队。
+    - 影视二创行来自真实 DB job，点击行进入真实 JobDetail，另保留“查看队列”按钮只看生产清单。
+    - 真实影视二创任务显示“开始/重新开始”按钮；普通 orchestrator 明确跳过 `script_footage_remix/remix_*` 外部二创任务，避免误派普通剪辑步骤。
+    - 已为 39 条 pending 任务生成封面缩略图，并通过真实 job artifact 接入 `cover-thumbnail` 接口。
+  - 当前运行态：
+    - 之前已经创建出的 39 条 pending 二创任务保留为真实 job；批量 `materialize` 接口已从代码中删除，后续补任务必须逐集调用 `POST /jobs/remix-production/tasks/job`。
+    - 首条 `S02E02 · 仓储超市` 对应 job：`d8abc434-9a70-4e6f-81fd-1bb41e7a45d3`，状态 `pending`，阶段包含 `content_profile=done`、`script_footage_remix=pending`。
+    - `GET /jobs/d8abc434-9a70-4e6f-81fd-1bb41e7a45d3/cover-thumbnail` 返回 `200 image/jpeg`。
+  - 重要阻断：
+    - 当前 `roughcut-api-1` 容器没有挂载 `F:\布鲁伊育儿节目`，所以点击“开始”会返回明确 422，提示源片/文案路径在 API 运行环境不可读。必须把源片目录挂进 API 容器，或把 script-footage 执行迁移到宿主机执行器，不能静默假启动。
+  - 验证：
+    - `python -m py_compile src\roughcut\api\jobs.py src\roughcut\api\schemas.py src\roughcut\pipeline\orchestrator.py`
+    - `PYTHONPATH=src python -m pytest tests\test_job_queue_preview.py tests\test_remix_cli.py tests\test_remix_quality_contracts.py -q --basetemp .tmp\pytest-remix-production-jobs`（`83 passed`）
+    - `pnpm --dir frontend run typecheck`
+    - `pnpm --dir frontend exec vitest run src/pages/page-interactions.audit.test.tsx --environment jsdom`（`7 passed`）
+    - `pnpm --dir frontend run build`
+    - `git diff --check` 只剩 Git CRLF 换行提示，无 whitespace error。
+
+- 2026-06-19: 按“真实任务逐条添加”纠偏影视二创入队接口：
+  - 观察到的症状：
+    - 前一版虽然把 manifest 条目落成真实 job，但暴露了 `POST /api/v1/jobs/remix-production/materialize` 批量物化接口，语义上像“批量上传/批量导入”，不符合真实任务一个一个添加的产品模型。
+  - 第一坏层：
+    - API 边界把“批量生产清单”与“任务创建动作”混成一个批量 endpoint；正确边界应是清单只负责枚举候选，创建任务必须按单集执行。
+  - 根因：
+    - 为了快速修复“工作台看不到真实任务”，把 manifest 到 job 的映射做成批量接口，跳过了普通任务系统的单任务创建语义。
+  - 已落地修复：
+    - 删除批量 `materialize` 路由和前端 client。
+    - 新增单集接口：`POST /api/v1/jobs/remix-production/tasks/job`，请求体为 `{ "season": 2, "episode": 2 }`。
+    - 前端发现 pending 清单项缺 job 时，按任务顺序逐条调用单集创建接口；没有批量上传接口。
+    - 删除 `JobQueueTable` 中残留的 `remix-production:` 前端假 ID 兼容分支，任务表只接受真实 DB job。
+  - 当前运行态验证：
+    - `POST /api/v1/jobs/remix-production/materialize` 返回 `405 Method Not Allowed`。
+    - `POST /api/v1/jobs/remix-production/tasks/job` with `S02E02` 返回已有真实 job `d8abc434-9a70-4e6f-81fd-1bb41e7a45d3`，状态 `pending`，阶段 `content_profile:done, script_footage_remix:pending`。
+  - 验证：
+    - `python -m py_compile src\roughcut\api\jobs.py src\roughcut\api\schemas.py src\roughcut\pipeline\orchestrator.py`
+    - `pnpm --dir frontend run typecheck`
+    - `pnpm --dir frontend exec vitest run src/pages/page-interactions.audit.test.tsx --environment jsdom`（`7 passed`）
+    - `pnpm --dir frontend run build`
+    - `git diff --check -- src/roughcut/api/jobs.py frontend/src/api/jobs.ts frontend/src/pages/JobsPage.tsx frontend/src/features/jobs/JobQueueTable.tsx frontend/src/pages/page-interactions.audit.test.tsx docs/agent-current-state.md` 只剩 Git CRLF 换行提示，无 whitespace error。
+
+- 2026-06-19: 修复影视二创生产全链路运行稳定性，并完成 S02E02 单集样片：
+  - 观察到的症状：
+    - `S02E02 · 仓储超市` 启动后 TTS run 长时间停在 `queued`，导致脚本 300 秒超时失败。
+    - 旧 TTS run 从持久化记录恢复后排在新生产任务前面，且 API dev `--reload` 会在长 TTS 过程中杀掉后台任务，造成 MOSS 生成进度反复从 1/10 重来。
+    - API dev 运行态还有多 worker 风险；内存 `_RUNS` 和队列 worker 不能在多个 uvicorn worker 间共享。
+  - 第一坏层：
+    - `src/roughcut/api/tools.py` 的工具队列恢复和派发契约不稳定：历史非终态 run 无条件恢复、worker 领取 run 前不先标记 running、相同 TTS 请求会重复入队。
+    - `docker-compose.dev.yml` 的 API 运行模式与 in-process 工具队列不兼容：`--reload` 和多 worker 都会中断/分裂长任务状态。
+  - 根因：
+    - 二创链路把 MOSS TTS 这种长任务放在 API 进程内执行，但 dev API 被配置成热重载/多进程，导致任何源码时间戳变化或 worker 切换都可能破坏工具队列。
+    - TTS 等待预算固定 300 秒，无法覆盖 10 段 MOSS voice-clone 文案生成。
+  - 已落地修复：
+    - 工具 worker 领取 queued run 时先持久化为 `running`，避免“正在执行但仍显示排队”。
+    - 非终态历史 run 恢复增加 2 小时窗口；创建时间已过窗口的旧 run 自动 `failed`，不再堵新任务。
+    - TTS 请求增加 `request_signature` 幂等：同参数已有 queued/running run 时复用；复用 active run 时取消同签名 queued 副本。
+    - `scripts/build_script_footage_remix_samples.py` 的 TTS 等待改为按 MOSS 分段动态扩展，保留基础 300 秒但长文案可放宽到 `120 + segment_count * 90` 秒。
+    - `docker-compose.dev.yml` 的 API 去掉 `--reload`，并显式 `--workers 1`，保护 in-process 工具队列。
+    - 当前 `roughcut-api-1` 已重建，命令确认为 `roughcut api --host 0.0.0.0 --port 8000 --workers 1 ...`。
+  - 当前样片结果：
+    - job `d8abc434-9a70-4e6f-81fd-1bb41e7a45d3` 已完成：`status=done`，`progress_percent=100`，`script_footage_remix=done`。
+    - 最终视频：`E:\WorkSpace\RoughCut\data\runtime\output\script-footage-remix-production\bluey_script_footage_remix\s02e02\s02e02_仓储超市\bluey_s02e02_仓储超市_parenting_remix.mp4`。
+    - ffprobe：1920x1080，28fps，AAC 音频，duration `235.606s`，size `119552011`。
+    - QA：`passed=true`、`status=warn`；唯一 warning 为时长超出 2-3 分钟目标，符合“完整保留文案，时长限制降权”。
+    - TTS：`moss_tts_local` + `moss_voice_clone`，参考音频 `/app/data/tools/reference-uploads/读绘本试音-2.mp3`。
+    - TTS-ASR：`qwen3_asr_forced_aligner_on_tts`，coverage `0.9967`，字幕覆盖 `1.0`，unmatched `0`，bad drift `0`，最大 start drift `0.04s`，最大 end drift `0.12s`。
+    - Source-ASR：`done`，anchor_count `14`。
+    - 原片情景桥：LLM 判定插入，2 个原片声画桥，总时长 `25.2s`，mapping 来源 `llm_source_asr_mapping`，`llm_reviewed=true`。
+    - Hyperframes：`enabled=true`，element_count `65`，effect_count `142`，packaging cue `14`，semantic packaging 来源 `llm_script_packaging` 且 `llm_reviewed=true`。
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests\test_start_script_process_guard.py tests\test_tools_reference_audio_history.py tests\test_remix_quality_contracts.py tests\test_remix_production_api.py -q --basetemp .tmp\pytest-tools-remix-queue`（`131 passed`）
+    - `python -m py_compile src\roughcut\api\tools.py scripts\build_script_footage_remix_samples.py src\roughcut\api\jobs.py`
+    - `ffprobe` 验证最终 MP4 1920x1080、28fps、音频存在。
+    - 抽查 review frame：`s02e02_review_03_117803ms.jpg` 非空，字幕儿童向样式可见，原片底部字幕区被裁切。
+
+- 2026-06-19: 珍妮斯 B 站登录绑定与账号隔离已确认：
+  - 观察到的症状：用户完成 B 站登录后，RoughCut 仍显示 `login_invalid`，且早期方案会把可读账号标签当作 social-auto-upload cookie key，存在跨创作者同名账号覆盖风险。
+  - 第一坏层：`sau_cli.py bilibili check` 仍调用旧 `biliup renew` 校验；RoughCut 发布执行层也优先读取 `account_label`，没有优先解析 `social-auto-upload:<account_name>:<platform>` 隔离凭证。
+  - 根因：登录、状态检查、发布执行三条路径没有共享同一个“内部凭证 key vs 展示标签”的契约。
+  - 已落地修复：创作者绑定保存 `account_label=珍妮斯baby · Chrome` 供 UI 展示，保存 `account_name=creator-7be7da2e7d54-bilibili-chrome` 作为隔离 cookie key；发布执行层优先从 `credential_ref` 解析内部 key；B 站 `check` 改为复用 `bilibili_setup/cookie_auth`。
+  - 当前运行态：B 站绑定 `credential_ref=social-auto-upload:creator-7be7da2e7d54-bilibili-chrome:bilibili`，cookie 文件 `E:\WorkSpace\_eval\social-auto-upload\cookies\bilibili_creator-7be7da2e7d54-bilibili-chrome.json` 存在，接口 `/api/v1/creator-cards/7be7da2e-7d54-4d0b-a63d-809d71094839/platform-bindings/social-auto-upload/login-status` 返回 `login_valid`。
+  - 验证：`python -m py_compile src\roughcut\api\creator_assets.py src\roughcut\publication_social_auto_upload.py scripts\codex_host_bridge.py`；`PYTHONPATH=src python -m pytest tests\test_creator_publication_profiles_api.py tests\test_publication_social_auto_upload.py tests\test_codex_host_bridge.py -q`（`35 passed`）；`pnpm --dir frontend exec vitest run src/pages/PublicationManagementPage.binding.test.tsx --environment jsdom`（`3 passed`）；`E:\WorkSpace\_eval\social-auto-upload\.venv\Scripts\python.exe sau_cli.py bilibili check --account creator-7be7da2e7d54-bilibili-chrome` 输出 `valid`。
+
+- 2026-06-19: 已绑定平台增加“打开后台确认账号”能力：
+  - 观察到的产品缺口：`login_valid` 只能证明 cookie 可用，不能让用户肉眼确认当前绑定是否为正确平台账号。
+  - 第一坏层：RoughCut/host bridge 只有 `login/check` 两个 social-auto-upload 操作，缺少“用已绑定隔离 cookie 打开平台后台”的动作。
+  - 已落地修复：
+    - `sau_cli.py` 新增各平台 `open-dashboard --account <account> --headed`，用保存的 storage state 打开平台创作者后台。
+    - RoughCut API 新增 `POST /api/v1/creator-cards/{creator_id}/platform-bindings/social-auto-upload/dashboard`，只允许 `login_confirmed` 绑定调用，并从 binding/credential_ref 解析内部隔离 key。
+    - host bridge 新增 `/v1/host/social-auto-upload-dashboard`，在 Windows 宿主机正常窗口启动后台页面。
+    - 智能发布管理平台卡片新增“打开后台”按钮，已绑定平台可直接打开后台确认头像/昵称/账号归属。
+  - 当前运行态：珍妮斯 B 站 dashboard 接口返回 `dashboard_started`，命令为 `sau_cli.py bilibili open-dashboard --account creator-7be7da2e7d54-bilibili-chrome --headed`，`launch_source=codex_host_bridge`。
+  - 验证：`python -m py_compile src\roughcut\api\creator_assets.py src\roughcut\publication_social_auto_upload.py scripts\codex_host_bridge.py`；`E:\WorkSpace\_eval\social-auto-upload\.venv\Scripts\python.exe -m py_compile E:\WorkSpace\_eval\social-auto-upload\sau_cli.py`；`PYTHONPATH=src python -m pytest tests\test_creator_publication_profiles_api.py tests\test_codex_host_bridge.py tests\test_publication_social_auto_upload.py -q`（`37 passed`）；`pnpm --dir frontend exec vitest run src/pages/PublicationManagementPage.binding.test.tsx --environment jsdom`（`4 passed`）；`pnpm --dir frontend run typecheck`；`pnpm --dir frontend run build`。
+
+- 2026-06-19: 视频号登录态耐久性改造：
+  - 观察到的症状：珍妮斯视频号 profile 曾被写成 `login_confirmed`，但 `cookies` 目录只有二维码图片，没有 `tencent_creator-...json`，真实 `sau_cli.py tencent check` 返回 `invalid`。
+  - 第一坏层：
+    - 绑定保存以前只信前端 `login_confirmed`，没有强制真实 `check`。
+    - `tencent_uploader` 只保存 Playwright `storage_state` JSON，并用临时浏览器上下文校验/发布；微信系登录态可能依赖更完整的浏览器 profile 状态。
+  - 已落地修复：
+    - RoughCut 绑定保存前必须真实 `check=login_valid`；无效不能写成已绑定。
+    - 打开后台前也必须真实 `check`；无效会把 binding 降级为 `login_invalid`。
+    - `tencent_uploader` 对每个账号使用 `cookies/tencent_profiles/<account>` 持久 Chrome profile；扫码登录、cookie_auth、视频上传、图文上传都复用该 profile。
+    - 视频号 `check` 成功时会写回 `storage_state`，用于刷新本地凭证快照。
+  - 当前限制：
+    - 这不能绕过微信/视频号服务端强制风控或主动过期；但可以避免 RoughCut 因临时上下文/只保存 JSON cookie 导致的频繁重新登录。
+    - 当前珍妮斯视频号仍需重新扫码一次，之后才会生成持久 profile 和可用 cookie。
+  - 验证：`E:\WorkSpace\_eval\social-auto-upload\.venv\Scripts\python.exe -m py_compile E:\WorkSpace\_eval\social-auto-upload\sau_cli.py E:\WorkSpace\_eval\social-auto-upload\uploader\tencent_uploader\main.py`；`sau_cli.py tencent open-dashboard --help` 正常；当前未扫码状态下 `sau_cli.py tencent check --account creator-7be7da2e7d54-wechat-channels-chrome` 仍按预期返回 `invalid`。
+
+- 2026-06-19: 修复珍妮斯视频号“已登录但 RoughCut 没反应”的根因：
+  - 观察到的症状：
+    - 视频号登录窗口已进入 `https://channels.weixin.qq.com/platform` 后台首页，页面显示账号 `路西王子` / 视频号 ID `pshhDBsA7U0HZvD`，但 RoughCut 绑定弹窗仍显示“正在等待登录完成”。
+  - 第一坏层：
+    - 上游 `social-auto-upload` 的 `tencent_uploader` 登录完成检测与 `sau_cli.py tencent check` 边界。
+  - 根因：
+    - `_is_tencent_login_completed()` 只接受 `/platform/post/create` 和 `/platform/post/list`，没有把真实登录后落点 `/platform` 后台首页纳入完成态。
+    - `cookie_auth()` 精确等待发布页 URL，遇到微信重定向后台首页时会误判失败。
+    - `sau_cli.py tencent check` 在调用持久 profile 校验前先要求 `tencent_*.json` 存在；首次扫码完成但尚未写 JSON 时，check 根本不读取已登录的持久 profile。
+  - 已落地修复：
+    - 新增 `TENCENT_PLATFORM_URL`，登录态检测先排除二维码/扫码登录控件，再接受发布页真实控件或后台首页多个创作者标志（内容管理、互动管理、数据中心、收入与服务、视频号ID、发表视频）。
+    - `cookie_auth()` 改为加载发布页后等待 DOM 稳定，不再硬等精确 URL。
+    - `sau_cli.py tencent check` 即使 JSON 不存在也会调用 `tencent_cookie_auth()` 检查同账号持久 profile，并在成功时写回 storage_state。
+    - 如果可见后台窗口正在占用持久 profile，`cookie_auth()` 会回退到已写出的 storage_state 快照做只读校验，避免“已打开后台反而 check 失败”。
+  - 当前运行态：
+    - `E:\WorkSpace\_eval\social-auto-upload\cookies\tencent_creator-7be7da2e7d54-wechat-channels-chrome.json` 已生成。
+    - `sau_cli.py tencent check --account creator-7be7da2e7d54-wechat-channels-chrome` 输出 `valid`。
+    - RoughCut `login-status` 返回 `login_valid`，`check_source=codex_host_bridge`。
+    - 珍妮斯视频号 binding 已写入 `login_confirmed`，`credential_ref=social-auto-upload:creator-7be7da2e7d54-wechat-channels-chrome:wechat-channels`。
+    - “打开后台”接口返回 `dashboard_started`，可用该隔离账号打开视频号后台确认账号。
+  - 验证：
+    - `E:\WorkSpace\_eval\social-auto-upload\.venv\Scripts\python.exe -m py_compile E:\WorkSpace\_eval\social-auto-upload\sau_cli.py E:\WorkSpace\_eval\social-auto-upload\uploader\tencent_uploader\main.py`
+    - `E:\WorkSpace\_eval\social-auto-upload\.venv\Scripts\python.exe sau_cli.py tencent check --account creator-7be7da2e7d54-wechat-channels-chrome`
+    - 在视频号后台窗口占用持久 profile 时再次执行同一 check，日志显示回退到 cookie 快照并返回 `valid`。
+    - `POST /api/v1/creator-cards/7be7da2e-7d54-4d0b-a63d-809d71094839/platform-bindings/social-auto-upload/login-status` for `wechat-channels` 返回 `login_valid`。
+    - `POST /api/v1/creator-cards/7be7da2e-7d54-4d0b-a63d-809d71094839/platform-bindings/social-auto-upload/dashboard` for `wechat-channels` 返回 `dashboard_started`。
+
+- 2026-06-19: 珍妮斯二创系列自动发布链路计划收口与发布日程能力：
+  - 观察到的症状：
+    - 用户补齐珍妮斯多平台发布凭证后，S02E02 `仓储超市` 成片和 smart-copy 物料可读，但 `POST /api/v1/intelligent-copy/publication/plan` 仍返回 `blocked`，原因是“创作者档案没有可发布的 browser-agent 登录凭据绑定”。
+    - 旧物料合同仍把视频号标为 `manual_handoff`，与当前已接入 `social-auto-upload` 的运行态不一致。
+    - 系统没有“同一账号每天最多发布一条”的共享发布日志/顺延策略；连续不同视频可能都创建为立即发布 attempt。
+  - 第一坏层：
+    - 智能发布入口只读取 avatar material profile 的 `creator_profile.publishing.platform_credentials`，没有合并 creator card 的 `CreatorPlatformBinding`。
+    - 平台能力矩阵仍将 `wechat-channels.manual_handoff_only=true`。
+    - `submit_publication_attempts` 只有同素材重复发布去重，没有按“平台账号 + 本地日期”的发布日程容量控制。
+  - 根因：
+    - 创作者素材档案、创作者卡片发布绑定、平台能力矩阵三者演进后没有重新统一到 `build_publication_plan(...)` 的单一凭据合同。
+    - 发布日志已有 `PublicationAttempt`，但没有被用作账号日程账本。
+  - 已落地修复：
+    - `intelligent-copy` 发布输入会把同名/同 UUID creator card 的 `CreatorPlatformBinding` 合并进 avatar material profile 的 `platform_credentials`。
+    - `credential_ref=social-auto-upload:...` 会在凭据归一化时推断 `adapter=social_auto_upload`。
+    - `wechat-channels` 在平台矩阵中不再是 manual handoff；有 confirmed social-auto-upload 绑定时进入自动发布 target。
+    - `submit_publication_attempts` 新增账号日程策略：同平台同账号默认每天 1 条；当天已有 active/published/scheduled attempt 时，自动顺延到下一个空档日 `10:00 Asia/Shanghai`，并写入 `request_payload.metadata.publication_schedule_policy` 与 `operator_summary`。
+    - `social-auto-upload` 定时成功状态从 `draft_created` 改为 `scheduled_pending`。
+  - 当前运行态：
+    - 珍妮斯 `bilibili/douyin/xiaohongshu/kuaishou/wechat-channels` 五个平台隔离凭证均 `valid`。
+    - S02E02 发布计划 artifact：`artifacts/janice-s02e02-publication-plan.json`。
+    - 发布计划结果：`status=ready`，`publish_ready=true`，目标 `douyin,xiaohongshu,bilibili,kuaishou,wechat-channels` 全部为 `adapter=social_auto_upload`。
+    - 已触发真实发布并写入 `PublicationAttempt` 日志；发布响应 artifact：
+      - `artifacts/janice-s02e02-publication-publish-response.json`
+      - `artifacts/janice-s02e02-publication-republish-response.json`
+      - `artifacts/janice-s02e02-publication-republish-after-host-bridge-response.json`
+      - `artifacts/janice-s02e02-publication-republish-title-category-fix-response.json`
+      - `artifacts/janice-s02e02-publication-retry-wechat-response.json`
+    - `worker-publication` 已加入 runtime/dev compose、启动脚本和刷新脚本；当前容器 `roughcut-worker-publication-1` 从 `/app/src` 加载新代码，能解析 `social_auto_upload` 执行器。
+    - Docker worker 不能直接执行 Windows 路径 `E:/WorkSpace/_eval/social-auto-upload`；已通过 Codex host bridge 新增 `/v1/host/social-auto-upload-command` 在宿主机执行真实 `sau_cli.py upload-video`，并把 `/app/data/output/...` 路径映射回 Windows host path。
+    - 当前 S02E02 发布结果：
+      - 抖音 attempt `e9ea99b791f048299a7ef840868bc604`：`scheduled_pending`，平台定时任务已创建，计划 `2026-06-19 20:30 Asia/Shanghai`。
+      - 快手 attempt `8bccdef08a89489db09b151253c549b9`：`scheduled_pending`，平台定时任务已创建，计划 `2026-06-19 20:00 Asia/Shanghai`。
+      - B站 attempt `133ca58ced2a4af3adf759a8c2819b51`：失败。前置标题、封面、分区已走通，当前第一坏层是 `social-auto-upload/uploader/bilibili_uploader/main.py::_set_schedule`，旧选择器等待 `.time-container input[placeholder*=日期/时间/预约]`，而当前页面失败现场只有定时开关/隐藏的 `time-release-dialog`。
+      - 小红书 attempt `f616adffaac14a26ae3cffcdcf277e0d`：失败。第一坏层是 `social-auto-upload/uploader/xiaohongshu_uploader/main.py::set_schedule_time_xiaohongshu`，开启定时后旧 `d-datepicker-input-filter.show input.d-text` 未出现。
+      - 视频号 attempt `a506e1f3058a4597bff56a3e29eabb25`：重试到 attempt 5 后仍失败。`sau_cli.py tencent check --account creator-7be7da2e7d54-wechat-channels-chrome` 返回 `valid`，但真实上传进入 `https://channels.weixin.qq.com/platform/post/create` 后 `_is_tencent_login_completed` 仍判定未进入创作页；第一坏层是上游视频号登录态/创作页进入判断不一致。
+  - 验证：
+    - `python -m py_compile src\roughcut\api\intelligent_copy.py src\roughcut\publication.py`
+    - `python -m py_compile src\roughcut\publication_social_auto_upload.py src\roughcut\publication.py scripts\codex_host_bridge.py`
+    - `PYTHONPATH=src python -m pytest tests\test_intelligent_copy_publication_api.py tests\test_publication.py::test_publication_plan_routes_wechat_channels_to_social_auto_upload_target tests\test_publication.py::test_submit_publication_attempts_auto_defers_second_account_video_to_next_day tests\test_publication_social_auto_upload.py -q`（`23 passed`）
+    - `PYTHONPATH=src python -m pytest tests\test_publication.py::test_publication_plan_defaults_to_stable_platforms_when_not_explicitly_requested tests\test_publication.py::test_publication_plan_routes_wechat_channels_to_social_auto_upload_target tests\test_publication.py::test_submit_publication_attempts_auto_defers_second_account_video_to_next_day tests\test_publication_social_auto_upload.py tests\test_intelligent_copy_publication_api.py::test_publish_intelligent_folder_skips_browser_agent_gate_for_social_auto_upload_only -q`（`19 passed`）
+    - `PYTHONPATH=src python -m pytest tests\test_publication_social_auto_upload.py::test_social_auto_upload_command_uses_host_bridge_when_root_is_not_runtime_accessible tests\test_publication_social_auto_upload.py::test_submit_publication_attempt_to_social_auto_upload_marks_attempt_published tests\test_codex_host_bridge.py::test_social_auto_upload_command_maps_runtime_paths_to_host tests\test_codex_host_bridge.py::test_social_auto_upload_check_reports_valid_cookie tests\test_codex_host_bridge.py::test_social_auto_upload_dashboard_uses_host_root_and_headed_window -q`（`5 passed`）
+    - `PYTHONPATH=src python -m pytest tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_derives_missing_title_from_body_for_title_required_platform tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_bilibili_uses_parenting_default_category_when_missing tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_account_name_prefers_payload_credential_ref_over_uuid -q`（`3 passed`）
+    - `POST /api/v1/intelligent-copy/publication/plan` for S02E02 + creator profile `61007301d4d94bc0a8311066c2d93c7d` 返回 ready。
+    - `GET /api/v1/intelligent-copy/publication/attempts/recent?creator_profile_id=61007301d4d94bc0a8311066c2d93c7d&limit=5` 显示抖音/快手 `scheduled_pending`，B站/小红书/视频号为上述平台适配失败。
+
+- 2026-06-19: 珍妮斯自动发布链路二次根因修复进展：
+  - 观察到的症状：小红书同一 attempt 在旧 worker 下出现两个并发 `sau_cli.py xiaohongshu upload-video` 进程；B站已完成字段填写但最终等待成功态失败；视频号上传完成等待超时但缺少足够诊断。
+  - 第一坏层：
+    - RoughCut `submit_publication_attempt_to_social_auto_upload(...)` 在长时间外部 CLI 执行前没有先提交 attempt/run 的 `processing` 状态，导致下一轮 worker tick 仍能看到 `queued` 并重复执行。
+    - 小红书上游适配器的封面输入、定时输入、最终自定义发布按钮点击路径与当前页面 DOM 不匹配。
+    - B站上游适配器只依赖页面跳转/成功文案，缺少对最终投稿接口 `dtime` 补丁命中和接口响应 `code=0` 的确认。
+    - 视频号上游适配器在上传完成超时时只输出按钮 disabled 摘要，无法区分真实上传处理中、必填字段缺失或平台校验失败。
+  - 根因修复：
+    - RoughCut 侧新增 social-auto-upload 执行前 processing-state commit，长命令开始前写入 attempt/run 状态、lease 与 heartbeat，阻止重复 worker 执行。
+    - 小红书适配器扩展封面上传选择器、定时输入 DOM fallback、上传完成等待与自定义 `xhs-publish-btn` 物理点击路径；最终点击修复仍需重载 worker 后 live 验证。
+    - B站适配器扩大最终投稿接口匹配到 `/x/vu/web/add*`/`edit`，记录 `dtime` 补丁命中和 submit response；接口响应 `code=0` 现在可作为成功态，避免页面未跳转导致误判失败。
+    - 视频号适配器新增超时 PNG/HTML/JSON 诊断，记录发表按钮、状态文本、错误/toast/tips 和页面关键行。
+  - 当前运行态：
+    - 没有残留 `sau_cli.py` 进程。
+    - 小红书 attempt `f616adffaac14a26ae3cffcdcf277e0d` 被故意置为 `failed/social_auto_upload_duplicate_execution_guard`，避免旧 worker 在代码重载前重复创建定时稿。
+    - 抖音 attempt `e9ea99b791f048299a7ef840868bc604` 仍为 `scheduled_pending`，`2026-06-19 20:30 Asia/Shanghai`。
+    - 快手 attempt `8bccdef08a89489db09b151253c549b9` 仍为 `scheduled_pending`，`2026-06-19 20:00 Asia/Shanghai`。
+    - 视频号 attempt `a506e1f3058a4597bff56a3e29eabb25` 仍为 failed，下一次重试应先读取新 JSON/HTML 诊断。
+    - B站 attempt `133ca58ced2a4af3adf759a8c2819b51` 仍为 failed，源码已补接口级成功判定，需重载后 live retry。
+  - 必须遵守：
+    - 重载 `worker-publication` 和 Windows `social-auto-upload` 源码后，才允许重试小红书/B站/视频号。
+    - 小红书最终发布点击在 duplicate guard 后尚未 live 证明成功，不要把它记为已定时成功。
+    - B站现在应优先看 submit response `code=0` 与 `dtime` 命中记录，不再只看页面是否跳转。
+  - 验证：
+    - `python -m py_compile src\roughcut\publication.py src\roughcut\publication_social_auto_upload.py src\roughcut\api\intelligent_copy.py`
+    - `PYTHONPATH=src python -m pytest tests\test_publication_social_auto_upload.py -q`（`20 passed`）
+    - `E:\WorkSpace\_eval\social-auto-upload\.venv\Scripts\python.exe -m py_compile uploader\xiaohongshu_uploader\main.py uploader\tencent_uploader\main.py uploader\bilibili_uploader\main.py`
+    - `E:\WorkSpace\_eval\social-auto-upload\.venv\Scripts\python.exe -m unittest tests.test_xiaohongshu_uploader`（`12 passed`）
+    - `E:\WorkSpace\_eval\social-auto-upload\.venv\Scripts\python.exe -m unittest tests.test_tencent_uploader`（`4 passed`）
+    - B站全文件 unittest 会触发既有交互登录用例，已改跑非交互精确用例：`test_bilibili_scheduled_submit_patch_adds_target_dtime`、`test_bilibili_submit_response_success_counts_as_completion`、三个 upload payload mapping tests（`5 passed`）。
+
+- 2026-06-19: 珍妮斯自动发布链路最新 live 收口状态：
+  - 当前 S02E02 `仓储超市` 已成功进入平台定时队列的平台：
+    - 抖音 `e9ea99b791f048299a7ef840868bc604`：`scheduled_pending`，`2026-06-19 20:30 Asia/Shanghai`。
+    - 快手 `8bccdef08a89489db09b151253c549b9`：`scheduled_pending`，`2026-06-19 20:00 Asia/Shanghai`。
+    - 小红书 `f616adffaac14a26ae3cffcdcf277e0d`：`scheduled_pending`，`2026-06-20 21:00 Asia/Shanghai`。
+    - B站 `133ca58ced2a4af3adf759a8c2819b51`：`scheduled_pending`，`2026-06-20 18:00 Asia/Shanghai`，submit response `code=0`，`aid=116777056995111`，`bvid=BV15Uj66SEXz`。
+  - 小红书根因闭环：
+    - 症状：二创内容发布时页面要求内容类型/原创声明并阻断最终发布。
+    - 第一坏层：`social-auto-upload/uploader/xiaohongshu_uploader/main.py` 原创声明和最终发布点击。
+    - 根因：适配器把原创声明当默认必开，而珍妮斯这条是二创；同时当前小红书内容类型声明是二级菜单，自定义发布按钮需要更稳的物理点击。
+    - 修复：原创声明改为显式 opt-in；未要求原创时保持关闭；内容类型声明仅在要求原创时选择；最终发布按钮支持可见 custom element/shadow DOM 候选和物理点击 fallback。
+  - B站根因闭环：
+    - 症状：页面日志显示“投稿动作已提交”，但没有提交接口命中，随后长时间等待。
+    - 第一坏层：`social-auto-upload/uploader/bilibili_uploader/main.py::_publish`。
+    - 根因：旧 `_publish()` 点击任意“投稿”文本后就返回，未验证真实提交信号；合集选择也把可选 UI 漂移当成硬失败。
+    - 修复：最终点击必须观察到 submit route hit、submit response、成功文案/URL 或自动提交浮层；`/x/vu/web/add*`/`edit` 请求补 `dtime`，`code=0` 为成功证据；可选合集缺失降级为诊断并继续。
+  - 视频号仍未 live 收口：
+  - 最新真实失败诊断显示页面已到主表单，发表按钮 enabled 但不可见/在隐藏候选上，旧上传完成判定只接受 visible publish button，导致 900s 误等。
+  - 当前源码已改为遍历发表按钮候选、尝试滚动到视口，并在主表单稳定且按钮已启用时继续；该修复通过 `tests.test_tencent_uploader`，但还需要一次不被手动终止的 live retry。
+
+- 2026-06-19 小红书原创声明策略更正：
+  - 用户确认：珍妮斯二创系列的小红书“原创声明”应按“本账号是否创作本期视频、是否非搬运成片”理解，应该开启。
+  - 第一坏层：RoughCut 平台元数据策略，而不是小红书 DOM 自动化。
+  - 根因：`xiaohongshu` 在 `publication_platform_matrix.json` 里仍是 `supports_declaration=false/default_declaration=""`，导致默认 payload 没有 `原创声明`，也就不会向 social-auto-upload 传 `--original-declaration`。
+  - 已修复：小红书平台矩阵改为支持声明并默认 `原创声明`；新增 payload 回归测试，既有命令构建测试确认带 `--original-declaration`。
+  - 注意：已创建的小红书定时 attempt `f616adffaac14a26ae3cffcdcf277e0d` 是旧策略下提交的 `2026-06-20 21:00 Asia/Shanghai` 定时稿；如要保证该条也开启原创声明，需要先在小红书队列取消/替换，避免同内容重复定时。
+  - 验证：`PYTHONPATH=src python -m pytest tests\test_publication.py::test_build_request_payload_uses_shared_default_declaration_for_xiaohongshu tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_xiaohongshu_group_chat_and_original -q`（`2 passed`）。
+
+- 2026-06-19 B站/小红书当前成功态更正：
+  - 用户反馈：B站、小红书仍不能按预期算成功，抖音、快手发布没问题。
+  - B站第一坏层：RoughCut command builder 在 `request_payload.category=null` 时没有下发 `--tid/--category`。
+  - B站根因：`BILIBILI_DEFAULT_TID=254` / `BILIBILI_DEFAULT_CATEGORY=生活/亲子` 有常量但缺省路径未使用，导致 B站自动归类到 `tid=47`（动画/同人·手书）。
+  - B站只读后台核验：`x/vupre/web/archive/view?aid=116777056995111` 返回 `code=0`、`BV15Uj66SEXz`、`state_desc=通过审核，等待发布`、`dtime=1781949600`，但 `tid=47`，所以当前稿件是“已进入后台但分区错误”，不应作为完全收口成功。
+  - 已修复：B站缺省分区现在显式下发 `--tid 254 --category 生活/亲子`；回归测试已更新。
+  - 小红书当前 scheduled attempt 是旧策略下创建，原创声明关闭；原创开启后的新策略尚未 live 提交，不能把旧定时稿当作成功证明。
+  - 验证：`python -m py_compile src\roughcut\publication_social_auto_upload.py src\roughcut\publication.py`；`PYTHONPATH=src python -m pytest tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_bilibili_uses_parenting_default_category_when_missing tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_xiaohongshu_group_chat_and_original tests\test_publication.py::test_build_request_payload_uses_shared_default_declaration_for_xiaohongshu -q`（`3 passed`）。
+
+- 2026-06-19 B站提交后后台验稿补齐：
+  - 症状：B站 CLI 可以返回成功并创建定时稿，但 RoughCut 只根据 CLI 成功写入 `scheduled_pending`，没有核对后台稿件字段。
+  - 第一坏层：RoughCut `submit_publication_attempt_to_social_auto_upload(...)` 的成功判定边界；上游 `social-auto-upload` 只负责提交，RoughCut 侧缺少 post-submit verification。
+  - 根因：B站 submit response 的 `code=0` 只能证明平台接收了稿件，不能证明分区、标题、定时时间等业务字段符合 RoughCut 计划。
+  - 已修复：
+    - `social-auto-upload sau_cli.py` 新增 `bilibili verify-video` 只读命令，使用创作中心 `x/vupre/web/archive/view` 读取后台稿件并比对 `title/tid/dtime`。
+    - RoughCut B站上传成功后自动解析 `aid`，调用 `verify-video`；核验失败或缺少 `aid` 时标记 `needs_human`，避免把字段错误的稿件当成成功，也避免自动重试造成重复投稿。
+  - 真实核验：`aid=116777056995111` 返回 `success=true`、`state_desc=通过审核，等待发布`，但 `verified=false`，`mismatches=[{field=tid, expected=254, actual=47}]`；新链路能正确抓出当前 B站分区错误。
+  - 验证：
+    - `python -m py_compile src\roughcut\publication.py src\roughcut\publication_social_auto_upload.py`
+    - `PYTHONPATH=src python -m pytest tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_bilibili_uses_parenting_default_category_when_missing tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_xiaohongshu_group_chat_and_original tests\test_publication_social_auto_upload.py::test_bilibili_social_auto_upload_verifies_backend_archive_before_scheduled_success tests\test_publication_social_auto_upload.py::test_bilibili_social_auto_upload_backend_mismatch_needs_human tests\test_publication.py::test_build_request_payload_uses_shared_default_declaration_for_xiaohongshu -q`（`5 passed`）
+    - `E:\WorkSpace\_eval\social-auto-upload\.venv\Scripts\python.exe -m py_compile sau_cli.py`
+    - `E:\WorkSpace\_eval\social-auto-upload\.venv\Scripts\python.exe -m unittest tests.test_sau_bilibili_cli.BilibiliCliTests.test_build_parser_accepts_bilibili_verify_video tests.test_sau_bilibili_cli.BilibiliCliTests.test_verify_bilibili_archive_payload_accepts_matching_schedule_and_tid tests.test_sau_bilibili_cli.BilibiliCliTests.test_verify_bilibili_archive_payload_reports_tid_mismatch`（`3 passed`）

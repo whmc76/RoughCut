@@ -1226,6 +1226,21 @@ def test_merge_short_chain_entries_merges_short_followon_clause_leftward() -> No
     assert [item.text_raw for item in merged] == ["所以说它的揣在兜里非常轻便，呃，非常的无感。"]
 
 
+def test_resolve_sequence_merges_orphan_pronoun_into_following_spoken_clause() -> None:
+    entries = [
+        _worded_entry(0, 0.0, [("当然", 1.93)]),
+        _worded_entry(1, 1.93, [("你", 1.41)]),
+        _worded_entry(2, 3.34, [("拉开以后你不去固定啊", 2.34)]),
+    ]
+
+    resolved = _resolve_subtitle_entry_sequence(entries, max_chars=20, max_duration=3.8, allow_window_refine=True)
+
+    resolved_texts = [item.text_raw for item in resolved]
+    assert "你" not in resolved_texts
+    assert "".join(resolved_texts) == "当然你拉开以后你不去固定啊"
+    assert any("你拉开以后你不去固定啊" in text for text in resolved_texts)
+
+
 def test_resolve_sequence_repairs_short_followon_clause_after_readability_split() -> None:
     entries = [
         _worded_entry(0, 0.0, [("啊，这个晚上出门都会带它。", 2.41)]),
@@ -1632,6 +1647,20 @@ def test_quality_report_warns_single_generic_word_split() -> None:
     assert any("普通词跨字幕截断" in reason for reason in report["warning_reasons"])
 
 
+def test_quality_report_ignores_filler_and_complete_short_noun_boundary_false_positive() -> None:
+    report = build_subtitle_quality_report(
+        subtitle_items=[
+            {"text_final": "呃"},
+            {"text_final": "包括这他们这个最近一。"},
+            {"text_final": "小把手"},
+            {"text_final": "你配合这个把手去开它的话， 它。"},
+        ],
+    )
+
+    assert report["metrics"]["generic_word_split_count"] == 0
+    assert not any("普通词跨字幕截断" in reason for reason in report["warning_reasons"])
+
+
 def test_quality_report_blocks_dense_generic_word_splits() -> None:
     report = build_subtitle_quality_report(
         subtitle_items=[
@@ -1690,6 +1719,21 @@ def test_quality_report_exposes_alignment_source_metrics_per_subtitle() -> None:
     assert alignment["source_counts"] == {"fallback": 1, "provider": 2, "synthetic": 1}
     assert alignment["source_ratios"]["provider"] == 0.5
     assert [item["dominant_source"] for item in alignment["per_subtitle"]] == ["provider", "synthetic"]
+
+
+def test_quality_report_blocks_when_required_word_alignment_is_missing() -> None:
+    report = build_subtitle_quality_report(
+        subtitle_items=[
+            {"index": 0, "text_final": "第一句没有词级时间戳"},
+            {"index": 1, "text_final": "第二句也没有词级时间戳"},
+        ],
+        require_word_alignment=True,
+    )
+
+    assert report["blocking"] is True
+    assert report["score"] <= 65.0
+    assert report["metrics"]["alignment_source"]["missing_word_subtitle_count"] == 2
+    assert any("缺少词级时间戳覆盖 2/2" in reason for reason in report["blocking_reasons"])
 
 
 def test_quality_report_suppresses_generic_summary_warning_when_subject_context_is_specific() -> None:

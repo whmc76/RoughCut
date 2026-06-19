@@ -22,6 +22,7 @@ from roughcut.media.variant_timeline_bundle import (
     resolve_effective_variant_timeline_bundle,
     variant_llm_cut_review,
     variant_refine_decision_summary,
+    variant_subtitle_timeline_issues,
     variant_timeline_diagnostics,
 )
 from roughcut.pipeline.quality import (
@@ -182,7 +183,17 @@ def _summarize_variant_score(name: str, media_path: str | None, quality_check: d
         reasons.append("缺少字幕同步质检结果")
 
     if warning_codes:
-        score -= min(20.0, 4.0 * len(warning_codes))
+        severe_codes = {
+            "subtitle_out_of_bounds",
+            "subtitle_timestamp_disorder",
+            "subtitle_overlap_detected",
+            "subtitle_invalid_range",
+            "subtitle_short_flash_detected",
+            "subtitle_burst_density_detected",
+            "subtitle_local_gap_unstable",
+        }
+        severe_count = len([code for code in warning_codes if code in severe_codes])
+        score -= min(45.0, 10.0 * severe_count + 4.0 * (len(warning_codes) - severe_count))
         reasons.append("warning_codes=" + ", ".join(warning_codes))
 
     effective_gap = _safe_float(check.get("effective_duration_gap_sec"))
@@ -376,15 +387,29 @@ def _score_avatar(
     segments = list(avatar_plan.get("segments") or []) if isinstance(avatar_plan, dict) else []
     reasons: list[str] = []
     score = 100.0
+    reason = str(avatar_result.get("reason") or "").strip()
+    reason_category = str(avatar_result.get("reason_category") or "").strip()
+    if not reason_category:
+        reason_category = classify_render_or_avatar_reason_category(reason) or ""
+
+    if status == "skipped" and reason_category == "not_configured":
+        return {
+            "score": None,
+            "grade": "N/A",
+            "status": "not_configured",
+            "summary": (
+                f"avatar_result=skipped:{reason}({reason_category})"
+                if reason
+                else "avatar_result=skipped:not_configured"
+            ),
+            "provider": str(avatar_plan.get("provider") or ""),
+            "voice_provider": str(avatar_plan.get("voice_provider") or ""),
+        }
 
     if status == "done":
         reasons.append("数字人版本已写入")
     elif status:
         score -= 35.0
-        reason = str(avatar_result.get("reason") or "").strip()
-        reason_category = str(avatar_result.get("reason_category") or "").strip()
-        if not reason_category:
-            reason_category = classify_render_or_avatar_reason_category(reason) or ""
         if reason:
             if reason_category:
                 reasons.append(f"avatar_result={status}:{reason}({reason_category})")
@@ -530,6 +555,275 @@ def _score_subtitle_effects(render_plan: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _score_viewing_experience(
+    *,
+    job: dict[str, Any],
+    render_outputs: dict[str, Any],
+    subtitle_quality: dict[str, Any],
+    render_plan: dict[str, Any],
+    variant_bundle: dict[str, Any] | None,
+    version_scores: list[dict[str, Any]],
+    editing_risk_metrics: dict[str, Any],
+) -> dict[str, Any]:
+    """Score viewer-facing polish separately from delivery/blocking quality gates."""
+
+    components: list[dict[str, Any]] = []
+
+    subtitle_metrics = subtitle_quality.get("metrics") if isinstance(subtitle_quality.get("metrics"), dict) else {}
+    subtitle_timeline_issues = variant_subtitle_timeline_issues(resolve_effective_variant_timeline_bundle(variant_bundle) or {})
+    subtitle_warning_count = len(list(subtitle_quality.get("warning_reasons") or []))
+    subtitle_blocking_count = len(list(subtitle_quality.get("blocking_reasons") or []))
+    short_fragment_count = int(subtitle_metrics.get("short_fragment_count") or 0)
+    generic_word_split_count = int(subtitle_metrics.get("generic_word_split_count") or 0)
+    filler_count = int(subtitle_metrics.get("filler_count") or 0)
+    low_signal_count = int(subtitle_metrics.get("low_signal_count") or 0)
+    subtitle_reasons: list[str] = []
+    subtitle_score = 100.0
+    quality_checks = render_outputs.get("quality_checks") if isinstance(render_outputs.get("quality_checks"), dict) else {}
+    subtitle_sync_warning_codes = [
+        str(code).strip()
+        for payload in quality_checks.values()
+        if isinstance(payload, dict)
+        for code in list(payload.get("warning_codes") or [])
+        if str(code).strip()
+    ]
+    severe_sync_codes = {
+        "subtitle_short_flash_detected",
+        "subtitle_burst_density_detected",
+        "subtitle_local_gap_unstable",
+        "subtitle_out_of_bounds",
+        "subtitle_timestamp_disorder",
+        "subtitle_overlap_detected",
+        "subtitle_invalid_range",
+    }.intersection(subtitle_sync_warning_codes)
+    if subtitle_blocking_count:
+        subtitle_score -= min(55.0, 24.0 * subtitle_blocking_count)
+        subtitle_reasons.append(f"字幕阻断项 {subtitle_blocking_count} 个")
+    if severe_sync_codes:
+        subtitle_score -= min(45.0, 16.0 + 8.0 * len(severe_sync_codes))
+        subtitle_reasons.append("字幕时间结构异常: " + ", ".join(sorted(severe_sync_codes)))
+    final_alignment = quality_checks.get("final_render_subtitle_asr_alignment")
+    if not isinstance(final_alignment, dict):
+        subtitle_score -= 42.0
+        subtitle_reasons.append("缺少最终成片音频 Qwen3 字幕校准审计")
+    elif not bool(final_alignment.get("gate_pass")):
+        audit = final_alignment.get("audit") if isinstance(final_alignment.get("audit"), dict) else {}
+        bad_drift_count = int(audit.get("bad_drift_count") or 0)
+        unmatched_count = int(audit.get("unmatched_count") or 0)
+        avg_start = audit.get("avg_abs_start_drift_sec")
+        avg_end = audit.get("avg_abs_end_drift_sec")
+        subtitle_score -= min(72.0, 38.0 + bad_drift_count * 2.0 + unmatched_count * 3.0)
+        subtitle_reasons.append(
+            "最终成片音频 Qwen3 字幕校准失败"
+            + f": bad_drift={bad_drift_count}, unmatched={unmatched_count}, avg_start={avg_start}, avg_end={avg_end}"
+        )
+    else:
+        audit = final_alignment.get("audit") if isinstance(final_alignment.get("audit"), dict) else {}
+        subtitle_reasons.append(
+            "最终成片音频 Qwen3 字幕校准通过"
+            + f": matched={int(audit.get('matched_count') or 0)}/{int(audit.get('event_count') or 0)}"
+        )
+    if subtitle_timeline_issues:
+        subtitle_score -= min(30.0, 14.0 + len(subtitle_timeline_issues) * 4.0)
+        subtitle_reasons.append(f"字幕时间线校验异常 {len(subtitle_timeline_issues)} 个")
+    if subtitle_warning_count:
+        subtitle_score -= min(18.0, 5.0 * subtitle_warning_count)
+        subtitle_reasons.append(f"字幕 warning {subtitle_warning_count} 个")
+    if short_fragment_count > 2:
+        subtitle_score -= min(12.0, (short_fragment_count - 2) * 2.0)
+        subtitle_reasons.append(f"短碎句 {short_fragment_count} 条")
+    if generic_word_split_count:
+        subtitle_score -= min(14.0, generic_word_split_count * 4.0)
+        subtitle_reasons.append(f"普通词跨字幕截断 {generic_word_split_count} 处")
+    if filler_count or low_signal_count:
+        subtitle_score -= min(10.0, filler_count * 1.5 + low_signal_count * 2.0)
+        subtitle_reasons.append(f"低信息/语气词字幕 {filler_count + low_signal_count} 条")
+    if not subtitle_reasons or not any(
+        not str(reason).startswith("最终成片音频 Qwen3")
+        for reason in subtitle_reasons
+    ):
+        subtitle_reasons.append("字幕读感干净，无明显碎片/截断")
+    components.append(
+        {
+            "name": "subtitle_readability",
+            "score": _round_score(subtitle_score),
+            "grade": _score_to_grade(_round_score(subtitle_score)),
+            "reasons": subtitle_reasons,
+        }
+    )
+
+    diagnostics = variant_timeline_diagnostics(resolve_effective_variant_timeline_bundle(variant_bundle) or {})
+    cut_summary = diagnostics.get("cut_analysis_summary") if isinstance(diagnostics.get("cut_analysis_summary"), dict) else {}
+    refine_summary = diagnostics.get("refine_decision_summary") if isinstance(diagnostics.get("refine_decision_summary"), dict) else {}
+    keep_ratio = _safe_float(job.get("keep_ratio")) or 0.0
+    accepted_cut_count = _effective_applied_cut_count(
+        accepted_cut_count=int(cut_summary.get("accepted_cut_count") or 0),
+        refine_decision_summary=refine_summary,
+    )
+    advisory_high_risk_count = int((editing_risk_metrics or {}).get("high_risk_cut_count") or 0) - int(
+        (diagnostics or {}).get("blocking_high_risk_cut_count") or 0
+    )
+    pacing_score = 100.0
+    pacing_reasons: list[str] = []
+    if keep_ratio <= 0:
+        pacing_score -= 28.0
+        pacing_reasons.append("缺少有效保留比，无法判断节奏")
+    elif keep_ratio > 0.92:
+        pacing_score -= min(18.0, (keep_ratio - 0.92) * 150.0)
+        pacing_reasons.append(f"保留比偏高 {keep_ratio:.1%}，可能偏拖")
+    elif keep_ratio < 0.45:
+        pacing_score -= min(18.0, (0.45 - keep_ratio) * 120.0)
+        pacing_reasons.append(f"保留比偏低 {keep_ratio:.1%}，可能跳切过猛")
+    else:
+        pacing_reasons.append(f"保留比 {keep_ratio:.1%}，节奏区间合理")
+    if bool((editing_risk_metrics or {}).get("blocking_high_risk_cuts")):
+        pacing_score -= 30.0
+        pacing_reasons.append("存在阻断级高风险 cut")
+    if advisory_high_risk_count > 0:
+        pacing_score -= min(10.0, advisory_high_risk_count * 1.0)
+        pacing_reasons.append(f"静音边界建议抽检 {advisory_high_risk_count} 处")
+    if accepted_cut_count <= 0 and _safe_float(job.get("output_duration_sec")) and float(job.get("output_duration_sec") or 0.0) > 180.0:
+        pacing_score -= 8.0
+        pacing_reasons.append("长视频几乎无有效剪切，需人工确认节奏")
+    elif accepted_cut_count > 0:
+        pacing_reasons.append(f"有效剪切 {accepted_cut_count} 处")
+    components.append(
+        {
+            "name": "pacing_and_cut_flow",
+            "score": _round_score(pacing_score),
+            "grade": _score_to_grade(_round_score(pacing_score)),
+            "reasons": pacing_reasons,
+        }
+    )
+
+    subtitles_plan = render_plan.get("subtitles") if isinstance(render_plan.get("subtitles"), dict) else {}
+    section_profiles = list(subtitles_plan.get("section_profiles") or [])
+    editing_accents = packaging_timeline_editing_accents(render_plan)
+    effect_policy = editing_accents.get("effect_policy") if isinstance(editing_accents.get("effect_policy"), dict) else {}
+    overlays = list(editing_accents.get("emphasis_overlays") or [])
+    sounds = list(editing_accents.get("sound_effects") or [])
+    transitions = editing_accents.get("transitions") if isinstance(editing_accents.get("transitions"), dict) else {}
+    transition_count = len(list(transitions.get("boundary_indexes") or []))
+    duration = _safe_float(job.get("output_duration_sec")) or 0.0
+    density_base = max(1.0, duration / 60.0)
+    visual_score = 100.0
+    visual_reasons: list[str] = []
+    if not section_profiles:
+        visual_score -= 12.0
+        visual_reasons.append("缺少分段字幕样式编排")
+    else:
+        visual_reasons.append(f"字幕分段样式 {len(section_profiles)} 段")
+    if effect_policy and not bool(effect_policy.get("preserve_color")):
+        visual_score -= 12.0
+        visual_reasons.append("包装效果未声明保色")
+    if len(overlays) > max(3.0, density_base * 1.2):
+        visual_score -= min(12.0, (len(overlays) - density_base) * 1.5)
+        visual_reasons.append(f"强调字幕密度偏高 {len(overlays)} 处")
+    elif overlays:
+        visual_reasons.append(f"强调字幕 {len(overlays)} 处")
+    if len(sounds) > max(3.0, density_base * 1.2):
+        visual_score -= min(10.0, (len(sounds) - density_base) * 1.2)
+        visual_reasons.append(f"音效点缀密度偏高 {len(sounds)} 处")
+    elif sounds:
+        visual_reasons.append(f"轻量音效 {len(sounds)} 处")
+    if transition_count > max(6.0, density_base * 2.0):
+        visual_score -= min(8.0, transition_count - density_base * 2.0)
+        visual_reasons.append(f"转场密度偏高 {transition_count} 处")
+    elif transition_count:
+        visual_reasons.append(f"转场 {transition_count} 处")
+    if not visual_reasons:
+        visual_reasons.append("包装信息不足，无法判断视觉观感")
+    components.append(
+        {
+            "name": "visual_polish_and_restraint",
+            "score": _round_score(visual_score),
+            "grade": _score_to_grade(_round_score(visual_score)),
+            "reasons": visual_reasons,
+        }
+    )
+
+    delivery_score = 100.0
+    delivery_reasons: list[str] = []
+    packaged_path = str(render_outputs.get("packaged_mp4") or render_outputs.get("plain_mp4") or job.get("output_path") or "").strip()
+    if not packaged_path:
+        delivery_score -= 45.0
+        delivery_reasons.append("缺少主成片路径")
+    elif not _file_exists(packaged_path):
+        delivery_score -= 35.0
+        delivery_reasons.append("主成片文件不存在")
+    else:
+        delivery_reasons.append("主成片文件可访问")
+    generated_versions = [
+        item
+        for item in version_scores
+        if str(item.get("status") or "").strip().lower() in {"done", "missing_file", "missing"}
+        and item.get("score") is not None
+    ]
+    weak_versions = [
+        item
+        for item in generated_versions
+        if _safe_float(item.get("score")) is not None and float(item.get("score") or 0.0) < 80.0
+    ]
+    if weak_versions:
+        delivery_score -= min(16.0, len(weak_versions) * 4.0)
+        delivery_reasons.append("存在版本质检偏弱: " + ", ".join(str(item.get("name") or "") for item in weak_versions))
+    sync_warnings = [
+        name
+        for name, payload in quality_checks.items()
+        if isinstance(payload, dict) and str(payload.get("status") or "").strip().lower() == "warning"
+    ]
+    final_alignment = quality_checks.get("final_render_subtitle_asr_alignment")
+    if not isinstance(final_alignment, dict):
+        delivery_score -= 28.0
+        delivery_reasons.append("缺少最终成片音频 Qwen3 字幕审计")
+    elif not bool(final_alignment.get("gate_pass")):
+        delivery_score -= 42.0
+        delivery_reasons.append("最终成片音频 Qwen3 字幕审计未通过")
+    if sync_warnings:
+        delivery_score -= min(18.0, len(sync_warnings) * 6.0)
+        delivery_reasons.append("字幕同步 warning: " + ", ".join(sync_warnings))
+    if not sync_warnings and quality_checks:
+        delivery_reasons.append("主版本字幕同步稳定")
+    components.append(
+        {
+            "name": "delivery_stability",
+            "score": _round_score(delivery_score),
+            "grade": _score_to_grade(_round_score(delivery_score)),
+            "reasons": delivery_reasons,
+        }
+    )
+
+    weights = {
+        "subtitle_readability": 0.30,
+        "pacing_and_cut_flow": 0.30,
+        "visual_polish_and_restraint": 0.25,
+        "delivery_stability": 0.15,
+    }
+    score = _round_score(
+        sum(float(component["score"]) * weights.get(str(component.get("name")), 0.0) for component in components)
+    )
+    weak_components = [component for component in components if float(component.get("score") or 0.0) < 90.0]
+    summary_parts = [
+        f"{component['name']}={component.get('score')}"
+        for component in components
+    ]
+    if weak_components:
+        summary_parts.append(
+            "重点关注 "
+            + " / ".join(
+                f"{component['name']}:{'; '.join(component.get('reasons') or [])}"
+                for component in weak_components[:2]
+            )
+        )
+    return {
+        "score": score,
+        "grade": _score_to_grade(score),
+        "status": "pass" if score is not None and score >= 90.0 else "warn" if score is not None and score >= 75.0 else "fail",
+        "summary": "；".join(summary_parts),
+        "components": components,
+    }
+
+
 def _score_editing(job: dict[str, Any], editorial: dict[str, Any], render_plan: dict[str, Any]) -> dict[str, Any]:
     return _score_editing_from_legacy_editorial(job, editorial, render_plan)
 
@@ -546,14 +840,14 @@ def _score_editing_from_inputs(
     refine_mode: str = "",
     refine_candidate_total: int = 0,
 ) -> dict[str, Any]:
-    score = 70.0
+    score = 82.0
     if keep_ratio > 0:
         score += 10.0
     if 0.35 <= keep_ratio <= 0.8:
         score += 8.0
     if accepted_cut_count:
         score += min(8.0, accepted_cut_count)
-    if llm_reviewed:
+    if llm_reviewed and llm_candidate_count > 0:
         score += 6.0
     elif llm_error:
         score -= 12.0
@@ -572,7 +866,7 @@ def _score_editing_from_inputs(
         "status": "done",
         "summary": (
             f"保留比 {keep_ratio:.1%}，accepted_cuts={accepted_cut_count}，"
-            f"llm_cut_review={'yes' if llm_reviewed else 'no'}，"
+            f"llm_cut_review={'yes' if llm_reviewed else 'not_required' if llm_candidate_count <= 0 else 'no'}，"
             f"transition_boundaries={len(boundary_indexes)}"
             + (f"，refine_mode={refine_mode}" if refine_mode else "")
             + (f"，refine_candidates={refine_candidate_total}" if refine_candidate_total else "")
@@ -830,6 +1124,8 @@ async def build_scorecard(batch_report: dict[str, Any]) -> dict[str, Any]:
         packaging = (artifacts.get("platform_packaging_md") or {}).get("data_json") or {}
         subtitle_quality = (artifacts.get("subtitle_quality_report") or {}).get("data_json") or {}
         variant_bundle = (artifacts.get("variant_timeline_bundle") or {}).get("data_json") or {}
+        resolved_variant_bundle = resolve_effective_variant_timeline_bundle(variant_bundle) or {}
+        subtitle_timeline_issues = variant_subtitle_timeline_issues(resolved_variant_bundle)
         cut_analysis = (artifacts.get("cut_analysis") or {}).get("data_json") or {}
         editorial = timelines.get("editorial") or {}
         render_plan = timelines.get("render_plan") or {}
@@ -843,16 +1139,20 @@ async def build_scorecard(batch_report: dict[str, Any]) -> dict[str, Any]:
         }
 
         subtitle_score = _round_score(_safe_float(subtitle_quality.get("score")))
+        if subtitle_score is not None and subtitle_timeline_issues:
+            subtitle_score = _round_score(max(0.0, subtitle_score - min(35.0, 14.0 + len(subtitle_timeline_issues) * 5.0)))
+        subtitle_warning_count = len(subtitle_quality.get("warning_reasons") or []) + len(subtitle_timeline_issues)
         subtitle_quality_section = {
             "score": subtitle_score,
             "grade": _score_to_grade(subtitle_score),
-            "status": "done" if subtitle_quality else "missing",
+            "status": "warning" if subtitle_timeline_issues else ("done" if subtitle_quality else "missing"),
             "summary": (
-                f"字幕质检分 {subtitle_score:.1f}，warning={len(subtitle_quality.get('warning_reasons') or [])}，"
+                f"字幕质检分 {subtitle_score:.1f}，warning={subtitle_warning_count}，"
                 f"blocking={len(subtitle_quality.get('blocking_reasons') or [])}"
             )
             if subtitle_quality
             else "缺少 subtitle_quality_report",
+            "timeline_issues": subtitle_timeline_issues,
         }
 
         version_scores = _build_version_scores(render_outputs)
@@ -875,6 +1175,15 @@ async def build_scorecard(batch_report: dict[str, Any]) -> dict[str, Any]:
         subtitle_effects_score = _score_subtitle_effects(render_plan)
         editing_score = _score_editing_with_variant_bundle(job, editorial, render_plan, variant_bundle)
         editing_risk_metrics = _editing_risk_metrics(job, editorial, cut_analysis, variant_bundle)
+        viewing_experience = _score_viewing_experience(
+            job=job,
+            render_outputs=render_outputs,
+            subtitle_quality=subtitle_quality,
+            render_plan=render_plan,
+            variant_bundle=variant_bundle,
+            version_scores=version_scores,
+            editing_risk_metrics=editing_risk_metrics,
+        )
         live_stage_scores = _build_stage_scores(job)
 
         scorecard_jobs.append(
@@ -883,6 +1192,7 @@ async def build_scorecard(batch_report: dict[str, Any]) -> dict[str, Any]:
                 "source_name": job.get("source_name"),
                 "output_path": job.get("output_path"),
                 "overall_video_quality": overall_video_quality,
+                "viewing_experience": viewing_experience,
                 "version_scores": version_scores,
                 "subtitle_quality": subtitle_quality_section,
                 "multi_platform_package": packaging_score,
@@ -923,6 +1233,7 @@ async def build_scorecard(batch_report: dict[str, Any]) -> dict[str, Any]:
 
     dimension_names = [
         "overall_video_quality",
+        "viewing_experience",
         "subtitle_quality",
         "multi_platform_package",
         "avatar",
@@ -1095,6 +1406,7 @@ def render_markdown(scorecard: dict[str, Any], batch_report_path: Path) -> str:
 
     for job in jobs:
         job_pre_render_only = _job_stopped_before_render(job)
+        viewing_experience = job.get("viewing_experience") if isinstance(job.get("viewing_experience"), dict) else {}
         lines.extend(
             [
                 "",
@@ -1102,6 +1414,7 @@ def render_markdown(scorecard: dict[str, Any], batch_report_path: Path) -> str:
                 "",
                 f"- output_path: {job.get('output_path') or ''}",
                 f"- overall_video_quality: {job['overall_video_quality'].get('score')} ({job['overall_video_quality'].get('grade')}) | {job['overall_video_quality'].get('summary')}",
+                f"- viewing_experience: {viewing_experience.get('score')} ({viewing_experience.get('grade')}) | {viewing_experience.get('summary')}",
                 f"- subtitle_quality: {job['subtitle_quality'].get('score')} ({job['subtitle_quality'].get('grade')}) | {job['subtitle_quality'].get('summary')}",
                 f"- subtitle_effects: {job['subtitle_effects'].get('score')} ({job['subtitle_effects'].get('grade')}) | {job['subtitle_effects'].get('summary')}",
                 f"- editing: {job['editing'].get('score')} ({job['editing'].get('grade')}) | {job['editing'].get('summary')}",

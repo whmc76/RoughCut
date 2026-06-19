@@ -40,6 +40,8 @@ def test_variant_diagnostics_compacts_cut_evidence() -> None:
                     "start": 2.0,
                     "end": 4.0,
                     "reason": "silence",
+                    "source_text": "这里正在展示锁定结构细节",
+                    "signals": ["protected_speech_overlap"],
                     "boundary_keep_energy": 1.2,
                     "left_keep_role": "detail",
                     "right_keep_role": "detail",
@@ -60,8 +62,54 @@ def test_variant_diagnostics_compacts_cut_evidence() -> None:
     high_risk = diagnostics["high_risk_cuts"][0]
     assert high_risk["evidence"]["visual_showcase_score"] == 0.9
     assert high_risk["evidence"]["tags"][:2] == ["visual_context", "scene_activity"]
+    assert high_risk["review_priority"] == "blocking"
+    assert high_risk["blocking"] is True
     assert diagnostics["cut_evidence_summary"]["protected_visual_cut_count"] == 1
     assert any("保护证据" in reason for reason in diagnostics["review_flags"]["review_reasons"])
+
+
+def test_variant_diagnostics_marks_visual_silence_placeholder_as_advisory() -> None:
+    diagnostics = _build_variant_timeline_diagnostics(
+        editorial_analysis={
+            "accepted_cuts": [
+                {
+                    "start": 77.97,
+                    "end": 79.05,
+                    "reason": "silence",
+                    "source_text": "silence",
+                    "match_surface": "silence",
+                    "risk_level": "low",
+                    "signals": [
+                        "silence_duration=1.08s",
+                        "evidence:visual_context",
+                        "evidence:language_signal",
+                        "evidence:strong_subtitle",
+                        "evidence:transcript_present",
+                    ],
+                    "boundary_keep_energy": 1.3,
+                    "left_keep_role": "detail",
+                    "right_keep_role": "body",
+                    "evidence": {
+                        "previous_text": "前一句真实口播在静音前",
+                        "next_text": "后一句真实口播在静音后",
+                        "tags": ["visual_context", "language_signal", "strong_subtitle", "transcript_present"],
+                        "language_score": 1.4,
+                        "protection_score": 1.42,
+                        "visual_showcase_score": 0.66,
+                    },
+                }
+            ]
+        },
+        cut_analysis={},
+        timeline_analysis={},
+    )
+
+    high_risk = diagnostics["high_risk_cuts"][0]
+    assert high_risk["review_priority"] == "advisory"
+    assert high_risk["blocking"] is False
+    assert high_risk["review_reason"] == "silence_boundary_between_meaningful_keeps"
+    assert diagnostics["blocking_high_risk_cut_count"] == 0
+    assert diagnostics["advisory_high_risk_cut_count"] == 1
 
 
 def test_variant_diagnostics_excludes_edge_silence_from_high_risk_cuts() -> None:
@@ -98,22 +146,49 @@ def test_variant_diagnostics_excludes_edge_silence_from_high_risk_cuts() -> None
         timeline_analysis={},
     )
 
-    assert diagnostics["high_risk_cuts"] == [
-        {
-            "start": 150.03,
-            "end": 150.63,
-            "reason": "silence",
-            "source_text": "",
-            "match_surface": "",
-            "match_surface_layer": "",
-            "risk_level": "",
-            "rule_id": "",
-            "boundary_keep_energy": 2.23,
-            "left_keep_role": "body",
-            "right_keep_role": "body",
-            "evidence": {},
-        }
-    ]
+    assert len(diagnostics["high_risk_cuts"]) == 1
+    high_risk = diagnostics["high_risk_cuts"][0]
+    assert high_risk["start"] == 150.03
+    assert high_risk["end"] == 150.63
+    assert high_risk["reason"] == "silence"
+    assert high_risk["left_keep_role"] == "body"
+    assert high_risk["right_keep_role"] == "body"
+    assert high_risk["review_priority"] == "advisory"
+    assert high_risk["blocking"] is False
+    assert diagnostics["blocking_high_risk_cut_count"] == 0
+    assert diagnostics["advisory_high_risk_cut_count"] == 1
+
+
+def test_variant_diagnostics_marks_plain_silence_boundary_as_advisory() -> None:
+    diagnostics = _build_variant_timeline_diagnostics(
+        editorial_analysis={
+            "accepted_cuts": [
+                {
+                    "start": 12.4,
+                    "end": 13.1,
+                    "reason": "silence",
+                    "boundary_keep_energy": 1.8,
+                    "left_keep_role": "detail",
+                    "right_keep_role": "body",
+                    "evidence": {
+                        "protection_score": 0.1,
+                        "language_score": 0.0,
+                        "removal_score": 0.7,
+                    },
+                }
+            ],
+        },
+        cut_analysis={},
+        timeline_analysis={},
+    )
+
+    high_risk = diagnostics["high_risk_cuts"][0]
+    assert high_risk["review_priority"] == "advisory"
+    assert high_risk["blocking"] is False
+    assert high_risk["review_reason"] == "silence_boundary_between_meaningful_keeps"
+    assert diagnostics["blocking_high_risk_cut_count"] == 0
+    assert diagnostics["advisory_high_risk_cut_count"] == 1
+    assert any("静默边界" in reason for reason in diagnostics["review_flags"]["review_reasons"])
 
 
 def test_variant_diagnostics_include_refine_decision_summary() -> None:
@@ -432,7 +507,17 @@ def test_variant_packaging_timeline_reads_nested_payload_and_legacy_flat_fields(
             "outro": None,
             "insert": None,
             "watermark": None,
-            "music": {"path": "music.mp3"},
+            "music": {
+                "path": "music.mp3",
+                "audio_cues": [
+                    {
+                        "time_sec": 0.0,
+                        "kind": "bgm_entry",
+                        "reason": "",
+                        "review_recommended": False,
+                    }
+                ],
+            },
         },
         "editing_accents": {"style": "smart_effect_commercial"},
     }

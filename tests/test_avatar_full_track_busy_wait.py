@@ -9,6 +9,7 @@ import pytest
 
 from roughcut.pipeline.steps import (
     _AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS,
+    _AVATAR_FULL_TRACK_CALL_TIMEOUT_SECONDS,
     _AVATAR_FULL_TRACK_SLOT_TIMEOUT_SECONDS,
     AvatarFullTrackRenderError,
     _avatar_full_track_error_payload,
@@ -63,7 +64,7 @@ def test_resolve_avatar_full_track_execution_timeout_uses_provider_budget(monkey
             provider=provider,
             render_request={"request_id": "test"},
         )
-        == 640.0
+        == _AVATAR_FULL_TRACK_CALL_TIMEOUT_SECONDS
     )
 
 

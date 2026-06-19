@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
+import uuid
 
 from roughcut.api import intelligent_copy as intelligent_copy_api
+from roughcut.api import jobs as jobs_api
 from roughcut.host import file_manager
 
 
@@ -96,3 +100,122 @@ def test_intelligent_copy_open_folder_accepts_host_style_path_via_shared_gate(mo
     assert captured["path"] == host_path
     assert result.kind == "folder"
     assert result.path == host_path
+
+
+def test_job_open_folder_resolves_relative_render_output_from_project_root(tmp_path, monkeypatch) -> None:
+    project_root = tmp_path / "repo"
+    output_path = project_root / "output" / "test" / "result.mp4"
+    output_path.parent.mkdir(parents=True)
+    output_path.write_bytes(b"video")
+    unrelated_cwd = tmp_path / "server-cwd"
+    unrelated_cwd.mkdir()
+
+    class FakeScalarResult:
+        def all(self):
+            return [SimpleNamespace(output_path=r"output\test\result.mp4")]
+
+    class FakeResult:
+        def scalars(self):
+            return FakeScalarResult()
+
+    class FakeSession:
+        async def execute(self, _statement):
+            return FakeResult()
+
+    monkeypatch.chdir(unrelated_cwd)
+    monkeypatch.setattr(jobs_api, "DEFAULT_PROJECT_ROOT", project_root)
+
+    target_path, kind = asyncio.run(
+        jobs_api._resolve_job_open_target(
+            SimpleNamespace(id=uuid.uuid4(), source_path=""),
+            FakeSession(),
+        )
+    )
+
+    assert Path(target_path) == output_path.resolve()
+    assert kind == "output"
+
+
+def test_job_open_target_maps_project_relative_output_to_host_project_root(monkeypatch) -> None:
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", "E:/WorkSpace/RoughCut/data/runtime")
+    monkeypatch.setattr(jobs_api, "DEFAULT_PROJECT_ROOT", Path("/app"))
+    monkeypatch.setattr(
+        jobs_api,
+        "can_open_in_file_manager",
+        lambda path: str(path).replace("\\", "/")
+        == "E:/WorkSpace/RoughCut/output/test/result.mp4",
+    )
+
+    target_path = jobs_api._resolve_file_manager_existing_path(r"output\test\result.mp4")
+
+    assert str(target_path).replace("\\", "/") == "E:/WorkSpace/RoughCut/output/test/result.mp4"
+
+
+def test_download_path_maps_host_runtime_root_to_container_runtime_root(tmp_path, monkeypatch) -> None:
+    container_root = tmp_path / "container-runtime"
+    target = container_root / "output" / "demo" / "final.mp4"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"video")
+
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", "E:/WorkSpace/RoughCut/data/runtime")
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_ROOT", str(container_root))
+
+    resolved = jobs_api._first_existing_download_path(
+        r"E:\WorkSpace\RoughCut\data\runtime\output\demo\final.mp4",
+    )
+
+    assert resolved == target.resolve()
+
+
+def test_collect_downloadable_files_uses_runtime_mapped_path(tmp_path, monkeypatch) -> None:
+    container_root = tmp_path / "container-runtime"
+    target = container_root / "output" / "demo" / "final.mp4"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"video")
+
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", "E:/WorkSpace/RoughCut/data/runtime")
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_ROOT", str(container_root))
+
+    files = jobs_api._collect_downloadable_files(
+        None,
+        {
+            "packaged_mp4": r"E:\WorkSpace\RoughCut\data\runtime\output\demo\final.mp4",
+        },
+    )
+
+    assert files[0]["id"] == "packaged_mp4"
+    assert files[0]["_path"] == str(target.resolve())
+
+
+def test_job_open_target_prefers_runtime_mount_path_for_host_runtime_output(tmp_path, monkeypatch) -> None:
+    container_root = tmp_path / "container-runtime"
+    target = container_root / "output" / "demo" / "final.mp4"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"video")
+    host_path = r"E:\WorkSpace\RoughCut\data\runtime\output\demo\final.mp4"
+
+    class FakeScalarResult:
+        def all(self):
+            return [SimpleNamespace(output_path=host_path)]
+
+    class FakeResult:
+        def scalars(self):
+            return FakeScalarResult()
+
+    class FakeSession:
+        async def execute(self, _statement):
+            return FakeResult()
+
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", "E:/WorkSpace/RoughCut/data/runtime")
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_ROOT", str(container_root))
+    monkeypatch.setattr(jobs_api, "can_open_in_file_manager", lambda path: Path(path).exists())
+
+    target_path, kind = asyncio.run(
+        jobs_api._resolve_job_open_target(
+            SimpleNamespace(id=uuid.uuid4(), source_path=""),
+            FakeSession(),
+        )
+    )
+
+    assert Path(target_path) == target.resolve()
+    assert kind == "output"

@@ -22,6 +22,7 @@ from roughcut.intelligent_copy_layout import SMART_COPY_COVER_DIRNAME
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import extract_json_text
 from roughcut.providers.auth import resolve_credential
+from roughcut.utils.asyncio_subprocess import close_asyncio_subprocess_transport
 
 CODEX_BUILTIN_IMAGE_MODEL_LABEL = "codex_builtin_image_generation"
 MINIMAX_IMAGE_MODEL_LABEL = "image-01"
@@ -242,7 +243,7 @@ def _write_codex_imagegen_request(
             "When reference_image_paths is present, treat the full ordered set as the allowed same-product multi-angle reference pack. "
             "Treat codex_runner.model as the Codex execution agent model only, not as the underlying image model. "
             "Do not use the OpenAI Images API fallback unless explicitly requested. "
-            "Pass the prompt as the concise final-cover brief; let the image model render the complete publishable cover with integrated typography and effects. "
+            "Pass the prompt as the concise image-generation brief and final-cover brief; let the image model render the complete publishable cover with integrated typography and effects. "
             "Copy the selected generated bitmap into output_path."
         ),
     }
@@ -333,6 +334,12 @@ def _codex_imagegen_request_completed(
     recorded_output = str(payload.get("output_path") or "").strip()
     if recorded_output and Path(recorded_output) != output_path:
         return False
+    recorded_result = str(payload.get("result_path") or "").strip()
+    if recorded_result and not codex_imagegen_result_path_is_allowed(
+        Path(recorded_result).expanduser(),
+        output_path=output_path,
+    ):
+        return False
     if expected_prompt is not None and str(payload.get("prompt") or "") != str(expected_prompt or ""):
         return False
     if expected_hard_contract is not None:
@@ -363,6 +370,8 @@ def mark_codex_imagegen_request_completed(
         raise FileNotFoundError(f"Codex imagegen request not found: {request_path}")
     if not output_path.exists():
         raise FileNotFoundError(f"Codex imagegen output not found: {output_path}")
+    if result_path is not None and not codex_imagegen_result_path_is_allowed(result_path, output_path=output_path):
+        raise ValueError(f"Codex imagegen result path is outside the allowed Codex output roots: {result_path}")
     payload = json.loads(request_path.read_text(encoding="utf-8"))
     completed_at = datetime.now(UTC).isoformat()
     payload["status"] = "completed"
@@ -379,6 +388,42 @@ def mark_codex_imagegen_request_completed(
         payload["timed_out"] = bool(timed_out)
     request_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     return payload
+
+
+def codex_imagegen_result_path_is_allowed(result_path: Path, *, output_path: Path) -> bool:
+    try:
+        resolved_result = Path(result_path).expanduser().resolve()
+        resolved_output = Path(output_path).expanduser().resolve()
+    except OSError:
+        return False
+    if resolved_result == resolved_output:
+        return True
+    return any(_path_is_relative_to(resolved_result, root) for root in codex_generated_image_roots())
+
+
+def codex_generated_image_roots() -> list[Path]:
+    roots: list[Path] = []
+    codex_home = str(os.getenv("CODEX_HOME", "") or "").strip()
+    if codex_home:
+        roots.append(Path(codex_home).expanduser() / "generated_images")
+    roots.append(Path.home() / ".codex" / "generated_images")
+    unique: list[Path] = []
+    for root in roots:
+        try:
+            resolved = root.resolve()
+        except OSError:
+            continue
+        if resolved not in unique:
+            unique.append(resolved)
+    return unique
+
+
+def _path_is_relative_to(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _record_codex_imagegen_request_bridge_error(*, request_path: Path, error: str) -> str:
@@ -434,6 +479,16 @@ async def _attempt_codex_imagegen_auto_completion(*, request_path: Path, output_
         raise RuntimeError(str(result.get("error") or "Codex imagegen host runner did not complete the request"))
     if not output_path.exists():
         raise RuntimeError("Codex imagegen host runner completed without producing the output file")
+    mark_codex_imagegen_request_completed(
+        request_path=request_path,
+        output_path=output_path,
+        result_path=Path(str(result.get("result_path") or "")).expanduser()
+        if str(result.get("result_path") or "").strip()
+        else None,
+        recorded_output_path=str(result.get("output_path") or output_path),
+        session_id=str(result.get("session_id") or "").strip() or None,
+        timed_out=bool(result.get("timed_out")) if "timed_out" in result else None,
+    )
 
 
 def _resolve_minimax_aspect_ratio(width: int, height: int) -> str:
@@ -757,7 +812,9 @@ async def _request_dreamina_web_generation(
     except TimeoutError as exc:
         process.kill()
         await process.communicate()
+        await close_asyncio_subprocess_transport(process)
         raise RuntimeError(f"Dreamina runner timed out after {timeout_sec}s") from exc
+    await close_asyncio_subprocess_transport(process)
     stderr_text = stderr.decode("utf-8", errors="replace").strip()
     if process.returncode != 0:
         detail = stderr_text or stdout.decode("utf-8", errors="replace").strip() or "unknown error"
@@ -907,6 +964,7 @@ async def _generate_with_dreamina_web(
     )
     response_meta = runner_response.get("responseMeta") if isinstance(runner_response.get("responseMeta"), dict) else {}
     selected_index = int(result_block.get("selectedCandidateIndex", result_block.get("selected_candidate_index", 0)) or 0)
+    runner_selected_index = selected_index
     resolved_model = str(response_meta.get("resolved_model_version") or requested_model or "").strip()
     timeout_sec = float(max(30, int(getattr(settings, "intelligent_copy_cover_image_timeout_sec", 90) or 90)))
     ranking_timeout_sec = float(max(10, min(timeout_sec, 45)))
@@ -935,10 +993,19 @@ async def _generate_with_dreamina_web(
                     ),
                     timeout=ranking_timeout_sec,
                 )
-                selected_index = max(
-                    0,
-                    min(len(candidate_urls) - 1, int(consistency_assessment.get("selected_index", selected_index) or 0)),
-                )
+                scores = consistency_assessment.get("scores") if isinstance(consistency_assessment, dict) else []
+                if (
+                    isinstance(scores, list)
+                    and scores
+                    and _dreamina_consistency_ranking_should_override(
+                        consistency_assessment,
+                        runner_selected_index=runner_selected_index,
+                    )
+                ):
+                    selected_index = max(
+                        0,
+                        min(len(candidate_urls) - 1, int(consistency_assessment.get("selected_index", selected_index) or 0)),
+                    )
                 image_url = candidate_urls[selected_index]
                 selected_candidate = candidates[selected_index] if selected_index < len(candidates) else selected_candidate
                 shutil.copy2(candidate_paths[selected_index], output_path)
@@ -1002,3 +1069,33 @@ async def _generate_with_dreamina_web(
         "candidate_subject_match_max": max(subject_match_scores) if subject_match_scores else None,
         "candidate_deformation_risk_min": min(deformation_risks) if deformation_risks else None,
     }
+
+
+def _dreamina_consistency_ranking_should_override(
+    assessment: dict[str, Any] | None,
+    *,
+    runner_selected_index: int,
+) -> bool:
+    if not isinstance(assessment, dict) or bool(assessment.get("all_low_confidence")):
+        return False
+    scores = assessment.get("scores") if isinstance(assessment.get("scores"), list) else []
+    selected_index = int(assessment.get("selected_index", runner_selected_index) or 0)
+    selected_score = next(
+        (item for item in scores if isinstance(item, dict) and int(item.get("candidate_index", -1)) == selected_index),
+        None,
+    )
+    if not isinstance(selected_score, dict):
+        return False
+    selected_overall = float(selected_score.get("overall") or 0.0)
+    selected_subject = float(selected_score.get("subject_match") or 0.0)
+    if selected_overall < 0.72 or selected_subject < 0.70:
+        return False
+    runner_score = next(
+        (item for item in scores if isinstance(item, dict) and int(item.get("candidate_index", -1)) == runner_selected_index),
+        None,
+    )
+    if not isinstance(runner_score, dict):
+        return selected_overall >= 0.85 and selected_subject >= 0.80
+    runner_overall = float(runner_score.get("overall") or 0.0)
+    runner_subject = float(runner_score.get("subject_match") or 0.0)
+    return (selected_overall - runner_overall) >= 0.12 or (selected_subject - runner_subject) >= 0.12

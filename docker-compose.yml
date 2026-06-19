@@ -21,6 +21,8 @@ x-app-env: &app-env
   OUTPUT_DIR: /app/data/output
   RENDER_DEBUG_DIR: /app/logs/render-debug
   TELEGRAM_AGENT_STATE_DIR: /app/data/telegram-agent
+  ROUGHCUT_REMIX_SOURCE_HOST_ROOT: ${ROUGHCUT_REMIX_SOURCE_HOST_ROOT:-./data/remix-source}
+  ROUGHCUT_REMIX_SOURCE_CONTAINER_ROOT: ${ROUGHCUT_REMIX_SOURCE_CONTAINER_ROOT:-/app/remix-source}
   XDG_CACHE_HOME: /app/data/cache
   HF_HOME: /app/data/cache/huggingface
   TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-local_http_asr}
@@ -61,6 +63,7 @@ x-app-common: &app-common
     - ${ROUGHCUT_OUTPUT_HOST_ROOT:-./data/runtime}/render-debug:/app/logs/render-debug
     - ./logs:/app/logs
     - ./watch:/app/watch
+    - ${ROUGHCUT_REMIX_SOURCE_HOST_ROOT:-./data/remix-source}:${ROUGHCUT_REMIX_SOURCE_CONTAINER_ROOT:-/app/remix-source}:ro
     - ${HEYGEM_SHARED_HOST_DIR:-D:/duix_avatar_data/face2face}:/code/data
     - ${ROUGHCUT_CODEX_AUTH_HOST_DIR:-C:/Users/28687/.codex}:/host-codex:ro
     - /var/run/docker.sock:/var/run/docker.sock

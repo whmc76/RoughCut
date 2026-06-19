@@ -110,6 +110,17 @@ def test_docker_compose_mounts_whole_runtime_root_inside_container() -> None:
         assert "ROUGHCUT_TEST_OUTPUT_ROOT: /app/data/tests" in source
         assert "TELEGRAM_AGENT_STATE_DIR: /app/data/telegram-agent" in source
         assert "${ROUGHCUT_OUTPUT_HOST_ROOT:-./data/runtime}:/app/data" in source
+        assert "ROUGHCUT_REMIX_SOURCE_HOST_ROOT: ${ROUGHCUT_REMIX_SOURCE_HOST_ROOT:-./data/remix-source}" in source
+        assert "ROUGHCUT_REMIX_SOURCE_CONTAINER_ROOT: ${ROUGHCUT_REMIX_SOURCE_CONTAINER_ROOT:-/app/remix-source}" in source
+        assert "${ROUGHCUT_REMIX_SOURCE_HOST_ROOT:-./data/remix-source}:${ROUGHCUT_REMIX_SOURCE_CONTAINER_ROOT:-/app/remix-source}:ro" in source
+
+
+def test_dev_api_does_not_enable_reload_for_in_process_tool_queue() -> None:
+    source = (REPO_ROOT / "docker-compose.dev.yml").read_text(encoding="utf-8")
+    api_block = source[source.index("  api:"):source.index("  orchestrator:")]
+
+    assert '"--reload"' not in api_block
+    assert '"--workers", "1"' in api_block
 
 
 def test_automation_compose_mounts_runtime_root_inside_container() -> None:

@@ -94,6 +94,16 @@ def test_resolve_tts_spoken_text_rejects_structured_prompt_without_tts_text() ->
         tools._resolve_tts_spoken_text(prompt)
 
 
+def test_resolve_tts_spoken_text_allows_plain_narration_with_weak_prompt_words() -> None:
+    text = (
+        "育儿问题：孩子上学前这些小仪式，到底有没有必要？"
+        "有的孩子会要求：爸爸必须抱一下，再挥一次手。"
+        "这不是结构化提示词，而是孩子在用自己的方式完成分离。"
+    )
+
+    assert tools._resolve_tts_spoken_text(text) == text
+
+
 def test_strip_tts_text_ui_hints_still_keeps_plain_text() -> None:
     text = "需要 prompt_wav/reference_audio；prompt_text 和 instruct_text 不参与该模式。 这是一段试音。"
 

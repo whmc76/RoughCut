@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import re
@@ -41,6 +41,7 @@ _RUN_TASKS: dict[str, asyncio.Task[None]] = {}
 _RUNS_LOADED = False
 _RUN_QUEUE_WORKER: asyncio.Task[None] | None = None
 _TERMINAL_RUN_STATUSES = frozenset({"completed", "failed", "cancelled"})
+_INTERRUPTED_RUN_RECOVERY_WINDOW = timedelta(hours=2)
 _RUN_STAGE_NAMES: tuple[str, ...] = (
     "upload",
     "validate",
@@ -156,6 +157,23 @@ _STRUCTURED_TTS_PROMPT_MARKERS: tuple[str, ...] = (
     "JSON 结构",
     "你是短视频 AI 导演",
     "你是严谨的中文短视频导演",
+    "请根据字幕",
+    "要求：",
+    "结构化",
+)
+_STRONG_STRUCTURED_TTS_PROMPT_MARKERS: tuple[str, ...] = (
+    "voiceover_segments",
+    "source_text",
+    "opening_hook",
+    "rewrite_strategy",
+    "target_duration_sec",
+    "suggested_start_time",
+    "输出 JSON",
+    "JSON 结构",
+    "你是短视频 AI 导演",
+    "你是严谨的中文短视频导演",
+)
+_WEAK_STRUCTURED_TTS_PROMPT_MARKERS: tuple[str, ...] = (
     "请根据字幕",
     "要求：",
     "结构化",
@@ -353,6 +371,11 @@ async def run_tts(
         "auto_prompt_text_asr": auto_prompt_text_asr,
         "reference_path": str(reference_path) if reference_path is not None else None,
     }
+    existing_run = _find_equivalent_active_run("tts", request)
+    if existing_run is not None:
+        _cancel_equivalent_queued_duplicates("tts", request, keep_run_id=str(existing_run.get("run_id") or ""))
+        _ensure_tool_queue_worker()
+        return _run_public_payload(existing_run)
     run = _create_run("tts", request=request)
     _update_run_stage(run["run_id"], "upload", detail="TTS request accepted")
     _enqueue_run(run["run_id"])
@@ -1969,7 +1992,10 @@ def _looks_like_structured_tts_prompt(value: str | None) -> bool:
         return False
     if raw.startswith(("```", "{", "[")):
         return True
-    return any(marker in raw for marker in _STRUCTURED_TTS_PROMPT_MARKERS)
+    if any(marker in raw for marker in _STRONG_STRUCTURED_TTS_PROMPT_MARKERS):
+        return True
+    weak_hits = sum(1 for marker in _WEAK_STRUCTURED_TTS_PROMPT_MARKERS if marker in raw)
+    return weak_hits >= 2 and raw.startswith(("你", "请", "要求", "输出"))
 
 
 def _ensure_cosyvoice_prompt_boundary(value: str) -> str:
@@ -2310,6 +2336,7 @@ async def _run_tool_queue_worker() -> None:
         if current_task is not None:
             _RUN_TASKS[run_id] = current_task
         try:
+            _mark_run_dispatched(run)
             await _execute_persisted_run(run)
         except Exception as exc:
             _fail_run(run_id, str(exc))
@@ -2321,6 +2348,15 @@ def _next_queued_run() -> dict[str, Any] | None:
     queued = [run for run in _RUNS.values() if run.get("status") == "queued"]
     queued.sort(key=lambda item: str(item.get("created_at") or ""))
     return queued[0] if queued else None
+
+
+def _mark_run_dispatched(run: dict[str, Any]) -> None:
+    if run.get("status") != "queued":
+        return
+    run["status"] = "running"
+    run["progress"] = max(_coerce_progress(run.get("progress")) or 0.0, _RUN_PROGRESS_FLOORS["upload"])
+    run["updated_at"] = datetime.now(timezone.utc).isoformat()
+    _persist_run(run)
 
 
 async def _execute_persisted_run(run: dict[str, Any]) -> None:
@@ -2385,12 +2421,14 @@ async def _execute_persisted_run(run: dict[str, Any]) -> None:
 def _create_run(tool: str, *, request: dict[str, Any] | None = None) -> dict[str, Any]:
     run_id = uuid.uuid4().hex
     now = datetime.now(timezone.utc).isoformat()
+    safe_request = _json_safe(request or {})
     run = {
         "run_id": run_id,
         "tool": tool,
         "status": "queued",
         "progress": 0.0,
-        "request": _json_safe(request or {}),
+        "request": safe_request,
+        "request_signature": _tool_request_signature(tool, safe_request),
         "created_at": now,
         "updated_at": now,
         "stages": [
@@ -2409,6 +2447,66 @@ def _create_run(tool: str, *, request: dict[str, Any] | None = None) -> dict[str
     _RUNS[run_id] = run
     _persist_run(run)
     return run
+
+
+def _find_equivalent_active_run(tool: str, request: dict[str, Any]) -> dict[str, Any] | None:
+    signature = _tool_request_signature(tool, request)
+    candidates = [
+        run
+        for run in _RUNS.values()
+        if run.get("tool") == tool
+        and run.get("status") in {"queued", "running"}
+        and _run_request_signature(run) == signature
+    ]
+    candidates.sort(
+        key=lambda item: (
+            1 if item.get("status") == "running" else 0,
+            str(item.get("created_at") or ""),
+        ),
+        reverse=True,
+    )
+    return candidates[0] if candidates else None
+
+
+def _run_request_signature(run: dict[str, Any]) -> str:
+    signature = str(run.get("request_signature") or "")
+    if signature:
+        return signature
+    request = run.get("request") if isinstance(run.get("request"), dict) else {}
+    signature = _tool_request_signature(str(run.get("tool") or ""), request)
+    run["request_signature"] = signature
+    _persist_run(run)
+    return signature
+
+
+def _cancel_equivalent_queued_duplicates(tool: str, request: dict[str, Any], *, keep_run_id: str) -> None:
+    signature = _tool_request_signature(tool, request)
+    now = datetime.now(timezone.utc).isoformat()
+    for run in list(_RUNS.values()):
+        run_id = str(run.get("run_id") or "")
+        if run_id == keep_run_id or run.get("status") != "queued":
+            continue
+        if run.get("tool") != tool or _run_request_signature(run) != signature:
+            continue
+        run["status"] = "cancelled"
+        run["error"] = f"Superseded by equivalent active run {keep_run_id}"
+        run["updated_at"] = now
+        failed_stage = _get_run_stage(run, "failed")
+        if failed_stage is not None:
+            failed_stage["status"] = "cancelled"
+            failed_stage["progress"] = 1.0
+            failed_stage["detail"] = run["error"]
+            failed_stage["updated_at"] = now
+        _persist_run(run)
+
+
+def _tool_request_signature(tool: str, request: dict[str, Any]) -> str:
+    payload = {
+        "tool": str(tool or "").strip().lower(),
+        "request": _json_safe(request),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _update_run_stage(run_id: str, stage_name: str, *, detail: str = "", progress: float | None = None, **extra: Any) -> None:
@@ -2606,6 +2704,23 @@ def _repair_run_shape(run: dict[str, Any]) -> None:
 
 def _requeue_interrupted_run(run: dict[str, Any]) -> None:
     now = datetime.now(timezone.utc).isoformat()
+    if _interrupted_run_expired(run):
+        run["status"] = "failed"
+        run["error"] = "Tool run was interrupted and exceeded the automatic recovery window"
+        run["updated_at"] = now
+        for stage in run.get("stages", []):
+            if stage.get("status") == "running":
+                stage["status"] = "failed"
+                stage["detail"] = "后台任务中断且已超过自动恢复窗口"
+                stage["updated_at"] = now
+        failed_stage = _get_run_stage(run, "failed")
+        if failed_stage is not None:
+            failed_stage["status"] = "failed"
+            failed_stage["progress"] = 1.0
+            failed_stage["detail"] = run["error"]
+            failed_stage["updated_at"] = now
+        _persist_run(run)
+        return
     for stage in run.get("stages", []):
         if stage.get("status") == "running":
             stage["status"] = "pending"
@@ -2615,6 +2730,27 @@ def _requeue_interrupted_run(run: dict[str, Any]) -> None:
     run["error"] = None
     run["updated_at"] = now
     _persist_run(run)
+
+
+def _interrupted_run_expired(run: dict[str, Any]) -> bool:
+    created_at = _parse_run_datetime(run.get("created_at"))
+    updated_at = _parse_run_datetime(run.get("updated_at") or run.get("created_at"))
+    candidates = [value for value in (created_at, updated_at) if value is not None]
+    if not candidates:
+        return False
+    return datetime.now(timezone.utc) - min(candidates) > _INTERRUPTED_RUN_RECOVERY_WINDOW
+
+
+def _parse_run_datetime(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _persist_run(run: dict[str, Any]) -> None:

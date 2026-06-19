@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import re
 import uuid
 from typing import Any
 
@@ -12,6 +13,7 @@ from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.db.models import Timeline
 from roughcut.edit.local_audio_cues import normalize_local_music_plan
 from roughcut.edit.local_insert_plan import normalize_local_insert_plan
+from roughcut.hyperframes import build_static_packaging_plan
 from roughcut.packaging.library import resolve_insert_transition_overlap
 
 _DEFAULT_SMART_EFFECT_STYLE = "smart_effect_commercial"
@@ -73,6 +75,73 @@ _AI_SMART_EFFECT_STYLE_VARIANTS = {
     "smart_effect_atmosphere": "smart_effect_atmosphere_ai",
     "smart_effect_minimal": "smart_effect_minimal_ai",
 }
+_OVERLAY_LABEL_MAX_CJK_CHARS = 8
+_OVERLAY_LABEL_MAX_ASCII_CHARS = 14
+_OVERLAY_LABEL_TERMS = (
+    "快拆结构",
+    "锁定细节",
+    "演示容量",
+    "实测背负",
+    "防滑纹",
+    "背负系统",
+    "快拆",
+    "锁定",
+    "演示",
+    "容量",
+    "对比",
+    "实测",
+    "背负",
+    "细节",
+    "功能",
+    "区别",
+    "开箱",
+    "快开",
+    "收纳",
+    "肩带",
+    "刀型",
+    "刃材",
+)
+_OVERLAY_LABEL_STOP_WORDS = (
+    "因为",
+    "所以",
+    "然后",
+    "但是",
+    "就是",
+    "这个",
+    "那个",
+    "这里",
+    "那边",
+    "你看",
+    "我们",
+    "可以",
+    "还是",
+    "不太",
+    "不算",
+)
+_OVERLAY_LABEL_BAD_SUFFIX_MARKERS = (
+    "怎么",
+    "怎样",
+    "一遍",
+    "一下",
+    "起来",
+    "进去",
+    "出来",
+    "过去",
+    "过来",
+)
+_OVERLAY_LABEL_ALLOWED_SUFFIXES = (
+    "结构",
+    "细节",
+    "方式",
+    "按键",
+    "过程",
+    "效果",
+    "功能",
+    "位置",
+    "体验",
+    "容量",
+    "背负",
+)
 
 
 def _render_plan_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -139,6 +208,7 @@ def build_render_plan(
     smart_effect_style: str = _DEFAULT_SMART_EFFECT_STYLE,
     cover_style: str | None = None,
     title_style: str = "preset_default",
+    include_cover: bool = False,
     target_lufs: float = -16.0,
     peak_limit: float = -2.0,
     noise_reduction: bool = True,
@@ -221,8 +291,20 @@ def build_render_plan(
             )
     if content_effect_policy:
         resolved_editing_accents["effect_policy"] = copy.deepcopy(content_effect_policy)
-    return {
+    normalized_music = normalize_local_music_plan(
+        _bind_music_to_choreography(music, section_choreography=section_choreography, insert=bound_insert)
+    )
+    hyperframes_plan = build_static_packaging_plan(
+        subtitles_plan=bound_subtitles,
+        editing_accents=resolved_editing_accents,
+        focus_plan=copy.deepcopy(focus_plan or {}) if isinstance(focus_plan, dict) and focus_plan else None,
+        audio_cues=list((normalized_music or {}).get("audio_cues") or []) if isinstance(normalized_music, dict) else [],
+        source="roughcut.edit.render_plan",
+    )
+    plan = {
         "editorial_timeline_id": str(editorial_timeline_id),
+        "render_engine": "hyperframes",
+        "visual_timeline_engine": "hyperframes",
         "workflow_preset": preset.name,
         "loudness": {
             "target_lufs": target_lufs,
@@ -237,9 +319,7 @@ def build_render_plan(
         "outro": outro,
         "insert": bound_insert,
         "watermark": watermark,
-        "music": normalize_local_music_plan(
-            _bind_music_to_choreography(music, section_choreography=section_choreography, insert=bound_insert)
-        ),
+        "music": normalized_music,
         "focus": copy.deepcopy(focus_plan or {}) if isinstance(focus_plan, dict) and focus_plan else None,
         "timeline_analysis": resolved_timeline_analysis,
         "editing_skill": resolved_editing_skill,
@@ -249,11 +329,6 @@ def build_render_plan(
         "ai_director": ai_director_plan,
         "avatar_commentary": avatar_commentary_plan,
         "editing_accents": resolved_editing_accents,
-        "cover": {
-            "style": cover_style or preset.cover_style,
-            "title_style": title_style,
-            "variant_count": preset.cover_variant_count,
-        },
         "delivery": {
             "resolution_mode": export_resolution_mode,
             "resolution_preset": export_resolution_preset,
@@ -261,6 +336,30 @@ def build_render_plan(
             "frame_rate_preset": export_frame_rate_preset,
         },
     }
+    plan["hyperframes"] = hyperframes_plan
+    plan["packaging_timeline"] = {
+        "timeline_analysis": copy.deepcopy(plan["timeline_analysis"] or {}),
+        "editing_skill": copy.deepcopy(plan["editing_skill"] or {}),
+        "section_choreography": copy.deepcopy(plan["section_choreography"] or {}),
+        "subtitles": copy.deepcopy(plan["subtitles"] or {}),
+        "packaging": {
+            "intro": copy.deepcopy(plan.get("intro")),
+            "outro": copy.deepcopy(plan.get("outro")),
+            "insert": copy.deepcopy(plan.get("insert")),
+            "watermark": copy.deepcopy(plan.get("watermark")),
+            "music": copy.deepcopy(plan.get("music")),
+        },
+        "editing_accents": copy.deepcopy(plan["editing_accents"] or {}),
+        "focus": copy.deepcopy(plan.get("focus")) if isinstance(plan.get("focus"), dict) else None,
+        "hyperframes": copy.deepcopy(hyperframes_plan),
+    }
+    if include_cover:
+        plan["cover"] = {
+            "style": cover_style or preset.cover_style,
+            "title_style": title_style,
+            "variant_count": preset.cover_variant_count,
+        }
+    return plan
 
 
 def build_smart_editing_accents(
@@ -278,13 +377,19 @@ def build_smart_editing_accents(
         editing_skill=resolved_skill,
         timeline_analysis=timeline_analysis,
     )
+    base_transition_max_count = int(tokens.get("transition_max_count") or 4)
+    skill_transition_max_count = int((resolved_skill or {}).get("transition_max_count") or 0)
     transition_max_count = _resolve_review_focus_transition_max_count(
-        int((resolved_skill or {}).get("transition_max_count") or 2),
+        max(base_transition_max_count, skill_transition_max_count),
         review_focus=review_focus,
     )
+    base_overlay_max_count = int(tokens.get("overlay_max_count") or 6)
+    skill_overlay_max_count = int((resolved_skill or {}).get("overlay_max_count") or 0)
+    base_overlay_spacing_sec = float(tokens.get("overlay_spacing_sec") or 4.2)
+    skill_overlay_spacing_sec = float((resolved_skill or {}).get("overlay_spacing_sec") or 0.0)
     overlay_max_count, overlay_spacing_sec = _resolve_review_focus_overlay_constraints(
-        int((resolved_skill or {}).get("overlay_max_count") or 2),
-        float((resolved_skill or {}).get("overlay_spacing_sec") or 8.0),
+        max(base_overlay_max_count, skill_overlay_max_count),
+        min(base_overlay_spacing_sec, skill_overlay_spacing_sec) if skill_overlay_spacing_sec > 0 else base_overlay_spacing_sec,
         review_focus=review_focus,
     )
     transition_boundaries = _select_transition_boundaries(
@@ -300,6 +405,7 @@ def build_smart_editing_accents(
         preferred_candidates=list((timeline_analysis or {}).get("emphasis_candidates") or []),
         max_count=overlay_max_count,
         min_spacing_sec=overlay_spacing_sec,
+        max_duration_sec=float(tokens.get("overlay_max_duration_sec") or 1.35),
     )
     sound_effects = [
         {
@@ -320,6 +426,13 @@ def build_smart_editing_accents(
         },
         "emphasis_overlays": emphasis_overlays,
         "sound_effects": sound_effects,
+        "social_packaging": _build_social_packaging_strategy(
+            style=resolved_style,
+            tokens=tokens,
+            overlay_count=len(emphasis_overlays),
+            transition_count=len(transition_boundaries),
+            review_focus=review_focus,
+        ),
     }
 
 
@@ -417,6 +530,20 @@ def build_ai_effect_render_plan(
         preserve_color=preserve_color,
         reuse_event_structure=reuse_bound_assets,
     )
+    ai_plan["hyperframes"] = build_static_packaging_plan(
+        subtitles_plan=ai_plan.get("subtitles") if isinstance(ai_plan.get("subtitles"), dict) else None,
+        editing_accents=ai_plan.get("editing_accents") if isinstance(ai_plan.get("editing_accents"), dict) else None,
+        focus_plan=ai_plan.get("focus") if isinstance(ai_plan.get("focus"), dict) else None,
+        audio_cues=list(((ai_plan.get("music") or {}).get("audio_cues") or [])) if isinstance(ai_plan.get("music"), dict) else [],
+        source="roughcut.edit.render_plan.ai_effect",
+    )
+    packaging_timeline = dict(ai_plan.get("packaging_timeline") or {})
+    packaging_timeline["subtitles"] = copy.deepcopy(ai_plan.get("subtitles") or {})
+    packaging_timeline["section_choreography"] = copy.deepcopy(ai_plan.get("section_choreography") or {})
+    packaging_timeline["editing_accents"] = copy.deepcopy(ai_plan.get("editing_accents") or {})
+    packaging_timeline["focus"] = copy.deepcopy(ai_plan.get("focus")) if isinstance(ai_plan.get("focus"), dict) else None
+    packaging_timeline["hyperframes"] = copy.deepcopy(ai_plan["hyperframes"])
+    ai_plan["packaging_timeline"] = packaging_timeline
     return ai_plan
 
 
@@ -592,6 +719,39 @@ def _resolve_ai_effect_style_variant(style: str) -> str:
     return _AI_SMART_EFFECT_STYLE_VARIANTS.get(normalized, "smart_effect_commercial_ai")
 
 
+def _build_social_packaging_strategy(
+    *,
+    style: str,
+    tokens: dict[str, Any],
+    overlay_count: int,
+    transition_count: int,
+    review_focus: str,
+) -> dict[str, Any]:
+    return {
+        "strategy": "hyperframes_social_retention_v2",
+        "style": _normalize_smart_effect_style(style),
+        "principles": [
+            "hook_first_screen",
+            "pattern_interrupt_every_3_to_5_seconds",
+            "animated_keyword_captions",
+            "one_text_zone_per_frame",
+            "bottom_progress_and_chapter_context",
+            "product_color_fidelity",
+        ],
+        "target_density": {
+            "transition_max_count": int(tokens.get("transition_max_count") or 0),
+            "overlay_max_count": int(tokens.get("overlay_max_count") or 0),
+            "max_total_overlays": int(tokens.get("max_total_overlays") or tokens.get("overlay_max_count") or 0),
+            "overlay_spacing_sec": round(float(tokens.get("overlay_spacing_sec") or 0.0), 3),
+        },
+        "resolved_density": {
+            "transition_count": int(transition_count),
+            "overlay_count": int(overlay_count),
+        },
+        "review_focus": str(review_focus or ""),
+    }
+
+
 def _smart_effect_tokens(style: str) -> dict[str, Any]:
     mapping: dict[str, dict[str, Any]] = {
         _DEFAULT_SMART_EFFECT_STYLE: {
@@ -600,6 +760,11 @@ def _smart_effect_tokens(style: str) -> dict[str, Any]:
             "sound_duration_sec": 0.08,
             "sound_frequency": 960,
             "sound_volume": 0.045,
+            "transition_max_count": 4,
+            "overlay_max_count": 6,
+            "max_total_overlays": 10,
+            "overlay_spacing_sec": 4.2,
+            "overlay_max_duration_sec": 1.35,
         },
         "smart_effect_punch": {
             "transition": "fadeblack",
@@ -607,6 +772,11 @@ def _smart_effect_tokens(style: str) -> dict[str, Any]:
             "sound_duration_sec": 0.11,
             "sound_frequency": 820,
             "sound_volume": 0.06,
+            "transition_max_count": 5,
+            "overlay_max_count": 7,
+            "max_total_overlays": 11,
+            "overlay_spacing_sec": 3.6,
+            "overlay_max_duration_sec": 1.35,
         },
         "smart_effect_glitch": {
             "transition": "pixelize",
@@ -614,6 +784,11 @@ def _smart_effect_tokens(style: str) -> dict[str, Any]:
             "sound_duration_sec": 0.09,
             "sound_frequency": 1320,
             "sound_volume": 0.05,
+            "transition_max_count": 5,
+            "overlay_max_count": 7,
+            "max_total_overlays": 11,
+            "overlay_spacing_sec": 3.4,
+            "overlay_max_duration_sec": 1.25,
         },
         "smart_effect_cinematic": {
             "transition": "fade",
@@ -621,6 +796,11 @@ def _smart_effect_tokens(style: str) -> dict[str, Any]:
             "sound_duration_sec": 0.07,
             "sound_frequency": 640,
             "sound_volume": 0.028,
+            "transition_max_count": 4,
+            "overlay_max_count": 5,
+            "max_total_overlays": 9,
+            "overlay_spacing_sec": 4.8,
+            "overlay_max_duration_sec": 1.55,
         },
         "smart_effect_atmosphere": {
             "transition": "fade",
@@ -628,6 +808,11 @@ def _smart_effect_tokens(style: str) -> dict[str, Any]:
             "sound_duration_sec": 0.075,
             "sound_frequency": 720,
             "sound_volume": 0.032,
+            "transition_max_count": 4,
+            "overlay_max_count": 5,
+            "max_total_overlays": 9,
+            "overlay_spacing_sec": 4.6,
+            "overlay_max_duration_sec": 1.5,
         },
         "smart_effect_minimal": {
             "transition": "fade",
@@ -635,6 +820,11 @@ def _smart_effect_tokens(style: str) -> dict[str, Any]:
             "sound_duration_sec": 0.06,
             "sound_frequency": 900,
             "sound_volume": 0.018,
+            "transition_max_count": 3,
+            "overlay_max_count": 4,
+            "max_total_overlays": 7,
+            "overlay_spacing_sec": 5.2,
+            "overlay_max_duration_sec": 1.15,
         },
         "smart_effect_commercial_ai": {
             "transition": "fadeblack",
@@ -643,9 +833,9 @@ def _smart_effect_tokens(style: str) -> dict[str, Any]:
             "sound_frequency": 980,
             "sound_volume": 0.07,
             "transition_max_count": 7,
-            "overlay_max_count": 7,
-            "max_total_overlays": 12,
-            "overlay_spacing_sec": 3.6,
+            "overlay_max_count": 10,
+            "max_total_overlays": 16,
+            "overlay_spacing_sec": 2.8,
             "overlay_max_duration_sec": 1.5,
         },
         "smart_effect_punch_ai": {
@@ -655,9 +845,9 @@ def _smart_effect_tokens(style: str) -> dict[str, Any]:
             "sound_frequency": 1120,
             "sound_volume": 0.078,
             "transition_max_count": 7,
-            "overlay_max_count": 7,
-            "max_total_overlays": 12,
-            "overlay_spacing_sec": 3.8,
+            "overlay_max_count": 10,
+            "max_total_overlays": 16,
+            "overlay_spacing_sec": 2.8,
             "overlay_max_duration_sec": 1.45,
         },
         "smart_effect_glitch_ai": {
@@ -667,9 +857,9 @@ def _smart_effect_tokens(style: str) -> dict[str, Any]:
             "sound_frequency": 1480,
             "sound_volume": 0.068,
             "transition_max_count": 8,
-            "overlay_max_count": 7,
-            "max_total_overlays": 12,
-            "overlay_spacing_sec": 3.4,
+            "overlay_max_count": 10,
+            "max_total_overlays": 16,
+            "overlay_spacing_sec": 2.7,
             "overlay_max_duration_sec": 1.35,
         },
         "smart_effect_cinematic_ai": {
@@ -679,9 +869,9 @@ def _smart_effect_tokens(style: str) -> dict[str, Any]:
             "sound_frequency": 700,
             "sound_volume": 0.052,
             "transition_max_count": 6,
-            "overlay_max_count": 6,
-            "max_total_overlays": 10,
-            "overlay_spacing_sec": 4.3,
+            "overlay_max_count": 8,
+            "max_total_overlays": 14,
+            "overlay_spacing_sec": 3.6,
             "overlay_max_duration_sec": 1.7,
         },
         "smart_effect_atmosphere_ai": {
@@ -691,9 +881,9 @@ def _smart_effect_tokens(style: str) -> dict[str, Any]:
             "sound_frequency": 760,
             "sound_volume": 0.056,
             "transition_max_count": 6,
-            "overlay_max_count": 6,
-            "max_total_overlays": 10,
-            "overlay_spacing_sec": 4.1,
+            "overlay_max_count": 8,
+            "max_total_overlays": 14,
+            "overlay_spacing_sec": 3.5,
             "overlay_max_duration_sec": 1.65,
         },
         "smart_effect_minimal_ai": {
@@ -1298,7 +1488,7 @@ def _select_emphasis_overlays(
     )
     candidates: list[tuple[float, dict[str, Any]]] = []
     for item in preferred_candidates or []:
-        text = str(item.get("text") or "").strip()
+        text = _normalize_overlay_label_text(str(item.get("text") or ""))
         if not text:
             continue
         start_time = float(item.get("start_time", 0.0) or 0.0)
@@ -1317,9 +1507,21 @@ def _select_emphasis_overlays(
             (
                 score,
                 {
-                    "text": text[:18],
+                    "text": text,
                     "start_time": round(start_time + 0.05, 3),
                     "end_time": round(min(end_time, start_time + max_duration_sec), 3),
+                    "source": "timeline_emphasis_candidate",
+                    "role": role,
+                    "visual_treatment": _resolve_overlay_visual_treatment(
+                        start_time,
+                        role=role,
+                        timeline_analysis=timeline_analysis,
+                    ),
+                    "transform_intensity": _resolve_overlay_transform_intensity(
+                        start_time,
+                        role=role,
+                        timeline_analysis=timeline_analysis,
+                    ),
                 },
             )
         )
@@ -1350,6 +1552,18 @@ def _select_emphasis_overlays(
                     "text": text,
                     "start_time": round(start_time + 0.05, 3),
                     "end_time": round(min(end_time, start_time + max_duration_sec), 3),
+                    "source": "subtitle_keyword",
+                    "role": str(item.get("subtitle_unit_role") or ""),
+                    "visual_treatment": _resolve_overlay_visual_treatment(
+                        start_time,
+                        role=str(item.get("subtitle_unit_role") or ""),
+                        timeline_analysis=timeline_analysis,
+                    ),
+                    "transform_intensity": _resolve_overlay_transform_intensity(
+                        start_time,
+                        role=str(item.get("subtitle_unit_role") or ""),
+                        timeline_analysis=timeline_analysis,
+                    ),
                 },
             )
         )
@@ -1373,6 +1587,43 @@ def _resolve_overlay_weight(
     if directive is None:
         return 0.0
     return float(directive.get("overlay_weight", 0.0) or 0.0)
+
+
+def _resolve_overlay_visual_treatment(
+    start_time: float,
+    *,
+    role: str,
+    timeline_analysis: dict[str, Any] | None = None,
+) -> str:
+    directive = _find_section_directive(start_time, timeline_analysis=timeline_analysis)
+    resolved_role = str(role or (directive or {}).get("role") or "").strip().lower()
+    packaging_intent = str((directive or {}).get("packaging_intent") or "").strip().lower()
+    if resolved_role in {"hook", "lead"} or packaging_intent == "hook_focus" or start_time <= 3.0:
+        return "hook_pop"
+    if resolved_role in {"focus", "detail"} or packaging_intent == "detail_support":
+        return "keyword_sticker"
+    if resolved_role == "action":
+        return "beat_pulse"
+    return "keyword_pop"
+
+
+def _resolve_overlay_transform_intensity(
+    start_time: float,
+    *,
+    role: str,
+    timeline_analysis: dict[str, Any] | None = None,
+) -> float:
+    directive = _find_section_directive(start_time, timeline_analysis=timeline_analysis)
+    resolved_role = str(role or (directive or {}).get("role") or "").strip().lower()
+    packaging_intent = str((directive or {}).get("packaging_intent") or "").strip().lower()
+    intensity = 1.0
+    if start_time <= 3.0 or resolved_role in {"hook", "lead"} or packaging_intent == "hook_focus":
+        intensity *= 1.16
+    if resolved_role in {"focus", "detail"} or packaging_intent == "detail_support":
+        intensity *= 1.08
+    if packaging_intent == "cta_protect" or resolved_role == "cta":
+        intensity *= 0.72
+    return round(max(0.68, min(1.3, intensity)), 3)
 
 
 def _find_section_directive(
@@ -1556,14 +1807,20 @@ def _merge_ai_effect_overlays(*overlay_groups: list[dict[str, Any]], max_count: 
 def _normalize_overlay_event(item: dict[str, Any]) -> dict[str, Any] | None:
     start_time = max(0.0, float(item.get("start_time", 0.0) or 0.0))
     end_time = max(start_time + 0.24, float(item.get("end_time", start_time + 0.42) or start_time + 0.42))
-    text = "".join(str(item.get("text") or "").split())[:18]
+    text = _normalize_overlay_label_text(str(item.get("text") or ""))
     if not text and not item.get("allow_empty", True):
         return None
-    return {
+    normalized = {
         "text": text,
         "start_time": round(start_time, 3),
         "end_time": round(end_time, 3),
     }
+    for key in ("source", "role", "visual_treatment", "subtitle_unit_role", "packaging_intent"):
+        if str(item.get(key) or "").strip():
+            normalized[key] = str(item.get(key) or "").strip()
+    if "transform_intensity" in item:
+        normalized["transform_intensity"] = round(max(0.65, min(1.35, float(item.get("transform_intensity") or 1.0))), 3)
+    return normalized
 
 
 def _overlay_signature(item: dict[str, Any]) -> tuple[str, float]:
@@ -1613,16 +1870,103 @@ def _resolve_ai_effect_motion_style(current_motion_style: str, *, base_style: st
 
 def _normalize_overlay_text(item: dict[str, Any]) -> str:
     raw = subtitle_display_rule_text(item)
-    text = "".join(raw.split())
-    text = text.strip("，。！？!?、,.；;：:\"'()（）[]【】")
-    if len(text) < 4 or len(text) > 18:
+    return _extract_overlay_label_text(raw)
+
+
+def _extract_overlay_label_text(raw: str) -> str:
+    text = _compact_overlay_text(raw)
+    if not text:
         return ""
-    return text[:18]
+    model_match = re.search(r"\b[A-Z][A-Z0-9+\-]{1,}(?:mini|MAX|PRO|Plus|Ultra)?\b", text, flags=re.IGNORECASE)
+    if model_match:
+        return _normalize_overlay_label_text(model_match.group(0))
+    for term in _OVERLAY_LABEL_TERMS:
+        if term not in text:
+            continue
+        phrase = _overlay_phrase_around_term(text, term)
+        label = _normalize_overlay_label_text(phrase)
+        if label:
+            return label
+    return ""
+
+
+def _overlay_phrase_around_term(text: str, term: str) -> str:
+    start = text.find(term)
+    if start < 0:
+        return term
+    end = min(len(text), start + max(len(term), _OVERLAY_LABEL_MAX_CJK_CHARS))
+    phrase = text[start:end]
+    for marker in ("，", "。", "！", "？", ",", ".", "!", "?", "、", "；", ";", "：", ":"):
+        marker_index = phrase.find(marker)
+        if marker_index >= 0:
+            phrase = phrase[:marker_index]
+    for marker in ("一下", "一个", "这个", "那个", "这里", "那边"):
+        marker_index = phrase.find(marker, len(term))
+        if marker_index >= 0:
+            phrase = phrase[:marker_index]
+    while len(phrase) > len(term) and phrase[-1] in "的了吧吗呢啊哦哈啦呀嘛":
+        phrase = phrase[:-1]
+    suffix = phrase[len(term):]
+    if suffix and any(marker in suffix for marker in _OVERLAY_LABEL_BAD_SUFFIX_MARKERS):
+        return term
+    if suffix and not phrase.endswith(_OVERLAY_LABEL_ALLOWED_SUFFIXES):
+        return term
+    return phrase or term
+
+
+def _normalize_overlay_label_text(raw: str) -> str:
+    text = _compact_overlay_text(raw)
+    if len(text) < 2:
+        return ""
+    cjk_count = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    ascii_count = sum(1 for ch in text if ch.isascii() and ch.isalnum())
+    if cjk_count and cjk_count > _OVERLAY_LABEL_MAX_CJK_CHARS:
+        return ""
+    if not cjk_count and ascii_count > _OVERLAY_LABEL_MAX_ASCII_CHARS:
+        return ""
+    if cjk_count >= 5 and any(stop_word in text for stop_word in _OVERLAY_LABEL_STOP_WORDS):
+        return ""
+    if any(mark in text for mark in ("，", "。", "！", "？", ",", ".", "!", "?", "；", ";", "：", ":")):
+        return ""
+    return text
+
+
+def _compact_overlay_text(raw: str) -> str:
+    text = "".join(str(raw or "").split())
+    return text.strip("，。！？!?、,.；;：:\"'()（）[]【】<>《》")
 
 
 def _score_overlay_text(text: str, *, start_time: float) -> float:
     score = 0.0
-    keywords = ("重点", "关键", "注意", "提醒", "一定", "终于", "真的", "直接", "千万", "别")
+    keywords = (
+        "重点",
+        "关键",
+        "注意",
+        "提醒",
+        "一定",
+        "终于",
+        "真的",
+        "直接",
+        "千万",
+        "别",
+        "你看",
+        "看",
+        "这里",
+        "这个",
+        "区别",
+        "对比",
+        "实测",
+        "演示",
+        "细节",
+        "功能",
+        "快拆",
+        "锁定",
+        "容量",
+        "背负",
+        "EDC",
+        "MT",
+        "FXX",
+    )
     if any(keyword in text for keyword in keywords):
         score += 2.5
     if any(ch.isdigit() for ch in text):

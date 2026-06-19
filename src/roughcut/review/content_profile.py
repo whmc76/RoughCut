@@ -38,6 +38,7 @@ from roughcut.review.content_understanding_verify import (
     build_verification_search_queries,
     verify_content_understanding,
 )
+from roughcut.review.downstream_context import strip_publication_only_profile_fields
 from roughcut.review.content_profile_memory import summarize_content_profile_user_memory
 from roughcut.review.content_profile_ocr import build_content_profile_ocr
 from roughcut.review.content_profile_candidates import build_identity_candidates
@@ -87,9 +88,10 @@ from roughcut.speech.postprocess import (
     normalize_display_text,
 )
 
-_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-04-14.infer.v36"
-_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-04-14.enrich.v37"
+_CONTENT_PROFILE_INFER_CACHE_VERSION = "2026-06-17.infer.editing-profile.v1"
+_CONTENT_PROFILE_ENRICH_CACHE_VERSION = "2026-06-17.enrich.editing-profile.v1"
 _CONTENT_UNDERSTANDING_TIMEOUT_SEC = 360.0
+_CONTENT_VERIFICATION_TIMEOUT_SEC = 60.0
 
 
 def _resolve_content_understanding_timeout_seconds() -> float:
@@ -100,6 +102,11 @@ def _resolve_content_understanding_timeout_seconds() -> float:
     except (TypeError, ValueError):
         configured_timeout = _CONTENT_UNDERSTANDING_TIMEOUT_SEC
     return max(1.0, min(configured_timeout, _CONTENT_UNDERSTANDING_TIMEOUT_SEC))
+
+
+def _resolve_content_verification_timeout_seconds() -> float:
+    return max(10.0, min(_resolve_content_understanding_timeout_seconds() / 3.0, _CONTENT_VERIFICATION_TIMEOUT_SEC))
+
 _INGESTIBLE_PRODUCT_SIGNALS = (
     "luckykiss",
     "kisspod",
@@ -1703,6 +1710,7 @@ def assess_content_profile_automation(
     has_editorial_source_name = _source_name_has_editorial_brief(resolved_source_name)
     has_editorial_review_basis = has_editorial_source_context or has_editorial_source_name
     preset_name = _workflow_template_name(profile)
+    preset = get_workflow_preset(preset_name)
     product_like_presets = {"unboxing_standard", "edc_tactical"}
 
     score = 0.0
@@ -1742,12 +1750,12 @@ def assess_content_profile_automation(
     else:
         review_reasons.append("摘要仍像默认模板")
 
-    cover_title = profile.get("cover_title")
-    if isinstance(cover_title, dict) and _cover_title_is_usable(cover_title):
+    hook_line = str(profile.get("hook_line") or "").strip()
+    if hook_line and not _is_generic_cover_line(hook_line) and hook_line != preset.cover_accent:
         score += 0.12
-        reasons.append("封面标题可用")
+        reasons.append("剪辑钩子可用")
     else:
-        review_reasons.append("封面标题还不够稳定")
+        review_reasons.append("剪辑钩子还不够具体")
 
     engagement_question = str(profile.get("engagement_question") or "").strip()
     if engagement_question and not _is_generic_engagement_question(engagement_question):
@@ -3082,6 +3090,46 @@ def _sanitize_profile_identity(
     if verified_model == "FXX1":
         verified_model = "FXX1小副包"
 
+    selected_brand_candidate = _selected_identity_candidate(
+        list(scored_candidates.get("subject_brand") or []),
+        verified_brand,
+    )
+    selected_brand_sources = {
+        str(source).strip()
+        for source in list(getattr(selected_brand_candidate, "all_sources", ()) or ())
+        if str(source).strip()
+    }
+    visual_only_brand = bool(verified_brand) and bool(selected_brand_sources) and selected_brand_sources <= {
+        "profile",
+        "visual_cluster",
+        "visual",
+        "visible_text",
+        "ocr",
+    }
+    if (
+        visual_only_brand
+        and _source_name_has_editorial_brief(source_name)
+        and not _identity_supported_by_text(
+            verified_brand,
+            verified_model,
+            text=f"{source_name}\n{transcript_excerpt}",
+            glossary_terms=glossary_terms,
+        )
+    ):
+        verified_brand = ""
+        profile_identity_conflict_detected = True
+        identity_extraction = (
+            dict(sanitized.get("identity_extraction") or {})
+            if isinstance(sanitized.get("identity_extraction"), dict)
+            else {}
+        )
+        identity_extraction["visual_only_brand_suppressed"] = {
+            "brand": current_profile_brand,
+            "sources": sorted(selected_brand_sources),
+            "reason": "visual_brand_not_supported_by_source_or_transcript",
+        }
+        sanitized["identity_extraction"] = identity_extraction
+
     if not verified_brand:
         sanitized["subject_brand"] = ""
     else:
@@ -4038,7 +4086,16 @@ async def infer_content_profile(
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            frame_paths = _extract_reference_frames(source_path, Path(tmpdir), count=3)
+            tmp_path = Path(tmpdir)
+            targeted_frame_paths = _extract_asr_guided_visual_probe_frames(
+                source_path,
+                tmp_path,
+                subtitle_items=subtitle_items,
+            )
+            frame_paths = [
+                *targeted_frame_paths,
+                *_extract_reference_frames(source_path, tmp_path, count=24),
+            ]
             if bool(getattr(settings, "ocr_enabled", False)):
                 ocr_profile = await _collect_content_profile_ocr(frame_paths, source_name=source_name)
                 if ocr_profile:
@@ -4068,7 +4125,11 @@ async def infer_content_profile(
                     else ""
                 ),
             )
-            visual_semantic_evidence = await infer_visual_semantic_evidence(frame_paths, capabilities)
+            visual_semantic_evidence = await infer_visual_semantic_evidence(
+                frame_paths,
+                capabilities,
+                source_path=source_path,
+            )
             if visual_semantic_evidence:
                 initial_profile["visual_semantic_evidence"] = dict(visual_semantic_evidence)
                 visual_hints = _build_visual_hints_from_semantic_evidence(visual_semantic_evidence)
@@ -4098,40 +4159,47 @@ async def infer_content_profile(
                 infer_content_understanding(evidence_bundle),
                 timeout=infer_timeout_sec,
             )
-        force_neutral_cover_title = False
     except Exception as exc:
         understanding = _build_failed_content_understanding(
             transcript_excerpt=transcript_excerpt,
             failure_reason=_format_content_understanding_failure_reason(exc),
         )
-        force_neutral_cover_title = True
 
     verification_queries = build_verification_search_queries(understanding)
     if include_research and verification_queries:
         try:
-            async with get_session_factory()() as session:
-                verification_bundle = await build_hybrid_verification_bundle(
-                    search_queries=verification_queries,
-                    online_search=_online_search_content_understanding,
-                    internal_search=None,
-                    session=session,
-                    subject_domain=understanding.content_domain,
-                    evidence_texts=_collect_verification_evidence_texts(
-                        evidence_bundle,
-                        source_name=source_name,
-                        transcript_excerpt=transcript_excerpt,
-                        visible_text=str(initial_profile.get("visible_text") or "").strip(),
-                    ),
-                    glossary_terms=glossary_terms,
-                    confirmed_entities=list((user_memory or {}).get("confirmed_entities") or []),
-                )
-                with track_usage_operation("content_profile.universal_verify"):
-                    understanding = await verify_content_understanding(
+            async def _run_verification() -> HybridVerificationBundle:
+                async with get_session_factory()() as session:
+                    return await build_hybrid_verification_bundle(
+                        search_queries=verification_queries,
+                        online_search=_online_search_content_understanding,
+                        internal_search=None,
+                        session=session,
+                        subject_domain=understanding.content_domain,
+                        evidence_texts=_collect_verification_evidence_texts(
+                            evidence_bundle,
+                            source_name=source_name,
+                            transcript_excerpt=transcript_excerpt,
+                            visible_text=str(initial_profile.get("visible_text") or "").strip(),
+                        ),
+                        glossary_terms=glossary_terms,
+                        confirmed_entities=list((user_memory or {}).get("confirmed_entities") or []),
+                    )
+
+            verification_bundle = await asyncio.wait_for(
+                _run_verification(),
+                timeout=_resolve_content_verification_timeout_seconds(),
+            )
+            with track_usage_operation("content_profile.universal_verify"):
+                understanding = await asyncio.wait_for(
+                    verify_content_understanding(
                         understanding=understanding,
                         evidence_bundle=evidence_bundle,
                         verification_bundle=verification_bundle,
-                    )
-                initial_profile["verification_evidence"] = _build_profile_verification_snapshot(verification_bundle)
+                    ),
+                    timeout=_resolve_content_verification_timeout_seconds(),
+                )
+            initial_profile["verification_evidence"] = _build_profile_verification_snapshot(verification_bundle)
         except Exception:
             pass
 
@@ -4187,13 +4255,7 @@ async def infer_content_profile(
         profile["summary"] = _build_profile_summary(profile)
     if not str(profile.get("engagement_question") or "").strip():
         profile["engagement_question"] = _default_engagement_question(preset)
-    profile["cover_title"] = build_cover_title(profile, preset)
-    if force_neutral_cover_title:
-        profile["cover_title"] = {
-            "top": "",
-            "main": "内容待确认",
-            "bottom": "",
-        }
+    profile = strip_publication_only_profile_fields(profile)
     profile = _refresh_video_understanding_profile_payload(
         profile,
         source_name=source_name,
@@ -5116,19 +5178,20 @@ async def enrich_content_profile(
             try:
                 provider = get_reasoning_provider()
                 prompt = (
-                    "你在做短视频字幕与封面前置研究。请把字幕/画面线索与搜索证据做双重校验，"
-                    "确认视频主体品牌、型号/版本、主体类型、视频主题，并生成适合做封面的三段标题。"
-                    "如果是软件/AI/科技视频，必须锁定软件名和功能名，封面标题不能再写成“软件工具”“功能演示”这种泛词。"
-                    "同时生成一个适合评论区互动的问题，要具体、自然、贴合内容，不要反复使用同一句泛化问题。"
+                    "你在做短视频自动剪辑前的内容事实画像。请把字幕/画面线索与搜索证据做双重校验，"
+                    "确认视频主体品牌、型号/版本、主体类型、视频主题、剪辑摘要和校对关注点。"
+                    "不要生成封面标题、封面风格、发布文案或平台运营内容；这些只属于智能发布阶段。"
+                    "如果是软件/AI/科技视频，必须锁定软件名和功能名，不能写成“软件工具”“功能演示”这种泛词。"
+                    "可以生成一个适合后续互动参考的问题，但它只能作为内容理解字段，不代表发布文案。"
                     "只有当字幕/画面线索与搜索结果能够互相印证时，才提升品牌、型号等关键信息。"
                     "如果搜索结果与字幕线索冲突，优先保守，保留已有可信字段，不要为了补全而乱改。"
-                    "优先给出品牌名、系列名或主体名，不要输出泛化标题如“产品开箱与上手体验”。"
+                    "优先给出品牌名、系列名或主体名，不要输出泛化主题如“产品开箱与上手体验”。"
                     "subject_brand 指视频主体品牌，不是频道名；不要把文件名、时间戳或相机编号当成型号。"
                     "如果证据不足，不要编造，保留已有可信信息。\n\n"
                     "输出 JSON："
                     '{"subject_brand":"","subject_model":"","subject_type":"","video_theme":"",'
                     '"hook_line":"","visible_text":"","summary":"","engagement_question":"",'
-                    '"cover_title":{"top":"","main":"","bottom":""}}'
+                    '"correction_notes":"","supplemental_context":""}'
                     f"\n视觉一致簇（当前画面主体验证结果，优先级高于脏字幕和错误搜索）：{json.dumps(_visual_cluster_prompt_payload(enriched), ensure_ascii=False)}"
                     f"\n已有判断：{json.dumps(enriched, ensure_ascii=False)}"
                     f"\n用户历史偏好（仅作辅助参考，不能压过当前字幕和画面）：\n{memory_prompt or '无'}"
@@ -5144,8 +5207,10 @@ async def enrich_content_profile(
                         temperature=0.1,
                         max_tokens=700,
                         json_mode=True,
-                    )
+                )
                 refined = response.as_json()
+                if isinstance(refined, dict):
+                    refined = strip_publication_only_profile_fields(refined)
                 enriched.update({k: v for k, v in refined.items() if v})
                 _merge_specific_profile_hints(enriched, _identity_only_profile_hints(context_hints))
                 _merge_specific_profile_hints(enriched, _identity_only_profile_hints(memory_hints))
@@ -5211,16 +5276,7 @@ async def enrich_content_profile(
                 preset=preset,
             )
 
-    cover_title = enriched.get("cover_title")
-    if not isinstance(cover_title, dict) or not _cover_title_is_usable(cover_title):
-        cover_title = build_cover_title(enriched, preset)
-    else:
-        cover_title = {
-            "top": _clean_line(cover_title.get("top") or "")[:14],
-            "main": _clean_line(cover_title.get("main") or "")[:18],
-            "bottom": _clean_line(cover_title.get("bottom") or "")[:18],
-        }
-    enriched["cover_title"] = cover_title
+    enriched = strip_publication_only_profile_fields(enriched)
     if "summary" not in review_payload_fields and (
         not enriched.get("summary") or _is_generic_profile_summary(str(enriched.get("summary") or ""))
     ):
@@ -5270,7 +5326,7 @@ async def enrich_content_profile(
         key in confirmed_fields
         for key in ("subject_brand", "subject_model", "subject_type", "video_theme", "hook_line", "visible_text")
     ):
-        enriched["cover_title"] = build_cover_title(enriched, preset)
+        enriched = strip_publication_only_profile_fields(enriched)
     _ensure_review_fields_not_empty(enriched, source_name=source_name, transcript_excerpt=transcript_excerpt)
     enriched = _refresh_video_understanding_profile_payload(
         enriched,
@@ -5278,7 +5334,7 @@ async def enrich_content_profile(
         transcript_excerpt=transcript_excerpt,
     )
     enriched["topic_fact_confirmation"] = build_topic_fact_confirmation_snapshot(enriched)
-    return enriched
+    return strip_publication_only_profile_fields(enriched)
 
 
 async def _infer_content_understanding_for_enrich(
@@ -5316,27 +5372,36 @@ async def _infer_content_understanding_for_enrich(
     verification_queries = build_verification_search_queries(understanding)
     if include_research and verification_queries:
         try:
-            async with get_session_factory()() as session:
-                verification_bundle = await build_hybrid_verification_bundle(
-                    search_queries=verification_queries,
-                    online_search=_online_search_content_understanding,
-                    internal_search=None,
-                    session=session,
-                    subject_domain=understanding.content_domain,
-                    evidence_texts=_collect_verification_evidence_texts(
-                        evidence_bundle,
-                        source_name=source_name,
-                        transcript_excerpt=transcript_excerpt,
-                        visible_text=str(profile.get("visible_text") or "").strip(),
-                    ),
-                )
-                with track_usage_operation("content_profile.enrich_universal_verify"):
-                    understanding = await verify_content_understanding(
+            async def _run_verification() -> HybridVerificationBundle:
+                async with get_session_factory()() as session:
+                    return await build_hybrid_verification_bundle(
+                        search_queries=verification_queries,
+                        online_search=_online_search_content_understanding,
+                        internal_search=None,
+                        session=session,
+                        subject_domain=understanding.content_domain,
+                        evidence_texts=_collect_verification_evidence_texts(
+                            evidence_bundle,
+                            source_name=source_name,
+                            transcript_excerpt=transcript_excerpt,
+                            visible_text=str(profile.get("visible_text") or "").strip(),
+                        ),
+                    )
+
+            verification_bundle = await asyncio.wait_for(
+                _run_verification(),
+                timeout=_resolve_content_verification_timeout_seconds(),
+            )
+            with track_usage_operation("content_profile.enrich_universal_verify"):
+                understanding = await asyncio.wait_for(
+                    verify_content_understanding(
                         understanding=understanding,
                         evidence_bundle=evidence_bundle,
                         verification_bundle=verification_bundle,
-                    )
-                profile["verification_evidence"] = _build_profile_verification_snapshot(verification_bundle)
+                    ),
+                    timeout=_resolve_content_verification_timeout_seconds(),
+                )
+            profile["verification_evidence"] = _build_profile_verification_snapshot(verification_bundle)
         except Exception:
             pass
     return understanding, evidence_bundle
@@ -7957,7 +8022,7 @@ def _extract_reference_frames(source_path: Path, tmpdir: Path, *, count: int) ->
         segment_end = usable_start + (usable_duration * (i + 1) / max(count, 1))
         segment_length = max(segment_end - segment_start, 0.8)
         seek = max(segment_start + (segment_length / 2), 0.0)
-        out = tmpdir / f"profile_{i:02d}.jpg"
+        out = tmpdir / f"profile_{i:02d}_t{_format_frame_timestamp_for_name(seek)}.jpg"
         result = subprocess.run(
             [
                 "ffmpeg",
@@ -8004,6 +8069,415 @@ def _extract_reference_frames(source_path: Path, tmpdir: Path, *, count: int) ->
         if result.returncode == 0 and out.exists():
             frames.append(out)
     return frames
+
+
+_ASR_VISUAL_RETAKE_CUES = (
+    "麦克风",
+    "话筒",
+    "收音",
+    "掉了",
+    "掉落",
+    "捡",
+    "拾",
+    "等一下",
+    "等下",
+    "等会",
+    "不好意思",
+    "重来",
+    "重新来",
+    "重新说",
+    "口误",
+    "说错",
+    "讲错",
+    "剪掉",
+    "删掉",
+    "这段不要",
+    "累了",
+)
+_ASR_VISUAL_BACKSTAGE_CUES = (
+    "拿一下",
+    "找一下",
+    "递过来",
+    "送过来",
+    "先停",
+    "停一下",
+    "别录",
+    "别拍",
+)
+_ASR_VISUAL_ATTEMPT_FAILURE_CUES = (
+    "没成功",
+    "没开",
+    "没打开",
+    "打不开",
+    "没拉开",
+    "没扣上",
+    "没挂上",
+    "没插上",
+    "没对上",
+    "没到位",
+    "不对",
+    "不太对",
+    "不行",
+    "不顺",
+    "不太顺",
+    "有点卡住",
+    "卡住了",
+    "卡壳",
+    "失败",
+)
+_ASR_VISUAL_SELF_CORRECTION_PREFIXES = (
+    "不是",
+    "不是不是",
+    "不对",
+    "准确说",
+    "应该是",
+    "换句话说",
+)
+_ASR_VISUAL_ATTEMPT_RETRY_CUES = (
+    "再试",
+    "再来",
+    "重新",
+    "重来",
+    "再弄",
+    "再拉",
+    "再开",
+    "再扣",
+    "试一下",
+    "试试",
+    "这次",
+)
+_ASR_VISUAL_ATTEMPT_SUCCESS_CUES = (
+    "成功",
+    "好了",
+    "可以了",
+    "打开了",
+    "扣上了",
+    "挂上了",
+    "插上了",
+    "到位",
+    "顺了",
+    "轻松",
+    "顺滑",
+    "这样就",
+    "这就",
+)
+_ASR_VISUAL_ATTEMPT_OBJECT_CUES = (
+    "拉链",
+    "扣",
+    "卡扣",
+    "磁吸",
+    "快拆",
+    "快开",
+    "肩带",
+    "刀",
+    "锁",
+    "包",
+    "仓",
+    "盖",
+    "插",
+    "挂",
+    "拉",
+    "开",
+    "关",
+    "装",
+    "取",
+    "抽",
+    "弹",
+)
+_ASR_VISUAL_RETAKE_MAX_GAP_SEC = 3.8
+_ASR_VISUAL_RETAKE_MAX_ITEMS = 5
+_ASR_VISUAL_RETAKE_MAX_WINDOW_SEC = 24.0
+
+
+def _extract_asr_guided_visual_probe_frames(
+    source_path: Path,
+    tmpdir: Path,
+    *,
+    subtitle_items: list[dict],
+    max_windows: int = 8,
+) -> list[Path]:
+    import subprocess
+
+    duration = _probe_duration(source_path)
+    windows = _build_asr_guided_visual_probe_windows(
+        subtitle_items,
+        duration=duration,
+        max_windows=max_windows,
+    )
+    frames: list[Path] = []
+    for index, window in enumerate(windows):
+        start = float(window.get("start", 0.0) or 0.0)
+        end = float(window.get("end", start) or start)
+        reason = str(window.get("reason") or "asr_probe").strip() or "asr_probe"
+        seek_points = _visual_probe_seek_points(start, end)
+        for point_index, seek in enumerate(seek_points):
+            out = tmpdir / (
+                f"target_{_safe_visual_probe_reason(reason)}_{index:02d}_{point_index:02d}"
+                f"_t{_format_frame_timestamp_for_name(seek)}.jpg"
+            )
+            result = subprocess.run(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-ss",
+                    f"{seek:.2f}",
+                    "-i",
+                    str(source_path),
+                    "-frames:v",
+                    "1",
+                    "-update",
+                    "1",
+                    "-q:v",
+                    "3",
+                    "-vf",
+                    "scale=960:-2",
+                    str(out),
+                ],
+                capture_output=True,
+                timeout=20,
+            )
+            if result.returncode == 0 and out.exists():
+                frames.append(out)
+    return frames
+
+
+def _build_asr_guided_visual_probe_windows(
+    subtitle_items: list[dict],
+    *,
+    duration: float = 0.0,
+    max_windows: int = 8,
+) -> list[dict[str, Any]]:
+    items = _sorted_timed_subtitle_items(subtitle_items)
+    windows: list[dict[str, Any]] = []
+
+    for item in items:
+        start, end = _subtitle_time_bounds(item)
+        text = _compact_visual_probe_text(_content_profile_semantic_text(item))
+        if not text:
+            continue
+        if any(cue in text for cue in _ASR_VISUAL_RETAKE_CUES):
+            windows.append(
+                _visual_probe_window(
+                    start - 2.0,
+                    end + 2.5,
+                    duration=duration,
+                    reason="asr_retake_or_accident",
+                    text=text,
+                    priority=3,
+                )
+            )
+            continue
+        if any(cue in text for cue in _ASR_VISUAL_BACKSTAGE_CUES):
+            windows.append(
+                _visual_probe_window(
+                    start - 1.5,
+                    end + 2.0,
+                    duration=duration,
+                    reason="asr_backstage_dialogue",
+                    text=text,
+                    priority=2,
+                )
+            )
+
+    for previous, current in zip(items, items[1:]):
+        prev_start, prev_end = _subtitle_time_bounds(previous)
+        current_start, _current_end = _subtitle_time_bounds(current)
+        gap = current_start - prev_end
+        if gap < 2.2:
+            continue
+        windows.append(
+            _visual_probe_window(
+                prev_end,
+                current_start,
+                duration=duration,
+                reason="long_silence_gap",
+                text="",
+                priority=1,
+            )
+        )
+
+    windows.extend(_build_asr_repeated_attempt_probe_windows(items, duration=duration))
+
+    return _dedupe_visual_probe_windows(windows, max_windows=max_windows)
+
+
+def _build_asr_repeated_attempt_probe_windows(
+    items: list[dict],
+    *,
+    duration: float,
+) -> list[dict[str, Any]]:
+    windows: list[dict[str, Any]] = []
+    for start_index in range(0, max(0, len(items) - 1)):
+        for end_index in range(start_index + 1, min(len(items), start_index + _ASR_VISUAL_RETAKE_MAX_ITEMS)):
+            cluster = items[start_index:end_index + 1]
+            first_start, _first_end = _subtitle_time_bounds(cluster[0])
+            final_start, final_end = _subtitle_time_bounds(cluster[-1])
+            if final_end - first_start > _ASR_VISUAL_RETAKE_MAX_WINDOW_SEC:
+                break
+            if not _asr_visual_cluster_is_contiguous(cluster):
+                break
+            reason = _classify_asr_repeated_attempt_cluster(cluster)
+            if not reason:
+                continue
+            windows.append(
+                _visual_probe_window(
+                    first_start - 1.0,
+                    final_end + 1.2,
+                    duration=duration,
+                    reason=reason,
+                    text=" / ".join(
+                        _compact_visual_probe_text(_content_profile_semantic_text(item))[:28]
+                        for item in cluster
+                    ),
+                    priority=2,
+                )
+            )
+            break
+    return windows
+
+
+def _asr_visual_cluster_is_contiguous(cluster: list[dict]) -> bool:
+    for previous, current in zip(cluster, cluster[1:]):
+        _prev_start, prev_end = _subtitle_time_bounds(previous)
+        current_start, _current_end = _subtitle_time_bounds(current)
+        if current_start - prev_end > _ASR_VISUAL_RETAKE_MAX_GAP_SEC:
+            return False
+    return True
+
+
+def _classify_asr_repeated_attempt_cluster(cluster: list[dict]) -> str:
+    texts = [_compact_visual_probe_text(_content_profile_semantic_text(item)) for item in cluster]
+    texts = [text for text in texts if text]
+    if len(texts) < 2:
+        return ""
+    before_final = "".join(texts[:-1])
+    all_text = "".join(texts)
+    final = texts[-1]
+    has_attempt_failure = any(cue in before_final for cue in _ASR_VISUAL_ATTEMPT_FAILURE_CUES)
+    has_retry = any(cue in before_final for cue in _ASR_VISUAL_ATTEMPT_RETRY_CUES)
+    has_success = any(cue in final for cue in _ASR_VISUAL_ATTEMPT_SUCCESS_CUES)
+    has_object = any(cue in all_text for cue in _ASR_VISUAL_ATTEMPT_OBJECT_CUES)
+    if has_object and has_attempt_failure and has_success:
+        return "asr_repeated_failed_demo"
+    if has_object and has_retry and has_success:
+        return "asr_repeated_demo_attempt"
+    first = texts[0]
+    if (
+        len(texts) >= 3
+        and any(final.startswith(prefix) for prefix in _ASR_VISUAL_SELF_CORRECTION_PREFIXES)
+        and has_object
+    ):
+        return "asr_progressive_line_retake"
+    if (
+        len(first) >= 4
+        and len(first) <= 18
+        and len(final) >= len(first) + 3
+        and (
+            _visual_probe_common_prefix_len(first, final) >= min(len(first), 8)
+            or SequenceMatcher(None, first, final).ratio() >= 0.58
+        )
+        and (len(texts) >= 3 or any(cue in before_final for cue in _ASR_VISUAL_RETAKE_CUES))
+    ):
+        return "asr_progressive_line_retake"
+    return ""
+
+
+def _visual_probe_common_prefix_len(left: str, right: str) -> int:
+    count = 0
+    for left_char, right_char in zip(left, right):
+        if left_char != right_char:
+            break
+        count += 1
+    return count
+
+
+def _sorted_timed_subtitle_items(subtitle_items: list[dict]) -> list[dict]:
+    return sorted(
+        [item for item in list(subtitle_items or []) if isinstance(item, dict)],
+        key=lambda item: _subtitle_time_bounds(item),
+    )
+
+
+def _subtitle_time_bounds(item: dict[str, Any]) -> tuple[float, float]:
+    start = _coerce_seconds(item.get("start_time", item.get("start", item.get("begin", 0.0))))
+    end = _coerce_seconds(item.get("end_time", item.get("end", item.get("stop", start))))
+    if end <= start:
+        end = start + _coerce_seconds(item.get("duration_sec", item.get("duration", 0.0)))
+    return max(0.0, start), max(start, end)
+
+
+def _visual_probe_window(
+    start: float,
+    end: float,
+    *,
+    duration: float,
+    reason: str,
+    text: str,
+    priority: int,
+) -> dict[str, Any]:
+    normalized_start = max(0.0, float(start or 0.0))
+    normalized_end = max(normalized_start + 0.6, float(end or normalized_start))
+    if duration > 0:
+        normalized_start = min(normalized_start, duration)
+        normalized_end = min(max(normalized_start + 0.6, normalized_end), duration)
+    return {
+        "start": round(normalized_start, 3),
+        "end": round(normalized_end, 3),
+        "duration_sec": round(max(0.0, normalized_end - normalized_start), 3),
+        "reason": reason,
+        "text": text[:120],
+        "priority": int(priority),
+    }
+
+
+def _dedupe_visual_probe_windows(windows: list[dict[str, Any]], *, max_windows: int) -> list[dict[str, Any]]:
+    ordered = sorted(
+        windows,
+        key=lambda item: (
+            -int(item.get("priority", 0) or 0),
+            float(item.get("start", 0.0) or 0.0),
+            float(item.get("end", 0.0) or 0.0),
+        ),
+    )
+    selected: list[dict[str, Any]] = []
+    for window in ordered:
+        start = float(window.get("start", 0.0) or 0.0)
+        end = float(window.get("end", start) or start)
+        if any(min(end, float(existing.get("end", 0.0) or 0.0)) - max(start, float(existing.get("start", 0.0) or 0.0)) > 0.5 for existing in selected):
+            continue
+        selected.append(window)
+        if len(selected) >= max_windows:
+            break
+    selected.sort(key=lambda item: float(item.get("start", 0.0) or 0.0))
+    return selected
+
+
+def _visual_probe_seek_points(start: float, end: float) -> list[float]:
+    if end <= start + 1.0:
+        return [max(0.0, start)]
+    midpoint = start + (end - start) / 2.0
+    return sorted({round(max(0.0, start + 0.25), 2), round(midpoint, 2), round(max(start, end - 0.25), 2)})
+
+
+def _compact_visual_probe_text(text: str) -> str:
+    return re.sub(r"\s+", "", str(text or ""))
+
+
+def _safe_visual_probe_reason(reason: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_]+", "_", str(reason or "asr_probe").strip())
+    return cleaned.strip("_")[:32] or "asr_probe"
+
+
+def _coerce_seconds(value: Any) -> float:
+    try:
+        return float(value or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _format_frame_timestamp_for_name(value: float) -> str:
+    safe = max(0.0, float(value or 0.0))
+    return f"{safe:08.2f}".replace(".", "p")
 
 
 def _probe_duration(source_path: Path) -> float:
@@ -9537,6 +10011,31 @@ def _apply_identity_extraction_rewrite_guard(
     extraction_sources = (extraction.get("sources") if isinstance(extraction, dict) else {}) or {}
     brand_sources = list(extraction_sources.get("subject_brand") or [])
     model_sources = list(extraction_sources.get("subject_model") or [])
+    brand_source_set = {str(source).strip() for source in brand_sources if str(source).strip()}
+    if brand and brand_source_set and brand_source_set <= {"profile", "visual_cluster", "visual", "visible_text", "ocr"}:
+        if not _identity_supported_by_text(
+            brand,
+            model,
+            text=f"{source_name}\n{transcript_excerpt}",
+            glossary_terms=glossary_terms,
+        ):
+            suppressed = brand
+            brand = ""
+            if _normalize_profile_value(str(guarded.get("subject_brand") or "")) == _normalize_profile_value(suppressed):
+                guarded["subject_brand"] = ""
+            extraction["visual_only_brand_suppressed"] = {
+                "brand": suppressed,
+                "sources": sorted(brand_source_set),
+                "reason": "visual_brand_not_supported_by_source_or_transcript",
+            }
+            resolved_payload = extraction.get("resolved")
+            if isinstance(resolved_payload, dict):
+                resolved_payload["subject_brand"] = ""
+            sources_payload = extraction.get("sources")
+            if isinstance(sources_payload, dict):
+                sources_payload["subject_brand"] = []
+            guarded["identity_extraction"] = extraction
+            brand_sources = []
     current_evidence_supported_identity = any(
         source not in {"memory_confirmed", "graph_confirmed_entities", "source_context"}
         for source in [*brand_sources, *model_sources]

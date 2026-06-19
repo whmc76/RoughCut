@@ -3,6 +3,7 @@
 .env
 .env.*
 .pytest_cache/
+.pytest-*.log
 node_modules/
 .pnpm-store/
 roughcut_config.json

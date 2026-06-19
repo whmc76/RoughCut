@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 from roughcut.pipeline.steps import _project_canonical_transcript_to_timeline, _should_keep_existing_subtitle_projection
+from roughcut.review.subtitle_quality import build_subtitle_quality_report
 from roughcut.speech.subtitle_pipeline import _build_canonical_transcript_words
 
 
@@ -48,6 +49,37 @@ def test_transcript_review_prefers_canonical_when_human_corrections_exist() -> N
         },
         canonical_transcript_layer=SimpleNamespace(
             correction_metrics={"accepted_correction_count": 1, "pending_correction_count": 0},
+        ),
+    )
+
+
+def test_transcript_review_rejects_display_baseline_without_word_alignment() -> None:
+    existing_quality = build_subtitle_quality_report(
+        subtitle_items=[
+            {"index": 0, "text_final": "旧字幕没有词级时间戳"},
+            {"index": 1, "text_final": "不能作为安全 baseline"},
+        ],
+        require_word_alignment=True,
+    )
+    refreshed_quality = build_subtitle_quality_report(
+        subtitle_items=[
+            {
+                "index": 0,
+                "text_final": "新字幕有词级时间戳",
+                "words": [
+                    {"word": "新字幕", "start": 0.0, "end": 0.6, "alignment": {"source": "provider"}},
+                    {"word": "有词级时间戳", "start": 0.6, "end": 1.4, "alignment": {"source": "provider"}},
+                ],
+            }
+        ],
+        require_word_alignment=True,
+    )
+
+    assert not _should_keep_existing_subtitle_projection(
+        existing_quality_report=existing_quality,
+        refreshed_quality_report=refreshed_quality,
+        canonical_transcript_layer=SimpleNamespace(
+            correction_metrics={"accepted_correction_count": 0, "pending_correction_count": 0},
         ),
     )
 

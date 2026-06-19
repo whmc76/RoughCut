@@ -22,7 +22,7 @@ def _output_path_was_written_during_current_attempt(output_path: Path, *, starte
     if not output_path.exists():
         return False
     try:
-        return output_path.stat().st_mtime >= float(started_at)
+        return output_path.stat().st_mtime >= float(started_at) - 1.0
     except OSError:
         return False
 
@@ -195,10 +195,14 @@ def _run_single_codex_imagegen(
     excerpt = str(exec_result.get("excerpt") or "")
     combined = "\n".join(part for part in (stdout, stderr, excerpt) if part)
     session_id = _extract_codex_session_id(combined)
-    allowed_roots = _generated_image_search_roots(repo_root=repo_root, output_path=output_path)
+    allowed_roots = _generated_image_search_roots(output_path=output_path)
     generated = output_path if _output_path_was_written_during_current_attempt(output_path, started_at=started_at) else None
     if generated is None:
-        generated = _extract_generated_image_path_from_text(combined, allowed_roots=allowed_roots)
+        generated = _extract_generated_image_path_from_text(
+            combined,
+            allowed_roots=allowed_roots,
+            started_at=started_at,
+        )
         if generated is not None and generated.resolve() == output_path.resolve():
             if not _output_path_was_written_during_current_attempt(output_path, started_at=started_at):
                 generated = None
@@ -248,7 +252,12 @@ def _extract_codex_session_id(text: str) -> str:
     return ""
 
 
-def _extract_generated_image_path_from_text(text: str, *, allowed_roots: list[Path] | None = None) -> Path | None:
+def _extract_generated_image_path_from_text(
+    text: str,
+    *,
+    allowed_roots: list[Path] | None = None,
+    started_at: float | None = None,
+) -> Path | None:
     if not text:
         return None
     roots = [root.resolve() for root in (allowed_roots or []) if isinstance(root, Path)]
@@ -258,6 +267,8 @@ def _extract_generated_image_path_from_text(text: str, *, allowed_roots: list[Pa
         try:
             resolved = path.resolve()
             if not resolved.exists() or not resolved.is_file():
+                continue
+            if started_at is not None and resolved.stat().st_mtime < float(started_at) - 30:
                 continue
             if roots:
                 try:
@@ -302,8 +313,8 @@ def _resolve_generated_image(*, session_id: str, started_at: float) -> Path | No
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
-def _generated_image_search_roots(*, repo_root: Path, output_path: Path) -> list[Path]:
-    roots = [repo_root, output_path.parent]
+def _generated_image_search_roots(*, output_path: Path) -> list[Path]:
+    roots = [output_path.parent]
     codex_home = str(os.getenv("CODEX_HOME", "") or "").strip()
     if codex_home:
         roots.append(Path(codex_home) / "generated_images")

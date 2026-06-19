@@ -6,6 +6,7 @@
 
 | 日期 | 标题 | 定位 | 文件 |
 |------|------|------|------|
+| 2026-06-17 | Film And Animation Remix Editing Methodology | 影视动画二创剪辑方法论、流程规划与 RoughCut 产品映射 | [2026-06-17-film-animation-remix-methodology.md](./2026-06-17-film-animation-remix-methodology.md) |
 | 2026-06-13 | Creator-Agent Asset Workspace Closure Note | 创作者 Agent 资产工作台重构验证记录与收口结论 | [2026-06-13-creator-agent-asset-workspace-closure-note.md](./2026-06-13-creator-agent-asset-workspace-closure-note.md) |
 | 2026-06-13 | Creator-Agent Asset Workspace Closure Checklist | 创作者 Agent 资产工作台重构收口清单与验收口径 | [2026-06-13-creator-agent-asset-workspace-closure-checklist.md](./2026-06-13-creator-agent-asset-workspace-closure-checklist.md) |
 | 2026-06-13 | Creator-Agent Asset Workspace Execution Plan | 创作者 Agent 资产工作台、创建任务页与任务流程页重构执行计划 | [2026-06-13-creator-agent-asset-workspace-execution-plan.md](./2026-06-13-creator-agent-asset-workspace-execution-plan.md) |

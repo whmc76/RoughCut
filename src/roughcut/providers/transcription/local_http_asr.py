@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import replace
 import json
+import os
 import re
 from pathlib import Path
 import tempfile
@@ -34,6 +35,14 @@ from roughcut.review.hotword_learning import extract_prompt_hotwords
 
 
 class LocalHTTPASRProvider(TranscriptionProvider):
+    _MODEL_BASE_URL_ENV_KEYS = {
+        "fun-asr-nano-2512": "LOCAL_ASR_FUNASR_NANO_2512_BASE_URL",
+        "faster-whisper-large-v3-beam5-nohot": "LOCAL_ASR_FASTER_WHISPER_LARGE_V3_BASE_URL",
+    }
+    _MODEL_BASE_URL_DEFAULTS = {
+        "fun-asr-nano-2512": "http://127.0.0.1:30210",
+        "faster-whisper-large-v3-beam5-nohot": "http://127.0.0.1:30200",
+    }
     _QWEN3_ASR_MAX_CHUNK_SEC = 75.0
     _QWEN3_ASR_RETRY_CHUNK_SEC = 30.0
     _QWEN3_ASR_RETRY_MIN_CHUNK_SEC = 12.0
@@ -55,19 +64,35 @@ class LocalHTTPASRProvider(TranscriptionProvider):
     _SHORT_PREFIX_DUPLICATE_NOISE_TERMS = frozenset({"开", "有", "借", "简"})
     _SHORT_DUPLICATE_NOISE_RE = re.compile(r"([啊呃嗯哦哎诶呀呢嘛吧吗了的还又就也都再很太是个我你他她它给把])\1+")
     _SHORT_PREFIX_DUPLICATE_NOISE_RE = re.compile(r"([开有借简])\1(?=[\u4e00-\u9fff])")
+    _LONG_LAUGHTER_DUPLICATE_NOISE_RE = re.compile(r"([哈嘿呵嘻哼])\1{2,}")
+    _LONG_CJK_DUPLICATE_NOISE_RE = re.compile(r"([\u4e00-\u9fff])\1{3,}")
 
-    def __init__(self, *, model_name: str = "faster-whisper-large-v3-beam5-nohot") -> None:
+    def __init__(self, *, model_name: str | None = None) -> None:
         settings = get_settings()
-        self._base_url = settings.local_asr_api_base_url.rstrip("/")
         self._transcribe_path = self._normalize_path(settings.local_asr_transcribe_path or "/transcribe")
+        explicit_model = str(model_name or "").strip()
         configured_model = str(settings.local_asr_model_name or "").strip()
-        self._model_name = configured_model or model_name
+        self._model_name = explicit_model or configured_model or "faster-whisper-large-v3-beam5-nohot"
+        self._base_url = self._resolve_base_url_for_model(
+            self._model_name,
+            default_base_url=str(settings.local_asr_api_base_url or ""),
+        ).rstrip("/")
         self._hotwords_field = str(settings.local_asr_hotwords_field or "hotwords").strip() or "hotwords"
         self._hotwords_enabled = bool(getattr(settings, "local_asr_hotwords_enabled", False))
         self._beam_size = max(1, int(getattr(settings, "local_asr_beam_size", 5) or 5))
         self._best_of = max(1, int(getattr(settings, "local_asr_best_of", 5) or 5))
         self._condition_on_previous_text = bool(getattr(settings, "local_asr_condition_on_previous_text", False))
         self._vad_filter = bool(getattr(settings, "local_asr_vad_filter", True))
+
+    @classmethod
+    def _resolve_base_url_for_model(cls, model_name: str, *, default_base_url: str) -> str:
+        normalized_model = str(model_name or "").strip().lower()
+        env_key = cls._MODEL_BASE_URL_ENV_KEYS.get(normalized_model)
+        if env_key:
+            override = str(os.getenv(env_key) or "").strip()
+            if override:
+                return override
+        return cls._MODEL_BASE_URL_DEFAULTS.get(normalized_model) or default_base_url or "http://127.0.0.1:30230"
 
     async def transcribe(
         self,
@@ -644,14 +669,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                     "application/octet-stream",
                 )
             }
-            data = {
-                self._hotwords_field: context or "",
-                "max_new_tokens": str(max_new_tokens),
-                "beam_size": str(self._beam_size),
-                "best_of": str(self._best_of),
-                "condition_on_previous_text": str(self._condition_on_previous_text).lower(),
-                "vad_filter": str(self._vad_filter).lower(),
-            }
+            data = self._build_request_data(context=context, max_new_tokens=max_new_tokens)
             async with hold_managed_gpu_services_async(
                 required_urls=[self._base_url],
                 reason="local_http_asr_transcribe",
@@ -660,6 +678,18 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                     response = await client.post(f"{self._base_url}{self._transcribe_path}", files=files, data=data)
         response.raise_for_status()
         return dict(response.json() or {})
+
+    def _build_request_data(self, *, context: str | None, max_new_tokens: int) -> dict[str, str]:
+        return {
+            self._hotwords_field: context or "",
+            "model": self._model_name,
+            "model_name": self._model_name,
+            "max_new_tokens": str(max_new_tokens),
+            "beam_size": str(self._beam_size),
+            "best_of": str(self._best_of),
+            "condition_on_previous_text": str(self._condition_on_previous_text).lower(),
+            "vad_filter": str(self._vad_filter).lower(),
+        }
 
     def _build_result_from_payload(
         self,
@@ -691,16 +721,9 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                     )
                 ]
 
-        if self._decode_loop_sanitizer_enabled():
-            segments = self._sanitize_decode_loop_segments(segments)
-        if self._short_duplicate_noise_sanitizer_enabled():
-            segments = self._sanitize_short_duplicate_noise_segments(segments)
+        segments = self._sanitize_asr_decode_artifacts(segments)
         raw_segments_copy = list(segments)
         segments = self._repair_segments(segments, duration=duration)
-        if self._decode_loop_sanitizer_enabled():
-            segments = self._sanitize_decode_loop_segments(segments)
-        if self._short_duplicate_noise_sanitizer_enabled():
-            segments = self._sanitize_short_duplicate_noise_segments(segments)
 
         if progress_callback is not None:
             total = duration if duration > 0 else (segments[-1].end if segments else 0.0)
@@ -726,6 +749,14 @@ class LocalHTTPASRProvider(TranscriptionProvider):
             context=context,
             hotword=context,
         )
+
+    def _sanitize_asr_decode_artifacts(self, segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
+        cleaned = list(segments or [])
+        if self._decode_loop_sanitizer_enabled():
+            cleaned = self._sanitize_decode_loop_segments(cleaned)
+        if self._short_duplicate_noise_sanitizer_enabled():
+            cleaned = self._sanitize_short_duplicate_noise_segments(cleaned)
+        return cleaned
 
     def _extract_segment_items(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
         raw_segments = payload.get("segments")
@@ -1150,10 +1181,18 @@ class LocalHTTPASRProvider(TranscriptionProvider):
     def _sanitize_short_duplicate_noise_segments(self, segments: list[TranscriptSegment]) -> list[TranscriptSegment]:
         sanitized: list[TranscriptSegment] = []
         for index, segment in enumerate(list(segments or [])):
-            text = self._collapse_short_duplicate_noise_text(segment.text)
+            text, collapsed_text_loop_count = self._collapse_short_duplicate_noise_text(
+                segment.text,
+                allow_long_text_loops=not bool(segment.words),
+            )
             words, dropped_word_count = self._collapse_short_duplicate_noise_words(segment.words)
             text_changed = text != str(segment.text or "").strip()
             words_changed = words != list(segment.words)
+            if words_changed and not text_changed:
+                rebuilt_text = "".join(str(word.word or "").strip() for word in words).strip()
+                if rebuilt_text:
+                    text = rebuilt_text
+                    text_changed = text != str(segment.text or "").strip()
             raw_payload = dict(segment.raw_payload)
             if text_changed or words_changed:
                 raw_payload["_roughcut_filtering"] = {
@@ -1162,6 +1201,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                         "original_text": segment.text,
                         "text": text,
                         "dropped_word_count": dropped_word_count,
+                        "collapsed_text_loop_count": collapsed_text_loop_count,
                     },
                 }
             sanitized.append(
@@ -1186,16 +1226,45 @@ class LocalHTTPASRProvider(TranscriptionProvider):
         return [segment for segment in sanitized if str(segment.text or "").strip()]
 
     @classmethod
-    def _collapse_short_duplicate_noise_text(cls, text: str) -> str:
+    def _collapse_short_duplicate_noise_text(
+        cls,
+        text: str,
+        *,
+        allow_long_text_loops: bool = True,
+    ) -> tuple[str, int]:
         cleaned = str(text or "").strip()
         if not cleaned:
-            return ""
+            return "", 0
+        collapsed_text_loop_count = 0
         cleaned = re.sub(r"没(?:没有)+", "没有", cleaned)
         cleaned = re.sub(r"(?:没有){2,}", "没有", cleaned)
         cleaned = re.sub(r"这(?=这个)", "", cleaned)
         cleaned = re.sub(r"那(?=那个)", "", cleaned)
         cleaned = cls._SHORT_PREFIX_DUPLICATE_NOISE_RE.sub(r"\1", cleaned)
-        return cls._SHORT_DUPLICATE_NOISE_RE.sub(r"\1", cleaned).strip()
+        cleaned = cls._SHORT_DUPLICATE_NOISE_RE.sub(r"\1", cleaned)
+        if allow_long_text_loops:
+            cleaned, collapsed_text_loop_count = cls._collapse_long_text_only_duplicate_loops(cleaned)
+        return cleaned.strip(), collapsed_text_loop_count
+
+    @classmethod
+    def _collapse_long_text_only_duplicate_loops(cls, text: str) -> tuple[str, int]:
+        dropped_count = 0
+
+        def keep_pair(match: re.Match[str]) -> str:
+            nonlocal dropped_count
+            value = match.group(0)
+            dropped_count += max(0, len(value) - 2)
+            return match.group(1) * 2
+
+        def keep_single(match: re.Match[str]) -> str:
+            nonlocal dropped_count
+            value = match.group(0)
+            dropped_count += max(0, len(value) - 1)
+            return match.group(1)
+
+        cleaned = cls._LONG_LAUGHTER_DUPLICATE_NOISE_RE.sub(keep_pair, str(text or ""))
+        cleaned = cls._LONG_CJK_DUPLICATE_NOISE_RE.sub(keep_single, cleaned)
+        return cleaned, dropped_count
 
     def _collapse_short_duplicate_noise_words(self, words: list[WordTiming]) -> tuple[list[WordTiming], int]:
         source = list(words or [])
@@ -1253,10 +1322,30 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                 index = run_end
                 continue
 
+            run_end = index + 1
+            while run_end < len(source) and self._short_duplicate_noise_key(source[run_end].word) == key:
+                run_end += 1
+            if run_end > index + 1 and self._duplicate_word_run_has_collapsed_timing(source[index:run_end]):
+                cleaned.append(self._copy_word_timing(word))
+                dropped_count += run_end - index - 1
+                index = run_end
+                continue
+
             cleaned.append(self._copy_word_timing(word))
             index += 1
 
         return cleaned, dropped_count
+
+    @staticmethod
+    def _duplicate_word_run_has_collapsed_timing(words: list[WordTiming]) -> bool:
+        if len(words) <= 1:
+            return False
+        starts = [float(getattr(word, "start", 0.0) or 0.0) for word in words]
+        ends = [float(getattr(word, "end", starts[index]) or starts[index]) for index, word in enumerate(words)]
+        durations = [max(0.0, end - start) for start, end in zip(starts, ends)]
+        span = max(ends) - min(starts) if starts and ends else 0.0
+        unique_starts = {round(value, 2) for value in starts}
+        return len(unique_starts) <= 1 or (span <= 0.16 and any(duration <= 0.025 for duration in durations))
 
     @classmethod
     def _short_duplicate_noise_key(cls, text: str) -> str:

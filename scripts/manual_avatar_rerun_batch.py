@@ -15,7 +15,7 @@ from roughcut.pipeline.orchestrator import _reset_job_for_quality_rerun
 from roughcut.pipeline.steps import run_step_sync
 from roughcut.pipeline.tasks import _apply_job_runtime_snapshot, _update_step_status
 
-RERUN_STEPS = ["avatar_commentary", "edit_plan", "render", "final_review", "platform_package"]
+RERUN_STEPS = ["avatar_commentary", "edit_plan", "render"]
 EXECUTE_STEPS = ["avatar_commentary", "edit_plan", "render"]
 
 
@@ -39,6 +39,26 @@ async def _reset_jobs(job_ids: Iterable[str], *, issue_codes: list[str]) -> list
             reset_ids.append(job_id_text)
         await session.commit()
     return reset_ids
+
+
+async def _finalize_rerun_jobs(job_ids: Iterable[str]) -> None:
+    factory = get_session_factory()
+    async with factory() as session:
+        for job_id_text in job_ids:
+            job_id = uuid.UUID(job_id_text)
+            job = await session.get(Job, job_id)
+            if job is None:
+                continue
+            steps = (await session.execute(select(JobStep).where(JobStep.job_id == job.id))).scalars().all()
+            failed_steps = [step for step in steps if step.status == "failed"]
+            if failed_steps:
+                job.status = "failed"
+                job.error_message = failed_steps[-1].error_message or f"{failed_steps[-1].step_name} failed"
+                continue
+            if steps and all(step.status == "done" for step in steps):
+                job.status = "done"
+                job.error_message = None
+        await session.commit()
 
 
 def _run_single_step(job_id: str, step: str) -> dict:
@@ -81,6 +101,8 @@ def main() -> int:
         except Exception as exc:  # pragma: no cover - operational path
             failures[job_id] = str(exc)
             print(json.dumps({"job_id": job_id, "error": str(exc)}, ensure_ascii=False), flush=True)
+
+    asyncio.run(_finalize_rerun_jobs(results.keys() if not failures else reset_ids))
 
     print(
         json.dumps(

@@ -61,3 +61,24 @@ def test_reconcile_job_preview_terminal_status_prefers_successful_outputs_over_s
 
     assert job.status == "done"
     assert job.error_message is None
+
+
+def test_reconcile_job_preview_terminal_status_ignores_stale_platform_package_step() -> None:
+    job = _build_job(source_name="noc_mt34_90s.mp4", file_hash="hash-1", status="failed")
+    job.error_message = "stale publication wait"
+    job.steps = [
+        JobStep(job_id=job.id, step_name="render", status="done"),
+        JobStep(job_id=job.id, step_name="platform_package", status="pending"),
+    ]
+    job.artifacts = [
+        Artifact(
+            job_id=job.id,
+            artifact_type="render_outputs",
+            data_json={"packaged_mp4": "E:/output/20260614_NOC_MT34_手感展示_横版_成片.mp4"},
+        ),
+    ]
+
+    _reconcile_job_preview_terminal_status(job)
+
+    assert job.status == "done"
+    assert job.error_message is None

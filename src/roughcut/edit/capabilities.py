@@ -24,9 +24,9 @@ VALID_CAPABILITY_STATES: Final[set[str]] = {
 
 CAPABILITY_METADATA: Final[dict[str, dict[str, str]]] = {
     "speech_density_trim": {
-        "label": "语速密度剪辑",
+        "label": "智能自动剪辑",
         "layer": "editorial",
-        "description": "Speech-driven low-risk density trimming on uploaded source material.",
+        "description": "Single editorial authority for speech cleanup, pacing compression, and low-risk smart delete candidates.",
     },
     "screen_focus": {
         "label": "教程画面聚焦",

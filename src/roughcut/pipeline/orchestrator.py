@@ -6,11 +6,13 @@ State in DB, Celery only executes individual steps.
         → subtitle_term_resolution → subtitle_consistency_review
         → glossary_review → transcript_review → subtitle_translation
         → content_profile → summary_review(auto gate) → ai_director
-        → avatar_commentary → edit_plan → render → final_review(auto gate) → platform_package
+        → avatar_commentary → edit_plan → render
 
  The ASR cleanup and review gates remain in the main path because they provide
  term resolution, consistency checks, and canonical transcript projection for
- downstream editing. They can still be explicitly skipped through the legacy
+ downstream editing. Publication, cover ideation, and platform packaging are
+ owned by the intelligent publication module, not this editing pipeline. ASR
+ steps can still be explicitly skipped through the legacy
  streamlined-ASR compatibility flag, but that is no longer the default.
 """
 from __future__ import annotations
@@ -41,7 +43,6 @@ from roughcut.review.evidence_types import (
     ARTIFACT_TYPE_ENTITY_RESOLUTION_TRACE,
     ARTIFACT_TYPE_TRANSCRIPT_EVIDENCE,
 )
-from roughcut.review.final_review_state import mark_final_review_approved
 from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
 from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
 from roughcut.review.subtitle_term_resolution import ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH
@@ -67,8 +68,6 @@ PIPELINE_STEPS = [
     "avatar_commentary",
     "edit_plan",
     "render",
-    "final_review",
-    "platform_package",
 ]
 
 STEP_TASK_MAP = {
@@ -86,7 +85,6 @@ STEP_TASK_MAP = {
     "avatar_commentary": "roughcut.pipeline.tasks.llm_avatar_commentary",
     "edit_plan": "roughcut.pipeline.tasks.media_edit_plan",
     "render": "roughcut.pipeline.tasks.media_render",
-    "platform_package": "roughcut.pipeline.tasks.llm_platform_package",
 }
 
 STEP_QUEUES = {
@@ -104,13 +102,13 @@ STEP_QUEUES = {
     "avatar_commentary": "llm_queue",
     "edit_plan": "media_queue",
     "render": "media_queue",
-    "platform_package": "llm_queue",
 }
 
 MAX_ATTEMPTS = 3
 _GPU_SENSITIVE_STEPS = {"transcribe", "avatar_commentary", "render"}
-_REVIEW_ROUND_STEPS = {"summary_review", "glossary_review", "final_review"}
+_REVIEW_ROUND_STEPS = {"summary_review", "glossary_review"}
 _EDIT_PLAN_OPTIONAL_PREREQUISITES = {"ai_director", "avatar_commentary"}
+_EXTERNAL_SCRIPT_FOOTAGE_WORKFLOW_MODES = {"remix_auto_commentary", "remix_llm_plan", "script_footage_remix"}
 _STREAMLINED_ASR_REVIEW_STEPS = frozenset(
     {
         "subtitle_term_resolution",
@@ -123,6 +121,11 @@ _ORCHESTRATOR_ADVISORY_LOCK_KEY = 22032026
 _ORCHESTRATOR_HEARTBEAT_PATH = Path("logs/orchestrator-heartbeat.json")
 _ORCHESTRATOR_HEARTBEAT_MIN_FRESH_SEC = 30.0
 _SMART_ASSIST_MODE = "smart_assist"
+_TERMINAL_FAILURE_ERROR_PREFIXES = (
+    "edit_plan_blocked_by_projection_fallback:",
+    "edit_plan_blocked_by_insert_fallback:",
+    "render_blocked_by_fallback_output:",
+)
 
 
 @dataclass(frozen=True)
@@ -353,6 +356,8 @@ async def tick() -> None:
             select(Job).where(Job.status.notin_(["cancelled", "failed", "done"]))
         )
         for job in jobs_result.scalars().all():
+            if _job_uses_external_script_footage_remix(job):
+                continue
             await _ensure_job_steps(job, session)
 
         if bool(getattr(get_settings(), "watch_auto_duty_enabled", True)):
@@ -388,6 +393,9 @@ async def tick() -> None:
         pending_steps = result.scalars().all()
 
         for step in pending_steps:
+            job = await session.get(Job, step.job_id)
+            if job is not None and _job_uses_external_script_footage_remix(job):
+                continue
             if await _maybe_auto_skip_step(step, session):
                 continue
 
@@ -942,6 +950,31 @@ def _mark_step_retry_exhausted(step: JobStep, *, now: datetime, detail: str | No
     step.metadata_ = metadata
 
 
+def _step_failure_is_terminal(step: JobStep) -> bool:
+    metadata = dict(step.metadata_ or {})
+    if bool(metadata.get("terminal_failure")):
+        return True
+    if metadata.get("retryable") is False:
+        return True
+    error_message = str(step.error_message or "").strip()
+    if any(error_message.startswith(prefix) for prefix in _TERMINAL_FAILURE_ERROR_PREFIXES):
+        return True
+    return int(step.attempt or 0) >= MAX_ATTEMPTS
+
+
+def _step_blocks_job_as_failure(step: JobStep) -> bool:
+    status = str(step.status or "").strip().lower()
+    if status == "failed":
+        return _step_failure_is_terminal(step)
+    if status != "cancelled":
+        return False
+    metadata = dict(step.metadata_ or {})
+    error_message = str(step.error_message or "").strip()
+    if bool(metadata.get("terminal_failure")) or metadata.get("retryable") is False:
+        return True
+    return any(error_message.startswith(prefix) for prefix in _TERMINAL_FAILURE_ERROR_PREFIXES)
+
+
 async def _recover_stale_running_steps(session) -> None:
     settings = get_settings()
     if not bool(getattr(settings, "step_stale_recovery_enabled", True)):
@@ -1156,6 +1189,10 @@ def _step_requires_local_gpu_for_dispatch(step_name: str) -> bool:
         return step_name in _GPU_SENSITIVE_STEPS
 
 
+def _job_uses_external_script_footage_remix(job: Job) -> bool:
+    return str(getattr(job, "workflow_mode", "") or "").strip() in _EXTERNAL_SCRIPT_FOOTAGE_WORKFLOW_MODES
+
+
 def _coerce_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
@@ -1222,7 +1259,7 @@ async def _recover_incomplete_jobs() -> None:
                         "updated_at": now.isoformat(),
                     }
                     recovered = True
-                elif step.status == "failed" and step.attempt < MAX_ATTEMPTS:
+                elif step.status == "failed" and not _step_failure_is_terminal(step):
                     metadata = dict(step.metadata_ or {})
                     metadata.pop("task_id", None)
                     metadata.pop("retry_wait_until", None)
@@ -1251,7 +1288,7 @@ async def _recover_incomplete_jobs() -> None:
 
 async def _is_step_ready(step: JobStep, session) -> bool:
     """Check if all prerequisite steps are done."""
-    if step.step_name in {"summary_review", "final_review"}:
+    if step.step_name == "summary_review":
         return False
 
     step_idx = PIPELINE_STEPS.index(step.step_name)
@@ -1328,6 +1365,8 @@ async def _update_job_statuses(session) -> None:
     jobs = result.scalars().all()
 
     for job in jobs:
+        if _job_uses_external_script_footage_remix(job):
+            continue
         steps_result = await session.execute(
             select(JobStep).where(JobStep.job_id == job.id)
         )
@@ -1342,9 +1381,7 @@ async def _update_job_statuses(session) -> None:
         ]
         _reconcile_terminal_steps(job, ordered_existing_steps)
         if job.status == "failed":
-            remaining_failed_steps = [
-                s for s in steps if s.status == "failed" and s.attempt >= MAX_ATTEMPTS
-            ]
+            remaining_failed_steps = [s for s in steps if _step_blocks_job_as_failure(s)]
             if remaining_failed_steps:
                 continue
             job.status = "processing"
@@ -1359,15 +1396,6 @@ async def _update_job_statuses(session) -> None:
             quality_outcome = await _assess_and_maybe_rerun_job(session, job, steps)
             if quality_outcome == "rerun":
                 continue
-            if quality_outcome == "needs_review":
-                final_review_step = step_map.get("final_review")
-                if final_review_step is not None:
-                    _mark_final_review_exception_gate(
-                        job=job,
-                        final_review_step=final_review_step,
-                        detail="质量门发现需要关注的问题，已保留为手动调整提示并继续完成流程。",
-                        pause_job=False,
-                    )
             job.status = "done"
             job.error_message = None
             job.updated_at = datetime.now(timezone.utc)
@@ -1377,7 +1405,6 @@ async def _update_job_statuses(session) -> None:
 
         review_step = step_map.get("summary_review")
         draft_step = step_map.get("content_profile")
-        final_review_step = step_map.get("final_review")
         render_step = step_map.get("render")
         if (
             draft_step is not None
@@ -1417,21 +1444,6 @@ async def _update_job_statuses(session) -> None:
         ):
             _mark_job_waiting_for_manual_edit(job, render_step)
             continue
-        if (
-            render_step is not None
-            and render_step.status == "done"
-            and final_review_step is not None
-            and final_review_step.status == "pending"
-        ):
-            final_gate_outcome = await _auto_advance_final_review_after_render(
-                session,
-                job=job,
-                steps=steps,
-                final_review_step=final_review_step,
-            )
-            if final_gate_outcome in {"advanced", "rerun", "needs_review"}:
-                continue
-
         now = datetime.now(timezone.utc)
         exhausted_pending_steps = [s for s in steps if s.status == "pending" and s.attempt >= MAX_ATTEMPTS]
         for step in exhausted_pending_steps:
@@ -1441,8 +1453,8 @@ async def _update_job_statuses(session) -> None:
                 detail=f"步骤处于待执行状态但已达到最大重试次数({MAX_ATTEMPTS})，调度器已标记为失败以避免无限挂起。",
             )
 
-        # Any step failed with max attempts = job failed
-        failed_steps = [s for s in steps if s.status == "failed" and s.attempt >= MAX_ATTEMPTS]
+        # Any terminal step failure fails the job.
+        failed_steps = [s for s in steps if _step_blocks_job_as_failure(s)]
         if failed_steps:
             job.status = "failed"
             job.error_message = _build_job_failure_message(_latest_failed_step(steps), attempts=MAX_ATTEMPTS)
@@ -1450,81 +1462,11 @@ async def _update_job_statuses(session) -> None:
             await _cleanup_terminal_job_files(session, job, purge_deliverables=True)
             logger.error(f"Job {job.id} failed: {job.error_message}")
 
-
-async def _auto_advance_final_review_after_render(
-    session,
-    *,
-    job: Job,
-    steps: list[JobStep],
-    final_review_step: JobStep,
-) -> str | None:
-    metadata = dict(final_review_step.metadata_ or {})
-    if job.status == "needs_review" and bool(metadata.get("exception_gate")):
-        return "needs_review"
-
-    quality_outcome = await _assess_and_maybe_rerun_job(session, job, steps)
-    if quality_outcome == "rerun":
-        return "rerun"
-    quality_advisory = quality_outcome == "needs_review"
-    if quality_outcome == "needs_review":
-        _mark_final_review_exception_gate(
-            job=job,
-            final_review_step=final_review_step,
-            detail="质量门发现需要关注的问题，已保留为手动调整提示并继续后续流程。",
-            pause_job=False,
-        )
-
-    mark_final_review_approved(
-        review_step=final_review_step,
-        job=job,
-        now=datetime.now(timezone.utc),
-        approved_via="auto_quality_gate",
-        metadata_updates={
-            "detail": (
-                "质量门发现需关注提示，已保留到手动调整并自动通过成片核对。"
-                if quality_advisory
-                else "质量门未发现阻塞异常，已自动通过成片核对并继续生成平台文案。"
-            ),
-            "auto_approved": True,
-            "exception_only_auto_approved": True,
-            "manual_adjustment_advisory": quality_advisory,
-        },
-    )
-    return "advanced"
-
-
-def _mark_final_review_exception_gate(
-    *,
-    job: Job,
-    final_review_step: JobStep,
-    detail: str,
-    pause_job: bool = True,
-) -> None:
-    now = datetime.now(timezone.utc)
-    metadata = dict(final_review_step.metadata_ or {})
-    final_review_step.status = "pending" if pause_job else "done"
-    final_review_step.started_at = final_review_step.started_at or now
-    final_review_step.finished_at = None if pause_job else now
-    final_review_step.error_message = None
-    final_review_step.metadata_ = {
-        **metadata,
-        "detail": detail,
-        "updated_at": now.isoformat(),
-        "exception_gate": True,
-        "manual_adjustment_advisory": not pause_job,
-        "auto_approved": False,
-        "progress": 0.0 if pause_job else 1.0,
-    }
-    job.status = "needs_review" if pause_job else "processing"
-    job.error_message = None
-    job.updated_at = now
-
-
 def _latest_failed_step(steps: list[JobStep]) -> JobStep | None:
     step_map = {step.step_name: step for step in steps}
     for step_name in reversed(PIPELINE_STEPS):
         step = step_map.get(step_name)
-        if step is not None and step.status == "failed" and step.attempt >= MAX_ATTEMPTS:
+        if step is not None and _step_blocks_job_as_failure(step):
             return step
     return None
 
@@ -1611,6 +1553,8 @@ def _reconcile_completed_summary_review_step(step_map: dict[str, JobStep]) -> No
 
 
 async def _ensure_job_steps(job: Job, session) -> None:
+    if _job_uses_external_script_footage_remix(job):
+        return
     result = await session.execute(select(JobStep).where(JobStep.job_id == job.id))
     existing_steps = result.scalars().all()
     existing_names = {step.step_name for step in existing_steps}
@@ -1875,8 +1819,6 @@ def _artifact_types_for_quality_rerun(rerun_steps: set[str], *, issue_codes: lis
         artifact_types.add(QUALITY_ARTIFACT_TYPE)
         if not preserve_render_outputs:
             artifact_types.update({"render_outputs", "variant_timeline_bundle"})
-    if "platform_package" in rerun_steps:
-        artifact_types.add("platform_packaging_md")
     return artifact_types
 
 

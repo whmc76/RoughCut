@@ -368,7 +368,12 @@ def _check_cover_hard_contract(
         or ""
     ).strip().lower()
     full_cover_typography_required = typography_owner in {"codex_full_cover", "bitmap_full_cover", "imagegen_full_cover"}
-    image_text_quality_is_blocking = typography_owner == "local_post_overlay" or bool(contract.get("post_title_overlay_required"))
+    image_text_quality_is_blocking = (
+        typography_owner == "local_post_overlay"
+        or bool(contract.get("post_title_overlay_required"))
+        or bool(contract.get("full_bitmap_cover_required"))
+        or full_cover_typography_required
+    )
     if bool(contract.get("preserve_subject_geometry")):
         deformation_risk = _positive_float(metadata.get("deformation_risk"))
         if deformation_risk is not None and deformation_risk > 0.35:

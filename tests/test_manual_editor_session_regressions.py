@@ -1001,7 +1001,6 @@ def test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_on
             packaging_plan_inputs.append(
                 {
                     "packaging_timeline": kwargs.get("packaging_timeline"),
-                    "cover": kwargs.get("cover"),
                     "delivery": kwargs.get("delivery"),
                     "render_plan_context": kwargs.get("render_plan_context"),
                 }
@@ -1180,7 +1179,6 @@ def test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_on
             assert packaging_plan_render_payloads == [None]
             assert len(packaging_plan_inputs) == 1
             assert packaging_plan_inputs[0]["packaging_timeline"] is None
-            assert packaging_plan_inputs[0]["cover"] is None
             assert packaging_plan_inputs[0]["delivery"] is None
             assert packaging_plan_inputs[0]["render_plan_context"] is not None
             assert packaging_plan_inputs[0]["render_plan_context"]["packaging_timeline"] == {
@@ -1197,7 +1195,6 @@ def test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_on
                 },
                 "editing_accents": {},
             }
-            assert packaging_plan_inputs[0]["render_plan_context"]["cover"] == {}
             assert packaging_plan_inputs[0]["render_plan_context"]["delivery"] == {}
             assert packaging_plan_inputs[0]["render_plan_context"]["loudness"] == {"target_lufs": -18.0}
             assert packaging_plan_inputs[0]["render_plan_context"]["voice_processing"] == {"noise_reduction": True}
@@ -1221,7 +1218,7 @@ def test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_on
         asyncio.run(engine.dispose())
 
 
-def test_manual_editor_apply_shrinks_no_material_change_to_platform_package_rerun(
+def test_manual_editor_apply_skips_no_material_change_rerun(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1430,11 +1427,9 @@ def test_manual_editor_apply_shrinks_no_material_change_to_platform_package_reru
 
             assert result.change_scope == "no_material_change"
             assert result.render_strategy == "metadata_refresh_render"
-            assert result.rerun_steps == ["platform_package"]
-            assert "仅刷新平台文案" in str(result.detail)
-            assert rerun_plans and rerun_plans[-1].rerun_start_step == "platform_package"
-            assert rerun_plans[-1].rerun_steps == ["platform_package"]
-            assert rerun_plans[-1].issue_codes == ["manual_editor_no_material_change"]
+            assert result.rerun_steps == []
+            assert "无需触发剪辑重跑" in str(result.detail)
+            assert rerun_plans == []
             assert captured_refine_audio_defaults == [{"target_lufs": -18.0, "noise_reduction": True}]
             assert len(packaging_helper_calls["editing_skill"]) == 1
             assert len(packaging_helper_calls["editing_accents"]) == 1
@@ -2030,7 +2025,7 @@ def test_manual_editor_apply_reuses_previous_packaging_effect_style_for_timeline
             assert len(packaging_helper_calls["editing_accents"]) == 1
             assert len(packaging_helper_calls["subtitles"]) == 1
             assert rerun_plans and rerun_plans[-1].issue_codes == ["manual_timeline_edit"]
-            assert rerun_plans[-1].rerun_steps == ["render", "final_review", "platform_package"]
+            assert rerun_plans[-1].rerun_steps == ["render"]
             assert latest_render_plan_payload.get("editing_accents", {}).get("style") == "smart_effect_punch"
 
     try:

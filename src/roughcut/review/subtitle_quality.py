@@ -31,8 +31,11 @@ _KEEP_SHORT_FRAGMENT_RE = re.compile(
 _ALLOWED_SHORT_UTTERANCE_RE = re.compile(
     r"^(?:"
     r"我发现|你看|你说|算了|但是|不过|并且|然后|后来|所以|其实|另外|再说|比如|例如|行了|好了|没事|确实|真的"
-    r"|这也是|直接去看|那无所谓|或者说|同时"
+    r"|这也是|直接去看|那无所谓|或者说|同时|它们都有|我们来看|我们看一下|来看一下|看一下"
     r")$"
+)
+_COMPLETE_SHORT_NOUN_PHRASE_RE = re.compile(
+    r"^(?:小把手|卡扣|肩带|拉链|口袋|背板|夹子|尾盖|按键|侧面|正面|背面|刀刃|刀尖|细节|做工|手感|亮度)$"
 )
 _ALLOWED_SHORT_TEMPORAL_PHRASE_RE = re.compile(
     r"^(?:前|这|那|近|后)?(?:\d+|[一二三四五六七八九十两几])(?:天|周|年|个月|分钟|秒钟?)$"
@@ -48,8 +51,12 @@ _CONSERVATIVE_IDENTITY_SUMMARY_PHRASES = {
 }
 _IDENTITY_HINT_RE = re.compile(r"(MT34|EDC17|EDC37|FXX1|EXO|NOC|FAS|foxbat|OLIGHT|NITECORE|REATE)", re.IGNORECASE)
 _SHORT_FRAGMENT_BLOCKING_MIN_COUNT = 10
+_SHORT_FRAGMENT_WARNING_MIN_COUNT = 4
+_SHORT_FRAGMENT_DENSE_WARNING_RATE = 0.08
 _GENERIC_WORD_SPLIT_BLOCKING_MIN_COUNT = 10
 _GENERIC_WORD_SPLIT_BLOCKING_RATE = 0.02
+_MISSING_WORD_ALIGNMENT_BLOCKING_RATE = 0.5
+_MISSING_WORD_ALIGNMENT_WARNING_RATE = 0.05
 _SYNTHETIC_ALIGNMENT_SOURCES = {"synthetic", "segment_only", "provider_missing", "roughcut_synthesized"}
 _FALLBACK_ALIGNMENT_SOURCES = {"postprocess_text_fallback", "canonical_segment_fallback"}
 
@@ -184,6 +191,104 @@ def subtitle_alignment_source_metrics_has_output_fallback(
         return False
 
 
+def _subtitle_alignment_source_missing_rate(metrics: Mapping[str, Any] | None) -> tuple[int, int, float]:
+    payload = metrics if isinstance(metrics, Mapping) else {}
+    per_subtitle = payload.get("per_subtitle")
+    total = len(per_subtitle) if isinstance(per_subtitle, (list, tuple)) else 0
+    try:
+        missing_count = int(payload.get("missing_word_subtitle_count") or 0)
+    except (TypeError, ValueError):
+        missing_count = 0
+    if total <= 0 and missing_count > 0:
+        total = missing_count
+    rate = (missing_count / total) if total > 0 else 0.0
+    return missing_count, total, rate
+
+
+def subtitle_alignment_source_metrics_has_missing_word_alignment(
+    metrics: Mapping[str, Any] | None,
+    *,
+    blocking_only: bool = False,
+) -> bool:
+    missing_count, total, rate = _subtitle_alignment_source_missing_rate(metrics)
+    if total <= 0 or missing_count <= 0:
+        return False
+    if blocking_only:
+        return rate >= _MISSING_WORD_ALIGNMENT_BLOCKING_RATE
+    return rate >= _MISSING_WORD_ALIGNMENT_WARNING_RATE
+
+
+def subtitle_quality_report_has_missing_word_alignment(
+    report: Mapping[str, Any] | None,
+    *,
+    blocking_only: bool = False,
+) -> bool:
+    payload = report if isinstance(report, Mapping) else {}
+    metrics = payload.get("metrics")
+    if not isinstance(metrics, Mapping):
+        return False
+    alignment_source = metrics.get("alignment_source")
+    if not isinstance(alignment_source, Mapping):
+        return False
+    return subtitle_alignment_source_metrics_has_missing_word_alignment(
+        alignment_source,
+        blocking_only=blocking_only,
+    )
+
+
+def apply_subtitle_alignment_quality_guard(
+    report: Mapping[str, Any] | None,
+    *,
+    require_word_alignment: bool = False,
+) -> dict[str, Any]:
+    guarded = dict(report or {})
+    if not require_word_alignment:
+        return guarded
+    metrics = guarded.get("metrics")
+    if not isinstance(metrics, Mapping):
+        return guarded
+    alignment_source = metrics.get("alignment_source")
+    if not isinstance(alignment_source, Mapping):
+        return guarded
+
+    missing_count, total, missing_rate = _subtitle_alignment_source_missing_rate(alignment_source)
+    if total <= 0 or missing_count <= 0:
+        return guarded
+
+    blocking_reasons = [
+        str(item)
+        for item in list(guarded.get("blocking_reasons") or [])
+        if str(item).strip()
+    ]
+    warning_reasons = [
+        str(item)
+        for item in list(guarded.get("warning_reasons") or [])
+        if str(item).strip()
+    ]
+    reason = f"字幕缺少词级时间戳覆盖 {missing_count}/{total}，无法验证字幕时间轴"
+    if missing_rate >= _MISSING_WORD_ALIGNMENT_BLOCKING_RATE:
+        if reason not in blocking_reasons:
+            blocking_reasons.append(reason)
+        guarded["blocking"] = True
+    else:
+        warning = f"部分字幕缺少词级时间戳覆盖 {missing_count}/{total}"
+        if warning not in warning_reasons:
+            warning_reasons.append(warning)
+
+    try:
+        score = float(guarded.get("score"))
+    except (TypeError, ValueError):
+        score = 100.0
+    score -= min(45.0, missing_rate * 45.0)
+    if missing_rate >= _MISSING_WORD_ALIGNMENT_BLOCKING_RATE:
+        score = min(score, 65.0)
+    guarded["score"] = max(0.0, round(score, 2))
+    guarded["blocking_reasons"] = blocking_reasons
+    guarded["warning_reasons"] = warning_reasons
+    guarded["blocking"] = bool(blocking_reasons)
+    return guarded
+
+
 def subtitle_quality_report_has_output_fallback(
     report: Mapping[str, Any] | None,
 ) -> bool:
@@ -207,11 +312,27 @@ def subtitle_items_have_output_fallback_alignment(
 
 def _is_allowed_short_utterance(text: str, duration: float | None) -> bool:
     candidate = str(text or "").strip()
-    if not candidate or not _ALLOWED_SHORT_UTTERANCE_RE.match(candidate):
+    if not candidate:
+        return False
+    if _COMPLETE_SHORT_NOUN_PHRASE_RE.match(candidate):
+        return True
+    if not _ALLOWED_SHORT_UTTERANCE_RE.match(candidate):
         return False
     if duration is None:
         return True
     return duration >= 0.5
+
+
+def _is_low_value_boundary_split_false_positive(left_text: str, right_text: str) -> bool:
+    left = str(left_text or "").strip()
+    right = str(right_text or "").strip()
+    if not left or not right:
+        return False
+    if _PURE_FILLER_RE.match(left) or _PURE_FILLER_RE.match(right):
+        return True
+    if _COMPLETE_SHORT_NOUN_PHRASE_RE.match(left):
+        return True
+    return False
 
 
 def _is_allowed_short_temporal_phrase(text: str, duration: float | None) -> bool:
@@ -298,6 +419,7 @@ def build_subtitle_quality_report(
     subtitle_items: Sequence[Mapping[str, Any]],
     source_name: str = "",
     content_profile: Mapping[str, Any] | None = None,
+    require_word_alignment: bool = False,
 ) -> dict[str, Any]:
     total = len(subtitle_items)
     texts = [_subtitle_text(item) for item in subtitle_items]
@@ -337,7 +459,10 @@ def build_subtitle_quality_report(
         ):
             short_fragment_count += 1
     for left_text, right_text in zip(texts, texts[1:]):
-        if _boundary_splits_generic_word(left_text, right_text):
+        if _boundary_splits_generic_word(left_text, right_text) and not _is_low_value_boundary_split_false_positive(
+            left_text,
+            right_text,
+        ):
             generic_word_split_count += 1
 
     subject = _profile_subject(content_profile)
@@ -361,7 +486,10 @@ def build_subtitle_quality_report(
         blocking_reasons.append(f"可词级纠偏的热词/型号残留 {lexical_bad_term_total} 处")
     if short_fragment_rate > 0.015 and short_fragment_count >= _SHORT_FRAGMENT_BLOCKING_MIN_COUNT:
         warning_reasons.append(f"短碎句率过高 {short_fragment_rate:.2%}")
-    elif short_fragment_rate > 0.008:
+    elif short_fragment_rate > 0.008 and (
+        short_fragment_count >= _SHORT_FRAGMENT_WARNING_MIN_COUNT
+        or short_fragment_rate >= _SHORT_FRAGMENT_DENSE_WARNING_RATE
+    ):
         warning_reasons.append(f"短碎句率偏高 {short_fragment_rate:.2%}")
     generic_word_split_rate = (generic_word_split_count / max(1, total - 1)) if total > 1 else 0.0
     if (
@@ -383,14 +511,15 @@ def build_subtitle_quality_report(
     score = 100.0
     score -= float(bad_term_total * 6)
     score -= min(12.0, float(generic_word_split_count * 1.5))
-    score -= min(25.0, short_fragment_rate * 180.0)
+    scored_short_fragment_rate = (max(0, short_fragment_count - 2) / total) if total else 0.0
+    score -= min(25.0, scored_short_fragment_rate * 180.0)
     score -= min(10.0, filler_rate * 120.0)
     score -= min(8.0, low_signal_rate * 160.0)
     score -= float(len(summary_generic_hits) * 8)
     score -= 12.0 if identity_missing else 0.0
     score = max(0.0, round(score, 2))
 
-    return {
+    report = {
         "score": score,
         "blocking": bool(blocking_reasons),
         "blocking_reasons": blocking_reasons,
@@ -423,6 +552,10 @@ def build_subtitle_quality_report(
         "subject": subject,
         "summary": summary,
     }
+    return apply_subtitle_alignment_quality_guard(
+        report,
+        require_word_alignment=require_word_alignment,
+    )
 
 
 def build_subtitle_quality_report_from_items(
@@ -430,6 +563,7 @@ def build_subtitle_quality_report_from_items(
     subtitle_items: Iterable[Any],
     source_name: str = "",
     content_profile: Mapping[str, Any] | None = None,
+    require_word_alignment: bool = False,
 ) -> dict[str, Any]:
     normalized_items = []
     for item in subtitle_items:
@@ -463,4 +597,5 @@ def build_subtitle_quality_report_from_items(
         subtitle_items=normalized_items,
         source_name=source_name,
         content_profile=content_profile,
+        require_word_alignment=require_word_alignment,
     )

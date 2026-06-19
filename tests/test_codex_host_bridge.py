@@ -172,3 +172,221 @@ def test_host_runtime_mount_prefers_container_mapping_over_windows_root_lookalik
     )
 
     assert resolved == str(mapped.resolve())
+
+
+def test_social_auto_upload_login_uses_host_root_and_headed_window(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "social-auto-upload"
+    root.mkdir()
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 2468
+
+    def fake_popen(command, **kwargs):  # noqa: ANN001
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(codex_host_bridge.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(codex_host_bridge.os, "name", "nt")
+
+    result = codex_host_bridge.start_social_auto_upload_login(
+        {
+            "root": str(root),
+            "python_executable": "python",
+            "platform": "wechat-channels",
+            "account_name": "珍妮斯baby 视频号",
+        }
+    )
+
+    assert result["status"] == "login_started"
+    assert result["pid"] == 2468
+    assert result["command"] == ["python", "sau_cli.py", "tencent", "login", "--account", "珍妮斯baby 视频号", "--headed"]
+    assert captured["command"][:5] == ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
+    powershell_command = str(captured["command"][5])
+    assert "-WindowStyle Normal" in powershell_command
+    assert f"-WorkingDirectory '{str(root.resolve())}'" in powershell_command
+    assert "-FilePath 'python'" in powershell_command
+    assert "'sau_cli.py'" in powershell_command
+    assert "'tencent'" in powershell_command
+    assert "'login'" in powershell_command
+    assert "'珍妮斯baby 视频号'" in powershell_command
+    assert "'--headed'" in powershell_command
+
+
+def test_social_auto_upload_check_reports_valid_cookie(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "social-auto-upload"
+    root.mkdir()
+    captured: dict[str, object] = {}
+
+    class FakeCompleted:
+        returncode = 0
+        stdout = "valid\n"
+        stderr = ""
+
+    def fake_run(command, **kwargs):  # noqa: ANN001
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return FakeCompleted()
+
+    monkeypatch.setattr(codex_host_bridge.subprocess, "run", fake_run)
+
+    result = codex_host_bridge.check_social_auto_upload_login(
+        {
+            "root": str(root),
+            "python_executable": "python",
+            "platform": "bilibili",
+            "account_name": "珍妮斯baby B站",
+            "timeout_sec": 12,
+        }
+    )
+
+    assert result["status"] == "login_valid"
+    assert result["stdout"] == "valid"
+    assert captured["command"] == ["python", "sau_cli.py", "bilibili", "check", "--account", "珍妮斯baby B站"]
+    assert captured["kwargs"]["cwd"] == str(root.resolve())
+
+
+def test_social_auto_upload_dashboard_uses_host_root_and_headed_window(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "social-auto-upload"
+    root.mkdir()
+    captured: dict[str, object] = {}
+
+    class FakeProcess:
+        pid = 1357
+
+    def fake_popen(command, **kwargs):  # noqa: ANN001
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return FakeProcess()
+
+    monkeypatch.setattr(codex_host_bridge.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(codex_host_bridge.os, "name", "nt")
+
+    result = codex_host_bridge.open_social_auto_upload_dashboard(
+        {
+            "root": str(root),
+            "python_executable": "python",
+            "platform": "bilibili",
+            "account_name": "creator-jenny-bilibili-chrome",
+        }
+    )
+
+    assert result["status"] == "dashboard_started"
+    assert result["pid"] == 1357
+    assert result["command"] == [
+        "python",
+        "sau_cli.py",
+        "bilibili",
+        "open-dashboard",
+        "--account",
+        "creator-jenny-bilibili-chrome",
+        "--headed",
+    ]
+    powershell_command = str(captured["command"][5])
+    assert "-WindowStyle Normal" in powershell_command
+    assert "'open-dashboard'" in powershell_command
+    assert "'creator-jenny-bilibili-chrome'" in powershell_command
+
+
+def test_social_auto_upload_command_maps_runtime_paths_to_host(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "social-auto-upload"
+    root.mkdir()
+    runtime_root = tmp_path / "runtime"
+    media_path = runtime_root / "output" / "video.mp4"
+    media_path.parent.mkdir(parents=True)
+    media_path.write_bytes(b"video")
+    captured: dict[str, object] = {}
+
+    class FakeCompleted:
+        returncode = 0
+        stdout = "ok\n"
+        stderr = ""
+
+    def fake_run(command, **kwargs):  # noqa: ANN001
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return FakeCompleted()
+
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", str(runtime_root))
+    monkeypatch.setattr(codex_host_bridge.subprocess, "run", fake_run)
+
+    result = codex_host_bridge.run_social_auto_upload_command(
+        {
+            "root": str(root),
+            "command": [
+                "python",
+                "sau_cli.py",
+                "douyin",
+                "upload-video",
+                "--account",
+                "creator-a",
+                "--file",
+                "/app/data/output/video.mp4",
+            ],
+            "timeout_sec": 30,
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert captured["command"] == [
+        "python",
+        "sau_cli.py",
+        "douyin",
+        "upload-video",
+        "--account",
+        "creator-a",
+        "--file",
+        str(media_path.resolve()),
+    ]
+
+
+def test_social_auto_upload_command_allows_bilibili_verify_video(tmp_path, monkeypatch) -> None:
+    root = tmp_path / "social-auto-upload"
+    root.mkdir()
+    captured: dict[str, object] = {}
+
+    class FakeCompleted:
+        returncode = 0
+        stdout = '{"verified":true}\n'
+        stderr = ""
+
+    def fake_run(command, **kwargs):  # noqa: ANN001
+        captured["command"] = command
+        captured["kwargs"] = kwargs
+        return FakeCompleted()
+
+    monkeypatch.setattr(codex_host_bridge.subprocess, "run", fake_run)
+
+    result = codex_host_bridge.run_social_auto_upload_command(
+        {
+            "root": str(root),
+            "command": [
+                "python",
+                "sau_cli.py",
+                "bilibili",
+                "verify-video",
+                "--account",
+                "creator-a",
+                "--aid",
+                "116777526757126",
+                "--expected-tid",
+                "160",
+            ],
+            "timeout_sec": 30,
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert captured["command"] == [
+        "python",
+        "sau_cli.py",
+        "bilibili",
+        "verify-video",
+        "--account",
+        "creator-a",
+        "--aid",
+        "116777526757126",
+        "--expected-tid",
+        "160",
+    ]

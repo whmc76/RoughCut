@@ -130,10 +130,6 @@ def _candidate_source_text(item: dict[str, Any]) -> str:
         return source_text
     if str(item.get("reason") or "").strip() == "silence":
         return "silence"
-    if str(item.get("reason") or "").strip() == "filler_word":
-        filler_mode = str(item.get("filler_mode") or "").strip()
-        if filler_mode:
-            return filler_mode
     for signal in list(item.get("signals") or []):
         text = str(signal or "").strip()
         if ":" not in text:
@@ -144,17 +140,34 @@ def _candidate_source_text(item: dict[str, Any]) -> str:
     return ""
 
 
+def _candidate_filler_mode(item: dict[str, Any]) -> str:
+    filler_mode = str(item.get("filler_mode") or "").strip()
+    if filler_mode in {"standalone", "sentence_head", "sentence_tail", "continuous"}:
+        return filler_mode
+    if str(item.get("reason") or "").strip() != "filler_word":
+        return ""
+    signals = {str(signal or "").strip() for signal in list(item.get("signals") or [])}
+    if "pure_filler" in signals:
+        return "standalone"
+    if "partial_filler" in signals:
+        return "sentence_head"
+    return ""
+
+
 def _normalize_rule_candidate_metadata(item: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(item)
     reason = str(normalized.get("reason") or "").strip()
     if not reason:
         return normalized
+    filler_mode = _candidate_filler_mode(normalized)
+    if filler_mode and not str(normalized.get("filler_mode") or "").strip():
+        normalized["filler_mode"] = filler_mode
     source_text = _candidate_source_text(normalized)
     if source_text and not str(normalized.get("source_text") or "").strip():
         normalized["source_text"] = source_text
     match_surface = str(normalized.get("match_surface") or "").strip()
     if not match_surface:
-        match_surface = str(normalized.get("filler_mode") or "").strip() or source_text
+        match_surface = filler_mode or source_text
         if match_surface:
             normalized["match_surface"] = match_surface
     if not str(normalized.get("risk_level") or "").strip():
@@ -424,6 +437,25 @@ def cut_analysis_effective_applied_cuts(payload: dict[str, Any] | None) -> list[
     return merged
 
 
+def cut_analysis_refine_auto_cut_candidates(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Return cuts that may drive render/refine keep-segment changes.
+
+    Modern cut-analysis payloads use accepted_cuts as the authority. Rule
+    candidates remain review suggestions even when their local strategy says
+    auto_applied; otherwise a stale/preview candidate list can silently
+    override the final editorial timeline during render.
+    """
+    if not isinstance(payload, dict):
+        return []
+    if "accepted_cuts" in payload or "accepted_cut_count" in payload:
+        return cut_analysis_accepted_cuts(payload, resolved=True)
+    return [
+        item
+        for item in cut_analysis_rule_candidates(payload, resolved=True)
+        if isinstance(item, dict) and bool(item.get("auto_applied"))
+    ]
+
+
 def cut_analysis_silence_segments(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
@@ -483,12 +515,22 @@ def build_cut_analysis_payload(
         accepted_cuts.append(normalized_item)
     normalized_smart_cut_rules = normalize_smart_cut_rules_payload(smart_cut_rules)
     repeated_speech_enabled = bool(normalized_smart_cut_rules.get("repeatedEnabled", True))
+    disabled_smart_delete_reasons = {
+        str(reason or "").strip()
+        for reason in list(normalized_smart_cut_rules.get("disabledSmartDeleteReasons") or [])
+    }
     analysis_rule_candidates = _dict_items(
         analysis.get("rule_candidates")
         if str(analysis.get("schema") or "").strip() == CUT_ANALYSIS_SCHEMA_VERSION
         else analysis.get("manual_editor_rule_candidates")
     )
     analysis_rule_candidates = [_normalize_rule_candidate_metadata(item) for item in analysis_rule_candidates]
+    if disabled_smart_delete_reasons:
+        analysis_rule_candidates = [
+            item
+            for item in analysis_rule_candidates
+            if str(item.get("reason") or "").strip() not in disabled_smart_delete_reasons
+        ]
     if not repeated_speech_enabled:
         analysis_rule_candidates = [
             item

@@ -45,8 +45,6 @@ STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
         "avatar_commentary",
         "edit_plan",
         "render",
-        "final_review",
-        "platform_package",
     ),
     "transcribe": (
         "transcribe",
@@ -62,8 +60,6 @@ STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
         "avatar_commentary",
         "edit_plan",
         "render",
-        "final_review",
-        "platform_package",
     ),
     "subtitle_postprocess": (
         "subtitle_postprocess",
@@ -78,8 +74,6 @@ STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
         "avatar_commentary",
         "edit_plan",
         "render",
-        "final_review",
-        "platform_package",
     ),
     "subtitle_term_resolution": (
         "subtitle_term_resolution",
@@ -93,8 +87,6 @@ STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
         "avatar_commentary",
         "edit_plan",
         "render",
-        "final_review",
-        "platform_package",
     ),
     "subtitle_consistency_review": (
         "subtitle_consistency_review",
@@ -107,8 +99,6 @@ STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
         "avatar_commentary",
         "edit_plan",
         "render",
-        "final_review",
-        "platform_package",
     ),
     "glossary_review": (
         "glossary_review",
@@ -120,8 +110,6 @@ STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
         "avatar_commentary",
         "edit_plan",
         "render",
-        "final_review",
-        "platform_package",
     ),
     "transcript_review": (
         "transcript_review",
@@ -132,15 +120,12 @@ STEP_RERUN_CHAINS: dict[str, tuple[str, ...]] = {
         "avatar_commentary",
         "edit_plan",
         "render",
-        "final_review",
-        "platform_package",
     ),
-    "content_profile": ("content_profile", "summary_review", "ai_director", "avatar_commentary", "edit_plan", "render", "final_review", "platform_package"),
-    "render": ("render", "final_review", "platform_package"),
-    "edit_plan": ("edit_plan", "render", "final_review", "platform_package"),
-    "ai_director": ("ai_director", "avatar_commentary", "edit_plan", "render", "final_review", "platform_package"),
-    "avatar_commentary": ("avatar_commentary", "edit_plan", "render", "final_review", "platform_package"),
-    "platform_package": ("platform_package",),
+    "content_profile": ("content_profile", "summary_review", "ai_director", "avatar_commentary", "edit_plan", "render"),
+    "render": ("render",),
+    "edit_plan": ("edit_plan", "render"),
+    "ai_director": ("ai_director", "avatar_commentary", "edit_plan", "render"),
+    "avatar_commentary": ("avatar_commentary", "edit_plan", "render"),
 }
 
 QUALITY_RERUN_STEPS = {
@@ -158,8 +143,6 @@ QUALITY_RERUN_STEPS = {
     "avatar_commentary",
     "edit_plan",
     "render",
-    "final_review",
-    "platform_package",
 }
 
 MANUAL_REVIEW_ONLY_ISSUES = frozenset(

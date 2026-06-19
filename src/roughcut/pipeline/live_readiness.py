@@ -262,7 +262,6 @@ def _extract_render_diagnostics_summary(summary: dict[str, Any]) -> dict[str, An
         try:
             evaluated_jobs = int(payload.get("evaluated_job_count") or 0)
             failed_render_jobs = int(payload.get("failed_render_job_count") or 0)
-            cover_degraded_jobs = int(payload.get("cover_degraded_job_count") or 0)
             avatar_degraded_jobs = int(payload.get("avatar_degraded_job_count") or 0)
         except (TypeError, ValueError):
             return None
@@ -277,13 +276,9 @@ def _extract_render_diagnostics_summary(summary: dict[str, Any]) -> dict[str, An
                 for key, value in dict(payload.get("failed_render_reasons") or {}).items()
                 if str(key).strip()
             },
-            "cover_degraded_job_count": cover_degraded_jobs,
-            "cover_degraded_job_ids": [str(item) for item in list(payload.get("cover_degraded_job_ids") or []) if str(item).strip()],
-            "cover_degraded_reasons": {
-                str(key): int(value)
-                for key, value in dict(payload.get("cover_degraded_reasons") or {}).items()
-                if str(key).strip()
-            },
+            "cover_degraded_job_count": 0,
+            "cover_degraded_job_ids": [],
+            "cover_degraded_reasons": {},
             "avatar_degraded_job_count": avatar_degraded_jobs,
             "avatar_degraded_job_ids": [str(item) for item in list(payload.get("avatar_degraded_job_ids") or []) if str(item).strip()],
             "avatar_degraded_reasons": {
@@ -304,9 +299,6 @@ def _extract_render_diagnostics_summary(summary: dict[str, Any]) -> dict[str, An
                 "failed_render_job_count",
                 "failed_render_job_ids",
                 "failed_render_reasons",
-                "cover_degraded_job_count",
-                "cover_degraded_job_ids",
-                "cover_degraded_reasons",
                 "avatar_degraded_job_count",
                 "avatar_degraded_job_ids",
                 "avatar_degraded_reasons",
@@ -322,10 +314,8 @@ def _extract_render_diagnostics_summary(summary: dict[str, Any]) -> dict[str, An
     if not jobs:
         return None
     failed_render_job_ids: list[str] = []
-    cover_degraded_job_ids: list[str] = []
     avatar_degraded_job_ids: list[str] = []
     failed_render_reasons: dict[str, int] = {}
-    cover_degraded_reasons: dict[str, int] = {}
     avatar_degraded_reasons: dict[str, int] = {}
     avatar_degraded_reason_categories: dict[str, int] = {}
     evaluated_job_count = 0
@@ -333,9 +323,8 @@ def _extract_render_diagnostics_summary(summary: dict[str, Any]) -> dict[str, An
         diagnostics = job.get("render_diagnostics") if isinstance(job.get("render_diagnostics"), dict) else {}
         diagnostics = _normalize_legacy_render_diagnostics(diagnostics)
         render_step = diagnostics.get("render_step") if isinstance(diagnostics.get("render_step"), dict) else {}
-        cover_result = diagnostics.get("cover_result") if isinstance(diagnostics.get("cover_result"), dict) else {}
         avatar_result = diagnostics.get("avatar_result") if isinstance(diagnostics.get("avatar_result"), dict) else {}
-        if not render_step and not cover_result and not avatar_result:
+        if not render_step and not avatar_result:
             continue
         evaluated_job_count += 1
         job_id = str(job.get("job_id") or job.get("source_name") or "").strip()
@@ -344,11 +333,6 @@ def _extract_render_diagnostics_summary(summary: dict[str, Any]) -> dict[str, An
             reason = str(render_step.get("reason") or "").strip()
             if reason:
                 failed_render_reasons[reason] = failed_render_reasons.get(reason, 0) + 1
-        if str(cover_result.get("status") or "").strip().lower() == "degraded" and job_id:
-            cover_degraded_job_ids.append(job_id)
-            reason = str(cover_result.get("reason") or "").strip()
-            if reason:
-                cover_degraded_reasons[reason] = cover_degraded_reasons.get(reason, 0) + 1
         if str(avatar_result.get("status") or "").strip().lower() == "degraded" and job_id:
             avatar_degraded_job_ids.append(job_id)
             reason = str(avatar_result.get("reason") or "").strip()
@@ -364,9 +348,9 @@ def _extract_render_diagnostics_summary(summary: dict[str, Any]) -> dict[str, An
         "failed_render_job_count": len(failed_render_job_ids),
         "failed_render_job_ids": failed_render_job_ids,
         "failed_render_reasons": failed_render_reasons,
-        "cover_degraded_job_count": len(cover_degraded_job_ids),
-        "cover_degraded_job_ids": cover_degraded_job_ids,
-        "cover_degraded_reasons": cover_degraded_reasons,
+        "cover_degraded_job_count": 0,
+        "cover_degraded_job_ids": [],
+        "cover_degraded_reasons": {},
         "avatar_degraded_job_count": len(avatar_degraded_job_ids),
         "avatar_degraded_job_ids": avatar_degraded_job_ids,
         "avatar_degraded_reasons": avatar_degraded_reasons,
@@ -630,8 +614,6 @@ def build_live_readiness_summary(
         }
     if not golden_source_names:
         warning_reasons.append("未显式提供 golden jobs，当前按本次 batch 全量样本评估")
-    if render_summary is not None and render_summary["cover_degraded_job_count"] > 0:
-        warning_reasons.append(f"存在封面降级 job：{render_summary['cover_degraded_job_count']} 个")
     if render_summary is not None and render_summary["avatar_degraded_job_count"] > 0:
         warning_reasons.append(f"存在数字人降级 job：{render_summary['avatar_degraded_job_count']} 个")
 

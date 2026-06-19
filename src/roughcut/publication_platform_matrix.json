@@ -140,7 +140,6 @@
           { "key": "cover_slot_select_4_3", "label": "选择 4:3 封面槽位", "result_key": "cover_slot_4_3_selected" },
           { "key": "cover_upload", "label": "上传 4:3 自定义封面", "result_key": "cover_ready" },
           { "key": "cover_confirm", "label": "确认封面上传", "result_key": "cover_confirmed" },
-          { "key": "declaration", "label": "设置作者声明", "result_key": "declaration_ready" },
           { "key": "collection", "label": "加入合集", "result_key": "collection_ready" },
           { "key": "schedule", "label": "设置定时发布", "result_key": "schedule_ready" },
           { "key": "final_publish", "label": "点击发布", "result_key": "publish_submitted" }
@@ -188,6 +187,8 @@
       }
     },
     "wechat-channels": {
+      "manual_handoff_only": false,
+      "manual_publish_entry_url": "",
       "requires_explicit_collection_policy": true,
       "requires_custom_cover_policy": true,
       "required_cover_slots": [
@@ -251,8 +252,8 @@
           "target_size": { "width": 1080, "height": 1440 }
         }
       ],
-      "supports_declaration": false,
-      "default_declaration": "",
+      "supports_declaration": true,
+      "default_declaration": "原创声明",
       "supports_scheduled_publish": true,
       "minimum_schedule_lead_minutes": 60,
       "publish_scheme": {

@@ -47,23 +47,19 @@ def test_platform_packaging_output_fallback_reasons_block_deterministic_or_rende
     ]
 
 
-def test_render_output_blocking_reasons_collect_runtime_and_projection_failures() -> None:
+def test_render_output_blocking_reasons_ignore_optional_runtime_degradation() -> None:
     reasons = render_output_blocking_reasons(
         avatar_result={"status": "degraded", "reason": "missing_avatar_render"},
-        cover_result={"status": "degraded", "reason": "cover_export_failed"},
         subtitle_projection_repair={"projection_validation_fallback_used": True},
     )
 
     assert reasons == [
         "subtitle_projection_validation_fallback_used",
-        "avatar_missing_avatar_render",
-        "cover_cover_export_failed",
     ]
     assert render_output_blocking_reasons(
         avatar_result=None,
-        cover_result={"status": "done", "fallback_generated": True, "reason": "cover_generation_fallback"},
         subtitle_projection_repair=None,
-    ) == ["cover_cover_generation_fallback"]
+    ) == []
 
 
 def test_creator_refine_and_insert_plan_fallbacks_are_blocking() -> None:

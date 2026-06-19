@@ -64,6 +64,17 @@ def test_build_audio_chunk_specs_adds_overlapping_tail_instead_of_extending_last
     assert all(chunk.duration <= 300.0 for chunk in chunks)
 
 
+def test_local_http_asr_request_data_includes_explicit_model() -> None:
+    provider = LocalHTTPASRProvider(model_name="fun-asr-nano-2512")
+
+    data = provider._build_request_data(context="MAXACE", max_new_tokens=512)
+
+    assert data["model"] == "fun-asr-nano-2512"
+    assert data["model_name"] == "fun-asr-nano-2512"
+    assert data["hotwords"] == "MAXACE"
+    assert data["max_new_tokens"] == "512"
+
+
 @pytest.mark.asyncio
 async def test_transcribe_long_audio_in_chunks_offsets_segments_and_reports_progress(
     monkeypatch: pytest.MonkeyPatch,
@@ -505,6 +516,141 @@ def test_local_http_asr_collapses_qwen3_short_duplicate_noise_but_keeps_real_rep
     assert segment.words[9].start == 5.2
     filtering = segment.raw_payload["_roughcut_filtering"]["collapsed_short_duplicate_noise"]
     assert filtering["dropped_word_count"] == 13
+
+
+def test_local_http_asr_collapses_qwen3_collapsed_timestamp_duplicate_noise(tmp_path: Path) -> None:
+    provider = LocalHTTPASRProvider()
+    provider._model_name = "qwen3-asr-1.7b-forced-aligner"
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"stub")
+    payload = {
+        "duration": 4.0,
+        "segments": [
+            {
+                "start_time": 0.0,
+                "end_time": 4.0,
+                "text": "这么甩甩甩甩甩然后看高肩背背负",
+                "words": [
+                    {"text": "这", "start": 0.0, "end": 0.1},
+                    {"text": "么", "start": 0.1, "end": 0.2},
+                    {"text": "甩", "start": 0.5, "end": 0.5},
+                    {"text": "甩", "start": 0.5, "end": 0.5},
+                    {"text": "甩", "start": 0.5, "end": 0.5},
+                    {"text": "甩", "start": 0.5, "end": 0.5},
+                    {"text": "甩", "start": 0.5, "end": 0.5},
+                    {"text": "然", "start": 0.8, "end": 0.9},
+                    {"text": "后", "start": 0.9, "end": 1.0},
+                    {"text": "看", "start": 1.1, "end": 1.2},
+                    {"text": "高", "start": 1.4, "end": 1.5},
+                    {"text": "肩", "start": 1.5, "end": 1.6},
+                    {"text": "背", "start": 1.6, "end": 1.75},
+                    {"text": "背", "start": 1.9, "end": 2.05},
+                    {"text": "负", "start": 2.05, "end": 2.2},
+                ],
+            }
+        ],
+    }
+
+    result = provider._build_result_from_payload(
+        payload,
+        audio_path=audio_path,
+        language="zh-CN",
+        context="",
+        progress_callback=None,
+    )
+
+    segment = result.segments[0]
+    assert segment.text == "这么甩然后看高肩背背负"
+    assert [word.word for word in segment.words] == ["这", "么", "甩", "然", "后", "看", "高", "肩", "背", "背", "负"]
+    assert segment.words[2].start == 0.5
+    assert segment.words[8].start == 1.6
+    assert segment.words[9].start == 1.9
+    filtering = segment.raw_payload["_roughcut_filtering"]["collapsed_short_duplicate_noise"]
+    assert filtering["dropped_word_count"] == 4
+
+
+def test_local_http_asr_collapses_qwen3_text_only_long_duplicate_loops(tmp_path: Path) -> None:
+    provider = LocalHTTPASRProvider()
+    provider._model_name = "qwen3-asr-1.7b-forced-aligner"
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"stub")
+    payload = {
+        "duration": 5.0,
+        "segments": [
+            {
+                "start_time": 0.0,
+                "end_time": 5.0,
+                "text": "这个可以当比萨烤炉烤烤烤烤烤烤烤烤烤哦看，好的给你嘿嘿嘿嘿好了。",
+            }
+        ],
+    }
+
+    result = provider._build_result_from_payload(
+        payload,
+        audio_path=audio_path,
+        language="zh-CN",
+        context="",
+        progress_callback=None,
+    )
+
+    segment = result.segments[0]
+    assert segment.text == "这个可以当比萨烤炉烤哦看，好的给你嘿嘿好了。"
+    filtering = segment.raw_payload["_roughcut_filtering"]["collapsed_short_duplicate_noise"]
+    assert filtering["dropped_word_count"] == 0
+    assert filtering["collapsed_text_loop_count"] == 10
+
+
+def test_local_http_asr_runs_duplicate_sanitizer_once_before_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = LocalHTTPASRProvider()
+    provider._model_name = "qwen3-asr-1.7b-forced-aligner"
+    audio_path = tmp_path / "audio.wav"
+    audio_path.write_bytes(b"stub")
+    calls: list[str] = []
+    original_sanitize = provider._sanitize_short_duplicate_noise_segments
+    original_repair = provider._repair_segments
+
+    def wrapped_sanitize(segments):
+        calls.append("sanitize")
+        return original_sanitize(segments)
+
+    def wrapped_repair(segments, *, duration: float):
+        calls.append("repair")
+        return original_repair(segments, duration=duration)
+
+    monkeypatch.setattr(provider, "_sanitize_short_duplicate_noise_segments", wrapped_sanitize)
+    monkeypatch.setattr(provider, "_repair_segments", wrapped_repair)
+
+    provider._build_result_from_payload(
+        {
+            "duration": 2.0,
+            "segments": [
+                {
+                    "start_time": 0.0,
+                    "end_time": 2.0,
+                    "text": "这么甩甩甩然后看",
+                    "words": [
+                        {"text": "这", "start": 0.0, "end": 0.1},
+                        {"text": "么", "start": 0.1, "end": 0.2},
+                        {"text": "甩", "start": 0.5, "end": 0.5},
+                        {"text": "甩", "start": 0.5, "end": 0.5},
+                        {"text": "甩", "start": 0.5, "end": 0.5},
+                        {"text": "然", "start": 0.8, "end": 0.9},
+                        {"text": "后", "start": 0.9, "end": 1.0},
+                        {"text": "看", "start": 1.1, "end": 1.2},
+                    ],
+                }
+            ],
+        },
+        audio_path=audio_path,
+        language="zh-CN",
+        context="",
+        progress_callback=None,
+    )
+
+    assert calls == ["sanitize", "repair"]
 
 
 def test_local_http_asr_applies_short_duplicate_noise_to_funasr_nano(tmp_path: Path) -> None:

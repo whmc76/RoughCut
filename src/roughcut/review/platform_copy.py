@@ -620,24 +620,67 @@ async def generate_platform_packaging(
             target_platforms=target_platforms,
             copy_style=copy_style,
         )
-    if not fallback_used:
-        _assert_platform_packaging_publishable(
+    if target_platforms:
+        packaging = _prune_packaging_platforms(packaging, platform_keys=target_keys)
+    quality_assessment = _assess_platform_packaging_quality(
+        packaging,
+        content_profile=content_profile,
+        fact_sheet=fact_sheet,
+        target_platforms=target_platforms,
+    )
+    if not fallback_used and len(target_keys) == 1 and not quality_assessment["publish_ready"]:
+        fallback_used = True
+        repair_trace = list(repair_trace or [])
+        repair_trace.append(
+            {
+                "attempt": "single_platform_quality_fallback",
+                "status": "deterministic_fallback",
+                "reason": "；".join(str(item) for item in quality_assessment.get("blocking_reasons") or []),
+            }
+        )
+        raw_response = _build_deterministic_platform_packaging(
+            prompt_brief=prompt_brief,
+            content_profile=content_profile,
+            copy_style=copy_style,
+            fact_sheet=fact_sheet,
+            target_platforms=target_platforms,
+            constraint_only_mode=constraint_only_mode,
+        )
+        packaging = normalize_platform_packaging(
+            raw_response,
+            content_profile=content_profile,
+            copy_style=copy_style,
+            fact_sheet=fact_sheet,
+            author_profile=author_profile,
+        )
+        if not constraint_only_mode:
+            packaging = _apply_methodology_body_repairs(
+                packaging,
+                prompt_brief=prompt_brief,
+                content_profile=content_profile,
+                fact_sheet=fact_sheet,
+                target_platforms=target_platforms,
+            )
+            packaging = _apply_methodology_title_repairs(
+                packaging,
+                content_profile=content_profile,
+                target_platforms=target_platforms,
+                copy_style=copy_style,
+            )
+        if target_platforms:
+            packaging = _prune_packaging_platforms(packaging, platform_keys=target_keys)
+        quality_assessment = _assess_platform_packaging_quality(
             packaging,
             content_profile=content_profile,
             fact_sheet=fact_sheet,
             target_platforms=target_platforms,
         )
-    if target_platforms:
-        packaging = _prune_packaging_platforms(packaging, platform_keys=target_keys)
+    if not fallback_used and not quality_assessment["publish_ready"]:
+        raise RuntimeError("文案模型输出质量不达标，禁止发布：" + "；".join(quality_assessment["blocking_reasons"][:12]))
     packaging["fact_sheet"] = fact_sheet
     packaging["generation_repair_trace"] = repair_trace
     if fallback_used:
-        packaging["fallback_quality_assessment"] = _assess_platform_packaging_quality(
-            packaging,
-            content_profile=content_profile,
-            fact_sheet=fact_sheet,
-            target_platforms=target_platforms,
-        )
+        packaging["fallback_quality_assessment"] = quality_assessment
     return packaging
 
 

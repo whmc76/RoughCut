@@ -25,6 +25,7 @@ from roughcut.config import DEFAULT_TEST_OUTPUT_ROOT, get_settings
 from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
 from roughcut.db.models import ConfigProfile, Job, WatchRoot
 from roughcut.db.session import get_session_factory
+from roughcut.hyperframes import normalize_options as normalize_hyperframes_options
 from roughcut.media.probe import probe
 from roughcut.media.output import get_output_dir
 from roughcut.pipeline.orchestrator import create_job_steps
@@ -752,11 +753,12 @@ async def _create_job_for_file(
     config_profile_id: uuid.UUID | str | None = None,
     content_profile_source_context: dict[str, Any] | None = None,
     awaiting_initialization: bool = False,
+    allow_duplicate_file: bool = False,
 ) -> str:
     """Upload file to S3, create job + steps in DB. Returns job_id."""
     # Compute hash first for dedup
     file_hash = _hash_file(file_path)
-    if await _file_already_processed(file_hash):
+    if not allow_duplicate_file and await _file_already_processed(file_hash):
         logger.info(f"File already processed (hash={file_hash[:8]}): {file_path}")
         return ""
 
@@ -771,6 +773,11 @@ async def _create_job_for_file(
     resolved_source_context = enrich_source_context_with_filename_hints(
         content_profile_source_context,
         source_name=file_path.name,
+    )
+    resolved_source_context["hyperframes_options"] = normalize_hyperframes_options(
+        resolved_source_context.get("hyperframes_options")
+        if isinstance(resolved_source_context.get("hyperframes_options"), dict)
+        else None
     )
 
     factory = get_session_factory()

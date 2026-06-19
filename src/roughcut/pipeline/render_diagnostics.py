@@ -15,6 +15,8 @@ def classify_avatar_runtime_reason_category(reason: str) -> str | None:
         return "busy_exhausted"
     if "provider_response_error" in normalized or normalized.endswith("provider_error") or "provider_error" in normalized:
         return "provider_error"
+    if normalized in {"creator_avatar_binding_missing", "creator_avatar_presenter_missing"}:
+        return "not_configured"
     return None
 
 

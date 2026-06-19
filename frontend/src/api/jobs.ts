@@ -18,6 +18,7 @@ import type {
   PublicationPlan,
   PublicationPlatformPublishOptions,
   Report,
+  RemixProductionTasks,
   TokenUsageReport,
 } from "../types";
 import { apiPath, request, requestForm } from "./core";
@@ -114,6 +115,18 @@ async function requestDownloadZip(jobId: string, fileIds: string[]): Promise<Job
 export const jobsApi = {
   listJobs: (limit = 50, offset = 0) =>
     request<Job[]>(`/jobs?${new URLSearchParams({ limit: String(limit), offset: String(offset) })}`),
+  getRemixProductionTasks: () => request<RemixProductionTasks>("/jobs/remix-production/tasks"),
+  createRemixProductionTaskJob: (season: number, episode: number) =>
+    request<Job>("/jobs/remix-production/tasks/job", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ season, episode }),
+    }),
+  startRemixProductionJob: (jobId: string, force = false) =>
+    request<{ job_id: string; status: string; detail: string; command: string[] }>(
+      `/jobs/remix-production/jobs/${jobId}/start${force ? "?force=true" : ""}`,
+      { method: "POST" },
+    ),
   getJobsUsageSummary: (limit = 60) => request<JobsUsageSummary>(`/jobs/usage-summary?limit=${limit}`),
   getJobsUsageTrend: (days = 7, limit = 120, focusType?: string, focusName?: string) =>
     request<JobsUsageTrend>(
@@ -126,6 +139,10 @@ export const jobsApi = {
     jobFlowMode?: string,
     workflowMode?: string,
     enhancementModes: string[] = [],
+    selectedSmartCutRuleReasons: string[] = [],
+    materialEnhancementModes: string[] = [],
+    selectedAgentCapabilityKeys: string[] = [],
+    hyperframesOptions: Record<string, boolean> = {},
     outputDir?: string,
     videoDescription?: string,
     creatorCardId?: string,
@@ -144,6 +161,10 @@ export const jobsApi = {
     if (creatorCardId) formData.append("creator_card_id", creatorCardId);
     if (taskBrief?.trim()) formData.append("task_brief", taskBrief.trim());
     if (executionMode) formData.append("execution_mode", executionMode);
+    formData.append("smart_cut_rule_reasons", JSON.stringify(selectedSmartCutRuleReasons));
+    formData.append("material_enhancement_modes", JSON.stringify(materialEnhancementModes));
+    formData.append("agent_capability_keys", JSON.stringify(selectedAgentCapabilityKeys));
+    formData.append("hyperframes_options", JSON.stringify(hyperframesOptions));
     platformTargets.forEach((platform) => formData.append("platform_targets", platform));
     enhancementModes.forEach((mode) => formData.append("enhancement_modes", mode));
     return requestForm<Job>("/jobs", formData);
@@ -225,6 +246,8 @@ export const jobsApi = {
   warmContentProfileThumbnails: (jobId: string) => request<{ status: string; job_id: string }>(`/jobs/${jobId}/content-profile/thumbnails/warm`, {
     method: "POST",
   }),
+  jobRenderedFileUrl: (jobId: string, variant: "packaged" | "plain" = "packaged") =>
+    apiPath(`/jobs/${jobId}/download/file?variant=${encodeURIComponent(variant)}&disposition=inline`),
   getJobDownloadFiles: (jobId: string) => request<JobDownloadFiles>(`/jobs/${jobId}/download/files`),
   downloadJobFiles: requestDownloadZip,
   cancelJob: (jobId: string) => request<Job>(`/jobs/${jobId}/cancel`, { method: "POST" }),

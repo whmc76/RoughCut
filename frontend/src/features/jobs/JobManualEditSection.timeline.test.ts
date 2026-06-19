@@ -11,6 +11,7 @@ import {
   resolveManualTimelineSemanticFocus,
   buildSourceTranscriptProjectedBaseline,
   buildSmartCutRuleAnalysis,
+  buildAutoEditParameterRows,
   buildSmartDeleteSuggestions,
   buildTranscriptTokens,
   buildVisibleSubtitleRows,
@@ -3167,6 +3168,31 @@ describe("manual editor timeline mapping", () => {
     expect(smartDeleteSuggestionRanges(analysis, rules)).toEqual([expect.objectContaining({ start: 12.346, end: 14.9, kind: "smart_delete" })]);
   });
 
+  it("filters disabled smart-delete reasons from confirm-required suggestions", () => {
+    const rules = {
+      fillerEnabled: false,
+      repeatedEnabled: false,
+      pauseEnabled: false,
+      smartDeleteEnabled: true,
+      disabledSmartDeleteReasons: ["restart_retake"],
+      pauseThresholdSec: 0.8,
+      fillers: "嗯,呃",
+    };
+    const analysis = buildSmartCutRuleAnalysis(
+      [],
+      rules,
+      [],
+      [
+        { start: 12.3456, end: 14.9, duration_sec: 2.554, kind: "smart_delete", reason: "restart_retake", source: "llm_cut_review" },
+        { start: 20, end: 21, duration_sec: 1, kind: "smart_delete", reason: "low_signal_subtitle", source: "llm_cut_review" },
+      ],
+    );
+
+    expect(smartDeleteSuggestionRanges(analysis, rules)).toEqual([
+      expect.objectContaining({ start: 20, end: 21, kind: "smart_delete", reason: "low_signal_subtitle" }),
+    ]);
+  });
+
   it("restores unconfirmed backend smart-delete cuts instead of applying them by default", () => {
     const rules = { fillerEnabled: false, repeatedEnabled: false, pauseEnabled: false, smartDeleteEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃" };
     const analysis = buildSmartCutRuleAnalysis(
@@ -3255,10 +3281,10 @@ describe("manual editor timeline mapping", () => {
     ).toEqual(["smart_delete", "repeated"]);
   });
 
-  it("ignores disabled local rule types and stale backend candidates during fallback analysis", () => {
+  it("keeps disabled rule matches visible for counts without auto-cutting them", () => {
     const rules = {
       fillerEnabled: false,
-      fillerStandaloneEnabled: false,
+      fillerStandaloneEnabled: true,
       fillerSentenceHeadEnabled: false,
       fillerSentenceTailEnabled: false,
       catchphraseEnabled: false,
@@ -3271,24 +3297,46 @@ describe("manual editor timeline mapping", () => {
     };
     const analysis = buildSmartCutRuleAnalysis(
       [
-        { index: 0, start_time: 0, end_time: 1.5, text_final: "今天我们开始" },
-        { index: 1, start_time: 1.6, end_time: 2.4, text_final: "然后这个就是重点" },
+        { index: 0, start_time: 0, end_time: 1.5, text_final: "嗯，今天我们开始" },
+        { index: 1, start_time: 1.6, end_time: 2.4, text_final: "这个就是重点" },
+        {
+          index: 2,
+          start_time: 2.6,
+          end_time: 3.4,
+          text_final: "型号型号不错",
+          words: [
+            { word: "型", start: 2.6, end: 2.68 },
+            { word: "号", start: 2.68, end: 2.76 },
+            { word: "型", start: 2.82, end: 2.9 },
+            { word: "号", start: 2.9, end: 2.98 },
+            { word: "不", start: 3.0, end: 3.1 },
+            { word: "错", start: 3.1, end: 3.22 },
+          ],
+        },
       ],
       rules,
-      [{ start: 0.9, end: 1.6, duration_sec: 0.7, source: "word_gap" }],
-      [
-        { start: 0.1, end: 0.2, duration_sec: 0.1, kind: "filler", reason: "filler_word", source: "manual_editor_rule_candidate", source_text: "嗯", filler_mode: "standalone" },
-        { start: 1.0, end: 1.15, duration_sec: 0.15, kind: "catchphrase", reason: "catchphrase_phrase", source: "manual_editor_rule_candidate", source_text: "就是" },
-        { start: 0.7, end: 1.03, duration_sec: 0.33, kind: "repeated", reason: "repeated_speech", source: "manual_editor_rule_candidate" },
-        { start: 0.9, end: 1.6, duration_sec: 0.7, kind: "pause", reason: "silence", source: "manual_editor_rule_candidate" },
-      ],
+      [{ start: 4.0, end: 5.0, duration_sec: 1.0, source: "audio_vad" }],
     );
 
-    expect(analysis.filler).toEqual([]);
-    expect(analysis.catchphrase).toEqual([]);
-    expect(analysis.repeated).toEqual([]);
-    expect(analysis.pause).toEqual([]);
-    expect(analysis.pauseCandidates).toEqual([]);
+    expect(analysis.filler).toEqual([
+      expect.objectContaining({ kind: "filler", fillerMode: "standalone", sourceText: "嗯" }),
+    ]);
+    expect(analysis.catchphrase).toEqual([
+      expect.objectContaining({ kind: "catchphrase", sourceText: "就是" }),
+    ]);
+    expect(analysis.repeated).toEqual([
+      expect.objectContaining({ kind: "repeated" }),
+    ]);
+    expect(analysis.pause).toEqual([
+      expect.objectContaining({ start: 4.0, end: 5.0, kind: "pause" }),
+    ]);
+    expect(buildSmartCutRulePreviews(analysis, rules, []).map((preview) => [preview.kind, preview.count])).toEqual([
+      ["filler", 1],
+      ["catchphrase", 1],
+      ["repeated", 1],
+      ["pause", 1],
+      ["smart_delete", 0],
+    ]);
     expect(autoSmartCutRuleRanges(analysis, rules)).toEqual([]);
   });
 
@@ -3535,11 +3583,82 @@ describe("manual editor timeline mapping", () => {
 
     const previews = buildSmartCutRulePreviews(analysis, rules, subtitles);
 
-    expect(previews.map((preview) => preview.label)).toEqual(["语气词", "口头禅", "重复口误", "停顿", "智能删减"]);
+    expect(previews.map((preview) => preview.label)).toEqual(["水词清理", "口头禅参数", "重复口误参数", "口播节奏", "智能删减"]);
     expect(previews.find((preview) => preview.kind === "filler")?.sampleText).toBe("嗯");
     expect(previews.find((preview) => preview.kind === "catchphrase")?.sampleText).toBe("就是");
     expect(previews.find((preview) => preview.kind === "pause")?.sampleText).toBe("[0.8s]");
     expect(previews.find((preview) => preview.kind === "smart_delete")?.reason).toContain("开头重说");
+  });
+
+  it("exposes every automatic edit reason in the manual parameter panel data", () => {
+    const rules = { fillerEnabled: true, catchphraseEnabled: true, repeatedEnabled: true, pauseEnabled: true, smartDeleteEnabled: true, pauseThresholdSec: 0.8, fillers: "嗯,呃", catchphrases: "就是" };
+    const analysis = buildSmartCutRuleAnalysis(
+      [{ index: 0, start_time: 0, end_time: 1, text_final: "嗯就是这个这个" }],
+      rules,
+      [{ start: 1.1, end: 2.0, duration_sec: 0.9 }],
+      [
+        { start: 3, end: 4, duration_sec: 1, kind: "smart_delete", reason: "failed_attempt", detail: "失败尝试" },
+        { start: 4, end: 5, duration_sec: 1, kind: "smart_delete", reason: "off_topic_interruption", detail: "离题打断" },
+        { start: 5, end: 5.2, duration_sec: 0.2, kind: "smart_delete", reason: "timing_trim", detail: "边界修剪" },
+        { start: 5.2, end: 5.5, duration_sec: 0.3, kind: "smart_delete", reason: "micro_keep", detail: "短空段" },
+        { start: 5.5, end: 5.8, duration_sec: 0.3, kind: "smart_delete", reason: "gap_fill", detail: "空隙清理" },
+      ],
+    );
+
+    const rows = buildAutoEditParameterRows(analysis, rules, []);
+    const byReason = new Map(rows.map((row) => [row.reason, row]));
+
+    expect(rows.map((row) => row.reason)).toEqual([
+      "filler_word",
+      "catchphrase_phrase",
+      "repeated_speech",
+      "silence",
+      "rollback_instruction",
+      "restart_retake",
+      "restart_cue",
+      "failed_attempt",
+      "off_topic_interruption",
+      "noise_subtitle",
+      "low_signal_subtitle",
+      "long_non_dialogue",
+      "timing_trim",
+      "micro_keep",
+      "micro_keep_bridge",
+      "gap_fill",
+    ]);
+    expect(byReason.get("failed_attempt")?.label).toBe("失败尝试废片");
+    expect(byReason.get("off_topic_interruption")?.label).toBe("离题/打断废片");
+    expect(byReason.get("timing_trim")?.count).toBe(1);
+    expect(byReason.get("micro_keep")?.enabled).toBe(true);
+    expect(byReason.get("gap_fill")?.count).toBe(1);
+  });
+
+  it("keeps disabled automatic edit reasons countable but marks them closed", () => {
+    const rules = {
+      fillerEnabled: true,
+      repeatedEnabled: true,
+      pauseEnabled: true,
+      smartDeleteEnabled: true,
+      disabledSmartDeleteReasons: ["low_signal_subtitle", "micro_keep"],
+      pauseThresholdSec: 0.8,
+      fillers: "嗯,呃",
+    };
+    const analysis = buildSmartCutRuleAnalysis(
+      [],
+      rules,
+      [],
+      [
+        { start: 3, end: 4, duration_sec: 1, kind: "smart_delete", reason: "low_signal_subtitle", detail: "低信息量" },
+        { start: 4, end: 4.2, duration_sec: 0.2, kind: "smart_delete", reason: "micro_keep", detail: "短空段" },
+      ],
+    );
+
+    const rows = buildAutoEditParameterRows(analysis, rules, []);
+    const byReason = new Map(rows.map((row) => [row.reason, row]));
+
+    expect(byReason.get("low_signal_subtitle")).toMatchObject({ count: 1, enabled: false });
+    expect(byReason.get("micro_keep")).toMatchObject({ count: 1, enabled: false });
+    expect(byReason.get("restart_retake")?.enabled).toBe(true);
   });
 
   it("groups smart-delete pacing fragments into one readable suggestion", () => {

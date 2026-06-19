@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -48,6 +49,16 @@ _SMART_COPY_ROOT_LEGACY_INTERNAL_FILENAMES = {
     "platform-packaging.json",
     "platform-packaging.md",
 }
+_SOCIAL_AUTO_UPLOAD_CLI_PLATFORMS = {
+    "douyin": "douyin",
+    "kuaishou": "kuaishou",
+    "xiaohongshu": "xiaohongshu",
+    "bilibili": "bilibili",
+    "wechat-channels": "tencent",
+    "wechat_channels": "tencent",
+    "tencent": "tencent",
+    "youtube": "youtube",
+}
 
 
 def _json_response(handler: BaseHTTPRequestHandler, status: int, payload: dict[str, Any]) -> None:
@@ -76,6 +87,10 @@ def _make_handler(expected_token: str):
                 "/v1/host/sync-smart-copy",
                 "/v1/host/complete-codex-imagegen",
                 "/v1/host/open-path",
+                "/v1/host/social-auto-upload-login",
+                "/v1/host/social-auto-upload-check",
+                "/v1/host/social-auto-upload-dashboard",
+                "/v1/host/social-auto-upload-command",
             }:
                 _json_response(self, HTTPStatus.NOT_FOUND, {"error": "not_found"})
                 return
@@ -99,6 +114,14 @@ def _make_handler(expected_token: str):
                     result = complete_codex_imagegen_request(payload)
                 elif normalized_path == "/v1/host/open-path":
                     result = open_host_path(payload)
+                elif normalized_path == "/v1/host/social-auto-upload-login":
+                    result = start_social_auto_upload_login(payload)
+                elif normalized_path == "/v1/host/social-auto-upload-check":
+                    result = check_social_auto_upload_login(payload)
+                elif normalized_path == "/v1/host/social-auto-upload-dashboard":
+                    result = open_social_auto_upload_dashboard(payload)
+                elif normalized_path == "/v1/host/social-auto-upload-command":
+                    result = run_social_auto_upload_command(payload)
                 else:
                     result = run_codex_exec(_normalize_codex_exec_payload(payload))
             except Exception as exc:
@@ -257,6 +280,204 @@ def open_host_path(payload: dict[str, Any]) -> dict[str, Any]:
         "path": str(target_path.resolve()),
         "kind": "file" if target_path.is_file() else "folder",
     }
+
+
+def start_social_auto_upload_login(payload: dict[str, Any]) -> dict[str, Any]:
+    root, python_executable, command = _build_social_auto_upload_command(payload, action="login")
+    if "--headless" in command:
+        command[command.index("--headless")] = "--headed"
+    if "--headed" not in command:
+        command.append("--headed")
+
+    if os.name == "nt":
+        ps_argument_list = "@(" + ",".join(_quote_powershell_literal(item) for item in command[1:]) + ")"
+        ps_command = (
+            "Start-Process "
+            f"-FilePath {_quote_powershell_literal(command[0])} "
+            f"-ArgumentList {ps_argument_list} "
+            f"-WorkingDirectory {_quote_powershell_literal(str(root))} "
+            "-WindowStyle Normal"
+        )
+        process = subprocess.Popen(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_command],
+            cwd=str(root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        process = subprocess.Popen(
+            command,
+            cwd=str(root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    return {
+        "status": "login_started",
+        "pid": int(process.pid),
+        "root": str(root),
+        "python_executable": python_executable,
+        "command": command,
+        "launch_source": "codex_host_bridge",
+    }
+
+
+def open_social_auto_upload_dashboard(payload: dict[str, Any]) -> dict[str, Any]:
+    root, python_executable, command = _build_social_auto_upload_command(payload, action="open-dashboard")
+    if "--headless" in command:
+        command[command.index("--headless")] = "--headed"
+    if "--headed" not in command:
+        command.append("--headed")
+
+    if os.name == "nt":
+        ps_argument_list = "@(" + ",".join(_quote_powershell_literal(item) for item in command[1:]) + ")"
+        ps_command = (
+            "Start-Process "
+            f"-FilePath {_quote_powershell_literal(command[0])} "
+            f"-ArgumentList {ps_argument_list} "
+            f"-WorkingDirectory {_quote_powershell_literal(str(root))} "
+            "-WindowStyle Normal"
+        )
+        process = subprocess.Popen(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps_command],
+            cwd=str(root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        process = subprocess.Popen(
+            command,
+            cwd=str(root),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    return {
+        "status": "dashboard_started",
+        "pid": int(process.pid),
+        "root": str(root),
+        "python_executable": python_executable,
+        "command": command,
+        "launch_source": "codex_host_bridge",
+    }
+
+
+def check_social_auto_upload_login(payload: dict[str, Any]) -> dict[str, Any]:
+    root, python_executable, command = _build_social_auto_upload_command(payload, action="check")
+    timeout_sec = max(5, min(int(payload.get("timeout_sec") or 30), 120))
+    completed = subprocess.run(
+        command,
+        cwd=str(root),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_sec,
+        check=False,
+    )
+    stdout = str(completed.stdout or "").strip()
+    stderr = str(completed.stderr or "").strip()
+    return {
+        "status": "login_valid" if completed.returncode == 0 else "login_invalid",
+        "returncode": int(completed.returncode),
+        "stdout": stdout,
+        "stderr": stderr,
+        "root": str(root),
+        "python_executable": python_executable,
+        "command": command,
+        "check_source": "codex_host_bridge",
+    }
+
+
+def run_social_auto_upload_command(payload: dict[str, Any]) -> dict[str, Any]:
+    root = Path(_host_path_for_runtime_mount(payload.get("root"), require_exists=True))
+    if not root.is_dir():
+        raise ValueError("social-auto-upload root is not a directory")
+    command = _normalize_social_auto_upload_host_command(payload.get("command"))
+    timeout_sec = max(5, min(int(payload.get("timeout_sec") or 1800), 7200))
+    completed = subprocess.run(
+        command,
+        cwd=str(root),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_sec,
+        check=False,
+    )
+    return {
+        "status": "completed" if completed.returncode == 0 else "failed",
+        "returncode": int(completed.returncode),
+        "stdout": str(completed.stdout or ""),
+        "stderr": str(completed.stderr or ""),
+        "root": str(root),
+        "command": command,
+        "run_source": "codex_host_bridge",
+    }
+
+
+def _build_social_auto_upload_command(payload: dict[str, Any], *, action: str) -> tuple[Path, str, list[str]]:
+    root = Path(_host_path_for_runtime_mount(payload.get("root"), require_exists=True))
+    if not root.is_dir():
+        raise ValueError("social-auto-upload root is not a directory")
+    python_executable = str(payload.get("python_executable") or "").strip()
+    if not python_executable:
+        python_executable = str(root / ".venv" / "Scripts" / "python.exe") if os.name == "nt" else "python"
+    account_name = str(payload.get("account_name") or "").strip()
+    if not account_name:
+        raise ValueError("account_name is required")
+    platform = _normalize_social_auto_upload_platform(payload.get("platform"))
+    command = [python_executable, "sau_cli.py", platform, action, "--account", account_name]
+    return root, python_executable, command
+
+
+def _normalize_social_auto_upload_host_command(raw_command: Any) -> list[str]:
+    if not isinstance(raw_command, list) or not raw_command:
+        raise ValueError("command must be a non-empty list")
+    command = [str(item) for item in raw_command]
+    if len(command) < 4:
+        raise ValueError("social-auto-upload command is incomplete")
+    if Path(command[1]).name != "sau_cli.py":
+        raise ValueError("only sau_cli.py commands are allowed")
+    _normalize_social_auto_upload_platform(command[2])
+    if command[3] not in {"check", "login", "open-dashboard", "upload-video", "verify-video"}:
+        raise ValueError(f"unsupported social-auto-upload action: {command[3]}")
+
+    path_value_flags = {
+        "--file",
+        "--thumbnail",
+        "--thumbnail-landscape",
+        "--thumbnail-portrait",
+        "--thumbnail-4-3",
+        "--thumbnail-16-9",
+    }
+    normalized: list[str] = []
+    previous = ""
+    for item in command:
+        if previous in path_value_flags:
+            normalized.append(_host_path_for_runtime_mount(item, require_exists=True))
+        else:
+            normalized.append(item)
+        previous = item
+    return normalized
+
+
+def _quote_powershell_literal(value: Any) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _normalize_social_auto_upload_platform(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    platform = _SOCIAL_AUTO_UPLOAD_CLI_PLATFORMS.get(normalized)
+    if not platform:
+        raise ValueError(f"unsupported social-auto-upload platform: {normalized or '<empty>'}")
+    return platform
 
 
 def _normalize_codex_exec_payload(payload: dict[str, Any]) -> dict[str, Any]:

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { PageHeader } from "../components/ui/PageHeader";
@@ -225,12 +225,30 @@ function withPlatformOptionValue(
   return next;
 }
 
+function platformBindingStatus(bindingPayload: Record<string, unknown> | null | undefined) {
+  if (bindingPayload?.adapter !== "social_auto_upload") return "unbound";
+  return bindingPayload.status === "login_confirmed" ? "confirmed" : "needs_confirmation";
+}
+
+function errorText(error: unknown) {
+  if (error instanceof Error) return error.message;
+  return String(error || "");
+}
+
 export function PublicationManagementPage() {
   const queryClient = useQueryClient();
   const creators = useQuery({ queryKey: ["creator-cards"], queryFn: api.listCreatorCards });
   const [selectedCreatorId, setSelectedCreatorId] = useState("");
   const [refinePrompt, setRefinePrompt] = useState("");
+  const [bindingModal, setBindingModal] = useState<{ id: string; label: string } | null>(null);
+  const [bindingAccountName, setBindingAccountName] = useState("");
+  const [loginLaunchResult, setLoginLaunchResult] = useState<Record<string, unknown> | null>(null);
+  const [loginStatusResult, setLoginStatusResult] = useState<Record<string, unknown> | null>(null);
+  const [dashboardOpenResult, setDashboardOpenResult] = useState<Record<string, unknown> | null>(null);
+  const lastAutoLoginKeyRef = useRef("");
+  const autoConfirmedLoginKeyRef = useRef("");
   const creatorId = selectedCreatorId || creators.data?.items[0]?.id || "";
+  const selectedCreator = creators.data?.items.find((creator) => creator.id === creatorId) ?? null;
   const publicationProfile = useQuery({
     queryKey: ["creator-publication-profile", creatorId],
     queryFn: () => api.getPublicationProfile(creatorId),
@@ -248,13 +266,51 @@ export function PublicationManagementPage() {
       await refresh();
     },
   });
-  const addBinding = useMutation({
-    mutationFn: (platform: string) =>
-      api.bindSocialAutoUploadLogin(creatorId, {
-        platform,
+  const startLogin = useMutation({
+    mutationFn: () => {
+      if (!bindingModal) throw new Error("未选择平台。");
+      return api.startSocialAutoUploadLogin(creatorId, {
+        platform: bindingModal.id,
         browser: "chrome",
-      }),
-    onSuccess: async (_data, platform) => {
+        account_name: bindingAccountName.trim(),
+      });
+    },
+    onSuccess: (result) => {
+      setLoginLaunchResult(result);
+    },
+  });
+  const confirmBinding = useMutation({
+    mutationFn: () => {
+      if (!bindingModal) throw new Error("未选择平台。");
+      return api.bindSocialAutoUploadLogin(creatorId, {
+        platform: bindingModal.id,
+        browser: "chrome",
+        account_name: bindingAccountName.trim(),
+        login_confirmed: true,
+      });
+    },
+    onSuccess: async () => {
+      setBindingModal(null);
+      setBindingAccountName("");
+      setLoginLaunchResult(null);
+      setLoginStatusResult(null);
+      lastAutoLoginKeyRef.current = "";
+      autoConfirmedLoginKeyRef.current = "";
+      await refresh();
+    },
+  });
+  const openDashboard = useMutation({
+    mutationFn: (platformId: string) => api.openSocialAutoUploadDashboard(creatorId, {
+      platform: platformId,
+      browser: "chrome",
+    }),
+    onSuccess: (result) => {
+      setDashboardOpenResult(result);
+    },
+    onError: (error) => {
+      setDashboardOpenResult({ status: "dashboard_failed", warning: errorText(error) });
+    },
+    onSettled: async () => {
       await refresh();
     },
   });
@@ -317,6 +373,58 @@ export function PublicationManagementPage() {
       collection_strategy: nextStrategy,
     });
   };
+  const openBindingModal = (platform: { id: string; label: string }, bindingPayload?: Record<string, unknown> | null) => {
+    setBindingModal(platform);
+    setBindingAccountName(
+      String(bindingPayload?.account_label || bindingPayload?.account_name || "").trim()
+      || `${selectedCreator?.name || "发布账号"} · ${platform.label}`,
+    );
+    setLoginLaunchResult(null);
+    setLoginStatusResult(null);
+    lastAutoLoginKeyRef.current = "";
+    autoConfirmedLoginKeyRef.current = "";
+    startLogin.reset();
+    confirmBinding.reset();
+  };
+  useEffect(() => {
+    if (!bindingModal || !creatorId || !bindingAccountName.trim()) return;
+    const loginKey = `${creatorId}:${bindingModal.id}`;
+    if (lastAutoLoginKeyRef.current === loginKey) return;
+    lastAutoLoginKeyRef.current = loginKey;
+    setLoginLaunchResult(null);
+    setLoginStatusResult(null);
+    startLogin.mutate();
+  }, [bindingModal?.id, creatorId]);
+
+  useEffect(() => {
+    if (!bindingModal || !creatorId || !bindingAccountName.trim()) return;
+    if (!loginLaunchResult && !startLogin.isSuccess) return;
+    let stopped = false;
+    const loginKey = `${creatorId}:${bindingModal.id}:${bindingAccountName.trim()}`;
+    const poll = async () => {
+      try {
+        const result = await api.checkSocialAutoUploadLogin(creatorId, {
+          platform: bindingModal.id,
+          browser: "chrome",
+          account_name: bindingAccountName.trim(),
+        });
+        if (stopped) return;
+        setLoginStatusResult(result);
+        if (result.status === "login_valid" && autoConfirmedLoginKeyRef.current !== loginKey) {
+          autoConfirmedLoginKeyRef.current = loginKey;
+          confirmBinding.mutate();
+        }
+      } catch (error) {
+        if (!stopped) setLoginStatusResult({ status: "monitor_unavailable", warning: errorText(error) });
+      }
+    };
+    poll();
+    const timer = window.setInterval(poll, 5000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [bindingModal?.id, bindingAccountName, creatorId, loginLaunchResult?.status, startLogin.isSuccess]);
   return (
     <section className="page-stack asset-workspace-page">
       <PageHeader
@@ -425,7 +533,8 @@ export function PublicationManagementPage() {
               {platformCards.map((platform) => {
                 const binding = bindingByPlatform.get(platform.id);
                 const bindingPayload = binding?.binding_payload_json;
-                const isSocialAutoUploadBound = bindingPayload?.adapter === "social_auto_upload";
+                const bindingStatus = platformBindingStatus(bindingPayload);
+                const isSocialAutoUploadBound = bindingStatus === "confirmed";
                 const rules = normalizedPlatformRules[platform.id] ?? {};
                 const materialSpecs = PLATFORM_MATERIAL_SPECS[platform.id] ?? [];
                 const selectOptions = PLATFORM_SELECT_OPTIONS[platform.id] ?? [];
@@ -434,11 +543,25 @@ export function PublicationManagementPage() {
                     <div className="publication-platform-card-head">
                       <div>
                         <strong>{platform.label}</strong>
-                        <span>{defaultPlatforms.has(platform.id) ? "默认发布平台" : "可选平台"}</span>
+                        <span>
+                          {isSocialAutoUploadBound
+                            ? `已绑定 · ${String(bindingPayload?.account_label || bindingPayload?.account_name || binding?.credential_ref || "").trim()}`
+                            : bindingStatus === "needs_confirmation"
+                              ? "需重新登录确认账号"
+                              : defaultPlatforms.has(platform.id) ? "默认发布平台" : "可选平台"}
+                        </span>
                       </div>
                       <div className="publication-platform-card-actions">
-                        <button type="button" className="button button-sm" disabled={!creatorId || addBinding.isPending} onClick={() => addBinding.mutate(platform.id)}>
-                          {addBinding.isPending ? "绑定中" : isSocialAutoUploadBound ? "已绑定" : "绑定平台"}
+                        <button type="button" className="button button-sm" disabled={!creatorId} onClick={() => openBindingModal(platform, bindingPayload)}>
+                          {isSocialAutoUploadBound ? "更换账号" : "绑定平台"}
+                        </button>
+                        <button
+                          type="button"
+                          className="button ghost button-sm"
+                          disabled={!isSocialAutoUploadBound || openDashboard.isPending}
+                          onClick={() => openDashboard.mutate(platform.id)}
+                        >
+                          打开后台
                         </button>
                         <button type="button" className="button ghost button-sm" disabled={!isSocialAutoUploadBound}>
                           自动发布
@@ -489,6 +612,89 @@ export function PublicationManagementPage() {
               })}
             </div>
           ) : <div className="muted top-gap">先选择创作者。</div>}
+          {dashboardOpenResult ? (
+            <div className={`publication-login-status publication-login-status-${String(dashboardOpenResult.status || "unknown").replace(/_/g, "-")}`}>
+              <strong>{dashboardOpenResult.status === "dashboard_started" ? "后台窗口已打开" : "后台窗口未打开"}</strong>
+              <span>{String(dashboardOpenResult.account_label || dashboardOpenResult.warning || dashboardOpenResult.next_step || "").trim()}</span>
+            </div>
+          ) : null}
+          {bindingModal ? (
+            <div className="floating-modal-backdrop" role="presentation">
+              <div className="floating-modal-shell publication-login-modal" role="dialog" aria-modal="true" aria-label={`${bindingModal.label} 登录绑定`}>
+                <button
+                  className="button ghost floating-modal-close"
+                  type="button"
+                  onClick={() => {
+                    setBindingModal(null);
+                    setLoginLaunchResult(null);
+                    setLoginStatusResult(null);
+                    lastAutoLoginKeyRef.current = "";
+                    autoConfirmedLoginKeyRef.current = "";
+                  }}
+                >
+                  关闭
+                </button>
+                <div className="publication-login-modal-content">
+                  <div>
+                    <span className="publication-login-modal-kicker">平台账号绑定</span>
+                    <h2>{bindingModal.label}</h2>
+                    <p>先用独立账号标签打开登录窗口，完成扫码或手动登录后再确认绑定。</p>
+                  </div>
+                  <label>
+                    <span>账号标签</span>
+                    <input
+                      className="input"
+                      value={bindingAccountName}
+                      onChange={(event) => setBindingAccountName(event.target.value)}
+                      placeholder="例如：珍妮斯baby · B站主号"
+                    />
+                  </label>
+                  {loginLaunchResult ? (
+                    <div className="publication-login-command">
+                      <strong>{loginLaunchResult.status === "login_started" ? "登录窗口已启动" : "需要手动登录"}</strong>
+                      {loginLaunchResult.launch_source ? <span>启动方式：{String(loginLaunchResult.launch_source)}</span> : null}
+                      {loginLaunchResult.pid ? <span>进程：{String(loginLaunchResult.pid || "")}</span> : null}
+                      {loginLaunchResult.warning ? <span>{String(loginLaunchResult.warning)}</span> : null}
+                      <code>{Array.isArray(loginLaunchResult.command) ? loginLaunchResult.command.join(" ") : ""}</code>
+                    </div>
+                  ) : null}
+                  {loginStatusResult ? (
+                    <div className={`publication-login-status publication-login-status-${String(loginStatusResult.status || "unknown").replace(/_/g, "-")}`}>
+                      <strong>
+                        {loginStatusResult.status === "login_valid"
+                          ? "已检测到登录成功，正在保存绑定"
+                          : loginStatusResult.status === "login_invalid"
+                            ? "正在等待登录完成"
+                            : "暂时无法自动检测登录状态"}
+                      </strong>
+                      {loginStatusResult.check_source ? <span>检测方式：{String(loginStatusResult.check_source)}</span> : null}
+                      {loginStatusResult.warning ? <span>{String(loginStatusResult.warning)}</span> : null}
+                    </div>
+                  ) : null}
+                  {startLogin.isError ? <div className="publication-login-error">{errorText(startLogin.error)}</div> : null}
+                  {confirmBinding.isError ? <div className="publication-login-error">{errorText(confirmBinding.error)}</div> : null}
+                  <div className="publication-login-modal-actions">
+                    <button
+                      type="button"
+                      className="button"
+                      disabled={!bindingAccountName.trim() || startLogin.isPending}
+                      onClick={() => startLogin.mutate()}
+                    >
+                      {startLogin.isPending ? "正在打开" : "重新打开登录窗口"}
+                    </button>
+                    <button
+                      type="button"
+                      className="button primary"
+                      disabled={!bindingAccountName.trim() || confirmBinding.isPending}
+                      onClick={() => confirmBinding.mutate()}
+                    >
+                      {confirmBinding.isPending ? "保存中" : "确认已登录并绑定"}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
         </div>
       </section>
     </section>

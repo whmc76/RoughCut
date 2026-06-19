@@ -24,7 +24,7 @@ from roughcut.config import get_settings
 from roughcut.creative.modes import resolve_live_batch_enhancement_modes
 from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline, TranscriptSegment
 from roughcut.media.output import get_cover_manifest_path
-from roughcut.db.session import get_session_factory
+from roughcut.db.session import get_session_factory, reset_session_state_sync
 from roughcut.pipeline.orchestrator import MAX_ATTEMPTS, PIPELINE_STEPS
 from roughcut.pipeline.render_diagnostics import (
     classify_avatar_runtime_reason_category as _shared_classify_avatar_runtime_reason_category,
@@ -36,26 +36,67 @@ from roughcut.pipeline.quality import assess_job_quality
 from roughcut.pipeline.steps import run_step_sync
 from roughcut.runtime_health import build_readiness_payload
 from roughcut.edit.refine_decisions import resolve_refine_keep_segments_for_timeline
-from roughcut.review.final_review_state import mark_final_review_approved
 from roughcut.review.content_profile import apply_content_profile_feedback
 from roughcut.review.content_profile_memory import record_content_profile_feedback_memory
+from roughcut.review.downstream_context import strip_publication_only_profile_fields
 from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
 from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
 from roughcut.review.subtitle_term_resolution import ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH
 from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER
-from roughcut.watcher.folder_watcher import create_jobs_for_inventory_paths
+from roughcut.speech.transcribe import ARTIFACT_TYPE_ASR_QUALITY_GATE
+from roughcut.watcher.folder_watcher import _create_job_for_file, create_jobs_for_inventory_paths
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 _BATCH_STEP_TIMEOUT_SECONDS = 1800.0
 _BATCH_STEP_TIMEOUT_MIN_SECONDS = 1.0
 _BATCH_STEP_TIMEOUT_SECONDS_BY_STEP = {
-    "render": 1200.0,
+    "content_profile": 420.0,
+    "render": 5400.0,
 }
 _BATCH_STEP_TIMEOUT_STRATEGY = "thread"
 _BATCH_STEP_TIMEOUT_STRATEGY_BY_STEP = {
+    "content_profile": "process",
     "render": "process",
 }
 _BATCH_STEP_TIMEOUT_STRATEGIES = {"thread", "process"}
+
+
+def _configure_console_encoding() -> None:
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+def _is_windows_proactor_closed_pipe_unraisable(unraisable: Any) -> bool:
+    if sys.platform != "win32":
+        return False
+    exc_type = getattr(unraisable, "exc_type", None)
+    exc_value = getattr(unraisable, "exc_value", None)
+    if exc_type is not ValueError or "closed pipe" not in str(exc_value):
+        return False
+    traceback_obj = getattr(unraisable, "exc_traceback", None)
+    while traceback_obj is not None:
+        filename = str(getattr(traceback_obj.tb_frame.f_code, "co_filename", "") or "").replace("\\", "/")
+        if filename.endswith("/asyncio/proactor_events.py") or filename.endswith("/asyncio/base_subprocess.py"):
+            return True
+        traceback_obj = traceback_obj.tb_next
+    return False
+
+
+def _configure_windows_proactor_unraisable_filter() -> None:
+    previous_hook = sys.unraisablehook
+
+    def hook(unraisable: Any) -> None:
+        if _is_windows_proactor_closed_pipe_unraisable(unraisable):
+            return
+        previous_hook(unraisable)
+
+    sys.unraisablehook = hook
 
 
 def _resolve_batch_step_timeout_seconds(step_name: str) -> float:
@@ -68,6 +109,12 @@ def _resolve_batch_step_timeout_seconds(step_name: str) -> float:
             default_timeout_seconds = _BATCH_STEP_TIMEOUT_SECONDS
     normalized_step = str(step_name or "").strip().lower()
     step_timeout_seconds = _BATCH_STEP_TIMEOUT_SECONDS_BY_STEP.get(normalized_step, default_timeout_seconds)
+    if normalized_step == "render":
+        settings = get_settings()
+        step_timeout_seconds = max(
+            float(step_timeout_seconds),
+            float(getattr(settings, "render_step_stale_timeout_sec", 5400) or 5400),
+        )
     if default_raw:
         step_timeout_seconds = default_timeout_seconds
     step_override_env = f"ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS_{normalized_step.upper()}"
@@ -78,6 +125,44 @@ def _resolve_batch_step_timeout_seconds(step_name: str) -> float:
         except ValueError:
             pass
     return max(_BATCH_STEP_TIMEOUT_MIN_SECONDS, float(step_timeout_seconds))
+
+
+def _apply_terminal_status_to_quality_assessment(
+    quality_assessment: dict[str, Any] | None,
+    *,
+    status: str,
+    render_diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = dict(quality_assessment or {})
+    if status == "done":
+        return payload
+
+    issue_codes = [str(code) for code in list(payload.get("issue_codes") or []) if str(code).strip()]
+    if status == "failed":
+        issue_codes.append("job_failed")
+        render_step = (
+            dict(render_diagnostics.get("render_step") or {})
+            if isinstance(render_diagnostics, dict) and isinstance(render_diagnostics.get("render_step"), dict)
+            else {}
+        )
+        if render_step:
+            _, render_issue_codes = _classify_render_failure_reason(
+                error=str(render_step.get("error") or ""),
+                detail=str(render_step.get("detail") or ""),
+                sync_runner=dict(render_step.get("sync_runner") or {})
+                if isinstance(render_step.get("sync_runner"), dict)
+                else None,
+            )
+            issue_codes.extend(render_issue_codes or ["render_failed"])
+        payload["score"] = 0.0
+        payload["grade"] = "E"
+    elif status == "partial":
+        issue_codes.append("partial_run")
+        if payload.get("score") is not None:
+            payload["score"] = min(float(payload.get("score") or 0.0), 60.0)
+            payload["grade"] = "D" if float(payload["score"]) < 60.0 else "C"
+    payload["issue_codes"] = sorted(set(issue_codes))
+    return payload
 
 
 def _run_step_sync_with_timeout(step_name: str, job_id: str, timeout_seconds: float) -> None:
@@ -152,6 +237,8 @@ def _run_step_sync_process_worker(step_name: str, job_id: str, result_queue: mul
                 "traceback": traceback.format_exc(),
             }
         )
+    finally:
+        reset_session_state_sync()
 
 
 def _run_step_sync_with_timeout_in_process(step_name: str, job_id: str, timeout_seconds: float) -> None:
@@ -293,6 +380,7 @@ class JobRunReport:
     content_profile: dict[str, Any] | None
     steps: list[StepRun]
     notes: list[str]
+    asr_evidence: dict[str, Any] = field(default_factory=dict)
     step_sync_runner_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
     render_diagnostics: dict[str, Any] = field(default_factory=dict)
 
@@ -355,6 +443,11 @@ def parse_args() -> argparse.Namespace:
         help="Reset and rerun matching jobs even if a finished render already exists",
     )
     parser.add_argument(
+        "--fresh-jobs",
+        action="store_true",
+        help="Always create new jobs for this batch instead of reusing matching source-name jobs.",
+    )
+    parser.add_argument(
         "--golden-manifest",
         type=Path,
         default=None,
@@ -371,6 +464,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    _configure_console_encoding()
+    _configure_windows_proactor_unraisable_filter()
     _configure_local_event_loop_policy()
     args = parse_args()
     args.report_dir.mkdir(parents=True, exist_ok=True)
@@ -418,6 +513,7 @@ def main() -> None:
                 output_dir=args.output_dir,
                 enhancement_modes=enhancement_modes,
                 force_rerun_existing=args.force_rerun_existing,
+                fresh_jobs=args.fresh_jobs,
             )
         )
         if not job_id:
@@ -624,33 +720,48 @@ async def prepare_job_for_source(
     output_dir: str | None,
     enhancement_modes: list[str],
     force_rerun_existing: bool,
+    fresh_jobs: bool = False,
 ) -> str | None:
-    factory = get_session_factory()
-    async with factory() as session:
-        result = await session.execute(
-            select(Job).where(Job.source_name == source_path.name).order_by(Job.created_at.desc())
-        )
-        jobs = result.scalars().all()
-        for job in jobs:
-            render_result = await session.execute(
-                select(RenderOutput)
-                .where(RenderOutput.job_id == job.id, RenderOutput.status == "done")
-                .order_by(RenderOutput.created_at.desc())
+    if not fresh_jobs:
+        factory = get_session_factory()
+        async with factory() as session:
+            result = await session.execute(
+                select(Job).where(Job.source_name == source_path.name).order_by(Job.created_at.desc())
             )
-            render = render_result.scalars().first()
-            if render and render.output_path and Path(render.output_path).exists() and not force_rerun_existing:
-                return None
+            jobs = result.scalars().all()
+            for job in jobs:
+                render_result = await session.execute(
+                    select(RenderOutput)
+                    .where(RenderOutput.job_id == job.id, RenderOutput.status == "done")
+                    .order_by(RenderOutput.created_at.desc())
+                )
+                render = render_result.scalars().first()
+                if render and render.output_path and Path(render.output_path).exists() and not force_rerun_existing:
+                    return None
 
-        reusable = jobs[0] if jobs else None
-        if reusable is not None:
-            await reset_job_for_batch_rerun(
-                session,
-                reusable,
-                enhancement_modes=enhancement_modes,
-                output_dir=output_dir,
-            )
-            await session.commit()
-            return str(reusable.id)
+            reusable = jobs[0] if jobs else None
+            if reusable is not None:
+                await reset_job_for_batch_rerun(
+                    session,
+                    reusable,
+                    enhancement_modes=enhancement_modes,
+                    output_dir=output_dir,
+                )
+                await session.commit()
+                return str(reusable.id)
+    else:
+        job_id = await _create_job_for_file(
+            source_path,
+            workflow_template=channel_profile,
+            language=language,
+            output_dir=output_dir,
+            allow_duplicate_file=True,
+        )
+        if not job_id:
+            return None
+        if enhancement_modes:
+            await override_job_batch_settings(job_id, enhancement_modes=enhancement_modes, output_dir=output_dir)
+        return job_id
 
     created = await create_jobs_for_inventory_paths(
         [str(source_path)],
@@ -746,22 +857,6 @@ def run_job(job_id: str, item: dict[str, Any], *, stop_after: str | None = None)
             started = time.perf_counter()
             auto_confirm_content_profile(job_id)
             current_steps["summary_review"] = "done"
-            step_runs.append(
-                StepRun(
-                    step=step_name,
-                    status="done",
-                    elapsed_seconds=round(time.perf_counter() - started, 3),
-                    detail=read_step_detail(job_id, step_name),
-                )
-            )
-            if stop_after == step_name:
-                status = "partial"
-                break
-            continue
-        if step_name == "final_review":
-            started = time.perf_counter()
-            auto_approve_final_review(job_id)
-            current_steps["final_review"] = "done"
             step_runs.append(
                 StepRun(
                     step=step_name,
@@ -973,31 +1068,6 @@ def auto_confirm_content_profile(job_id: str) -> None:
     asyncio.run(_confirm())
 
 
-def auto_approve_final_review(job_id: str) -> None:
-    async def _approve() -> None:
-        factory = get_session_factory()
-        async with factory() as session:
-            job_uuid = uuid.UUID(job_id)
-            job = await session.get(Job, job_uuid)
-            review_result = await session.execute(
-                select(JobStep).where(JobStep.job_id == job.id, JobStep.step_name == "final_review")
-            )
-            review_step = review_result.scalar_one_or_none()
-            if review_step is None:
-                raise RuntimeError("final_review step not found")
-            now = datetime.now(timezone.utc)
-            mark_final_review_approved(
-                review_step=review_step,
-                job=job,
-                now=now,
-                approved_via="batch_test",
-                metadata_updates={"batch_auto_approved": True},
-            )
-            await session.commit()
-
-    asyncio.run(_approve())
-
-
 def finalize_job(job_id: str, status: str, *, error: str | None = None) -> None:
     async def _finalize() -> None:
         factory = get_session_factory()
@@ -1081,12 +1151,6 @@ def _build_render_diagnostics(
         if avatar_summary:
             diagnostics["avatar_result"] = avatar_summary
 
-    cover_result = render_payload.get("cover_result") if isinstance(render_payload, dict) else None
-    if isinstance(cover_result, dict) and cover_result:
-        cover_summary = _normalize_cover_render_result_for_reporting(cover_result)
-        if cover_summary:
-            diagnostics["cover_result"] = cover_summary
-
     render_step = next((step for step in steps if str(step.step_name) == "render"), None)
     if render_step is not None:
         render_step_summary: dict[str, Any] = {}
@@ -1120,7 +1184,7 @@ def _merge_render_runtime_payloads(
 ) -> dict[str, Any]:
     merged = dict(render_payload or {}) if isinstance(render_payload, dict) else {}
     runtime = runtime_payload if isinstance(runtime_payload, dict) else {}
-    for key in ("avatar_result", "cover_result"):
+    for key in ("avatar_result",):
         value = runtime.get(key)
         if isinstance(value, dict) and value:
             merged[key] = dict(value)
@@ -1265,6 +1329,11 @@ async def collect_job_report(
             (artifact for artifact in artifacts if artifact.artifact_type == ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT),
             None,
         )
+        transcript_artifact = next((artifact for artifact in artifacts if artifact.artifact_type == "transcript"), None)
+        asr_quality_gate_artifact = next(
+            (artifact for artifact in artifacts if artifact.artifact_type == ARTIFACT_TYPE_ASR_QUALITY_GATE),
+            None,
+        )
         profile_artifact = next(
             (
                 artifact
@@ -1305,26 +1374,9 @@ async def collect_job_report(
         else {}
     )
     render_payload = _merge_render_runtime_payloads(render_payload, render_runtime_payload)
-    cover_path = str(render_payload.get("cover") or "").strip() or None
+    cover_path = None
+    cover_variant_count = 0
     platform_doc = str(packaging_artifact.storage_path or "").strip() if packaging_artifact else None
-    if not platform_doc and output_path:
-        platform_doc = str(Path(output_path).with_name(f"{Path(output_path).stem}_publish.md"))
-
-    cover_variants = [
-        str(item).strip()
-        for item in (render_payload.get("cover_variants") or [])
-        if str(item).strip()
-    ]
-    cover_manifest = get_cover_manifest_path(Path(cover_path)) if cover_path else None
-    if cover_manifest and not cover_manifest.exists():
-        legacy_manifest = get_legacy_cover_manifest_path(Path(cover_path))
-        cover_manifest = legacy_manifest if legacy_manifest.exists() else cover_manifest
-    cover_variant_count = len(cover_variants)
-    if cover_variant_count == 0 and cover_manifest and cover_manifest.exists():
-        try:
-            cover_variant_count = len(json.loads(cover_manifest.read_text(encoding="utf-8")))
-        except Exception:
-            cover_variant_count = 0
 
     quality_assessment = assess_job_quality(
         job=job,
@@ -1336,12 +1388,30 @@ async def collect_job_report(
     )
     step_sync_runner_metadata = _build_step_sync_runner_metadata(steps)
     render_diagnostics = _build_render_diagnostics(render_payload, steps)
+    quality_assessment = _apply_terminal_status_to_quality_assessment(
+        quality_assessment,
+        status=status,
+        render_diagnostics=render_diagnostics,
+    )
+    asr_evidence = _build_asr_evidence(
+        transcript_artifact.data_json
+        if transcript_artifact and isinstance(transcript_artifact.data_json, dict)
+        else {},
+        asr_quality_gate_artifact.data_json
+        if asr_quality_gate_artifact and isinstance(asr_quality_gate_artifact.data_json, dict)
+        else {},
+    )
     subtitle_projection_data = (
         subtitle_projection_artifact.data_json
         if subtitle_projection_artifact and isinstance(subtitle_projection_artifact.data_json, dict)
         else {}
     )
     effective_subtitle_count = len(list(subtitle_projection_data.get("entries") or [])) or len(subtitles)
+    report_content_profile = (
+        strip_publication_only_profile_fields(profile_artifact.data_json)
+        if profile_artifact and isinstance(profile_artifact.data_json, dict)
+        else None
+    )
     live_stage_validations = build_live_stage_validations(
         step_statuses={step.step_name: step.status for step in steps},
         step_details={
@@ -1362,7 +1432,7 @@ async def collect_job_report(
         transcript_segment_count=len(transcript_segments),
         subtitle_count=effective_subtitle_count,
         keep_ratio=keep_ratio,
-        profile=profile_artifact.data_json if profile_artifact else None,
+        profile=report_content_profile,
         platform_doc=platform_doc,
         subtitle_quality_report=subtitle_quality_artifact.data_json if subtitle_quality_artifact else None,
         subtitle_term_resolution_patch=(
@@ -1379,9 +1449,6 @@ async def collect_job_report(
         subtitle_count=effective_subtitle_count,
         correction_count=len(corrections),
         keep_ratio=keep_ratio,
-        cover_path=cover_path,
-        cover_variant_count=cover_variant_count,
-        platform_doc=platform_doc,
         quality_assessment=quality_assessment,
         live_stage_validations=live_stage_validations,
     )
@@ -1392,24 +1459,99 @@ async def collect_job_report(
         source_name=str(item.get("source_name") or job.source_name),
         status=status,
         output_path=output_path,
-        cover_path=cover_path if cover_path and Path(cover_path).exists() else None,
+        cover_path=None,
         output_duration_sec=round(output_duration, 3),
         transcript_segment_count=len(transcript_segments),
         subtitle_count=effective_subtitle_count,
         correction_count=len(corrections),
         keep_ratio=round(keep_ratio, 3),
-        cover_variant_count=cover_variant_count,
-        platform_doc=platform_doc if platform_doc and Path(platform_doc).exists() else None,
+        cover_variant_count=0,
+        platform_doc=None,
         quality_score=quality_assessment.get("score"),
         quality_grade=quality_assessment.get("grade"),
         quality_issue_codes=list(quality_assessment.get("issue_codes") or []),
         live_stage_validations=live_stage_validations,
-        content_profile=profile_artifact.data_json if profile_artifact else None,
+        content_profile=report_content_profile,
+        asr_evidence=asr_evidence,
         step_sync_runner_metadata=step_sync_runner_metadata,
         render_diagnostics=render_diagnostics,
         steps=step_runs,
         notes=notes,
     )
+
+
+def _build_asr_evidence(
+    transcript_payload: dict[str, Any],
+    quality_gate_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not isinstance(transcript_payload, dict):
+        transcript_payload = {}
+    if not isinstance(quality_gate_payload, dict):
+        quality_gate_payload = {}
+    if not transcript_payload and not quality_gate_payload:
+        return {}
+    source_payload = transcript_payload or quality_gate_payload
+    attempts = [
+        attempt
+        for attempt in list(source_payload.get("attempts") or [])
+        if isinstance(attempt, dict)
+    ]
+    rejected_attempts = [
+        attempt
+        for attempt in list(quality_gate_payload.get("rejected_attempts") or [])
+        if isinstance(attempt, dict)
+    ]
+    if not attempts and rejected_attempts:
+        for attempt in rejected_attempts:
+            attempts.append(
+                {
+                    "provider": attempt.get("provider"),
+                    "model": attempt.get("model"),
+                    "error": quality_gate_payload.get("message") or "asr_quality_gate",
+                }
+            )
+    summarized_attempts: list[dict[str, Any]] = []
+    quality_gate_rejections: list[dict[str, Any]] = []
+    for attempt in attempts:
+        error = str(attempt.get("error") or "").strip()
+        item = {
+            "provider": str(attempt.get("provider") or "").strip(),
+            "model": str(attempt.get("model") or "").strip(),
+            "status": "rejected" if error else "selected",
+        }
+        if error:
+            item["error"] = error
+        summarized_attempts.append(item)
+        if error.startswith("asr_quality_gate:") or (
+            quality_gate_payload and "asr_quality_gate" in error
+        ):
+            quality_gate_rejections.append(item)
+
+    provider = str(source_payload.get("provider") or "").strip()
+    model = str(source_payload.get("model") or "").strip()
+    if not provider and attempts:
+        provider = str(attempts[-1].get("provider") or "").strip()
+    if not model and attempts:
+        model = str(attempts[-1].get("model") or "").strip()
+    evidence = {
+        "provider": provider,
+        "model": model,
+        "status": str(source_payload.get("status") or ("rejected" if quality_gate_payload else "selected")),
+        "attempt_count": len(summarized_attempts),
+        "fallback_used": (
+            any(item.get("status") == "rejected" for item in summarized_attempts)
+            and any(item.get("status") == "selected" for item in summarized_attempts)
+        ),
+        "attempts": summarized_attempts,
+        "quality_gate_rejections": quality_gate_rejections,
+    }
+    if quality_gate_payload.get("message"):
+        evidence["error"] = quality_gate_payload.get("message")
+    if source_payload.get("language"):
+        evidence["language"] = source_payload.get("language")
+    if source_payload.get("duration"):
+        evidence["duration_sec"] = source_payload.get("duration")
+    return evidence
 
 
 def compute_keep_ratio(editorial_timeline: dict[str, Any] | None) -> float:
@@ -1545,7 +1687,6 @@ def build_live_stage_validations(
     has_term_resolution_step = "subtitle_term_resolution" in step_statuses
     has_consistency_step = "subtitle_consistency_review" in step_statuses
     has_summary_review_step = "summary_review" in step_statuses
-    has_final_review_step = "final_review" in step_statuses
     stage_to_step = {
         "probe": "probe",
         "transcribe": "transcribe",
@@ -1556,8 +1697,6 @@ def build_live_stage_validations(
         "summary_review": "summary_review",
         "edit_plan": "edit_plan",
         "render": "render",
-        "final_review": "final_review",
-        "platform_package": "platform_package",
     }
     pipeline_step_order = {step_name: index for index, step_name in enumerate(PIPELINE_STEPS)}
     stop_after_index = pipeline_step_order.get(str(stop_after or "").strip())
@@ -1590,6 +1729,29 @@ def build_live_stage_validations(
         step_statuses.get("subtitle_postprocess") == "done"
         and subtitle_count <= 0
         and "0 段 -> 0 条" in subtitle_postprocess_detail
+    )
+    render_detail = step_details.get("render", "")
+    render_error = step_errors.get("render", "")
+    render_metadata = dict(step_metadata.get("render") or {})
+    render_failure_reason, render_failure_issue_codes = _classify_render_failure_reason(
+        error=render_error,
+        detail=render_detail,
+        sync_runner=render_metadata,
+    )
+    render_done = step_statuses.get("render") == "done"
+    render_issue_codes = (
+        ["subtitle_sync_issue"]
+        if "subtitle_sync_issue" in issue_codes
+        else list(render_failure_issue_codes or ["render_failed"])
+        if not render_done
+        else []
+    )
+    render_summary = (
+        "导出成片字幕同步正常"
+        if render_done and "subtitle_sync_issue" not in issue_codes
+        else "导出层存在字幕同步/结构问题"
+        if "subtitle_sync_issue" in issue_codes
+        else f"导出成片失败：{render_failure_reason or 'render_failed'}"
     )
 
     def _stage_skipped(stage: str) -> bool:
@@ -1790,27 +1952,9 @@ def build_live_stage_validations(
         ),
         _skipped_validation("render") if _stage_skipped("render") else _blocked_validation("render") or LiveStageValidation(
             stage="render",
-            status="pass" if step_statuses.get("render") == "done" and "subtitle_sync_issue" not in issue_codes else "fail",
-            summary="导出成片字幕同步正常" if "subtitle_sync_issue" not in issue_codes else "导出层存在字幕同步/结构问题",
-            issue_codes=["subtitle_sync_issue"] if "subtitle_sync_issue" in issue_codes else [],
-        ),
-        _skipped_validation("final_review") if _stage_skipped("final_review") else _blocked_validation("final_review") or LiveStageValidation(
-            stage="final_review",
-            status="pass" if not has_final_review_step or step_statuses.get("final_review") == "done" else "fail",
-            summary=(
-                "成片审核已通过"
-                if step_statuses.get("final_review") == "done"
-                else "成片无需人工审核"
-                if not has_final_review_step
-                else "成片审核未通过"
-            ),
-            issue_codes=[] if not has_final_review_step or step_statuses.get("final_review") == "done" else ["final_review_pending"],
-        ),
-        _skipped_validation("platform_package") if _stage_skipped("platform_package") else _blocked_validation("platform_package") or LiveStageValidation(
-            stage="platform_package",
-            status="pass" if step_statuses.get("platform_package") == "done" and platform_doc and Path(platform_doc).exists() else "fail",
-            summary="平台包装文案已导出" if platform_doc and Path(platform_doc).exists() else "平台包装文案未导出",
-            issue_codes=["missing_platform_package"] if not (platform_doc and Path(platform_doc).exists()) else [],
+            status="pass" if render_done and "subtitle_sync_issue" not in issue_codes else "fail",
+            summary=render_summary,
+            issue_codes=render_issue_codes,
         ),
     ]
     return validations
@@ -1824,9 +1968,6 @@ def build_job_notes(
     subtitle_count: int,
     correction_count: int,
     keep_ratio: float,
-    cover_path: str | None,
-    cover_variant_count: int,
-    platform_doc: str | None,
     quality_assessment: dict[str, Any] | None,
     live_stage_validations: list[LiveStageValidation],
 ) -> list[str]:
@@ -1847,12 +1988,6 @@ def build_job_notes(
         notes.append(f"术语/字幕纠正 {correction_count} 处")
     if keep_ratio > 0:
         notes.append(f"保留比 {keep_ratio:.0%}")
-    if cover_path and Path(cover_path).exists():
-        notes.append("封面已导出")
-    if cover_variant_count >= 5:
-        notes.append(f"封面候选 {cover_variant_count} 张")
-    if platform_doc and Path(platform_doc).exists():
-        notes.append("平台文案已导出")
     if isinstance(quality_assessment, dict):
         grade = str(quality_assessment.get("grade") or "").strip()
         score = quality_assessment.get("score")
@@ -1900,6 +2035,14 @@ def build_console_summary(summary: dict[str, Any]) -> dict[str, Any]:
                 "output_duration_sec": job["output_duration_sec"],
                 "quality_score": job.get("quality_score"),
                 "quality_grade": job.get("quality_grade"),
+                "asr_evidence": {
+                    "status": (job.get("asr_evidence") or {}).get("status"),
+                    "provider": (job.get("asr_evidence") or {}).get("provider"),
+                    "model": (job.get("asr_evidence") or {}).get("model"),
+                    "fallback_used": (job.get("asr_evidence") or {}).get("fallback_used"),
+                    "attempt_count": (job.get("asr_evidence") or {}).get("attempt_count"),
+                    "error": (job.get("asr_evidence") or {}).get("error"),
+                },
                 "subtitle_count": job["subtitle_count"],
                 "keep_ratio": job["keep_ratio"],
                 "notes": job["notes"][:4],
@@ -1962,17 +2105,41 @@ def render_markdown(summary: dict[str, Any]) -> str:
         lines.append(f"## {job['source_name']}")
         lines.append(f"- status: {job['status']}")
         lines.append(f"- output_path: {job['output_path'] or ''}")
-        lines.append(f"- cover_path: {job.get('cover_path') or ''}")
         lines.append(f"- output_duration_sec: {job['output_duration_sec']}")
         lines.append(f"- transcript_segment_count: {job.get('transcript_segment_count', 0)}")
         lines.append(f"- subtitle_count: {job['subtitle_count']}")
         lines.append(f"- correction_count: {job['correction_count']}")
         lines.append(f"- keep_ratio: {job['keep_ratio']}")
-        lines.append(f"- cover_variant_count: {job['cover_variant_count']}")
         if job.get("quality_score") is not None:
             lines.append(f"- quality: {job.get('quality_grade') or ''} {job['quality_score']}")
         if job.get("quality_issue_codes"):
             lines.append("- quality_issue_codes: " + ", ".join(job["quality_issue_codes"]))
+        asr_evidence = job.get("asr_evidence") if isinstance(job.get("asr_evidence"), dict) else {}
+        if asr_evidence:
+            lines.append(
+                "- asr_evidence: "
+                + ", ".join(
+                    [
+                        f"provider={asr_evidence.get('provider') or ''}",
+                        f"model={asr_evidence.get('model') or ''}",
+                        f"attempt_count={asr_evidence.get('attempt_count') or 0}",
+                        f"fallback_used={str(bool(asr_evidence.get('fallback_used'))).lower()}",
+                    ]
+                )
+            )
+            attempts = list(asr_evidence.get("attempts") or [])
+            if attempts:
+                lines.append("  - asr_attempts:")
+                for attempt in attempts:
+                    if not isinstance(attempt, dict):
+                        continue
+                    attempt_line = (
+                        f"    - {attempt.get('provider') or ''}/{attempt.get('model') or ''}: "
+                        f"{attempt.get('status') or ''}"
+                    )
+                    if attempt.get("error"):
+                        attempt_line += f" | error={attempt['error']}"
+                    lines.append(attempt_line)
         if job.get("live_stage_validations"):
             lines.append(
                 "- live_stage_validations: "
@@ -2028,20 +2195,6 @@ def render_markdown(summary: dict[str, Any]) -> str:
                         "error_metadata=" + json.dumps(avatar_result["error_metadata"], ensure_ascii=False, sort_keys=True)
                     )
                 lines.append("- render_avatar: " + ", ".join(avatar_parts))
-            cover_result = (
-                render_diagnostics.get("cover_result")
-                if isinstance(render_diagnostics.get("cover_result"), dict)
-                else {}
-            )
-            if cover_result:
-                cover_parts = [
-                    f"{key}={cover_result[key]}"
-                    for key in ("status", "reason", "variant_count", "selection_review_recommended")
-                    if key in cover_result
-                ]
-                if cover_result.get("detail"):
-                    cover_parts.append(f"detail={cover_result['detail']}")
-                lines.append("- render_cover: " + ", ".join(cover_parts))
             if render_step:
                 render_step_parts = [
                     f"{key}={render_step[key]}"

@@ -119,6 +119,14 @@ The dual-cover source-of-truth contract can only be reopened if fresh live evide
 - `bilibili` is closed as a RoughCut formal publication platform on the adapter/runtime side.
 - `wechat-channels` is not closed yet. Current blocker is login-state stability, not publish-field control logic.
 
+## 2026-06-19 Account Binding Rule
+
+- Creator platform binding must not infer "bound" from a default platform, default browser, or synthetic account label.
+- `social-auto-upload` bindings require an explicit account label plus a user-confirmed login flow. The UI must open a login/QR/manual-login modal first, then save the binding only after the user confirms the platform account.
+- Legacy bindings with `status=login_reference_bound` are not confirmed accounts. Treat them as needing re-login confirmation and block automatic publish until upgraded to `status=login_confirmed`.
+- This is required because the same platform can have multiple accounts, and RoughCut must know which account label the publication credential targets.
+- The publication-management binding modal now auto-starts the login flow when opened and polls `social-auto-upload check` until login succeeds. If the Docker API runtime cannot access the Windows `social-auto-upload` root, it must call `codex_host_bridge` host routes for login/check instead of falling back to fake success or requiring copied shell commands.
+
 ### Current Production Flow
 
 - Intelligent publish no longer requires `browser-agent` readiness for targets that resolve to `social_auto_upload` only.
@@ -143,6 +151,12 @@ The dual-cover source-of-truth contract can only be reopened if fresh live evide
   - why it surfaced now: RoughCut formal publish had switched to the `social-auto-upload` adapter path, which needs a stable `tid` fallback even when page text uses a newer hierarchical label
 - This root cause is fixed in-repo. Reopen Bilibili only if fresh live evidence from the current script version shows category drift again.
 - The already published `maxace蜂巢3顶配` Bilibili稿件 may still contain the old wrong partition/tag result. Treat that as historical output drift, not an open framework blocker.
+- 2026-06-19 Jenny Baby binding update:
+  - creator `7be7da2e-7d54-4d0b-a63d-809d71094839` is bound to Bilibili with display label `珍妮斯baby · Chrome`.
+  - Credential isolation key is `creator-7be7da2e7d54-bilibili-chrome`; cookie file is `E:/WorkSpace/_eval/social-auto-upload/cookies/bilibili_creator-7be7da2e7d54-bilibili-chrome.json`.
+  - Stored binding must keep `account_label` for UI display and `account_name` for the isolated social-auto-upload key. Do not use the display label as the cookie key.
+  - The `credential_ref` contract is `social-auto-upload:<account_name>:<platform>`, currently `social-auto-upload:creator-7be7da2e7d54-bilibili-chrome:bilibili`.
+  - Root cause fixed during binding: Bilibili login saved a valid storage state, but `sau_cli.py bilibili check` still used the old `biliup renew` path and reported `invalid`; it now reuses `bilibili_setup/cookie_auth`, and `cookie_auth` accepts loaded Bilibili auth cookies as the base login-state evidence.
 
 ### Douyin
 
@@ -190,6 +204,13 @@ The dual-cover source-of-truth contract can only be reopened if fresh live evide
   - if `sau_cli.py tencent check --account "FAS · Chrome"` is `invalid`, do not continue publish attempts
   - first refresh login, then publish
 - Remaining blocker to close WeChat Channels is external runtime state: cookie expiry / confirmation flow, not current field automation logic.
+- 2026-06-19 Jenny Baby video-account binding update:
+  - creator `7be7da2e-7d54-4d0b-a63d-809d71094839` is bound to WeChat Channels with display label `珍妮斯baby · 视频号`.
+  - Credential isolation key is `creator-7be7da2e7d54-wechat-channels-chrome`; cookie file is `E:/WorkSpace/_eval/social-auto-upload/cookies/tencent_creator-7be7da2e7d54-wechat-channels-chrome.json`.
+  - Root cause fixed during binding: the actual post-login landing page was `https://channels.weixin.qq.com/platform`, but `_is_tencent_login_completed()` only accepted post-create/post-list URLs; `sau_cli.py tencent check` also refused to inspect the persistent profile before the JSON snapshot existed.
+  - Check behavior while the dashboard is already open: if the persistent profile is locked by a headed backend window, `cookie_auth()` falls back to the saved storage_state snapshot and still returns `valid` when the session is usable.
+  - Current evidence: `sau_cli.py tencent check --account creator-7be7da2e7d54-wechat-channels-chrome` returns `valid`; RoughCut login-status returns `login_valid`; RoughCut dashboard action returns `dashboard_started`.
+  - Keep account isolation strict: UI label stays `account_label`; all check/publish/dashboard operations must use `account_name` from `credential_ref`.
 
 ### YouTube And X
 
@@ -220,3 +241,135 @@ The dual-cover source-of-truth contract can only be reopened if fresh live evide
 - `PUBLICATION_SOCIAL_AUTO_UPLOAD_PYTHON` must point to the repo-local interpreter:
   - `E:/WorkSpace/_eval/social-auto-upload/.venv/Scripts/python.exe`
   - using system `python` can reintroduce fake auth failures caused by missing dependencies.
+
+## 2026-06-19 Jenny Baby Auto-Publish Closure
+
+- All Jenny Baby `social-auto-upload` isolated credentials checked valid on the host runtime:
+  - `bilibili`: `creator-7be7da2e7d54-bilibili-chrome`
+  - `douyin`: `creator-7be7da2e7d54-douyin-chrome`
+  - `xiaohongshu`: `creator-7be7da2e7d54-xiaohongshu-chrome`
+  - `kuaishou`: `creator-7be7da2e7d54-kuaishou-chrome`
+  - `wechat-channels`: `creator-7be7da2e7d54-wechat-channels-chrome`
+- New publication schedule contract:
+  - `PublicationAttempt` remains the publication log source of truth.
+  - Same platform account defaults to one video per local day.
+  - If a target account/day is already occupied by an active, published, or scheduled attempt, new attempts auto-defer to the next open local day at `10:00 Asia/Shanghai` unless an explicit schedule time was supplied.
+  - The deferral reason is written to `request_payload.metadata.publication_schedule_policy` and `operator_summary`.
+- Root-cause fixes for Jenny Baby S02E02 plan readiness:
+  - `src/roughcut/publication_platform_matrix.json` no longer marks `wechat-channels` as `manual_handoff_only`; it is an automatic `social-auto-upload` target when a confirmed binding exists.
+  - `normalize_publication_credentials(...)` infers `adapter=social_auto_upload` from `credential_ref=social-auto-upload:...`.
+  - `intelligent-copy` publish inputs now merge creator-card `CreatorPlatformBinding` records into the avatar material profile publication credentials, so creator card bindings are visible to `build_publication_plan(...)`.
+  - `social-auto-upload` scheduled submissions now map to `scheduled_pending`, not `draft_created`.
+- Live plan evidence for S02E02 `仓储超市`:
+  - Plan artifact: `artifacts/janice-s02e02-publication-plan.json`.
+  - API path: `POST /api/v1/intelligent-copy/publication/plan`.
+  - Result: `status=ready`, `publish_ready=true`, no blocked reasons.
+  - Targets: `douyin`, `xiaohongshu`, `bilibili`, `kuaishou`, `wechat-channels`.
+  - All five targets resolved to `adapter=social_auto_upload`.
+- Live publish evidence for S02E02 `仓储超市`:
+  - `PublicationAttempt` is now the live publication log and recovery ledger for the series.
+  - Publish artifacts:
+    - `artifacts/janice-s02e02-publication-publish-response.json`
+    - `artifacts/janice-s02e02-publication-republish-after-host-bridge-response.json`
+    - `artifacts/janice-s02e02-publication-republish-title-category-fix-response.json`
+    - `artifacts/janice-s02e02-publication-retry-wechat-response.json`
+  - RoughCut runtime fixes required for real publish:
+    - `worker-publication` must run from the current `/app/src` source mount; the old orphan worker rejected `adapter=social_auto_upload`.
+    - Docker workers must execute Windows-only `social-auto-upload` through `codex_host_bridge` `/v1/host/social-auto-upload-command`; direct subprocess from Linux resolves the root as an invalid `/app/E:/...` path.
+    - `social-auto-upload` account names must come from `request_payload.metadata.credential_ref`, not RoughCut UUID credential ids.
+    - Platform command building must derive missing titles from copy material/body for title-required platforms and must provide Bilibili default `tid=254` / `category=生活/亲子` when no explicit partition is supplied.
+  - Platform outcomes:
+    - Douyin attempt `e9ea99b791f048299a7ef840868bc604`: `scheduled_pending`, scheduled for `2026-06-19 20:30 Asia/Shanghai`.
+    - Kuaishou attempt `8bccdef08a89489db09b151253c549b9`: `scheduled_pending`, scheduled for `2026-06-19 20:00 Asia/Shanghai`.
+    - Bilibili attempt `133ca58ced2a4af3adf759a8c2819b51`: failed in upstream schedule UI automation after title, cover, declaration, and category succeeded. First bad layer: `social-auto-upload/uploader/bilibili_uploader/main.py::_set_schedule`; old `.time-container input[placeholder*=日期/时间/预约]` selector no longer matches the current page.
+    - Xiaohongshu attempt `f616adffaac14a26ae3cffcdcf277e0d`: failed in upstream schedule UI automation. First bad layer: `social-auto-upload/uploader/xiaohongshu_uploader/main.py::set_schedule_time_xiaohongshu`; the expected datepicker input did not appear after enabling scheduled publish.
+    - WeChat Channels attempt `a506e1f3058a4597bff56a3e29eabb25`: failed again after a valid `sau_cli.py tencent check`. First bad layer: upstream Tencent creator-page entry/login-state detection; `check` can report valid while real upload does not reach the creation page.
+  - Do not mark Bilibili, Xiaohongshu, or WeChat Channels as successfully scheduled until the upstream `social-auto-upload` platform adapters are fixed and rerun with fresh live evidence.
+
+### 2026-06-19 Jenny Baby Auto-Publish Root-Cause Follow-Up
+
+- Current attempt state after the duplicate guard:
+  - Xiaohongshu `f616adffaac14a26ae3cffcdcf277e0d`: intentionally failed with `social_auto_upload_duplicate_execution_guard`; do not retry before worker/source reload.
+  - Douyin `e9ea99b791f048299a7ef840868bc604`: `scheduled_pending`, `2026-06-19 20:30 Asia/Shanghai`.
+  - Kuaishou `8bccdef08a89489db09b151253c549b9`: `scheduled_pending`, `2026-06-19 20:00 Asia/Shanghai`.
+  - WeChat Channels `a506e1f3058a4597bff56a3e29eabb25`: failed on upload-complete timeout; next run should inspect new timeout JSON/HTML diagnostics.
+  - Bilibili `133ca58ced2a4af3adf759a8c2819b51`: failed before this follow-up; source now has submit-response success detection but no fresh live retry yet.
+- Root cause fixed in RoughCut:
+  - Long `social-auto-upload` CLI calls used to keep attempts visibly `queued` until the subprocess returned, so a later publication-worker tick could start the same attempt again.
+  - `submit_publication_attempt_to_social_auto_upload(...)` now commits attempt/run `processing` state, provider task id, heartbeat, and lease before invoking the external CLI.
+- Root causes fixed upstream in `E:/WorkSpace/_eval/social-auto-upload`:
+  - Xiaohongshu cover upload, schedule input, upload-settled wait, and custom final publish button click paths were updated for the current DOM. The final click fix still needs live proof after reload.
+  - Bilibili final submit now patches `/x/vu/web/add*` and `/x/vu/web/edit` POST bodies with the target `dtime`, records patch hits, records submit responses, and treats HTTP 2xx with JSON `code=0` as the authoritative success signal.
+  - WeChat Channels upload timeout now writes PNG/HTML/JSON diagnostics with publish-button state, status/toast/error/tips text, and relevant body lines.
+- Operating rule:
+  - Restart/reload `worker-publication` and ensure Windows `social-auto-upload` uses the current source before any retry of Xiaohongshu, Bilibili, or WeChat Channels.
+  - No active `sau_cli.py` process remained after cleanup.
+- Verification:
+  - RoughCut: `python -m py_compile src\roughcut\publication.py src\roughcut\publication_social_auto_upload.py src\roughcut\api\intelligent_copy.py`; `PYTHONPATH=src python -m pytest tests\test_publication_social_auto_upload.py -q` (`20 passed`).
+  - Upstream: `py_compile` for Xiaohongshu/Tencent/Bilibili uploaders; `tests.test_xiaohongshu_uploader` (`12 passed`); `tests.test_tencent_uploader` (`4 passed`); non-interactive Bilibili submit/payload tests (`5 passed`).
+
+### 2026-06-19 Jenny Baby Auto-Publish Latest Live Closure
+
+- Current S02E02 `仓储超市` publication ledger:
+  - Douyin `e9ea99b791f048299a7ef840868bc604`: `scheduled_pending`, `2026-06-19 20:30 Asia/Shanghai`.
+  - Kuaishou `8bccdef08a89489db09b151253c549b9`: `scheduled_pending`, `2026-06-19 20:00 Asia/Shanghai`.
+  - Xiaohongshu `f616adffaac14a26ae3cffcdcf277e0d`: `scheduled_pending`, `2026-06-20 21:00 Asia/Shanghai`.
+  - Bilibili `133ca58ced2a4af3adf759a8c2819b51`: `scheduled_pending`, `2026-06-20 18:00 Asia/Shanghai`; submit response returned `code=0`, `aid=116777056995111`, `bvid=BV15Uj66SEXz`.
+  - WeChat Channels `a506e1f3058a4597bff56a3e29eabb25`: still failed; latest manual stop was after applying the new upload-completion fallback, so it does not prove the new code failed.
+- Xiaohongshu root cause closed:
+  - The old adapter forced original declaration for remix content, which exposed a second-level content-source declaration and blocked publish.
+  - The adapter now treats original declaration as opt-in, leaves it off for Jenny's secondary-creation content, and only selects content type declaration when explicitly required.
+  - The final `xhs-publish-btn` click now uses visible custom-element/shadow DOM candidates and physical click fallback.
+- Bilibili root causes closed:
+  - `_publish()` no longer treats any clicked text as submission; it now requires a real submit signal: `/x/vu/web/add*`/`edit` route hit, submit response, success text, success URL, or auto-submit overlay.
+  - Scheduled submit requests patch `dtime` and HTTP 2xx JSON `code=0` is authoritative success evidence.
+  - Missing/changed optional collection UI is now diagnostic-only and cannot block the main publish path.
+- WeChat Channels current open root cause:
+  - The first bad layer is upstream upload-completion detection in `uploader/tencent_uploader/main.py`.
+  - Live diagnostics show the page can reach the main form with an enabled but hidden/off-screen publish button; the old wait loop only accepted visible publish buttons and could wait until timeout.
+  - Current source now traverses publish-button candidates, scrolls enabled buttons into view, and after the main form is stable allows an enabled hidden publish button to count as upload-complete. This code is unit-tested but still needs a fresh uninterrupted live retry.
+- Latest verification:
+  - RoughCut: `python -m py_compile src\roughcut\publication.py src\roughcut\publication_social_auto_upload.py src\roughcut\api\intelligent_copy.py`; `PYTHONPATH=src python -m pytest tests\test_publication_social_auto_upload.py -q` (`20 passed`).
+  - Upstream Xiaohongshu: `py_compile uploader\xiaohongshu_uploader\main.py`; `python -m unittest tests.test_xiaohongshu_uploader` (`16 passed`).
+  - Upstream Bilibili: `py_compile uploader\bilibili_uploader\main.py`; selected non-interactive Bilibili tests (`8 passed`).
+  - Upstream Tencent: `py_compile uploader\tencent_uploader\main.py`; `python -m unittest tests.test_tencent_uploader` (`5 passed`).
+
+### 2026-06-19 Xiaohongshu Original Declaration Policy Correction
+
+- Product-policy correction: for Jenny Baby remix videos, 小红书“原创声明” should represent that this account created the current episode/video and is not reposting another user's ready-made work. It should be enabled for the series.
+- First bad layer: RoughCut publication metadata policy, not the Xiaohongshu DOM automation.
+- Root cause: `publication_platform_matrix.json` marked `xiaohongshu.supports_declaration=false` and left `default_declaration=""`; therefore RoughCut generated no declaration by default and `social-auto-upload` did not receive `--original-declaration`.
+- Fix: Xiaohongshu now supports declarations and defaults to `原创声明`, so future RoughCut payloads resolve to original declaration and the social-auto-upload command appends `--original-declaration`.
+- Existing live caveat: Xiaohongshu attempt `f616adffaac14a26ae3cffcdcf277e0d` was already scheduled under the prior policy at `2026-06-20 21:00 Asia/Shanghai`; if strict declaration correctness is required for that exact scheduled item, cancel/replace it in the platform queue before creating a new attempt.
+- Verification:
+  - `PYTHONPATH=src python -m pytest tests\test_publication.py::test_build_request_payload_uses_shared_default_declaration_for_xiaohongshu tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_xiaohongshu_group_chat_and_original -q` (`2 passed`).
+  - `PYTHONPATH=src python -c "... platform_default_declaration('xiaohongshu') == '原创声明' ..."` passed.
+
+### 2026-06-19 Bilibili/Xiaohongshu Publish Status Correction
+
+- User-visible correction: Douyin and Kuaishou are the only fully accepted successes from the current live round. Bilibili and Xiaohongshu must not be treated as closed just because the CLI returned success text.
+- Bilibili observed symptom: the submit API returned `code=0`, but the submitted archive landed in Bilibili backend with `tid=47` (`动画/同人·手书`) instead of the intended parenting category.
+- Bilibili first bad layer: RoughCut `build_social_auto_upload_upload_command(...)` omitted `--tid/--category` when `request_payload.category` was missing.
+- Bilibili root cause: the intended default `BILIBILI_DEFAULT_TID=254` / `BILIBILI_DEFAULT_CATEGORY=生活/亲子` existed in code but was not applied in the missing-category path, so Bilibili auto-classified the Bluey remix.
+- Bilibili live verification: read-only creator-center API `x/vupre/web/archive/view?aid=116777056995111` returned `code=0`, `bvid=BV15Uj66SEXz`, `state=-40`, `state_desc=通过审核，等待发布`, `dtime=1781949600`, but `tid=47`.
+- Bilibili fix: missing-category uploads now explicitly include `--tid 254 --category 生活/亲子`.
+- Xiaohongshu correction: current scheduled attempt `f616adffaac14a26ae3cffcdcf277e0d` was created before the original-declaration policy correction and kept original declaration off. It should not be reused as proof of the corrected policy.
+- Verification:
+  - `python -m py_compile src\roughcut\publication_social_auto_upload.py src\roughcut\publication.py`.
+  - `PYTHONPATH=src python -m pytest tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_bilibili_uses_parenting_default_category_when_missing tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_xiaohongshu_group_chat_and_original tests\test_publication.py::test_build_request_payload_uses_shared_default_declaration_for_xiaohongshu -q` (`3 passed`).
+
+### 2026-06-19 Bilibili Post-Submit Verification Closure
+
+- Bilibili observed symptom: a platform submit response can be successful while the resulting backend archive has the wrong business fields. Current live archive `aid=116777056995111` exists and is scheduled, but has `tid=47` instead of expected `254`.
+- First bad layer: RoughCut success mapping after `social-auto-upload upload-video`; the adapter accepted CLI success without reading the platform backend record.
+- Root cause: Bilibili `code=0` proves submission acceptance only. It does not prove category/title/schedule correctness, so missing default `--tid` surfaced as a false success.
+- Fix:
+  - Added `sau_cli.py bilibili verify-video --aid ...` in `E:/WorkSpace/_eval/social-auto-upload`; it reads `x/vupre/web/archive/view` with stored creator cookies and validates expected title, tid, and schedule timestamp.
+  - RoughCut now parses Bilibili `aid` from upload stdout, calls `verify-video`, stores the verification payload, and marks the attempt `needs_human` on mismatch or missing receipt instead of `scheduled_pending`.
+- Live verification:
+  - `sau_cli.py bilibili verify-video --account creator-7be7da2e7d54-bilibili-chrome --aid 116777056995111 --expected-title "S02E02关键画面整理" --expected-tid 254 --expected-schedule "2026-06-20 18:00"` returned exit code `1` with `success=true`, `verified=false`, `state_desc=通过审核，等待发布`, mismatch `tid expected=254 actual=47`.
+- Test verification:
+  - RoughCut py_compile for `publication.py` and `publication_social_auto_upload.py` passed.
+  - RoughCut targeted pytest passed: Bilibili default category, Xiaohongshu original declaration command, Bilibili verification success path, Bilibili verification mismatch path, and Xiaohongshu default declaration payload (`5 passed`).
+  - social-auto-upload `sau_cli.py` py_compile passed.
+  - social-auto-upload selected Bilibili CLI verification tests passed (`3 passed`).

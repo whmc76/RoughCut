@@ -71,20 +71,20 @@ def manual_editor_rerun_plan(change_contract: dict[str, Any] | None) -> dict[str
     contract = manual_editor_change_contract(change_contract)
     if contract["render_strategy"] == "metadata_refresh_render":
         return {
-            "rerun_start_step": "platform_package",
-            "rerun_steps": ["platform_package"],
+            "rerun_start_step": "",
+            "rerun_steps": [],
         }
     return {
         "rerun_start_step": "render",
-        "rerun_steps": ["render", "final_review", "platform_package"],
+        "rerun_steps": ["render"],
     }
 
 
 def manual_editor_apply_detail(change_scope: str) -> str:
     if str(change_scope or "") == "subtitle_only":
-        return "手动字幕已保存，已复用原剪辑/特效计划并从 render 重新烧录字幕、生成成片和平台包。"
+        return "手动字幕已保存，已复用原剪辑/特效计划并从 render 重新烧录字幕、生成成片。"
     if str(change_scope or "") == "no_material_change":
-        return "未检测到时间线/字幕/画面方向变化，已保存编辑元数据并仅刷新平台文案。"
+        return "未检测到时间线/字幕/画面方向变化，已保存编辑元数据，无需触发剪辑重跑。"
     if str(change_scope or "") == "video_transform":
-        return "画面方向已保存，已从 render 开始重新生成成片、特效和数字人口播链路。"
-    return "手动时间线已保存，已从 render 开始重新生成成片、特效和数字人口播链路。"
+        return "画面方向已保存，已从 render 开始重新生成成片。"
+    return "手动时间线已保存，已从 render 开始重新生成成片。"

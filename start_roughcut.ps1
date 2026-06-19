@@ -213,6 +213,7 @@ function Remove-RoughCutStoppedComposeContainers {
             "worker-media",
             "worker-llm",
             "worker-agent",
+            "worker-publication",
             "watcher",
             "migrate"
         )
@@ -307,7 +308,7 @@ function Wait-RoughCutComposeModeReady {
         [int]$TimeoutSec = 120
     )
 
-    $requiredRunningServices = @("postgres", "redis", "minio", "api", "orchestrator", "worker-media", "worker-llm", "worker-agent")
+    $requiredRunningServices = @("postgres", "redis", "minio", "api", "orchestrator", "worker-media", "worker-llm", "worker-agent", "worker-publication")
     if ($ComposeMode -eq "full") {
         $requiredRunningServices += "watcher"
     }
@@ -551,7 +552,12 @@ function Uninstall-RoughCutDockerAutostart {
 
 function Get-RoughCutCodexHostBridgeToken {
     $bytes = New-Object byte[] 24
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    } finally {
+        $rng.Dispose()
+    }
     return [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
 }
 

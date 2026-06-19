@@ -18,6 +18,7 @@ def test_run_job_stops_job_after_requested_step(monkeypatch) -> None:
 
     monkeypatch.setattr(batch, "load_step_statuses", lambda job_id: {"probe": "done"})
     monkeypatch.setattr(batch, "PIPELINE_STEPS", ["probe", "content_profile", "render"])
+    monkeypatch.setattr(batch, "_resolve_batch_step_timeout_strategy", lambda step_name: "thread")
     monkeypatch.setattr(batch, "mark_step", lambda *args, **kwargs: None)
     monkeypatch.setattr(batch, "run_step_sync", lambda step_name, job_id: {"step": step_name, "job_id": job_id})
     monkeypatch.setattr(batch, "read_step_detail", lambda job_id, step_name: f"{step_name} done")
@@ -71,6 +72,124 @@ def test_configure_local_event_loop_policy_forces_selector_when_enabled(monkeypa
     assert isinstance(calls[0], DummyPolicy)
 
 
+def test_configure_console_encoding_sets_utf8(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class DummyStream:
+        def reconfigure(self, *, encoding: str, errors: str) -> None:
+            calls.append((encoding, errors))
+
+    monkeypatch.setattr(batch.sys, "stdout", DummyStream())
+    monkeypatch.setattr(batch.sys, "stderr", DummyStream())
+
+    batch._configure_console_encoding()
+
+    assert calls == [("utf-8", "replace"), ("utf-8", "replace")]
+
+
+def test_render_batch_timeout_uses_render_stale_budget(monkeypatch) -> None:
+    class Settings:
+        render_step_stale_timeout_sec = 5400
+
+    monkeypatch.delenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS_RENDER", raising=False)
+    monkeypatch.setattr(batch, "get_settings", lambda: Settings())
+
+    assert batch._resolve_batch_step_timeout_seconds("render") >= 5400.0
+
+
+def test_terminal_failed_status_caps_quality_and_adds_render_issue() -> None:
+    adjusted = batch._apply_terminal_status_to_quality_assessment(
+        {"score": 100.0, "grade": "A", "issue_codes": []},
+        status="failed",
+        render_diagnostics={
+            "render_step": {
+                "status": "failed",
+                "error": "TimeoutError: 步骤 render 执行超过 1200.0 秒",
+                "sync_runner": {"sync_runner_timeout_strategy": "process"},
+            }
+        },
+    )
+
+    assert adjusted["score"] == 0.0
+    assert adjusted["grade"] == "E"
+    assert "job_failed" in adjusted["issue_codes"]
+    assert "render_timeout" in adjusted["issue_codes"]
+
+
+def test_process_worker_disposes_db_session_state(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class DummyQueue:
+        def put(self, payload: dict) -> None:
+            calls.append(str(payload.get("status")))
+
+    monkeypatch.setattr(batch, "run_step_sync", lambda step_name, job_id: calls.append(f"run:{step_name}:{job_id}"))
+    monkeypatch.setattr(batch, "reset_session_state_sync", lambda: calls.append("reset"))
+
+    batch._run_step_sync_process_worker("render", "job-1", DummyQueue())
+
+    assert calls == ["run:render:job-1", "ok", "reset"]
+
+
+def test_build_live_stage_validations_reports_render_failure_summary() -> None:
+    validations = batch.build_live_stage_validations(
+        step_statuses={
+            "probe": "done",
+            "transcribe": "done",
+            "subtitle_postprocess": "done",
+            "content_profile": "done",
+            "summary_review": "done",
+            "edit_plan": "done",
+            "render": "failed",
+        },
+        step_details={},
+        step_errors={"render": "TimeoutError: 步骤 render 执行超过 1200.0 秒"},
+        step_metadata={"render": {"sync_runner_timeout_strategy": "process"}},
+        run_status="failed",
+        stop_after=None,
+        transcript_segment_count=1,
+        subtitle_count=1,
+        keep_ratio=0.8,
+        profile={"review_mode": "auto_confirmed", "summary": "ok"},
+        platform_doc=None,
+        subtitle_quality_report={},
+        subtitle_term_resolution_patch={},
+        subtitle_consistency_report={},
+        quality_assessment={"issue_codes": []},
+    )
+
+    render_validation = next(item for item in validations if item.stage == "render")
+    assert render_validation.status == "fail"
+    assert render_validation.summary == "导出成片失败：render_timeout_process"
+    assert render_validation.issue_codes == ["render_timeout"]
+
+
+def test_configure_windows_proactor_unraisable_filter_suppresses_only_known_noise(monkeypatch) -> None:
+    forwarded: list[object] = []
+
+    def previous_hook(unraisable: object) -> None:
+        forwarded.append(unraisable)
+
+    class DummyUnraisable:
+        pass
+
+    benign = DummyUnraisable()
+    real_error = DummyUnraisable()
+    monkeypatch.setattr(batch.sys, "unraisablehook", previous_hook)
+    monkeypatch.setattr(
+        batch,
+        "_is_windows_proactor_closed_pipe_unraisable",
+        lambda unraisable: unraisable is benign,
+    )
+
+    batch._configure_windows_proactor_unraisable_filter()
+    batch.sys.unraisablehook(benign)
+    batch.sys.unraisablehook(real_error)
+
+    assert forwarded == [real_error]
+
+
 def test_run_job_finishes_done_runs_normally(monkeypatch) -> None:
     calls: list[tuple[str, str]] = []
 
@@ -83,6 +202,7 @@ def test_run_job_finishes_done_runs_normally(monkeypatch) -> None:
 
     monkeypatch.setattr(batch, "load_step_statuses", lambda job_id: {})
     monkeypatch.setattr(batch, "PIPELINE_STEPS", ["content_profile"])
+    monkeypatch.setattr(batch, "_resolve_batch_step_timeout_strategy", lambda step_name: "thread")
     monkeypatch.setattr(batch, "mark_step", lambda *args, **kwargs: None)
     monkeypatch.setattr(batch, "run_step_sync", lambda step_name, job_id: {"step": step_name, "job_id": job_id})
     monkeypatch.setattr(batch, "read_step_detail", lambda job_id, step_name: f"{step_name} done")
@@ -102,6 +222,68 @@ def test_run_job_finishes_done_runs_normally(monkeypatch) -> None:
 
     assert result["status"] == "done"
     assert calls == [("finalize", "done")]
+
+
+def test_build_asr_evidence_summarizes_fallback_attempts() -> None:
+    evidence = batch._build_asr_evidence(
+        {
+            "provider": "local_http_asr",
+            "model": "faster-whisper-large-v3-beam5-nohot",
+            "language": "zh-CN",
+            "attempts": [
+                {
+                    "provider": "local_http_asr",
+                    "model": "qwen3-asr-1.7b-forced-aligner",
+                    "error": "asr_quality_gate: rejected suspicious local_http_asr output",
+                },
+                {
+                    "provider": "local_http_asr",
+                    "model": "faster-whisper-large-v3-beam5-nohot",
+                    "error": "",
+                },
+            ],
+            "segments": [{"text": "large transcript payload should not be copied"}],
+        }
+    )
+
+    assert evidence["provider"] == "local_http_asr"
+    assert evidence["model"] == "faster-whisper-large-v3-beam5-nohot"
+    assert evidence["attempt_count"] == 2
+    assert evidence["fallback_used"] is True
+    assert evidence["attempts"][0]["status"] == "rejected"
+    assert evidence["attempts"][1]["status"] == "selected"
+    assert len(evidence["quality_gate_rejections"]) == 1
+    assert "segments" not in evidence
+
+
+def test_build_asr_evidence_summarizes_quality_gate_artifact() -> None:
+    evidence = batch._build_asr_evidence(
+        {},
+        {
+            "status": "rejected",
+            "reason": "asr_quality_gate",
+            "message": "All transcription providers failed: local_http_asr/qwen3: asr_quality_gate",
+            "language": "zh-CN",
+            "rejected_attempts": [
+                {
+                    "provider": "local_http_asr",
+                    "model": "qwen3-asr-1.7b-forced-aligner",
+                    "analysis": {
+                        "confirmed_noise_duplicate_count": 5,
+                        "severe_timing_noise_count": 1,
+                    },
+                }
+            ],
+        },
+    )
+
+    assert evidence["status"] == "rejected"
+    assert evidence["provider"] == "local_http_asr"
+    assert evidence["model"] == "qwen3-asr-1.7b-forced-aligner"
+    assert evidence["attempt_count"] == 1
+    assert evidence["fallback_used"] is False
+    assert evidence["quality_gate_rejections"][0]["status"] == "rejected"
+    assert "asr_quality_gate" in evidence["error"]
 
 
 def test_sync_runner_attempt_value_marks_terminal_failures_exhausted() -> None:
@@ -149,11 +331,17 @@ def test_run_job_passes_failure_error_into_finalize(monkeypatch) -> None:
 
 def test_resolve_batch_step_timeout_default_and_step_override(monkeypatch) -> None:
     monkeypatch.delenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS_CONTENT_PROFILE", raising=False)
     monkeypatch.delenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS_RENDER", raising=False)
+    assert batch._resolve_batch_step_timeout_seconds("content_profile") == 420.0
     assert batch._resolve_batch_step_timeout_seconds("render") == 1200.0
 
     monkeypatch.setenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS", "1200")
+    assert batch._resolve_batch_step_timeout_seconds("content_profile") == 1200.0
     assert batch._resolve_batch_step_timeout_seconds("render") == 1200.0
+
+    monkeypatch.setenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS_CONTENT_PROFILE", "240")
+    assert batch._resolve_batch_step_timeout_seconds("content_profile") == 240.0
 
     monkeypatch.setenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS_RENDER", "120")
     assert batch._resolve_batch_step_timeout_seconds("render") == 120.0
@@ -515,7 +703,7 @@ def test_classify_render_failure_reason_distinguishes_thread_timeout() -> None:
     assert issue_codes == ["render_timeout"]
 
 
-def test_build_render_diagnostics_classifies_non_avatar_render_failures_and_cover_status() -> None:
+def test_build_render_diagnostics_classifies_non_avatar_render_failures_and_ignores_cover_status() -> None:
     class _DummyStep:
         def __init__(self, step_name: str, status: str, error_message: str, metadata: dict[str, object]) -> None:
             self.step_name = step_name
@@ -542,11 +730,6 @@ def test_build_render_diagnostics_classifies_non_avatar_render_failures_and_cove
     )
 
     assert diagnostics == {
-        "cover_result": {
-            "status": "degraded",
-            "reason": "cover_export_failed",
-            "detail": "封面导出失败，成片已保留但未产出封面图。",
-        },
         "render_step": {
             "status": "failed",
             "detail": "render failed",
@@ -584,11 +767,6 @@ def test_build_render_diagnostics_does_not_mark_done_render_as_failed() -> None:
     )
 
     assert diagnostics == {
-        "cover_result": {
-            "status": "done",
-            "detail": "封面图已生成。",
-            "variant_count": 5,
-        },
         "render_step": {
             "status": "done",
             "detail": "检测到已完成渲染输出，调度器已自动收口 render 步骤。",
@@ -688,7 +866,7 @@ def test_normalize_render_step_summary_for_reporting_classifies_timeout_and_stri
     assert done == {"status": "done", "detail": "ok"}
 
 
-def test_merge_render_runtime_payloads_preserves_runtime_avatar_and_cover_facts() -> None:
+def test_merge_render_runtime_payloads_preserves_runtime_avatar_and_ignores_cover_facts() -> None:
     merged = batch._merge_render_runtime_payloads(
         {
             "packaged_mp4": "E:/demo.mp4",
@@ -715,11 +893,6 @@ def test_merge_render_runtime_payloads_preserves_runtime_avatar_and_cover_facts(
             "reason": "avatar_full_track_call_timeout",
             "detail": "数字人渲染未完成，已自动回退普通成片：avatar_full_track_call_timeout>180.0s",
         },
-        "cover_result": {
-            "status": "degraded",
-            "reason": "cover_export_failed",
-            "detail": "封面导出失败，成片已保留但未产出封面图。",
-        },
     }
 
 
@@ -732,7 +905,6 @@ def test_build_live_stage_validations_marks_downstream_stages_skipped_for_partia
             "content_profile": "done",
             "edit_plan": "pending",
             "render": "pending",
-            "platform_package": "pending",
         },
         step_details={},
         step_errors={},
@@ -754,7 +926,8 @@ def test_build_live_stage_validations_marks_downstream_stages_skipped_for_partia
     assert by_stage["content_profile"].status == "pass"
     assert by_stage["edit_plan"].status == "skipped"
     assert by_stage["render"].status == "skipped"
-    assert by_stage["platform_package"].status == "skipped"
+    assert "platform_package" not in by_stage
+    assert "final_review" not in by_stage
 
 
 def test_build_live_stage_validations_accepts_frozen_profile_when_content_profile_step_is_stale() -> None:
@@ -1239,7 +1412,7 @@ def test_live_readiness_fails_when_render_end_state_stability_not_met() -> None:
 
     assert readiness.checks["render_end_state_stability"]["passed"] is False
     assert readiness.checks["render_end_state_stability"]["actual"] == 1
-    assert readiness.checks["render_end_state_stability"]["cover_degraded_job_count"] == 1
+    assert readiness.checks["render_end_state_stability"]["cover_degraded_job_count"] == 0
 
 
 def test_live_readiness_extract_render_diagnostics_summary_preserves_reason_counts() -> None:

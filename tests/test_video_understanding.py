@@ -59,3 +59,41 @@ def test_build_video_understanding_payload_fuses_profile_and_visual_evidence() -
     assert payload["segment_understanding"][1]["keep_priority"] == "high"
     assert "comparison" in payload["automation_hints"]["editing_bias"]["protect_roles"]
     assert payload["review"]["needs_review"] is False
+
+
+def test_build_video_understanding_payload_promotes_visual_drop_events_to_junk_segments() -> None:
+    payload = build_video_understanding_payload(
+        {
+            "content_kind": "unboxing",
+            "subject_domain": "bag",
+            "subject_brand": "BOLTBOAT",
+            "subject_type": "机能单肩包",
+            "visual_semantic_evidence": {
+                "provider": "zhipu",
+                "model": "zai-mcp-server",
+                "mode": "llm_mcp_vision",
+                "status": "ready",
+                "subject_candidates": ["edc_shoulder_bag"],
+                "interaction_type": "上身展示",
+                "timeline_events": [
+                    {
+                        "start": 123.0,
+                        "end": 129.0,
+                        "role": "junk",
+                        "keep_priority": "drop",
+                        "summary": "麦克风掉落后弯腰捡起",
+                        "reason_tags": ["visual_drop_candidate"],
+                        "confidence": 0.82,
+                    }
+                ],
+            },
+        },
+        source_name="IMG_0185 HSJUN BOLTBOAT 影蚀.MOV",
+        transcript_excerpt="我们来看这个包的上身效果。",
+    )
+
+    junk_segments = [item for item in payload["segment_understanding"] if item["role"] == "junk"]
+    assert junk_segments
+    assert junk_segments[0]["keep_priority"] == "drop"
+    assert junk_segments[0]["start"] == 123.0
+    assert "visual_drop_candidate" in junk_segments[0]["reason_tags"]

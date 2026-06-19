@@ -367,6 +367,205 @@ def test_official_edc_cover_style_can_be_selected_explicitly_without_edc_keyword
     assert "主体要像英雄物件" in prompt
 
 
+def test_creator_cover_strategy_selects_children_storybook_parenting_style() -> None:
+    brief = ic._apply_creator_cover_strategy_to_brief(
+        {
+            "cover_title": "孩子为什么非要自己来",
+            "product_identity": "动画亲子场景",
+            "visual_brief": "孩子在超市里尝试独立选择。",
+        },
+        creator_profile={
+            "display_name": "珍妮斯baby",
+            "creator_profile": {
+                "publishing": {
+                    "description_strategy": "先提出家长困惑，再给出温和育儿观察和可复用沟通话术。",
+                    "cover_style": ic.OFFICIAL_COVER_STYLE_CHILDREN_STORYBOOK_PARENTING,
+                    "cover_style_label": "儿童绘本育儿封面",
+                    "cover_packaging_scheme": ic.OFFICIAL_COVER_STYLE_CHILDREN_STORYBOOK_PARENTING,
+                }
+            },
+        },
+        creator_profile_name="珍妮斯baby",
+    )
+
+    assert brief["style_key"] == ic.OFFICIAL_COVER_STYLE_CHILDREN_STORYBOOK_PARENTING
+    assert brief["creator_profile_name"] == "珍妮斯baby"
+    assert brief["video_type"] == "亲子教育动画二创解说"
+    assert "儿童绘本式标题" in brief["visual_brief"]
+    assert brief["creator_cover_policy"]["cover_style_label"] == "儿童绘本育儿封面"
+
+
+def test_children_storybook_parenting_prompt_uses_warm_parenting_style() -> None:
+    prompt = ic._build_platform_cover_image_prompt(
+        title="孩子为什么非要自己来",
+        platform_key="bilibili",
+        rules=ic.PLATFORM_PUBLISH_RULES["bilibili"],
+        width=1280,
+        height=720,
+        cover_brief={
+            "style_key": ic.OFFICIAL_COVER_STYLE_CHILDREN_STORYBOOK_PARENTING,
+            "video_type": "亲子教育动画二创解说",
+            "product_identity": "动画亲子场景",
+            "selling_angle": "用一个超市场景看懂孩子的独立需求",
+            "visual_brief": "孩子和家长的表情清楚，标题突出育儿观察。",
+        },
+    )
+
+    assert "风格：儿童绘本育儿封面" in prompt
+    assert "亲子教育类动画解读内容" in prompt
+    assert "不重绘成陌生角色" in prompt
+    assert "真实商品" not in prompt
+    assert "产品主体" not in prompt
+    assert "金属质感" not in prompt
+    assert "赛博" not in prompt
+
+
+def test_children_storybook_parenting_prompt_keeps_animation_contract_for_codex() -> None:
+    cover_brief = {
+        "style_key": ic.OFFICIAL_COVER_STYLE_CHILDREN_STORYBOOK_PARENTING,
+        "video_type": "亲子教育动画二创解说",
+        "product_identity": "动画亲子场景",
+        "selling_angle": "看懂孩子的我也要",
+        "visual_brief": "角色表情清楚，标题突出育儿观察。",
+        "critical_detail_notes": [
+            "角色表情要体现孩子渴望/纠结的情绪；画面不要出现真实商品或购物场景；整体保持动画二创风格统一"
+        ],
+    }
+    cover_brief = ic._annotate_cover_strategy_axes(
+        cover_brief,
+        creator_profile_name="珍妮斯baby",
+        copy_brief={"intent": "parenting_animation_explainer"},
+        content_profile={},
+    )
+    prompt = ic._build_platform_cover_image_prompt(
+        title="孩子总想要别人手里的东西",
+        platform_key="bilibili",
+        rules=ic.PLATFORM_PUBLISH_RULES["bilibili"],
+        width=1280,
+        height=720,
+        cover_brief=cover_brief,
+        reference_count=4,
+    )
+
+    assert "同一动画原片片段" in prompt
+    assert "动画角色" in prompt
+    assert "亲子互动" in prompt
+    assert "商品" not in prompt
+    assert "产品" not in prompt
+    assert "开箱" not in prompt
+    assert "电光" not in prompt
+    assert "火焰" not in prompt
+
+
+def test_reference_cover_fallback_blocks_material_generation_contract() -> None:
+    material = {
+        "key": "bilibili",
+        "label": "B站",
+        "primary_title": "孩子总想要别人手里的东西",
+        "body": "这期聊孩子行为背后的需求。",
+        "full_copy": "这期聊孩子行为背后的需求。",
+        "tags": ["育儿"],
+        "cover_path": "fallback.jpg",
+        "cover_generation": {
+            "source": "reference_cover_fallback",
+            "publish_ready": True,
+            "blocking_reasons": [],
+            "image_generation": {"status": "completed", "backend": "codex_builtin"},
+        },
+    }
+
+    contract = ic._build_material_generation_contract([material], requested_platforms=["bilibili"])
+
+    assert contract["status"] == "failed"
+    assert contract["generation_ready"] is False
+    assert any("fallback" in reason for reason in contract["blocking_reasons"])
+
+
+def test_non_codex_cover_backend_blocks_material_generation_contract() -> None:
+    material = {
+        "key": "bilibili",
+        "label": "B站",
+        "primary_title": "孩子总想要别人手里的东西",
+        "body": "这期聊孩子行为背后的需求。",
+        "full_copy": "这期聊孩子行为背后的需求。",
+        "tags": ["育儿"],
+        "cover_path": "local.jpg",
+        "cover_generation": {
+            "source": "cover_group_reuse",
+            "publish_ready": True,
+            "blocking_reasons": [],
+            "group_generation": {
+                "source": "local_source_composite",
+                "publish_ready": True,
+                "image_generation": {"status": "completed", "backend": "local_source_composite"},
+            },
+        },
+    }
+
+    contract = ic._build_material_generation_contract([material], requested_platforms=["bilibili"])
+
+    assert contract["status"] == "failed"
+    assert contract["generation_ready"] is False
+    assert any("Codex" in reason for reason in contract["blocking_reasons"])
+
+
+def test_creator_copy_strategy_overrides_product_fallback_for_jenny_parenting() -> None:
+    video_path = Path("bluey_s02e02_仓储超市_parenting_remix.mp4")
+    subtitle_items = [
+        {"text_final": "很多妈妈会发现，孩子总想要别人手里的东西。"},
+        {"text_final": "这不是简单的贪心，而是孩子正在练习选择和轮流。"},
+    ]
+    creator_profile = {
+        "display_name": "珍妮斯baby",
+        "creator_profile": {
+            "publishing": {
+                "cover_style": ic.OFFICIAL_COVER_STYLE_CHILDREN_STORYBOOK_PARENTING,
+                "description_strategy": "先提出家长困惑，再给出亲子沟通话术。",
+            }
+        },
+    }
+
+    profile = ic._apply_creator_content_strategy_to_profile(
+        {"subject_model": "S02E02", "summary": "这期围绕S02E02展开，重点看画面里能确认的细节和实际观感。"},
+        creator_profile=creator_profile,
+        creator_profile_name="珍妮斯baby",
+        video_path=video_path,
+        subtitle_items=subtitle_items,
+    )
+    raw_brief = ic._build_intelligent_copy_brief(
+        video_path=video_path,
+        subtitle_items=subtitle_items,
+        content_profile=profile,
+    )
+    brief = ic._apply_creator_copy_strategy_to_brief(
+        raw_brief,
+        creator_profile=creator_profile,
+        creator_profile_name="珍妮斯baby",
+        content_profile=profile,
+        video_path=video_path,
+        subtitle_items=subtitle_items,
+    )
+
+    assert brief["intent"] == "parenting_animation_explainer"
+    assert "孩子" in brief["topic_subject"]
+    assert {"育儿", "亲子沟通", "早教"}.issubset(set(brief["tags"]))
+    assert {"开箱", "上手体验", "值不值"}.issubset(set(brief["forbidden_terms"]))
+    titles = ic._build_intelligent_copy_titles(
+        platform_key="bilibili",
+        rules=ic.PLATFORM_PUBLISH_RULES["bilibili"],
+        copy_brief=brief,
+        content_profile=profile,
+    )
+    assert titles
+    assert all("开箱" not in title and "上手" not in title and "值不值" not in title for title in titles)
+    assert any("孩子" in title or "珍妮斯" in title for title in titles)
+
+
+def test_parenting_episode_title_strips_engineering_tokens() -> None:
+    assert ic._extract_parenting_episode_title(Path("bluey_s02e02_仓储超市_parenting_remix.mp4")) == "仓储超市"
+    assert ic._extract_parenting_episode_title(Path("s02e02_仓储超市/bluey_s02e02_仓储超市_parenting_remix.mp4")) == "仓储超市"
+
+
 def test_cover_style_router_treats_maxace_knife_subject_as_edc_cinematic() -> None:
     style = ic._resolve_cover_image_style_key(
         rules={"cover_style": "tech_showcase"},
@@ -1727,6 +1926,31 @@ def test_build_intelligent_copy_brief_does_not_promote_compare_from_contaminated
     assert brief["intent"] != "comparison_unboxing"
     assert brief["focus_points"] == ["开箱过程", "细节展示", "上手体验"]
     assert brief["title_candidates"] == []
+
+
+def test_build_intelligent_copy_brief_generic_does_not_inject_unboxing_terms() -> None:
+    brief = ic._build_intelligent_copy_brief(
+        video_path=Path("bluey_s02e02_仓储超市_parenting_remix.mp4"),
+        subtitle_items=[{"text_final": "孩子们在超市里练习选择，也在学习怎么表达自己的需求。"}],
+        content_profile={
+            "subject_model": "仓储超市",
+            "subject_type": "动画片段",
+            "summary": "这期围绕仓储超市展开，重点看孩子选择和家庭互动。",
+            "engagement_question": "你会怎么回应孩子？",
+        },
+    )
+
+    forbidden_product_terms = {"开箱", "上手体验"}
+    assert brief["intent"] == "generic"
+    assert not forbidden_product_terms.intersection(set(brief["tags"]))
+    assert brief["focus_points"] == ["核心信息", "关键画面", "观看重点"]
+    titles = ic._build_intelligent_copy_titles(
+        platform_key="bilibili",
+        rules=ic.PLATFORM_PUBLISH_RULES["bilibili"],
+        copy_brief=brief,
+        content_profile={"subject_model": "仓储超市"},
+    )
+    assert all("开箱" not in title and "上手" not in title and "值不值" not in title for title in titles)
 
 
 def test_build_intelligent_copy_description_omits_engagement_question_for_bilibili() -> None:
@@ -3215,6 +3439,39 @@ def test_codex_imagegen_request_completed_requires_bridge_generation_marker(tmp_
                 "status": "completed",
                 "backend": "codex_builtin",
                 "output_path": str(output),
+                "prompt": "prompt",
+                "cover_hard_contract": {},
+                "cover_director_policy": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert imagegen._codex_imagegen_request_completed(
+        request_path,
+        output,
+        expected_prompt="prompt",
+        expected_hard_contract={},
+        expected_director_policy={},
+    ) is False
+
+
+def test_codex_imagegen_request_completed_rejects_non_codex_result_path(tmp_path: Path) -> None:
+    request_path = tmp_path / "cover.codex-imagegen.json"
+    output = tmp_path / "cover.jpg"
+    unrelated = tmp_path / "repo-output" / "contact_sheet.jpg"
+    output.write_bytes(b"generated")
+    unrelated.parent.mkdir()
+    unrelated.write_bytes(b"unrelated")
+    request_path.write_text(
+        json.dumps(
+            {
+                "status": "completed",
+                "backend": "codex_builtin",
+                "generated_by_codex_bridge": True,
+                "output_path": str(output),
+                "result_path": str(unrelated),
                 "prompt": "prompt",
                 "cover_hard_contract": {},
                 "cover_director_policy": {},

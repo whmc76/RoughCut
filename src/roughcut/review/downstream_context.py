@@ -16,8 +16,14 @@ _TRACKED_FIELDS = (
     "correction_notes",
     "supplemental_context",
     "search_queries",
-    "cover_title",
     "creative_preferences",
+)
+
+_PUBLICATION_ONLY_FIELDS = (
+    "cover_title",
+    "cover_style",
+    "cover_style_label",
+    "cover_variant_count",
 )
 
 _ARTIFACT_PRIORITY = {
@@ -29,7 +35,7 @@ _ARTIFACT_PRIORITY = {
 
 
 def build_downstream_context(content_profile: dict[str, Any] | None) -> dict[str, Any]:
-    base_profile = dict(content_profile or {})
+    base_profile = strip_publication_only_profile_fields(content_profile)
     manual_feedback = _normalized_manual_feedback(base_profile)
     resolved_profile = dict(base_profile)
     field_sources: dict[str, str] = {}
@@ -65,12 +71,27 @@ def resolve_downstream_profile(payload: dict[str, Any] | None) -> dict[str, Any]
     if not isinstance(payload, dict):
         return {}
     if isinstance(payload.get("resolved_profile"), dict):
-        resolved = dict(payload.get("resolved_profile") or {})
+        resolved = strip_publication_only_profile_fields(payload.get("resolved_profile"))
         resolved["manual_review_applied"] = bool(payload.get("manual_review_applied"))
         resolved["research_applied"] = bool(payload.get("research_applied"))
         resolved["field_sources"] = dict(payload.get("field_sources") or {})
         return resolved
-    return dict(build_downstream_context(payload).get("resolved_profile") or {})
+    return strip_publication_only_profile_fields(build_downstream_context(payload).get("resolved_profile"))
+
+
+def strip_publication_only_profile_fields(content_profile: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the editing/downstream profile without publish-stage creative fields."""
+    profile = dict(content_profile or {})
+    for key in _PUBLICATION_ONLY_FIELDS:
+        profile.pop(key, None)
+    manual_feedback = profile.get("resolved_review_user_feedback")
+    if isinstance(manual_feedback, dict):
+        profile["resolved_review_user_feedback"] = {
+            key: value
+            for key, value in manual_feedback.items()
+            if key not in _PUBLICATION_ONLY_FIELDS
+        }
+    return profile
 
 
 def select_resolved_downstream_profile(artifacts: list[Any]) -> dict[str, Any]:

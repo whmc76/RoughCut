@@ -29,6 +29,15 @@ Use this file to route into the smallest set of source-of-truth documents needed
 - `docs/design/INDEX.md`
   Design-doc entrypoint for deeper architecture work.
 
+## Script-Footage Remix
+
+- `docs/2026-06-18-script-footage-remix-optimization-goal.md`
+  Current objective, quality gates, deliverables, milestones, and closure conditions for the "script commentary + referenced original footage" remix editing chain.
+- `docs/2026-06-18-script-footage-remix-full-script-retest-plan.md`
+  Current full-script preservation retrofit and retest plan. Use this before rerunning Bluey samples; old condensed-script evidence is not final editorial closure evidence.
+- `docs/bluey-remix-fullchain-test-plan.md`
+  Historical Bluey three-episode test plan. Use only as sample-run context; the current closure standard is the 2026-06-18 optimization goal document above.
+
 ## Auto Edit Recovery
 
 - `docs/design/2026-06-08-auto-edit-quality-recovery-architecture.md`

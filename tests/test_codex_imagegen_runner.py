@@ -218,6 +218,40 @@ def test_run_single_codex_imagegen_does_not_accept_stale_output_path_echoed_in_s
         )
 
 
+def test_run_single_codex_imagegen_does_not_accept_repo_image_echoed_in_stdout(monkeypatch, tmp_path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    source = repo_root / "source.jpg"
+    source.write_bytes(b"source")
+    stale_repo_image = repo_root / "output" / "test" / "contact_sheet.jpg"
+    stale_repo_image.parent.mkdir(parents=True)
+    stale_repo_image.write_bytes(b"stale-contact-sheet")
+    output = tmp_path / "runtime" / "cover.jpg"
+
+    def fake_run_codex_exec(_payload):  # noqa: ANN001
+        return {
+            "stdout": f"Generated image: {stale_repo_image}",
+            "stderr": "",
+            "excerpt": f"Generated image: {stale_repo_image}",
+        }
+
+    monkeypatch.setattr(runner, "run_codex_exec", fake_run_codex_exec)
+    monkeypatch.setattr(runner, "_resolve_generated_image", lambda **_kwargs: None)
+
+    with pytest.raises(RuntimeError):
+        runner._run_single_codex_imagegen(
+            command="codex",
+            repo_root=repo_root,
+            reference_image_paths=[source],
+            prompt="生成封面",
+            output_path=output,
+            model_name="gpt-5.4-mini",
+            sandbox_mode="danger-full-access",
+            timeout_sec=60,
+            started_at=runner.time.time(),
+        )
+
+
 def test_extract_generated_image_path_from_text_prefers_existing_latest_file(tmp_path) -> None:
     older = tmp_path / "older.png"
     latest = tmp_path / "final-cover.png"

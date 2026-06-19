@@ -59,13 +59,13 @@ _FINDING_POLICY: dict[str, dict[str, str]] = {
 
 _CATEGORY_RULES: dict[str, dict[str, tuple[str, ...]]] = {
     "flashlight": {
-        "forbidden": ("折刀", "折刀帕", "背夹", "柄材", "钢材", "刀鞘", "双肩包", "机能包"),
+        "forbidden": ("折刀帕", "柄材", "钢材", "刀鞘", "双肩包", "机能包"),
     },
     "knife": {
-        "forbidden": ("手电", "电筒", "流明", "灯珠", "泛光", "聚光", "双肩包", "机能包"),
+        "forbidden": ("流明", "灯珠", "泛光", "聚光", "双肩包", "机能包"),
     },
     "bag": {
-        "forbidden": ("折刀", "折刀帕", "开合", "锁定", "背夹", "柄材", "钢材", "手电", "电筒", "流明", "灯珠"),
+        "forbidden": ("折刀帕", "柄材", "钢材", "流明", "灯珠"),
     },
 }
 _BAG_CARRY_CONTEXT_TOKENS: tuple[str, ...] = (
@@ -208,8 +208,15 @@ def _is_bag_carry_context(line: str) -> bool:
     return has_bag_context and (has_carry_action or has_listed_contents)
 
 
-def _filter_cross_domain_tokens(category: str, line: str, tokens: list[str]) -> list[str]:
-    if category == "bag" and _is_bag_carry_context(line):
+def _subtitle_context_window(lines: list[str], index: int, *, radius: int = 1) -> str:
+    start = max(0, index - radius)
+    end = min(len(lines), index + radius + 1)
+    return "".join(lines[start:end])
+
+
+def _filter_cross_domain_tokens(category: str, line: str, tokens: list[str], *, context: str = "") -> list[str]:
+    merged = f"{context}{line}"
+    if category == "bag" and _is_bag_carry_context(merged):
         return [token for token in tokens if token not in {"手电", "电筒", "流明", "灯珠"}]
     return tokens
 
@@ -240,9 +247,11 @@ def _audit_job(job: dict[str, Any], render_outputs: dict[str, Any]) -> dict[str,
     warning_findings: list[dict[str, Any]] = []
 
     forbidden_tokens = _CATEGORY_RULES.get(category, {}).get("forbidden", ())
-    for line_no, line in enumerate(lines, start=1):
+    for line_index, line in enumerate(lines):
+        line_no = line_index + 1
+        context = _subtitle_context_window(lines, line_index)
         matched_forbidden = [token for token in forbidden_tokens if token in line]
-        matched_forbidden = _filter_cross_domain_tokens(category, line, matched_forbidden)
+        matched_forbidden = _filter_cross_domain_tokens(category, line, matched_forbidden, context=context)
         if matched_forbidden:
             blocking_findings.append(
                 {
