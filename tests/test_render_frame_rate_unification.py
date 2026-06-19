@@ -11,6 +11,7 @@ from roughcut.media.render import (
     _apply_music_and_watermark,
     _apply_timed_overlays_to_video,
     _build_timed_overlay_filter_chain,
+    _build_hyperframes_visual_filters,
     _build_overlay_only_editing_accents,
     _normalize_render_emphasis_overlays,
     _normalize_watermark_plan,
@@ -25,6 +26,7 @@ from roughcut.media.render import (
     _resolve_delivery_frame_rate,
     render_video,
 )
+from roughcut import hyperframes as hyperframes_module
 from roughcut.packaging.library import _normalize_config
 from roughcut.hyperframes import HYPERFRAMES_PLAN_SCHEMA
 
@@ -364,6 +366,33 @@ def test_render_plan_uses_hyperframes_as_visual_timeline() -> None:
     assert plan["packaging_timeline"]["hyperframes"]["schema"] == HYPERFRAMES_PLAN_SCHEMA
     assert plan["hyperframes"]["metadata"]["subtitle"]["style"] == "keyword_highlight"
     assert plan["hyperframes"]["metadata"]["effects"]["style"] == "smart_effect_punch"
+
+
+def test_hyperframes_progress_filter_draws_real_chapter_segments() -> None:
+    plan = hyperframes_module.build_render_plan(
+        width=1920,
+        height=1080,
+        duration_sec=12.0,
+        subtitle_items=[
+            {"start_time": 0.0, "end_time": 2.0, "text_final": "先看整体", "subtitle_section_role": "hook"},
+            {"start_time": 3.0, "end_time": 6.0, "text_final": "结构细节", "subtitle_section_role": "detail"},
+            {"start_time": 8.0, "end_time": 11.0, "text_final": "最后总结", "subtitle_section_role": "cta"},
+        ],
+    )
+
+    filter_parts, video_label = _build_hyperframes_visual_filters(
+        "v0",
+        plan,
+        render_w=1920,
+        render_h=1080,
+    )
+    filter_text = ";".join(filter_parts)
+
+    assert video_label == "vhfprogress"
+    assert "t/12.0" in filter_text
+    assert "vhfprogresschapters0" in filter_text
+    assert "vhfprogresschapterstick1" in filter_text
+    assert "color=0x28d3a2@0.64" in filter_text
 
 
 def test_smart_editing_accents_use_social_packaging_density_by_default() -> None:

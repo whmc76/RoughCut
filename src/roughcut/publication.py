@@ -21,10 +21,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.config import DEFAULT_PROJECT_ROOT, get_settings
 from roughcut.intelligent_copy_layout import (
-    resolve_smart_copy_cover_group_output_path,
     resolve_smart_copy_material_json_path,
     resolve_smart_copy_platform_packaging_json_path,
-    smart_copy_cover_dir,
 )
 from roughcut.providers.factory import get_reasoning_provider
 from roughcut.providers.reasoning.base import Message, extract_json_text
@@ -3157,46 +3155,7 @@ def _prefer_xiaohongshu_landscape_cover_contract(
     cover_path: str | None,
     cover_slots: list[dict[str, Any]] | None = None,
 ) -> tuple[str | None, list[dict[str, Any]]]:
-    if not isinstance(source, dict):
-        return cover_path, [dict(item) for item in (cover_slots or []) if isinstance(item, dict)]
-    normalized_platform = str(platform or source.get("platform") or source.get("key") or "").strip().lower()
-    resolved_slots = [dict(item) for item in (cover_slots or []) if isinstance(item, dict)]
-    if normalized_platform != "xiaohongshu":
-        return cover_path, resolved_slots
-
-    cover_matrix = source.get("cover_matrix") if isinstance(source.get("cover_matrix"), dict) else {}
-    landscape_matrix = cover_matrix.get("landscape_4_3") if isinstance(cover_matrix.get("landscape_4_3"), dict) else {}
-    landscape_cover_path = str(landscape_matrix.get("cover_path") or "").strip()
-    if not landscape_cover_path:
-        candidate_parent = None
-        for raw_candidate in [str(cover_path or "").strip(), *(str(item.get("cover_path") or "").strip() for item in resolved_slots)]:
-            if not raw_candidate:
-                continue
-            candidate_parent = Path(raw_candidate).expanduser().parent
-            break
-        if candidate_parent is not None:
-            for sibling in (
-                candidate_parent / "00-cover-landscape_4_3.jpg",
-                smart_copy_cover_dir(candidate_parent) / "00-cover-landscape_4_3.jpg",
-                resolve_smart_copy_cover_group_output_path(candidate_parent, "landscape_4_3"),
-            ):
-                try:
-                    if sibling.exists() and sibling.is_file():
-                        landscape_cover_path = str(sibling)
-                        break
-                except OSError:
-                    continue
-    if not landscape_cover_path:
-        return cover_path, resolved_slots
-    return landscape_cover_path, [
-        {
-            "slot": "landscape_4_3",
-            "label": "4:3 横版母版",
-            "matrix_key": "landscape_4_3",
-            "target_size": {"width": 1440, "height": 1080},
-            "cover_path": landscape_cover_path,
-        }
-    ]
+    return cover_path, [dict(item) for item in (cover_slots or []) if isinstance(item, dict)]
 
 
 def _load_publication_platform_cover_source_from_media_candidates(
@@ -3970,6 +3929,9 @@ def _normalize_publication_platform_options(value: dict[str, Any] | None) -> dic
         visibility_or_publish_mode = str(raw_value.get("visibility_or_publish_mode") or "").strip()
         if visibility_or_publish_mode:
             option["visibility_or_publish_mode"] = visibility_or_publish_mode[:80]
+        declaration = str(raw_value.get("declaration") or "").strip()
+        if declaration:
+            option["declaration"] = declaration[:80]
         platform_specific_overrides = raw_value.get("platform_specific_overrides")
         if isinstance(platform_specific_overrides, dict):
             option["platform_specific_overrides"] = platform_specific_overrides

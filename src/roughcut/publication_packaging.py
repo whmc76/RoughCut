@@ -263,8 +263,13 @@ def _project_required_cover_slots_from_cover_matrix(
         slot_key = str(spec.get("slot") or "").strip()
         matrix_key = str(spec.get("matrix_key") or "").strip()
         source_slot = explicit_by_slot.get(slot_key) or explicit_by_matrix_key.get(matrix_key)
+        matrix_slot = _normalize_cover_matrix_slot_entry(matrix_key, cover_matrix.get(matrix_key)) if matrix_key else None
+        if source_slot is not None and matrix_slot is not None and not str(source_slot.get("cover_path") or "").strip():
+            merged_slot = dict(matrix_slot)
+            merged_slot.update({key: value for key, value in source_slot.items() if str(value or "").strip()})
+            source_slot = merged_slot
         if source_slot is None and matrix_key:
-            source_slot = _normalize_cover_matrix_slot_entry(matrix_key, cover_matrix.get(matrix_key))
+            source_slot = matrix_slot
         if source_slot is None and len(required_specs) == 1 and (cover_path or target_size):
             source_slot = {}
         if source_slot is None:

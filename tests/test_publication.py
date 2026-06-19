@@ -30,6 +30,7 @@ from roughcut.intelligent_copy_layout import (
     smart_copy_platform_packaging_json_path,
 )
 from roughcut.publication_packaging import (
+    derive_publication_cover_slots,
     filter_publication_packaging_platforms,
     load_publication_packaging_payload,
 )
@@ -607,7 +608,7 @@ def test_build_request_payload_prefers_stable_source_media_path_for_requested_me
     assert payload["metadata"]["resolved_media_path"] == str(runtime_media_path.resolve())
 
 
-def test_build_request_payload_rehydrates_xiaohongshu_cover_from_generation_group_when_explicit_cover_is_suspicious(tmp_path):
+def test_build_request_payload_rehydrates_xiaohongshu_portrait_cover_from_generation_group_when_explicit_cover_is_suspicious(tmp_path):
     portrait_cover_path = tmp_path / "00-cover-portrait_3_4.jpg"
     portrait_cover_path.write_bytes(b"cover")
     landscape_cover_path = tmp_path / "00-cover-landscape_4_3.jpg"
@@ -640,15 +641,15 @@ def test_build_request_payload_rehydrates_xiaohongshu_cover_from_generation_grou
         },
     )
 
-    assert payload["cover_path"] == str(landscape_cover_path.resolve())
-    assert payload["copy_material"]["cover_path"] == str(landscape_cover_path.resolve())
+    assert payload["cover_path"] == str(portrait_cover_path.resolve())
+    assert payload["copy_material"]["cover_path"] == str(portrait_cover_path.resolve())
     assert payload["cover_slots"] == [
         {
-            "slot": "landscape_4_3",
-            "cover_path": str(landscape_cover_path.resolve()),
-            "label": "4:3 横版母版",
-            "matrix_key": "landscape_4_3",
-            "target_size": {"width": 1440, "height": 1080},
+            "slot": "portrait_3_4",
+            "cover_path": str(portrait_cover_path.resolve()),
+            "label": "3:4 竖版母版",
+            "matrix_key": "portrait_3_4",
+            "target_size": {"width": 1080, "height": 1440},
         }
     ]
 
@@ -760,9 +761,10 @@ def test_build_browser_agent_task_payload_from_attempt_recovers_cover_from_packa
 
     payload = publication.build_browser_agent_task_payload_from_attempt(attempt)
 
-    assert payload["content"]["cover_path"] == str(landscape_cover_path.resolve())
-    assert payload["content"]["copy_material"]["cover_path"] == str(landscape_cover_path.resolve())
-    assert payload["content"]["cover_slots"][0]["cover_path"] == str(landscape_cover_path.resolve())
+    assert payload["content"]["cover_path"] == str(portrait_cover_path.resolve())
+    assert payload["content"]["copy_material"]["cover_path"] == str(portrait_cover_path.resolve())
+    assert payload["content"]["cover_slots"][0]["cover_path"] == str(portrait_cover_path.resolve())
+    assert payload["content"]["cover_slots"][0]["slot"] == "portrait_3_4"
 
 
 def test_build_browser_agent_task_payload_includes_session_binding_contract():
@@ -5341,6 +5343,37 @@ def test_filter_publication_packaging_platforms_recomputes_root_publish_ready_fo
     assert filtered["blocking_reasons"] == []
 
 
+def test_derive_publication_cover_slots_backfills_explicit_slot_path_from_cover_matrix() -> None:
+    slots = derive_publication_cover_slots(
+        {
+            "platform": "xiaohongshu",
+            "cover_slots": [
+                {
+                    "slot": "portrait_3_4",
+                    "matrix_key": "portrait_3_4",
+                    "target_size": {"width": 1080, "height": 1440},
+                }
+            ],
+            "cover_matrix": {
+                "portrait_3_4": {
+                    "cover_path": "E:/covers/portrait.jpg",
+                    "cover_size": [1080, 1440],
+                }
+            },
+        }
+    )
+
+    assert slots == [
+        {
+            "slot": "portrait_3_4",
+            "cover_path": "E:/covers/portrait.jpg",
+            "target_size": {"width": 1080, "height": 1440},
+            "label": "3:4 竖版母版",
+            "matrix_key": "portrait_3_4",
+        }
+    ]
+
+
 def test_load_publication_packaging_payload_backfills_missing_requested_platform_from_material_json(
     tmp_path,
 ) -> None:
@@ -5633,6 +5666,51 @@ def test_publication_plan_falls_back_to_package_publication_metadata(tmp_path):
     assert target["category"] == "潮玩"
     assert target["platform_specific_overrides"]["selected_declarations"] == ["原创声明"]
     assert target["copy_material"]["source"] == "intelligent_copy_material_self_heal"
+
+
+def test_publication_plan_allows_declaration_option_to_override_package_default(tmp_path):
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        platform_packaging={
+            "platforms": {
+                "bilibili": {
+                    "titles": ["标题"],
+                    "description": "简介",
+                    "tags": ["tag"],
+                    "declaration": "内容无需标注",
+                    "platform_specific_overrides": {
+                        "skip_collection_select": True,
+                        "collection_policy": "skip",
+                    },
+                }
+            }
+        },
+        creator_profile={
+            "creator_profile": {
+                "publishing": {
+                    "platform_credentials": [
+                        {
+                            "platform": "bilibili",
+                            "account_label": "主号",
+                            "credential_ref": "chrome-profile:main",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "browser_agent",
+                        }
+                    ]
+                }
+            }
+        },
+        platform_options={"bilibili": {"declaration": "原创声明"}},
+    )
+
+    assert plan["publish_ready"] is True
+    target = plan["targets"][0]
+    assert target["declaration"] == "原创声明"
+    assert target["copy_material"]["declaration"] == "原创声明"
 
 
 def test_publication_plan_drops_youtube_placeholder_category(tmp_path):

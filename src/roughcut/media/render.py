@@ -661,6 +661,7 @@ async def render_video(
         duration_sec=_keep_segments_duration(keep_segments),
         subtitles_plan=subtitles_plan,
         subtitle_items=choreographed_subtitles or subtitle_items,
+        section_choreography=section_choreography,
         overlay_plan=overlay_plan,
         editing_accents=editing_accents,
     )
@@ -1873,6 +1874,7 @@ async def _apply_timed_overlays_to_video(
             duration_sec=source_duration,
             subtitles_plan=resolved_subtitles_plan,
             subtitle_items=choreographed_subtitles or subtitle_items,
+            section_choreography=resolved_section_choreography,
             overlay_plan=resolved_overlay_plan,
             editing_accents=overlay_editing_accents,
         )
@@ -2387,6 +2389,7 @@ def _build_runtime_hyperframes_plan(
     duration_sec: float,
     subtitles_plan: dict[str, Any] | None,
     subtitle_items: list[dict[str, Any]] | list[dict] | None,
+    section_choreography: dict[str, Any] | None,
     overlay_plan: dict[str, Any] | None,
     editing_accents: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -2401,6 +2404,7 @@ def _build_runtime_hyperframes_plan(
         overlay_plan=overlay_plan,
         editing_accents=editing_accents,
         focus_plan=(packaging_context or {}).get("focus") if isinstance(packaging_context, dict) else None,
+        section_choreography=section_choreography,
         audio_cues=(packaging_context or {}).get("audio_cues") if isinstance(packaging_context, dict) else None,
         options=base_metadata.get("options") if isinstance(base_metadata.get("options"), dict) else None,
         source="roughcut.media.render",
@@ -2481,17 +2485,61 @@ def _build_hyperframes_visual_filters(
         current_video = output_label
     if hyperframes.progress_bar_enabled(plan):
         duration = max(0.01, float(plan.get("duration_sec") or 0.0))
-        bar_h = max(6, min(12, int(render_h * 0.012)))
+        bar_h = max(5, min(10, int(render_h * 0.009)))
+        chapter_h = max(3, min(6, int(render_h * 0.005)))
+        margin_x = max(42, int(render_w * 0.045))
+        track_w = max(10, render_w - margin_x * 2)
+        y_base = f"ih-{bar_h + chapter_h + 8}"
+        y_fill = f"ih-{bar_h + 4}"
         bg_label = "vhfprogressbg"
+        chapter_label = "vhfprogresschapters"
         fg_label = "vhfprogress"
         parts.append(
-            f"[{current_video}]drawbox=x=0:y=ih-{bar_h}:w=iw:h={bar_h}:color=black@0.32:t=fill[{bg_label}]"
+            f"[{current_video}]drawbox=x={margin_x}:y={y_fill}:w={track_w}:h={bar_h}:color=black@0.28:t=fill[{bg_label}]"
         )
+        current_progress_label = bg_label
+        chapter_segments = hyperframes.chapter_segments(plan)
+        for segment_index, segment in enumerate(chapter_segments[:10]):
+            try:
+                start = max(0.0, float(segment.get("start_sec", 0.0) or 0.0))
+                end = min(duration, max(start, float(segment.get("end_sec", start) or start)))
+            except (TypeError, ValueError):
+                continue
+            if end - start <= 0.1:
+                continue
+            x = margin_x + int(track_w * min(max(start / duration, 0.0), 1.0))
+            w = max(3, int(track_w * min(max((end - start) / duration, 0.0), 1.0)) - 3)
+            role_color = _hyperframes_chapter_color(str(segment.get("role") or ""), segment_index)
+            output_label = f"{chapter_label}{segment_index}"
+            parts.append(
+                f"[{current_progress_label}]drawbox=x={x}:y={y_base}:w={w}:h={chapter_h}:color={role_color}:t=fill[{output_label}]"
+            )
+            current_progress_label = output_label
+            if segment_index > 0:
+                tick_label = f"{chapter_label}tick{segment_index}"
+                parts.append(
+                    f"[{current_progress_label}]drawbox=x={x}:y={y_base}:w=2:h={chapter_h + bar_h + 4}:color=white@0.42:t=fill[{tick_label}]"
+                )
+                current_progress_label = tick_label
         parts.append(
-            f"[{bg_label}]drawbox=x=0:y=ih-{bar_h}:w='iw*min(max(t/{duration}\\,0)\\,1)':h={bar_h}:color=0xff8a2a@0.92:t=fill[{fg_label}]"
+            f"[{current_progress_label}]drawbox=x={margin_x}:y={y_fill}:w='{track_w}*min(max(t/{duration}\\,0)\\,1)':h={bar_h}:color=0xff8a2a@0.9:t=fill[{fg_label}]"
         )
         current_video = fg_label
     return parts, current_video
+
+
+def _hyperframes_chapter_color(role: str, index: int) -> str:
+    normalized = str(role or "").strip().lower()
+    if normalized in {"hook", "lead", "opening"}:
+        return "0xff8a2a@0.72"
+    if normalized in {"detail", "detail_support", "focus"}:
+        return "0x28d3a2@0.64"
+    if normalized in {"action", "body"}:
+        return "0x4f8cff@0.58"
+    if normalized in {"cta", "cta_protect"}:
+        return "0xffffff@0.46"
+    palette = ("0xff8a2a@0.58", "0x28d3a2@0.54", "0x4f8cff@0.5", "0xffffff@0.42")
+    return palette[index % len(palette)]
 
 
 def _resolve_delivery_resolution(
