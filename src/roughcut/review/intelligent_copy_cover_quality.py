@@ -462,7 +462,9 @@ def _check_cover_hard_contract(
     if bool(contract.get("signature_stability_required")):
         if not title_contract_satisfied or (required_top and actual_top != required_top) or (required_main and actual_main != required_main):
             warnings.append("signature_stability_risk: cover title contract not locked")
-    if bitmap_title_verification_unavailable:
+    if bitmap_title_verification_unavailable and (bool(contract.get("full_bitmap_cover_required")) or full_cover_typography_required):
+        blocking_reasons.append("完整封面位图标题校验未产出有效结论，不能放行到最终封面")
+    elif bitmap_title_verification_unavailable:
         warnings.append("bitmap_title_contract_verification_unavailable: cover accepted without OCR-style title proof")
 
 

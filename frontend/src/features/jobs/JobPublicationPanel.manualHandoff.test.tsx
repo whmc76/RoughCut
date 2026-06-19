@@ -291,7 +291,7 @@ describe("JobPublicationPanel manual handoff UI", () => {
     render(<JobPublicationPanel job={buildJob()} />);
 
     expect(await screen.findByText("人工接管")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "发布" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "生成物料并发布" })).toBeDisabled();
   });
 
   it("shows publication executor preflight messages from the plan contract", async () => {

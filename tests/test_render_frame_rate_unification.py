@@ -388,11 +388,18 @@ def test_hyperframes_progress_filter_draws_real_chapter_segments() -> None:
     )
     filter_text = ";".join(filter_parts)
 
-    assert video_label == "vhfprogress"
-    assert "t/12.0" in filter_text
-    assert "vhfprogresschapters0" in filter_text
-    assert "vhfprogresschapterstick1" in filter_text
-    assert "color=0x28d3a2@0.64" in filter_text
+    assert video_label.startswith("vhfprogress")
+    assert "T/12.0" in filter_text
+    assert "geq=" in filter_text
+    assert "color=black@0.45" in filter_text
+    assert "h=45" in filter_text
+    assert "vhfprogresschaptertick1" in filter_text
+    assert "vhfprogresschaptertitle1" in filter_text
+    assert "text='细节'" in filter_text
+    assert "结构细节" not in filter_text
+    assert "color=0x28d3a2" not in filter_text
+    assert "color=0x4f8cff" not in filter_text
+    assert "color=white@0.58" in filter_text
 
 
 def test_smart_editing_accents_use_social_packaging_density_by_default() -> None:

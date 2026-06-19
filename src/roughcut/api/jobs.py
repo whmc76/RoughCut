@@ -126,6 +126,10 @@ from roughcut.edit.rule_registry import (
     rule_match_surface_layer,
 )
 from roughcut.host.file_manager import can_open_in_file_manager, describe_file_manager_target, open_in_file_manager
+from roughcut.intelligent_copy_layout import (
+    resolve_smart_copy_material_json_path,
+    resolve_smart_copy_platform_packaging_json_path,
+)
 from roughcut.production_readiness import (
     insert_plan_output_fallback_reasons,
     projection_output_fallback_reasons,
@@ -246,12 +250,14 @@ from roughcut.publication import (
     publication_plan_status,
     submit_publication_attempts,
 )
+from roughcut.publication_packaging import load_publication_packaging_payload
 from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE
 from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
 from roughcut.packaging.library import resolve_packaging_plan_for_job
 from roughcut.recovery.stuck_step_recovery import STUCK_STEP_DIAGNOSTIC_ARTIFACT_TYPE
 from roughcut.review.content_understanding_schema import normalize_video_type
 from roughcut.review.content_profile import _probe_duration, build_reviewed_transcript_excerpt
+from roughcut.review.intelligent_copy import generate_intelligent_copy, rerender_existing_intelligent_copy_cover_groups
 from roughcut.review.content_profile_feedback import apply_content_profile_feedback
 from roughcut.review.content_profile_keywords import normalize_query_list
 from roughcut.review.content_profile_memory import (
@@ -1639,6 +1645,15 @@ async def get_jobs_usage_trend(
 DEFAULT_REMIX_PRODUCTION_MANIFEST = DEFAULT_PROJECT_ROOT / "data" / "remix_production_tasks" / "jenny_baby_bluey_pending.json"
 REMIX_PRODUCTION_WORKFLOW_MODES = {"remix_auto_commentary", "remix_llm_plan", "script_footage_remix"}
 REMIX_PRODUCTION_STEP_NAME = "script_footage_remix"
+REMIX_PRODUCTION_TTS_TIMEOUT_SEC = 3600.0
+_PUBLICATION_COVER_AUTO_HEAL_BLOCK_TOKENS = (
+    "封面",
+    "cover",
+    "codex",
+    "imagegen",
+    "位图",
+    "bitmap",
+)
 
 
 class RemixProductionStartOut(BaseModel):
@@ -1838,7 +1853,9 @@ def _attach_remix_task_job_state(task: dict[str, Any], job: Job | None) -> dict[
     item["job_id"] = str(job.id)
     item["job_status"] = str(job.status or "")
     item["job_updated_at"] = _iso_or_none(job.updated_at)
-    item["job_progress_percent"] = _calculate_job_progress_percent(job)
+    progress_percent = _calculate_job_progress_percent(job)
+    item["job_progress_percent"] = progress_percent
+    item["progress_percent"] = progress_percent
     output_path = _latest_remix_job_output_path(job)
     if output_path:
         item["output_path"] = output_path
@@ -2144,6 +2161,8 @@ def _build_remix_production_job_command(job: Job, remix_payload: dict[str, Any],
         _remix_qwen3_asr_base(),
         "--creator-profile",
         creator_profile,
+        "--tts-timeout-sec",
+        str(REMIX_PRODUCTION_TTS_TIMEOUT_SEC),
     ]
     if force:
         command.append("--force")
@@ -9810,6 +9829,20 @@ async def publish_job_to_bound_platforms(
         creator_profile_id=payload.creator_profile_id,
         session=session,
     )
+    material_generation: dict[str, Any] | None = None
+    if _job_publication_packaging_needs_generation(packaging):
+        material_generation = await _generate_job_publication_materials(
+            job=job,
+            render_output=render_output,
+            creator_profile=creator_profile,
+            creator_profile_id=payload.creator_profile_id,
+            platforms=payload.platforms,
+        )
+        job, render_output, packaging, creator_profile = await _load_publication_inputs(
+            job_id=job_id,
+            creator_profile_id=payload.creator_profile_id,
+            session=session,
+        )
     existing_attempts = await list_publication_attempts(session, job_id=str(job_id))
     platform_options = await _resolve_job_publication_platform_options(
         session=session,
@@ -9830,8 +9863,23 @@ async def publish_job_to_bound_platforms(
         platform_options=platform_options,
         existing_attempts=existing_attempts,
     )
+    plan, job, render_output, packaging, creator_profile = await _maybe_auto_heal_job_publication_cover_plan(
+        plan=plan,
+        job=job,
+        render_output=render_output,
+        packaging=packaging,
+        creator_profile=creator_profile,
+        creator_profile_id=payload.creator_profile_id,
+        requested_platforms=payload.platforms,
+        platform_options=platform_options,
+        existing_attempts=existing_attempts,
+        session=session,
+    )
     if not publication_plan_is_publishable(plan):
-        return _build_job_publication_executor_gate_response(plan)
+        response = _build_job_publication_executor_gate_response(plan)
+        if material_generation is not None:
+            response["material_generation"] = material_generation
+        return response
     browser_agent_targets = [
         target
         for target in (plan.get("targets") or [])
@@ -9861,6 +9909,8 @@ async def publish_job_to_bound_platforms(
     result = await submit_publication_attempts(session, plan)
     await session.commit()
     _dispatch_publication_worker_tick(len(result.get("created_attempts") or []))
+    if material_generation is not None:
+        result["material_generation"] = material_generation
     return result
 
 
@@ -10108,9 +10158,9 @@ async def _job_agent_publication_profile_options(
 
 def _derive_job_publication_folder_path(job: Job, render_output: RenderOutput | None) -> str:
     candidates = [
-        str(getattr(job, "source_path", "") or "").strip(),
         str(getattr(render_output, "output_path", "") or "").strip() if render_output is not None else "",
         str(getattr(job, "output_dir", "") or "").strip(),
+        str(getattr(job, "source_path", "") or "").strip(),
     ]
     for raw in candidates:
         if not raw:
@@ -10178,6 +10228,206 @@ def _dispatch_publication_worker_tick(created_count: int) -> None:
         pass
 
 
+def _job_publication_packaging_needs_generation(packaging: dict[str, Any] | None) -> bool:
+    if not isinstance(packaging, dict):
+        return True
+    root_status = str(packaging.get("status") or "").strip().lower()
+    if root_status == "failed":
+        return True
+    contract = packaging.get("material_contract")
+    if isinstance(contract, dict) and str(contract.get("status") or "").strip().lower() == "failed":
+        return True
+    platforms = packaging.get("platforms")
+    if isinstance(platforms, dict):
+        return not any(isinstance(value, dict) for value in platforms.values())
+    if isinstance(platforms, list):
+        return not any(isinstance(value, dict) for value in platforms)
+    return True
+
+
+async def _generate_job_publication_materials(
+    *,
+    job: Job,
+    render_output: RenderOutput | None,
+    creator_profile: dict[str, Any] | None,
+    creator_profile_id: str | None,
+    platforms: list[str] | None,
+) -> dict[str, Any]:
+    folder_path = _derive_job_publication_folder_path(job, render_output)
+    if not folder_path:
+        raise HTTPException(status_code=409, detail="无法定位成片目录，不能自动生成发布物料。")
+    try:
+        result = await generate_intelligent_copy(
+            folder_path,
+            platforms=platforms or None,
+            creator_profile_id=creator_profile_id,
+            creator_profile=creator_profile,
+            creator_profile_name=str((creator_profile or {}).get("display_name") or "").strip() or None,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"自动生成发布物料失败：{exc}") from exc
+    return {
+        "status": (
+            "completed"
+            if bool(result.get("publish_ready") or result.get("one_click_publish_ready"))
+            else str(result.get("status") or "completed")
+        ),
+        "source": "job_one_click_publish",
+        "folder_path": folder_path,
+        "material_dir": str(result.get("material_dir") or ""),
+        "platform_packaging_json_path": str(result.get("platform_packaging_json_path") or ""),
+        "publish_ready": bool(result.get("publish_ready") or result.get("one_click_publish_ready")),
+        "blocking_reasons": [str(item).strip() for item in (result.get("blocking_reasons") or []) if str(item).strip()],
+    }
+
+
+def _publication_plan_cover_auto_heal_reasons(plan: dict[str, Any] | None) -> list[str]:
+    if not isinstance(plan, dict):
+        return []
+    candidates = [
+        *[str(item).strip() for item in (plan.get("blocked_reasons") or []) if str(item).strip()],
+        *[str(item).strip() for item in (plan.get("warnings") or []) if str(item).strip()],
+    ]
+    reasons: list[str] = []
+    for reason in candidates:
+        normalized = reason.lower()
+        if any(token in normalized for token in _PUBLICATION_COVER_AUTO_HEAL_BLOCK_TOKENS):
+            reasons.append(reason)
+    return list(dict.fromkeys(reasons))
+
+
+def _attach_cover_auto_heal_status(plan: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(plan)
+    updated["cover_auto_heal"] = status
+    status_kind = str(status.get("status") or "").strip().lower()
+    if status_kind in {"failed", "needs_human"}:
+        blocked_reasons = [str(item).strip() for item in (updated.get("blocked_reasons") or []) if str(item).strip()]
+        summary = str(status.get("summary") or "封面自愈未能恢复发布计划，需人工处理。").strip()
+        if summary and summary not in blocked_reasons:
+            blocked_reasons.append(summary)
+        updated["blocked_reasons"] = blocked_reasons
+        updated["status"] = "blocked"
+        updated["publish_ready"] = False
+    return updated
+
+
+async def _maybe_auto_heal_job_publication_cover_plan(
+    *,
+    plan: dict[str, Any],
+    job: Job,
+    render_output: RenderOutput | None,
+    packaging: dict[str, Any] | None,
+    creator_profile: dict[str, Any] | None,
+    creator_profile_id: str | None,
+    requested_platforms: list[str] | None,
+    platform_options: dict[str, Any],
+    existing_attempts: list[dict[str, Any]],
+    session: AsyncSession,
+) -> tuple[dict[str, Any], Job, RenderOutput | None, dict[str, Any] | None, dict[str, Any] | None]:
+    reasons = _publication_plan_cover_auto_heal_reasons(plan)
+    if not reasons or publication_plan_is_publishable(plan):
+        return plan, job, render_output, packaging, creator_profile
+    settings = get_settings()
+    if not bool(getattr(settings, "publication_cover_auto_heal_enabled", True)):
+        return plan, job, render_output, packaging, creator_profile
+    try:
+        max_attempts = int(getattr(settings, "publication_cover_auto_heal_max_attempts", 1) or 1)
+    except (TypeError, ValueError):
+        max_attempts = 1
+    max_attempts = max(0, min(3, max_attempts))
+    if max_attempts <= 0:
+        return plan, job, render_output, packaging, creator_profile
+
+    folder_path = _derive_job_publication_folder_path(job, render_output)
+    if not folder_path:
+        return plan, job, render_output, packaging, creator_profile
+
+    current_plan = plan
+    current_job = job
+    current_render_output = render_output
+    current_packaging = packaging
+    current_creator_profile = creator_profile
+    attempts: list[dict[str, Any]] = []
+    creator_profile_name = str((creator_profile or {}).get("display_name") or "").strip()
+    for attempt_index in range(1, max_attempts + 1):
+        before_reasons = _publication_plan_cover_auto_heal_reasons(current_plan)
+        try:
+            healed_result = await rerender_existing_intelligent_copy_cover_groups(
+                folder_path,
+                platforms=requested_platforms,
+                refresh_cover_source=False,
+                creator_profile_name=creator_profile_name or None,
+            )
+            current_job, current_render_output, current_packaging, current_creator_profile = await _load_publication_inputs(
+                job_id=current_job.id,
+                creator_profile_id=creator_profile_id,
+                session=session,
+            )
+            current_plan = build_publication_plan(
+                job=current_job,
+                render_output=current_render_output,
+                platform_packaging=current_packaging,
+                creator_profile=current_creator_profile,
+                requested_platforms=requested_platforms,
+                platform_options=platform_options,
+                existing_attempts=existing_attempts,
+            )
+            after_reasons = _publication_plan_cover_auto_heal_reasons(current_plan)
+            healed_ready = publication_plan_is_publishable(current_plan)
+            attempts.append(
+                {
+                    "attempt": attempt_index,
+                    "status": "healed" if healed_ready else "still_blocked",
+                    "before_reasons": before_reasons,
+                    "after_reasons": after_reasons,
+                    "publish_ready": bool(healed_result.get("publish_ready")) if isinstance(healed_result, dict) else None,
+                    "material_contract_status": (
+                        str((healed_result.get("material_contract") or {}).get("status") or "").strip()
+                        if isinstance(healed_result, dict) and isinstance(healed_result.get("material_contract"), dict)
+                        else ""
+                    ),
+                }
+            )
+            if healed_ready or not after_reasons:
+                current_plan = _attach_cover_auto_heal_status(
+                    current_plan,
+                    {
+                        "status": "healed" if healed_ready else "rechecked",
+                        "attempts": attempts,
+                        "summary": "封面质量门失败后已自动重生并重新构建发布计划。",
+                    },
+                )
+                return current_plan, current_job, current_render_output, current_packaging, current_creator_profile
+        except Exception as exc:
+            attempts.append(
+                {
+                    "attempt": attempt_index,
+                    "status": "failed",
+                    "before_reasons": before_reasons,
+                    "error": str(exc),
+                }
+            )
+            current_plan = _attach_cover_auto_heal_status(
+                current_plan,
+                {
+                    "status": "failed",
+                    "attempts": attempts,
+                    "summary": f"封面自愈执行失败，需人工处理：{exc}",
+                },
+            )
+            return current_plan, current_job, current_render_output, current_packaging, current_creator_profile
+
+    current_plan = _attach_cover_auto_heal_status(
+        current_plan,
+        {
+            "status": "needs_human",
+            "attempts": attempts,
+            "summary": f"封面自愈重试已耗尽（{max_attempts} 次），需人工处理后再发布。",
+        },
+    )
+    return current_plan, current_job, current_render_output, current_packaging, current_creator_profile
+
+
 async def _load_publication_inputs(
     *,
     job_id: uuid.UUID,
@@ -10204,9 +10454,32 @@ async def _load_publication_inputs(
         artifact_types=("platform_packaging_md",),
     )
     packaging = packaging_artifact.data_json if packaging_artifact and isinstance(packaging_artifact.data_json, dict) else None
+    if _job_publication_packaging_needs_generation(packaging):
+        packaging = _load_job_smart_copy_publication_packaging(job=job, render_output=render_output) or packaging
 
     creator_profile = _resolve_publication_creator_profile(creator_profile_id)
+    creator_profile = await _merge_job_creator_card_publication_bindings(
+        session=session,
+        job=job,
+        creator_profile=creator_profile,
+    )
     return job, render_output, packaging, creator_profile
+
+
+def _load_job_smart_copy_publication_packaging(
+    *,
+    job: Job,
+    render_output: RenderOutput | None,
+) -> dict[str, Any] | None:
+    folder_path = _derive_job_publication_folder_path(job, render_output)
+    if not folder_path:
+        return None
+    material_dir = Path(folder_path).expanduser() / "smart-copy"
+    packaging, _sources = load_publication_packaging_payload(
+        material_json=str(resolve_smart_copy_material_json_path(material_dir)),
+        platform_packaging=str(resolve_smart_copy_platform_packaging_json_path(material_dir)),
+    )
+    return packaging if isinstance(packaging, dict) else None
 
 
 def _resolve_publication_creator_profile(creator_profile_id: str | None) -> dict[str, Any] | None:
@@ -10219,6 +10492,123 @@ def _resolve_publication_creator_profile(creator_profile_id: str | None) -> dict
 
     profiles = list_avatar_material_profiles()
     return next((profile for profile in profiles if active_publication_credentials(profile)), profiles[0] if profiles else None)
+
+
+async def _merge_job_creator_card_publication_bindings(
+    *,
+    session: AsyncSession,
+    job: Job,
+    creator_profile: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    base_profile = dict(creator_profile or {})
+    creator = await _find_job_publication_creator_card(
+        session=session,
+        job=job,
+        creator_profile=base_profile,
+    )
+    if creator is None or creator.publication_profile is None:
+        return creator_profile
+    credentials = _creator_publication_profile_credentials(creator.publication_profile)
+    if not credentials:
+        return creator_profile
+
+    creator_payload = (
+        dict(base_profile.get("creator_profile"))
+        if isinstance(base_profile.get("creator_profile"), dict)
+        else {}
+    )
+    publishing = (
+        dict(creator_payload.get("publishing"))
+        if isinstance(creator_payload.get("publishing"), dict)
+        else {}
+    )
+    existing_credentials = [
+        item
+        for item in (publishing.get("platform_credentials") or [])
+        if isinstance(item, dict)
+    ]
+    merged_by_platform = {
+        str(item.get("platform") or "").strip().lower(): dict(item)
+        for item in existing_credentials
+        if str(item.get("platform") or "").strip()
+    }
+    for credential in credentials:
+        platform = str(credential.get("platform") or "").strip().lower()
+        if platform:
+            merged_by_platform[platform] = credential
+    publishing["platform_credentials"] = list(merged_by_platform.values())
+    if "active_platforms" not in publishing:
+        publishing["active_platforms"] = [item["platform"] for item in credentials if item.get("platform")]
+    creator_payload["publishing"] = publishing
+    base_profile["creator_profile"] = creator_payload
+    if not str(base_profile.get("display_name") or "").strip():
+        base_profile["display_name"] = creator.name
+    base_profile["creator_card_id"] = str(creator.id)
+    return base_profile
+
+
+async def _find_job_publication_creator_card(
+    *,
+    session: AsyncSession,
+    job: Job,
+    creator_profile: dict[str, Any],
+) -> CreatorCard | None:
+    if job.creator_card_id:
+        result = await session.execute(
+            select(CreatorCard)
+            .where(CreatorCard.id == job.creator_card_id)
+            .options(selectinload(CreatorCard.publication_profile).selectinload(CreatorPublicationProfile.bindings))
+        )
+        creator = result.scalar_one_or_none()
+        if creator is not None:
+            return creator
+
+    candidate_names = [
+        str(creator_profile.get("display_name") or "").strip(),
+        str(creator_profile.get("name") or "").strip(),
+    ]
+    compatible = creator_profile.get("creator_card_compatible")
+    if isinstance(compatible, dict):
+        candidate_names.append(str(compatible.get("name") or "").strip())
+    for name in dict.fromkeys(item for item in candidate_names if item):
+        result = await session.execute(
+            select(CreatorCard)
+            .where(CreatorCard.name == name)
+            .options(selectinload(CreatorCard.publication_profile).selectinload(CreatorPublicationProfile.bindings))
+            .limit(1)
+        )
+        creator = result.scalar_one_or_none()
+        if creator is not None:
+            return creator
+    return None
+
+
+def _creator_publication_profile_credentials(profile: CreatorPublicationProfile) -> list[dict[str, Any]]:
+    credentials: list[dict[str, Any]] = []
+    for binding in profile.bindings or []:
+        payload = binding.binding_payload_json if isinstance(binding.binding_payload_json, dict) else {}
+        platform = str(binding.platform or payload.get("platform") or "").strip().lower()
+        credential_ref = str(binding.credential_ref or payload.get("credential_ref") or "").strip()
+        if not platform or not credential_ref:
+            continue
+        status = str(payload.get("status") or "").strip().lower().replace("-", "_")
+        if status == "login_confirmed":
+            status = "logged_in"
+        credentials.append(
+            {
+                "id": str(binding.id),
+                "platform": platform,
+                "credential_ref": credential_ref,
+                "account_label": str(payload.get("account_label") or platform).strip(),
+                "browser_profile_id": str(payload.get("browser_profile_id") or "").strip() or credential_ref,
+                "browser_binding": payload.get("browser_binding") if isinstance(payload.get("browser_binding"), dict) else {},
+                "status": status or "unverified",
+                "enabled": bool(payload.get("enabled", True)),
+                "adapter": str(payload.get("adapter") or "").strip() or ("social_auto_upload" if credential_ref.startswith("social-auto-upload:") else ""),
+                "notes": str(payload.get("notes") or "").strip() or None,
+            }
+        )
+    return credentials
 
 
 async def _load_download_context(job_id: uuid.UUID, session: AsyncSession) -> tuple[RenderOutput | None, dict[str, Any]]:
@@ -12416,15 +12806,19 @@ def _resolve_job_merged_source_names(job: Job) -> list[str]:
 
 
 def _calculate_job_progress_percent(job: Job) -> int:
+    normalized_status = str(job.status or "").strip()
+    if normalized_status in {"done", "published"}:
+        return 100
+
     steps = list(job.steps or [])
     if not steps:
         return 0
 
     if _job_is_remix_production(job):
         remix_step = _find_step(steps, REMIX_PRODUCTION_STEP_NAME)
-        if str(job.status or "").strip() == "done" or (remix_step is not None and remix_step.status == "done"):
+        if remix_step is not None and remix_step.status == "done":
             return 100
-        if str(job.status or "").strip() in {"failed", "cancelled"}:
+        if normalized_status in {"failed", "cancelled"}:
             return 0
         if remix_step is not None and remix_step.status == "running":
             metadata = remix_step.metadata_ or {}
@@ -12434,7 +12828,7 @@ def _calculate_job_progress_percent(job: Job) -> int:
                 return 50
         return 0
 
-    if str(job.status or "").strip() == "awaiting_manual_edit":
+    if normalized_status == "awaiting_manual_edit":
         render_index = STEP_ORDER.get("render", len(PIPELINE_STEPS))
         completed_before_render = sum(
             1
@@ -12451,9 +12845,7 @@ def _calculate_job_progress_percent(job: Job) -> int:
     running_bonus = (0.5 / total) if running_count else 0.0
     progress = max(0.0, min(1.0, base_progress + running_bonus))
 
-    if job.status == "done":
-        return 100
-    if job.status in {"failed", "cancelled"}:
+    if normalized_status in {"failed", "cancelled"}:
         return round(base_progress * 100)
     return round(progress * 100)
 

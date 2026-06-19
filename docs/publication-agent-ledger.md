@@ -373,3 +373,130 @@ The dual-cover source-of-truth contract can only be reopened if fresh live evide
   - RoughCut targeted pytest passed: Bilibili default category, Xiaohongshu original declaration command, Bilibili verification success path, Bilibili verification mismatch path, and Xiaohongshu default declaration payload (`5 passed`).
   - social-auto-upload `sau_cli.py` py_compile passed.
   - social-auto-upload selected Bilibili CLI verification tests passed (`3 passed`).
+
+### 2026-06-20 Jenny Baby S02E03 Real Edit And Four-Platform Publish Closure
+
+- True task selected from the production task list: `data/remix_production_tasks/jenny_baby_bluey_pending.json`.
+- Episode: Bluey S02E03 `羽毛魔杖`.
+- Source media: `F:\布鲁伊育儿节目\中文配音 (中文字幕)\第二季 (Season 2)\Bluey.S02E03...mp4`.
+- Final rendered video: `output/bluey-remix-production-jenny-baby-s02e03-20260620/s02e03_羽毛魔杖/bluey_s02e03_羽毛魔杖_parenting_remix.mp4`.
+- Edit verification:
+  - `script-footage` formal CLI completed with `success_count=1`, `total_output_duration_sec=244.893`.
+  - QA status is `warn` but `passed=true`; only warning is full-script duration outside the 2-3 minute target.
+  - TTS forced alignment used `qwen3-asr-1.7b-forced-aligner`, canonical coverage `0.9868`.
+  - Source-ASR completed with 14 anchors.
+  - Final MP4 is H.264 `1920x1080`, `28fps`, duration `244.892857s`.
+- Publication job id: `7d9cbd74-75e4-44cc-abf2-411b3a613d12`.
+- Final live publication state for S02E03:
+  - Douyin attempt `f07c57e603944ec6860172a62daa7183`: `published` at `2026-06-20 01:00:58 Asia/Shanghai`.
+  - Kuaishou attempt `10931b5a8802464f97b6ccb16f42bfa7`: `published` at `2026-06-20 01:08:30 Asia/Shanghai`.
+  - Xiaohongshu attempt `0eca1f59686d49afac1d416106261f20`: `scheduled_pending`, auto-deferred to `2026-06-21 10:00 Asia/Shanghai` because the account already had a 2026-06-20 scheduled item.
+  - Bilibili attempt `2d8f1ab2d42047aaadbec9a1c52325e2`: `scheduled_pending`, auto-deferred to `2026-06-21 10:00 Asia/Shanghai` because the account already had a 2026-06-20 scheduled item.
+  - Historical failed Kuaishou attempts `d959472ec33b49b99a8166a06c0fb8d7` and `74c11d9c4c284f9e92e77c6a460c3bd4` remain in the ledger as failed attempts; the later `10931...` attempt is the current successful Kuaishou publication record.
+- Auto-defer verification:
+  - The one-video-per-platform-account-per-local-day policy was exercised by Bilibili and Xiaohongshu.
+  - Both were moved from the occupied `2026-06-20` account day to `2026-06-21 10:00 Asia/Shanghai`.
+- Root-cause fixes proven by this live run:
+  - Xiaohongshu cover planning no longer forces the obsolete landscape slot; it uses the required portrait `3:4` cover for the current matrix.
+  - Top-level platform `declaration` options are preserved so payload overrides can carry `原创声明` into the plan.
+  - Explicit cover slots with a `matrix_key` but no direct `cover_path` are backfilled from `cover_matrix`, so Bilibili/Douyin/Xiaohongshu receive the intended cover assets.
+  - Kuaishou `social-auto-upload` command building no longer passes unstable cross-platform declaration strings such as `原创声明` or `个人观点，仅供参考` into the Kuaishou author-declaration modal. The final successful Kuaishou command was verified as `no_declaration`.
+- Verification commands:
+  - `python -m py_compile src\roughcut\publication.py src\roughcut\publication_packaging.py tests\test_publication.py`.
+  - `PYTHONPATH=src python -m pytest tests\test_publication.py::test_build_request_payload_rehydrates_xiaohongshu_portrait_cover_from_generation_group_when_explicit_cover_is_suspicious tests\test_publication.py::test_build_browser_agent_task_payload_from_attempt_recovers_cover_from_packaging_when_attempt_is_pinned_to_stale_mirror tests\test_publication.py::test_publication_plan_allows_declaration_option_to_override_package_default tests\test_publication.py::test_derive_publication_cover_slots_backfills_explicit_slot_path_from_cover_matrix -q` (`4 passed`).
+  - `python -m py_compile src\roughcut\publication_social_auto_upload.py tests\test_publication_social_auto_upload.py`.
+  - `PYTHONPATH=src python -m pytest tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_douyin tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_xiaohongshu_group_chat_and_original tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_bilibili_uses_cover_matrix_slots tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_kuaishou_omits_unstable_declaration -q` (`4 passed`).
+
+### 2026-06-20 Jenny Baby S02E03 Cover And Schedule Gate Correction
+
+- Observed symptom:
+  - `00-cover-landscape_16_9.jpg` was effectively a reference/source frame and did not contain the requested Codex-style integrated cover typography.
+  - `00-cover-portrait_3_4.jpg` was generated through imagegen but redrew the characters into unrelated dog/person characters.
+  - Formal publish did not stop on those cover failures because the release request used `ignore_publish_ready_gate`.
+  - Douyin/Kuaishou published immediately around `2026-06-20 01:00 Asia/Shanghai` instead of using audience-active schedule windows.
+- First bad layers:
+  - Cover quality gate: Codex full-cover title drift / unavailable verification could be downgraded to warning.
+  - Publication plan gate: `ignore_publish_ready_gate` could bypass cover/imagegen/bitmap blocking reasons.
+  - Schedule policy: missing `scheduled_publish_at` used current time as the publish candidate instead of platform audience-active windows.
+- Root causes:
+  - The full-cover imagegen contract trusted completion metadata even when the OCR/title contract said the bitmap had no title.
+  - Character fidelity was expressed in prompts but not enforced as a blocking acceptance gate before release.
+  - Recovery compensation was too broad; it was intended for draft/copy recovery, but also bypassed hard cover failures.
+  - Account daily-limit scheduling existed, but default audience-active-time scheduling did not.
+- Fixes:
+  - `codex_full_cover` full-bitmap title failure, missing verification, or unavailable verification is now blocking.
+  - Publication plan recovery override cannot bypass packaging blockers containing cover/Codex/imagegen/bitmap failures.
+  - Default platform active publish windows were added: Douyin `20:30`, Kuaishou `20:00`, Xiaohongshu `21:00`, Bilibili `18:00`, WeChat Channels `20:00`.
+  - Scheduling now always chooses a platform active window by default, then auto-defers if the slot is too close or the account/day is occupied.
+  - S02E03 local covers were regenerated from source-frame anchors, not model-redrawn characters, and synchronized to both output and runtime smart-copy directories.
+  - S02E03 `platform-packaging.json` cover matrix and platform entries were updated to `publish_ready=true` after the corrected covers passed local readiness checks.
+- Current caveat:
+  - Douyin/Kuaishou already published with the earlier cover assets; local material is corrected for future retries/reuse, but already-published platform posts require platform-side edit/replacement if the platform supports it.
+  - Bilibili/Xiaohongshu were already scheduled with the earlier cover assets; replacing those scheduled drafts requires a platform-side edit or cancel-and-recreate flow to avoid duplicate scheduled posts.
+- Verification:
+  - Corrected local covers: `landscape_16_9`, `landscape_4_3`, and `portrait_3_4` all returned `publish_ready=True`, with no blocking reasons or warnings.
+  - `python -m py_compile src\roughcut\publication.py src\roughcut\config.py src\roughcut\review\intelligent_copy_cover_quality.py tests\test_publication.py tests\test_intelligent_copy_cover_quality.py` passed.
+  - `PYTHONPATH=src python -m pytest tests\test_intelligent_copy_cover_quality.py tests\test_publication.py::test_publication_plan_blocks_unready_smart_copy_platform tests\test_publication.py::test_publication_plan_does_not_ignore_cover_hard_gate_for_recovery_override tests\test_publication.py::test_publication_schedule_policy_defaults_to_platform_audience_active_window tests\test_publication.py::test_submit_publication_attempts_auto_defers_second_account_video_to_next_day tests\test_publication.py::test_publication_schedule_policy_defers_bilibili_when_schedule_too_close -q` passed (`22 passed`).
+
+### 2026-06-20 Publication Cover Auto-Heal And Queue Progress Fix
+
+- Observed symptom:
+  - Already submitted/published Jenny Baby remix publication jobs showed `0%` in the editing queue.
+  - The cover quality gate could block bad covers, but one-click publish did not automatically regenerate and recheck covers before giving up.
+- First bad layers:
+  - Queue progress preview: `src/roughcut/api/jobs.py::_calculate_job_progress_percent` returned `0` for step-less `done` jobs before checking terminal status.
+  - Publication entrypoint: `src/roughcut/api/intelligent_copy.py::publish_intelligent_folder` treated cover-gated plans like any other blocked plan and did not call the existing cover rerender workflow.
+- Root causes:
+  - Intelligent publish jobs are terminal publication ledger jobs, not full editing pipeline jobs; they often have no pipeline steps, so step-count progress is the wrong first source of truth.
+  - `rerender_existing_intelligent_copy_cover_groups(...)` already provided the correct regenerate/revalidate/rewrite path, but it was only manually reachable and not wired into formal publish recovery.
+- Fixes:
+  - Terminal `done/published` jobs now report `progress_percent=100` even without steps.
+  - Remix production task attachment now includes both `job_progress_percent` and `progress_percent`.
+  - Formal one-click publish now auto-heals cover/Codex/imagegen/bitmap blockers by rerendering existing smart-copy cover groups, reloading packaging, rebuilding the plan, and continuing only if the rebuilt plan is publishable.
+  - Exhausted or failed cover auto-heal returns `cover_auto_heal.status=needs_human/failed` and remains blocked instead of submitting to platforms.
+- Runtime check:
+  - `GET /api/v1/jobs` returned `progress_percent=100` for S02E03 and S02E02 Jenny Baby intelligent publish jobs after the API restart.
+- Verification:
+  - `PYTHONPATH=src python -m pytest tests\test_remix_production_api.py tests\test_intelligent_copy_publication_api.py tests\test_intelligent_copy_cover_quality.py tests\test_publication.py::test_publication_plan_does_not_ignore_cover_hard_gate_for_recovery_override tests\test_publication.py::test_publication_schedule_policy_defaults_to_platform_audience_active_window tests\test_publication.py::test_submit_publication_attempts_auto_defers_second_account_video_to_next_day -q` passed (`33 passed`).
+
+### 2026-06-20 Job One-Click Publish Material Generation Closure
+
+- Product boundary correction: queue editing jobs produce the edited video only. The formal one-click publish action is responsible for generating publication materials and then submitting publication.
+- Observed symptom: the queue publish button could not close a newly edited job end to end when `platform_packaging` was missing. The frontend treated blocked/missing-material plans as non-submittable, and `POST /jobs/{job_id}/publication/publish` only consumed existing packaging instead of generating it.
+- First bad layer: job-level one-click publish API and UI gating, not the editing pipeline.
+- Root cause: RoughCut used the same "plan is currently ready" signal for both preview readiness and the formal publish action. That made missing material a UI/API stop condition even though material generation belongs inside the formal publish flow.
+- Fix:
+  - `publish_job_to_bound_platforms(...)` now detects missing/unusable publication packaging, derives the rendered video folder, calls `generate_intelligent_copy(...)`, reloads `smart-copy/_meta/platform-packaging.json`, rebuilds the publication plan, and only then submits publication attempts.
+  - The generated material summary is returned as `material_generation` for both submitted and blocked responses.
+  - The job publication loader can read promoted smart-copy packaging from the rendered output folder instead of requiring a database artifact.
+  - The queue publication panel now exposes the formal action as `生成物料并发布`; blocked/missing-material preview state no longer disables the action, while manual-handoff and in-flight submissions still do.
+- Verification:
+  - `PYTHONPATH=src python -m pytest tests\test_intelligent_copy_publication_api.py tests\test_remix_production_api.py tests\test_intelligent_copy_cover_quality.py tests\test_publication.py::test_publication_plan_does_not_ignore_cover_hard_gate_for_recovery_override tests\test_publication.py::test_publication_schedule_policy_defaults_to_platform_audience_active_window tests\test_publication.py::test_submit_publication_attempts_auto_defers_second_account_video_to_next_day -q` passed (`34 passed`).
+  - `pnpm --dir frontend exec vitest run src\features\jobs\JobPublicationPanel.manualHandoff.test.tsx` passed (`6 passed`).
+  - `pnpm --dir frontend run typecheck` passed.
+
+### 2026-06-20 Jenny Baby S02E03 RC-Native Rerun And Republish
+
+- User requested rerunning the previous Bluey task and republishing through RC native paths, not manual script/material bypasses.
+- RC remix production job: `80a24a43-a235-4817-a923-0ab778d50803`.
+- Final rendered video:
+  - `/app/data/output/script-footage-remix-production/bluey_script_footage_remix/s02e03/s02e03_羽毛魔杖/bluey_s02e03_羽毛魔杖_parenting_remix.mp4`
+  - H.264 `1920x1080`, `28fps`, duration `242.858s`.
+  - QA `warn` but `passed=true`; batch report `gate_passed=true`.
+- Formal job one-click publish regenerated smart-copy material and submitted four platform attempts. Final state:
+  - Kuaishou `724af9055ab246cdb9d698228c0bd9c3`: `scheduled_pending`, `2026-06-21 20:00 Asia/Shanghai`.
+  - Douyin `67d29b7baf494286a589aeb9265345af`: `scheduled_pending`, `2026-06-21 20:30 Asia/Shanghai`.
+  - Bilibili `6271752354234766831b2fe2c8306169`: `scheduled_pending`, `2026-06-22 19:30 Asia/Shanghai`, `provider_task_id=bilibili:116778449569067`.
+  - Xiaohongshu `59cd3ba9521043d18487f5fa9eba3d46`: `scheduled_pending`, `2026-06-22 21:00 Asia/Shanghai`.
+- The account daily-limit auto-defer policy was exercised for all four platforms. The target times are platform audience-active windows, not immediate publish times.
+- Root-cause fixes closed during this run:
+  - Production remix API now passes `--tts-timeout-sec 3600.0`; the previous native job command let long Jenny Baby TTS runs hit the builder's lower default timeout.
+  - Job publication folder derivation now prefers render output/job output before Windows `source_path`, avoiding container-side `Path("F:\\...").parent == "."`.
+  - Failed job packaging now triggers material regeneration instead of reusing stale `platform-packaging.json`.
+  - Job publish input loading now merges creator-card social-auto-upload bindings, so bound Jenny Baby credentials are available to job one-click publish.
+  - Job one-click publish now invokes cover auto-heal when the publication plan is blocked by cover/Codex/imagegen/bitmap quality reasons.
+  - `social_auto_upload` reconciliation now releases expired `claimed/submitted/processing` attempts with attempt-local provider ids, preventing worker/watchfiles restarts from leaving zombie publication state.
+- Operational note:
+  - During this live run, the watchfiles-managed `worker-publication` process was restarted mid-upload twice. No host `sau_cli.py` process remained afterward, so the zombie attempts were released and completed with the same RC `run_publication_worker_once` execution path in a one-shot process. This avoided duplicate browser submissions while preserving native queue semantics.
+- Verification:
+  - `PYTHONPATH=src python -m pytest tests\test_intelligent_copy_publication_api.py tests\test_remix_production_api.py tests\test_publication_social_auto_upload.py -q` (`43 passed`).

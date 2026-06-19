@@ -2417,7 +2417,7 @@ def _hyperframes_has_runtime_visual_overlays(plan: dict[str, Any] | None) -> boo
     if hyperframes.progress_bar_enabled(plan):
         return True
     return any(
-        str(element.get("track") or "") in {"chapter_cards", "subtitle_emphasis"}
+        str(element.get("track") or "") == "subtitle_emphasis"
         for element in list(plan.get("elements") or [])
         if isinstance(element, dict)
     )
@@ -2438,37 +2438,20 @@ def _build_hyperframes_visual_filters(
     text_elements = [
         dict(element)
         for element in list(plan.get("elements") or [])
-        if isinstance(element, dict) and element.get("kind") == "text" and str(element.get("track") or "") in {"chapter_cards", "subtitle_emphasis"}
+        if isinstance(element, dict) and element.get("kind") == "text" and str(element.get("track") or "") == "subtitle_emphasis"
     ]
     for index, element in enumerate(text_elements):
         text = _escape_drawtext_value(str(element.get("text") or ""))
         if not text:
             continue
-        track = str(element.get("track") or "")
         start_time = max(0.0, float(element.get("start_sec") or 0.0))
         end_time = max(start_time + 0.4, float(element.get("end_sec") or start_time + 1.2))
-        position = element.get("position") if isinstance(element.get("position"), dict) else {}
-        x = int(position.get("x") or max(28, render_w * 0.04))
-        y = int(position.get("y") or max(34, render_h * 0.08))
         output_label = f"vhftext{index}"
-        if track == "subtitle_emphasis":
-            x_expr = "(w-text_w)/2"
-            y_expr = f"h*0.18"
-            font_size = max(34, min(72, int(render_h * 0.058)))
-            box_color = "0x101318@0.58"
-            border_color = "0xff8a3d@0.68"
-        elif str(element.get("style") or "") == "bottom_chapter_pill":
-            x_expr = str(x)
-            y_expr = f"h-{max(70, int(render_h * 0.076))}"
-            font_size = max(24, min(42, int(render_h * 0.032)))
-            box_color = "0x111317@0.62"
-            border_color = "0xff8a2a@0.46"
-        else:
-            x_expr = str(x)
-            y_expr = str(y)
-            font_size = max(26, min(48, int(render_h * 0.038)))
-            box_color = "0x101318@0.52"
-            border_color = "0xffffff@0.28"
+        x_expr = "(w-text_w)/2"
+        y_expr = "h*0.18"
+        font_size = max(34, min(72, int(render_h * 0.058)))
+        box_color = "0x101318@0.58"
+        border_color = "0xff8a3d@0.68"
         enable_expr = f"between(t\\,{start_time}\\,{end_time})"
         parts.append(
             f"[{current_video}]drawtext="
@@ -2485,19 +2468,30 @@ def _build_hyperframes_visual_filters(
         current_video = output_label
     if hyperframes.progress_bar_enabled(plan):
         duration = max(0.01, float(plan.get("duration_sec") or 0.0))
-        bar_h = max(5, min(10, int(render_h * 0.009)))
-        chapter_h = max(3, min(6, int(render_h * 0.005)))
+        bar_h = max(34, min(48, int(render_h * 0.042)))
         margin_x = max(42, int(render_w * 0.045))
         track_w = max(10, render_w - margin_x * 2)
-        y_base = f"ih-{bar_h + chapter_h + 8}"
-        y_fill = f"ih-{bar_h + 4}"
+        bottom_margin = max(14, int(render_h * 0.016))
+        y_fill = render_h - bar_h - bottom_margin
         bg_label = "vhfprogressbg"
-        chapter_label = "vhfprogresschapters"
+        fill_src_label = "vhfprogressfillsrc"
+        fill_label = "vhfprogressfill"
         fg_label = "vhfprogress"
+        tick_label_prefix = "vhfprogresschaptertick"
         parts.append(
-            f"[{current_video}]drawbox=x={margin_x}:y={y_fill}:w={track_w}:h={bar_h}:color=black@0.28:t=fill[{bg_label}]"
+            f"[{current_video}]drawbox=x={margin_x}:y={y_fill}:w={track_w}:h={bar_h}:color=black@0.45:t=fill[{bg_label}]"
         )
-        current_progress_label = bg_label
+        parts.append(
+            f"nullsrc=s={track_w}x{bar_h}:r=30:d={duration}[{fill_src_label}]"
+        )
+        parts.append(
+            f"[{fill_src_label}]format=rgba,"
+            f"geq=r='255':g='138':b='42':a='if(lte(X\\,W*min(max(T/{duration}\\,0)\\,1))\\,235\\,0)'[{fill_label}]"
+        )
+        parts.append(
+            f"[{bg_label}][{fill_label}]overlay=x={margin_x}:y={y_fill}:shortest=1[{fg_label}]"
+        )
+        current_progress_label = fg_label
         chapter_segments = hyperframes.chapter_segments(plan)
         for segment_index, segment in enumerate(chapter_segments[:10]):
             try:
@@ -2508,38 +2502,40 @@ def _build_hyperframes_visual_filters(
             if end - start <= 0.1:
                 continue
             x = margin_x + int(track_w * min(max(start / duration, 0.0), 1.0))
-            w = max(3, int(track_w * min(max((end - start) / duration, 0.0), 1.0)) - 3)
-            role_color = _hyperframes_chapter_color(str(segment.get("role") or ""), segment_index)
-            output_label = f"{chapter_label}{segment_index}"
-            parts.append(
-                f"[{current_progress_label}]drawbox=x={x}:y={y_base}:w={w}:h={chapter_h}:color={role_color}:t=fill[{output_label}]"
-            )
-            current_progress_label = output_label
             if segment_index > 0:
-                tick_label = f"{chapter_label}tick{segment_index}"
+                tick_label = f"{tick_label_prefix}{segment_index}"
                 parts.append(
-                    f"[{current_progress_label}]drawbox=x={x}:y={y_base}:w=2:h={chapter_h + bar_h + 4}:color=white@0.42:t=fill[{tick_label}]"
+                    f"[{current_progress_label}]drawbox=x={x}:y={y_fill}:w=2:h={bar_h}:color=white@0.58:t=fill[{tick_label}]"
                 )
                 current_progress_label = tick_label
-        parts.append(
-            f"[{current_progress_label}]drawbox=x={margin_x}:y={y_fill}:w='{track_w}*min(max(t/{duration}\\,0)\\,1)':h={bar_h}:color=0xff8a2a@0.9:t=fill[{fg_label}]"
-        )
-        current_video = fg_label
+        title_font_size = max(18, min(28, int(render_h * 0.024)))
+        title_x = margin_x + max(12, int(bar_h * 0.35))
+        title_y = f"{y_fill}+({bar_h}-text_h)/2"
+        for segment_index, segment in enumerate(chapter_segments[:10]):
+            try:
+                start = max(0.0, float(segment.get("start_sec", 0.0) or 0.0))
+                end = min(duration, max(start, float(segment.get("end_sec", start) or start)))
+            except (TypeError, ValueError):
+                continue
+            title = _escape_drawtext_value(str(segment.get("title") or "").strip()[:8])
+            if not title or end - start <= 0.1:
+                continue
+            title_label = f"vhfprogresschaptertitle{segment_index}"
+            enable_expr = f"between(t\\,{start}\\,{end})"
+            parts.append(
+                f"[{current_progress_label}]drawtext="
+                f"font='{font_name}':"
+                f"text='{title}':"
+                f"fontsize={title_font_size}:"
+                f"fontcolor=white:"
+                f"borderw=2:bordercolor=black@0.55:"
+                f"x={title_x}:y={title_y}:"
+                f"enable='{enable_expr}'"
+                f"[{title_label}]"
+            )
+            current_progress_label = title_label
+        current_video = current_progress_label
     return parts, current_video
-
-
-def _hyperframes_chapter_color(role: str, index: int) -> str:
-    normalized = str(role or "").strip().lower()
-    if normalized in {"hook", "lead", "opening"}:
-        return "0xff8a2a@0.72"
-    if normalized in {"detail", "detail_support", "focus"}:
-        return "0x28d3a2@0.64"
-    if normalized in {"action", "body"}:
-        return "0x4f8cff@0.58"
-    if normalized in {"cta", "cta_protect"}:
-        return "0xffffff@0.46"
-    palette = ("0xff8a2a@0.58", "0x28d3a2@0.54", "0x4f8cff@0.5", "0xffffff@0.42")
-    return palette[index % len(palette)]
 
 
 def _resolve_delivery_resolution(

@@ -125,6 +125,23 @@ Complete the RoughCut final subtitle authority refactor. The closure standard is
   - v9 debug command uses the FAS image asset path, `colorkey=0xFFFFFF`, `colorkey=0xF8F8F8`, and dynamic `overlay ... sin(t...)`; it contains no `drawtext` or `RoughCut`;
   - frame checks in `output/mt34-v9-frame-check` show FAS watermark on the output frames.
 
+2026-06-20 correction: bottom chapter/progress bar contract.
+
+- Observed symptom: the bottom chapter/progress component still looked like a solid bar; chapter text rendered outside the bar and leaked internal planning copy such as `细节段优先保留近...`.
+- First bad layer: Hyperframes chapter metadata contract and render-time progress implementation, not subtitle timing or the browser preview player.
+- Root cause:
+  - chapter titles were built by concatenating role labels with subtitle text, section summaries, or creative-rationale fields;
+  - render treated `chapter_cards` as an independent text overlay, so chapter text could appear as a separate subtitle-like layer instead of being integrated into the progress bar;
+  - progress fill used `drawbox w=t/duration`, but `drawbox` does not provide timeline progress through `t` in this context, so the fill rendered as a full-width solid bar.
+- Root cause fix:
+  - chapter titles are now controlled short labels only: `开场 / 细节 / 展示 / 重点 / 演示 / 总结 / 章节`;
+  - render ignores `chapter_cards` as a standalone visual text layer and renders current chapter text only inside the progress bar;
+  - progress fill now uses a clipped RGBA `geq` alpha layer driven by frame timestamp `T/duration`, overlaid inside the track bounds.
+- Verification:
+  - `python -m py_compile src\roughcut\hyperframes.py src\roughcut\media\render.py tests\test_hyperframes_options.py tests\test_render_frame_rate_unification.py` passed;
+  - `PYTHONPATH=src python -m pytest -q tests\test_hyperframes_options.py tests\test_render_frame_rate_unification.py -k "hyperframes or progress or chapter"` passed with 9 tests;
+  - FFmpeg smoke render `output/progress-inline-chapter-smoke/progress_smoke.mp4` passed, with frame checks at `2s` and `10s` showing dynamic fill and short in-bar chapter titles.
+
 Current do-not-reopen decisions for this objective:
 
 - Qwen3-ASR remains the authoritative ASR/alignment source. Do not switch to FunASR or faster-whisper as a workaround.
@@ -6595,3 +6612,73 @@ The remaining content in this file is historical context from previous optimizat
     - `PYTHONPATH=src python -m pytest tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_bilibili_uses_parenting_default_category_when_missing tests\test_publication_social_auto_upload.py::test_build_social_auto_upload_upload_command_for_xiaohongshu_group_chat_and_original tests\test_publication_social_auto_upload.py::test_bilibili_social_auto_upload_verifies_backend_archive_before_scheduled_success tests\test_publication_social_auto_upload.py::test_bilibili_social_auto_upload_backend_mismatch_needs_human tests\test_publication.py::test_build_request_payload_uses_shared_default_declaration_for_xiaohongshu -q`（`5 passed`）
     - `E:\WorkSpace\_eval\social-auto-upload\.venv\Scripts\python.exe -m py_compile sau_cli.py`
     - `E:\WorkSpace\_eval\social-auto-upload\.venv\Scripts\python.exe -m unittest tests.test_sau_bilibili_cli.BilibiliCliTests.test_build_parser_accepts_bilibili_verify_video tests.test_sau_bilibili_cli.BilibiliCliTests.test_verify_bilibili_archive_payload_accepts_matching_schedule_and_tid tests.test_sau_bilibili_cli.BilibiliCliTests.test_verify_bilibili_archive_payload_reports_tid_mismatch`（`3 passed`）
+
+- 2026-06-20 珍妮斯 S02E03 `羽毛魔杖` 真实剪辑发布收口：
+  - 真实任务来源：`data/remix_production_tasks/jenny_baby_bluey_pending.json`。
+  - 成片：`output/bluey-remix-production-jenny-baby-s02e03-20260620/s02e03_羽毛魔杖/bluey_s02e03_羽毛魔杖_parenting_remix.mp4`，`1920x1080`，`244.893s`；QA `passed=true`，唯一 warning 是完整脚本导致时长超过 2-3 分钟目标。
+  - 发布 job：`7d9cbd74-75e4-44cc-abf2-411b3a613d12`。
+  - 四平台当前有效状态：
+    - 抖音 `f07c57e603944ec6860172a62daa7183`：`published`。
+    - 快手 `10931b5a8802464f97b6ccb16f42bfa7`：`published`。
+    - 小红书 `0eca1f59686d49afac1d416106261f20`：`scheduled_pending`，自动顺延到 `2026-06-21 10:00 Asia/Shanghai`。
+    - B站 `2d8f1ab2d42047aaadbec9a1c52325e2`：`scheduled_pending`，自动顺延到 `2026-06-21 10:00 Asia/Shanghai`。
+  - 本轮新增根因修复：小红书封面恢复为 portrait `3:4`；平台级 `declaration` 覆盖被保留；显式 cover slot 可从 `cover_matrix` 回填路径；快手不再把跨平台声明字符串传给不稳定的作者声明弹窗，最终成功命令已确认 `no_declaration`。
+  - 验证：RoughCut publication cover/declaration 回归 `4 passed`；social-auto-upload 四平台命令构建回归 `4 passed`；快手真实重试已回写 `published`。
+
+- 2026-06-20 珍妮斯 S02E03 封面与排期门禁更正：
+  - 症状：16:9 封面是无标题参考帧，不符合 Codex 完整封面要求；3:4 imagegen 封面把原片角色重绘成陌生角色；自动发布仍通过 `ignore_publish_ready_gate` 放行；抖音/快手未按客群活跃时间定时。
+  - 第一坏层：封面质量 gate、发布计划 gate、账号日程策略。
+  - 根因：Codex full-cover 标题合同失败/不可用可降级为 warning；发布恢复补偿过宽，能绕过封面硬失败；缺省排期使用当前时间而不是平台活跃窗口。
+  - 修复：
+    - `codex_full_cover` 的标题失败、标题校验缺失或不可用现在都是 blocking。
+    - `ignore_publish_ready_gate` 不能绕过封面/Codex/imagegen/位图类 blocking reason。
+    - 默认平台活跃窗口已接入：抖音 `20:30`、快手 `20:00`、小红书 `21:00`、B站 `18:00`、视频号 `20:00`。
+    - S02E03 三张封面已用原片参考帧锚定重制并同步 output/runtime；本地质量评估三张均 `publish_ready=True` 且无 warning。
+  - 残余事实：抖音/快手已经发布，B站/小红书已经定时，平台侧已提交的旧封面不会因本地文件替换自动变化；需要平台侧编辑或取消重发才能替换已提交稿件封面。
+  - 验证：封面质量全组与关键发布/排期回归 `22 passed`；相关文件 `py_compile` 通过。
+
+- 2026-06-20 发布前封面自愈与任务进度显示修复：
+  - 症状 1：剪辑制片列表中 `bluey_s02e03_羽毛魔杖_parenting_remix.mp4`、`bluey_s02e02_仓储超市_parenting_remix.mp4` 等已发布二创发布任务显示 `0%`。
+  - 第一坏层：`src/roughcut/api/jobs.py::_calculate_job_progress_percent`。智能发布 job 是 `workflow_template=intelligent_publish`、`status=done`，但没有剪辑 pipeline steps，旧逻辑先判断 `steps=[]` 并直接返回 `0`，没有先处理终态。
+  - 修复：终态 `done/published` job 现在直接返回 `100`；`/jobs/remix-production/tasks` 附加 job 状态时同时输出 `progress_percent` 和 `job_progress_percent`，避免前端字段错位回落为 0。
+  - 实时回读：`GET /api/v1/jobs` 中 S02E03/S02E02 智能发布 job 已返回 `progress_percent=100`。
+  - 症状 2：封面质量门已能阻断不合格封面，但正式发布入口不会自动把封面失败交回重生流程。
+  - 第一坏层：`src/roughcut/api/intelligent_copy.py::publish_intelligent_folder`。发布入口只构建计划并提交/阻断，没有在封面/Codex/imagegen/位图类硬阻断后调用已存在的 `rerender_existing_intelligent_copy_cover_groups(...)`。
+  - 修复：正式一键发布现在发现封面类阻断后，会按配置自动执行封面矩阵重生、重新加载 `platform-packaging.json`、重建发布计划；若重生后计划 ready，则继续正式发布；若重试耗尽或异常，则返回 `cover_auto_heal.status=needs_human/failed` 并保持 blocked，不提交平台。
+  - 新配置：`publication_cover_auto_heal_enabled=true`，`publication_cover_auto_heal_max_attempts=1`。
+  - 验证：`PYTHONPATH=src python -m pytest tests\test_remix_production_api.py tests\test_intelligent_copy_publication_api.py tests\test_intelligent_copy_cover_quality.py tests\test_publication.py::test_publication_plan_does_not_ignore_cover_hard_gate_for_recovery_override tests\test_publication.py::test_publication_schedule_policy_defaults_to_platform_audience_active_window tests\test_publication.py::test_submit_publication_attempts_auto_defers_second_account_video_to_next_day -q`（`33 passed`）。
+
+- 2026-06-20 任务列表正式一键发布边界更正：
+  - 用户确认的产品边界：剪辑任务只负责产生成片；“正式的一键发布”按钮必须负责自动生成发布物料、跑发布质量门、必要时封面自愈、通过后自动提交发布。
+  - 症状：剪辑制片列表的一键发布入口依赖既有 `platform_packaging`，缺物料时前端会禁用/阻断，后端 `POST /jobs/{job_id}/publication/publish` 也只消费已有物料，不会触发 `smart-copy` 物料生成。
+  - 第一坏层：任务队列的一键发布 API 边界，而不是剪辑链路；智能发布文件夹入口已有生成/发布能力，但 job 入口没有把缺物料状态升级为生成物料动作。
+  - 根因：系统把“发布前预览计划缺物料”和“正式发布动作生成物料”混成同一个准入状态；前端把 blocked plan 当成不能提交，后端也没有在发布前补齐物料。
+  - 修复：
+    - `publish_job_to_bound_platforms(...)` 现在发现包装物料缺失或不可用时，先对成片输出目录调用 `generate_intelligent_copy(...)` 生成 `smart-copy` 和 `platform-packaging.json`。
+    - 物料生成后重新加载发布包装、重建平台计划、继续执行已有封面硬门禁/封面自愈/客群活跃时间排期/账号每日限额顺延/提交发布链路。
+    - `_load_publication_inputs(...)` 增加从成片目录 `smart-copy/_meta/platform-packaging.json` 回读的兜底，避免只依赖数据库 artifact。
+    - 前端任务发布面板按钮改为 `生成物料并发布`；缺物料或 blocked plan 不再阻断正式动作提交，只有人工接管态和提交中态禁用。
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests\test_intelligent_copy_publication_api.py tests\test_remix_production_api.py tests\test_intelligent_copy_cover_quality.py tests\test_publication.py::test_publication_plan_does_not_ignore_cover_hard_gate_for_recovery_override tests\test_publication.py::test_publication_schedule_policy_defaults_to_platform_audience_active_window tests\test_publication.py::test_submit_publication_attempts_auto_defers_second_account_video_to_next_day -q`（`34 passed`）。
+    - `pnpm --dir frontend exec vitest run src\features\jobs\JobPublicationPanel.manualHandoff.test.tsx`（`6 passed`）。
+    - `pnpm --dir frontend run typecheck` 通过。
+
+- 2026-06-20 珍妮斯 S02E03 使用 RC 原生任务路径重跑并重新正式发布：
+  - 用户要求：不要手工找素材/脚本绕过链路，必须使用 RC 原生任务路径重跑“刚才那个任务”，并重新正确发布。
+  - 真实 remix production job：`80a24a43-a235-4817-a923-0ab778d50803`，来源任务 `season=2/episode=3`。
+  - 成片：`/app/data/output/script-footage-remix-production/bluey_script_footage_remix/s02e03/s02e03_羽毛魔杖/bluey_s02e03_羽毛魔杖_parenting_remix.mp4`，`1920x1080`，`242.858s`；QA `status=warn` 但 `passed=true`，batch `gate_passed=true`。
+  - 正式一键发布入口：`POST /api/v1/jobs/80a24a43-a235-4817-a923-0ab778d50803/publication/publish`，自动生成 `smart-copy` 物料、通过封面质量门/自愈后提交四个平台。
+  - 四个平台最终状态均为 `scheduled_pending`：
+    - 快手 attempt `724af9055ab246cdb9d698228c0bd9c3`：`2026-06-21 20:00 Asia/Shanghai`。
+    - 抖音 attempt `67d29b7baf494286a589aeb9265345af`：`2026-06-21 20:30 Asia/Shanghai`。
+    - B站 attempt `6271752354234766831b2fe2c8306169`：`2026-06-22 19:30 Asia/Shanghai`，`provider_task_id=bilibili:116778449569067`。
+    - 小红书 attempt `59cd3ba9521043d18487f5fa9eba3d46`：`2026-06-22 21:00 Asia/Shanghai`。
+  - 本轮新增根因修复：
+    - RC job 命令缺少生产级 TTS 超时，导致完整 S02E03 TTS 约 10 段时被默认等待预算杀掉；`_build_remix_production_job_command` 现在显式传 `--tts-timeout-sec 3600.0`。
+    - job 一键发布物料目录派生优先使用 Windows `source_path`，容器里 `Path("F:\\...").parent` 退化为 `.`，导致物料生成报 `Is a directory: '.'`；现在优先使用 `render_output.output_path/job.output_dir`。
+    - job 发布入口没有识别失败的 `platform-packaging.json`，且未合并创作者卡片里的 social-auto-upload 绑定；现在失败包装会重生，job creator card 绑定会合并进发布凭据。
+    - job 一键发布未接入封面自愈；现在封面/Codex/imagegen/位图硬阻断会触发重生、重跑质量门、通过后恢复发布计划。
+    - `social_auto_upload` 对账原本是空操作，worker/watchfiles 重启会把 `claimed/processing` attempt 永久卡住；现在过期 lease 会释放僵尸状态并重新排队。本次 B站/抖音/快手被 watch reload 打断后，已用 RC 的 `run_publication_worker_once` 一次性原生 worker 执行完成。
+  - 验证：
+    - `PYTHONPATH=src python -m pytest tests\test_intelligent_copy_publication_api.py tests\test_remix_production_api.py tests\test_publication_social_auto_upload.py -q`（`43 passed`）。
+    - `python -m py_compile src\roughcut\api\jobs.py src\roughcut\publication.py` 通过。

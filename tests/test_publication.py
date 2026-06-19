@@ -5241,6 +5241,58 @@ def test_publication_plan_blocks_unready_smart_copy_platform(tmp_path):
     assert plan["targets"] == []
 
 
+def test_publication_plan_does_not_ignore_cover_hard_gate_for_recovery_override(tmp_path):
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    cover_path = tmp_path / "cover.jpg"
+    cover_path.write_bytes(b"cover")
+
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        platform_options={
+            "douyin": {
+                "platform_specific_overrides": {
+                    "ignore_publish_ready_gate": True,
+                }
+            }
+        },
+        platform_packaging={
+            "platforms": {
+                "douyin": {
+                    "titles": ["标题"],
+                    "description": "简介",
+                    "tags": ["tag"],
+                    "cover_path": str(cover_path),
+                    "publish_ready": False,
+                    "blocking_reasons": ["完整封面位图标题不满足硬合同：位图内未发现任何明确标题文字"],
+                }
+            },
+        },
+        creator_profile={
+            "creator_profile": {
+                "publishing": {
+                    "platform_credentials": [
+                        {
+                            "platform": "douyin",
+                            "account_label": "主号",
+                            "credential_ref": "chrome-profile:main",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "browser_agent",
+                        }
+                    ]
+                }
+            }
+        },
+        requested_platforms=["douyin"],
+    )
+
+    assert plan["publish_ready"] is False
+    assert plan["targets"] == []
+    assert any("完整封面位图标题不满足硬合同" in reason for reason in plan["blocked_reasons"])
+
+
 def test_publication_plan_ignores_root_publish_ready_false_when_requested_platform_is_ready(tmp_path):
     media_path = tmp_path / "output.mp4"
     media_path.write_bytes(b"video")
@@ -7172,6 +7224,7 @@ async def test_submit_publication_attempts_auto_defers_second_account_video_to_n
         lambda: SimpleNamespace(
             publication_daily_account_limit=1,
             publication_auto_schedule_local_time="10:00",
+            publication_platform_active_schedule_times="bilibili=10:00",
             publication_social_auto_upload_platforms="bilibili,wechat-channels",
         ),
     )
@@ -7243,17 +7296,17 @@ async def test_submit_publication_attempts_auto_defers_second_account_video_to_n
     finally:
         await engine.dispose()
 
-    assert first["created_attempts"][0]["request_payload"]["scheduled_publish_at"] is None
+    assert first["created_attempts"][0]["request_payload"]["scheduled_publish_at"] == "2026-06-20T10:00:00+08:00"
     assert len(second["created_attempts"]) == 1
     created = second["created_attempts"][0]
-    assert created["request_payload"]["scheduled_publish_at"] == "2026-06-20T10:00:00+08:00"
-    assert created["scheduled_at"] == "2026-06-20T02:00:00+00:00"
+    assert created["request_payload"]["scheduled_publish_at"] == "2026-06-21T10:00:00+08:00"
+    assert created["scheduled_at"] == "2026-06-21T02:00:00+00:00"
     assert created["request_payload"]["metadata"]["publication_schedule_policy"]["reason"] == "account_daily_limit_reached"
     assert second["auto_deferred_targets"] == [
         {
             "platform": "bilibili",
             "account_label": "珍妮斯baby · Chrome",
-            "scheduled_publish_at": "2026-06-20T10:00:00+08:00",
+            "scheduled_publish_at": "2026-06-21T10:00:00+08:00",
             "reason": "account_daily_limit_reached",
         }
     ]
@@ -7268,6 +7321,7 @@ def test_publication_schedule_policy_defers_bilibili_when_schedule_too_close(mon
         lambda: SimpleNamespace(
             publication_daily_account_limit=1,
             publication_auto_schedule_local_time="10:00",
+            publication_platform_active_schedule_times="bilibili=10:00",
         ),
     )
     target = {
@@ -7286,6 +7340,34 @@ def test_publication_schedule_policy_defers_bilibili_when_schedule_too_close(mon
     assert updated["scheduled_publish_at"] == "2026-06-20T19:30:00+08:00"
     assert updated["publication_schedule_policy"]["reason"] == "platform_min_schedule_lead_time"
     assert updated["publication_schedule_policy"]["min_schedule_lead_seconds"] == 7200
+
+
+def test_publication_schedule_policy_defaults_to_platform_audience_active_window(monkeypatch):
+    fixed_now = datetime(2026, 6, 19, 1, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        publication,
+        "get_settings",
+        lambda: SimpleNamespace(
+            publication_daily_account_limit=1,
+            publication_auto_schedule_local_time="10:00",
+            publication_platform_active_schedule_times="douyin=20:30,kuaishou=20:00",
+        ),
+    )
+    target = {
+        "platform": "douyin",
+        "account_label": "珍妮斯baby · 抖音",
+    }
+
+    updated = publication._apply_publication_account_daily_schedule_policy(
+        target=target,
+        history_attempts=[],
+        newly_planned_targets=[],
+        now=fixed_now,
+    )
+
+    assert updated["scheduled_publish_at"] == "2026-06-19T20:30:00+08:00"
+    assert updated["publication_schedule_policy"]["reason"] == "audience_active_window"
+    assert updated["publication_schedule_policy"]["audience_active_local_time"] == "20:30"
 
 
 @pytest.mark.asyncio

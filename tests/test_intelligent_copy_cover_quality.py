@@ -402,8 +402,8 @@ def test_cover_hard_contract_blocks_full_bitmap_cover_when_title_verification_is
 
     result = quality.assess_cover_publish_readiness(_metadata(output), request, output)
 
-    assert result["publish_ready"] is True
-    assert any("完整封面位图标题校验未完成" in warning for warning in result["warnings"])
+    assert result["publish_ready"] is False
+    assert any("完整封面位图标题校验未完成" in reason for reason in result["blocking_reasons"])
 
 
 def test_cover_hard_contract_does_not_treat_verification_unavailable_as_title_drift(tmp_path, monkeypatch) -> None:
@@ -430,12 +430,12 @@ def test_cover_hard_contract_does_not_treat_verification_unavailable_as_title_dr
 
     result = quality.assess_cover_publish_readiness(_metadata(output), request, output)
 
-    assert result["publish_ready"] is True
+    assert result["publish_ready"] is False
     assert not any("未稳定锁定" in reason for reason in result["blocking_reasons"])
-    assert any("bitmap_title_contract_verification_unavailable" in warning for warning in result["warnings"])
+    assert any("完整封面位图标题校验未产出有效结论" in reason for reason in result["blocking_reasons"])
 
 
-def test_cover_hard_contract_downgrades_bitmap_title_drift_to_warning_for_codex_full_cover(tmp_path, monkeypatch) -> None:
+def test_cover_hard_contract_blocks_bitmap_title_drift_for_codex_full_cover(tmp_path, monkeypatch) -> None:
     output = tmp_path / "cover.jpg"
     output.write_bytes(b"generated")
     request = _request(output)
@@ -458,6 +458,5 @@ def test_cover_hard_contract_downgrades_bitmap_title_drift_to_warning_for_codex_
 
     result = quality.assess_cover_publish_readiness(_metadata(output), request, output)
 
-    assert result["publish_ready"] is True
-    assert result["blocking_reasons"] == []
-    assert any("完整封面位图标题不满足硬合同" in warning for warning in result["warnings"])
+    assert result["publish_ready"] is False
+    assert any("完整封面位图标题不满足硬合同" in reason for reason in result["blocking_reasons"])

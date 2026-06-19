@@ -6,7 +6,6 @@ import {
   openManualHandoffTarget,
   publicationPlanExecutorPreflightMessages,
   publicationPlanHasManualHandoffReady,
-  publicationPlanIsReady,
   publicationPlanManualHandoffTargets,
   publicationPlanStatusKind,
 } from "../intelligentCopy/useIntelligentCopyWorkspace";
@@ -146,7 +145,6 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
   const manualHandoffTargets = publicationPlanManualHandoffTargets(publicationPlan.data);
   const manualHandoffReady = publicationPlanHasManualHandoffReady(publicationPlan.data);
   const publicationPlanStatus = publicationPlanStatusKind(publicationPlan.data);
-  const publicationPlanReady = publicationPlanIsReady(publicationPlan.data);
   const publicationExecutorPreflightMessages = publicationPlanExecutorPreflightMessages(publicationPlan.data);
 
   useEffect(() => {
@@ -378,10 +376,10 @@ export function JobPublicationPanel({ job, onCancel }: JobPublicationPanelProps)
         <button
           className="button primary"
           type="button"
-          disabled={!publicationPlanReady || publishMutation.isPending}
+          disabled={publicationPlanStatus === "manual_handoff" || publishMutation.isPending}
           onClick={() => publishMutation.mutate()}
         >
-          {publishMutation.isPending ? "提交中..." : "发布"}
+          {publishMutation.isPending ? "提交中..." : "生成物料并发布"}
         </button>
       </div>
     </section>

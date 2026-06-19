@@ -457,11 +457,8 @@ def _chapter_card_elements(
     elements: list[dict[str, Any]] = []
     for index, segment in enumerate([dict(item) for item in chapter_segments if isinstance(item, dict)][:8]):
         start = max(0.0, float(segment.get("start_sec", segment.get("start_time", 0.0)) or 0.0))
-        visible_end = min(start + 2.8, max(start + 0.01, float(duration_sec or start + 2.8)))
-        end = min(
-            max(start + 1.4, float(segment.get("end_sec", segment.get("end_time", visible_end)) or visible_end)),
-            visible_end,
-        )
+        segment_end = max(start + 1.4, float(segment.get("end_sec", segment.get("end_time", start + 2.8)) or start + 2.8))
+        end = min(segment_end, max(start + 0.01, float(duration_sec or segment_end)))
         title = str(segment.get("title") or segment.get("text") or "").strip()[:18]
         if not title:
             continue
@@ -533,7 +530,7 @@ def _chapter_segments_from_subtitles(
         ).strip().lower()
         if not role:
             continue
-        title = _chapter_title(role=role, summary=subtitle_display_rule_text(item))
+        title = _chapter_title(role=role)
         if not groups or str(groups[-1].get("role") or "") != role or start - float(groups[-1].get("end_sec", 0.0) or 0.0) > 3.2:
             groups.append(
                 {
@@ -573,7 +570,7 @@ def _chapter_segments_from_section_choreography(
                 "start_sec": round(start, 3),
                 "end_sec": round(end, 3),
                 "role": role,
-                "title": _chapter_title(role=role, summary=str(section.get("summary") or section.get("creative_rationale") or "")),
+                "title": _chapter_title(role=role),
                 "source": "section_choreography",
             }
         )
@@ -597,7 +594,7 @@ def _chapter_segments_from_focus_cards(
                 "start_sec": round(start, 3),
                 "end_sec": round(end, 3),
                 "role": role,
-                "title": str(card.get("title") or card.get("text") or _chapter_title(role=role, summary="")).strip()[:18],
+                "title": _chapter_title(role=role),
                 "source": "focus_chapter_cards",
             }
         )
@@ -619,7 +616,7 @@ def _normalize_chapter_segments(
             end = min(max(end, start), duration)
         if end - start < 0.55:
             continue
-        title = str(raw.get("title") or _chapter_title(role=str(raw.get("role") or ""), summary=str(raw.get("summary") or ""))).strip()
+        title = _chapter_title(role=str(raw.get("role") or ""))
         if not title:
             continue
         if normalized and start < float(normalized[-1]["end_sec"]):
@@ -630,7 +627,7 @@ def _normalize_chapter_segments(
             {
                 "start_sec": round(start, 3),
                 "end_sec": round(end, 3),
-                "title": title[:18],
+                "title": title,
                 "role": str(raw.get("role") or "").strip().lower(),
                 "source": str(raw.get("source") or ""),
             }
@@ -638,7 +635,7 @@ def _normalize_chapter_segments(
     return normalized
 
 
-def _chapter_title(*, role: str, summary: str) -> str:
+def _chapter_title(*, role: str) -> str:
     normalized_role = str(role or "").strip().lower()
     labels = {
         "hook": "开场",
@@ -649,14 +646,14 @@ def _chapter_title(*, role: str, summary: str) -> str:
         "body": "展示",
         "focus": "重点",
         "action": "演示",
-        "cta": "收尾",
-        "cta_protect": "收尾",
+        "demo": "演示",
+        "showcase": "展示",
+        "summary": "总结",
+        "conclusion": "总结",
+        "cta": "总结",
+        "cta_protect": "总结",
     }
-    label = labels.get(normalized_role, "章节")
-    compact_summary = "".join(str(summary or "").split())[:8]
-    if compact_summary and compact_summary not in label:
-        return f"{label} {compact_summary}"[:18]
-    return label
+    return labels.get(normalized_role, "章节")
 
 
 def _normalize_element(index: int, item: dict[str, Any]) -> dict[str, Any]:

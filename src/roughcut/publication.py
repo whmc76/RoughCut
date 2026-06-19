@@ -74,6 +74,7 @@ BROWSER_AGENT_EXECUTION_MODE = "browser_agent"
 PUBLISHABLE_CREDENTIAL_STATUSES = {"logged_in", "available", "verified"}
 PUBLICATION_ACTIVE_STATUSES = {"queued", "claimed", "submitted", "processing", "scheduled_pending"}
 PUBLICATION_RECONCILE_STATUSES = {"submitted", "processing", "scheduled_pending"}
+PUBLICATION_STALE_SOCIAL_AUTO_UPLOAD_RECOVERY_STATUSES = {"claimed", "submitted", "processing"}
 PUBLICATION_TERMINAL_STATUSES = {"published", "draft_created", "failed", "needs_human", "cancelled"}
 PUBLICATION_SUCCESS_STATUSES = {"published", "draft_created", "scheduled_pending"}
 PUBLICATION_STALE_POLL_FAILURE_GRACE_SECONDS = 15 * 60
@@ -99,6 +100,13 @@ PUBLICATION_RECOVERY_ADAPTIVE_HISTORY_LIMIT = 80
 PUBLICATION_RECOVERY_REPEAT_LIMIT = 3
 PUBLICATION_DEFAULT_DAILY_ACCOUNT_LIMIT = 1
 PUBLICATION_DEFAULT_AUTO_SCHEDULE_LOCAL_TIME = "10:00"
+PUBLICATION_DEFAULT_PLATFORM_ACTIVE_SCHEDULE_TIMES = {
+    "douyin": "20:30",
+    "kuaishou": "20:00",
+    "xiaohongshu": "21:00",
+    "bilibili": "18:00",
+    "wechat-channels": "20:00",
+}
 PUBLICATION_PLATFORM_MIN_SCHEDULE_LEAD_SECONDS = {
     "bilibili": 2 * 60 * 60,
 }
@@ -166,6 +174,14 @@ _YOUTUBE_CATEGORY_PLACEHOLDER_VALUES = {
     "发送反馈",
     "内容",
 }
+
+_NON_OVERRIDABLE_PUBLICATION_PACKAGING_BLOCK_TOKENS = (
+    "封面",
+    "cover",
+    "位图",
+    "imagegen",
+    "codex",
+)
 
 
 def _normalize_publication_adapter(value: Any) -> str:
@@ -295,6 +311,16 @@ _PUBLICATION_BROWSER_ALIASES = {
 def normalize_publication_browser_name(value: Any) -> str:
     normalized = str(value or "").strip().lower().replace(" ", "-").replace("_", "-")
     return _PUBLICATION_BROWSER_ALIASES.get(normalized, normalized)
+
+
+def _publication_packaging_block_reasons_are_overridable(reasons: list[str]) -> bool:
+    for reason in reasons:
+        normalized = str(reason or "").strip().lower()
+        if not normalized:
+            continue
+        if any(token in normalized for token in _NON_OVERRIDABLE_PUBLICATION_PACKAGING_BLOCK_TOKENS):
+            return False
+    return True
 
 
 def _normalize_publication_browser_path(value: Any) -> str | None:
@@ -1146,7 +1172,7 @@ def build_publication_plan(
                 block_reasons = ["文案未通过发布预检。"]
             normalized_block_reasons = [str(item).strip() for item in block_reasons if str(item).strip()]
             packaging_blocked_count += 1
-            if ignore_publish_ready_gate:
+            if ignore_publish_ready_gate and _publication_packaging_block_reasons_are_overridable(normalized_block_reasons):
                 warnings.append(
                     f"{platform_label(platform)} 已触发草稿恢复补偿，尽管文案未就绪（{'; '.join(normalized_block_reasons)}）仍继续执行。"
                 )
@@ -1364,17 +1390,58 @@ def _publication_daily_account_limit() -> int:
     return max(1, value)
 
 
-def _publication_auto_schedule_local_time() -> tuple[int, int]:
-    raw = str(
-        getattr(get_settings(), "publication_auto_schedule_local_time", PUBLICATION_DEFAULT_AUTO_SCHEDULE_LOCAL_TIME)
-        or PUBLICATION_DEFAULT_AUTO_SCHEDULE_LOCAL_TIME
-    ).strip()
+def _parse_publication_local_time(value: Any, *, fallback: str = PUBLICATION_DEFAULT_AUTO_SCHEDULE_LOCAL_TIME) -> tuple[int, int]:
+    raw = str(value or fallback).strip()
     match = re.match(r"^(\d{1,2}):(\d{2})$", raw)
     if not match:
         return (10, 0)
     hour = max(0, min(23, int(match.group(1))))
     minute = max(0, min(59, int(match.group(2))))
     return (hour, minute)
+
+
+def _publication_auto_schedule_local_time() -> tuple[int, int]:
+    raw = str(
+        getattr(get_settings(), "publication_auto_schedule_local_time", PUBLICATION_DEFAULT_AUTO_SCHEDULE_LOCAL_TIME)
+        or PUBLICATION_DEFAULT_AUTO_SCHEDULE_LOCAL_TIME
+    ).strip()
+    return _parse_publication_local_time(raw)
+
+
+def _publication_platform_active_schedule_times() -> dict[str, str]:
+    raw = str(getattr(get_settings(), "publication_platform_active_schedule_times", "") or "").strip()
+    result = dict(PUBLICATION_DEFAULT_PLATFORM_ACTIVE_SCHEDULE_TIMES)
+    if not raw:
+        return result
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, dict):
+        items = parsed.items()
+    else:
+        items = []
+        for part in raw.split(","):
+            if "=" in part:
+                key, value = part.split("=", 1)
+            elif ":" in part and re.match(r"^[A-Za-z0-9_-]+\s*:\s*\d{1,2}:\d{2}$", part.strip()):
+                key, value = part.split(":", 1)
+            else:
+                continue
+            items.append((key, value))
+    for key, value in items:
+        platform = normalize_publication_platform(key)
+        time_text = str(value or "").strip()
+        if platform and re.match(r"^\d{1,2}:\d{2}$", time_text):
+            result[platform] = time_text
+    return result
+
+
+def _publication_platform_active_schedule_local_time(platform: Any) -> tuple[int, int]:
+    normalized = normalize_publication_platform(platform)
+    raw = _publication_platform_active_schedule_times().get(normalized, "")
+    fallback_hour, fallback_minute = _publication_auto_schedule_local_time()
+    return _parse_publication_local_time(raw, fallback=f"{fallback_hour:02d}:{fallback_minute:02d}")
 
 
 def _publication_platform_min_schedule_lead(platform: Any) -> timedelta:
@@ -1483,32 +1550,36 @@ def _apply_publication_account_daily_schedule_policy(
     local_now = (now or _utc_now()).astimezone(DEFAULT_PUBLICATION_TIMEZONE)
     requested_schedule = _parse_datetime(target.get("scheduled_publish_at"))
     requested_local = requested_schedule.astimezone(DEFAULT_PUBLICATION_TIMEZONE) if requested_schedule is not None else None
-    candidate_local = requested_local or local_now
+    default_hour, default_minute = _publication_platform_active_schedule_local_time(platform)
+    candidate_local = requested_local or local_now.replace(
+        hour=default_hour,
+        minute=default_minute,
+        second=0,
+        microsecond=0,
+    )
     original_date_key = candidate_local.date().isoformat()
     min_schedule_local = local_now + _publication_platform_min_schedule_lead(platform)
-    too_close_for_platform = requested_local is not None and requested_local < min_schedule_local
-    if occupied_dates.get(original_date_key, 0) < daily_limit and not too_close_for_platform:
-        return dict(target)
+    too_close_for_platform = candidate_local < min_schedule_local
 
     scheduled_hour, scheduled_minute = (
         (requested_local.hour, requested_local.minute)
         if requested_local is not None
-        else _publication_auto_schedule_local_time()
+        else (default_hour, default_minute)
     )
     deferred_local = candidate_local
-    while (
-        occupied_dates.get(deferred_local.date().isoformat(), 0) >= daily_limit
-        or (
-            requested_local is not None
-            and deferred_local.replace(
-                hour=scheduled_hour,
-                minute=scheduled_minute,
-                second=0,
-                microsecond=0,
-            )
-            < min_schedule_local
+    deferred_for_daily_limit = False
+    while True:
+        date_occupied = occupied_dates.get(deferred_local.date().isoformat(), 0) >= daily_limit
+        slot_candidate = deferred_local.replace(
+            hour=scheduled_hour,
+            minute=scheduled_minute,
+            second=0,
+            microsecond=0,
         )
-    ):
+        slot_too_close = slot_candidate < min_schedule_local
+        if not date_occupied and not slot_too_close:
+            break
+        deferred_for_daily_limit = deferred_for_daily_limit or date_occupied
         deferred_local = deferred_local + timedelta(days=1)
     deferred_local = deferred_local.replace(
         hour=scheduled_hour,
@@ -1520,24 +1591,46 @@ def _apply_publication_account_daily_schedule_policy(
     scheduled_publish_at = _publication_schedule_slot_iso(deferred_local)
     updated = dict(target)
     updated["scheduled_publish_at"] = scheduled_publish_at
+    if occupied_dates.get(original_date_key, 0) >= daily_limit or deferred_for_daily_limit:
+        reason = "account_daily_limit_reached"
+        mode = "account_daily_limit_auto_defer"
+    elif too_close_for_platform:
+        reason = "platform_min_schedule_lead_time" if requested_local is not None else "audience_active_window_elapsed"
+        mode = "audience_active_window_auto_defer"
+    else:
+        reason = "audience_active_window"
+        mode = "audience_active_window_schedule"
     updated["publication_schedule_policy"] = {
         "schema": "roughcut.publication_schedule_policy.v1",
-        "mode": "account_daily_limit_auto_defer",
+        "mode": mode,
         "daily_limit": daily_limit,
         "platform": platform,
         "account_key": account_key[1],
         "original_publish_date": original_date_key,
         "scheduled_publish_date": deferred_local.date().isoformat(),
         "scheduled_publish_at": scheduled_publish_at,
-        "reason": (
-            "account_daily_limit_reached"
-            if occupied_dates.get(original_date_key, 0) >= daily_limit
-            else "platform_min_schedule_lead_time"
-        ),
+        "reason": reason,
+        "audience_active_local_time": f"{scheduled_hour:02d}:{scheduled_minute:02d}",
         "min_schedule_lead_seconds": int(_publication_platform_min_schedule_lead(platform).total_seconds()),
         "occupied_dates": dict(sorted(occupied_dates.items())),
     }
     return updated
+
+
+def _publication_schedule_policy_operator_suffix(policy: dict[str, Any] | None, scheduled_publish_at: Any) -> str:
+    if not isinstance(policy, dict):
+        return ""
+    scheduled_text = str(scheduled_publish_at or policy.get("scheduled_publish_at") or "").strip()
+    reason = str(policy.get("reason") or "").strip()
+    if reason == "account_daily_limit_reached":
+        return f" 已按账号每日发布上限自动顺延到 {scheduled_text}。"
+    if reason == "platform_min_schedule_lead_time":
+        return f" 已按平台最小提前量顺延到 {scheduled_text}。"
+    if reason == "audience_active_window_elapsed":
+        return f" 已按客群活跃时间顺延到 {scheduled_text}。"
+    if reason == "audience_active_window":
+        return f" 已按客群活跃时间定时到 {scheduled_text}。"
+    return f" 已定时到 {scheduled_text}。"
 
 
 async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any]) -> dict[str, Any]:
@@ -1845,7 +1938,8 @@ async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any
             )
             if schedule_policy:
                 attempt.operator_summary = (
-                    f"{attempt.operator_summary} 已按账号每日发布上限自动顺延到 {target.get('scheduled_publish_at')}。"
+                    f"{attempt.operator_summary}"
+                    f"{_publication_schedule_policy_operator_suffix(schedule_policy, target.get('scheduled_publish_at'))}"
                 )
             attempt.run_status = "retry_scheduled" if is_recovery else attempt.run_status
             if is_recovery:
@@ -1900,7 +1994,8 @@ async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any
             )
             if schedule_policy:
                 attempt.operator_summary = (
-                    f"{attempt.operator_summary} 已按账号每日发布上限自动顺延到 {target.get('scheduled_publish_at')}。"
+                    f"{attempt.operator_summary}"
+                    f"{_publication_schedule_policy_operator_suffix(schedule_policy, target.get('scheduled_publish_at'))}"
                 )
             session.add(attempt)
         run = PublicationAttemptRun(
@@ -2749,12 +2844,69 @@ async def reconcile_publication_attempt_with_social_auto_upload(
     session: AsyncSession,
     attempt: PublicationAttempt,
 ) -> dict[str, Any]:
+    run = await _latest_publication_run(session, attempt.id)
+    recovered = await _release_stale_social_auto_upload_attempt_if_needed(
+        session,
+        attempt,
+        run=run,
+    )
+    if recovered:
+        return {
+            "attempt_id": attempt.id,
+            "status": attempt.status,
+            "provider_task_id": attempt.provider_task_id,
+            "recovered": True,
+        }
     await session.flush()
     return {
         "attempt_id": attempt.id,
         "status": attempt.status,
         "provider_task_id": attempt.provider_task_id,
     }
+
+
+async def _release_stale_social_auto_upload_attempt_if_needed(
+    session: AsyncSession,
+    attempt: PublicationAttempt,
+    *,
+    run: PublicationAttemptRun | None = None,
+    now: datetime | None = None,
+    force: bool = False,
+) -> bool:
+    if str(getattr(attempt, "adapter", "") or "").strip() != SOCIAL_AUTO_UPLOAD_ADAPTER:
+        return False
+    status = str(getattr(attempt, "status", "") or "").strip()
+    if status not in PUBLICATION_STALE_SOCIAL_AUTO_UPLOAD_RECOVERY_STATUSES:
+        return False
+    if run is None:
+        run = await _latest_publication_run(session, attempt.id)
+    if run is None:
+        return False
+    provider_task_id = str(getattr(attempt, "provider_task_id", "") or "").strip()
+    if provider_task_id and provider_task_id != str(attempt.id):
+        return False
+    reference = now or _utc_now()
+    if not force and not _publication_run_lease_expired(run, now=reference):
+        return False
+
+    adapter_label = _publication_adapter_display_name(attempt.adapter)
+    attempt.status = "queued"
+    attempt.run_status = "retry_scheduled"
+    attempt.provider_task_id = None
+    attempt.provider_execution_id = None
+    attempt.provider_status = None
+    attempt.error_code = None
+    attempt.error_message = None
+    attempt.next_retry_at = reference
+    attempt.operator_summary = f"{adapter_label} 执行 lease 已过期，已释放僵尸状态并重新排队。"
+    run.status = "retry_scheduled"
+    run.phase = "recovery"
+    run.heartbeat_at = reference
+    run.completed_at = reference
+    run.provider_status = "stale_requeued"
+    run.error_message = attempt.operator_summary
+    await session.flush()
+    return True
 
 
 def _build_publication_executor_registry(
@@ -2890,6 +3042,11 @@ async def run_publication_worker_once(
     if normalized_content_ids:
         # Prefer deterministic and isolated execution for a known job set (例如：一次发布回归门禁中的单次作业)。
         normalized_content_ids = list(dict.fromkeys(normalized_content_ids))
+    await _release_stale_social_auto_upload_attempts(
+        session,
+        content_ids=normalized_content_ids,
+        limit=max(1, int(limit or 1)),
+    )
     claimed = await claim_publication_attempts(
         session,
         limit=limit,
@@ -2969,6 +3126,40 @@ async def run_publication_worker_once(
         "reconciled": reconciled,
         "active_count": active_count,
     }
+
+
+async def _release_stale_social_auto_upload_attempts(
+    session: AsyncSession,
+    *,
+    content_ids: list[str] | None = None,
+    limit: int = 5,
+) -> list[str]:
+    normalized_content_ids = [
+        str(item or "").strip()
+        for item in (content_ids or [])
+        if str(item or "").strip()
+    ]
+    stmt = (
+        select(PublicationAttempt)
+        .where(
+            PublicationAttempt.adapter == SOCIAL_AUTO_UPLOAD_ADAPTER,
+            PublicationAttempt.status.in_(PUBLICATION_STALE_SOCIAL_AUTO_UPLOAD_RECOVERY_STATUSES),
+            *(
+                [PublicationAttempt.content_id.in_(normalized_content_ids)]
+                if normalized_content_ids
+                else []
+            ),
+        )
+        .order_by(PublicationAttempt.updated_at.asc(), PublicationAttempt.created_at.asc())
+        .limit(max(1, int(limit or 1)))
+    )
+    result = await session.execute(stmt)
+    released: list[str] = []
+    for attempt in result.scalars().all():
+        run = await _latest_publication_run(session, attempt.id)
+        if await _release_stale_social_auto_upload_attempt_if_needed(session, attempt, run=run):
+            released.append(attempt.id)
+    return released
 
 
 async def list_publication_attempts(

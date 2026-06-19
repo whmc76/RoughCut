@@ -553,6 +553,11 @@ class Settings(BaseSettings):
     publication_social_auto_upload_platforms: str = ""
     publication_social_auto_upload_auto_login: bool = False
     publication_social_auto_upload_headless: bool = True
+    publication_platform_active_schedule_times: str = (
+        "douyin=20:30,kuaishou=20:00,xiaohongshu=21:00,bilibili=18:00,wechat-channels=20:00"
+    )
+    publication_cover_auto_heal_enabled: bool = True
+    publication_cover_auto_heal_max_attempts: int = 1
 
     # Security
     max_upload_size_mb: int = 2048

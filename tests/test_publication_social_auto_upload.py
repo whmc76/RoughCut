@@ -1,3 +1,4 @@
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -260,6 +261,23 @@ def test_build_social_auto_upload_upload_command_for_collection_targets():
         "--collection",
         "EDC刀光火工具集",
     ]
+
+
+def test_build_social_auto_upload_upload_command_for_kuaishou_omits_unstable_declaration():
+    command = build_social_auto_upload_upload_command(
+        python_executable="python",
+        platform="kuaishou",
+        account_name="creator-a",
+        request_payload={
+            "title": "标题",
+            "body": "简介",
+            "hashtags": ["测试"],
+            "declaration": "原创声明",
+            "media_items": [{"local_path": "E:/video.mp4"}],
+        },
+    )
+
+    assert "--declaration" not in command
 
 
 def test_build_social_auto_upload_upload_command_for_wechat_channels_uses_dual_thumbnail_slots_and_category():
@@ -761,6 +779,69 @@ async def test_social_auto_upload_submit_commits_processing_state_before_cli(mon
     assert result["status"] == "published"
     assert observations[0] == ("douyin", "processing", "processing", 1)
     assert run.phase == "completed"
+
+
+@pytest.mark.asyncio
+async def test_social_auto_upload_reconcile_requeues_expired_processing_attempt(monkeypatch):
+    reference = publication._utc_now()
+    expired_run = SimpleNamespace(
+        status="processing",
+        phase="submit",
+        heartbeat_at=reference - timedelta(minutes=20),
+        lease_expires_at=reference - timedelta(seconds=1),
+        completed_at=None,
+        provider_task_id="attempt-stale-social",
+        provider_execution_id=None,
+        provider_status="processing",
+        result_json=None,
+        error_message=None,
+    )
+
+    async def fake_latest_run(session, attempt_id):
+        assert attempt_id == "attempt-stale-social"
+        return expired_run
+
+    monkeypatch.setattr(publication, "_latest_publication_run", fake_latest_run)
+
+    class _FakeSession:
+        def __init__(self):
+            self.flushes = 0
+
+        async def flush(self):
+            self.flushes += 1
+
+    attempt = SimpleNamespace(
+        id="attempt-stale-social",
+        platform="bilibili",
+        adapter="social_auto_upload",
+        status="processing",
+        run_status="processing",
+        provider_task_id="attempt-stale-social",
+        provider_execution_id=None,
+        provider_status="processing",
+        error_code=None,
+        error_message=None,
+        next_retry_at=None,
+        operator_summary=None,
+    )
+    session = _FakeSession()
+
+    result = await publication.reconcile_publication_attempt_with_social_auto_upload(session, attempt)
+
+    assert result == {
+        "attempt_id": "attempt-stale-social",
+        "status": "queued",
+        "provider_task_id": None,
+        "recovered": True,
+    }
+    assert attempt.status == "queued"
+    assert attempt.run_status == "retry_scheduled"
+    assert attempt.next_retry_at is not None
+    assert attempt.provider_status is None
+    assert expired_run.status == "retry_scheduled"
+    assert expired_run.phase == "recovery"
+    assert expired_run.completed_at is not None
+    assert session.flushes == 1
 
 
 @pytest.mark.asyncio

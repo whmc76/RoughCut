@@ -79,6 +79,7 @@ from roughcut.providers.image_generation import (
 from roughcut.review.intelligent_copy import (
     generate_intelligent_copy,
     inspect_intelligent_copy_folder,
+    rerender_existing_intelligent_copy_cover_groups,
     upgrade_existing_intelligent_copy_result,
 )
 
@@ -97,6 +98,14 @@ _LOCAL_IMAGE_MEDIA_TYPES = {
     ".png": "image/png",
     ".webp": "image/webp",
 }
+_PUBLICATION_COVER_AUTO_HEAL_BLOCK_TOKENS = (
+    "封面",
+    "cover",
+    "codex",
+    "imagegen",
+    "位图",
+    "bitmap",
+)
 
 
 def _build_publication_plan_gate_response(plan: dict[str, Any], **extra: Any) -> dict[str, Any]:
@@ -562,6 +571,17 @@ async def publish_intelligent_folder(body: IntelligentPublishIn, session: AsyncS
         platform_options=platform_options,
         existing_attempts=existing_attempts,
     )
+    plan, plan_inputs = await _maybe_auto_heal_publication_cover_plan(
+        plan=plan,
+        plan_inputs=plan_inputs,
+        folder_path=body.folder_path,
+        creator_profile_id=body.creator_profile_id,
+        requested_platforms=body.platforms,
+        platform_options=platform_options,
+        existing_attempts=existing_attempts,
+        session=session,
+        materialize_job=True,
+    )
     if not publication_plan_is_publishable(plan):
         return _build_publication_executor_gate_response(plan)
     browser_agent_targets = [
@@ -594,6 +614,145 @@ async def publish_intelligent_folder(body: IntelligentPublishIn, session: AsyncS
     await session.commit()
     _dispatch_publication_worker_tick(len(result.get("created_attempts") or []))
     return result
+
+
+def _publication_plan_cover_auto_heal_reasons(plan: dict[str, Any] | None) -> list[str]:
+    if not isinstance(plan, dict):
+        return []
+    candidates = [
+        *[str(item).strip() for item in (plan.get("blocked_reasons") or []) if str(item).strip()],
+        *[str(item).strip() for item in (plan.get("warnings") or []) if str(item).strip()],
+    ]
+    reasons: list[str] = []
+    for reason in candidates:
+        normalized = reason.lower()
+        if any(token in normalized for token in _PUBLICATION_COVER_AUTO_HEAL_BLOCK_TOKENS):
+            reasons.append(reason)
+    return list(dict.fromkeys(reasons))
+
+
+def _attach_cover_auto_heal_status(plan: dict[str, Any], status: dict[str, Any]) -> dict[str, Any]:
+    updated = dict(plan)
+    updated["cover_auto_heal"] = status
+    status_kind = str(status.get("status") or "").strip().lower()
+    if status_kind in {"failed", "needs_human"}:
+        blocked_reasons = [str(item).strip() for item in (updated.get("blocked_reasons") or []) if str(item).strip()]
+        summary = str(status.get("summary") or "封面自愈未能恢复发布计划，需人工处理。").strip()
+        if summary and summary not in blocked_reasons:
+            blocked_reasons.append(summary)
+        updated["blocked_reasons"] = blocked_reasons
+        updated["status"] = "blocked"
+        updated["publish_ready"] = False
+    return updated
+
+
+async def _maybe_auto_heal_publication_cover_plan(
+    *,
+    plan: dict[str, Any],
+    plan_inputs: dict[str, Any],
+    folder_path: str,
+    creator_profile_id: str | None,
+    requested_platforms: list[str] | None,
+    platform_options: dict[str, Any],
+    existing_attempts: list[dict[str, Any]],
+    session: AsyncSession,
+    materialize_job: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    reasons = _publication_plan_cover_auto_heal_reasons(plan)
+    if not reasons or publication_plan_is_publishable(plan):
+        return plan, plan_inputs
+    settings = get_settings()
+    if not bool(getattr(settings, "publication_cover_auto_heal_enabled", True)):
+        return plan, plan_inputs
+    try:
+        max_attempts = int(getattr(settings, "publication_cover_auto_heal_max_attempts", 1) or 1)
+    except (TypeError, ValueError):
+        max_attempts = 1
+    max_attempts = max(0, min(3, max_attempts))
+    if max_attempts <= 0:
+        return plan, plan_inputs
+
+    current_plan = plan
+    current_inputs = plan_inputs
+    attempts: list[dict[str, Any]] = []
+    creator_profile = current_inputs.get("creator_profile") if isinstance(current_inputs, dict) else {}
+    creator_profile_name = str((creator_profile or {}).get("display_name") or "").strip()
+    for attempt_index in range(1, max_attempts + 1):
+        before_reasons = _publication_plan_cover_auto_heal_reasons(current_plan)
+        try:
+            healed_result = await rerender_existing_intelligent_copy_cover_groups(
+                str(folder_path or ""),
+                platforms=requested_platforms,
+                refresh_cover_source=False,
+                creator_profile_name=creator_profile_name or None,
+            )
+            current_inputs = await _load_intelligent_publish_inputs(
+                folder_path=folder_path,
+                creator_profile_id=creator_profile_id,
+                session=session,
+                materialize_job=materialize_job,
+            )
+            current_plan = build_publication_plan(
+                job=current_inputs["job"],
+                render_output=current_inputs["render_output"],
+                source_media_path=current_inputs.get("source_video_path"),
+                platform_packaging=current_inputs["packaging"],
+                creator_profile=current_inputs["creator_profile"],
+                requested_platforms=requested_platforms,
+                platform_options=platform_options,
+                existing_attempts=existing_attempts,
+            )
+            after_reasons = _publication_plan_cover_auto_heal_reasons(current_plan)
+            healed_ready = publication_plan_is_publishable(current_plan)
+            attempts.append(
+                {
+                    "attempt": attempt_index,
+                    "status": "healed" if healed_ready else "still_blocked",
+                    "before_reasons": before_reasons,
+                    "after_reasons": after_reasons,
+                    "publish_ready": bool(healed_result.get("publish_ready")) if isinstance(healed_result, dict) else None,
+                    "material_contract_status": (
+                        str((healed_result.get("material_contract") or {}).get("status") or "").strip()
+                        if isinstance(healed_result, dict) and isinstance(healed_result.get("material_contract"), dict)
+                        else ""
+                    ),
+                }
+            )
+            if healed_ready or not after_reasons:
+                return _attach_cover_auto_heal_status(
+                    current_plan,
+                    {
+                        "status": "healed" if healed_ready else "rechecked",
+                        "attempts": attempts,
+                        "summary": "封面质量门失败后已自动重生并重新构建发布计划。",
+                    },
+                ), current_inputs
+        except Exception as exc:
+            attempts.append(
+                {
+                    "attempt": attempt_index,
+                    "status": "failed",
+                    "before_reasons": before_reasons,
+                    "error": str(exc),
+                }
+            )
+            return _attach_cover_auto_heal_status(
+                current_plan,
+                {
+                    "status": "failed",
+                    "attempts": attempts,
+                    "summary": f"封面自愈执行失败，需人工处理：{exc}",
+                },
+            ), current_inputs
+
+    return _attach_cover_auto_heal_status(
+        current_plan,
+        {
+            "status": "needs_human",
+            "attempts": attempts,
+            "summary": f"封面自愈重试已耗尽（{max_attempts} 次），需人工处理后再发布。",
+        },
+    ), current_inputs
 
 
 def _normalize_publish_platform_options_payload(value: Any) -> dict[str, dict[str, Any]]:

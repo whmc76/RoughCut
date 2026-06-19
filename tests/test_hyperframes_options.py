@@ -65,8 +65,13 @@ def test_hyperframes_chapters_derive_from_subtitle_section_roles() -> None:
     progress_elements = [item for item in plan["elements"] if item.get("track") == "progress_bar"]
 
     assert [item["role"] for item in segments] == ["hook", "detail", "body", "cta"]
-    assert [item["title"].split()[0] for item in segments] == ["开场", "细节", "展示", "收尾"]
+    assert [item["title"] for item in segments] == ["开场", "细节", "展示", "总结"]
+    assert all("先看整体" not in item["title"] for item in segments)
     assert len(chapter_elements) == 4
+    assert chapter_elements[1]["start_sec"] == 3.0
+    assert chapter_elements[1]["end_sec"] == 6.0
+    assert chapter_elements[2]["start_sec"] == 8.0
+    assert chapter_elements[2]["end_sec"] == 14.0
     assert progress_elements[0]["segments"] == segments
 
 
@@ -77,9 +82,9 @@ def test_hyperframes_chapters_fallback_to_section_choreography() -> None:
         duration_sec=12.0,
         section_choreography={
             "sections": [
-                {"start_sec": 0.0, "end_sec": 3.0, "role": "hook"},
-                {"start_sec": 3.0, "end_sec": 8.0, "role": "detail"},
-                {"start_sec": 8.0, "end_sec": 12.0, "role": "cta"},
+                {"start_sec": 0.0, "end_sec": 3.0, "role": "hook", "summary": "内部摘要不应上屏"},
+                {"start_sec": 3.0, "end_sec": 8.0, "role": "detail", "creative_rationale": "细节段优先保留近景"},
+                {"start_sec": 8.0, "end_sec": 12.0, "role": "cta", "summary": "结尾行动引导"},
             ]
         },
     )
@@ -87,4 +92,6 @@ def test_hyperframes_chapters_fallback_to_section_choreography() -> None:
     segments = hyperframes.chapter_segments(plan)
 
     assert [item["role"] for item in segments] == ["hook", "detail", "cta"]
+    assert [item["title"] for item in segments] == ["开场", "细节", "总结"]
     assert [item["source"] for item in segments] == ["section_choreography"] * 3
+    assert all("优先保留" not in item["title"] for item in segments)

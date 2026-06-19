@@ -38,6 +38,18 @@ BILIBILI_DECLARATION_ALIASES = {
     "个人观点，仅供参考": "个人观点，仅供参考",
     "内容为转载": "内容为转载",
 }
+KUAISHOU_UNSTABLE_DECLARATIONS = {
+    "原创",
+    "原创声明",
+    "无需声明",
+    "无需添加自主声明",
+    "内容无需标注",
+    "个人观点仅供参考",
+    "个人观点，仅供参考",
+}
+KUAISHOU_UNSTABLE_DECLARATION_KEYS = {
+    item.strip().replace(" ", "").lower() for item in KUAISHOU_UNSTABLE_DECLARATIONS
+}
 
 # Complete Bilibili tid table used by the social-auto-upload adapter.
 # Source basis:
@@ -419,7 +431,7 @@ def build_social_auto_upload_upload_command(
             if original_content_type:
                 command.extend(["--original-content-type", original_content_type])
     if normalized_platform == "kuaishou":
-        declaration = str(request_payload.get("declaration") or "").strip()
+        declaration = _resolve_kuaishou_declaration(request_payload)
         if declaration:
             command.extend(["--declaration", declaration])
     collection_name = _resolve_social_auto_upload_collection_name(request_payload)
@@ -453,6 +465,19 @@ def _resolve_social_auto_upload_title(request_payload: dict[str, Any]) -> str:
         if text:
             return text[:80]
     return "视频发布"
+
+
+def _normalize_declaration_key(value: Any) -> str:
+    return str(value or "").strip().replace(" ", "").lower()
+
+
+def _resolve_kuaishou_declaration(request_payload: dict[str, Any]) -> str:
+    declaration = str(request_payload.get("declaration") or "").strip()
+    if not declaration:
+        return ""
+    if _normalize_declaration_key(declaration) in KUAISHOU_UNSTABLE_DECLARATION_KEYS:
+        return ""
+    return declaration
 
 
 def _resolve_social_auto_upload_thumbnails(
