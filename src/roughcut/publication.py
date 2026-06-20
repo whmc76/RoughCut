@@ -31,6 +31,8 @@ from roughcut.publication_executor_registry import PublicationExecutor
 from roughcut.publication_executor_registry import PublicationExecutorRegistry
 from roughcut.publication_platform_matrix import (
     platform_allows_field_edits_while_processing,
+    platform_auto_publish_disabled_reason,
+    platform_auto_publish_supported,
     platform_cover_project_mode,
     platform_cover_asset_policy,
     platform_default_declaration,
@@ -251,6 +253,8 @@ def _resolve_publication_target_adapter(platform: Any, adapter: Any) -> str:
     explicit_adapter = bool(str(adapter or "").strip())
     normalized_adapter = _normalize_publication_adapter(adapter)
     normalized_platform = normalize_publication_platform(platform)
+    if normalized_platform and not platform_auto_publish_supported(normalized_platform):
+        return CANONICAL_PUBLICATION_ADAPTER if normalized_adapter == SOCIAL_AUTO_UPLOAD_ADAPTER else normalized_adapter
     if normalized_adapter != CANONICAL_PUBLICATION_ADAPTER:
         return normalized_adapter
     if normalized_platform == "x":
@@ -326,6 +330,11 @@ def _publication_packaging_block_reasons_are_overridable(reasons: list[str]) -> 
         if any(token in normalized for token in _NON_OVERRIDABLE_PUBLICATION_PACKAGING_BLOCK_TOKENS):
             return False
     return True
+
+
+def _publication_auto_publish_disabled_message(platform: str) -> str:
+    reason = platform_auto_publish_disabled_reason(platform) or "当前平台仅支持生成发布物料，自动发布已暂停。"
+    return f"{platform_label(platform)}：{reason}"
 
 
 def _normalize_publication_browser_path(value: Any) -> str | None:
@@ -1013,9 +1022,20 @@ def build_publication_plan(
     }
     credential_by_platform = {item["platform"]: item for item in credentials}
     options_by_platform = _normalize_publication_platform_options(platform_options)
-    candidate_platforms = requested or STABLE_PUBLICATION_PLATFORM_SET
+    candidate_platforms = requested or {
+        platform for platform in STABLE_PUBLICATION_PLATFORM_SET if platform_auto_publish_supported(platform)
+    }
+    auto_publish_disabled_platforms = sorted(
+        {platform for platform in candidate_platforms if platform and not platform_auto_publish_supported(platform)},
+        key=_platform_sort_key,
+    )
+    for platform in auto_publish_disabled_platforms:
+        warnings.append(f"{_publication_auto_publish_disabled_message(platform)} 已跳过自动发布目标。")
+    auto_publish_candidate_platforms = {
+        platform for platform in candidate_platforms if platform_auto_publish_supported(platform)
+    }
     target_platforms = sorted(
-        candidate_platforms & set(credential_by_platform) & set(packages),
+        auto_publish_candidate_platforms & set(credential_by_platform) & set(packages),
         key=_platform_sort_key,
     )
     targets: list[dict[str, Any]] = []
@@ -1246,6 +1266,18 @@ def build_publication_plan(
                 + "；".join(dict.fromkeys([str(item) for item in manual_handoff_reasons if str(item)]))
             )
             manual_handoff_ready = True
+        elif auto_publish_disabled_platforms:
+            blocked_reasons.append(
+                "以下平台当前仅支持生成发布物料，不支持自动发布："
+                + "；".join(
+                    dict.fromkeys(
+                        [
+                            _publication_auto_publish_disabled_message(platform)
+                            for platform in auto_publish_disabled_platforms
+                        ]
+                    )
+                )
+            )
         elif packaging_blocked_count:
             blocked_reasons.append(
                 "平台文案未就绪：" + "；".join(dict.fromkeys([str(item) for item in packaging_block_reasons if str(item)]))
@@ -1372,6 +1404,12 @@ def publication_plan_is_publishable(plan: dict[str, Any] | None) -> bool:
     if publication_plan_status(plan) != "ready":
         return False
     if not bool(plan.get("targets")):
+        return False
+    if any(
+        not platform_auto_publish_supported(str(target.get("platform") or ""))
+        for target in (plan.get("targets") or [])
+        if isinstance(target, dict)
+    ):
         return False
     if any(str(item).strip() for item in (plan.get("blocked_reasons") or []) if str(item).strip()):
         return False
@@ -2451,6 +2489,30 @@ def _mark_publication_attempt_needs_human(
         run.error_message = message
 
 
+def _mark_publication_attempt_cancelled(
+    attempt: PublicationAttempt,
+    run: PublicationAttemptRun | None,
+    *,
+    code: str,
+    message: str,
+) -> None:
+    now = _utc_now()
+    attempt.status = "cancelled"
+    attempt.run_status = "cancelled"
+    attempt.error_code = code
+    attempt.error_message = message
+    attempt.next_retry_at = None
+    attempt.provider_status = "cancelled"
+    attempt.operator_summary = message
+    if run is not None:
+        run.status = "cancelled"
+        run.phase = "submit"
+        run.heartbeat_at = now
+        run.completed_at = now
+        run.provider_status = "cancelled"
+        run.error_message = message
+
+
 async def _mark_social_auto_upload_attempt_processing(
     session: AsyncSession,
     attempt: PublicationAttempt,
@@ -2986,6 +3048,18 @@ async def submit_publication_attempt_for_adapter(
     request_timeout_sec: int = 60,
 ) -> dict[str, Any]:
     adapter = _normalize_publication_adapter(attempt.adapter)
+    platform = normalize_publication_platform(getattr(attempt, "platform", ""))
+    if platform and not platform_auto_publish_supported(platform):
+        run = await _latest_publication_run(session, attempt.id)
+        message = _publication_auto_publish_disabled_message(platform)
+        _mark_publication_attempt_cancelled(
+            attempt,
+            run,
+            code="platform_auto_publish_disabled",
+            message=message,
+        )
+        await session.flush()
+        return {"attempt_id": attempt.id, "status": attempt.status, "error": message}
     executor = _build_publication_executor_registry(
         browser_agent_base_url=browser_agent_base_url,
         auth_token=auth_token,
@@ -3015,6 +3089,18 @@ async def reconcile_publication_attempt_for_adapter(
     request_timeout_sec: int = 60,
 ) -> dict[str, Any]:
     adapter = _normalize_publication_adapter(attempt.adapter)
+    platform = normalize_publication_platform(getattr(attempt, "platform", ""))
+    if platform and not platform_auto_publish_supported(platform):
+        run = await _latest_publication_run(session, attempt.id)
+        message = _publication_auto_publish_disabled_message(platform)
+        _mark_publication_attempt_cancelled(
+            attempt,
+            run,
+            code="platform_auto_publish_disabled",
+            message=message,
+        )
+        await session.flush()
+        return {"attempt_id": attempt.id, "status": attempt.status, "error": message}
     executor = _build_publication_executor_registry(
         browser_agent_base_url=browser_agent_base_url,
         auth_token=auth_token,

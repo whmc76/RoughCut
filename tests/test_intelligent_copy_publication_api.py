@@ -23,7 +23,7 @@ async def test_publish_intelligent_folder_skips_browser_agent_gate_for_social_au
         return {
             "job": SimpleNamespace(id="job-1", status="done"),
             "render_output": SimpleNamespace(output_path="E:/video.mp4"),
-            "packaging": {"platforms": {"douyin": {}, "wechat-channels": {}}},
+            "packaging": {"platforms": {"douyin": {}, "kuaishou": {}}},
             "creator_profile": {"creator_profile": {"publishing": {"platform_credentials": []}}},
             "source_video_path": "E:/video.mp4",
         }
@@ -39,7 +39,7 @@ async def test_publish_intelligent_folder_skips_browser_agent_gate_for_social_au
             "creator_profile_id": "creator-1",
             "targets": [
                 {"platform": "douyin", "adapter": "social_auto_upload"},
-                {"platform": "wechat-channels", "adapter": "social_auto_upload"},
+                {"platform": "kuaishou", "adapter": "social_auto_upload"},
             ],
         }
 
@@ -64,14 +64,14 @@ async def test_publish_intelligent_folder_skips_browser_agent_gate_for_social_au
     body = SimpleNamespace(
         folder_path="E:/materials/maxace",
         creator_profile_id="creator-1",
-        platforms=["douyin", "wechat-channels"],
+        platforms=["douyin", "kuaishou"],
         platform_options=None,
     )
 
     result = await ic_api.publish_intelligent_folder(body, session=_FakeSession())
 
     assert result["status"] == "submitted"
-    assert [item["platform"] for item in result["created_attempts"]] == ["douyin", "wechat-channels"]
+    assert [item["platform"] for item in result["created_attempts"]] == ["douyin", "kuaishou"]
 
 
 @pytest.mark.asyncio

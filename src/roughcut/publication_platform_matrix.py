@@ -166,6 +166,22 @@ def platform_supports_scheduled_publish(platform: str | None) -> bool:
     return bool(capabilities.get("supports_scheduled_publish"))
 
 
+def platform_auto_publish_supported(platform: str | None) -> bool:
+    capabilities = publication_platform_capabilities(platform)
+    if "auto_publish_supported" not in capabilities:
+        return True
+    return bool(capabilities.get("auto_publish_supported"))
+
+
+def platform_material_generation_only(platform: str | None) -> bool:
+    capabilities = publication_platform_capabilities(platform)
+    return bool(capabilities.get("material_generation_only")) or not platform_auto_publish_supported(platform)
+
+
+def platform_auto_publish_disabled_reason(platform: str | None) -> str:
+    return str(publication_platform_capabilities(platform).get("auto_publish_disabled_reason") or "").strip()
+
+
 def platform_soft_verification_fields(platform: str | None) -> set[str]:
     capabilities = publication_platform_capabilities(platform)
     raw_fields = capabilities.get("soft_verification_fields")

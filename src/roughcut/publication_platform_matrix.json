@@ -156,6 +156,9 @@
       }
     },
     "toutiao": {
+      "auto_publish_supported": false,
+      "material_generation_only": true,
+      "auto_publish_disabled_reason": "当前平台仅支持生成发布物料，自动发布已暂停。",
       "requires_explicit_collection_policy": true,
       "requires_custom_cover_policy": true,
       "required_cover_slots": [
@@ -187,6 +190,9 @@
       }
     },
     "wechat-channels": {
+      "auto_publish_supported": false,
+      "material_generation_only": true,
+      "auto_publish_disabled_reason": "当前平台仅支持生成发布物料，自动发布已暂停。",
       "manual_handoff_only": false,
       "manual_publish_entry_url": "",
       "requires_explicit_collection_policy": true,
@@ -242,6 +248,9 @@
       }
     },
     "xiaohongshu": {
+      "auto_publish_supported": false,
+      "material_generation_only": true,
+      "auto_publish_disabled_reason": "当前平台仅支持生成发布物料，自动发布已暂停。",
       "requires_explicit_collection_policy": true,
       "requires_custom_cover_policy": true,
       "required_cover_slots": [

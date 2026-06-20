@@ -18,6 +18,7 @@ def test_resolve_publication_target_adapter_uses_social_auto_upload_for_enabled_
     )
 
     assert publication._resolve_publication_target_adapter("douyin", "") == "social_auto_upload"
+    assert publication._resolve_publication_target_adapter("xiaohongshu", "") == "browser_agent"
     assert publication._resolve_publication_target_adapter("kuaishou", "") == "browser_agent"
 
 

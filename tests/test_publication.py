@@ -6120,23 +6120,23 @@ def test_publication_plan_defaults_to_stable_platforms_when_not_explicitly_reque
     )
 
     assert plan["publish_ready"] is True
-    assert [target["platform"] for target in plan["targets"]] == [
-        "douyin",
-        "xiaohongshu",
-        "bilibili",
-        "kuaishou",
-        "wechat-channels",
-        "toutiao",
-        "youtube",
-        "x",
-    ]
+    target_platforms = [target["platform"] for target in plan["targets"]]
+    assert target_platforms[:3] == ["douyin", "bilibili", "kuaishou"]
+    assert "x" in target_platforms
+    assert "xiaohongshu" not in target_platforms
+    assert "wechat-channels" not in target_platforms
+    assert "toutiao" not in target_platforms
+    assert not any(
+        "仅支持生成发布物料" in str(warning)
+        for warning in plan["warnings"]
+    )
 
 
-def test_publication_plan_routes_wechat_channels_to_social_auto_upload_target(tmp_path, monkeypatch):
+def test_publication_plan_blocks_material_only_platforms_from_auto_publish(tmp_path, monkeypatch):
     monkeypatch.setattr(
         publication,
         "get_settings",
-        lambda: SimpleNamespace(publication_social_auto_upload_platforms="wechat-channels"),
+        lambda: SimpleNamespace(publication_social_auto_upload_platforms="xiaohongshu,wechat-channels"),
     )
     media_path = tmp_path / "output.mp4"
     media_path.write_bytes(b"video")
@@ -6145,6 +6145,11 @@ def test_publication_plan_routes_wechat_channels_to_social_auto_upload_target(tm
         render_output=SimpleNamespace(output_path=str(media_path)),
         platform_packaging={
             "platforms": {
+                "xiaohongshu": {
+                    "titles": ["标题"],
+                    "description": "简介",
+                    "tags": ["tag"],
+                },
                 "wechat-channels": {
                     "titles": ["标题"],
                     "description": "简介",
@@ -6157,6 +6162,13 @@ def test_publication_plan_routes_wechat_channels_to_social_auto_upload_target(tm
                 "publishing": {
                     "platform_credentials": [
                         {
+                            "platform": "xiaohongshu",
+                            "account_label": "小红书账号",
+                            "credential_ref": "social-auto-upload:creator-1-xiaohongshu-chrome:xiaohongshu",
+                            "status": "logged_in",
+                            "enabled": True,
+                        },
+                        {
                             "platform": "wechat-channels",
                             "account_label": "视频号账号",
                             "credential_ref": "social-auto-upload:creator-1-wechat-channels-chrome:wechat-channels",
@@ -6167,16 +6179,18 @@ def test_publication_plan_routes_wechat_channels_to_social_auto_upload_target(tm
                 }
             }
         },
-        requested_platforms=["wechat-channels"],
+        requested_platforms=["xiaohongshu", "wechat-channels"],
     )
 
-    assert plan["status"] == "ready"
-    assert plan["publish_ready"] is True
+    assert plan["status"] == "blocked"
+    assert plan["publish_ready"] is False
     assert plan["manual_handoff_ready"] is False
-    assert [target["platform"] for target in plan["targets"]] == ["wechat-channels"]
-    assert plan["targets"][0]["adapter"] == "social_auto_upload"
-    assert plan["targets"][0]["credential_ref"] == "social-auto-upload:creator-1-wechat-channels-chrome:wechat-channels"
+    assert plan["targets"] == []
     assert plan["manual_handoff_targets"] == []
+    assert any("小红书" in reason and "仅支持生成发布物料" in reason for reason in plan["blocked_reasons"])
+    assert any("视频号" in reason and "仅支持生成发布物料" in reason for reason in plan["blocked_reasons"])
+    assert any("小红书" in warning and "已跳过自动发布目标" in warning for warning in plan["warnings"])
+    assert any("视频号" in warning and "已跳过自动发布目标" in warning for warning in plan["warnings"])
     assert publication.publication_plan_is_manual_handoff_ready(plan) is False
 
 
