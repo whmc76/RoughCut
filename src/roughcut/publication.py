@@ -99,6 +99,11 @@ PUBLICATION_RECOVERY_STATE_SCHEMA_VERSION = 1
 PUBLICATION_RECOVERY_ADAPTIVE_HISTORY_LIMIT = 80
 PUBLICATION_RECOVERY_REPEAT_LIMIT = 3
 PUBLICATION_DEFAULT_DAILY_ACCOUNT_LIMIT = 1
+JENNY_BABY_PUBLICATION_IDENTIFIERS = {
+    "61007301d4d94bc0a8311066c2d93c7d",
+    "7be7da2e-7d54-4d0b-a63d-809d71094839",
+    "jenny_baby",
+}
 PUBLICATION_DEFAULT_AUTO_SCHEDULE_LOCAL_TIME = "10:00"
 PUBLICATION_DEFAULT_PLATFORM_ACTIVE_SCHEDULE_TIMES = {
     "douyin": "20:30",
@@ -1039,13 +1044,18 @@ def build_publication_plan(
         if not _package_has_publish_copy(package):
             warnings.append(f"{platform_label(platform)} 文案包为空，已跳过。")
             continue
+        suppress_declaration = _suppress_declaration_for_creator_platform(
+            platform=platform,
+            creator_profile=creator_profile,
+            credential=credential,
+        )
         declared = str(
             platform_overrides.get("declaration")
             or publish_options.get("declaration")
             or package.get("declaration")
             or ""
         ).strip()
-        declaration = declared or platform_default_declaration(platform)
+        declaration = "" if suppress_declaration else (declared or platform_default_declaration(platform))
         category = _sanitize_publication_target_category(
             platform,
             _resolve_publication_plan_option_value(publish_options, package, "category"),
@@ -1071,6 +1081,8 @@ def build_publication_plan(
         )
         if isinstance(publish_options.get("platform_specific_overrides"), dict):
             merged_platform_overrides.update(publish_options.get("platform_specific_overrides") or {})
+        if suppress_declaration:
+            merged_platform_overrides = _clear_publication_declaration_overrides(merged_platform_overrides)
         collection = _resolve_publication_collection_target(
             platform=platform,
             collection=collection,
@@ -4017,6 +4029,56 @@ def _coerce_publication_topic_list(value: Any) -> list[str]:
     )[:20]
 
 
+def _suppress_declaration_for_creator_platform(
+    *,
+    platform: str,
+    creator_profile: dict[str, Any] | None,
+    credential: dict[str, Any] | None = None,
+) -> bool:
+    if normalize_publication_platform(platform) != "xiaohongshu":
+        return False
+    blobs: list[str] = []
+    if isinstance(creator_profile, dict):
+        for key in ("id", "slug", "display_name", "name", "presenter_alias"):
+            text = str(creator_profile.get(key) or "").strip()
+            if text:
+                blobs.append(text)
+        nested = creator_profile.get("creator_profile")
+        if isinstance(nested, dict):
+            for key in ("id", "slug", "display_name", "name", "presenter_alias", "public_name"):
+                text = str(nested.get(key) or "").strip()
+                if text:
+                    blobs.append(text)
+            identity = nested.get("identity")
+            if isinstance(identity, dict):
+                for key in ("public_name", "brand_name", "presenter_alias"):
+                    text = str(identity.get(key) or "").strip()
+                    if text:
+                        blobs.append(text)
+    if isinstance(credential, dict):
+        for key in ("id", "account_label", "credential_ref", "browser_profile_id"):
+            text = str(credential.get(key) or "").strip()
+            if text:
+                blobs.append(text)
+    normalized_blob = " ".join(blobs).lower().replace("-", "_")
+    if "珍妮斯" in normalized_blob or "jenny_baby" in normalized_blob or "jenny baby" in normalized_blob:
+        return True
+    return any(identifier.lower().replace("-", "_") in normalized_blob for identifier in JENNY_BABY_PUBLICATION_IDENTIFIERS)
+
+
+def _clear_publication_declaration_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
+    cleared = dict(overrides)
+    for key in (
+        "declaration",
+        "selected_declarations",
+        "original_declaration",
+        "original_content_type",
+        "content_type_declaration",
+    ):
+        cleared.pop(key, None)
+    return cleared
+
+
 def _resolve_publication_collection_target(
     *,
     platform: str,
@@ -6425,7 +6487,10 @@ def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> d
         )
     category = _sanitize_publication_target_category(platform, target.get("category"))
     content_kind = str(target.get("content_kind") or "video").strip().lower() or "video"
-    declaration = str(target.get("declaration") or default_declaration).strip() or None
+    if "declaration" in target:
+        declaration = str(target.get("declaration") or "").strip() or None
+    else:
+        declaration = str(default_declaration).strip() or None
     cover_path, cover_slots = _resolve_authoritative_publication_cover_contract(
         target,
         platform=platform,

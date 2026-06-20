@@ -34,6 +34,7 @@ from roughcut.publication_packaging import (
     filter_publication_packaging_platforms,
     load_publication_packaging_payload,
 )
+from roughcut.publication_social_auto_upload import build_social_auto_upload_upload_command
 
 
 class _FakeBrowserAgentResponse:
@@ -5942,6 +5943,69 @@ def test_publication_plan_clamps_xiaohongshu_title_to_platform_hard_limit(tmp_pa
     target = plan["targets"][0]
     assert target["title"] == "新到的美杜莎4｜两款配置到手，差别一眼就"
     assert target["copy_material"]["primary_title"] == "新到的美杜莎4｜两款配置到手，差别一眼就"
+
+
+def test_publication_plan_suppresses_xiaohongshu_original_declaration_for_jenny_account(tmp_path):
+    media_path = tmp_path / "output.mp4"
+    cover_path = tmp_path / "cover.jpg"
+    media_path.write_bytes(b"video")
+    cover_path.write_bytes(b"cover")
+
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        platform_packaging={
+            "platforms": {
+                "xiaohongshu": {
+                    "titles": ["孩子总说我也要"],
+                    "description": "简介",
+                    "tags": ["育儿"],
+                    "cover_path": str(cover_path),
+                    "declaration": "原创声明",
+                    "platform_specific_overrides": {
+                        "selected_declarations": ["原创声明"],
+                        "original_content_type": "虚构演绎，仅供娱乐",
+                    },
+                }
+            }
+        },
+        creator_profile={
+            "id": "61007301d4d94bc0a8311066c2d93c7d",
+            "display_name": "珍妮斯baby",
+            "creator_profile": {
+                "publishing": {
+                    "platform_credentials": [
+                        {
+                            "platform": "xiaohongshu",
+                            "account_label": "珍妮斯baby · 小红书",
+                            "credential_ref": "social-auto-upload:creator-7be7da2e7d54-xiaohongshu-chrome:xiaohongshu",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "social_auto_upload",
+                        }
+                    ]
+                }
+            },
+        },
+        requested_platforms=["xiaohongshu"],
+    )
+
+    assert plan["publish_ready"] is True
+    target = plan["targets"][0]
+    assert target["declaration"] == ""
+    assert target["copy_material"]["declaration"] == ""
+    assert "selected_declarations" not in target["platform_specific_overrides"]
+
+    payload = publication._build_request_payload(plan=plan, target=target)
+    assert payload["declaration"] is None
+    command = build_social_auto_upload_upload_command(
+        python_executable="python",
+        platform="xiaohongshu",
+        account_name="creator-7be7da2e7d54-xiaohongshu-chrome",
+        request_payload=payload,
+    )
+    assert "--original-declaration" not in command
+    assert "--original-content-type" not in command
 
 
 def test_publication_plan_skips_platforms_with_title_audit_errors(tmp_path):
