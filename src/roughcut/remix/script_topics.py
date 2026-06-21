@@ -66,7 +66,7 @@ def extract_story_keywords(title: str, text: str, *, limit: int = 48) -> list[st
         keywords.append(value)
         if len(keywords) >= limit:
             break
-    for value in ("布鲁伊", "宾果", "爸爸", "妈妈", "孩子", "规则", "感受", "愿望", "边界"):
+    for value in ("示例动画", "宾果", "爸爸", "妈妈", "孩子", "规则", "感受", "愿望", "边界"):
         if value not in keywords:
             keywords.append(value)
     return keywords

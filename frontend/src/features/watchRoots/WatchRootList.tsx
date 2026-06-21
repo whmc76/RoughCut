@@ -46,12 +46,16 @@ export function WatchRootList({
             >
               <div>
                 <div className="row-title">{root.path}</div>
-                <div className="muted">{root.workflow_template || t("watch.list.unsetProfile")}</div>
+                <div className="muted">
+                  {t(`watch.form.editMode.${root.edit_mode ?? "auto"}`)} · {root.workflow_template || t("watch.list.unsetProfile")}
+                </div>
               </div>
               <div className="row-meta">
                 <span className={`status-chip ${root.enabled ? "done" : "cancelled"}`}>{root.enabled ? t("watch.list.enabled") : t("watch.list.disabled")}</span>
                 <span>{root.ingest_mode === "task_only" ? t("watch.list.modeTaskOnly") : t("watch.list.modeFullAuto")}</span>
                 <span>{root.job_flow_mode === "smart_assist" ? t("jobs.flowMode.smart_assist") : t("jobs.flowMode.auto")}</span>
+                <span>{t(`watch.form.automationLevel.${root.automation_level ?? "standard"}`)}</span>
+                <span>{t(`watch.form.materialUsage.${root.material_usage ?? "all_uploaded"}`)}</span>
                 <span>{root.scan_mode}</span>
                 <span className={`status-chip ${recursive ? "done" : "cancelled"}`}>{recursive ? t("watch.list.recursive") : t("watch.list.currentDirOnly")}</span>
                 <ListActions className="watch-root-row-actions">

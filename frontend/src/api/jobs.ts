@@ -214,6 +214,15 @@ export const jobsApi = {
     request<PublicationPlan>(
       `/jobs/${jobId}/publication/plan${creatorProfileId ? `?creator_profile_id=${encodeURIComponent(creatorProfileId)}` : ""}`,
     ),
+  prepareJobPublicationMaterials: (
+    jobId: string,
+    body: {
+      creator_profile_id?: string | null;
+      platforms?: string[];
+      platform_options?: Record<string, PublicationPlatformPublishOptions>;
+    },
+  ) =>
+    request<PublicationPlan>(`/jobs/${jobId}/publication/materials`, { method: "POST", body: JSON.stringify(body) }),
   publishJob: (
     jobId: string,
     body: {

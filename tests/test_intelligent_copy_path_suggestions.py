@@ -106,7 +106,7 @@ def test_inspect_prefers_final_remix_video_over_intermediate_montage(tmp_path):
     folder = tmp_path / "sample"
     folder.mkdir()
     montage = folder / "s02e02_video_montage.mp4"
-    final_video = folder / "bluey_s02e02_parenting_remix.mp4"
+    final_video = folder / "sample_show_s02e02_parenting_remix.mp4"
     montage.write_bytes(b"m" * 128)
     final_video.write_bytes(b"f" * 64)
     (folder / "s02e02_narration.ass").write_text(

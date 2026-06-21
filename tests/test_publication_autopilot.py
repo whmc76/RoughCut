@@ -1503,7 +1503,7 @@ def test_build_autopilot_verification_digest_preserves_visual_evidence() -> None
                         "receipt_target_unbound": False,
                         "verified_stop_before_final_publish": False,
                         "visual_evidence": {
-                            "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-prepublish.png",
+                            "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-prepublish.png",
                             "capture_type": "screenshot",
                             "phase": "pre_publish_page_snapshot",
                         },
@@ -1517,7 +1517,7 @@ def test_build_autopilot_verification_digest_preserves_visual_evidence() -> None
 
     assert digest["visual_evidence_by_platform"] == {
         "douyin": {
-            "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-prepublish.png",
+            "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-prepublish.png",
             "capture_type": "screenshot",
             "phase": "pre_publish_page_snapshot",
         }
@@ -1538,7 +1538,7 @@ def test_build_autopilot_verification_digest_preserves_creator_session_and_probe
                         "platform": "douyin",
                         "status": "auth_required",
                         "visual_evidence": {
-                            "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-session.png",
+                            "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-session.png",
                             "capture_type": "screenshot",
                             "phase": "creator_session_probe",
                         },
@@ -1550,7 +1550,7 @@ def test_build_autopilot_verification_digest_preserves_creator_session_and_probe
                     "douyin": {
                         "status": "partial",
                         "visual_evidence": {
-                            "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-probe.png",
+                            "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-probe.png",
                             "capture_type": "screenshot",
                             "phase": "probe_inventory",
                         },
@@ -1562,14 +1562,14 @@ def test_build_autopilot_verification_digest_preserves_creator_session_and_probe
 
     assert digest["creator_session_visual_evidence_by_platform"] == {
         "douyin": {
-            "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-session.png",
+            "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-session.png",
             "capture_type": "screenshot",
             "phase": "creator_session_probe",
         }
     }
     assert digest["probe_inventory_visual_evidence_by_platform"] == {
         "douyin": {
-            "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-probe.png",
+            "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-probe.png",
             "capture_type": "screenshot",
             "phase": "probe_inventory",
         }
@@ -1593,7 +1593,7 @@ def test_build_autopilot_verification_digest_preserves_nested_phase_visual_evide
                                     "platform": "douyin",
                                     "status": "ready",
                                     "visual_evidence": {
-                                        "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-nested-session.png",
+                                        "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-nested-session.png",
                                         "capture_type": "screenshot",
                                         "phase": "creator_session_probe",
                                     },
@@ -1605,7 +1605,7 @@ def test_build_autopilot_verification_digest_preserves_nested_phase_visual_evide
                                 "douyin": {
                                     "status": "partial",
                                     "visual_evidence": {
-                                        "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-nested-probe.png",
+                                        "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-nested-probe.png",
                                         "capture_type": "screenshot",
                                         "phase": "probe_inventory",
                                     },
@@ -1771,7 +1771,7 @@ def test_collect_autopilot_verification_report_preserves_creator_session_and_pro
                             "douyin": {
                                 "status": "partial",
                                 "visual_evidence": {
-                                    "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-probe.png",
+                                    "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-probe.png",
                                     "capture_type": "screenshot",
                                     "phase": "probe_inventory",
                                 },
@@ -1784,7 +1784,7 @@ def test_collect_autopilot_verification_report_preserves_creator_session_and_pro
                                 "platform": "douyin",
                                 "status": "auth_required",
                                 "visual_evidence": {
-                                    "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-session.png",
+                                    "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-session.png",
                                     "capture_type": "screenshot",
                                     "phase": "creator_session_probe",
                                 },
@@ -1803,14 +1803,14 @@ def test_collect_autopilot_verification_report_preserves_creator_session_and_pro
 
     assert report["publication_verification"]["creator_session_visual_evidence_by_platform"] == {
         "douyin": {
-            "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-session.png",
+            "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-session.png",
             "capture_type": "screenshot",
             "phase": "creator_session_probe",
         }
     }
     assert report["publication_verification"]["probe_inventory_visual_evidence_by_platform"] == {
         "douyin": {
-            "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-probe.png",
+            "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-probe.png",
             "capture_type": "screenshot",
             "phase": "probe_inventory",
         }
@@ -1840,7 +1840,7 @@ def test_build_autopilot_verification_digest_preserves_embedded_probe_inventory_
                 "platform_summaries": [],
                 "probe_inventory_visual_evidence_by_platform": {
                     "douyin": {
-                        "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-embedded-probe.png",
+                        "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-embedded-probe.png",
                         "capture_type": "screenshot",
                         "phase": "probe_inventory",
                     }
@@ -1851,7 +1851,7 @@ def test_build_autopilot_verification_digest_preserves_embedded_probe_inventory_
 
     assert digest["probe_inventory_visual_evidence_by_platform"] == {
         "douyin": {
-            "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-embedded-probe.png",
+            "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-embedded-probe.png",
             "capture_type": "screenshot",
             "phase": "probe_inventory",
         }
@@ -1877,7 +1877,7 @@ def test_collect_autopilot_verification_report_preserves_nested_phase_visual_evi
                                                     "platform": "douyin",
                                                     "status": "ready",
                                                     "visual_evidence": {
-                                                        "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-nested-session.png",
+                                                        "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-nested-session.png",
                                                         "capture_type": "screenshot",
                                                         "phase": "creator_session_probe",
                                                     },
@@ -1889,7 +1889,7 @@ def test_collect_autopilot_verification_report_preserves_nested_phase_visual_evi
                                                 "douyin": {
                                                     "status": "partial",
                                                     "visual_evidence": {
-                                                        "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-nested-probe.png",
+                                                        "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-nested-probe.png",
                                                         "capture_type": "screenshot",
                                                         "phase": "probe_inventory",
                                                     },
@@ -2350,7 +2350,7 @@ async def test_duplicate_history_gate_blocks_same_media_groups(monkeypatch: pyte
         },
         media_path="E:/media/maxace4.mp4",
         target_platforms=["douyin"],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
         allow_republish=False,
     )
 
@@ -2385,7 +2385,7 @@ async def test_duplicate_history_gate_warns_when_allow_republish(monkeypatch: py
         },
         media_path="E:/media/maxace4.mp4",
         target_platforms=["douyin"],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
         allow_republish=True,
     )
 
@@ -2427,12 +2427,12 @@ async def test_duplicate_history_gate_relaxes_profile_filter_when_history_profil
         },
         media_path="E:/media/maxace4.mp4",
         target_platforms=["douyin"],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
         allow_republish=False,
     )
 
     assert len(calls) == 2
-    assert calls[0]["browser_profile_ids"] == ["browser-profile:chrome:21104fd69d72ad7267c2"]
+    assert calls[0]["browser_profile_ids"] == ["browser-profile:chrome:demo-profile-a"]
     assert calls[1]["browser_profile_ids"] == []
     assert report["status"] == "failed"
     assert report["profile_filter_relaxed"] is True

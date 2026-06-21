@@ -53,11 +53,11 @@
 发布链路唯一允许的浏览器执行面如下：
 
 - 浏览器/profile 必须由当前任务绑定的创作者卡片 / publication credential 决定，不能写死系统默认浏览器，也不能写死某个全局 profile。
-- 对当前 FAS 测试任务，这个绑定当前解析为：
+- 对本地测试任务，这个绑定应从创作者卡片 / publication credential 解析，例如：
   - 浏览器：`Google Chrome`
-  - 用户数据目录：`C:\Users\28687\AppData\Local\Google\Chrome\User Data`
-  - Profile：`Profile 2`
-  - RoughCut 复用 profile id：`browser-profile:chrome:21104fd69d72ad7267c2`
+  - 用户数据目录：`<your Chrome User Data directory>`
+  - Profile：`<your Chrome profile directory>`
+  - RoughCut 复用 profile id：`browser-profile:chrome:<local-profile-id>`
 - browser-agent 入口：`http://127.0.0.1:49310`
 - browser transport：`bridge://chrome-extension`
 - 执行扩展：`RoughCut Publication Bridge`
@@ -93,8 +93,8 @@
 
 ```powershell
 powershell -File .\scripts\start_publication_browser_session.ps1 `
-  -UserDataDir "C:\Users\28687\AppData\Local\Google\Chrome\User Data" `
-  -ProfileDirectory "Profile 2"
+  -UserDataDir "<your Chrome User Data directory>" `
+  -ProfileDirectory "<your Chrome profile directory>"
 ```
 
 默认会同时通过 `--load-extension` 自动加载 repo 内的 `browser/publication-bridge-extension`。只有在明确做无桥调试时，才允许额外传 `-DisableBridgeExtension`。

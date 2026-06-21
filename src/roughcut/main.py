@@ -49,6 +49,7 @@ async def lifespan(app: FastAPI):
     # Ensure host-backed job storage exists on startup
     from roughcut.storage.s3 import get_storage
     from roughcut.docker_gpu_guard import adopt_running_idle_managed_gpu_services
+    from roughcut.api.jobs import recover_interrupted_remix_production_jobs_on_startup
 
     try:
         storage = get_storage()
@@ -61,6 +62,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         import logging
         logging.getLogger(__name__).warning(f"Could not adopt running managed GPU services: {e}")
+    try:
+        recovered = await recover_interrupted_remix_production_jobs_on_startup()
+        if recovered:
+            import logging
+            logging.getLogger(__name__).warning("Recovered %s interrupted remix production job(s) on startup", recovered)
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"Could not recover interrupted remix production jobs: {e}")
     yield
 
 

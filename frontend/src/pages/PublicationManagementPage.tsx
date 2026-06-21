@@ -646,7 +646,7 @@ export function PublicationManagementPage() {
                       className="input"
                       value={bindingAccountName}
                       onChange={(event) => setBindingAccountName(event.target.value)}
-                      placeholder="例如：珍妮斯baby · B站主号"
+                      placeholder="例如：Demo Creator · B站主号"
                     />
                   </label>
                   {loginLaunchResult ? (

@@ -2,7 +2,7 @@ from pathlib import Path
 
 from scripts.check_agent_docs import (
     DOC_INDEX_PATH,
-    STATE_TEMPLATE_PATH,
+    MANUAL_EDITOR_PATH,
     validate_agents_text,
     validate_repo_docs,
     validate_state_doc_text,
@@ -20,7 +20,7 @@ def test_agents_guard_rejects_platform_specific_terms() -> None:
 This is the entrypoint map for coding agents.
 Do not use it as task memory.
 
-See docs/agent-current-state.md and docs/agent-doc-index.md.
+See README.md and docs/design/INDEX.md.
 
 ## Current Goal
 
@@ -39,23 +39,20 @@ def test_state_template_and_index_have_required_structure() -> None:
         str(DOC_INDEX_PATH),
         DOC_INDEX_PATH.read_text(encoding="utf-8"),
         (
-            "# Agent Document Index",
-            "## Default Read Path",
-            "## State Templates",
-            "## Publication Work",
-            "## Read Discipline",
+            "# RoughCut Design Docs",
+            "## Public Documents",
+            "## Notes",
         ),
     )
-    template_errors = validate_state_doc_text(
-        str(STATE_TEMPLATE_PATH),
-        STATE_TEMPLATE_PATH.read_text(encoding="utf-8"),
+    manual_editor_errors = validate_state_doc_text(
+        str(MANUAL_EDITOR_PATH),
+        MANUAL_EDITOR_PATH.read_text(encoding="utf-8"),
         (
-            "# Agent Current State Template",
-            "## Current Objective",
-            "## Do Not Reopen",
-            "## Verification",
+            "# Manual Editor Open Source Alignment",
+            "## Baseline",
+            "## Guardrails",
         ),
     )
 
     assert index_errors == []
-    assert template_errors == []
+    assert manual_editor_errors == []

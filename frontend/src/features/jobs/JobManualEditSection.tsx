@@ -2550,7 +2550,10 @@ function normalizeVideoTransform(transform?: JobManualVideoTransform | null): Jo
   };
 }
 
-function aspectRatioCssValue(value?: string | null) {
+function aspectRatioCssValue(value?: string | null, sourceAspectRatio?: number | null) {
+  if (value === "source" && sourceAspectRatio && Number.isFinite(sourceAspectRatio) && sourceAspectRatio > 0) {
+    return `${sourceAspectRatio.toFixed(6)} / 1`;
+  }
   switch (value) {
     case "9:16":
       return "9 / 16";
@@ -2565,7 +2568,10 @@ function aspectRatioCssValue(value?: string | null) {
   }
 }
 
-function aspectRatioNumber(value?: string | null) {
+function aspectRatioNumber(value?: string | null, sourceAspectRatio?: number | null) {
+  if (value === "source" && sourceAspectRatio && Number.isFinite(sourceAspectRatio) && sourceAspectRatio > 0) {
+    return sourceAspectRatio;
+  }
   switch (value) {
     case "9:16":
       return 9 / 16;
@@ -7907,9 +7913,9 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
     const rawWidth = Math.max(1, sourceVideoSize?.width || 16);
     const rawHeight = Math.max(1, sourceVideoSize?.height || 9);
     const rawAspect = rawWidth / rawHeight;
-    const frameAspectValue = currentVideoTransform.aspect_ratio === "source" ? 16 / 9 : aspectRatioNumber(currentVideoTransform.aspect_ratio);
     const quarterTurn = rotation === 90 || rotation === 270;
     const displayedAspect = quarterTurn ? 1 / rawAspect : rawAspect;
+    const frameAspectValue = aspectRatioNumber(currentVideoTransform.aspect_ratio, displayedAspect);
     let stageWidth: number;
     let stageHeight: number;
     if (displayedAspect >= frameAspectValue) {
@@ -7928,7 +7934,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
       "--manual-video-stage-height": `${stageHeight * 100}%`,
       "--manual-video-width": `${unrotatedWidth * 100}%`,
       "--manual-video-height": `${unrotatedHeight * 100}%`,
-      aspectRatio: currentVideoTransform.aspect_ratio === "source" ? "16 / 9" : aspectRatioCssValue(currentVideoTransform.aspect_ratio),
+      aspectRatio: aspectRatioCssValue(currentVideoTransform.aspect_ratio, displayedAspect),
       width: `min(100%, ${boundedWidth}px)`,
     } as CSSProperties;
   };
@@ -8165,7 +8171,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
             </div>
 
             <div className="manual-editor-resolution-preview">
-              <div style={{ aspectRatio: aspectRatioCssValue(resolutionDraft.aspect_ratio) }}>
+              <div style={{ aspectRatio: aspectRatioCssValue(resolutionDraft.aspect_ratio, sourceVideoSize ? sourceVideoSize.width / sourceVideoSize.height : null) }}>
                 <span>{ASPECT_RATIO_OPTIONS.find((option) => option.value === resolutionDraft.aspect_ratio)?.label ?? "跟随原片"}</span>
                 <small>
                   {resolutionDraft.resolution_mode === "specified"

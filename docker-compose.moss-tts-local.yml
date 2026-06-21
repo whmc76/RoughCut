@@ -27,5 +27,5 @@ services:
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     volumes:
-      - ${MOSS_TTS_LOCAL_MODEL_CACHE:-E:/WorkSpace/RoughCut/.model-cache/moss-tts-local}:/models
+      - ${MOSS_TTS_LOCAL_MODEL_CACHE:-C:/sample-workspace/RoughCut/.model-cache/moss-tts-local}:/models
     restart: unless-stopped

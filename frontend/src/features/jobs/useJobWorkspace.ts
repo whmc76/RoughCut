@@ -88,11 +88,15 @@ function jobTaskTypeLabel(job: Pick<Job, "queue_task_kind" | "source_name">): st
 
 export type JobQueueFilter = "all" | "pending" | "running" | "done" | "attention";
 export type JobTaskKindFilter = "all" | NonNullable<Job["queue_task_kind"]>;
+export type JobPublicationFilter = "all" | "published" | "unpublished";
+export type JobClipStatusFilter = "all" | "pending" | "processing" | "done";
 
 type UseJobWorkspaceOptions = {
   isCreateOpen?: boolean;
   additionalJobs?: Job[];
   taskKindFilter?: JobTaskKindFilter;
+  publicationFilter?: JobPublicationFilter;
+  clipStatusFilter?: JobClipStatusFilter;
 };
 
 export type JobReviewStep = "summary_review" | "final_review";
@@ -176,6 +180,31 @@ function sameStringArray(left: string[], right: string[]) {
 function matchesTaskKindFilter(job: Job, filter: JobTaskKindFilter) {
   if (filter === "all") return true;
   return (job.queue_task_kind ?? "edit") === filter;
+}
+
+function isPublishedJob(job: Pick<Job, "publication_status" | "status">) {
+  return job.publication_status === "published" || job.status === "published";
+}
+
+function matchesPublicationFilter(job: Job, filter: JobPublicationFilter) {
+  if (filter === "all") return true;
+  const published = isPublishedJob(job);
+  return filter === "published" ? published : !published;
+}
+
+function isClipProcessingJob(status: string) {
+  return status === "running" || status === "processing";
+}
+
+function isClipDoneJob(job: Pick<Job, "status" | "publication_status">) {
+  return job.status === "done" || isPublishedJob(job);
+}
+
+function matchesClipStatusFilter(job: Job, filter: JobClipStatusFilter) {
+  if (filter === "all") return true;
+  if (filter === "processing") return isClipProcessingJob(job.status);
+  if (filter === "done") return isClipDoneJob(job);
+  return !isClipProcessingJob(job.status) && !isClipDoneJob(job);
 }
 
 function sameBoolRecord(left: Record<string, boolean>, right: Record<string, boolean>) {
@@ -301,6 +330,8 @@ export function useJobWorkspace({
   isCreateOpen = false,
   additionalJobs = [],
   taskKindFilter = "all",
+  publicationFilter = "all",
+  clipStatusFilter = "all",
 }: UseJobWorkspaceOptions = {}) {
   const queryClient = useQueryClient();
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
@@ -534,7 +565,7 @@ export function useJobWorkspace({
 
   useEffect(() => {
     setJobsPage(0);
-  }, [keyword, queueFilter]);
+  }, [keyword, queueFilter, taskKindFilter, publicationFilter, clipStatusFilter]);
 
   useEffect(() => {
     const previousDefaults = previousUploadDefaultsRef.current;
@@ -785,7 +816,10 @@ export function useJobWorkspace({
   });
   const searchMatchedJobs = useMemo(() => {
     const needle = keyword.trim().toLowerCase();
-    const allJobs = [...(jobs.data ?? []), ...additionalJobs];
+    const jobsById = new Map<string, Job>();
+    additionalJobs.forEach((job) => jobsById.set(job.id, job));
+    (jobs.data ?? []).forEach((job) => jobsById.set(job.id, job));
+    const allJobs = [...jobsById.values()];
     const visibleJobs = !needle
       ? allJobs
       : allJobs.filter((job) =>
@@ -793,8 +827,12 @@ export function useJobWorkspace({
           String(field ?? "").toLowerCase().includes(needle),
         ),
     );
-    return [...visibleJobs].filter((job) => matchesTaskKindFilter(job, taskKindFilter)).sort(compareJobs);
-  }, [additionalJobs, jobs.data, keyword, taskKindFilter]);
+    return [...visibleJobs]
+      .filter((job) => matchesTaskKindFilter(job, taskKindFilter))
+      .filter((job) => matchesPublicationFilter(job, publicationFilter))
+      .filter((job) => matchesClipStatusFilter(job, clipStatusFilter))
+      .sort(compareJobs);
+  }, [additionalJobs, clipStatusFilter, jobs.data, keyword, publicationFilter, taskKindFilter]);
   const queueStats = useMemo(() => ({
     total: searchMatchedJobs.length,
     pending: searchMatchedJobs.filter((job) => isPendingJob(job.status)).length,

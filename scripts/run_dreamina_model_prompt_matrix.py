@@ -22,7 +22,7 @@ REFERENCE_IMAGE = Path(
 OUTPUT_DIR = Path(
     r"\\Z4pro-gwil\团队文件-媒体工作台\EDC系列\待发布\MAXACE 美杜莎4 顶配次顶配开箱\smart-copy\compare\dreamina-matrix"
 )
-LOCAL_PREVIEW_DIR = Path(r"E:/WorkSpace/RoughCut/data/runtime/compare-preview/dreamina-matrix")
+LOCAL_PREVIEW_DIR = Path(r"C:/sample-workspace/RoughCut/data/runtime/compare-preview/dreamina-matrix")
 TITLE = "美杜莎4双版开箱对比"
 WIDTH = 1600
 HEIGHT = 900

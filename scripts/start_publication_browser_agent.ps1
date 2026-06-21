@@ -221,6 +221,8 @@ $environmentMap = [ordered]@{
     PUBLICATION_BROWSER_PROFILE_DIRECTORY = $ProfileDirectory.Trim()
     PUBLICATION_BROWSER_ALLOW_TAB_AUTOCREATE = $AllowTabAutocreate.ToString().ToLowerInvariant()
     PUBLICATION_LIVE_PUBLISH_ENABLED = $(if ($EnableLivePublish) { "true" } else { "false" })
+    PUBLICATION_BROWSER_BRIDGE_COMMAND_TIMEOUT_MS = "90000"
+    PUBLICATION_BROWSER_CREATOR_SESSION_PROBE_TIMEOUT_MS = "90000"
 }
 
 if ($DryRun) {

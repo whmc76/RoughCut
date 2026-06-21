@@ -265,4 +265,14 @@ if ($DryRun) {
     return
 }
 
-& $ChromePath @arguments | Out-Null
+$startProcessArguments = @(
+    foreach ($argument in $arguments) {
+        $value = [string]$argument
+        if ($value -match '\s') {
+            '"' + $value.Replace('"', '\"') + '"'
+        } else {
+            $value
+        }
+    }
+)
+Start-Process -FilePath $ChromePath -ArgumentList $startProcessArguments -WindowStyle Normal | Out-Null

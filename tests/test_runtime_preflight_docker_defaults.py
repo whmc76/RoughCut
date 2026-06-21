@@ -11,6 +11,7 @@ def test_docker_autostart_defaults_to_disabled() -> None:
 
     assert settings.runtime_preflight_docker_enabled is False
     assert settings.docker_gpu_guard_enabled is True
+    assert settings.docker_gpu_guard_ready_timeout_sec == 240
     assert settings.avatar_render_no_progress_timeout_sec == 0
     assert settings.local_asr_docker_guard_enabled is True
     assert settings.heygem_docker_idle_timeout_sec == 10
@@ -24,6 +25,7 @@ def test_docker_autostart_defaults_to_disabled() -> None:
     assert settings.moss_tts_local_docker_compose_file.endswith("docker-compose.moss-tts-local.yml")
     assert settings.moss_tts_local_docker_services == "moss-tts-local"
     assert settings.moss_tts_local_docker_idle_timeout_sec == 10
+    assert settings.moss_tts_local_docker_ready_timeout_sec == 900
     assert settings.indextts2_docker_guard_enabled is False
     assert settings.indextts2_docker_services == "indextts2"
     assert settings.indextts2_docker_idle_timeout_sec == 10
@@ -46,19 +48,19 @@ def test_managed_service_targets_include_lifecycle_metadata(monkeypatch: pytest.
     settings = SimpleNamespace(
         transcription_provider="local_http_asr",
         local_asr_api_base_url="http://127.0.0.1:30200",
-        local_asr_docker_compose_file="E:/WorkSpace/RoughCut/docker-compose.asr-matrix.yml",
+        local_asr_docker_compose_file="C:/sample-workspace/RoughCut/docker-compose.asr-matrix.yml",
         local_asr_docker_env_file="",
         local_asr_docker_services="faster-whisper-large-v3",
         local_asr_docker_guard_enabled=True,
         local_asr_docker_idle_timeout_sec=120,
         cosyvoice3_tts_api_base_url="http://127.0.0.1:30180",
-        cosyvoice3_tts_docker_compose_file="E:/WorkSpace/RoughCut/docker-compose.cosyvoice3.yml",
+        cosyvoice3_tts_docker_compose_file="C:/sample-workspace/RoughCut/docker-compose.cosyvoice3.yml",
         cosyvoice3_tts_docker_env_file="",
         cosyvoice3_tts_docker_services="cosyvoice3-tts",
         cosyvoice3_tts_docker_guard_enabled=True,
         cosyvoice3_tts_docker_idle_timeout_sec=180,
         moss_tts_local_api_base_url="http://127.0.0.1:30191",
-        moss_tts_local_docker_compose_file="E:/WorkSpace/RoughCut/docker-compose.moss-tts-local.yml",
+        moss_tts_local_docker_compose_file="C:/sample-workspace/RoughCut/docker-compose.moss-tts-local.yml",
         moss_tts_local_docker_env_file="",
         moss_tts_local_docker_services="moss-tts-local",
         moss_tts_local_docker_guard_enabled=True,
@@ -86,6 +88,20 @@ def test_managed_service_targets_include_lifecycle_metadata(monkeypatch: pytest.
     assert targets["moss_tts_local"]["services"] == "moss-tts-local"
     assert targets["moss_tts_local"]["guard_enabled"] is True
     assert targets["moss_tts_local"]["idle_timeout_sec"] == 10
+
+
+def test_managed_gpu_ready_timeout_uses_target_specific_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        docker_gpu_guard,
+        "get_settings",
+        lambda: SimpleNamespace(
+            docker_gpu_guard_ready_timeout_sec=240,
+            moss_tts_local_docker_ready_timeout_sec=900,
+        ),
+    )
+
+    assert docker_gpu_guard._ready_timeout_seconds("moss_tts_local") == 900
+    assert docker_gpu_guard._ready_timeout_seconds("local_asr") == 240
 
 
 @pytest.mark.asyncio
@@ -182,7 +198,7 @@ def test_managed_service_defaults_use_current_project_root() -> None:
 
 
 def test_resolve_path_remaps_legacy_windows_workspace_path() -> None:
-    resolved = docker_gpu_guard._resolve_path("E:/WorkSpace/RoughCut/docker-compose.moss-tts-local.yml")
+    resolved = docker_gpu_guard._resolve_path("C:/sample-workspace/RoughCut/docker-compose.moss-tts-local.yml")
 
     assert resolved == docker_gpu_guard.DEFAULT_PROJECT_ROOT / "docker-compose.moss-tts-local.yml"
 
@@ -190,6 +206,6 @@ def test_resolve_path_remaps_legacy_windows_workspace_path() -> None:
 def test_resolve_path_ignores_external_windows_path_in_non_windows_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(docker_gpu_guard.os, "name", "posix")
 
-    resolved = docker_gpu_guard._resolve_path("E:/WorkSpace/heygem/docker-compose.yml")
+    resolved = docker_gpu_guard._resolve_path("C:/sample-workspace/heygem/docker-compose.yml")
 
     assert resolved is None

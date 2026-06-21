@@ -495,14 +495,14 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
       normalizedBackend.cdp_user_data_dir,
       env.HYDRA_DREAMINA_CDP_USER_DATA_DIR,
       process.env.HYDRA_DREAMINA_CDP_USER_DATA_DIR,
-      "C:/Users/Administrator/AppData/Local/HydraDreaminaCDPProfile"
+      "./data/runtime/dreamina-profile"
     ),
     cdpHeadlessUserDataDir: firstNonEmpty(
       normalizedBackend.cdpHeadlessUserDataDir,
       normalizedBackend.cdp_headless_user_data_dir,
       env.HYDRA_DREAMINA_CDP_HEADLESS_USER_DATA_DIR,
       process.env.HYDRA_DREAMINA_CDP_HEADLESS_USER_DATA_DIR,
-      "C:/Users/Administrator/AppData/Local/HydraDreaminaCDPProfileHeadless"
+      "./data/runtime/dreamina-profile-headless"
     ),
     cdpCookieSourceBaseUrl: firstNonEmpty(
       normalizedBackend.cdpCookieSourceBaseUrl,

@@ -264,9 +264,15 @@ def _project_required_cover_slots_from_cover_matrix(
         matrix_key = str(spec.get("matrix_key") or "").strip()
         source_slot = explicit_by_slot.get(slot_key) or explicit_by_matrix_key.get(matrix_key)
         matrix_slot = _normalize_cover_matrix_slot_entry(matrix_key, cover_matrix.get(matrix_key)) if matrix_key else None
-        if source_slot is not None and matrix_slot is not None and not str(source_slot.get("cover_path") or "").strip():
-            merged_slot = dict(matrix_slot)
-            merged_slot.update({key: value for key, value in source_slot.items() if str(value or "").strip()})
+        if source_slot is not None and matrix_slot is not None:
+            merged_slot = dict(source_slot)
+            merged_slot.update(
+                {
+                    key: value
+                    for key, value in matrix_slot.items()
+                    if str(value or "").strip() and key in {"cover_path", "target_size", "label", "matrix_key"}
+                }
+            )
             source_slot = merged_slot
         if source_slot is None and matrix_key:
             source_slot = matrix_slot
@@ -277,7 +283,15 @@ def _project_required_cover_slots_from_cover_matrix(
         normalized_slot: dict[str, Any] = {
             "slot": slot_key or str(source_slot.get("slot") or "").strip() or f"slot_{index + 1}",
         }
-        resolved_cover_path = str(source_slot.get("cover_path") or cover_path or "").strip()
+        matrix_cover_path = str(matrix_slot.get("cover_path") or "").strip() if matrix_slot is not None else ""
+        single_slot_primary_cover = (
+            str(cover_path or "").strip()
+            if len(required_specs) == 1 and not matrix_cover_path
+            else ""
+        )
+        resolved_cover_path = str(
+            matrix_cover_path or single_slot_primary_cover or source_slot.get("cover_path") or cover_path or ""
+        ).strip()
         if resolved_cover_path:
             normalized_slot["cover_path"] = resolved_cover_path
         resolved_target_size = _normalize_cover_size(source_slot.get("target_size")) or target_size
@@ -370,6 +384,15 @@ def derive_publication_cover_slots(entry: dict[str, Any] | None) -> list[dict[st
 
 
 def publication_primary_cover_path(entry: dict[str, Any] | None) -> str:
+    if isinstance(entry, dict):
+        platform = normalize_publication_packaging_platform_key(entry.get("platform") or entry.get("key"))
+        explicit_cover_path = str(entry.get("cover_path") or "").strip()
+        if (
+            explicit_cover_path
+            and len(platform_required_cover_slots(platform)) == 1
+            and not isinstance(entry.get("cover_matrix"), dict)
+        ):
+            return explicit_cover_path
     slots = derive_publication_cover_slots(entry)
     for slot in slots:
         path = str(slot.get("cover_path") or "").strip()
@@ -738,6 +761,8 @@ def publication_packaging_entry_blocking_reasons(entry: dict[str, Any]) -> list[
     manual_handoff_only = bool(entry.get("manual_handoff_only")) or platform_manual_handoff_only(platform)
     if manual_handoff_only:
         return list(dict.fromkeys(blocking_reasons))
+    if not _publication_packaging_entry_has_title(entry):
+        blocking_reasons.append("标题为空，不能自动发布。")
     metadata_contract_fields = (
         "declaration",
         "category",
@@ -809,6 +834,16 @@ def publication_packaging_entry_blocking_reasons(entry: dict[str, Any]) -> list[
     if collection_contract_present and not collection_policy_ready:
         blocking_reasons.append("缺少合集决策（需指定 collection_name 或显式声明跳过合集）")
     return list(dict.fromkeys(blocking_reasons))
+
+
+def _publication_packaging_entry_has_title(entry: dict[str, Any]) -> bool:
+    for key in ("primary_title", "title"):
+        if str(entry.get(key) or "").strip():
+            return True
+    titles = entry.get("titles")
+    if isinstance(titles, list):
+        return any(str(title or "").strip() for title in titles)
+    return False
 
 
 def publication_packaging_entry_publish_ready(

@@ -7,10 +7,10 @@
 Read documents in this order:
 
 1. `AGENTS.md`
-2. `docs/agent-current-state.md`
-3. Task-specific source-of-truth docs from `docs/agent-doc-index.md`
+2. `README.md`
+3. Task-specific public docs from `docs/design/INDEX.md`
 
-If a document disagrees with stale conversation context, old logs, or old artifacts, trust the current source-of-truth document and the current runtime state.
+If a document disagrees with stale conversation context, old logs, or old artifacts, trust the current public docs and the current runtime state.
 
 ## Core Rules
 
@@ -18,15 +18,15 @@ If a document disagrees with stale conversation context, old logs, or old artifa
 - Before editing a bug, identify the observed symptom, the first bad layer, the suspected root cause, and why it surfaced now.
 - When the same smell appears in multiple places, fix the shared abstraction or source of truth instead of the nearest call site.
 - After a fix, run the narrowest useful verification tied to the root cause.
-- For long-running work, keep current plan, progress, blockers, and "do not reopen" decisions in dedicated markdown state files. Do not rely on compacted chat history as the source of truth.
+- Formal editing/production jobs must run through a durable worker or queue with restart recovery, not API-owned background tasks.
+- For long-running work, keep current plan, progress, blockers, and "do not reopen" decisions in local ignored state files. Do not rely on compacted chat history as the source of truth.
 - Treat the live browser page or current runtime state as authoritative over stale artifacts, cached verdicts, screenshots, or memory.
 - When downloading or referencing open-source model weights, prefer ModelScope over Hugging Face when an equivalent model is available. Fall back only when ModelScope does not provide the needed files or revision.
 
 ## Document Hygiene
 
 - Keep this file short. Only store rules that should be applied across many tasks.
-- Put active task state in `docs/agent-current-state.md`.
-- Put publication session facts in `docs/publication-agent-ledger.md`.
+- Keep active task state and publication session facts in local ignored files.
 - Put operating procedures and command flows in runbooks, not here.
 - Put incident writeups and retrospectives in incident docs, not here.
 
@@ -35,7 +35,7 @@ If a document disagrees with stale conversation context, old logs, or old artifa
 When a new rule is proposed, first decide whether it is:
 
 - a global rule that belongs in `AGENTS.md`;
-- active task state that belongs in `docs/agent-current-state.md`;
+- active task state that belongs in local ignored state;
 - workflow detail that belongs in a runbook;
 - or a one-off lesson that belongs in an incident doc.
 

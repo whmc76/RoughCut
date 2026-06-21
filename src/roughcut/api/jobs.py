@@ -20,9 +20,10 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile, status
+import httpx
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import delete, distinct, func, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -126,6 +127,7 @@ from roughcut.edit.rule_registry import (
     rule_match_surface_layer,
 )
 from roughcut.host.file_manager import can_open_in_file_manager, describe_file_manager_target, open_in_file_manager
+from roughcut.host.codex_proxy import resolve_codex_proxy_sibling_url, resolve_codex_proxy_token
 from roughcut.intelligent_copy_layout import (
     resolve_smart_copy_material_json_path,
     resolve_smart_copy_platform_packaging_json_path,
@@ -660,6 +662,7 @@ class ManualEditorPreviewAssetsOut(BaseModel):
     auto_volume_gain: float = 1.0
     thumbnail_urls: list[str] = Field(default_factory=list)
     thumbnail_items: list[ManualEditorThumbnailOut] = Field(default_factory=list)
+    orientation_decision: dict[str, Any] = Field(default_factory=dict)
     cached: bool = False
     detail: str | None = None
     error: str | None = None
@@ -1642,10 +1645,13 @@ async def get_jobs_usage_trend(
     )
 
 
-DEFAULT_REMIX_PRODUCTION_MANIFEST = DEFAULT_PROJECT_ROOT / "data" / "remix_production_tasks" / "jenny_baby_bluey_pending.json"
+DEFAULT_REMIX_PRODUCTION_MANIFEST_ENV = "ROUGHCUT_REMIX_PRODUCTION_MANIFEST"
 REMIX_PRODUCTION_WORKFLOW_MODES = {"remix_auto_commentary", "remix_llm_plan", "script_footage_remix"}
 REMIX_PRODUCTION_STEP_NAME = "script_footage_remix"
 REMIX_PRODUCTION_TTS_TIMEOUT_SEC = 3600.0
+REMIX_PRODUCTION_STARTUP_RECOVERY_MAX_ATTEMPTS = 3
+REMIX_PRODUCTION_CELERY_TASK_NAME = "roughcut.pipeline.tasks.remix_production_run"
+REMIX_PRODUCTION_CELERY_QUEUE = "media_queue"
 _PUBLICATION_COVER_AUTO_HEAL_BLOCK_TOKENS = (
     "封面",
     "cover",
@@ -1661,6 +1667,7 @@ class RemixProductionStartOut(BaseModel):
     status: str
     detail: str
     command: list[str] = Field(default_factory=list)
+    task_id: str | None = None
 
 
 class RemixProductionTaskCreateIn(BaseModel):
@@ -1738,7 +1745,6 @@ async def create_remix_production_task_job(
 @router.post("/remix-production/jobs/{job_id}/start", response_model=RemixProductionStartOut)
 async def start_remix_production_job(
     job_id: uuid.UUID,
-    background_tasks: BackgroundTasks,
     force: bool = False,
     session: AsyncSession = Depends(get_session),
 ):
@@ -1760,6 +1766,7 @@ async def start_remix_production_job(
     command, output_dir = _build_remix_production_job_command(job, remix_payload, force=force)
     step = _ensure_remix_production_step(job)
     now = datetime.now(timezone.utc)
+    task_id = uuid.uuid4().hex
     step.status = "running"
     step.started_at = now
     step.finished_at = None
@@ -1771,6 +1778,9 @@ async def start_remix_production_job(
         "output_dir": str(output_dir),
         "progress": 0.05,
         "detail": "已提交影视二创 script-footage 生产任务。",
+        "task_id": task_id,
+        "queue": REMIX_PRODUCTION_CELERY_QUEUE,
+        "dispatched_at": now.isoformat(),
         "worker_started_at": now.isoformat(),
         "updated_at": now.isoformat(),
     }
@@ -1778,19 +1788,40 @@ async def start_remix_production_job(
     job.error_message = None
     job.updated_at = now
     await session.commit()
-    background_tasks.add_task(_run_remix_production_job_background, str(job.id), command, str(output_dir))
+    try:
+        _send_remix_production_job_task(str(job.id), command, str(output_dir), task_id=task_id)
+    except Exception as exc:
+        detail = f"影视二创生产任务入队失败：{exc}"
+        now = datetime.now(timezone.utc)
+        step.status = "failed"
+        step.finished_at = now
+        step.error_message = detail
+        step.metadata_ = {
+            **(step.metadata_ or {}),
+            "detail": detail,
+            "updated_at": now.isoformat(),
+        }
+        job.status = "failed"
+        job.error_message = detail
+        job.updated_at = now
+        await session.commit()
+        raise HTTPException(status_code=503, detail=detail) from exc
     return RemixProductionStartOut(
         job_id=str(job.id),
         status="started",
-        detail="已启动该集影视二创生产任务。",
+        detail="已将该集影视二创生产任务提交到媒体队列。",
         command=command,
+        task_id=task_id,
     )
 
 
 def _resolve_remix_production_manifest_path(value: str | None) -> Path:
-    raw = str(value or "").strip()
+    raw = str(value or os.getenv(DEFAULT_REMIX_PRODUCTION_MANIFEST_ENV) or "").strip()
     if not raw:
-        return DEFAULT_REMIX_PRODUCTION_MANIFEST
+        raise HTTPException(
+            status_code=400,
+            detail=f"Remix production manifest path is required. Set {DEFAULT_REMIX_PRODUCTION_MANIFEST_ENV} or pass a manifest path.",
+        )
     path = Path(raw).expanduser()
     if path.is_absolute():
         return path
@@ -1928,6 +1959,7 @@ async def _create_or_update_remix_production_job(
     creator_card_id = await _resolve_remix_creator_card_id(session, payload)
     existing_job = existing.get(_remix_task_identity(task))
     if existing_job is not None:
+        _refresh_remix_production_job_metadata(existing_job, payload, task, creator_card_id=creator_card_id)
         _ensure_remix_production_cover_artifact(existing_job, payload, task)
         return existing_job
 
@@ -1979,6 +2011,58 @@ async def _create_or_update_remix_production_job(
     _ensure_remix_production_cover_artifact(job, payload, task)
     await _ensure_job_agent_plan(session, job)
     return job
+
+
+def _refresh_remix_production_job_metadata(
+    job: Job,
+    payload: dict[str, Any],
+    task: dict[str, Any],
+    *,
+    creator_card_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    source_video_path = str(task.get("source_video_path") or "").strip()
+    script_path = str(task.get("script_path") or "").strip()
+    if not source_video_path or not script_path:
+        raise HTTPException(status_code=422, detail="Remix production task is missing source video or script path")
+
+    label = _remix_task_label(task)
+    source_context = _build_remix_production_source_context(payload, task)
+    job.source_path = source_video_path
+    job.source_name = label
+    job.file_hash = _remix_production_file_hash(payload, task)
+    job.workflow_mode = "script_footage_remix"
+    job.output_dir = str(_default_remix_production_output_dir(payload, task))
+    if creator_card_id is not None:
+        job.creator_card_id = creator_card_id
+    job.task_brief = (
+        f"{label} 影视二创正式生产任务。完整保留文案，使用创作者参考语音、"
+        "Source-ASR 定位原片剧情，TTS-ASR 对齐字幕，Hyperframes 包装。"
+    )
+
+    steps = list(job.steps or [])
+    content_step = _find_step(steps, "content_profile")
+    if content_step is None:
+        content_step = JobStep(job_id=job.id, step_name="content_profile", status="done")
+        (job.steps or []).append(content_step)
+    content_step.status = "done"
+    content_step.error_message = None
+    content_step.metadata_ = {
+        **(content_step.metadata_ or {}),
+        "source_context": source_context,
+        "detail": "二创生产任务元数据已导入。",
+    }
+
+    remix_step = _find_step(steps, REMIX_PRODUCTION_STEP_NAME)
+    if remix_step is None:
+        remix_step = JobStep(job_id=job.id, step_name=REMIX_PRODUCTION_STEP_NAME, status="pending")
+        (job.steps or []).append(remix_step)
+    remix_step.metadata_ = {
+        **(remix_step.metadata_ or {}),
+        "source_context": source_context,
+        "detail": (remix_step.metadata_ or {}).get("detail") or "等待启动影视二创生产。",
+        "progress": (remix_step.metadata_ or {}).get("progress", 0.0),
+    }
+    return source_context
 
 
 def _build_remix_production_source_context(payload: dict[str, Any], task: dict[str, Any]) -> dict[str, Any]:
@@ -2038,23 +2122,47 @@ def _remix_production_thumbnail_path(payload: dict[str, Any], task: dict[str, An
     return DEFAULT_PROJECT_ROOT / "data" / "remix-production-thumbnails" / (manifest_id or "script_footage_remix") / f"s02e{episode:02d}.jpg"
 
 
+def _resolve_remix_production_output_cover_path(output_dir: Path, *, episode: int) -> Path | None:
+    candidate_patterns = [
+        f"s02e{episode:02d}_*_cover.jpg",
+        f"s02e{episode:02d}_*/s02e{episode:02d}_*_cover.jpg",
+    ]
+    for pattern in candidate_patterns:
+        for cover_path in sorted(output_dir.glob(pattern)):
+            if cover_path.is_file():
+                return cover_path
+    return None
+
+
+def _resolve_remix_production_cover_path(payload: dict[str, Any], task: dict[str, Any]) -> Path | None:
+    thumbnail_path = _remix_production_thumbnail_path(payload, task)
+    if thumbnail_path.exists():
+        return thumbnail_path
+
+    episode = int(task.get("episode") or 0)
+    output_dir = _default_remix_production_output_dir(payload, task)
+    return _resolve_remix_production_output_cover_path(output_dir, episode=episode)
+
+
 def _ensure_remix_production_cover_artifact(job: Job, payload: dict[str, Any], task: dict[str, Any]) -> None:
-    cover_path = _remix_production_thumbnail_path(payload, task)
-    if not cover_path.exists():
+    cover_path = _resolve_remix_production_cover_path(payload, task)
+    if cover_path is None:
         return
     cover_text = str(cover_path)
     for artifact in list(getattr(job, "artifacts", None) or []):
         if str(getattr(artifact, "artifact_type", "") or "") != "render_outputs":
             continue
         data = dict(getattr(artifact, "data_json", None) or {})
-        data.setdefault("cover", cover_text)
+        if _normalize_existing_image_path(data.get("cover")) is None:
+            data["cover"] = cover_text
+        data.setdefault("cover_source", "remix_production")
         artifact.data_json = data
         return
     job.artifacts.append(
         Artifact(
             job_id=job.id,
             artifact_type="render_outputs",
-            data_json={"cover": cover_text, "cover_source": "remix_production_thumbnail"},
+            data_json={"cover": cover_text, "cover_source": "remix_production"},
         )
     )
 
@@ -2202,6 +2310,145 @@ def _run_remix_production_job_background(job_id: str, command: list[str], output
     asyncio.run(_run_remix_production_job(job_id, command, output_dir))
 
 
+def _send_remix_production_job_task(job_id: str, command: list[str], output_dir: str, *, task_id: str) -> object:
+    return celery_app.send_task(
+        REMIX_PRODUCTION_CELERY_TASK_NAME,
+        args=[job_id, command, output_dir],
+        queue=REMIX_PRODUCTION_CELERY_QUEUE,
+        task_id=task_id,
+    )
+
+
+async def recover_interrupted_remix_production_jobs_on_startup(
+    *,
+    schedule_task: Callable[[str, list[str], str, str], object] | None = None,
+) -> int:
+    settings = get_settings()
+    if not bool(getattr(settings, "startup_recovery_enabled", True)):
+        return 0
+
+    scheduled_runs: list[tuple[str, list[str], str, str]] = []
+    factory = get_session_factory()
+    async with factory() as session:
+        result = await session.execute(
+            select(Job)
+            .options(selectinload(Job.steps))
+            .where(
+                Job.status.in_(["processing", "running"]),
+                Job.workflow_mode.in_(REMIX_PRODUCTION_WORKFLOW_MODES),
+            )
+            .with_for_update(skip_locked=True)
+        )
+        jobs = result.scalars().unique().all()
+        now = datetime.now(timezone.utc)
+        for job in jobs:
+            step = _find_step(list(job.steps or []), REMIX_PRODUCTION_STEP_NAME)
+            if step is None or str(step.status or "").strip().lower() != "running":
+                continue
+            source_context = _extract_job_source_context_from_steps(job.steps or [])
+            remix_payload = source_context.get("remix_production") if isinstance(source_context, dict) else None
+            metadata = dict(step.metadata_ or {})
+            if not isinstance(remix_payload, dict):
+                detail = "服务启动恢复失败：影视二创任务缺少 remix production 元数据，无法自动续跑。"
+                step.status = "failed"
+                step.finished_at = now
+                step.error_message = detail
+                step.metadata_ = {**metadata, "detail": detail, "updated_at": now.isoformat()}
+                job.status = "failed"
+                job.error_message = detail
+                job.updated_at = now
+                continue
+            if int(step.attempt or 0) >= REMIX_PRODUCTION_STARTUP_RECOVERY_MAX_ATTEMPTS:
+                detail = (
+                    "服务启动发现影视二创任务已达到最大自动恢复次数"
+                    f"({REMIX_PRODUCTION_STARTUP_RECOVERY_MAX_ATTEMPTS})，不再自动续跑。"
+                )
+                step.status = "failed"
+                step.finished_at = now
+                step.error_message = detail
+                step.metadata_ = {**metadata, "detail": detail, "updated_at": now.isoformat()}
+                job.status = "failed"
+                job.error_message = detail
+                job.updated_at = now
+                continue
+            runtime_blocker = _remix_runtime_path_blocker(remix_payload)
+            if runtime_blocker:
+                detail = f"服务启动恢复失败：{runtime_blocker}"
+                step.status = "failed"
+                step.finished_at = now
+                step.error_message = detail
+                step.metadata_ = {**metadata, "detail": detail, "updated_at": now.isoformat()}
+                job.status = "failed"
+                job.error_message = detail
+                job.updated_at = now
+                continue
+
+            command, output_dir = _build_remix_production_job_command(job, remix_payload, force=False)
+            task_id = uuid.uuid4().hex
+            step.status = "running"
+            step.started_at = now
+            step.finished_at = None
+            step.error_message = None
+            step.attempt = int(step.attempt or 0) + 1
+            step.metadata_ = {
+                **metadata,
+                "command": command,
+                "output_dir": str(output_dir),
+                "progress": float(metadata.get("progress") or 0.05),
+                "detail": "服务重启后自动恢复影视二创生产任务，复用已有中间产物继续执行。",
+                "task_id": task_id,
+                "queue": REMIX_PRODUCTION_CELERY_QUEUE,
+                "startup_recovered_at": now.isoformat(),
+                "dispatched_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            }
+            job.status = "processing"
+            job.error_message = None
+            job.updated_at = now
+            scheduled_runs.append((str(job.id), command, str(output_dir), task_id))
+
+        await session.commit()
+
+    def _default_schedule(job_id: str, command: list[str], output_dir: str, task_id: str) -> None:
+        _send_remix_production_job_task(job_id, command, output_dir, task_id=task_id)
+
+    scheduler = schedule_task or _default_schedule
+    scheduled_count = 0
+    failed_schedules: list[tuple[str, str]] = []
+    for job_id, command, output_dir, task_id in scheduled_runs:
+        try:
+            scheduler(job_id, command, output_dir, task_id)
+        except Exception as exc:
+            failed_schedules.append((job_id, str(exc)))
+            logger.warning("Failed to enqueue recovered remix production job job=%s error=%s", job_id, exc)
+            continue
+        scheduled_count += 1
+        logger.warning("Recovered interrupted remix production job on startup job=%s output_dir=%s", job_id, output_dir)
+
+    if failed_schedules:
+        failure_now = datetime.now(timezone.utc)
+        failed_by_job = {job_id: error for job_id, error in failed_schedules}
+        async with factory() as session:
+            result = await session.execute(
+                select(Job)
+                .options(selectinload(Job.steps))
+                .where(Job.id.in_([uuid.UUID(job_id) for job_id in failed_by_job]))
+            )
+            for job in result.scalars().unique().all():
+                detail = f"服务启动恢复入队失败：{failed_by_job.get(str(job.id), 'unknown error')}"
+                step = _find_step(list(job.steps or []), REMIX_PRODUCTION_STEP_NAME)
+                if step is not None:
+                    step.status = "failed"
+                    step.finished_at = failure_now
+                    step.error_message = detail
+                    step.metadata_ = {**(step.metadata_ or {}), "detail": detail, "updated_at": failure_now.isoformat()}
+                job.status = "failed"
+                job.error_message = detail
+                job.updated_at = failure_now
+            await session.commit()
+    return scheduled_count
+
+
 async def _run_remix_production_job(job_id: str, command: list[str], output_dir: str) -> None:
     factory = get_session_factory()
     env = dict(os.environ)
@@ -2308,7 +2555,7 @@ def _remix_manifest_path_exists(value: str) -> bool:
         return False
     if Path(path_text).exists():
         return True
-    # Bluey production manifests are authored on the Windows host. When the API
+    # SampleShow production manifests are authored on the Windows host. When the API
     # runs in Linux containers those drive-letter paths are valid for the host
     # CLI but cannot be resolved inside /app, so do not report them as missing.
     if os.name != "nt" and re.match(r"^[A-Za-z]:[\\/]", path_text):
@@ -3090,6 +3337,8 @@ async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_ses
             detail="Only completed, running, review-paused, manual-edit-paused, cancelled, or failed jobs can be restarted",
         )
 
+    is_remix_production = _job_is_remix_production(job)
+    preserved_source_context = _extract_job_source_context_from_steps(job.steps or [])
     _revoke_running_steps(job.steps or [])
     await _clear_job_runtime_state(job_id, session, source_path=str(job.source_path or "").strip())
 
@@ -3097,28 +3346,77 @@ async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_ses
     job.status = "pending"
     job.error_message = None
     job.updated_at = now
-    job.file_hash = None
-    existing_step_names = {step.step_name for step in job.steps or []}
-    for step_name in PIPELINE_STEPS:
-        if step_name in existing_step_names:
-            continue
-        step = JobStep(job_id=job.id, step_name=step_name, status="pending")
-        session.add(step)
-        (job.steps or []).append(step)
+    if is_remix_production:
+        remix_step_names = {"content_profile", REMIX_PRODUCTION_STEP_NAME}
+        for step in list(job.steps or []):
+            if step.step_name not in remix_step_names:
+                await session.delete(step)
+                (job.steps or []).remove(step)
 
-    ordered_steps = _ordered_steps(job.steps or [])
-    for step in ordered_steps:
-        step.status = "pending"
-        step.attempt = 0
-        step.started_at = None
-        step.finished_at = None
-        step.error_message = None
-        step.metadata_ = None
-    if ordered_steps:
-        ordered_steps[0].metadata_ = {
-            "detail": "任务已重新开始，等待调度器派发。",
+        steps = list(job.steps or [])
+        content_step = _find_step(steps, "content_profile")
+        if content_step is None:
+            content_step = JobStep(job_id=job.id, step_name="content_profile", status="done")
+            session.add(content_step)
+            (job.steps or []).append(content_step)
+        remix_step = _find_step(steps, REMIX_PRODUCTION_STEP_NAME)
+        if remix_step is None:
+            remix_step = JobStep(job_id=job.id, step_name=REMIX_PRODUCTION_STEP_NAME, status="pending")
+            session.add(remix_step)
+            (job.steps or []).append(remix_step)
+
+        content_step.status = "done"
+        content_step.attempt = 0
+        content_step.started_at = None
+        content_step.finished_at = now
+        content_step.error_message = None
+        content_step.metadata_ = {
+            "source_context": preserved_source_context,
+            "detail": "二创生产任务元数据已保留，等待重新启动。",
+            "updated_at": now.isoformat(),
+        } if preserved_source_context else {
+            "detail": "二创生产任务已重新开始，但缺少源任务元数据，请重新导入 manifest。",
             "updated_at": now.isoformat(),
         }
+
+        remix_step.status = "pending"
+        remix_step.attempt = 0
+        remix_step.started_at = None
+        remix_step.finished_at = None
+        remix_step.error_message = None
+        remix_step.metadata_ = {
+            "source_context": preserved_source_context,
+            "detail": "任务已重新开始，等待启动影视二创生产。",
+            "progress": 0.0,
+            "updated_at": now.isoformat(),
+        } if preserved_source_context else {
+            "detail": "任务已重新开始，等待 manifest 元数据恢复。",
+            "progress": 0.0,
+            "updated_at": now.isoformat(),
+        }
+    else:
+        job.file_hash = None
+        existing_step_names = {step.step_name for step in job.steps or []}
+        for step_name in PIPELINE_STEPS:
+            if step_name in existing_step_names:
+                continue
+            step = JobStep(job_id=job.id, step_name=step_name, status="pending")
+            session.add(step)
+            (job.steps or []).append(step)
+
+        ordered_steps = _ordered_steps(job.steps or [])
+        for step in ordered_steps:
+            step.status = "pending"
+            step.attempt = 0
+            step.started_at = None
+            step.finished_at = None
+            step.error_message = None
+            step.metadata_ = None
+        if ordered_steps:
+            ordered_steps[0].metadata_ = {
+                "detail": "任务已重新开始，等待调度器派发。",
+                "updated_at": now.isoformat(),
+            }
 
     await session.commit()
     result = await session.execute(
@@ -7646,6 +7944,11 @@ def _manual_editor_preview_assets_response(
         auto_volume_gain=float(payload.get("auto_volume_gain") or 1.0),
         thumbnail_urls=thumbnail_urls if is_ready else [],
         thumbnail_items=thumbnail_items if is_ready else [],
+        orientation_decision=(
+            payload.get("orientation_decision")
+            if isinstance(payload.get("orientation_decision"), dict)
+            else {}
+        ),
         cached=bool(payload.get("cached", False)),
         detail=str(payload.get("detail") or "") or None,
         error=str(payload.get("error") or "") or None,
@@ -7653,15 +7956,27 @@ def _manual_editor_preview_assets_response(
     )
 
 
+def _manual_editor_orientation_decision_sync(source_path: Path) -> dict[str, Any]:
+    from roughcut.media.rotation import detect_video_rotation_decision
+
+    return asyncio.run(detect_video_rotation_decision(source_path)).to_dict()
+
+
+async def _manual_editor_orientation_decision(source_path: Path) -> dict[str, Any]:
+    return await asyncio.to_thread(_manual_editor_orientation_decision_sync, source_path)
+
+
 def _warm_manual_editor_preview_assets(job_id: uuid.UUID, source_path: Path, duration_sec: float, asset_dir: Path) -> None:
     key = str(job_id)
     try:
         with _MANUAL_EDITOR_ASSET_WARMUP_SEMAPHORE:
+            orientation_decision = _manual_editor_orientation_decision_sync(source_path)
             ensure_manual_editor_preview_assets(
                 job_id=job_id,
                 source_path=source_path,
                 duration_sec=duration_sec,
                 asset_dir=asset_dir,
+                orientation_decision=orientation_decision,
             )
     except Exception:
         logger.exception("manual editor preview asset warmup failed job_id=%s", job_id)
@@ -8438,12 +8753,14 @@ async def get_manual_editor_preview_assets(job_id: uuid.UUID, session: AsyncSess
     media_meta = media_meta_artifact.data_json if media_meta_artifact and isinstance(media_meta_artifact.data_json, dict) else {}
     duration_sec = float(media_meta.get("duration_sec") or media_meta.get("duration") or 0.0)
     asset_dir = await _manual_editor_primary_asset_dir(session, job)
+    orientation_decision = await _manual_editor_orientation_decision(source_path)
     payload = await asyncio.to_thread(
         ensure_manual_editor_preview_assets,
         job_id=job.id,
         source_path=source_path,
         duration_sec=duration_sec,
         asset_dir=asset_dir,
+        orientation_decision=orientation_decision,
     )
     return _manual_editor_preview_assets_response(job.id, payload, ready=True)
 
@@ -9767,12 +10084,24 @@ async def download_rendered_file(
     return FileResponse(path=download_path, filename=download_path.name, media_type=_media_type_for_path(download_path))
 
 
+def _normalize_publication_query_platforms(platforms: list[str] | None) -> list[str] | None:
+    normalized: list[str] = []
+    for item in platforms or []:
+        for part in str(item or "").split(","):
+            platform = normalize_publication_platform(part)
+            if platform and platform not in normalized:
+                normalized.append(platform)
+    return normalized or None
+
+
 @router.get("/{job_id}/publication/plan")
 async def get_job_publication_plan(
     job_id: uuid.UUID,
     creator_profile_id: str | None = None,
+    platforms: list[str] | None = Query(default=None),
     session: AsyncSession = Depends(get_session),
 ):
+    requested_platforms = _normalize_publication_query_platforms(platforms)
     job, render_output, packaging, creator_profile = await _load_publication_inputs(
         job_id=job_id,
         creator_profile_id=creator_profile_id,
@@ -9786,7 +10115,7 @@ async def get_job_publication_plan(
         packaging=packaging,
         creator_profile=creator_profile,
         existing_attempts=existing_attempts,
-        requested_platforms=None,
+        requested_platforms=requested_platforms,
         requested_platform_options=None,
     )
     return build_publication_plan(
@@ -9794,9 +10123,73 @@ async def get_job_publication_plan(
         render_output=render_output,
         platform_packaging=packaging,
         creator_profile=creator_profile,
+        requested_platforms=requested_platforms,
         platform_options=platform_options,
         existing_attempts=existing_attempts,
     )
+
+
+@router.post("/{job_id}/publication/materials")
+async def prepare_job_publication_materials(
+    job_id: uuid.UUID,
+    payload: PublicationSubmitIn,
+    session: AsyncSession = Depends(get_session),
+):
+    job, render_output, packaging, creator_profile = await _load_publication_inputs(
+        job_id=job_id,
+        creator_profile_id=payload.creator_profile_id,
+        session=session,
+    )
+    existing_attempts = await list_publication_attempts(session, job_id=str(job_id))
+    material_generation: dict[str, Any] | None = None
+    if _job_publication_packaging_needs_generation(packaging, requested_platforms=payload.platforms):
+        material_generation = await _generate_job_publication_materials(
+            job=job,
+            render_output=render_output,
+            creator_profile=creator_profile,
+            creator_profile_id=payload.creator_profile_id,
+            platforms=payload.platforms,
+        )
+        job, render_output, packaging, creator_profile = await _load_publication_inputs(
+            job_id=job_id,
+            creator_profile_id=payload.creator_profile_id,
+            session=session,
+        )
+        existing_attempts = await list_publication_attempts(session, job_id=str(job_id))
+    platform_options = await _resolve_job_publication_platform_options(
+        session=session,
+        job=job,
+        render_output=render_output,
+        packaging=packaging,
+        creator_profile=creator_profile,
+        existing_attempts=existing_attempts,
+        requested_platforms=payload.platforms,
+        requested_platform_options=payload.platform_options,
+    )
+    plan = build_publication_plan(
+        job=job,
+        render_output=render_output,
+        platform_packaging=packaging,
+        creator_profile=creator_profile,
+        requested_platforms=payload.platforms,
+        platform_options=platform_options,
+        existing_attempts=existing_attempts,
+    )
+    plan, job, render_output, packaging, creator_profile = await _maybe_auto_heal_job_publication_cover_plan(
+        plan=plan,
+        job=job,
+        render_output=render_output,
+        packaging=packaging,
+        creator_profile=creator_profile,
+        creator_profile_id=payload.creator_profile_id,
+        requested_platforms=payload.platforms,
+        platform_options=platform_options,
+        existing_attempts=existing_attempts,
+        session=session,
+    )
+    if material_generation is not None:
+        plan = {**plan, "material_generation": material_generation}
+    return plan
 
 
 def _build_job_publication_executor_gate_response(
@@ -9829,21 +10222,41 @@ async def publish_job_to_bound_platforms(
         creator_profile_id=payload.creator_profile_id,
         session=session,
     )
+    existing_attempts = await list_publication_attempts(session, job_id=str(job_id))
     material_generation: dict[str, Any] | None = None
-    if _job_publication_packaging_needs_generation(packaging):
-        material_generation = await _generate_job_publication_materials(
+    if _job_publication_packaging_needs_generation(packaging, requested_platforms=payload.platforms):
+        recovered_plan = build_publication_plan(
             job=job,
             render_output=render_output,
+            platform_packaging=packaging,
             creator_profile=creator_profile,
-            creator_profile_id=payload.creator_profile_id,
-            platforms=payload.platforms,
+            requested_platforms=payload.platforms,
+            platform_options=payload.platform_options,
+            existing_attempts=existing_attempts,
         )
-        job, render_output, packaging, creator_profile = await _load_publication_inputs(
-            job_id=job_id,
-            creator_profile_id=payload.creator_profile_id,
-            session=session,
+        recovered_media_source = (
+            recovered_plan.get("media_source_contract")
+            if isinstance(recovered_plan.get("media_source_contract"), dict)
+            else {}
+        ).get("source")
+        can_use_materialized_contract = (
+            recovered_media_source == "materialized_attempt_payload"
+            and publication_plan_is_publishable(recovered_plan)
         )
-    existing_attempts = await list_publication_attempts(session, job_id=str(job_id))
+        if not can_use_materialized_contract:
+            material_generation = await _generate_job_publication_materials(
+                job=job,
+                render_output=render_output,
+                creator_profile=creator_profile,
+                creator_profile_id=payload.creator_profile_id,
+                platforms=payload.platforms,
+            )
+            job, render_output, packaging, creator_profile = await _load_publication_inputs(
+                job_id=job_id,
+                creator_profile_id=payload.creator_profile_id,
+                session=session,
+            )
+            existing_attempts = await list_publication_attempts(session, job_id=str(job_id))
     platform_options = await _resolve_job_publication_platform_options(
         session=session,
         job=job,
@@ -9894,6 +10307,11 @@ async def publish_job_to_bound_platforms(
             target_profile_ids=[
                 str(target.get("browser_profile_id") or target.get("credential_ref") or "")
                 for target in browser_agent_targets
+            ],
+            skip_creator_session_platforms=[
+                str(target.get("platform") or "")
+                for target in browser_agent_targets
+                if str(target.get("platform") or "").strip().lower() == "youtube"
             ],
             request_timeout_sec=max(5, int(getattr(settings, "publication_browser_agent_timeout_sec", 60) or 60)),
         )
@@ -10165,7 +10583,12 @@ def _derive_job_publication_folder_path(job: Job, render_output: RenderOutput | 
     for raw in candidates:
         if not raw:
             continue
+        if raw in {".", "./", ".\\"}:
+            continue
         try:
+            if re.match(r"^[A-Za-z]:[\\/]", raw) or raw.startswith("\\\\"):
+                path_like = PureWindowsPath(raw)
+                return str(path_like.parent if path_like.suffix else path_like)
             path = Path(raw).expanduser()
         except Exception:
             continue
@@ -10173,6 +10596,57 @@ def _derive_job_publication_folder_path(job: Job, render_output: RenderOutput | 
             return str(path.parent)
         return str(path)
     return ""
+
+
+def _normalize_publication_path_for_compare(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return raw.replace("/", "\\").rstrip("\\").casefold()
+
+
+def _expected_job_publication_material_dir(job: Job, render_output: RenderOutput | None) -> str:
+    folder_path = _derive_job_publication_folder_path(job, render_output)
+    if not folder_path:
+        return ""
+    return str(Path(folder_path).expanduser() / "smart-copy")
+
+
+def _publication_packaging_material_dir(packaging: dict[str, Any] | None) -> str:
+    if not isinstance(packaging, dict):
+        return ""
+    metadata = packaging.get("metadata") if isinstance(packaging.get("metadata"), dict) else {}
+    candidates = [
+        packaging.get("material_dir"),
+        packaging.get("smart_copy_dir"),
+        packaging.get("material_root"),
+        packaging.get("folder_path"),
+        metadata.get("material_dir"),
+        metadata.get("smart_copy_dir"),
+        metadata.get("material_root"),
+    ]
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _publication_packaging_belongs_to_job_render_output(
+    packaging: dict[str, Any] | None,
+    *,
+    job: Job,
+    render_output: RenderOutput | None,
+) -> bool:
+    if not isinstance(packaging, dict):
+        return False
+    expected_material_dir = _expected_job_publication_material_dir(job, render_output)
+    if not expected_material_dir:
+        return True
+    actual_material_dir = _publication_packaging_material_dir(packaging)
+    if not actual_material_dir:
+        return False
+    return _normalize_publication_path_for_compare(actual_material_dir) == _normalize_publication_path_for_compare(expected_material_dir)
 
 
 async def _resolve_job_publication_platform_options(
@@ -10228,7 +10702,11 @@ def _dispatch_publication_worker_tick(created_count: int) -> None:
         pass
 
 
-def _job_publication_packaging_needs_generation(packaging: dict[str, Any] | None) -> bool:
+def _job_publication_packaging_needs_generation(
+    packaging: dict[str, Any] | None,
+    *,
+    requested_platforms: list[str] | None = None,
+) -> bool:
     if not isinstance(packaging, dict):
         return True
     root_status = str(packaging.get("status") or "").strip().lower()
@@ -10238,10 +10716,26 @@ def _job_publication_packaging_needs_generation(packaging: dict[str, Any] | None
     if isinstance(contract, dict) and str(contract.get("status") or "").strip().lower() == "failed":
         return True
     platforms = packaging.get("platforms")
+    requested = [normalize_publication_platform(item) for item in list(requested_platforms or [])]
+    requested = [item for item in requested if item]
     if isinstance(platforms, dict):
-        return not any(isinstance(value, dict) for value in platforms.values())
+        platform_ids = {
+            normalize_publication_platform(platform)
+            for platform, value in platforms.items()
+            if isinstance(value, dict)
+        }
+        if requested:
+            return any(platform not in platform_ids for platform in requested)
+        return bool(platform_ids) is False
     if isinstance(platforms, list):
-        return not any(isinstance(value, dict) for value in platforms)
+        platform_ids = {
+            normalize_publication_platform(item.get("platform"))
+            for item in platforms
+            if isinstance(item, dict)
+        }
+        if requested:
+            return any(platform not in platform_ids for platform in requested)
+        return bool(platform_ids) is False
     return True
 
 
@@ -10453,9 +10947,19 @@ async def _load_publication_inputs(
         job_id=job_id,
         artifact_types=("platform_packaging_md",),
     )
-    packaging = packaging_artifact.data_json if packaging_artifact and isinstance(packaging_artifact.data_json, dict) else None
-    if _job_publication_packaging_needs_generation(packaging):
-        packaging = _load_job_smart_copy_publication_packaging(job=job, render_output=render_output) or packaging
+    artifact_packaging = packaging_artifact.data_json if packaging_artifact and isinstance(packaging_artifact.data_json, dict) else None
+    packaging = artifact_packaging
+    if artifact_packaging is not None and not _publication_packaging_belongs_to_job_render_output(
+        artifact_packaging,
+        job=job,
+        render_output=render_output,
+    ):
+        packaging = None
+    smart_copy_packaging = _load_job_smart_copy_publication_packaging(job=job, render_output=render_output)
+    if smart_copy_packaging is not None:
+        packaging = smart_copy_packaging
+    elif _job_publication_packaging_needs_generation(packaging):
+        packaging = smart_copy_packaging or packaging
 
     creator_profile = _resolve_publication_creator_profile(creator_profile_id)
     creator_profile = await _merge_job_creator_card_publication_bindings(
@@ -10475,11 +10979,97 @@ def _load_job_smart_copy_publication_packaging(
     if not folder_path:
         return None
     material_dir = Path(folder_path).expanduser() / "smart-copy"
+    material_dir = _resolve_job_smart_copy_material_dir(material_dir) or material_dir
     packaging, _sources = load_publication_packaging_payload(
         material_json=str(resolve_smart_copy_material_json_path(material_dir)),
         platform_packaging=str(resolve_smart_copy_platform_packaging_json_path(material_dir)),
     )
     return packaging if isinstance(packaging, dict) else None
+
+
+def _resolve_job_smart_copy_material_dir(material_dir: Path) -> Path | None:
+    if material_dir.exists():
+        return material_dir
+    raw_material_dir = str(material_dir)
+    if not _looks_like_host_publication_path(raw_material_dir):
+        return None
+    return _materialize_job_smart_copy_material_dir(raw_material_dir)
+
+
+def _looks_like_host_publication_path(value: Any) -> bool:
+    text = str(value or "").strip().strip('"')
+    if not text:
+        return False
+    return text.startswith(("\\\\", "//")) or bool(re.match(r"^[A-Za-z]:[\\/]", text))
+
+
+def _materialize_job_smart_copy_material_dir(raw_material_dir: str) -> Path | None:
+    parent_folder = _host_smart_copy_parent_folder_path(raw_material_dir)
+    if parent_folder:
+        materialized_parent = _materialize_job_publication_folder(parent_folder)
+        if materialized_parent is not None:
+            materialized_material_dir = materialized_parent / "smart-copy"
+            if resolve_smart_copy_platform_packaging_json_path(materialized_material_dir).exists():
+                return materialized_material_dir
+
+    return _materialize_job_publication_folder(raw_material_dir)
+
+
+def _host_smart_copy_parent_folder_path(raw_material_dir: str) -> str:
+    text = str(raw_material_dir or "").strip().strip('"')
+    if not text or not _looks_like_host_publication_path(text):
+        return ""
+    path = PureWindowsPath(text)
+    if path.name.casefold() != "smart-copy":
+        return ""
+    parent = str(path.parent or "").strip()
+    return parent if parent and parent != "." and parent != text else ""
+
+
+def _materialize_job_publication_folder(raw_folder_path: str) -> Path | None:
+    url = resolve_codex_proxy_sibling_url("/v1/host/materialize-directory")
+    if not url:
+        return None
+
+    headers = {"Content-Type": "application/json"}
+    token = resolve_codex_proxy_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        response = httpx.post(
+            url,
+            json={
+                "folder_path": str(raw_folder_path or "").strip().strip('"'),
+                "container_output_root": str(os.getenv("ROUGHCUT_OUTPUT_ROOT", "/app/data") or "/app/data"),
+            },
+            headers=headers,
+            timeout=float(os.getenv("ROUGHCUT_HOST_MATERIALIZE_TIMEOUT_SEC", "120") or "120"),
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    materialized_folder = str(payload.get("folder_path") or "").strip()
+    if materialized_folder:
+        return Path(materialized_folder).expanduser()
+
+    files = payload.get("files") if isinstance(payload.get("files"), list) else []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        path_text = str(item.get("path") or "").strip()
+        if not path_text:
+            continue
+        normalized = path_text.replace("\\", "/").rstrip("/")
+        if normalized.endswith("/_meta/platform-packaging.json"):
+            return Path(path_text).expanduser().parent.parent
+        if normalized.endswith("/platform-packaging.json"):
+            return Path(path_text).expanduser().parent
+    return None
 
 
 def _resolve_publication_creator_profile(creator_profile_id: str | None) -> dict[str, Any] | None:
@@ -12652,6 +13242,18 @@ def _resolve_job_queue_cover_path(job: Job) -> Path | None:
             path = _normalize_existing_image_path(value)
             if path is not None:
                 return path
+
+    source_context = _extract_job_source_context_from_steps(list(getattr(job, "steps", None) or []))
+    remix_payload = source_context.get("remix_production") if isinstance(source_context, dict) else None
+    if isinstance(remix_payload, dict):
+        raw_output_dir = str(getattr(job, "output_dir", "") or "").strip()
+        if raw_output_dir:
+            cover_path = _resolve_remix_production_output_cover_path(
+                Path(raw_output_dir).expanduser(),
+                episode=int(remix_payload.get("episode") or 0),
+            )
+            if cover_path is not None:
+                return cover_path
 
     try:
         if "publication_attempts" in inspect(job).unloaded:

@@ -28,8 +28,8 @@ if hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8")
 
 DEFAULT_KEYWORDS = [
-    "LuckyKiss",
-    "KissPod",
+    "SampleMint",
+    "SamplePod",
     "KISSPORT",
     "益倍萃",
     "含片",
@@ -39,7 +39,7 @@ DEFAULT_KEYWORDS = [
     "口气",
 ]
 PROFILE_PRIORITY = ["content_profile_final", "content_profile", "content_profile_draft"]
-FOOD_SIGNALS = ["luckykiss", "kisspod", "kissport", "含片", "益生菌", "零糖", "口气", "薄荷糖"]
+FOOD_SIGNALS = ["samplemint", "samplepod", "sampleport", "含片", "益生菌", "零糖", "口气", "薄荷糖"]
 GEAR_SIGNALS = ["工具钳", "战术笔", "弹夹", "装备", "莱德曼", "edc"]
 DELIVERABLE_STEPS = ["summary_review", "render"]
 

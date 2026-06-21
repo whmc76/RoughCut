@@ -124,7 +124,7 @@ async def test_run_checks_preserves_probe_inventory_visual_evidence() -> None:
                 "douyin": {
                     "status": "ready",
                     "visual_evidence": {
-                        "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260601/douyin/editor.png",
+                        "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260601/douyin/editor.png",
                         "capture_type": "screenshot",
                         "phase": "probe_inventory",
                     },
@@ -157,7 +157,7 @@ async def test_run_checks_preserves_probe_inventory_visual_evidence() -> None:
     assert report["probe_inventory"]["status"] == "ok"
     assert report["probe_inventory"]["platforms"]["douyin"]["visual_evidence"]["artifact_path"].endswith("editor.png")
     assert report["cdp"]["platform_checks"]["douyin"]["visual_evidence"] == {
-        "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260601/douyin/editor.png",
+        "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260601/douyin/editor.png",
         "capture_type": "screenshot",
         "phase": "probe_inventory",
     }
@@ -250,7 +250,7 @@ async def test_run_checks_blocks_when_probe_inventory_missing_required_surfaces(
                         ]
                     },
                     "visual_evidence": {
-                        "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260601/xiaohongshu/probe.png",
+                        "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260601/xiaohongshu/probe.png",
                         "capture_type": "screenshot",
                         "phase": "probe_inventory",
                     },
@@ -423,7 +423,7 @@ async def test_run_checks_excludes_manual_handoff_platforms_from_agent_ready_and
                 "douyin": {
                     "status": "ready",
                     "visual_evidence": {
-                        "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260602/douyin/probe.png",
+                        "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260602/douyin/probe.png",
                         "capture_type": "screenshot",
                         "phase": "probe_inventory",
                     },
@@ -1005,7 +1005,7 @@ def test_build_preflight_publication_verification_surfaces_probe_gate_blocked_re
                 "creator_sessions": {
                     "bilibili": {
                         "visual_evidence": {
-                            "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260602/bilibili/session.png",
+                            "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260602/bilibili/session.png",
                             "capture_type": "screenshot",
                             "phase": "creator_session_probe",
                         }
@@ -1019,7 +1019,7 @@ def test_build_preflight_publication_verification_surfaces_probe_gate_blocked_re
             "platforms": {
                 "bilibili": {
                     "visual_evidence": {
-                        "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260602/bilibili/probe.png",
+                        "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260602/bilibili/probe.png",
                         "capture_type": "screenshot",
                         "phase": "probe_inventory",
                     }

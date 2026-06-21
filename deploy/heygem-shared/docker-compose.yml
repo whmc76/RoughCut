@@ -1,9 +1,9 @@
 # Legacy compatibility stack.
 # Default RoughCut runtime now points to:
-# - E:/WorkSpace/heygem/docker-compose.yml
+# - C:/sample-workspace/heygem/docker-compose.yml
 # - E:/WorkSpace/indextts2-service/docker-compose.yml
 # Keep HeyGem shared data in the public service root. Prefer HEYGEM_DATA_DIR
-# from E:/WorkSpace/heygem/.env instead of any RoughCut-private runtime path.
+# from C:/sample-workspace/heygem/.env instead of any RoughCut-private runtime path.
 name: heygem-shared
 
 services:
@@ -19,7 +19,7 @@ services:
     ports:
       - "${INDEXTTS2_API_PORT:-49204}:8080"
     volumes:
-      - "${HEYGEM_VOICE_HOST_DIR:-D:/duix_avatar_data/face2face/voice/data}:/code/data"
+      - "${HEYGEM_VOICE_HOST_DIR:-C:/sample-data/heygem-shared/voice/data}:/code/data"
     command: /bin/bash -c "python tools/api_server.py --listen 0.0.0.0:8080"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/v1/health', timeout=5)"]
@@ -39,7 +39,7 @@ services:
     ports:
       - "${HEYGEM_API_PORT:-49202}:8383"
     volumes:
-      - "${HEYGEM_DATA_DIR:-D:/duix_avatar_data/face2face}:/code/data"
+      - "${HEYGEM_DATA_DIR:-C:/sample-data/heygem-shared}:/code/data"
     shm_size: "8g"
     command: python /code/app_local.py
     depends_on:

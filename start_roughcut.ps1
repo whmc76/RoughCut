@@ -1625,7 +1625,7 @@ function Update-LocalServiceEnv {
         [bool]$IndexTtsEnabled = $false
     )
 
-    $defaultHeygemRoot = "D:/duix_avatar_data/face2face"
+    $defaultHeygemRoot = "C:/sample-data/heygem-shared"
     $heygemSharedRoot = if ($env:HEYGEM_SHARED_ROOT -and -not [string]::IsNullOrWhiteSpace($env:HEYGEM_SHARED_ROOT)) {
         [System.IO.Path]::GetFullPath($env:HEYGEM_SHARED_ROOT).Replace('\\', '/')
     } else {
@@ -1650,7 +1650,7 @@ function Update-LocalServiceEnv {
     $voiceRoot = if ($env:HEYGEM_VOICE_ROOT -and -not [string]::IsNullOrWhiteSpace($env:HEYGEM_VOICE_ROOT)) {
         [System.IO.Path]::GetFullPath($env:HEYGEM_VOICE_ROOT).Replace('\\', '/')
     } else {
-        "D:/duix_avatar_data/face2face/voice/data"
+        "C:/sample-data/heygem-shared/voice/data"
     }
     if (-not (Test-Path $voiceRoot)) {
         New-Item -ItemType Directory -Force -Path $voiceRoot | Out-Null

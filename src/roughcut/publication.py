@@ -10,7 +10,7 @@ import shutil
 import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
@@ -20,6 +20,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.config import DEFAULT_PROJECT_ROOT, get_settings
+from roughcut.host.codex_proxy import resolve_codex_proxy_sibling_url, resolve_codex_proxy_token
 from roughcut.intelligent_copy_layout import (
     resolve_smart_copy_material_json_path,
     resolve_smart_copy_platform_packaging_json_path,
@@ -101,11 +102,7 @@ PUBLICATION_RECOVERY_STATE_SCHEMA_VERSION = 1
 PUBLICATION_RECOVERY_ADAPTIVE_HISTORY_LIMIT = 80
 PUBLICATION_RECOVERY_REPEAT_LIMIT = 3
 PUBLICATION_DEFAULT_DAILY_ACCOUNT_LIMIT = 1
-JENNY_BABY_PUBLICATION_IDENTIFIERS = {
-    "61007301d4d94bc0a8311066c2d93c7d",
-    "7be7da2e-7d54-4d0b-a63d-809d71094839",
-    "jenny_baby",
-}
+PUBLICATION_DECLARATION_SUPPRESS_IDENTIFIERS_ENV = "ROUGHCUT_PUBLICATION_DECLARATION_SUPPRESS_IDENTIFIERS"
 PUBLICATION_DEFAULT_AUTO_SCHEDULE_LOCAL_TIME = "10:00"
 PUBLICATION_DEFAULT_PLATFORM_ACTIVE_SCHEDULE_TIMES = {
     "douyin": "20:30",
@@ -128,6 +125,16 @@ PUBLICATION_RECOVERY_OVERRIDE_KEYS = {
     "fresh_start_platform_tab",
     "verify_media_upload",
     "wait_for_publish_confirmation",
+    "youtube_current_fresh_upload_resume",
+}
+YOUTUBE_FRESH_PUBLISH_ONLY_BLOCKED_OVERRIDE_KEYS = {
+    "verification_only_current_page",
+    "repair_only_current_page",
+    "prepublish_only_current_page",
+    "prepare_only_current_page",
+    "force_repair_fields",
+    "next_platform_specific_overrides",
+    "target_platform_specific_overrides",
 }
 _PUBLICATION_DRAFT_RESET_ERROR_SUFFIXES = {
     "publication_audit_unverified",
@@ -259,8 +266,6 @@ def _resolve_publication_target_adapter(platform: Any, adapter: Any) -> str:
         return normalized_adapter
     if normalized_platform == "x":
         return X_LINK_SHARE_PUBLICATION_ADAPTER
-    if normalized_platform == "youtube":
-        return CANONICAL_PUBLICATION_ADAPTER
     if (
         not explicit_adapter
         and normalized_platform
@@ -461,6 +466,7 @@ async def check_publication_browser_agent_ready(
     auth_token: str = "",
     target_platforms: list[str] | None = None,
     target_profile_ids: list[str] | None = None,
+    skip_creator_session_platforms: list[str] | None = None,
     session_bindings: dict[str, dict[str, Any]] | None = None,
     http_client: Any | None = None,
     request_timeout_sec: int = 10,
@@ -471,6 +477,14 @@ async def check_publication_browser_agent_ready(
         platform
         for platform in (normalize_publication_platform(item) for item in (target_platforms or []))
         if platform
+    ]
+    skipped_creator_session_platforms = {
+        platform
+        for platform in (normalize_publication_platform(item) for item in (skip_creator_session_platforms or []))
+        if platform
+    }
+    session_probe_platforms = [
+        platform for platform in requested_platforms if platform not in skipped_creator_session_platforms
     ]
     requested_profile_ids = [
         str(item or "").strip()
@@ -496,10 +510,10 @@ async def check_publication_browser_agent_ready(
         if normalize_publication_platform(platform)
     }
     health_path = "/healthz"
-    if requested_platforms:
+    if session_probe_platforms:
         query_payload: dict[str, str] = {
             "check_session": "1",
-            "platforms": ",".join(requested_platforms),
+            "platforms": ",".join(session_probe_platforms),
         }
         if requested_browser_profile_ids:
             query_payload["target_profile_ids"] = ",".join(requested_browser_profile_ids)
@@ -622,7 +636,7 @@ async def check_publication_browser_agent_ready(
             "health": payload,
             "profile_reuse": profile_reuse,
         }
-    if requested_platforms:
+    if session_probe_platforms:
         if capabilities.get("creator_session_probe") is not True or str(
             capabilities.get("creator_session_contract") or ""
         ).strip() != PUBLICATION_BROWSER_AGENT_CREATOR_SESSION_CONTRACT:
@@ -637,7 +651,7 @@ async def check_publication_browser_agent_ready(
         auth_required_platforms: list[str] = []
         unverified_platforms: list[str] = []
         binding_invalid_platforms: list[str] = []
-        for platform in requested_platforms:
+        for platform in session_probe_platforms:
             session_state = creator_sessions.get(platform)
             if not isinstance(session_state, dict):
                 unverified_platforms.append(platform)
@@ -985,6 +999,110 @@ def _rehydrate_publication_attempt_runtime_metadata(
     return normalized_metadata
 
 
+def _existing_attempt_request_payloads(
+    existing_attempts: list[dict[str, Any]] | None,
+    *,
+    requested_platforms: list[str] | None = None,
+) -> list[tuple[str, dict[str, Any]]]:
+    requested = {
+        platform
+        for platform in (normalize_publication_platform(item) for item in (requested_platforms or []))
+        if platform
+    }
+    payloads: list[tuple[str, dict[str, Any]]] = []
+    for attempt in existing_attempts or []:
+        if not isinstance(attempt, dict):
+            continue
+        platform = normalize_publication_platform(attempt.get("platform"))
+        if not platform or (requested and platform not in requested):
+            continue
+        payload = attempt.get("request_payload")
+        if isinstance(payload, dict) and payload:
+            payloads.append((platform, dict(payload)))
+    return payloads
+
+
+def _recover_publication_media_path_from_existing_attempts(
+    existing_attempts: list[dict[str, Any]] | None,
+    *,
+    requested_platforms: list[str] | None = None,
+) -> Path | None:
+    for _platform, payload in _existing_attempt_request_payloads(
+        existing_attempts,
+        requested_platforms=requested_platforms,
+    ):
+        metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+        media_items = payload.get("media_items") if isinstance(payload.get("media_items"), list) else []
+        candidates: list[Any] = [
+            metadata.get("resolved_media_path"),
+            metadata.get("requested_media_path"),
+            payload.get("media_path"),
+        ]
+        for item in media_items:
+            if not isinstance(item, dict):
+                continue
+            candidates.extend([item.get("local_path"), item.get("path"), item.get("media_url")])
+        for candidate in candidates:
+            resolved = resolve_publication_local_media_path(candidate)
+            if resolved is not None:
+                return resolved
+    return None
+
+
+def _recover_publication_packaging_from_existing_attempts(
+    existing_attempts: list[dict[str, Any]] | None,
+    *,
+    requested_platforms: list[str] | None = None,
+) -> dict[str, Any] | None:
+    platforms: dict[str, dict[str, Any]] = {}
+    for platform, payload in _existing_attempt_request_payloads(
+        existing_attempts,
+        requested_platforms=requested_platforms,
+    ):
+        source_package = payload.get("copy_material")
+        package = dict(source_package) if isinstance(source_package, dict) else {}
+        title = str(payload.get("title") or package.get("primary_title") or package.get("title") or "").strip()
+        body = str(payload.get("body") or package.get("body") or package.get("description") or "").strip()
+        if title:
+            package["primary_title"] = title
+            package["title"] = title
+            package["titles"] = [title]
+        if body:
+            package["body"] = body
+            package["description"] = body
+        for key in (
+            "hashtags",
+            "structured_tags",
+            "display_hashtags",
+            "cover_path",
+            "cover_slots",
+            "declaration",
+            "category",
+            "collection",
+            "native_topics",
+            "scheduled_publish_at",
+            "visibility_or_publish_mode",
+            "platform_specific_overrides",
+        ):
+            if key in payload and key not in package:
+                package[key] = payload.get(key)
+        package["key"] = platform
+        package["platform"] = platform
+        package.setdefault("source", "materialized_attempt_payload")
+        if _package_has_publish_copy(package):
+            platforms[platform] = package
+    if not platforms:
+        return None
+    return {
+        "platforms": platforms,
+        "material_contract": {
+            "schema": "roughcut.publication_material_contract.v1",
+            "status": "passed",
+            "source": "materialized_attempt_payload",
+        },
+    }
+
+
 def build_publication_plan(
     *,
     job: Any,
@@ -1000,26 +1118,58 @@ def build_publication_plan(
     warnings: list[str] = []
     manual_handoff_targets: list[dict[str, Any]] = []
     manual_handoff_reasons: list[str] = []
+    requested = {
+        platform
+        for platform in (normalize_publication_platform(item) for item in (requested_platforms or []))
+        if platform
+    }
     if str(getattr(job, "status", "") or "") != "done":
         blocked_reasons.append("任务尚未完成，不能发布。")
 
     media_path = _resolve_render_media_path(render_output)
+    media_source = "render_output"
+    recovered_media_path = None
     if media_path is None:
-        blocked_reasons.append("缺少本地成片文件，browser-agent 不能上传 remote-only media。")
+        recovered_media_path = _recover_publication_media_path_from_existing_attempts(
+            existing_attempts,
+            requested_platforms=sorted(requested),
+        )
+        if recovered_media_path is not None:
+            media_path = recovered_media_path
+            media_source = "materialized_attempt_payload"
+        else:
+            blocked_reasons.append("缺少本地成片文件，browser-agent 不能上传 remote-only media。")
+    raw_render_output_path = str(getattr(render_output, "output_path", "") or "").strip() if render_output is not None else ""
+    media_source_contract = {
+        "schema": "roughcut.publication_media_source.v1",
+        "source": media_source,
+        "render_output_path": raw_render_output_path,
+        "resolved_media_path": str(media_path) if media_path else "",
+    }
+    explicit_source_media_path = str(source_media_path or "").strip()
+    if explicit_source_media_path and media_path is not None:
+        explicit_resolved = resolve_publication_local_media_path(explicit_source_media_path)
+        if explicit_resolved is None or str(explicit_resolved) != str(media_path):
+            blocked_reasons.append("发布视频源与最终成片输出不一致，已阻断发布。")
 
+    recovered_packaging = None
+    effective_platform_packaging = platform_packaging
     packages = _normalize_platform_packages(platform_packaging)
-    title_audit_by_platform = _normalize_publication_title_audit_by_platform(platform_packaging)
+    if not packages:
+        recovered_packaging = _recover_publication_packaging_from_existing_attempts(
+            existing_attempts,
+            requested_platforms=sorted(requested),
+        )
+        packages = _normalize_platform_packages(recovered_packaging)
+        if packages:
+            effective_platform_packaging = recovered_packaging
+    title_audit_by_platform = _normalize_publication_title_audit_by_platform(effective_platform_packaging)
     if not packages:
         blocked_reasons.append("缺少多平台发布文案包，请先完成 platform_package。")
     credentials = active_publication_credentials(creator_profile)
     if not credentials:
         blocked_reasons.append("创作者档案没有可发布的 browser-agent 登录凭据绑定。")
 
-    requested = {
-        platform
-        for platform in (normalize_publication_platform(item) for item in (requested_platforms or []))
-        if platform
-    }
     credential_by_platform = {item["platform"]: item for item in credentials}
     options_by_platform = _normalize_publication_platform_options(platform_options)
     candidate_platforms = requested or {
@@ -1042,7 +1192,9 @@ def build_publication_plan(
     preflight_blocked_count = 0
     title_audit_blocked_count = 0
     packaging_blocked_count = 0
+    material_quality_blocked_count = 0
     packaging_block_reasons: list[str] = []
+    material_quality_block_reasons: list[str] = []
     for platform in target_platforms:
         credential = credential_by_platform.get(platform)
         package = packages.get(platform) or {}
@@ -1143,6 +1295,21 @@ def build_publication_plan(
         )
         if "source" not in copy_material:
             copy_material["source"] = "platform_packaging"
+        material_quality_reasons = _publication_material_quality_blocking_reasons(
+            platform=platform,
+            package=package,
+            title=normalized_title,
+            body=str(package.get("description") or package.get("body") or "").strip(),
+            cover_path=primary_cover_path,
+            cover_slots=cover_slots,
+            platform_packaging=effective_platform_packaging,
+        )
+        if material_quality_reasons:
+            material_quality_blocked_count += 1
+            material_quality_block_reasons.extend(material_quality_reasons)
+            for reason in material_quality_reasons:
+                warnings.append(f"{platform_label(platform)} 发布物料质量未通过：{reason}")
+            continue
         if platform_manual_handoff_only(platform):
             reason = platform_manual_publish_reason(platform) or "当前平台仅支持人工登录后继续发布。"
             entry_url = platform_manual_publish_entry_url(platform)
@@ -1254,6 +1421,7 @@ def build_publication_plan(
                 "visibility_or_publish_mode": visibility_or_publish_mode,
                 "scheduled_publish_at": scheduled_publish_at,
                 "platform_specific_overrides": merged_platform_overrides,
+                "manual_publish_entry_url": platform_manual_publish_entry_url(platform),
                 "status": "ready",
             }
         )
@@ -1286,6 +1454,11 @@ def build_publication_plan(
             blocked_reasons.append("所有候选平台都未通过发布前页面验证。")
         elif title_audit_blocked_count:
             blocked_reasons.append("所有候选平台都未通过发布文案质量门。")
+        elif material_quality_blocked_count:
+            blocked_reasons.append(
+                "发布物料质量未通过："
+                + "；".join(dict.fromkeys([str(item) for item in material_quality_block_reasons if str(item)]))
+            )
         else:
             blocked_reasons.append("当前创作者凭据与文案包平台没有交集。")
 
@@ -1314,7 +1487,12 @@ def build_publication_plan(
                 "ready": bool(media_path and packages),
                 "reasons": [] if media_path and packages else ["local_media_or_platform_package_missing"],
             },
+            "material_quality": {
+                "ready": material_quality_blocked_count == 0,
+                "reasons": list(dict.fromkeys(material_quality_block_reasons)),
+            },
         },
+        "media_source_contract": media_source_contract,
         "creator_profile_id": str((creator_profile or {}).get("id") or ""),
         "creator_profile_name": str((creator_profile or {}).get("display_name") or ""),
         "media_path": str(media_path) if media_path else None,
@@ -1388,6 +1566,8 @@ def _normalize_youtube_visibility_or_publish_mode(
         return "scheduled" if scheduled else "public"
     lowered = text.casefold()
     if "schedule" in lowered or "scheduled" in lowered or "安排" in text or "预约" in text or "定时" in text:
+        return "scheduled"
+    if scheduled and ("draft" in lowered or "草稿" in text):
         return "scheduled"
     if "unlisted" in lowered or "不公开" in text:
         return "unlisted"
@@ -1775,6 +1955,7 @@ async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any
                     "reason": schedule_policy.get("reason"),
                 }
             )
+        target_platform = str(target.get("platform") or "").strip().lower()
         request_payload = _build_request_payload(plan=plan, target=target)
         request_plan_signature = _extract_publication_plan_signature(request_payload)
         raw_target_overrides = (
@@ -1798,7 +1979,11 @@ async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any
         )
         fresh_start_platform_tab = bool(raw_target_overrides.get("fresh_start_platform_tab"))
         active_override_mode = str(raw_target_overrides.get("recovery_mode") or "").strip().lower()
-        history_scoped_attempt = (current_page_scoped_attempt and active_override_mode != "receipt_rebind") or fresh_start_platform_tab
+        history_scoped_attempt = (
+            target_platform == "youtube"
+            or (current_page_scoped_attempt and active_override_mode != "receipt_rebind")
+            or fresh_start_platform_tab
+        )
         is_recovery_target = _is_publication_recovery_target(target)
         target_adapter = _normalize_publication_adapter(target.get("adapter"))
         target_execution_mode = str(target.get("execution_mode") or BROWSER_AGENT_EXECUTION_MODE).strip() or BROWSER_AGENT_EXECUTION_MODE
@@ -1911,10 +2096,14 @@ async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any
             )
         if active_attempt is not None and (force_republish or is_recovery_target):
             reusable_attempt = active_attempt
-        target_platform = str(target.get("platform") or "").strip().lower()
         platform_recovery_attempt = None
         platform_recovery_overrides = {}
         platform_recovery_state = None
+        if target_platform == "youtube":
+            is_recovery_target = False
+            platform_recovery_overrides = {}
+            platform_recovery_state = None
+            platform_recovery_attempt = None
         if target_platform and is_recovery_target and not history_scoped_attempt:
             platform_attempts_for_recovery = _select_recovery_candidate_attempts_for_platform(
                 attempts_by_platform.get(target_platform, [])
@@ -1925,6 +2114,9 @@ async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any
                     attempt=platform_recovery_attempt,
                     request_plan_signature=request_plan_signature,
                 )
+        if reusable_attempt is not None:
+            if target_platform == "youtube":
+                reusable_attempt = None
         if reusable_attempt is not None:
             reusable_recovery_overrides, reusable_recovery_state = _build_platform_recovery_overrides(
                 attempt=reusable_attempt,
@@ -2003,6 +2195,10 @@ async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any
                 or bool(platform_recovery_overrides)
                 or bool(platform_recovery_state)
             )
+            if target_platform == "youtube":
+                is_recovery = False
+                platform_recovery_overrides = {}
+                platform_recovery_state = None
             request_payload["platform_specific_overrides"] = _merge_platform_specific_overrides_with_current_target(
                 request_payload.get("platform_specific_overrides"),
                 platform_recovery_overrides,
@@ -2013,6 +2209,7 @@ async def submit_publication_attempts(session: AsyncSession, plan: dict[str, Any
                 request_payload["publication_recovery_state"]["plan_signature"] = request_plan_signature
                 if platform_recovery_attempt is not None:
                     request_payload["publication_recovery_state"]["carry_over_from_attempt_id"] = str(platform_recovery_attempt.id)
+            request_payload = _enforce_youtube_fresh_publish_request_payload(request_payload)
             attempt = PublicationAttempt(
                 id=attempt_id,
                 content_id=str(plan.get("job_id") or ""),
@@ -2599,10 +2796,13 @@ def _build_social_auto_upload_bilibili_verify_command(
         aid,
     ]
     title = _social_auto_upload_command_option(upload_command, "--title")
+    tid = _social_auto_upload_command_option(upload_command, "--tid")
     category = _social_auto_upload_command_option(upload_command, "--category")
     schedule = _social_auto_upload_command_option(upload_command, "--schedule")
     if title:
         command.extend(["--expected-title", title])
+    if tid:
+        command.extend(["--expected-tid", tid])
     if category:
         command.extend(["--expected-category", category])
     if schedule:
@@ -3447,6 +3647,58 @@ def _prefer_xiaohongshu_landscape_cover_contract(
     return cover_path, [dict(item) for item in (cover_slots or []) if isinstance(item, dict)]
 
 
+def _align_single_slot_cover_contract_to_primary(
+    *,
+    platform: str,
+    cover_path: str | None,
+    cover_slots: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    slots = [dict(item) for item in (cover_slots or []) if isinstance(item, dict)]
+    primary = str(cover_path or "").strip()
+    if not primary:
+        return slots
+    required_specs = platform_required_cover_slots(str(platform or "").strip().lower())
+    if len(required_specs) != 1:
+        return slots
+    spec = required_specs[0]
+    required_slot = str(spec.get("slot") or "").strip()
+    required_matrix_key = str(spec.get("matrix_key") or "").strip()
+    if not slots:
+        slot: dict[str, Any] = {
+            "slot": required_slot or "primary",
+            "cover_path": primary,
+        }
+        if required_matrix_key:
+            slot["matrix_key"] = required_matrix_key
+        if spec.get("label"):
+            slot["label"] = spec.get("label")
+        if isinstance(spec.get("target_size"), dict):
+            slot["target_size"] = dict(spec["target_size"])
+        return [slot]
+    aligned: list[dict[str, Any]] = []
+    for item in slots:
+        normalized = dict(item)
+        item_slot = str(normalized.get("slot") or "").strip()
+        item_matrix_key = str(normalized.get("matrix_key") or "").strip()
+        matches_required = (
+            (required_slot and item_slot == required_slot)
+            or (required_matrix_key and item_matrix_key == required_matrix_key)
+            or len(slots) == 1
+        )
+        if matches_required:
+            normalized["cover_path"] = primary
+            if required_slot and not item_slot:
+                normalized["slot"] = required_slot
+            if required_matrix_key and not item_matrix_key:
+                normalized["matrix_key"] = required_matrix_key
+            if spec.get("label") and not str(normalized.get("label") or "").strip():
+                normalized["label"] = spec.get("label")
+            if isinstance(spec.get("target_size"), dict) and not isinstance(normalized.get("target_size"), dict):
+                normalized["target_size"] = dict(spec["target_size"])
+        aligned.append(normalized)
+    return aligned
+
+
 def _load_publication_platform_cover_source_from_media_candidates(
     *,
     media_paths: list[str],
@@ -3610,11 +3862,17 @@ def _resolve_authoritative_publication_cover_contract(
             if slot_cover_path:
                 resolved_cover_path = slot_cover_path
                 break
+    resolved_cover_slots = _align_single_slot_cover_contract_to_primary(
+        platform=normalized_platform,
+        cover_path=resolved_cover_path,
+        cover_slots=resolved_cover_slots,
+    )
     return resolved_cover_path or None, resolved_cover_slots
 
 
 def build_browser_agent_task_payload(attempt_id: str, *, plan: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
     request_payload = _build_request_payload(plan=plan, target=target)
+    request_payload = _enforce_youtube_fresh_publish_request_payload(request_payload)
     metadata = request_payload.get("metadata") if isinstance(request_payload.get("metadata"), dict) else {}
     media_items = list(request_payload.get("media_items") or [])
     publication_capability = request_payload.get("publication_capability") or {}
@@ -3664,6 +3922,7 @@ def build_browser_agent_task_payload(attempt_id: str, *, plan: dict[str, Any], t
             "publication_content_signature": request_payload.get("publication_content_signature"),
             "publication_plan_signature": request_payload.get("publication_plan_signature"),
             "publication_recovery_state": request_payload.get("publication_recovery_state") or {},
+            "publication_path_contract": request_payload.get("publication_path_contract") or {},
             "publication_capability": request_payload.get("publication_capability") or {},
             "validation_contract": request_payload.get("validation_contract") or BROWSER_AGENT_PUBLICATION_RUN_CONTRACT,
             "publish_media_source": {
@@ -3907,14 +4166,21 @@ def _build_platform_recovery_overrides(
 
 def build_browser_agent_task_payload_from_attempt(attempt: PublicationAttempt) -> dict[str, Any]:
     request_payload = attempt.request_payload if isinstance(attempt.request_payload, dict) else {}
-    media_items = [item for item in (request_payload.get("media_items") or []) if isinstance(item, dict)]
     platform = str(attempt.platform or "").strip()
+    request_payload = _enforce_youtube_fresh_publish_request_payload(
+        {
+            **request_payload,
+            "platform": platform,
+        }
+    )
+    media_items = [item for item in (request_payload.get("media_items") or []) if isinstance(item, dict)]
     publication_capability = request_payload.get("publication_capability") or {}
     requires_local_media = bool(
         publication_capability.get("requires_local_media", PLATFORM_LOCAL_MEDIA_REQUIRED.get(platform, True))
     )
     metadata = request_payload.get("metadata") if isinstance(request_payload.get("metadata"), dict) else {}
     metadata = _rehydrate_publication_attempt_runtime_metadata(attempt, metadata)
+    preserve_host_media_paths = _browser_agent_payload_should_preserve_host_media_paths(metadata)
     requested_media_path = str(metadata.get("requested_media_path") or "").strip()
     refreshed_media_items: list[dict[str, Any]] = []
     workspace_runtime_root = (Path(__file__).resolve().parents[2] / "data" / "runtime").resolve()
@@ -3930,7 +4196,17 @@ def build_browser_agent_task_payload_from_attempt(attempt: PublicationAttempt) -
             if resolved is not None:
                 resolved_local_path = str(resolved)
                 break
-        if resolved_local_path:
+        host_local_path = _first_browser_host_media_path(candidate_paths)
+        if (
+            preserve_host_media_paths
+            and host_local_path
+            and (
+                not resolved_local_path
+                or _looks_like_container_runtime_media_path(resolved_local_path)
+            )
+        ):
+            refreshed["local_path"] = host_local_path
+        elif resolved_local_path:
             refreshed["local_path"] = resolved_local_path
         elif raw_local_path:
             clear_unresolved_path = bool(requested_media_path)
@@ -4004,6 +4280,7 @@ def build_browser_agent_task_payload_from_attempt(attempt: PublicationAttempt) -
             "publication_content_signature": request_payload.get("publication_content_signature"),
             "publication_plan_signature": request_payload.get("publication_plan_signature"),
             "publication_recovery_state": request_payload.get("publication_recovery_state") or {},
+            "publication_path_contract": request_payload.get("publication_path_contract") or {},
             "publication_capability": request_payload.get("publication_capability") or {},
             "validation_contract": request_payload.get("validation_contract") or BROWSER_AGENT_PUBLICATION_RUN_CONTRACT,
             "publish_media_source": {
@@ -4021,6 +4298,68 @@ def build_browser_agent_task_payload_from_attempt(attempt: PublicationAttempt) -
     if reconcile_callback_url:
         payload["reconcile_callback_url"] = reconcile_callback_url
     return payload
+
+
+def _looks_like_windows_or_unc_path(value: Any) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    normalized = text.replace("/", "\\")
+    return bool(re.match(r"^[A-Za-z]:\\", normalized) or normalized.startswith("\\\\"))
+
+
+def _looks_like_container_runtime_media_path(value: Any) -> bool:
+    text = str(value or "").strip().replace("\\", "/")
+    if not text:
+        return False
+    return text.startswith("/app/data/")
+
+
+def _first_browser_host_media_path(values: list[str]) -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if _looks_like_windows_or_unc_path(text):
+            return text
+        mapped = _browser_host_mapped_media_path(text)
+        if mapped:
+            return mapped
+    return ""
+
+
+def _browser_host_mapped_media_path(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    host_root = str(os.getenv("ROUGHCUT_OUTPUT_HOST_ROOT") or "").strip()
+    container_root = str(os.getenv("ROUGHCUT_OUTPUT_ROOT") or "").strip()
+    if not host_root or not container_root:
+        return ""
+    relative = _portable_relative_path(text, container_root)
+    if relative is None:
+        return ""
+    return _join_host_media_path(host_root, relative)
+
+
+def _join_host_media_path(root: str, parts: list[str]) -> str:
+    normalized_root = str(root or "").strip().rstrip("\\/")
+    if not normalized_root:
+        return ""
+    separator = "\\" if "\\" in normalized_root else "/"
+    if not parts:
+        return normalized_root
+    return normalized_root + separator + separator.join(str(part).strip("\\/") for part in parts if str(part).strip("\\/"))
+
+
+def _browser_agent_payload_should_preserve_host_media_paths(metadata: dict[str, Any]) -> bool:
+    binding = metadata.get("browser_binding") if isinstance(metadata.get("browser_binding"), dict) else {}
+    if not binding:
+        session_binding = metadata.get("session_binding") if isinstance(metadata.get("session_binding"), dict) else {}
+        binding = session_binding.get("browser_binding") if isinstance(session_binding.get("browser_binding"), dict) else {}
+    browser = str(binding.get("browser") or metadata.get("browser") or "").strip().lower()
+    user_data_dir = str(binding.get("user_data_dir") or "").strip()
+    if browser and browser not in {"chrome", "google-chrome"}:
+        return False
+    return _looks_like_windows_or_unc_path(user_data_dir)
 
 
 def _build_publication_reconcile_callback_url() -> str:
@@ -4048,6 +4387,8 @@ def _build_runtime_publication_platform_specific_overrides(
 ) -> dict[str, Any]:
     overrides = dict(platform_specific_overrides or {}) if isinstance(platform_specific_overrides, dict) else {}
     normalized_platform = str(platform or "").strip().lower()
+    if normalized_platform == "youtube":
+        overrides = _youtube_fresh_publish_platform_specific_overrides(overrides)
     recovery_flags = {
         "verification_only_current_page",
         "repair_only_current_page",
@@ -4121,7 +4462,19 @@ def _suppress_declaration_for_creator_platform(
     creator_profile: dict[str, Any] | None,
     credential: dict[str, Any] | None = None,
 ) -> bool:
-    if normalize_publication_platform(platform) != "xiaohongshu":
+    normalized_platform = normalize_publication_platform(platform)
+    if normalized_platform != "xiaohongshu":
+        return False
+    if _creator_profile_suppresses_platform_declaration(creator_profile, normalized_platform):
+        return True
+    if isinstance(credential, dict) and bool(credential.get("suppress_original_declaration")):
+        return True
+    identifiers = [
+        item.strip().lower().replace("-", "_")
+        for item in os.getenv(PUBLICATION_DECLARATION_SUPPRESS_IDENTIFIERS_ENV, "").split(",")
+        if item.strip()
+    ]
+    if not identifiers:
         return False
     blobs: list[str] = []
     if isinstance(creator_profile, dict):
@@ -4147,9 +4500,39 @@ def _suppress_declaration_for_creator_platform(
             if text:
                 blobs.append(text)
     normalized_blob = " ".join(blobs).lower().replace("-", "_")
-    if "珍妮斯" in normalized_blob or "jenny_baby" in normalized_blob or "jenny baby" in normalized_blob:
+    return any(identifier in normalized_blob for identifier in identifiers)
+
+
+def _creator_profile_suppresses_platform_declaration(
+    creator_profile: dict[str, Any] | None,
+    platform: str,
+) -> bool:
+    if not isinstance(creator_profile, dict):
+        return False
+    nested = creator_profile.get("creator_profile")
+    profile_payload = nested if isinstance(nested, dict) else creator_profile
+    publishing = profile_payload.get("publishing") if isinstance(profile_payload, dict) else {}
+    if not isinstance(publishing, dict):
+        return False
+    platform_set = {
+        normalize_publication_platform(str(item))
+        for key in ("suppress_original_declaration_platforms", "declaration_suppression_platforms")
+        for item in (publishing.get(key) or [])
+        if str(item).strip()
+    }
+    if platform in platform_set:
         return True
-    return any(identifier.lower().replace("-", "_") in normalized_blob for identifier in JENNY_BABY_PUBLICATION_IDENTIFIERS)
+    policies = publishing.get("platform_policies")
+    if isinstance(policies, dict):
+        policy = policies.get(platform)
+        if isinstance(policy, dict) and bool(policy.get("suppress_original_declaration")):
+            return True
+    overrides = publishing.get("platform_specific_overrides")
+    if isinstance(overrides, dict):
+        override = overrides.get(platform)
+        if isinstance(override, dict) and bool(override.get("suppress_original_declaration")):
+            return True
+    return False
 
 
 def _clear_publication_declaration_overrides(overrides: dict[str, Any]) -> dict[str, Any]:
@@ -4172,8 +4555,7 @@ def _resolve_publication_collection_target(
     platform_specific_overrides: Any,
 ) -> dict[str, str] | None:
     normalized_collection = collection if isinstance(collection, dict) else _normalize_collection_option({"collection": collection})
-    if normalized_collection:
-        return normalized_collection
+    normalized_platform = normalize_publication_platform(platform)
     overrides = (
         dict(platform_specific_overrides)
         if isinstance(platform_specific_overrides, dict)
@@ -4190,6 +4572,18 @@ def _resolve_publication_collection_target(
         or collection_management.get("collection_name")
         or ""
     ).strip()
+    if normalized_collection:
+        collection_label = str(normalized_collection.get("name") or "").strip()
+        youtube_create_placeholder = normalized_platform == "youtube" and bool(
+            collection_name
+            and (
+                re.search(r"^(新建播放列表|新建播客|Create playlist|New playlist|New podcast)$", collection_label, re.IGNORECASE)
+                or bool(collection_management.get("create_required"))
+                or str(collection_management.get("status") or "").strip().lower() in {"needs_create", "create_required"}
+            )
+        )
+        if not youtube_create_placeholder:
+            return normalized_collection
     if not collection_name:
         return None
     return {"name": collection_name[:160]}
@@ -4348,6 +4742,8 @@ def _should_auto_recover_publication_failure(
     mapped_status: str,
     diagnosis: dict[str, Any] | None,
 ) -> bool:
+    if _publication_attempt_requires_fresh_browser_attempt(attempt):
+        return False
     if not PUBLICATION_LLM_AUTO_RECOVERY_ENABLED:
         return False
     if not isinstance(diagnosis, dict):
@@ -4375,6 +4771,74 @@ def _should_auto_recover_publication_failure(
         if confidence < float(PUBLICATION_LLM_AUTO_RECOVERY_CONFIDENCE_THRESHOLD):
             return False
     return int(attempt.retry_count or 0) < int(attempt.max_retries or 0)
+
+
+def _publication_attempt_requires_fresh_browser_attempt(attempt: PublicationAttempt | Any) -> bool:
+    platform = str(getattr(attempt, "platform", "") or "").strip().lower()
+    adapter = _normalize_publication_adapter(getattr(attempt, "adapter", ""))
+    return platform == "youtube" and adapter == CANONICAL_PUBLICATION_ADAPTER
+
+
+def _youtube_fresh_publish_platform_specific_overrides(overrides: Any) -> dict[str, Any]:
+    normalized = dict(overrides or {}) if isinstance(overrides, dict) else {}
+    current_fresh_upload_resume = (
+        bool(normalized.get("youtube_current_fresh_upload_resume"))
+        and str(normalized.get("recovery_mode") or "").strip().lower() == "prepublish_resume"
+        and bool(normalized.get("prepare_only_current_page"))
+    )
+    for key in YOUTUBE_FRESH_PUBLISH_ONLY_BLOCKED_OVERRIDE_KEYS:
+        normalized.pop(key, None)
+    if current_fresh_upload_resume:
+        normalized["youtube_current_fresh_upload_resume"] = True
+        normalized["recovery_mode"] = "prepublish_resume"
+        normalized["prepare_only_current_page"] = True
+        normalized["fresh_start_platform_tab"] = False
+        normalized["clear_draft_context"] = False
+        normalized["force_publish_page_refresh"] = False
+    else:
+        normalized.pop("youtube_current_fresh_upload_resume", None)
+        normalized["fresh_start_platform_tab"] = True
+        normalized["clear_draft_context"] = True
+        normalized["force_publish_page_refresh"] = True
+        normalized["recovery_mode"] = "fresh_publish"
+    normalized["verify_media_upload"] = True
+    normalized["youtube_publish_path_policy"] = "fresh_upload_only"
+    return normalized
+
+
+def _enforce_youtube_fresh_publish_request_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return payload
+    platform = str(
+        payload.get("platform")
+        or (payload.get("publication_capability") or {}).get("platform")
+        or ""
+    ).strip().lower()
+    if platform != "youtube":
+        return payload
+    sanitized = dict(payload)
+    sanitized["platform_specific_overrides"] = _youtube_fresh_publish_platform_specific_overrides(
+        sanitized.get("platform_specific_overrides")
+    )
+    sanitized["publication_recovery_state"] = {
+        "schema_version": PUBLICATION_RECOVERY_STATE_SCHEMA_VERSION,
+        "platform": "youtube",
+        "fresh_publish_only": True,
+        "current_fresh_upload_resume": bool(
+            sanitized.get("platform_specific_overrides", {}).get("youtube_current_fresh_upload_resume")
+        ),
+    }
+    current_fresh_upload_resume = bool(
+        sanitized.get("platform_specific_overrides", {}).get("youtube_current_fresh_upload_resume")
+    )
+    sanitized["publication_path_contract"] = {
+        "platform": "youtube",
+        "mode": "fresh_upload_resume" if current_fresh_upload_resume else "fresh_upload_only",
+        "forbid_current_page_repair": not current_fresh_upload_resume,
+        "forbid_existing_video_edit": True,
+        "forbid_attempt_reuse": not current_fresh_upload_resume,
+    }
+    return sanitized
 
 
 def _next_publication_retry_delay_seconds(retry_count: int) -> int:
@@ -4725,6 +5189,7 @@ def _coerce_recovery_plan(raw_recovery: Any) -> dict[str, Any] | None:
         "fresh_start_platform_tab",
         "verify_media_upload",
         "wait_for_publish_confirmation",
+        "youtube_current_fresh_upload_resume",
     ):
         if isinstance(recovery_overrides.get(key), bool):
             normalized_overrides[key] = bool(recovery_overrides.get(key))
@@ -5211,7 +5676,6 @@ def _derive_recovery_diagnosis_from_context(context: dict[str, Any]) -> dict[str
     code = str(recovery.get("code") or "").strip()
     error_code = str(error.get("code") or "").strip()
     error_message = str(error.get("message") or "").strip()
-    blockers = context.get("blockers") or []
     duplicate_detected = bool(recovery.get("duplicate_detected"))
     if code.endswith("draft_clear_failed") or error_code.endswith("draft_clear_failed"):
         return _as_rule_diagnosis({
@@ -5920,7 +6384,11 @@ def _mark_publication_attempt_failed(
     retryable: bool,
 ) -> None:
     now = _utc_now()
-    can_retry = retryable and int(attempt.retry_count or 0) < int(attempt.max_retries or 0)
+    can_retry = (
+        retryable
+        and not _publication_attempt_requires_fresh_browser_attempt(attempt)
+        and int(attempt.retry_count or 0) < int(attempt.max_retries or 0)
+    )
     attempt.error_code = code
     attempt.error_message = message
     if can_retry:
@@ -6538,6 +7006,10 @@ def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> d
     native_topics = _coerce_publication_topic_list(target.get("native_topics"))
     raw_media_path = str(plan.get("media_path") or "").strip()
     raw_source_media_path = str(plan.get("source_media_path") or "").strip()
+    media_source_contract = plan.get("media_source_contract") if isinstance(plan.get("media_source_contract"), dict) else {}
+    contract_media_path = str(media_source_contract.get("resolved_media_path") or "").strip()
+    if contract_media_path:
+        raw_media_path = contract_media_path
     resolved_media_path = resolve_publication_local_media_path(raw_media_path)
     media_path = str(resolved_media_path) if resolved_media_path else ""
     platform = str(target.get("platform") or "").strip().lower()
@@ -6668,12 +7140,16 @@ def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> d
         if isinstance(target.get("publication_schedule_policy"), dict)
         else {}
     )
-    return {
+    payload = {
         "title": title,
         "body": (
             body
             if body
-            else (f"转发内容：{x_share_link}" if platform == "x" and x_link_share and adapter == X_LINK_SHARE_PUBLICATION_ADAPTER else "")
+            else (
+                f"转发内容：{x_share_link}"
+                if platform == "x" and x_link_share and adapter == X_LINK_SHARE_PUBLICATION_ADAPTER
+                else ""
+            )
         ),
         "declaration": declaration,
         "content_kind": content_kind,
@@ -6733,6 +7209,7 @@ def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> d
             "creator_profile_name": str(plan.get("creator_profile_name") or ""),
             "publication_guard": plan.get("publication_guard") or {},
             "publication_schedule_policy": publication_schedule_policy,
+            "media_source_contract": media_source_contract,
             "requested_media_path": raw_source_media_path or raw_media_path or None,
             "resolved_media_path": media_path or None,
             "requested_cover_path": str(cover_path or "").strip() or None,
@@ -6755,6 +7232,7 @@ def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> d
         },
         "validation_contract": _resolve_publication_adapter_publication_contract(target.get("adapter")),
     }
+    return _enforce_youtube_fresh_publish_request_payload(payload)
 
 
 def _extract_publication_plan_signature(request_payload: dict[str, Any] | None) -> str:
@@ -6785,13 +7263,18 @@ def resolve_publication_local_media_path(raw_path: Any) -> Path | None:
     if not raw:
         return None
     if _looks_like_external_media_path(raw):
-        return _materialize_publication_media_file(raw)
-    path = Path(raw).expanduser()
-    try:
-        if path.exists() and path.is_file():
-            return path.resolve()
-    except OSError:
-        pass
+        materialized = _materialize_publication_media_file(raw)
+        if materialized is not None:
+            return materialized
+    for path in _publication_local_media_path_candidates(raw):
+        try:
+            if path.exists() and path.is_file():
+                resolved = path.resolve()
+                if _publication_media_path_requires_browser_safe_copy(resolved):
+                    return _materialize_publication_media_file(str(resolved)) or resolved
+                return resolved
+        except OSError:
+            pass
 
     normalized = raw.replace("\\", "/")
     runtime_prefix = "/app/data/"
@@ -6799,8 +7282,128 @@ def resolve_publication_local_media_path(raw_path: Any) -> Path | None:
         workspace_root = Path(__file__).resolve().parents[2]
         mapped = workspace_root / "data" / "runtime" / normalized[len(runtime_prefix):].lstrip("/")
         if mapped.exists() and mapped.is_file():
-            return mapped.resolve()
+            resolved = mapped.resolve()
+            if _publication_media_path_requires_browser_safe_copy(resolved):
+                return _materialize_publication_media_file(str(resolved)) or resolved
+            return resolved
 
+    host_materialized = _materialize_publication_media_from_host_directory(raw)
+    if host_materialized is not None:
+        return host_materialized
+
+    return None
+
+
+def _publication_local_media_path_candidates(raw_path: str) -> list[Path]:
+    raw = str(raw_path or "").strip()
+    if not raw:
+        return []
+    candidates: list[Path] = [Path(raw).expanduser()]
+    for mapped in _publication_runtime_root_mapped_path_candidates(raw):
+        if all(str(mapped) != str(item) for item in candidates):
+            candidates.append(mapped)
+    return candidates
+
+
+def _publication_runtime_root_mapped_path_candidates(raw_path: str) -> list[Path]:
+    raw = str(raw_path or "").strip()
+    host_root = str(os.getenv("ROUGHCUT_OUTPUT_HOST_ROOT") or "").strip()
+    container_root = str(os.getenv("ROUGHCUT_OUTPUT_ROOT") or "").strip()
+    if not raw or not host_root or not container_root:
+        return []
+    candidates: list[Path] = []
+    for source_root, target_root in ((host_root, container_root), (container_root, host_root)):
+        relative = _portable_relative_path(raw, source_root)
+        if relative is None:
+            continue
+        target = Path(target_root).expanduser().joinpath(*relative)
+        if all(str(target) != str(item) for item in candidates):
+            candidates.append(target)
+    return candidates
+
+
+def _portable_relative_path(path_value: str, root_value: str) -> list[str] | None:
+    path_text = _portable_path_text(path_value)
+    root_text = _portable_path_text(root_value).rstrip("/")
+    if not path_text or not root_text:
+        return None
+    path_key = path_text.casefold()
+    root_key = root_text.casefold()
+    if path_key == root_key:
+        return []
+    prefix = f"{root_key}/"
+    if not path_key.startswith(prefix):
+        return None
+    relative_text = path_text[len(root_text):].lstrip("/")
+    return [part for part in relative_text.split("/") if part]
+
+
+def _portable_path_text(value: Any) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    text = re.sub(r"/+", "/", text)
+    return text.rstrip("/") if len(text) > 1 else text
+
+
+def _looks_like_windows_or_unc_path(value: Any) -> bool:
+    text = str(value or "").strip().strip('"')
+    if not text:
+        return False
+    return text.startswith(("\\\\", "//")) or bool(re.match(r"^[A-Za-z]:[\\/]", text))
+
+
+def _host_path_parent_and_name(raw_path: str) -> tuple[str, str] | None:
+    raw = str(raw_path or "").strip().strip('"')
+    if not _looks_like_windows_or_unc_path(raw):
+        return None
+    windows_path = PureWindowsPath(raw)
+    name = str(windows_path.name or "").strip()
+    parent = str(windows_path.parent or "").strip()
+    if not name or not parent or parent in {".", raw}:
+        return None
+    return parent, name
+
+
+def _materialize_publication_media_from_host_directory(raw_path: str) -> Path | None:
+    host_path = _host_path_parent_and_name(raw_path)
+    if host_path is None:
+        return None
+    parent, expected_name = host_path
+    url = resolve_codex_proxy_sibling_url("/v1/host/materialize-directory")
+    if not url:
+        return None
+
+    headers = {"Content-Type": "application/json"}
+    token = resolve_codex_proxy_token()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    try:
+        response = httpx.post(
+            url,
+            json={
+                "folder_path": parent,
+                "container_output_root": str(os.getenv("ROUGHCUT_OUTPUT_ROOT", "/app/data") or "/app/data"),
+            },
+            headers=headers,
+            timeout=float(os.getenv("ROUGHCUT_HOST_MATERIALIZE_TIMEOUT_SEC", "120") or "120"),
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    expected_key = expected_name.casefold()
+    files = payload.get("files") if isinstance(payload.get("files"), list) else []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        path = str(item.get("path") or "").strip()
+        if name.casefold() != expected_key or not path:
+            continue
+        return Path(path).expanduser()
     return None
 
 
@@ -6814,10 +7417,21 @@ def _materialized_publication_media_target(raw_path: str) -> Path:
     normalized = re.sub(r"[\\/]+", "/", str(raw_path or "").strip())
     file_name = Path(normalized).name or "publication-media.bin"
     stem = Path(file_name).stem or "publication-media"
+    suffix = Path(file_name).suffix or ".bin"
+    safe_suffix = suffix if re.fullmatch(r"\.[A-Za-z0-9]{1,12}", suffix) else ".bin"
     safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-") or "publication-media"
     digest = hashlib.sha1(normalized.casefold().encode("utf-8", errors="ignore")).hexdigest()[:16]
     target_dir = _publication_media_runtime_root() / f"{digest}-{safe_stem[:48]}"
-    return target_dir / file_name
+    return target_dir / f"{safe_stem[:64]}-{digest}{safe_suffix}"
+
+
+def _publication_media_path_requires_browser_safe_copy(path: Path) -> bool:
+    name = str(path.name or "")
+    if not name:
+        return True
+    if len(name) > 96:
+        return True
+    return re.search(r"[^A-Za-z0-9._-]", name) is not None
 
 
 def _should_copy_publication_media(source_path: Path, target_path: Path) -> bool:
@@ -6942,6 +7556,158 @@ def _package_primary_title(package: dict[str, Any]) -> str:
             if text:
                 return text
     return str(package.get("primary_title") or package.get("title") or "").strip()
+
+
+_PUBLICATION_MODEL_TOKEN_RE = re.compile(r"\b[A-Z]{1,10}\d{1,5}[A-Z0-9-]*\b", re.I)
+
+
+def _publication_material_quality_blocking_reasons(
+    *,
+    platform: str,
+    package: dict[str, Any],
+    title: str,
+    body: str,
+    cover_path: str | None,
+    cover_slots: list[dict[str, Any]],
+    platform_packaging: dict[str, Any] | None,
+) -> list[str]:
+    normalized_platform = normalize_publication_platform(platform) or str(platform or "").strip().lower()
+    reasons: list[str] = []
+    normalized_title = re.sub(r"\s+", " ", str(title or "").strip())
+    normalized_body = re.sub(r"\s+", " ", str(body or "").strip())
+    if normalized_platform != "x":
+        if not normalized_title:
+            reasons.append("标题为空，不能自动发布。")
+        if not normalized_body:
+            reasons.append("正文/说明为空，不能自动发布。")
+        elif normalized_platform == "youtube" and len(normalized_body) < 20:
+            reasons.append("YouTube 说明过短，不能作为正式发布物料。")
+    if normalized_title and _publication_title_looks_like_raw_filename(normalized_title):
+        reasons.append("标题疑似文件名或成片名残留，不能自动发布。")
+    comparison_issue = _publication_title_self_comparison_issue(normalized_title, normalized_body)
+    if comparison_issue:
+        reasons.append(comparison_issue)
+    reasons.extend(
+        _publication_cover_matrix_quality_blocking_reasons(
+            platform=normalized_platform,
+            package=package,
+            cover_path=cover_path,
+            cover_slots=cover_slots,
+            platform_packaging=platform_packaging,
+        )
+    )
+    return list(dict.fromkeys(reason for reason in reasons if str(reason).strip()))
+
+
+def _publication_title_looks_like_raw_filename(title: str) -> bool:
+    text = str(title or "").strip()
+    if not text:
+        return False
+    lowered = text.casefold()
+    if re.search(r"\.(mp4|mov|m4v|avi|mkv)\b", lowered):
+        return True
+    if re.search(r"\b(img|vid|dji)[_\-\s]?\d{3,}\b", lowered):
+        return True
+    compact = re.sub(r"\s+", "", text)
+    if "横版" in compact and "成片" in compact:
+        return True
+    if re.match(r"^\d{8}[\s_\-]", text) and len(text) > 36:
+        return True
+    return False
+
+
+def _publication_title_self_comparison_issue(title: str, body: str) -> str:
+    normalized_title = str(title or "").strip()
+    if not normalized_title:
+        return ""
+    if not re.search(r"\bvs\.?\b|对比|比较|同框|和.+比|与.+比", normalized_title, re.I):
+        return ""
+    title_tokens = [token.upper() for token in _PUBLICATION_MODEL_TOKEN_RE.findall(normalized_title)]
+    if not title_tokens:
+        return ""
+    duplicate_tokens = {token for token in title_tokens if title_tokens.count(token) > 1}
+    if not duplicate_tokens:
+        return ""
+    body_tokens = {token.upper() for token in _PUBLICATION_MODEL_TOKEN_RE.findall(str(body or ""))}
+    for token in sorted(duplicate_tokens):
+        same_vs_pattern = rf"\b{re.escape(token)}\b\s*(?:vs\.?|v\.?|对比|比较|和|与|/|-)\s*\b{re.escape(token)}\b"
+        if re.search(same_vs_pattern, normalized_title, re.I) or (body_tokens - {token}):
+            return f"比较型标题自相矛盾：{token} 不能和自身作为对比对象。"
+    return ""
+
+
+def _publication_cover_matrix_quality_blocking_reasons(
+    *,
+    platform: str,
+    package: dict[str, Any],
+    cover_path: str | None,
+    cover_slots: list[dict[str, Any]],
+    platform_packaging: dict[str, Any] | None,
+) -> list[str]:
+    if platform == "x":
+        return []
+    packaging = platform_packaging if isinstance(platform_packaging, dict) else {}
+    cover_matrix = packaging.get("cover_matrix") if isinstance(packaging.get("cover_matrix"), dict) else {}
+    reasons: list[str] = []
+    candidate_slots = cover_slots or (
+        package.get("cover_slots") if isinstance(package.get("cover_slots"), list) else []
+    )
+    if not str(cover_path or "").strip():
+        if cover_matrix or candidate_slots:
+            return ["缺少封面路径，不能自动发布。"]
+        return []
+    if not cover_matrix:
+        return []
+    matrix_keys = [
+        str(slot.get("matrix_key") or "").strip()
+        for slot in candidate_slots
+        if isinstance(slot, dict) and str(slot.get("matrix_key") or "").strip()
+    ]
+    if not matrix_keys:
+        return []
+    for matrix_key in dict.fromkeys(matrix_keys):
+        entry = cover_matrix.get(matrix_key) if isinstance(cover_matrix.get(matrix_key), dict) else {}
+        if not entry:
+            reasons.append(f"封面矩阵缺少 {matrix_key} 的质量记录。")
+            continue
+        quality = entry.get("cover_quality") if isinstance(entry.get("cover_quality"), dict) else {}
+        if not quality:
+            if entry.get("generation_timing") or entry.get("publish_ready") is True:
+                reasons.append(f"封面矩阵 {matrix_key} 缺少发布级视觉质量审计证据。")
+            continue
+        if quality.get("publish_ready") is False:
+            quality_reasons = [
+                str(item).strip()
+                for item in (quality.get("blocking_reasons") or [])
+                if str(item).strip()
+            ]
+            if quality_reasons:
+                reasons.extend(f"封面矩阵 {matrix_key}：{reason}" for reason in quality_reasons)
+            else:
+                reasons.append(f"封面矩阵 {matrix_key} 未通过发布级视觉质量审计。")
+        bitmap_contract = (
+            entry.get("bitmap_title_contract")
+            if isinstance(entry.get("bitmap_title_contract"), dict)
+            else {}
+        )
+        hard_contract = (
+            entry.get("cover_hard_contract")
+            if isinstance(entry.get("cover_hard_contract"), dict)
+            else {}
+        )
+        full_bitmap_required = bool(hard_contract.get("full_bitmap_cover_required"))
+        if full_bitmap_required and not bitmap_contract:
+            reasons.append(f"封面矩阵 {matrix_key} 缺少完整位图标题校验证据。")
+        if bitmap_contract.get("bitmap_title_contract_check_unavailable") is True:
+            reasons.append(f"封面矩阵 {matrix_key} 位图标题校验未产出有效结论。")
+        if bitmap_contract.get("bitmap_title_contract_passed") is False:
+            detail = str(bitmap_contract.get("bitmap_title_contract_reason") or "").strip()
+            reasons.append(f"封面矩阵 {matrix_key} 位图标题未通过校验" + (f"：{detail}" if detail else "。"))
+        if bitmap_contract.get("bitmap_title_main_title_matches") is False:
+            reasons.append(f"封面矩阵 {matrix_key} 主标题识别不匹配。")
+        if bitmap_contract.get("bitmap_title_subtitle_matches") is False:
+            reasons.append(f"封面矩阵 {matrix_key} 副标题识别不匹配。")
+    return list(dict.fromkeys(reason for reason in reasons if str(reason).strip()))
 
 
 def _publication_title_hard_limit(platform: str, platform_audit: dict[str, Any] | None = None) -> int | None:

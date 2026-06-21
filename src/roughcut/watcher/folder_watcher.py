@@ -25,6 +25,12 @@ from roughcut.config import DEFAULT_TEST_OUTPUT_ROOT, get_settings
 from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
 from roughcut.db.models import ConfigProfile, Job, WatchRoot
 from roughcut.db.session import get_session_factory
+from roughcut.edit.product_controls import (
+    normalize_automation_level,
+    normalize_edit_mode,
+    normalize_material_usage,
+    workflow_template_for_edit_mode,
+)
 from roughcut.hyperframes import normalize_options as normalize_hyperframes_options
 from roughcut.media.probe import probe
 from roughcut.media.output import get_output_dir
@@ -47,6 +53,7 @@ async def _call_inventory_job_factory(
     file_paths: list[str],
     *,
     workflow_template: str | None,
+    product_controls: dict[str, Any] | None = None,
     job_flow_mode: str = "auto",
     output_dir: str | None = None,
     config_profile_id: uuid.UUID | str | None = None,
@@ -56,6 +63,7 @@ async def _call_inventory_job_factory(
         file_paths,
         output_dir=output_dir,
         workflow_template=workflow_template,
+        product_controls=product_controls,
         job_flow_mode=job_flow_mode,
         config_profile_id=config_profile_id,
         awaiting_initialization=awaiting_initialization,
@@ -271,6 +279,7 @@ async def create_jobs_for_inventory_paths(
     *,
     config_profile_id: uuid.UUID | str | None = None,
     workflow_template: str | None = None,
+    product_controls: dict[str, Any] | None = None,
     job_flow_mode: str = "auto",
     output_dir: str | None = None,
     language: str = "zh-CN",
@@ -282,6 +291,7 @@ async def create_jobs_for_inventory_paths(
             Path(file_path),
             workflow_template,
             language,
+            product_controls=product_controls,
             job_flow_mode=job_flow_mode,
             output_dir=output_dir,
             config_profile_id=config_profile_id,
@@ -719,6 +729,25 @@ def _normalize_job_flow_mode(value: str | None) -> str:
     return "smart_assist" if normalized == "smart_assist" else "auto"
 
 
+def _normalize_watch_root_product_controls(product_controls: dict[str, Any] | None = None) -> dict[str, str]:
+    source = dict(product_controls or {}) if isinstance(product_controls, dict) else {}
+    return {
+        "edit_mode": normalize_edit_mode(source.get("edit_mode")),
+        "automation_level": normalize_automation_level(source.get("automation_level")),
+        "material_usage": normalize_material_usage(source.get("material_usage")),
+    }
+
+
+def _watch_root_product_controls(root: WatchRoot) -> dict[str, str]:
+    return _normalize_watch_root_product_controls(
+        {
+            "edit_mode": getattr(root, "edit_mode", "auto") or "auto",
+            "automation_level": getattr(root, "automation_level", "standard") or "standard",
+            "material_usage": getattr(root, "material_usage", "all_uploaded") or "all_uploaded",
+        }
+    )
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -751,6 +780,7 @@ async def _create_job_for_file(
     output_dir: str | None = None,
     *,
     config_profile_id: uuid.UUID | str | None = None,
+    product_controls: dict[str, Any] | None = None,
     content_profile_source_context: dict[str, Any] | None = None,
     awaiting_initialization: bool = False,
     allow_duplicate_file: bool = False,
@@ -770,8 +800,16 @@ async def _create_job_for_file(
     storage.upload_file(file_path, s3_key)
     logger.info(f"Uploaded {file_path.name} → {s3_key}")
 
+    normalized_product_controls = (
+        _normalize_watch_root_product_controls(product_controls)
+        if isinstance(product_controls, dict) and product_controls
+        else None
+    )
     resolved_source_context = enrich_source_context_with_filename_hints(
-        content_profile_source_context,
+        {
+            **(content_profile_source_context or {}),
+            **({"product_controls": normalized_product_controls} if normalized_product_controls else {}),
+        },
         source_name=file_path.name,
     )
     resolved_source_context["hyperframes_options"] = normalize_hyperframes_options(
@@ -784,6 +822,11 @@ async def _create_job_for_file(
     async with factory() as session:
         settings = get_settings()
         job_flow_mode = _normalize_job_flow_mode(job_flow_mode)
+        workflow_template = (
+            workflow_template_for_edit_mode(normalized_product_controls.get("edit_mode"))
+            if normalized_product_controls
+            else None
+        ) or workflow_template
         profile_uuid = None
         profile_settings_snapshot: dict[str, Any] | None = None
         profile_packaging_snapshot: dict[str, Any] | None = None
@@ -924,6 +967,7 @@ async def create_merged_job_for_inventory_paths(
     *,
     config_profile_id: uuid.UUID | str | None = None,
     workflow_template: str | None = None,
+    product_controls: dict[str, Any] | None = None,
     job_flow_mode: str = "auto",
     output_dir: str | None = None,
     language: str = "zh-CN",
@@ -955,6 +999,7 @@ async def create_merged_job_for_inventory_paths(
             merged_path,
             workflow_template,
             language,
+            product_controls=product_controls,
             job_flow_mode=job_flow_mode,
             output_dir=output_dir,
             config_profile_id=config_profile_id,
@@ -1686,6 +1731,7 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
                             [str(item.get("path") or "") for item in selected_items],
                             config_profile_id=root.config_profile_id,
                             workflow_template=root.workflow_template,
+                            product_controls=_watch_root_product_controls(root),
                             job_flow_mode=getattr(root, "job_flow_mode", "auto") or "auto",
                             output_dir=root.output_dir,
                             awaiting_initialization=False,
@@ -1731,6 +1777,7 @@ async def run_watch_root_auto_duty() -> dict[str, Any]:
                             [str(item.get("path") or "") for item in selected_items],
                             config_profile_id=root.config_profile_id,
                             workflow_template=root.workflow_template,
+                            product_controls=_watch_root_product_controls(root),
                             job_flow_mode=getattr(root, "job_flow_mode", "auto") or "auto",
                             output_dir=root.output_dir,
                             awaiting_initialization=ingest_mode == "task_only",
@@ -1802,6 +1849,7 @@ class VideoFileHandler(FileSystemEventHandler):
         workflow_template: str | None,
         config_profile_id: uuid.UUID | str | None,
         job_flow_mode: str,
+        product_controls: dict[str, Any] | None,
         output_dir: str | None,
         language: str,
         loop: asyncio.AbstractEventLoop,
@@ -1809,6 +1857,7 @@ class VideoFileHandler(FileSystemEventHandler):
         self._workflow_template = workflow_template
         self._config_profile_id = config_profile_id
         self._job_flow_mode = _normalize_job_flow_mode(job_flow_mode)
+        self._product_controls = _normalize_watch_root_product_controls(product_controls)
         self._output_dir = output_dir
         self._language = language
         self._loop = loop
@@ -1823,6 +1872,7 @@ class VideoFileHandler(FileSystemEventHandler):
                 file_path,
                 self._workflow_template,
                 self._language,
+                product_controls=self._product_controls,
                 job_flow_mode=self._job_flow_mode,
                 output_dir=self._output_dir,
                 config_profile_id=self._config_profile_id,
@@ -1856,6 +1906,7 @@ async def watch_directory(
     workflow_template: str | None = None,
     config_profile_id: uuid.UUID | str | None = None,
     job_flow_mode: str = "auto",
+    product_controls: dict[str, Any] | None = None,
     output_dir: str | None = None,
     language: str = "zh-CN",
     recursive: bool = True,
@@ -1866,7 +1917,7 @@ async def watch_directory(
         raise FileNotFoundError(f"Watch path does not exist: {watch_path}")
 
     loop = asyncio.get_running_loop()
-    handler = VideoFileHandler(workflow_template, config_profile_id, job_flow_mode, output_dir, language, loop)
+    handler = VideoFileHandler(workflow_template, config_profile_id, job_flow_mode, product_controls, output_dir, language, loop)
     observer = Observer()
     observer.schedule(handler, str(path), recursive=recursive)
     observer.start()
@@ -1901,6 +1952,7 @@ async def watch_from_db() -> None:
                 root.workflow_template,
                 root.config_profile_id,
                 getattr(root, "job_flow_mode", "auto") or "auto",
+                _watch_root_product_controls(root),
                 root.output_dir,
                 recursive=bool(getattr(root, "recursive", True)),
             )

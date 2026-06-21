@@ -9,6 +9,8 @@ const BRIDGE_POLL_TIMEOUT_MS = 1000;
 const BRIDGE_IDLE_POLL_DELAY_MS = 750;
 const BRIDGE_AUTO_RELOAD_DELAY_MINUTES = 0.5;
 const BRIDGE_HTTP_TIMEOUT_MS = 8000;
+const BRIDGE_COMMAND_TIMEOUT_MS = 35000;
+const BRIDGE_FAST_COMMAND_TIMEOUT_MS = 10000;
 const attachedTabs = new Set();
 const eventSubscriptions = new Map();
 let bridgeLoopStarted = false;
@@ -93,6 +95,50 @@ async function ensureDebuggerAttached(tabId) {
   attachedTabs.add(tabId);
 }
 
+async function detachDebugger(tabId) {
+  const normalizedTabId = Number(tabId);
+  if (!Number.isInteger(normalizedTabId) || normalizedTabId <= 0) return;
+  try {
+    await chrome.debugger.detach({ tabId: normalizedTabId });
+  } catch {}
+  attachedTabs.delete(normalizedTabId);
+  eventSubscriptions.delete(normalizedTabId);
+}
+
+async function withTimeout(promise, timeoutMs, timeoutMessage, onTimeout) {
+  let settled = false;
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(async () => {
+      if (settled) return;
+      try {
+        if (typeof onTimeout === "function") await onTimeout();
+      } catch {}
+      reject(new Error(timeoutMessage));
+    }, Math.max(1000, Number(timeoutMs || BRIDGE_COMMAND_TIMEOUT_MS)));
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    settled = true;
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function commandTimeoutMs(command) {
+  const type = String(command?.type || "").trim();
+  if (type === "cdp_send" || type === "subscribe_events") return BRIDGE_COMMAND_TIMEOUT_MS;
+  return BRIDGE_FAST_COMMAND_TIMEOUT_MS;
+}
+
+async function recoverAfterCommandTimeout(command) {
+  const payload = command?.payload && typeof command.payload === "object" ? command.payload : {};
+  const tabId = Number(payload.tab_id);
+  if (Number.isInteger(tabId) && tabId > 0) {
+    await detachDebugger(tabId);
+  }
+}
+
 async function postBridgeEvent(tabId, method, params) {
   const clientId = await ensureClientId();
   try {
@@ -143,8 +189,7 @@ async function handleBridgeCommand(command) {
       const tabId = Number(payload.tab_id);
       if (!Number.isInteger(tabId) || tabId <= 0) throw new Error("close_tab_id_invalid");
       await chrome.tabs.remove(tabId);
-      attachedTabs.delete(tabId);
-      eventSubscriptions.delete(tabId);
+      await detachDebugger(tabId);
       return { closed: true, tab_id: tabId };
     }
     case "cdp_send": {
@@ -154,7 +199,12 @@ async function handleBridgeCommand(command) {
       if (!Number.isInteger(tabId) || tabId <= 0) throw new Error("cdp_tab_id_invalid");
       if (!method) throw new Error("cdp_method_missing");
       await ensureDebuggerAttached(tabId);
-      return await chrome.debugger.sendCommand({ tabId }, method, params);
+      return await withTimeout(
+        chrome.debugger.sendCommand({ tabId }, method, params),
+        BRIDGE_COMMAND_TIMEOUT_MS,
+        `cdp_send_timeout:${method}`,
+        () => detachDebugger(tabId),
+      );
     }
     case "set_origin_notification_permission": {
       const origin = String(payload.origin || "").trim();
@@ -262,7 +312,12 @@ async function pumpBridgeLoop() {
         continue;
       }
       try {
-        const result = await handleBridgeCommand(command);
+        const result = await withTimeout(
+          handleBridgeCommand(command),
+          commandTimeoutMs(command),
+          `bridge_command_timeout:${String(command.type || "")}`,
+          () => recoverAfterCommandTimeout(command),
+        );
         await postCommandResult(command.request_id, true, result);
       } catch (error) {
         await postCommandResult(command.request_id, false, error);

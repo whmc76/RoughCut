@@ -234,7 +234,7 @@ def test_social_auto_upload_binding_rejects_invalid_runtime_login(creator_assets
     client, _session_factory = creator_assets_client
     creator_id = client.post(
         "/creator-cards",
-        json={"name": "珍妮斯baby", "default_platforms": ["wechat_channels"]},
+        json={"name": "Demo Creator", "default_platforms": ["wechat_channels"]},
     ).json()["id"]
 
     async def fake_check(**kwargs):  # noqa: ANN003
@@ -255,7 +255,7 @@ def test_social_auto_upload_binding_rejects_invalid_runtime_login(creator_assets
         json={
             "platform": "wechat_channels",
             "browser": "chrome",
-            "account_name": "珍妮斯baby · 视频号",
+            "account_name": "Demo Creator · 视频号",
             "login_confirmed": True,
         },
     )
@@ -275,7 +275,7 @@ def test_social_auto_upload_login_endpoint_starts_headed_login_command(creator_a
     monkeypatch.setattr(
         creator_assets,
         "_social_auto_upload_settings_or_400",
-        lambda: ("E:/WorkSpace/_eval/social-auto-upload", "python", 1800, True),
+        lambda: ("C:/sample-workspace/_eval/social-auto-upload", "python", 1800, True),
     )
 
     def fake_spawn(command, *, root):  # noqa: ANN001
@@ -298,7 +298,7 @@ def test_social_auto_upload_login_endpoint_starts_headed_login_command(creator_a
     assert payload["root_exists_in_api_runtime"] is True
     assert payload["account_name"] == account_key
     assert payload["account_label"] == "FAS 抖音主号"
-    assert observed["root"] == "E:/WorkSpace/_eval/social-auto-upload"
+    assert observed["root"] == "C:/sample-workspace/_eval/social-auto-upload"
     assert observed["command"] == ["python", "sau_cli.py", "douyin", "login", "--account", account_key, "--headed"]
 
 
@@ -312,7 +312,7 @@ def test_social_auto_upload_login_endpoint_returns_manual_command_when_root_is_n
     monkeypatch.setattr(
         creator_assets,
         "_social_auto_upload_settings_or_400",
-        lambda: ("E:/WorkSpace/_eval/social-auto-upload", "python", 1800, False),
+        lambda: ("C:/sample-workspace/_eval/social-auto-upload", "python", 1800, False),
     )
     async def fake_host_login(**kwargs):  # noqa: ANN003
         return None
@@ -344,12 +344,12 @@ def test_social_auto_upload_login_endpoint_uses_host_bridge_when_api_runtime_can
     monkeypatch.setattr(
         creator_assets,
         "_social_auto_upload_settings_or_400",
-        lambda: ("E:/WorkSpace/_eval/social-auto-upload", "python", 1800, False),
+        lambda: ("C:/sample-workspace/_eval/social-auto-upload", "python", 1800, False),
     )
 
     async def fake_host_login(**kwargs):  # noqa: ANN003
         account_key = _expected_social_auto_upload_account_key(creator_id, "douyin")
-        assert kwargs["root"] == "E:/WorkSpace/_eval/social-auto-upload"
+        assert kwargs["root"] == "C:/sample-workspace/_eval/social-auto-upload"
         assert kwargs["platform"] == "douyin"
         assert kwargs["account_name"] == account_key
         return {
@@ -384,13 +384,13 @@ def test_social_auto_upload_login_status_endpoint_reports_valid_local_check(crea
     monkeypatch.setattr(
         creator_assets,
         "_social_auto_upload_settings_or_400",
-        lambda: ("E:/WorkSpace/_eval/social-auto-upload", "python", 1800, True),
+        lambda: ("C:/sample-workspace/_eval/social-auto-upload", "python", 1800, True),
     )
 
     async def fake_run(command, *, root, timeout_sec):  # noqa: ANN001
         account_key = _expected_social_auto_upload_account_key(creator_id, "douyin")
         assert command == ["python", "sau_cli.py", "douyin", "check", "--account", account_key]
-        assert root == "E:/WorkSpace/_eval/social-auto-upload"
+        assert root == "C:/sample-workspace/_eval/social-auto-upload"
         assert timeout_sec == 120
         return SimpleNamespace(returncode=0, stdout="valid\n", stderr="", ok=True)
 
@@ -418,7 +418,7 @@ def test_social_auto_upload_login_status_endpoint_uses_host_bridge_when_api_runt
     monkeypatch.setattr(
         creator_assets,
         "_social_auto_upload_settings_or_400",
-        lambda: ("E:/WorkSpace/_eval/social-auto-upload", "python", 1800, False),
+        lambda: ("C:/sample-workspace/_eval/social-auto-upload", "python", 1800, False),
     )
 
     async def fake_host_check(**kwargs):  # noqa: ANN003
@@ -453,7 +453,7 @@ def test_social_auto_upload_dashboard_uses_bound_isolated_account_key(creator_as
     _mock_social_auto_upload_login_valid(monkeypatch)
     creator_id = client.post(
         "/creator-cards",
-        json={"name": "珍妮斯baby", "default_platforms": ["bilibili"]},
+        json={"name": "Demo Creator", "default_platforms": ["bilibili"]},
     ).json()["id"]
     account_key = _expected_social_auto_upload_account_key(creator_id, "bilibili")
     client.post(
@@ -461,7 +461,7 @@ def test_social_auto_upload_dashboard_uses_bound_isolated_account_key(creator_as
         json={
             "platform": "bilibili",
             "browser": "chrome",
-            "account_name": "珍妮斯baby · Chrome",
+            "account_name": "Demo Creator · Chrome",
             "login_confirmed": True,
         },
     )
@@ -469,7 +469,7 @@ def test_social_auto_upload_dashboard_uses_bound_isolated_account_key(creator_as
     monkeypatch.setattr(
         creator_assets,
         "_social_auto_upload_settings_or_400",
-        lambda: ("E:/WorkSpace/_eval/social-auto-upload", "python", 1800, False),
+        lambda: ("C:/sample-workspace/_eval/social-auto-upload", "python", 1800, False),
     )
 
     async def fake_host_dashboard(**kwargs):  # noqa: ANN003
@@ -494,6 +494,6 @@ def test_social_auto_upload_dashboard_uses_bound_isolated_account_key(creator_as
     assert payload["status"] == "dashboard_started"
     assert payload["pid"] == 789
     assert payload["account_name"] == account_key
-    assert payload["account_label"] == "珍妮斯baby · Chrome"
+    assert payload["account_label"] == "Demo Creator · Chrome"
     assert payload["credential_ref"] == f"social-auto-upload:{account_key}:bilibili"
     assert payload["root_exists_in_api_runtime"] is False

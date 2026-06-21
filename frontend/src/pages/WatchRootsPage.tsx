@@ -30,7 +30,10 @@ export function WatchRootsPage() {
       : "编辑自动任务";
   const modalSubtitle = workspace.isCreatingRoot
     ? "设置目录路径、默认方案和扫描规则。"
-    : "点击目录卡片进入编辑，保存会自动同步到当前监看配置。";
+    : "点击目录卡片进入编辑，保存会自动同步到当前自动剪辑配置。";
+  const productControlSummary = workspace.selectedRoot
+    ? `${t(`watch.form.editMode.${workspace.form.edit_mode}`)} / ${t(`watch.form.automationLevel.${workspace.form.automation_level}`)} / ${t(`watch.form.materialUsage.${workspace.form.material_usage}`)}`
+    : t("watch.page.pickRoot");
 
   const handleCloseEditor = () => {
     setEditorOpen(false);
@@ -61,8 +64,8 @@ export function WatchRootsPage() {
           <strong>{workspace.selectedRoot ? t("watch.page.healthTitle") : t("watch.page.pickRoot")}</strong>
         </article>
         <article className="watch-command-chip">
-          <span className="watch-command-label">默认方案</span>
-          <strong>{effectiveConfigProfile?.name ?? t("watch.form.followActiveProfileOption")}</strong>
+          <span className="watch-command-label">自动剪辑</span>
+          <strong>{productControlSummary}</strong>
         </article>
       </section>
 

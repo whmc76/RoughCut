@@ -117,7 +117,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-dir",
         type=Path,
-        default=Path(r"Y:\EDC系列\视频原片"),
+        default=Path(os.getenv("ROUGHCUT_LIVE_PROOF_SOURCE_DIR", "data/samples")),
     )
     parser.add_argument("--sample-count", type=int, default=10)
     parser.add_argument("--random-seed", type=int, default=20260420)

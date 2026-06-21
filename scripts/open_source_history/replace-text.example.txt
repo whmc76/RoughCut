@@ -1,0 +1,10 @@
+# Replace sensitive literals that should not remain in Git history.
+# Format: literal:before==>after
+# Copy this file into a local ignored workspace such as .tmp/open-source-history/
+# and replace the examples with your real private values.
+
+literal:real_creator_name==>Demo Creator
+literal:real_creator_id==>creator-demo
+literal:real_browser_profile_id==>browser-profile:chrome:demo-profile-a
+literal:E:/private/source/root==>C:/sample-source-root
+literal:real_product_hotword==>SampleMint

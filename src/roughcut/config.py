@@ -49,7 +49,7 @@ DEFAULT_TEST_OUTPUT_ROOT = Path(
 DEFAULT_HEYGEM_SHARED_ROOT = Path(
     os.getenv(
         "HEYGEM_SHARED_ROOT",
-        os.getenv("HEYGEM_DATA_DIR", "D:/duix_avatar_data/face2face"),
+        os.getenv("HEYGEM_DATA_DIR", str((DEFAULT_OUTPUT_ROOT / "heygem-shared").as_posix())),
     )
 ).expanduser()
 DEFAULT_HEYGEM_VOICE_ROOT = Path(
@@ -108,6 +108,7 @@ ENV_EXPLICIT_OVERRIDE_SETTINGS: tuple[str, ...] = ENV_MANAGED_SETTINGS + (
     "publication_attempt_lease_sec",
     "publication_browser_agent_timeout_sec",
     "publication_browser_cdp_url",
+    "publication_x_username",
 )
 TRANSCRIPTION_PROVIDER_PRIORITY: tuple[str, ...] = TRANSCRIPTION_PROVIDER_VALUES
 TRANSCRIPTION_MODEL_OPTIONS: dict[str, list[str]] = {
@@ -431,14 +432,15 @@ class Settings(BaseSettings):
     runtime_preflight_docker_enabled: bool = False
     docker_gpu_guard_enabled: bool = True
     docker_gpu_guard_idle_timeout_sec: int = 900
+    docker_gpu_guard_ready_timeout_sec: int = 240
     heygem_docker_guard_enabled: bool = True
-    heygem_docker_compose_file: str = "E:/WorkSpace/heygem/docker-compose.yml"
-    heygem_docker_env_file: str = "E:/WorkSpace/heygem/.env"
+    heygem_docker_compose_file: str = str((DEFAULT_PROJECT_ROOT.parent / "heygem" / "docker-compose.yml").as_posix())
+    heygem_docker_env_file: str = str((DEFAULT_PROJECT_ROOT.parent / "heygem" / ".env").as_posix())
     heygem_docker_services: str = "heygem"
     heygem_docker_idle_timeout_sec: int = 10
     indextts2_docker_guard_enabled: bool = False
-    indextts2_docker_compose_file: str = "E:/WorkSpace/indextts2-service/docker-compose.yml"
-    indextts2_docker_env_file: str = "E:/WorkSpace/indextts2-service/.env"
+    indextts2_docker_compose_file: str = str((DEFAULT_PROJECT_ROOT.parent / "indextts2-service" / "docker-compose.yml").as_posix())
+    indextts2_docker_env_file: str = str((DEFAULT_PROJECT_ROOT.parent / "indextts2-service" / ".env").as_posix())
     indextts2_docker_services: str = "indextts2"
     indextts2_docker_idle_timeout_sec: int = 10
     local_asr_docker_guard_enabled: bool = True
@@ -462,6 +464,7 @@ class Settings(BaseSettings):
     moss_tts_local_docker_env_file: str = ""
     moss_tts_local_docker_services: str = "moss-tts-local"
     moss_tts_local_docker_idle_timeout_sec: int = 10
+    moss_tts_local_docker_ready_timeout_sec: int = 900
     funasr_auto_unload_enabled: bool = True
     funasr_idle_unload_sec: int = 600
 
@@ -553,6 +556,7 @@ class Settings(BaseSettings):
     publication_social_auto_upload_platforms: str = ""
     publication_social_auto_upload_auto_login: bool = False
     publication_social_auto_upload_headless: bool = True
+    publication_x_username: str = ""
     publication_platform_active_schedule_times: str = (
         "douyin=20:30,kuaishou=20:00,xiaohongshu=21:00,bilibili=18:00,wechat-channels=20:00"
     )
@@ -634,9 +638,9 @@ class Settings(BaseSettings):
     intelligent_copy_cover_dreamina_cookie_source_base_url: str = "http://127.0.0.1:9222"
     intelligent_copy_cover_dreamina_page_url: str = "https://jimeng.jianying.com/ai-tool/generate/?type=image"
     intelligent_copy_cover_dreamina_page_url_pattern: str = "jimeng.jianying.com/ai-tool/generate"
-    intelligent_copy_cover_dreamina_user_data_dir: str = "C:/Users/Administrator/AppData/Local/HydraDreaminaCDPProfile"
+    intelligent_copy_cover_dreamina_user_data_dir: str = "./data/runtime/dreamina-profile"
     intelligent_copy_cover_dreamina_headless_user_data_dir: str = (
-        "C:/Users/Administrator/AppData/Local/HydraDreaminaCDPProfileHeadless"
+        "./data/runtime/dreamina-profile-headless"
     )
     intelligent_copy_cover_dreamina_template_path: str = ""
     intelligent_copy_cover_dreamina_submit_state_path: str = ""

@@ -7,7 +7,7 @@ from roughcut.publication import build_publication_browser_profile_id
 from roughcut.avatar.materials import avatar_materials_root
 
 
-def test_resolve_browser_profile_binding_for_creator_matches_fas_local_chrome_profile(tmp_path, monkeypatch):
+def test_resolve_browser_profile_binding_for_creator_matches_local_chrome_profile(tmp_path, monkeypatch):
     local_state_path = tmp_path / "Local State"
     local_state_path.write_text(
         json.dumps(
@@ -19,10 +19,10 @@ def test_resolve_browser_profile_binding_for_creator_matches_fas_local_chrome_pr
                             "user_name": "",
                         },
                         "Profile 2": {
-                            "name": "FAS_EDC",
-                            "gaia_given_name": "FAS_EDC",
-                            "gaia_name": "FAS_EDC",
-                            "user_name": "fas.galactic@gmail.com",
+                            "name": "Demo Chrome",
+                            "gaia_given_name": "Demo Chrome",
+                            "gaia_name": "Demo Chrome",
+                            "user_name": "demo.creator@example.com",
                         },
                     }
                 }
@@ -35,11 +35,11 @@ def test_resolve_browser_profile_binding_for_creator_matches_fas_local_chrome_pr
     user_data_dir.mkdir()
     body = avatar_materials.PublicationBrowserLoginMatchIn(browser="chrome", platforms=["douyin"])
     profile = {
-        "display_name": "FAS",
-        "presenter_alias": "FAS",
+        "display_name": "Demo Creator",
+        "presenter_alias": "Demo Creator",
         "creator_profile": {
             "identity": {
-                "public_name": "FAS",
+                "public_name": "Demo Creator",
             }
         },
     }
@@ -63,8 +63,8 @@ def test_resolve_browser_profile_binding_for_creator_matches_fas_local_chrome_pr
 
     assert binding["browser"] == "chrome"
     assert binding["profile_directory"] == "Profile 2"
-    assert binding["profile_name"] == "FAS_EDC"
-    assert binding["profile_email"] == "fas.galactic@gmail.com"
+    assert binding["profile_name"] == "Demo Chrome"
+    assert binding["profile_email"] == "demo.creator@example.com"
     assert binding["profile_id"] == build_publication_browser_profile_id(
         browser="chrome",
         user_data_dir=str(user_data_dir),
@@ -127,8 +127,8 @@ def test_resolve_browser_profile_binding_for_creator_falls_back_to_existing_prof
                 "profile": {
                     "info_cache": {
                         "Profile 2": {
-                            "name": "FAS_EDC",
-                            "user_name": "other@gmail.com",
+                            "name": "Demo Chrome",
+                            "user_name": "other@example.com",
                         }
                     }
                 }
@@ -200,10 +200,10 @@ def test_resolve_browser_profile_binding_for_creator_matches_by_contact_email(tm
                             "user_name": "",
                         },
                         "Profile 2": {
-                            "name": "FAS_EDC",
-                            "gaia_given_name": "FAS_EDC",
-                            "gaia_name": "FAS_EDC",
-                            "user_name": "fas.galactic@gmail.com",
+                            "name": "Demo Chrome",
+                            "gaia_given_name": "Demo Chrome",
+                            "gaia_name": "Demo Chrome",
+                            "user_name": "demo.creator@example.com",
                         },
                     }
                 }
@@ -218,7 +218,7 @@ def test_resolve_browser_profile_binding_for_creator_matches_by_contact_email(tm
     profile = {
         "display_name": "",
         "presenter_alias": "",
-        "personal_info": {"contact": "fas.galactic@gmail.com"},
+        "personal_info": {"contact": "demo.creator@example.com"},
         "creator_profile": {
             "identity": {},
         },
@@ -234,7 +234,7 @@ def test_resolve_browser_profile_binding_for_creator_matches_by_contact_email(tm
     )
 
     assert binding["profile_directory"] == "Profile 2"
-    assert binding["profile_email"] == "fas.galactic@gmail.com"
+    assert binding["profile_email"] == "demo.creator@example.com"
 
 
 def test_resolve_browser_profile_binding_for_creator_falls_back_to_agent_when_creator_tokens_missing(tmp_path, monkeypatch):

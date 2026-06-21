@@ -274,6 +274,85 @@ def test_llm_waste_discovery_candidates_merge_into_cut_analysis() -> None:
     assert cut_analysis["waste_segment_discovery_summary"]["stage"] == SEMANTIC_TIMELINE_ANALYSIS_STAGE
 
 
+def test_waste_discovery_rejects_overbroad_restart_retake_over_product_detail() -> None:
+    subtitle_context = [
+        {
+            "index": 1,
+            "start": 225.0,
+            "end": 242.0,
+            "text": "这层推牌的磁力配置和弹射模块的设置配置就可以衍生出多种，比如说单端发射、撞击，还是回弹震动的这种区别。",
+        },
+        {
+            "index": 2,
+            "start": 242.0,
+            "end": 260.0,
+            "text": "同时它还有这个胶条的存在，胶条既能够提供回弹的弹力，又能降低声音，可以当一个消音器使用。",
+        },
+        {
+            "index": 3,
+            "start": 260.0,
+            "end": 276.0,
+            "text": "老郭这次的设计真的绝了，正好今天要把这个胶条摘下来，因为它造成这个手感不太干脆。",
+        },
+        {
+            "index": 4,
+            "start": 276.0,
+            "end": 296.3,
+            "text": "说实话它的拆装不算很简单，零件毕竟太多了，最好有一个专用托盘或者操作台去操作。",
+        },
+    ]
+
+    candidates = _normalize_waste_segment_discovery_candidates(
+        {
+            "candidates": [
+                {
+                    "start": 225.0,
+                    "end": 296.3,
+                    "reason": "restart_retake",
+                    "confidence": 0.91,
+                    "summary": "前段和后文存在重复表达",
+                    "evidence": ["后面再次提到拆装不简单和零件太多"],
+                }
+            ]
+        },
+        duration=345.0,
+        min_confidence=0.68,
+        max_candidates=8,
+        subtitle_context=subtitle_context,
+    )
+
+    assert candidates == []
+
+
+def test_waste_discovery_keeps_restart_retake_with_explicit_restart_cue() -> None:
+    subtitle_context = [
+        {"index": 1, "start": 10.0, "end": 16.0, "text": "这个配置有三种模式，不对我刚才说错了，重新说。"},
+        {"index": 2, "start": 16.0, "end": 22.0, "text": "这个配置有四种模式，分别是发射、撞击、震动和回弹。"},
+    ]
+
+    candidates = _normalize_waste_segment_discovery_candidates(
+        {
+            "candidates": [
+                {
+                    "start": 10.0,
+                    "end": 22.0,
+                    "reason": "restart_retake",
+                    "confidence": 0.91,
+                    "summary": "说话人明确说错后重新说",
+                    "evidence": ["不对", "说错了", "重新说"],
+                }
+            ]
+        },
+        duration=60.0,
+        min_confidence=0.68,
+        max_candidates=8,
+        subtitle_context=subtitle_context,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["reason"] == "restart_retake"
+
+
 def test_waste_discovery_subtitle_context_windows_cover_full_timeline() -> None:
     subtitles = [
         {

@@ -108,9 +108,9 @@ def _resolve_content_verification_timeout_seconds() -> float:
     return max(10.0, min(_resolve_content_understanding_timeout_seconds() / 3.0, _CONTENT_VERIFICATION_TIMEOUT_SEC))
 
 _INGESTIBLE_PRODUCT_SIGNALS = (
-    "luckykiss",
-    "kisspod",
-    "kissport",
+    "samplemint",
+    "samplepod",
+    "sampleport",
     "含片",
     "益生菌",
     "口香糖",
@@ -1495,7 +1495,7 @@ def _has_ingestible_product_context(text: str) -> bool:
     hits = sum(1 for token in _INGESTIBLE_PRODUCT_SIGNALS if token in lowered)
     if hits >= 2:
         return True
-    return "kisspod" in lowered and hits >= 1
+    return "samplepod" in lowered and hits >= 1
 
 
 def _looks_like_gear_subject_text(text: str) -> bool:
@@ -6435,7 +6435,7 @@ _BRAND_ALIAS_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("狐蝠工业", re.compile(r"(FOXBAT|狐蝠工业|狐蝠)", re.IGNORECASE)),
     ("BOLTBOAT", re.compile(r"(BOLT\s*BOAT|BOLTBOAT|勃朗峰户外|船长|船厂)", re.IGNORECASE)),
     ("HSJUN", re.compile(r"(HSJUN|HESIJUN|赫斯俊|赫斯郡)", re.IGNORECASE)),
-    ("LuckyKiss", re.compile(r"(LUCKYKISS|LuckyKiss|luckykiss)", re.IGNORECASE)),
+    ("SampleMint", re.compile(r"(SAMPLEMINT|SampleMint|samplemint)", re.IGNORECASE)),
 ]
 
 _BRAND_CN_DISPLAY_MAP: dict[str, str] = {
@@ -6490,7 +6490,7 @@ _MODEL_TO_BRAND: dict[str, str] = {
     "FXX1": "狐蝠工业",
     "FXX1小副包": "狐蝠工业",
     "影蚀": "BOLTBOAT",
-    "KissPod": "LuckyKiss",
+    "SamplePod": "SampleMint",
     "S11 PRO": "NexTool",
     "S11PRO": "NexTool",
     "SK05二代ProUV版": "Loop露普",
@@ -6958,7 +6958,7 @@ def _seed_profile_from_text(
         model = "CHARGE"
         model_source = "explicit_alias"
     elif re.search(r"(?<![A-Z0-9])KISSPOD(?![A-Z0-9])", normalized):
-        model = "KissPod"
+        model = "SamplePod"
         model_source = "explicit_alias"
     elif _extract_edc_bag_model(canon, transcript):
         model = _extract_edc_bag_model(canon, transcript)
@@ -7035,7 +7035,7 @@ def _seed_profile_from_text(
     topic_terms = _extract_topic_terms(transcript)
     product_identity_detected = bool(
         subject_type
-        or brand in {"LEATHERMAN", "REATE", "Loop露普", "狐蝠工业", "LuckyKiss"}
+        or brand in {"LEATHERMAN", "REATE", "Loop露普", "狐蝠工业", "SampleMint"}
         or model
     )
     tech_brand = _detect_primary_tech_brand(transcript, topic_terms=topic_terms)

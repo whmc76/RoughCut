@@ -55,7 +55,7 @@ def parse_args() -> argparse.Namespace:
 
 
 def _controlled_non_media_path() -> Path:
-    return (ROOT / "docs" / "agent-doc-index.md").resolve()
+    return (ROOT / "docs" / "design" / "INDEX.md").resolve()
 
 
 def _inject_controlled_failure(render_plan: dict[str, Any], *, failure_mode: str) -> dict[str, Any]:

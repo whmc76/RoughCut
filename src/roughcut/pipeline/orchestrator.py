@@ -126,6 +126,7 @@ _TERMINAL_FAILURE_ERROR_PREFIXES = (
     "edit_plan_blocked_by_insert_fallback:",
     "render_blocked_by_fallback_output:",
 )
+_LEGACY_NON_EXECUTABLE_STEPS = {"final_review", "platform_package"}
 
 
 @dataclass(frozen=True)
@@ -482,6 +483,8 @@ def _auto_skip_reason_for_step(job: Job, step_name: str, *, settings: object | N
         return "ai_director_disabled"
     if normalized == "avatar_commentary" and "avatar_commentary" not in set(getattr(job, "enhancement_modes", []) or []):
         return "avatar_commentary_disabled"
+    if normalized in _LEGACY_NON_EXECUTABLE_STEPS:
+        return "legacy_non_executable_step"
     return None
 
 
@@ -512,6 +515,8 @@ def _skip_detail_for_reason(reason: str) -> str:
         return "未启用 AI 导演模式，跳过。"
     if reason == "avatar_commentary_disabled":
         return "未启用数字人解说模式，跳过。"
+    if reason == "legacy_non_executable_step":
+        return "旧版终审/发布文案步骤已从剪辑调度链路移除，当前由独立审核/智能发布入口处理。"
     return "当前配置不需要执行此步骤，已跳过。"
 
 
@@ -1289,6 +1294,15 @@ async def _recover_incomplete_jobs() -> None:
 async def _is_step_ready(step: JobStep, session) -> bool:
     """Check if all prerequisite steps are done."""
     if step.step_name == "summary_review":
+        return False
+
+    if step.step_name not in PIPELINE_STEPS:
+        logger.warning(
+            "Ignoring unknown pipeline step while checking readiness job=%s step=%s status=%s",
+            step.job_id,
+            step.step_name,
+            step.status,
+        )
         return False
 
     step_idx = PIPELINE_STEPS.index(step.step_name)

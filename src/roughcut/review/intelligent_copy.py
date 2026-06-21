@@ -1093,6 +1093,14 @@ async def generate_intelligent_copy(
         packaging=packaging,
         platform_materials=platform_materials,
     )
+    material_review = _run_material_review_and_regeneration(
+        packaging=packaging,
+        platform_materials=platform_materials,
+        requested_platforms=publish_platforms,
+    )
+    if material_review.get("changed"):
+        for serial, material in enumerate(platform_materials, start=1):
+            _write_platform_material_files(material_dir=material_dir, index=serial, material=material)
     material_generation_contract = _build_material_generation_contract(
         platform_materials,
         requested_platforms=publish_platforms,
@@ -1114,6 +1122,7 @@ async def generate_intelligent_copy(
     _apply_material_contract_export_state(result, material_contract, blocking_reasons=blocking_reasons)
     result["cover_matrix"] = _serialize_cover_matrix(cover_group_cache)
     result["material_validation"] = material_validation
+    result["material_review"] = material_review
     result["material_generation_contract"] = material_generation_contract
     result["material_contract"] = material_contract
     _apply_material_generation_export_state(
@@ -1564,6 +1573,18 @@ async def rerender_existing_intelligent_copy_cover_groups(
         platform_materials=platform_materials,
         requested_platforms=all_platform_keys,
     )
+    material_review = _run_material_review_and_regeneration(
+        packaging=packaging,
+        platform_materials=platform_materials,
+        requested_platforms=all_platform_keys,
+    )
+    if material_review.get("changed"):
+        for material in platform_materials:
+            _write_platform_material_files(
+                material_dir=material_dir,
+                index=_resolve_platform_material_serial(material.get("key")),
+                material=material,
+            )
     material_generation_contract = _build_material_generation_contract(
         platform_materials,
         requested_platforms=all_platform_keys,
@@ -1590,6 +1611,7 @@ async def rerender_existing_intelligent_copy_cover_groups(
     }
     updated_result["cover_matrix"] = _serialize_cover_matrix(cover_group_cache)
     updated_result["material_validation"] = material_validation
+    updated_result["material_review"] = material_review
     updated_result["material_generation_contract"] = material_generation_contract
     updated_result["material_contract"] = material_contract
     _apply_material_contract_export_state(
@@ -1748,6 +1770,18 @@ async def refresh_existing_intelligent_copy_cover_current_state(
         platform_materials=platform_materials,
         requested_platforms=all_platform_keys,
     )
+    material_review = _run_material_review_and_regeneration(
+        packaging=packaging,
+        platform_materials=platform_materials,
+        requested_platforms=all_platform_keys,
+    )
+    if material_review.get("changed"):
+        for material in platform_materials:
+            _write_platform_material_files(
+                material_dir=material_dir,
+                index=_resolve_platform_material_serial(material.get("key")),
+                material=material,
+            )
     material_generation_contract = _build_material_generation_contract(
         platform_materials,
         requested_platforms=all_platform_keys,
@@ -1774,6 +1808,7 @@ async def refresh_existing_intelligent_copy_cover_current_state(
     }
     updated_result["cover_matrix"] = _serialize_cover_matrix(cover_group_cache)
     updated_result["material_validation"] = material_validation
+    updated_result["material_review"] = material_review
     updated_result["material_generation_contract"] = material_generation_contract
     updated_result["material_contract"] = material_contract
     _apply_material_contract_export_state(
@@ -1934,6 +1969,18 @@ def upgrade_existing_intelligent_copy_result(
         platform_materials=upgraded_materials,
         requested_platforms=selected_platform_keys,
     )
+    material_review = _run_material_review_and_regeneration(
+        packaging=packaging,
+        platform_materials=upgraded_materials,
+        requested_platforms=selected_platform_keys,
+    )
+    if material_review.get("changed"):
+        for material in upgraded_materials:
+            _write_platform_material_files(
+                material_dir=material_dir,
+                index=_resolve_platform_material_serial(material.get("key")),
+                material=material,
+            )
     material_generation_contract = _build_material_generation_contract(
         upgraded_materials,
         requested_platforms=selected_platform_keys,
@@ -1957,6 +2004,7 @@ def upgrade_existing_intelligent_copy_result(
         blocking_reasons=blocking_reasons,
     )
     updated_result["material_validation"] = material_validation
+    updated_result["material_review"] = material_review
     updated_result["material_generation_contract"] = material_generation_contract
     updated_result["material_contract"] = material_contract
     _apply_material_generation_export_state(
@@ -2877,6 +2925,26 @@ def _refresh_existing_cover_generation_node(
                 request_path.write_text(json.dumps(request_payload, ensure_ascii=False, indent=2), encoding="utf-8")
             except Exception:
                 pass
+        completed_generated_cover = (
+            str(request_payload.get("status") or "").strip().lower() == "completed"
+            and output_path.exists()
+            and (
+                bool(request_payload.get("generated_by_codex_bridge"))
+                or _cover_request_has_post_generation_evidence(request_payload)
+            )
+        )
+        if completed_generated_cover:
+            if str(refreshed.get("source") or "").strip().lower() == "reference_cover_fallback":
+                refreshed["source"] = "image_generation"
+            if str(refreshed.get("source") or "").strip().lower() == "cover_group_reuse":
+                group_generation = (
+                    dict(refreshed.get("group_generation"))
+                    if isinstance(refreshed.get("group_generation"), dict)
+                    else {}
+                )
+                if str(group_generation.get("source") or "").strip().lower() == "reference_cover_fallback":
+                    group_generation["source"] = "image_generation"
+                    refreshed["group_generation"] = group_generation
     if request_payload or image_generation:
         cover_assessment = assess_cover_publish_readiness(
             refreshed,
@@ -3771,7 +3839,7 @@ def _creator_profile_uses_children_storybook_parenting(
         )
         if str(item or "").strip()
     )
-    return bool(re.search(r"珍妮斯|jenny\s*baby|育儿|亲子|早教", name_blob, re.I))
+    return bool(re.search(r"育儿|亲子|早教|children|parenting", name_blob, re.I))
 
 
 def _extract_parenting_episode_title(video_path: Path) -> str:
@@ -3781,7 +3849,7 @@ def _extract_parenting_episode_title(video_path: Path) -> str:
         if not normalized:
             continue
         normalized = re.sub(r"[_\-\s]+", " ", normalized).strip(" _-")
-        normalized = re.sub(r"(?i)(^|\s)bluey(\s|$)", " ", normalized)
+        normalized = re.sub(r"(?i)(^|\s)sample\s+show(\s|$)", " ", normalized)
         normalized = re.sub(r"(?i)(^|\s)parenting\s+remix(\s|$)", " ", normalized)
         normalized = re.sub(r"(?i)(^|\s)remix(\s|$)", " ", normalized)
         normalized = re.sub(r"(?i)(^|\s)s\d{1,2}e\d{1,2}(\s|$)", " ", normalized)
@@ -3853,9 +3921,14 @@ def _apply_creator_content_strategy_to_profile(
         subtitle_items=subtitle_items,
     )
     hook_line = _first_meaningful_parenting_line(subtitle_items) or "孩子这样做，真的是不懂事吗？"
+    creator_label = (
+        str(creator_profile_name or "").strip()
+        or str(((creator_profile or {}).get("identity") or {}).get("public_name") or "").strip()
+        or "亲子解说"
+    )
     profile.update(
         {
-            "subject_brand": "珍妮斯baby",
+            "subject_brand": creator_label,
             "subject_model": topic_subject,
             "subject_type": "动画亲子场景",
             "subject_domain": "亲子教育",
@@ -3865,7 +3938,7 @@ def _apply_creator_content_strategy_to_profile(
             "engagement_question": "你家孩子也会在类似场景里坚持“我也要”吗？",
             "search_queries": ["育儿", "亲子沟通", "早教", episode_title],
             "cover_title": {
-                "top": "珍妮斯育儿",
+                "top": creator_label[:12],
                 "main": _trim_to_display_units(topic_subject, 14),
                 "bottom": "别急着纠正",
             },
@@ -3915,7 +3988,7 @@ def _apply_creator_copy_strategy_to_brief(
         f"{topic_subject}不是坏习惯",
         f"{topic_subject}，家长可以这样说",
         f"别把{topic_subject}只看成任性",
-        f"珍妮斯育儿：{topic_subject}",
+        f"亲子解说：{topic_subject}",
     ]
     brief.update(
         {
@@ -3924,7 +3997,7 @@ def _apply_creator_copy_strategy_to_brief(
             "summary": summary,
             "question": "你家孩子也会在类似场景里坚持“我也要”吗？",
             "focus_points": ["孩子行为背后的需求", "家长回应方式", "可复用沟通话术"],
-            "tags": ["育儿", "亲子沟通", "早教", "动画解读", "布鲁伊", "珍妮斯baby"],
+            "tags": ["育儿", "亲子沟通", "早教", "动画解读"],
             "anchor_terms": [topic_subject, "孩子", "家长", "亲子沟通", "育儿"],
             "forbidden_terms": forbidden_terms,
             "title_candidates": title_candidates,
@@ -4492,7 +4565,7 @@ def _cover_brief_targets_parenting_animation(cover_brief: dict[str, Any] | None)
         )
         if str(brief.get(key) or "").strip()
     )
-    return bool(re.search(r"珍妮斯|jenny|baby|布鲁伊|bluey|育儿|亲子|早教|儿童|动画二创|动画解说", blob, re.I))
+    return bool(re.search(r"育儿|亲子|早教|儿童|children|parenting|动画二创|动画解说", blob, re.I))
 
 
 def _cover_reference_pack_prompt(
@@ -4710,6 +4783,7 @@ def _cover_product_title_parts(
     for prefix in ("MOT", "风灵", "MOT风灵", "OLIGHT", "琢匠", "FAS"):
         model_tail = model_tail.replace(prefix, "")
     model_tail = re.sub(r"(版本|版)$", "", model_tail)
+    model_tail = _repair_cover_model_token_from_context(model_tail, text_pool)
     if model_tail:
         if "锆合金" in model_tail and "推牌" in model_tail:
             parts.append("锆合金推牌")
@@ -4725,6 +4799,18 @@ def _cover_product_title_parts(
         parts.append(_trim_to_display_units(subject_type, 8))
 
     return [part for part in parts if part]
+
+
+def _repair_cover_model_token_from_context(model_tail: str, text_pool: str) -> str:
+    candidate = re.sub(r"\s+", "", str(model_tail or "").strip())
+    if not candidate:
+        return ""
+    context = str(text_pool or "")
+    if re.fullmatch(r"DC\d+[A-Z0-9-]*", candidate, flags=re.I):
+        corrected = re.search(rf"\bE{re.escape(candidate)}\b", context, flags=re.I)
+        if corrected:
+            return corrected.group(0).upper()
+    return candidate
 
 
 def _resolve_cover_action_keyword(text_pool: str) -> str:
@@ -4912,10 +4998,35 @@ def _serialize_cover_matrix(cache: dict[str, dict[str, Any]]) -> dict[str, Any]:
             "cover_path": str(cover_group.get("cover_path") or "").strip() or str(node.get("output_path") or "").strip() or None,
             "publish_ready": bool(node.get("publish_ready")),
             "blocking_reasons": [str(item).strip() for item in (node.get("blocking_reasons") or []) if str(item).strip()],
+            "cover_quality": dict(node.get("cover_quality") or {}) if isinstance(node.get("cover_quality"), dict) else {},
+            "cover_hard_contract": dict(node.get("cover_hard_contract") or {}) if isinstance(node.get("cover_hard_contract"), dict) else {},
+            "bitmap_title_contract": _serialize_cover_bitmap_title_contract(node),
             "members": list(group.get("members") or []),
             "generation_timing": _extract_cover_generation_timing_summary(node),
         }
     return matrix
+
+
+def _serialize_cover_bitmap_title_contract(node: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(node, dict):
+        return {}
+    payload: dict[str, Any] = {}
+    for key in (
+        "bitmap_title_contract_passed",
+        "bitmap_title_main_title_matches",
+        "bitmap_title_subtitle_matches",
+        "bitmap_title_style_verified",
+        "bitmap_title_contract_reason",
+        "bitmap_title_contract_verified_at",
+        "bitmap_title_contract_check_unavailable",
+    ):
+        if key in node:
+            payload[key] = node.get(key)
+    if isinstance(node.get("bitmap_title_lines"), dict):
+        payload["bitmap_title_lines"] = dict(node.get("bitmap_title_lines") or {})
+    if isinstance(node.get("bitmap_title_detected"), dict):
+        payload["bitmap_title_detected"] = dict(node.get("bitmap_title_detected") or {})
+    return payload
 
 
 async def _render_or_reuse_platform_cover_group(
@@ -5631,6 +5742,315 @@ def _run_material_self_healing(
         "passes": passes,
         "final_contract": final_contract,
     }
+
+
+MATERIAL_REVIEW_MAX_PASSES = 2
+_MATERIAL_MODEL_TOKEN_RE = re.compile(r"\b[A-Z]{1,10}\d{1,5}[A-Z0-9-]*\b", re.I)
+
+
+def _run_material_review_and_regeneration(
+    *,
+    packaging: dict[str, Any],
+    platform_materials: list[dict[str, Any]],
+    requested_platforms: list[str] | None = None,
+) -> dict[str, Any]:
+    requested_scope = _normalize_requested_material_platform_scope(requested_platforms)
+    if not requested_scope:
+        requested_scope = _normalize_requested_material_platform_scope(
+            [material.get("key") for material in platform_materials]
+        )
+    passes: list[dict[str, Any]] = []
+    changed = False
+    for pass_index in range(1, MATERIAL_REVIEW_MAX_PASSES + 1):
+        pass_issues: list[dict[str, Any]] = []
+        pass_actions: list[dict[str, Any]] = []
+        for material in platform_materials:
+            issues = _review_platform_material_quality(material)
+            pass_issues.extend(issues)
+            actions = _repair_platform_material_from_review(
+                material=material,
+                issues=issues,
+                packaging=packaging,
+            )
+            if actions:
+                changed = True
+                pass_actions.extend(actions)
+                issues = _review_platform_material_quality(material)
+            blocking_review_reasons = [
+                str(issue.get("message") or "").strip()
+                for issue in issues
+                if str(issue.get("severity") or "").strip().lower() == "blocking"
+                and str(issue.get("message") or "").strip()
+            ]
+            existing_blocking_reasons = [
+                str(item).strip()
+                for item in (material.get("blocking_reasons") or [])
+                if str(item).strip()
+                and not str(item).strip().startswith("物料审核未通过：")
+            ]
+            material["material_review"] = {
+                "status": "passed" if not blocking_review_reasons else "failed",
+                "issues": issues,
+                "blocking_reasons": blocking_review_reasons,
+            }
+            material["blocking_reasons"] = sorted(
+                set(
+                    [
+                        *existing_blocking_reasons,
+                        *[f"物料审核未通过：{reason}" for reason in blocking_review_reasons],
+                    ]
+                )
+            )
+            material["publish_ready"] = publication_packaging_entry_publish_ready(material, trust_explicit_flag=False)
+        contract = _build_material_contract(
+            platform_materials,
+            requested_platforms=requested_scope,
+        )
+        passes.append(
+            {
+                "pass_index": pass_index,
+                "issues": pass_issues,
+                "applied_actions": pass_actions,
+                "status": _material_contract_terminal_status(contract),
+                "blocking_reasons": list(contract.get("blocking_reasons") or []),
+            }
+        )
+        if not pass_actions:
+            return {
+                "status": _material_contract_terminal_status(contract),
+                "changed": changed,
+                "passes": passes,
+                "final_contract": contract,
+            }
+    final_contract = _build_material_contract(
+        platform_materials,
+        requested_platforms=requested_scope,
+    )
+    return {
+        "status": _material_contract_terminal_status(final_contract),
+        "changed": changed,
+        "passes": passes,
+        "final_contract": final_contract,
+    }
+
+
+def _review_platform_material_quality(material: dict[str, Any]) -> list[dict[str, Any]]:
+    issues: list[dict[str, Any]] = []
+    platform_key = _normalize_external_publish_platform_key(material.get("key"))
+    title = _material_primary_title(material)
+    body = str(material.get("body") or "").strip()
+    if bool(material.get("has_title", True)):
+        if not title:
+            issues.append(_material_review_issue(platform_key, "missing_title", "标题为空，不能自动发布。", repairable=False))
+        elif _material_title_looks_like_raw_filename(title):
+            issues.append(_material_review_issue(platform_key, "raw_filename_title", "标题疑似文件名或成片名残留。", repairable=True))
+        self_comparison = _material_title_self_comparison_issue(title, body)
+        if self_comparison:
+            issues.append(_material_review_issue(platform_key, "self_comparison_title", self_comparison, repairable=True))
+    if platform_key != "x":
+        if not body:
+            issues.append(_material_review_issue(platform_key, "missing_body", "正文/说明为空，不能自动发布。", repairable=True))
+        elif platform_key == "youtube" and len(body) < 20:
+            issues.append(_material_review_issue(platform_key, "body_too_short", "YouTube 说明过短，不能作为正式发布物料。", repairable=True))
+    cover_generation = material.get("cover_generation") if isinstance(material.get("cover_generation"), dict) else {}
+    if cover_generation and bool(cover_generation.get("publish_ready")):
+        cover_quality = cover_generation.get("cover_quality") if isinstance(cover_generation.get("cover_quality"), dict) else {}
+        source = str(cover_generation.get("source") or "").strip().lower()
+        if source in {"image_generation", "cover_group_reuse"} and not cover_quality:
+            issues.append(
+                _material_review_issue(
+                    platform_key,
+                    "missing_cover_quality_evidence",
+                    "封面缺少发布级视觉质量审计证据。",
+                    repairable=False,
+                )
+            )
+    return issues
+
+
+def _material_review_issue(platform: str, code: str, message: str, *, repairable: bool) -> dict[str, Any]:
+    return {
+        "platform": platform,
+        "code": code,
+        "severity": "blocking",
+        "message": message,
+        "repairable": bool(repairable),
+    }
+
+
+def _repair_platform_material_from_review(
+    *,
+    material: dict[str, Any],
+    issues: list[dict[str, Any]],
+    packaging: dict[str, Any],
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = []
+    issue_codes = {str(issue.get("code") or "").strip() for issue in issues if isinstance(issue, dict)}
+    if "raw_filename_title" in issue_codes or "self_comparison_title" in issue_codes:
+        repaired_title = _select_repaired_material_title(material)
+        if repaired_title and repaired_title != _material_primary_title(material):
+            _replace_material_primary_title(material, repaired_title)
+            actions.append(
+                {
+                    "platform": _normalize_external_publish_platform_key(material.get("key")),
+                    "field": "titles",
+                    "action": "regenerated_primary_title_from_valid_candidate",
+                    "value": repaired_title,
+                }
+            )
+    if "missing_body" in issue_codes or "body_too_short" in issue_codes:
+        repaired_body = _select_repaired_material_body(material=material, packaging=packaging)
+        if repaired_body and repaired_body != str(material.get("body") or "").strip():
+            material["body"] = repaired_body
+            _refresh_material_full_copy(material)
+            actions.append(
+                {
+                    "platform": _normalize_external_publish_platform_key(material.get("key")),
+                    "field": "body",
+                    "action": "regenerated_body_from_safe_material_context",
+                }
+            )
+    return actions
+
+
+def _material_primary_title(material: dict[str, Any]) -> str:
+    titles = [str(item).strip() for item in (material.get("titles") or []) if str(item).strip()]
+    if titles:
+        return titles[0]
+    return str(material.get("primary_title") or "").strip()
+
+
+def _select_repaired_material_title(material: dict[str, Any]) -> str:
+    titles = [str(item).strip() for item in (material.get("titles") or []) if str(item).strip()]
+    body = str(material.get("body") or "").strip()
+    for title in titles[1:]:
+        if _material_title_looks_like_raw_filename(title):
+            continue
+        if _material_title_self_comparison_issue(title, body):
+            continue
+        return title
+    current = _material_primary_title(material)
+    repaired = _repair_self_comparison_title(current, body)
+    if repaired and not _material_title_looks_like_raw_filename(repaired) and not _material_title_self_comparison_issue(repaired, body):
+        return repaired
+    copy_material = material.get("copy_material") if isinstance(material.get("copy_material"), dict) else {}
+    for title in [str(item).strip() for item in (copy_material.get("titles") or []) if str(item).strip()]:
+        if not _material_title_looks_like_raw_filename(title) and not _material_title_self_comparison_issue(title, body):
+            return title
+    return ""
+
+
+def _replace_material_primary_title(material: dict[str, Any], title: str) -> None:
+    clean_title = str(title or "").strip()
+    titles = [str(item).strip() for item in (material.get("titles") or []) if str(item).strip()]
+    titles = [clean_title, *[item for item in titles if item != clean_title]]
+    material["titles"] = titles[:TITLE_OPTION_LIMIT]
+    material["primary_title"] = clean_title
+    material["title_goals"] = _build_title_goals(material["titles"], platform_key=str(material.get("key") or ""))
+    material["title_copy_all"] = "\n".join(f"{index}. {item}" for index, item in enumerate(material["titles"], start=1))
+    copy_material = material.get("copy_material") if isinstance(material.get("copy_material"), dict) else {}
+    copy_material["primary_title"] = clean_title
+    copy_material["titles"] = list(material["titles"])
+    material["copy_material"] = copy_material
+    _refresh_material_full_copy(material)
+
+
+def _select_repaired_material_body(*, material: dict[str, Any], packaging: dict[str, Any]) -> str:
+    copy_material = material.get("copy_material") if isinstance(material.get("copy_material"), dict) else {}
+    for candidate in (
+        copy_material.get("body"),
+        copy_material.get("description"),
+    ):
+        text = str(candidate or "").strip()
+        if len(text) >= 20:
+            return text
+    platform_key = _normalize_internal_publish_platform_key(material.get("key"))
+    platforms = packaging.get("platforms") if isinstance(packaging.get("platforms"), dict) else {}
+    platform_payload = platforms.get(platform_key) if isinstance(platforms.get(platform_key), dict) else {}
+    for candidate in (
+        platform_payload.get("description"),
+        platform_payload.get("body"),
+    ):
+        text = str(candidate or "").strip()
+        if len(text) >= 20:
+            return text
+    highlights = packaging.get("highlights") if isinstance(packaging.get("highlights"), dict) else {}
+    product = str(highlights.get("product") or "").strip()
+    selling_point = str(highlights.get("strongest_selling_point") or "").strip()
+    title = _material_primary_title(material)
+    parts = [part for part in (product, title, selling_point) if part]
+    if parts:
+        return "，".join(dict.fromkeys(parts)) + "。"
+    return ""
+
+
+def _refresh_material_full_copy(material: dict[str, Any]) -> None:
+    titles = [str(item).strip() for item in (material.get("titles") or []) if str(item).strip()]
+    body = str(material.get("body") or "").strip()
+    tags_copy = str(material.get("tags_copy") or "").strip()
+    parts = []
+    if titles:
+        parts.append(titles[0])
+    if body:
+        parts.append(body)
+    if tags_copy:
+        parts.append(tags_copy)
+    material["full_copy"] = "\n\n".join(parts)
+    copy_material = material.get("copy_material") if isinstance(material.get("copy_material"), dict) else {}
+    if body:
+        copy_material["body"] = body
+    if copy_material:
+        material["copy_material"] = copy_material
+
+
+def _material_title_looks_like_raw_filename(title: str) -> bool:
+    text = str(title or "").strip()
+    if not text:
+        return False
+    lowered = text.casefold()
+    if re.search(r"\.(mp4|mov|m4v|avi|mkv)\b", lowered):
+        return True
+    if re.search(r"\b(img|vid|dji)[_\-\s]?\d{3,}\b", lowered):
+        return True
+    compact = re.sub(r"\s+", "", text)
+    if "横版" in compact and "成片" in compact:
+        return True
+    if re.match(r"^\d{8}[\s_\-]", text) and len(text) > 36:
+        return True
+    return False
+
+
+def _material_title_self_comparison_issue(title: str, body: str) -> str:
+    normalized_title = str(title or "").strip()
+    if not normalized_title:
+        return ""
+    if not re.search(r"\bvs\.?\b|对比|比较|同框|和.+比|与.+比", normalized_title, re.I):
+        return ""
+    title_tokens = [token.upper() for token in _MATERIAL_MODEL_TOKEN_RE.findall(normalized_title)]
+    duplicate_tokens = {token for token in title_tokens if title_tokens.count(token) > 1}
+    if not duplicate_tokens:
+        return ""
+    body_tokens = {token.upper() for token in _MATERIAL_MODEL_TOKEN_RE.findall(str(body or ""))}
+    for token in sorted(duplicate_tokens):
+        same_vs_pattern = rf"\b{re.escape(token)}\b\s*(?:vs\.?|v\.?|对比|比较|和|与|/|-)\s*\b{re.escape(token)}\b"
+        if re.search(same_vs_pattern, normalized_title, re.I) or (body_tokens - {token}):
+            return f"比较型标题自相矛盾：{token} 不能和自身作为对比对象。"
+    return ""
+
+
+def _repair_self_comparison_title(title: str, body: str) -> str:
+    text = str(title or "").strip()
+    body_tokens = [token.upper() for token in _MATERIAL_MODEL_TOKEN_RE.findall(str(body or ""))]
+    for token in [item.upper() for item in _MATERIAL_MODEL_TOKEN_RE.findall(text)]:
+        alternatives = [candidate for candidate in body_tokens if candidate != token]
+        if not alternatives:
+            continue
+        replacement = alternatives[0]
+        pattern = rf"(\b{re.escape(token)}\b\s*(?:vs\.?|v\.?|对比|比较|和|与|/|-)\s*)\b{re.escape(token)}\b"
+        repaired = re.sub(pattern, rf"\1{replacement}", text, count=1, flags=re.I)
+        if repaired != text:
+            return repaired
+    return ""
 
 
 def _derive_safe_platform_specific_overrides(
@@ -7476,16 +7896,23 @@ async def _render_platform_cover(
             completed_request_payload,
             output_path,
         )
-        return {
-            "source": "image_generation",
-            "platform": str(platform_key or "").strip(),
-            "target_size": {"width": target_width, "height": target_height},
-            "publish_ready": bool(cover_assessment.get("publish_ready")),
-            "blocking_reasons": list(cover_assessment.get("blocking_reasons") or []),
-            "warnings": list(cover_assessment.get("warnings") or []),
-            "image_generation": image_generation,
-            "cover_quality": cover_assessment,
-        }
+        if bool(cover_assessment.get("publish_ready")):
+            return {
+                "source": "image_generation",
+                "platform": str(platform_key or "").strip(),
+                "target_size": {"width": target_width, "height": target_height},
+                "publish_ready": True,
+                "blocking_reasons": [],
+                "warnings": list(cover_assessment.get("warnings") or []),
+                "image_generation": image_generation,
+                "cover_quality": cover_assessment,
+            }
+        _invalidate_failed_completed_cover_request(
+            request_path=request_path,
+            request_payload=completed_request_payload,
+            output_path=output_path,
+            cover_assessment=cover_assessment,
+        )
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         base_image = tmpdir_path / "base.jpg"
@@ -7762,7 +8189,7 @@ def _resolve_overlay_title_style(*, rules: dict[str, Any], cover_brief: dict[str
         title_style = "account_metal_cyber_stack"
     if _cover_style_is_children_storybook_parenting(cover_style) or _cover_brief_targets_parenting_animation(brief):
         cover_style = OFFICIAL_COVER_STYLE_CHILDREN_STORYBOOK_PARENTING
-        title_style = "jenny_children_bubble_stack"
+        title_style = "children_storybook_bubble_stack"
     return cover_style, title_style
 
 
@@ -7772,6 +8199,39 @@ def _read_cover_request_payload(path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _invalidate_failed_completed_cover_request(
+    *,
+    request_path: Path,
+    request_payload: dict[str, Any],
+    output_path: Path,
+    cover_assessment: dict[str, Any],
+) -> None:
+    payload = dict(request_payload or {})
+    payload["status"] = "invalidated_quality_failed"
+    payload["invalidated_at"] = datetime.now(timezone.utc).isoformat()
+    payload["invalidated_reason"] = "cover_publish_quality_failed"
+    payload["invalidated_blocking_reasons"] = [
+        str(item).strip()
+        for item in (cover_assessment.get("blocking_reasons") or [])
+        if str(item).strip()
+    ]
+    payload["cover_quality"] = dict(cover_assessment or {})
+    request_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        request_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+    for candidate in (
+        output_path,
+        output_path.with_name(f"{output_path.stem}.pre-overlay{output_path.suffix}"),
+    ):
+        try:
+            if candidate.exists():
+                candidate.unlink()
+        except Exception:
+            pass
 
 
 def _write_cover_request_payload_snapshot(
@@ -8093,10 +8553,7 @@ def _finalize_cover_request_generation_status(*, request_path: Path, payload: di
         return
     image_generation = payload.get("image_generation") if isinstance(payload.get("image_generation"), dict) else {}
     backend = str(payload.get("backend") or image_generation.get("backend") or "").strip().lower()
-    if backend == "codex_builtin" and not (
-        bool(payload.get("generated_by_codex_bridge"))
-        or _cover_request_has_post_generation_evidence(payload)
-    ):
+    if backend == "codex_builtin" and not _cover_request_has_generation_completion_evidence(payload):
         return
     output_path = _resolve_cover_request_status_output_path(request_path=request_path, payload=payload)
     if output_path is None:
@@ -8132,10 +8589,39 @@ def _cover_request_has_post_generation_evidence(payload: dict[str, Any] | None) 
     return False
 
 
+def _cover_request_has_generation_completion_evidence(payload: dict[str, Any] | None) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if bool(payload.get("generated_by_codex_bridge")):
+        return True
+    for field in ("completed_at", "result_path"):
+        if str(payload.get(field) or "").strip():
+            return True
+    return False
+
+
 def _resolve_cover_request_status_output_path(*, request_path: Path, payload: dict[str, Any]) -> Path | None:
     raw_output_path = str(payload.get("output_path") or "").strip()
     if not raw_output_path:
         return None
+    normalized_output_path = raw_output_path.replace("\\", "/")
+    container_prefix = "/app/data/"
+    if normalized_output_path.startswith(container_prefix):
+        repo_root = Path(__file__).resolve().parents[3]
+        host_output_root = Path(
+            os.getenv("ROUGHCUT_OUTPUT_HOST_ROOT", "") or (repo_root / "data" / "runtime")
+        ).expanduser()
+        relative = normalized_output_path[len(container_prefix):].lstrip("/")
+        return (host_output_root / Path(relative)).resolve()
+    output_path = Path(raw_output_path).expanduser()
+    if not output_path.is_absolute():
+        return (request_path.parent / output_path).resolve()
+    try:
+        if output_path.exists():
+            return output_path
+    except OSError:
+        return None
+    return output_path
 
 
 def _resolve_clean_intelligent_copy_cover_video(*, video_path: Path, material_dir: Path) -> Path:
@@ -8172,26 +8658,10 @@ def _resolve_clean_intelligent_copy_cover_video(*, video_path: Path, material_di
 def _map_container_remix_source_path_to_host(raw_path: str) -> Path:
     text = str(raw_path or "").strip()
     if text.startswith("/app/remix-source/"):
-        return Path("F:/布鲁伊育儿节目") / text.removeprefix("/app/remix-source/").lstrip("/")
+        host_root = str(os.getenv("ROUGHCUT_REMIX_SOURCE_HOST_ROOT") or "").strip()
+        if host_root:
+            return Path(host_root).expanduser() / text.removeprefix("/app/remix-source/").lstrip("/")
     return Path(text)
-    normalized_output_path = raw_output_path.replace("\\", "/")
-    container_prefix = "/app/data/"
-    if normalized_output_path.startswith(container_prefix):
-        repo_root = Path(__file__).resolve().parents[3]
-        host_output_root = Path(
-            os.getenv("ROUGHCUT_OUTPUT_HOST_ROOT", "") or (repo_root / "data" / "runtime")
-        ).expanduser()
-        relative = normalized_output_path[len(container_prefix):].lstrip("/")
-        return (host_output_root / Path(relative)).resolve()
-    output_path = Path(raw_output_path).expanduser()
-    if not output_path.is_absolute():
-        return (request_path.parent / output_path).resolve()
-    try:
-        if output_path.exists():
-            return output_path
-    except OSError:
-        return None
-    return output_path
 
 
 def _resolve_cover_verification_bitmap_path(
@@ -9176,7 +9646,9 @@ def _resolve_active_cover_image_backend() -> str:
 
 
 def _resolve_cover_typography_owner_for_backend(backend: str) -> str:
-    return "codex_full_cover" if str(backend or "").strip().lower() == "codex_builtin" else "local_post_overlay"
+    if str(os.getenv("ROUGHCUT_COVER_FULL_BITMAP_TYPOGRAPHY", "") or "").strip().lower() in {"1", "true", "yes"}:
+        return "codex_full_cover" if str(backend or "").strip().lower() == "codex_builtin" else "local_post_overlay"
+    return "local_post_overlay"
 
 
 def _cover_prompt_targets_knife_subject(spec: dict[str, Any] | None) -> bool:
@@ -9395,10 +9867,8 @@ def _build_cover_title_lines(title: str) -> dict[str, str] | None:
     if not normalized:
         return None
     action_tail_pattern = r"(双版本开箱|双版开箱|双版本对比|双版对比|开箱|评测|测评|教程|体验)$"
-    brand_split = re.match(r"^([A-Za-z0-9][A-Za-z0-9 ._-]{1,15})\s+(.+)$", normalized)
-    if brand_split:
-        brand = brand_split.group(1).strip()[:12]
-        remainder = brand_split.group(2).strip()
+    brand, remainder = _split_cover_ascii_brand_prefix(normalized)
+    if brand and remainder:
         compare_match = re.search(r"(双版开箱对比|开箱对比|版本对比|双版对比|对比)$", remainder)
         if compare_match:
             pivot = compare_match.start()
@@ -9413,6 +9883,8 @@ def _build_cover_title_lines(title: str) -> dict[str, str] | None:
             bottom = action_match.group(1).strip()[:18]
             if subject and re.search(r"[\u4e00-\u9fff]", subject):
                 return {"top": brand, "main": subject[:18], "bottom": bottom}
+        if remainder:
+            return {"top": brand, "main": remainder[:18], "bottom": ""}
     compare_match = re.search(r"(双版开箱对比|开箱对比|版本对比|双版对比|对比)$", normalized)
     if compare_match:
         pivot = compare_match.start()
@@ -9446,6 +9918,20 @@ def _build_cover_title_lines(title: str) -> dict[str, str] | None:
     if len(text) <= 24:
         return {"top": text[:10], "main": text[10:24], "bottom": ""}
     return {"top": text[:10], "main": text[10:26], "bottom": text[26:42]}
+
+
+def _split_cover_ascii_brand_prefix(value: str) -> tuple[str, str]:
+    normalized = re.sub(r"\s+", " ", str(value or "").strip())
+    match = re.match(r"^([A-Za-z][A-Za-z0-9._-]{1,15})(?:\s+)(.+)$", normalized)
+    if not match:
+        return "", ""
+    brand = match.group(1).strip()
+    remainder = match.group(2).strip()
+    if not brand or not remainder:
+        return "", ""
+    if _MATERIAL_MODEL_TOKEN_RE.fullmatch(brand):
+        return "", ""
+    return brand[:14], remainder
 
 
 def _build_cover_title_layout_plan(
@@ -9723,11 +10209,6 @@ def _resolve_cover_creator_style_profile_key(*, creator_profile_name: str, style
     normalized = creator_name.casefold()
     if "fas" in normalized and str(style_key or "").strip() == "edc_cinematic_hero":
         return "fas_edc_signature_full_cover_v1"
-    if (
-        ("珍妮斯" in creator_name or "jenny" in normalized or "baby" in normalized)
-        and str(style_key or "").strip() == OFFICIAL_COVER_STYLE_CHILDREN_STORYBOOK_PARENTING
-    ):
-        return "jenny_baby_children_storybook_cover_v1"
     return f"{str(style_key or '').strip() or 'default'}_generic_full_cover_v1"
 
 

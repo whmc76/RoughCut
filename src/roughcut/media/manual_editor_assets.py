@@ -15,7 +15,7 @@ from roughcut.config import get_settings
 from roughcut.media.silence import detect_silence
 
 MANUAL_EDITOR_PREVIEW_ARTIFACT_TYPE = "manual_editor_preview_assets"
-MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 11
+MANUAL_EDITOR_PREVIEW_ASSET_VERSION = 14
 MANUAL_EDITOR_PREVIEW_STATUS_FILENAME = "status.json"
 PREVIEW_AUDIO_TARGET_LUFS = -16.0
 PREVIEW_AUDIO_MIN_GAIN = 0.35
@@ -59,6 +59,7 @@ def ensure_manual_editor_preview_assets(
     source_path: Path,
     duration_sec: float,
     asset_dir: Path | str | None = None,
+    orientation_decision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     asset_dir = _resolve_manual_editor_asset_dir(job_id, asset_dir=asset_dir)
     asset_dir.mkdir(parents=True, exist_ok=True)
@@ -68,12 +69,15 @@ def ensure_manual_editor_preview_assets(
     peaks_path = asset_dir / "peaks.json"
     manifest_path = manual_editor_asset_manifest_path(job_id, asset_dir=asset_dir)
     source_fingerprint = _source_fingerprint(source_path)
+    normalized_orientation = _normalize_orientation_decision(orientation_decision)
+    orientation_fingerprint = _orientation_fingerprint(normalized_orientation)
 
     manifest = _read_json(manifest_path)
     status_payload = _read_asset_status(asset_dir)
     cached = (
         manifest.get("version") == MANUAL_EDITOR_PREVIEW_ASSET_VERSION
         and manifest.get("source_fingerprint") == source_fingerprint
+        and manifest.get("orientation_fingerprint") == orientation_fingerprint
         and video_path.exists()
         and audio_path.exists()
         and peaks_path.exists()
@@ -97,7 +101,7 @@ def ensure_manual_editor_preview_assets(
                 detail="Generating browser preview video",
                 source_fingerprint=source_fingerprint,
             )
-            _generate_proxy_video(source_path, video_path)
+            _generate_proxy_video(source_path, video_path, orientation_decision=normalized_orientation)
             status_payload = _write_asset_status(
                 asset_dir,
                 status="warming",
@@ -106,7 +110,7 @@ def ensure_manual_editor_preview_assets(
                 detail="Generating optional browser fallback video",
                 source_fingerprint=source_fingerprint,
             )
-            webm_ready = _generate_proxy_webm_best_effort(source_path, webm_path)
+            webm_ready = _generate_proxy_webm_best_effort(source_path, webm_path, orientation_decision=normalized_orientation)
             status_payload = _write_asset_status(
                 asset_dir,
                 status="warming",
@@ -138,10 +142,13 @@ def ensure_manual_editor_preview_assets(
                 source_path,
                 asset_dir=asset_dir,
                 duration_sec=duration_sec,
+                orientation_decision=normalized_orientation,
             )
             manifest = {
                 "version": MANUAL_EDITOR_PREVIEW_ASSET_VERSION,
                 "source_fingerprint": source_fingerprint,
+                "orientation_fingerprint": orientation_fingerprint,
+                "orientation_decision": normalized_orientation,
                 "video_filename": video_path.name,
                 "webm_filename": webm_path.name if webm_ready else "",
                 "audio_filename": audio_path.name,
@@ -196,6 +203,7 @@ def ensure_manual_editor_preview_assets(
             {"path": str(item["path"]), "time_sec": float(item["time_sec"])}
             for item in thumbnail_items
         ],
+        "orientation_decision": normalized_orientation,
         "cached": bool(cached),
         **status_payload,
     }
@@ -295,6 +303,7 @@ def load_manual_editor_preview_assets(
             {"path": str(item["path"]), "time_sec": float(item["time_sec"])}
             for item in thumbnail_items
         ],
+        "orientation_decision": manifest.get("orientation_decision") if isinstance(manifest.get("orientation_decision"), dict) else {},
         "cached": True,
         **_fallback_asset_status(
             status_payload,
@@ -309,6 +318,43 @@ def _source_fingerprint(source_path: Path) -> str:
     stat = source_path.stat()
     payload = f"{source_path.resolve()}:{stat.st_size}:{_sampled_file_digest(source_path, stat.st_size)}"
     return hashlib.sha256(payload.encode("utf-8", errors="ignore")).hexdigest()
+
+
+def _normalize_orientation_decision(decision: dict[str, Any] | Any | None) -> dict[str, Any]:
+    if decision is None:
+        payload: dict[str, Any] = {}
+    elif hasattr(decision, "to_dict") and callable(decision.to_dict):
+        payload = dict(decision.to_dict())
+    elif isinstance(decision, dict):
+        payload = dict(decision)
+    else:
+        payload = {}
+
+    try:
+        raw_rotation = int(float(payload.get("rotation_cw") or payload.get("rotation") or 0))
+    except (TypeError, ValueError):
+        raw_rotation = 0
+    normalized_rotation = raw_rotation % 360
+    rotation_cw = min((0, 90, 180, 270), key=lambda value: min(abs(value - normalized_rotation), 360 - abs(value - normalized_rotation)))
+    try:
+        confidence = float(payload.get("confidence", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        confidence = 0.0
+    return {
+        "rotation_cw": int(rotation_cw),
+        "source": str(payload.get("source") or "default").strip() or "default",
+        "confidence": round(max(0.0, min(1.0, confidence)), 3),
+        "reason": str(payload.get("reason") or "").strip()[:240],
+        "metadata_rotation_cw": _safe_int(payload.get("metadata_rotation_cw"), 0) % 360,
+    }
+
+
+def _orientation_fingerprint(orientation_decision: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(_normalize_orientation_decision(orientation_decision), sort_keys=True, ensure_ascii=False).encode(
+            "utf-8"
+        )
+    ).hexdigest()
 
 
 def _sampled_file_digest(source_path: Path, size: int) -> str:
@@ -406,12 +452,43 @@ def _assert_proxy_video_decodable(video_path: Path) -> None:
         raise RuntimeError(f"manual editor proxy video validation failed: {result.stderr[-1000:]}")
 
 
-def _generate_proxy_video(source_path: Path, video_path: Path) -> None:
+def _orientation_video_filter(orientation_decision: dict[str, Any] | None) -> str:
+    rotation_cw = int(_normalize_orientation_decision(orientation_decision).get("rotation_cw") or 0)
+    filters: list[str] = []
+    if rotation_cw == 90:
+        filters.append("transpose=1")
+    elif rotation_cw == 180:
+        filters.extend(["hflip", "vflip"])
+    elif rotation_cw == 270:
+        filters.append("transpose=2")
+    filters.append("sidedata=mode=delete:type=DISPLAYMATRIX")
+    return ",".join(filters)
+
+
+def _manual_editor_proxy_video_filter(orientation_decision: dict[str, Any] | None) -> str:
+    return (
+        f"{_orientation_video_filter(orientation_decision)},"
+        "scale=960:960:force_original_aspect_ratio=decrease,"
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p"
+    )
+
+
+def _manual_editor_thumbnail_filter(orientation_decision: dict[str, Any] | None) -> str:
+    return f"{_orientation_video_filter(orientation_decision)},scale=320:-2"
+
+
+def _generate_proxy_video(
+    source_path: Path,
+    video_path: Path,
+    *,
+    orientation_decision: dict[str, Any] | None = None,
+) -> None:
     settings = get_settings()
     temp_path = _temporary_output_path(video_path)
     cmd = [
         "ffmpeg",
         "-y",
+        "-noautorotate",
         "-i",
         str(source_path),
         "-map",
@@ -419,7 +496,7 @@ def _generate_proxy_video(source_path: Path, video_path: Path) -> None:
         "-map",
         "0:a?",
         "-vf",
-        "scale=960:960:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+        _manual_editor_proxy_video_filter(orientation_decision),
         "-c:v",
         "libx264",
         "-profile:v",
@@ -462,20 +539,31 @@ def _generate_proxy_video(source_path: Path, video_path: Path) -> None:
         _unlink_best_effort(temp_path)
 
 
-def _generate_proxy_webm_best_effort(source_path: Path, webm_path: Path) -> bool:
+def _generate_proxy_webm_best_effort(
+    source_path: Path,
+    webm_path: Path,
+    *,
+    orientation_decision: dict[str, Any] | None = None,
+) -> bool:
     try:
-        _generate_proxy_webm(source_path, webm_path)
+        _generate_proxy_webm(source_path, webm_path, orientation_decision=orientation_decision)
         return webm_path.exists()
     except Exception:
         return False
 
 
-def _generate_proxy_webm(source_path: Path, webm_path: Path) -> None:
+def _generate_proxy_webm(
+    source_path: Path,
+    webm_path: Path,
+    *,
+    orientation_decision: dict[str, Any] | None = None,
+) -> None:
     settings = get_settings()
     temp_path = _temporary_output_path(webm_path)
     cmd = [
         "ffmpeg",
         "-y",
+        "-noautorotate",
         "-i",
         str(source_path),
         "-map",
@@ -483,7 +571,7 @@ def _generate_proxy_webm(source_path: Path, webm_path: Path) -> None:
         "-map",
         "0:a?",
         "-vf",
-        "scale=960:960:force_original_aspect_ratio=decrease,scale=trunc(iw/2)*2:trunc(ih/2)*2,format=yuv420p",
+        _manual_editor_proxy_video_filter(orientation_decision),
         "-c:v",
         "libvpx",
         "-deadline",
@@ -683,7 +771,13 @@ def _db_from_amplitude(amplitude: float) -> float | None:
     return 20.0 * math.log10(value)
 
 
-def _generate_preview_thumbnails(source_path: Path, *, asset_dir: Path, duration_sec: float) -> list[tuple[Path, float]]:
+def _generate_preview_thumbnails(
+    source_path: Path,
+    *,
+    asset_dir: Path,
+    duration_sec: float,
+    orientation_decision: dict[str, Any] | None = None,
+) -> list[tuple[Path, float]]:
     if duration_sec <= 0:
         return []
     settings = get_settings()
@@ -694,6 +788,7 @@ def _generate_preview_thumbnails(source_path: Path, *, asset_dir: Path, duration
         cmd = [
             "ffmpeg",
             "-y",
+            "-noautorotate",
             "-ss",
             f"{timestamp:.3f}",
             "-i",
@@ -701,7 +796,7 @@ def _generate_preview_thumbnails(source_path: Path, *, asset_dir: Path, duration
             "-frames:v",
             "1",
             "-vf",
-            "scale=320:-2",
+            _manual_editor_thumbnail_filter(orientation_decision),
             "-q:v",
             "4",
             str(target),

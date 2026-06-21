@@ -584,7 +584,7 @@ def _infer_subject_domain_hints(value: ContentUnderstanding) -> set[str]:
         domain_hints.add("flashlight")
     if any(token in type_blob for token in ("刀", "刀具", "折刀", "重力刀", "刀柄", "开刃", "knife")):
         domain_hints.add("knife")
-    if any(token in type_blob for token in ("零食", "含片", "益生菌", "薄荷糖", "口香糖", "糖果", "食品", "可食用", "luckykiss", "kisspod", "kissport")):
+    if any(token in type_blob for token in ("零食", "含片", "益生菌", "薄荷糖", "口香糖", "糖果", "食品", "可食用", "samplemint", "samplepod", "sampleport")):
         domain_hints.add("food")
     glossary_inferred = _infer_subject_domain_from_hinting(value)
     if glossary_inferred:
@@ -634,7 +634,7 @@ def _matches_subject_domain(entity: SubjectEntity, subject_domain_hints: set[str
         return True
     if "knife" in subject_domain_hints and _entity_domain_alias_matches(entity, "knife"):
         return True
-    if "food" in subject_domain_hints and any(token in searchable for token in ("SNACK", "CANDY", "FOOD", "LUCKYKISS", "KISSPOD", "KISSPORT", "零食", "含片", "益生菌", "薄荷糖", "口香糖", "糖果")):
+    if "food" in subject_domain_hints and any(token in searchable for token in ("SNACK", "CANDY", "FOOD", "SAMPLEMINT", "KISSPOD", "KISSPORT", "零食", "含片", "益生菌", "薄荷糖", "口香糖", "糖果")):
         return True
     if "food" in subject_domain_hints and _entity_domain_alias_matches(entity, "food"):
         return True

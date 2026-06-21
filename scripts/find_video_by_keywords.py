@@ -25,8 +25,8 @@ from roughcut.providers.transcription.local_whisper import LocalWhisperProvider
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 DEFAULT_KEYWORDS = [
-    "luckykiss",
-    "kissport",
+    "samplemint",
+    "sampleport",
     "益倍萃",
     "含片",
     "益生菌",

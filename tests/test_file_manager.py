@@ -85,7 +85,7 @@ def test_intelligent_copy_open_folder_uses_shared_file_manager(tmp_path, monkeyp
 
 
 def test_intelligent_copy_open_folder_accepts_host_style_path_via_shared_gate(monkeypatch) -> None:
-    host_path = r"E:\WorkSpace\RoughCut\data\runtime\smart-copy"
+    host_path = r"C:\sample-workspace\RoughCut\data\runtime\smart-copy"
     captured: dict[str, str] = {}
 
     def fake_open(path: str) -> None:
@@ -137,18 +137,18 @@ def test_job_open_folder_resolves_relative_render_output_from_project_root(tmp_p
 
 
 def test_job_open_target_maps_project_relative_output_to_host_project_root(monkeypatch) -> None:
-    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", "E:/WorkSpace/RoughCut/data/runtime")
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", "C:/sample-workspace/RoughCut/data/runtime")
     monkeypatch.setattr(jobs_api, "DEFAULT_PROJECT_ROOT", Path("/app"))
     monkeypatch.setattr(
         jobs_api,
         "can_open_in_file_manager",
         lambda path: str(path).replace("\\", "/")
-        == "E:/WorkSpace/RoughCut/output/test/result.mp4",
+        == "C:/sample-workspace/RoughCut/output/test/result.mp4",
     )
 
     target_path = jobs_api._resolve_file_manager_existing_path(r"output\test\result.mp4")
 
-    assert str(target_path).replace("\\", "/") == "E:/WorkSpace/RoughCut/output/test/result.mp4"
+    assert str(target_path).replace("\\", "/") == "C:/sample-workspace/RoughCut/output/test/result.mp4"
 
 
 def test_download_path_maps_host_runtime_root_to_container_runtime_root(tmp_path, monkeypatch) -> None:
@@ -157,11 +157,11 @@ def test_download_path_maps_host_runtime_root_to_container_runtime_root(tmp_path
     target.parent.mkdir(parents=True)
     target.write_bytes(b"video")
 
-    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", "E:/WorkSpace/RoughCut/data/runtime")
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", "C:/sample-workspace/RoughCut/data/runtime")
     monkeypatch.setenv("ROUGHCUT_OUTPUT_ROOT", str(container_root))
 
     resolved = jobs_api._first_existing_download_path(
-        r"E:\WorkSpace\RoughCut\data\runtime\output\demo\final.mp4",
+        r"C:\sample-workspace\RoughCut\data\runtime\output\demo\final.mp4",
     )
 
     assert resolved == target.resolve()
@@ -173,13 +173,13 @@ def test_collect_downloadable_files_uses_runtime_mapped_path(tmp_path, monkeypat
     target.parent.mkdir(parents=True)
     target.write_bytes(b"video")
 
-    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", "E:/WorkSpace/RoughCut/data/runtime")
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", "C:/sample-workspace/RoughCut/data/runtime")
     monkeypatch.setenv("ROUGHCUT_OUTPUT_ROOT", str(container_root))
 
     files = jobs_api._collect_downloadable_files(
         None,
         {
-            "packaged_mp4": r"E:\WorkSpace\RoughCut\data\runtime\output\demo\final.mp4",
+            "packaged_mp4": r"C:\sample-workspace\RoughCut\data\runtime\output\demo\final.mp4",
         },
     )
 
@@ -192,7 +192,7 @@ def test_job_open_target_prefers_runtime_mount_path_for_host_runtime_output(tmp_
     target = container_root / "output" / "demo" / "final.mp4"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"video")
-    host_path = r"E:\WorkSpace\RoughCut\data\runtime\output\demo\final.mp4"
+    host_path = r"C:\sample-workspace\RoughCut\data\runtime\output\demo\final.mp4"
 
     class FakeScalarResult:
         def all(self):
@@ -206,7 +206,7 @@ def test_job_open_target_prefers_runtime_mount_path_for_host_runtime_output(tmp_
         async def execute(self, _statement):
             return FakeResult()
 
-    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", "E:/WorkSpace/RoughCut/data/runtime")
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", "C:/sample-workspace/RoughCut/data/runtime")
     monkeypatch.setenv("ROUGHCUT_OUTPUT_ROOT", str(container_root))
     monkeypatch.setattr(jobs_api, "can_open_in_file_manager", lambda path: Path(path).exists())
 

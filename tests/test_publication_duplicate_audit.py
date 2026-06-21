@@ -67,20 +67,20 @@ def test_build_duplicate_groups_detects_schedule_variants_for_same_media_and_pro
             status="scheduled_pending",
             scheduled_publish_at="2026-05-31T21:00",
             media_path="E:/media/maxace4.mp4",
-            browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+            browser_profile_id="browser-profile:chrome:demo-profile-a",
         ),
         _attempt(
             attempt_id="attempt-2",
             status="published",
             scheduled_publish_at="2026-05-31T22:45",
             media_path="E:/media/maxace4.mp4",
-            browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+            browser_profile_id="browser-profile:chrome:demo-profile-a",
         ),
     ]
 
     groups = build_duplicate_groups(
         attempts,
-        browser_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        browser_profile_ids=["browser-profile:chrome:demo-profile-a"],
         platforms=["douyin"],
         media_path="E:/media/maxace4.mp4",
     )
@@ -104,13 +104,13 @@ def test_build_duplicate_groups_filters_out_other_profile_or_media() -> None:
             status="published",
             scheduled_publish_at="2026-05-31T22:45",
             media_path="E:/media/other.mp4",
-            browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+            browser_profile_id="browser-profile:chrome:demo-profile-a",
         ),
     ]
 
     groups = build_duplicate_groups(
         attempts,
-        browser_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        browser_profile_ids=["browser-profile:chrome:demo-profile-a"],
         platforms=["douyin"],
         media_path="E:/media/maxace4.mp4",
     )
@@ -128,7 +128,7 @@ def test_extract_current_content_signatures_supports_platform_packaging_shape() 
             }
         },
         target_platforms=["douyin"],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
     )
 
     assert len(signatures) == 1
@@ -152,7 +152,7 @@ def test_extract_current_content_signatures_falls_back_to_material_scope_when_ta
         },
         media_path="E:/media/maxace4.mp4",
         target_platforms=[],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
     )
 
     assert len(signatures) == 1
@@ -178,7 +178,7 @@ def test_extract_current_content_signatures_falls_back_to_material_contract_scop
         },
         media_path="E:/media/maxace4.mp4",
         target_platforms=[],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
     )
 
     assert len(signatures) == 1
@@ -196,7 +196,7 @@ def test_extract_current_content_signatures_uses_media_path_for_local_media_plat
         },
         media_path="E:/media/maxace4.mp4",
         target_platforms=["douyin"],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
     )
     second = extract_current_content_signatures(
         material_payload={
@@ -208,7 +208,7 @@ def test_extract_current_content_signatures_uses_media_path_for_local_media_plat
         },
         media_path="E:/media/other.mp4",
         target_platforms=["douyin"],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
     )
 
     assert len(first) == 1
@@ -228,14 +228,14 @@ def test_build_duplicate_groups_prefers_stored_logical_signature_for_content_sig
         },
         media_path=media_path,
         target_platforms=["douyin"],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
     )
     attempt = _attempt(
         attempt_id="attempt-1",
         status="processing",
         scheduled_publish_at="",
         media_path=media_path,
-        browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+        browser_profile_id="browser-profile:chrome:demo-profile-a",
     )
     attempt.request_payload["title"] = "发生漂移的旧标题"
     attempt.request_payload["body"] = "发生漂移的旧正文"
@@ -247,9 +247,9 @@ def test_build_duplicate_groups_prefers_stored_logical_signature_for_content_sig
             status="submitted",
             scheduled_publish_at="",
             media_path=media_path,
-            browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+            browser_profile_id="browser-profile:chrome:demo-profile-a",
         )],
-        browser_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        browser_profile_ids=["browser-profile:chrome:demo-profile-a"],
         platforms=["douyin"],
         media_path=media_path,
         content_signatures=signatures,
@@ -267,7 +267,7 @@ def test_build_duplicate_groups_uses_logical_signature_as_default_group_key_when
             status="processing",
             scheduled_publish_at="",
             media_path=media_path,
-            browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+            browser_profile_id="browser-profile:chrome:demo-profile-a",
             dedupe_signature="dup-signature-a",
         ),
         _attempt(
@@ -275,14 +275,14 @@ def test_build_duplicate_groups_uses_logical_signature_as_default_group_key_when
             status="submitted",
             scheduled_publish_at="",
             media_path=media_path,
-            browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+            browser_profile_id="browser-profile:chrome:demo-profile-a",
             dedupe_signature="dup-signature-b",
         ),
     ]
 
     groups = build_duplicate_groups(
         attempts,
-        browser_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        browser_profile_ids=["browser-profile:chrome:demo-profile-a"],
         platforms=["douyin"],
         media_path=media_path,
     )
@@ -302,7 +302,7 @@ def test_build_duplicate_groups_ignores_same_job_retry_queue_duplicates_without_
             run_status="retry_scheduled",
             scheduled_publish_at="",
             media_path=media_path,
-            browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+            browser_profile_id="browser-profile:chrome:demo-profile-a",
             job_id="job-1",
         ),
         _attempt(
@@ -311,14 +311,14 @@ def test_build_duplicate_groups_ignores_same_job_retry_queue_duplicates_without_
             run_status="retry_scheduled",
             scheduled_publish_at="",
             media_path=media_path,
-            browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+            browser_profile_id="browser-profile:chrome:demo-profile-a",
             job_id="job-1",
         ),
     ]
 
     groups = build_duplicate_groups(
         attempts,
-        browser_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        browser_profile_ids=["browser-profile:chrome:demo-profile-a"],
         platforms=["douyin"],
         media_path=media_path,
     )
@@ -335,7 +335,7 @@ def test_build_duplicate_groups_keeps_multiple_active_attempts_when_provider_tas
             run_status="retry_scheduled",
             scheduled_publish_at="",
             media_path=media_path,
-            browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+            browser_profile_id="browser-profile:chrome:demo-profile-a",
             job_id="job-1",
         ),
         _attempt(
@@ -345,14 +345,14 @@ def test_build_duplicate_groups_keeps_multiple_active_attempts_when_provider_tas
             provider_task_id="provider-2",
             scheduled_publish_at="",
             media_path=media_path,
-            browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+            browser_profile_id="browser-profile:chrome:demo-profile-a",
             job_id="job-1",
         ),
     ]
 
     groups = build_duplicate_groups(
         attempts,
-        browser_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        browser_profile_ids=["browser-profile:chrome:demo-profile-a"],
         platforms=["douyin"],
         media_path=media_path,
     )
@@ -389,13 +389,13 @@ async def test_build_duplicate_history_gate_report_relaxes_profile_filter_for_pl
         },
         media_path="E:/media/maxace4.mp4",
         target_platforms=["douyin"],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
         allow_republish=False,
         audit_fn=_fake_audit,
     )
 
     assert len(calls) == 2
-    assert calls[0]["browser_profile_ids"] == ["browser-profile:chrome:21104fd69d72ad7267c2"]
+    assert calls[0]["browser_profile_ids"] == ["browser-profile:chrome:demo-profile-a"]
     assert calls[1]["browser_profile_ids"] == []
     assert report["status"] == "failed"
     assert report["profile_filter_relaxed"] is True
@@ -445,13 +445,13 @@ async def test_build_duplicate_history_gate_report_merges_relaxed_profile_groups
         },
         media_path="E:/media/maxace4.mp4",
         target_platforms=["douyin"],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
         allow_republish=False,
         audit_fn=_fake_audit,
     )
 
     assert len(calls) == 2
-    assert calls[0]["browser_profile_ids"] == ["browser-profile:chrome:21104fd69d72ad7267c2"]
+    assert calls[0]["browser_profile_ids"] == ["browser-profile:chrome:demo-profile-a"]
     assert calls[1]["browser_profile_ids"] == []
     assert report["status"] == "failed"
     assert report["profile_filter_relaxed"] is True
@@ -483,7 +483,7 @@ async def test_build_duplicate_history_gate_report_falls_back_to_material_scope_
         },
         media_path="E:/media/maxace4.mp4",
         target_platforms=[],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
         allow_republish=False,
         audit_fn=_fake_audit,
     )
@@ -519,7 +519,7 @@ async def test_build_duplicate_history_gate_report_falls_back_to_material_contra
         },
         media_path="E:/media/maxace4.mp4",
         target_platforms=[],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
         allow_republish=False,
         audit_fn=_fake_audit,
     )

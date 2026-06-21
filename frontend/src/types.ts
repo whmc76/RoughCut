@@ -513,6 +513,7 @@ export type JobManualEditPreviewAssets = {
   auto_volume_gain: number;
   thumbnail_urls: string[];
   thumbnail_items: Array<{ url: string; time_sec: number }>;
+  orientation_decision?: Record<string, unknown>;
   cached: boolean;
   detail?: string | null;
   error?: string | null;
@@ -729,6 +730,9 @@ export type WatchRoot = {
   scan_mode: "fast" | "precise";
   ingest_mode: "task_only" | "full_auto";
   job_flow_mode: "auto" | "smart_assist";
+  edit_mode: "auto" | "talking_head" | "tutorial" | "vlog" | "highlight" | "multi_material";
+  automation_level: "conservative" | "standard" | "richer";
+  material_usage: "main_only" | "all_uploaded" | "selected_uploaded";
   created_at: string;
 };
 
@@ -1089,15 +1093,32 @@ export type PublicationTarget = {
   platform: string;
   platform_label: string;
   credential_id: string;
+  credential_ref?: string | null;
+  browser_profile_id?: string | null;
+  browser_binding?: Record<string, unknown>;
   account_label: string;
   adapter: string;
+  execution_mode?: string | null;
+  content_kind?: string | null;
   title: string;
+  titles?: string[];
   body: string;
+  description?: string | null;
+  declaration?: string | null;
   tags: string[];
+  full_copy?: string | null;
+  cover_path?: string | null;
+  cover_slots?: Array<Record<string, unknown>>;
+  copy_material?: Record<string, unknown> | null;
   category?: string | null;
   collection?: PublicationCollectionOption | null;
+  native_topics?: string[];
   visibility_or_publish_mode?: string | null;
   scheduled_publish_at?: string | null;
+  platform_specific_overrides?: Record<string, unknown>;
+  login_url?: string | null;
+  manual_publish_entry_url?: string | null;
+  manual_reason?: string | null;
   status: string;
 };
 
@@ -1241,6 +1262,8 @@ export type PublicationPlan = {
   targets: PublicationTarget[];
   existing_attempts: PublicationAttempt[];
   created_attempts?: PublicationAttempt[];
+  material_generation?: Record<string, unknown>;
+  cover_auto_heal?: Record<string, unknown>;
 };
 
 export type AvatarProfileDashboard = {

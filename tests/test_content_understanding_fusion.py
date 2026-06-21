@@ -27,7 +27,7 @@ def test_source_context_and_asr_are_both_exposed_to_understanding() -> None:
         transcript_excerpt="今天给大家介绍一个战术技能，这个就是可以弹出来吃的益生菌含片。",
         candidate_hints={
             "source_context": {
-                "video_description": "零食开箱：LuckyKiss 弹射舱益生菌含片。",
+                "video_description": "零食开箱：SampleMint 弹射舱益生菌含片。",
                 "manual_video_summary": "这期是入口含片/零食产品，不是刀具或工具。",
             }
         },
@@ -64,22 +64,22 @@ def test_food_understanding_wins_over_edc_style_hint_in_profile_mapping() -> Non
     understanding = ContentUnderstanding(
         video_type="unboxing",
         content_domain="edc",
-        primary_subject="LuckyKiss 益生菌含片",
+        primary_subject="SampleMint 益生菌含片",
         semantic_facts=ContentSemanticFacts(
-            primary_subject_candidates=["LuckyKiss 益生菌含片"],
-            brand_candidates=["LUCKYKISS"],
+            primary_subject_candidates=["SampleMint 益生菌含片"],
+            brand_candidates=["SAMPLEMINT"],
             product_name_candidates=["益生菌含片"],
             product_type_candidates=["益生菌含片"],
             evidence_sentences=["标题和说明说零食开箱，ASR 持续提到益生菌含片。"],
         ),
         subject_entities=[
-            SubjectEntity(kind="product", name="LuckyKiss 益生菌含片", brand="LUCKYKISS"),
+            SubjectEntity(kind="product", name="SampleMint 益生菌含片", brand="SAMPLEMINT"),
         ],
         observed_entities=[
-            SubjectEntity(kind="product", name="益生菌含片", brand="LUCKYKISS"),
+            SubjectEntity(kind="product", name="益生菌含片", brand="SAMPLEMINT"),
         ],
-        video_theme="LuckyKiss 弹射舱益生菌含片开箱",
-        summary="这期围绕 LuckyKiss 弹射舱益生菌含片展开，EDC 只是包装描述风格。",
+        video_theme="SampleMint 弹射舱益生菌含片开箱",
+        summary="这期围绕 SampleMint 弹射舱益生菌含片展开，EDC 只是包装描述风格。",
         confidence={"overall": 0.82},
         needs_review=False,
     )
@@ -87,7 +87,7 @@ def test_food_understanding_wins_over_edc_style_hint_in_profile_mapping() -> Non
     profile = map_content_understanding_to_profile(understanding)
 
     assert profile["subject_domain"] == "food"
-    assert profile["subject_brand"] == "LUCKYKISS"
+    assert profile["subject_brand"] == "SAMPLEMINT"
     assert "益生菌含片" in profile["subject_type"]
 
 

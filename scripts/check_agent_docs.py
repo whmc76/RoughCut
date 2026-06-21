@@ -7,9 +7,9 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 AGENTS_PATH = REPO_ROOT / "AGENTS.md"
-CURRENT_STATE_PATH = REPO_ROOT / "docs" / "agent-current-state.md"
-DOC_INDEX_PATH = REPO_ROOT / "docs" / "agent-doc-index.md"
-STATE_TEMPLATE_PATH = REPO_ROOT / "docs" / "agent-current-state-template.md"
+README_PATH = REPO_ROOT / "README.md"
+DOC_INDEX_PATH = REPO_ROOT / "docs" / "design" / "INDEX.md"
+MANUAL_EDITOR_PATH = REPO_ROOT / "docs" / "design" / "manual-editor-open-source-plan.md"
 
 MAX_AGENTS_LINES = 80
 FORBIDDEN_AGENTS_TERMS = (
@@ -32,37 +32,24 @@ FORBIDDEN_AGENTS_HEADINGS = (
 )
 REQUIRED_AGENTS_SNIPPETS = (
     "entrypoint map for coding agents",
-    "docs/agent-current-state.md",
-    "docs/agent-doc-index.md",
+    "README.md",
+    "docs/design/INDEX.md",
     "Do not use it as task memory",
 )
-REQUIRED_STATE_HEADINGS = (
-    "# Agent Current State",
-    "## Current Objective",
-    "## Current Workstream",
-    "## Open Work",
-    "## Resolved Decisions",
-    "## Do Not Reopen",
-    "## Next Concrete Action",
-    "## Verification",
+REQUIRED_README_SNIPPETS = (
+    "# RoughCut",
+    "docs/design/INDEX.md",
 )
 REQUIRED_INDEX_HEADINGS = (
-    "# Agent Document Index",
-    "## Default Read Path",
-    "## Publication Work",
-    "## Product / Architecture Context",
-    "## Read Discipline",
+    "# RoughCut Design Docs",
+    "## Public Documents",
+    "## Notes",
 )
-REQUIRED_TEMPLATE_HEADINGS = (
-    "# Agent Current State Template",
-    "## Current Objective",
-    "## Current Workstream",
-    "## Open Work",
-    "## Resolved Decisions",
-    "## Do Not Reopen",
-    "## Next Concrete Action",
-    "## Verification",
-    "## Optional Task-Specific Sections",
+REQUIRED_MANUAL_EDITOR_SNIPPETS = (
+    "# Manual Editor Open Source Alignment",
+    "## Baseline",
+    "## Architecture",
+    "## Guardrails",
 )
 
 
@@ -105,9 +92,9 @@ def validate_repo_docs(root: Path = REPO_ROOT) -> list[str]:
     errors: list[str] = []
     required_paths = (
         AGENTS_PATH,
-        CURRENT_STATE_PATH,
+        README_PATH,
         DOC_INDEX_PATH,
-        STATE_TEMPLATE_PATH,
+        MANUAL_EDITOR_PATH,
     )
     for path in required_paths:
         if not path.exists():
@@ -116,18 +103,18 @@ def validate_repo_docs(root: Path = REPO_ROOT) -> list[str]:
         return errors
 
     agents_text = _read_text(AGENTS_PATH)
-    current_state_text = _read_text(CURRENT_STATE_PATH)
+    readme_text = _read_text(README_PATH)
     doc_index_text = _read_text(DOC_INDEX_PATH)
-    template_text = _read_text(STATE_TEMPLATE_PATH)
+    manual_editor_text = _read_text(MANUAL_EDITOR_PATH)
 
     errors.extend(validate_agents_text(agents_text))
-    errors.extend(validate_state_doc_text("docs/agent-current-state.md", current_state_text, REQUIRED_STATE_HEADINGS))
-    errors.extend(validate_state_doc_text("docs/agent-doc-index.md", doc_index_text, REQUIRED_INDEX_HEADINGS))
+    errors.extend(_check_required_snippets("README.md", readme_text, REQUIRED_README_SNIPPETS))
+    errors.extend(validate_state_doc_text("docs/design/INDEX.md", doc_index_text, REQUIRED_INDEX_HEADINGS))
     errors.extend(
         validate_state_doc_text(
-            "docs/agent-current-state-template.md",
-            template_text,
-            REQUIRED_TEMPLATE_HEADINGS,
+            "docs/design/manual-editor-open-source-plan.md",
+            manual_editor_text,
+            REQUIRED_MANUAL_EDITOR_SNIPPETS,
         )
     )
     return errors

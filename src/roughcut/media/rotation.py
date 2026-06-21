@@ -106,9 +106,10 @@ async def detect_video_rotation_decision(source_path: Path) -> RotationDecision:
             )
 
         try:
+            vision_frames = _build_orientation_candidate_sheets(frames, Path(tmpdir)) or frames
             answer = await complete_with_images(
                 _ROTATION_PROMPT,
-                frames,
+                vision_frames,
                 max_tokens=120,
                 temperature=0,
                 json_mode=True,
@@ -187,15 +188,55 @@ def _extract_raw_frames(
 # ── Vision model ──────────────────────────────────────────────────────────────
 
 _ROTATION_PROMPT = (
-    "You are checking whether video frames are visually sideways or upside down. "
-    "Look across all attached frames as samples from the same video. Decide the "
-    "single clockwise rotation needed to make people, hands, products, objects, "
-    "and readable text look naturally upright. If the angle is not obviously "
-    "wrong, choose 0. Do not rotate merely because the video is portrait or "
-    "landscape.\n\n"
+    "You are choosing the correct display orientation for a video. Each attached "
+    "image is a contact sheet made from one raw video frame without metadata "
+    "autorotation. The four labeled panels show candidate clockwise rotations: "
+    "0, 90, 180, and 270. Choose the single rotation label whose panel looks most "
+    "naturally upright across the sheets. Prioritize gravity cues, faces, hands, "
+    "tabletops, room structure, and the overall scene. Ignore local logos, labels, "
+    "stickers, or text printed on handheld objects because those objects can be "
+    "turned independently inside a correctly oriented video. If the 0 panel already "
+    "looks like a normal landscape or portrait recording, choose 0. Do not choose a "
+    "portrait rotation merely because the file metadata may say portrait.\n\n"
     'Return JSON only: {"rotation":0,"confidence":0.0,"reason":""}\n'
-    "rotation must be one of 0, 90, 180, 270. confidence is 0.0 to 1.0."
+    "rotation must be one of 0, 90, 180, 270. Use confidence >= 0.7 only when the "
+    "best panel is clearly more natural than the others."
 )
+
+
+def _build_orientation_candidate_sheets(frames: list[Path], tmpdir: Path) -> list[Path]:
+    try:
+        from PIL import Image, ImageDraw, ImageOps
+    except Exception:
+        return []
+
+    sheets: list[Path] = []
+    cell_w = 480
+    cell_h = 300
+    label_h = 34
+    rotations = (0, 90, 180, 270)
+    for index, frame in enumerate(frames):
+        try:
+            with Image.open(frame) as source:
+                source = ImageOps.exif_transpose(source).convert("RGB")
+                sheet = Image.new("RGB", (cell_w * 2, (cell_h + label_h) * 2), "white")
+                draw = ImageDraw.Draw(sheet)
+                for panel_index, rotation in enumerate(rotations):
+                    candidate = source.rotate(-rotation, expand=True)
+                    candidate.thumbnail((cell_w, cell_h), Image.Resampling.LANCZOS)
+                    x = (panel_index % 2) * cell_w
+                    y = (panel_index // 2) * (cell_h + label_h)
+                    draw.rectangle([x, y, x + cell_w - 1, y + label_h - 1], fill=(20, 20, 20))
+                    draw.text((x + 12, y + 9), f"ROTATION {rotation} CW", fill=(255, 255, 255))
+                    paste_x = x + (cell_w - candidate.width) // 2
+                    paste_y = y + label_h + (cell_h - candidate.height) // 2
+                    sheet.paste(candidate, (paste_x, paste_y))
+                out = tmpdir / f"orientation_candidates_{index:02d}.jpg"
+                sheet.save(out, quality=88)
+                sheets.append(out)
+        except Exception:
+            continue
+    return sheets
 
 
 # ── Metadata fallback ─────────────────────────────────────────────────────────

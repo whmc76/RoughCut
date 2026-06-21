@@ -42,7 +42,7 @@ x-automation-app-common: &automation-app-common
     - ${ROUGHCUT_OUTPUT_HOST_ROOT:-./data/runtime}/render-debug:/app/logs/render-debug
     - ./logs:/app/logs
     - ./watch:/app/watch
-    - ${HEYGEM_SHARED_HOST_DIR:-D:/duix_avatar_data/face2face}:/code/data
+    - ${HEYGEM_SHARED_HOST_DIR:-C:/sample-data/heygem-shared}:/code/data
   depends_on:
     postgres:
       condition: service_healthy

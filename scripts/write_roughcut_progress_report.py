@@ -45,8 +45,8 @@ def _configured_api_base() -> str:
 API_CANDIDATES = [
     _configured_api_base(),
 ]
-REPORT_PATH = Path(r"Y:\EDC系列\AI粗剪\roughcut_progress_report.md")
-SNAPSHOT_PATH = Path(r"Y:\EDC系列\AI粗剪\roughcut_progress_report.json")
+REPORT_PATH = Path(os.getenv("ROUGHCUT_PROGRESS_REPORT_PATH", "output/roughcut_progress_report.md"))
+SNAPSHOT_PATH = Path(os.getenv("ROUGHCUT_PROGRESS_SNAPSHOT_PATH", "output/roughcut_progress_report.json"))
 TIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 STALE_MINUTES = 20
 

@@ -10,9 +10,9 @@ def test_codex_command_prefers_windows_cmd_launcher(monkeypatch) -> None:
         return
 
     paths = {
-        "codex.cmd": r"C:\Users\user\AppData\Roaming\npm\codex.cmd",
+        "codex.cmd": r"C:\Example\npm\codex.cmd",
         "codex.exe": r"C:\Program Files\WindowsApps\OpenAI.Codex\app\resources\codex.exe",
-        "codex": r"C:\Users\user\AppData\Roaming\npm\codex",
+        "codex": r"C:\Example\npm\codex",
     }
 
     monkeypatch.setattr(codex_bridge.shutil, "which", lambda name: paths.get(name))

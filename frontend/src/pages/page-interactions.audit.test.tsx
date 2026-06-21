@@ -271,15 +271,15 @@ beforeEach(() => {
   document.documentElement.lang = "zh-CN";
   apiMock.getRemixProductionTasks.mockResolvedValue({
     schema: "roughcut.remix.production_tasks.v1",
-    id: "jenny_baby_bluey_script_footage_remix_pending_20260619",
-    manifest_path: "E:/WorkSpace/RoughCut/data/remix_production_tasks/jenny_baby_bluey_pending.json",
-    creator_profile: "jenny_baby",
-    task_binding_id: "bluey_script_footage_remix",
-    source_root: "F:/布鲁伊育儿节目",
+    id: "example_script_footage_remix_pending",
+    manifest_path: "C:/sample-workspace/RoughCut/data/remix_production_tasks/example_remix_pending.json",
+    creator_profile: "demo_creator",
+    task_binding_id: "example_script_footage_remix",
+    source_root: "C:/sample-remix-source",
     created_at: "2026-06-19",
     selection_policy: {},
     execution: {
-      command: "python -m roughcut.cli remix script-footage --production-manifest data/remix_production_tasks/jenny_baby_bluey_pending.json",
+      command: "python -m roughcut.cli remix script-footage --production-manifest data/remix_production_tasks/example_remix_pending.json",
       pending_episode_csv: "2,3",
       pending_count: 2,
       blocked_missing_script_count: 1,
@@ -293,8 +293,8 @@ beforeEach(() => {
     },
     completed_by_user: [{ status: "done", season: 2, episode: 1, title: "跳舞模式" }],
     pending_tasks: [
-      { status: "pending", season: 2, episode: 2, title: "仓储超市", script_path: "F:/布鲁伊育儿节目/布鲁伊第二季新风格育儿文案_第1-5集.md" },
-      { status: "pending", season: 2, episode: 3, title: "羽毛魔杖", script_path: "F:/布鲁伊育儿节目/布鲁伊第二季新风格育儿文案_第1-5集.md" },
+      { status: "pending", season: 2, episode: 2, title: "仓储超市", script_path: "C:/sample-remix-source/示例动画第二季新风格育儿文案_第1-5集.md" },
+      { status: "pending", season: 2, episode: 3, title: "羽毛魔杖", script_path: "C:/sample-remix-source/示例动画第二季新风格育儿文案_第1-5集.md" },
     ],
     blocked_missing_script_tasks: [],
     tasks: [],
@@ -356,6 +356,110 @@ describe("JobsPage audit interactions", () => {
     expect(apiMock.createRemixProductionTaskJob).toHaveBeenCalledWith(2, 3);
     expect(screen.queryByRole("dialog", { name: "影视二创" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("任务说明")).not.toBeInTheDocument();
+  });
+
+  it("passes publication and clip status filters to the jobs workspace", async () => {
+    const setQueueFilter = vi.fn();
+    jobWorkspaceMock.mockReturnValue(buildJobWorkspaceMock({
+      setQueueFilter,
+    }));
+
+    renderWithQueryClient(
+      <I18nProvider>
+        <MemoryRouter initialEntries={["/jobs"]}>
+          <JobsPage />
+        </MemoryRouter>
+      </I18nProvider>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "已发布" }));
+    await waitFor(() => {
+      expect(jobWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({
+        publicationFilter: "published",
+        clipStatusFilter: "all",
+      }));
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "剪辑完成" }));
+
+    expect(setQueueFilter).toHaveBeenCalledWith("all");
+    await waitFor(() => {
+      expect(jobWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({
+        publicationFilter: "published",
+        clipStatusFilter: "done",
+      }));
+    });
+  });
+
+  it("keeps materialized film remix jobs visible outside the current jobs page", async () => {
+    apiMock.getRemixProductionTasks.mockResolvedValueOnce({
+      schema: "roughcut.remix.production_tasks.v1",
+      id: "example_script_footage_remix_pending",
+      manifest_path: "C:/sample-workspace/RoughCut/data/remix_production_tasks/example_remix_pending.json",
+      creator_profile: "demo_creator",
+      task_binding_id: "example_script_footage_remix",
+      source_root: "C:/sample-remix-source",
+      created_at: "2026-06-19",
+      selection_policy: {},
+      execution: { pending_count: 1, blocked_missing_script_count: 0 },
+      summary: {
+        task_count: 1,
+        pending_count: 1,
+        blocked_missing_script_count: 0,
+        completed_by_user_count: 0,
+        pending_file_missing_count: 0,
+      },
+      completed_by_user: [],
+      pending_tasks: [
+        {
+          status: "pending",
+          season: 2,
+          episode: 4,
+          title: "避球",
+          script_path: "C:/sample-remix-source/示例动画第二季新风格育儿文案_第1-5集.md",
+          job_id: "b5944520-3507-4acf-a463-0c0ef32e08b4",
+          job_status: "pending",
+          job_updated_at: "2026-06-19T02:11:17.636109+08:00",
+          job_progress_percent: 0,
+        },
+      ],
+      blocked_missing_script_tasks: [],
+      tasks: [
+        {
+          status: "pending",
+          season: 2,
+          episode: 4,
+          title: "避球",
+          script_path: "C:/sample-remix-source/示例动画第二季新风格育儿文案_第1-5集.md",
+          job_id: "b5944520-3507-4acf-a463-0c0ef32e08b4",
+          job_status: "pending",
+          job_updated_at: "2026-06-19T02:11:17.636109+08:00",
+          job_progress_percent: 0,
+        },
+      ],
+    });
+
+    renderWithQueryClient(
+      <I18nProvider>
+        <MemoryRouter initialEntries={["/jobs"]}>
+          <JobsPage />
+        </MemoryRouter>
+      </I18nProvider>,
+    );
+
+    await waitFor(() => {
+      expect(jobWorkspaceMock).toHaveBeenLastCalledWith(expect.objectContaining({
+        additionalJobs: [
+          expect.objectContaining({
+            id: "b5944520-3507-4acf-a463-0c0ef32e08b4",
+            source_name: "S02E04 · 避球",
+            queue_task_kind: "remix_production",
+            workflow_mode: "script_footage_remix",
+          }),
+        ],
+      }));
+    });
+    expect(apiMock.createRemixProductionTaskJob).not.toHaveBeenCalled();
   });
 
   it("opens the film remix create modal from the header action", () => {

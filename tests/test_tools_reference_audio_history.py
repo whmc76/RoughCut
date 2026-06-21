@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import httpx
 
 from roughcut.api import tools
 
@@ -349,6 +350,93 @@ def test_moss_tts_duration_token_caps_max_new_tokens() -> None:
     )
 
     assert tokens == 300
+
+
+@pytest.mark.asyncio
+async def test_moss_tts_segment_request_restarts_service_and_retries_on_500(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("POST", "http://moss.local/inference")
+    responses = [
+        httpx.Response(500, text="Internal Server Error", request=request),
+        httpx.Response(200, content=b"wav", request=request),
+    ]
+    calls: list[int] = []
+    restarts: list[tuple[list[str], str]] = []
+    waits: list[str] = []
+    stage_updates: list[dict[str, object]] = []
+
+    async def fake_post_with_progress(*args, **kwargs):
+        del args, kwargs
+        calls.append(1)
+        return responses.pop(0)
+
+    async def fake_restart(*, required_urls, reason: str = ""):
+        restarts.append((list(required_urls), reason))
+
+    async def fake_wait(run_id: str, settings) -> None:
+        del settings
+        waits.append(run_id)
+
+    monkeypatch.setattr(tools, "_post_moss_tts_segment_request_with_progress", fake_post_with_progress)
+    monkeypatch.setattr(tools, "restart_managed_gpu_services_async", fake_restart)
+    monkeypatch.setattr(tools, "_wait_moss_tts_local_ready", fake_wait)
+    monkeypatch.setattr(tools, "_update_run_stage", lambda run_id, stage, **data: stage_updates.append({"run_id": run_id, "stage": stage, **data}))
+
+    response = await tools._post_moss_tts_segment_request_with_recovery(
+        "run-1",
+        SimpleNamespace(),
+        "http://moss.local/inference",
+        settings=SimpleNamespace(moss_tts_local_api_base_url="http://moss.local"),
+        data={"tts_text": "测试"},
+        reference_path=None,
+        segment_index=1,
+        segment_count=1,
+        max_new_tokens=256,
+    )
+
+    assert response.status_code == 200
+    assert len(calls) == 2
+    assert restarts == [(["http://moss.local"], "tools_tts_moss_local_recoverable_failure")]
+    assert waits == ["run-1"]
+    assert stage_updates[0]["stage"] == "service_start"
+    assert stage_updates[0]["recovery_attempt"] == 1
+
+
+@pytest.mark.asyncio
+async def test_moss_tts_segment_request_does_not_restart_on_request_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = httpx.Request("POST", "http://moss.local/inference")
+    response = httpx.Response(400, text="tts_text is required", request=request)
+    restarted = False
+
+    async def fake_post_with_progress(*args, **kwargs):
+        del args, kwargs
+        return response
+
+    async def fake_restart(*, required_urls, reason: str = ""):
+        del required_urls, reason
+        nonlocal restarted
+        restarted = True
+
+    monkeypatch.setattr(tools, "_post_moss_tts_segment_request_with_progress", fake_post_with_progress)
+    monkeypatch.setattr(tools, "restart_managed_gpu_services_async", fake_restart)
+
+    with pytest.raises(httpx.HTTPStatusError):
+        await tools._post_moss_tts_segment_request_with_recovery(
+            "run-1",
+            SimpleNamespace(),
+            "http://moss.local/inference",
+            settings=SimpleNamespace(moss_tts_local_api_base_url="http://moss.local"),
+            data={"tts_text": ""},
+            reference_path=None,
+            segment_index=1,
+            segment_count=1,
+            max_new_tokens=256,
+        )
+
+    assert restarted is False
 
 
 @pytest.mark.asyncio

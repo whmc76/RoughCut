@@ -54,11 +54,11 @@ DEFAULT_API_BASE = "http://127.0.0.1:38471"
 DEFAULT_QWEN3_ASR_BASE = "http://127.0.0.1:30230"
 DEFAULT_TTS_PROMPT_TEXT = "明亮互动版，小朋友们看这里，这是什么颜色呢？对啦，是黄色，黄。"
 DEFAULT_CREATOR_PROFILE = ""
-DEFAULT_PRODUCTION_MANIFEST = ROOT / "data" / "remix_production_tasks" / "jenny_baby_bluey_pending.json"
+DEFAULT_PRODUCTION_MANIFEST = ROOT / "data" / "remix_production_tasks" / "example_remix_pending.json"
 REFERENCE_WIDTH = 1920
 REFERENCE_HEIGHT = 1080
 REFERENCE_FPS = 28
-REFERENCE_WATERMARK = "珍妮斯育儿"
+REFERENCE_WATERMARK = "Demo Parenting"
 REMIX_SEGMENT_X264_PRESET = "medium"
 REMIX_SEGMENT_X264_CRF = "14"
 REMIX_FINAL_X264_PRESET = "medium"
@@ -119,6 +119,7 @@ class SampleReport:
     edit_plan_path: str
     qa_report_path: str
     review_frames_manifest_path: str
+    cover_path: str | None
     scene_index_path: str
     source_duration_sec: float
     narration_duration_sec: float
@@ -425,7 +426,11 @@ def load_production_manifest_episodes(path: Path, *, status: str = "pending") ->
 
 def load_episode_scripts(source_root: Path) -> dict[int, EpisodeScript]:
     scripts: dict[int, EpisodeScript] = {}
-    for path in sorted(source_root.glob("布鲁伊第二季新风格育儿文案_第*.md")):
+    script_paths = {
+        *source_root.glob("示例动画第二季新风格育儿文案_第*.md"),
+        *source_root.glob("*第二季*文案_第*.md"),
+    }
+    for path in sorted(script_paths):
         text = path.read_text(encoding="utf-8")
         matches = list(re.finditer(r"^##\s*第(\d+)集《([^》]+)》\s*$", text, flags=re.M))
         for index, match in enumerate(matches):
@@ -594,9 +599,15 @@ def extract_tts_run_voice_evidence(run_payload: dict[str, Any]) -> dict[str, Any
 
 def find_episode_video(source_root: Path, episode: int) -> Path | None:
     season_dir = source_root / "中文配音 (中文字幕)" / "第二季 (Season 2)"
-    pattern = f"Bluey.S02E{episode:02d}.*.mp4"
-    matches = sorted(season_dir.glob(pattern))
-    return matches[0] if matches else None
+    patterns = [
+        f"SampleShow.S02E{episode:02d}.*.mp4",
+        f"*S02E{episode:02d}*.mp4",
+    ]
+    for pattern in patterns:
+        matches = sorted(season_dir.glob(pattern))
+        if matches:
+            return matches[0]
+    return None
 
 
 def build_episode_sample(script: EpisodeScript, video: Path, args: argparse.Namespace) -> SampleReport:
@@ -1030,7 +1041,7 @@ def build_episode_sample(script: EpisodeScript, video: Path, args: argparse.Name
         notes.append(f"Mixed {len(packaging_audio_cues)} short packaging cue sound(s) into final narration audio.")
     copy_file(render_audio_path, clean_narration_path, force=args.force)
 
-    output_path = episode_dir / f"bluey_s02e{script.episode:02d}_{safe_name(script.title)}_parenting_remix.mp4"
+    output_path = episode_dir / f"sample_show_s02e{script.episode:02d}_{safe_name(script.title)}_parenting_remix.mp4"
     mux_final(concat_path, render_audio_path, subtitle_path, output_path, duration=effective_output_duration, force=args.force)
     output_duration = probe_duration(output_path)
     if output_duration <= 0:
@@ -1045,6 +1056,12 @@ def build_episode_sample(script: EpisodeScript, video: Path, args: argparse.Name
         output_duration=output_duration,
         review_dir=episode_dir / "review_frames",
         manifest_path=review_frames_manifest_path,
+        force=args.force,
+    )
+    cover_path = episode_dir / f"s02e{script.episode:02d}_{safe_name(script.title)}_cover.jpg"
+    cover_path = derive_remix_cover_from_review_frames(
+        review_frames_manifest=review_frames_manifest,
+        cover_path=cover_path,
         force=args.force,
     )
 
@@ -1109,6 +1126,7 @@ def build_episode_sample(script: EpisodeScript, video: Path, args: argparse.Name
         edit_plan_path=str(edit_plan_path),
         qa_report_path=str(qa_report_path),
         review_frames_manifest_path=str(review_frames_manifest_path),
+        cover_path=str(cover_path) if cover_path is not None else None,
         scene_index_path=str(scene_index_path),
         source_duration_sec=round(source_duration, 3),
         narration_duration_sec=round(narration_duration, 3),
@@ -1225,7 +1243,7 @@ def condense_script_for_sample(text: str, *, target_chars: int) -> str:
     )
     add_indexes(list(range(0, opener_end + 1)), limit_chars=210)
 
-    story_keywords = ("这一集", "布鲁伊", "宾果", "爸爸", "妈妈", "姐姐", "妹妹", "结果", "后来", "到最后", "这一刻")
+    story_keywords = ("这一集", "示例动画", "宾果", "爸爸", "妈妈", "姐姐", "妹妹", "结果", "后来", "到最后", "这一刻")
     story_indexes = [index for index, sentence in enumerate(sentences) if any(keyword in sentence for keyword in story_keywords)]
     add_indexes(story_indexes, limit_chars=230)
 
@@ -1284,7 +1302,7 @@ def sentence_score(sentence: str, *, index: int, total: int) -> int:
     for keyword in ("今天借", "这一集", "你看", "可能", "可以说", "你可以", "真正", "孩子不是", "一个被"):
         if keyword in sentence:
             score += 3
-    for keyword in ("布鲁伊", "宾果", "爸爸", "妈妈", "孩子", "家长"):
+    for keyword in ("示例动画", "宾果", "爸爸", "妈妈", "孩子", "家长"):
         if keyword in sentence:
             score += 1
     return score
@@ -2193,7 +2211,7 @@ def extract_source_anchor_keywords(title: str, text: str) -> list[str]:
         keywords.append(value)
         if len(keywords) >= 48:
             break
-    for value in ("布鲁伊", "宾果", "爸爸", "妈妈", "孩子", "规则", "感受", "愿望", "边界"):
+    for value in ("示例动画", "宾果", "爸爸", "妈妈", "孩子", "规则", "感受", "愿望", "边界"):
         if value not in keywords:
             keywords.append(value)
     return keywords
@@ -3956,7 +3974,7 @@ def build_video_segments(
 
 
 def source_clean_crop_filter() -> str:
-    # Source is 1080p in the Bluey batch. This inner crop removes the top-right
+    # Source is 1080p in the SampleShow batch. This inner crop removes the top-right
     # platform mark and the burned-in bottom subtitles before our own packaging.
     return "crop=1440:810:180:50"
 
@@ -4670,6 +4688,30 @@ def extract_review_frames(
     return manifest
 
 
+def derive_remix_cover_from_review_frames(
+    *,
+    review_frames_manifest: dict[str, Any],
+    cover_path: Path,
+    force: bool,
+) -> Path | None:
+    frames = [
+        item
+        for item in (review_frames_manifest.get("frames") or [])
+        if isinstance(item, dict) and str(item.get("path") or "").strip()
+    ]
+    if not frames:
+        return None
+    selected = frames[len(frames) // 2]
+    source_path = Path(str(selected.get("path") or "")).expanduser()
+    if not source_path.is_file():
+        return None
+    if cover_path.exists() and not force:
+        return cover_path
+    cover_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source_path, cover_path)
+    return cover_path
+
+
 def probe_duration(path: Path) -> float:
     result = run(
         [
@@ -4912,7 +4954,7 @@ def probe_wav_rms_dbfs(path: Path) -> float | None:
 
 def render_markdown_report(payload: dict[str, Any]) -> str:
     lines = [
-        "# Bluey Parenting Remix Sample Report",
+        "# SampleShow Parenting Remix Sample Report",
         "",
         f"- created_at: {payload.get('created_at')}",
         f"- source_root: `{payload.get('source_root')}`",

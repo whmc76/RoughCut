@@ -53,6 +53,7 @@ async def _create_jobs_for_watch_root(
     *,
     config_profile_id: uuid.UUID | None,
     workflow_template: str | None,
+    product_controls: dict | None = None,
     output_dir: str | None = None,
     ingest_mode: str = "full_auto",
     job_flow_mode: str = "auto",
@@ -62,6 +63,7 @@ async def _create_jobs_for_watch_root(
         output_dir=output_dir,
         config_profile_id=config_profile_id,
         workflow_template=workflow_template,
+        product_controls=product_controls,
         job_flow_mode=job_flow_mode,
         awaiting_initialization=ingest_mode == "task_only",
     )
@@ -72,6 +74,7 @@ async def _create_merged_job_for_watch_root(
     *,
     config_profile_id: uuid.UUID | None,
     workflow_template: str | None,
+    product_controls: dict | None = None,
     output_dir: str | None = None,
     allow_related_profiles: bool = False,
     ingest_mode: str = "full_auto",
@@ -82,6 +85,7 @@ async def _create_merged_job_for_watch_root(
         output_dir=output_dir,
         config_profile_id=config_profile_id,
         workflow_template=workflow_template,
+        product_controls=product_controls,
         job_flow_mode=job_flow_mode,
         allow_related_profiles=allow_related_profiles,
         awaiting_initialization=ingest_mode == "task_only",
@@ -158,6 +162,9 @@ async def create_watch_root(
         scan_mode=body.scan_mode,
         ingest_mode=body.ingest_mode,
         job_flow_mode=body.job_flow_mode,
+        edit_mode=body.edit_mode,
+        automation_level=body.automation_level,
+        material_usage=body.material_usage,
     )
     session.add(root)
     await session.commit()
@@ -184,6 +191,9 @@ async def update_watch_root(
     root.scan_mode = body.scan_mode
     root.ingest_mode = body.ingest_mode
     root.job_flow_mode = body.job_flow_mode
+    root.edit_mode = body.edit_mode
+    root.automation_level = body.automation_level
+    root.material_usage = body.material_usage
     await session.commit()
     await session.refresh(root)
     return root
@@ -300,6 +310,11 @@ async def enqueue_inventory_items(
         [str(item["path"]) for item in selected_items],
         config_profile_id=root.config_profile_id,
         workflow_template=root.workflow_template,
+        product_controls={
+            "edit_mode": getattr(root, "edit_mode", "auto") or "auto",
+            "automation_level": getattr(root, "automation_level", "standard") or "standard",
+            "material_usage": getattr(root, "material_usage", "all_uploaded") or "all_uploaded",
+        },
         output_dir=root.output_dir,
         ingest_mode=root.ingest_mode or "full_auto",
         job_flow_mode=root.job_flow_mode or "auto",
@@ -384,6 +399,11 @@ async def merge_inventory_items(
         file_paths,
         config_profile_id=root.config_profile_id,
         workflow_template=root.workflow_template,
+        product_controls={
+            "edit_mode": getattr(root, "edit_mode", "auto") or "auto",
+            "automation_level": getattr(root, "automation_level", "standard") or "standard",
+            "material_usage": getattr(root, "material_usage", "all_uploaded") or "all_uploaded",
+        },
         output_dir=root.output_dir,
         allow_related_profiles=True,
         ingest_mode=root.ingest_mode or "full_auto",

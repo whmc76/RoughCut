@@ -11,7 +11,7 @@ def test_inject_controlled_failure_sets_invalid_intro_and_clears_other_bookends(
         failure_mode="render_ffprobe_failed",
     )
 
-    assert payload["intro"]["path"].endswith("docs\\agent-doc-index.md") or payload["intro"]["path"].endswith("docs/agent-doc-index.md")
+    assert payload["intro"]["path"].endswith("docs\\design\\INDEX.md") or payload["intro"]["path"].endswith("docs/design/INDEX.md")
     assert payload["intro"]["source"] == "controlled_failure_sample"
     assert payload["outro"] is None
     assert payload["insert"] is None

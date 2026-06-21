@@ -220,21 +220,22 @@ def _write_codex_imagegen_request(
         "codex_runner": runner_config,
         "codex_imagegen_size": size,
         "cover_director_policy": dict(director_policy or {
-            "codex_role": "render_final_cover_with_integrated_typography",
-            "goal": "Let Codex image generation produce the final publishable cover with integrated typography and unified style.",
-            "typography_owner": "codex_full_cover",
+            "direction_version": "local_overlay_required_v1",
+            "codex_role": "render_cover_base_for_local_overlay",
+            "goal": "Let Codex image generation produce a clean cover base that is safe for deterministic local typography overlay.",
+            "typography_owner": "local_post_overlay",
             "forbidden_extra_visual_text": [
                 "subtitles",
                 "watermarks",
                 "pseudo logos unrelated to the requested brand",
-                "Chinese or English words not explicitly requested in the prompt contract",
+                "any readable Chinese or English text",
+                "any readable numbers or pseudo text",
             ],
             "completion_requires": [
                 "A real bitmap generated with Codex built-in image_gen/edit mode.",
-                "The bitmap is the final cover, not a text-free base image.",
-                "The bitmap already contains the requested brand line, main title, subtitle, and hook badge in a unified style.",
+                "The bitmap is a clean cover base, not the final text-integrated cover.",
                 "No extra unrequested typography, subtitles, watermarks, or unrelated pseudo logos appear in the bitmap.",
-                "Key subject stays complete and readable after typography placement.",
+                "Key subject stays complete and readable after later local typography placement.",
                 "The generated bitmap copied to output_path before marking this request completed.",
             ],
         }),
@@ -243,7 +244,7 @@ def _write_codex_imagegen_request(
             "When reference_image_paths is present, treat the full ordered set as the allowed same-product multi-angle reference pack. "
             "Treat codex_runner.model as the Codex execution agent model only, not as the underlying image model. "
             "Do not use the OpenAI Images API fallback unless explicitly requested. "
-            "Pass the prompt as the concise image-generation brief and final-cover brief; let the image model render the complete publishable cover with integrated typography and effects. "
+            "Pass the prompt as the concise image-generation brief for a text-free cover base; local post-processing owns typography. "
             "Copy the selected generated bitmap into output_path."
         ),
     }

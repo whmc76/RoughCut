@@ -566,7 +566,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Run browser-agent prepare-only publication tasks from current material.")
     parser.add_argument("--target-profile-id", required=True)
     parser.add_argument("--material-json", required=True)
-    parser.add_argument("--profiles-json", default=r"E:\WorkSpace\RoughCut\data\avatar_materials\profiles.json")
+    parser.add_argument("--profiles-json", default="data/avatar_materials/profiles.json")
     parser.add_argument("--browser-agent-base-url", default="http://127.0.0.1:49310")
     parser.add_argument("--media-path", required=True, help="Use the real source video path.")
     parser.add_argument("--publication-scheme-json", help="Optional publication scheme JSON; inject scheme platform_options into content.")

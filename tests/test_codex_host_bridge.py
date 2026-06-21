@@ -195,13 +195,13 @@ def test_social_auto_upload_login_uses_host_root_and_headed_window(tmp_path, mon
             "root": str(root),
             "python_executable": "python",
             "platform": "wechat-channels",
-            "account_name": "珍妮斯baby 视频号",
+            "account_name": "Demo Creator 视频号",
         }
     )
 
     assert result["status"] == "login_started"
     assert result["pid"] == 2468
-    assert result["command"] == ["python", "sau_cli.py", "tencent", "login", "--account", "珍妮斯baby 视频号", "--headed"]
+    assert result["command"] == ["python", "sau_cli.py", "tencent", "login", "--account", "Demo Creator 视频号", "--headed"]
     assert captured["command"][:5] == ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command"]
     powershell_command = str(captured["command"][5])
     assert "-WindowStyle Normal" in powershell_command
@@ -210,7 +210,7 @@ def test_social_auto_upload_login_uses_host_root_and_headed_window(tmp_path, mon
     assert "'sau_cli.py'" in powershell_command
     assert "'tencent'" in powershell_command
     assert "'login'" in powershell_command
-    assert "'珍妮斯baby 视频号'" in powershell_command
+    assert "'Demo Creator 视频号'" in powershell_command
     assert "'--headed'" in powershell_command
 
 
@@ -236,14 +236,14 @@ def test_social_auto_upload_check_reports_valid_cookie(tmp_path, monkeypatch) ->
             "root": str(root),
             "python_executable": "python",
             "platform": "bilibili",
-            "account_name": "珍妮斯baby B站",
+            "account_name": "Demo Creator B站",
             "timeout_sec": 12,
         }
     )
 
     assert result["status"] == "login_valid"
     assert result["stdout"] == "valid"
-    assert captured["command"] == ["python", "sau_cli.py", "bilibili", "check", "--account", "珍妮斯baby B站"]
+    assert captured["command"] == ["python", "sau_cli.py", "bilibili", "check", "--account", "Demo Creator B站"]
     assert captured["kwargs"]["cwd"] == str(root.resolve())
 
 
@@ -268,7 +268,7 @@ def test_social_auto_upload_dashboard_uses_host_root_and_headed_window(tmp_path,
             "root": str(root),
             "python_executable": "python",
             "platform": "bilibili",
-            "account_name": "creator-jenny-bilibili-chrome",
+            "account_name": "creator-demo-bilibili-chrome",
         }
     )
 
@@ -280,13 +280,13 @@ def test_social_auto_upload_dashboard_uses_host_root_and_headed_window(tmp_path,
         "bilibili",
         "open-dashboard",
         "--account",
-        "creator-jenny-bilibili-chrome",
+        "creator-demo-bilibili-chrome",
         "--headed",
     ]
     powershell_command = str(captured["command"][5])
     assert "-WindowStyle Normal" in powershell_command
     assert "'open-dashboard'" in powershell_command
-    assert "'creator-jenny-bilibili-chrome'" in powershell_command
+    assert "'creator-demo-bilibili-chrome'" in powershell_command
 
 
 def test_social_auto_upload_command_maps_runtime_paths_to_host(tmp_path, monkeypatch) -> None:

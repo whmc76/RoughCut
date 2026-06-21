@@ -51,6 +51,16 @@ async def hold_managed_gpu_services_async(*, required_urls: Iterable[str], reaso
         await asyncio.to_thread(lease.__exit__, None, None, None)
 
 
+def restart_managed_gpu_services(*, required_urls: Iterable[str], reason: str = "") -> None:
+    targets = _resolve_required_targets(required_urls)
+    for target in targets:
+        _restart_target(target=target, reason=reason)
+
+
+async def restart_managed_gpu_services_async(*, required_urls: Iterable[str], reason: str = "") -> None:
+    await asyncio.to_thread(restart_managed_gpu_services, required_urls=tuple(required_urls), reason=reason)
+
+
 def adopt_running_idle_managed_gpu_services(*, reason: str = "") -> None:
     """Attach idle-stop timers to already-running managed GPU services.
 
@@ -128,16 +138,16 @@ def _build_target_configs(settings) -> list[_ManagedDockerTarget]:
     return [
         _ManagedDockerTarget(
             key="heygem",
-            compose_file=str(getattr(settings, "heygem_docker_compose_file", "E:/WorkSpace/heygem/docker-compose.yml") or ""),
-            env_file=str(getattr(settings, "heygem_docker_env_file", "E:/WorkSpace/heygem/.env") or ""),
+            compose_file=str(getattr(settings, "heygem_docker_compose_file", "") or ""),
+            env_file=str(getattr(settings, "heygem_docker_env_file", "") or ""),
             services=_parse_services(getattr(settings, "heygem_docker_services", "heygem")),
             base_urls=(_normalize_base_url(getattr(settings, "avatar_api_base_url", "")),),
             probe_kind="heygem_preview",
         ),
         _ManagedDockerTarget(
             key="indextts2",
-            compose_file=str(getattr(settings, "indextts2_docker_compose_file", "E:/WorkSpace/indextts2-service/docker-compose.yml") or ""),
-            env_file=str(getattr(settings, "indextts2_docker_env_file", "E:/WorkSpace/indextts2-service/.env") or ""),
+            compose_file=str(getattr(settings, "indextts2_docker_compose_file", "") or ""),
+            env_file=str(getattr(settings, "indextts2_docker_env_file", "") or ""),
             services=_parse_services(getattr(settings, "indextts2_docker_services", "indextts2")),
             base_urls=(
                 _normalize_base_url(getattr(settings, "voice_clone_api_base_url", "")),
@@ -283,6 +293,34 @@ def _stop_target_if_idle(*, target: _ManagedDockerTarget, reason: str) -> None:
         _release_operation_lock(target.key, token)
 
 
+def _restart_target(*, target: _ManagedDockerTarget, reason: str) -> None:
+    if not _target_management_supported(target):
+        return
+    lock_acquired, token = _acquire_operation_lock(target.key, timeout_sec=20)
+    if not lock_acquired:
+        logger.warning("skipping managed gpu target restart because operation lock is busy: target=%s reason=%s", target.key, reason or "-")
+        return
+    try:
+        services = _resolve_target_services(target)
+        logger.warning(
+            "restarting managed gpu target=%s services=%s reason=%s",
+            target.key,
+            ",".join(services) if services else "all",
+            reason or "-",
+        )
+        if _can_manage_target_via_compose(target):
+            if services:
+                _run_compose_command(target, "restart", *services)
+            else:
+                _run_compose_command(target, "restart")
+        else:
+            _run_docker_container_command(target, "restart")
+        _wait_until_target_ready(target)
+    finally:
+        if lock_acquired:
+            _release_operation_lock(target.key, token)
+
+
 def _target_management_supported(target: _ManagedDockerTarget) -> bool:
     settings = get_settings()
     if not bool(getattr(settings, "docker_gpu_guard_enabled", True)):
@@ -311,12 +349,26 @@ def _target_ready(target: _ManagedDockerTarget) -> bool:
 
 
 def _wait_until_target_ready(target: _ManagedDockerTarget) -> None:
-    deadline = time.monotonic() + 240.0
+    deadline = time.monotonic() + _ready_timeout_seconds(target.key)
     while time.monotonic() < deadline:
         if _target_ready(target):
             return
         time.sleep(2.0)
     raise RuntimeError(f"managed gpu target {target.key} did not become ready")
+
+
+def _ready_timeout_seconds(target_key: str) -> float:
+    settings = get_settings()
+    specific = getattr(settings, f"{target_key}_docker_ready_timeout_sec", None)
+    if specific is not None:
+        try:
+            return max(1.0, float(specific))
+        except (TypeError, ValueError):
+            pass
+    try:
+        return max(1.0, float(getattr(settings, "docker_gpu_guard_ready_timeout_sec", 240) or 240))
+    except (TypeError, ValueError):
+        return 240.0
 
 
 def _probe_service_health(base_url: str, *, probe_kind: str) -> bool:

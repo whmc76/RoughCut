@@ -36,11 +36,11 @@ function renderWithQueryClient(children: ReactNode) {
 beforeEach(() => {
   vi.clearAllMocks();
   apiMock.listCreatorCards.mockResolvedValue({
-    items: [{ id: "creator-jenny", name: "珍妮斯baby" }],
+    items: [{ id: "creator-demo", name: "Demo Creator" }],
   });
   apiMock.getPublicationProfile.mockResolvedValue({
     id: "profile-1",
-    creator_card_id: "creator-jenny",
+    creator_card_id: "creator-demo",
     status: "active",
     publication_payload_json: {
       default_platforms: ["bilibili"],
@@ -54,7 +54,7 @@ beforeEach(() => {
   apiMock.startSocialAutoUploadLogin.mockResolvedValue({
     status: "login_started",
     pid: 12345,
-    command: ["python", "sau_cli.py", "bilibili", "login", "--account", "珍妮斯baby · B 站", "--headed"],
+    command: ["python", "sau_cli.py", "bilibili", "login", "--account", "Demo Creator · B 站", "--headed"],
   });
   apiMock.checkSocialAutoUploadLogin.mockResolvedValue({
     status: "login_invalid",
@@ -62,11 +62,11 @@ beforeEach(() => {
   });
   apiMock.openSocialAutoUploadDashboard.mockResolvedValue({
     status: "dashboard_started",
-    account_label: "珍妮斯baby · Chrome",
+    account_label: "Demo Creator · Chrome",
   });
   apiMock.bindSocialAutoUploadLogin.mockResolvedValue({
     id: "profile-1",
-    creator_card_id: "creator-jenny",
+    creator_card_id: "creator-demo",
     status: "active",
     publication_payload_json: { default_platforms: ["bilibili"] },
     created_at: "2026-06-19T00:00:00Z",
@@ -88,14 +88,14 @@ describe("PublicationManagementPage platform binding", () => {
     fireEvent.click(bindButtons[0]);
 
     expect(screen.getByRole("dialog", { name: "B 站 登录绑定" })).toBeInTheDocument();
-    expect(screen.getByDisplayValue("珍妮斯baby · B 站")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("Demo Creator · B 站")).toBeInTheDocument();
     expect(apiMock.bindSocialAutoUploadLogin).not.toHaveBeenCalled();
 
     await waitFor(() => {
-      expect(apiMock.startSocialAutoUploadLogin).toHaveBeenCalledWith("creator-jenny", {
+      expect(apiMock.startSocialAutoUploadLogin).toHaveBeenCalledWith("creator-demo", {
         platform: "bilibili",
         browser: "chrome",
-        account_name: "珍妮斯baby · B 站",
+        account_name: "Demo Creator · B 站",
       });
     });
     expect(await screen.findByText("登录窗口已启动")).toBeInTheDocument();
@@ -103,10 +103,10 @@ describe("PublicationManagementPage platform binding", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "确认已登录并绑定" }));
     await waitFor(() => {
-      expect(apiMock.bindSocialAutoUploadLogin).toHaveBeenCalledWith("creator-jenny", {
+      expect(apiMock.bindSocialAutoUploadLogin).toHaveBeenCalledWith("creator-demo", {
         platform: "bilibili",
         browser: "chrome",
-        account_name: "珍妮斯baby · B 站",
+        account_name: "Demo Creator · B 站",
         login_confirmed: true,
       });
     });
@@ -123,10 +123,10 @@ describe("PublicationManagementPage platform binding", () => {
     fireEvent.click(bindButtons[0]);
 
     await waitFor(() => {
-      expect(apiMock.bindSocialAutoUploadLogin).toHaveBeenCalledWith("creator-jenny", {
+      expect(apiMock.bindSocialAutoUploadLogin).toHaveBeenCalledWith("creator-demo", {
         platform: "bilibili",
         browser: "chrome",
-        account_name: "珍妮斯baby · B 站",
+        account_name: "Demo Creator · B 站",
         login_confirmed: true,
       });
     });
@@ -135,7 +135,7 @@ describe("PublicationManagementPage platform binding", () => {
   it("does not treat legacy login reference bindings as confirmed accounts", async () => {
     apiMock.getPublicationProfile.mockResolvedValueOnce({
       id: "profile-1",
-      creator_card_id: "creator-jenny",
+      creator_card_id: "creator-demo",
       status: "active",
       publication_payload_json: {
         default_platforms: ["bilibili"],
@@ -169,7 +169,7 @@ describe("PublicationManagementPage platform binding", () => {
   it("opens the bound platform dashboard for account confirmation", async () => {
     apiMock.getPublicationProfile.mockResolvedValueOnce({
       id: "profile-1",
-      creator_card_id: "creator-jenny",
+      creator_card_id: "creator-demo",
       status: "active",
       publication_payload_json: {
         default_platforms: ["bilibili"],
@@ -181,12 +181,12 @@ describe("PublicationManagementPage platform binding", () => {
         {
           id: "binding-1",
           platform: "bilibili",
-          credential_ref: "social-auto-upload:creator-jenny-bilibili-chrome:bilibili",
+          credential_ref: "social-auto-upload:creator-demo-bilibili-chrome:bilibili",
           binding_payload_json: {
             adapter: "social_auto_upload",
             status: "login_confirmed",
-            account_name: "creator-jenny-bilibili-chrome",
-            account_label: "珍妮斯baby · Chrome",
+            account_name: "creator-demo-bilibili-chrome",
+            account_label: "Demo Creator · Chrome",
           },
           created_at: "2026-06-19T00:00:00Z",
           updated_at: "2026-06-19T00:00:00Z",
@@ -203,7 +203,7 @@ describe("PublicationManagementPage platform binding", () => {
     fireEvent.click(enabledDashboardButton!);
 
     await waitFor(() => {
-      expect(apiMock.openSocialAutoUploadDashboard).toHaveBeenCalledWith("creator-jenny", {
+      expect(apiMock.openSocialAutoUploadDashboard).toHaveBeenCalledWith("creator-demo", {
         platform: "bilibili",
         browser: "chrome",
       });

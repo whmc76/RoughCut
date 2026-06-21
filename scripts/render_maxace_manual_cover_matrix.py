@@ -8,17 +8,17 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
 
 
 SOURCE = Path(
-    r"\\Z4pro-gwil\团队文件-媒体工作台\EDC系列\待发布\MAXACE 美杜莎4 顶配次顶配开箱\smart-copy\00-highlight-cover-source.jpg"
+    r"\\sample-share\media-workbench\sample-series\pending\sample-product-unbox\smart-copy\00-highlight-cover-source.jpg"
 )
 OUTPUT_DIR = Path(
-    r"E:\WorkSpace\RoughCut\artifacts\objective-smoke\maxace4-manual-cover-template"
+    r"C:\sample-workspace\RoughCut\artifacts\objective-smoke\sample-product-cover-template"
 )
 FONT_PATH = Path(r"C:\Windows\Fonts\msyhbd.ttc")
 
 TEXT_SPEC = {
-    "brand": "MAXACE",
-    "main": "美杜莎4",
-    "sub": "顶配 VS 次顶配",
+    "brand": "SAMPLE",
+    "main": "示例产品4",
+    "sub": "版本A VS 版本B",
     "hook": "双版本开箱",
 }
 

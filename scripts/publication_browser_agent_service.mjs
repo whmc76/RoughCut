@@ -39,6 +39,10 @@ const BRIDGE_CLIENT_RECOVERABLE_AFTER_MS = Math.max(
   BRIDGE_CLIENT_STALE_AFTER_MS,
   Number(process.env.PUBLICATION_BROWSER_BRIDGE_CLIENT_RECOVERABLE_AFTER_MS || 5 * 60_000),
 );
+const CREATOR_SESSION_PROBE_TIMEOUT_MS = Math.max(
+  20_000,
+  Number(process.env.PUBLICATION_BROWSER_CREATOR_SESSION_PROBE_TIMEOUT_MS || 60_000),
+);
 // MV3 background workers are prone to going idle when a localhost long-poll stays open
 // for too long. Keep bridge polling short so the unpacked extension keeps cycling.
 const BRIDGE_LONG_POLL_TIMEOUT_MS = Math.max(250, Number(process.env.PUBLICATION_BROWSER_BRIDGE_LONG_POLL_TIMEOUT_MS || 5_000));
@@ -322,7 +326,7 @@ function sanitizeVisualEvidenceSegment(value, fallback = "unknown", maxLength = 
   return output.slice(0, maxLength);
 }
 
-function normalizeVisualEvidence(payload) {
+export function normalizeVisualEvidence(payload) {
   if (!payload || typeof payload !== "object") return null;
   const artifactPath = String(payload.artifact_path || "").trim();
   if (!artifactPath) return null;
@@ -343,6 +347,118 @@ function normalizeVisualEvidence(payload) {
   if (Number.isFinite(width) && width > 0) normalized.width = Math.floor(width);
   if (Number.isFinite(height) && height > 0) normalized.height = Math.floor(height);
   return normalized;
+}
+
+export function normalizeVisualEvidencePack(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  const evidenceId = String(payload.evidence_id || "").trim();
+  const visualEvidence = normalizeVisualEvidence(payload.visual_evidence);
+  if (!evidenceId && !visualEvidence) return null;
+  const route = payload.route && typeof payload.route === "object" ? payload.route : {};
+  const normalizeLines = (items, limit) => (Array.isArray(items) ? items : [])
+    .map((item) => String(item || "").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(0, limit);
+  const normalizeControls = (items, limit) => (Array.isArray(items) ? items : [])
+    .filter((item) => item && typeof item === "object")
+    .map((item) => ({
+      index: Number.isFinite(Number(item.index)) ? Number(item.index) : 0,
+      tag: String(item.tag || "").trim().slice(0, 32),
+      role: String(item.role || "").trim().slice(0, 64),
+      type: String(item.type || "").trim().slice(0, 64),
+      bbox: item.bbox && typeof item.bbox === "object"
+        ? {
+            x: Number.isFinite(Number(item.bbox.x)) ? Number(item.bbox.x) : 0,
+            y: Number.isFinite(Number(item.bbox.y)) ? Number(item.bbox.y) : 0,
+            width: Number.isFinite(Number(item.bbox.width)) ? Number(item.bbox.width) : 0,
+            height: Number.isFinite(Number(item.bbox.height)) ? Number(item.bbox.height) : 0,
+          }
+        : null,
+      text: String(item.text || item.label || item.ariaLabel || "").replace(/\s+/g, " ").trim().slice(0, 220),
+      aria_label: String(item.aria_label || item.ariaLabel || "").replace(/\s+/g, " ").trim().slice(0, 220),
+      placeholder: String(item.placeholder || "").replace(/\s+/g, " ").trim().slice(0, 180),
+      checked: Boolean(item.checked),
+      disabled: Boolean(item.disabled),
+      visible: item.visible !== false,
+    }))
+    .filter((item) => item.text || item.aria_label || item.placeholder || item.role || item.type)
+    .slice(0, limit);
+  const normalized = {
+    evidence_id: evidenceId || createHash("sha256")
+      .update(JSON.stringify({
+        artifact: visualEvidence?.sha256 || visualEvidence?.artifact_path || "",
+        route: route.url || "",
+        phase: payload.phase || "",
+      }))
+      .digest("hex")
+      .slice(0, 16),
+    schema_version: "publication_visual_evidence_pack_v1",
+    captured_at: String(payload.captured_at || visualEvidence?.captured_at || "").trim(),
+    platform: String(payload.platform || visualEvidence?.platform || "").trim(),
+    phase: String(payload.phase || visualEvidence?.phase || "").trim(),
+    route: {
+      url: String(route.url || visualEvidence?.route_url || "").trim(),
+      title: String(route.title || visualEvidence?.route_title || "").trim(),
+      path: String(route.path || "").trim(),
+    },
+    visual_evidence: visualEvidence,
+    visible_lines: normalizeLines(payload.visible_lines, 160),
+    headings: normalizeLines(payload.headings, 80),
+    overlays: normalizeLines(payload.overlays || payload.overlay_texts, 80),
+    controls: normalizeControls(payload.controls, 160),
+    file_inputs: Array.isArray(payload.file_inputs) ? payload.file_inputs.slice(0, 40) : [],
+    hashes: payload.hashes && typeof payload.hashes === "object" ? payload.hashes : {},
+    expected: payload.expected && typeof payload.expected === "object" ? payload.expected : {},
+    observations: payload.observations && typeof payload.observations === "object" ? payload.observations : {},
+  };
+  if (!normalized.hashes.visible_text_sha256) {
+    normalized.hashes = {
+      ...normalized.hashes,
+      visible_text_sha256: createHash("sha256").update(normalized.visible_lines.join("\n")).digest("hex"),
+    };
+  }
+  return normalized;
+}
+
+export function buildVisualEvidencePackFromSnapshot(snapshot = {}, {
+  platform = "",
+  phase = "",
+  expected = {},
+  observations = {},
+} = {}) {
+  const baseSnapshot = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const visualEvidence = normalizeVisualEvidence(baseSnapshot.visual_evidence);
+  const route = {
+    url: String(baseSnapshot.url || visualEvidence?.route_url || "").trim(),
+    title: String(baseSnapshot.title || visualEvidence?.route_title || "").trim(),
+    path: "",
+  };
+  const visibleLines = Array.isArray(baseSnapshot.lines) ? baseSnapshot.lines : [];
+  const controls = Array.isArray(baseSnapshot.elements)
+    ? baseSnapshot.elements.map((item, index) => ({ index, ...item }))
+    : [];
+  const evidenceSeed = JSON.stringify({
+    visual: visualEvidence?.sha256 || visualEvidence?.artifact_path || "",
+    platform,
+    phase,
+    route,
+    text: visibleLines.slice(0, 80),
+  });
+  return normalizeVisualEvidencePack({
+    evidence_id: createHash("sha256").update(evidenceSeed).digest("hex").slice(0, 16),
+    captured_at: visualEvidence?.captured_at || new Date().toISOString(),
+    platform,
+    phase,
+    route,
+    visual_evidence: visualEvidence,
+    visible_lines: visibleLines,
+    headings: Array.isArray(baseSnapshot.headings) ? baseSnapshot.headings : [],
+    overlays: Array.isArray(baseSnapshot.overlayTexts) ? baseSnapshot.overlayTexts : [],
+    controls,
+    file_inputs: Array.isArray(baseSnapshot.fileInputs) ? baseSnapshot.fileInputs : [],
+    expected,
+    observations,
+  });
 }
 
 async function capturePageVisualEvidence(client, {
@@ -399,6 +515,15 @@ async function attachVisualEvidenceToSnapshot(client, snapshot, options = {}) {
   });
   if (visualEvidence) {
     baseSnapshot.visual_evidence = visualEvidence;
+  }
+  const visualEvidencePack = buildVisualEvidencePackFromSnapshot(baseSnapshot, {
+    platform: options.platform || "",
+    phase: options.visualEvidencePhase || options.phase || "snapshot",
+    expected: options.expected && typeof options.expected === "object" ? options.expected : {},
+    observations: options.observations && typeof options.observations === "object" ? options.observations : {},
+  });
+  if (visualEvidencePack) {
+    baseSnapshot.visual_evidence_pack = visualEvidencePack;
   }
   return baseSnapshot;
 }
@@ -465,9 +590,70 @@ export function deriveCompositeCdpTimeoutWaitEnvelope({
   });
 }
 
+const YOUTUBE_FRESH_UPLOAD_ONLY_BLOCKED_OVERRIDE_KEYS = new Set([
+  "verification_only_current_page",
+  "repair_only_current_page",
+  "prepublish_only_current_page",
+  "prepare_only_current_page",
+  "force_repair_fields",
+  "next_platform_specific_overrides",
+  "target_platform_specific_overrides",
+]);
+
+function enforceYouTubeFreshUploadOnlyContent(platform, content = {}) {
+  const normalizedPlatform = normalizePlatform(platform);
+  const source = content && typeof content === "object" ? content : {};
+  if (normalizedPlatform !== "youtube") return source;
+  const overrides = source.platform_specific_overrides && typeof source.platform_specific_overrides === "object"
+    ? { ...source.platform_specific_overrides }
+    : {};
+  const currentFreshUploadResume = Boolean(overrides.youtube_current_fresh_upload_resume)
+    && String(overrides.recovery_mode || "").trim().toLowerCase() === "prepublish_resume"
+    && _coerceRecoveryBool(overrides.prepare_only_current_page, false);
+  for (const key of YOUTUBE_FRESH_UPLOAD_ONLY_BLOCKED_OVERRIDE_KEYS) {
+    delete overrides[key];
+  }
+  if (currentFreshUploadResume) {
+    overrides.youtube_current_fresh_upload_resume = true;
+    overrides.recovery_mode = "prepublish_resume";
+    overrides.prepare_only_current_page = true;
+    overrides.fresh_start_platform_tab = false;
+    overrides.clear_draft_context = false;
+    overrides.force_publish_page_refresh = false;
+  } else {
+    delete overrides.youtube_current_fresh_upload_resume;
+    overrides.fresh_start_platform_tab = true;
+    overrides.clear_draft_context = true;
+    overrides.force_publish_page_refresh = true;
+    overrides.recovery_mode = "fresh_publish";
+  }
+  overrides.verify_media_upload = true;
+  overrides.youtube_publish_path_policy = "fresh_upload_only";
+  return {
+    ...source,
+    platform_specific_overrides: overrides,
+    publication_recovery_state: {
+      schema_version: 1,
+      platform: "youtube",
+      fresh_publish_only: true,
+      ...(currentFreshUploadResume ? { current_fresh_upload_resume: true } : {}),
+    },
+    publication_path_contract: {
+      platform: "youtube",
+      mode: currentFreshUploadResume ? "fresh_upload_resume" : "fresh_upload_only",
+      forbid_current_page_repair: !currentFreshUploadResume,
+      forbid_existing_video_edit: true,
+      forbid_attempt_reuse: !currentFreshUploadResume,
+    },
+  };
+}
+
 export function applyCompositeSafeRuntimePolicyDefaults(platform, content = {}) {
   const normalizedPlatform = normalizePlatform(platform);
   const source = content && typeof content === "object" ? content : {};
+  if (normalizedPlatform === "youtube") {
+    return enforceYouTubeFreshUploadOnlyContent(normalizedPlatform, source);
+  }
   const recoveryContext = _extract_publication_recovery_context(source);
   const sourceOverrides = source.platform_specific_overrides && typeof source.platform_specific_overrides === "object"
     ? source.platform_specific_overrides
@@ -485,6 +671,22 @@ export function applyCompositeSafeRuntimePolicyDefaults(platform, content = {}) 
   const overrides = source.platform_specific_overrides && typeof source.platform_specific_overrides === "object"
     ? { ...source.platform_specific_overrides }
     : {};
+  if (
+    recoveryContext.prepare_only_current_page
+    || recoveryContext.repair_only_current_page
+    || recoveryContext.prepublish_only_current_page
+    || recoveryContext.verification_only_current_page
+  ) {
+    overrides.clear_draft_context = false;
+  }
+  if (recoveryContext.prepare_only_current_page || recoveryContext.prepublish_only_current_page) {
+    if (overrides.force_publish_page_refresh === undefined) overrides.force_publish_page_refresh = true;
+    if (overrides.verify_media_upload === undefined) overrides.verify_media_upload = true;
+  }
+  if (recoveryContext.prepare_only_current_page) {
+    delete overrides.repair_only_current_page;
+    delete overrides.force_repair_fields;
+  }
   const normalized = { ...source, platform_specific_overrides: overrides };
   const collectionManagement = overrides.collection_management && typeof overrides.collection_management === "object"
     ? overrides.collection_management
@@ -1125,7 +1327,21 @@ export function shouldAllowCompositeFieldPreparation(platform, uploadReadiness =
   const snapshot = readiness.last && typeof readiness.last === "object" ? readiness.last : {};
   if (snapshot.failed || snapshot.uploadPromptOnly) return false;
   if (platform === "douyin") {
-    return Boolean(snapshot.mediaPresent && snapshot.fieldShell);
+    return Boolean(snapshot.mediaPresent && snapshot.fieldShell && snapshot.douyinReadySurface);
+  }
+  if (platform === "youtube") {
+    return Boolean(
+      snapshot.mediaPresent
+      && !snapshot.uploadPromptOnly
+      && (
+        snapshot.fieldShell
+        || snapshot.youtubeEditorSurface
+        || snapshot.youtubeUploadDialogRoute
+      )
+    );
+  }
+  if (snapshot.mediaPresent && snapshot.fieldShell) {
+    return true;
   }
   const processingBlocksFinalPublishOnly = compositePlatformUploadProcessingBlocksFinalPublishOnly(platform);
   return Boolean(
@@ -1166,6 +1382,10 @@ export function shouldWaitForCompositeUploadReadyBeforeFieldPreparation(platform
   return !shouldAllowCompositeFieldPreparation(platform, readiness);
 }
 
+export function compositePostUploadReadinessProbeDelayMs(platform = "") {
+  return normalizePlatform(platform) === "youtube" ? 0 : 16000;
+}
+
 export function shouldDeferGenericPostUploadIntegrityUntilPlatformAdapter(platform) {
   // Dedicated platform workflows should finish their own project steps
   // (for example Bilibili cover/collection/schedule) before generic
@@ -1184,8 +1404,7 @@ export function buildPendingUploadMaterialIntegrity(platform, readiness = {}, ro
   const uploadPromptOnly = Boolean(last.uploadPromptOnly);
   const fileInputCount = Number(last.fileInputCount || 0);
   const pendingReason = String(
-    state.pending_reason
-    || (shouldDeferYouTubeDraftResumeReupload(state) ? "draft_resume_pending" : ""),
+    state.pending_reason,
   ).trim();
   const verificationState = failed ? "error" : ready ? "ready" : "not_ready";
   const verificationReason = pendingReason || (failed
@@ -1237,10 +1456,6 @@ export function buildPendingUploadMaterialIntegrity(platform, readiness = {}, ro
       last_lines: lines,
     },
   };
-}
-
-export function shouldDeferYouTubeDraftResumeReupload(readiness = {}) {
-  return false;
 }
 
 export function normalizeYouTubeDraftResumeHintText(value = "") {
@@ -1347,6 +1562,14 @@ export function buildCompositeUploadPendingProcessingEnvelope({
 }) {
   const normalizedPlatform = String(platform || "").trim();
   const normalizedCode = String(code || `${normalizedPlatform}_pre_publish_upload_pending`).trim();
+  const youtubeFreshUploadOnly = normalizePlatform(normalizedPlatform) === "youtube";
+  const youtubeOverrides = content?.platform_specific_overrides && typeof content.platform_specific_overrides === "object"
+    ? content.platform_specific_overrides
+    : {};
+  const youtubeCurrentFreshUploadResume = youtubeFreshUploadOnly
+    && Boolean(youtubeOverrides.youtube_current_fresh_upload_resume)
+    && String(youtubeOverrides.recovery_mode || "").trim().toLowerCase() === "prepublish_resume"
+    && Boolean(prepareOnlyCurrentPage);
   const normalizedRoute = {
     url: String(route?.url || ""),
     title: String(route?.title || ""),
@@ -1377,22 +1600,34 @@ export function buildCompositeUploadPendingProcessingEnvelope({
       visibleLines: Array.isArray(materialIntegrity?.platform_extras?.relevant_lines)
         ? materialIntegrity.platform_extras.relevant_lines.slice(0, 120)
         : [],
-      clearDraftContext: false,
-      forceRefresh: true,
+      clearDraftContext: youtubeFreshUploadOnly && !youtubeCurrentFreshUploadResume,
+      forceRefresh: !youtubeCurrentFreshUploadResume,
       blockers: [{
         code: normalizedCode,
         message: String(blockerMessage || `预发布等待上传完成：${remaining.join(",") || "upload_ready"}`).trim(),
         details: String(blockerDetails || `post_upload_wait_only=${remaining.join(",") || "upload_ready"}`).trim(),
       }],
-      recoveryOverrides: {
-        recovery_mode: "prepublish_resume",
-        clear_draft_context: false,
-        force_publish_page_refresh: false,
-        verify_media_upload: false,
-        wait_for_publish_confirmation: false,
-        prepublish_only_current_page: Boolean(prepublishOnlyCurrentPage),
-        prepare_only_current_page: Boolean(prepareOnlyCurrentPage),
-      },
+      recoveryOverrides: youtubeFreshUploadOnly
+        ? {
+            recovery_mode: youtubeCurrentFreshUploadResume ? "prepublish_resume" : "fresh_publish",
+            fresh_start_platform_tab: !youtubeCurrentFreshUploadResume,
+            verify_media_upload: true,
+            wait_for_publish_confirmation: true,
+            prepublish_only_current_page: false,
+            prepare_only_current_page: youtubeCurrentFreshUploadResume,
+            clear_draft_context: !youtubeCurrentFreshUploadResume,
+            force_publish_page_refresh: !youtubeCurrentFreshUploadResume,
+            ...(youtubeCurrentFreshUploadResume ? { youtube_current_fresh_upload_resume: true } : {}),
+          }
+        : {
+            recovery_mode: "prepublish_resume",
+            clear_draft_context: false,
+            force_publish_page_refresh: false,
+            verify_media_upload: false,
+            wait_for_publish_confirmation: false,
+            prepublish_only_current_page: Boolean(prepublishOnlyCurrentPage),
+            prepare_only_current_page: Boolean(prepareOnlyCurrentPage),
+          },
     }).recovery,
     interruptions,
   }, content);
@@ -1423,6 +1658,18 @@ export function deriveCompositeUploadReadinessFailureState(platform, readiness =
   }
   if (
     syntheticUploadExpected
+    && String(platform || "").trim() === "youtube"
+    && Boolean(last.youtubeUploadRoute)
+    && Boolean(last.youtubeChannelContentList)
+    && Boolean(last.youtubeDraftResumeAvailable)
+  ) {
+    return {
+      failed: true,
+      reason: "youtube_fresh_upload_left_editor",
+    };
+  }
+  if (
+    syntheticUploadExpected
     && waitedMs >= 15000
     && !last.busy
     && !last.mediaPresent
@@ -1431,6 +1678,21 @@ export function deriveCompositeUploadReadinessFailureState(platform, readiness =
     return {
       failed: true,
       reason: "upload_not_applied",
+    };
+  }
+  if (
+    syntheticUploadExpected
+    && String(platform || "").trim() === "youtube"
+    && waitedMs >= 15000
+    && !last.busy
+    && !last.mediaPresent
+    && Boolean(last.youtubeUploadRoute)
+    && Boolean(last.youtubeChannelContentList)
+    && !Boolean(last.youtubeDraftResumeAvailable)
+  ) {
+    return {
+      failed: true,
+      reason: "youtube_upload_lost_after_file_input",
     };
   }
   if (
@@ -1457,11 +1719,8 @@ export function deriveCompositeUploadReadinessFailureState(platform, readiness =
   };
 }
 
-export function shouldDeferYoutubeDraftResumeReupload(readiness = {}) {
-  return false;
-}
-
 export function deriveCompositeMediaUploadFailureDisposition(platform, upload = {}, options = {}) {
+  const normalizedPlatform = normalizePlatform(platform);
   const failureReason = String(upload?.reason || "").trim();
   const stopBeforeFinalPublish = Boolean(options?.stopBeforeFinalPublish);
   const uploadNotApplied = stopBeforeFinalPublish && ["no_file_input", "no_video_file_input"].includes(failureReason);
@@ -1470,10 +1729,11 @@ export function deriveCompositeMediaUploadFailureDisposition(platform, upload = 
     message: uploadNotApplied
       ? "未能打开可用的视频上传输入面，已保留现场等待后续复核。"
       : "未能将视频素材重新挂载到发布页，已阻断后续填充与发布。",
-    clear_draft_context: uploadNotApplied ? false : true,
+    clear_draft_context: uploadNotApplied ? normalizedPlatform === "youtube" : true,
     force_publish_page_refresh: true,
     recovery_overrides: uploadNotApplied
       ? buildStopBeforeFinalPublishRecoveryOverrides({
+          platform,
           prepublishOnlyCurrentPage: Boolean(options?.prepublishOnlyCurrentPage),
           prepareOnlyCurrentPage: Boolean(options?.prepareOnlyCurrentPage),
         })
@@ -1492,21 +1752,34 @@ export function deriveCompositeMediaUploadFailureDisposition(platform, upload = 
 }
 
 export function deriveCompositeUploadReadinessBlockerDisposition(platform, blocker = {}, options = {}) {
+  const normalizedPlatform = normalizePlatform(platform);
   const failureReason = String(blocker?.pending_reason || "").trim();
   const stopBeforeFinalPublish = Boolean(options?.stopBeforeFinalPublish);
   const blockers = Array.isArray(blocker?.blockers)
     ? blocker.blockers.map((item) => String(item || "").trim()).filter(Boolean)
     : [];
+  const freshUploadPathViolation = normalizedPlatform === "youtube"
+    && (
+      failureReason === "youtube_fresh_upload_left_editor"
+      || failureReason === "fresh_upload_path_must_not_resume_draft"
+    );
   const uploadNotApplied = stopBeforeFinalPublish && failureReason === "draft_resume_inert";
   return {
-    code: uploadNotApplied ? `${platform}_media_upload_failed` : `${platform}_composite_upload_not_ready`,
-    message: uploadNotApplied
+    code: freshUploadPathViolation
+      ? "youtube_fresh_upload_path_violation"
+      : (uploadNotApplied ? `${platform}_media_upload_failed` : `${platform}_composite_upload_not_ready`),
+    message: freshUploadPathViolation
+      ? "YouTube 正式发布偏离新上传编辑器，进入草稿/内容列表，已停止以避免编辑旧草稿。"
+      : uploadNotApplied
       ? "已检测到平台草稿恢复入口未真正推进到上传编辑态，已保留现场等待后续复核。"
       : "复合适配器上传就绪检查失败，已阻止继续发布以避免错误回填草稿。",
-    clear_draft_context: uploadNotApplied ? false : true,
+    clear_draft_context: uploadNotApplied ? normalizedPlatform === "youtube" : true,
     force_publish_page_refresh: true,
-    recovery_overrides: uploadNotApplied
+    recovery_overrides: freshUploadPathViolation
+      ? null
+      : uploadNotApplied
       ? buildStopBeforeFinalPublishRecoveryOverrides({
+          platform,
           prepublishOnlyCurrentPage: Boolean(options?.prepublishOnlyCurrentPage),
           prepareOnlyCurrentPage: Boolean(options?.prepareOnlyCurrentPage),
         })
@@ -2622,7 +2895,7 @@ const PLATFORM_DOMAINS = {
   kuaishou: ["cp.kuaishou.com", "cp.kuaishou.com/article/publish/video"],
   "wechat-channels": ["channels.weixin.qq.com"],
   toutiao: ["mp.toutiao.com/profile_v4/xigua/upload-video", "mp.toutiao.com/profile_v4/xigua/publish-video", "mp.toutiao.com"],
-  youtube: ["studio.youtube.com"],
+  youtube: ["studio.youtube.com", "www.youtube.com", "youtube.com"],
   x: ["x.com", "twitter.com"],
 };
 
@@ -2633,12 +2906,13 @@ const PLATFORM_PUBLISH_ENTRY_URLS = {
   kuaishou: "https://cp.kuaishou.com/article/publish/video",
   "wechat-channels": "https://channels.weixin.qq.com/platform/post/create",
   toutiao: "https://mp.toutiao.com/profile_v4/xigua/upload-video?index=0",
-  youtube: "https://studio.youtube.com/",
+  youtube: "https://www.youtube.com/upload",
   x: "https://twitter.com/compose/tweet",
 };
 
 const PLATFORM_FRESH_ENTRY_URLS = {
   douyin: "https://creator.douyin.com/creator-micro/content/upload",
+  youtube: "https://www.youtube.com/upload",
 };
 
 function currentPageMatchesAuthoritativeFreshEntry(platform, route = {}) {
@@ -2665,9 +2939,54 @@ function currentPageMatchesAuthoritativeFreshEntry(platform, route = {}) {
   return true;
 }
 
-export function currentPageMatchesPrepareOnlyExecutionContext(platform, route = {}, snapshot = {}, mediaPath = "", actions = []) {
-  if (currentPageMatchesAuthoritativeFreshEntry(platform, route)) return true;
+export function currentPageMatchesPrepareOnlyExecutionContext(platform, route = {}, snapshot = {}, mediaPath = "", actions = [], content = {}) {
   const normalizedPlatform = String(platform || "").trim().toLowerCase().replace(/_/g, "-");
+  if (normalizedPlatform === "youtube") {
+    const routeUrl = String(route?.url || snapshot?.url || "").trim();
+    const routeText = String(route?.text || snapshot?.text || snapshot?.bodyText || "")
+      || [
+        ...(Array.isArray(snapshot?.lines) ? snapshot.lines : []),
+        ...(Array.isArray(snapshot?.headings) ? snapshot.headings : []),
+      ].join(" ");
+    const compactText = String(routeText || "").replace(/\s+/g, " ").trim();
+    if (isCompositePublishRouteContext(normalizedPlatform, {
+      url: routeUrl,
+      text: compactText,
+      title: String(route?.title || snapshot?.title || "").trim(),
+      file_inputs: Array.isArray(route?.file_inputs) ? route.file_inputs : [],
+    })) {
+      return true;
+    }
+    const overrides = content && typeof content === "object" ? content.platform_specific_overrides || {} : {};
+    const currentFreshResume = Boolean(overrides?.youtube_current_fresh_upload_resume);
+    if (!currentFreshResume) return false;
+    if (!/studio\.youtube\.com/i.test(routeUrl)) return false;
+    if (!/继续上传|上传已中断|正在上传|取消上传|上传完毕|已上传\s*100%|处理出现延迟|已保存为草稿|编辑草稿|添加说明\s*草稿\s*无\s*编辑草稿|resume upload|upload interrupted|uploading|uploaded\s*100%|processing delayed|saved as draft|edit draft/i.test(compactText)) return false;
+    const compactLower = compactText.toLowerCase();
+    const identityHints = [
+      content?.title,
+      content?.publish_title,
+      content?.youtube_title,
+      overrides?.title,
+      overrides?.publish_title,
+      overrides?.youtube_title,
+      path.win32.basename(String(mediaPath || "")).replace(/\.[^.]+$/, ""),
+    ]
+      .map((value) => String(value || "").replace(/[_\-]+/g, " ").replace(/\s+/g, " ").trim())
+      .filter(Boolean);
+    const identityMatched = identityHints.some((hint) => {
+      const normalizedHint = hint.toLowerCase();
+      if (normalizedHint.length >= 8 && compactLower.includes(normalizedHint)) return true;
+      const tokens = normalizedHint
+        .split(/[^a-z0-9\u4e00-\u9fff]+/i)
+        .map((item) => item.trim())
+        .filter((item) => item.length >= 3);
+      if (tokens.length < 2) return false;
+      return tokens.filter((token) => compactLower.includes(token.toLowerCase())).length >= Math.min(3, tokens.length);
+    });
+    return Boolean(identityMatched);
+  }
+  if (currentPageMatchesAuthoritativeFreshEntry(platform, route)) return true;
   if (normalizedPlatform !== "douyin") return false;
   const routeUrl = String(route?.url || snapshot?.url || "").trim().toLowerCase();
   if (!/creator\.douyin\.com\/creator-micro\/content\/post\/video/i.test(routeUrl)) return false;
@@ -2752,9 +3071,11 @@ export function isCompositePublishRouteContext(platform, route = {}) {
   if (normalizedPlatform === "youtube") {
     const youtubeEditorUrlReady = /studio\.youtube\.com\/video\/[A-Za-z0-9_-]+\/edit/i.test(url);
     const youtubeUploadUrlReady = /studio\.youtube\.com\/channel\/[^/?#]+\/(?:videos\/)?upload/i.test(url);
+    const youtubeNativeUploadUrlReady = /(?:^|\/\/)(?:www\.)?youtube\.com\/upload\b/i.test(url);
     const youtubeUploadResumeRoute = hasYoutubeUploadResumeVideoId(url);
     const youtubeUploadDialogRoute = hasYoutubeUploadDialogQuery(url);
-    const youtubeChannelContentList = /频道内容|每页行数|发布日期|第\s*\d+\s*-\s*\d+\s*条|观看次数|评论数/.test(text);
+    const youtubeUploadPromptTextSurface = /Select files|选择文件|将要上传的视频文件拖放到此处|拖放视频文件即可上传|Drag and drop video files/i.test(text);
+    const youtubeChannelContentList = /频道内容|Channel content|每页行数|Rows per page|发布日期|Date|第\s*\d+\s*-\s*\d+\s*条|观看次数|Views|评论数|Comments|编辑草稿|Edit draft|草稿|Draft/i.test(text);
     const videoCapableFileInputCount = fileInputs.filter((input) => /video|mp4/i.test(String(input?.accept || ""))).length;
     const youtubeEditorSurfaceReady =
       (/视频详细信息|Video details/i.test(text) && /标题（必填）|说明|缩略图|播放列表|观众|视频链接/.test(text))
@@ -2769,13 +3090,18 @@ export function isCompositePublishRouteContext(platform, route = {}) {
     const youtubeUploadSurfaceReady = shouldTreatYouTubeUploadSurfaceAsStable({
       uploadResumeRoute: youtubeUploadResumeRoute,
       channelContentList: youtubeChannelContentList,
-      uploadDialogSurface: youtubeUploadDialogRoute
-        || /上传视频|Upload videos|Select files|选择文件|将要上传的视频文件拖放到此处/.test(text),
+      uploadDialogSurface: youtubeNativeUploadUrlReady
+        || (youtubeUploadDialogRoute && youtubeUploadPromptTextSurface)
+        || youtubeUploadPromptTextSurface,
+      uploadPromptTextSurface: youtubeUploadPromptTextSurface,
       visibleFileInputCount: fileInputs.length,
       videoCapableFileInputCount,
     });
     if (/糟糕，出了点问题|something went wrong/i.test(text)) return false;
-    return youtubeEditorUrlReady || (youtubeUploadUrlReady && youtubeUploadSurfaceReady) || youtubeEditorSurfaceReady;
+    return youtubeEditorUrlReady
+      || (youtubeUploadUrlReady && youtubeUploadSurfaceReady)
+      || (youtubeNativeUploadUrlReady && youtubeUploadSurfaceReady)
+      || youtubeEditorSurfaceReady;
   }
   return /upload|publish|compose|post|studio|creator/.test(lowerUrl);
 }
@@ -2824,7 +3150,7 @@ function _coerceRecoveryTimeoutMs(value, fallback = 0) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   const minMs = 15000;
-  const maxMs = 180000;
+  const maxMs = 4 * 60 * 60 * 1000;
   return Math.max(minMs, Math.min(maxMs, Math.floor(parsed)));
 }
 
@@ -2916,9 +3242,17 @@ function _extract_publication_recovery_context(value) {
       mergedOverrides.wait_for_publish_confirmation,
       ["draft_reset", "content_plan", "auto_recover"].includes(mode),
     ),
+    youtube_current_fresh_upload_resume: _coerceRecoveryBool(
+      mergedOverrides.youtube_current_fresh_upload_resume,
+      false,
+    ),
     capture_response_timeout_ms: _coerceRecoveryTimeoutMs(
       mergedOverrides.capture_response_timeout_ms,
       _coerceRecoveryTimeoutMs(recoveryPlan.capture_response_timeout_ms, 65000),
+    ),
+    platform_tab_resolution_timeout_ms: _coerceRecoveryTimeoutMs(
+      mergedOverrides.platform_tab_resolution_timeout_ms,
+      _coerceRecoveryTimeoutMs(recoveryPlan.platform_tab_resolution_timeout_ms, 0),
     ),
     recovery_mode: mode,
     next_platform_specific_overrides: nextPlatformOverrides,
@@ -2973,6 +3307,7 @@ export function buildPreparationBootstrapRecoveryOverrides(preparationPolicy = {
     fresh_start_platform_tab: Boolean(policy.freshStartPlatformTab),
     verify_media_upload: recoveryContext.verify_media_upload,
     wait_for_publish_confirmation: recoveryContext.wait_for_publish_confirmation,
+    youtube_current_fresh_upload_resume: recoveryContext.youtube_current_fresh_upload_resume,
     force_publish_page_refresh: Boolean(policy.forcePublishPageRefresh),
     clear_draft_context: false,
   };
@@ -3187,6 +3522,10 @@ export function schedulePublicationTaskReconcileCallback(taskLike, options = {})
 export function derivePublicationTaskExecutionTimeoutMs(taskLike) {
   const task = taskLike && typeof taskLike === "object" ? taskLike : {};
   const content = task.content && typeof task.content === "object" ? task.content : {};
+  const platform = normalizePlatform(task.platform || content.platform || "");
+  const taskTimeoutCeiling = platform === "youtube"
+    ? Math.max(PUBLICATION_TASK_TIMEOUT_MS, compositeUploadTimeoutMs(platform) + 900000)
+    : PUBLICATION_TASK_TIMEOUT_MS;
   const taskRecoveryContext = task.recovery_context && typeof task.recovery_context === "object"
     ? task.recovery_context
     : null;
@@ -3204,17 +3543,26 @@ export function derivePublicationTaskExecutionTimeoutMs(taskLike) {
     ),
   );
   if (explicitTimeout > 0) {
-    return Math.max(60000, Math.min(PUBLICATION_TASK_TIMEOUT_MS, explicitTimeout));
+    return Math.max(60000, Math.min(taskTimeoutCeiling, explicitTimeout));
   }
-  const platform = normalizePlatform(task.platform || content.platform || "");
   const captureTimeout = _coerceRecoveryTimeoutMs(recoveryContext.capture_response_timeout_ms, 0);
   if (captureTimeout > 0) {
     const uploadTimeout = compositeUploadReadinessTimeoutMs(platform, captureTimeout);
     // Publish-confirmation flows include upload/fill/final-click work before the receipt wait starts.
     // A 60s fixed allowance is too tight for real creator pages like Douyin/Xiaohongshu.
-    return Math.max(150000, Math.min(PUBLICATION_TASK_TIMEOUT_MS, uploadTimeout + 120000));
+    return Math.max(150000, Math.min(taskTimeoutCeiling, uploadTimeout + 120000));
   }
+  if (platform === "youtube") return taskTimeoutCeiling;
   return Math.max(60000, PUBLICATION_TASK_TIMEOUT_MS);
+}
+
+export function publicationTabResolutionTimeoutMs(platform = "", content = {}) {
+  const normalizedPlatform = normalizePlatform(platform);
+  const recoveryContext = _extract_publication_recovery_context(content);
+  const explicitTimeout = _coerceRecoveryTimeoutMs(recoveryContext.platform_tab_resolution_timeout_ms, 0);
+  if (explicitTimeout > 0) return explicitTimeout;
+  if (normalizedPlatform === "youtube") return 90000;
+  return 15000;
 }
 
 export function shouldBlockOnMediaUploadFailure(upload) {
@@ -3326,6 +3674,8 @@ export function _build_publication_recovery_hint({
   duplicateMarker,
   blockers = [],
   recoveryOverrides = {},
+  visualEvidence = null,
+  visualEvidencePack = null,
 }) {
   const rawRecoveryOverrides = recoveryOverrides && typeof recoveryOverrides === "object"
     ? recoveryOverrides
@@ -3343,6 +3693,7 @@ export function _build_publication_recovery_hint({
     "fresh_start_platform_tab",
     "verify_media_upload",
     "wait_for_publish_confirmation",
+    "youtube_current_fresh_upload_resume",
   ]) {
     if (key in rawRecoveryOverrides) {
       recoveryHintOverrides[key] = Boolean(rawRecoveryOverrides[key]);
@@ -3360,6 +3711,10 @@ export function _build_publication_recovery_hint({
       .filter(Boolean),
     duplicate_marker: duplicateMarker ? String(duplicateMarker).trim() : "",
   };
+  const normalizedVisualEvidence = normalizeVisualEvidence(visualEvidence);
+  const normalizedVisualEvidencePack = normalizeVisualEvidencePack(visualEvidencePack);
+  if (normalizedVisualEvidence) normalizedEvidence.visual_evidence = normalizedVisualEvidence;
+  if (normalizedVisualEvidencePack) normalizedEvidence.visual_evidence_pack = normalizedVisualEvidencePack;
   const normalizedTargetPlatformOverrides = targetPlatformSpecificOverrides && typeof targetPlatformSpecificOverrides === "object"
     ? targetPlatformSpecificOverrides
     : {};
@@ -3544,8 +3899,6 @@ function buildCompositeUploadReadinessBlockerAction(platform, uploadReadiness = 
 
 export function shouldTreatCompositeUploadReadinessBlockerAsPending(blocker = {}) {
   if (!blocker || typeof blocker !== "object") return false;
-  const pendingReason = String(blocker.pending_reason || "").trim();
-  if (pendingReason === "draft_resume_pending") return true;
   const blockers = Array.isArray(blocker.blockers)
     ? blocker.blockers.map((item) => String(item || "").trim()).filter(Boolean)
     : [];
@@ -3792,6 +4145,17 @@ export function bridgeTargetDescriptor(options = {}) {
   };
 }
 
+export function isRecoverableBridgeHealthError(errorMessage = "") {
+  const normalized = String(errorMessage || "").trim();
+  if (!normalized) return false;
+  return (
+    normalized === "chrome_extension_bridge_unavailable" ||
+    /bridge list_tabs timed out/i.test(normalized) ||
+    /list_tabs timed out after \d+ms/i.test(normalized) ||
+    /bridge_command_timeout:list_tabs/i.test(normalized)
+  );
+}
+
 async function waitForBridgeCommand(clientId) {
   const targetClientId = selectBridgeClientId(clientId);
   if (!targetClientId) return null;
@@ -3954,6 +4318,7 @@ async function resolvePlatformTab(platform, options = {}) {
     : "";
   const isReusableFreshStartTab = (candidate) => {
     if (!candidate || !explicitFreshStartPlatformTab) return false;
+    if (normalized === "youtube") return false;
     return currentPageMatchesAuthoritativeFreshEntry(normalized, {
       url: String(candidate?.url || "").trim(),
       text: "",
@@ -4016,6 +4381,16 @@ async function resolvePlatformTab(platform, options = {}) {
         });
         tab = existingFreshCandidate;
       }
+    }
+    if (tab && !isReusableFreshStartTab(tab)) {
+      actions.push({
+        kind: "platform_tab_fresh_start_reject_existing",
+        platform: normalized,
+        tab_id: String(tab?.id || "").trim(),
+        tab_url: String(tab?.url || "").trim(),
+        reason: "fresh_start_requires_authoritative_entry",
+      });
+      tab = null;
     }
   }
 
@@ -4222,6 +4597,11 @@ export function derivePlatformTabSelectionPolicy(platform, recoveryContext = {})
   const normalizedPlatform = normalizePlatform(platform);
   const context = recoveryContext && typeof recoveryContext === "object" ? recoveryContext : {};
   const recoveryMode = _normalize_recovery_mode(context.recovery_mode);
+  const youtubeCurrentFreshUploadResume = Boolean(
+    normalizedPlatform === "youtube"
+    && context.youtube_current_fresh_upload_resume
+    && recoveryMode === "prepublish_resume"
+  );
   const linearCurrentPageMode = Boolean(
     context.verification_only_current_page
     || context.repair_only_current_page
@@ -4234,8 +4614,10 @@ export function derivePlatformTabSelectionPolicy(platform, recoveryContext = {})
     && recoveryMode === "receipt_rebind"
   );
   const freshStartPlatformTab = Boolean(
-    context.fresh_start_platform_tab
+    !youtubeCurrentFreshUploadResume
+    && (context.fresh_start_platform_tab
     || (linearCurrentPageMode && !receiptRebindCurrentPageMode)
+    )
   );
   const lockActiveTab = Boolean(!freshStartPlatformTab && linearCurrentPageMode);
   const stopBeforeFinalPublish = Boolean(
@@ -4493,8 +4875,16 @@ export function extractYouTubeStudioChannelId(url = "") {
 }
 
 export function buildYouTubeStudioUploadEntryUrl(channelId = "") {
+  return buildYouTubeFreshUploadEntryUrl();
+}
+
+export function buildYouTubeFreshUploadEntryUrl() {
+  return String(PLATFORM_FRESH_ENTRY_URLS.youtube || PLATFORM_PUBLISH_ENTRY_URLS.youtube || "https://www.youtube.com/upload").trim();
+}
+
+export function buildYouTubeLegacyStudioUploadEntryUrl(channelId = "") {
   const normalized = String(channelId || "").trim();
-  if (!normalized) return String(PLATFORM_PUBLISH_ENTRY_URLS.youtube || "").trim();
+  if (!normalized) return "https://studio.youtube.com/";
   return `https://studio.youtube.com/channel/${normalized}/videos/upload`;
 }
 
@@ -4513,6 +4903,9 @@ export function resolvePlatformPublishEntryUrl(platform, tabs = [], options = {}
   const validChannelId = youtubeTabs
     .map((tab) => extractYouTubeStudioChannelId(tab?.url || ""))
     .find((channelId) => channelId.length >= 6);
+  if (options?.prefer_draft_list_surface && validChannelId) {
+    return buildYouTubeStudioContentListUrl(validChannelId);
+  }
   return buildYouTubeStudioUploadEntryUrl(validChannelId);
 }
 
@@ -4712,6 +5105,111 @@ function formatRuntimeException(exceptionDetails, expression = "") {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function dispatchMouseClick(client, x, y) {
+  const clickX = Number(x);
+  const clickY = Number(y);
+  if (!Number.isFinite(clickX) || !Number.isFinite(clickY)) {
+    return { clicked: false, reason: "invalid_click_coordinates" };
+  }
+  await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: clickX, y: clickY, button: "none" }).catch(() => {});
+  await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: clickX, y: clickY, button: "left", clickCount: 1 }).catch(() => {});
+  await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: clickX, y: clickY, button: "left", clickCount: 1 }).catch(() => {});
+  return { clicked: true, x: clickX, y: clickY };
+}
+
+async function dispatchKeyboardChord(client, key, {
+  code = key,
+  windowsVirtualKeyCode = 0,
+  control = false,
+} = {}) {
+  const modifiers = control ? 2 : 0;
+  if (control) {
+    await client.send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key: "Control",
+      code: "ControlLeft",
+      windowsVirtualKeyCode: 17,
+      modifiers,
+    }).catch(() => {});
+  }
+  await client.send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key,
+    code,
+    windowsVirtualKeyCode,
+    modifiers,
+  }).catch(() => {});
+  await client.send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key,
+    code,
+    windowsVirtualKeyCode,
+    modifiers,
+  }).catch(() => {});
+  if (control) {
+    await client.send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key: "Control",
+      code: "ControlLeft",
+      windowsVirtualKeyCode: 17,
+      modifiers: 0,
+    }).catch(() => {});
+  }
+  return { pressed: true, key, control };
+}
+
+async function dispatchNativeTextReplacement(client, target, value) {
+  const targetX = Number(target?.x || 0);
+  const targetY = Number(target?.y || 0);
+  if (!Number.isFinite(targetX) || !Number.isFinite(targetY) || targetX <= 0 || targetY <= 0) {
+    return { filled: false, reason: "invalid_target_coordinates" };
+  }
+  await dispatchMouseClick(client, targetX, targetY);
+  await sleep(180);
+  await dispatchKeyboardChord(client, "a", { code: "KeyA", windowsVirtualKeyCode: 65, control: true });
+  await sleep(80);
+  await client.send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "Backspace",
+    code: "Backspace",
+    windowsVirtualKeyCode: 8,
+  }).catch(() => {});
+  await client.send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: "Backspace",
+    code: "Backspace",
+    windowsVirtualKeyCode: 8,
+  }).catch(() => {});
+  await sleep(120);
+  await client.send("Input.insertText", { text: String(value || "") }).catch(async () => {
+    await client.send("Input.dispatchKeyEvent", {
+      type: "char",
+      text: String(value || ""),
+      unmodifiedText: String(value || ""),
+    }).catch(() => {});
+  });
+  await sleep(180);
+  await client.send("Input.dispatchKeyEvent", {
+    type: "keyDown",
+    key: "Tab",
+    code: "Tab",
+    windowsVirtualKeyCode: 9,
+  }).catch(() => {});
+  await client.send("Input.dispatchKeyEvent", {
+    type: "keyUp",
+    key: "Tab",
+    code: "Tab",
+    windowsVirtualKeyCode: 9,
+  }).catch(() => {});
+  return { filled: true, x: targetX, y: targetY };
+}
+
+function isNativeInputTargetClickable(target) {
+  const targetX = Number(target?.x || 0);
+  const targetY = Number(target?.y || 0);
+  return Number.isFinite(targetX) && Number.isFinite(targetY) && targetX > 0 && targetY > 0;
 }
 
 class AsyncStepTimeoutError extends Error {
@@ -4947,18 +5445,27 @@ const PAGE_SNAPSHOT_EXPRESSION = `(() => {
   const elements = queryAll("button,input,textarea,select,label,[role=button],[role=checkbox],[role=switch],[role=combobox],[role=option],[role=menuitem],[aria-label],[class*=select],[class*=dropdown],[class*=option],[class*=menu],[class*=collection],[class*=playlist]")
     .filter(visible)
     .slice(0, 1200)
-    .map((el) => ({
-      tag: el.tagName.toLowerCase(),
-      role: el.getAttribute("role") || "",
-      className: clean(typeof el.className === "string" ? el.className : ""),
-      type: el.getAttribute("type") || "",
-      text: clean(el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.getAttribute("title")),
-      ariaLabel: clean(el.getAttribute("aria-label")),
-      placeholder: clean(el.getAttribute("placeholder")),
-      checked: Boolean(el.checked || el.getAttribute("aria-checked") === "true"),
-      disabled: Boolean(el.disabled || el.getAttribute("aria-disabled") === "true"),
-      options: el.tagName.toLowerCase() === "select" ? [...el.options].map((option) => clean(option.textContent)).filter(Boolean) : [],
-    }));
+    .map((el) => {
+      const rect = el.getBoundingClientRect();
+      return {
+        tag: el.tagName.toLowerCase(),
+        role: el.getAttribute("role") || "",
+        className: clean(typeof el.className === "string" ? el.className : ""),
+        type: el.getAttribute("type") || "",
+        bbox: {
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        },
+        text: clean(el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("placeholder") || el.getAttribute("title")),
+        ariaLabel: clean(el.getAttribute("aria-label")),
+        placeholder: clean(el.getAttribute("placeholder")),
+        checked: Boolean(el.checked || el.getAttribute("aria-checked") === "true"),
+        disabled: Boolean(el.disabled || el.getAttribute("aria-disabled") === "true"),
+        options: el.tagName.toLowerCase() === "select" ? [...el.options].map((option) => clean(option.textContent)).filter(Boolean) : [],
+      };
+    });
   const overlayTexts = queryAll("[role=dialog],[aria-modal=true],[role=listbox],[role=menu],[class*=modal i],[class*=dialog i],[class*=popover i],[class*=dropdown i],[class*=select i],[class*=menu i],[class*=overlay i],[class*=drawer i]")
     .filter(visible)
     .slice(0, 80)
@@ -5249,23 +5756,14 @@ async function ensurePlatformPublishRoute(client, tab, platform, options = {}) {
   if (forcePublishRefresh && entryUrl) {
     if (platform === "youtube") {
       const currentBootstrapUrl = String(current?.url || currentUrl || "").trim();
-      const currentIsYouTubeUploadRoute = /studio\.youtube\.com\/channel\/[^/?#]+\/(?:videos\/)?upload\b/i.test(currentBootstrapUrl);
-      if (
-        shouldPreserveYouTubeUploadResumeRouteForBootstrap(current?.url || currentUrl, currentText)
-        || shouldPreserveYouTubeEditorRouteForBootstrap(current?.url || currentUrl, currentText)
-      ) {
-        return {
-          navigated: false,
-          from: currentUrl,
-          to: current?.url || currentUrl,
-          url: current?.url || currentUrl,
-          title: String(current?.title || tab?.title || ""),
-          verified: true,
-          reason: "youtube_preserve_upload_resume_route",
-        };
-      }
+      const currentIsYouTubeUploadRoute = isPlatformPublishRouteBootstrapReady("youtube", {
+        url: currentBootstrapUrl,
+        title: String(current?.title || tab?.title || ""),
+        text: currentText,
+        file_inputs: Array.isArray(current?.fileInputs) ? current.fileInputs : [],
+      });
       if (!currentIsYouTubeUploadRoute) {
-        return navigateExistingTabToUrl(tab, entryUrl, {
+        const routeRefresh = await navigateExistingTabToUrl(tab, entryUrl, {
           client,
           timeout_ms: 18000,
           reason: "forced_publish_page_refresh",
@@ -5273,6 +5771,24 @@ async function ensurePlatformPublishRoute(client, tab, platform, options = {}) {
           verify: verifyRouteBootstrapSnapshot,
           snapshot_fn: (activeClient) => routeBootstrapSnapshot(activeClient).catch(() => null),
         });
+        if (routeRefresh?.verified) return routeRefresh;
+        const createFlow = await forceYouTubeCreateUploadFlow(client).catch(() => ({ clicked: false, actions: [], state: null }));
+        const createFlowUsable = createFlow.clicked && isYouTubeCreateFlowStateUsable(createFlow.state);
+        return {
+          ...routeRefresh,
+          navigated: true,
+          from: currentUrl,
+          to: createFlow.state?.url || routeRefresh?.url || entryUrl,
+          url: createFlow.state?.url || routeRefresh?.url || entryUrl,
+          title: String(createFlow.state?.title || routeRefresh?.title || tab?.title || ""),
+          verified: createFlowUsable,
+          reason: createFlowUsable ? "youtube_create_upload_flow_after_route" : "youtube_fresh_upload_entry_not_open",
+          actions: [
+            ...(Array.isArray(routeRefresh?.actions) ? routeRefresh.actions : []),
+            ...(Array.isArray(createFlow.actions) ? createFlow.actions : []),
+          ],
+          create_flow_state: createFlow.state || null,
+        };
       }
       const createFlow = await forceYouTubeCreateUploadFlow(client).catch(() => ({ clicked: false, actions: [], state: null }));
       if (createFlow.clicked && isYouTubeCreateFlowStateUsable(createFlow.state)) {
@@ -5287,7 +5803,7 @@ async function ensurePlatformPublishRoute(client, tab, platform, options = {}) {
           actions: createFlow.actions,
         };
       }
-      return navigateExistingTabToUrl(tab, entryUrl, {
+      const routeRefresh = await navigateExistingTabToUrl(tab, entryUrl, {
         client,
         timeout_ms: 18000,
         reason: "forced_publish_page_refresh",
@@ -5295,6 +5811,24 @@ async function ensurePlatformPublishRoute(client, tab, platform, options = {}) {
         verify: verifyRouteBootstrapSnapshot,
         snapshot_fn: (activeClient) => routeBootstrapSnapshot(activeClient).catch(() => null),
       });
+      if (routeRefresh?.verified) return routeRefresh;
+      const routeCreateFlow = await forceYouTubeCreateUploadFlow(client).catch(() => ({ clicked: false, actions: [], state: null }));
+      const routeCreateFlowUsable = routeCreateFlow.clicked && isYouTubeCreateFlowStateUsable(routeCreateFlow.state);
+      return {
+        ...routeRefresh,
+        navigated: true,
+        to: routeCreateFlow.state?.url || routeRefresh?.url || entryUrl,
+        url: routeCreateFlow.state?.url || routeRefresh?.url || entryUrl,
+        title: String(routeCreateFlow.state?.title || routeRefresh?.title || tab?.title || ""),
+        verified: routeCreateFlowUsable,
+        reason: routeCreateFlowUsable ? "youtube_create_upload_flow_after_route" : "youtube_fresh_upload_entry_not_open",
+        actions: [
+          ...(Array.isArray(createFlow.actions) ? createFlow.actions : []),
+          ...(Array.isArray(routeRefresh?.actions) ? routeRefresh.actions : []),
+          ...(Array.isArray(routeCreateFlow.actions) ? routeCreateFlow.actions : []),
+        ],
+        create_flow_state: routeCreateFlow.state || createFlow.state || null,
+      };
     }
     return navigateClientToUrlWithDialogHandling(client, currentUrl, freshEntryUrl, {
       timeout_ms: 18000,
@@ -5319,13 +5853,31 @@ async function ensurePlatformPublishRoute(client, tab, platform, options = {}) {
       const currentBootstrapUrl = String(current?.url || currentUrl || "").trim();
       const currentIsYouTubeUploadRoute = /studio\.youtube\.com\/channel\/[^/?#]+\/(?:videos\/)?upload\b/i.test(currentBootstrapUrl);
       if (!currentIsYouTubeUploadRoute) {
-        return navigateClientToUrlWithDialogHandling(client, current?.url || currentUrl, entryUrl, {
+        const routeRefresh = await navigateClientToUrlWithDialogHandling(client, current?.url || currentUrl, entryUrl, {
           timeout_ms: 18000,
           reason: "generic_publish_route_bootstrap",
           javascript_dialog_policy: "navigation_route_switch",
           verify: verifyRouteBootstrapSnapshot,
           snapshot_fn: (activeClient) => routeBootstrapSnapshot(activeClient).catch(() => null),
         });
+        if (routeRefresh?.verified) return routeRefresh;
+        const createFlow = await forceYouTubeCreateUploadFlow(client).catch(() => ({ clicked: false, actions: [], state: null }));
+        const createFlowUsable = createFlow.clicked && isYouTubeCreateFlowStateUsable(createFlow.state);
+        return {
+          ...routeRefresh,
+          navigated: true,
+          from: current?.url || currentUrl,
+          to: createFlow.state?.url || routeRefresh?.url || entryUrl,
+          url: createFlow.state?.url || routeRefresh?.url || entryUrl,
+          title: String(createFlow.state?.title || routeRefresh?.title || tab?.title || ""),
+          verified: createFlowUsable,
+          reason: createFlowUsable ? "youtube_create_upload_flow_after_route" : "youtube_fresh_upload_entry_not_open",
+          actions: [
+            ...(Array.isArray(routeRefresh?.actions) ? routeRefresh.actions : []),
+            ...(Array.isArray(createFlow.actions) ? createFlow.actions : []),
+          ],
+          create_flow_state: createFlow.state || null,
+        };
       }
       const createFlow = await forceYouTubeCreateUploadFlow(client).catch(() => ({ clicked: false, actions: [], state: null }));
       if (createFlow.clicked && isYouTubeCreateFlowStateUsable(createFlow.state)) {
@@ -6103,12 +6655,19 @@ async function dismissInterruptions(client, tab, platform, stage = "unspecified"
     const pageText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
     const youtubeUploadEntryOverlayPresent =
       platform === "youtube"
-      && /before_file_upload|after_upload_button|before_expand_|after_expand_/i.test(stage)
+      && /before_file_upload|after_upload_button|after_file_upload|post_upload|upload_in_progress|before_expand_|after_expand_|before_api_inventory/i.test(stage)
       && overlayTexts.some((text) => /上传视频|Upload videos|Select files|选择文件|将要上传的视频文件拖放到此处|Drag and drop video files to upload/i.test(text));
     const youtubeUploadProgressPresent =
       platform === "youtube"
-      && /after_file_upload|before_expand_|after_expand_|before_api_inventory/i.test(stage)
-      && /正在上传第\s*\d+\s*个|剩余时间[:：]|已上传\s*\d+%|Uploading|Remaining time/i.test(pageText);
+      && /after_file_upload|post_upload|upload_in_progress|before_expand_|after_expand_|before_api_inventory/i.test(stage)
+      && /正在上传第\s*\d+\s*个|剩余时间[:：]|已上传\s*\d+%|Uploading|Remaining time|正在创建链接|正在上传视频|处理出现延迟|取消上传/i.test(pageText);
+    const youtubeUploadEditorOrCancelDialogPresent =
+      platform === "youtube"
+      && /post_upload|upload_in_progress|after_file_upload|before_expand_|after_expand_|before_api_inventory/i.test(stage)
+      && (
+        /详细信息|视频元素|检查|公开范围|视频链接|保存或发布/i.test(pageText)
+        || overlayTexts.some((text) => /取消上传|你添加到视频的任何详情都会被删除|Cancel upload|Any details you added/i.test(text))
+      );
     const labelOf = (el) => clean(el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("title") || el.getAttribute("alt") || el.getAttribute("placeholder"));
     const classOf = (el) => clean(el.className && typeof el.className === "string" ? el.className : "");
     const looksLikeCloseIcon = (el, label) => {
@@ -6147,13 +6706,15 @@ async function dismissInterruptions(client, tab, platform, stage = "unspecified"
         return leftClose - rightClose || left.area - right.area;
       });
     const clicked = [];
-    if (youtubeUploadEntryOverlayPresent || youtubeUploadProgressPresent) {
+    if (youtubeUploadEntryOverlayPresent || youtubeUploadProgressPresent || youtubeUploadEditorOrCancelDialogPresent) {
       return {
         clicked,
         skipped: true,
         reason: youtubeUploadEntryOverlayPresent
           ? "youtube_upload_entry_overlay_preserved"
-          : "youtube_upload_progress_preserved",
+          : youtubeUploadProgressPresent
+            ? "youtube_upload_progress_preserved"
+            : "youtube_upload_editor_dialog_preserved",
       };
     }
     const onboardingChosen = (${selectOnboardingGuideDismissCandidate.toString()})(candidates, overlayTexts);
@@ -6566,7 +7127,7 @@ export function canReuseCurrentPageMediaForPrepublish(platform, snapshot = {}, m
     return { reusable: false, media_attached: false, reason: "upload_failed" };
   }
   if (platform === "youtube" && shouldPreserveYouTubeUploadResumeRoute(String(snapshot?.url || ""), text)) {
-    return { reusable: false, media_attached: false, reason: "youtube_resume_surface_requires_fresh_task" };
+    return { reusable: false, media_attached: true, reason: "youtube_upload_resume_surface_ignored_fresh_publish" };
   }
   if (
     platform === "youtube"
@@ -6619,6 +7180,9 @@ export function canReuseCurrentPageMediaForPrepublish(platform, snapshot = {}, m
     }
   }
   if (matchedMediaPath) {
+    if (platform === "youtube") {
+      return { reusable: false, media_attached: true, reason: "youtube_current_page_media_ignored_fresh_publish" };
+    }
     return { reusable: true, media_attached: true, reason: "media_path_match" };
   }
   if (signals.upload_prompt_only) {
@@ -6950,6 +7514,213 @@ export function selectYouTubeDraftResumeCandidate(candidates = [], titleHint = "
   };
 }
 
+export function selectYouTubeFreshUploadContinuationCandidate(surface = {}, content = {}, actions = []) {
+  const actionList = Array.isArray(actions) ? actions : [];
+  const uploadStartedInCurrentRun = actionList.some((action) => {
+    const kind = String(action?.kind || "").trim();
+    const reason = String(action?.reason || "").trim();
+    return kind === "media_upload"
+      && Boolean(action?.uploaded)
+      && !Boolean(action?.skipped)
+      && !/already_present|reuse|current_page/i.test(reason);
+  });
+  if (!uploadStartedInCurrentRun) {
+    return {
+      allowed: false,
+      reason: "missing_current_run_media_upload",
+    };
+  }
+  const href = String(surface?.href || surface?.current || surface?.url || "").trim();
+  const bodyText = String(surface?.bodyText || surface?.text || "").replace(/\s+/g, " ").trim();
+  const channelContentList = Boolean(surface?.channelContentList)
+    || /频道内容|每页行数|第\s*\d+\s*-\s*\d+\s*条|添加说明|编辑草稿|草稿|发布日期/.test(bodyText);
+  if (!channelContentList) {
+    return {
+      allowed: false,
+      reason: "not_youtube_content_list_after_upload",
+      href,
+    };
+  }
+  const mediaHints = [
+    ...(Array.isArray(content?.media_items) ? content.media_items : []).flatMap((item) => [
+      item?.local_path,
+      item?.path,
+      item?.url,
+    ]),
+    ...(Array.isArray(content?.media_urls) ? content.media_urls : []),
+  ]
+    .map((value) => path.win32.basename(String(value || "").trim()).replace(/\.[^.]+$/, ""))
+    .map((value) => value.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const titleHints = [
+    content?.title,
+    content?.publish_title,
+    content?.youtube_title,
+    content?.platform_specific_overrides?.title,
+    content?.platform_specific_overrides?.youtube_title,
+    content?.platform_specific_overrides?.publish_title,
+    ...mediaHints,
+  ]
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  if (!titleHints.length) {
+    return {
+      allowed: false,
+      reason: "missing_title_hint",
+      href,
+    };
+  }
+  const draftRows = Array.isArray(surface?.draftRows) ? surface.draftRows : [];
+  const selectedDraft = selectYouTubeDraftResumeCandidate(draftRows, titleHints);
+  const selectedText = String(selectedDraft?.text || "").trim();
+  const titleMatched = selectedText && matchesYouTubeDraftResumeHint(selectedText, titleHints);
+  const currentFreshUploadResume = Boolean(content?.platform_specific_overrides?.youtube_current_fresh_upload_resume);
+  const activeUploadRow = /正在上传|上传完毕|已上传\s*\d+%|剩余时间|取消上传|Uploading|Uploaded\s*\d+%|Remaining time|Cancel upload/i.test(selectedText);
+  const completedCurrentUploadRow = currentFreshUploadResume
+    && /添加说明|编辑草稿|草稿|Add description|Edit draft|Draft/i.test(selectedText);
+  const videoId = String(
+    selectedDraft?.videoId
+    || extractYouTubeDraftVideoId(selectedDraft?.watchHref || "", selectedDraft?.titleHref || ""),
+  ).trim();
+  if (!titleMatched || !videoId) {
+    if (titleMatched && (activeUploadRow || completedCurrentUploadRow) && !videoId) {
+      return {
+        allowed: true,
+        reason: activeUploadRow ? "current_fresh_upload_row_active_click_required" : "current_fresh_upload_row_completed_click_required",
+        click_required: true,
+        href,
+        title_hints: titleHints.slice(0, 4),
+        selected_text: selectedText,
+        video_id: "",
+      };
+    }
+    if (titleMatched && !videoId) {
+      return {
+        allowed: false,
+        reason: "fresh_upload_path_must_not_resume_draft",
+        blocked: true,
+        click_required: false,
+        href,
+        title_hints: titleHints.slice(0, 4),
+        selected_text: selectedText,
+        video_id: "",
+      };
+    }
+    return {
+      allowed: false,
+      reason: !titleMatched ? "draft_title_not_bound_to_current_content" : "draft_video_id_missing",
+      href,
+      title_hints: titleHints.slice(0, 4),
+      selected_text: selectedText,
+      video_id: videoId,
+    };
+  }
+  if (activeUploadRow || completedCurrentUploadRow) {
+    return {
+      allowed: true,
+      blocked: false,
+      reason: activeUploadRow ? "current_fresh_upload_row_active" : "current_fresh_upload_row_completed",
+      href,
+      video_id: videoId,
+      watch_href: String(selectedDraft?.watchHref || "").trim(),
+      title_href: String(selectedDraft?.titleHref || "").trim(),
+      selected_text: selectedText,
+      editor_url: buildYouTubeStudioEditorUrl(videoId),
+      title_hints: titleHints.slice(0, 4),
+    };
+  }
+  return {
+    allowed: false,
+    blocked: true,
+    reason: "fresh_upload_path_must_not_resume_draft",
+    href,
+    video_id: videoId,
+    watch_href: String(selectedDraft?.watchHref || "").trim(),
+    title_href: String(selectedDraft?.titleHref || "").trim(),
+    selected_text: selectedText,
+    editor_url: "",
+    title_hints: titleHints.slice(0, 4),
+  };
+}
+
+async function openYouTubeFreshUploadContinuationCandidate(client, continuation = {}) {
+  const editorUrl = String(continuation?.editor_url || "").trim();
+  if (editorUrl) {
+    await evaluateWithClient(client, `(() => { location.href = ${JSON.stringify(editorUrl)}; return { navigated: true, target: ${JSON.stringify(editorUrl)} }; })()`, 10000);
+    return {
+      opened: true,
+      navigated: true,
+      target: editorUrl,
+      reason: "current_fresh_upload_editor_url",
+    };
+  }
+  const selectedText = String(continuation?.selected_text || "").replace(/\s+/g, " ").trim();
+  if (!selectedText) {
+    return { opened: false, clicked: false, reason: "missing_selected_text" };
+  }
+  const titleHints = Array.isArray(continuation?.title_hints)
+    ? continuation.title_hints.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  return evaluateWithClient(client, `(() => {
+    const selectedText = ${JSON.stringify(selectedText)};
+    const titleHints = ${JSON.stringify(titleHints)};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const tokenize = (value) => clean(value)
+      .toLowerCase()
+      .split(/[^a-z0-9\\u4e00-\\u9fff]+/i)
+      .map((item) => item.trim())
+      .filter((item) => item.length >= 3);
+    const visible = (el) => {
+      if (!el || typeof el.getBoundingClientRect !== "function") return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const clickEl = (el) => {
+      el.scrollIntoView({ block: "center", inline: "center" });
+      const rect = el.getBoundingClientRect();
+      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
+        el.dispatchEvent(new MouseEvent(type, eventInit));
+      }
+      if (typeof el.click === "function") el.click();
+    };
+    const hintTokens = Array.from(new Set(titleHints.flatMap(tokenize)));
+    const rows = [...document.querySelectorAll("ytcp-video-row,[role=row]")]
+      .filter(visible)
+      .map((el) => {
+        const text = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "");
+        const lower = text.toLowerCase();
+        let score = 0;
+        if (selectedText && (text === selectedText || text.includes(selectedText) || selectedText.includes(text))) score += 300;
+        if (/正在上传|上传完毕|已上传\\s*\\d+%|剩余时间|取消上传|处理出现延迟|添加说明|编辑草稿|草稿|Uploading|Uploaded\\s*\\d+%|Remaining time|Cancel upload|processing delayed|Add description|Edit draft|Draft/i.test(text)) score += 180;
+        const matchedTokens = hintTokens.filter((token) => lower.includes(token));
+        score += matchedTokens.length * 40;
+        if (/公开\\s+无|发布日期|观看次数|评论数/.test(text)) score -= 30;
+        return { el, text, score, matchedTokens };
+      })
+      .filter((item) => item.text && item.score > 0)
+      .sort((left, right) => right.score - left.score);
+    const row = rows[0] || null;
+    if (!row) return { opened: false, clicked: false, reason: "active_upload_row_not_found" };
+    const controls = [...row.el.querySelectorAll?.("button,[role=button],a,ytcp-icon-button") || []].filter(visible);
+    const preferred = controls.find((el) => /编辑视频|编辑草稿|Edit video|Edit draft/i.test(clean(el.innerText || el.getAttribute("aria-label") || el.getAttribute("title") || "")))
+      || controls.find((el) => /编辑|Edit/i.test(clean(el.innerText || el.getAttribute("aria-label") || el.getAttribute("title") || "")))
+      || controls.find((el) => clean(el.innerText || el.getAttribute("aria-label") || el.getAttribute("title") || "").includes(clean(titleHints[0] || "")))
+      || row.el;
+    clickEl(preferred);
+    return {
+      opened: true,
+      clicked: true,
+      reason: "current_fresh_upload_active_row_clicked",
+      label: clean(preferred.innerText || preferred.getAttribute("aria-label") || preferred.getAttribute("title") || ""),
+      row_score: row.score,
+      matched_tokens: row.matchedTokens.slice(0, 12),
+      row_text: row.text.slice(0, 240),
+    };
+  })()`, 10000);
+}
+
 export function buildYouTubeStudioEditorUrl(videoId = "") {
   const normalized = String(videoId || "").trim();
   if (!normalized) return "";
@@ -6994,29 +7765,15 @@ export function deriveYouTubeStudioReceiptBinding(integrity = {}, finalPublish =
 }
 
 export function deriveYouTubeDraftResumeFallbackTarget(resume = {}, currentUrl = "") {
-  const currentUrlValue = String(currentUrl || "").trim();
-  const uploadResumeUrl = String(resume?.upload_resume_url || "").trim();
-  const editUrl = String(resume?.edit_url || "").trim();
-  if (uploadResumeUrl && uploadResumeUrl !== currentUrlValue) {
-    return { target: uploadResumeUrl, reason: "upload_resume_url" };
-  }
-  if (editUrl && editUrl !== currentUrlValue) {
-    return { target: editUrl, reason: "edit_url" };
-  }
-  return { target: "", reason: "" };
+  void resume;
+  void currentUrl;
+  return { target: "", reason: "youtube_fresh_upload_only_forbids_draft_resume" };
 }
 
 export function shouldAttemptYouTubeDraftResumeFallbackRoute(readiness = {}, resume = {}) {
-  const state = readiness && typeof readiness === "object" ? readiness : {};
-  const last = state.last && typeof state.last === "object" ? state.last : {};
-  if (String(last.platform || "").trim() !== "youtube") return false;
-  if (state.ready || state.failed || last.busy) return false;
-  const onUploadResumeRoute = Boolean(last.youtubeUploadDialogRoute);
-  if (!last.youtubeUploadRoute || last.youtubeHasEditorSurface) return false;
-  if (!last.youtubeChannelContentList && !onUploadResumeRoute) return false;
-  if (!last.mediaPresent && (!onUploadResumeRoute || last.uploadPromptOnly)) return false;
-  const fallback = deriveYouTubeDraftResumeFallbackTarget(resume, String(last.href || ""));
-  return Boolean(fallback.target);
+  void readiness;
+  void resume;
+  return false;
 }
 
 export function buildYouTubeUploadResumeUrl(currentHref = "", videoId = "") {
@@ -7066,105 +7823,6 @@ async function resolveYouTubeDraftEditorRoute(client) {
       videoId,
     ),
     edit_url: buildYouTubeStudioEditorUrl(videoId),
-  };
-}
-
-async function clickYouTubeDraftResumeEntry(client, titleHints = []) {
-  const snapshot = await evaluateWithClient(client, `(() => {
-    const titleHints = ${JSON.stringify((Array.isArray(titleHints) ? titleHints : [titleHints]).map((value) => String(value || "").trim()).filter(Boolean))};
-    const extractYouTubeDraftVideoId = ${extractYouTubeDraftVideoId.toString()};
-    const buildUploadResumeUrl = ${buildYouTubeUploadResumeUrl.toString()};
-    const buildEditorUrl = ${buildYouTubeStudioEditorUrl.toString()};
-    const normalizeHint = ${normalizeYouTubeDraftResumeHintText.toString()};
-    const matchesHint = ${matchesYouTubeDraftResumeHint.toString()};
-    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
-    const visible = (el) => {
-      const rect = el.getBoundingClientRect();
-      const style = getComputedStyle(el);
-      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
-    };
-    const rowElements = [...document.querySelectorAll("ytcp-video-row,[role=row],div")]
-      .map((el) => ({ el, text: clean(el.innerText || el.textContent || "") }))
-      .filter((item) => /草稿|Draft/.test(item.text) && /编辑草稿|Edit draft/.test(item.text))
-      .slice(0, 24);
-    const rows = rowElements.map((item) => {
-      const watchAnchor = item.el.querySelector("a#anchor-watch-on-yt,a[href*='watch?v=']");
-      const titleAnchor = item.el.querySelector("#video-title,a#video-title,a[href*='/video/'][href*='/edit']");
-      const watchHref = String(watchAnchor?.href || watchAnchor?.getAttribute?.("href") || "").trim();
-      const titleHref = String(titleAnchor?.href || titleAnchor?.getAttribute?.("href") || "").trim();
-      const videoId = extractYouTubeDraftVideoId(watchHref, titleHref || String(location.href || ""));
-      const targets = [...item.el.querySelectorAll("button,[role=button],a,ytcp-button,ytcp-icon-button")]
-        .filter(visible)
-        .map((target) => {
-          const rect = target.getBoundingClientRect();
-          return {
-            tag: String(target.tagName || "").toLowerCase(),
-            target_id: String(target.id || ""),
-            label: clean(target.innerText || target.textContent || target.getAttribute("aria-label") || target.getAttribute("title")),
-            role: String(target.getAttribute("role") || ""),
-            x: rect.left + rect.width / 2,
-            y: rect.top + rect.height / 2,
-            width: rect.width,
-            height: rect.height,
-            visible: true,
-          };
-        })
-        .filter((candidate) => /编辑草稿|Edit draft|详细信息|Details/i.test(candidate.label) || candidate.target_id === "video-title");
-      return {
-        row_text: item.text.slice(0, 800),
-        row_role: String(item.el.getAttribute("role") || item.el.tagName || "").toLowerCase(),
-        hint_match: matchesHint(item.text, titleHints),
-        watch_href: watchHref,
-        title_href: titleHref,
-        video_id: videoId,
-        upload_resume_url: buildUploadResumeUrl(String(location.href || ""), videoId),
-        edit_url: buildEditorUrl(videoId),
-        targets,
-      };
-    }).filter((row) => row.targets.length > 0);
-    const matchingRows = rows.filter((row) => row.hint_match);
-    return {
-      href: String(location.href || ""),
-      rows: matchingRows.length > 0 ? matchingRows : rows,
-    };
-  })()`, 12000);
-  const chosen = selectYouTubeDraftResumeEntryCandidate(
-    (snapshot?.rows || []).flatMap((row) => (row.targets || []).map((target) => ({
-      ...target,
-      row_text: row.row_text,
-      row_role: row.row_role,
-      watch_href: row.watch_href,
-      title_href: row.title_href,
-      video_id: row.video_id,
-      upload_resume_url: row.upload_resume_url,
-      edit_url: row.edit_url,
-    }))),
-  );
-  if (!chosen) {
-    return {
-      clicked: false,
-      reason: "youtube_draft_resume_entry_not_found",
-      href: String(snapshot?.href || ""),
-      rows: (snapshot?.rows || []).slice(0, 8),
-    };
-  }
-  await client.send("Input.dispatchMouseEvent", { type: "mouseMoved", x: chosen.x, y: chosen.y, button: "none" }).catch(() => {});
-  await client.send("Input.dispatchMouseEvent", { type: "mousePressed", x: chosen.x, y: chosen.y, button: "left", clickCount: 1 }).catch(() => {});
-  await client.send("Input.dispatchMouseEvent", { type: "mouseReleased", x: chosen.x, y: chosen.y, button: "left", clickCount: 1 }).catch(() => {});
-  await sleep(1800);
-  return {
-    clicked: true,
-    label: chosen.label,
-    tag: chosen.tag,
-    target_id: chosen.target_id,
-    row_text: chosen.row_text,
-    input_click: { x: chosen.x, y: chosen.y },
-    href: String(snapshot?.href || ""),
-    watch_href: String(chosen.watch_href || ""),
-    title_href: String(chosen.title_href || ""),
-    video_id: String(chosen.video_id || ""),
-    upload_resume_url: String(chosen.upload_resume_url || ""),
-    edit_url: String(chosen.edit_url || ""),
   };
 }
 
@@ -7253,7 +7911,9 @@ export function deriveCompositeCurrentPageRouteDisposition(platform, snapshot = 
   const routeReady = isCompositePublishRouteContext(normalizedPlatform, {
     url: routeUrl,
     text: bodyText,
-    file_inputs: [],
+    file_inputs: Array.isArray(snapshot?.fileInputs)
+      ? snapshot.fileInputs
+      : (Array.isArray(snapshot?.file_inputs) ? snapshot.file_inputs : []),
   });
   if (routeReady && routeErrorPatterns.test(bodyText)) {
     return {
@@ -7480,10 +8140,12 @@ async function dispatchTrustedMouseClick(client, point = null) {
 }
 
 export function buildStopBeforeFinalPublishRecoveryOverrides({
+  platform = "",
   prepublishOnlyCurrentPage = false,
   prepareOnlyCurrentPage = false,
   verificationReason = "",
 } = {}) {
+  const normalizedPlatform = normalizePlatform(platform);
   const normalizedReason = String(verificationReason || "").trim().toLowerCase();
   if (normalizedReason === "auth_required") {
     return {
@@ -7492,6 +8154,18 @@ export function buildStopBeforeFinalPublishRecoveryOverrides({
       prepare_only_current_page: Boolean(prepareOnlyCurrentPage),
       verify_media_upload: false,
       wait_for_publish_confirmation: false,
+    };
+  }
+  if (normalizedPlatform === "youtube") {
+    return {
+      recovery_mode: "fresh_publish",
+      clear_draft_context: true,
+      force_publish_page_refresh: true,
+      fresh_start_platform_tab: true,
+      prepublish_only_current_page: false,
+      prepare_only_current_page: false,
+      verify_media_upload: true,
+      wait_for_publish_confirmation: true,
     };
   }
   return {
@@ -7917,7 +8591,9 @@ async function clickLooseText(client, texts) {
 }
 
 export function hasYoutubeUploadDialogQuery(href = "") {
-  return /[?&]d=ud(?:[&#]|$)/i.test(String(href || ""));
+  const normalizedHref = String(href || "").trim();
+  return /[?&]d=ud(?:[&#]|$)/i.test(normalizedHref)
+    || /(?:^|\/\/)(?:www\.)?youtube\.com\/upload\b/i.test(normalizedHref);
 }
 
 export function hasYoutubeUploadResumeVideoId(href = "") {
@@ -7928,16 +8604,14 @@ export function shouldTreatYouTubeUploadSurfaceAsStable({
   uploadResumeRoute = false,
   channelContentList = false,
   uploadDialogSurface = false,
+  uploadPromptTextSurface = false,
   visibleFileInputCount = 0,
   videoCapableFileInputCount = 0,
 } = {}) {
   if (uploadResumeRoute) return true;
-  if (channelContentList && uploadDialogSurface) {
-    return true;
-  }
-  if (channelContentList) return false;
-  if (Number(visibleFileInputCount || 0) > 0) return true;
+  if (channelContentList && !uploadPromptTextSurface) return false;
   if (uploadDialogSurface && Number(videoCapableFileInputCount || 0) > 0) return true;
+  if (Number(visibleFileInputCount || 0) > 0) return true;
   return Boolean(uploadDialogSurface);
 }
 
@@ -7946,15 +8620,30 @@ function isYouTubeCreateFlowStateReady(state = {}) {
   return ["upload_entry", "details", "video_elements", "checks", "visibility"].includes(step);
 }
 
-function isYouTubeCreateFlowStateUsable(state = {}) {
+export function isYouTubeCreateFlowStateUsable(state = {}) {
   if (!isYouTubeCreateFlowStateReady(state)) return false;
+  const text = String(state?.text || "").replace(/\s+/g, " ").trim();
+  const fileInputs = Array.isArray(state?.fileInputs)
+    ? state.fileInputs
+    : (Array.isArray(state?.file_inputs) ? state.file_inputs : []);
+  const youtubeChannelContentList = /频道内容|Channel content|每页行数|Rows per page|发布日期|Date|第\s*\d+\s*-\s*\d+\s*条|观看次数|Views|评论数|Comments|编辑草稿|Edit draft|草稿|Draft/.test(text);
+  const uploadDialogText = /Select files|选择文件|将要上传的视频文件拖放到此处|拖放视频文件即可上传|Drag and drop video files/i.test(text);
+  const uploadWizardText = /详细信息|Video details|视频元素|Video elements|检查|Checks|视频链接|Video link|取消上传|Cancel upload|正在创建链接|正在上传视频|标题（必填）|保存或发布/i.test(text);
+  const hasUploadInput = fileInputs.some((input) => {
+    const accept = String(input?.accept || "").trim();
+    if (!accept) return true;
+    return /video|mp4|\*/i.test(accept);
+  });
+  const uploadDialogRoute = hasYoutubeUploadDialogQuery(String(state?.url || "").trim());
+  const freshUploadInputSurface = uploadDialogRoute && hasUploadInput;
+  if (youtubeChannelContentList && !uploadDialogText && !uploadWizardText && !freshUploadInputSurface) return false;
+  if (youtubeChannelContentList && freshUploadInputSurface && uploadDialogText) return true;
+  if (!uploadDialogText && !uploadWizardText && !hasUploadInput) return false;
   return isCompositePublishRouteContext("youtube", {
     url: String(state?.url || "").trim(),
-    text: String(state?.text || "").trim(),
+    text,
     title: String(state?.title || "").trim(),
-    file_inputs: Array.isArray(state?.fileInputs)
-      ? state.fileInputs
-      : (Array.isArray(state?.file_inputs) ? state.file_inputs : []),
+    file_inputs: fileInputs,
   });
 }
 
@@ -7986,14 +8675,34 @@ export function isYouTubeEditorReadinessSurface(href = "", bodyText = "") {
   const normalizedHref = String(href || "").trim();
   const text = String(bodyText || "").replace(/\s+/g, " ").trim();
   const legacyEditRoute = /studio\.youtube\.com\/video\/[A-Za-z0-9_-]+\/edit\b/i.test(normalizedHref);
-  const uploadDialogRoute = /[?&]d=ud(?:[&#]|$)/i.test(normalizedHref);
-  const uploadWizardRoute = /studio\.youtube\.com\/channel\/[^/?#]+\/(?:videos\/)?upload\b/i.test(normalizedHref)
-    || uploadDialogRoute;
+  const uploadDialogRoute = /[?&]d=ud(?:[&#]|$)/i.test(normalizedHref)
+    || /(?:^|\/\/)(?:www\.)?youtube\.com\/upload\b/i.test(normalizedHref);
+  const uploadResumeRoute = /(?:[?&])udvid=([A-Za-z0-9_-]{6,})/i.test(normalizedHref);
+  const strongUploadDialogText = /Select files|选择文件|将要上传的视频文件拖放到此处|拖放视频文件即可上传|Drag and drop video files/i.test(text);
+  const channelContentListSurface =
+    /频道内容|Channel content|每页行数|Rows per page|发布日期|Date|观看次数|Views|评论数|Comments/.test(text)
+    && !strongUploadDialogText;
+  if (!legacyEditRoute && !uploadDialogRoute && !uploadResumeRoute && channelContentListSurface) return false;
+  const uploadWizardRoute = uploadDialogRoute || uploadResumeRoute;
   if (!legacyEditRoute && !uploadWizardRoute) return false;
   if (legacyEditRoute) {
     return /视频详细信息|Video details/i.test(text)
       && /标题（必填）|说明|缩略图|播放列表|观众|视频链接/.test(text);
   }
+  const uploadWizardStepSurface =
+    /详细信息/.test(text)
+    && /视频元素/.test(text)
+    && /检查/.test(text)
+    && /公开范围/.test(text);
+  const uploadWizardDetailsSurface =
+    uploadWizardStepSurface
+    && /标题（必填）|说明|缩略图|播放列表|观众|视频链接/.test(text)
+    && (
+      /已上传\s*100%|上传完毕|已保存所有更改|正在保存|处理过程延迟|视频链接/.test(text)
+      || uploadDialogRoute
+      || uploadResumeRoute
+    );
+  if (uploadWizardDetailsSurface) return true;
   if (/详细信息/.test(text) && /标题（必填）|说明|缩略图|播放列表|观众|视频链接/.test(text)) return true;
   if (/视频元素/.test(text) && /添加字幕|添加片尾画面|添加卡片|继续/.test(text)) return true;
   if (/检查/.test(text) && /检查完毕|未发现任何问题|版权|继续/.test(text)) return true;
@@ -8007,8 +8716,8 @@ export function shouldPreserveYouTubeEditorRouteForBootstrap(href = "", bodyText
   if (!/studio\.youtube\.com\/video\/[A-Za-z0-9_-]+\/edit\b/i.test(normalizedHref)) return false;
   if (!text) return true;
   if (/糟糕，出了点问题|something went wrong|an error occurred|upload unavailable/i.test(text)) return false;
-  if (isYouTubeEditorReadinessSurface(normalizedHref, text)) return true;
   if (/编辑草稿|继续上传|上传已中断|处理中，画质最高可为高清|草稿\b|upload interrupted/i.test(text)) return false;
+  if (isYouTubeEditorReadinessSurface(normalizedHref, text)) return true;
   return isYouTubeEditorReadinessSurface(normalizedHref, text);
 }
 
@@ -8103,22 +8812,17 @@ export function deriveYouTubeUploadEditorBootstrapPlan(surface = {}, titleHint =
   const selectedDraft = selectYouTubeDraftResumeCandidate(draftRows, titleHint);
   const draftWatchHref = String(selectedDraft?.watchHref || selectedDraft?.watch_href || "").trim();
   const draftTitleHref = String(selectedDraft?.titleHref || selectedDraft?.title_href || "").trim();
-  const draftVideoId = String(
-    selectedDraft?.videoId
-    || selectedDraft?.video_id
-    || extractYouTubeDraftVideoId(draftWatchHref, draftTitleHref || href),
-  ).trim();
   const contentListUrl = buildYouTubeStudioContentListUrl(channel);
-  const uploadEntryUrl = buildYouTubeStudioUploadEntryUrl(channel);
+  const uploadEntryUrl = buildYouTubeFreshUploadEntryUrl();
   const uploadUrls = [
     uploadEntryUrl,
+    buildYouTubeLegacyStudioUploadEntryUrl(channel),
     `https://studio.youtube.com/channel/${channel}/upload`,
   ].filter((value, index, items) => value && items.indexOf(value) === index);
   const uniqueTargets = (...lists) => lists
     .flatMap((list) => Array.isArray(list) ? list : [list])
     .map((value) => String(value || "").trim())
     .filter((value, index, items) => value && items.indexOf(value) === index);
-  const uploadResumeTarget = buildYouTubeUploadResumeUrl(uploadEntryUrl, draftVideoId);
   const baseState = {
     matched: true,
     channel,
@@ -8131,7 +8835,7 @@ export function deriveYouTubeUploadEditorBootstrapPlan(surface = {}, titleHint =
     videoCapableFileInputs,
     uploadUrls,
     channelContentList,
-    draftVideoId,
+    draftRowDetected: Boolean(draftRows.length),
     draftWatchHref,
     draftTitleHref,
     selectedDraftText: String(selectedDraft?.text || "").trim(),
@@ -8191,6 +8895,8 @@ export function normalizeYouTubeVisibilityOrPublishMode(value = "", scheduledPub
   if (!text) return scheduled ? "schedule" : "public";
   const lowered = text.toLowerCase();
   if (/(schedule|scheduled)/.test(lowered) || /安排时间|预约|定时/.test(text)) return "schedule";
+  if (scheduled && /draft|草稿/.test(lowered)) return "schedule";
+  if (scheduled && (/public/.test(lowered) || /公开/.test(text))) return "schedule";
   if (/unlisted/.test(lowered) || /不公开/.test(text)) return "unlisted";
   if (/private/.test(lowered) || /私享|私密/.test(text)) return "private";
   if (/public/.test(lowered) || /公开/.test(text)) return "public";
@@ -8201,14 +8907,18 @@ export function deriveYouTubeUploadWizardStep(href = "", bodyText = "") {
   const normalizedHref = String(href || "").trim();
   const text = String(bodyText || "").replace(/\s+/g, " ").trim();
   const channelContentList = /频道内容|每页行数|第\s*\d+\s*-\s*\d+\s*条|观看次数|评论数|赞和不喜欢的比率|发布日期/.test(text);
-  const uploadDialogEntry = hasYoutubeUploadDialogQuery(normalizedHref) || /上传视频|Upload videos|Select files|拖拽视频|选择文件/.test(text);
+  const strongUploadDialogText = /Select files|选择文件|将要上传的视频文件拖放到此处|拖放视频文件即可上传|Drag and drop video files/i.test(text);
+  const uploadResumeRoute = hasYoutubeUploadResumeVideoId(normalizedHref);
+  const uploadDialogEntry = uploadResumeRoute
+    || strongUploadDialogText
+    || (!channelContentList && (hasYoutubeUploadDialogQuery(normalizedHref) || /上传视频|Upload videos|拖拽视频/.test(text)));
+  if (channelContentList && !strongUploadDialogText && !uploadResumeRoute) return "";
   if (isYouTubeEditorReadinessSurface(normalizedHref, text) || (/详细信息/.test(text) && /标题（必填）|说明|缩略图|播放列表|观众/.test(text))) {
     return "details";
   }
   if (/视频元素/.test(text) && /添加字幕|添加片尾画面|添加卡片/.test(text)) return "video_elements";
   if (/检查/.test(text) && /检查完毕|发现任何问题|无发现任何问题|版权/.test(text)) return "checks";
   if (/公开范围/.test(text) && /私享|不公开列出|安排时间|保存或发布|发布之前|立即发布/.test(text)) return "visibility";
-  if (uploadDialogEntry && channelContentList) return "upload_entry";
   if (uploadDialogEntry) return "upload_entry";
   return "";
 }
@@ -8964,6 +9674,228 @@ async function describeFileInputCandidates(client, selector = "input[type=file]"
   return [];
 }
 
+async function setYouTubeFreshUploadRuntimeFileInput(client, mediaPath) {
+  const normalizedPath = String(mediaPath || "").trim();
+  if (!normalizedPath) return { uploaded: false, reason: "missing_media_path" };
+  let objectId = "";
+  try {
+    const evaluated = await client.send("Runtime.evaluate", {
+      expression: `(() => {
+        const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+        const roots = [];
+        const visitRoot = (root) => {
+          if (!root || roots.includes(root)) return;
+          roots.push(root);
+          let all = [];
+          try { all = [...root.querySelectorAll("*")]; } catch {}
+          for (const el of all) {
+            if (el && el.shadowRoot) visitRoot(el.shadowRoot);
+          }
+        };
+        visitRoot(document);
+        const visible = (el) => {
+          if (!el || typeof el.getBoundingClientRect !== "function") return false;
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+        };
+        const score = (input, root) => {
+          const accept = clean(input.getAttribute("accept") || input.accept || "").toLowerCase();
+          const rootText = clean(root?.innerText || root?.textContent || "").toLowerCase();
+          let value = 0;
+          if (!accept || /video|mp4|mov|mkv|webm|avi|mpeg|quicktime|\\*/i.test(accept)) value += 80;
+          if (/image|png|jpe?g|webp/i.test(accept) && !/video|mp4|\\*/i.test(accept)) value -= 200;
+          if (/上传视频|upload videos|select files|选择文件|拖放视频|drag and drop video/i.test(rootText)) value += 120;
+          if (/封面|thumbnail|cover/i.test(rootText)) value -= 120;
+          if (visible(input)) value += 20;
+          if (input.multiple) value += 5;
+          return value;
+        };
+        const candidates = roots.flatMap((root) => {
+          let inputs = [];
+          try { inputs = [...root.querySelectorAll("input[type=file]")]; } catch {}
+          return inputs.map((input) => ({ input, root, score: score(input, root) }));
+        }).filter((item) => item.score > 0);
+        candidates.sort((left, right) => right.score - left.score);
+        return candidates[0]?.input || null;
+      })()`,
+      returnByValue: false,
+      objectGroup: "roughcut_youtube_upload",
+    });
+    objectId = String(evaluated?.result?.objectId || "");
+    if (!objectId) {
+      return {
+        uploaded: false,
+        reason: "youtube_runtime_file_input_not_found",
+      };
+    }
+    await client.send("DOM.setFileInputFiles", {
+      objectId,
+      files: [normalizedPath],
+    });
+    const dispatch = await client.send("Runtime.callFunctionOn", {
+      objectId,
+      functionDeclaration: `function() {
+        const eventInit = { bubbles: true, cancelable: true };
+        for (const type of ["input", "change"]) {
+          try { this.dispatchEvent(new Event(type, eventInit)); } catch {}
+        }
+        return {
+          filesLength: this.files ? this.files.length : 0,
+          accept: this.getAttribute("accept") || this.accept || "",
+          multiple: Boolean(this.multiple),
+          value: String(this.value || ""),
+        };
+      }`,
+      returnByValue: true,
+    });
+    await sleep(900);
+    const verify = await client.send("Runtime.callFunctionOn", {
+      objectId,
+      functionDeclaration: `function() {
+        return {
+          filesLength: this.files ? this.files.length : 0,
+          accept: this.getAttribute("accept") || this.accept || "",
+          multiple: Boolean(this.multiple),
+          value: String(this.value || ""),
+        };
+      }`,
+      returnByValue: true,
+    });
+    const runtime = verify?.result?.value && typeof verify.result.value === "object"
+      ? verify.result.value
+      : (dispatch?.result?.value || {});
+    const filesLength = Number(runtime?.filesLength || 0);
+    await sleep(1800);
+    const snapshot = await pageSnapshot(client).catch(() => null);
+    const snapshotText = [
+      ...(Array.isArray(snapshot?.headings) ? snapshot.headings : []),
+      ...(Array.isArray(snapshot?.lines) ? snapshot.lines : []),
+      String(snapshot?.bodyText || ""),
+    ].join(" ");
+    const pageAcceptedUpload = shouldTreatMediaUploadAsInProgress("youtube", {
+      uploaded: false,
+      reason: "youtube_runtime_file_input_loaded",
+    }, snapshot, normalizedPath)
+      || isYouTubeEditorReadinessSurface(String(snapshot?.url || ""), snapshotText)
+      || /正在上传视频|正在上传，已完成|已上传\s*\d+%|正在创建链接|上传完毕|视频链接|取消上传|处理过程延迟/i.test(snapshotText);
+    await sleep(16000);
+    const stableReadiness = await readCompositeUploadReadinessSnapshot(client, "youtube", normalizedPath).catch(() => null);
+    const stablePageAcceptedUpload = Boolean(
+      stableReadiness
+      && (
+        stableReadiness.ready
+        || stableReadiness.busy
+        || stableReadiness.mediaPresent
+        || stableReadiness.youtubeDraftResumeAvailable
+        || (stableReadiness.youtubeEditorSurface && !stableReadiness.youtubeChannelContentList)
+      )
+    );
+    return {
+      uploaded: filesLength > 0 && pageAcceptedUpload && stablePageAcceptedUpload,
+      reason: filesLength > 0
+        ? (
+          pageAcceptedUpload && stablePageAcceptedUpload
+            ? "youtube_runtime_file_input_loaded"
+            : "youtube_runtime_file_input_loaded_without_page_acceptance"
+        )
+        : "youtube_runtime_file_input_not_loaded",
+      runtime,
+      input: {
+        accept: String(runtime?.accept || ""),
+        multiple: Boolean(runtime?.multiple),
+      },
+      page_accepted_upload: Boolean(pageAcceptedUpload),
+      stable_page_accepted_upload: Boolean(stablePageAcceptedUpload),
+      stable_readiness: stableReadiness,
+      snapshot_url: String(snapshot?.url || ""),
+    };
+  } catch (error) {
+    return {
+      uploaded: false,
+      reason: "youtube_runtime_file_input_failed",
+      error: String(error?.message || error || ""),
+    };
+  } finally {
+    if (objectId) {
+      await client.send("Runtime.releaseObject", { objectId }).catch(() => {});
+    }
+  }
+}
+
+async function setYouTubeRuntimeImageFileInput(client, imagePath) {
+  const normalizedPath = String(imagePath || "").trim();
+  if (!normalizedPath) return { uploaded: false, reason: "missing_image_path" };
+  let objectId = "";
+  try {
+    const evaluated = await client.send("Runtime.evaluate", {
+      expression: `(() => {
+        const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+        const roots = [];
+        const visitRoot = (root) => {
+          if (!root || roots.includes(root)) return;
+          roots.push(root);
+          let all = [];
+          try { all = [...root.querySelectorAll("*")]; } catch {}
+          for (const el of all) if (el && el.shadowRoot) visitRoot(el.shadowRoot);
+        };
+        visitRoot(document);
+        const visible = (el) => {
+          if (!el || typeof el.getBoundingClientRect !== "function") return false;
+          const rect = el.getBoundingClientRect();
+          const style = getComputedStyle(el);
+          return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+        };
+        const score = (input, root) => {
+          const accept = clean(input.getAttribute("accept") || input.accept || "").toLowerCase();
+          const rootText = clean(root?.innerText || root?.textContent || "").toLowerCase();
+          let value = 0;
+          if (!accept || /image|png|jpe?g|webp|gif|\\*/i.test(accept)) value += 80;
+          if (/video|mp4|mov|mkv|webm/i.test(accept) && !/image|\\*/i.test(accept)) value -= 200;
+          if (/缩略图|封面|thumbnail|upload file|上传文件|上传图片|image/i.test(rootText)) value += 140;
+          if (/上传视频|upload videos|select files|选择文件|drag and drop video/i.test(rootText)) value -= 80;
+          if (visible(input)) value += 20;
+          return value;
+        };
+        const candidates = roots.flatMap((root) => {
+          let inputs = [];
+          try { inputs = [...root.querySelectorAll("input[type=file]")]; } catch {}
+          return inputs.map((input) => ({ input, root, score: score(input, root) }));
+        }).filter((item) => item.score > 0);
+        candidates.sort((left, right) => right.score - left.score);
+        return candidates[0]?.input || null;
+      })()`,
+      returnByValue: false,
+      objectGroup: "roughcut_youtube_cover",
+    });
+    objectId = String(evaluated?.result?.objectId || "");
+    if (!objectId) return { uploaded: false, reason: "youtube_runtime_image_input_not_found" };
+    await client.send("DOM.setFileInputFiles", { objectId, files: [normalizedPath] });
+    const dispatch = await client.send("Runtime.callFunctionOn", {
+      objectId,
+      functionDeclaration: `function() {
+        for (const type of ["input", "change"]) {
+          try { this.dispatchEvent(new Event(type, { bubbles: true, cancelable: true })); } catch {}
+        }
+        return { filesLength: this.files ? this.files.length : 0, accept: this.getAttribute("accept") || this.accept || "", value: String(this.value || "") };
+      }`,
+      returnByValue: true,
+    });
+    await sleep(900);
+    const runtime = dispatch?.result?.value && typeof dispatch.result.value === "object" ? dispatch.result.value : {};
+    return {
+      uploaded: Number(runtime?.filesLength || 0) > 0,
+      reason: Number(runtime?.filesLength || 0) > 0 ? "youtube_runtime_image_input_loaded" : "youtube_runtime_image_input_not_loaded",
+      runtime,
+      input: { accept: String(runtime?.accept || "") },
+    };
+  } catch (error) {
+    return { uploaded: false, reason: "youtube_runtime_image_input_failed", error: String(error?.message || error || "") };
+  } finally {
+    if (objectId) await client.send("Runtime.releaseObject", { objectId }).catch(() => {});
+  }
+}
+
 export function selectPreferredVideoFileInput(candidates = []) {
   const normalized = (Array.isArray(candidates) ? candidates : []).map((candidate) => {
     const attrMap = candidate?.attrMap && typeof candidate.attrMap === "object" ? candidate.attrMap : {};
@@ -9063,6 +9995,30 @@ export function collapseBilibiliQueueCardEntries(cards = []) {
 
 async function findFileInputNodeIds(client, selector = "input[type=file]") {
   const normalizedSelector = String(selector || "").trim() || "input[type=file]";
+  const findFlattenedFileInputs = async () => {
+    try {
+      const flattened = await client.send("DOM.getFlattenedDocument", { depth: -1, pierce: true });
+      const nodes = Array.isArray(flattened?.nodes) ? flattened.nodes : [];
+      const backendNodeIds = nodes
+        .filter((node) => {
+          if (String(node?.nodeName || "").toLowerCase() !== "input") return false;
+          const attrs = Array.isArray(node?.attributes) ? node.attributes : [];
+          for (let index = 0; index < attrs.length - 1; index += 2) {
+            if (String(attrs[index] || "").toLowerCase() === "type" && String(attrs[index + 1] || "").toLowerCase() === "file") {
+              return true;
+            }
+          }
+          return false;
+        })
+        .map((node) => Number(node?.backendNodeId || 0))
+        .filter(Boolean);
+      if (!backendNodeIds.length) return [];
+      const pushed = await client.send("DOM.pushNodesByBackendIdsToFrontend", { backendNodeIds });
+      return Array.isArray(pushed?.nodeIds) ? pushed.nodeIds.filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  };
   try {
     const search = await client.send("DOM.performSearch", {
       query: normalizedSelector,
@@ -9076,12 +10032,16 @@ async function findFileInputNodeIds(client, selector = "input[type=file]") {
       fromIndex: 0,
       toIndex: resultCount,
     });
-    return Array.isArray(fetched?.nodeIds) ? fetched.nodeIds : [];
+    const nodeIds = Array.isArray(fetched?.nodeIds) ? fetched.nodeIds : [];
+    if (nodeIds.length) return nodeIds;
+    return await findFlattenedFileInputs();
   } catch {
     const documentResult = await client.send("DOM.getDocument", { depth: -1, pierce: true });
     const rootNodeId = documentResult.root.nodeId;
     const queryResult = await client.send("DOM.querySelectorAll", { nodeId: rootNodeId, selector: normalizedSelector });
-    return Array.isArray(queryResult?.nodeIds) ? queryResult.nodeIds : [];
+    const nodeIds = Array.isArray(queryResult?.nodeIds) ? queryResult.nodeIds : [];
+    if (nodeIds.length) return nodeIds;
+    return await findFlattenedFileInputs();
   }
 }
 
@@ -9120,6 +10080,15 @@ async function setFirstVideoFileInput(client, mediaPath, options = {}) {
   }
   const candidates = singlePathMode ? allCandidates.slice(0, 1) : allCandidates;
   if (!candidates.length) {
+    if (normalizedPlatform === "youtube") {
+      const runtimeUpload = await setYouTubeFreshUploadRuntimeFileInput(client, mediaPath);
+      if (runtimeUpload.uploaded) {
+        return {
+          ...runtimeUpload,
+          fileInputCount: described.length,
+        };
+      }
+    }
     return {
       uploaded: false,
       reason: described.length ? "no_video_file_input" : "no_file_input",
@@ -9249,21 +10218,33 @@ async function dispatchFileInputEvents(client, nodeId, options = {}) {
 export function shouldAttemptNativeFileChooserFallback(upload = {}) {
   if (!upload || upload.uploaded) return false;
   const reason = String(upload.reason || "").trim().toLowerCase();
-  return reason === "upload_not_applied" || reason === "no_video_file_input" || reason === "no_file_input";
+  return reason === "upload_not_applied"
+    || reason === "no_video_file_input"
+    || reason === "no_file_input"
+    || reason === "youtube_runtime_file_input_loaded_without_page_acceptance";
 }
 
 async function completeNativeFileChooserSelection(mediaPath, { timeoutMs = 15000 } = {}) {
+  const normalizedMediaPath = String(mediaPath || "").trim();
   if (process.platform !== "win32") {
-    return { handled: false, reason: "native_file_chooser_windows_only" };
+    return { handled: false, reason: "native_file_chooser_windows_only", media_path: normalizedMediaPath, cwd: process.cwd() };
   }
-  if (!mediaPath) {
-    return { handled: false, reason: "missing_media_path" };
+  if (!normalizedMediaPath) {
+    return { handled: false, reason: "missing_media_path", media_path: normalizedMediaPath, cwd: process.cwd() };
   }
-  if (!fs.existsSync(mediaPath)) {
-    return { handled: false, reason: "missing_media_file" };
+  const resolvedMediaPath = path.resolve(normalizedMediaPath);
+  const mediaExists = fs.existsSync(normalizedMediaPath) || fs.existsSync(resolvedMediaPath);
+  if (!mediaExists) {
+    return {
+      handled: false,
+      reason: "missing_media_file",
+      media_path: normalizedMediaPath,
+      resolved_media_path: resolvedMediaPath,
+      cwd: process.cwd(),
+    };
   }
   if (!fs.existsSync(NATIVE_FILE_CHOOSER_SCRIPT_PATH)) {
-    return { handled: false, reason: "native_file_chooser_script_missing" };
+    return { handled: false, reason: "native_file_chooser_script_missing", media_path: normalizedMediaPath, cwd: process.cwd() };
   }
   return await new Promise((resolve) => {
     const args = [
@@ -9273,7 +10254,7 @@ async function completeNativeFileChooserSelection(mediaPath, { timeoutMs = 15000
       "-File",
       NATIVE_FILE_CHOOSER_SCRIPT_PATH,
       "-FilePath",
-      mediaPath,
+      fs.existsSync(normalizedMediaPath) ? normalizedMediaPath : resolvedMediaPath,
       "-TimeoutSeconds",
       String(Math.max(3, Math.ceil(timeoutMs / 1000))),
     ];
@@ -9416,46 +10397,6 @@ async function tryAuthoritativeUploadEntryNativeUpload(client, {
     entryAction,
     chooser,
     snapshot: afterSnapshot,
-  };
-}
-
-async function tryYouTubeSelectFilesNativeUpload(client, mediaPath) {
-  const actions = [];
-  let entryAction = await clickByText(client, ["选择文件", "Select files"]);
-  actions.push({ kind: "youtube_select_files_entry", ...entryAction });
-  if (!entryAction.clicked) {
-    entryAction = await clickLooseText(client, ["选择文件", "Select files"]);
-    actions.push({ kind: "youtube_select_files_entry_loose", ...entryAction });
-  }
-  if (!entryAction.clicked) {
-    return {
-      uploaded: false,
-      reason: "youtube_select_files_not_clicked",
-      actions,
-    };
-  }
-  await sleep(700);
-  const chooser = await completeNativeFileChooserSelection(mediaPath, { timeoutMs: 15000 });
-  actions.push({ kind: "youtube_select_files_native_dialog", ...chooser });
-  if (!chooser.handled) {
-    return {
-      uploaded: false,
-      reason: chooser.reason || "native_file_chooser_not_applied",
-      actions,
-    };
-  }
-  await sleep(1200);
-  const snapshot = await pageSnapshot(client).catch(() => null);
-  const uploadInProgress = shouldTreatMediaUploadAsInProgress("youtube", {
-    uploaded: false,
-    reason: "native_file_chooser_submitted",
-  }, snapshot, mediaPath);
-  return {
-    uploaded: uploadInProgress,
-    reason: uploadInProgress ? "youtube_select_files_native_upload_in_progress" : "youtube_select_files_native_upload_not_applied",
-    actions,
-    chooser,
-    snapshot,
   };
 }
 
@@ -11105,8 +12046,8 @@ function resolveExpectedCoverSlotsForPlatform(platform, content) {
   for (const spec of requiredSlots) {
     const existing = explicitByMatrix.get(spec.matrix_key) || explicitBySlot.get(spec.slot);
     const coverPath = String(
-      existing?.cover_path
-      || (requiredSlots.length === 1 ? explicitCoverPath : "")
+      (requiredSlots.length === 1 ? explicitCoverPath : "")
+      || existing?.cover_path
       || "",
     ).trim();
     const signature = JSON.stringify({
@@ -11494,6 +12435,80 @@ export function verifyCompositeBodyField(platform, expectedBody, actualBody, { t
     return squashedActual.includes(squashedExpected) || squashedExpected.includes(squashedActual);
   }
   return actual.includes(expected) || expected.includes(actual);
+}
+
+function _normalizeYouTubeReadbackText(value = "") {
+  return String(value || "")
+    .replace(/\.[A-Za-z0-9]{2,5}\b/g, "")
+    .replace(/[\s｜|:：!！,，.。?？'"\-—_()/\\[\]【】]/g, "")
+    .toLowerCase()
+    .trim();
+}
+
+function _expectedYouTubeMediaTitleStems(content = {}) {
+  const mediaItems = Array.isArray(content?.media_items) ? content.media_items : [];
+  const mediaPaths = [
+    content?.media_path,
+    ...(Array.isArray(content?.media_urls) ? content.media_urls : []),
+    ...mediaItems.flatMap((item) => [item?.local_path, item?.path, item?.url]),
+  ];
+  return Array.from(new Set(
+    mediaPaths
+      .map((value) => String(value || "").trim())
+      .filter(Boolean)
+      .map((value) => {
+        const base = path.win32.basename(value) || path.posix.basename(value);
+        return base.replace(/\.[^.]+$/, "");
+      })
+      .map((value) => String(value || "").trim())
+      .filter(Boolean),
+  ));
+}
+
+export function isYouTubeDefaultFilenameTitle(actualTitle = "", content = {}) {
+  const actual = String(actualTitle || "").replace(/\s+/g, " ").trim();
+  if (!actual) return false;
+  if (/\.(?:mp4|mov|m4v|mkv|webm)\b/i.test(actual)) return true;
+  if (/^\d{8}[_\-\s].*(?:横版|竖版).*(?:成片|final|output)/i.test(actual)) return true;
+  const normalizedActual = _normalizeYouTubeReadbackText(actual);
+  if (!normalizedActual) return false;
+  return _expectedYouTubeMediaTitleStems(content).some((stem) => {
+    const normalizedStem = _normalizeYouTubeReadbackText(stem);
+    return Boolean(
+      normalizedStem
+      && normalizedStem.length >= 12
+      && (
+        normalizedActual === normalizedStem
+        || normalizedActual.includes(normalizedStem)
+        || normalizedStem.includes(normalizedActual)
+      ),
+    );
+  });
+}
+
+export function deriveYouTubePrePublishReadbackFailureCode(audit = {}, integrity = {}, content = {}) {
+  const fields = integrity?.fields && typeof integrity.fields === "object" ? integrity.fields : {};
+  const titleActual = String(fields.title?.actual || audit?.checklist?.title?.actual || "").trim();
+  const bodyActual = String(fields.body?.actual || audit?.checklist?.body?.actual || "").trim();
+  const expectedBody = String(content?.body || fields.body?.expected || "").trim();
+  const expectedCoverPath = String(content?.cover_path || fields.cover?.expected_path || "").trim();
+  const expectedSchedule = String(content?.scheduled_publish_at || fields.schedule?.expected || "").trim();
+  const expectedVisibility = String(content?.visibility || content?.visibility_mode || content?.visibility_or_publish_mode || content?.publish_mode || fields.visibility?.expected || "").trim();
+  const requiredUnverified = Array.isArray(audit?.required_unverified)
+    ? audit.required_unverified.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const failures = Array.isArray(integrity?.failures)
+    ? integrity.failures.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const missing = new Set([...requiredUnverified, ...failures]);
+  if (isYouTubeDefaultFilenameTitle(titleActual, content)) return "youtube_default_filename_title";
+  if (missing.has("title")) return "youtube_title_readback_mismatch";
+  if (expectedBody && (!bodyActual || missing.has("body"))) return "youtube_description_empty";
+  if (expectedCoverPath && (missing.has("cover") || fields.cover?.verified === false || fields.cover?.uploaded === false)) return "youtube_cover_readback_mismatch";
+  if (expectedSchedule && (missing.has("schedule") || fields.schedule?.verified === false)) return "youtube_schedule_readback_mismatch";
+  if (expectedVisibility && (missing.has("visibility") || fields.visibility?.verified === false)) return "youtube_visibility_readback_mismatch";
+  if (missing.has("content_plan_match")) return "youtube_pre_publish_form_readback_mismatch";
+  return "youtube_pre_publish_form_readback_mismatch";
 }
 
 export function extractDouyinSelectedCollectionEvidence(lines = [], expectedCollection = "", inputFields = []) {
@@ -13526,7 +14541,7 @@ async function readCompositeUploadReadinessSnapshot(client, platform, mediaPath 
     const youtubeUploadDialogSurface = /上传视频|Upload videos|Select files|拖拽|点击上传|选择文件/.test(text);
     const youtubeEditorSurface = isYouTubeEditorSurface(href, text);
     const youtubeChannelContentList = !youtubeEditorSurface && (/频道内容/.test(text) || /每页行数|发布日期|第\\s*\\d+\\s*-\\s*\\d+\\s*条/.test(text));
-    const youtubeDraftResumeAvailable = !youtubeEditorSurface && mediaPresent && /编辑草稿|Edit draft/.test(text) && /草稿|Draft/.test(text);
+    const youtubeDraftResumeAvailable = !youtubeEditorSurface && youtubeChannelContentList && /编辑草稿|Edit draft/.test(text) && /草稿|Draft/.test(text);
     const youtubeHasEditorSurface =
       youtubeEditorSurface
       || youtubeUploadDialogSurface
@@ -13616,11 +14631,27 @@ async function waitForCompositeUploadReady(client, platform, timeoutMs = 120000,
   return { ready: false, waited_ms: Date.now() - startedAt, ready_streak: readyStreak, last };
 }
 
+export function shouldYieldYouTubeFreshUploadDraftContinuation(platform, readiness = {}, options = {}) {
+  return false;
+}
+
 export function shouldBootstrapCompositeUploadFromCleanEntry(readiness = {}) {
   const state = readiness && typeof readiness === "object" ? readiness : {};
   const last = state.last && typeof state.last === "object" ? state.last : {};
   if (Boolean(state.ready) || Boolean(state.failed)) return false;
   if (Boolean(last.busy) || Boolean(last.failed) || Boolean(last.mediaPresent)) return false;
+  const platform = normalizePlatform(last.platform || state.platform || "");
+  if (platform === "youtube") {
+    if (
+      Boolean(last.fieldShell)
+      || Boolean(last.readySurface)
+      || Boolean(last.youtubeEditorSurface)
+      || Boolean(last.youtubeHasEditorSurface)
+      || Boolean(last.youtubeChannelContentList)
+      || Boolean(last.youtubeDraftResumeAvailable)
+    ) return false;
+    if (!Boolean(last.youtubeUploadRoute) && !Boolean(last.youtubeUploadDialogRoute)) return false;
+  }
   if (Boolean(last.uploadPromptOnly)) return true;
   return Number(last.fileInputCount || 0) > 0;
 }
@@ -13653,9 +14684,9 @@ export function expectedMediaPath(content) {
   ).trim();
 }
 
-function compositeUploadTimeoutMs(platform) {
+export function compositeUploadTimeoutMs(platform) {
   if (platform === "douyin" || platform === "toutiao" || platform === "xiaohongshu") return 900000;
-  if (platform === "youtube") return 240000;
+  if (platform === "youtube") return 3600000;
   if (platform === "kuaishou" || platform === "bilibili") return 300000;
   return 180000;
 }
@@ -13815,11 +14846,55 @@ async function forceYouTubeCreateUploadFlow(client) {
     actions.push({ kind: "youtube_upload_entry_hidden", ...(await activateYoutubeHiddenUploadEntry(client)) });
   }
   await sleep(1600);
-  const state = await inspectYouTubeUploadWizardState(client);
+  let state = await inspectYouTubeUploadWizardState(client);
+  if (!isYouTubeCreateFlowStateUsable(state)) {
+    const directUrlEntry = await openYouTubeFreshUploadDialogByUrl(client).catch((error) => ({
+      navigated: false,
+      reason: "youtube_direct_upload_url_error",
+      message: String(error?.message || error || ""),
+      state: null,
+    }));
+    actions.push({ kind: "youtube_upload_entry_direct_url", ...directUrlEntry });
+    if (directUrlEntry?.state) {
+      state = directUrlEntry.state;
+    } else {
+      await sleep(1600);
+      state = await inspectYouTubeUploadWizardState(client);
+    }
+  }
   return {
     clicked: actions.some((action) => action?.clicked),
     actions,
     state,
+  };
+}
+
+async function openYouTubeFreshUploadDialogByUrl(client) {
+  const before = await pageSnapshot(client).catch(() => ({}));
+  const beforeHref = String(before?.url || "").trim();
+  const target = `${buildYouTubeFreshUploadEntryUrl()}?roughcut_fresh_upload=${Date.now()}`;
+  const navigation = await navigateClientToUrlWithDialogHandling(client, beforeHref, target, {
+    timeout_ms: 18000,
+    reason: "youtube_direct_upload_dialog_url",
+    javascript_dialog_policy: "navigation_route_switch",
+    verify: (snapshot) => {
+      const text = [...(snapshot?.lines || []), ...(snapshot?.headings || [])].join(" ");
+      return isPlatformPublishRouteBootstrapReady("youtube", {
+        url: snapshot?.url || "",
+        title: snapshot?.title || "",
+        text,
+        file_inputs: snapshot?.fileInputs || [],
+      });
+    },
+    snapshot_fn: (activeClient) => pageSnapshot(activeClient).catch(() => null),
+  });
+  const state = await inspectYouTubeUploadWizardState(client);
+  return {
+    ...navigation,
+    before_href: beforeHref,
+    target,
+    state,
+    usable: isYouTubeCreateFlowStateUsable(state),
   };
 }
 
@@ -13968,7 +15043,9 @@ async function setYouTubeVisibilityAndSchedule(client, content) {
     actions.push({ kind: "youtube_schedule_entry", ...(await clickByText(client, ["安排时间", "Schedule", "安排", "时间"])) });
     if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_schedule_entry_loose", ...(await clickLooseText(client, ["安排时间", "Schedule", "安排", "时间"])) });
     await sleep(900);
-    actions.push({ kind: "youtube_schedule_set", ...(await setCompositeSchedule(client, "youtube", content)) });
+    const scheduleActions = await setCompositeSchedule(client, "youtube", content);
+    if (Array.isArray(scheduleActions)) actions.push(...scheduleActions);
+    else if (scheduleActions && typeof scheduleActions === "object") actions.push({ kind: "youtube_schedule_set", ...scheduleActions });
     return actions;
   }
   if (visibilityMode === "unlisted") {
@@ -13984,6 +15061,82 @@ async function setYouTubeVisibilityAndSchedule(client, content) {
   actions.push({ kind: "youtube_visibility_public", ...(await clickByText(client, ["公开", "Public"])) });
   if (!actions.at(-1)?.clicked) actions.push({ kind: "youtube_visibility_public_loose", ...(await clickLooseText(client, ["公开", "Public"])) });
   return actions;
+}
+
+export function deriveYouTubePrepareControlGateState(gate = "", audit = {}, integrity = {}, requiredFields = []) {
+  const fields = Array.from(new Set(
+    (Array.isArray(requiredFields) ? requiredFields : [])
+      .map((item) => String(item || "").trim())
+      .filter(Boolean),
+  ));
+  const checklist = audit && typeof audit.checklist === "object" ? audit.checklist : {};
+  const integrityFields = integrity && typeof integrity.fields === "object" ? integrity.fields : {};
+  const snapshot = {};
+  const failedFields = [];
+  for (const field of fields) {
+    const source = checklist[field] && typeof checklist[field] === "object"
+      ? checklist[field]
+      : (integrityFields[field] && typeof integrityFields[field] === "object" ? integrityFields[field] : null);
+    snapshot[field] = source
+      ? {
+          expected: source.expected ?? source.expected_path ?? "",
+          actual: source.actual ?? "",
+          configured: source.configured,
+          uploaded: source.uploaded ?? source.cover_uploaded,
+          verified: source.verified === true,
+          required: source.required === false ? false : true,
+          verification_mode: source.verification_mode || "",
+        }
+      : {
+          expected: "",
+          actual: "",
+          verified: false,
+          required: true,
+          reason: "field_missing_from_readback",
+        };
+    if (!source || (source.required !== false && source.verified !== true)) failedFields.push(field);
+  }
+  return {
+    kind: "youtube_control_gate",
+    gate: String(gate || "").trim(),
+    required_fields: fields,
+    failed_fields: failedFields,
+    fields: snapshot,
+    verified: failedFields.length === 0,
+    blocked: failedFields.length > 0,
+    reason: failedFields.length > 0 ? "control_readback_mismatch" : "ok",
+  };
+}
+
+async function verifyYouTubePrepareControlGate(client, content, gate, requiredFields, actions = []) {
+  const integrity = await readCompositeMaterialIntegrityWithVisualEvidence(client, "youtube", content, `youtube_prepare_control_gate_${gate}`).catch((error) => ({
+    fields: {},
+    failures: Array.isArray(requiredFields) ? requiredFields : [],
+    verification_state: "readback_error",
+    verification_reason: String(error?.message || error || "readback_error"),
+    platform_extras: {
+      relevant_lines: [],
+      route: {},
+    },
+  }));
+  const enriched = enrichCompositeMaterialIntegrityFromActions("youtube", integrity, actions);
+  const route = enriched?.platform_extras?.route || {};
+  const audit = buildCompositePublicationAudit("youtube", content, enriched, {}, route);
+  return {
+    ...deriveYouTubePrepareControlGateState(gate, audit, enriched, requiredFields),
+    route,
+    verification_state: enriched?.verification_state || "",
+    verification_reason: enriched?.verification_reason || "",
+    relevant_lines: Array.isArray(enriched?.platform_extras?.relevant_lines)
+      ? enriched.platform_extras.relevant_lines.slice(0, 80)
+      : [],
+  };
+}
+
+function findBlockingCompositeAction(actions = [], startIndex = 0) {
+  return (Array.isArray(actions) ? actions : [])
+    .slice(Math.max(0, Number(startIndex) || 0))
+    .find((action) => action && typeof action === "object" && action.blocked === true) || null;
 }
 
 async function ensureYoutubeUploadEditor(client, titleHint = "") {
@@ -14053,7 +15206,7 @@ export async function activateYoutubeHiddenUploadEntry(client) {
 }
 
 export async function activateYouTubeCreateButton(client) {
-  return evaluateWithClient(client, `(() => {
+  const result = await evaluateWithClient(client, `(() => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const visible = (el) => {
       if (!el || typeof el.getBoundingClientRect !== "function") return false;
@@ -14075,8 +15228,11 @@ export async function activateYouTubeCreateButton(client) {
     };
     const selectors = [
       "ytcp-button.ytcpAppHeaderCreateIcon button[aria-label='创建']",
+      "ytcp-button.ytcpAppHeaderCreateIcon",
+      "ytcp-topbar-menu-button-renderer button[aria-label='创建']",
       "ytcp-button.ytcpAppHeaderCreateIcon button",
       "button[aria-label='创建']",
+      "button[aria-label='Create']",
     ];
     const target = selectors
       .flatMap((selector) => [...document.querySelectorAll(selector)])
@@ -14085,16 +15241,24 @@ export async function activateYouTubeCreateButton(client) {
         .find((el) => visible(el) && /创建|Create/i.test(clean(el.innerText || el.textContent || el.getAttribute("aria-label") || "")));
     if (!target) return { clicked: false, reason: "youtube_create_button_not_found" };
     click(target);
+    const rect = target.getBoundingClientRect();
     return {
       clicked: true,
       label: clean(target.innerText || target.textContent || target.getAttribute("aria-label") || ""),
       selector_hint: target.matches("button[aria-label='创建']") ? "button[aria-label='创建']" : String(target.tagName || "").toLowerCase(),
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
     };
   })()`, 10000);
+  if (result?.clicked) {
+    const nativeClick = await dispatchMouseClick(client, result.x, result.y);
+    return { ...result, native_click: nativeClick };
+  }
+  return result;
 }
 
 export async function activateYouTubeVisibleUploadEntry(client) {
-  return evaluateWithClient(client, `(() => {
+  const result = await evaluateWithClient(client, `(() => {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const visible = (el) => {
       if (!el || typeof el.getBoundingClientRect !== "function") return false;
@@ -14113,17 +15277,50 @@ export async function activateYouTubeVisibleUploadEntry(client) {
       }
       return true;
     };
-    const target = [...document.querySelectorAll("tp-yt-paper-item[test-id='upload'][role='menuitem'], [test-id='upload'][role='menuitem']")]
+    const roots = [];
+    const visitRoot = (root) => {
+      if (!root || roots.includes(root)) return;
+      roots.push(root);
+      for (const el of [...root.querySelectorAll("*")]) {
+        if (el.shadowRoot) visitRoot(el.shadowRoot);
+      }
+    };
+    visitRoot(document);
+    const queryAll = (selector) => roots.flatMap((root) => {
+      try { return [...root.querySelectorAll(selector)]; } catch { return []; }
+    });
+    const target = queryAll("tp-yt-paper-item[test-id='upload'][role='menuitem'], [test-id='upload'][role='menuitem'], ytcp-text-menu tp-yt-paper-item, tp-yt-paper-item, [role='menuitem'], yt-formatted-string")
       .find(visible);
-    if (!target) return { clicked: false, reason: "youtube_upload_menuitem_not_found" };
-    click(target);
-    click(target.querySelector("yt-formatted-string, .text-content, tp-yt-paper-item-body, div, span"));
+    const textMatchedTarget = queryAll("tp-yt-paper-item[test-id='upload'][role='menuitem'], [test-id='upload'][role='menuitem'], ytcp-text-menu tp-yt-paper-item, tp-yt-paper-item, [role='menuitem'], button, a, div, span")
+      .find((el) => visible(el) && /上传视频|Upload videos/i.test(clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "")));
+    const chosen = textMatchedTarget || target;
+    if (!chosen || !/上传视频|Upload videos|upload/i.test(clean(chosen.innerText || chosen.textContent || chosen.getAttribute("aria-label") || chosen.getAttribute("title") || chosen.getAttribute("test-id") || ""))) {
+      return {
+        clicked: false,
+        reason: "youtube_upload_menuitem_not_found",
+        candidates: queryAll("tp-yt-paper-item,[role='menuitem'],button,a")
+          .filter(visible)
+          .map((el) => clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || ""))
+          .filter(Boolean)
+          .slice(0, 40),
+      };
+    }
+    click(chosen);
+    click(chosen.querySelector("yt-formatted-string, .text-content, tp-yt-paper-item-body, div, span"));
+    const rect = chosen.getBoundingClientRect();
     return {
       clicked: true,
-      label: clean(target.innerText || target.textContent || target.getAttribute("aria-label") || ""),
-      test_id: String(target.getAttribute("test-id") || ""),
+      label: clean(chosen.innerText || chosen.textContent || chosen.getAttribute("aria-label") || ""),
+      test_id: String(chosen.getAttribute("test-id") || ""),
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
     };
   })()`, 10000);
+  if (result?.clicked) {
+    const nativeClick = await dispatchMouseClick(client, result.x, result.y);
+    return { ...result, native_click: nativeClick };
+  }
+  return result;
 }
 
 async function uploadYoutubeVideoForComposite(client, mediaPath) {
@@ -14140,15 +15337,6 @@ async function uploadYoutubeVideoForComposite(client, mediaPath) {
   }
   firstUpload = await setFirstVideoFileInput(client, mediaPath, { platform: "youtube" });
   if (firstUpload.uploaded) return firstUpload;
-  if (shouldAttemptNativeFileChooserFallback(firstUpload)) {
-    const nativeFallbackUpload = await tryYouTubeSelectFilesNativeUpload(client, mediaPath);
-    if (nativeFallbackUpload.uploaded) {
-      return {
-        ...nativeFallbackUpload,
-        create_flow: createFlow,
-      };
-    }
-  }
   const currentWizardState = await inspectYouTubeUploadWizardState(client).catch(() => ({ step: "" }));
   const alreadyInsideUploadSurface = ["upload_entry", "details", "video_elements", "checks", "visibility"].includes(String(currentWizardState?.step || ""));
   if (!createFlow.clicked && !alreadyInsideUploadSurface) {
@@ -14163,15 +15351,6 @@ async function uploadYoutubeVideoForComposite(client, mediaPath) {
         create_flow: createFlow,
       };
     }
-    if (shouldAttemptNativeFileChooserFallback(secondUpload)) {
-      const nativeFallbackUpload = await tryYouTubeSelectFilesNativeUpload(client, mediaPath);
-      if (nativeFallbackUpload.uploaded) {
-        return {
-          ...nativeFallbackUpload,
-          create_flow: createFlow,
-        };
-      }
-    }
   }
   if (route.fallbackTarget) {
     await evaluateWithClient(client, `(() => { location.href = ${JSON.stringify(route.fallbackTarget)}; return { navigated: true, target: ${JSON.stringify(route.fallbackTarget)} }; })()`, 10000);
@@ -14183,27 +15362,9 @@ async function uploadYoutubeVideoForComposite(client, mediaPath) {
         create_flow: createFlow,
       };
     }
-    if (shouldAttemptNativeFileChooserFallback(fallbackUpload)) {
-      const nativeFallbackUpload = await tryYouTubeSelectFilesNativeUpload(client, mediaPath);
-      if (nativeFallbackUpload.uploaded) {
-        return {
-          ...nativeFallbackUpload,
-          create_flow: createFlow,
-        };
-      }
-    }
   }
   await sleep(3000);
   const finalUpload = await setFirstVideoFileInput(client, mediaPath, { platform: "youtube" });
-  if (!finalUpload.uploaded && shouldAttemptNativeFileChooserFallback(finalUpload)) {
-    const nativeFallbackUpload = await tryYouTubeSelectFilesNativeUpload(client, mediaPath);
-    if (nativeFallbackUpload.uploaded) {
-      return {
-        ...nativeFallbackUpload,
-        create_flow: createFlow,
-      };
-    }
-  }
   return {
     ...finalUpload,
     create_flow: createFlow,
@@ -14314,14 +15475,23 @@ async function ensureCompositeUploadReady(client, platform, content, timeoutMs =
       ...readiness,
     });
   }
-  if (shouldBootstrapCompositeUploadFromCleanEntry(readiness)) {
+  if (shouldBootstrapCompositeUploadFromCleanEntry(readiness) && Boolean(options?.syntheticUploadExpected)) {
+    actions.push({
+      kind: `${platform}_upload_bootstrap_skipped`,
+      skipped: true,
+      reason: "media_upload_already_submitted",
+      bootstrap_ready: true,
+    });
+    readiness = await waitForCompositeUploadReady(client, platform, timeoutMs, mediaPath, onPoll, options);
+    actions.push({ kind: `${platform}_upload_ready_wait_after_submitted_media`, ...readiness });
+  } else if (shouldBootstrapCompositeUploadFromCleanEntry(readiness)) {
     actions.push({ kind: `${platform}_upload_bootstrap_entry`, reason: "clean_upload_entry_detected" });
     actions.push({ kind: `${platform}_upload_reupload_entry`, ...(await clickByText(client, reuploadTexts)) });
     await sleep(1200);
     const bootstrapUpload = await setFirstVideoFileInput(client, mediaPath, { platform });
     actions.push({ kind: `${platform}_upload_bootstrap`, ...bootstrapUpload });
     if (bootstrapUpload.uploaded) {
-      await sleep(16000);
+      await sleep(compositePostUploadReadinessProbeDelayMs(platform));
       readiness = await waitForCompositeUploadReady(client, platform, timeoutMs, mediaPath, onPoll, {
         ...options,
         syntheticUploadExpected: true,
@@ -14371,17 +15541,46 @@ async function ensureCompositeUploadReady(client, platform, content, timeoutMs =
     return { actions, readiness };
   }
 
+  if (Boolean(options?.syntheticUploadExpected)) {
+    actions.push({
+      kind: `${platform}_upload_reupload_skipped`,
+      skipped: true,
+      reason: "media_upload_already_submitted",
+    });
+    return { actions, readiness };
+  }
+
   actions.push({ kind: `${platform}_upload_reupload_entry`, ...(await clickByText(client, reuploadTexts)) });
   await sleep(1200);
   const upload = await setFirstVideoFileInput(client, mediaPath, { platform });
   actions.push({ kind: `${platform}_upload_reupload`, ...upload });
   if (upload.uploaded) {
-    await sleep(16000);
+    await sleep(compositePostUploadReadinessProbeDelayMs(platform));
     readiness = await waitForCompositeUploadReady(client, platform, timeoutMs, mediaPath, onPoll, {
       ...options,
       syntheticUploadExpected: true,
     });
     actions.push({ kind: `${platform}_upload_ready_after_reupload`, ...readiness });
+  } else if (platform === "youtube" && shouldAttemptNativeFileChooserFallback(upload)) {
+    const createFlow = await forceYouTubeCreateUploadFlow(client).catch((error) => ({
+      clicked: false,
+      actions: [{ kind: "youtube_create_flow_for_dom_upload_retry_error", reason: String(error?.message || error || "") }],
+      state: null,
+    }));
+    actions.push({ kind: "youtube_create_flow_for_dom_upload_retry", clicked: Boolean(createFlow.clicked), state: createFlow.state || null });
+    if (Array.isArray(createFlow.actions)) actions.push(...createFlow.actions);
+    await sleep(createFlow.clicked ? 1800 : 800);
+    actions.push({ kind: "youtube_native_file_chooser_skipped", skipped: true, reason: "youtube_formal_publish_uses_dom_file_input_only" });
+    const retryUpload = await setFirstVideoFileInput(client, mediaPath, { platform });
+    actions.push({ kind: "youtube_upload_dom_retry_after_create_flow", ...retryUpload });
+    if (retryUpload.uploaded) {
+      await sleep(compositePostUploadReadinessProbeDelayMs(platform));
+      readiness = await waitForCompositeUploadReady(client, platform, timeoutMs, mediaPath, onPoll, {
+        ...options,
+        syntheticUploadExpected: true,
+      });
+      actions.push({ kind: "youtube_upload_ready_after_dom_retry", ...readiness });
+    }
   }
   return { actions, readiness };
 }
@@ -14428,6 +15627,7 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       platform_overrides: typeof content?.platform_specific_overrides === "object" && content?.platform_specific_overrides !== null
         ? content.platform_specific_overrides
         : {},
+      mediaTitleStems: platform === "youtube" ? _expectedYouTubeMediaTitleStems(content) : [],
     })};
     const extractBody = ${extractCompositeBodyForAudit.toString()};
     const extractDouyinCollection = ${extractDouyinSelectedCollectionEvidence.toString()};
@@ -14566,27 +15766,72 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       : [];
     const textLikeInputTypes = new Set(["", "text", "search", "url", "tel", "email", "number", "date", "time", "datetime-local"]);
     const labeledControlHint = /标题|title|正文|简介|描述|说明|作品描述|作品简介|内容|合集|播放列表|栏目|分类|分区|系列|专辑|发布时间|定时|预约|日期|时间|原创|声明|封面|缩略图|话题|标签/i;
-    const inputFields = [...(youtubeScopedAuditRoot || document).querySelectorAll("input,textarea,[contenteditable=true],div[role=textbox]")]
+    const auditRoots = [];
+    const visitAuditRoot = (root) => {
+      if (!root || auditRoots.includes(root)) return;
+      auditRoots.push(root);
+      let nodes = [];
+      try {
+        nodes = [...root.querySelectorAll("*")];
+      } catch {
+        nodes = [];
+      }
+      for (const el of nodes) {
+        if (el.shadowRoot) visitAuditRoot(el.shadowRoot);
+        if (el.tagName === "IFRAME") {
+          try {
+            if (el.contentDocument) visitAuditRoot(el.contentDocument);
+          } catch {}
+        }
+      }
+    };
+    visitAuditRoot(youtubeScopedAuditRoot || document);
+    const queryAuditAll = (selector) => auditRoots.flatMap((root) => {
+      try {
+        return [...root.querySelectorAll(selector)];
+      } catch {
+        return [];
+      }
+    });
+    const isContentEditableElement = (el) => Boolean(
+      el?.isContentEditable
+      || (
+        typeof el?.hasAttribute === "function"
+        && el.hasAttribute("contenteditable")
+        && String(el.getAttribute("contenteditable") || "").toLowerCase() !== "false"
+      )
+    );
+    const readTextLikeValue = (el) => {
+      if (!el) return "";
+      if (isContentEditableElement(el) || String(el.getAttribute("role") || "").toLowerCase() === "textbox") {
+        return clean(el.innerText || el.textContent || el.value || "");
+      }
+      return clean(el.value || el.innerText || el.textContent || "");
+    };
+    const readNearbyControlLabel = (el) => clean(
+      el?.getAttribute("placeholder")
+      || el?.getAttribute("aria-label")
+      || el?.getAttribute("name")
+      || el?.getAttribute("id")
+      || el?.getAttribute("data-placeholder")
+      || el?.closest?.("label,[role=radio],[role=checkbox],[role=switch]")?.innerText
+      || el?.parentElement?.innerText
+      || el?.host?.innerText
+      || "",
+    );
+    const inputFields = queryAuditAll("input,textarea,[contenteditable],#textbox,div[role=textbox],ytcp-social-suggestions-textbox")
       .filter(visible)
       .map((el) => ({
         el,
         tag: String(el.tagName || "").toLowerCase(),
         type: String(el.getAttribute("type") || "").toLowerCase(),
-        label: clean(
-          el.getAttribute("placeholder")
-          || el.getAttribute("aria-label")
-          || el.getAttribute("name")
-          || el.getAttribute("id")
-          || el.getAttribute("data-placeholder")
-          || el.closest("label,[role=radio],[role=checkbox],[role=switch]")?.innerText
-          || "",
-        ),
-        value: clean(el.value || el.innerText || el.textContent),
+        label: readNearbyControlLabel(el),
+        value: readTextLikeValue(el),
         checked: typeof el.checked === "boolean" ? Boolean(el.checked) : null,
         textLike:
           el.tagName === "TEXTAREA"
-          || el.getAttribute("contenteditable") === "true"
-          || el.isContentEditable
+          || isContentEditableElement(el)
+          || String(el.tagName || "").toLowerCase() === "ytcp-social-suggestions-textbox"
           || (el.tagName === "DIV" && el.getAttribute("role") === "textbox")
           || (el.tagName === "INPUT" && textLikeInputTypes.has(String(el.getAttribute("type") || "").toLowerCase())),
       }))
@@ -14646,6 +15891,8 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       if (platform === "youtube") {
         const youtubeTitleCandidate = textFields.find((item) => /标题（必填）|添加一个可描述你视频的标题|add a title|title/i.test(item.label));
         if (youtubeTitleCandidate) return youtubeTitleCandidate.value;
+        const expectedTitle = clean(expected.title || "");
+        if (expectedTitle && textHaystack.includes(expectedTitle)) return expectedTitle;
       }
       const byLabel = findInputValue(["标题", "title", "作品标题", "填写作品标题"], { textLikeOnly: true });
       const needle = expected.title ? expected.title.slice(0, 120) : "";
@@ -14669,9 +15916,14 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
         if (youtubeBodyCandidate) {
           return extractBody(platform, youtubeBodyCandidate.value || youtubeBodyCandidate.label);
         }
-        if (expected.body && bodyText.includes(expected.body)) {
-          return extractBody(platform, expected.body);
-        }
+        const expectedBody = clean(expected.body || "");
+        if (expectedBody && textHaystack.includes(expectedBody)) return extractBody(platform, expectedBody);
+        const needle = expected.body ? expected.body.slice(0, 180) : "";
+        const byNeedle = needle
+          ? textFields.map((item) => item.value).find((value) => value.includes(needle) || needle.includes(value))
+          : "";
+        if (byNeedle) return extractBody(platform, byNeedle);
+        return "";
       }
       if (platform === "douyin") {
         const readDraftValue = (el) => {
@@ -15023,6 +16275,9 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
     const modalOpen = [...document.querySelectorAll("[role=dialog],[class*=modal],[class*=dialog],[class*=popover]")]
       .filter(visible)
       .some((el) => /设置封面|上传图片|封面比例|预览封面|预览视频/.test(clean(el.innerText || el.textContent)));
+    const hasYoutubeUploadResumeVideoId = ${hasYoutubeUploadResumeVideoId.toString()};
+    const hasYoutubeUploadDialogQuery = ${hasYoutubeUploadDialogQuery.toString()};
+    const shouldTreatYouTubeUploadSurfaceAsStable = ${shouldTreatYouTubeUploadSurfaceAsStable.toString()};
     const signals = detectSignals(platform, textHaystack, lines);
     const youtubeSemanticEditorReady = platform === "youtube" && (
       ${isYouTubeEditorReadinessSurface.toString()}(routeUrl, textHaystack)
@@ -15030,9 +16285,6 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       || inputFields.some((item) => /标题（必填）|说明|缩略图|播放列表|观众|title|description|playlist/i.test(String(item.label || "")))
     );
     const hasInputFields = inputs.length > 0 || fileInputs.length > 0 || youtubeSemanticEditorReady;
-    const hasYoutubeUploadResumeVideoId = ${hasYoutubeUploadResumeVideoId.toString()};
-    const hasYoutubeUploadDialogQuery = ${hasYoutubeUploadDialogQuery.toString()};
-    const shouldTreatYouTubeUploadSurfaceAsStable = ${shouldTreatYouTubeUploadSurfaceAsStable.toString()};
     const routeReady = ${isCompositePublishRouteContext.toString()}(platform, {
       url: routeUrl,
       text: bodyText,
@@ -15141,6 +16393,19 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       && ${isYouTubeEditorReadinessSurface.toString()}(routeUrl, textHaystack);
     const scheduleShort = scheduleDate ? scheduleDate.slice(5) : "";
     const scheduleDateLabel = scheduleShort ? scheduleShort.replace("-", "月") + "日" : "";
+    const scheduleYear = scheduleDate ? scheduleDate.slice(0, 4) : "";
+    const scheduleMonth = scheduleDate ? String(Number(scheduleDate.slice(5, 7) || "0")) : "";
+    const scheduleDay = scheduleDate ? String(Number(scheduleDate.slice(8, 10) || "0")) : "";
+    const scheduleDateVariants = Array.from(new Set([
+      scheduleDate,
+      scheduleShort,
+      scheduleDateLabel,
+      scheduleMonth && scheduleDay ? scheduleMonth + "月" + scheduleDay + "日" : "",
+      scheduleMonth && scheduleDay ? scheduleMonth.padStart(2, "0") + "月" + scheduleDay.padStart(2, "0") + "日" : "",
+      scheduleYear && scheduleMonth && scheduleDay ? scheduleYear + "年" + scheduleMonth + "月" + scheduleDay + "日" : "",
+      scheduleYear && scheduleMonth && scheduleDay ? scheduleYear + "年" + scheduleMonth.padStart(2, "0") + "月" + scheduleDay.padStart(2, "0") + "日" : "",
+    ].filter(Boolean)));
+    const scheduleDateVariantPresent = scheduleDateVariants.some((value) => textHaystack.includes(value));
     const douyinCollapsedSchedulePresent =
       platform === "douyin"
       && douyinCheckedScheduled
@@ -15158,7 +16423,7 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       textHaystack.includes(expected.scheduleDisplay) ||
       douyinCollapsedSchedulePresent ||
       (scheduleDate && scheduleTime && textHaystack.includes(scheduleDate) && textHaystack.includes(scheduleTime)) ||
-      (scheduleDate && scheduleTime && textHaystack.includes(scheduleDate.replace(/-/g, "年").replace(/年(\\d{2})年/, "年$1月")) && textHaystack.includes(scheduleTime)) ||
+      (scheduleDate && scheduleTime && scheduleDateVariantPresent && textHaystack.includes(scheduleTime)) ||
       (scheduleShort && scheduleTime && textHaystack.includes(scheduleShort) && textHaystack.includes(scheduleTime)) ||
       (scheduleDateLabel && scheduleTime && textHaystack.includes(scheduleDateLabel) && textHaystack.includes(scheduleTime))
     );
@@ -15176,8 +16441,42 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       (platform === "xiaohongshu" && String(location.href || "").includes("/publish/success") && /发布成功/.test(textHaystack));
     const receiptFieldBypass = receiptLike && platform !== "youtube";
     const tagVerified = expected.skipExplicitTagEntry ? true : tagChecks.every((item) => item.present);
+    const normalizeYouTubeReadbackText = (value = "") => String(value || "")
+      .replace(/\\.[A-Za-z0-9]{2,5}\\b/g, "")
+      .replace(/[\\s｜|:：!！,，.。?？'"\\-—_()/\\\\[\\]【】]/g, "")
+      .toLowerCase()
+      .trim();
+    const youtubeTitleLooksLikeDefaultFilename = platform === "youtube" && (() => {
+      const actualTitle = String(titleFieldActual || "").trim();
+      if (!actualTitle) return false;
+      if (/\\.(?:mp4|mov|m4v|mkv|webm)\\b/i.test(actualTitle)) return true;
+      if (/^\\d{8}[_\\-\\s].*(?:横版|竖版).*(?:成片|final|output)/i.test(actualTitle)) return true;
+      const normalizedActual = normalizeYouTubeReadbackText(actualTitle);
+      return (Array.isArray(expected.mediaTitleStems) ? expected.mediaTitleStems : []).some((stem) => {
+        const normalizedStem = normalizeYouTubeReadbackText(stem);
+        return Boolean(
+          normalizedActual
+          && normalizedStem
+          && normalizedStem.length >= 12
+          && (
+            normalizedActual === normalizedStem
+            || normalizedActual.includes(normalizedStem)
+            || normalizedStem.includes(normalizedActual)
+          )
+        );
+      });
+    })();
+    const youtubeTitleVerified = platform !== "youtube"
+      ? true
+      : (
+          !expected.title
+          || (
+            Boolean(titleFieldActual)
+            && !youtubeTitleLooksLikeDefaultFilename
+            && normalizeYouTubeReadbackText(titleFieldActual).includes(normalizeYouTubeReadbackText(expected.title))
+          )
+        );
     const bodyVerified = receiptFieldBypass
-      || (platform === "youtube" && expected.body && bodyText.includes(expected.body))
       || verifyBody(platform, expected.body, bodyActual, { tagVerified, textHaystack });
     const coverBasename = expected.coverPath ? expected.coverPath.split(/[\\\\/]/).pop() : "";
     const youtubeAutoThumbnail = platform === "youtube" && imageSources.some((src) => /i\\.ytimg\\.com|mqdefault|hqdefault|vi_webp/.test(src));
@@ -15231,14 +16530,18 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
     const douyinAllRequiredCoverSlotsReady = !multipleCoverSlotsRequired
       ? douyinCustomCoverSaved
       : Boolean(douyinCoverState?.all_required_slots_saved) && !douyinEffectiveDualCoverWarning;
+    const youtubeCoverPresent = platform === "youtube" && (
+      !expected.coverPath
+      || Boolean(coverActual)
+    );
     const coverPresent = !expected.coverPath && !requiredCoverSlots.length
       ? true
       : platform === "douyin"
         ? !coverRequiredWarning && douyinAllRequiredCoverSlotsReady
+      : platform === "youtube"
+        ? !coverRequiredWarning && youtubeCoverPresent
       : !coverRequiredWarning && (
-        (platform === "youtube" && textHaystack.includes(coverBasename))
-        || (platform !== "youtube" && platformCoverSuccess)
-        || (platform === "youtube" && (youtubeCustomThumbnailPreview || youtubeThumbnailUploading))
+        platformCoverSuccess
       );
     const declarationMissingPrompt = /发布前请添加创作声明|请先添加创作声明|发布前需添加创作声明|根据相关法律法规要求/.test(textHaystack);
     const declarationPresent = verifyDeclaration(
@@ -15285,7 +16588,7 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
       relevant_lines: lines.filter((line) => /发布|预约|定时|封面|缩略图|播放列表|合集|原创|声明|公开|已排定|链接|正在上传|上传失败|无效的视频|打扰粉丝|不生成动态|标签|话题|分类/.test(line)).slice(0, 120),
     };
     const fields = {
-      title: { expected: expected.title, actual: titleFieldActual, verified: receiptFieldBypass || !expected.title || textHaystack.includes(expected.title) },
+      title: { expected: expected.title, actual: titleFieldActual, verified: receiptFieldBypass || (platform === "youtube" ? youtubeTitleVerified : (!expected.title || textHaystack.includes(expected.title))) },
       body: { expected: expected.body, actual: bodyActual, verified: bodyVerified },
       tags: {
         expected: expectedTags,
@@ -15431,6 +16734,43 @@ async function readCompositeMaterialIntegrity(client, platform, content) {
   return result;
 }
 
+function attachVisualEvidencePackToMaterialIntegrity(integrity = {}, snapshot = null, {
+  platform = "",
+  phase = "",
+} = {}) {
+  const base = integrity && typeof integrity === "object" ? { ...integrity } : {};
+  const extras = base.platform_extras && typeof base.platform_extras === "object" ? { ...base.platform_extras } : {};
+  const evidencePack = normalizeVisualEvidencePack(snapshot?.visual_evidence_pack);
+  const visualEvidence = normalizeVisualEvidence(snapshot?.visual_evidence);
+  if (visualEvidence) extras.visual_evidence = visualEvidence;
+  if (evidencePack) extras.visual_evidence_pack = evidencePack;
+  if (snapshot && typeof snapshot === "object") {
+    extras.visual_evidence_phase = String(phase || evidencePack?.phase || "").trim();
+    extras.visual_route = {
+      url: String(snapshot.url || evidencePack?.route?.url || "").trim(),
+      title: String(snapshot.title || evidencePack?.route?.title || "").trim(),
+    };
+    if (!Array.isArray(extras.relevant_lines) || extras.relevant_lines.length === 0) {
+      extras.relevant_lines = Array.isArray(snapshot.lines) ? snapshot.lines.slice(0, 120) : [];
+    }
+  }
+  return {
+    ...base,
+    platform: base.platform || normalizePlatform(platform),
+    platform_extras: extras,
+  };
+}
+
+async function readCompositeMaterialIntegrityWithVisualEvidence(client, platform, content, phase = "material_integrity") {
+  const integrity = await readCompositeMaterialIntegrity(client, platform, content);
+  const snapshot = await pageSnapshot(client, {
+    captureVisualEvidence: true,
+    platform,
+    visualEvidencePhase: phase,
+  }).catch(() => null);
+  return attachVisualEvidencePackToMaterialIntegrity(integrity, snapshot, { platform, phase });
+}
+
 async function prepareGenericCompositeDraft(client, platform, content) {
   const actions = [];
   const title = String(content.title || "").trim();
@@ -15461,7 +16801,9 @@ async function prepareGenericCompositeDraft(client, platform, content) {
       if (!actions.at(-1)?.clicked) actions.push({ kind: "toutiao_cover_local_upload_loose", ...(await clickLooseText(client, ["本地上传", "上传图片", "上传封面"])) });
       await sleep(800);
     }
-    actions.push({ kind: "cover_upload", ...(await setImageFileInputByAccept(client, coverPath)) });
+    actions.push({ kind: "cover_upload", ...(platform === "youtube"
+      ? await setYouTubeRuntimeImageFileInput(client, coverPath)
+      : await setImageFileInputByAccept(client, coverPath)) });
     await sleep(3500);
     if (platform === "xiaohongshu") {
       actions.push({ kind: "xiaohongshu_cover_confirm", ...(await clickByText(client, ["确定"])) });
@@ -15610,8 +16952,11 @@ async function uploadCompositeCover(client, platform, content, coverPath = "") {
   }
   actions.push({
     kind: `${platform}_cover_upload`,
+    expected_path: resolvedCoverPath,
     ...(platform === "kuaishou"
       ? await setKuaishouMainCoverUploadInput(client, resolvedCoverPath)
+      : platform === "youtube"
+      ? await setYouTubeRuntimeImageFileInput(client, resolvedCoverPath)
       : await setImageFileInputByAccept(
         client,
         resolvedCoverPath,
@@ -15625,6 +16970,108 @@ async function uploadCompositeCover(client, platform, content, coverPath = "") {
           : {},
       )),
   });
+  if (platform === "youtube") {
+    const coverBase = path.win32.basename(resolvedCoverPath);
+    const coverUploadAction = actions.at(-1) && actions.at(-1).kind === "youtube_cover_upload" ? actions.at(-1) : {};
+    const runtimeCoverValue = String(coverUploadAction?.runtime?.value || "");
+    const runtimeCoverFilesLength = Number(coverUploadAction?.runtime?.filesLength || 0);
+    const runtimeCoverExactHit = Boolean(runtimeCoverFilesLength > 0 && coverBase && runtimeCoverValue.includes(coverBase));
+    const readback = await evaluateWithClient(client, `(() => {
+      const expectedBase = ${JSON.stringify(coverBase)};
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const visible = (el) => {
+        if (!el || typeof el.getBoundingClientRect !== "function") return false;
+        const rect = el.getBoundingClientRect();
+        const style = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+      };
+      const text = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+      const viewportImages = [...document.querySelectorAll("img")]
+        .filter(visible)
+        .slice(0, 40)
+        .map((img) => String(img.currentSrc || img.src || "").trim())
+        .filter(Boolean);
+      const fileInputValues = [...document.querySelectorAll("input[type=file]")]
+        .map((input) => ({
+          accept: String(input.accept || input.getAttribute("accept") || ""),
+          value: String(input.value || ""),
+          files_length: input.files ? input.files.length : 0,
+        }))
+        .filter((item) => /image|png|jpe?g|webp|gif|\\*/i.test(item.accept) || item.value || item.files_length > 0);
+      const sourceHit = Boolean(
+        expectedBase
+        && (
+          viewportImages.some((src) => src.includes(expectedBase))
+          || fileInputValues.some((item) => item.value.includes(expectedBase) || item.files_length > 0)
+        )
+      );
+      const thumbnailSurface = /缩略图|Thumbnail|上传缩略图|Upload thumbnail|上传文件|Upload file/i.test(text);
+      const thumbnailUploading = /缩略图[\s\S]{0,80}正在上传|Thumbnail[\s\S]{0,80}Uploading|正在上传…|Uploading/i.test(text);
+      const accountRestriction = /积累更多历史记录|每天添加更多自定义缩略图|daily custom thumbnails|advanced features|unlock advanced features/i.test(text);
+      const uploadError = /缩略图.{0,40}(失败|错误|无法|过大|无效)|Thumbnail.{0,40}(failed|error|invalid|too large)/i.test(text);
+      const pending = !sourceHit && thumbnailSurface && thumbnailUploading;
+      return {
+        verified: Boolean(!accountRestriction && !uploadError && (sourceHit || (thumbnailSurface && fileInputValues.some((item) => item.files_length > 0)))),
+        pending,
+        thumbnail_uploading: thumbnailUploading,
+        account_restriction: accountRestriction,
+        upload_error: uploadError,
+        expected_base: expectedBase,
+        source_hit: sourceHit,
+        thumbnail_surface: thumbnailSurface,
+        image_sources: viewportImages.slice(0, 12),
+        background_sources: [],
+        file_inputs: fileInputValues.slice(0, 12),
+        relevant_lines: text.split(/[\\n\\r]+| {2,}/).map(clean).filter((line) => /缩略图|Thumbnail|上传文件|Upload file|封面|cover/i.test(line)).slice(0, 40),
+      };
+    })()`, 6000).catch((error) => {
+      if (runtimeCoverExactHit) {
+        return {
+          verified: true,
+          pending: false,
+          expected_base: coverBase,
+          source_hit: true,
+          thumbnail_surface: true,
+          file_inputs: [{
+            value: runtimeCoverValue,
+            files_length: runtimeCoverFilesLength,
+            accept: String(coverUploadAction?.runtime?.accept || coverUploadAction?.input?.accept || ""),
+          }],
+          reason: "youtube_cover_runtime_exact_filename_after_readback_timeout",
+          message: String(error?.message || error || ""),
+        };
+      }
+      return {
+        verified: false,
+        pending: false,
+        expected_base: coverBase,
+        reason: "youtube_cover_readback_error",
+        message: String(error?.message || error || ""),
+      };
+    });
+    actions.push({ kind: "youtube_cover_readback", ...readback });
+    if (!readback?.verified && readback?.pending) {
+      actions.push({
+        kind: "youtube_cover_pending",
+        pending: true,
+        blocked: false,
+        expected_path: resolvedCoverPath,
+        reason: readback?.account_restriction
+          ? "cover_upload_pending_with_account_restriction_hint"
+          : "cover_upload_pending",
+        readback,
+      });
+    } else if (!readback?.verified) {
+      actions.push({
+        kind: "youtube_cover_blocked",
+        blocked: true,
+        expected_path: resolvedCoverPath,
+        reason: "cover_readback_mismatch",
+        readback,
+      });
+      return actions;
+    }
+  }
   if (platform === "xiaohongshu" && actions.at(-1)?.uploaded !== true) {
     actions.push({
       kind: "xiaohongshu_cover_upload_blocked",
@@ -16384,140 +17831,95 @@ async function selectCompositeCollection(client, platform, content) {
   return actions;
 }
 
+function actionTextIndicatesYouTubePlaylistSelected(actions = [], playlistName = "") {
+  const target = String(playlistName || "").replace(/\s+/g, " ").trim();
+  if (!target) return false;
+  const chunks = [];
+  const visit = (value, depth = 0) => {
+    if (value == null || depth > 4) return;
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      chunks.push(String(value));
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value.slice(0, 80)) visit(item, depth + 1);
+      return;
+    }
+    if (typeof value === "object") {
+      for (const key of [
+        "text",
+        "row_text",
+        "actual",
+        "actual_body",
+        "body",
+        "message",
+        "reason",
+        "visible_lines",
+        "relevant_lines",
+        "lines",
+        "overlays",
+        "headings",
+        "last",
+      ]) {
+        if (Object.prototype.hasOwnProperty.call(value, key)) visit(value[key], depth + 1);
+      }
+    }
+  };
+  for (const action of actions.slice(-24)) visit(action);
+  const text = chunks.join(" ").replace(/\s+/g, " ").trim();
+  return text.includes(target) && /播放列表|playlist/i.test(text);
+}
+
 async function selectYouTubePlaylist(client, playlistName) {
   const actions = [];
   const target = String(playlistName || "").trim();
   if (!target) return actions;
   const entry = await evaluateWithClient(client, `(() => {
-    const target = ${JSON.stringify(target)};
-    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const visible = (el) => {
       if (!el || typeof el.getBoundingClientRect !== "function") return false;
       const rect = el.getBoundingClientRect();
       const style = getComputedStyle(el);
-      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+      return rect.width > 0
+        && rect.height > 0
+        && rect.bottom > 0
+        && rect.right > 0
+        && rect.top < window.innerHeight
+        && rect.left < window.innerWidth
+        && style.display !== "none"
+        && style.visibility !== "hidden"
+        && !el.disabled
+        && el.getAttribute("aria-disabled") !== "true";
     };
-    const click = (el) => {
-      if (!el || !visible(el)) return false;
-      el.scrollIntoView({ block: "center", inline: "center" });
-      const rect = el.getBoundingClientRect();
-      const eventInit = { bubbles: true, cancelable: true, view: window, clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
-      try { if (typeof el.focus === "function") el.focus({ preventScroll: true }); } catch {}
-      for (const type of ["pointerdown", "mousedown", "pointerup", "mouseup", "click"]) {
-        try { el.dispatchEvent(new MouseEvent(type, eventInit)); } catch {}
-      }
-      try { if (typeof el.click === "function") el.click(); } catch {}
-      try {
-        el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
-        el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: "Enter", code: "Enter" }));
-        el.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: " ", code: "Space" }));
-        el.dispatchEvent(new KeyboardEvent("keyup", { bubbles: true, cancelable: true, key: " ", code: "Space" }));
-      } catch {}
-      return true;
-    };
-    const popupCandidates = () => [...document.querySelectorAll("[role=dialog],[role=listbox],[role=menu],tp-yt-paper-dialog,ytcp-dialog,tp-yt-paper-listbox,div,section")]
-      .filter(visible)
-      .map((el) => {
-        const rect = el.getBoundingClientRect();
-        const text = clean(el.innerText || el.textContent || "");
-        return {
-          el,
-          text,
-          area: rect.width * rect.height,
-        };
-      })
-      .filter((item) => {
-        if (!item.text) return false;
-        const hasPlaylistSignals = item.text.includes(target) || /新建播放列表|播放列表|playlist/i.test(item.text);
-        const hasSelectionSignals = /完成|done|新建播放列表|创建/.test(item.text);
-        return hasPlaylistSignals && hasSelectionSignals && item.area > 20000 && item.area < 1200000;
-      });
-    const popupOpen = () => popupCandidates().length > 0;
-    const rows = [...document.querySelectorAll("ytcp-video-metadata-playlists, ytcp-form-input-container, section, div")]
-      .filter(visible)
-      .map((el) => ({
-        el,
-        text: clean(el.innerText || el.textContent || ""),
-        area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
-      }))
-      .filter((item) => item.area > 1200 && /播放列表|playlist/i.test(item.text))
-      .sort((left, right) => left.area - right.area);
-    const row = rows.find((item) => /选择|choose|select|播放列表|playlist/i.test(item.text)) || rows[0] || null;
+    const row = document.querySelector("ytcp-video-metadata-playlists");
     if (!row) return { clicked: false, reason: "playlist_row_missing" };
-    const directChoice = [...row.el.querySelectorAll("*")]
-      .filter(visible)
-      .map((el) => ({
-        el,
-        text: clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || ""),
-        context: clean(el.parentElement?.innerText || row.el.innerText || ""),
-        area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
-      }))
-      .filter((item) => /^选择$|^select$|^choose$/i.test(item.text) && /播放列表|playlist/i.test(item.context))
-      .sort((left, right) => left.area - right.area)[0] || null;
-    const dialogRoot = row.el.closest("ytcp-uploads-dialog,tp-yt-paper-dialog,[role=dialog]") || document.body;
-    const controls = [
-      ...row.el.querySelectorAll("button,[role=button],tp-yt-paper-button,tp-yt-paper-item,ytcp-button,div,span,[aria-haspopup=true]"),
-      ...dialogRoot.querySelectorAll("button,[role=button],tp-yt-paper-button,ytcp-button,[aria-haspopup=true]")
-    ]
-      .filter(visible)
-      .map((el) => ({
-        el,
-        text: clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || ""),
-        cls: clean(typeof el.className === "string" ? el.className : ""),
-        area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
-        context: clean(el.closest("ytcp-video-metadata-playlists,ytcp-form-input-container,ytcp-uploads-dialog,tp-yt-paper-dialog,[role=dialog]")?.innerText || ""),
-        hasPopup: String(el.getAttribute("aria-haspopup") || "").toLowerCase() === "true",
-      }))
-      .sort((left, right) => {
-        const score = (item) => {
-          let value = 0;
-          const cls = String(item.cls || "").toLowerCase();
-          if (/^选择$|^select$|^choose$/i.test(item.text)) value += 600;
-          else if (/选择|select|choose|playlist|播放列表/i.test(item.text)) value += 300;
-          if (/播放列表|playlist/i.test(item.context)) value += 240;
-          if (item.hasPopup) value += 180;
-          if (/button|trigger|dropdown|select|ytcp-button|ytcp-dropdown-trigger|paper-button/i.test(cls)) value += 120;
-          if (item.area > 800) value += 40;
-          return value;
-        };
-        return score(right) - score(left) || left.area - right.area;
-      });
-    const candidateChain = [
-      directChoice?.el || null,
-      controls[0]?.el || null,
-      directChoice?.el?.closest?.("[aria-haspopup=true],button,[role=button],ytcp-button,ytcp-dropdown-trigger,tp-yt-paper-button") || null,
-      row.el.querySelector?.("[aria-haspopup=true],button,[role=button],ytcp-button,ytcp-dropdown-trigger,tp-yt-paper-button") || null,
-      row.el,
-    ].filter(Boolean);
-    let clicked = false;
-    let chosenLabel = "";
-    for (const candidate of candidateChain) {
-      chosenLabel = clean(candidate.innerText || candidate.textContent || candidate.getAttribute?.("aria-label") || candidate.getAttribute?.("title") || "");
-      clicked = click(candidate);
-      if (!clicked) continue;
-      const started = Date.now();
-      while (Date.now() - started < 1800) {
-        if (popupOpen()) {
-          return {
-            clicked: true,
-            popup_open: true,
-            label: chosenLabel.slice(0, 160),
-            row_text: row.text.slice(0, 240),
-          };
-        }
-      }
-    }
+    row.scrollIntoView({ block: "center", inline: "center" });
+    const candidate = [
+      row.querySelector("ytcp-dropdown-trigger[aria-label],ytcp-dropdown-trigger"),
+      row.querySelector("[role=button][aria-label],button,[role=button],ytcp-text-dropdown-trigger"),
+      row,
+    ].find((el) => el && visible(el));
+    if (!candidate) return { clicked: false, reason: "playlist_control_missing" };
+    const rect = candidate.getBoundingClientRect();
     return {
-      clicked,
-      popup_open: popupOpen(),
-      label: clean(chosenLabel || controls[0]?.text || row.text).slice(0, 160),
-      row_text: row.text.slice(0, 240),
+      clicked: false,
+      needs_native_click: true,
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+      width: rect.width,
+      height: rect.height,
+      label: String(candidate.getAttribute("aria-label") || candidate.tagName || "").slice(0, 160),
     };
-  })()`, 15000);
+  })()`, 4000);
+  if (entry?.needs_native_click && Number.isFinite(Number(entry.x)) && Number.isFinite(Number(entry.y))) {
+    await dispatchMouseClick(client, Number(entry.x), Number(entry.y));
+    entry.clicked = true;
+    entry.click_mode = "native_cdp_coordinate";
+  }
   actions.push({ kind: "youtube_collection_entry", ...entry });
   await sleep(900);
-  const selection = await evaluateWithClient(client, `(() => {
+  let selection = await evaluateWithClient(client, `(async () => {
     const target = ${JSON.stringify(target)};
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const visible = (el) => {
       if (!el || typeof el.getBoundingClientRect !== "function") return false;
@@ -16537,7 +17939,7 @@ async function selectYouTubePlaylist(client, playlistName) {
       try { if (typeof el.click === "function") el.click(); } catch {}
       return true;
     };
-    const popupCandidates = () => [...document.querySelectorAll("[role=dialog],[role=listbox],[role=menu],tp-yt-paper-dialog,ytcp-dialog,tp-yt-paper-listbox,div,section")]
+    const popupCandidates = () => [...document.querySelectorAll("ytcp-playlist-dialog,tp-yt-paper-dialog,ytcp-dialog,[role=dialog],tp-yt-paper-listbox,[role=listbox]")]
       .filter(visible)
       .map((el) => {
         const rect = el.getBoundingClientRect();
@@ -16554,7 +17956,7 @@ async function selectYouTubePlaylist(client, playlistName) {
         const hasSelectionSignals = /完成|done|新建播放列表|创建/.test(item.text);
         return hasPlaylistSignals && hasSelectionSignals && item.area > 20000 && item.area < 1200000;
       });
-    const roots = popupCandidates()
+    let roots = popupCandidates()
       .sort((left, right) => {
         const score = (item) => {
           let value = 0;
@@ -16566,7 +17968,7 @@ async function selectYouTubePlaylist(client, playlistName) {
         };
         return score(right) - score(left) || left.area - right.area;
       });
-    const root = roots[0]?.el || null;
+    let root = roots[0]?.el || null;
     if (!root) {
       return {
         clicked: false,
@@ -16583,22 +17985,23 @@ async function selectYouTubePlaylist(client, playlistName) {
       const cls = clean(typeof el.className === "string" ? el.className : "");
       return /(checked|selected|active)/i.test(cls) && !/(unchecked|disabled)/i.test(cls);
     };
-    const optionTargets = [...root.querySelectorAll("*")]
+    const collectOptionTargets = (scanRoot) => [...scanRoot.querySelectorAll("tp-yt-paper-checkbox,[role=checkbox],ytcp-checkbox-lit,label,button,[role=button],div,span")]
       .filter(visible)
       .map((el) => {
-        const text = clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "");
-        const rect = el.getBoundingClientRect();
-        const clickable = el.closest("label,button,[role=button],[role=option],[role=checkbox],tp-yt-paper-checkbox,ytcp-checkbox-lit,div,span") || el;
-        const checkboxLike = el.closest("tp-yt-paper-checkbox,[role=checkbox],ytcp-checkbox-lit,label") || null;
-        const className = clean(typeof el.className === "string" ? el.className : "");
-        const tag = String(el.tagName || "").toLowerCase();
+        const row = el.closest("tp-yt-paper-checkbox,[role=checkbox],ytcp-checkbox-lit,label,ytcp-playlist-dialog-row,div") || el;
+        const text = clean(row.innerText || row.textContent || el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "");
+        const rect = row.getBoundingClientRect();
+        const clickable = row.closest("label,button,[role=button],[role=option],[role=checkbox],tp-yt-paper-checkbox,ytcp-checkbox-lit,div,span") || row || el;
+        const checkboxLike = row.closest("tp-yt-paper-checkbox,[role=checkbox],ytcp-checkbox-lit,label") || el.closest("tp-yt-paper-checkbox,[role=checkbox],ytcp-checkbox-lit,label") || null;
+        const className = clean(typeof row.className === "string" ? row.className : "");
+        const tag = String(row.tagName || el.tagName || "").toLowerCase();
         return {
-          el,
+          el: row || el,
           text,
           clickable,
           checkboxLike,
           area: rect.width * rect.height,
-          checked: checkboxState(el) || checkboxState(checkboxLike) || checkboxState(clickable),
+          checked: checkboxState(el) || checkboxState(row) || checkboxState(checkboxLike) || checkboxState(clickable),
           className,
           tag,
         };
@@ -16619,11 +18022,34 @@ async function selectYouTubePlaylist(client, playlistName) {
         };
         return score(right) - score(left) || left.area - right.area;
       });
+    let optionTargets = [];
+    let stableEmptySeen = 0;
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      roots = popupCandidates().sort((left, right) => {
+        const score = (item) => {
+          let value = 0;
+          if (item.text.includes(target)) value += 800;
+          if (/播放列表|playlist/.test(item.text)) value += 260;
+          if (/完成|done|新建播放列表|创建/.test(item.text)) value += 180;
+          if (item.area > 30000 && item.area < 900000) value += 120;
+          return value;
+        };
+        return score(right) - score(left) || left.area - right.area;
+      });
+      root = roots[0]?.el || root;
+      if (!root) break;
+      optionTargets = collectOptionTargets(root);
+      if (optionTargets.length > 0) break;
+      const textNow = clean(root.innerText || root.textContent || "");
+      if (/没有可用的播放列表|No playlists available/i.test(textNow)) stableEmptySeen += 1;
+      await sleep(350);
+    }
     const option = optionTargets[0] || null;
     if (!option) {
       return {
         clicked: false,
         reason: "playlist_option_missing",
+        stable_empty_seen: stableEmptySeen,
         candidates: [...new Set(
           [...root.querySelectorAll("*")]
             .filter(visible)
@@ -16640,8 +18066,9 @@ async function selectYouTubePlaylist(client, playlistName) {
         el,
         text: clean(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || ""),
         area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
+        context: clean(el.closest("[role=dialog],tp-yt-paper-dialog,ytcp-dialog,ytcp-uploads-dialog")?.innerText || root.innerText || ""),
       }))
-      .filter((item) => /^(完成|Done|确定|保存)$/i.test(item.text) || /完成|Done|确定|保存/.test(item.text))
+      .filter((item) => /^(完成|Done|确定|保存)$/i.test(item.text) && item.text.length <= 8 && /播放列表|playlist/i.test(item.context))
       .sort((left, right) => {
         const exactLeft = /^(完成|Done)$/i.test(left.text);
         const exactRight = /^(完成|Done)$/i.test(right.text);
@@ -16657,9 +18084,91 @@ async function selectYouTubePlaylist(client, playlistName) {
       done_clicked: doneClicked,
       done_text: done?.text || "",
     };
-  })()`, 18000);
+  })()`, 9000);
   actions.push({ kind: "youtube_collection_select", ...selection, expected: target });
+  if (
+    selection?.clicked !== true
+    && selection?.reason === "playlist_option_missing"
+    && Number(selection?.stable_empty_seen || 0) >= 3
+    && (
+      /创建播放列表|Create playlist/i.test(String(selection?.dialog_text || ""))
+      || (Array.isArray(selection?.candidates) && selection.candidates.some((item) => /创建播放列表|Create playlist/i.test(String(item || ""))))
+    )
+  ) {
+    actions.push({
+      kind: "youtube_collection_create_skipped",
+      skipped: true,
+      expected: target,
+      reason: "existing_playlist_required",
+    });
+  }
   await sleep(900);
+  const readback = await evaluateWithClient(client, `(() => {
+    const target = ${JSON.stringify(target)};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const visible = (el) => {
+      if (!el || typeof el.getBoundingClientRect !== "function") return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden";
+    };
+    const text = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    const popupStillOpen = [...document.querySelectorAll("ytcp-playlist-dialog,tp-yt-paper-dialog,ytcp-dialog,[role=dialog],tp-yt-paper-listbox,[role=listbox]")]
+      .filter(visible)
+      .some((el) => {
+        const dialogText = clean(el.innerText || el.textContent || "");
+        return /播放列表|playlist/i.test(dialogText)
+          && (
+            dialogText.includes(target)
+            || /新建播放列表|完成|Done|Create playlist/i.test(dialogText)
+          );
+      });
+    const playlistRows = [...document.querySelectorAll("ytcp-video-metadata-playlists, ytcp-form-input-container")]
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        return { text: clean(el.innerText || el.textContent || ""), area: rect.width * rect.height };
+      })
+      .filter((item) => item.area > 1000 && /播放列表|playlist/i.test(item.text))
+      .sort((left, right) => left.area - right.area);
+    const rowText = playlistRows[0]?.text || "";
+    const verified = Boolean(!popupStillOpen && (rowText.includes(target) || text.includes(target)));
+    return {
+      verified,
+      popup_still_open: popupStillOpen,
+      expected: target,
+      row_text: rowText.slice(0, 360),
+      relevant_lines: text.split(/[\\n\\r]+| {2,}/).map(clean).filter((line) => /播放列表|playlist|新建播放列表|完成|Done/.test(line)).slice(0, 40),
+    };
+  })()`, 6000).catch((error) => ({
+    verified: false,
+    expected: target,
+    reason: "youtube_collection_readback_error",
+    message: String(error?.message || error || ""),
+  }));
+  if (
+    !readback?.verified
+    && selection?.clicked
+    && selection?.done_clicked
+    && String(selection?.option_text || "").includes(target)
+    && (readback?.popup_still_open === false || readback?.reason === "youtube_collection_readback_error")
+  ) {
+    readback.verified = true;
+    readback.action_confirmed = true;
+    readback.reason = readback?.reason === "youtube_collection_readback_error"
+      ? "playlist_action_confirmed_after_light_readback_timeout"
+      : "playlist_action_confirmed_and_dialog_closed";
+  }
+  actions.push({ kind: "youtube_collection_readback", ...readback });
+  if (!readback?.verified) {
+    actions.push({
+      kind: "youtube_collection_blocked",
+      blocked: true,
+      expected: target,
+      reason: readback?.popup_still_open ? "playlist_dialog_not_confirmed" : "playlist_readback_mismatch",
+      readback,
+    });
+  }
   return actions;
 }
 
@@ -17405,6 +18914,44 @@ async function prepareYoutubeCompositeDraft(client, platform, content) {
     )),
   });
   await sleep(900);
+  const postEditorSurface = await runStep("post_editor_surface", () => inspectYouTubeUploadEditorBootstrapSurface(client));
+  if (
+    postEditorSurface?.channelContentList
+    && !postEditorSurface?.uploadDialogSurface
+    && !postEditorSurface?.uploadResumeRoute
+    && Array.isArray(postEditorSurface?.draftRows)
+    && postEditorSurface.draftRows.length > 0
+  ) {
+    const continuation = selectYouTubeFreshUploadContinuationCandidate(
+      postEditorSurface,
+      content,
+      [{ kind: "media_upload", uploaded: true, reason: "prepare_youtube_current_fresh_upload_probe" }],
+    );
+    actions.push({
+      kind: "youtube_current_fresh_upload_continuation_probe",
+      ...continuation,
+    });
+    if (continuation.allowed) {
+      const opened = await runStep("open_current_fresh_upload", () =>
+        openYouTubeFreshUploadContinuationCandidate(client, continuation)
+      );
+      actions.push({
+        kind: "youtube_current_fresh_upload_continuation_open",
+        ...opened,
+      });
+      if (opened?.opened) {
+        await sleep(2600);
+      }
+    } else {
+    actions.push({
+      kind: "youtube_draft_resume_forbidden_from_content_list",
+      blocked: true,
+      reason: "fresh_upload_path_must_not_resume_draft",
+      draft_row_count: postEditorSurface.draftRows.length,
+    });
+    return actions;
+    }
+  }
   actions.push({
     kind: "youtube_draft_resume_prompt",
     attempted: false,
@@ -17422,15 +18969,120 @@ async function prepareYoutubeCompositeDraft(client, platform, content) {
     });
     return actions;
   }
-  const inheritedUploadReadiness = await runStep("shared_upload_readiness", () =>
-    ensureCompositeUploadReady(client, platform, content, compositeUploadTimeoutMs(platform))
-  );
+  const resumeExistingFreshUpload = Boolean(content?.platform_specific_overrides?.youtube_current_fresh_upload_resume);
+  let directUpload = null;
+  if (resumeExistingFreshUpload) {
+    const binding = await resolveYouTubeDraftEditorRoute(client).catch(() => ({}));
+    const routeVideoId = String(binding?.video_id || "").trim();
+    if (routeVideoId) {
+      directUpload = {
+        uploaded: true,
+        skipped: true,
+        reason: "youtube_current_fresh_upload_resume_existing_video_bound",
+        video_id: routeVideoId,
+        edit_url: String(binding?.edit_url || ""),
+      };
+      actions.push({
+        kind: "youtube_media_upload",
+        ...directUpload,
+      });
+    }
+  }
+  if (!directUpload) {
+    const currentUploadState = await readCompositeUploadReadinessSnapshot(client, "youtube", mediaPath).catch(() => null);
+    const currentRouteBinding = await resolveYouTubeDraftEditorRoute(client).catch(() => ({}));
+    const routeVideoId = String(currentRouteBinding?.video_id || "").trim();
+    const mediaAlreadyAttached = Boolean(
+      routeVideoId
+      || currentUploadState?.mediaPresent
+      || currentUploadState?.busy
+      || currentUploadState?.youtubeUploadDialogRoute
+      || currentUploadState?.youtubeUploadRoute
+    );
+    const uploadPromptOnly = Boolean(currentUploadState?.uploadPromptOnly)
+      && !currentUploadState?.mediaPresent
+      && !currentUploadState?.busy
+      && !routeVideoId;
+    if (mediaAlreadyAttached && !uploadPromptOnly) {
+      directUpload = {
+        uploaded: true,
+        skipped: true,
+        reason: "youtube_current_fresh_upload_media_already_attached",
+        video_id: routeVideoId,
+        edit_url: String(currentRouteBinding?.edit_url || ""),
+        media_present: Boolean(currentUploadState?.mediaPresent),
+        upload_busy: Boolean(currentUploadState?.busy),
+        upload_ready: Boolean(currentUploadState?.ready),
+      };
+      actions.push({
+        kind: "youtube_media_upload",
+        ...directUpload,
+      });
+    }
+  }
+  if (!directUpload) {
+    directUpload = await runStep("media_upload", () => uploadYoutubeVideoForComposite(client, mediaPath));
+    actions.push({
+      kind: "youtube_media_upload",
+      ...directUpload,
+      skipped: false,
+      reason: directUpload?.uploaded
+        ? "youtube_runtime_file_input_loaded"
+        : String(directUpload?.reason || "youtube_runtime_file_input_not_loaded"),
+    });
+  }
+  if (!directUpload?.uploaded) {
+    return actions;
+  }
+  let inheritedUploadReadiness = null;
+  try {
+    inheritedUploadReadiness = await runStep("shared_upload_readiness", () =>
+      ensureCompositeUploadReady(client, platform, content, Math.min(compositeUploadTimeoutMs(platform), 120000), null, {
+        syntheticUploadExpected: true,
+      })
+    );
+  } catch (error) {
+    const message = String(error?.message || error || "");
+    actions.push({
+      kind: "youtube_upload_ready_wait",
+      ready: false,
+      failed: false,
+      waited_ms: 0,
+      ready_streak: 0,
+      upload_busy: true,
+      media_present: true,
+      upload_prompt_only: false,
+      reason: /cdp_send timed out/i.test(message) ? "cdp_timeout_after_media_upload" : "readiness_probe_failed_after_media_upload",
+      error_message: message.slice(0, 500),
+      last: {
+        busy: true,
+        mediaPresent: true,
+        uploadPromptOnly: false,
+        fileInputCount: 0,
+        lines: [],
+      },
+    });
+    actions.push(buildCompositeUploadReadinessBlockerAction(platform, {
+      ready: false,
+      failed: false,
+      pending_reason: /cdp_send timed out/i.test(message) ? "cdp_timeout_after_media_upload" : "readiness_probe_failed_after_media_upload",
+      waited_ms: 0,
+      last: {
+        busy: true,
+        mediaPresent: true,
+        uploadPromptOnly: false,
+        fileInputCount: 0,
+        lines: [],
+      },
+    }));
+    return actions;
+  }
   actions.push(...inheritedUploadReadiness.actions);
   actions.push({
-    kind: "youtube_media_upload",
+    kind: "youtube_media_upload_readiness",
     uploaded: Boolean(inheritedUploadReadiness?.readiness?.ready || inheritedUploadReadiness?.readiness?.last?.mediaPresent),
     skipped: true,
-    reason: "shared_upload_mainline_reused",
+    reason: "youtube_runtime_file_input_loaded_readiness_probe",
     inherited_upload_ready: Boolean(inheritedUploadReadiness?.readiness?.ready),
     inherited_media_present: Boolean(inheritedUploadReadiness?.readiness?.last?.mediaPresent),
   });
@@ -17439,30 +19091,130 @@ async function prepareYoutubeCompositeDraft(client, platform, content) {
     return actions;
   }
   actions.push({
+    kind: "youtube_field_entry_gate",
+    verified: true,
+    reason: "metadata_fill_allowed_after_media_attached",
+    upload_ready: Boolean(inheritedUploadReadiness?.readiness?.ready),
+    media_present: Boolean(inheritedUploadReadiness?.readiness?.last?.mediaPresent),
+    upload_busy: Boolean(inheritedUploadReadiness?.readiness?.last?.busy),
+  });
+  actions.push({
     kind: "youtube_rich_text",
     ...(await runStep("rich_text", () => setPlatformRichText(client, platform, title, body))),
   });
+  actions.push(await runStep("rich_text_gate", () =>
+    verifyYouTubePrepareControlGate(client, content, "rich_text", ["title", "body"], actions)
+  ));
+  if (actions.at(-1)?.blocked) return actions;
+  const coverStart = actions.length;
   actions.push(...(await runStep("cover", () => uploadCompositeCover(client, platform, content, coverPath))));
+  const coverBlocker = findBlockingCompositeAction(actions, coverStart);
+  if (coverBlocker) {
+    if (platform === "youtube" && String(coverBlocker.reason || "") === "cover_readback_mismatch") {
+      coverBlocker.blocked = false;
+      coverBlocker.deferred = true;
+      coverBlocker.reason = "cover_readback_mismatch_deferred";
+      actions.push({
+        kind: "youtube_cover_gate_deferred",
+        deferred: true,
+        reason: "cover_readback_mismatch_continue_required_metadata",
+        cover_readback: coverBlocker.readback || null,
+      });
+    } else {
+      return actions;
+    }
+  }
+  const coverPending = actions
+    .slice(coverStart)
+    .some((item) => item?.kind === "youtube_cover_pending" && item?.pending === true);
+  if (coverPath && !coverPending) {
+    actions.push(await runStep("cover_gate", () =>
+      verifyYouTubePrepareControlGate(client, content, "cover", ["cover"], actions)
+    ));
+    if (actions.at(-1)?.blocked) return actions;
+  } else if (coverPath && coverPending) {
+    actions.push({
+      kind: "youtube_cover_gate_deferred",
+      deferred: true,
+      reason: "cover_upload_pending_continue_metadata_fill",
+    });
+  }
   if (compositePlatformSkipsExplicitTagEntry(platform)) {
     actions.push({ kind: "youtube_tag_entry_skipped", skipped: true, reason: "platform_soft_tag_policy" });
   } else {
     actions.push({ kind: "youtube_metadata_expand", ...(await runStep("metadata_expand", () => expandYoutubeMetadataSections(client))) });
     actions.push({ kind: "youtube_tags", ...(await runStep("tags", () => setYouTubeTags(client, expectedTags(content, 15)))) });
   }
-  actions.push(...(await runStep("collection", () => selectCompositeCollection(client, platform, content))));
+  const collectionStart = actions.length;
+  const expectedYouTubeCollection = expectedCollectionNameForPlatform(platform, content);
+  const collectionActions = platform === "youtube"
+    && actionTextIndicatesYouTubePlaylistSelected(actions, expectedYouTubeCollection)
+    ? [{
+      kind: "youtube_collection_already_correct",
+      expected: expectedYouTubeCollection,
+      verified: true,
+      skipped: true,
+      reason: "current_editor_readback_contains_target_playlist",
+    }]
+    : await withAsyncStepTimeout(
+      selectCompositeCollection(client, platform, content),
+      9_000,
+      "youtube_collection_step_timeout",
+      "youtube playlist selection did not return before the browser bridge deadline",
+      { step: "collection" },
+    ).catch((error) => ([{
+      kind: "youtube_collection_blocked",
+      blocked: true,
+      expected: expectedYouTubeCollection,
+      reason: error?.code || "collection_step_error",
+      message: String(error?.message || error || ""),
+    }]));
+  actions.push(...collectionActions);
+  const collectionBlocker = findBlockingCompositeAction(actions, collectionStart);
+  if (collectionBlocker) return actions;
+  if (expectedYouTubeCollection) {
+    actions.push(await runStep("collection_gate", () =>
+      verifyYouTubePrepareControlGate(client, content, "collection", ["collection"], actions)
+    ));
+    if (actions.at(-1)?.blocked) return actions;
+  }
   actions.push({
     kind: "youtube_not_for_kids",
     ...(await runStep("audience", () => ensureYouTubeAudienceSelection(client, content))),
   });
+  if (actions.at(-1)?.selected !== true) {
+    actions.push({
+      kind: "youtube_audience_blocked",
+      blocked: true,
+      reason: "audience_readback_mismatch",
+      audience: actions.at(-1),
+    });
+    return actions;
+  }
+  const wizardStart = actions.length;
   actions.push(...(await runStep("wizard", () => advanceYouTubeUploadWizard(client, content, "visibility"))));
+  const wizardBlocker = findBlockingCompositeAction(actions, wizardStart);
+  if (wizardBlocker) return actions;
+  const visibilityStart = actions.length;
   actions.push(...(await runStep("visibility", () => setYouTubeVisibilityAndSchedule(client, content))));
+  const visibilityBlocker = findBlockingCompositeAction(actions, visibilityStart);
+  if (visibilityBlocker) return actions;
+  const visibilityGateFields = content.scheduled_publish_at ? ["visibility", "schedule"] : ["visibility"];
+  actions.push(await runStep("visibility_gate", () =>
+    verifyYouTubePrepareControlGate(client, content, "visibility", visibilityGateFields, actions)
+  ));
+  if (actions.at(-1)?.blocked) return actions;
   const uploadReadiness = await runStep("upload_ready_probe", () =>
     ensureCompositeUploadReady(client, platform, content, compositeUploadTimeoutMs(platform))
   );
   actions.push(...uploadReadiness.actions);
-  if (!shouldAllowCompositeFieldPreparation(platform, uploadReadiness.readiness)) {
+  if (!uploadReadiness?.readiness?.ready) {
     actions.push(buildCompositeUploadReadinessBlockerAction(platform, uploadReadiness.readiness));
+    return actions;
   }
+  actions.push(await runStep("final_upload_ready_gate", () =>
+    verifyYouTubePrepareControlGate(client, content, "final_upload_ready", ["upload_ready"], actions)
+  ));
   return actions;
 }
 
@@ -17826,7 +19578,7 @@ async function setDouyinCompositeVisibility(client, platform, content) {
       verified: true,
     }];
   }
-  const after = await readCompositeMaterialIntegrity(client, platform, content).catch(() => null);
+  const after = await readCompositeMaterialIntegrityWithVisualEvidence(client, platform, content, "douyin_visibility_readback").catch(() => null);
   const visibilityField = after?.fields?.visibility && typeof after.fields.visibility === "object"
     ? after.fields.visibility
     : null;
@@ -17853,7 +19605,7 @@ async function setDouyinCompositeVisibility(client, platform, content) {
   }];
 }
 
-function enrichCompositeMaterialIntegrityFromActions(platform, integrity = {}, actions = []) {
+export function enrichCompositeMaterialIntegrityFromActions(platform, integrity = {}, actions = []) {
   const normalizedPlatform = String(platform || "").trim();
   if (normalizedPlatform === "youtube") {
     const entries = Array.isArray(actions) ? actions : [];
@@ -17863,7 +19615,22 @@ function enrichCompositeMaterialIntegrityFromActions(platform, integrity = {}, a
     const latestCollection = [...entries]
       .reverse()
       .find((item) => item?.kind === "youtube_collection_select");
-    if (!latestRichText && !latestCollection) {
+    const latestCollectionReadback = [...entries]
+      .reverse()
+      .find((item) => item?.kind === "youtube_collection_readback");
+    const latestVisibility = [...entries]
+      .reverse()
+      .find((item) => item?.kind === "youtube_visibility_public" || item?.kind === "youtube_visibility_public_seed");
+    const latestCoverUpload = [...entries]
+      .reverse()
+      .find((item) => item?.kind === "youtube_cover_upload");
+    const latestCoverReadback = [...entries]
+      .reverse()
+      .find((item) => item?.kind === "youtube_cover_readback");
+    const latestSchedule = [...entries]
+      .reverse()
+      .find((item) => item?.kind === "youtube_schedule_set");
+    if (!latestRichText && !latestCollection && !latestCollectionReadback && !latestVisibility && !latestCoverUpload && !latestCoverReadback && !latestSchedule) {
       return integrity;
     }
     const cloned = integrity && typeof integrity === "object" ? { ...integrity } : {};
@@ -17874,39 +19641,94 @@ function enrichCompositeMaterialIntegrityFromActions(platform, integrity = {}, a
     if (latestRichText && typeof latestRichText === "object") {
       const titleField = fields.title && typeof fields.title === "object" ? { ...fields.title } : {};
       const bodyField = fields.body && typeof fields.body === "object" ? { ...fields.body } : {};
-      if (latestRichText.actual_title !== undefined) titleField.actual = String(latestRichText.actual_title || "").trim();
-      if (latestRichText.verified_title !== undefined) titleField.verified = Boolean(latestRichText.verified_title);
-      if (latestRichText.actual_body !== undefined) bodyField.actual = String(latestRichText.actual_body || "").trim();
-      if (latestRichText.verified_body !== undefined) bodyField.verified = Boolean(latestRichText.verified_body);
+      titleField.action_attempted = true;
+      titleField.action_input_mode = String(latestRichText.input_mode || "").trim();
+      titleField.action_save_status_verified = Boolean(latestRichText.save_status_verified);
+      bodyField.action_attempted = true;
+      bodyField.action_input_mode = String(latestRichText.input_mode || "").trim();
+      bodyField.action_save_status_verified = Boolean(latestRichText.save_status_verified);
       fields.title = titleField;
       fields.body = bodyField;
     }
-    if (latestCollection && typeof latestCollection === "object") {
+    if ((latestCollection || latestCollectionReadback) && typeof (latestCollection || latestCollectionReadback) === "object") {
       const collectionField = fields.collection && typeof fields.collection === "object" ? { ...fields.collection } : {};
+      const readbackVerified = latestCollectionReadback?.verified === true;
       const expectedCollection = String(
-        latestCollection.expected
+        latestCollectionReadback?.expected
+        || latestCollection?.expected
         || collectionField.expected
         || "",
       ).trim();
       const selectedOptionText = String(
-        latestCollection.option_text
-        || latestCollection.actual
+        latestCollectionReadback?.actual
+        || latestCollectionReadback?.row_text
+        || latestCollection?.option_text
+        || latestCollection?.actual
         || collectionField.actual
         || "",
       ).trim();
-      const selectionVerified = Boolean(
-        latestCollection.clicked
-        && (
-          latestCollection.already_selected
-          || latestCollection.done_clicked
-          || _collectionHasExpectedTagOrText(selectedOptionText, expectedCollection)
-        ),
-      );
+      const selectionVerified = Boolean(readbackVerified && _collectionHasExpectedTagOrText(selectedOptionText, expectedCollection));
       collectionField.expected = expectedCollection || collectionField.expected || "";
-      collectionField.actual = selectedOptionText || (selectionVerified ? expectedCollection : String(collectionField.actual || "").trim());
-      collectionField.verified = selectionVerified || Boolean(collectionField.verified === true);
+      collectionField.actual = selectionVerified
+        ? expectedCollection
+        : (selectedOptionText || String(collectionField.actual || "").trim());
+      collectionField.verified = latestCollectionReadback
+        ? selectionVerified
+        : (latestCollection ? false : Boolean(collectionField.verified === true));
       collectionField.configured = Boolean(collectionField.actual);
       fields.collection = collectionField;
+    }
+    if (latestVisibility && typeof latestVisibility === "object") {
+      const visibilityField = fields.visibility && typeof fields.visibility === "object" ? { ...fields.visibility } : {};
+      if (latestVisibility.clicked) {
+        visibilityField.actual = "public";
+        visibilityField.configured = true;
+        visibilityField.verified = true;
+      }
+      fields.visibility = visibilityField;
+    }
+    if (latestSchedule && typeof latestSchedule === "object") {
+      const scheduleField = fields.schedule && typeof fields.schedule === "object" ? { ...fields.schedule } : {};
+      const expectedSchedule = String(
+        latestSchedule.expected?.display
+        || scheduleField.expected
+        || "",
+      ).trim();
+      if (latestSchedule.set) {
+        scheduleField.actual = expectedSchedule || String(scheduleField.actual || "").trim();
+        scheduleField.configured = true;
+        scheduleField.verified = true;
+        fields.schedule = scheduleField;
+        const visibilityField = fields.visibility && typeof fields.visibility === "object" ? { ...fields.visibility } : {};
+        visibilityField.actual = visibilityField.actual || "public";
+        visibilityField.configured = true;
+        visibilityField.verified = true;
+        fields.visibility = visibilityField;
+      } else {
+        fields.schedule = scheduleField;
+      }
+    }
+    if ((latestCoverUpload || latestCoverReadback) && typeof (latestCoverUpload || latestCoverReadback) === "object") {
+      const coverField = fields.cover && typeof fields.cover === "object" ? { ...fields.cover } : {};
+      const expectedPath = String(
+        latestCoverUpload?.expected_path
+        || coverField.expected_path
+        || coverField.expected
+        || "",
+      ).trim();
+      const readbackVerified = latestCoverReadback?.verified === true;
+      if (latestCoverUpload?.uploaded || readbackVerified) {
+        coverField.actual = expectedPath || String(coverField.actual || "").trim();
+        coverField.expected_path = expectedPath || coverField.expected_path || "";
+        coverField.uploaded = true;
+        coverField.cover_uploaded = true;
+        coverField.configured = true;
+        coverField.verified = latestCoverReadback
+          ? readbackVerified
+          : Boolean(coverField.verified === true && !expectedPath);
+        coverField.verification_mode = readbackVerified ? "youtube_cover_readback" : coverField.verification_mode;
+      }
+      fields.cover = coverField;
     }
     cloned.fields = fields;
     const resolvedFailures = [...failures];
@@ -17922,6 +19744,21 @@ function enrichCompositeMaterialIntegrityFromActions(platform, integrity = {}, a
     }
     if (fields.collection?.verified) {
       const next = resolvedFailures.filter((item) => item !== "collection");
+      resolvedFailures.length = 0;
+      resolvedFailures.push(...next);
+    }
+    if (fields.visibility?.verified) {
+      const next = resolvedFailures.filter((item) => item !== "visibility");
+      resolvedFailures.length = 0;
+      resolvedFailures.push(...next);
+    }
+    if (fields.cover?.verified) {
+      const next = resolvedFailures.filter((item) => item !== "cover");
+      resolvedFailures.length = 0;
+      resolvedFailures.push(...next);
+    }
+    if (fields.schedule?.verified) {
+      const next = resolvedFailures.filter((item) => item !== "schedule");
       resolvedFailures.length = 0;
       resolvedFailures.push(...next);
     }
@@ -17982,7 +19819,7 @@ async function prepareDouyinCompositeDraft(client, platform, content) {
     actions.push(blocker);
     return actions;
   }
-  const editorIntegrity = await readCompositeMaterialIntegrity(client, platform, content).catch(() => null);
+  const editorIntegrity = await readCompositeMaterialIntegrityWithVisualEvidence(client, platform, content, "douyin_editor_inventory").catch(() => null);
   const projectAvailability = deriveDouyinPrepareProjectAvailabilityFromIntegrity(editorIntegrity || {});
   actions.push({
     kind: "douyin_editor_inventory",
@@ -18550,7 +20387,7 @@ async function prepareKuaishouCompositeDraft(client, platform, content) {
     actions.push(blocker);
     return actions;
   }
-  const initialIntegrity = await readCompositeMaterialIntegrity(client, platform, content).catch(() => null);
+  const initialIntegrity = await readCompositeMaterialIntegrityWithVisualEvidence(client, platform, content, "kuaishou_initial_integrity").catch(() => null);
   const initialChecklist = initialIntegrity?.fields && typeof initialIntegrity.fields === "object"
     ? initialIntegrity.fields
     : {};
@@ -19027,9 +20864,12 @@ export function deriveCompositeFinalPrePublishVisualVerification(
     url: String(snapshot?.url || publicationFieldSnapshot?.route?.url || integrity?.platform_extras?.route?.url || "").trim(),
     title: String(snapshot?.title || publicationFieldSnapshot?.route?.title || integrity?.platform_extras?.route?.title || "").trim(),
   };
+  const visualEvidencePack = normalizeVisualEvidencePack(snapshot?.visual_evidence_pack);
   const visualEvidence = normalizeVisualEvidence(snapshot?.visual_evidence);
-  const visibleLines = Array.isArray(snapshot?.lines)
-    ? snapshot.lines.map((item) => String(item || "").trim()).filter(Boolean)
+  const visibleLines = Array.isArray(visualEvidencePack?.visible_lines) && visualEvidencePack.visible_lines.length
+    ? visualEvidencePack.visible_lines
+    : Array.isArray(snapshot?.lines)
+      ? snapshot.lines.map((item) => String(item || "").trim()).filter(Boolean)
     : Array.isArray(integrity?.platform_extras?.relevant_lines)
       ? integrity.platform_extras.relevant_lines.map((item) => String(item || "").trim()).filter(Boolean)
       : [];
@@ -19059,8 +20899,11 @@ export function deriveCompositeFinalPrePublishVisualVerification(
   const draftStateActual = String(checklist?.draft_state?.actual || publicationFieldSnapshot?.draft_state || "").trim();
   const uploadReadyActual = String(checklist?.upload_ready?.actual || publicationFieldSnapshot?.upload_ready || "").trim();
   const blockingReasons = [];
-  if (!visualEvidence || !String(visualEvidence.artifact_path || "").trim()) {
-    blockingReasons.push("missing_visual_evidence");
+  if (!visualEvidencePack || !String(visualEvidencePack.evidence_id || "").trim()) {
+    blockingReasons.push("missing_visual_evidence_pack");
+  }
+  if (!visualEvidence && !visualEvidencePack?.visual_evidence) {
+    blockingReasons.push("missing_visual_screenshot");
   }
   if (String(integrity?.verification_state || "").trim() !== "ready") {
     blockingReasons.push(`route_${String(integrity?.verification_state || "unknown").trim() || "unknown"}`);
@@ -19081,6 +20924,7 @@ export function deriveCompositeFinalPrePublishVisualVerification(
     blocked_fields: blockedFields,
     blocking_reasons: blockingReasons,
     visual_evidence: visualEvidence,
+    visual_evidence_pack: visualEvidencePack,
     route,
     visible_lines: visibleLines.slice(0, 160),
   };
@@ -19466,6 +21310,86 @@ export function shouldWaitForVerificationOnlyMaterialIntegrity(integrity = {}) {
   return false;
 }
 
+export function shouldTreatCompositeMaterialIntegrityAsPendingUpload(platform, integrity = {}) {
+  const normalizedPlatform = normalizePlatform(platform);
+  if (normalizedPlatform !== "youtube") return false;
+  if (!integrity || typeof integrity !== "object") return false;
+  if (String(integrity.verification_state || "").trim() !== "not_ready") return false;
+  const routeReadyState = integrity.route_ready_state && typeof integrity.route_ready_state === "object"
+    ? integrity.route_ready_state
+    : {};
+  if (!Boolean(routeReadyState.route_ready)) return false;
+  const extras = integrity.platform_extras && typeof integrity.platform_extras === "object"
+    ? integrity.platform_extras
+    : {};
+  const routeUrl = String(extras.route?.url || "").toLowerCase();
+  if (!routeUrl.includes("studio.youtube.com") || !routeUrl.includes("/upload")) return false;
+  const lines = Array.isArray(extras.relevant_lines)
+    ? extras.relevant_lines.map((item) => String(item || "").trim()).filter(Boolean)
+    : [];
+  const text = lines.join(" ");
+  const hasEditorSurface = /详细信息|标题（必填）|说明|缩略图|播放列表|观众/.test(text);
+  const uploadInProgress = Boolean(extras.youtube_thumbnail_uploading)
+    || /正在上传|已上传\s*\d+%|剩余时间|Uploading|uploading|Processing/i.test(text);
+  const mediaBound = /文件名|视频链接|youtu\.be|\.mp4/i.test(text);
+  return hasEditorSurface && uploadInProgress && mediaBound;
+}
+
+export function buildCompositePendingUploadIntegrityFromMaterialIntegrity(platform, integrity = {}) {
+  if (!shouldTreatCompositeMaterialIntegrityAsPendingUpload(platform, integrity)) return null;
+  const extras = integrity.platform_extras && typeof integrity.platform_extras === "object"
+    ? integrity.platform_extras
+    : {};
+  const route = extras.route && typeof extras.route === "object" ? extras.route : {};
+  const lines = Array.isArray(extras.relevant_lines)
+    ? extras.relevant_lines.slice(0, 120)
+    : [];
+  return {
+    ...(integrity && typeof integrity === "object" ? integrity : {}),
+    verified: false,
+    failures: [],
+    verification_state: "not_ready",
+    verification_reason: "upload_in_progress",
+    fields: {
+      ...(integrity.fields && typeof integrity.fields === "object" ? integrity.fields : {}),
+      upload_ready: {
+        actual: "not_ready",
+        verified: false,
+      },
+    },
+    platform_extras: {
+      ...extras,
+      route: {
+        url: String(route.url || ""),
+        title: String(route.title || ""),
+      },
+      receipt_like: false,
+      relevant_lines: lines,
+    },
+    route_ready_state: {
+      ...(integrity.route_ready_state && typeof integrity.route_ready_state === "object"
+        ? integrity.route_ready_state
+        : {}),
+      route_ready: true,
+      auth_required: false,
+      text_ready: true,
+      input_ready: true,
+      loading_surface: false,
+    },
+    upload_readiness: {
+      ready: false,
+      failed: false,
+      waited_ms: 0,
+      ready_streak: 0,
+      busy: true,
+      media_present: true,
+      upload_prompt_only: false,
+      file_input_count: 0,
+      last_lines: lines,
+    },
+  };
+}
+
 export function _buildVerificationOnlyRouteNotReadyFailure(platform, content, route = {}, snapshot = {}, integrity = {}) {
   const verificationReason = String(integrity?.verification_reason || "").trim();
   const mediaEntrySurface = verificationReason === "publish_media_entry";
@@ -19538,7 +21462,7 @@ export function _buildVerificationOnlyRouteNotReadyFailure(platform, content, ro
 
 async function waitForVerificationOnlyMaterialIntegrity(client, platform, content, timeoutMs = 12000, onPoll = null) {
   const startedAt = Date.now();
-  let integrity = await readCompositeMaterialIntegrity(client, platform, content);
+  let integrity = await readCompositeMaterialIntegrityWithVisualEvidence(client, platform, content, "verification_only_material_integrity_wait");
   let attempts = 1;
   while ((Date.now() - startedAt) < timeoutMs && shouldWaitForVerificationOnlyMaterialIntegrity(integrity)) {
     if (typeof onPoll === "function") {
@@ -19551,7 +21475,7 @@ async function waitForVerificationOnlyMaterialIntegrity(client, platform, conten
       } catch {}
     }
     await sleep(1200);
-    integrity = await readCompositeMaterialIntegrity(client, platform, content);
+    integrity = await readCompositeMaterialIntegrityWithVisualEvidence(client, platform, content, "verification_only_material_integrity_wait");
     attempts += 1;
   }
   return {
@@ -20091,6 +22015,11 @@ export function deriveCompositePrePublishRepairPlan(audit = {}, integrity = {}, 
     (field) => field !== "content_plan_match" && !COMPOSITE_PREPUBLISH_REPAIRABLE_FIELDS.has(field),
   );
   const inferredRepairable = integrityFailures.filter((field) => COMPOSITE_PREPUBLISH_REPAIRABLE_FIELDS.has(field));
+  const forcedRepairable = Array.isArray(options?.forceRepairFields)
+    ? options.forceRepairFields
+        .map((field) => String(field || "").trim())
+        .filter((field) => COMPOSITE_PREPUBLISH_REPAIRABLE_FIELDS.has(field))
+    : [];
   const contentMismatchFallback = requiredUnverified.includes("content_plan_match")
     ? ["title", "body", "tags"].filter((field) => COMPOSITE_PREPUBLISH_REPAIRABLE_FIELDS.has(field))
     : [];
@@ -20098,6 +22027,7 @@ export function deriveCompositePrePublishRepairPlan(audit = {}, integrity = {}, 
     new Set([
       ...directRepairable,
       ...inferredRepairable,
+      ...forcedRepairable,
       ...(directRepairable.length === 0 && inferredRepairable.length === 0 ? contentMismatchFallback : []),
     ]),
   );
@@ -20651,6 +22581,29 @@ async function setGenericScheduleControls(client, platform, scheduledPublishAt) 
     const classifyInput = ${classifyCompositeScheduleInputHint.toString()};
     const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const dateParts = expected.date
+      ? {
+          year: expected.date.slice(0, 4),
+          month: String(Number(expected.date.slice(5, 7) || "0")),
+          day: String(Number(expected.date.slice(8, 10) || "0")),
+        }
+      : { year: "", month: "", day: "" };
+    const expectedDateVariants = Array.from(new Set([
+      expected.date,
+      expected.date ? expected.date.slice(5) : "",
+      dateParts.month && dateParts.day ? dateParts.month + "月" + dateParts.day + "日" : "",
+      dateParts.month && dateParts.day ? dateParts.month.padStart(2, "0") + "月" + dateParts.day.padStart(2, "0") + "日" : "",
+      dateParts.year && dateParts.month && dateParts.day ? dateParts.year + "年" + dateParts.month + "月" + dateParts.day + "日" : "",
+      dateParts.year && dateParts.month && dateParts.day ? dateParts.year + "年" + dateParts.month.padStart(2, "0") + "月" + dateParts.day.padStart(2, "0") + "日" : "",
+    ].filter(Boolean)));
+    const schedulePartsPresent = (text, values = []) => {
+      const haystack = clean([text, ...(Array.isArray(values) ? values : [])].join(" "));
+      return Boolean(
+        expected.time
+        && haystack.includes(expected.time)
+        && expectedDateVariants.some((value) => haystack.includes(value))
+      );
+    };
     const visible = (el) => {
       const rect = el.getBoundingClientRect();
       const style = getComputedStyle(el);
@@ -20749,7 +22702,36 @@ async function setGenericScheduleControls(client, platform, scheduledPublishAt) 
       const options = [...select.options].map((option) => ({ value: option.value, text: clean(option.textContent) }));
       let chosen = "";
       if (/year|年/i.test(label)) chosen = options.find((option) => option.text.includes(expected.date.slice(0, 4)) || option.value.includes(expected.date.slice(0, 4)))?.value || "";
-      else if (/month|月/i.test(label)) chosen = options.find((option) => /May|五月|5月|^5$/.test(option.text) || option.value === "5" || option.value === "4")?.value || "";
+      else if (/month|月/i.test(label)) {
+        const expectedMonthNumber = String(Number(expected.date.slice(5, 7) || "0"));
+        const expectedMonthPadded = expected.date.slice(5, 7);
+        const expectedMonthIndex = String(Math.max(0, Number(expectedMonthNumber || "0") - 1));
+        const monthNames = [
+          ["1", "01", "January", "Jan", "一月", "1月"],
+          ["2", "02", "February", "Feb", "二月", "2月"],
+          ["3", "03", "March", "Mar", "三月", "3月"],
+          ["4", "04", "April", "Apr", "四月", "4月"],
+          ["5", "05", "May", "五月", "5月"],
+          ["6", "06", "June", "Jun", "六月", "6月"],
+          ["7", "07", "July", "Jul", "七月", "7月"],
+          ["8", "08", "August", "Aug", "八月", "8月"],
+          ["9", "09", "September", "Sep", "九月", "9月"],
+          ["10", "October", "Oct", "十月", "10月"],
+          ["11", "November", "Nov", "十一月", "11月"],
+          ["12", "December", "Dec", "十二月", "12月"],
+        ];
+        const monthNeedles = new Set([
+          expectedMonthNumber,
+          expectedMonthPadded,
+          expectedMonthIndex,
+          ...((monthNames[Number(expectedMonthNumber || "0") - 1] || [])),
+        ].filter(Boolean));
+        chosen = options.find((option) => {
+          const text = clean(option.text);
+          const value = clean(option.value);
+          return [...monthNeedles].some((needle) => text === needle || value === needle || text.includes(needle));
+        })?.value || "";
+      }
       else if (/day|日|天/i.test(label)) chosen = options.find((option) => option.text === String(Number(expected.date.slice(8, 10))) || option.value === String(Number(expected.date.slice(8, 10))) || option.text === expected.date.slice(8, 10))?.value || "";
       else if (/hour|时/i.test(label)) chosen = options.find((option) => option.text === expected.time.slice(0, 2) || option.text === String(Number(expected.time.slice(0, 2))) || option.value === expected.time.slice(0, 2) || option.value === String(Number(expected.time.slice(0, 2))))?.value || "";
       else if (/minute|分/i.test(label)) chosen = options.find((option) => option.text === expected.time.slice(3, 5) || option.value === expected.time.slice(3, 5))?.value || "";
@@ -20788,9 +22770,11 @@ async function setGenericScheduleControls(client, platform, scheduledPublishAt) 
         await sleep(250);
       }
     }
+    const day = String(Number(expected.date.slice(8, 10) || "0"));
+    const dayPadded = expected.date.slice(8, 10);
     const hour = String(Number(expected.time.slice(0, 2)));
     const minute = expected.time.slice(3, 5);
-    const wantedTexts = [expected.date, expected.time, hour, expected.time.slice(0, 2), minute, "确定"];
+    const wantedTexts = [expected.date, day, dayPadded, expected.time, hour, expected.time.slice(0, 2), minute, "确定"];
     for (const wanted of wantedTexts) {
       const target = queryPicker("button,[role=button],li,span,div,td")
         .map((el) => ({ el, text: clean(el.innerText || el.textContent), area: el.getBoundingClientRect().width * el.getBoundingClientRect().height }))
@@ -20825,16 +22809,18 @@ async function setGenericScheduleControls(client, platform, scheduledPublishAt) 
       });
     const valueHasExpectedDisplay = postInputValues.some((value) => value.includes(expected.display));
     const valueHasExpectedParts = postInputValues.some((value) => value.includes(expected.date) && value.includes(expected.time));
+    const localizedSchedulePartsPresent = schedulePartsPresent(bodyAfter, postInputValues);
     return {
       set:
         bodyAfter.includes(expected.display)
         || (bodyAfter.includes(expected.date) && bodyAfter.includes(expected.time))
         || valueHasExpectedDisplay
         || valueHasExpectedParts
+        || localizedSchedulePartsPresent
         || (platform === "douyin" && checkedScheduled && (valueHasExpectedDisplay || valueHasExpectedParts)),
       expected,
       body_before_had_schedule: bodyBefore.includes(expected.display) || bodyBefore.includes(expected.date),
-      body_after_had_schedule: bodyAfter.includes(expected.display) || (bodyAfter.includes(expected.date) && bodyAfter.includes(expected.time)),
+      body_after_had_schedule: bodyAfter.includes(expected.display) || (bodyAfter.includes(expected.date) && bodyAfter.includes(expected.time)) || localizedSchedulePartsPresent,
       actions: actions.slice(0, 40),
       input_values: postInputValues.slice(0, 40),
       checked_scheduled: checkedScheduled,
@@ -20843,10 +22829,333 @@ async function setGenericScheduleControls(client, platform, scheduledPublishAt) 
   })()`, 25000);
 }
 
+async function inspectYouTubeRichTextTargets(client, title, body) {
+  return evaluateWithClient(client, `(() => {
+    const expected = ${JSON.stringify({
+      title: normalizeCompositeTitleForPlatform("youtube", title),
+      body: String(body || "").trim(),
+    })};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const normalizeDraft = ${normalizeRichTextDraftValue.toString()};
+    const roots = [];
+    const visitRoot = (root) => {
+      if (!root || roots.includes(root)) return;
+      roots.push(root);
+      for (const el of [...root.querySelectorAll("*")]) {
+        if (el.shadowRoot) visitRoot(el.shadowRoot);
+        if (el.tagName === "IFRAME") {
+          try {
+            if (el.contentDocument) visitRoot(el.contentDocument);
+          } catch {}
+        }
+      }
+    };
+    visitRoot(document);
+    const queryAll = (selector) => roots.flatMap((root) => {
+      try {
+        return [...root.querySelectorAll(selector)];
+      } catch {
+        return [];
+      }
+    });
+    const isContentEditableElement = (el) => Boolean(
+      el?.isContentEditable
+      || (
+        typeof el?.hasAttribute === "function"
+        && el.hasAttribute("contenteditable")
+        && String(el.getAttribute("contenteditable") || "").toLowerCase() !== "false"
+      )
+    );
+    const visible = (el) => {
+      if (!el || typeof el.getBoundingClientRect !== "function") return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const readValue = (el) => {
+      if (!el) return "";
+      if (isContentEditableElement(el)) return normalizeDraft(el.innerText || el.textContent || "");
+      return normalizeDraft(el.value || "");
+    };
+    const editables = queryAll("textarea,input[type=text],[contenteditable],#textbox,div[role=textbox]")
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const text = clean([
+          el.placeholder,
+          el.getAttribute("aria-label"),
+          el.getAttribute("data-testid"),
+          el.value,
+          el.innerText,
+          el.closest("label")?.innerText,
+          el.parentElement?.innerText,
+        ].join(" "));
+        return {
+          el,
+          text,
+          area: rect.width * rect.height,
+          tag: String(el.tagName || "").toLowerCase(),
+          role: clean(el.getAttribute("role") || "").toLowerCase(),
+          value: readValue(el),
+          isContentEditable: isContentEditableElement(el),
+          x: rect.left + rect.width / 2,
+          y: rect.top + Math.min(rect.height / 2, 36),
+          top: rect.top,
+          left: rect.left,
+          width: rect.width,
+          height: rect.height,
+        };
+      })
+      .filter((item) => item.area > 1000)
+      .sort((left, right) => {
+        const leftCurrentViewport = left.x > 0 && left.y > 0 && left.x < window.innerWidth && left.y < window.innerHeight;
+        const rightCurrentViewport = right.x > 0 && right.y > 0 && right.x < window.innerWidth && right.y < window.innerHeight;
+        return Number(rightCurrentViewport) - Number(leftCurrentViewport)
+          || left.top - right.top
+          || right.area - left.area;
+      });
+    const titlePatterns = [/标题（必填）|添加一个可描述你视频的标题|add a title|title/i];
+    const bodyPatterns = [/向观看者介绍你的视频|describe your video|description|说明/i];
+    const titleTarget = expected.title
+      ? editables.find((item) => titlePatterns.some((pattern) => pattern.test(item.text)))
+      : null;
+    const bodyTarget = expected.body
+      ? (
+        editables.find((item) => bodyPatterns.some((pattern) => pattern.test(item.text)))
+        || editables.find((item) => (item.isContentEditable || item.tag === "textarea") && !titlePatterns.some((pattern) => pattern.test(item.text)))
+      )
+      : null;
+    const toTarget = (item) => item ? ({
+      x: item.x,
+      y: item.y,
+      top: item.top,
+      left: item.left,
+      width: item.width,
+      height: item.height,
+      tag: item.tag,
+      role: item.role,
+      text: item.text.slice(0, 180),
+      actual: item.value,
+    }) : null;
+    const bodyText = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+    return {
+      title_target: toTarget(titleTarget),
+      body_target: toTarget(bodyTarget),
+      save_text: (bodyText.match(/正在保存|已保存|保存完毕|Saved|Saving/i) || [])[0] || "",
+      route: { url: String(location.href || ""), title: String(document.title || "") },
+      candidates: editables.slice(0, 12).map((item) => ({
+        text: item.text.slice(0, 140),
+        actual: item.value.slice(0, 140),
+        area: item.area,
+        tag: item.tag,
+        role: item.role,
+        x: item.x,
+        y: item.y,
+        top: item.top,
+        left: item.left,
+      })),
+    };
+  })()`, 15000);
+}
+
+async function waitForYouTubeStudioSave(client, timeoutMs = 18000) {
+  const startedAt = Date.now();
+  let last = { status_text: "", saved: false, saving: false };
+  while (Date.now() - startedAt < timeoutMs) {
+    last = await evaluateWithClient(client, `(() => {
+      const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+      const text = clean(((document.scrollingElement || document.documentElement || document.body)?.innerText) || "");
+      const statusText = (text.match(/正在保存\\.\\.\\.|正在保存|保存完毕|已保存|Saved|Saving/i) || [])[0] || "";
+      return {
+        status_text: statusText,
+        saved: /保存完毕|已保存|Saved/i.test(statusText),
+        saving: /正在保存|Saving/i.test(statusText),
+      };
+    })()`, 8000).catch((error) => ({
+      status_text: "",
+      saved: false,
+      saving: false,
+      reason: "save_status_read_error",
+      message: String(error?.message || error || ""),
+    }));
+    if (last.saved) {
+      return {
+        ...last,
+        waited_ms: Date.now() - startedAt,
+      };
+    }
+    await sleep(900);
+  }
+  return {
+    ...last,
+    waited_ms: Date.now() - startedAt,
+    timeout: true,
+  };
+}
+
+async function scrollYouTubeRichTextTargetIntoView(client, field) {
+  return evaluateWithClient(client, `(() => {
+    const field = ${JSON.stringify(String(field || "").trim())};
+    const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+    const roots = [];
+    const visitRoot = (root) => {
+      if (!root || roots.includes(root)) return;
+      roots.push(root);
+      for (const el of [...root.querySelectorAll("*")]) {
+        if (el.shadowRoot) visitRoot(el.shadowRoot);
+        if (el.tagName === "IFRAME") {
+          try {
+            if (el.contentDocument) visitRoot(el.contentDocument);
+          } catch {}
+        }
+      }
+    };
+    visitRoot(document);
+    const queryAll = (selector) => roots.flatMap((root) => {
+      try {
+        return [...root.querySelectorAll(selector)];
+      } catch {
+        return [];
+      }
+    });
+    const visible = (el) => {
+      if (!el || typeof el.getBoundingClientRect !== "function") return false;
+      const rect = el.getBoundingClientRect();
+      const style = getComputedStyle(el);
+      return rect.width > 0 && rect.height > 0 && style.display !== "none" && style.visibility !== "hidden" && !el.disabled && el.getAttribute("aria-disabled") !== "true";
+    };
+    const titlePatterns = [/标题（必填）|添加一个可描述你视频的标题|add a title|title/i];
+    const bodyPatterns = [/向观看者介绍你的视频|describe your video|description|说明/i];
+    const targets = queryAll("textarea,input[type=text],[contenteditable],#textbox,div[role=textbox]")
+      .filter(visible)
+      .map((el) => {
+        const rect = el.getBoundingClientRect();
+        const text = clean([
+          el.placeholder,
+          el.getAttribute("aria-label"),
+          el.getAttribute("data-testid"),
+          el.value,
+          el.innerText,
+          el.closest("label")?.innerText,
+          el.parentElement?.innerText,
+        ].join(" "));
+        return { el, text, top: rect.top, area: rect.width * rect.height };
+      })
+      .filter((item) => item.area > 1000)
+      .sort((left, right) => Math.abs(left.top) - Math.abs(right.top) || right.area - left.area);
+    const target = field === "body"
+      ? targets.find((item) => bodyPatterns.some((pattern) => pattern.test(item.text)))
+      : targets.find((item) => titlePatterns.some((pattern) => pattern.test(item.text)));
+    if (!target?.el) return { scrolled: false, reason: "target_not_found", field };
+    target.el.scrollIntoView({ block: "center", inline: "center" });
+    const rect = target.el.getBoundingClientRect();
+    return {
+      scrolled: true,
+      field,
+      text: target.text.slice(0, 160),
+      x: rect.left + rect.width / 2,
+      y: rect.top + Math.min(rect.height / 2, 36),
+      top: rect.top,
+      left: rect.left,
+    };
+  })()`, 10000);
+}
+
+async function setYouTubeRichTextWithNativeInput(client, title, body) {
+  const expectedTitle = normalizeCompositeTitleForPlatform("youtube", title);
+  const expectedBody = String(body || "").trim();
+  const actions = [];
+  let before = await inspectYouTubeRichTextTargets(client, expectedTitle, expectedBody);
+  if (expectedTitle) {
+    if (!before?.title_target) {
+      return {
+        filled: false,
+        reason: "youtube_title_target_not_found",
+        actions,
+        candidates: before?.candidates || [],
+        route: before?.route || {},
+      };
+    }
+    if (!isNativeInputTargetClickable(before.title_target)) {
+      actions.push({ field: "title_scroll", ...(await scrollYouTubeRichTextTargetIntoView(client, "title").catch((error) => ({ scrolled: false, reason: "scroll_error", message: String(error?.message || error || "") }))) });
+      await sleep(350);
+      before = await inspectYouTubeRichTextTargets(client, expectedTitle, expectedBody);
+    }
+    actions.push({
+      field: "title",
+      ...(await dispatchNativeTextReplacement(client, before.title_target, expectedTitle)),
+      target: {
+        text: before.title_target.text,
+        actual_before: before.title_target.actual,
+        x: before.title_target.x,
+        y: before.title_target.y,
+        top: before.title_target.top,
+        left: before.title_target.left,
+      },
+    });
+  }
+  if (expectedBody) {
+    before = await inspectYouTubeRichTextTargets(client, expectedTitle, expectedBody);
+    if (!before?.body_target) {
+      return {
+        filled: actions.some((item) => item.filled),
+        reason: "youtube_body_target_not_found",
+        actions,
+        candidates: before?.candidates || [],
+        route: before?.route || {},
+      };
+    }
+    if (!isNativeInputTargetClickable(before.body_target)) {
+      actions.push({ field: "body_scroll", ...(await scrollYouTubeRichTextTargetIntoView(client, "body").catch((error) => ({ scrolled: false, reason: "scroll_error", message: String(error?.message || error || "") }))) });
+      await sleep(350);
+      before = await inspectYouTubeRichTextTargets(client, expectedTitle, expectedBody);
+    }
+    actions.push({
+      field: "body",
+      ...(await dispatchNativeTextReplacement(client, before.body_target, expectedBody)),
+      target: {
+        text: before.body_target.text,
+        actual_before: before.body_target.actual,
+        x: before.body_target.x,
+        y: before.body_target.y,
+        top: before.body_target.top,
+        left: before.body_target.left,
+      },
+    });
+  }
+  const saveStatus = await waitForYouTubeStudioSave(client, 18000);
+  const after = await inspectYouTubeRichTextTargets(client, expectedTitle, expectedBody).catch((error) => ({
+    title_target: null,
+    body_target: null,
+    candidates: [],
+    route: {},
+    reason: "youtube_rich_text_after_read_error",
+    message: String(error?.message || error || ""),
+  }));
+  const actualTitle = String(after?.title_target?.actual || "").trim();
+  const actualBody = String(after?.body_target?.actual || "").trim();
+  return {
+    filled: actions.some((item) => item.filled),
+    input_mode: "native_cdp_input",
+    actions,
+    save_status: saveStatus,
+    save_status_verified: Boolean(saveStatus?.saved),
+    verified_title: !expectedTitle || richTextDraftValueMatches(actualTitle, expectedTitle),
+    verified_body: !expectedBody || richTextDraftValueMatches(actualBody, expectedBody),
+    actual_title: actualTitle,
+    actual_body: actualBody,
+    route: after?.route || before?.route || {},
+    candidates: after?.candidates || before?.candidates || [],
+  };
+}
+
 async function setPlatformRichText(client, platform, title, body) {
   const titleValue = normalizeCompositeTitleForPlatform(platform, title);
   const bodyValue = String(body || "").trim();
   if (!titleValue && !bodyValue) return { filled: false, reason: "empty_value" };
+  if (platform === "youtube") {
+    return setYouTubeRichTextWithNativeInput(client, titleValue, bodyValue);
+  }
   if (platform === "toutiao") {
     return evaluateWithClient(client, `(() => {
       const expected = ${JSON.stringify({ title: titleValue, body: bodyValue })};
@@ -20900,6 +23209,35 @@ async function setPlatformRichText(client, platform, title, body) {
     const clean = (value) => String(value || "").replace(/\\s+/g, " ").trim();
     const normalizeDraft = ${normalizeRichTextDraftValue.toString()};
     const draftMatches = ${richTextDraftValueMatches.toString()};
+    const roots = [];
+    const visitRoot = (root) => {
+      if (!root || roots.includes(root)) return;
+      roots.push(root);
+      for (const el of [...root.querySelectorAll("*")]) {
+        if (el.shadowRoot) visitRoot(el.shadowRoot);
+        if (el.tagName === "IFRAME") {
+          try {
+            if (el.contentDocument) visitRoot(el.contentDocument);
+          } catch {}
+        }
+      }
+    };
+    visitRoot(document);
+    const queryAll = (selector) => roots.flatMap((root) => {
+      try {
+        return [...root.querySelectorAll(selector)];
+      } catch {
+        return [];
+      }
+    });
+    const isContentEditableElement = (el) => Boolean(
+      el?.isContentEditable
+      || (
+        typeof el?.hasAttribute === "function"
+        && el.hasAttribute("contenteditable")
+        && String(el.getAttribute("contenteditable") || "").toLowerCase() !== "false"
+      )
+    );
     const visible = (el) => {
       const rect = el.getBoundingClientRect();
       const style = getComputedStyle(el);
@@ -20916,7 +23254,7 @@ async function setPlatformRichText(client, platform, title, body) {
       if (!el || !value) return false;
       el.scrollIntoView({ block: "center", inline: "center" });
       el.focus();
-      if (el.isContentEditable || el.getAttribute("contenteditable") === "true") {
+      if (isContentEditableElement(el)) {
         if (platform === "douyin") {
           try {
             const selection = window.getSelection();
@@ -20971,11 +23309,11 @@ async function setPlatformRichText(client, platform, title, body) {
       }
       el.dispatchEvent(new Event("change", { bubbles: true }));
       el.dispatchEvent(new Event("blur", { bubbles: true }));
-      return el.isContentEditable || el.getAttribute("contenteditable") === "true"
+      return isContentEditableElement(el)
         ? draftMatches(normalizeDraft(el.innerText || el.textContent), value)
         : true;
     };
-    const editables = [...document.querySelectorAll("textarea,input[type=text],[contenteditable=true],div[role=textbox],div[data-testid=tweetTextarea_0]")]
+    const editables = queryAll("textarea,input[type=text],[contenteditable],#textbox,div[role=textbox],div[data-testid=tweetTextarea_0]")
       .filter(visible)
       .map((el) => ({
         el,
@@ -20983,7 +23321,7 @@ async function setPlatformRichText(client, platform, title, body) {
         area: el.getBoundingClientRect().width * el.getBoundingClientRect().height,
         className: clean(typeof el.className === "string" ? el.className : ""),
         role: clean(el.getAttribute("role") || "").toLowerCase(),
-        isContentEditable: Boolean(el.isContentEditable || el.getAttribute("contenteditable") === "true"),
+        isContentEditable: isContentEditableElement(el),
       }))
       .filter((item) => item.area > 1000)
       .sort((left, right) => right.area - left.area);
@@ -21025,7 +23363,7 @@ async function setPlatformRichText(client, platform, title, body) {
       : null;
     const readDraftValue = (el) => {
       if (!el) return "";
-      if (el.isContentEditable || el.getAttribute("contenteditable") === "true") {
+      if (isContentEditableElement(el)) {
         return normalizeDraft(el.innerText || el.textContent || "");
       }
       return normalizeDraft(el.value || "");
@@ -21045,14 +23383,13 @@ async function setPlatformRichText(client, platform, title, body) {
       );
     }
     const bodyCandidates = platform === "xiaohongshu"
-      ? editables.filter((item) => item.el.tagName !== "INPUT" || item.el.isContentEditable || item.el.getAttribute("contenteditable") === "true")
+      ? editables.filter((item) => item.el.tagName !== "INPUT" || item.isContentEditable)
       : editables;
     const kuaishouBodyTarget = platform === "kuaishou"
       ? bodyCandidates
         .filter((item) => (
           item.el.tagName === "TEXTAREA"
-          || item.el.isContentEditable
-          || item.el.getAttribute("contenteditable") === "true"
+          || item.isContentEditable
           || (item.el.tagName === "DIV" && item.el.getAttribute("role") === "textbox")
         ))
         .filter((item) => /作品描述|描述|智能文案/.test(item.text))
@@ -21064,8 +23401,7 @@ async function setPlatformRichText(client, platform, title, body) {
       kuaishouBodyTarget ||
       bodyCandidates.find((item) => bodyPatterns.some((pattern) => pattern.test(item.text))) ||
       bodyCandidates.find((item) => (
-        item.el.isContentEditable
-        || item.el.getAttribute("contenteditable") === "true"
+        item.isContentEditable
         || item.el.tagName === "TEXTAREA"
       ) && !titlePatterns.some((pattern) => pattern.test(item.text))) ||
       bodyCandidates[0];
@@ -21119,6 +23455,32 @@ async function finalizeGenericCompositePublish(
   const reportTaskProgress = typeof recoveryOptions.task_progress === "function"
     ? recoveryOptions.task_progress
     : null;
+  const prePublishVisualEvidencePack = normalizeVisualEvidencePack(prePublishVerification?.visual_evidence_pack);
+  if (!prePublishVisualEvidencePack) {
+    return {
+      status: "needs_human",
+      ..._build_publication_recovery_hint({
+        platform,
+        code: `${platform}_final_publish_missing_visual_evidence_pack`,
+        reason: "最终发布前缺少统一视觉证据包，禁止点击发布。",
+        route: prePublishVerification?.route || platformRoute,
+        visibleLines: Array.isArray(prePublishVerification?.visible_lines) ? prePublishVerification.visible_lines : [],
+        actionHistory: finalizationInterruptions.slice(0, 20),
+        clearDraftContext: false,
+        forceRefresh: false,
+        blockers: [{
+          code: `${platform}_final_publish_missing_visual_evidence_pack`,
+          message: "最终发布前没有截图证据包，不能继续点击发布。",
+          details: "missing_visual_evidence_pack",
+        }],
+      }).recovery,
+      error: {
+        code: `${platform}_final_publish_missing_visual_evidence_pack`,
+        message: "最终发布前缺少统一视觉证据包，已阻断发布点击。",
+        details: prePublishVerification || {},
+      },
+    };
+  }
   if (integrity?.verification_state === "auth_required") {
     return {
       status: "needs_human",
@@ -21129,6 +23491,7 @@ async function finalizeGenericCompositePublish(
         route: platformRoute,
         visibleLines: integrity?.platform_extras ? [integrity.platform_extras.route?.url || ""] : [],
         actionHistory: [],
+        visualEvidencePack: prePublishVisualEvidencePack,
         forceRefresh: true,
         blockers: [{ code: `${platform}_final_publish_route_auth_required`, message: "请先处理账号会话，避免重复发布。", details: integrity?.verification_reason || "" }],
       }).recovery,
@@ -21140,6 +23503,28 @@ async function finalizeGenericCompositePublish(
     };
   }
   if (integrity?.verification_state === "not_ready") {
+    const pendingIntegrity = buildCompositePendingUploadIntegrityFromMaterialIntegrity(platform, integrity);
+    if (pendingIntegrity) {
+      return {
+        status: "processing",
+        result: buildCompositeUploadPendingProcessingEnvelope({
+          platform,
+          route: {
+            url: String(pendingIntegrity?.platform_extras?.route?.url || platformRoute.url || ""),
+            title: String(pendingIntegrity?.platform_extras?.route?.title || platformRoute.title || ""),
+          },
+          actions: finalizationInterruptions,
+          content,
+          interruptions: finalizationInterruptions,
+          materialIntegrity: pendingIntegrity,
+          code: `${platform}_pre_publish_upload_pending`,
+          reason: "复合收尾阶段确认媒体仍在上传，继续等待平台进入可发布态。",
+          blockerMessage: "上传仍在进行，等待下一轮 worker 继续处理。",
+          blockerDetails: `verification_reason=${pendingIntegrity.verification_reason || "upload_not_ready"}`,
+        }),
+        error: null,
+      };
+    }
     return {
       status: "needs_human",
       ..._build_publication_recovery_hint({
@@ -21149,6 +23534,7 @@ async function finalizeGenericCompositePublish(
         route: platformRoute,
         visibleLines: integrity?.platform_extras ? [integrity.platform_extras.route?.url || ""] : [],
         actionHistory: [],
+        visualEvidencePack: prePublishVisualEvidencePack,
         clearDraftContext: true,
         forceRefresh: true,
         blockers: [{ code: `${platform}_material_integrity_route_not_ready`, message: "发布页状态不稳定，建议清理草稿上下文并刷新发布页。", details: integrity?.verification_reason || "" }],
@@ -21169,6 +23555,7 @@ async function finalizeGenericCompositePublish(
         reason: "live publish 未开启。",
         route: platformRoute,
         actionHistory: finalizationInterruptions.slice(0, 20),
+        visualEvidencePack: prePublishVisualEvidencePack,
         clearDraftContext: false,
         forceRefresh: false,
         blockers: [{ code: "live_publish_disabled", message: "环境关闭 live publish，请先开启。", details: "建议仅测试预览时使用。"}],
@@ -21185,6 +23572,7 @@ async function finalizeGenericCompositePublish(
         reason: "发布前物料读回校验失败。",
         route: platformRoute,
         actionHistory: finalizationInterruptions.slice(0, 20),
+        visualEvidencePack: prePublishVisualEvidencePack,
         clearDraftContext: true,
         forceRefresh: true,
         blockers: [{ code: `${platform}_material_integrity_failed`, message: `发布前读回失败：${(integrity?.failures || []).join(", ") || "unknown"}`, details: (integrity?.failures || []).join(", ") }],
@@ -21209,6 +23597,7 @@ async function finalizeGenericCompositePublish(
         route: prePublishVerification.route || platformRoute,
         visibleLines: Array.isArray(prePublishVerification.visible_lines) ? prePublishVerification.visible_lines : [],
         actionHistory: finalizationInterruptions.slice(0, 20),
+        visualEvidencePack: prePublishVisualEvidencePack,
         clearDraftContext: true,
         forceRefresh: true,
         blockers: [{
@@ -21261,9 +23650,44 @@ async function finalizeGenericCompositePublish(
       reportTaskProgress,
       { task_created_at: String(recoveryOptions?.task_created_at || "").trim() },
     )
-    : { after: await readCompositeMaterialIntegrity(client, platform, content), receiptLike: false, waited_ms: 0 };
+    : { after: await readCompositeMaterialIntegrityWithVisualEvidence(client, platform, content, "final_publish_no_click_receipt"), receiptLike: false, waited_ms: 0 };
   const after = receipt.after;
   const receiptLike = receipt.receiptLike;
+  const receiptSnapshot = await pageSnapshot(client, {
+    captureVisualEvidence: true,
+    platform,
+    visualEvidencePhase: "final_publish_receipt",
+  }).catch(() => null);
+  const receiptVisualEvidencePack = normalizeVisualEvidencePack(receiptSnapshot?.visual_evidence_pack);
+  if (typeof reportTaskProgress === "function" && receiptSnapshot) {
+    const routeState = after?.platform_extras?.route || {
+      url: String(receiptSnapshot.url || ""),
+      title: String(receiptSnapshot.title || ""),
+    };
+    reportTaskProgress({
+      phase: "final_publish_receipt_visual_evidence",
+      route: {
+        url: String(routeState.url || receiptSnapshot.url || ""),
+        title: String(routeState.title || receiptSnapshot.title || ""),
+        path: String(routeState.path || ""),
+      },
+      final_publish: {
+        platform,
+        scheduled,
+        task_created_at: String(recoveryOptions?.task_created_at || "").trim(),
+        click,
+        second_confirm: secondConfirm,
+        receipt_wait: receipt.waited_ms,
+        receipt_like: receiptLike,
+        post_click_integrity: after,
+        visual_evidence_pack: receiptVisualEvidencePack,
+      },
+      material_integrity: after,
+      visual_evidence: receiptSnapshot.visual_evidence || undefined,
+      visual_evidence_pack: receiptVisualEvidencePack || undefined,
+      visible_lines: (receiptSnapshot.lines || after?.platform_extras?.relevant_lines || []).slice(0, 160),
+    });
+  }
   return {
     status: click.clicked && receiptLike ? (scheduled ? "scheduled_pending" : "published") : "needs_human",
     result: {
@@ -21277,7 +23701,10 @@ async function finalizeGenericCompositePublish(
         receipt_like: receiptLike,
         post_click_integrity: after,
         finalization_interruptions: receipt.interruptions || finalizationInterruptions,
+        pre_publish_visual_evidence_pack: prePublishVisualEvidencePack,
+        receipt_visual_evidence_pack: receiptVisualEvidencePack,
       },
+      visual_evidence_pack: receiptVisualEvidencePack || prePublishVisualEvidencePack,
     },
     ...(click.clicked && receiptLike
       ? { error: null }
@@ -21292,6 +23719,8 @@ async function finalizeGenericCompositePublish(
             },
             visibleLines: after?.platform_extras?.relevant_lines || [],
             actionHistory: finalizationInterruptions,
+            visualEvidence: receiptSnapshot?.visual_evidence || null,
+            visualEvidencePack: receiptVisualEvidencePack || prePublishVisualEvidencePack,
             clearDraftContext: true,
             forceRefresh: true,
             duplicateDetected: Boolean(receipt?.duplicate_detected || false),
@@ -21430,7 +23859,7 @@ async function runCompositePlatformAdapter(
     ? recoveryOptions.task_progress
     : null;
   const readIntegrityWithActionEvidence = async (phase) => {
-    const integrity = await runCompositePhase(platform, phase, () => readCompositeMaterialIntegrity(client, platform, content));
+    const integrity = await runCompositePhase(platform, phase, () => readCompositeMaterialIntegrityWithVisualEvidence(client, platform, content, phase));
     return enrichCompositeMaterialIntegrityFromActions(platform, integrity, actions);
   };
   const stopBeforeFinalPublish = Boolean(recoveryOptions.stop_before_final_publish);
@@ -21587,13 +24016,21 @@ async function runCompositePlatformAdapter(
     throw new TypeError("composite_prepare_actions_invalid");
   }
   await sleep(1200);
-  const readDouyinPendingUploadIntegrity = async () => {
-    if (platform !== "douyin") return null;
-    const readinessAction = [...preparedDraftActions].reverse().find((item) =>
-      item
-      && typeof item === "object"
-      && /^douyin_upload_(?:ready_wait|initial_snapshot|ready_after_bootstrap|ready_after_reupload)$/.test(String(item.kind || "")),
-    );
+  const readPendingUploadIntegrity = async (currentIntegrity = null) => {
+    const youtubePendingIntegrity = buildCompositePendingUploadIntegrityFromMaterialIntegrity(platform, currentIntegrity);
+    if (youtubePendingIntegrity) return youtubePendingIntegrity;
+    const uploadActionPattern = platform === "youtube"
+      ? /^youtube_upload_(?:ready_wait|initial_snapshot|ready_after_bootstrap|ready_after_reupload)$/
+      : platform === "douyin"
+        ? /^douyin_upload_(?:ready_wait|initial_snapshot|ready_after_bootstrap|ready_after_reupload)$/
+        : null;
+    const readinessAction = uploadActionPattern
+      ? [...preparedDraftActions].reverse().find((item) =>
+        item
+        && typeof item === "object"
+        && uploadActionPattern.test(String(item.kind || "")),
+      )
+      : null;
     if (readinessAction && (readinessAction.upload_busy || readinessAction.media_present || readinessAction.mediaPresent || readinessAction.last)) {
       return buildPendingUploadMaterialIntegrity(
         platform,
@@ -21617,6 +24054,8 @@ async function runCompositePlatformAdapter(
         { url: String(tab.url || ""), title: String(tab.title || "") },
       );
     }
+    if (platform === "youtube") return null;
+    if (platform !== "douyin") return null;
     const uploadState = await readCompositeUploadReadinessSnapshot(client, platform, content?.media_path || "").catch(() => null);
     if (!uploadState || !(uploadState.busy || (uploadState.mediaPresent && !uploadState.ready))) return null;
     return buildPendingUploadMaterialIntegrity(
@@ -21635,7 +24074,7 @@ async function runCompositePlatformAdapter(
   try {
     integrity = await readIntegrityWithActionEvidence("pre_publish_material_integrity");
   } catch (error) {
-    const pendingIntegrity = await readDouyinPendingUploadIntegrity();
+    const pendingIntegrity = await readPendingUploadIntegrity();
     if (!pendingIntegrity) throw error;
     integrity = pendingIntegrity;
   }
@@ -21683,9 +24122,30 @@ async function runCompositePlatformAdapter(
     };
   }
   if (integrity?.verification_state === "not_ready") {
-    const pendingIntegrity = await readDouyinPendingUploadIntegrity();
+    const pendingIntegrity = await readPendingUploadIntegrity(integrity);
     if (pendingIntegrity) {
-      integrity = pendingIntegrity;
+      return {
+        status: "processing",
+        result: buildCompositeUploadPendingProcessingEnvelope({
+          platform,
+          route: {
+            url: String(pendingIntegrity?.platform_extras?.route?.url || tab.url || ""),
+            title: String(pendingIntegrity?.platform_extras?.route?.title || tab.title || ""),
+          },
+          actions,
+          content,
+          interruptions: [],
+          materialIntegrity: pendingIntegrity,
+          code: `${platform}_pre_publish_upload_pending`,
+          reason: "复合适配器已确认媒体正在上传，继续保留现场等待进入可编辑发布态。",
+          blockerMessage: "复合适配器检测到上传进行中，已切换为等待态而不是失败态。",
+          blockerDetails: `verification_reason=${pendingIntegrity.verification_reason || "upload_not_ready"}`,
+          prepublishOnlyCurrentPage,
+          prepareOnlyCurrentPage,
+          stopBeforeFinalPublish,
+        }),
+        error: null,
+      };
     } else {
     return {
       status: "needs_human",
@@ -21758,6 +24218,7 @@ async function runCompositePlatformAdapter(
       publication_audit: effectiveAudit,
       publication_field_snapshot: effectiveFieldSnapshot,
       visual_evidence: effectiveSnapshot?.visual_evidence || undefined,
+      visual_evidence_pack: effectiveSnapshot?.visual_evidence_pack || undefined,
       visible_lines: (effectiveSnapshot.lines || []).slice(0, 120),
     });
     if (typeof framework.repair !== "function" && !shouldFallbackToFullPrepareDuringRepair(platform, framework)) {
@@ -21830,6 +24291,7 @@ async function runCompositePlatformAdapter(
         publication_audit: effectiveAudit,
         publication_field_snapshot: effectiveFieldSnapshot,
         visual_evidence: effectiveSnapshot?.visual_evidence || undefined,
+        visual_evidence_pack: effectiveSnapshot?.visual_evidence_pack || undefined,
         visible_lines: (effectiveSnapshot.lines || []).slice(0, 120),
       });
     }
@@ -21844,6 +24306,8 @@ async function runCompositePlatformAdapter(
     material_integrity: effectiveIntegrity,
     publication_audit: effectiveAudit,
     publication_field_snapshot: effectiveFieldSnapshot,
+    visual_evidence: effectiveSnapshot?.visual_evidence || undefined,
+    visual_evidence_pack: effectiveSnapshot?.visual_evidence_pack || undefined,
     visible_lines: (effectiveSnapshot.lines || []).slice(0, 120),
   });
   const result = {
@@ -21859,6 +24323,8 @@ async function runCompositePlatformAdapter(
     },
     publication_audit: effectiveAudit,
     publication_field_snapshot: effectiveFieldSnapshot,
+    visual_evidence: normalizeVisualEvidence(effectiveSnapshot?.visual_evidence),
+    visual_evidence_pack: normalizeVisualEvidencePack(effectiveSnapshot?.visual_evidence_pack),
     pre_publish_repair: prePublishRepairAttempt || undefined,
     actions: actions.slice(0, 120),
     visible_option_lines: (effectiveSnapshot.lines || [])
@@ -21892,6 +24358,8 @@ async function runCompositePlatformAdapter(
         material_integrity: effectiveIntegrity,
         publication_audit: result.publication_audit,
         publication_field_snapshot: result.publication_field_snapshot,
+        visual_evidence: effectiveSnapshot?.visual_evidence || undefined,
+        visual_evidence_pack: effectiveSnapshot?.visual_evidence_pack || undefined,
         visible_lines: (effectiveSnapshot.lines || []).slice(0, 120),
       });
       return {
@@ -21929,9 +24397,11 @@ async function runCompositePlatformAdapter(
         },
       };
     }
-    const prePublishCode = prePublishMissing.includes("content_plan_match")
-      ? `${platform}_pre_publish_content_plan_mismatch`
-      : `${platform}_pre_publish_material_integrity_failed`;
+    const prePublishCode = platform === "youtube"
+      ? deriveYouTubePrePublishReadbackFailureCode(result.publication_audit, effectiveIntegrity, content)
+      : (prePublishMissing.includes("content_plan_match")
+        ? `${platform}_pre_publish_content_plan_mismatch`
+        : `${platform}_pre_publish_material_integrity_failed`);
     const prePublishDetailCode = "pre_publish_field_readback";
     const prePublishReadbackFields = prePublishMissing.filter((item) => String(item || "").trim());
     const prePublishRecovery = deriveCompositePrePublishFailureRecoveryPlan(
@@ -22007,6 +24477,8 @@ async function runCompositePlatformAdapter(
       material_integrity: effectiveIntegrity,
       publication_audit: result.publication_audit,
       publication_field_snapshot: result.publication_field_snapshot,
+      visual_evidence: effectiveSnapshot?.visual_evidence || undefined,
+      visual_evidence_pack: effectiveSnapshot?.visual_evidence_pack || undefined,
       final_pre_publish_visual_verification: result.final_pre_publish_visual_verification,
       visible_lines: (effectiveSnapshot.lines || []).slice(0, 120),
     });
@@ -22147,7 +24619,7 @@ async function runCompositePlatformAdapter(
     ),
   );
   result.final_publish = finalOutcome.result?.final_publish || {};
-  const finalIntegrity = await readCompositeMaterialIntegrity(client, platform, content);
+  const finalIntegrity = await readCompositeMaterialIntegrityWithVisualEvidence(client, platform, content, "final_material_integrity");
   const normalizedFinalIntegrity = normalizeCompositePostPublishIntegrity(
     platform,
     finalIntegrity,
@@ -23502,7 +25974,7 @@ async function preparePublicationTask(task) {
         tab_selection: tabSelectionPolicy,
         media_path: mediaPath,
       }),
-      15000,
+      publicationTabResolutionTimeoutMs(platform, content),
       "platform_tab_resolution_timeout",
       `Resolving ${platform} publication tab timed out`,
       { platform, phase: "resolve_platform_tab" },
@@ -23660,6 +26132,7 @@ async function preparePublicationTask(task) {
         },
         actions,
         visual_evidence: promptSnapshot?.visual_evidence || undefined,
+        visual_evidence_pack: promptSnapshot?.visual_evidence_pack || undefined,
         ..._build_publication_recovery_hint({
           platform,
           code: "draft_resume_prompt_not_declined",
@@ -23686,7 +26159,9 @@ async function preparePublicationTask(task) {
       },
     };
   }
-  const shouldEnforcePublishRoute = skipSharedBootstrapForFreshStart
+  const shouldEnforcePublishRoute = youtubeFreshUploadOnly
+    ? true
+    : skipSharedBootstrapForFreshStart
     ? false
     : directStartAtConnectedUploadEntry
     ? false
@@ -23708,7 +26183,7 @@ async function preparePublicationTask(task) {
           force_publish_page_refresh: forcePublishPageRefresh || forceMediaUpload,
           prefer_draft_list_surface: Boolean(tabSelectionPolicy.prefer_draft_list_surface),
         }),
-        30000,
+        publicationTabResolutionTimeoutMs(platform, content),
         "platform_route_bootstrap_timeout",
         `Bootstrapping ${platform} publish route timed out`,
         { platform, phase: "ensure_publish_route" },
@@ -23746,6 +26221,46 @@ async function preparePublicationTask(task) {
     title: String(tab?.title || ""),
   };
   const postRouteSnapshot = await routeBootstrapSnapshot(client).catch(() => null);
+  if (youtubeFreshUploadOnly && routeAction?.verified === false) {
+    const routeSnapshotText = [
+      ...(Array.isArray(postRouteSnapshot?.lines) ? postRouteSnapshot.lines : []),
+      ...(Array.isArray(postRouteSnapshot?.headings) ? postRouteSnapshot.headings : []),
+    ].join(" ");
+    return {
+      status: "needs_human",
+      result: _attach_publication_content_signature({
+        platform,
+        route: {
+          url: String(postRouteSnapshot?.url || routeAction.url || tab?.url || ""),
+          title: String(postRouteSnapshot?.title || tab?.title || ""),
+        },
+        actions,
+        ..._build_publication_recovery_hint({
+          platform,
+          code: "youtube_fresh_upload_entry_not_open",
+          reason: "YouTube fresh-only 发布未能确认进入新上传弹窗/向导，已停止，避免继续编辑旧草稿或旧视频。",
+          route: {
+            url: String(postRouteSnapshot?.url || routeAction.url || tab?.url || ""),
+            title: String(postRouteSnapshot?.title || tab?.title || ""),
+          },
+          actionHistory: actions,
+          visibleLines: (postRouteSnapshot?.lines || []).slice(0, 120),
+          clearDraftContext: true,
+          forceRefresh: true,
+          blockers: [{
+            code: "youtube_fresh_upload_entry_not_open",
+            message: "YouTube 仍停留在频道内容/草稿列表页，没有进入新上传弹窗。",
+            details: routeSnapshotText.slice(0, 1000),
+          }],
+        }).recovery,
+      }, content),
+      error: {
+        code: "youtube_fresh_upload_entry_not_open",
+        message: "YouTube fresh-only 发布入口未打开，已阻断后续发布。",
+        details: routeAction,
+      },
+    };
+  }
   const bypassDraftResumeAtUploadEntry = shouldBypassDraftResumeAtAuthoritativeUploadEntry(platform, {
     url: String(postRouteSnapshot?.url || currentRouteHint.url || tab?.url || ""),
     lines: postRouteSnapshot?.lines || [],
@@ -23832,6 +26347,7 @@ async function preparePublicationTask(task) {
         },
         actions,
         visual_evidence: promptSnapshot?.visual_evidence || undefined,
+        visual_evidence_pack: promptSnapshot?.visual_evidence_pack || undefined,
         ..._build_publication_recovery_hint({
           platform,
           code: "draft_resume_prompt_not_declined",
@@ -23997,6 +26513,7 @@ async function preparePublicationTask(task) {
     snapshot,
     mediaPath,
     actions,
+    content,
   );
   if (prepareOnlyCurrentPage && !currentPagePrepareOnlyExecutionContext) {
     return {
@@ -24009,6 +26526,7 @@ async function preparePublicationTask(task) {
         },
         actions,
         visual_evidence: snapshot?.visual_evidence || undefined,
+        visual_evidence_pack: snapshot?.visual_evidence_pack || undefined,
         ..._build_publication_recovery_hint({
           platform,
           code: `${platform}_prepare_only_requires_fresh_upload_entry`,
@@ -24047,6 +26565,7 @@ async function preparePublicationTask(task) {
       path: "",
     },
     visual_evidence: snapshot?.visual_evidence || undefined,
+    visual_evidence_pack: snapshot?.visual_evidence_pack || undefined,
     visible_lines: (snapshot?.lines || []).slice(0, 120),
     actions,
   });
@@ -24114,8 +26633,9 @@ async function preparePublicationTask(task) {
     );
     let integrity = verificationWait && typeof verificationWait === "object" ? verificationWait.integrity : null;
     if (!integrity || typeof integrity !== "object") {
-      integrity = await runCompositePhase(platform, "verification_only_material_integrity", () => readCompositeMaterialIntegrity(client, platform, content));
+      integrity = await runCompositePhase(platform, "verification_only_material_integrity", () => readCompositeMaterialIntegrityWithVisualEvidence(client, platform, content, "verification_only_material_integrity"));
     }
+    integrity = enrichCompositeMaterialIntegrityFromActions(platform, integrity, actions);
     snapshot = await pageSnapshot(client, {
       captureVisualEvidence: true,
       platform,
@@ -24199,6 +26719,7 @@ async function preparePublicationTask(task) {
         path: "",
       },
         visual_evidence: snapshot?.visual_evidence || undefined,
+        visual_evidence_pack: snapshot?.visual_evidence_pack || undefined,
         material_integrity: integrity,
         publication_audit: publicationAudit,
         publication_field_snapshot: publicationFieldSnapshot,
@@ -24218,9 +26739,12 @@ async function preparePublicationTask(task) {
       );
     }
     let repairAttempt = null;
-    if (effectiveRepairOnlyCurrentPage && !publicationAudit.verified) {
+    if (effectiveRepairOnlyCurrentPage) {
       const repairPlan = deriveCompositePrePublishRepairPlan(publicationAudit, integrity, {
         allowRepairWithBlocking: true,
+        forceRepairFields: Array.isArray(content?.platform_specific_overrides?.force_repair_fields)
+          ? content.platform_specific_overrides.force_repair_fields
+          : (Array.isArray(content?.force_repair_fields) ? content.force_repair_fields : []),
       });
       if (repairPlan.shouldRepair) {
         reportTaskProgress({
@@ -24233,6 +26757,8 @@ async function preparePublicationTask(task) {
           material_integrity: integrity,
           publication_audit: publicationAudit,
           publication_field_snapshot: publicationFieldSnapshot,
+          visual_evidence: snapshot?.visual_evidence || undefined,
+          visual_evidence_pack: snapshot?.visual_evidence_pack || undefined,
           visible_lines: integrity?.platform_extras?.relevant_lines || (snapshot?.lines || []).slice(0, 120),
           actions,
         });
@@ -24271,8 +26797,13 @@ async function preparePublicationTask(task) {
             }
             actions.push(...repairActions);
             await sleep(1200);
-            integrity = await runCompositePhase(platform, "repair_only_current_page_material_integrity_reverify", () => readCompositeMaterialIntegrity(client, platform, content));
-            snapshot = await pageSnapshot(client).catch(() => snapshot);
+            integrity = await runCompositePhase(platform, "repair_only_current_page_material_integrity_reverify", () => readCompositeMaterialIntegrityWithVisualEvidence(client, platform, content, "repair_only_current_page_material_integrity_reverify"));
+            integrity = enrichCompositeMaterialIntegrityFromActions(platform, integrity, actions);
+            snapshot = await pageSnapshot(client, {
+              captureVisualEvidence: true,
+              platform,
+              visualEvidencePhase: "repair_only_current_page_reverify",
+            }).catch(() => snapshot);
             const reverifyRoute = { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" };
             publicationAudit = buildCompositePublicationAudit(platform, content, integrity, verificationFinalPublish, reverifyRoute);
             publicationFieldSnapshot = buildPublicationFieldSnapshotFromAudit(
@@ -24299,6 +26830,8 @@ async function preparePublicationTask(task) {
               material_integrity: integrity,
               publication_audit: publicationAudit,
               publication_field_snapshot: publicationFieldSnapshot,
+              visual_evidence: snapshot?.visual_evidence || undefined,
+              visual_evidence_pack: snapshot?.visual_evidence_pack || undefined,
               visible_lines: integrity?.platform_extras?.relevant_lines || (snapshot?.lines || []).slice(0, 120),
               actions,
             });
@@ -24380,7 +26913,9 @@ async function preparePublicationTask(task) {
       expectedTitle: String(content?.title || "").trim(),
       allowDraftTitleMismatchReuse: currentPageOnlyMode,
     })
-    : { reusable: Boolean(mediaPath && pageAlreadyHasMedia(snapshot, mediaPath)), reason: mediaPath ? "media_path_match" : "missing_media_path" };
+    : platform === "youtube"
+      ? { reusable: false, media_attached: Boolean(mediaPath && pageAlreadyHasMedia(snapshot, mediaPath)), reason: mediaPath ? "youtube_current_page_media_ignored_fresh_publish" : "missing_media_path" }
+      : { reusable: Boolean(mediaPath && pageAlreadyHasMedia(snapshot, mediaPath)), reason: mediaPath ? "media_path_match" : "missing_media_path" };
   if (stopBeforeFinalPublish && shouldBootstrapStopBeforeMediaRouteRecovery(platform, snapshot, stopBeforeCurrentMediaState)) {
     if (platform === "youtube") {
       const routeBootstrap = await ensureYoutubeUploadEditor(
@@ -24467,6 +27002,7 @@ async function preparePublicationTask(task) {
             details: JSON.stringify({ route_url: snapshot?.url || tab.url || "", verification_reason: stopBeforeRouteDisposition.verification_reason }),
           }],
           recoveryOverrides: buildStopBeforeFinalPublishRecoveryOverrides({
+            platform,
             prepublishOnlyCurrentPage,
             prepareOnlyCurrentPage,
             verificationReason: stopBeforeRouteDisposition.verification_reason,
@@ -24500,11 +27036,21 @@ async function preparePublicationTask(task) {
       reason: "prepare_only_current_page_force_fresh_upload",
     };
   }
+  let currentPageMediaNameMatchIsReusable = Boolean(platform !== "youtube" && mediaPath && pageAlreadyHasMedia(snapshot, mediaPath));
   let mediaAlreadyPresent = Boolean(
     currentPageMediaState?.reusable
-    || currentPageMediaState?.media_attached
-    || (mediaPath && pageAlreadyHasMedia(snapshot, mediaPath)),
+    || (platform !== "youtube" && currentPageMediaState?.media_attached)
+    || currentPageMediaNameMatchIsReusable,
   );
+  if (youtubeFreshUploadOnly) {
+    currentPageMediaState = {
+      ...(currentPageMediaState && typeof currentPageMediaState === "object" ? currentPageMediaState : {}),
+      reusable: false,
+      media_attached: false,
+      reason: "youtube_fresh_upload_only_forbid_current_media_reuse",
+    };
+    mediaAlreadyPresent = false;
+  }
   if (prepareOnlyCurrentPage) {
     mediaAlreadyPresent = false;
   }
@@ -24567,7 +27113,7 @@ async function preparePublicationTask(task) {
               route: { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" },
               actionHistory: actions.slice(0, 80),
               visibleLines: (snapshot?.lines || []).slice(0, 120),
-              clearDraftContext: false,
+              clearDraftContext: platform === "youtube",
               forceRefresh: true,
               blockers: [{
                 code: mediaPendingDisposition.code,
@@ -24575,6 +27121,7 @@ async function preparePublicationTask(task) {
                 details: JSON.stringify({ media_path: mediaPath || "", media_reuse_reason: mediaPendingDisposition.media_reuse_reason || "", media_already_present: mediaAlreadyPresent }),
               }],
               recoveryOverrides: buildStopBeforeFinalPublishRecoveryOverrides({
+                platform,
                 prepublishOnlyCurrentPage,
                 prepareOnlyCurrentPage,
               }),
@@ -24614,7 +27161,7 @@ async function preparePublicationTask(task) {
               route: { url: snapshot?.url || tab.url || "", title: snapshot?.title || tab.title || "" },
               actionHistory: actions.slice(0, 80),
               visibleLines: (snapshot?.lines || []).slice(0, 120),
-              clearDraftContext: false,
+              clearDraftContext: platform === "youtube",
               forceRefresh: true,
               blockers: [{
                 code: `${platform}_prepublish_only_media_missing`,
@@ -24622,6 +27169,7 @@ async function preparePublicationTask(task) {
                 details: JSON.stringify({ media_path: mediaPath || "", media_reuse_reason: refreshedStopBeforeCurrentMediaState.reason || "", media_already_present: mediaAlreadyPresent }),
               }],
               recoveryOverrides: buildStopBeforeFinalPublishRecoveryOverrides({
+                platform,
                 prepublishOnlyCurrentPage,
                 prepareOnlyCurrentPage,
               }),
@@ -24664,10 +27212,11 @@ async function preparePublicationTask(task) {
       expectedTitle: String(content?.title || "").trim(),
       allowDraftTitleMismatchReuse: currentPageOnlyMode,
     });
+    currentPageMediaNameMatchIsReusable = Boolean(platform !== "youtube" && mediaPath && pageAlreadyHasMedia(snapshot, mediaPath));
     mediaAlreadyPresent = Boolean(
       currentPageMediaState?.reusable
-      || currentPageMediaState?.media_attached
-      || (mediaPath && pageAlreadyHasMedia(snapshot, mediaPath)),
+      || (platform !== "youtube" && currentPageMediaState?.media_attached)
+      || currentPageMediaNameMatchIsReusable,
     );
   }
   const bilibiliMediaReuseReason = String(currentPageMediaState?.reason || "").trim();
@@ -24679,11 +27228,29 @@ async function preparePublicationTask(task) {
       "upload_prompt_only",
       "media_presence_unconfirmed",
     ].includes(bilibiliMediaReuseReason);
+  const youtubeMediaReuseReason = String(currentPageMediaState?.reason || "").trim();
+  const skipRedundantYoutubeMediaBootstrap =
+    platform === "youtube"
+    && !youtubeFreshUploadOnly
+    && Boolean(currentPageMediaState?.media_attached || currentPageMediaState?.reusable || mediaAlreadyPresent)
+    && ![
+      "youtube_uploaded_draft_row_ignored",
+      "upload_prompt_only",
+      "media_presence_unconfirmed",
+    ].includes(youtubeMediaReuseReason);
   if (skipRedundantBilibiliMediaBootstrap) {
     actions.push({
       kind: "bilibili_media_upload_reuse",
       skipped: true,
       reason: String(currentPageMediaState?.reason || "bilibili_media_already_attached"),
+      media_already_present: mediaAlreadyPresent,
+    });
+  }
+  if (skipRedundantYoutubeMediaBootstrap) {
+    actions.push({
+      kind: "youtube_media_upload_reuse",
+      skipped: true,
+      reason: String(currentPageMediaState?.reason || "youtube_media_already_attached"),
       media_already_present: mediaAlreadyPresent,
     });
   }
@@ -24700,13 +27267,13 @@ async function preparePublicationTask(task) {
       bilibiliUploadSurfaceAfterAttach?.field_shell
       && (bilibiliUploadSurfaceAfterAttach?.media_attached || bilibiliUploadSurfaceAfterAttach?.ready_surface || bilibiliUploadSurfaceAfterAttach?.concrete_progress),
     );
-  if (!skipRedundantBilibiliMediaBootstrap && shouldAttemptMediaBootstrap({
+  if (!skipRedundantBilibiliMediaBootstrap && !skipRedundantYoutubeMediaBootstrap && shouldAttemptMediaBootstrap({
     stopBeforeFinalPublish,
     prepublishOnlyCurrentPage,
     forceMediaUpload,
     stopBeforeUploadBootstrap,
     mediaAlreadyPresent,
-    pageHasMedia: pageAlreadyHasMedia(snapshot, mediaPath),
+    pageHasMedia: platform === "youtube" ? false : pageAlreadyHasMedia(snapshot, mediaPath),
     hasMediaPath: Boolean(mediaPath),
   })) {
       if (platform === "bilibili") {
@@ -24929,6 +27496,10 @@ async function preparePublicationTask(task) {
       let upload = skipUploadAfterPreflight
         ? { uploaded: true, skipped: true, reason: "bilibili_media_already_attached_after_preflight" }
         : await setFirstVideoFileInput(client, mediaPath, { platform });
+      if (platform === "youtube") {
+        actions.push({ kind: "youtube_upload_dom_primary", ...upload });
+        actions.push({ kind: "youtube_native_file_chooser_skipped", skipped: true, reason: "youtube_formal_publish_uses_dom_file_input_only" });
+      }
       if (!upload.uploaded) {
         snapshot = await pageSnapshot(client).catch(() => snapshot);
         const snapshotLines = Array.isArray(snapshot?.lines) ? snapshot.lines : [];
@@ -24980,8 +27551,12 @@ async function preparePublicationTask(task) {
           }
           await sleep(2200);
           upload = await setFirstVideoFileInput(client, mediaPath, { platform });
+          if (platform === "youtube") {
+            actions.push({ kind: "youtube_upload_dom_retry", ...upload });
+            actions.push({ kind: "youtube_native_file_chooser_skipped", skipped: true, reason: "youtube_formal_publish_uses_dom_file_input_only" });
+          }
         }
-        if (!upload.uploaded && allowGenericRetryUploadPath && !useAuthoritativeUploadEntryNativePath && shouldAttemptNativeFileChooserFallback(upload)) {
+        if (!upload.uploaded && platform !== "youtube" && allowGenericRetryUploadPath && !useAuthoritativeUploadEntryNativePath && shouldAttemptNativeFileChooserFallback(upload)) {
           const nativeFallbackUpload = await tryNativeMediaUploadFallback(client, {
             mediaPath,
             uploadEntryHints: ["上传视频", "点击上传", "选择视频", "选择文件", "从电脑中选择", "Upload videos", "Select files"],
@@ -25165,6 +27740,11 @@ async function preparePublicationTask(task) {
                   media_present: Boolean(state?.last?.mediaPresent),
                   upload_prompt_only: Boolean(state?.last?.uploadPromptOnly),
                   file_input_count: Number(state?.last?.fileInputCount || 0),
+                  youtube_upload_route: Boolean(state?.last?.youtubeUploadRoute),
+                  youtube_channel_content_list: Boolean(state?.last?.youtubeChannelContentList),
+                  youtube_draft_resume_available: Boolean(state?.last?.youtubeDraftResumeAvailable),
+                  youtube_upload_dialog_route: Boolean(state?.last?.youtubeUploadDialogRoute),
+                  youtube_editor_surface: Boolean(state?.last?.youtubeEditorSurface),
                   last_lines: Array.isArray(state?.last?.lines) ? state.last.lines.slice(0, 50) : [],
                 },
               },
@@ -25246,6 +27826,92 @@ async function preparePublicationTask(task) {
           }
           if (shouldWaitForCompositeUploadReadyBeforeFieldPreparation(platform, readiness, { verifyMediaUpload })) {
             snapshot = await pageSnapshot(client);
+            let youtubeCurrentFreshUploadOpened = false;
+            if (youtubeFreshUploadOnly && platform === "youtube") {
+              const continuationSurface = await inspectYouTubeUploadEditorBootstrapSurface(client).catch((error) => ({
+                error: String(error?.message || error || ""),
+              }));
+              const continuation = selectYouTubeFreshUploadContinuationCandidate(
+                continuationSurface,
+                content,
+                actions,
+              );
+              actions.push({
+                kind: "youtube_fresh_upload_draft_continuation_probe",
+                ...continuation,
+              });
+              if (continuation.allowed) {
+                const opened = await openYouTubeFreshUploadContinuationCandidate(client, continuation).catch((error) => ({
+                  opened: false,
+                  clicked: false,
+                  reason: "current_fresh_upload_open_failed",
+                  error: String(error?.message || error || ""),
+                }));
+                actions.push({
+                  kind: "youtube_fresh_upload_current_row_open",
+                  ...opened,
+                });
+                if (opened?.opened) {
+                  youtubeCurrentFreshUploadOpened = true;
+                  await sleep(3200);
+                  snapshot = await pageSnapshot(client).catch(() => snapshot);
+                }
+              }
+              if (continuation.blocked || continuation.reason === "fresh_upload_path_must_not_resume_draft") {
+                actions.push({
+                  kind: "youtube_fresh_upload_draft_continuation_forbidden",
+                  blocked: true,
+                  reason: "fresh_upload_path_must_not_resume_draft",
+                  selected_text: continuation.selected_text || "",
+                  video_id: continuation.video_id || "",
+                });
+                return {
+                  status: "needs_human",
+                  result: _attach_publication_content_signature({
+                    platform,
+                    route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
+                    actions,
+                    material_integrity: {
+                      verification_state: "path_violation",
+                      verification_reason: "fresh_upload_path_must_not_resume_draft",
+                      platform_extras: {
+                        route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
+                        youtube_draft_continuation: continuation,
+                      },
+                    },
+                    ..._build_publication_recovery_hint({
+                      platform,
+                      code: "youtube_fresh_upload_path_violation",
+                      reason: "YouTube fresh-only 发布检测到静态草稿续编候选，已停止以避免编辑旧视频。",
+                      route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
+                      actionHistory: actions.slice(0, 120),
+                      visibleLines: (snapshot?.lines || []).slice(0, 120),
+                      clearDraftContext: true,
+                      forceRefresh: true,
+                      blockers: [{
+                        code: "youtube_fresh_upload_path_violation",
+                        message: "YouTube 正式发布只能接续本轮正在上传的活动行，不能进入静态旧草稿。",
+                        details: JSON.stringify({
+                          selected_text: continuation.selected_text || "",
+                          video_id: continuation.video_id || "",
+                        }),
+                      }],
+                    }).recovery,
+                  }, content),
+                  error: {
+                    code: "youtube_fresh_upload_path_violation",
+                    message: "YouTube fresh-only 发布检测到静态草稿续编候选，已阻断。",
+                    details: continuation,
+                  },
+                };
+              }
+            }
+            if (youtubeCurrentFreshUploadOpened) {
+              actions.push({
+                kind: "youtube_fresh_upload_current_row_continue_after_open",
+                reason: "current_fresh_upload_activity_row_opened",
+              });
+            } else {
             const pendingUploadIntegrity = buildPendingUploadMaterialIntegrity(
               platform,
               readiness,
@@ -25266,7 +27932,7 @@ async function preparePublicationTask(task) {
               actions,
             });
             return {
-              status: "processing",
+              status: platform === "youtube" ? "needs_human" : "processing",
               result: buildCompositeUploadPendingProcessingEnvelope({
                 platform,
                 route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
@@ -25282,8 +27948,14 @@ async function preparePublicationTask(task) {
                 interruptions,
                 content,
               }),
-              error: null,
+              error: platform === "youtube"
+                ? {
+                  code: `${platform}_pre_publish_upload_pending`,
+                  message: `媒体上传等待超时：${pendingUploadIntegrity.verification_reason || "upload_ready"}`,
+                }
+                : null,
             };
+            }
           }
         }
         if (!shouldDeferGenericPostUploadIntegrityUntilPlatformAdapter(platform)) {
@@ -25299,7 +27971,7 @@ async function preparePublicationTask(task) {
           const postUploadIntegrity = await runCompositePhase(
             platform,
             "post_upload_material_integrity",
-            () => readCompositeMaterialIntegrity(client, platform, content),
+            () => readCompositeMaterialIntegrityWithVisualEvidence(client, platform, content, "verification_only_material_integrity_wait"),
           );
           actions.push({ kind: "post_upload_material_integrity", ...postUploadIntegrity });
           snapshot = await pageSnapshot(client);
@@ -25480,6 +28152,11 @@ async function preparePublicationTask(task) {
                     media_present: Boolean(state?.last?.mediaPresent),
                     upload_prompt_only: Boolean(state?.last?.uploadPromptOnly),
                     file_input_count: Number(state?.last?.fileInputCount || 0),
+                    youtube_upload_route: Boolean(state?.last?.youtubeUploadRoute),
+                    youtube_channel_content_list: Boolean(state?.last?.youtubeChannelContentList),
+                    youtube_draft_resume_available: Boolean(state?.last?.youtubeDraftResumeAvailable),
+                    youtube_upload_dialog_route: Boolean(state?.last?.youtubeUploadDialogRoute),
+                    youtube_editor_surface: Boolean(state?.last?.youtubeEditorSurface),
                     last_lines: Array.isArray(state?.last?.lines) ? state.last.lines.slice(0, 50) : [],
                   },
                 },
@@ -25552,6 +28229,92 @@ async function preparePublicationTask(task) {
           }
           if (shouldWaitForCompositeUploadReadyBeforeFieldPreparation(platform, readiness, { verifyMediaUpload })) {
             snapshot = await pageSnapshot(client);
+            let youtubeCurrentFreshUploadOpened = false;
+            if (youtubeFreshUploadOnly && platform === "youtube") {
+              const continuationSurface = await inspectYouTubeUploadEditorBootstrapSurface(client).catch((error) => ({
+                error: String(error?.message || error || ""),
+              }));
+              const continuation = selectYouTubeFreshUploadContinuationCandidate(
+                continuationSurface,
+                content,
+                actions,
+              );
+              actions.push({
+                kind: "youtube_fresh_upload_draft_continuation_probe",
+                ...continuation,
+              });
+              if (continuation.allowed) {
+                const opened = await openYouTubeFreshUploadContinuationCandidate(client, continuation).catch((error) => ({
+                  opened: false,
+                  clicked: false,
+                  reason: "current_fresh_upload_open_failed",
+                  error: String(error?.message || error || ""),
+                }));
+                actions.push({
+                  kind: "youtube_fresh_upload_current_row_open",
+                  ...opened,
+                });
+                if (opened?.opened) {
+                  youtubeCurrentFreshUploadOpened = true;
+                  await sleep(3200);
+                  snapshot = await pageSnapshot(client).catch(() => snapshot);
+                }
+              }
+              if (continuation.blocked || continuation.reason === "fresh_upload_path_must_not_resume_draft") {
+                actions.push({
+                  kind: "youtube_fresh_upload_draft_continuation_forbidden",
+                  blocked: true,
+                  reason: "fresh_upload_path_must_not_resume_draft",
+                  selected_text: continuation.selected_text || "",
+                  video_id: continuation.video_id || "",
+                });
+                return {
+                  status: "needs_human",
+                  result: _attach_publication_content_signature({
+                    platform,
+                    route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
+                    actions,
+                    material_integrity: {
+                      verification_state: "path_violation",
+                      verification_reason: "fresh_upload_path_must_not_resume_draft",
+                      platform_extras: {
+                        route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
+                        youtube_draft_continuation: continuation,
+                      },
+                    },
+                    ..._build_publication_recovery_hint({
+                      platform,
+                      code: "youtube_fresh_upload_path_violation",
+                      reason: "YouTube fresh-only 发布检测到草稿续编候选，已停止以避免编辑旧视频。",
+                      route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
+                      actionHistory: actions.slice(0, 120),
+                      visibleLines: (snapshot?.lines || []).slice(0, 120),
+                      clearDraftContext: true,
+                      forceRefresh: true,
+                      blockers: [{
+                        code: "youtube_fresh_upload_path_violation",
+                        message: "YouTube 正式发布必须从新上传编辑器继续，不能进入内容列表草稿续编。",
+                        details: JSON.stringify({
+                          selected_text: continuation.selected_text || "",
+                          video_id: continuation.video_id || "",
+                        }),
+                      }],
+                    }).recovery,
+                  }, content),
+                  error: {
+                    code: "youtube_fresh_upload_path_violation",
+                    message: "YouTube fresh-only 发布检测到草稿续编候选，已阻断。",
+                    details: continuation,
+                  },
+                };
+              }
+            }
+            if (youtubeCurrentFreshUploadOpened) {
+              actions.push({
+                kind: "youtube_fresh_upload_current_row_continue_after_open",
+                reason: "current_fresh_upload_activity_row_opened",
+              });
+            } else {
             const pendingUploadIntegrity = buildPendingUploadMaterialIntegrity(
               platform,
               readiness,
@@ -25572,7 +28335,7 @@ async function preparePublicationTask(task) {
               actions,
             });
             return {
-              status: "processing",
+              status: platform === "youtube" ? "needs_human" : "processing",
               result: buildCompositeUploadPendingProcessingEnvelope({
                 platform,
                 route: { url: snapshot?.url || tab?.url || "", title: snapshot?.title || tab?.title || "" },
@@ -25588,8 +28351,14 @@ async function preparePublicationTask(task) {
                 interruptions,
                 content,
               }),
-              error: null,
+              error: platform === "youtube"
+                ? {
+                  code: `${platform}_pre_publish_upload_pending`,
+                  message: `媒体上传等待超时：${pendingUploadIntegrity.verification_reason || "upload_ready"}`,
+                }
+                : null,
             };
+            }
           }
         }
       } else if (skipBilibiliUploadReadinessWait) {
@@ -25615,7 +28384,7 @@ async function preparePublicationTask(task) {
           snapshot = await pageSnapshot(client).catch(() => snapshot);
         }
       }
-      const initialIntegrity = await readCompositeMaterialIntegrity(client, platform, content).catch(() => null);
+      const initialIntegrity = await readCompositeMaterialIntegrityWithVisualEvidence(client, platform, content, "bilibili_initial_integrity").catch(() => null);
       const initialChecklist = initialIntegrity?.fields && typeof initialIntegrity.fields === "object"
         ? initialIntegrity.fields
         : {};
@@ -26051,6 +28820,7 @@ export function mergePublicationTaskProgress(currentProgress = {}, patch = {}) {
   merged.publication_field_snapshot = _mergeTaskProgressValue(current.publication_field_snapshot, next.publication_field_snapshot);
   merged.final_publish = _mergeTaskProgressValue(current.final_publish, next.final_publish);
   merged.visual_evidence = _mergeTaskProgressValue(current.visual_evidence, next.visual_evidence);
+  merged.visual_evidence_pack = _mergeTaskProgressValue(current.visual_evidence_pack, next.visual_evidence_pack);
   merged.actions = _mergeTaskProgressValue(current.actions, next.actions);
   return merged;
 }
@@ -26088,6 +28858,7 @@ export function buildPublicationTaskTimeoutEvidence(task) {
       ? progress.material_integrity
       : {},
     visual_evidence: normalizeVisualEvidence(progress.visual_evidence),
+    visual_evidence_pack: normalizeVisualEvidencePack(progress.visual_evidence_pack),
     visible_lines: Array.isArray(progress.visible_lines) ? progress.visible_lines.slice(0, 120) : [],
     updated_at: String(progress.updated_at || ""),
   };
@@ -26103,12 +28874,33 @@ function reportTaskPreparationStage(task, patch = {}) {
     publication_field_snapshot: patch.publication_field_snapshot && typeof patch.publication_field_snapshot === "object" ? patch.publication_field_snapshot : {},
     final_publish: patch.final_publish && typeof patch.final_publish === "object" ? patch.final_publish : {},
     visual_evidence: normalizeVisualEvidence(patch.visual_evidence),
+    visual_evidence_pack: normalizeVisualEvidencePack(patch.visual_evidence_pack),
     actions: Array.isArray(patch.actions) ? patch.actions.slice(0, 40) : undefined,
   });
 }
 
 function startPublicationTask(payload) {
   const taskId = String(payload.task_id || payload.id || randomUUID()).trim();
+  const existingTask = TASKS.get(taskId) || loadPersistedPublicationTask(taskId);
+  const existingStatus = String(existingTask?.status || "").trim().toLowerCase();
+  const existingUpdatedAtMs = Date.parse(String(existingTask?.updated_at || ""));
+  const existingTaskAgeMs = Number.isFinite(existingUpdatedAtMs) ? Date.now() - existingUpdatedAtMs : Number.POSITIVE_INFINITY;
+  const existingProcessingStale = existingStatus === "processing" && existingTaskAgeMs > 5 * 60 * 1000;
+  const existingUploadPending = Boolean(existingTask?.result?.final_publish?.pre_publish_pending)
+    && Boolean(existingTask?.result?.final_publish?.wait_for_upload_ready);
+  const existingTaskReusable = existingTask
+    && !existingUploadPending
+    && !existingProcessingStale
+    && !["needs_human", "failed", "published", "scheduled_pending", "cancelled", "draft_created"].includes(existingStatus);
+  if (existingTaskReusable) {
+    TASKS.set(taskId, existingTask);
+    console.log(`[task:start:existing] id=${taskId} status=${String(existingTask.status || "")} instance=${SERVICE_INSTANCE_ID} pid=${process.pid}`);
+    return existingTask;
+  }
+  if (existingTask) {
+    TASKS.delete(taskId);
+    console.log(`[task:start:replace_terminal] id=${taskId} previous_status=${String(existingTask.status || "")} instance=${SERVICE_INSTANCE_ID} pid=${process.pid}`);
+  }
   const taskContent = coerceTaskContentWithRecoveryPayload(payload);
   const taskIdentity = extractPublicationTaskIdentity(payload, taskContent);
   const sessionBinding = extractTaskSessionBinding(payload, taskContent);
@@ -26208,6 +29000,7 @@ function startPublicationTask(payload) {
           final_publish: timeoutEvidence.final_publish,
           material_integrity: timeoutEvidence.material_integrity,
           visual_evidence: timeoutEvidence.visual_evidence,
+          visual_evidence_pack: timeoutEvidence.visual_evidence_pack,
           timeout_progress: timeoutEvidence,
           ...timeoutHint.recovery,
         }, task.content);
@@ -26848,6 +29641,7 @@ function buildInventory(platform, tab, snapshot, probeMeta = {}) {
     option_groups: optionGroups,
     evidence,
     visual_evidence: normalizeVisualEvidence(snapshot.visual_evidence),
+    visual_evidence_pack: normalizeVisualEvidencePack(snapshot.visual_evidence_pack),
     framework_inventory: snapshot.framework_inventory || { framework: "unknown", components: [], option_groups: [] },
     coverage: effectiveCoverage,
     operation_steps: operationSteps,
@@ -26898,6 +29692,7 @@ export function buildLightweightProbeInventorySummary(platform, tab, snapshot, p
     warnings: warnings.slice(0, 20),
     operation_steps: compositePlatformOperationSteps(platform).slice(0, 20),
     visual_evidence: normalizeVisualEvidence(snapshot?.visual_evidence),
+    visual_evidence_pack: normalizeVisualEvidencePack(snapshot?.visual_evidence_pack),
     probe_meta: {
       summary_only: true,
       draft_upload_requested: Boolean(probeMeta?.draft_upload_requested),
@@ -26937,6 +29732,7 @@ export function buildCompactProbeInventorySummary(inventory) {
     warnings: Array.isArray(inventory.warnings) ? inventory.warnings.slice(0, 20) : [],
     operation_steps: Array.isArray(inventory.operation_steps) ? inventory.operation_steps.slice(0, 20) : [],
     visual_evidence: normalizeVisualEvidence(inventory.visual_evidence),
+    visual_evidence_pack: normalizeVisualEvidencePack(inventory.visual_evidence_pack),
     probe_meta: inventory.probe_meta && typeof inventory.probe_meta === "object"
       ? {
           draft_upload_requested: Boolean(inventory.probe_meta.draft_upload_requested),
@@ -27974,12 +30770,36 @@ const server = http.createServer(async (req, res) => {
       });
       return;
     }
+    if (req.method === "GET" && url.pathname === "/local/debug/tabs") {
+      const tabs = await listCdpTabs();
+      jsonResponse(res, 200, { ok: true, tabs });
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/local/debug/cdp") {
+      const payload = await readRequestJson(req);
+      const tabId = Number(payload.tab_id);
+      const method = String(payload.method || "").trim();
+      if (!Number.isFinite(tabId) || tabId <= 0 || !method) {
+        jsonResponse(res, 400, { ok: false, error: "invalid_cdp_debug_request" });
+        return;
+      }
+      const client = new BridgeCdpClient(tabId);
+      const result = await client.send(method, payload.params && typeof payload.params === "object" ? payload.params : {});
+      jsonResponse(res, 200, { ok: true, result });
+      return;
+    }
     if (req.method === "GET" && url.pathname === "/healthz") {
       let cdpStatus = "ok";
       let cdpError = "";
       let creatorSessions = {};
       try {
-        await listCdpTabs();
+        await withAsyncStepTimeout(
+          listCdpTabs(),
+          8000,
+          "healthz_list_tabs_timeout",
+          "healthz bridge list_tabs timed out",
+          { phase: "healthz_list_tabs" },
+        );
         const shouldCheckSession = /^(1|true|yes)$/i.test(String(url.searchParams.get("check_session") || "").trim());
         const requestedPlatforms = String(url.searchParams.get("platforms") || "")
           .split(",")
@@ -28004,10 +30824,16 @@ const server = http.createServer(async (req, res) => {
             await Promise.all(
               requestedPlatforms.map(async (platform) => [
                 platform,
-                await probeCreatorSession(platform, {
-                  target_profile_ids: targetProfileIds,
-                  session_binding: requestedSessionBindings[platform],
-                }),
+                await withAsyncStepTimeout(
+                  probeCreatorSession(platform, {
+                    target_profile_ids: targetProfileIds,
+                    session_binding: requestedSessionBindings[platform],
+                  }),
+                  CREATOR_SESSION_PROBE_TIMEOUT_MS,
+                  `${platform}_healthz_creator_session_timeout`,
+                  `${platform} creator session probe timed out`,
+                  { phase: "healthz_creator_session", platform },
+                ),
               ]),
             ),
           );
@@ -28018,11 +30844,7 @@ const server = http.createServer(async (req, res) => {
         const normalizeHealthValue = (value) => String(value || "").trim();
         const hasBoundProfile = Boolean(normalizeHealthValue(attachedProfileBinding()?.profile_id));
         const hasRecoverableBridgeClient = Boolean(normalizeHealthValue(bridgeTarget.bridge_client_id));
-        if (
-          normalizeHealthValue(cdpError) === "chrome_extension_bridge_unavailable"
-          && hasBoundProfile
-          && hasRecoverableBridgeClient
-        ) {
+        if (isRecoverableBridgeHealthError(cdpError) && hasBoundProfile && hasRecoverableBridgeClient) {
           cdpStatus = "degraded";
         } else {
           cdpStatus = "unavailable";

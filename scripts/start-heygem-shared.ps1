@@ -1,6 +1,6 @@
 param(
-    [string]$HeygemRepo = "E:/WorkSpace/heygem",
-    [string]$IndexTtsRepo = "E:/WorkSpace/indextts2-service",
+    [string]$HeygemRepo = "C:/sample-workspace/heygem",
+    [string]$IndexTtsRepo = "C:/sample-workspace/indextts2-service",
     [switch]$IncludeIndexTts
 )
 

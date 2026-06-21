@@ -17,11 +17,12 @@ SOCIAL_AUTO_UPLOAD_SUPPORTED_PLATFORMS = {
     "xiaohongshu": "xiaohongshu",
     "bilibili": "bilibili",
     "wechat-channels": "tencent",
+    "youtube": "youtube",
 }
 
 BILIBILI_DEFAULT_DECLARATION = "内容无需标注"
-BILIBILI_DEFAULT_CATEGORY = "生活/亲子"
-BILIBILI_DEFAULT_TID = ""
+BILIBILI_DEFAULT_CATEGORY = "生活兴趣/户外潮流"
+BILIBILI_DEFAULT_TID = "161"
 SOCIAL_AUTO_UPLOAD_LOCAL_TIMEZONE = timezone(timedelta(hours=8))
 BILIBILI_DECLARATION_ALIASES = {
     "": BILIBILI_DEFAULT_DECLARATION,
@@ -226,13 +227,15 @@ def _build_bilibili_tid_aliases() -> dict[str, int]:
             keys.add("预告资讯")
         if major == "生活" and minor == "出行":
             keys.add("生活出行")
-            keys.add("生活兴趣/户外潮流")
-            keys.add("生活兴趣-户外潮流")
-            keys.add("户外潮流")
         if major == "运动" and minor == "篮球":
             keys.add("篮球足球")
         for key in keys:
             aliases[_normalize_bilibili_category_key(key)] = tid
+    # Bilibili's current creator-center "生活兴趣/户外潮流" UI category
+    # reads back as archive tid=161 in live verification, even though older
+    # legacy tables only expose 161 as "生活/手工".
+    for key in ("生活兴趣/户外潮流", "生活兴趣-户外潮流", "户外潮流"):
+        aliases[_normalize_bilibili_category_key(key)] = 161
     return aliases
 
 @dataclass(frozen=True)
@@ -417,6 +420,13 @@ def build_social_auto_upload_upload_command(
         thumbnail = portrait_thumbnail or landscape_thumbnail or str(request_payload.get("cover_path") or "").strip()
         if thumbnail:
             command.extend(["--thumbnail", thumbnail])
+    elif normalized_platform == "youtube":
+        thumbnail = _resolve_youtube_social_auto_upload_thumbnail(request_payload) or landscape_thumbnail
+        if thumbnail:
+            command.extend(["--thumbnail", thumbnail])
+        visibility = _resolve_youtube_social_auto_upload_visibility(request_payload)
+        if visibility:
+            command.extend(["--visibility", visibility])
     if normalized_platform == "bilibili":
         declaration = _resolve_bilibili_declaration(request_payload)
         if declaration:
@@ -435,10 +445,12 @@ def build_social_auto_upload_upload_command(
         if declaration:
             command.extend(["--declaration", declaration])
     collection_name = _resolve_social_auto_upload_collection_name(request_payload)
-    if collection_name and normalized_platform in {"douyin", "kuaishou", "xiaohongshu", "wechat-channels", "bilibili"}:
+    if collection_name and normalized_platform == "youtube":
+        command.extend(["--playlist", collection_name])
+    elif collection_name and normalized_platform in {"douyin", "kuaishou", "xiaohongshu", "wechat-channels", "bilibili"}:
         command.extend(["--collection", collection_name])
     scheduled_publish_at = _normalize_schedule_value(request_payload.get("scheduled_publish_at"))
-    if scheduled_publish_at:
+    if scheduled_publish_at and normalized_platform != "youtube":
         command.extend(["--schedule", scheduled_publish_at])
     return command
 
@@ -566,6 +578,61 @@ def _resolve_bilibili_social_auto_upload_thumbnails(
         )
 
     return cover_4_3, cover_16_9
+
+
+def _resolve_youtube_social_auto_upload_thumbnail(request_payload: dict[str, Any]) -> str:
+    for source in (
+        request_payload.get("cover_matrix"),
+        (request_payload.get("copy_material") or {}).get("cover_matrix")
+        if isinstance(request_payload.get("copy_material"), dict)
+        else None,
+    ):
+        if not isinstance(source, dict):
+            continue
+        for key in ("landscape_16_9", "horizontal_16_9", "youtube", "landscape_4_3", "horizontal_4_3"):
+            payload = source.get(key)
+            if isinstance(payload, dict):
+                path = str(payload.get("cover_path") or "").strip()
+                if path:
+                    return path
+
+    cover_slots: list[dict[str, Any]] = []
+    for source in (
+        request_payload.get("cover_slots"),
+        (request_payload.get("copy_material") or {}).get("cover_slots")
+        if isinstance(request_payload.get("copy_material"), dict)
+        else None,
+    ):
+        if isinstance(source, list):
+            cover_slots.extend(item for item in source if isinstance(item, dict))
+
+    preferred_slots = {"landscape_16_9", "horizontal_16_9", "youtube", "landscape_4_3", "horizontal_4_3"}
+    for slot in cover_slots:
+        slot_name = str(slot.get("slot") or slot.get("matrix_key") or "").strip().lower()
+        members = {str(item).strip().lower() for item in slot.get("members") or [] if str(item).strip()}
+        path = str(slot.get("cover_path") or "").strip()
+        if path and (slot_name in preferred_slots or "youtube" in members):
+            return path
+    return str(request_payload.get("cover_path") or "").strip()
+
+
+def _resolve_youtube_social_auto_upload_visibility(request_payload: dict[str, Any]) -> str:
+    candidates = [
+        request_payload.get("visibility_or_publish_mode"),
+        request_payload.get("visibility"),
+        (request_payload.get("platform_specific_overrides") or {}).get("visibility")
+        if isinstance(request_payload.get("platform_specific_overrides"), dict)
+        else None,
+    ]
+    for candidate in candidates:
+        normalized = str(candidate or "").strip().lower().replace("-", "_")
+        if normalized in {"public", "publish", "published", "公开"}:
+            return "public"
+        if normalized in {"unlisted", "link_only", "不公开列出"}:
+            return "unlisted"
+        if normalized in {"private", "draft", "草稿", "私密"}:
+            return "private"
+    return "public"
 
 
 

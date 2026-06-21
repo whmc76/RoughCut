@@ -3,7 +3,7 @@ import path from "node:path";
 
 const API_BASE = process.env.ROUGHCUT_API_BASE || "http://127.0.0.1:38471/api/v1";
 const CDP_BASE = (process.env.PUBLICATION_BROWSER_CDP_URL || "http://127.0.0.1:9222").replace(/\/$/, "");
-const CREATOR_PROFILE_ID = process.env.PUBLICATION_AUDIT_CREATOR_PROFILE_ID || "d2d15bc6d77a47b79cf20a79b56596c2";
+const CREATOR_PROFILE_ID = process.env.PUBLICATION_AUDIT_CREATOR_PROFILE_ID || "demo-credential-ref";
 const OUTPUT_PATH = process.env.PUBLICATION_AUDIT_OUTPUT || path.resolve("artifacts", "publication-live-page-audit.json");
 
 const PLATFORM_DOMAINS = {

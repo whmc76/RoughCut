@@ -264,7 +264,7 @@ def test_build_fresh_draft_prepare_live_check_uses_healthz_authority_only() -> N
                 "browser_transport": {"transport": "chrome_extension_bridge"},
                 "attached_profile_binding": {
                     "browser": "chrome",
-                    "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+                    "profile_id": "browser-profile:chrome:demo-profile-a",
                 },
             }
         }
@@ -283,7 +283,7 @@ def test_build_fresh_draft_prepare_live_check_accepts_degraded_bridge_state() ->
                 "browser_transport": {"transport": "chrome_extension_bridge", "bridge_client_id": "bridge-test-client"},
                 "attached_profile_binding": {
                     "browser": "chrome",
-                    "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+                    "profile_id": "browser-profile:chrome:demo-profile-a",
                 },
             }
         }
@@ -3025,7 +3025,7 @@ def test_serialize_verification_platform_summary_preserves_receipt_and_duplicate
             "receipt_target_unbound": False,
             "verified_stop_before_final_publish": False,
             "visual_evidence": {
-                "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-receipt.png",
+                "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-receipt.png",
                 "capture_type": "screenshot",
                 "phase": "receipt_rebind",
             },
@@ -3055,7 +3055,7 @@ def test_build_publication_failure_context_preserves_visual_evidence() -> None:
             "request_plan_fill_gaps": [],
             "strict_contract_reasons": ["content_plan_fill_gaps"],
             "visual_evidence": {
-                "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-prepublish.png",
+                "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-prepublish.png",
                 "capture_type": "screenshot",
                 "phase": "pre_publish_page_snapshot",
             },
@@ -3773,7 +3773,7 @@ async def test_real_release_gate_blocks_on_duplicate_history_gate(monkeypatch: p
         execution_mode="browser_agent",
         media_path="E:/media/maxace4.mp4",
         platforms=["douyin"],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
         timeout=12,
         poll_interval=2,
         max_wait_seconds=180,
@@ -3836,7 +3836,7 @@ async def test_real_release_gate_dedupe_only_returns_non_publishable_plan(
         execution_mode="browser_agent",
         media_path="E:/media/maxace4.mp4",
         platforms=["douyin"],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
         timeout=12,
         poll_interval=2,
         max_wait_seconds=180,
@@ -3887,7 +3887,7 @@ async def test_real_release_gate_reports_platform_outside_packaging_scope() -> N
         execution_mode="browser_agent",
         media_path="E:/media/maxace4.mp4",
         platforms=["douyin", "toutiao"],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
         timeout=12,
         poll_interval=2,
         max_wait_seconds=180,
@@ -3932,7 +3932,7 @@ async def test_real_release_gate_reports_requested_platform_missing_packaging_en
         execution_mode="browser_agent",
         media_path="E:/media/maxace4.mp4",
         platforms=["douyin", "toutiao"],
-        target_profile_ids=["browser-profile:chrome:21104fd69d72ad7267c2"],
+        target_profile_ids=["browser-profile:chrome:demo-profile-a"],
         timeout=12,
         poll_interval=2,
         max_wait_seconds=180,
@@ -4056,34 +4056,34 @@ async def test_real_release_gate_uses_longer_readiness_timeout_than_publish_time
 def test_build_creator_profile_does_not_treat_creator_profile_id_as_browser_profile_id() -> None:
     profile = release_gate._build_creator_profile(
         ["youtube"],
-        ["d2d15bc6d77a47b79cf20a79b56596c2"],
+        ["demo-credential-ref"],
         publication_adapter="browser_agent",
         execution_mode="browser_agent",
     )
 
-    assert profile["id"] == "d2d15bc6d77a47b79cf20a79b56596c2"
+    assert profile["id"] == "demo-credential-ref"
     credential = profile["creator_profile"]["publishing"]["platform_credentials"][0]
-    assert credential["credential_ref"] == "d2d15bc6d77a47b79cf20a79b56596c2"
+    assert credential["credential_ref"] == "demo-credential-ref"
     assert credential["browser_profile_id"] == ""
 
 
 def test_build_creator_profile_preserves_explicit_browser_profile_binding_without_release_gate_fallback() -> None:
     profile = release_gate._build_creator_profile(
         ["douyin"],
-        ["browser-profile:chrome:21104fd69d72ad7267c2"],
+        ["browser-profile:chrome:demo-profile-a"],
         publication_adapter="browser_agent",
         execution_mode="browser_agent",
         attached_profile_binding={
             "browser": "chrome",
-            "user_data_dir": "C:/Users/28687/AppData/Local/Google/Chrome/User Data",
+            "user_data_dir": "C:/Users/demo/AppData/Local/Google/Chrome/User Data",
             "profile_directory": "Profile 2",
-            "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+            "profile_id": "browser-profile:chrome:demo-profile-a",
         },
     )
 
-    assert profile["id"] == "release-gate::browser-profile:chrome:21104fd69d72ad7267c2"
+    assert profile["id"] == "release-gate::browser-profile:chrome:demo-profile-a"
     credential = profile["creator_profile"]["publishing"]["platform_credentials"][0]
-    assert credential["credential_ref"] == "browser-profile:chrome:21104fd69d72ad7267c2"
-    assert credential["browser_profile_id"] == "browser-profile:chrome:21104fd69d72ad7267c2"
-    assert credential["browser_binding"]["profile_id"] == "browser-profile:chrome:21104fd69d72ad7267c2"
-    assert credential["browser_binding"]["user_data_dir"] == "C:/Users/28687/AppData/Local/Google/Chrome/User Data"
+    assert credential["credential_ref"] == "browser-profile:chrome:demo-profile-a"
+    assert credential["browser_profile_id"] == "browser-profile:chrome:demo-profile-a"
+    assert credential["browser_binding"]["profile_id"] == "browser-profile:chrome:demo-profile-a"
+    assert credential["browser_binding"]["user_data_dir"] == "C:/Users/demo/AppData/Local/Google/Chrome/User Data"

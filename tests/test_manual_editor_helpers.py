@@ -13017,7 +13017,7 @@ def test_manual_editor_asset_dir_can_live_under_output_project(tmp_path) -> None
 
 def test_output_dir_falls_back_from_windows_path_inside_container() -> None:
     output_dir = output_module._resolve_configured_output_dir(
-        "Y:\\EDC系列\\AI粗剪",
+        "C:\\sample-output",
         "/app/data/output",
         platform_name="posix",
     )
@@ -13074,7 +13074,32 @@ def test_manual_editor_proxy_video_uses_browser_compatible_h264(monkeypatch, tmp
     assert cmd[cmd.index("-c:v") + 1] == "libx264"
     assert cmd[cmd.index("-profile:v") + 1] == "baseline"
     assert cmd[cmd.index("-level:v") + 1] == "3.1"
+    assert "-noautorotate" in cmd
     assert "format=yuv420p" in cmd[cmd.index("-vf") + 1]
+    assert "sidedata=mode=delete:type=DISPLAYMATRIX" in cmd[cmd.index("-vf") + 1]
+
+
+def test_manual_editor_proxy_video_applies_visual_orientation_decision(monkeypatch, tmp_path) -> None:
+    captured: dict[str, list[str]] = {}
+
+    def fake_run(cmd, **_kwargs):
+        if "-c:v" in cmd:
+            captured["cmd"] = cmd
+            Path(cmd[-1]).write_bytes(b"proxy")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(manual_editor_assets_module.subprocess, "run", fake_run)
+
+    _generate_proxy_video(
+        tmp_path / "source.mp4",
+        tmp_path / "proxy.mp4",
+        orientation_decision={"rotation_cw": 90, "source": "vision", "confidence": 0.91},
+    )
+
+    vf = captured["cmd"][captured["cmd"].index("-vf") + 1]
+    assert "-noautorotate" in captured["cmd"]
+    assert vf.startswith("transpose=1,sidedata=mode=delete:type=DISPLAYMATRIX,")
+    assert "format=yuv420p" in vf
 
 
 def test_manual_editor_proxy_webm_uses_open_browser_codec_fallback(monkeypatch, tmp_path) -> None:
@@ -13093,7 +13118,56 @@ def test_manual_editor_proxy_webm_uses_open_browser_codec_fallback(monkeypatch, 
     cmd = captured["cmd"]
     assert cmd[cmd.index("-c:v") + 1] == "libvpx"
     assert cmd[cmd.index("-c:a") + 1] == "libopus"
+    assert "-noautorotate" in cmd
     assert "format=yuv420p" in cmd[cmd.index("-vf") + 1]
+    assert "sidedata=mode=delete:type=DISPLAYMATRIX" in cmd[cmd.index("-vf") + 1]
+
+
+def test_manual_editor_preview_thumbnails_ignore_bad_rotation_metadata(monkeypatch, tmp_path) -> None:
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        captured.append(cmd)
+        Path(cmd[-1]).write_bytes(b"thumb")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(manual_editor_assets_module.subprocess, "run", fake_run)
+
+    thumbnails = manual_editor_assets_module._generate_preview_thumbnails(
+        tmp_path / "source.mp4",
+        asset_dir=tmp_path,
+        duration_sec=2.0,
+    )
+
+    assert thumbnails
+    cmd = captured[0]
+    assert "-noautorotate" in cmd
+    assert "sidedata=mode=delete:type=DISPLAYMATRIX" in cmd[cmd.index("-vf") + 1]
+
+
+def test_manual_editor_preview_thumbnails_apply_visual_orientation_decision(monkeypatch, tmp_path) -> None:
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        captured.append(cmd)
+        Path(cmd[-1]).write_bytes(b"thumb")
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(manual_editor_assets_module.subprocess, "run", fake_run)
+
+    thumbnails = manual_editor_assets_module._generate_preview_thumbnails(
+        tmp_path / "source.mp4",
+        asset_dir=tmp_path,
+        duration_sec=2.0,
+        orientation_decision={"rotation_cw": 270, "source": "vision", "confidence": 0.88},
+    )
+
+    assert thumbnails
+    cmd = captured[0]
+    vf = cmd[cmd.index("-vf") + 1]
+    assert "-noautorotate" in cmd
+    assert vf.startswith("transpose=2,sidedata=mode=delete:type=DISPLAYMATRIX,")
+    assert vf.endswith("scale=320:-2")
 
 
 def test_file_response_cache_validates_and_invalidates_local_files(tmp_path) -> None:

@@ -77,7 +77,7 @@ INTENT_TITLE_TEMPLATES: dict[str, tuple[str, ...]] = {
         "{topic_subject}背后藏着什么需求",
         "看懂孩子的“我也要”",
         "{topic_subject}不是坏习惯",
-        "珍妮斯育儿：{focus_0}",
+        "亲子解说：{focus_0}",
     ),
     "generic": (
         "{topic_subject}这期重点看什么",

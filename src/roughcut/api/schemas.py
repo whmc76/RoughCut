@@ -1240,6 +1240,9 @@ class WatchRootCreate(BaseModel):
     scan_mode: Literal["fast", "precise"] = "fast"
     ingest_mode: Literal["task_only", "full_auto"] = "full_auto"
     job_flow_mode: str = JOB_FLOW_MODE_AUTO
+    edit_mode: str = "auto"
+    automation_level: str = "standard"
+    material_usage: str = "all_uploaded"
 
     @field_validator("config_profile_id", mode="before")
     @classmethod
@@ -1266,6 +1269,21 @@ class WatchRootCreate(BaseModel):
     def validate_job_flow_mode(cls, value: Any) -> str:
         return normalize_job_flow_mode(value)
 
+    @field_validator("edit_mode", mode="before")
+    @classmethod
+    def validate_edit_mode(cls, value: Any) -> str:
+        return normalize_edit_mode(value)
+
+    @field_validator("automation_level", mode="before")
+    @classmethod
+    def validate_automation_level(cls, value: Any) -> str:
+        return normalize_automation_level(value)
+
+    @field_validator("material_usage", mode="before")
+    @classmethod
+    def validate_material_usage(cls, value: Any) -> str:
+        return normalize_material_usage(value)
+
 
 class WatchRootOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -1280,6 +1298,9 @@ class WatchRootOut(BaseModel):
     scan_mode: Literal["fast", "precise"]
     ingest_mode: Literal["task_only", "full_auto"]
     job_flow_mode: str = JOB_FLOW_MODE_AUTO
+    edit_mode: str = "auto"
+    automation_level: str = "standard"
+    material_usage: str = "all_uploaded"
     created_at: datetime
 
 

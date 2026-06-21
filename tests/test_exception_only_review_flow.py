@@ -187,26 +187,26 @@ def test_llm_food_domain_wins_over_edc_keyword_conflict() -> None:
         {
             "workflow_template": "unboxing_standard",
             "subject_domain": "food",
-            "subject_brand": "LuckyKiss",
+            "subject_brand": "SampleMint",
             "subject_model": "edc弹射舱益生菌含片",
             "subject_type": "弹射益生菌含片",
-            "video_theme": "LuckyKiss弹射益生菌含片功能演示",
-            "summary": "这条视频围绕 LuckyKiss edc弹射舱益生菌含片展开，EDC 只是包装和携带场景。",
-            "cover_title": {"top": "LUCKYKISS", "main": "edc弹射舱益生菌含片", "bottom": "收纳装载直接看"},
+            "video_theme": "SampleMint弹射益生菌含片功能演示",
+            "summary": "这条视频围绕 SampleMint edc弹射舱益生菌含片展开，EDC 只是包装和携带场景。",
+            "cover_title": {"top": "SAMPLEMINT", "main": "edc弹射舱益生菌含片", "bottom": "收纳装载直接看"},
             "engagement_question": "你会把这种含片放进日常随身小物里吗？",
-            "search_queries": ["LuckyKiss 益生菌含片", "edc弹射舱益生菌含片"],
+            "search_queries": ["SampleMint 益生菌含片", "edc弹射舱益生菌含片"],
             "content_understanding": {
                 "content_domain": "food",
                 "needs_review": False,
             },
         },
         subtitle_items=[
-            {"text_final": "这是 LUCKYKISS 的一个口香糖。"},
+            {"text_final": "这是 SAMPLEMINT 的一个口香糖。"},
             {"text_final": "也是一个益生菌含片。"},
             {"text_final": "它做成了 EDC 弹射舱的样子。"},
         ]
         * 3,
-        source_name="IMG_0024 luckykiss edc弹射舱 益生菌含片.MOV",
+        source_name="IMG_0024 samplemint edc弹射舱 益生菌含片.MOV",
         auto_confirm_enabled=True,
         threshold=0.92,
     )
@@ -564,3 +564,26 @@ async def test_summary_review_quality_issue_records_advisory_without_auto_rerun(
 
 def test_final_review_auto_advance_hook_is_removed_from_editing_orchestrator() -> None:
     assert not hasattr(orchestrator, "_auto_advance_final_review_after_render")
+
+
+@pytest.mark.asyncio
+async def test_legacy_final_review_step_is_skipped_before_readiness_check() -> None:
+    job = Job(id=uuid.uuid4(), source_name="source.mp4", status="processing", enhancement_modes=[])
+    step = JobStep(job_id=job.id, step_name="final_review", status="pending")
+    session = _FakeStepSession(job, [step])
+
+    skipped = await orchestrator._maybe_auto_skip_step(step, session)
+
+    assert skipped is True
+    assert step.status == "skipped"
+    assert step.metadata_["skip_reason"] == "legacy_non_executable_step"
+    assert "独立审核/智能发布入口" in step.metadata_["detail"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_pending_step_does_not_crash_readiness_check() -> None:
+    job = Job(id=uuid.uuid4(), source_name="source.mp4", status="processing", enhancement_modes=[])
+    step = JobStep(job_id=job.id, step_name="legacy_extra_step", status="pending")
+    session = _FakeStepSession(job, [step])
+
+    assert await orchestrator._is_step_ready(step, session) is False

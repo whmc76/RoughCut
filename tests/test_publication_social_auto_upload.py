@@ -26,20 +26,34 @@ def test_resolve_publication_target_adapter_defaults_x_to_link_share():
     assert publication._resolve_publication_target_adapter("x", "") == "x_link_share"
 
 
-def test_resolve_publication_target_adapter_keeps_youtube_on_browser_agent_even_when_sau_enabled(monkeypatch):
+def test_resolve_publication_target_adapter_defaults_youtube_to_browser_agent_for_existing_browser_cookie(monkeypatch):
     monkeypatch.setattr(
         publication,
         "get_settings",
-        lambda: SimpleNamespace(publication_social_auto_upload_platforms="douyin,youtube,xiaohongshu"),
+        lambda: SimpleNamespace(publication_social_auto_upload_platforms="douyin,xiaohongshu"),
     )
 
     assert publication._resolve_publication_target_adapter("youtube", "") == "browser_agent"
 
 
+def test_resolve_publication_target_adapter_uses_social_auto_upload_for_explicit_youtube_binding(monkeypatch):
+    monkeypatch.setattr(
+        publication,
+        "get_settings",
+        lambda: SimpleNamespace(publication_social_auto_upload_platforms="douyin,xiaohongshu"),
+    )
+
+    assert publication._resolve_publication_target_adapter("youtube", "social_auto_upload") == "social_auto_upload"
+
+
+def test_resolve_publication_target_adapter_keeps_explicit_x_link_share():
+    assert publication._resolve_publication_target_adapter("x", "x_link_share") == "x_link_share"
+
+
 def test_build_social_auto_upload_account_name_prefers_isolated_credential_ref():
     attempt = SimpleNamespace(
         credential_id="social-auto-upload:creator-abc123-bilibili-chrome:bilibili",
-        account_label="珍妮斯baby · Chrome",
+        account_label="Demo Creator · Chrome",
         creator_profile_id="profile-1",
         platform="bilibili",
     )
@@ -50,17 +64,17 @@ def test_build_social_auto_upload_account_name_prefers_isolated_credential_ref()
 def test_build_social_auto_upload_account_name_prefers_payload_credential_ref_over_uuid():
     attempt = SimpleNamespace(
         credential_id="7619655d-3ac1-4e8f-915e-541a88978fba",
-        account_label="珍妮斯baby · Chrome",
+        account_label="Demo Creator · Chrome",
         creator_profile_id="profile-1",
         platform="bilibili",
         request_payload={
             "metadata": {
-                "credential_ref": "social-auto-upload:creator-7be7da2e7d54-bilibili-chrome:bilibili",
+                "credential_ref": "social-auto-upload:creator-demo-bilibili-chrome:bilibili",
             }
         },
     )
 
-    assert build_social_auto_upload_account_name(attempt) == "creator-7be7da2e7d54-bilibili-chrome"
+    assert build_social_auto_upload_account_name(attempt) == "creator-demo-bilibili-chrome"
 
 
 def test_build_social_auto_upload_upload_command_for_douyin():
@@ -108,6 +122,51 @@ def test_build_social_auto_upload_upload_command_for_douyin():
     ]
 
 
+def test_build_social_auto_upload_upload_command_for_youtube_uses_cookie_cli_contract():
+    command = build_social_auto_upload_upload_command(
+        python_executable="python",
+        platform="youtube",
+        account_name="creator-youtube",
+        request_payload={
+            "title": "NITECORE EDC17 三光源超薄",
+            "body": "双版对比评测",
+            "hashtags": ["NITECORE", "EDC17"],
+            "visibility_or_publish_mode": "public",
+            "scheduled_publish_at": "2026-06-21T20:00:00+08:00",
+            "collection": {"name": "EDC刀光火工具集"},
+            "copy_material": {
+                "cover_matrix": {
+                    "landscape_16_9": {"cover_path": "E:/cover-youtube.jpg"},
+                }
+            },
+            "media_items": [{"local_path": "E:/video.mp4"}],
+        },
+    )
+
+    assert command == [
+        "python",
+        "sau_cli.py",
+        "youtube",
+        "upload-video",
+        "--account",
+        "creator-youtube",
+        "--file",
+        "E:/video.mp4",
+        "--title",
+        "NITECORE EDC17 三光源超薄",
+        "--desc",
+        "双版对比评测",
+        "--tags",
+        "NITECORE,EDC17",
+        "--thumbnail",
+        "E:/cover-youtube.jpg",
+        "--visibility",
+        "public",
+        "--playlist",
+        "EDC刀光火工具集",
+    ]
+
+
 def test_build_social_auto_upload_upload_command_converts_utc_schedule_to_platform_local_time():
     command = build_social_auto_upload_upload_command(
         python_executable="python",
@@ -141,7 +200,7 @@ def test_build_social_auto_upload_upload_command_derives_missing_title_from_body
     assert command[command.index("--title") + 1] == "这期围绕S02E02展开，重点看画面里能确认的细节和实际观感。"
 
 
-def test_build_social_auto_upload_upload_command_for_bilibili_uses_parenting_default_category_when_missing():
+def test_build_social_auto_upload_upload_command_for_bilibili_uses_edc_safe_default_category_when_missing():
     command = build_social_auto_upload_upload_command(
         python_executable="python",
         platform="bilibili",
@@ -154,8 +213,8 @@ def test_build_social_auto_upload_upload_command_for_bilibili_uses_parenting_def
         },
     )
 
-    assert "--tid" not in command
-    assert command[command.index("--category") + 1] == "生活/亲子"
+    assert command[command.index("--tid") + 1] == "161"
+    assert command[command.index("--category") + 1] == "生活兴趣/户外潮流"
 
 
 def test_build_social_auto_upload_upload_command_for_douyin_uses_projected_landscape_slot_even_when_source_members_exclude_platform():
@@ -416,7 +475,7 @@ def test_build_social_auto_upload_upload_command_for_bilibili_preserves_ui_categ
     assert "--category" in command
     assert "生活兴趣/户外潮流" in command
     assert "--tid" in command
-    assert "250" in command
+    assert "161" in command
 
 
 def test_maybe_resolve_bilibili_tid_uses_legacy_fallback_when_ui_category_has_no_direct_alias():
@@ -433,7 +492,7 @@ def test_maybe_resolve_bilibili_tid_uses_legacy_fallback_when_ui_category_has_no
                 },
             }
         )
-        == "250"
+        == "161"
     )
 
 
@@ -454,7 +513,7 @@ async def test_submit_publication_attempt_to_social_auto_upload_marks_attempt_pu
         publication,
         "get_settings",
         lambda: SimpleNamespace(
-            publication_social_auto_upload_root="E:/WorkSpace/_eval/social-auto-upload",
+            publication_social_auto_upload_root="C:/sample-workspace/_eval/social-auto-upload",
             publication_social_auto_upload_python="python",
             publication_social_auto_upload_timeout_sec=30,
             publication_social_auto_upload_auto_login=False,
@@ -522,7 +581,7 @@ async def test_bilibili_social_auto_upload_verifies_backend_archive_before_sched
         publication,
         "get_settings",
         lambda: SimpleNamespace(
-            publication_social_auto_upload_root="E:/WorkSpace/_eval/social-auto-upload",
+            publication_social_auto_upload_root="C:/sample-workspace/_eval/social-auto-upload",
             publication_social_auto_upload_python="python",
             publication_social_auto_upload_timeout_sec=30,
             publication_social_auto_upload_auto_login=False,
@@ -600,7 +659,7 @@ async def test_bilibili_social_auto_upload_verifies_backend_archive_before_sched
     assert attempt.provider_task_id == "bilibili:116777056995111"
     verify_command = commands[-1]
     assert verify_command[2:4] == ["bilibili", "verify-video"]
-    assert verify_command[verify_command.index("--expected-category") + 1] == "生活/亲子"
+    assert verify_command[verify_command.index("--expected-category") + 1] == "生活兴趣/户外潮流"
     assert verify_command[verify_command.index("--expected-schedule") + 1] == "2026-06-20 18:00"
     assert attempt.response_payload["verification"]["payload"]["archive"]["human_type2"]["id"] == 1025
 
@@ -611,7 +670,7 @@ async def test_bilibili_social_auto_upload_backend_mismatch_needs_human(monkeypa
         publication,
         "get_settings",
         lambda: SimpleNamespace(
-            publication_social_auto_upload_root="E:/WorkSpace/_eval/social-auto-upload",
+            publication_social_auto_upload_root="C:/sample-workspace/_eval/social-auto-upload",
             publication_social_auto_upload_python="python",
             publication_social_auto_upload_timeout_sec=30,
             publication_social_auto_upload_auto_login=False,
@@ -704,7 +763,7 @@ async def test_social_auto_upload_submit_commits_processing_state_before_cli(mon
         publication,
         "get_settings",
         lambda: SimpleNamespace(
-            publication_social_auto_upload_root="E:/WorkSpace/_eval/social-auto-upload",
+            publication_social_auto_upload_root="C:/sample-workspace/_eval/social-auto-upload",
             publication_social_auto_upload_python="python",
             publication_social_auto_upload_timeout_sec=30,
             publication_social_auto_upload_auto_login=False,

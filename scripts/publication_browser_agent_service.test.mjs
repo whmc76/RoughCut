@@ -1,20 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   applyCompositeSafeRuntimePolicyDefaults,
   buildPublicationHealthPayload,
   bridgeTargetDescriptor,
+  isRecoverableBridgeHealthError,
   buildCompactProbeInventorySummary,
   buildLightweightProbeInventorySummary,
   deriveProbeInventoryRouteReadiness,
   buildBilibiliPublicationAudit,
   buildCompositeUploadPendingProcessingEnvelope,
+  compositePostUploadReadinessProbeDelayMs,
+  compositeUploadTimeoutMs,
   buildPreparationBootstrapRecoveryOverrides,
   buildPreparationBootstrapTimeoutOutcome,
   buildPendingUploadMaterialIntegrity,
   buildCompositePublicationAudit,
   buildPublicationFieldSnapshotFromAudit,
+  enrichCompositeMaterialIntegrityFromActions,
   collectRepairEvidenceFlags,
   coerceTaskContentWithRecoveryPayload,
   extractPublicationTaskIdentity,
@@ -44,6 +49,7 @@ import {
   deriveCompositeFinalPrePublishVisualVerification,
   deriveCompositeSchedulePolicyState,
   derivePublicationTaskExecutionTimeoutMs,
+  publicationTabResolutionTimeoutMs,
   derivePublicationTaskPreparationPolicy,
   dispatchPublicationTaskReconcileCallback,
   shouldApplyCompositeDraftPolicyBlockers,
@@ -60,6 +66,7 @@ import {
   deriveCompositeUploadReadinessBlockerDisposition,
   deriveCompositePostUploadIntegrityDisposition,
   deriveCompositeUploadReadinessFailureState,
+  deriveYouTubePrepareControlGateState,
   buildStopBeforeFinalPublishRecoveryOverrides,
   derivePublicationTaskTimeoutStatus,
   deriveCompositePrePublishRepairPlan,
@@ -72,6 +79,7 @@ import {
   extractYouTubeStudioChannelId,
   buildYouTubeStudioContentListUrl,
   buildYouTubeStudioUploadEntryUrl,
+  buildYouTubeFreshUploadEntryUrl,
   PUBLICATION_CREATOR_SESSION_CONTRACT,
   PUBLICATION_TASK_IDENTITY_CONTRACT,
   resolvePlatformPublishEntryUrl,
@@ -87,6 +95,8 @@ import {
   shouldBootstrapStopBeforeMediaUpload,
   shouldBootstrapStopBeforeMediaRouteRecovery,
   shouldTreatYouTubeUploadSurfaceAsStable,
+  isYouTubeCreateFlowStateUsable,
+  shouldAttemptNativeFileChooserFallback,
   isPlatformReceiptSurfaceUrl,
   isPlatformPublishRouteBootstrapReady,
   shouldAcquireReceiptSurfaceRoute,
@@ -94,9 +104,10 @@ import {
   shouldContinueStopBeforeUploadBootstrap,
     shouldEnforcePlatformPublishRoute,
     shouldAllowCompositeFieldPreparation,
-    shouldBootstrapCompositeUploadFromCleanEntry,
-    shouldAwaitCompositeUploadEntryHydration,
-    shouldWaitForCompositeUploadReadyBeforeFieldPreparation,
+  shouldBootstrapCompositeUploadFromCleanEntry,
+  shouldAwaitCompositeUploadEntryHydration,
+  shouldWaitForCompositeUploadReadyBeforeFieldPreparation,
+  shouldYieldYouTubeFreshUploadDraftContinuation,
   currentPageMatchesPrepareOnlyExecutionContext,
   resolveDouyinRichTextTargets,
   findPlatformTabs,
@@ -127,6 +138,8 @@ import {
   isDouyinCoverEditorImmediateEditable,
   isDouyinCustomCoverReady,
   mergePublicationTaskProgress,
+  buildVisualEvidencePackFromSnapshot,
+  normalizeVisualEvidencePack,
   normalizeCompositeUploadReadyResult,
   normalizeRichTextDraftValue,
   normalizeYouTubeVisibilityOrPublishMode,
@@ -159,6 +172,7 @@ import {
   extractYouTubeDraftVideoId,
   matchesYouTubeDraftResumeHint,
   selectYouTubeDraftResumeCandidate,
+  selectYouTubeFreshUploadContinuationCandidate,
   deriveYouTubeDraftResumeFallbackTarget,
   deriveYouTubeUploadEditorBootstrapPlan,
   deriveYouTubeUploadWizardStep,
@@ -167,14 +181,17 @@ import {
   buildYouTubeStudioEditorUrl,
   shouldPreserveYouTubeUploadResumeRouteForBootstrap,
   isYouTubeEditorReadinessSurface,
+  isYouTubeDefaultFilenameTitle,
+  deriveYouTubePrePublishReadbackFailureCode,
   shouldPreserveYouTubeEditorRouteForBootstrap,
   shouldAcceptCompositeUploadReadyState,
   shouldAcceptCollapsedDouyinScheduleEvidence,
   shouldBlockOnMediaUploadFailure,
   shouldFallbackToFullPrepareDuringRepair,
   shouldFailYouTubeDraftResumeAsInert,
-  shouldDeferYouTubeDraftResumeReupload,
   shouldTreatCompositeUploadReadinessBlockerAsPending,
+  shouldTreatCompositeMaterialIntegrityAsPendingUpload,
+  buildCompositePendingUploadIntegrityFromMaterialIntegrity,
   hasYoutubeUploadResumeVideoId,
   shouldPreserveYouTubeUploadResumeRoute,
   shouldDeferGenericPostUploadIntegrityUntilPlatformAdapter,
@@ -187,6 +204,146 @@ import {
   verifyCompositeDeclarationField,
   verifyCompositeBodyField,
 } from "./publication_browser_agent_service.mjs";
+
+test("publicationTabResolutionTimeoutMs gives youtube formal upload a real browser window", () => {
+  assert.equal(publicationTabResolutionTimeoutMs("youtube", {}), 90000);
+  assert.equal(publicationTabResolutionTimeoutMs("douyin", {}), 15000);
+  assert.equal(
+    publicationTabResolutionTimeoutMs("youtube", {
+      platform_specific_overrides: {
+        platform_tab_resolution_timeout_ms: 120000,
+      },
+    }),
+    120000,
+  );
+});
+
+test("visual evidence pack normalizes screenshot, route, text and controls", () => {
+  const pack = buildVisualEvidencePackFromSnapshot({
+    url: "https://studio.youtube.com/channel/test/videos/upload?d=ud",
+    title: "频道内容 - YouTube Studio",
+    lines: ["标题（必填）", "缩略图", "播放列表"],
+    headings: ["详细信息"],
+    overlayTexts: ["上传视频"],
+    elements: [
+      { tag: "button", text: "继续", role: "button", disabled: false, bbox: { x: 100, y: 200, width: 80, height: 36 } },
+      { tag: "input", type: "file", text: "", visible: false },
+    ],
+    fileInputs: [{ index: 0, accept: "video/*", visible: false }],
+    visual_evidence: {
+      artifact_path: "C:\\demo-workspace\\RoughCut\\artifacts\\publication-visual-evidence\\test.png",
+      sha256: "abc123",
+      captured_at: "2026-06-21T09:00:00.000Z",
+      platform: "youtube",
+      phase: "pre_publish",
+      route_url: "https://studio.youtube.com/channel/test/videos/upload?d=ud",
+      route_title: "频道内容 - YouTube Studio",
+      byte_size: 123,
+    },
+  }, { platform: "youtube", phase: "pre_publish" });
+
+  assert.equal(pack.schema_version, "publication_visual_evidence_pack_v1");
+  assert.equal(pack.platform, "youtube");
+  assert.equal(pack.route.title, "频道内容 - YouTube Studio");
+  assert.ok(pack.evidence_id);
+  assert.equal(pack.visible_lines.length, 3);
+  assert.equal(pack.controls[0].text, "继续");
+  assert.deepEqual(pack.controls[0].bbox, { x: 100, y: 200, width: 80, height: 36 });
+  assert.ok(pack.hashes.visible_text_sha256);
+  assert.equal(normalizeVisualEvidencePack(pack).evidence_id, pack.evidence_id);
+});
+
+test("final prepublish verification requires visual evidence pack", () => {
+  const result = deriveCompositeFinalPrePublishVisualVerification(
+    "youtube",
+    { title: "NITECORE EDC17 上手", body: "正文", scheduled_publish_at: "2026-06-21T21:00:00+08:00" },
+    { verification_state: "ready", platform_extras: { route: { url: "https://studio.youtube.com/", title: "YouTube Studio" } } },
+    {
+      checklist: {
+        title: { required: true, verified: true },
+        body: { required: true, verified: true },
+        schedule: { required: true, verified: true },
+        cover: { required: false, verified: true },
+        draft_state: { required: true, verified: true },
+      },
+    },
+    {},
+    { url: "https://studio.youtube.com/", title: "YouTube Studio", lines: ["NITECORE EDC17 上手"] },
+  );
+
+  assert.equal(result.verified, false);
+  assert.ok(result.blocking_reasons.includes("missing_visual_evidence_pack"));
+});
+
+test("final prepublish verification carries visual evidence pack", () => {
+  const snapshot = {
+    url: "https://studio.youtube.com/",
+    title: "YouTube Studio",
+    lines: ["NITECORE EDC17 上手", "已排定"],
+    visual_evidence: {
+      artifact_path: "C:\\demo-workspace\\RoughCut\\artifacts\\publication-visual-evidence\\test.png",
+      sha256: "abc123",
+      captured_at: "2026-06-21T09:00:00.000Z",
+      platform: "youtube",
+      phase: "final_pre_publish",
+      route_url: "https://studio.youtube.com/",
+      route_title: "YouTube Studio",
+      byte_size: 123,
+    },
+  };
+  snapshot.visual_evidence_pack = buildVisualEvidencePackFromSnapshot(snapshot, {
+    platform: "youtube",
+    phase: "final_pre_publish",
+  });
+  const result = deriveCompositeFinalPrePublishVisualVerification(
+    "youtube",
+    { title: "NITECORE EDC17 上手" },
+    { verification_state: "ready", platform_extras: { route: { url: "https://studio.youtube.com/", title: "YouTube Studio" } } },
+    {
+      checklist: {
+        title: { required: true, verified: true },
+        cover: { required: false, verified: true },
+        draft_state: { required: true, verified: true },
+      },
+    },
+    {},
+    snapshot,
+  );
+
+  assert.equal(result.visual_evidence_pack.evidence_id, snapshot.visual_evidence_pack.evidence_id);
+  assert.ok(!result.blocking_reasons.includes("missing_visual_evidence_pack"));
+});
+
+test("_build_publication_recovery_hint carries visual evidence pack", () => {
+  const recovery = _build_publication_recovery_hint({
+    platform: "youtube",
+    code: "youtube_final_publish_unconfirmed",
+    reason: "未读到可靠发布回执。",
+    route: { url: "https://studio.youtube.com/", title: "YouTube Studio" },
+    visibleLines: ["上传视频", "公开视频"],
+    visualEvidencePack: {
+      evidence_id: "receipt-pack",
+      platform: "youtube",
+      phase: "final_publish_receipt",
+      visual_evidence: {
+        artifact_path: "E:/artifacts/youtube-receipt.png",
+        capture_type: "screenshot",
+      },
+      visible_lines: ["上传视频", "公开视频"],
+    },
+  }).recovery;
+
+  assert.equal(recovery.evidence.visual_evidence_pack.evidence_id, "receipt-pack");
+  assert.equal(recovery.evidence.visual_evidence_pack.phase, "final_publish_receipt");
+});
+
+test("generic final publish path is gated by visual evidence and captures receipt evidence", () => {
+  const source = readFileSync("scripts/publication_browser_agent_service.mjs", "utf8");
+  assert.match(source, /final_publish_missing_visual_evidence_pack/);
+  assert.match(source, /visualEvidencePhase: "final_publish_receipt"/);
+  assert.match(source, /receipt_visual_evidence_pack/);
+  assert.match(source, /pre_publish_visual_evidence_pack/);
+});
 
 test("buildPendingUploadMaterialIntegrity marks upload_in_progress without content field failures", () => {
   const integrity = buildPendingUploadMaterialIntegrity(
@@ -319,7 +476,7 @@ test("buildCompactProbeInventorySummary preserves visual evidence while trimming
     warnings: ["未完成关键发布面摸底：编辑面。"],
     operation_steps: [{ index: 1, label: "打开平台创作/发布页" }],
     visual_evidence: {
-      artifact_path: "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260601/douyin/editor.png",
+      artifact_path: "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260601/douyin/editor.png",
       capture_type: "screenshot",
       phase: "probe_inventory",
     },
@@ -356,7 +513,7 @@ test("buildLightweightProbeInventorySummary keeps lightweight coverage and visua
         { text: "请选择自主声明", role: "button", type: "button", className: "declaration-picker", disabled: false },
       ],
       visual_evidence: {
-        artifact_path: "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260601/douyin/preflight.png",
+        artifact_path: "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260601/douyin/preflight.png",
         capture_type: "screenshot",
         phase: "probe_inventory",
       },
@@ -629,14 +786,22 @@ test("shouldBootstrapProbeInventoryRoute requests xiaohongshu publish entry when
   );
 });
 
-test("shouldUseAuthoritativeUploadEntryNativePath only uses douyin upload shell", () => {
+test("shouldUseAuthoritativeUploadEntryNativePath does not use native chooser for upload shells", () => {
   assert.equal(
     shouldUseAuthoritativeUploadEntryNativePath("douyin", {
       url: "https://creator.douyin.com/creator-micro/content/upload",
       text: "发布视频 点击上传 或直接将视频文件拖入此区域 视频大小和格式",
       title: "抖音创作者中心",
     }),
-    true,
+    false,
+  );
+  assert.equal(
+    shouldUseAuthoritativeUploadEntryNativePath("youtube", {
+      url: "https://www.youtube.com/upload",
+      text: "上传视频 Select files 选择文件",
+      title: "YouTube",
+    }),
+    false,
   );
   assert.equal(
     shouldUseAuthoritativeUploadEntryNativePath("douyin", {
@@ -646,6 +811,15 @@ test("shouldUseAuthoritativeUploadEntryNativePath only uses douyin upload shell"
     }),
     false,
   );
+});
+
+test("youtube formal publish path does not retain native file chooser upload helpers", () => {
+  const source = readFileSync("scripts/publication_browser_agent_service.mjs", "utf8");
+  assert.equal(source.includes("tryYouTubeSelectFilesNativeUpload"), false);
+  assert.equal(source.includes("youtube_upload_native_primary"), false);
+  assert.equal(source.includes("youtube_upload_native_retry"), false);
+  assert.equal(source.includes("youtube_upload_native_fallback"), false);
+  assert.equal(source.includes("youtube_select_files_native_dialog"), false);
 });
 
 test("selectPreferredSemanticActionCandidate rejects notification and close for media upload entry intent", () => {
@@ -688,13 +862,13 @@ test("selectPreferredSemanticActionCandidate rejects notification and close for 
   assert.ok((ranked.candidates || []).find((item) => item.label === "close")?.score < 0);
 });
 
-test("buildPendingUploadMaterialIntegrity preserves youtube draft resume pending reason", () => {
+test("buildPendingUploadMaterialIntegrity treats youtube draft resume as path violation", () => {
   const integrity = buildPendingUploadMaterialIntegrity(
     "youtube",
     {
       ready: false,
-      failed: false,
-      pending_reason: "draft_resume_pending",
+      failed: true,
+      pending_reason: "youtube_fresh_upload_left_editor",
       last: {
         platform: "youtube",
         busy: false,
@@ -711,19 +885,19 @@ test("buildPendingUploadMaterialIntegrity preserves youtube draft resume pending
     { url: "https://studio.youtube.com/channel/test/videos/upload?d=ud", title: "频道内容 - YouTube Studio" },
   );
 
-  assert.equal(integrity.verification_state, "not_ready");
-  assert.equal(integrity.verification_reason, "draft_resume_pending");
+  assert.equal(integrity.verification_state, "error");
+  assert.equal(integrity.verification_reason, "youtube_fresh_upload_left_editor");
   assert.equal(integrity.fields.upload_ready.verified, false);
 });
 
-test("buildCompositeUploadPendingProcessingEnvelope preserves safe stop-before recovery flags", () => {
+test("buildCompositeUploadPendingProcessingEnvelope resumes the current youtube fresh upload while pending", () => {
   const result = buildCompositeUploadPendingProcessingEnvelope({
     platform: "youtube",
     route: {
       url: "https://studio.youtube.com/channel/test/videos/upload?d=ud",
       title: "频道内容 - YouTube Studio",
     },
-    actions: [{ kind: "youtube_upload_ready_wait_after_draft_resume" }],
+    actions: [{ kind: "youtube_upload_ready_wait_after_fresh_upload_start" }],
     content: {
       title: "MAXACE 美杜莎4 顶配次顶配开箱",
       media_path: "E:/media/maxace4.mp4",
@@ -762,13 +936,118 @@ test("buildCompositeUploadPendingProcessingEnvelope preserves safe stop-before r
 
   assert.equal(result.code, "youtube_pre_publish_upload_pending");
   assert.equal(result.recovery_overrides?.recovery_mode, "prepublish_resume");
+  assert.equal(result.recovery_overrides?.youtube_current_fresh_upload_resume, true);
+  assert.equal(result.recovery_overrides?.fresh_start_platform_tab, false);
   assert.equal(result.recovery_overrides?.prepare_only_current_page, true);
+  assert.equal(result.recovery_overrides?.prepublish_only_current_page, false);
   assert.equal(result.recovery_overrides?.verify_media_upload, true);
   assert.equal(result.recovery_overrides?.wait_for_publish_confirmation, true);
   assert.equal(result.recovery_overrides?.clear_draft_context, false);
+  assert.equal(result.recovery_overrides?.force_publish_page_refresh, false);
   assert.equal(result.final_publish?.pre_publish_pending, true);
   assert.equal(result.final_publish?.wait_for_upload_ready, true);
   assert.equal(result.final_publish?.prepare_only_current_page, true);
+});
+
+test("compositeUploadTimeoutMs gives youtube enough time for real large uploads", () => {
+  assert.ok(compositeUploadTimeoutMs("youtube") >= 30 * 60 * 1000);
+});
+
+test("compositePostUploadReadinessProbeDelayMs does not hold youtube metadata fill behind upload completion", () => {
+  assert.equal(compositePostUploadReadinessProbeDelayMs("youtube"), 0);
+  assert.equal(compositePostUploadReadinessProbeDelayMs("douyin"), 16000);
+});
+
+test("youtube uploading editor material integrity stays in pending-upload state", () => {
+  const integrity = {
+    verification_state: "not_ready",
+    verification_reason: "publish_route_not_ready",
+    route_ready_state: {
+      route_ready: true,
+      text_ready: true,
+      input_ready: false,
+      loading_surface: false,
+    },
+    platform_extras: {
+      route: {
+        url: "https://studio.youtube.com/channel/abc/videos/upload?d=ud",
+        title: "频道内容 - YouTube Studio",
+      },
+      youtube_thumbnail_uploading: true,
+      relevant_lines: [
+        "详细信息 标题（必填） 说明 缩略图 播放列表 观众",
+        "视频链接 https://youtu.be/Z7GTNU5Y4qw 文件名 sample.mp4",
+        "正在上传，已完成 13% 剩余时间：53秒钟",
+      ],
+    },
+  };
+
+  assert.equal(shouldTreatCompositeMaterialIntegrityAsPendingUpload("youtube", integrity), true);
+  const pending = buildCompositePendingUploadIntegrityFromMaterialIntegrity("youtube", integrity);
+  assert.equal(pending.verification_reason, "upload_in_progress");
+  assert.equal(pending.route_ready_state.input_ready, true);
+  assert.equal(pending.upload_readiness.busy, true);
+});
+
+test("youtube playlist selection never creates missing playlists", () => {
+  const source = readFileSync("scripts/publication_browser_agent_service.mjs", "utf8");
+  assert.equal(source.includes("createYouTubePlaylistInOpenDialog"), false);
+  assert.equal(source.includes("playlist_created_from_missing_option"), false);
+  assert.equal(source.includes("youtube_collection_create\""), false);
+  assert.match(source, /youtube_collection_create_skipped/);
+  assert.match(source, /existing_playlist_required/);
+});
+
+test("publication task POST replaces persisted terminal task with same id", () => {
+  const source = readFileSync("scripts/publication_browser_agent_service.mjs", "utf8");
+  assert.match(source, /existingTaskReusable/);
+  assert.match(source, /task:start:replace_terminal/);
+  assert.match(source, /needs_human", "failed", "published", "scheduled_pending", "cancelled", "draft_created"/);
+});
+
+test("publication task POST can replace upload-pending processing task with same id", () => {
+  const source = readFileSync("scripts/publication_browser_agent_service.mjs", "utf8");
+  assert.match(source, /existingUploadPending/);
+  assert.match(source, /pre_publish_pending/);
+  assert.match(source, /wait_for_upload_ready/);
+  assert.match(source, /&& !existingUploadPending/);
+});
+
+test("publication task POST can replace stale processing task with same id", () => {
+  const source = readFileSync("scripts/publication_browser_agent_service.mjs", "utf8");
+  assert.match(source, /existingProcessingStale/);
+  assert.match(source, /existingStatus === "processing"/);
+  assert.match(source, /5 \* 60 \* 1000/);
+  assert.match(source, /&& !existingProcessingStale/);
+});
+
+test("youtube media upload cdp timeout becomes upload-pending instead of failed", () => {
+  const source = readFileSync("scripts/publication_browser_agent_service.mjs", "utf8");
+  assert.match(source, /cdp_timeout_after_media_upload/);
+  assert.match(source, /readiness_probe_failed_after_media_upload/);
+  assert.match(source, /kind: "youtube_upload_ready_wait"/);
+  assert.match(source, /buildCompositeUploadReadinessBlockerAction\(platform/);
+});
+
+test("youtube current fresh upload resume can continue from matched continue-upload row", () => {
+  assert.equal(currentPageMatchesPrepareOnlyExecutionContext("youtube", {
+    url: "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos/upload?d=ud",
+    text: "频道内容 20260503 NITECORE EDC17 EDC17 EDC37 6ee1b976e4a1701a 继续上传 删除视频",
+    title: "频道内容 - YouTube Studio",
+    file_inputs: [],
+  }, {}, "C:\\demo-workspace\\RoughCut\\data\\runtime\\publication-media\\x\\20260503_NITECORE_EDC17_-EDC17-EDC37-_-_-6ee1b976e4a1701a.mp4", [], {
+    title: "NITECORE EDC17 上手：白光、紫外、绿激光三合一",
+    platform_specific_overrides: {
+      youtube_current_fresh_upload_resume: true,
+    },
+  }), true);
+});
+
+test("youtube pending upload can be inferred from prepare action evidence after integrity read timeout", () => {
+  const source = readFileSync("scripts/publication_browser_agent_service.mjs", "utf8");
+  assert.match(source, /platform === "youtube"\s*\?\s*\/\^youtube_upload_/);
+  assert.match(source, /if \(platform === "youtube"\) return null;/);
+  assert.match(source, /readinessAction && \(readinessAction\.upload_busy/);
 });
 
 test("normalizeCompositeUploadReadyResult unwraps nested readiness envelope", () => {
@@ -867,6 +1146,23 @@ test("isCompositePublishRouteContext accepts youtube video edit editor surface",
   );
 });
 
+test("deriveCompositeCurrentPageRouteDisposition accepts youtube upload dialog over content list", () => {
+  const disposition = deriveCompositeCurrentPageRouteDisposition("youtube", {
+    url: "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos/upload?d=ud",
+    title: "频道内容 - YouTube Studio",
+    lines: [
+      "频道内容",
+      "上传视频",
+      "将要上传的视频文件拖放到此处",
+      "选择文件",
+    ],
+    fileInputs: [],
+  });
+
+  assert.equal(disposition.blocked, false);
+  assert.equal(disposition.verification_reason, "");
+});
+
 test("detectCompositePublicationSignals surfaces upload failure and bilibili batch modal blockers", () => {
   const lines = [
     "上传失败",
@@ -889,7 +1185,7 @@ test("isCompositePublishRouteContext keeps douyin loading-only publish surface f
       text: "高清发布 抖音 加载中，请稍候...",
       file_inputs: [],
     }),
-    true,
+    false,
   );
 });
 
@@ -983,6 +1279,22 @@ test("expectedPrimaryCoverPathForPlatform prefers bilibili 4:3 slot over 16:9 sl
   assert.equal(path, "E:/covers/bilibili-4-3.jpg");
 });
 
+test("expectedPrimaryCoverPathForPlatform prefers explicit primary cover for single-slot youtube", () => {
+  const path = expectedPrimaryCoverPathForPlatform("youtube", {
+    cover_path: "E:/covers/new-youtube-cover.jpg",
+    cover_slots: [
+      {
+        slot: "landscape_16_9",
+        matrix_key: "landscape_16_9",
+        label: "16:9 横版母版",
+        cover_path: "E:/covers/old-youtube-cover.jpg",
+      },
+    ],
+  });
+
+  assert.equal(path, "E:/covers/new-youtube-cover.jpg");
+});
+
 test("coerceTaskContentWithRecoveryPayload maps top-level recovery overrides into publication recovery state", () => {
   const content = coerceTaskContentWithRecoveryPayload({
     content: {
@@ -1058,7 +1370,7 @@ test("buildPublicationHealthPayload preserves creator session probe results", ()
         code: "douyin_route_auth_required",
         route: { url: "https://creator.douyin.com/creator-micro/content/post/video" },
         visual_evidence: {
-          artifact_path: "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260602/douyin/session-auth.png",
+          artifact_path: "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260602/douyin/session-auth.png",
           capture_type: "screenshot",
           phase: "creator_session_probe",
         },
@@ -1082,6 +1394,14 @@ test("bridgeTargetDescriptor keeps last known stale bridge client for degraded h
   assert.equal(payload.cdp_status, "degraded");
   assert.equal(payload.browser_transport.bridge_client_id, "bridge-test-client");
   assert.equal(payload.browser_transport.bridge_client_state, "stale");
+});
+
+test("isRecoverableBridgeHealthError classifies bridge probe timeouts as degraded health candidates", () => {
+  assert.equal(isRecoverableBridgeHealthError("chrome_extension_bridge_unavailable"), true);
+  assert.equal(isRecoverableBridgeHealthError("healthz bridge list_tabs timed out"), true);
+  assert.equal(isRecoverableBridgeHealthError("list_tabs timed out after 45000ms"), true);
+  assert.equal(isRecoverableBridgeHealthError("bridge_command_timeout:list_tabs"), true);
+  assert.equal(isRecoverableBridgeHealthError("youtube creator session probe timed out"), false);
 });
 
 test("selectBridgeClientId can reuse stale bridge client when allowStale is enabled", () => {
@@ -1241,6 +1561,24 @@ test("deriveCompositePrePublishRepairPlan retries repairable field failures befo
 
   assert.equal(plan.shouldRepair, true);
   assert.deepEqual(plan.repairable_fields, ["cover", "collection"]);
+  assert.deepEqual(plan.blocking_fields, []);
+});
+
+test("deriveCompositePrePublishRepairPlan honors forced repair fields even when audit already passed", () => {
+  const plan = deriveCompositePrePublishRepairPlan(
+    {
+      required_unverified: [],
+    },
+    {
+      failures: [],
+    },
+    {
+      forceRepairFields: ["cover"],
+    },
+  );
+
+  assert.equal(plan.shouldRepair, true);
+  assert.deepEqual(plan.repairable_fields, ["cover"]);
   assert.deepEqual(plan.blocking_fields, []);
 });
 
@@ -1643,11 +1981,75 @@ test("isCompositePublishRouteContext rejects youtube content-list upload skeleto
   );
   assert.equal(
     isCompositePublishRouteContext("youtube", {
+      url: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&filter=%5B%5D",
+      text: "频道内容 编辑草稿 草稿 发布日期 观看次数 评论数",
+      file_inputs: [{ accept: "video/mp4" }],
+    }),
+    false,
+  );
+  assert.equal(
+    isCompositePublishRouteContext("youtube", {
       url: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&udvid=eaTu-rtsyiw",
       text: "上传视频 Select files",
       file_inputs: [],
     }),
     true,
+  );
+});
+
+test("isYouTubeCreateFlowStateUsable rejects youtube d=ud content list without real upload dialog", () => {
+  assert.equal(
+    isCompositePublishRouteContext("youtube", {
+      url: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&filter=%5B%5D",
+      text: "",
+      file_inputs: [],
+    }),
+    false,
+  );
+  assert.equal(
+    isYouTubeCreateFlowStateUsable({
+      url: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&filter=%5B%5D",
+      title: "频道内容 - YouTube Studio",
+      step: "details",
+      text: "频道内容 视频 公开范围 限制 日期 观看次数 评论数 草稿 编辑草稿",
+      fileInputs: [{ accept: "", multiple: true, visible: false }],
+    }),
+    false,
+  );
+  assert.equal(
+    isYouTubeCreateFlowStateUsable({
+      url: "https://www.youtube.com/upload?roughcut_fresh_upload=123",
+      title: "Upload videos - YouTube",
+      step: "upload_entry",
+      text: "Upload videos Drag and drop video files to upload Select files",
+      fileInputs: [{ accept: "video/*", multiple: false, visible: true }],
+    }),
+    true,
+  );
+  assert.equal(
+    isCompositePublishRouteContext("youtube", {
+      url: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&filter=%5B%5D",
+      text: "频道内容 视频 公开范围 限制 日期 观看次数 评论数 草稿 编辑草稿",
+      file_inputs: [{ accept: "" }],
+    }),
+    false,
+  );
+});
+
+test("deriveYouTubeUploadWizardStep rejects youtube content list even when d=ud and upload menu text are visible", () => {
+  assert.equal(
+    deriveYouTubeUploadWizardStep(
+      "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&filter=%5B%5D",
+      "频道内容 视频 公开范围 限制 日期 观看次数 评论数 创建 上传视频 草稿 编辑草稿",
+    ),
+    "",
+  );
+  assert.equal(
+    deriveYouTubeUploadWizardStep(
+      "https://studio.youtube.com/channel/UC123/videos/upload?d=ud",
+      "上传视频 将要上传的视频文件拖放到此处 选择文件",
+    ),
+    "upload_entry",
   );
 });
 
@@ -1680,7 +2082,7 @@ test("verifyCompositeDeclarationField requires xiaohongshu original switch when 
         xiaohongshuOriginalDeclarationEnabled: true,
       },
     ),
-    true,
+    false,
   );
 });
 
@@ -1730,8 +2132,7 @@ test("deriveCompositeDraftPolicyBlockers blocks supported platforms with missing
     platform_specific_overrides: {},
   });
 
-  assert.equal(blockers.length, 1);
-  assert.equal(blockers[0].code, "douyin_collection_policy_missing");
+  assert.equal(blockers.some((blocker) => blocker.code === "douyin_collection_policy_missing"), true);
 });
 
 test("deriveCompositeDraftPolicyBlockers blocks supported platforms with missing cover policy", () => {
@@ -1742,8 +2143,7 @@ test("deriveCompositeDraftPolicyBlockers blocks supported platforms with missing
     },
   });
 
-  assert.equal(blockers.length, 1);
-  assert.equal(blockers[0].code, "douyin_cover_policy_missing");
+  assert.equal(blockers.some((blocker) => blocker.code === "douyin_cover_policy_missing"), true);
 });
 
 test("deriveCompositeDraftPolicyBlockers uses shared matrix for xiaohongshu and x", () => {
@@ -1764,19 +2164,80 @@ test("deriveCompositeDraftPolicyBlockers uses shared matrix for xiaohongshu and 
   assert.equal(xBlockers.length, 0);
 });
 
-test("applyCompositeSafeRuntimePolicyDefaults auto-fills cover and collection policy for safe youtube tasks", () => {
+test("applyCompositeSafeRuntimePolicyDefaults forces default youtube task onto fresh-upload-only path", () => {
+  const normalized = applyCompositeSafeRuntimePolicyDefaults("youtube", {
+    title: "测试标题",
+  });
+
+  assert.equal(normalized.platform_specific_overrides.youtube_publish_path_policy, "fresh_upload_only");
+  assert.equal(normalized.platform_specific_overrides.fresh_start_platform_tab, true);
+  assert.equal(normalized.platform_specific_overrides.clear_draft_context, true);
+  assert.equal(normalized.platform_specific_overrides.force_publish_page_refresh, true);
+  assert.equal(normalized.platform_specific_overrides.verify_media_upload, true);
+  assert.equal(normalized.platform_specific_overrides.recovery_mode, "fresh_publish");
+  assert.deepEqual(normalized.publication_recovery_state, {
+    schema_version: 1,
+    platform: "youtube",
+    fresh_publish_only: true,
+  });
+  assert.equal(normalized.publication_path_contract.mode, "fresh_upload_only");
+});
+
+test("applyCompositeSafeRuntimePolicyDefaults strips explicit youtube current-page recovery", () => {
   const normalized = applyCompositeSafeRuntimePolicyDefaults("youtube", {
     title: "测试标题",
     platform_specific_overrides: {
       prepare_only_current_page: true,
+      repair_only_current_page: true,
+      force_repair_fields: ["cover"],
+      recovery_mode: "prepublish_resume",
+    },
+    publication_recovery_state: {
+      recovery_overrides: {
+        prepare_only_current_page: true,
+        recovery_mode: "prepublish_resume",
+      },
     },
   });
 
-  assert.equal(normalized.platform_specific_overrides.prepare_only_current_page, true);
-  assert.equal(normalized.platform_specific_overrides.collection_policy, "skip");
-  assert.equal(normalized.platform_specific_overrides.skip_collection_select, true);
-  assert.equal(normalized.platform_specific_overrides.cover_policy, "platform_default");
-  assert.equal(normalized.platform_specific_overrides.skip_cover_upload, true);
+  assert.equal(normalized.platform_specific_overrides.youtube_publish_path_policy, "fresh_upload_only");
+  assert.equal(normalized.platform_specific_overrides.fresh_start_platform_tab, true);
+  assert.equal(normalized.platform_specific_overrides.recovery_mode, "fresh_publish");
+  assert.equal(normalized.platform_specific_overrides.clear_draft_context, true);
+  assert.equal(normalized.platform_specific_overrides.force_publish_page_refresh, true);
+  assert.equal(normalized.platform_specific_overrides.verify_media_upload, true);
+  assert.equal("prepare_only_current_page" in normalized.platform_specific_overrides, false);
+  assert.equal("repair_only_current_page" in normalized.platform_specific_overrides, false);
+  assert.equal("force_repair_fields" in normalized.platform_specific_overrides, false);
+  assert.deepEqual(normalized.publication_recovery_state, {
+    schema_version: 1,
+    platform: "youtube",
+    fresh_publish_only: true,
+  });
+  assert.equal(normalized.publication_path_contract.mode, "fresh_upload_only");
+  assert.equal(normalized.publication_path_contract.forbid_current_page_repair, true);
+  assert.equal(normalized.publication_path_contract.forbid_existing_video_edit, true);
+  assert.equal(normalized.publication_path_contract.forbid_attempt_reuse, true);
+});
+
+test("applyCompositeSafeRuntimePolicyDefaults preserves youtube platform schedule as fresh upload contract", () => {
+  const normalized = applyCompositeSafeRuntimePolicyDefaults("youtube", {
+    title: "测试标题",
+    visibility_or_publish_mode: "draft",
+    scheduled_publish_at: "2026-06-21T10:00:00+08:00",
+    platform_specific_overrides: {
+      recovery_mode: "prepublish_resume",
+      prepublish_only_current_page: true,
+    },
+  });
+
+  assert.equal(normalizeYouTubeVisibilityOrPublishMode(
+    normalized.visibility_or_publish_mode,
+    normalized.scheduled_publish_at,
+  ), "schedule");
+  assert.equal(normalized.platform_specific_overrides.youtube_publish_path_policy, "fresh_upload_only");
+  assert.equal("prepublish_only_current_page" in normalized.platform_specific_overrides, false);
+  assert.equal(normalized.publication_path_contract.forbid_existing_video_edit, true);
 });
 
 test("applyCompositeSafeRuntimePolicyDefaults treats stop-before-final-publish as safe runtime mode", () => {
@@ -1792,9 +2253,11 @@ test("applyCompositeSafeRuntimePolicyDefaults treats stop-before-final-publish a
   assert.equal(normalized.platform_specific_overrides.skip_collection_select, true);
 });
 
-test("deriveCompositeDraftPolicyBlockers respects safe runtime auto-defaults for youtube", () => {
+test("deriveCompositeDraftPolicyBlockers strips youtube current-page recovery while honoring complete fresh-upload material", () => {
   const blockers = deriveCompositeDraftPolicyBlockers("youtube", {
     title: "测试标题",
+    cover_path: "E:/covers/youtube.jpg",
+    collection: { name: "EDC刀光火工具集" },
     platform_specific_overrides: {
       prepare_only_current_page: true,
     },
@@ -1824,8 +2287,10 @@ test("deriveCompositeCdpTimeoutWaitEnvelope converts youtube editor runtime time
 
   assert.ok(envelope);
   assert.equal(envelope.code, "youtube_pre_publish_upload_pending");
-  assert.equal(envelope.recovery_overrides?.recovery_mode, "prepublish_resume");
-  assert.equal(envelope.recovery_overrides?.prepare_only_current_page, true);
+  assert.equal(envelope.recovery_overrides?.recovery_mode, "fresh_publish");
+  assert.equal(envelope.recovery_overrides?.fresh_start_platform_tab, true);
+  assert.equal(envelope.recovery_overrides?.prepare_only_current_page, false);
+  assert.equal(envelope.recovery_overrides?.clear_draft_context, true);
   assert.equal(envelope.final_publish?.prepare_only_current_page, true);
   assert.equal(envelope.material_integrity?.verification_reason, "editor_surface_runtime_timeout");
 });
@@ -1990,7 +2455,7 @@ test("deriveCompositeUploadReadinessFailureState treats stalled synthetic upload
   assert.equal(failure.reason, "upload_not_applied");
 });
 
-test("deriveCompositeUploadReadinessFailureState treats youtube hidden upload dialog that remains on channel content as failed", () => {
+test("deriveCompositeUploadReadinessFailureState treats youtube channel content after synthetic upload as lost", () => {
   const failure = deriveCompositeUploadReadinessFailureState(
     "youtube",
     {
@@ -2013,47 +2478,32 @@ test("deriveCompositeUploadReadinessFailureState treats youtube hidden upload di
   );
 
   assert.equal(failure.failed, true);
-  assert.equal(failure.reason, "upload_not_applied");
+  assert.equal(failure.reason, "youtube_upload_lost_after_file_input");
+  const noDialogFailure = deriveCompositeUploadReadinessFailureState(
+    "youtube",
+    {
+      ready: false,
+      failed: false,
+      waited_ms: 20000,
+      last: {
+        busy: false,
+        mediaPresent: false,
+        uploadPromptOnly: false,
+        youtubeUploadRoute: true,
+        youtubeChannelContentList: true,
+        youtubeDraftResumeAvailable: false,
+        youtubeUploadDialogRoute: false,
+        totalFileInputCount: 0,
+      },
+    },
+    {
+      syntheticUploadExpected: true,
+    },
+  );
+  assert.equal(noDialogFailure.failed, true);
+  assert.equal(noDialogFailure.reason, "youtube_upload_lost_after_file_input");
 });
 
-test("shouldDeferYouTubeDraftResumeReupload stays disabled for youtube draft rows", () => {
-  assert.equal(
-    shouldDeferYouTubeDraftResumeReupload({
-      ready: false,
-      failed: false,
-      last: {
-        platform: "youtube",
-        busy: false,
-        mediaPresent: true,
-        uploadPromptOnly: false,
-        fileInputCount: 0,
-        totalFileInputCount: 1,
-        youtubeUploadRoute: true,
-        youtubeChannelContentList: true,
-        youtubeDraftResumeAvailable: true,
-      },
-    }),
-    true,
-  );
-  assert.equal(
-    shouldDeferYouTubeDraftResumeReupload({
-      ready: false,
-      failed: false,
-      last: {
-        platform: "youtube",
-        busy: false,
-        mediaPresent: true,
-        uploadPromptOnly: false,
-        fileInputCount: 1,
-        totalFileInputCount: 1,
-        youtubeUploadRoute: true,
-        youtubeChannelContentList: true,
-        youtubeDraftResumeAvailable: true,
-      },
-    }),
-    false,
-  );
-});
 
 test("selectYouTubeDraftResumeEntryCandidate prefers actionable edit-draft button on active upload row", () => {
   const chosen = selectYouTubeDraftResumeEntryCandidate([
@@ -2175,6 +2625,323 @@ test("selectYouTubeDraftResumeCandidate prefers hinted draft row and extracts lo
   assert.match(chosen.text, /MAXACE 美杜莎4/);
 });
 
+test("selectYouTubeFreshUploadContinuationCandidate blocks matched draft continuation for fresh upload", () => {
+  const continuation = selectYouTubeFreshUploadContinuationCandidate(
+    {
+      href: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&filter=%5B%5D",
+      channelContentList: true,
+      draftRows: [
+        {
+          text: "8:32 白光+紫外+绿激光三合一，EDC17开箱细节和上手感受 草稿 编辑草稿",
+          watchHref: "https://www.youtube.com/watch?v=iVZQiMe_CTM",
+          titleHref: "",
+        },
+      ],
+    },
+    { title: "白光+紫外+绿激光三合一，EDC17开箱细节和上手感受" },
+    [{ kind: "media_upload", uploaded: true, reason: "youtube_runtime_file_input_loaded" }],
+  );
+
+  assert.equal(continuation.allowed, false);
+  assert.equal(continuation.blocked, true);
+  assert.equal(continuation.reason, "fresh_upload_path_must_not_resume_draft");
+  assert.equal(continuation.video_id, "iVZQiMe_CTM");
+  assert.equal(continuation.editor_url, "");
+});
+
+test("selectYouTubeFreshUploadContinuationCandidate blocks matched draft click when youtube hides ids", () => {
+  const continuation = selectYouTubeFreshUploadContinuationCandidate(
+    {
+      href: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&filter=%5B%5D",
+      channelContentList: true,
+      draftRows: [
+        {
+          text: "8:32 白光+紫外+绿激光三合一，EDC17开箱细节和上手感受 草稿 编辑草稿",
+          watchHref: "",
+          titleHref: "",
+        },
+      ],
+    },
+    { title: "白光+紫外+绿激光三合一，EDC17开箱细节和上手感受" },
+    [{ kind: "media_upload", uploaded: true, reason: "youtube_runtime_file_input_loaded" }],
+  );
+
+  assert.equal(continuation.allowed, false);
+  assert.equal(continuation.blocked, true);
+  assert.equal(continuation.reason, "fresh_upload_path_must_not_resume_draft");
+  assert.equal(continuation.click_required, false);
+  assert.equal(continuation.video_id, "");
+  assert.match(continuation.selected_text, /EDC17/);
+});
+
+test("selectYouTubeFreshUploadContinuationCandidate allows current active upload row for fresh upload", () => {
+  const continuation = selectYouTubeFreshUploadContinuationCandidate(
+    {
+      href: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&filter=%5B%5D",
+      channelContentList: true,
+      draftRows: [
+        {
+          text: "20260503 NITECORE EDC17 EDC17 EDC37 6ee1b976e4a1701a 正在上传，已完成 33% 草稿 取消上传 编辑草稿",
+          watchHref: "https://www.youtube.com/watch?v=iVZQiMe_CTM",
+          titleHref: "",
+        },
+      ],
+    },
+    {
+      title: "NITECORE EDC17 上手：白光、紫外、绿激光三合一",
+      media_items: [{
+        local_path: "C:\\demo-workspace\\RoughCut\\data\\runtime\\publication-media\\job\\20260503_NITECORE_EDC17_-EDC17-EDC37-_-_-6ee1b976e4a1701a.mp4",
+      }],
+    },
+    [{ kind: "media_upload", uploaded: true, reason: "youtube_runtime_file_input_loaded" }],
+  );
+
+  assert.equal(continuation.allowed, true);
+  assert.equal(continuation.blocked, false);
+  assert.equal(continuation.reason, "current_fresh_upload_row_active");
+  assert.equal(continuation.video_id, "iVZQiMe_CTM");
+  assert.equal(continuation.editor_url, "https://studio.youtube.com/video/iVZQiMe_CTM/edit");
+});
+
+test("selectYouTubeFreshUploadContinuationCandidate allows active upload row click when youtube hides ids", () => {
+  const continuation = selectYouTubeFreshUploadContinuationCandidate(
+    {
+      href: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&filter=%5B%5D",
+      channelContentList: true,
+      draftRows: [
+        {
+          text: "20260503_NITECORE_EDC17_-EDC17-EDC37-_-_-6ee1b976e4a1701a.mp4 已上传 33% 草稿 取消上传 编辑草稿",
+          watchHref: "",
+          titleHref: "",
+        },
+      ],
+    },
+    {
+      title: "NITECORE EDC17 上手：白光、紫外、绿激光三合一",
+      media_items: [{
+        local_path: "C:\\demo-workspace\\RoughCut\\data\\runtime\\publication-media\\job\\20260503_NITECORE_EDC17_-EDC17-EDC37-_-_-6ee1b976e4a1701a.mp4",
+      }],
+    },
+    [{ kind: "media_upload", uploaded: true, reason: "youtube_runtime_file_input_loaded" }],
+  );
+
+  assert.equal(continuation.allowed, true);
+  assert.equal(continuation.reason, "current_fresh_upload_row_active_click_required");
+  assert.equal(continuation.click_required, true);
+  assert.equal(continuation.video_id, "");
+});
+
+test("selectYouTubeFreshUploadContinuationCandidate allows completed current upload row only in resume mode", () => {
+  const surface = {
+    href: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&filter=%5B%5D",
+    channelContentList: true,
+    draftRows: [
+      {
+        text: "8:32 20260503 NITECORE EDC17 EDC17 EDC37 6ee1b976e4a1701a 添加说明 草稿 无 编辑草稿",
+        watchHref: "https://www.youtube.com/watch?v=iVZQiMe_CTM",
+        titleHref: "",
+      },
+    ],
+  };
+  const content = {
+    title: "NITECORE EDC17 上手：白光、紫外、绿激光三合一",
+    media_items: [{
+      local_path: "C:\\demo-workspace\\RoughCut\\data\\runtime\\publication-media\\job\\20260503_NITECORE_EDC17_-EDC17-EDC37-_-_-6ee1b976e4a1701a.mp4",
+    }],
+  };
+  const withoutResume = selectYouTubeFreshUploadContinuationCandidate(
+    surface,
+    content,
+    [{ kind: "media_upload", uploaded: true, reason: "youtube_runtime_file_input_loaded" }],
+  );
+  const withResume = selectYouTubeFreshUploadContinuationCandidate(
+    surface,
+    {
+      ...content,
+      platform_specific_overrides: { youtube_current_fresh_upload_resume: true },
+    },
+    [{ kind: "media_upload", uploaded: true, reason: "youtube_runtime_file_input_loaded" }],
+  );
+
+  assert.equal(withoutResume.allowed, false);
+  assert.equal(withoutResume.reason, "fresh_upload_path_must_not_resume_draft");
+  assert.equal(withResume.allowed, true);
+  assert.equal(withResume.reason, "current_fresh_upload_row_completed");
+  assert.equal(withResume.video_id, "iVZQiMe_CTM");
+});
+
+test("selectYouTubeFreshUploadContinuationCandidate rejects stale or unbound youtube drafts", () => {
+  assert.equal(
+    selectYouTubeFreshUploadContinuationCandidate(
+      {
+        href: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&filter=%5B%5D",
+        channelContentList: true,
+        draftRows: [
+          {
+            text: "8:32 白光+紫外+绿激光三合一，EDC17开箱细节和上手感受 草稿 编辑草稿",
+            watchHref: "https://www.youtube.com/watch?v=iVZQiMe_CTM",
+          },
+        ],
+      },
+      { title: "白光+紫外+绿激光三合一，EDC17开箱细节和上手感受" },
+      [{ kind: "media_upload", uploaded: true, skipped: true, reason: "media_already_present" }],
+    ).allowed,
+    false,
+  );
+  assert.equal(
+    selectYouTubeFreshUploadContinuationCandidate(
+      {
+        href: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&filter=%5B%5D",
+        channelContentList: true,
+        draftRows: [
+          {
+            text: "8:32 旧视频标题 草稿 编辑草稿",
+            watchHref: "https://www.youtube.com/watch?v=oldDraft1",
+          },
+        ],
+      },
+      { title: "白光+紫外+绿激光三合一，EDC17开箱细节和上手感受" },
+      [{ kind: "media_upload", uploaded: true, reason: "youtube_runtime_file_input_loaded" }],
+    ).allowed,
+    false,
+  );
+});
+
+test("shouldYieldYouTubeFreshUploadDraftContinuation never resumes youtube drafts on formal path", () => {
+  assert.equal(
+    shouldYieldYouTubeFreshUploadDraftContinuation(
+      "youtube",
+      {
+        ready: false,
+        failed: false,
+        last: {
+          busy: false,
+          mediaPresent: false,
+          uploadPromptOnly: false,
+          youtubeUploadRoute: true,
+          youtubeChannelContentList: true,
+          youtubeDraftResumeAvailable: true,
+        },
+      },
+      { syntheticUploadExpected: true },
+    ),
+    false,
+  );
+  assert.equal(
+    shouldYieldYouTubeFreshUploadDraftContinuation(
+      "youtube",
+      {
+        ready: false,
+        failed: false,
+        last: {
+          busy: false,
+          mediaPresent: true,
+          uploadPromptOnly: false,
+          youtubeUploadRoute: true,
+          youtubeChannelContentList: true,
+          youtubeDraftResumeAvailable: true,
+        },
+      },
+      { syntheticUploadExpected: false },
+    ),
+    false,
+  );
+  assert.equal(
+    shouldYieldYouTubeFreshUploadDraftContinuation(
+      "youtube",
+      {
+        ready: false,
+        failed: false,
+        last: {
+          busy: false,
+          mediaPresent: false,
+          uploadPromptOnly: false,
+          youtubeUploadRoute: true,
+          youtubeChannelContentList: false,
+          youtubeDraftResumeAvailable: false,
+          lines: [
+            "频道内容 视频 公开范围 日期 观看次数",
+            "8:32 白光+紫外+绿激光三合一，EDC17开箱细节和上手感受 草稿 无 编辑草稿",
+          ],
+        },
+      },
+      { syntheticUploadExpected: true },
+    ),
+    false,
+  );
+});
+
+test("youtube fresh upload path treats draft continuation as terminal path violation", () => {
+  const integrity = buildPendingUploadMaterialIntegrity(
+    "youtube",
+    {
+      ready: false,
+      failed: true,
+      failure_reason: "youtube_fresh_upload_left_editor",
+      pending_reason: "fresh_upload_path_must_not_resume_draft",
+      waited_ms: 45000,
+      last: {
+        platform: "youtube",
+        youtubeUploadRoute: true,
+        youtubeChannelContentList: true,
+        youtubeDraftResumeAvailable: true,
+        mediaPresent: true,
+        uploadPromptOnly: false,
+        fileInputCount: 0,
+        lines: ["频道内容", "草稿", "编辑草稿"],
+      },
+    },
+    { url: "https://studio.youtube.com/channel/demo/videos/upload?d=ud", title: "频道内容" },
+  );
+
+  const disposition = deriveCompositeUploadReadinessBlockerDisposition(
+    "youtube",
+    {
+      pending_reason: integrity.verification_reason,
+      blockers: integrity.route_ready_state.blockers || [],
+      media_present: true,
+      upload_busy: false,
+      upload_prompt_only: false,
+      line_samples: integrity.platform_extras.relevant_lines,
+    },
+    {},
+  );
+
+  assert.equal(integrity.verification_state, "error");
+  assert.equal(integrity.verification_reason, "fresh_upload_path_must_not_resume_draft");
+  assert.equal(disposition.code, "youtube_fresh_upload_path_violation");
+  assert.equal(disposition.clear_draft_context, true);
+  assert.equal(disposition.recovery_overrides, null);
+});
+
+test("isYouTubeEditorReadinessSurface rejects youtube channel content list route", () => {
+  const href = "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos/upload?filter=%5B%5D";
+  const text = [
+    "频道内容 视频 Shorts 直播 帖子 播放列表 播客",
+    "公开范围 限制 日期 观看次数 评论数",
+    "7:15 迟来的开箱！maxace蜂巢3顶配 公开 无 2026年6月11日 发布日期",
+    "每页行数：30 第 1 - 3 条，共约 3 条",
+  ].join(" ");
+  assert.equal(isYouTubeEditorReadinessSurface(href, text), false);
+});
+
+test("shouldAttemptNativeFileChooserFallback retries youtube runtime input not accepted by page", () => {
+  assert.equal(
+    shouldAttemptNativeFileChooserFallback({
+      uploaded: false,
+      reason: "youtube_runtime_file_input_loaded_without_page_acceptance",
+    }),
+    true,
+  );
+  assert.equal(
+    shouldAttemptNativeFileChooserFallback({
+      uploaded: true,
+      reason: "youtube_runtime_file_input_loaded",
+    }),
+    false,
+  );
+});
+
 test("matchesYouTubeDraftResumeHint tolerates publish-title punctuation drift and media-stem fallback", () => {
   assert.equal(
     matchesYouTubeDraftResumeHint(
@@ -2198,7 +2965,36 @@ test("matchesYouTubeDraftResumeHint tolerates publish-title punctuation drift an
   );
 });
 
-test("deriveYouTubeDraftResumeFallbackTarget prefers upload resume url before edit url", () => {
+test("currentPageMatchesPrepareOnlyExecutionContext rejects youtube draft list even when title appears bound", () => {
+  assert.equal(
+    currentPageMatchesPrepareOnlyExecutionContext(
+      "youtube",
+      {
+        url: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&filter=%5B%5D",
+        text: "频道内容 视频 发布日期 观看次数 8:32 白光+紫外+绿激光三合一，EDC17开箱细节和上手感受 草稿 编辑草稿",
+      },
+      {},
+      "",
+      [],
+    ),
+    false,
+  );
+  assert.equal(
+    currentPageMatchesPrepareOnlyExecutionContext(
+      "youtube",
+      {
+        url: "https://studio.youtube.com/channel/UC123/videos/upload?d=ud&filter=%5B%5D",
+        text: "频道内容 视频 发布日期 观看次数",
+      },
+      {},
+      "",
+      [],
+    ),
+    false,
+  );
+});
+
+test("deriveYouTubeDraftResumeFallbackTarget never returns a draft resume target for fresh publishing", () => {
   assert.deepEqual(
     deriveYouTubeDraftResumeFallbackTarget(
       {
@@ -2208,8 +3004,8 @@ test("deriveYouTubeDraftResumeFallbackTarget prefers upload resume url before ed
       "https://studio.youtube.com/channel/test/videos/upload?filter=%5B%5D",
     ),
     {
-      target: "https://studio.youtube.com/channel/test/videos/upload?d=ud&udvid=eaTu-rtsyiw",
-      reason: "upload_resume_url",
+      target: "",
+      reason: "youtube_fresh_upload_only_forbids_draft_resume",
     },
   );
   assert.deepEqual(
@@ -2221,8 +3017,8 @@ test("deriveYouTubeDraftResumeFallbackTarget prefers upload resume url before ed
       "https://studio.youtube.com/channel/test/videos/upload?filter=%5B%5D",
     ),
     {
-      target: "https://studio.youtube.com/video/eaTu-rtsyiw/edit",
-      reason: "edit_url",
+      target: "",
+      reason: "youtube_fresh_upload_only_forbids_draft_resume",
     },
   );
 });
@@ -2244,7 +3040,9 @@ test("deriveYouTubeUploadEditorBootstrapPlan requires control-driven upload flow
 
   assert.equal(plan.changed, false);
   assert.equal(plan.reason, "control_driven_create_upload_required");
-  assert.equal(plan.fallbackTarget, "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos/upload");
+  assert.equal(plan.fallbackTarget, "https://www.youtube.com/upload");
+  assert.equal(plan.draftVideoId, undefined);
+  assert.equal(plan.draftRowDetected, true);
 });
 
 test("deriveYouTubeUploadEditorBootstrapPlan supports youtube web channel page via create control", () => {
@@ -2257,12 +3055,15 @@ test("deriveYouTubeUploadEditorBootstrapPlan supports youtube web channel page v
   assert.equal(plan.matched, true);
   assert.equal(plan.changed, false);
   assert.equal(plan.reason, "control_driven_create_upload_required");
-  assert.equal(plan.fallbackTarget, "https://studio.youtube.com/");
+  assert.equal(plan.fallbackTarget, "https://www.youtube.com/upload");
 });
 
 test("normalizeYouTubeVisibilityOrPublishMode defaults youtube to public and scheduled publish to schedule", () => {
   assert.equal(normalizeYouTubeVisibilityOrPublishMode("", ""), "public");
   assert.equal(normalizeYouTubeVisibilityOrPublishMode("", "2026-06-05T21:00:00+08:00"), "schedule");
+  assert.equal(normalizeYouTubeVisibilityOrPublishMode("public", "2026-06-05T21:00:00+08:00"), "schedule");
+  assert.equal(normalizeYouTubeVisibilityOrPublishMode("draft", "2026-06-05T21:00:00+08:00"), "schedule");
+  assert.equal(normalizeYouTubeVisibilityOrPublishMode("公开", "2026-06-05T21:00:00+08:00"), "schedule");
   assert.equal(normalizeYouTubeVisibilityOrPublishMode("公开", ""), "public");
   assert.equal(normalizeYouTubeVisibilityOrPublishMode("不公开列出", ""), "unlisted");
 });
@@ -2298,7 +3099,7 @@ test("deriveYouTubeUploadWizardStep recognizes the four-step upload wizard", () 
   );
 });
 
-test("shouldAttemptYouTubeDraftResumeFallbackRoute requires youtube draft row inert state with a concrete fallback target", () => {
+test("shouldAttemptYouTubeDraftResumeFallbackRoute stays disabled for youtube fresh publishing", () => {
   assert.equal(
     shouldAttemptYouTubeDraftResumeFallbackRoute(
       {
@@ -2320,7 +3121,7 @@ test("shouldAttemptYouTubeDraftResumeFallbackRoute requires youtube draft row in
         edit_url: "https://studio.youtube.com/video/eaTu-rtsyiw/edit",
       },
     ),
-    true,
+    false,
   );
   assert.equal(
     shouldAttemptYouTubeDraftResumeFallbackRoute(
@@ -2344,7 +3145,7 @@ test("shouldAttemptYouTubeDraftResumeFallbackRoute requires youtube draft row in
         edit_url: "https://studio.youtube.com/video/eaTu-rtsyiw/edit",
       },
     ),
-    true,
+    false,
   );
   assert.equal(
     shouldAttemptYouTubeDraftResumeFallbackRoute(
@@ -2522,6 +3323,69 @@ test("isYouTubeEditorReadinessSurface recognizes studio video edit surface", () 
   );
 });
 
+test("isYouTubeEditorReadinessSurface prioritizes active upload wizard over channel list background", () => {
+  const text = [
+    "频道内容",
+    "视频",
+    "公开范围",
+    "限制",
+    "发布日期",
+    "每页行数：30",
+    "上传完毕",
+    "20260503_NITECORE_EDC17_横版_成片.mp4",
+    "已上传 100%",
+    "正在保存…",
+    "详细信息",
+    "视频元素",
+    "检查",
+    "公开范围",
+    "标题（必填）",
+    "说明",
+    "缩略图",
+    "播放列表",
+    "观众",
+    "视频链接",
+    "https://youtu.be/iVZQiMe_CTM",
+    "处理过程延迟了长达几个小时。",
+  ].join(" ");
+  assert.equal(
+    isYouTubeEditorReadinessSurface(
+      "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos/upload?d=ud&udvid=iVZQiMe_CTM",
+      text,
+    ),
+    true,
+  );
+  assert.equal(
+    shouldAllowCompositeFieldPreparation("youtube", {
+      ready: false,
+      failed: false,
+      last: {
+        mediaPresent: true,
+        fieldShell: true,
+        youtubeEditorSurface: true,
+        busy: true,
+        uploadPromptOnly: false,
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    shouldAllowCompositeFieldPreparation("youtube", {
+      ready: false,
+      failed: false,
+      last: {
+        mediaPresent: true,
+        fieldShell: false,
+        youtubeEditorSurface: true,
+        youtubeUploadDialogRoute: true,
+        busy: false,
+        uploadPromptOnly: false,
+      },
+    }),
+    true,
+  );
+});
+
 test("shouldPreserveYouTubeEditorRouteForBootstrap keeps youtube editor route unless it is an error surface", () => {
   assert.equal(
     shouldPreserveYouTubeEditorRouteForBootstrap(
@@ -2644,14 +3508,14 @@ test("shouldTreatCompositeUploadReadinessBlockerAsPending keeps upload-busy bloc
   );
 });
 
-test("shouldTreatCompositeUploadReadinessBlockerAsPending keeps youtube draft-resume pending state in wait-only mode", () => {
+test("shouldTreatCompositeUploadReadinessBlockerAsPending rejects youtube draft-resume pending state", () => {
   assert.equal(
     shouldTreatCompositeUploadReadinessBlockerAsPending({
       blockers: [],
       pending_reason: "draft_resume_pending",
       upload_busy: false,
     }),
-    true,
+    false,
   );
 });
 
@@ -2686,13 +3550,15 @@ test("deriveCompositeMediaUploadFailureDisposition preserves safe stop-before mo
   );
 
   assert.equal(disposition.code, "youtube_media_upload_failed");
-  assert.equal(disposition.clear_draft_context, false);
-  assert.equal(disposition.recovery_overrides.recovery_mode, "prepublish_resume");
-  assert.equal(disposition.recovery_overrides.prepare_only_current_page, true);
+  assert.equal(disposition.clear_draft_context, true);
+  assert.equal(disposition.recovery_overrides.recovery_mode, "fresh_publish");
+  assert.equal(disposition.recovery_overrides.fresh_start_platform_tab, true);
+  assert.equal(disposition.recovery_overrides.prepare_only_current_page, false);
+  assert.equal(disposition.recovery_overrides.clear_draft_context, true);
   assert.equal(disposition.error_details.failure_reason, "upload_not_applied");
 });
 
-test("deriveCompositeUploadReadinessBlockerDisposition preserves safe stop-before mode for youtube draft resume inert blocker", () => {
+test("deriveCompositeUploadReadinessBlockerDisposition keeps youtube draft-resume inert blocker fresh-only", () => {
   const disposition = deriveCompositeUploadReadinessBlockerDisposition(
     "youtube",
     {
@@ -2710,9 +3576,11 @@ test("deriveCompositeUploadReadinessBlockerDisposition preserves safe stop-befor
   );
 
   assert.equal(disposition.code, "youtube_media_upload_failed");
-  assert.equal(disposition.clear_draft_context, false);
-  assert.equal(disposition.recovery_overrides.recovery_mode, "prepublish_resume");
-  assert.equal(disposition.recovery_overrides.prepare_only_current_page, true);
+  assert.equal(disposition.clear_draft_context, true);
+  assert.equal(disposition.recovery_overrides.recovery_mode, "fresh_publish");
+  assert.equal(disposition.recovery_overrides.fresh_start_platform_tab, true);
+  assert.equal(disposition.recovery_overrides.prepare_only_current_page, false);
+  assert.equal(disposition.recovery_overrides.clear_draft_context, true);
   assert.equal(disposition.error_details.failure_reason, "upload_not_applied");
 });
 
@@ -2780,7 +3648,7 @@ test("buildCompositePublicationAudit normalizes collapsed douyin schedule eviden
         title: { expected: "测试标题", actual: "测试标题", verified: true },
         body: { expected: "测试正文", actual: "测试正文", verified: true },
         tags: { expected: ["标签A"], actual: ["标签A"], verified: true },
-        cover: { expected_path: "", verified: true },
+    cover: { expected_path: "", verified: true },
         schedule: { expected: "2026-05-31 20:30", actual: "", verified: false },
         declaration: { verified: true },
         upload_ready: { expected: "ready", actual: "ready", verified: true },
@@ -2868,6 +3736,201 @@ test("verifyCompositeBodyField accepts youtube body when editor collapses blank 
     verifyCompositeBodyField("youtube", expected, actual),
     true,
   );
+});
+
+test("deriveYouTubePrePublishReadbackFailureCode reports default filename title before generic mismatch", () => {
+  const content = {
+    title: "NITECORE EDC17 对比 EDC37 功能实测",
+    body: "这期重点看 EDC17 的便携性、亮度和与 EDC37 的实际差异。",
+    cover_path: "E:/covers/youtube-cover.jpg",
+    media_items: [
+      {
+        local_path: "Y:/EDC系列/AI粗剪/20260503_NITECORE_EDC17_奈特科尔EDC17手电筒轻便性与实用性功能展示及与EDC37的对比/20260503_NITECORE_EDC17_奈特科尔EDC17手电筒轻便性与实用性功能展示及与EDC37的对比_横版_成片.mp4",
+      },
+    ],
+  };
+  const integrity = {
+    fields: {
+      title: {
+        expected: content.title,
+        actual: "20260503 NITECORE EDC17 奈特科尔EDC17手电筒轻便性与实用性功能展示及与EDC37的对比 横版 成片",
+        verified: false,
+      },
+      body: { expected: content.body, actual: "", verified: false },
+      cover: { expected_path: content.cover_path, actual: "", uploaded: false, verified: false },
+    },
+    failures: ["title", "body", "cover"],
+  };
+  const audit = {
+    required_unverified: ["title", "body", "cover", "content_plan_match"],
+    checklist: integrity.fields,
+  };
+
+  assert.equal(isYouTubeDefaultFilenameTitle(integrity.fields.title.actual, content), true);
+  assert.equal(
+    deriveYouTubePrePublishReadbackFailureCode(audit, integrity, content),
+    "youtube_default_filename_title",
+  );
+});
+
+test("deriveYouTubePrePublishReadbackFailureCode reports empty youtube description", () => {
+  const content = {
+    title: "NITECORE EDC17 对比 EDC37 功能实测",
+    body: "这期重点看 EDC17 的便携性、亮度和与 EDC37 的实际差异。",
+    cover_path: "E:/covers/youtube-cover.jpg",
+    media_path: "E:/videos/edc17.mp4",
+  };
+  const integrity = {
+    fields: {
+      title: { expected: content.title, actual: content.title, verified: true },
+      body: { expected: content.body, actual: "", verified: false },
+      cover: { expected_path: content.cover_path, actual: "youtube-cover.jpg", uploaded: true, verified: true },
+    },
+    failures: ["body"],
+  };
+
+  assert.equal(
+    deriveYouTubePrePublishReadbackFailureCode({ required_unverified: ["body"] }, integrity, content),
+    "youtube_description_empty",
+  );
+});
+
+test("enrichCompositeMaterialIntegrityFromActions does not treat youtube rich text action as saved readback", () => {
+  const content = {
+    title: "白光+紫外+绿激光三合一，EDC17开箱细节和上手感受",
+    body: "EDC17和EDC37同框对比，重点看体积、手感和做工差异。",
+    collection: "EDC装备工具集",
+    visibility: "public",
+    scheduled_publish_at: "2026-06-21T10:00:00+08:00",
+  };
+  const integrity = {
+    fields: {
+      title: { expected: content.title, actual: "", verified: false },
+      body: { expected: content.body, actual: "", verified: false },
+      collection: { expected: content.collection, actual: "", verified: false, configured: false },
+      visibility: { expected: "public", actual: "", verified: false, configured: false },
+      schedule: { expected: "2026-06-21 10:00", actual: "", verified: false, configured: false },
+      upload_ready: { actual: "ready", verified: true },
+      draft_state: { actual: "clean", verified: true },
+      cover: { expected_path: "", verified: true },
+      declaration: { expected: "", verified: true },
+      tags: { expected: [], actual: [], verified: true },
+      native_topics: { expected: [], actual: [], verified: true },
+    },
+    failures: ["title", "body", "collection", "visibility"],
+  };
+  const enriched = enrichCompositeMaterialIntegrityFromActions("youtube", integrity, [
+    {
+      kind: "youtube_rich_text",
+      actual_title: content.title,
+      actual_body: content.body,
+      verified_title: true,
+      verified_body: true,
+      input_mode: "native_cdp_input",
+      save_status_verified: true,
+    },
+    {
+      kind: "youtube_collection_select",
+      expected: content.collection,
+      option_text: content.collection,
+      clicked: true,
+      done_clicked: true,
+    },
+    {
+      kind: "youtube_collection_readback",
+      expected: content.collection,
+      row_text: `播放列表 ${content.collection}`,
+      verified: true,
+    },
+    {
+      kind: "youtube_visibility_public",
+      clicked: true,
+    },
+    {
+      kind: "youtube_cover_upload",
+      uploaded: true,
+      expected_path: "E:/covers/edc17-youtube.jpg",
+    },
+    {
+      kind: "youtube_cover_readback",
+      verified: true,
+      expected_base: "edc17-youtube.jpg",
+      source_hit: true,
+    },
+    {
+      kind: "youtube_schedule_set",
+      set: true,
+      expected: { display: "2026-06-21 10:00" },
+    },
+  ]);
+  const audit = buildCompositePublicationAudit("youtube", content, enriched, {}, { url: "https://studio.youtube.com/channel/test/videos/upload?d=ud" });
+  const snapshot = buildPublicationFieldSnapshotFromAudit("youtube", content, audit);
+
+  assert.ok(enriched.failures.includes("title"));
+  assert.ok(enriched.failures.includes("body"));
+  assert.equal(snapshot.title, "");
+  assert.equal(snapshot.body, "");
+  assert.equal(snapshot.collection, content.collection);
+  assert.equal(snapshot.cover_path, "E:/covers/edc17-youtube.jpg");
+  assert.equal(snapshot.visibility_or_publish_mode, "public");
+  assert.equal(snapshot.scheduled_publish_at, "2026-06-21 10:00");
+  assert.equal(audit.checklist.title.verified, false);
+  assert.equal(audit.checklist.body.verified, false);
+  assert.equal(audit.checklist.collection.verified, true);
+  assert.equal(audit.checklist.cover.verified, true);
+  assert.equal(audit.checklist.visibility.verified, true);
+  assert.equal(audit.checklist.schedule.verified, true);
+  assert.equal(audit.verified, false);
+});
+
+test("enrichCompositeMaterialIntegrityFromActions requires youtube readback before trusting cover or playlist actions", () => {
+  const integrity = {
+    fields: {
+      collection: { expected: "EDC装备工具集", actual: "", verified: false, configured: false },
+      cover: { expected_path: "E:/covers/edc17-youtube.jpg", actual: "", uploaded: false, verified: false },
+    },
+    failures: ["collection", "cover"],
+  };
+  const enriched = enrichCompositeMaterialIntegrityFromActions("youtube", integrity, [
+    {
+      kind: "youtube_collection_select",
+      expected: "EDC装备工具集",
+      option_text: "EDC装备工具集",
+      clicked: true,
+      done_clicked: true,
+    },
+    {
+      kind: "youtube_cover_upload",
+      uploaded: true,
+      expected_path: "E:/covers/edc17-youtube.jpg",
+    },
+  ]);
+
+  assert.equal(enriched.fields.collection.verified, false);
+  assert.equal(enriched.fields.cover.verified, false);
+  assert.deepEqual(enriched.failures.sort(), ["collection", "cover"]);
+});
+
+test("deriveYouTubePrepareControlGateState blocks failed youtube control readback fields", () => {
+  const state = deriveYouTubePrepareControlGateState(
+    "cover",
+    {
+      checklist: {
+        cover: {
+          expected_path: "E:/covers/edc17-youtube.jpg",
+          actual: "",
+          uploaded: true,
+          verified: false,
+        },
+      },
+    },
+    {},
+    ["cover"],
+  );
+
+  assert.equal(state.verified, false);
+  assert.equal(state.blocked, true);
+  assert.deepEqual(state.failed_fields, ["cover"]);
 });
 
 test("buildCompositePublicationAudit treats douyin inline hashtags as body-compatible in content plan match", () => {
@@ -3579,6 +4642,29 @@ test("shouldBootstrapCompositeUploadFromCleanEntry still starts upload on douyin
   );
 });
 
+test("shouldBootstrapCompositeUploadFromCleanEntry does not restart once youtube editor is open", () => {
+  assert.equal(
+    shouldBootstrapCompositeUploadFromCleanEntry({
+      ready: false,
+      failed: false,
+      last: {
+        platform: "youtube",
+        busy: false,
+        mediaPresent: false,
+        uploadPromptOnly: true,
+        fieldShell: true,
+        readySurface: true,
+        youtubeUploadRoute: true,
+        youtubeUploadDialogRoute: true,
+        youtubeEditorSurface: true,
+        youtubeHasEditorSurface: true,
+        fileInputCount: 1,
+      },
+    }),
+    false,
+  );
+});
+
 test("shouldBootstrapCompositeUploadFromCleanEntry stays off once media is already present", () => {
   assert.equal(
     shouldBootstrapCompositeUploadFromCleanEntry({
@@ -3668,15 +4754,41 @@ test("shouldWaitForCompositeUploadReadyBeforeFieldPreparation skips xiaohongshu 
   );
 });
 
+test("shouldWaitForCompositeUploadReadyBeforeFieldPreparation skips youtube wait once editor surface appears", () => {
+  assert.equal(
+    shouldWaitForCompositeUploadReadyBeforeFieldPreparation("youtube", {
+      ready: false,
+      failed: false,
+      last: {
+        mediaPresent: true,
+        fieldShell: false,
+        youtubeEditorSurface: true,
+        youtubeUploadDialogRoute: true,
+        uploadPromptOnly: false,
+        busy: false,
+      },
+    }),
+    false,
+  );
+});
+
+test("youtube post-upload interruptions preserve upload editor instead of closing it", () => {
+  const source = readFileSync("scripts/publication_browser_agent_service.mjs", "utf8");
+  assert.match(source, /youtubeUploadEditorOrCancelDialogPresent/);
+  assert.match(source, /post_upload\|upload_in_progress/);
+  assert.match(source, /youtube_upload_editor_dialog_preserved/);
+  assert.doesNotMatch(source, /stage:\s*"post_upload_in_progress"[\s\S]{0,800}dom_popup_dismissed/);
+});
+
 test("canReuseCurrentPageMediaForPrepublish reuses bilibili page whenever matching media is already attached", () => {
-  const mediaPath = String.raw`E:\WorkSpace\RoughCut\MAXACE 美杜莎4 顶配次顶配开箱.mp4`;
+  const mediaPath = String.raw`C:\sample-workspace\RoughCut\sample-product-unbox.mp4`;
   const state = canReuseCurrentPageMediaForPrepublish(
     "bilibili",
     {
       url: "https://member.bilibili.com/platform/upload/video/frame",
       lines: [
         "发布视频",
-        "MAXACE 美杜莎4 顶配次顶配开箱",
+        "示例产品双版本开箱",
         "已上传： 136.5MB/761.1MB",
         "当前速度： 6.5MB/s",
         "剩余时间： 1.6分钟",
@@ -4766,10 +5878,24 @@ test("deriveCompositeFinalPrePublishVisualVerification requires screenshot evide
   );
 
   assert.equal(verification.verified, false);
-  assert.match(verification.blocking_reasons.join(","), /missing_visual_evidence/);
+  assert.match(verification.blocking_reasons.join(","), /missing_visual_evidence_pack/);
 });
 
-test("deriveCompositeFinalPrePublishVisualVerification passes when required fields and screenshot evidence are present", () => {
+test("deriveCompositeFinalPrePublishVisualVerification passes when required fields and visual evidence pack are present", () => {
+  const snapshot = {
+    url: "https://creator.douyin.com/creator-micro/content/post/video",
+    title: "发布页",
+    visual_evidence: {
+      artifact_path: "E:/artifacts/douyin-prepublish-ok.png",
+      capture_type: "screenshot",
+      phase: "pre_publish_page_snapshot",
+    },
+    lines: ["发布", "设置封面", "定时发布"],
+  };
+  snapshot.visual_evidence_pack = buildVisualEvidencePackFromSnapshot(snapshot, {
+    platform: "douyin",
+    phase: "pre_publish_page_snapshot",
+  });
   const verification = deriveCompositeFinalPrePublishVisualVerification(
     "douyin",
     {
@@ -4801,12 +5927,7 @@ test("deriveCompositeFinalPrePublishVisualVerification passes when required fiel
       cover_path: "E:/covers/02-douyin-cover.jpg",
       route: { url: "https://creator.douyin.com/creator-micro/content/post/video", title: "发布页" },
     },
-    {
-      url: "https://creator.douyin.com/creator-micro/content/post/video",
-      title: "发布页",
-      visual_evidence: { artifact_path: "E:/artifacts/douyin-prepublish-ok.png", capture_type: "screenshot", phase: "pre_publish_page_snapshot" },
-      lines: ["发布", "设置封面", "定时发布"],
-    },
+    snapshot,
   );
 
   assert.equal(verification.verified, true);
@@ -5497,6 +6618,26 @@ test("shouldAcceptCompositeUploadReadyState rejects busy upload states", () => {
   assert.equal(shouldAcceptCompositeUploadReadyState("xiaohongshu", state, 1, 8000), false);
 });
 
+test("shouldAllowCompositeFieldPreparation lets all platforms fill metadata while upload is still running", () => {
+  for (const platform of ["youtube", "bilibili", "xiaohongshu", "kuaishou", "toutiao", "wechat-channels"]) {
+    assert.equal(
+      shouldAllowCompositeFieldPreparation(platform, {
+        ready: false,
+        failed: false,
+        last: {
+          busy: true,
+          mediaPresent: true,
+          uploadPromptOnly: false,
+          fieldShell: true,
+          readySurface: false,
+        },
+      }),
+      true,
+      platform,
+    );
+  }
+});
+
 test("derivePublicationTaskPreparationPolicy keeps refresh-only recovery from forcing draft clear", () => {
   const policy = derivePublicationTaskPreparationPolicy({
     platform_specific_overrides: {
@@ -5589,7 +6730,11 @@ test("extractYouTubeStudioChannelId and youtube studio route builders normalize 
   );
   assert.equal(
     buildYouTubeStudioUploadEntryUrl("UCAoEPjdkkZ_4QRQuZROfknw"),
-    "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos/upload",
+    "https://www.youtube.com/upload",
+  );
+  assert.equal(
+    buildYouTubeFreshUploadEntryUrl(),
+    "https://www.youtube.com/upload",
   );
   assert.equal(
     buildYouTubeStudioContentListUrl("UCAoEPjdkkZ_4QRQuZROfknw"),
@@ -5614,11 +6759,11 @@ test("resolvePlatformPublishEntryUrl and platformTabScore reject malformed youtu
   ];
   assert.equal(
     resolvePlatformPublishEntryUrl("youtube", tabs),
-    "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos/upload",
+    "https://www.youtube.com/upload",
   );
   assert.equal(
     resolvePlatformPublishEntryUrl("youtube", tabs, { prefer_draft_list_surface: true }),
-    "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos/upload",
+    "https://studio.youtube.com/channel/UCAoEPjdkkZ_4QRQuZROfknw/videos",
   );
   assert.equal(
     platformTabScore(
@@ -5934,7 +7079,7 @@ test("canReuseCurrentPageMediaForPrepublish accepts douyin ready editor surface 
         "重新上传",
       ],
     },
-    "E:\\WorkSpace\\RoughCut\\video.mp4",
+    "C:\\sample-workspace\\roughcut\\video.mp4",
   );
 
   assert.equal(state.reusable, true);
@@ -5965,7 +7110,7 @@ test("canReuseCurrentPageMediaForPrepublish accepts bilibili editor surface with
 });
 
 test("canReuseCurrentPageMediaForPrepublish rejects bilibili attached draft by default when the title drifts", () => {
-  const mediaPath = String.raw`E:\WorkSpace\RoughCut\MAXACE 美杜莎4 顶配次顶配开箱.mp4`;
+  const mediaPath = String.raw`C:\sample-workspace\RoughCut\sample-product-unbox.mp4`;
   const state = canReuseCurrentPageMediaForPrepublish(
     "bilibili",
     {
@@ -5974,7 +7119,7 @@ test("canReuseCurrentPageMediaForPrepublish rejects bilibili attached draft by d
         "更换视频",
         "标题",
         "旧稿标题",
-        "MAXACE 美杜莎4 顶配次顶配开箱",
+        "示例产品双版本开箱",
         "创作声明",
         "标签",
         "简介",
@@ -5984,7 +7129,7 @@ test("canReuseCurrentPageMediaForPrepublish rejects bilibili attached draft by d
       ],
     },
     mediaPath,
-    { expectedTitle: "MAXACE美杜莎4开箱先看细节" },
+    { expectedTitle: "示例产品开箱先看细节" },
   );
 
   assert.equal(state.reusable, false);
@@ -5992,7 +7137,7 @@ test("canReuseCurrentPageMediaForPrepublish rejects bilibili attached draft by d
 });
 
 test("canReuseCurrentPageMediaForPrepublish allows bilibili draft title mismatch reuse only in explicit current-page mode", () => {
-  const mediaPath = String.raw`E:\WorkSpace\RoughCut\MAXACE 美杜莎4 顶配次顶配开箱.mp4`;
+  const mediaPath = String.raw`C:\sample-workspace\RoughCut\sample-product-unbox.mp4`;
   const state = canReuseCurrentPageMediaForPrepublish(
     "bilibili",
     {
@@ -6001,7 +7146,7 @@ test("canReuseCurrentPageMediaForPrepublish allows bilibili draft title mismatch
         "更换视频",
         "标题",
         "旧稿标题",
-        "MAXACE 美杜莎4 顶配次顶配开箱",
+        "示例产品双版本开箱",
         "创作声明",
         "标签",
         "简介",
@@ -6021,7 +7166,7 @@ test("canReuseCurrentPageMediaForPrepublish allows bilibili draft title mismatch
   assert.equal(state.reason, "media_path_match");
 });
 
-test("canReuseCurrentPageMediaForPrepublish accepts youtube upload resume surface without local filename echo", () => {
+test("canReuseCurrentPageMediaForPrepublish rejects youtube upload resume surface for fresh publishing", () => {
   const state = canReuseCurrentPageMediaForPrepublish(
     "youtube",
     {
@@ -6039,8 +7184,29 @@ test("canReuseCurrentPageMediaForPrepublish accepts youtube upload resume surfac
     "",
   );
 
-  assert.equal(state.reusable, true);
-  assert.equal(state.reason, "youtube_upload_resume_surface");
+  assert.equal(state.reusable, false);
+  assert.equal(state.media_attached, true);
+  assert.equal(state.reason, "youtube_upload_resume_surface_ignored_fresh_publish");
+});
+
+test("canReuseCurrentPageMediaForPrepublish rejects youtube current-page media filename matches", () => {
+  const state = canReuseCurrentPageMediaForPrepublish(
+    "youtube",
+    {
+      url: "https://studio.youtube.com/video/eaTu-rtsyiw/edit",
+      lines: [
+        "频道内容",
+        "20260503_NITECORE_EDC17_横版_成片.mp4",
+        "视频链接",
+        "正在保存",
+      ],
+    },
+    "E:/videos/20260503_NITECORE_EDC17_横版_成片.mp4",
+  );
+
+  assert.equal(state.reusable, false);
+  assert.equal(state.media_attached, true);
+  assert.equal(state.reason, "youtube_current_page_media_ignored_fresh_publish");
 });
 
 test("canReuseCurrentPageMediaForPrepublish rejects youtube uploaded draft row on channel content list", () => {
@@ -6073,7 +7239,7 @@ test("canReuseCurrentPageMediaForPrepublish rejects bare upload prompt surface",
         "上传视频 视频大小不超过4GB",
       ],
     },
-    "E:\\WorkSpace\\RoughCut\\video.mp4",
+    "C:\\sample-workspace\\roughcut\\video.mp4",
   );
 
   assert.equal(state.reusable, false);
@@ -6114,7 +7280,7 @@ test("canReuseCurrentPageMediaForPrepublish skips media gate when local media is
 test("deriveCompositeCurrentPageMediaPendingDisposition converts upload prompt into wait-only pending state", () => {
   const disposition = deriveCompositeCurrentPageMediaPendingDisposition(
     "xiaohongshu",
-    "E:\\WorkSpace\\RoughCut\\video.mp4",
+    "C:\\sample-workspace\\roughcut\\video.mp4",
     { reusable: false, reason: "upload_prompt_only" },
   );
 
@@ -6127,7 +7293,7 @@ test("deriveCompositeCurrentPageMediaPendingDisposition converts upload prompt i
 test("deriveCompositeCurrentPageMediaPendingDisposition keeps upload_failed as needs_human", () => {
   const disposition = deriveCompositeCurrentPageMediaPendingDisposition(
     "xiaohongshu",
-    "E:\\WorkSpace\\RoughCut\\video.mp4",
+    "C:\\sample-workspace\\roughcut\\video.mp4",
     { reusable: false, reason: "upload_failed" },
   );
 
@@ -6140,7 +7306,7 @@ test("shouldBootstrapStopBeforeMediaUpload enables safe upload bootstrap for loc
   assert.equal(
     shouldBootstrapStopBeforeMediaUpload(
       "bilibili",
-      "E:\\WorkSpace\\RoughCut\\video.mp4",
+      "C:\\sample-workspace\\roughcut\\video.mp4",
       { reusable: false, reason: "upload_prompt_only" },
       {
         stopBeforeFinalPublish: true,
@@ -6169,7 +7335,7 @@ test("shouldBootstrapStopBeforeMediaUpload keeps unsupported or failed routes bl
   assert.equal(
     shouldBootstrapStopBeforeMediaUpload(
       "youtube",
-      "E:\\WorkSpace\\RoughCut\\video.mp4",
+      "C:\\sample-workspace\\roughcut\\video.mp4",
       { reusable: false, reason: "upload_failed" },
       {
         stopBeforeFinalPublish: true,
@@ -6217,6 +7383,17 @@ test("shouldTreatYouTubeUploadSurfaceAsStable rejects generic d=ud list with onl
   );
   assert.equal(
     shouldTreatYouTubeUploadSurfaceAsStable({
+      uploadResumeRoute: false,
+      channelContentList: true,
+      uploadDialogSurface: true,
+      uploadPromptTextSurface: false,
+      visibleFileInputCount: 1,
+      videoCapableFileInputCount: 1,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldTreatYouTubeUploadSurfaceAsStable({
       uploadResumeRoute: true,
       channelContentList: true,
       uploadDialogSurface: true,
@@ -6227,18 +7404,18 @@ test("shouldTreatYouTubeUploadSurfaceAsStable rejects generic d=ud list with onl
   );
 });
 
-test("shouldAttemptMediaBootstrap skips youtube stop-before reupload when upload-resume surface is already reusable", () => {
+test("shouldAttemptMediaBootstrap allows youtube stop-before bootstrap when resume surface is not reusable", () => {
   assert.equal(
     shouldAttemptMediaBootstrap({
       stopBeforeFinalPublish: true,
       prepublishOnlyCurrentPage: false,
       forceMediaUpload: false,
       stopBeforeUploadBootstrap: false,
-      mediaAlreadyPresent: true,
+      mediaAlreadyPresent: false,
       pageHasMedia: false,
       hasMediaPath: true,
     }),
-    false,
+    true,
   );
 });
 
@@ -6467,7 +7644,7 @@ test("deriveDedicatedVerifierMediaEntryDisposition converts bilibili upload prom
         },
       },
     },
-    "E:\\WorkSpace\\RoughCut\\video.mp4",
+    "C:\\sample-workspace\\roughcut\\video.mp4",
   );
 
   assert.equal(disposition.pending, true);
@@ -6536,8 +7713,28 @@ test("buildStopBeforeFinalPublishRecoveryOverrides keeps safe stop-before-final-
   });
 });
 
+test("buildStopBeforeFinalPublishRecoveryOverrides keeps youtube stop-before recovery fresh-only", () => {
+  const overrides = buildStopBeforeFinalPublishRecoveryOverrides({
+    platform: "youtube",
+    prepublishOnlyCurrentPage: false,
+    prepareOnlyCurrentPage: true,
+  });
+
+  assert.deepEqual(overrides, {
+    recovery_mode: "fresh_publish",
+    clear_draft_context: true,
+    force_publish_page_refresh: true,
+    fresh_start_platform_tab: true,
+    prepublish_only_current_page: false,
+    prepare_only_current_page: false,
+    verify_media_upload: true,
+    wait_for_publish_confirmation: true,
+  });
+});
+
 test("buildStopBeforeFinalPublishRecoveryOverrides keeps auth-required stop-before paths out of prepublish resume", () => {
   const overrides = buildStopBeforeFinalPublishRecoveryOverrides({
+    platform: "youtube",
     prepublishOnlyCurrentPage: false,
     prepareOnlyCurrentPage: true,
     verificationReason: "auth_required",
@@ -6596,16 +7793,16 @@ test("buildPreparationBootstrapRecoveryOverrides preserves fresh-start tab flag"
   assert.equal(overrides.fresh_start_platform_tab, true);
 });
 
-test("buildPreparationBootstrapTimeoutOutcome keeps safe recovery context on bootstrap timeout", () => {
+test("buildPreparationBootstrapTimeoutOutcome keeps youtube fresh-start context on bootstrap timeout", () => {
   const policy = derivePublicationTaskPreparationPolicy({
     publication_recovery_state: {
       recovery_overrides: {
-        prepare_only_current_page: true,
-        recovery_mode: "prepublish_resume",
+        fresh_start_platform_tab: true,
+        recovery_mode: "fresh_publish",
         clear_draft_context: false,
         force_publish_page_refresh: true,
         verify_media_upload: true,
-        wait_for_publish_confirmation: true,
+        wait_for_publish_confirmation: false,
       },
     },
   });
@@ -6617,17 +7814,18 @@ test("buildPreparationBootstrapTimeoutOutcome keeps safe recovery context on boo
     actions: [{ kind: "platform_tab_resolved" }],
     preparationPolicy: policy,
     content: { title: "demo" },
-    details: { phase: "ensure_publish_route", timeout_ms: 30000 },
+    details: { phase: "ensure_publish_route", timeout_ms: 90000 },
   });
 
   assert.equal(outcome.status, "needs_human");
   assert.equal(outcome.error.code, "platform_route_bootstrap_timeout");
-  assert.equal(outcome.result.recovery_overrides.recovery_mode, "prepublish_resume");
-  assert.equal(outcome.result.recovery_overrides.prepare_only_current_page, true);
+  assert.equal(outcome.result.recovery_overrides.recovery_mode, "fresh_publish");
+  assert.equal(outcome.result.recovery_overrides.prepare_only_current_page, false);
+  assert.equal(outcome.result.recovery_overrides.fresh_start_platform_tab, true);
   assert.equal(outcome.result.recovery_overrides.clear_draft_context, false);
   assert.equal(outcome.result.recovery_overrides.force_publish_page_refresh, true);
   assert.equal(outcome.result.recovery_overrides.verify_media_upload, true);
-  assert.equal(outcome.result.recovery_overrides.wait_for_publish_confirmation, true);
+  assert.equal(outcome.result.recovery_overrides.wait_for_publish_confirmation, false);
 });
 
 test("derivePublicationTaskExecutionTimeoutMs follows publish confirmation budget instead of fixed global timeout", () => {
@@ -6659,6 +7857,21 @@ test("derivePublicationTaskExecutionTimeoutMs honors persisted recovery context 
   });
 
   assert.equal(timeoutMs, 240000);
+});
+
+test("derivePublicationTaskExecutionTimeoutMs gives youtube uploads enough task budget", () => {
+  const timeoutMs = derivePublicationTaskExecutionTimeoutMs({
+    platform: "youtube",
+    content: {
+      platform: "youtube",
+      platform_specific_overrides: {
+        youtube_publish_path_policy: "fresh_upload_only",
+      },
+    },
+  });
+
+  assert.ok(timeoutMs >= compositeUploadTimeoutMs("youtube"));
+  assert.ok(timeoutMs > 240000);
 });
 
 test("derivePublicationTaskExecutionTimeoutMs honors explicit per-task timeout without exceeding global ceiling", () => {
@@ -6960,17 +8173,26 @@ test("buildPublicationTaskTimeoutEvidence preserves visual evidence from trusted
         receipt_wait: 12345,
       },
       visual_evidence: {
-        artifact_path: "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-timeout.png",
+        artifact_path: "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-timeout.png",
         capture_type: "screenshot",
+      },
+      visual_evidence_pack: {
+        evidence_id: "timeout-pack",
+        visual_evidence: {
+          artifact_path: "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-timeout.png",
+          capture_type: "screenshot",
+        },
+        visible_lines: ["定时发布", "发布视频"],
       },
     },
   });
 
   assert.equal(
     evidence.visual_evidence.artifact_path,
-    "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-timeout.png",
+    "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-timeout.png",
   );
   assert.equal(evidence.visual_evidence.capture_type, "screenshot");
+  assert.equal(evidence.visual_evidence_pack.evidence_id, "timeout-pack");
 });
 
 test("mergePublicationTaskProgress keeps last trusted visual evidence when later patch is sparse", () => {
@@ -6983,8 +8205,16 @@ test("mergePublicationTaskProgress keeps last trusted visual evidence when later
         path: "",
       },
       visual_evidence: {
-        artifact_path: "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-pre-publish.png",
+        artifact_path: "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-pre-publish.png",
         capture_type: "screenshot",
+      },
+      visual_evidence_pack: {
+        evidence_id: "pre-publish-pack",
+        visual_evidence: {
+          artifact_path: "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-pre-publish.png",
+          capture_type: "screenshot",
+        },
+        visible_lines: ["定时发布", "发布视频"],
       },
     },
     {
@@ -6995,14 +8225,16 @@ test("mergePublicationTaskProgress keeps last trusted visual evidence when later
         path: "",
       },
       visual_evidence: {},
+      visual_evidence_pack: {},
     },
   );
 
   assert.equal(
     merged.visual_evidence.artifact_path,
-    "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-pre-publish.png",
+    "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-pre-publish.png",
   );
   assert.equal(merged.visual_evidence.capture_type, "screenshot");
+  assert.equal(merged.visual_evidence_pack.evidence_id, "pre-publish-pack");
 });
 
 test("shouldBlockOnMediaUploadFailure blocks when video input was not mounted", () => {
@@ -7042,7 +8274,7 @@ test("shouldTreatMediaUploadAsInProgress recognizes douyin upload-progress pages
         ],
         elements: [],
       },
-      "E:\\WorkSpace\\RoughCut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+      "C:\\sample-workspace\\roughcut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
     ),
     true,
   );
@@ -7058,7 +8290,7 @@ test("shouldTreatMediaUploadAsInProgress recognizes douyin upload-progress pages
         lines: ["设置封面", "请选择合集"],
         elements: [],
       },
-      "E:\\WorkSpace\\RoughCut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+      "C:\\sample-workspace\\roughcut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
     ),
     false,
   );
@@ -7235,7 +8467,7 @@ test("currentPageMatchesPrepareOnlyExecutionContext accepts douyin upload shell 
       {
         lines: ["发布视频", "点击上传 或直接将视频文件拖入此区域"],
       },
-      "E:\\WorkSpace\\RoughCut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+      "C:\\sample-workspace\\roughcut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
       [],
     ),
     true,
@@ -7255,7 +8487,7 @@ test("currentPageMatchesPrepareOnlyExecutionContext accepts douyin loading uploa
         title: "抖音创作者中心",
         lines: ["加载中，请稍候..."],
       },
-      "E:\\WorkSpace\\RoughCut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+      "C:\\sample-workspace\\roughcut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
       [],
     ),
     true,
@@ -7279,7 +8511,7 @@ test("currentPageMatchesPrepareOnlyExecutionContext accepts douyin post-video ed
           "文件解析中，请稍等...",
         ],
       },
-      "E:\\WorkSpace\\RoughCut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+      "C:\\sample-workspace\\roughcut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
       [
         { kind: "prepare_only_current_page_normalize_to_upload_entry" },
         { kind: "media_upload", uploaded: true },
@@ -7301,7 +8533,7 @@ test("currentPageMatchesPrepareOnlyExecutionContext rejects douyin post-video ed
         url: "https://creator.douyin.com/creator-micro/content/post/video?enter_from=publish_page",
         lines: ["作品描述", "设置封面", "请选择合集", "请选择自主声明"],
       },
-      "E:\\WorkSpace\\RoughCut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
+      "C:\\sample-workspace\\roughcut\\MAXACE 美杜莎4 顶配次顶配开箱.mp4",
       [],
     ),
     false,

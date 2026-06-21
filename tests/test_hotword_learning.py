@@ -166,7 +166,7 @@ def test_llm_transcription_prior_allows_and_blocks_hotwords() -> None:
     review_memory = build_subtitle_review_memory(
         workflow_template="edc_tactical",
         subject_domain=None,
-        source_name="IMG_0024 luckykiss edc弹射舱 益生菌含片.MOV",
+        source_name="IMG_0024 samplemint edc弹射舱 益生菌含片.MOV",
         glossary_terms=[],
         user_memory={
             "learned_hotwords": [
@@ -180,7 +180,7 @@ def test_llm_transcription_prior_allows_and_blocks_hotwords() -> None:
         include_recent_examples=False,
     )
     prompt = build_transcription_prompt(
-        source_name="IMG_0024 luckykiss edc弹射舱 益生菌含片.MOV",
+        source_name="IMG_0024 samplemint edc弹射舱 益生菌含片.MOV",
         workflow_template="edc_tactical",
         review_memory=review_memory,
         dialect_profile="mandarin",
@@ -256,7 +256,7 @@ def test_llm_transcription_prior_can_scope_subject_domain() -> None:
         _infer_subject_domain_for_memory(
             workflow_template="edc_tactical",
             content_profile=content_profile,
-            source_name="IMG_0024 luckykiss edc弹射舱.MOV",
+            source_name="IMG_0024 samplemint edc弹射舱.MOV",
         )
         == "food"
     )
@@ -469,7 +469,7 @@ def test_subtitle_postprocess_does_not_apply_lexical_normalization() -> None:
 
 
 def test_ingestible_edc_style_source_does_not_prompt_knife_hotwords() -> None:
-    source_name = "IMG_0024 luckykiss edc弹射舱 益生菌含片.MOV"
+    source_name = "IMG_0024 samplemint edc弹射舱 益生菌含片.MOV"
     content_profile: dict = {}
     subject_domain = _infer_subject_domain_for_memory(
         workflow_template="edc_tactical",
@@ -640,7 +640,7 @@ def test_topic_fact_scope_ignores_subtitle_and_source_domain_noise() -> None:
                 "subject": {
                     "domain": "food",
                     "type": "益生菌含片",
-                    "theme": "LuckyKiss 弹射舱益生菌含片开箱",
+                    "theme": "SampleMint 弹射舱益生菌含片开箱",
                 },
             },
         },
@@ -661,7 +661,7 @@ def test_detect_glossary_domains_uses_canonical_surface_for_subtitle_haystack() 
         subtitle_items=[
             {
                 "text_raw": "这个EDC折刀和工具钳都很像",
-                "text_norm": "LuckyKiss 益生菌含片零食开箱",
+                "text_norm": "SampleMint 益生菌含片零食开箱",
                 "text_final": "",
                 "display_suppressed_reason": "standalone_filler",
             }
@@ -683,7 +683,7 @@ def test_build_subtitle_review_memory_uses_canonical_surface_for_recent_subtitle
         recent_subtitles=[
             {
                 "text_raw": "这个EDC折刀和工具钳都很像",
-                "text_norm": "LuckyKiss 益生菌含片零食开箱",
+                "text_norm": "SampleMint 益生菌含片零食开箱",
                 "text_final": "",
                 "display_suppressed_reason": "standalone_filler",
                 "source_name": "demo.mp4",
@@ -696,6 +696,6 @@ def test_build_subtitle_review_memory_uses_canonical_surface_for_recent_subtitle
 
     terms = {str(item.get("term") or "") for item in (review_memory.get("terms") or [])}
 
-    assert any(term.casefold() == "luckykiss" for term in terms)
+    assert any(term.casefold() == "samplemint" for term in terms)
     assert "EDC" not in terms
-    assert "LuckyKiss" in review_memory["style_examples"][0]["text"]
+    assert "SampleMint" in review_memory["style_examples"][0]["text"]

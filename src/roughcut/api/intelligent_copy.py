@@ -599,6 +599,11 @@ async def publish_intelligent_folder(body: IntelligentPublishIn, session: AsyncS
                 str(target.get("browser_profile_id") or target.get("credential_ref") or "")
                 for target in browser_agent_targets
             ],
+            skip_creator_session_platforms=[
+                str(target.get("platform") or "")
+                for target in browser_agent_targets
+                if str(target.get("platform") or "").strip().lower() == "youtube"
+            ],
             request_timeout_sec=max(5, int(getattr(settings, "publication_browser_agent_timeout_sec", 60) or 60)),
         )
         if not agent_ready.get("ready"):
@@ -1029,7 +1034,6 @@ def _find_active_generation_task(
     normalized_platforms = _normalize_generation_platforms(platforms)
     normalized_creator_profile_id = str(creator_profile_id or "").strip()
     for item in _load_generation_tasks():
-        task_id = str(item.get("id") or "")
         if item.get("folder_path") != folder_path:
             continue
         if str(item.get("copy_style") or "").strip() != normalized_style:

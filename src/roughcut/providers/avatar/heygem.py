@@ -16,8 +16,6 @@ from roughcut.providers.avatar.base import AvatarProvider
 
 _DEFAULT_SHARED_ROOTS = (
     DEFAULT_HEYGEM_SHARED_ROOT,
-    Path("D:/duix_avatar_data/face2face"),
-    Path("d:/duix_avatar_data/face2face"),
 )
 _CONTAINER_VIDEO_ROOT = Path("/code/data/inputs/video")
 _POLL_INTERVAL_SECONDS = 2.0

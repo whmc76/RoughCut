@@ -65,12 +65,13 @@ async def test_submit_publication_attempt_for_adapter_routes_browser_agent_execu
 
 
 @pytest.mark.asyncio
-async def test_submit_publication_attempt_for_adapter_routes_x_link_share_to_legacy_executor(monkeypatch):
+async def test_submit_publication_attempt_for_adapter_routes_x_link_share_to_browser_agent_executor(monkeypatch):
     called = {"count": 0}
 
     async def fake_submit(session, attempt, **kwargs):
         called["count"] += 1
-        return {"attempt_id": "attempt-2", "status": "submitted"}
+        called["kwargs"] = kwargs
+        return {"attempt_id": "attempt-2", "status": "published"}
 
     monkeypatch.setattr(publication, "submit_publication_attempt_to_browser_agent", fake_submit)
 
@@ -80,5 +81,6 @@ async def test_submit_publication_attempt_for_adapter_routes_x_link_share_to_leg
         browser_agent_base_url="http://browser-agent.local",
     )
 
-    assert result == {"attempt_id": "attempt-2", "status": "submitted"}
+    assert result == {"attempt_id": "attempt-2", "status": "published"}
     assert called["count"] == 1
+    assert called["kwargs"]["browser_agent_base_url"] == "http://browser-agent.local"

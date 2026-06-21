@@ -22,8 +22,8 @@ services:
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
       NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
     volumes:
-      - ${QWEN3_ASR_HF_CACHE:-E:/WorkSpace/RoughCut/.model-cache/huggingface}:/models/huggingface
-      - ${QWEN3_ASR_MODELSCOPE_CACHE:-E:/WorkSpace/RoughCut/.model-cache/modelscope}:/models/modelscope
+      - ${QWEN3_ASR_HF_CACHE:-C:/sample-workspace/RoughCut/.model-cache/huggingface}:/models/huggingface
+      - ${QWEN3_ASR_MODELSCOPE_CACHE:-C:/sample-workspace/RoughCut/.model-cache/modelscope}:/models/modelscope
       - ./output/test/asr-bench/samples:/bench/audio:ro
     ports:
       - "${QWEN3_ASR_PORT:-30080}:30000"

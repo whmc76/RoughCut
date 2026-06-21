@@ -723,6 +723,14 @@ def media_render(self, job_id: str):
     return _run_task_step(self, job_id, "render", retry_countdown=30)
 
 
+@celery_app.task(name="roughcut.pipeline.tasks.remix_production_run", bind=True, max_retries=0)
+def remix_production_run(self, job_id: str, command: list[str], output_dir: str):
+    from roughcut.api.jobs import _run_remix_production_job
+
+    logger.info("remix production task started job=%s task_id=%s output_dir=%s", job_id, self.request.id, output_dir)
+    return asyncio.run(_run_remix_production_job(job_id, list(command or []), str(output_dir or "")))
+
+
 @celery_app.task(name="roughcut.pipeline.tasks.agent_run_preset", bind=True, max_retries=0)
 def agent_run_preset(
     self,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 import uuid
@@ -65,7 +66,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-dir",
         type=Path,
-        default=Path(r"Y:\EDC系列\未剪辑视频"),
+        default=Path(os.getenv("ROUGHCUT_BENCHMARK_SOURCE_DIR", "data/samples")),
         help="Directory containing the benchmark source videos.",
     )
     parser.add_argument(

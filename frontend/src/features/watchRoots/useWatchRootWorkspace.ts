@@ -21,6 +21,9 @@ function serializeRootForm(form: RootForm): string {
     scan_mode: form.scan_mode,
     ingest_mode: form.ingest_mode,
     job_flow_mode: form.job_flow_mode,
+    edit_mode: form.edit_mode,
+    automation_level: form.automation_level,
+    material_usage: form.material_usage,
   });
 }
 
@@ -109,6 +112,9 @@ export function useWatchRootWorkspace() {
         scan_mode: selectedRoot.scan_mode,
         ingest_mode: selectedRoot.ingest_mode,
         job_flow_mode: selectedRoot.job_flow_mode ?? "auto",
+        edit_mode: selectedRoot.edit_mode ?? "auto",
+        automation_level: selectedRoot.automation_level ?? "standard",
+        material_usage: selectedRoot.material_usage ?? "all_uploaded",
       };
       lastPersistedRef.current = serializeRootForm(nextForm);
       setForm(nextForm);
@@ -168,6 +174,9 @@ export function useWatchRootWorkspace() {
         scan_mode: root.scan_mode,
         ingest_mode: root.ingest_mode,
         job_flow_mode: root.job_flow_mode ?? "auto",
+        edit_mode: root.edit_mode ?? "auto",
+        automation_level: root.automation_level ?? "standard",
+        material_usage: root.material_usage ?? "all_uploaded",
       });
     },
     onSuccess: (updatedRoot) => {
@@ -329,6 +338,9 @@ export function useWatchRootWorkspace() {
             scan_mode: updatedRoot.scan_mode,
             ingest_mode: updatedRoot.ingest_mode,
             job_flow_mode: updatedRoot.job_flow_mode ?? "auto",
+            edit_mode: updatedRoot.edit_mode ?? "auto",
+            automation_level: updatedRoot.automation_level ?? "standard",
+            material_usage: updatedRoot.material_usage ?? "all_uploaded",
           };
           lastPersistedRef.current = serializeRootForm(updatedForm);
           preserveSavedStateRef.current = true;

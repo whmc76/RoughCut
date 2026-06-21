@@ -2,6 +2,8 @@
 .venv312/
 .env
 .env.*
+!.env.example
+!**/.env.example
 .pytest_cache/
 .pytest-*.log
 node_modules/
@@ -67,6 +69,44 @@ watch/
 roughcut.ports.env
 frame_*.jpg
 data/intelligent_copy/
+
+# Open-source privacy guardrails: local identity, tasks, memory, and generated state
+data/avatar_materials/**
+data/creator_profiles/**
+data/remix_production_tasks/**
+data/content_profile_review_stats.json
+data/*hotword*
+data/*learned*
+data/*memory*
+data/glossary*
+data/jobs*
+data/tasks*
+data/watch_roots*
+roughcut_config_profiles.json
+
+# Codex/agent working state and internal evidence docs
+.superpowers/
+docs/agent-*.md
+docs/agent-*.json
+docs/publication-agent-ledger.md
+docs/codex-*.md
+docs/token-usage-cache.md
+docs/20*.md
+docs/20*.json
+docs/design/20*.md
+docs/golden-jobs/**
+docs/*remix*.md
+docs/dreamina-setup.md
+
+# Root-level scratch probes and generated media
+/inspect_*.py
+/rerun_*.py
+/temp_*.py
+/tmp_*.py
+/tmp_*.json
+/tmp_openapi.json
+/final-cover.png
+/compose-full.yml
 
 # Local debug and runtime scratch outputs
 .hydra-host-dev/

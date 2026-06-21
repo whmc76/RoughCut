@@ -75,6 +75,76 @@ async def test_publish_intelligent_folder_skips_browser_agent_gate_for_social_au
 
 
 @pytest.mark.asyncio
+async def test_publish_intelligent_folder_uses_browser_cookie_gate_for_x_and_skips_youtube_probe(monkeypatch) -> None:
+    captured_ready: dict[str, object] = {}
+
+    async def fake_load_inputs(**_kwargs):
+        return {
+            "job": SimpleNamespace(id="job-browser-cookie", status="done"),
+            "render_output": SimpleNamespace(output_path="E:/video.mp4"),
+            "packaging": {"platforms": {"youtube": {}, "x": {}}},
+            "creator_profile": {"creator_profile": {"publishing": {"platform_credentials": []}}},
+            "source_video_path": "E:/video.mp4",
+        }
+
+    async def fake_resolve_platform_options(**_kwargs):
+        return {}
+
+    def fake_build_plan(**_kwargs):
+        return {
+            "status": "ready",
+            "publish_ready": True,
+            "job_id": "job-browser-cookie",
+            "creator_profile_id": "creator-1",
+            "targets": [
+                {"platform": "youtube", "adapter": "browser_agent", "browser_profile_id": "chrome-main"},
+                {"platform": "x", "adapter": "x_link_share", "browser_profile_id": "chrome-main"},
+            ],
+        }
+
+    async def fake_agent_ready(**kwargs):
+        captured_ready.update(kwargs)
+        return {"ready": True}
+
+    async def fake_submit_attempts(_session, plan):
+        return {"status": "submitted", "created_attempts": [{"platform": target["platform"]} for target in plan["targets"]]}
+
+    async def fake_list_attempts(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(ic_api, "_load_intelligent_publish_inputs", fake_load_inputs)
+    monkeypatch.setattr(ic_api, "_resolve_intelligent_publish_platform_options", fake_resolve_platform_options)
+    monkeypatch.setattr(ic_api, "build_publication_plan", fake_build_plan)
+    monkeypatch.setattr(ic_api, "publication_plan_is_publishable", lambda _plan: True)
+    monkeypatch.setattr(ic_api, "list_publication_attempts", fake_list_attempts)
+    monkeypatch.setattr(ic_api, "submit_publication_attempts", fake_submit_attempts)
+    monkeypatch.setattr(ic_api, "check_publication_browser_agent_ready", fake_agent_ready)
+    monkeypatch.setattr(ic_api, "_dispatch_publication_worker_tick", lambda _count: None)
+    monkeypatch.setattr(
+        ic_api,
+        "get_settings",
+        lambda: SimpleNamespace(
+            publication_browser_agent_base_url="http://browser-agent.local",
+            publication_browser_agent_auth_token="",
+            publication_browser_agent_timeout_sec=60,
+        ),
+    )
+
+    body = SimpleNamespace(
+        folder_path="E:/materials/edc17",
+        creator_profile_id="creator-1",
+        platforms=["youtube", "x"],
+        platform_options=None,
+    )
+
+    result = await ic_api.publish_intelligent_folder(body, session=_FakeSession())
+
+    assert result["status"] == "submitted"
+    assert captured_ready["target_platforms"] == ["youtube", "x"]
+    assert captured_ready["skip_creator_session_platforms"] == ["youtube"]
+
+
+@pytest.mark.asyncio
 async def test_publish_intelligent_folder_auto_heals_cover_block_before_submit(monkeypatch) -> None:
     load_calls = {"count": 0}
     rerender_calls = []
@@ -86,7 +156,7 @@ async def test_publish_intelligent_folder_auto_heals_cover_block_before_submit(m
             "job": SimpleNamespace(id="job-cover", status="done"),
             "render_output": SimpleNamespace(output_path="E:/video.mp4"),
             "packaging": {"ready": packaging_ready},
-            "creator_profile": {"id": "creator-1", "display_name": "珍妮斯baby", "creator_profile": {"publishing": {}}},
+            "creator_profile": {"id": "creator-1", "display_name": "Demo Creator", "creator_profile": {"publishing": {}}},
             "source_video_path": "E:/video.mp4",
         }
 
@@ -136,7 +206,7 @@ async def test_publish_intelligent_folder_auto_heals_cover_block_before_submit(m
     )
 
     body = SimpleNamespace(
-        folder_path="E:/materials/bluey",
+        folder_path="E:/materials/sample_show",
         creator_profile_id="creator-1",
         platforms=["douyin"],
         platform_options=None,
@@ -156,7 +226,7 @@ async def test_publish_intelligent_folder_stops_when_cover_auto_heal_is_exhauste
             "job": SimpleNamespace(id="job-cover", status="done"),
             "render_output": SimpleNamespace(output_path="E:/video.mp4"),
             "packaging": {"ready": False},
-            "creator_profile": {"id": "creator-1", "display_name": "珍妮斯baby", "creator_profile": {"publishing": {}}},
+            "creator_profile": {"id": "creator-1", "display_name": "Demo Creator", "creator_profile": {"publishing": {}}},
             "source_video_path": "E:/video.mp4",
         }
 
@@ -195,7 +265,7 @@ async def test_publish_intelligent_folder_stops_when_cover_auto_heal_is_exhauste
     )
 
     body = SimpleNamespace(
-        folder_path="E:/materials/bluey",
+        folder_path="E:/materials/sample_show",
         creator_profile_id="creator-1",
         platforms=["douyin"],
         platform_options=None,
@@ -221,7 +291,7 @@ async def test_publish_job_auto_generates_materials_before_submit(monkeypatch) -
             SimpleNamespace(id=job_id, status="done", source_path="", output_dir="E:/rendered"),
             SimpleNamespace(output_path="E:/rendered/video.mp4"),
             packaging,
-            {"id": "creator-1", "display_name": "珍妮斯baby"},
+            {"id": "creator-1", "display_name": "Demo Creator"},
         )
 
     async def fake_generate_intelligent_copy(folder_path, **kwargs):
@@ -242,7 +312,13 @@ async def test_publish_job_auto_generates_materials_before_submit(monkeypatch) -
         return {}
 
     def fake_build_plan(**kwargs):
-        assert kwargs["platform_packaging"] is not None
+        if kwargs["platform_packaging"] is None:
+            return {
+                "status": "blocked",
+                "publish_ready": False,
+                "media_source_contract": {"source": "render_output"},
+                "targets": [],
+            }
         return {
             "status": "ready",
             "publish_ready": True,
@@ -272,6 +348,164 @@ async def test_publish_job_auto_generates_materials_before_submit(monkeypatch) -
     assert result["material_generation"]["source"] == "job_one_click_publish"
 
 
+@pytest.mark.asyncio
+async def test_prepare_job_publication_materials_generates_without_submit(monkeypatch) -> None:
+    job_id = "22222222-2222-2222-2222-222222222222"
+    load_calls = {"count": 0}
+    generated = {"called": False}
+
+    async def fake_load_publication_inputs(**_kwargs):
+        load_calls["count"] += 1
+        packaging = None if load_calls["count"] == 1 else {"platforms": {"bilibili": {"titles": ["标题"]}}}
+        return (
+            SimpleNamespace(id=job_id, status="done", source_path="", output_dir="E:/rendered"),
+            SimpleNamespace(output_path="E:/rendered/video.mp4"),
+            packaging,
+            {"id": "creator-1", "display_name": "Demo Creator"},
+        )
+
+    async def fake_generate_intelligent_copy(folder_path, **kwargs):
+        generated["called"] = True
+        assert Path(folder_path) == Path("E:/rendered")
+        assert kwargs["platforms"] == ["bilibili"]
+        return {
+            "publish_ready": True,
+            "material_dir": "E:/rendered/smart-copy",
+            "platform_packaging_json_path": "E:/rendered/smart-copy/_meta/platform-packaging.json",
+            "blocking_reasons": [],
+        }
+
+    async def fake_list_attempts(*_args, **_kwargs):
+        return []
+
+    async def fake_resolve_options(**_kwargs):
+        return {}
+
+    def fake_build_plan(**kwargs):
+        return {
+            "status": "ready",
+            "publish_ready": True,
+            "targets": [{"platform": "bilibili", "adapter": "browser_agent"}],
+            "existing_attempts": kwargs["existing_attempts"],
+        }
+
+    async def fail_submit_attempts(*_args, **_kwargs):
+        raise AssertionError("prepare materials must not submit publication attempts")
+
+    monkeypatch.setattr(jobs_api, "_load_publication_inputs", fake_load_publication_inputs)
+    monkeypatch.setattr(jobs_api, "generate_intelligent_copy", fake_generate_intelligent_copy)
+    monkeypatch.setattr(jobs_api, "list_publication_attempts", fake_list_attempts)
+    monkeypatch.setattr(jobs_api, "_resolve_job_publication_platform_options", fake_resolve_options)
+    monkeypatch.setattr(jobs_api, "build_publication_plan", fake_build_plan)
+    monkeypatch.setattr(jobs_api, "publication_plan_is_publishable", lambda plan: bool(plan.get("publish_ready")))
+    monkeypatch.setattr(jobs_api, "submit_publication_attempts", fail_submit_attempts)
+
+    result = await jobs_api.prepare_job_publication_materials(
+        job_id,
+        SimpleNamespace(creator_profile_id="creator-1", platforms=["bilibili"], platform_options={}),
+        session=_FakeSession(),
+    )
+
+    assert generated["called"] is True
+    assert result["status"] == "ready"
+    assert result["material_generation"]["source"] == "job_one_click_publish"
+    assert result["targets"] == [{"platform": "bilibili", "adapter": "browser_agent"}]
+
+
+def test_job_publication_packaging_generation_respects_requested_platforms() -> None:
+    packaging = {
+        "platforms": {
+            "bilibili": {
+                "titles": ["Demo title"],
+                "description": "Demo description",
+            }
+        }
+    }
+
+    assert (
+        jobs_api._job_publication_packaging_needs_generation(
+            packaging,
+            requested_platforms=["bilibili"],
+        )
+        is False
+    )
+    assert (
+        jobs_api._job_publication_packaging_needs_generation(
+            packaging,
+            requested_platforms=["douyin"],
+        )
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_publish_job_uses_recovered_materialized_contract_before_regeneration(monkeypatch) -> None:
+    job_id = "12345678-1234-1234-1234-123456789abc"
+    generated = {"called": False}
+    build_calls = []
+
+    async def fake_load_publication_inputs(**_kwargs):
+        return (
+            SimpleNamespace(id=job_id, status="done", source_path="", output_dir="."),
+            SimpleNamespace(output_path="."),
+            None,
+            {"id": "creator-1", "display_name": "Demo Creator"},
+        )
+
+    async def fake_generate_intelligent_copy(*_args, **_kwargs):
+        generated["called"] = True
+        raise AssertionError("material generation should not run when a materialized attempt contract is publishable")
+
+    async def fake_list_attempts(*_args, **_kwargs):
+        return [
+            {
+                "id": "attempt-1",
+                "platform": "douyin",
+                "request_payload": {
+                    "title": "标题",
+                    "body": "正文",
+                    "metadata": {"resolved_media_path": "E:/runtime/publication-media/final.mp4"},
+                    "media_items": [{"local_path": "E:/runtime/publication-media/final.mp4"}],
+                },
+            }
+        ]
+
+    async def fake_resolve_options(**_kwargs):
+        return {}
+
+    def fake_build_plan(**kwargs):
+        build_calls.append(kwargs)
+        return {
+            "status": "ready",
+            "publish_ready": True,
+            "media_source_contract": {"source": "materialized_attempt_payload"},
+            "targets": [{"platform": "douyin", "adapter": "social_auto_upload"}],
+        }
+
+    async def fake_submit_attempts(_session, plan):
+        return {"status": "submitted", "created_attempts": [{"platform": plan["targets"][0]["platform"]}]}
+
+    monkeypatch.setattr(jobs_api, "_load_publication_inputs", fake_load_publication_inputs)
+    monkeypatch.setattr(jobs_api, "generate_intelligent_copy", fake_generate_intelligent_copy)
+    monkeypatch.setattr(jobs_api, "list_publication_attempts", fake_list_attempts)
+    monkeypatch.setattr(jobs_api, "_resolve_job_publication_platform_options", fake_resolve_options)
+    monkeypatch.setattr(jobs_api, "build_publication_plan", fake_build_plan)
+    monkeypatch.setattr(jobs_api, "publication_plan_is_publishable", lambda plan: bool(plan.get("publish_ready")))
+    monkeypatch.setattr(jobs_api, "submit_publication_attempts", fake_submit_attempts)
+    monkeypatch.setattr(jobs_api, "_dispatch_publication_worker_tick", lambda _count: None)
+
+    result = await jobs_api.publish_job_to_bound_platforms(
+        job_id,
+        SimpleNamespace(creator_profile_id="creator-1", platforms=["douyin"], platform_options={}),
+        session=_FakeSession(),
+    )
+
+    assert generated["called"] is False
+    assert result["status"] == "submitted"
+    assert "material_generation" not in result
+    assert build_calls[0]["platform_packaging"] is None
+
+
 def test_job_publication_failed_packaging_needs_regeneration() -> None:
     assert jobs_api._job_publication_packaging_needs_generation(
         {
@@ -287,6 +521,97 @@ def test_job_publication_failed_packaging_needs_regeneration() -> None:
     ) is True
 
 
+def test_job_publication_packaging_must_belong_to_current_render_output() -> None:
+    job = SimpleNamespace(output_dir="E:/rendered", source_path="E:/source/input.mp4")
+    render_output = SimpleNamespace(output_path="E:/rendered/final.mp4")
+
+    assert jobs_api._publication_packaging_belongs_to_job_render_output(
+        {"material_dir": "E:/rendered/smart-copy", "platforms": {"youtube": {"title": "标题"}}},
+        job=job,
+        render_output=render_output,
+    ) is True
+    assert jobs_api._publication_packaging_belongs_to_job_render_output(
+        {"material_dir": "E:/待发布/smart-copy", "platforms": {"youtube": {"title": "标题"}}},
+        job=job,
+        render_output=render_output,
+    ) is False
+    assert jobs_api._publication_packaging_belongs_to_job_render_output(
+        {"platforms": {"youtube": {"title": "标题"}}},
+        job=job,
+        render_output=render_output,
+    ) is False
+
+
+def test_derive_job_publication_folder_path_uses_render_output_parent_for_windows_paths() -> None:
+    job = SimpleNamespace(output_dir="Y:/EDC系列/AI粗剪", source_path="jobs/job-1/source.mp4")
+    render_output = SimpleNamespace(
+        output_path=r"Y:\EDC系列\AI粗剪\20260503_NITECORE_EDC17\20260503_NITECORE_EDC17_横版_成片.mp4"
+    )
+
+    folder = jobs_api._derive_job_publication_folder_path(job, render_output)
+
+    assert folder.replace("/", "\\").endswith(r"Y:\EDC系列\AI粗剪\20260503_NITECORE_EDC17")
+
+
+def test_derive_job_publication_folder_path_rejects_current_directory_fallback() -> None:
+    job = SimpleNamespace(output_dir=".", source_path="")
+    render_output = SimpleNamespace(output_path=".")
+
+    assert jobs_api._derive_job_publication_folder_path(job, render_output) == ""
+
+
+def test_load_job_smart_copy_publication_packaging_materializes_host_path(monkeypatch, tmp_path) -> None:
+    material_dir = tmp_path / "host-intelligent-copy" / "edc17" / "smart-copy"
+    meta_dir = material_dir / "_meta"
+    meta_dir.mkdir(parents=True)
+    cover_path = material_dir / "01-bilibili-cover.jpg"
+    cover_path.write_bytes(b"cover")
+    platform_packaging = {
+        "platforms": {
+            "bilibili": {
+                "titles": ["EDC17 三光源超薄手电开箱"],
+                "description": "EDC17 手电筒开箱、功能演示和上手体验。",
+                "tags": ["EDC17"],
+                "cover_path": str(cover_path),
+            }
+        }
+    }
+    (meta_dir / "platform-packaging.json").write_text(
+        __import__("json").dumps(platform_packaging, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"folder_path": str(material_dir.parent), "files": []}
+
+    captured = {}
+
+    def fake_post(url, **kwargs):
+        captured["url"] = url
+        captured["json"] = kwargs.get("json")
+        return FakeResponse()
+
+    monkeypatch.setattr(jobs_api, "resolve_codex_proxy_sibling_url", lambda path: f"http://bridge{path}")
+    monkeypatch.setattr(jobs_api, "resolve_codex_proxy_token", lambda: "token-1")
+    monkeypatch.setattr(jobs_api.httpx, "post", fake_post)
+
+    job = SimpleNamespace(output_dir=r"Y:\EDC系列\AI粗剪\20260503_NITECORE_EDC17", source_path="")
+    render_output = SimpleNamespace(output_path=r"Y:\EDC系列\AI粗剪\20260503_NITECORE_EDC17\final.mp4")
+
+    packaging = jobs_api._load_job_smart_copy_publication_packaging(job=job, render_output=render_output)
+
+    assert captured["url"] == "http://bridge/v1/host/materialize-directory"
+    assert captured["json"]["folder_path"].endswith(r"20260503_NITECORE_EDC17")
+    assert packaging is not None
+    assert packaging["source"] == "platform_packaging"
+    assert packaging["material_dir"] == str(material_dir)
+    assert packaging["platforms"]["bilibili"]["titles"] == ["EDC17 三光源超薄手电开箱"]
+
+
 @pytest.mark.asyncio
 async def test_job_publish_merges_creator_card_publication_bindings() -> None:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
@@ -295,7 +620,7 @@ async def test_job_publish_merges_creator_card_publication_bindings() -> None:
             await conn.run_sync(Base.metadata.create_all)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         async with session_factory() as session:
-            creator = CreatorCard(name="珍妮斯baby", status="active")
+            creator = CreatorCard(name="Demo Creator", status="active")
             session.add(creator)
             await session.flush()
             profile = CreatorPublicationProfile(
@@ -308,14 +633,14 @@ async def test_job_publish_merges_creator_card_publication_bindings() -> None:
             binding = CreatorPlatformBinding(
                 publication_profile_id=profile.id,
                 platform="douyin",
-                credential_ref="social-auto-upload:creator-janice-douyin:douyin",
+                credential_ref="social-auto-upload:creator-demo-douyin:douyin",
                 binding_payload_json={
                     "status": "login_confirmed",
                     "enabled": True,
                     "adapter": "social_auto_upload",
-                    "account_label": "珍妮斯baby · 抖音",
-                    "browser_profile_id": "browser-agent:chrome:janice:douyin",
-                    "browser_binding": {"browser": "chrome", "profile_id": "browser-agent:chrome:janice:douyin"},
+                    "account_label": "Demo Creator · 抖音",
+                    "browser_profile_id": "browser-agent:chrome:demo:douyin",
+                    "browser_binding": {"browser": "chrome", "profile_id": "browser-agent:chrome:demo:douyin"},
                 },
             )
             session.add(binding)
@@ -324,7 +649,7 @@ async def test_job_publish_merges_creator_card_publication_bindings() -> None:
             merged = await jobs_api._merge_job_creator_card_publication_bindings(
                 session=session,
                 job=Job(creator_card_id=creator.id),
-                creator_profile={"id": "avatar-profile", "display_name": "珍妮斯baby", "creator_profile": {}},
+                creator_profile={"id": "avatar-profile", "display_name": "Demo Creator", "creator_profile": {}},
             )
     finally:
         await engine.dispose()
@@ -333,7 +658,7 @@ async def test_job_publish_merges_creator_card_publication_bindings() -> None:
     assert [item["platform"] for item in credentials] == ["douyin"]
     assert credentials[0]["status"] == "logged_in"
     assert credentials[0]["adapter"] == "social_auto_upload"
-    assert credentials[0]["credential_ref"] == "social-auto-upload:creator-janice-douyin:douyin"
+    assert credentials[0]["credential_ref"] == "social-auto-upload:creator-demo-douyin:douyin"
 
 
 @pytest.mark.asyncio
@@ -350,7 +675,7 @@ async def test_job_publication_auto_heals_cover_block_before_submit(monkeypatch)
             SimpleNamespace(id=job_id, status="done", source_path="", output_dir="E:/rendered"),
             SimpleNamespace(output_path="E:/rendered/video.mp4"),
             {"platforms": {"douyin": {"cover_path": "E:/rendered/smart-copy/03-douyin-cover.jpg"}}},
-            {"id": "creator-1", "display_name": "珍妮斯baby"},
+            {"id": "creator-1", "display_name": "Demo Creator"},
         )
 
     def fake_build_plan(**_kwargs):
@@ -380,7 +705,7 @@ async def test_job_publication_auto_heals_cover_block_before_submit(monkeypatch)
         job=SimpleNamespace(id=job_id, source_path="", output_dir="E:/rendered"),
         render_output=SimpleNamespace(output_path="E:/rendered/video.mp4"),
         packaging=None,
-        creator_profile={"id": "creator-1", "display_name": "珍妮斯baby"},
+        creator_profile={"id": "creator-1", "display_name": "Demo Creator"},
         creator_profile_id="creator-1",
         requested_platforms=["douyin"],
         platform_options={},
@@ -402,7 +727,7 @@ async def test_intelligent_publish_merges_creator_card_publication_bindings() ->
             await conn.run_sync(Base.metadata.create_all)
         session_factory = async_sessionmaker(engine, expire_on_commit=False)
         async with session_factory() as session:
-            creator = CreatorCard(name="珍妮斯baby", status="active")
+            creator = CreatorCard(name="Demo Creator", status="active")
             session.add(creator)
             await session.flush()
             profile = CreatorPublicationProfile(
@@ -415,14 +740,14 @@ async def test_intelligent_publish_merges_creator_card_publication_bindings() ->
             binding = CreatorPlatformBinding(
                 publication_profile_id=profile.id,
                 platform="bilibili",
-                credential_ref="social-auto-upload:creator-janice-bilibili:bilibili",
+                credential_ref="social-auto-upload:creator-demo-bilibili:bilibili",
                 binding_payload_json={
                     "status": "login_confirmed",
                     "enabled": True,
                     "adapter": "social_auto_upload",
-                    "account_label": "珍妮斯baby · Chrome",
-                    "browser_profile_id": "browser-agent:chrome:janice:bilibili",
-                    "browser_binding": {"browser": "chrome", "profile_id": "browser-agent:chrome:janice:bilibili"},
+                    "account_label": "Demo Creator · Chrome",
+                    "browser_profile_id": "browser-agent:chrome:demo:bilibili",
+                    "browser_binding": {"browser": "chrome", "profile_id": "browser-agent:chrome:demo:bilibili"},
                 },
             )
             session.add(binding)
@@ -430,7 +755,7 @@ async def test_intelligent_publish_merges_creator_card_publication_bindings() ->
 
             merged = await ic_api._merge_creator_card_publication_bindings(
                 session=session,
-                creator_profile={"id": "avatar-profile", "display_name": "珍妮斯baby", "creator_profile": {}},
+                creator_profile={"id": "avatar-profile", "display_name": "Demo Creator", "creator_profile": {}},
                 creator_profile_id="avatar-profile",
             )
     finally:
@@ -440,7 +765,7 @@ async def test_intelligent_publish_merges_creator_card_publication_bindings() ->
     assert [item["platform"] for item in credentials] == ["bilibili"]
     assert credentials[0]["status"] == "logged_in"
     assert credentials[0]["adapter"] == "social_auto_upload"
-    assert credentials[0]["credential_ref"] == "social-auto-upload:creator-janice-bilibili:bilibili"
+    assert credentials[0]["credential_ref"] == "social-auto-upload:creator-demo-bilibili:bilibili"
 
 
 @pytest.mark.asyncio

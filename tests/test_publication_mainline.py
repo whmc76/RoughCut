@@ -528,7 +528,7 @@ def test_build_bilibili_mainline_task_allows_runtime_browser_binding_override(tm
             "user_data_dir": "E:/recovered",
             "profile_directory": "Profile 2",
             "profile_name": "FAS_EDC",
-            "profile_email": "fas.galactic@gmail.com",
+            "profile_email": "demo.creator@example.com",
             "cdp_base_url": "http://127.0.0.1:9222",
         },
     )

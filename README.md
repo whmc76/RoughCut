@@ -4,7 +4,7 @@
 
 面向口播/开箱视频的自动剪辑 + 字幕审校系统。
 
-上传原始视频后，流水线按固定审核关口推进：转写 → 字幕后处理 → 术语纠错 → 内容画像 → 摘要确认 → 剪辑决策 → 渲染输出 → 成片审核 → 平台文案。摘要确认之后，下游默认只消费已确认版本，不再在 `edit_plan` 阶段回写字幕。完整的阶段顺序、人工关口、冻结规则和各阶段输入输出见 [剪辑校对流程](docs/2026-04-14-edit-review-flow.md)。
+上传原始视频后，流水线按固定审核关口推进：转写 → 字幕后处理 → 术语纠错 → 内容画像 → 摘要确认 → 剪辑决策 → 渲染输出 → 成片审核 → 平台文案。摘要确认之后，下游默认只消费已确认版本，不再在 `edit_plan` 阶段回写字幕。
 
 ---
 
@@ -70,7 +70,7 @@ probe → extract_audio → transcribe → subtitle_postprocess
       → edit_plan → render → final_review → platform_package
 ```
 
-这条顺序是当前的统一执行主线；详细的人工关口与冻结规则以 [剪辑校对流程](docs/2026-04-14-edit-review-flow.md) 为准。
+这条顺序是当前的统一执行主线；公开设计文档入口见 [设计文档索引](docs/design/INDEX.md)。
 同时，任务接口现在直接暴露 `review_step / review_detail`，前端不再自行猜测当前处于摘要审核还是成片审核。
 
 ---
@@ -83,6 +83,37 @@ probe → extract_audio → transcribe → subtitle_postprocess
 - FFmpeg（需在 PATH 中，支持 libx264 / libass；如需硬编码，可额外启用 h264_qsv / h264_amf / h264_nvenc）
 - Docker / Docker Compose（推荐用于基础服务或完整部署）
 - LLM 后端之一：MiniMax API Key、Ollama（本地）或 OpenAI API Key
+
+---
+
+## 开源发布前清洗
+
+公开仓库只保留可复用代码、公开文档和示例配置。以下内容应保持在本地忽略文件或外部系统中，不进入 Git 历史：
+
+- `.env`、浏览器登录态、账号映射、密钥和令牌
+- 真实创作者档案、真实发布任务、热词记忆、学习缓存
+- Codex/agent 状态文档、会话台账、真实运行证据
+- 临时排障脚本、导出的调试产物、一次性截图/图片
+
+当前仓库已通过 `.gitignore` 隔离这些目录和文件，但如果它们曾经进入过 Git 历史，忽略规则本身不够，还需要重写历史。
+
+历史清洗脚本：[`scripts/rewrite_open_source_history.ps1`](scripts/rewrite_open_source_history.ps1)
+
+配套模板：
+
+- [`scripts/open_source_history/paths.example.txt`](scripts/open_source_history/paths.example.txt)
+- [`scripts/open_source_history/replace-text.example.txt`](scripts/open_source_history/replace-text.example.txt)
+
+推荐流程：
+
+1. 先确保当前工作树已经把私有文件从索引移除，并由 `.gitignore` 接管。
+2. 提交最终的开源清理改动；历史重写只处理已提交历史，不会包含未提交工作树。
+3. 基于模板准备本地路径清单和替换词表。
+4. 运行历史清洗脚本，生成一个新的镜像仓库和校验副本。
+5. 在重写后的仓库再次扫描敏感串，并在确认无误后再执行强推。
+6. 任何已经暴露过的密钥都要在 Git 之外完成轮换；重写历史不能替代密钥轮换。
+
+完整发布清单见 [Open Source Release Checklist](docs/design/open-source-release-checklist.md)。
 
 ---
 
@@ -179,9 +210,9 @@ pnpm docker:runtime:auto-up
 
 - HeyGem: `http://127.0.0.1:49202`
 - 语音克隆默认走 RunningHub；本地 `49204` 仅在显式启用 IndexTTS2 时使用
-- HeyGem 公共服务目录: `E:/WorkSpace/heygem`
-- HeyGem 公共服务数据根: `D:/duix_avatar_data/face2face`
-- HeyGem 公共服务语音目录: `D:/duix_avatar_data/face2face/voice/data`
+- HeyGem 公共服务目录: 通过 `HEYGEM_DOCKER_COMPOSE_FILE` / `HEYGEM_DOCKER_ENV_FILE` 指向外部共享服务
+- HeyGem 公共服务数据根: 通过 `HEYGEM_SHARED_ROOT` 指向共享目录
+- HeyGem 公共服务语音目录: 通过 `HEYGEM_VOICE_ROOT` 指向共享目录
 - RoughCut 不迁移 HeyGem 本体或公共数据根；只迁移自己的 `jobs` / `output` / `cache` / `render-debug` / `tools` / `voice_refs` / `voice` 等运行数据
 
 ### 5. 配置环境变量
@@ -222,9 +253,9 @@ PACKAGING_SELECTION_MIN_SCORE=0.6
 AVATAR_PROVIDER=heygem
 AVATAR_API_BASE_URL=http://127.0.0.1:49202
 AVATAR_TRAINING_API_BASE_URL=http://127.0.0.1:49204
-HEYGEM_DOCKER_ENV_FILE=E:/WorkSpace/heygem/.env
-HEYGEM_SHARED_ROOT=D:/duix_avatar_data/face2face
-HEYGEM_VOICE_ROOT=D:/duix_avatar_data/face2face/voice/data
+HEYGEM_DOCKER_ENV_FILE=../heygem/.env
+HEYGEM_SHARED_ROOT=./data/heygem-shared
+HEYGEM_VOICE_ROOT=./data/heygem-shared/voice/data
 VOICE_PROVIDER=runninghub
 VOICE_CLONE_API_BASE_URL=https://www.runninghub.cn
 VOICE_CLONE_VOICE_ID=2003864334474354690
@@ -402,7 +433,7 @@ pnpm lint:backend
 ./start_roughcut.bat
 ```
 
-Windows 下当前建议把 [start_roughcut.bat](E:/WorkSpace/RoughCut/start_roughcut.bat) 作为用户入口：
+Windows 下当前建议把 [start_roughcut.bat](./start_roughcut.bat) 作为用户入口：
 
 - `start_roughcut.bat`
   默认 Docker full dev 入口。启动 `roughcut` compose 分组下的 infra + runtime + automation + dev overlay：后端源码 bind mount 并热重载，worker / orchestrator 由 `watchfiles` 自动重启，容器内 `frontend-watch` 持续更新 `frontend/dist`。端口仍统一来自 `roughcut.ports.env`
@@ -610,7 +641,7 @@ host-side rebuild watch 方案和 Hydra 的差别是：
 - `./data/runtime/voice_refs`：旧版语音参考文件
 - `./data/runtime/voice`：RoughCut 自有语音任务数据
 - `./data/runtime/content_profile_review_stats.json`：创作配置自动审校统计
-- `D:/duix_avatar_data/face2face`：HeyGem 公共服务输入 / temp / result，由 `E:/WorkSpace/heygem/.env` 的 `HEYGEM_DATA_DIR` 管理，不属于 RoughCut 私有数据迁移范围
+- `HEYGEM_SHARED_ROOT`：HeyGem 公共服务输入 / temp / result 的共享目录，不属于 RoughCut 私有数据迁移范围
 - `./watch`：可选目录监听挂载点（启用 automation compose 时使用）
 
   ### 5. 说明
@@ -766,7 +797,7 @@ ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.4-mini
 | `INTELLIGENT_COPY_COVER_IMAGE_TIMEOUT_SEC` | `90` | 智能发布单张封面图像编辑超时（秒） |
 | `INTELLIGENT_COPY_COVER_CODEX_RUNNER_MODEL` | `gpt-5.4-mini` | Codex 内置路径的执行代理模型；只负责理解请求、调用 `image_gen`、保存文件，不是底层图像模型 |
 | `INTELLIGENT_COPY_COVER_CODEX_RUNNER_EFFORT` | `low` | Codex 内置路径的执行代理推理强度；默认低推理即可，画质优先通过 prompt contract / QC / 重试策略提升 |
-| `PUBLICATION_BROWSER_AGENT_BASE_URL` | `http://127.0.0.1:49310` | 浏览器发布 agent 健康探针与正式发布入口 |
+| `PUBLICATION_BROWSER_AGENT_BASE_URL` | `http://127.0.0.1:49310` | 浏览器平台发布 agent 健康探针与执行入口；YouTube/X 默认不再走浏览器 agent |
 | `PUBLICATION_BROWSER_AGENT_TIMEOUT_SEC` | `60` | 与浏览器发布 agent 通信超时（秒） |
 | `PUBLICATION_BROWSER_CDP_URL` | `http://127.0.0.1:9222` | 连接已打开的 Chrome/Edge 远程调试端口 |
 | `PUBLICATION_BROWSER` | `chrome` | 发布时要绑定的浏览器类型标识 |
@@ -774,6 +805,13 @@ ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.4-mini
 | `PUBLICATION_BROWSER_PROFILE_DIRECTORY` | - | 固定发布 profile 子目录名（如 `Profile 1`） |
 | `PUBLICATION_BROWSER_ALLOW_TAB_AUTOCREATE` | `false` | 关闭时要求任务前该平台发布页已在当前 CDP 会话中打开 |
 | `PUBLICATION_BROWSER_AGENT_AUTH_TOKEN` | - | 访问发布 agent 的可选 token |
+| `PUBLICATION_YOUTUBE_TOKEN_FILE` | - | YouTube Data API OAuth token JSON；YouTube 发布、封面、播放列表和定时发布均走该 API |
+| `PUBLICATION_YOUTUBE_DEFAULT_CATEGORY_ID` | `22` | YouTube 未提供数字分类时使用的默认 categoryId |
+| `PUBLICATION_X_API_KEY` | - | X API Key；X 转发/发帖走 Tweepy，不再走浏览器 |
+| `PUBLICATION_X_API_SECRET` | - | X API Secret |
+| `PUBLICATION_X_ACCESS_TOKEN` | - | X Access Token |
+| `PUBLICATION_X_ACCESS_TOKEN_SECRET` | - | X Access Token Secret |
+| `PUBLICATION_X_USERNAME` | - | X 用户名，用于生成发布回执 URL |
 | `PACKAGING_ASSET_DIR` | `assets/packaging` | 包装素材持久目录；不要放在输出目录，避免清理成片时误删 BGM/水印/片头片尾 |
 | `PACKAGING_ASSET_STORAGE_BACKEND` | `local` | 包装素材后端，当前为本地目录；预留给后续 OSS 热切换 |
 | `PACKAGING_SELECTION_REVIEW_GAP` | `0.08` | BGM/插入素材首选与次优的最小安全分差，过近时建议确认 |
@@ -787,8 +825,8 @@ ROUGHCUT_ACP_BRIDGE_CODEX_MODEL=gpt-5.4-mini
 
 ```powershell
 powershell -File .\scripts\start_publication_browser_session.ps1 `
-  -UserDataDir "C:\Users\28687\AppData\Local\Google\Chrome\User Data" `
-  -ProfileDirectory "Profile 2"
+  -UserDataDir "<your Chrome User Data directory>" `
+  -ProfileDirectory "<your Chrome profile directory>"
 ```
 
 - 如果是即梦生图 fallback 的独立 profile，再显式换成那套目录，不要和发布 profile 混用。
@@ -797,8 +835,8 @@ powershell -File .\scripts\start_publication_browser_session.ps1 `
 
 ```powershell
 powershell -File .\scripts\start_publication_browser_agent.ps1 `
-  -UserDataDir "C:\Users\28687\AppData\Local\Google\Chrome\User Data" `
-  -ProfileDirectory "Profile 2" `
+  -UserDataDir "<your Chrome User Data directory>" `
+  -ProfileDirectory "<your Chrome profile directory>" `
   -EnableLivePublish `
   -StopExisting
 ```
@@ -806,7 +844,7 @@ powershell -File .\scripts\start_publication_browser_agent.ps1 `
 - 根因说明：如果用手写的 `pwsh -Command` 串接 `$env:` 赋值，值里一旦有空格或变量名被拼坏，agent 子进程会直接丢失 `PUBLICATION_LIVE_PUBLISH_ENABLED` / profile 绑定信息，健康探针会退化成 `live_publish=false`、`attached_profile_binding=null`。
 - 默认 `PUBLICATION_BROWSER_ALLOW_TAB_AUTOCREATE=false`，避免 agent 在错误 profile 下偷偷补开新页面。
 
-发布任务开始前请先在该会话中手动打开对应平台发布页（例如抖音/小红书/B站发布页），否则后台会返回 `platform_tab_autocreate_disabled` 提示并阻止直接摸底发布。
+浏览器平台发布任务开始前请先在该会话中手动打开对应平台发布页（例如抖音/小红书/B站发布页），否则后台会返回 `platform_tab_autocreate_disabled` 提示并阻止直接摸底发布。YouTube 默认走 YouTube Data API，X 默认走 Tweepy/X API，不需要也不应要求打开浏览器发布页。
 
 统一发布前置检查命令（用于每次正式发布前复用）：
 
@@ -973,7 +1011,7 @@ pnpm lint:backend
 如果你把仓库从 `FastCut` 改名为 `RoughCut`，或直接移动了项目目录，记得重新安装 editable package。否则虚拟环境里的 `.pth` 和本地缓存可能仍指向旧路径，表现为：
 
 - `ModuleNotFoundError: No module named 'roughcut'`
-- 报错路径仍显示旧目录，例如 `E:/WorkSpace/FastCut/...`
+- 报错路径仍显示旧目录，例如 `C:/sample-workspace/OldProject/...`
 
 建议执行：
 

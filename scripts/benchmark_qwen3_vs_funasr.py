@@ -85,7 +85,7 @@ class CandidateMetrics:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark qwen3-asr against funasr on real EDC source videos.")
-    parser.add_argument("--source-dir", type=Path, default=Path(r"Y:\EDC系列\视频原片"))
+    parser.add_argument("--source-dir", type=Path, default=Path(r"data\samples"))
     parser.add_argument("--report-dir", type=Path, default=ROOT / "output" / "test" / f"asr-qwen3-vs-funasr-{time.strftime('%Y%m%d-%H%M%S')}")
     parser.add_argument("--window-seconds", type=float, default=90.0)
     parser.add_argument("--skip-full", action="store_true", help="Only run head/middle/tail windows.")

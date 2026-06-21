@@ -374,28 +374,28 @@ def test_episode_report_accepts_no_reference_moss_direct_tts() -> None:
     assert not any(issue.code in {"remix_tts_moss_mode_invalid", "remix_tts_reference_missing"} for issue in result.issues)
 
 
-def test_jenny_baby_creator_profile_binds_default_moss_voice() -> None:
-    profile = load_creator_profile(repo_root=Path.cwd(), slug="jenny_baby")
+def test_demo_creator_creator_profile_binds_default_moss_voice() -> None:
+    profile = load_creator_profile(repo_root=Path.cwd(), slug="demo_creator")
 
     defaults = creator_tts_defaults(profile)
     caption_defaults = creator_caption_style_defaults(profile)
 
     assert profile is not None
-    assert profile["name"] == "珍妮斯baby"
+    assert profile["name"] == "Demo Creator"
     assert defaults["provider"] == "moss_tts_local"
     assert defaults["mode"] == "moss_voice_clone"
     assert defaults["reference_history_path"] == "/app/data/tools/reference-uploads/读绘本试音-2.mp3"
     assert defaults["prompt_text"] == "明亮互动版，小朋友们看这里，这是什么颜色呢？对啦，是黄色，黄。"
     assert caption_defaults["subtitle_style_profile"] == "children_storybook_v1"
-    assert profile["remix_task_bindings"][0]["task_id"] == "bluey_script_footage_remix"
+    assert profile["remix_task_bindings"][0]["task_id"] == "example_script_footage_remix"
     assert profile["remix_task_bindings"][0]["production_manifest_path"] == (
-        "data/remix_production_tasks/jenny_baby_bluey_pending.json"
+        "data/remix_production_tasks/example_remix_pending.json"
     )
 
 
-def test_bluey_builder_applies_creator_tts_defaults() -> None:
+def test_sample_show_builder_applies_creator_tts_defaults() -> None:
     args = argparse.Namespace(
-        creator_profile="jenny_baby",
+        creator_profile="demo_creator",
         creator_profile_path=None,
         tts_provider="moss_tts_local",
         tts_mode="",
@@ -416,7 +416,7 @@ def test_bluey_builder_applies_creator_tts_defaults() -> None:
 
 def test_production_manifest_applies_creator_profile_default() -> None:
     args = argparse.Namespace(
-        production_manifest=Path("data/remix_production_tasks/jenny_baby_bluey_pending.json"),
+        production_manifest=Path("data/remix_production_tasks/example_remix_pending.json"),
         creator_profile="",
         creator_profile_path=None,
         tts_provider="moss_tts_local",
@@ -429,14 +429,14 @@ def test_production_manifest_applies_creator_profile_default() -> None:
     script_footage_samples.apply_production_manifest_defaults(args)
     profile = script_footage_samples.apply_creator_profile_defaults(args)
 
-    assert args.creator_profile == "jenny_baby"
+    assert args.creator_profile == "demo_creator"
     assert profile is not None
     assert args.tts_mode == "moss_voice_clone"
     assert args.reference_history_path == "/app/data/tools/reference-uploads/读绘本试音-2.mp3"
 
 
-def test_bluey_production_manifest_selects_pending_second_season_tasks() -> None:
-    manifest_path = Path("data/remix_production_tasks/jenny_baby_bluey_pending.json")
+def test_sample_show_production_manifest_selects_pending_second_season_tasks() -> None:
+    manifest_path = Path("data/remix_production_tasks/example_remix_pending.json")
     episodes = script_footage_samples.load_production_manifest_episodes(manifest_path, status="pending")
 
     completed = {1, 11, 20, 21, 22, 25, 32, 34, 43, 44, 46, 47, 50}
@@ -449,7 +449,7 @@ def test_bluey_production_manifest_selects_pending_second_season_tasks() -> None
 def test_batch_report_accepts_single_complete_sample_by_default() -> None:
     payload = build_batch_report_payload(
         [_passing_report(1)],
-        source_root="F:/布鲁伊育儿节目",
+        source_root="C:/sample-remix-source",
         episodes=[1],
     )
 
@@ -464,7 +464,7 @@ def test_batch_report_accepts_single_complete_sample_by_default() -> None:
 def test_batch_report_can_require_ten_episodes_for_explicit_stability_run() -> None:
     payload = build_batch_report_payload(
         [_passing_report(episode) for episode in range(1, 4)],
-        source_root="F:/布鲁伊育儿节目",
+        source_root="C:/sample-remix-source",
         episodes=[1, 2, 3],
         min_sample_count=10,
     )
@@ -482,7 +482,7 @@ def test_batch_report_passes_when_nine_of_ten_have_complete_evidence() -> None:
     reports[-1]["qa_status"] = "warn"
     reports[-1]["qa_issue_count"] = 1
 
-    payload = build_batch_report_payload(reports, source_root="F:/布鲁伊育儿节目", episodes=list(range(1, 11)))
+    payload = build_batch_report_payload(reports, source_root="C:/sample-remix-source", episodes=list(range(1, 11)))
     markdown = render_batch_report_markdown(payload)
 
     assert payload["sample_count"] == 10
@@ -499,7 +499,7 @@ def test_batch_report_rejects_any_hard_qa_failure_even_when_pass_rate_is_high() 
     reports[-1]["qa_status"] = "fail"
     reports[-1]["qa_issue_count"] = 1
 
-    payload = build_batch_report_payload(reports, source_root="F:/布鲁伊育儿节目", episodes=list(range(1, 11)))
+    payload = build_batch_report_payload(reports, source_root="C:/sample-remix-source", episodes=list(range(1, 11)))
 
     assert payload["sample_count"] == 10
     assert payload["accepted_count"] == 9
@@ -513,7 +513,7 @@ def test_batch_report_rejects_missing_asr_or_review_evidence() -> None:
     reports[4]["tts_asr_evidence_path"] = ""
     reports[4]["review_frame_count"] = 0
 
-    payload = build_batch_report_payload(reports, source_root="F:/布鲁伊育儿节目", episodes=list(range(1, 11)))
+    payload = build_batch_report_payload(reports, source_root="C:/sample-remix-source", episodes=list(range(1, 11)))
 
     assert payload["gate_passed"] is False
     assert payload["gate_reason"] == "required_evidence_missing"
@@ -535,7 +535,7 @@ def test_batch_report_can_verify_required_evidence_files_exist(tmp_path: Path) -
 
     missing_payload = build_batch_report_payload(
         reports,
-        source_root="F:/布鲁伊育儿节目",
+        source_root="C:/sample-remix-source",
         episodes=list(range(1, 11)),
         verify_file_exists=True,
     )
@@ -566,10 +566,10 @@ def test_script_topic_chunks_preserve_order_and_target_count() -> None:
 
 
 def test_story_keywords_keep_title_and_domain_terms() -> None:
-    keywords = extract_story_keywords("跳舞模式", "孩子可以说不，爸爸和布鲁伊都需要看见边界。")
+    keywords = extract_story_keywords("跳舞模式", "孩子可以说不，爸爸和示例动画都需要看见边界。")
 
     assert keywords[0] == "跳舞模式"
-    assert "布鲁伊" in keywords
+    assert "示例动画" in keywords
     assert "爸爸" in keywords
     assert "边界" in keywords
 
@@ -682,7 +682,7 @@ def test_caption_package_can_use_creator_bound_children_storybook_style() -> Non
     assert "Style: BlueBanner" in package.ass_text
     assert "Style: BubbleText" in package.ass_text
     assert "Style: ImpactWord" in package.ass_text
-    assert "珍妮斯育儿" in package.ass_text
+    assert "Demo Parenting" in package.ass_text
     assert "不想要" not in package.ass_text
 
 
@@ -763,6 +763,32 @@ def test_review_frame_manifest_records_crop_evidence() -> None:
     assert payload["frame_count"] == 5
     assert payload["frames"][0]["timestamp_sec"] > 0
     assert payload["crop_evidence"]["source_clean_crop_filter"] == "crop=1440:810:180:50"
+
+
+def test_remix_cover_is_derived_from_middle_review_frame(tmp_path: Path) -> None:
+    frame_paths = []
+    for index in range(5):
+        frame_path = tmp_path / f"frame_{index}.jpg"
+        frame_path.write_bytes(f"frame-{index}".encode("utf-8"))
+        frame_paths.append(frame_path)
+    payload = build_review_frames_manifest(
+        episode=5,
+        title="理发师",
+        video_path=tmp_path / "final.mp4",
+        review_dir=tmp_path,
+        frame_paths=frame_paths,
+        timestamps_sec=[5.0, 58.5, 112.0, 165.5, 219.0],
+        crop_evidence={},
+    )
+
+    cover_path = script_footage_samples.derive_remix_cover_from_review_frames(
+        review_frames_manifest=payload,
+        cover_path=tmp_path / "s02e05_理发师_cover.jpg",
+        force=False,
+    )
+
+    assert cover_path is not None
+    assert cover_path.read_bytes() == b"frame-2"
 
 
 def test_clip_entries_keep_evidence_fields_when_duration_or_segment_is_missing() -> None:
@@ -940,7 +966,7 @@ def test_llm_original_audio_reference_intent_accepts_quoted_source_dialogue_evid
 def test_llm_original_audio_reference_intent_accepts_scene_evidence_bridges() -> None:
     text = (
         "这一集一开始，孩子们在客厅轮流启动跳舞模式。"
-        "布鲁伊想用一次，宾果说好吧。爸爸也想用一次，宾果又让了。"
+        "示例动画想用一次，宾果说好吧。爸爸也想用一次，宾果又让了。"
         "这里不是一句台词的问题，而是孩子一次次把自己的机会让出去。"
     )
 
@@ -955,7 +981,7 @@ def test_llm_original_audio_reference_intent_accepts_scene_evidence_bridges() ->
                 {
                     "request_type": "scene_evidence",
                     "matched_text": "孩子们在客厅轮流启动跳舞模式",
-                    "context": "这一集一开始，孩子们在客厅轮流启动跳舞模式。布鲁伊想用一次",
+                    "context": "这一集一开始，孩子们在客厅轮流启动跳舞模式。示例动画想用一次",
                     "char_start": 7,
                     "char_end": 22,
                     "suggested_duration_sec": 9.5,
@@ -1169,7 +1195,7 @@ def test_original_audio_insertions_filter_low_confidence_source_mapping() -> Non
     assert [item["index"] for item in filtered] == [1]
 
 
-def test_bluey_video_segments_use_animation_preserving_encode_settings(tmp_path: Path, monkeypatch) -> None:
+def test_sample_show_video_segments_use_animation_preserving_encode_settings(tmp_path: Path, monkeypatch) -> None:
     commands: list[list[str]] = []
 
     def fake_run(command: list[str]) -> None:
@@ -1195,7 +1221,7 @@ def test_bluey_video_segments_use_animation_preserving_encode_settings(tmp_path:
     assert command[command.index("-pix_fmt") + 1] == "yuv420p"
 
 
-def test_bluey_final_mux_uses_animation_preserving_encode_settings(tmp_path: Path, monkeypatch) -> None:
+def test_sample_show_final_mux_uses_animation_preserving_encode_settings(tmp_path: Path, monkeypatch) -> None:
     commands: list[list[str]] = []
 
     def fake_run(command: list[str]) -> None:

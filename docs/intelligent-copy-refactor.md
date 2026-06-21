@@ -12,16 +12,16 @@
 ## 已处理
 
 1. 已有封面时只做尺寸适配，不再额外叠字。
-2. `司令官2Ultra / 琢匠貔貅 / FAS刀帕` 已加专题化识别和文案分流。
+2. 已为多个高频专题补充题材化识别和文案分流。
 3. 智能文案模式增加 transcript-driven `copy_brief`，会在平台打包后再次覆盖标题、简介和标签，避免沿用错误主题。
 4. Windows 下 `codex exec` 改成走 stdin，修复长 prompt 直接失败的问题。
-5. 专题规则已抽成 [src/roughcut/review/intelligent_copy_topics.py](E:/WorkSpace/RoughCut/src/roughcut/review/intelligent_copy_topics.py) 的注册表，后续扩展题材不需要再改多处分支。
-6. 平台标题/简介句式已抽成 [src/roughcut/review/intelligent_copy_templates.py](E:/WorkSpace/RoughCut/src/roughcut/review/intelligent_copy_templates.py)，后续调平台语气不需要再改主流程。
-7. 标题和简介增加本地规则评分器 [src/roughcut/review/intelligent_copy_scoring.py](E:/WorkSpace/RoughCut/src/roughcut/review/intelligent_copy_scoring.py)，优先筛掉主体不明确、信息量过低或带错词的文案。
+5. 专题规则已抽成 [intelligent_copy_topics.py](../src/roughcut/review/intelligent_copy_topics.py) 的注册表，后续扩展题材不需要再改多处分支。
+6. 平台标题/简介句式已抽成 [intelligent_copy_templates.py](../src/roughcut/review/intelligent_copy_templates.py)，后续调平台语气不需要再改主流程。
+7. 标题和简介增加本地规则评分器 [intelligent_copy_scoring.py](../src/roughcut/review/intelligent_copy_scoring.py)，优先筛掉主体不明确、信息量过低或带错词的文案。
 8. 前置 `content_profile` 的 `source_context` 派生 hints 已接入题材注册表，前置摘要和智能文案开始共享一套专题识别能力。
 
 ## 下一步
 
 1. 继续压缩 `content_profile` 的输入和超时策略，避免首段字幕噪声把主题带偏。
-2. 增加更多专题规则和负面词过滤，优先覆盖现有 EDC 系列的真实选题。
+2. 增加更多专题规则和负面词过滤，优先覆盖现有高频垂类选题。
 3. 把 live 样例持续沉淀成回归测试，避免修一个坏一个。

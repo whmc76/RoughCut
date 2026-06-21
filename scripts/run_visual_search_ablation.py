@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -34,7 +35,7 @@ from run_text_model_comparison import (  # noqa: E402
 )
 from roughcut.providers.multimodal import complete_with_images  # noqa: E402
 
-DEFAULT_SOURCE_ROOT = Path(r"Y:\EDC系列\未剪辑视频")
+DEFAULT_SOURCE_ROOT = Path(os.getenv("ROUGHCUT_VISUAL_SEARCH_SOURCE_DIR", "data/samples"))
 DEFAULT_REPORT_ROOT = ROOT / "output" / "test" / "visual-search-ablation"
 DEFAULT_SOURCES = [
     "20260301-171443.mp4",

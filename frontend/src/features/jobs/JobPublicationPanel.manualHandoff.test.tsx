@@ -234,7 +234,10 @@ describe("JobPublicationPanel manual handoff UI", () => {
     expect(await screen.findByText("回执：receipt-binding:abc123")).toBeInTheDocument();
   });
 
-  it("keeps manual handoff plans non-publishable even if root publish_ready is stale true", async () => {
+  it("routes manual handoff plans to the manual publication entry instead of auto submit", async () => {
+    const windowOpen = vi.spyOn(window, "open").mockImplementation(() => null);
+    const mutate = vi.fn();
+
     reactQueryMocks.useQuery.mockImplementation((options: { queryKey?: unknown[] }) => {
       const queryKey = Array.isArray(options?.queryKey) ? options.queryKey : [];
       if (queryKey[0] === "avatar-materials") {
@@ -285,13 +288,23 @@ describe("JobPublicationPanel manual handoff UI", () => {
     reactQueryMocks.useMutation.mockReturnValue({
       isPending: false,
       error: null,
-      mutate: vi.fn(),
+      mutate,
     });
 
     render(<JobPublicationPanel job={buildJob()} />);
 
     expect(await screen.findByText("人工接管")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "生成物料并发布" })).toBeDisabled();
+    const publishButton = await screen.findByRole("button", { name: "一键发布" });
+    fireEvent.click(publishButton);
+
+    await waitFor(() => {
+      expect(windowOpen).toHaveBeenCalledWith(
+        "https://channels.weixin.qq.com/login.html",
+        "_blank",
+        "noopener,noreferrer",
+      );
+    });
+    expect(mutate).not.toHaveBeenCalled();
   });
 
   it("shows publication executor preflight messages from the plan contract", async () => {

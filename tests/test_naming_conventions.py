@@ -58,7 +58,7 @@ def test_content_profile_route_defaults_to_glm_for_analysis() -> None:
         _env_file=None,
         llm_mode="performance",
         llm_routing_mode="hybrid_performance",
-        zhipu_api_key="configured",
+        zhipu_api_key="<configured>",
     )
     _normalize_settings(settings)
 

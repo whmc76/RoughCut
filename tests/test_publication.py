@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import httpx
@@ -395,7 +396,7 @@ def test_build_browser_agent_task_payload_from_attempt_does_not_require_worker_l
 
 
 def test_build_browser_agent_task_payload_from_attempt_rehydrates_resolved_media_path(tmp_path, monkeypatch):
-    unreadable_runtime_path = r"E:\\WorkSpace\\RoughCut\\data\\runtime\\host-intelligent-copy\\missing\\video.mp4"
+    unreadable_runtime_path = r"C:\\sample-workspace\\roughcut\\data\\runtime\\host-intelligent-copy\\missing\\video.mp4"
     real_media_path = tmp_path / "video.mp4"
     real_media_path.write_bytes(b"video")
 
@@ -439,6 +440,89 @@ def test_build_browser_agent_task_payload_from_attempt_rehydrates_resolved_media
     assert payload["content"]["media_items"][0]["local_path"] == str(real_media_path.resolve())
 
 
+def test_build_browser_agent_task_payload_from_attempt_preserves_windows_media_path_for_bridge(monkeypatch):
+    host_media_path = r"C:\sample-workspace\RoughCut\data\runtime\publication-media\job\video.mp4"
+    container_media_path = Path("/app/data/publication-media/job/video.mp4")
+
+    monkeypatch.setattr(
+        publication,
+        "resolve_publication_local_media_path",
+        lambda raw: container_media_path if str(raw).strip() == host_media_path else None,
+    )
+
+    attempt = PublicationAttempt(
+        id="attempt-preserve-host-media",
+        job_id=uuid.uuid4(),
+        content_id="job-preserve-host-media",
+        platform="youtube",
+        platform_label="YouTube",
+        idempotency_key="key-preserve-host-media",
+        semantic_fingerprint="fingerprint-preserve-host-media",
+        adapter="browser_agent",
+        status="queued",
+        request_payload={
+            "title": "标题",
+            "body": "正文",
+            "media_items": [{"kind": "video", "local_path": host_media_path}],
+            "metadata": {
+                "browser_profile_id": "browser-profile:chrome:test",
+                "browser_binding": {
+                    "browser": "chrome",
+                    "user_data_dir": r"C:\Users\demo\AppData\Local\Google\Chrome\User Data",
+                    "profile_directory": "Profile 2",
+                },
+                "requested_media_path": host_media_path,
+            },
+        },
+    )
+
+    payload = publication.build_browser_agent_task_payload_from_attempt(attempt)
+
+    assert payload["content"]["media_items"][0]["local_path"] == host_media_path
+
+
+def test_build_browser_agent_task_payload_maps_container_media_path_to_browser_host(monkeypatch):
+    container_media_path = Path("/app/data/publication-media/job/video.mp4")
+    expected_host_path = "C:/sample-workspace/RoughCut/data/runtime/publication-media/job/video.mp4"
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_ROOT", "/app/data")
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", "C:/sample-workspace/RoughCut/data/runtime")
+    monkeypatch.setattr(
+        publication,
+        "resolve_publication_local_media_path",
+        lambda raw: container_media_path if str(raw).strip() == str(container_media_path) else None,
+    )
+
+    attempt = PublicationAttempt(
+        id="attempt-map-container-media",
+        job_id=uuid.uuid4(),
+        content_id="job-map-container-media",
+        platform="youtube",
+        platform_label="YouTube",
+        idempotency_key="key-map-container-media",
+        semantic_fingerprint="fingerprint-map-container-media",
+        adapter="browser_agent",
+        status="queued",
+        request_payload={
+            "title": "标题",
+            "body": "正文",
+            "media_items": [{"kind": "video", "local_path": str(container_media_path)}],
+            "metadata": {
+                "browser_profile_id": "browser-profile:chrome:test",
+                "browser_binding": {
+                    "browser": "chrome",
+                    "user_data_dir": r"C:\Users\demo\AppData\Local\Google\Chrome\User Data",
+                    "profile_directory": "Profile 2",
+                },
+                "requested_media_path": str(container_media_path),
+            },
+        },
+    )
+
+    payload = publication.build_browser_agent_task_payload_from_attempt(attempt)
+
+    assert payload["content"]["media_items"][0]["local_path"] == expected_host_path
+
+
 def test_build_browser_agent_task_payload_from_attempt_rehydrates_current_browser_profile_binding(monkeypatch, tmp_path):
     media_path = tmp_path / "video.mp4"
     media_path.write_bytes(b"video")
@@ -450,12 +534,12 @@ def test_build_browser_agent_task_payload_from_attempt_rehydrates_current_browse
             "platform": "xiaohongshu",
             "credential_ref": "browser-agent:chrome:release-gate-profile:xiaohongshu",
             "account_label": "xiaohongshu release-gate",
-            "browser_profile_id": "browser-profile:chrome:5748ec82429e20a77ac7",
+            "browser_profile_id": "browser-profile:chrome:demo-profile-b",
             "browser_binding": {
                 "browser": "chrome",
-                "user_data_dir": "E:/WorkSpace/RoughCut/data/runtime/publication-browser-profile-stable/chrome-user-data",
+                "user_data_dir": "C:/sample-workspace/RoughCut/data/runtime/publication-browser-profile-stable/chrome-user-data",
                 "profile_directory": "Profile 2",
-                "profile_id": "browser-profile:chrome:5748ec82429e20a77ac7",
+                "profile_id": "browser-profile:chrome:demo-profile-b",
             },
         },
     )
@@ -488,16 +572,16 @@ def test_build_browser_agent_task_payload_from_attempt_rehydrates_current_browse
                 "credential_id": "cred-legacy",
                 "credential_ref": "browser-agent:chrome:release-gate-profile:xiaohongshu:legacy",
                 "account_label": "xiaohongshu release-gate",
-                "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+                "browser_profile_id": "browser-profile:chrome:demo-profile-a",
                 "browser_binding": {
-                    "profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+                    "profile_id": "browser-profile:chrome:demo-profile-a",
                 },
                 "session_binding": {
                     "contract": publication.PUBLICATION_BROWSER_SESSION_BINDING_CONTRACT,
                     "platform": "xiaohongshu",
                     "creator_profile_id": "release-gate-profile",
-                    "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
-                    "allowed_profile_ids": ["browser-profile:chrome:21104fd69d72ad7267c2"],
+                    "browser_profile_id": "browser-profile:chrome:demo-profile-a",
+                    "allowed_profile_ids": ["browser-profile:chrome:demo-profile-a"],
                 },
             },
         },
@@ -505,9 +589,9 @@ def test_build_browser_agent_task_payload_from_attempt_rehydrates_current_browse
 
     payload = publication.build_browser_agent_task_payload_from_attempt(attempt)
 
-    assert payload["profile_id"] == "browser-profile-chrome-5748ec82429e20a77ac7"
-    assert payload["session_binding"]["browser_profile_id"] == "browser-profile:chrome:5748ec82429e20a77ac7"
-    assert payload["session_binding"]["allowed_profile_ids"] == ["browser-profile:chrome:5748ec82429e20a77ac7"]
+    assert payload["profile_id"] == "browser-profile-chrome-demo-profile-b"
+    assert payload["session_binding"]["browser_profile_id"] == "browser-profile:chrome:demo-profile-b"
+    assert payload["session_binding"]["allowed_profile_ids"] == ["browser-profile:chrome:demo-profile-b"]
     assert payload["content"]["metadata"]["credential_id"] == "cred-current"
     assert payload["content"]["metadata"]["browser_binding"]["profile_directory"] == "Profile 2"
 
@@ -540,9 +624,9 @@ def test_build_browser_agent_task_payload_from_attempt_rehydrates_release_gate_b
             "media_items": [{"kind": "video", "local_path": str(media_path)}],
             "metadata": {
                 "creator_profile_id": "release-gate-profile",
-                "credential_ref": "browser-profile:chrome:21104fd69d72ad7267c2",
+                "credential_ref": "browser-profile:chrome:demo-profile-a",
                 "account_label": "xiaohongshu release-gate",
-                "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+                "browser_profile_id": "browser-profile:chrome:demo-profile-a",
             },
         },
     )
@@ -564,12 +648,12 @@ def test_build_publication_browser_session_binding_does_not_promote_creator_prof
     payload = publication.build_publication_browser_session_binding(
         platform="youtube",
         creator_profile_id="creator-1",
-        credential_ref="d2d15bc6d77a47b79cf20a79b56596c2",
+        credential_ref="demo-credential-ref",
         account_label="FAS YouTube",
     )
 
     assert payload["creator_profile_id"] == "creator-1"
-    assert payload["credential_ref"] == "d2d15bc6d77a47b79cf20a79b56596c2"
+    assert payload["credential_ref"] == "demo-credential-ref"
     assert payload["browser_profile_id"] is None
     assert payload["allowed_profile_ids"] == []
 
@@ -674,7 +758,7 @@ def test_build_browser_agent_task_payload_from_attempt_fails_closed_when_no_loca
             "media_items": [
                 {
                     "kind": "video",
-                    "local_path": r"E:\\WorkSpace\\RoughCut\\data\\runtime\\host-intelligent-copy\\missing\\video.mp4",
+                    "local_path": r"C:\\sample-workspace\\roughcut\\data\\runtime\\host-intelligent-copy\\missing\\video.mp4",
                 }
             ],
             "publication_capability": {
@@ -783,7 +867,7 @@ def test_build_browser_agent_task_payload_includes_session_binding_contract():
         "account_label": "Creator One · YouTube",
         "browser_binding": {
             "browser": "chrome",
-            "user_data_dir": r"C:\\Users\\tester\\AppData\\Local\\Google\\Chrome\\User Data",
+            "user_data_dir": r"C:\\Users\\test\\AppData\\Local\\Google\\Chrome\\User Data",
             "profile_directory": "Profile 2",
         },
         "allowed_route_contexts": ["publish_route", "domain:studio.youtube.com"],
@@ -1103,10 +1187,13 @@ def test_build_browser_agent_task_payload_preserves_cover_and_declaration_runtim
     payload = publication.build_browser_agent_task_payload("attempt-runtime-fields", plan=plan, target=target)
 
     assert payload["content"]["cover_path"] == str(cover_path)
-    assert payload["content"]["cover_slots"] == cover_slots
+    assert payload["content"]["cover_slots"][0]["cover_path"] == str(cover_path)
+    assert payload["content"]["cover_slots"][0]["target_size"] == {"width": 1080, "height": 1440}
+    assert payload["content"]["cover_slots"][0]["matrix_key"] == "portrait_3_4"
     assert payload["content"]["declaration"] == "原创声明"
     assert payload["content"]["copy_material"]["cover_path"] == str(cover_path)
-    assert payload["content"]["copy_material"]["cover_slots"] == cover_slots
+    assert payload["content"]["copy_material"]["cover_slots"][0]["cover_path"] == str(cover_path)
+    assert payload["content"]["copy_material"]["cover_slots"][0]["matrix_key"] == "portrait_3_4"
     assert payload["content"]["copy_material"]["declaration"] == "原创声明"
 
 
@@ -1166,7 +1253,11 @@ def test_build_browser_agent_task_payload_defaults_cover_skip_for_safe_runtime_m
     payload = publication.build_browser_agent_task_payload("attempt-safe-cover-skip", plan=plan, target=target)
     overrides = payload["content"]["platform_specific_overrides"]
 
-    assert overrides["prepare_only_current_page"] is True
+    assert overrides["fresh_start_platform_tab"] is True
+    assert overrides["clear_draft_context"] is True
+    assert overrides["force_publish_page_refresh"] is True
+    assert overrides["verify_media_upload"] is True
+    assert overrides["recovery_mode"] == "fresh_publish"
     assert overrides["cover_policy"] == "platform_default"
     assert overrides["skip_cover_upload"] is True
 
@@ -1198,7 +1289,7 @@ def test_build_browser_agent_task_payload_from_attempt_preserves_safe_receipt_re
                 }
             ],
             "metadata": {
-                "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+                "browser_profile_id": "browser-profile:chrome:demo-profile-a",
             },
             "platform_specific_overrides": {
                 "verification_only_current_page": True,
@@ -1268,10 +1359,13 @@ def test_build_browser_agent_task_payload_from_attempt_preserves_cover_and_decla
     payload = publication.build_browser_agent_task_payload_from_attempt(attempt)
 
     assert payload["content"]["cover_path"] == str(cover_path)
-    assert payload["content"]["cover_slots"] == cover_slots
+    assert payload["content"]["cover_slots"][0]["cover_path"] == str(cover_path)
+    assert payload["content"]["cover_slots"][0]["target_size"] == {"width": 1080, "height": 1440}
+    assert payload["content"]["cover_slots"][0]["matrix_key"] == "portrait_3_4"
     assert payload["content"]["declaration"] == "原创声明"
     assert payload["content"]["copy_material"]["cover_path"] == str(cover_path)
-    assert payload["content"]["copy_material"]["cover_slots"] == cover_slots
+    assert payload["content"]["copy_material"]["cover_slots"][0]["cover_path"] == str(cover_path)
+    assert payload["content"]["copy_material"]["cover_slots"][0]["matrix_key"] == "portrait_3_4"
     assert payload["content"]["copy_material"]["declaration"] == "原创声明"
 
 
@@ -1380,7 +1474,11 @@ def test_build_browser_agent_task_payload_from_attempt_defaults_cover_skip_for_s
     payload = publication.build_browser_agent_task_payload_from_attempt(attempt)
     overrides = payload["content"]["platform_specific_overrides"]
 
-    assert overrides["prepare_only_current_page"] is True
+    assert overrides["fresh_start_platform_tab"] is True
+    assert overrides["clear_draft_context"] is True
+    assert overrides["force_publish_page_refresh"] is True
+    assert overrides["verify_media_upload"] is True
+    assert overrides["recovery_mode"] == "fresh_publish"
     assert overrides["cover_policy"] == "platform_default"
     assert overrides["skip_cover_upload"] is True
 
@@ -1442,6 +1540,28 @@ def test_intelligent_copy_packaging_normalization_accepts_platform_packaging_obj
     assert packaging["source"] == "platform_packaging"
     assert packaging["platforms"]["youtube"]["publish_ready"] is True
     assert packaging["publish_ready"] is True
+
+
+def test_intelligent_copy_packaging_normalization_blocks_auto_publish_without_title():
+    packaging = _normalize_intelligent_copy_payload_as_packaging(
+        {
+            "platforms": {
+                "kuaishou": {
+                    "titles": [],
+                    "description": "正文已经生成，但标题缺失。",
+                    "tags": ["EDC17"],
+                    "cover_path": "E:/materials/cover.jpg",
+                }
+            }
+        },
+        material_dir="E:/materials/edc17/smart-copy",
+    )
+
+    assert packaging is not None
+    entry = packaging["platforms"]["kuaishou"]
+    assert entry["publish_ready"] is False
+    assert "标题为空，不能自动发布。" in entry["blocking_reasons"]
+    assert packaging["publish_ready"] is False
 
 
 def test_intelligent_copy_packaging_normalization_preserves_manual_handoff_contract_from_smart_copy_shape():
@@ -3304,6 +3424,65 @@ def test_apply_publication_auto_recovery_adapts_repeat_failure_with_clear_draft_
     assert int(recovery_state.get("latest_retry_count") or 0) == 1
 
 
+def test_youtube_browser_agent_failure_requires_fresh_attempt_not_auto_recovery():
+    attempt = SimpleNamespace(
+        platform="youtube",
+        adapter="browser_agent",
+        retry_count=0,
+        max_retries=3,
+    )
+    diagnosis = {
+        "severity": "medium",
+        "action": "retry",
+        "retryable": True,
+        "next_steps": ["保留当前发布页现场后重试"],
+        "confidence": 0.96,
+    }
+
+    assert (
+        publication._should_auto_recover_publication_failure(
+            attempt,
+            mapped_status="needs_human",
+            diagnosis=diagnosis,
+        )
+        is False
+    )
+
+
+def test_youtube_browser_agent_submit_failure_does_not_retry_same_attempt():
+    attempt = SimpleNamespace(
+        adapter="browser_agent",
+        platform="youtube",
+        retry_count=0,
+        max_retries=3,
+        error_code=None,
+        error_message=None,
+        status="processing",
+        run_status="processing",
+        operator_summary=None,
+    )
+    run = SimpleNamespace(
+        status="processing",
+        phase="submit",
+        heartbeat_at=None,
+        completed_at=None,
+        error_message=None,
+    )
+
+    publication._mark_publication_attempt_failed(
+        attempt,
+        run,
+        code="browser_agent_submit_failed",
+        message="temporary failure",
+        retryable=True,
+    )
+
+    assert attempt.status == "failed"
+    assert attempt.run_status == "failed"
+    assert attempt.retry_count == 0
+    assert run.status == "failed"
+
+
 def test_build_platform_recovery_overrides_does_not_carry_clear_draft_after_draft_clear_failed():
     attempt = PublicationAttempt(
         id="attempt-draft-clear-failed",
@@ -3472,7 +3651,7 @@ def test_extract_publication_failure_context_reads_visual_evidence_from_result()
         "status": "needs_human",
         "result": {
             "visual_evidence": {
-                "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/douyin-pre-publish.png",
+                "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/douyin-pre-publish.png",
                 "capture_type": "screenshot",
                 "phase": "pre_publish_page_snapshot",
             },
@@ -5066,7 +5245,7 @@ async def test_publication_browser_agent_ready_does_not_pass_creator_profile_id_
     result = await publication.check_publication_browser_agent_ready(
         browser_agent_base_url="http://browser-agent",
         target_platforms=["youtube"],
-        target_profile_ids=["d2d15bc6d77a47b79cf20a79b56596c2"],
+        target_profile_ids=["demo-credential-ref"],
         http_client=client,
     )
 
@@ -5163,7 +5342,7 @@ async def test_publication_browser_agent_ready_blocks_auth_required_creator_sess
                     "code": "douyin_route_auth_required",
                     "route": {"url": "https://creator.douyin.com/creator-micro/content/post/video"},
                     "visual_evidence": {
-                        "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260602/douyin/session-auth.png",
+                        "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260602/douyin/session-auth.png",
                         "capture_type": "screenshot",
                         "phase": "creator_session_probe",
                     },
@@ -5240,6 +5419,344 @@ def test_publication_plan_blocks_unready_smart_copy_platform(tmp_path):
     assert plan["publish_ready"] is False
     assert any("封面等待 Codex 内置 imagegen 执行完成" in reason for reason in plan["blocked_reasons"])
     assert plan["targets"] == []
+
+
+def test_publication_plan_blocks_youtube_self_comparison_title(tmp_path):
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    cover_path = tmp_path / "cover.jpg"
+    cover_path.write_bytes(b"cover")
+
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        platform_packaging={
+            "platforms": {
+                "youtube": {
+                    "titles": ["NITECORE EDC17 vs EDC17 实拍对比，三光源EDC上手体验"],
+                    "description": "EDC17和EDC37同框对比，重点看体积、手感和做工差异。",
+                    "tags": ["NITECORE", "EDC17"],
+                    "cover_path": str(cover_path),
+                    "publish_ready": True,
+                }
+            }
+        },
+        creator_profile={
+            "creator_profile": {
+                "publishing": {
+                    "platform_credentials": [
+                        {
+                            "platform": "youtube",
+                            "account_label": "FAS",
+                            "credential_ref": "chrome-profile:fas",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "browser_agent",
+                        }
+                    ]
+                }
+            }
+        },
+        requested_platforms=["youtube"],
+    )
+
+    assert plan["publish_ready"] is False
+    assert plan["targets"] == []
+    assert any("比较型标题自相矛盾" in reason for reason in plan["blocked_reasons"])
+
+
+def test_publication_plan_blocks_raw_filename_title(tmp_path):
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    cover_path = tmp_path / "cover.jpg"
+    cover_path.write_bytes(b"cover")
+
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        platform_packaging={
+            "platforms": {
+                "youtube": {
+                    "titles": ["20260503 NITECORE EDC17 奈特科尔EDC17手电筒轻便性与实用性功能展示 横版 成片"],
+                    "description": "EDC17开箱与功能展示，包含体积、做工、三光源体验和对比说明。",
+                    "tags": ["NITECORE", "EDC17"],
+                    "cover_path": str(cover_path),
+                    "publish_ready": True,
+                }
+            }
+        },
+        creator_profile={
+            "creator_profile": {
+                "publishing": {
+                    "platform_credentials": [
+                        {
+                            "platform": "youtube",
+                            "account_label": "FAS",
+                            "credential_ref": "chrome-profile:fas",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "browser_agent",
+                        }
+                    ]
+                }
+            }
+        },
+        requested_platforms=["youtube"],
+    )
+
+    assert plan["publish_ready"] is False
+    assert any("标题疑似文件名" in reason for reason in plan["blocked_reasons"])
+
+
+def test_publication_plan_blocks_generated_cover_matrix_without_quality_evidence(tmp_path):
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    cover_path = tmp_path / "cover.jpg"
+    cover_path.write_bytes(b"cover")
+
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        platform_packaging={
+            "cover_matrix": {
+                "landscape_16_9": {
+                    "cover_path": str(cover_path),
+                    "publish_ready": True,
+                    "blocking_reasons": [],
+                    "generation_timing": {"status": "completed"},
+                }
+            },
+            "platforms": {
+                "youtube": {
+                    "titles": ["NITECORE EDC17开箱：超薄三光源EDC和EDC37差多少"],
+                    "description": "EDC17和EDC37同框对比，重点看体积、手感和做工差异。",
+                    "tags": ["NITECORE", "EDC17"],
+                    "cover_path": str(cover_path),
+                    "cover_slots": [{"slot": "landscape_16_9", "matrix_key": "landscape_16_9", "cover_path": str(cover_path)}],
+                    "publish_ready": True,
+                }
+            },
+        },
+        creator_profile={
+            "creator_profile": {
+                "publishing": {
+                    "platform_credentials": [
+                        {
+                            "platform": "youtube",
+                            "account_label": "FAS",
+                            "credential_ref": "chrome-profile:fas",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "browser_agent",
+                        }
+                    ]
+                }
+            }
+        },
+        requested_platforms=["youtube"],
+    )
+
+    assert plan["publish_ready"] is False
+    assert any("缺少发布级视觉质量审计证据" in reason for reason in plan["blocked_reasons"])
+
+
+def test_publication_plan_aligns_single_slot_cover_to_primary_path(tmp_path):
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    old_cover_path = tmp_path / "old-youtube-cover.jpg"
+    old_cover_path.write_bytes(b"old-cover")
+    new_cover_path = tmp_path / "new-youtube-cover.jpg"
+    new_cover_path.write_bytes(b"new-cover")
+
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        platform_packaging={
+            "cover_matrix": {
+                "landscape_16_9": {
+                    "cover_path": str(new_cover_path),
+                    "publish_ready": True,
+                    "cover_quality": {"publish_ready": True, "blocking_reasons": []},
+                }
+            },
+            "platforms": {
+                "youtube": {
+                    "titles": ["NITECORE EDC17开箱：超薄三光源EDC和EDC37差多少"],
+                    "description": "EDC17和EDC37同框对比，重点看体积、手感和做工差异。",
+                    "tags": ["NITECORE", "EDC17"],
+                    "cover_path": str(new_cover_path),
+                    "cover_slots": [
+                        {
+                            "slot": "landscape_16_9",
+                            "matrix_key": "landscape_16_9",
+                            "cover_path": str(old_cover_path),
+                        }
+                    ],
+                    "publish_ready": True,
+                }
+            },
+        },
+        creator_profile={
+            "creator_profile": {
+                "publishing": {
+                    "platform_credentials": [
+                        {
+                            "platform": "youtube",
+                            "account_label": "FAS",
+                            "credential_ref": "chrome-profile:fas",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "browser_agent",
+                        }
+                    ]
+                }
+            }
+        },
+        requested_platforms=["youtube"],
+    )
+
+    assert plan["publish_ready"] is True
+    assert plan["targets"][0]["cover_path"] == str(new_cover_path)
+    assert plan["targets"][0]["cover_slots"][0]["cover_path"] == str(new_cover_path)
+
+
+def test_browser_agent_payload_for_youtube_forces_fresh_upload_runtime(tmp_path):
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    cover_path = tmp_path / "youtube-cover.jpg"
+    cover_path.write_bytes(b"cover")
+
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="12345678-1234-1234-1234-123456789abc", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        platform_packaging={
+            "cover_matrix": {
+                "landscape_16_9": {
+                    "cover_path": str(cover_path),
+                    "publish_ready": True,
+                    "cover_quality": {"publish_ready": True, "blocking_reasons": []},
+                }
+            },
+            "platforms": {
+                "youtube": {
+                    "titles": ["NITECORE EDC17开箱：超薄三光源EDC和EDC37差多少"],
+                    "description": "EDC17和EDC37同框对比，重点看体积、手感和做工差异。",
+                    "tags": ["NITECORE", "EDC17"],
+                    "cover_path": str(cover_path),
+                    "cover_slots": [{"slot": "landscape_16_9", "matrix_key": "landscape_16_9", "cover_path": str(cover_path)}],
+                    "platform_specific_overrides": {
+                        "repair_only_current_page": True,
+                        "force_repair_fields": ["cover"],
+                    },
+                    "publish_ready": True,
+                }
+            },
+        },
+        creator_profile={
+            "id": "creator-1",
+            "display_name": "FAS",
+            "creator_profile": {
+                "publishing": {
+                    "platform_credentials": [
+                        {
+                            "platform": "youtube",
+                            "account_label": "FAS",
+                            "credential_ref": "chrome-profile:fas",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "browser_agent",
+                        }
+                    ]
+                }
+            },
+        },
+        requested_platforms=["youtube"],
+    )
+
+    payload = publication.build_browser_agent_task_payload(
+        "attempt-1",
+        plan=plan,
+        target=plan["targets"][0],
+    )
+    overrides = payload["content"]["platform_specific_overrides"]
+
+    assert overrides["youtube_publish_path_policy"] == "fresh_upload_only"
+    assert overrides["fresh_start_platform_tab"] is True
+    assert overrides["clear_draft_context"] is True
+    assert overrides["force_publish_page_refresh"] is True
+    assert overrides["verify_media_upload"] is True
+    assert overrides["recovery_mode"] == "fresh_publish"
+    assert "repair_only_current_page" not in overrides
+    assert "force_repair_fields" not in overrides
+    assert payload["content"]["publication_recovery_state"] == {
+        "schema_version": publication.PUBLICATION_RECOVERY_STATE_SCHEMA_VERSION,
+        "platform": "youtube",
+        "fresh_publish_only": True,
+        "current_fresh_upload_resume": False,
+    }
+    assert payload["content"]["publication_path_contract"]["mode"] == "fresh_upload_only"
+
+
+def test_browser_agent_payload_from_youtube_attempt_strips_explicit_current_page_recovery(tmp_path):
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    cover_path = tmp_path / "cover.jpg"
+    cover_path.write_bytes(b"cover")
+    attempt = PublicationAttempt(
+        id="attempt-youtube-stale",
+        content_id="job-1",
+        platform="youtube",
+        adapter="browser_agent",
+        content_kind="video",
+        request_payload={
+            "title": "NITECORE EDC17开箱：超薄三光源EDC和EDC37差多少",
+            "body": "EDC17三光源手电的开箱细节、体积手感和实际使用体验。",
+            "cover_path": str(cover_path),
+            "cover_slots": [{"slot": "landscape_16_9", "matrix_key": "landscape_16_9", "cover_path": str(cover_path)}],
+            "platform_specific_overrides": {
+                "repair_only_current_page": True,
+                "prepare_only_current_page": True,
+                "force_repair_fields": ["cover"],
+                "recovery_mode": "prepublish_resume",
+            },
+            "publication_recovery_state": {
+                "schema_version": 1,
+                "recovery_overrides": {
+                    "repair_only_current_page": True,
+                    "prepare_only_current_page": True,
+                    "recovery_mode": "prepublish_resume",
+                },
+            },
+            "media_items": [{"kind": "video", "local_path": str(media_path), "mime_type": "video/mp4"}],
+            "media_urls": [str(media_path)],
+            "publication_capability": {"platform": "youtube", "requires_local_media": True},
+            "metadata": {"requested_media_path": str(media_path), "browser_profile_id": "fas"},
+        },
+    )
+
+    payload = publication.build_browser_agent_task_payload_from_attempt(attempt)
+    overrides = payload["content"]["platform_specific_overrides"]
+
+    assert overrides["youtube_publish_path_policy"] == "fresh_upload_only"
+    assert overrides["recovery_mode"] == "fresh_publish"
+    assert overrides["fresh_start_platform_tab"] is True
+    assert overrides["clear_draft_context"] is True
+    assert overrides["force_publish_page_refresh"] is True
+    assert overrides["verify_media_upload"] is True
+    assert "prepare_only_current_page" not in overrides
+    assert "repair_only_current_page" not in overrides
+    assert "force_repair_fields" not in overrides
+    assert payload["content"]["publication_recovery_state"] == {
+        "schema_version": publication.PUBLICATION_RECOVERY_STATE_SCHEMA_VERSION,
+        "platform": "youtube",
+        "fresh_publish_only": True,
+        "current_fresh_upload_resume": False,
+    }
+    path_contract = payload["content"].get("publication_path_contract") or {}
+    assert path_contract.get("mode") == "fresh_upload_only"
+    assert path_contract.get("forbid_current_page_repair") is True
+    assert path_contract.get("forbid_existing_video_edit") is True
+    assert path_contract.get("forbid_attempt_reuse") is True
 
 
 def test_publication_plan_does_not_ignore_cover_hard_gate_for_recovery_override(tmp_path):
@@ -5425,6 +5942,54 @@ def test_derive_publication_cover_slots_backfills_explicit_slot_path_from_cover_
             "matrix_key": "portrait_3_4",
         }
     ]
+
+
+def test_derive_publication_cover_slots_prefers_primary_cover_for_single_slot_platform() -> None:
+    slots = derive_publication_cover_slots(
+        {
+            "platform": "youtube",
+            "cover_path": "E:/covers/new-youtube-cover.jpg",
+            "cover_slots": [
+                {
+                    "slot": "landscape_16_9",
+                    "matrix_key": "landscape_16_9",
+                    "cover_path": "E:/covers/old-youtube-cover.jpg",
+                }
+            ],
+        }
+    )
+
+    assert len(slots) == 1
+    assert slots[0]["slot"] == "landscape_16_9"
+    assert slots[0]["cover_path"] == "E:/covers/new-youtube-cover.jpg"
+    assert slots[0]["matrix_key"] == "landscape_16_9"
+
+
+def test_derive_publication_cover_slots_prefers_cover_matrix_over_stale_single_platform_cover() -> None:
+    slots = derive_publication_cover_slots(
+        {
+            "platform": "kuaishou",
+            "cover_path": "E:/covers/old-kuaishou-cover.jpg",
+            "cover_slots": [
+                {
+                    "slot": "landscape_4_3",
+                    "matrix_key": "landscape_4_3",
+                    "cover_path": "E:/covers/old-kuaishou-cover.jpg",
+                }
+            ],
+            "cover_matrix": {
+                "landscape_4_3": {
+                    "cover_path": "E:/covers/approved-landscape-4-3.jpg",
+                    "cover_size": [1440, 1080],
+                }
+            },
+        }
+    )
+
+    assert len(slots) == 1
+    assert slots[0]["slot"] == "landscape_4_3"
+    assert slots[0]["cover_path"] == "E:/covers/approved-landscape-4-3.jpg"
+    assert slots[0]["matrix_key"] == "landscape_4_3"
 
 
 def test_load_publication_packaging_payload_backfills_missing_requested_platform_from_material_json(
@@ -5662,11 +6227,12 @@ def test_publication_plan_blocks_packaging_entry_when_publish_ready_true_but_pre
     assert any("抖音 未就绪" in warning for warning in plan["warnings"])
 
 
-def test_publication_plan_falls_back_to_package_publication_metadata(tmp_path):
+def test_publication_plan_falls_back_to_package_publication_metadata(tmp_path, monkeypatch):
     media_path = tmp_path / "output.mp4"
     media_path.write_bytes(b"video")
     cover_path = tmp_path / "cover.jpg"
     cover_path.write_bytes(b"cover")
+    monkeypatch.setattr(publication, "platform_auto_publish_supported", lambda platform: str(platform or "").strip().lower() == "xiaohongshu")
     plan = publication.build_publication_plan(
         job=SimpleNamespace(id="job-1", status="done"),
         render_output=SimpleNamespace(output_path=str(media_path)),
@@ -5776,7 +6342,7 @@ def test_publication_plan_drops_youtube_placeholder_category(tmp_path):
             "platforms": {
                 "youtube": {
                     "titles": ["标题"],
-                    "description": "简介",
+                    "description": "这期完整展示手电的核心功能、实际手感和日常使用场景，说明信息足够用于正式发布。",
                     "tags": ["tag"],
                     "category": "视频",
                 }
@@ -5814,7 +6380,7 @@ def test_publication_plan_defaults_youtube_visibility_to_public(tmp_path):
             "platforms": {
                 "youtube": {
                     "titles": ["标题"],
-                    "description": "简介",
+                    "description": "这期完整展示手电的核心功能、实际手感和日常使用场景，说明信息足够用于正式发布。",
                     "tags": ["tag"],
                 }
             }
@@ -5839,6 +6405,54 @@ def test_publication_plan_defaults_youtube_visibility_to_public(tmp_path):
 
     assert plan["publish_ready"] is True
     assert plan["targets"][0]["visibility_or_publish_mode"] == "public"
+
+
+def test_publication_plan_normalizes_youtube_scheduled_publish_away_from_draft(tmp_path):
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        platform_packaging={
+            "platforms": {
+                "youtube": {
+                    "titles": ["标题"],
+                    "description": "这期完整展示手电的核心功能、实际手感和日常使用场景，说明信息足够用于正式发布。",
+                    "tags": ["tag"],
+                }
+            }
+        },
+        platform_options={
+            "youtube": {
+                "scheduled_publish_at": "2026-06-21T10:00:00+08:00",
+                "visibility_or_publish_mode": "draft",
+            }
+        },
+        creator_profile={
+            "creator_profile": {
+                "publishing": {
+                    "platform_credentials": [
+                        {
+                            "platform": "youtube",
+                            "account_label": "主号",
+                            "credential_ref": "chrome-profile:youtube",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "browser_agent",
+                        }
+                    ]
+                }
+            }
+        },
+    )
+
+    assert plan["publish_ready"] is True
+    target = plan["targets"][0]
+    assert target["scheduled_publish_at"]
+    assert target["visibility_or_publish_mode"] == "scheduled"
+    payload = publication._build_request_payload(plan=plan, target=target)
+    assert payload["scheduled_publish_at"] == target["scheduled_publish_at"]
+    assert payload["visibility_or_publish_mode"] == "scheduled"
 
 
 def test_publication_plan_projects_collection_management_and_native_topics_from_platform_options(tmp_path):
@@ -5906,9 +6520,58 @@ def test_publication_plan_projects_collection_management_and_native_topics_from_
     assert target["platform_specific_overrides"]["topic_selection_plan"]["requested_topics"] == ["EDC折刀", "MAXACE美杜莎4"]
 
 
-def test_publication_plan_clamps_xiaohongshu_title_to_platform_hard_limit(tmp_path):
+def test_youtube_publication_plan_prefers_collection_management_target_over_create_placeholder(tmp_path):
     media_path = tmp_path / "output.mp4"
     media_path.write_bytes(b"video")
+    cover_path = tmp_path / "cover.jpg"
+    cover_path.write_bytes(b"jpg")
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        platform_packaging={
+            "platforms": {
+                "youtube": {
+                    "titles": ["标题"],
+                    "description": "这期围绕 EDC17 的三光源功能、体积手感和与 EDC37 的实际差异做完整上手展示，重点看白光、紫外、绿激光和日常携带体验。",
+                    "tags": ["EDC手电"],
+                    "cover_path": str(cover_path),
+                    "collection": {"name": "新建播放列表"},
+                    "platform_specific_overrides": {
+                        "collection_management": {
+                            "status": "needs_create",
+                            "target_collection_name": "EDC刀光火工具集",
+                            "create_required": True,
+                        },
+                    },
+                }
+            }
+        },
+        creator_profile={
+            "creator_profile": {
+                "publishing": {
+                    "platform_credentials": [
+                        {
+                            "platform": "youtube",
+                            "account_label": "主号",
+                            "credential_ref": "chrome-profile:youtube",
+                            "status": "logged_in",
+                            "enabled": True,
+                            "adapter": "browser_agent",
+                        }
+                    ]
+                }
+            }
+        },
+    )
+
+    assert plan["publish_ready"] is True
+    assert plan["targets"][0]["collection"] == {"name": "EDC刀光火工具集"}
+
+
+def test_publication_plan_clamps_xiaohongshu_title_to_platform_hard_limit(tmp_path, monkeypatch):
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    monkeypatch.setattr(publication, "platform_auto_publish_supported", lambda platform: str(platform or "").strip().lower() == "xiaohongshu")
     plan = publication.build_publication_plan(
         job=SimpleNamespace(id="job-1", status="done"),
         render_output=SimpleNamespace(output_path=str(media_path)),
@@ -5945,11 +6608,12 @@ def test_publication_plan_clamps_xiaohongshu_title_to_platform_hard_limit(tmp_pa
     assert target["copy_material"]["primary_title"] == "新到的美杜莎4｜两款配置到手，差别一眼就"
 
 
-def test_publication_plan_suppresses_xiaohongshu_original_declaration_for_jenny_account(tmp_path):
+def test_publication_plan_suppresses_xiaohongshu_original_declaration_for_configured_account(tmp_path, monkeypatch):
     media_path = tmp_path / "output.mp4"
     cover_path = tmp_path / "cover.jpg"
     media_path.write_bytes(b"video")
     cover_path.write_bytes(b"cover")
+    monkeypatch.setattr(publication, "platform_auto_publish_supported", lambda platform: str(platform or "").strip().lower() == "xiaohongshu")
 
     plan = publication.build_publication_plan(
         job=SimpleNamespace(id="job-1", status="done"),
@@ -5970,15 +6634,16 @@ def test_publication_plan_suppresses_xiaohongshu_original_declaration_for_jenny_
             }
         },
         creator_profile={
-            "id": "61007301d4d94bc0a8311066c2d93c7d",
-            "display_name": "珍妮斯baby",
+            "id": "creator-demo",
+            "display_name": "Demo Creator",
             "creator_profile": {
                 "publishing": {
+                    "suppress_original_declaration_platforms": ["xiaohongshu"],
                     "platform_credentials": [
                         {
                             "platform": "xiaohongshu",
-                            "account_label": "珍妮斯baby · 小红书",
-                            "credential_ref": "social-auto-upload:creator-7be7da2e7d54-xiaohongshu-chrome:xiaohongshu",
+                            "account_label": "Demo Creator · 小红书",
+                            "credential_ref": "social-auto-upload:creator-demo-xiaohongshu-chrome:xiaohongshu",
                             "status": "logged_in",
                             "enabled": True,
                             "adapter": "social_auto_upload",
@@ -6001,7 +6666,7 @@ def test_publication_plan_suppresses_xiaohongshu_original_declaration_for_jenny_
     command = build_social_auto_upload_upload_command(
         python_executable="python",
         platform="xiaohongshu",
-        account_name="creator-7be7da2e7d54-xiaohongshu-chrome",
+        account_name="creator-demo-xiaohongshu-chrome",
         request_payload=payload,
     )
     assert "--original-declaration" not in command
@@ -7011,6 +7676,11 @@ async def test_publication_plan_fails_closed_when_external_media_cannot_material
         "_materialize_publication_media_file",
         lambda raw_path: None,
     )
+    monkeypatch.setattr(
+        publication,
+        "_materialize_publication_media_from_host_directory",
+        lambda raw_path: None,
+    )
     plan = publication.build_publication_plan(
         job=SimpleNamespace(id="job-1"),
         render_output=SimpleNamespace(output_path=r"\\server\share\video.mp4"),
@@ -7054,8 +7724,45 @@ async def test_publication_plan_fails_closed_when_external_media_cannot_material
     assert "缺少本地成片文件，browser-agent 不能上传 remote-only media。" in plan["blocked_reasons"]
 
 
+def test_resolve_publication_local_media_path_materializes_windows_host_path_via_bridge(monkeypatch):
+    captured = {}
+
+    class Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "files": [
+                    {
+                        "name": "20260503_NITECORE_EDC17_横版_成片.mp4",
+                        "path": "/app/data/host-intelligent-copy/job/20260503_NITECORE_EDC17_横版_成片.mp4",
+                    }
+                ]
+            }
+
+    def fake_post(url, *, json, headers, timeout):
+        captured.update({"url": url, "json": json, "headers": headers, "timeout": timeout})
+        return Response()
+
+    monkeypatch.setattr(publication, "resolve_codex_proxy_sibling_url", lambda path: f"http://bridge{path}")
+    monkeypatch.setattr(publication, "resolve_codex_proxy_token", lambda: "token-1")
+    monkeypatch.setattr(publication.httpx, "post", fake_post)
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_ROOT", "/app/data")
+
+    resolved = publication.resolve_publication_local_media_path(
+        r"Y:\EDC系列\AI粗剪\20260503_NITECORE_EDC17\20260503_NITECORE_EDC17_横版_成片.mp4"
+    )
+
+    assert resolved == Path("/app/data/host-intelligent-copy/job/20260503_NITECORE_EDC17_横版_成片.mp4")
+    assert captured["url"] == "http://bridge/v1/host/materialize-directory"
+    assert captured["json"]["folder_path"] == r"Y:\EDC系列\AI粗剪\20260503_NITECORE_EDC17"
+    assert captured["json"]["container_output_root"] == "/app/data"
+    assert captured["headers"]["Authorization"] == "Bearer token-1"
+
+
 def test_materialize_publication_media_file_copies_into_runtime_root(tmp_path, monkeypatch):
-    source_path = tmp_path / "source.mp4"
+    source_path = tmp_path / "中文 成片 source.mp4"
     source_path.write_bytes(b"video")
     runtime_root = tmp_path / "runtime-publication-media"
     monkeypatch.setattr(publication, "_publication_media_runtime_root", lambda: runtime_root)
@@ -7067,6 +7774,23 @@ def test_materialize_publication_media_file_copies_into_runtime_root(tmp_path, m
     assert materialized.is_file()
     assert materialized.read_bytes() == b"video"
     assert runtime_root in materialized.parents
+    assert materialized.name.endswith(".mp4")
+    assert all(ord(ch) < 128 for ch in materialized.name)
+
+
+def test_resolve_publication_local_media_path_rematerializes_browser_unsafe_filename(tmp_path, monkeypatch):
+    source_path = tmp_path / "20260503_奈特科尔EDC17_横版_成片.mp4"
+    source_path.write_bytes(b"video")
+    runtime_root = tmp_path / "runtime-publication-media"
+    monkeypatch.setattr(publication, "_publication_media_runtime_root", lambda: runtime_root)
+
+    resolved = publication.resolve_publication_local_media_path(str(source_path))
+
+    assert resolved is not None
+    assert resolved.exists()
+    assert resolved.read_bytes() == b"video"
+    assert runtime_root in resolved.parents
+    assert all(ord(ch) < 128 for ch in resolved.name)
 
 
 def test_resolve_publication_local_media_path_materializes_existing_unc_path(tmp_path, monkeypatch):
@@ -7103,6 +7827,21 @@ def test_resolve_publication_local_media_path_materializes_existing_unc_path(tmp
     assert resolved.is_file()
     assert resolved.read_bytes() == b"video"
     assert runtime_root in resolved.parents
+
+
+def test_resolve_publication_local_media_path_maps_host_runtime_path_to_container_root(tmp_path, monkeypatch):
+    container_root = tmp_path / "container-data"
+    media_path = container_root / "publication-media" / "job" / "video.mp4"
+    media_path.parent.mkdir(parents=True)
+    media_path.write_bytes(b"video")
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_HOST_ROOT", "C:/sample-workspace/RoughCut/data/runtime")
+    monkeypatch.setenv("ROUGHCUT_OUTPUT_ROOT", str(container_root))
+
+    resolved = publication.resolve_publication_local_media_path(
+        r"C:\sample-workspace\RoughCut\data\runtime\publication-media\job\video.mp4"
+    )
+
+    assert resolved == media_path.resolve()
 
 
 @pytest.mark.asyncio
@@ -7197,7 +7936,7 @@ async def test_publication_plan_requires_done_job_local_media_and_bound_credenti
         }
     ]
     assert result["created_attempts"][0]["request_payload"]["metadata"]["browser_profile_id"] == "chrome-profile:main"
-    assert result["created_attempts"][0]["request_payload"]["scheduled_publish_at"] == "2026-04-26T18:30"
+    assert result["created_attempts"][0]["request_payload"]["scheduled_publish_at"] == "2026-04-26T18:30:00+08:00"
     assert result["created_attempts"][0]["request_payload"]["collection"] == {"name": "新品体验"}
     assert result["created_attempts"][0]["request_payload"]["category"] == "数码"
     assert result["created_attempts"][0]["request_payload"]["visibility_or_publish_mode"] == "scheduled"
@@ -7205,6 +7944,172 @@ async def test_publication_plan_requires_done_job_local_media_and_bound_credenti
     assert len(duplicate["created_attempts"]) == 0
     assert job_with_attempts.publication_status == "published"
     assert job_with_attempts.publication_summary == "已提交发布：抖音"
+
+
+def test_publication_plan_blocks_explicit_media_source_that_differs_from_render_output(tmp_path):
+    media_path = tmp_path / "rendered" / "final.mp4"
+    media_path.parent.mkdir()
+    media_path.write_bytes(b"video")
+    stale_path = tmp_path / "pending" / "wrong.mp4"
+    stale_path.parent.mkdir()
+    stale_path.write_bytes(b"wrong")
+    creator_profile = {
+        "id": "creator-1",
+        "display_name": "creator",
+        "creator_profile": {
+            "publishing": {
+                "platform_credentials": [
+                    {
+                        "platform": "youtube",
+                        "account_label": "FAS",
+                        "credential_ref": "browser-agent:chrome:fas:youtube",
+                        "status": "logged_in",
+                        "enabled": True,
+                        "adapter": "browser_agent",
+                    }
+                ]
+            }
+        },
+    }
+    packaging = {
+        "platforms": {
+            "youtube": {
+                "titles": ["白光+紫外+绿激光三合一，EDC17开箱细节和上手感受"],
+                "description": "EDC17 手电筒开箱、功能演示和上手体验。",
+                "tags": ["EDC17"],
+                "publish_ready": True,
+            }
+        }
+    }
+
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        source_media_path=str(stale_path),
+        platform_packaging=packaging,
+        creator_profile=creator_profile,
+        requested_platforms=["youtube"],
+    )
+
+    assert plan["publish_ready"] is False
+    assert any("发布视频源与最终成片输出不一致" in reason for reason in plan["blocked_reasons"])
+
+
+def test_request_payload_media_path_is_bound_to_render_output_contract(tmp_path):
+    media_path = tmp_path / "rendered" / "final.mp4"
+    media_path.parent.mkdir()
+    media_path.write_bytes(b"video")
+    stale_path = tmp_path / "pending" / "wrong.mp4"
+    stale_path.parent.mkdir()
+    stale_path.write_bytes(b"wrong")
+    creator_profile = {
+        "id": "creator-1",
+        "display_name": "creator",
+        "creator_profile": {
+            "publishing": {
+                "platform_credentials": [
+                    {
+                        "platform": "douyin",
+                        "account_label": "主号",
+                        "credential_ref": "chrome-profile:main",
+                        "status": "logged_in",
+                        "enabled": True,
+                        "adapter": "browser_agent",
+                    }
+                ]
+            }
+        },
+    }
+    packaging = {
+        "platforms": {
+            "douyin": {
+                "titles": ["标题"],
+                "description": "简介",
+                "tags": ["tag"],
+                "publish_ready": True,
+            }
+        }
+    }
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path=str(media_path)),
+        platform_packaging=packaging,
+        creator_profile=creator_profile,
+        requested_platforms=["douyin"],
+    )
+    plan["media_path"] = str(stale_path)
+
+    payload = publication._build_request_payload(plan=plan, target=plan["targets"][0])
+
+    assert payload["media_items"][0]["local_path"] == str(media_path.resolve())
+    assert payload["metadata"]["media_source_contract"]["source"] == "render_output"
+    assert payload["metadata"]["media_source_contract"]["resolved_media_path"] == str(media_path.resolve())
+
+
+def test_publication_plan_recovers_materialized_youtube_contract_from_existing_attempt(tmp_path):
+    media_path = tmp_path / "publication-media" / "edc17-final.mp4"
+    media_path.parent.mkdir()
+    media_path.write_bytes(b"video")
+    cover_path = tmp_path / "smart-copy" / "01-youtube-cover.jpg"
+    cover_path.parent.mkdir()
+    cover_path.write_bytes(b"cover")
+    creator_profile = {
+        "id": "creator-1",
+        "display_name": "FAS",
+        "creator_profile": {
+            "publishing": {
+                "platform_credentials": [
+                    {
+                        "platform": "youtube",
+                        "account_label": "FAS",
+                        "credential_ref": "browser-agent:chrome:fas:youtube",
+                        "status": "logged_in",
+                        "enabled": True,
+                        "adapter": "browser_agent",
+                    }
+                ]
+            }
+        },
+    }
+    payload = {
+        "platform": "youtube",
+        "title": "白光+紫外+绿激光三合一，EDC17开箱细节和上手感受",
+        "body": "这期完整展示 EDC17 的白光、紫外、绿激光三种光源，以及和 EDC37 的上手差异。",
+        "media_items": [{"kind": "video", "local_path": str(media_path)}],
+        "metadata": {"resolved_media_path": str(media_path)},
+        "cover_path": str(cover_path),
+        "collection": {"name": "EDC刀光火工具集"},
+        "copy_material": {
+            "source": "materialized_attempt_payload",
+            "tags": ["EDC17", "手电筒"],
+        },
+        "visibility_or_publish_mode": "public",
+    }
+
+    plan = publication.build_publication_plan(
+        job=SimpleNamespace(id="job-1", status="done"),
+        render_output=SimpleNamespace(output_path="C:\\sample-output\\bad-final.mp4"),
+        platform_packaging=None,
+        creator_profile=creator_profile,
+        requested_platforms=["youtube"],
+        existing_attempts=[
+            {
+                "id": "attempt-1",
+                "platform": "youtube",
+                "request_payload": payload,
+            }
+        ],
+    )
+
+    assert plan["publish_ready"] is True
+    assert plan["media_source_contract"]["source"] == "materialized_attempt_payload"
+    assert plan["media_source_contract"]["resolved_media_path"] == str(media_path.resolve())
+    assert plan["targets"][0]["title"] == payload["title"]
+    assert plan["targets"][0]["collection"] == {"name": "EDC刀光火工具集"}
+
+    request_payload = publication._build_request_payload(plan=plan, target=plan["targets"][0])
+    assert request_payload["media_items"][0]["local_path"] == str(media_path.resolve())
+    assert request_payload["title"] == payload["title"]
 
 
 @pytest.mark.asyncio
@@ -7281,7 +8186,7 @@ async def test_publication_worker_submits_and_reconciles_browser_agent_attempt(t
 
     assert first_tick["claimed"] == 1
     assert fake_client.posts[0]["json"]["content"]["publish_media_source"]["local_file_count"] == 1
-    assert fake_client.posts[0]["json"]["content"]["scheduled_publish_at"] == "2026-04-26T19:00"
+    assert fake_client.posts[0]["json"]["content"]["scheduled_publish_at"] == "2026-04-26T19:00:00+08:00"
     assert fake_client.posts[0]["json"]["content"]["collection"] == {"id": "col-1", "name": "测评合集"}
     assert fake_client.posts[0]["json"]["profile_id"] == "chrome-profile-main"
     assert fake_client.posts[0]["headers"]["Authorization"] == "Bearer secret"
@@ -7312,15 +8217,15 @@ async def test_submit_publication_attempts_auto_defers_second_account_video_to_n
     first_media_path.write_bytes(b"first-video")
     second_media_path.write_bytes(b"second-video")
     creator_profile = {
-        "id": "creator-janice",
-        "display_name": "珍妮斯baby",
+        "id": "creator-demo",
+        "display_name": "Demo Creator",
         "creator_profile": {
             "publishing": {
                 "platform_credentials": [
                     {
                         "platform": "bilibili",
-                        "account_label": "珍妮斯baby · Chrome",
-                        "credential_ref": "social-auto-upload:creator-7be7da2e7d54-bilibili-chrome:bilibili",
+                        "account_label": "Demo Creator · Chrome",
+                        "credential_ref": "social-auto-upload:creator-demo-bilibili-chrome:bilibili",
                         "status": "logged_in",
                         "enabled": True,
                     }
@@ -7383,7 +8288,7 @@ async def test_submit_publication_attempts_auto_defers_second_account_video_to_n
     assert second["auto_deferred_targets"] == [
         {
             "platform": "bilibili",
-            "account_label": "珍妮斯baby · Chrome",
+            "account_label": "Demo Creator · Chrome",
             "scheduled_publish_at": "2026-06-21T10:00:00+08:00",
             "reason": "account_daily_limit_reached",
         }
@@ -7404,7 +8309,7 @@ def test_publication_schedule_policy_defers_bilibili_when_schedule_too_close(mon
     )
     target = {
         "platform": "bilibili",
-        "account_label": "珍妮斯baby · Chrome",
+        "account_label": "Demo Creator · Chrome",
         "scheduled_publish_at": "2026-06-19T19:30:00+08:00",
     }
 
@@ -7433,7 +8338,7 @@ def test_publication_schedule_policy_defaults_to_platform_audience_active_window
     )
     target = {
         "platform": "douyin",
-        "account_label": "珍妮斯baby · 抖音",
+        "account_label": "Demo Creator · 抖音",
     }
 
     updated = publication._apply_publication_account_daily_schedule_policy(
@@ -7799,6 +8704,97 @@ async def test_submit_publication_attempts_requeues_needs_human_attempt_instead_
     assert second["created_attempts"][0]["attempt_number"] == 2
     assert "已重新排队" in (second["created_attempts"][0]["operator_summary"] or "")
     assert len(attempts) == 1
+
+
+@pytest.mark.asyncio
+async def test_submit_publication_attempts_creates_new_youtube_attempt_after_needs_human(tmp_path):
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    media_path = tmp_path / "output.mp4"
+    media_path.write_bytes(b"video")
+    cover_path = tmp_path / "youtube-cover.jpg"
+    cover_path.write_bytes(b"cover")
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        session_factory = async_sessionmaker(engine, expire_on_commit=False)
+        async with session_factory() as session:
+            job = Job(source_path="source.mp4", source_name="source.mp4", status="done")
+            session.add(job)
+            await session.flush()
+            plan = publication.build_publication_plan(
+                job=job,
+                render_output=SimpleNamespace(output_path=str(media_path)),
+                platform_packaging={
+                    "cover_matrix": {
+                        "landscape_16_9": {
+                            "cover_path": str(cover_path),
+                            "publish_ready": True,
+                            "cover_quality": {"publish_ready": True, "blocking_reasons": []},
+                        }
+                    },
+                    "platforms": {
+                        "youtube": {
+                            "titles": ["NITECORE EDC17开箱细节和上手感受"],
+                            "description": "EDC17三光源手电的开箱细节、体积手感和实际使用体验。",
+                            "tags": ["NITECORE", "EDC17"],
+                            "cover_path": str(cover_path),
+                            "cover_slots": [
+                                {
+                                    "slot": "landscape_16_9",
+                                    "matrix_key": "landscape_16_9",
+                                    "cover_path": str(cover_path),
+                                }
+                            ],
+                        }
+                    },
+                },
+                creator_profile={
+                    "id": "creator-1",
+                    "display_name": "creator",
+                    "creator_profile": {
+                        "publishing": {
+                            "platform_credentials": [
+                                {
+                                    "platform": "youtube",
+                                    "account_label": "YouTube",
+                                    "credential_ref": "chrome-profile:youtube",
+                                    "status": "logged_in",
+                                    "enabled": True,
+                                    "adapter": "browser_agent",
+                                }
+                            ]
+                        }
+                    },
+                },
+                requested_platforms=["youtube"],
+            )
+            first = await publication.submit_publication_attempts(session, plan)
+            await session.flush()
+            attempt_id = first["created_attempts"][0]["id"]
+            attempt = await session.get(PublicationAttempt, attempt_id)
+            assert attempt is not None
+            attempt.status = "needs_human"
+            attempt.run_status = "superseded"
+            attempt.error_code = "youtube_old_draft_superseded_new_publish_required"
+            await session.flush()
+
+            second = await publication.submit_publication_attempts(session, plan)
+            third = await publication.submit_publication_attempts(session, plan)
+            await session.commit()
+
+            attempts = await publication.list_publication_attempts(session, job_id=str(job.id))
+    finally:
+        await engine.dispose()
+
+    assert len(first["created_attempts"]) == 1
+    assert len(second["created_attempts"]) == 1
+    assert len(third["created_attempts"]) == 1
+    assert second["created_attempts"][0]["id"] != attempt_id
+    assert third["created_attempts"][0]["id"] != attempt_id
+    assert third["created_attempts"][0]["id"] != second["created_attempts"][0]["id"]
+    assert second["created_attempts"][0]["attempt_number"] == 1
+    assert third["created_attempts"][0]["attempt_number"] == 1
+    assert len(attempts) == 3
 
 
 @pytest.mark.asyncio
@@ -8240,7 +9236,7 @@ async def test_submit_publication_attempts_reuses_active_attempt_for_safe_receip
                 render_output=SimpleNamespace(output_path=str(media_path)),
                 platform_packaging={
                     "platforms": {
-                        "toutiao": {
+                        "douyin": {
                             "titles": ["标题"],
                             "description": "简介",
                             "tags": ["tag"],
@@ -8254,7 +9250,7 @@ async def test_submit_publication_attempts_reuses_active_attempt_for_safe_receip
                         "publishing": {
                             "platform_credentials": [
                                 {
-                                    "platform": "toutiao",
+                                    "platform": "douyin",
                                     "account_label": "主号",
                                     "credential_ref": "chrome-profile:main",
                                     "status": "logged_in",
@@ -8484,7 +9480,7 @@ async def test_submit_publication_attempts_reuses_stale_retry_queued_attempt_ins
                 render_output=SimpleNamespace(output_path=str(media_path)),
                 platform_packaging={
                     "platforms": {
-                        "xiaohongshu": {
+                        "douyin": {
                             "titles": ["标题"],
                             "description": "简介",
                             "tags": ["tag"],
@@ -8498,7 +9494,7 @@ async def test_submit_publication_attempts_reuses_stale_retry_queued_attempt_ins
                         "publishing": {
                             "platform_credentials": [
                                 {
-                                    "platform": "xiaohongshu",
+                                    "platform": "douyin",
                                     "account_label": "主号",
                                     "credential_ref": "chrome-profile:main",
                                     "status": "logged_in",
@@ -8517,7 +9513,7 @@ async def test_submit_publication_attempts_reuses_stale_retry_queued_attempt_ins
             assert attempt is not None
             attempt.status = "queued"
             attempt.run_status = "retry_scheduled"
-            attempt.error_code = "xiaohongshu_media_upload_failed"
+            attempt.error_code = "douyin_media_upload_failed"
             attempt.error_message = "upload failed"
             await session.flush()
 
@@ -9002,7 +9998,7 @@ def test_publication_plan_prefers_physical_browser_profile_binding(tmp_path):
     media_path.write_bytes(b"video")
     profile_id = publication.build_publication_browser_profile_id(
         browser="chrome",
-        user_data_dir="C:/Users/28687/AppData/Local/Google/Chrome/User Data",
+        user_data_dir="C:/sample-browser-data/Chrome/User Data",
         profile_directory="Profile 2",
     )
     plan = publication.build_publication_plan(
@@ -9027,10 +10023,10 @@ def test_publication_plan_prefers_physical_browser_profile_binding(tmp_path):
                             "credential_ref": "browser-agent:chrome:fas:douyin",
                             "browser_binding": {
                                 "browser": "chrome",
-                                "user_data_dir": "C:/Users/28687/AppData/Local/Google/Chrome/User Data",
+                                "user_data_dir": "C:/sample-browser-data/Chrome/User Data",
                                 "profile_directory": "Profile 2",
                                 "profile_name": "FAS_EDC",
-                                "profile_email": "fas.galactic@gmail.com",
+                                "profile_email": "demo.creator@example.com",
                             },
                             "status": "logged_in",
                             "enabled": True,
@@ -9061,7 +10057,7 @@ def test_publication_plan_uses_function_media_path_for_cover_contract(tmp_path):
             "platforms": {
                 "youtube": {
                     "titles": ["标题"],
-                    "description": "简介",
+                    "description": "这期完整展示手电的核心功能、实际手感和日常使用场景，说明信息足够用于正式发布。",
                     "tags": ["tag"],
                     "cover_path": str(cover_path),
                 }
@@ -9127,7 +10123,7 @@ def test_extract_publication_dedupe_signature_falls_back_to_publication_capabili
         "publication_capability": {"platform": "douyin", "adapter": "browser_agent"},
         "metadata": {
             "creator_profile_id": "creator-1",
-            "browser_profile_id": "browser-profile:chrome:21104fd69d72ad7267c2",
+            "browser_profile_id": "browser-profile:chrome:demo-profile-a",
             "credential_id": "cred-1",
             "credential_ref": "browser-agent:release-gate:douyin",
             "account_label": "douyin release-gate",
@@ -9144,7 +10140,7 @@ def test_extract_publication_dedupe_signature_falls_back_to_publication_capabili
         platform="douyin",
         adapter="browser_agent",
         creator_profile_id="creator-1",
-        browser_profile_id="browser-profile:chrome:21104fd69d72ad7267c2",
+        browser_profile_id="browser-profile:chrome:demo-profile-a",
         credential_id="cred-1",
         credential_ref="browser-agent:release-gate:douyin",
         account_label="douyin release-gate",

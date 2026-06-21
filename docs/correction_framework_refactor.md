@@ -13,7 +13,7 @@ The old proofreading and verification path had four partially overlapping system
 
 This produced three recurring failures:
 
-- identity drift: `ARC -> AC/ASC`, `狐蝠工业 -> 鸿福`, `KissPod -> 战术笔`
+- identity drift: `ARC -> AC/ASC`, `狐蝠工业 -> 鸿福`, `SamplePod -> 战术笔`
 - weak correction: glossary review often returned `0`, so obvious contradictions were not blocked
 - shallow research: online search and internal memory were not merged into an explainable evidence chain
 

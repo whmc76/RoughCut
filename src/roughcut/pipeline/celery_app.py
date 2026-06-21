@@ -73,6 +73,7 @@ def create_celery_app() -> Celery:
         enable_utc=True,
         task_routes={
             "roughcut.pipeline.tasks.media_*": {"queue": "media_queue"},
+            "roughcut.pipeline.tasks.remix_production_run": {"queue": "media_queue"},
             "roughcut.pipeline.tasks.llm_*": {"queue": "llm_queue"},
             "roughcut.pipeline.tasks.agent_*": {"queue": "agent_queue"},
             "roughcut.pipeline.tasks.publication_*": {"queue": "publication_queue"},

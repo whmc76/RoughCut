@@ -1393,7 +1393,7 @@ def _title_style_tokens(
     main_large = _fit_font_size(title_lines.get("main", ""), 154, min_size=98)
     bottom_mid = _fit_font_size(title_lines.get("bottom", ""), 110, min_size=78)
 
-    if style_name == "jenny_children_bubble_stack":
+    if style_name in {"children_storybook_bubble_stack", "demo_children_bubble_stack"}:
         return _apply_cross_platform_safe_zone(
             {
                 "top": {

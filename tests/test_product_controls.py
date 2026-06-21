@@ -1,4 +1,7 @@
+import asyncio
+
 from roughcut.api.schemas import JobInitializeIn
+from roughcut.api.schemas import WatchRootCreate
 from roughcut.edit.product_controls import (
     build_product_controls_payload,
     extract_product_controls_from_profile,
@@ -10,6 +13,7 @@ from roughcut.edit.product_controls import (
     workflow_template_for_edit_mode,
 )
 from roughcut.edit.strategy_profile import infer_strategy_type
+from roughcut.watcher import folder_watcher
 
 
 def test_product_control_normalizers_accept_common_aliases() -> None:
@@ -114,3 +118,50 @@ def test_job_initialize_in_validates_phase7_product_controls() -> None:
     assert body.edit_mode == "talking_head"
     assert body.automation_level == "standard"
     assert body.material_usage == "selected_uploaded"
+
+
+def test_watch_root_create_validates_product_controls() -> None:
+    body = WatchRootCreate(
+        path="Y:/EDC",
+        edit_mode="gameplay",
+        automation_level="safe",
+        material_usage="primary_only",
+    )
+
+    assert body.edit_mode == "highlight"
+    assert body.automation_level == "conservative"
+    assert body.material_usage == "main_only"
+
+
+def test_inventory_job_factory_receives_watch_root_product_controls(monkeypatch) -> None:
+    calls = []
+
+    async def fake_create_job_for_file(file_path, workflow_template=None, language="zh-CN", **kwargs):
+        calls.append({
+            "file_path": str(file_path),
+            "workflow_template": workflow_template,
+            "language": language,
+            "product_controls": kwargs.get("product_controls"),
+        })
+        return "job-1"
+
+    monkeypatch.setattr(folder_watcher, "_create_job_for_file", fake_create_job_for_file)
+
+    results = asyncio.run(
+        folder_watcher.create_jobs_for_inventory_paths(
+            ["Y:/EDC/demo.mp4"],
+            workflow_template="unboxing_standard",
+            product_controls={
+                "edit_mode": "tutorial",
+                "automation_level": "richer",
+                "material_usage": "main_only",
+            },
+        )
+    )
+
+    assert results == [{"path": "Y:/EDC/demo.mp4", "job_id": "job-1"}]
+    assert calls[0]["product_controls"] == {
+        "edit_mode": "tutorial",
+        "automation_level": "richer",
+        "material_usage": "main_only",
+    }

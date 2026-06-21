@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--source-dir",
         type=Path,
-        default=Path(r"Y:\EDC系列\未剪辑视频"),
+        default=Path(os.getenv("ROUGHCUT_EDC_REGRESSION_SOURCE_DIR", "data/samples")),
     )
     parser.add_argument("--workflow-template", default="edc_tactical")
     parser.add_argument("--language", default="zh-CN")

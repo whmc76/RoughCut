@@ -31,13 +31,13 @@ _BUILTIN_ENTITY_CATALOG: tuple[EntityCatalogEntry, ...] = (
         supporting_keywords=("工具钳", "多功能钳", "单手开合", "钳口", "锉刀", "MagnaCut"),
     ),
     EntityCatalogEntry(
-        brand="LuckyKiss",
-        model="KissPod",
+        brand="SampleMint",
+        model="SamplePod",
         subject_type="益生菌含片",
         subject_domain="food",
-        brand_aliases=("LUCKYKISS", "Lucky Kiss"),
+        brand_aliases=("SAMPLEMINT", "Lucky Kiss"),
         model_aliases=("KISSPORT", "Kiss Pod"),
-        phrases=("LuckyKiss KissPod", "KissPod 益生菌含片"),
+        phrases=("SampleMint SamplePod", "SamplePod 益生菌含片"),
         supporting_keywords=("益生菌", "含片", "弹射", "口气", "零糖", "入口", "情侣"),
     ),
     EntityCatalogEntry(

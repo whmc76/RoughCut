@@ -243,7 +243,7 @@ def test_build_release_gate_publication_verification_preserves_creator_session_v
                     "verification_reason": "auth_required",
                     "route": {"url": "https://creator.douyin.com/creator-micro/content/post/video", "title": "抖音创作者中心"},
                     "visual_evidence": {
-                        "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260602/douyin/session-auth.png",
+                        "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260602/douyin/session-auth.png",
                         "capture_type": "screenshot",
                         "phase": "creator_session_probe",
                     },
@@ -278,7 +278,7 @@ def test_build_release_gate_publication_verification_preserves_probe_inventory_v
                             "title": "抖音创作者中心",
                         },
                         "visual_evidence": {
-                            "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260602/douyin/probe.png",
+                            "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260602/douyin/probe.png",
                             "capture_type": "screenshot",
                             "phase": "probe_inventory",
                         },
@@ -401,7 +401,7 @@ async def test_run_live_release_gate_preserves_creator_session_visual_evidence(m
                             "verification_reason": "auth_required",
                             "route": {"url": "https://creator.douyin.com/creator-micro/content/post/video", "title": "抖音创作者中心"},
                             "visual_evidence": {
-                                "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260602/douyin/session-auth.png",
+                                "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260602/douyin/session-auth.png",
                                 "capture_type": "screenshot",
                                 "phase": "creator_session_probe",
                             },
@@ -451,7 +451,7 @@ async def test_run_live_release_gate_preserves_probe_inventory_visual_evidence(m
                             "title": "抖音创作者中心",
                         },
                         "visual_evidence": {
-                            "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260602/douyin/probe.png",
+                            "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260602/douyin/probe.png",
                             "capture_type": "screenshot",
                             "phase": "probe_inventory",
                         },
@@ -502,7 +502,7 @@ async def test_run_live_release_gate_preserves_probe_gate_failures(monkeypatch: 
                             "title": "小红书创作服务平台",
                         },
                         "visual_evidence": {
-                            "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260602/xiaohongshu/probe.png",
+                            "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260602/xiaohongshu/probe.png",
                             "capture_type": "screenshot",
                             "phase": "probe_inventory",
                         },
@@ -610,7 +610,7 @@ async def test_run_live_release_gate_fails_closed_on_packaging_scope_mismatch(mo
                             "title": "快手创作者服务平台",
                         },
                         "visual_evidence": {
-                            "artifact_path": "E:/WorkSpace/RoughCut/artifacts/publication-visual-evidence/20260602/kuaishou/probe.png",
+                            "artifact_path": "C:/sample-workspace/RoughCut/artifacts/publication-visual-evidence/20260602/kuaishou/probe.png",
                             "capture_type": "screenshot",
                             "phase": "probe_inventory",
                         },

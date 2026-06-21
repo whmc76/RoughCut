@@ -906,6 +906,39 @@ _WASTE_SEGMENT_DISCOVERY_REASONS = {
     "off_topic_interruption",
     "long_non_dialogue",
 }
+_RESTART_RETAKE_EXPLICIT_CUE_RE = re.compile(
+    r"(重来|重新来|再来一遍|重新说|重说|说错|讲错|不对|错了|前面不要|剪掉|删掉|回删|卡住|卡壳|口误)"
+)
+_RESTART_RETAKE_INFORMATION_MARKERS = (
+    "配置",
+    "参数",
+    "功能",
+    "模式",
+    "区别",
+    "对比",
+    "结构",
+    "机构",
+    "模块",
+    "设计",
+    "教程",
+    "指南",
+    "操作",
+    "拆装",
+    "安装",
+    "使用",
+    "手感",
+    "体验",
+    "弹力",
+    "声音",
+    "降低",
+    "提供",
+    "可以",
+    "能够",
+    "因为",
+    "所以",
+    "建议",
+    "推荐",
+)
 SEMANTIC_TIMELINE_ANALYSIS_STAGE = "semantic_timeline_analysis"
 SEMANTIC_TIMELINE_ANALYSIS_SCHEMA_VERSION = "semantic_timeline_analysis.v1"
 
@@ -962,12 +995,63 @@ def _build_waste_segment_discovery_subtitle_context_windows(
     return windows
 
 
+def _compact_waste_discovery_text(value: Any) -> str:
+    return re.sub(r"[^\w\u4e00-\u9fff]+", "", str(value or "").strip().lower())
+
+
+def _waste_candidate_subtitle_text(
+    subtitle_context: list[dict[str, Any]] | None,
+    *,
+    start: float,
+    end: float,
+) -> str:
+    parts: list[str] = []
+    for item in list(subtitle_context or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            item_start = float(item.get("start", item.get("start_time", 0.0)) or 0.0)
+            item_end = float(item.get("end", item.get("end_time", item_start)) or item_start)
+        except (TypeError, ValueError):
+            continue
+        if min(end, item_end) - max(start, item_start) <= 0.02:
+            continue
+        text = str(item.get("text") or item.get("text_final") or item.get("text_raw") or "").strip()
+        if text:
+            parts.append(text)
+    return "".join(parts)
+
+
+def _restart_retake_candidate_is_overbroad(
+    raw: dict[str, Any],
+    *,
+    start: float,
+    end: float,
+    subtitle_context: list[dict[str, Any]] | None,
+) -> bool:
+    duration_sec = max(0.0, end - start)
+    if duration_sec < 20.0 or not subtitle_context:
+        return False
+    candidate_text = _waste_candidate_subtitle_text(subtitle_context, start=start, end=end)
+    compact_text = _compact_waste_discovery_text(candidate_text)
+    if len(compact_text) < 80:
+        return False
+    summary = str(raw.get("summary") or "")
+    evidence_text = " ".join(str(item or "") for item in list(raw.get("evidence") or []))
+    cue_surface = f"{candidate_text} {summary} {evidence_text}"
+    if _RESTART_RETAKE_EXPLICIT_CUE_RE.search(cue_surface):
+        return False
+    marker_count = sum(1 for marker in _RESTART_RETAKE_INFORMATION_MARKERS if marker in candidate_text)
+    return marker_count >= 4
+
+
 def _normalize_waste_segment_discovery_candidates(
     payload: dict[str, Any] | None,
     *,
     duration: float,
     min_confidence: float,
     max_candidates: int,
+    subtitle_context: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
@@ -986,6 +1070,13 @@ def _normalize_waste_segment_discovery_candidates(
         except (TypeError, ValueError):
             continue
         if end - start < 0.18 or confidence < min_confidence:
+            continue
+        if reason == "restart_retake" and _restart_retake_candidate_is_overbroad(
+            raw,
+            start=start,
+            end=end,
+            subtitle_context=subtitle_context,
+        ):
             continue
         key = (reason, round(start, 3), round(end, 3))
         if key in seen:
@@ -1170,6 +1261,7 @@ async def _maybe_discover_waste_segments_with_llm(
                     duration=duration,
                     min_confidence=min_confidence,
                     max_candidates=max_candidates,
+                    subtitle_context=subtitle_context,
                 )
                 for candidate in window_candidates:
                     candidate.setdefault("llm_discovery", {})
@@ -6810,19 +6902,26 @@ async def _warm_manual_editor_preview_assets_for_job(
             timeout_sec=preview_timeout_sec,
         )
         try:
+            async def _build_preview_assets_with_orientation() -> dict[str, Any]:
+                from roughcut.media.rotation import detect_video_rotation_decision
+
+                orientation_decision = (await detect_video_rotation_decision(source_path)).to_dict()
+                return await asyncio.to_thread(
+                    ensure_manual_editor_preview_assets,
+                    job_id=job.id,
+                    source_path=source_path,
+                    duration_sec=float(duration_sec or 0.0),
+                    asset_dir=asset_dir,
+                    orientation_decision=orientation_decision,
+                )
+
             async with _maintain_step_heartbeat(
                 step,
                 detail=f"预生成手动调整轻量预览代理（最多 {int(round(preview_timeout_sec))}s）",
                 progress=0.93,
             ):
                 payload = await asyncio.wait_for(
-                    asyncio.to_thread(
-                        ensure_manual_editor_preview_assets,
-                        job_id=job.id,
-                        source_path=source_path,
-                        duration_sec=float(duration_sec or 0.0),
-                        asset_dir=asset_dir,
-                    ),
+                    _build_preview_assets_with_orientation(),
                     timeout=preview_timeout_sec,
                 )
         finally:
@@ -6869,6 +6968,9 @@ async def _warm_manual_editor_preview_assets_for_job(
                 "stage": str(payload.get("stage") or "ready"),
                 "progress": float(payload.get("progress") or 1.0),
                 "asset_version": int(payload.get("asset_version") or 0),
+                "orientation_decision": payload.get("orientation_decision")
+                if isinstance(payload.get("orientation_decision"), dict)
+                else {},
                 "video_ready": bool(payload.get("video_ready")),
                 "audio_ready": bool(payload.get("audio_ready")),
                 "thumbnail_count": len(list(payload.get("thumbnail_items") or [])),

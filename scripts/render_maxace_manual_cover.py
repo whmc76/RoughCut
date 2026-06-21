@@ -6,13 +6,13 @@ from PIL import Image, ImageChops, ImageDraw, ImageEnhance, ImageFilter, ImageFo
 
 
 REFERENCE = Path(
-    r"\\Z4pro-gwil\团队文件-媒体工作台\EDC系列\待发布\MAXACE 美杜莎4 顶配次顶配开箱\smart-copy\compare\reference-fixed-21.jpg"
+    r"\\sample-share\media-workbench\sample-series\pending\sample-product-unbox\smart-copy\compare\reference-fixed-21.jpg"
 )
 OUTPUT = Path(
-    r"E:\WorkSpace\RoughCut\data\runtime\compare-preview\manual-maxace-cover-v3.jpg"
+    r"C:\sample-workspace\RoughCut\data\runtime\compare-preview\manual-sample-cover-v3.jpg"
 )
 SHARED_OUTPUT = Path(
-    r"\\Z4pro-gwil\团队文件-媒体工作台\EDC系列\待发布\MAXACE 美杜莎4 顶配次顶配开箱\smart-copy\compare\manual-maxace-cover-v3.jpg"
+    r"\\sample-share\media-workbench\sample-series\pending\sample-product-unbox\smart-copy\compare\manual-sample-cover-v3.jpg"
 )
 FONT_PATH = Path(r"C:\Windows\Fonts\msyhbd.ttc")
 SIZE = (1600, 900)

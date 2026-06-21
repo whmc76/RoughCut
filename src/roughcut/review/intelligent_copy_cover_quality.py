@@ -430,6 +430,16 @@ def _check_cover_hard_contract(
             blocking_reasons.append(message)
         else:
             warnings.append(message)
+    style_key = str(contract.get("unified_style_key") or "").strip()
+    if (bool(contract.get("full_bitmap_cover_required")) or full_cover_typography_required) and request.get("bitmap_title_contract_passed") is True:
+        reason = str(request.get("bitmap_title_contract_reason") or "").strip()
+        explanation = f"：{reason}" if reason else ""
+        if bool(contract.get("brand_model_title_required")) and request.get("bitmap_title_main_title_matches") is False:
+            blocking_reasons.append(f"完整封面位图主标题未通过识别校验{explanation}")
+        if bool(contract.get("config_subtitle_required")) and request.get("bitmap_title_subtitle_matches") is False:
+            blocking_reasons.append(f"完整封面位图副标题未通过识别校验{explanation}")
+        if style_key and request.get("bitmap_title_style_verified") is False:
+            blocking_reasons.append(f"完整封面位图标题风格未通过识别校验{explanation}")
     required_lines = contract.get("required_title_lines") if isinstance(contract.get("required_title_lines"), dict) else {}
     required_top = str(required_lines.get("top") or "").strip()
     required_main = str(required_lines.get("main") or "").strip()
@@ -455,7 +465,6 @@ def _check_cover_hard_contract(
             blocking_reasons.append(message)
         else:
             warnings.append(message)
-    style_key = str(contract.get("unified_style_key") or "").strip()
     style_verified = bool(str(request.get("post_title_overlay_title_style") or "").strip()) or bool(request.get("bitmap_title_style_verified"))
     if style_key and not style_verified:
         warnings.append(f"封面未记录标题风格校验，无法完全确认组内风格统一：style={style_key}")
@@ -548,6 +557,22 @@ def _resolve_verified_cover_title_lines(request: dict[str, Any]) -> tuple[dict[s
         return {}, False
     bitmap_lines = request.get("bitmap_title_lines") if isinstance(request.get("bitmap_title_lines"), dict) else {}
     if bool(request.get("bitmap_title_contract_passed")) and bitmap_lines:
+        contract = request.get("cover_hard_contract") if isinstance(request.get("cover_hard_contract"), dict) else {}
+        if (
+            bool(contract.get("brand_model_title_required"))
+            and request.get("bitmap_title_main_title_matches") is False
+        ):
+            return {}, False
+        if (
+            bool(contract.get("config_subtitle_required"))
+            and request.get("bitmap_title_subtitle_matches") is False
+        ):
+            return {}, False
+        if (
+            str(contract.get("unified_style_key") or "").strip()
+            and request.get("bitmap_title_style_verified") is False
+        ):
+            return {}, False
         return bitmap_lines, True
     if bool(request.get("bitmap_title_contract_check_unavailable")):
         fallback_lines = _extract_required_title_lines(request)

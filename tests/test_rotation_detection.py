@@ -82,6 +82,41 @@ def test_detect_video_rotation_decision_short_circuits_when_metadata_is_upright(
     assert decision.confidence == 0.92
 
 
+def test_detect_video_rotation_uses_visual_candidate_sheets(monkeypatch, tmp_path) -> None:
+    source_path = tmp_path / "demo.mp4"
+    source_path.write_bytes(b"video")
+    raw_frame = tmp_path / "raw.jpg"
+    raw_frame.write_bytes(b"raw")
+    candidate_sheet = tmp_path / "sheet.jpg"
+    candidate_sheet.write_bytes(b"sheet")
+    captured = {}
+
+    async def fake_complete_with_images(prompt, images, **_kwargs):
+        captured["prompt"] = prompt
+        captured["images"] = images
+        return '{"rotation":0,"confidence":0.82,"reason":"0 panel is upright"}'
+
+    monkeypatch.setattr("roughcut.media.rotation._probe_duration", lambda _path: 12.0)
+    monkeypatch.setattr(
+        "roughcut.media.rotation._probe_rotation_metadata_summary",
+        lambda _path: {"rotation_cw": 270, "has_display_matrix": True},
+    )
+    monkeypatch.setattr("roughcut.media.rotation._extract_raw_frames", lambda *_args, **_kwargs: [raw_frame])
+    monkeypatch.setattr(
+        "roughcut.media.rotation._build_orientation_candidate_sheets",
+        lambda _frames, _tmpdir: [candidate_sheet],
+    )
+    monkeypatch.setattr("roughcut.media.rotation.complete_with_images", fake_complete_with_images)
+
+    decision = asyncio.run(detect_video_rotation_decision(source_path))
+
+    assert captured["images"] == [candidate_sheet]
+    assert "contact sheet" in captured["prompt"]
+    assert decision.rotation_cw == 0
+    assert decision.source == "vision"
+    assert decision.metadata_rotation_cw == 270
+
+
 def test_probe_rotation_metadata_summary_defaults_to_zero(tmp_path) -> None:
     source_path = tmp_path / "missing.mp4"
 

@@ -8,6 +8,27 @@ import { PanelHeader } from "../../components/ui/PanelHeader";
 import { useI18n } from "../../i18n";
 import { classNames } from "../../utils";
 
+const EDIT_MODE_OPTIONS: Array<{ value: RootForm["edit_mode"]; labelKey: string }> = [
+  { value: "auto", labelKey: "watch.form.editModeAuto" },
+  { value: "talking_head", labelKey: "watch.form.editModeTalkingHead" },
+  { value: "tutorial", labelKey: "watch.form.editModeTutorial" },
+  { value: "vlog", labelKey: "watch.form.editModeVlog" },
+  { value: "highlight", labelKey: "watch.form.editModeHighlight" },
+  { value: "multi_material", labelKey: "watch.form.editModeMultiMaterial" },
+];
+
+const AUTOMATION_LEVEL_OPTIONS: Array<{ value: RootForm["automation_level"]; labelKey: string }> = [
+  { value: "conservative", labelKey: "watch.form.automationConservative" },
+  { value: "standard", labelKey: "watch.form.automationStandard" },
+  { value: "richer", labelKey: "watch.form.automationRicher" },
+];
+
+const MATERIAL_USAGE_OPTIONS: Array<{ value: RootForm["material_usage"]; labelKey: string }> = [
+  { value: "main_only", labelKey: "watch.form.materialMainOnly" },
+  { value: "all_uploaded", labelKey: "watch.form.materialAllUploaded" },
+  { value: "selected_uploaded", labelKey: "watch.form.materialSelectedUploaded" },
+];
+
 type WatchRootFormPanelProps = {
   form: RootForm;
   configProfileOptions: SelectOption[];
@@ -107,6 +128,30 @@ export function WatchRootFormPanel({
             </>
           ) : null}
         </div>
+        <div className="notice">
+          <div className="stat-label">{t("watch.form.autoEditFrameworkTitle")}</div>
+          <div className="muted compact-top">{t("watch.form.autoEditFrameworkDescription")}</div>
+          <div className="field-row compact-top">
+            <SelectField
+              label={t("watch.form.editMode")}
+              value={form.edit_mode}
+              onChange={(event) => onChange({ ...form, edit_mode: event.target.value as RootForm["edit_mode"] })}
+              options={EDIT_MODE_OPTIONS.map((option) => ({ value: option.value, label: t(option.labelKey) }))}
+            />
+            <SelectField
+              label={t("watch.form.automationLevel")}
+              value={form.automation_level}
+              onChange={(event) => onChange({ ...form, automation_level: event.target.value as RootForm["automation_level"] })}
+              options={AUTOMATION_LEVEL_OPTIONS.map((option) => ({ value: option.value, label: t(option.labelKey) }))}
+            />
+            <SelectField
+              label={t("watch.form.materialUsage")}
+              value={form.material_usage}
+              onChange={(event) => onChange({ ...form, material_usage: event.target.value as RootForm["material_usage"] })}
+              options={MATERIAL_USAGE_OPTIONS.map((option) => ({ value: option.value, label: t(option.labelKey) }))}
+            />
+          </div>
+        </div>
         <SelectField
           label={t("watch.form.workflowTemplate")}
           value={form.workflow_template}
@@ -166,6 +211,11 @@ export function WatchRootFormPanel({
             {form.ingest_mode === "task_only"
               ? t("watch.form.ingestModeTaskOnlyDescription")
               : t("watch.form.ingestModeFullAutoDescription")}
+          </div>
+          <div className="muted compact-top">{t("watch.form.productControlSummary")
+            .replace("{editMode}", t(`watch.form.editMode.${form.edit_mode}`))
+            .replace("{automationLevel}", t(`watch.form.automationLevel.${form.automation_level}`))
+            .replace("{materialUsage}", t(`watch.form.materialUsage.${form.material_usage}`))}
           </div>
           {form.job_flow_mode === "smart_assist" ? (
             <div className="muted compact-top">{t("watch.form.jobFlowModeSmartAssistDescription")}</div>

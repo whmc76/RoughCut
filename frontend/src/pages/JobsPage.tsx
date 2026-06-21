@@ -13,8 +13,8 @@ import { JobQueueTable } from "../features/jobs/JobQueueTable";
 import { JobReviewOverlay } from "../features/jobs/JobReviewOverlay";
 import { JobUploadPanel } from "../features/jobs/JobUploadPanel";
 import type { JobCreateEntryMode } from "../features/jobs/constants";
-import type { JobQueueFilter } from "../features/jobs/useJobWorkspace";
-import type { RemixProductionTask } from "../types";
+import type { JobClipStatusFilter, JobPublicationFilter, JobQueueFilter } from "../features/jobs/useJobWorkspace";
+import type { Job, RemixProductionTask } from "../types";
 import { MATERIAL_ENHANCEMENT_OPTIONS, resolveJobReviewStep, type JobReviewStep, type JobTaskKindFilter, useJobWorkspace } from "../features/jobs/useJobWorkspace";
 import { useI18n } from "../i18n";
 import { classNames } from "../utils";
@@ -34,8 +34,58 @@ const TASK_KIND_FILTER_META: Array<{ key: JobTaskKindFilter; label: string }> = 
   { key: "publication", label: "发布任务" },
 ];
 
+const PUBLICATION_FILTER_META: Array<{ key: JobPublicationFilter; label: string }> = [
+  { key: "all", label: "发布不限" },
+  { key: "published", label: "已发布" },
+  { key: "unpublished", label: "未发布" },
+];
+
+const CLIP_STATUS_FILTER_META: Array<{ key: JobClipStatusFilter; label: string }> = [
+  { key: "all", label: "剪辑状态不限" },
+  { key: "pending", label: "待处理" },
+  { key: "processing", label: "处理中" },
+  { key: "done", label: "剪辑完成" },
+];
+
 function remixTaskLabel(task: RemixProductionTask) {
   return `S${String(task.season).padStart(2, "0")}E${String(task.episode).padStart(2, "0")} · ${task.title}`;
+}
+
+function remixProductionTaskToJob(task: RemixProductionTask, manifestCreatedAt?: string): Job | null {
+  if (!task.job_id) return null;
+  const updatedAt = task.job_updated_at || manifestCreatedAt || new Date(0).toISOString();
+  return {
+    id: task.job_id,
+    source_name: remixTaskLabel(task),
+    video_description: task.script_path || task.source_video_path || "",
+    task_brief: "Demo Creator · 示例动画育儿二创正式生产任务",
+    content_subject: task.title,
+    content_summary: task.script_path || task.source_video_path || "",
+    queue_task_kind: "remix_production",
+    queue_thumbnail_source: "cover",
+    status: task.job_status || task.status || "pending",
+    language: "zh-CN",
+    workflow_template: null,
+    job_flow_mode: "auto",
+    workflow_mode: "script_footage_remix",
+    enhancement_modes: [],
+    output_dir: task.output_path ? task.output_path.replace(/[\\/][^\\/]*$/, "") : null,
+    error_message: task.blocker || null,
+    progress_percent: task.job_progress_percent,
+    created_at: manifestCreatedAt || updatedAt,
+    updated_at: updatedAt,
+    steps: [
+      {
+        id: `${task.job_id}:script_footage_remix`,
+        step_name: "script_footage_remix",
+        status: task.job_status || task.status || "pending",
+        attempt: 0,
+        started_at: null,
+        finished_at: task.job_status === "done" ? updatedAt : null,
+        error_message: task.blocker || null,
+      },
+    ],
+  };
 }
 
 export function JobsPage() {
@@ -55,6 +105,8 @@ export function JobsPage() {
   const [reviewOverlayOpen, setReviewOverlayOpen] = useState(false);
   const [reviewStepOverride, setReviewStepOverride] = useState<JobReviewStep | null>(null);
   const [taskKindFilter, setTaskKindFilter] = useState<JobTaskKindFilter>("all");
+  const [publicationFilter, setPublicationFilter] = useState<JobPublicationFilter>("all");
+  const [clipStatusFilter, setClipStatusFilter] = useState<JobClipStatusFilter>("all");
   const queueStageRef = useRef<HTMLElement | null>(null);
   const remixTaskCreationAttemptedRef = useRef(false);
   const remixProductionTasks = useQuery({
@@ -62,11 +114,18 @@ export function JobsPage() {
     queryFn: () => api.getRemixProductionTasks(),
     staleTime: 15_000,
   });
-  const remixQueueJobs = useMemo(() => [], []);
+  const remixQueueJobs = useMemo(
+    () => (remixProductionTasks.data?.tasks ?? [])
+      .map((task) => remixProductionTaskToJob(task, remixProductionTasks.data?.created_at))
+      .filter((job): job is Job => Boolean(job)),
+    [remixProductionTasks.data],
+  );
   const workspace = useJobWorkspace({
     isCreateOpen: createOpen,
     additionalJobs: remixQueueJobs,
     taskKindFilter,
+    publicationFilter,
+    clipStatusFilter,
   });
   const createMissingRemixProductionJobs = useMutation({
     mutationFn: async (tasks: RemixProductionTask[]) => {
@@ -113,6 +172,15 @@ export function JobsPage() {
   const workflowModeOptions = workspace.options.data?.workflow_modes ?? [{ value: "standard_edit", label: t("creative.workflow.standard_edit") }];
   const enhancementOptions = workspace.options.data?.enhancement_modes ?? [];
   const queueFilterMeta = QUEUE_FILTER_META[workspace.queueFilter];
+  const taskKindFilterMeta = TASK_KIND_FILTER_META.find((item) => item.key === taskKindFilter) ?? TASK_KIND_FILTER_META[0];
+  const publicationFilterMeta = PUBLICATION_FILTER_META.find((item) => item.key === publicationFilter) ?? PUBLICATION_FILTER_META[0];
+  const clipStatusFilterMeta = CLIP_STATUS_FILTER_META.find((item) => item.key === clipStatusFilter) ?? CLIP_STATUS_FILTER_META[0];
+  const activeFilterSummary = [
+    queueFilterMeta.label,
+    taskKindFilter !== "all" ? taskKindFilterMeta.label : null,
+    publicationFilter !== "all" ? publicationFilterMeta.label : null,
+    clipStatusFilter !== "all" ? clipStatusFilterMeta.label : null,
+  ].filter(Boolean).join(" · ");
 
   const reviewStep = reviewStepOverride ?? workspace.reviewStep ?? resolveJobReviewStep(selectedReviewJob, workspace.activity.data);
   const activeReviewStep: JobReviewStep = reviewStep ?? "summary_review";
@@ -402,42 +470,90 @@ export function JobsPage() {
             <h3>任务列表</h3>
             <p>
               {workspace.filteredJobs.length
-                ? `${queueFilterMeta.label} · ${workspace.filteredJobs.length} 个任务`
-                : `${queueFilterMeta.label} · 当前没有任务`}
+                ? `${activeFilterSummary} · ${workspace.filteredJobs.length} 个任务`
+                : `${activeFilterSummary} · 当前没有任务`}
             </p>
           </div>
           <div className="jobs-stage-meta">
             <span>当前筛选</span>
-            <strong>{queueFilterMeta.label}</strong>
+            <strong>{activeFilterSummary}</strong>
             <button
               type="button"
               className="button ghost button-sm"
-              onClick={() => focusQueue("all")}
-              disabled={workspace.queueFilter === "all"}
+              onClick={() => {
+                setTaskKindFilter("all");
+                setPublicationFilter("all");
+                setClipStatusFilter("all");
+                focusQueue("all");
+              }}
+              disabled={
+                workspace.queueFilter === "all"
+                && taskKindFilter === "all"
+                && publicationFilter === "all"
+                && clipStatusFilter === "all"
+              }
             >
               查看全部
             </button>
           </div>
         </div>
         <p className="jobs-queue-stage-note">{queueFilterMeta.description}</p>
-        <div className="jobs-task-kind-filter" aria-label="任务标签筛选">
-          {TASK_KIND_FILTER_META.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              className={classNames("mode-chip-button", taskKindFilter === item.key && "is-active")}
-              onClick={() => {
-                setTaskKindFilter(item.key);
-                workspace.setQueueFilter("all");
-              }}
-            >
-              {item.label}
-            </button>
-          ))}
+        <div className="jobs-queue-filter-panel" aria-label="任务列表筛选">
+          <div className="jobs-filter-row">
+            <span className="jobs-filter-label">任务标签</span>
+            <div className="jobs-task-kind-filter" aria-label="任务标签筛选">
+              {TASK_KIND_FILTER_META.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={classNames("mode-chip-button", taskKindFilter === item.key && "is-active")}
+                  onClick={() => {
+                    setTaskKindFilter(item.key);
+                    workspace.setQueueFilter("all");
+                  }}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="jobs-filter-row">
+            <span className="jobs-filter-label">发布状态</span>
+            <div className="jobs-task-kind-filter" aria-label="发布状态筛选">
+              {PUBLICATION_FILTER_META.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={classNames("mode-chip-button", publicationFilter === item.key && "is-active")}
+                  onClick={() => setPublicationFilter(item.key)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="jobs-filter-row">
+            <span className="jobs-filter-label">剪辑状态</span>
+            <div className="jobs-task-kind-filter" aria-label="剪辑状态筛选">
+              {CLIP_STATUS_FILTER_META.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={classNames("mode-chip-button", clipStatusFilter === item.key && "is-active")}
+                  onClick={() => {
+                    setClipStatusFilter(item.key);
+                    workspace.setQueueFilter("all");
+                  }}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
         {taskKindFilter === "remix_production" ? (
           <p className="jobs-queue-stage-note">
-            珍妮斯 baby · 布鲁伊育儿二创：待生产 {remixSummary?.pending_count ?? 0} 集，路径缺失 {remixSummary?.pending_file_missing_count ?? 0}。
+            Demo Creator · 示例动画育儿二创：待生产 {remixSummary?.pending_count ?? 0} 集，路径缺失 {remixSummary?.pending_file_missing_count ?? 0}。
           </p>
         ) : null}
 
@@ -490,7 +606,7 @@ export function JobsPage() {
         <section className="jobs-create-modal-content jobs-remix-production-modal-content">
           <div className="jobs-stage-head">
             <div>
-              <h3>珍妮斯 baby · 布鲁伊正式生产队列</h3>
+              <h3>Demo Creator · 示例动画正式生产队列</h3>
               <p>这里读取的是创作者档案绑定的二创生产 manifest，不进入普通原片剪辑流水线。</p>
             </div>
             <div className="jobs-stage-meta">

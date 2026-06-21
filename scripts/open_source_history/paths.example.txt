@@ -1,0 +1,20 @@
+# Paths to remove from Git history.
+# Copy this file into a local ignored workspace such as .tmp/open-source-history/
+# and replace the examples with your real private paths.
+
+literal:.env
+glob:.superpowers/**
+glob:data/creator_profiles/**
+glob:data/remix_production_tasks/**
+glob:data/*hotword*
+glob:data/*memory*
+glob:data/*learned*
+glob:docs/agent-*.md
+glob:docs/agent-*.json
+glob:docs/codex-*.md
+glob:docs/golden-jobs/**
+glob:docs/20*.md
+glob:docs/20*.json
+glob:inspect_*.py
+glob:temp_*.py
+glob:tmp_*.json

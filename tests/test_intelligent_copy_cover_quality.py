@@ -375,6 +375,41 @@ def test_cover_hard_contract_accepts_matching_bitmap_title_contract(tmp_path, mo
     assert result["publish_ready"] is True
 
 
+def test_cover_hard_contract_blocks_bitmap_subtitle_mismatch_even_when_pass_flag_is_true(tmp_path, monkeypatch) -> None:
+    output = tmp_path / "cover.jpg"
+    output.write_bytes(b"generated")
+    request = _request(output)
+    request["cover_hard_contract"] = {
+        "full_bitmap_cover_required": True,
+        "brand_model_title_required": True,
+        "config_subtitle_required": True,
+        "required_title_lines": {
+            "top": "NITECORE",
+            "main": "EDC17 三光源超薄",
+            "bottom": "双版对比评测",
+        },
+    }
+    request["cover_director_policy"] = {"typography_owner": "codex_full_cover"}
+    request["bitmap_title_contract_passed"] = True
+    request["bitmap_title_main_title_matches"] = True
+    request["bitmap_title_subtitle_matches"] = False
+    request["bitmap_title_style_verified"] = True
+    request["bitmap_title_contract_reason"] = "副标题识别为开箱实拍"
+    request["bitmap_title_contract_verified_at"] = datetime.now(UTC).isoformat()
+    request["bitmap_title_lines"] = {
+        "top": "NITECORE",
+        "main": "EDC17 三光源超薄",
+        "bottom": "双版对比评测",
+    }
+
+    monkeypatch.setattr(quality, "_read_image_dimensions", lambda path: (1600, 900, None))
+
+    result = quality.assess_cover_publish_readiness(_metadata(output), request, output)
+
+    assert result["publish_ready"] is False
+    assert any("完整封面位图副标题未通过识别校验" in reason for reason in result["blocking_reasons"])
+
+
 def test_cover_hard_contract_blocks_full_bitmap_cover_when_title_verification_is_missing(tmp_path, monkeypatch) -> None:
     output = tmp_path / "cover.jpg"
     output.write_bytes(b"generated")

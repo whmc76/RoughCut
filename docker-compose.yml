@@ -64,8 +64,8 @@ x-app-common: &app-common
     - ./logs:/app/logs
     - ./watch:/app/watch
     - ${ROUGHCUT_REMIX_SOURCE_HOST_ROOT:-./data/remix-source}:${ROUGHCUT_REMIX_SOURCE_CONTAINER_ROOT:-/app/remix-source}:ro
-    - ${HEYGEM_SHARED_HOST_DIR:-D:/duix_avatar_data/face2face}:/code/data
-    - ${ROUGHCUT_CODEX_AUTH_HOST_DIR:-C:/Users/28687/.codex}:/host-codex:ro
+    - ${HEYGEM_SHARED_HOST_DIR:-C:/sample-data/heygem-shared}:/code/data
+    - ${ROUGHCUT_CODEX_AUTH_HOST_DIR:-C:/Users/demo/.codex}:/host-codex:ro
     - /var/run/docker.sock:/var/run/docker.sock
   depends_on:
     postgres:

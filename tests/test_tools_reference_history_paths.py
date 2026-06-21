@@ -13,7 +13,7 @@ def test_resolve_reference_audio_history_path_accepts_legacy_f_drive_root(tmp_pa
     monkeypatch.setattr(tools, "DEFAULT_OUTPUT_ROOT", runtime_root)
     monkeypatch.setattr(tools, "_REFERENCE_UPLOAD_ROOT", reference_root)
 
-    resolved = tools._resolve_reference_audio_history_path(r"F:\roughcut_outputs\tools\reference-uploads\voice.wav")
+    resolved = tools._resolve_reference_audio_history_path(r"C:\roughcut_outputs\tools\reference-uploads\voice.wav")
 
     assert resolved == reference.resolve()
 
@@ -27,7 +27,7 @@ def test_resolve_reference_audio_history_path_rejects_missing_legacy_file(tmp_pa
     monkeypatch.setattr(tools, "_REFERENCE_UPLOAD_ROOT", reference_root)
 
     try:
-        tools._resolve_reference_audio_history_path(r"F:\roughcut_outputs\tools\reference-uploads\missing.wav")
+        tools._resolve_reference_audio_history_path(r"C:\roughcut_outputs\tools\reference-uploads\missing.wav")
     except HTTPException as exc:
         assert exc.status_code == 400
     else:
@@ -44,7 +44,7 @@ def test_tts_output_config_normalizes_existing_legacy_reference_path(tmp_path, m
     monkeypatch.setattr(tools, "DEFAULT_OUTPUT_ROOT", runtime_root)
 
     normalized = tools._normalize_tts_output_config(
-        {"reference_audio": "F:/roughcut_outputs/tools/reference-uploads/voice.wav", "mode": "instruct2"}
+        {"reference_audio": "C:/sample-data/roughcut-outputs/tools/reference-uploads/voice.wav", "mode": "instruct2"}
     )
 
     assert normalized["reference_audio"] == str(reference)

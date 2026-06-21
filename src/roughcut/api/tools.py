@@ -19,7 +19,7 @@ from fastapi import APIRouter, Body, File, Form, HTTPException, Request, UploadF
 from fastapi.responses import FileResponse, StreamingResponse
 
 from roughcut.config import DEFAULT_OUTPUT_ROOT, DEFAULT_ZHIPU_REASONING_MODEL, get_settings, uses_codex_auth_helper
-from roughcut.docker_gpu_guard import hold_managed_gpu_services_async
+from roughcut.docker_gpu_guard import hold_managed_gpu_services_async, restart_managed_gpu_services_async
 from roughcut.providers.avatar.heygem import HeyGemAvatarProvider
 from roughcut.providers.factory import get_reasoning_provider
 from roughcut.providers.reasoning.base import Message
@@ -88,6 +88,7 @@ _MOSS_DURATION_MAX_NEW_TOKEN_HEADROOM = 120
 _MOSS_REQUEST_HEARTBEAT_SECONDS = 15.0
 _MOSS_SEGMENT_REQUEST_TIMEOUT_SECONDS = 300.0
 _MOSS_SEGMENT_GENERATION_MAX_SECONDS = 240.0
+_MOSS_TTS_LOCAL_RECOVERY_RETRIES = 1
 _MOSS_STREAM_SESSION_POLL_INTERVAL_SECONDS = 0.2
 _MOSS_SERVICE_READY_TIMEOUT_SECONDS = 900.0
 _MOSS_SERVICE_READY_POLL_SECONDS = 5.0
@@ -1104,17 +1105,17 @@ async def _execute_moss_tts_local_run(
                             repetition_penalty=repetition_penalty,
                             seed=seed,
                         )
-                        response = await _post_moss_tts_segment_request_with_progress(
+                        response = await _post_moss_tts_segment_request_with_recovery(
                             run_id,
                             client,
                             f"{settings.moss_tts_local_api_base_url.rstrip('/')}{endpoint}",
+                            settings=settings,
                             data=data,
                             reference_path=reference_path,
                             segment_index=index,
                             segment_count=len(text_segments),
                             max_new_tokens=segment_max_new_tokens[index - 1],
                         )
-                        response.raise_for_status()
                         if len(text_segments) > 1:
                             _update_run_stage(
                                 run_id,
@@ -1351,6 +1352,91 @@ async def _get_tts_session_audio(
     if not isinstance(payload, dict):
         raise RuntimeError("MOSS-TTS session audio endpoint returned invalid payload")
     return payload
+
+
+async def _post_moss_tts_segment_request_with_recovery(
+    run_id: str,
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    settings: Any,
+    data: dict[str, str],
+    reference_path: Path | None,
+    segment_index: int,
+    segment_count: int,
+    max_new_tokens: int,
+) -> httpx.Response:
+    attempts = max(1, int(_MOSS_TTS_LOCAL_RECOVERY_RETRIES) + 1)
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = await _post_moss_tts_segment_request_with_progress(
+                run_id,
+                client,
+                url,
+                data=data,
+                reference_path=reference_path,
+                segment_index=segment_index,
+                segment_count=segment_count,
+                max_new_tokens=max_new_tokens,
+            )
+            response.raise_for_status()
+            return response
+        except Exception as exc:
+            last_error = exc
+            if attempt >= attempts or not _is_recoverable_moss_tts_local_failure(exc):
+                raise
+            detail = _describe_moss_tts_local_failure(exc)
+            _update_run_stage(
+                run_id,
+                "service_start",
+                detail=(
+                    "Recovering MOSS-TTS Local after a service-side failure; "
+                    f"restarting service before retry {attempt}/{attempts - 1}"
+                ),
+                progress=0.18,
+                endpoint="/inference",
+                segment_index=segment_index,
+                segment_count=segment_count,
+                recovery_attempt=attempt,
+                recovery_reason=detail,
+            )
+            await restart_managed_gpu_services_async(
+                required_urls=[settings.moss_tts_local_api_base_url],
+                reason="tools_tts_moss_local_recoverable_failure",
+            )
+            await _wait_moss_tts_local_ready(run_id, settings)
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("MOSS-TTS Local recovery failed before submitting a request")
+
+
+def _is_recoverable_moss_tts_local_failure(exc: Exception) -> bool:
+    if isinstance(exc, httpx.HTTPStatusError):
+        status_code = int(getattr(exc.response, "status_code", 0) or 0)
+        return status_code >= 500
+    if isinstance(exc, (httpx.ConnectError, httpx.ReadError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.RemoteProtocolError)):
+        return True
+    message = _describe_moss_tts_local_failure(exc).casefold()
+    recoverable_markers = (
+        "cuda error",
+        "acceleratorerror",
+        "internal server error",
+        "server disconnected",
+        "connection reset",
+        "connection refused",
+        "readtimeout",
+        "connecttimeout",
+        "timed out",
+    )
+    return any(marker in message for marker in recoverable_markers)
+
+
+def _describe_moss_tts_local_failure(exc: Exception) -> str:
+    if isinstance(exc, httpx.HTTPStatusError):
+        detail = _read_response_error(exc.response)
+        return f"HTTP {exc.response.status_code}: {detail}"
+    return str(exc)
 
 
 async def _post_moss_tts_segment_request_with_progress(
@@ -3011,8 +3097,8 @@ def _translate_legacy_runtime_path(value: str) -> Path | None:
         return None
     normalized = requested.replace("\\", "/")
     legacy_roots = (
-        "F:/roughcut_outputs",
-        "E:/WorkSpace/RoughCut/data/runtime",
+        "C:/sample-data/roughcut-outputs",
+        "C:/sample-workspace/RoughCut/data/runtime",
     )
     for legacy_root in legacy_roots:
         if normalized.casefold() == legacy_root.casefold():

@@ -278,7 +278,7 @@ async def _run_backend_contract_smoke(
             worker_result = await run_publication_worker_once(
                 session,
                 browser_agent_base_url="http://browser-agent.local",
-                auth_token="smoke-token",
+                auth_token="<test-token>",
                 worker_id="minimax-cdp-smoke",
                 limit=max(1, len(platforms)),
                 http_client=fake_client,

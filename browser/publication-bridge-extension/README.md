@@ -12,7 +12,7 @@ It does **not** unify platform flows. It only replaces the old `http://127.0.0.1
 4. Click `Load unpacked`.
 5. Select this folder:
 
-   `E:\WorkSpace\RoughCut\browser\publication-bridge-extension`
+   `C:\sample-workspace\roughcut\browser\publication-bridge-extension`
 
 6. Keep Chrome running with the target logged-in profile.
 7. Start `scripts/publication_browser_agent_service.mjs`.
