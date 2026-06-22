@@ -496,6 +496,7 @@ def _resolve_chapter_segments(
         _chapter_segments_from_subtitles(subtitle_items, duration_sec=duration),
         _chapter_segments_from_section_choreography(section_choreography, duration_sec=duration),
         _chapter_segments_from_focus_cards(focus_plan, duration_sec=duration),
+        _chapter_segments_from_subtitle_timeline(subtitle_items, duration_sec=duration),
     ]
     for segments in candidates:
         normalized = _normalize_chapter_segments(segments, duration_sec=duration)
@@ -530,7 +531,7 @@ def _chapter_segments_from_subtitles(
         ).strip().lower()
         if not role:
             continue
-        title = _chapter_title(role=role)
+        title = _chapter_title_from_payload(item, role=role)
         if not groups or str(groups[-1].get("role") or "") != role or start - float(groups[-1].get("end_sec", 0.0) or 0.0) > 3.2:
             groups.append(
                 {
@@ -546,6 +547,68 @@ def _chapter_segments_from_subtitles(
     if groups and duration_sec > 0:
         groups[-1]["end_sec"] = min(duration_sec, max(float(groups[-1]["end_sec"]), duration_sec))
     return groups
+
+
+def _chapter_segments_from_subtitle_timeline(
+    subtitle_items: Sequence[dict[str, Any]],
+    *,
+    duration_sec: float,
+) -> list[dict[str, Any]]:
+    items = [
+        dict(raw)
+        for raw in subtitle_items
+        if isinstance(raw, dict) and _clean_chapter_title(subtitle_display_rule_text(raw))
+    ]
+    if not items:
+        return []
+    items.sort(key=lambda raw: float(raw.get("start_time", 0.0) or 0.0))
+    first_start = max(0.0, float(items[0].get("start_time", 0.0) or 0.0))
+    last_end = max(
+        first_start,
+        max(float(item.get("end_time", item.get("start_time", 0.0)) or item.get("start_time", 0.0) or 0.0) for item in items),
+    )
+    duration = max(duration_sec, last_end)
+    if duration <= 0:
+        return []
+    target_count = max(1, min(6, int(round(duration / 45.0)) or 1))
+    if len(items) >= 8 and target_count < 3:
+        target_count = 3
+    elif len(items) >= 4 and target_count < 2:
+        target_count = 2
+    if len(items) < 3:
+        target_count = 1
+
+    segments: list[dict[str, Any]] = []
+    for index in range(target_count):
+        start = first_start + ((duration - first_start) * index / target_count)
+        end = first_start + ((duration - first_start) * (index + 1) / target_count)
+        bucket = [
+            item for item in items
+            if _subtitle_midpoint(item) >= start - 1e-6 and _subtitle_midpoint(item) < end + 1e-6
+        ]
+        if not bucket:
+            continue
+        segment_start = max(0.0, float(bucket[0].get("start_time", start) or start))
+        segment_end = max(segment_start, float(bucket[-1].get("end_time", end) or end))
+        if index == target_count - 1 and duration_sec > 0:
+            segment_end = max(segment_end, duration_sec)
+        title = _chapter_title_from_payload(bucket[0], role="section")
+        segments.append(
+            {
+                "start_sec": round(segment_start, 3),
+                "end_sec": round(segment_end, 3),
+                "role": "section",
+                "title": title,
+                "source": "subtitle_timeline_fallback",
+            }
+        )
+    return segments
+
+
+def _subtitle_midpoint(item: dict[str, Any]) -> float:
+    start = float(item.get("start_time", 0.0) or 0.0)
+    end = float(item.get("end_time", start) or start)
+    return (start + max(start, end)) / 2.0
 
 
 def _chapter_segments_from_section_choreography(
@@ -570,7 +633,7 @@ def _chapter_segments_from_section_choreography(
                 "start_sec": round(start, 3),
                 "end_sec": round(end, 3),
                 "role": role,
-                "title": _chapter_title(role=role),
+                "title": _chapter_title_from_payload(section, role=role),
                 "source": "section_choreography",
             }
         )
@@ -594,7 +657,7 @@ def _chapter_segments_from_focus_cards(
                 "start_sec": round(start, 3),
                 "end_sec": round(end, 3),
                 "role": role,
-                "title": _chapter_title(role=role),
+                "title": _chapter_title_from_payload(card, role=role),
                 "source": "focus_chapter_cards",
             }
         )
@@ -616,7 +679,8 @@ def _normalize_chapter_segments(
             end = min(max(end, start), duration)
         if end - start < 0.55:
             continue
-        title = _chapter_title(role=str(raw.get("role") or ""))
+        role = str(raw.get("role") or "").strip().lower()
+        title = _chapter_title_from_payload(raw, role=role)
         if not title:
             continue
         if normalized and start < float(normalized[-1]["end_sec"]):
@@ -628,11 +692,44 @@ def _normalize_chapter_segments(
                 "start_sec": round(start, 3),
                 "end_sec": round(end, 3),
                 "title": title,
-                "role": str(raw.get("role") or "").strip().lower(),
+                "role": role,
                 "source": str(raw.get("source") or ""),
             }
         )
     return normalized
+
+
+_CHAPTER_TITLE_KEYS = (
+    "title",
+    "chapter_title",
+    "section_title",
+    "heading",
+    "headline",
+    "name",
+    "label",
+    "text",
+    "display_text",
+    "text_final",
+    "text_norm",
+    "text_raw",
+    "topic",
+)
+
+
+def _chapter_title_from_payload(payload: dict[str, Any], *, role: str) -> str:
+    for key in _CHAPTER_TITLE_KEYS:
+        text = _clean_chapter_title(payload.get(key))
+        if text:
+            return text
+    subtitle_text = _clean_chapter_title(subtitle_display_rule_text(payload))
+    return subtitle_text or _chapter_title(role=role)
+
+
+def _clean_chapter_title(value: Any) -> str:
+    if value is None:
+        return ""
+    text = " ".join(str(value).split())
+    return text.strip()
 
 
 def _chapter_title(*, role: str) -> str:

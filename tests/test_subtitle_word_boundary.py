@@ -57,6 +57,7 @@ def test_analyzes_common_product_review_word_splits_without_jieba_dependency() -
         ("这个设", "计取向"),
         ("很有特", "色"),
         ("它的手", "感不错"),
+        ("很方便的去操", "作的"),
         ("他", "妈这个位置"),
     ]
     for left, right in cases:
@@ -1389,6 +1390,42 @@ def test_segmentation_falls_back_when_canonical_realign_short_chunks_have_gap_sp
     assert any(text == "我们其他博主也是也都发过这款手电了，" for text in texts)
     assert any(text == "我们就简单的做一下展示。" for text in texts)
     assert not any(left.endswith("手电") and right.startswith("了，") for left, right in zip(texts, texts[1:]))
+
+
+def test_segmenter_keeps_fxx1_spoken_phrases_with_relaxed_landscape_budget() -> None:
+    text = (
+        "好，今天给大家介绍，呃，狐蝠工业还是这个 FXX1 啊，星期天，"
+        "嗯，这是他家刚更新的配色，就是这个新的戒背色。"
+        "然后呢，另外他们也是搭配这个包啊，新出了一个新的背带，"
+        "这期给大家介绍一下，啊，包括它的使用方法，还有我的一个简单使用经验吧。"
+        "那么这个 FXX1 可能大家也比较熟悉了，很多人都已经讲过了这个包。"
+    )
+    compact = "".join(char for char in text if not char.isspace())
+    words = []
+    cursor = 0.0
+    for char in compact:
+        words.append({"word": char, "start": cursor, "end": cursor + 0.16})
+        cursor += 0.16
+    segment = type(
+        "TranscriptRow",
+        (),
+        {
+            "text": text,
+            "start_time": 0.0,
+            "end_time": cursor,
+            "words_json": words,
+        },
+    )()
+
+    result = segment_subtitles([segment], max_chars=34, max_duration=5.8)
+    texts = [entry.text_raw for entry in result.entries]
+
+    assert any("这是他家刚更新的配色" in item for item in texts)
+    assert any("包括它的使用方法" in item for item in texts)
+    assert any("比较熟悉了" in item for item in texts)
+    assert not any(left.endswith("刚") and right.startswith("更新") for left, right in zip(texts, texts[1:]))
+    assert not any(left.endswith("使用") and right.startswith("方法") for left, right in zip(texts, texts[1:]))
+    assert not any(left.endswith("比较") and right.startswith("熟悉") for left, right in zip(texts, texts[1:]))
 
 
 def test_display_text_corrects_material_context_precast_mishearing() -> None:

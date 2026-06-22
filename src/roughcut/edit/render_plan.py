@@ -1245,6 +1245,8 @@ def _build_section_choreography(
                 "role": str(action.get("role") or ""),
                 "start_sec": round(float(action.get("start_sec", 0.0) or 0.0), 3),
                 "end_sec": round(float(action.get("end_sec", 0.0) or 0.0), 3),
+                "summary": str(action.get("summary") or directive.get("summary") or "").strip(),
+                "chapter_title": str(action.get("summary") or directive.get("summary") or "").strip(),
                 "packaging_intent": packaging_intent,
                 "trim_intensity": str(action.get("trim_intensity") or "balanced"),
                 "transition_mode": transition_mode,

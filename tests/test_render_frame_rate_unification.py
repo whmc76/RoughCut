@@ -374,9 +374,9 @@ def test_hyperframes_progress_filter_draws_real_chapter_segments() -> None:
         height=1080,
         duration_sec=12.0,
         subtitle_items=[
-            {"start_time": 0.0, "end_time": 2.0, "text_final": "先看整体", "subtitle_section_role": "hook"},
-            {"start_time": 3.0, "end_time": 6.0, "text_final": "结构细节", "subtitle_section_role": "detail"},
-            {"start_time": 8.0, "end_time": 11.0, "text_final": "最后总结", "subtitle_section_role": "cta"},
+            {"start_time": 0.0, "end_time": 2.0, "text_final": "先看整体", "subtitle_section_role": "hook", "section_title": "开场完整段落名称"},
+            {"start_time": 3.0, "end_time": 6.0, "text_final": "结构细节", "subtitle_section_role": "detail", "section_title": "结构细节完整段落名称"},
+            {"start_time": 8.0, "end_time": 11.0, "text_final": "最后总结", "subtitle_section_role": "cta", "section_title": "总结完整段落名称"},
         ],
     )
 
@@ -392,11 +392,14 @@ def test_hyperframes_progress_filter_draws_real_chapter_segments() -> None:
     assert "T/12.0" in filter_text
     assert "geq=" in filter_text
     assert "color=black@0.45" in filter_text
+    assert "drawbox=x=0:y=1035:w=1920:h=45" in filter_text
+    assert "nullsrc=s=1920x45" in filter_text
+    assert "overlay=x=0:y=1035" in filter_text
     assert "h=45" in filter_text
     assert "vhfprogresschaptertick1" in filter_text
     assert "vhfprogresschaptertitle1" in filter_text
-    assert "text='细节'" in filter_text
-    assert "结构细节" not in filter_text
+    assert "text='结构细节完整段落名称'" in filter_text
+    assert "text='细节'" not in filter_text
     assert "color=0x28d3a2" not in filter_text
     assert "color=0x4f8cff" not in filter_text
     assert "color=white@0.58" in filter_text

@@ -1918,13 +1918,86 @@ def _resolve_subtitle_split_profile(*, width: int | None, height: int | None) ->
     if safe_height > safe_width and safe_width > 0:
         return {
             "orientation": "portrait",
-            "max_chars": 12,
-            "max_duration": 2.6,
+            "max_chars": 18,
+            "max_duration": 4.2,
         }
     return {
         "orientation": "landscape",
-        "max_chars": 20,
-        "max_duration": 3.8,
+        "max_chars": 34,
+        "max_duration": 5.8,
+    }
+
+
+def _subtitle_segmentation_defect_rank(analysis: Any) -> tuple[int, int, int, int]:
+    protected_or_word_split = int(getattr(analysis, "protected_term_split_count", 0) or 0) + int(
+        getattr(analysis, "generic_word_split_count", 0) or 0
+    )
+    fragment_count = int(getattr(analysis, "fragment_start_count", 0) or 0) + int(
+        getattr(analysis, "fragment_end_count", 0) or 0
+    )
+    suspicious_count = int(getattr(analysis, "suspicious_boundary_count", 0) or 0)
+    low_confidence_count = int(getattr(analysis, "low_confidence_window_count", 0) or 0)
+    return protected_or_word_split, fragment_count, suspicious_count, low_confidence_count
+
+
+def _subtitle_segmentation_needs_profile_retry(analysis: Any) -> bool:
+    word_split_count, fragment_count, suspicious_count, low_confidence_count = _subtitle_segmentation_defect_rank(
+        analysis
+    )
+    return (
+        word_split_count > 0
+        or fragment_count > 0
+        or suspicious_count > 0
+        or low_confidence_count >= 6
+    )
+
+
+def _subtitle_segmentation_candidate_is_better(base_analysis: Any, candidate_analysis: Any) -> bool:
+    return _subtitle_segmentation_defect_rank(candidate_analysis) < _subtitle_segmentation_defect_rank(base_analysis)
+
+
+def _relaxed_subtitle_split_profile(split_profile: dict[str, Any]) -> dict[str, Any] | None:
+    if bool(split_profile.get("auto_relaxed")):
+        return None
+    orientation = str(split_profile.get("orientation") or "landscape")
+    max_chars = int(split_profile.get("max_chars") or 30)
+    max_duration = float(split_profile.get("max_duration") or 5.0)
+    if orientation == "portrait":
+        relaxed_chars = min(24, max_chars + 4)
+        relaxed_duration = min(5.2, max_duration + 0.8)
+    else:
+        relaxed_chars = min(42, max_chars + 6)
+        relaxed_duration = min(7.0, max_duration + 1.0)
+    if relaxed_chars <= max_chars and relaxed_duration <= max_duration:
+        return None
+    return {
+        **dict(split_profile),
+        "max_chars": relaxed_chars,
+        "max_duration": round(relaxed_duration, 3),
+        "auto_relaxed": True,
+        "base_max_chars": max_chars,
+        "base_max_duration": max_duration,
+    }
+
+
+def _subtitle_segmentation_retry_summary(
+    *,
+    attempted: bool = False,
+    accepted: bool = False,
+    reason: str = "",
+    base_profile: dict[str, Any] | None = None,
+    candidate_profile: dict[str, Any] | None = None,
+    base_rank: tuple[int, int, int, int] | None = None,
+    candidate_rank: tuple[int, int, int, int] | None = None,
+) -> dict[str, Any]:
+    return {
+        "attempted": bool(attempted),
+        "accepted": bool(accepted),
+        "reason": reason,
+        "base_profile": dict(base_profile or {}),
+        "candidate_profile": dict(candidate_profile or {}),
+        "base_defect_rank": list(base_rank or ()),
+        "candidate_defect_rank": list(candidate_rank or ()),
     }
 
 
@@ -8191,6 +8264,54 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
                 max_chars=int(split_profile["max_chars"]),
                 max_duration=float(split_profile["max_duration"]),
             )
+        subtitle_profile_retry = _subtitle_segmentation_retry_summary()
+        if _subtitle_segmentation_needs_profile_retry(segmentation_result.analysis):
+            base_split_profile = dict(split_profile)
+            base_defect_rank = _subtitle_segmentation_defect_rank(segmentation_result.analysis)
+            relaxed_split_profile = _relaxed_subtitle_split_profile(base_split_profile)
+            if relaxed_split_profile:
+                await _set_step_progress(
+                    session,
+                    step,
+                    detail="检测到字幕断句缺陷，尝试放宽节奏重新切分",
+                    progress=0.5,
+                )
+                async with _maintain_step_heartbeat(
+                    step,
+                    detail="正在用放宽节奏重新生成字幕切分",
+                    progress=0.5,
+                ):
+                    candidate_segmentation_result = await asyncio.to_thread(
+                        segment_subtitles,
+                        effective_segmentation_segments,
+                        max_chars=int(relaxed_split_profile["max_chars"]),
+                        max_duration=float(relaxed_split_profile["max_duration"]),
+                    )
+                candidate_defect_rank = _subtitle_segmentation_defect_rank(candidate_segmentation_result.analysis)
+                accepted_retry = _subtitle_segmentation_candidate_is_better(
+                    segmentation_result.analysis,
+                    candidate_segmentation_result.analysis,
+                )
+                subtitle_profile_retry = _subtitle_segmentation_retry_summary(
+                    attempted=True,
+                    accepted=accepted_retry,
+                    reason="defect_rank_improved" if accepted_retry else "candidate_not_better",
+                    base_profile=base_split_profile,
+                    candidate_profile=relaxed_split_profile,
+                    base_rank=base_defect_rank,
+                    candidate_rank=candidate_defect_rank,
+                )
+                if accepted_retry:
+                    split_profile = relaxed_split_profile
+                    segmentation_result = candidate_segmentation_result
+            else:
+                subtitle_profile_retry = _subtitle_segmentation_retry_summary(
+                    attempted=False,
+                    accepted=False,
+                    reason="no_relaxed_profile_available",
+                    base_profile=base_split_profile,
+                    base_rank=base_defect_rank,
+                )
         entries = segmentation_result.entries
         _profile_artifact, content_profile = await _load_preferred_downstream_profile(session, job_id=job.id)
         source_context = await _load_content_profile_source_context(session, job_id=job.id)
@@ -8276,6 +8397,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             progress=0.7,
             metadata_updates={
                 "subtitle_segmentation": segmentation_result.analysis.as_dict(),
+                "subtitle_profile_retry": subtitle_profile_retry,
                 "subtitle_boundary_refine": llm_boundary_refine,
             },
         )
@@ -8441,6 +8563,7 @@ async def run_subtitle_postprocess(job_id: str) -> dict:
             "subtitle_quality_blocking": bool(subtitle_quality_report.get("blocking")),
             "subtitle_quality_blocking_reasons": list(subtitle_quality_report.get("blocking_reasons") or []),
             "subtitle_profile": split_profile,
+            "subtitle_profile_retry": subtitle_profile_retry,
             "subtitle_segmentation": segmentation_result.analysis.as_dict(),
             "subtitle_boundary_refine": llm_boundary_refine,
             "transcript_fact_layer_artifact_type": ARTIFACT_TYPE_TRANSCRIPT_FACT_LAYER,

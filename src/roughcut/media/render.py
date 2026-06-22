@@ -2469,10 +2469,9 @@ def _build_hyperframes_visual_filters(
     if hyperframes.progress_bar_enabled(plan):
         duration = max(0.01, float(plan.get("duration_sec") or 0.0))
         bar_h = max(34, min(48, int(render_h * 0.042)))
-        margin_x = max(42, int(render_w * 0.045))
-        track_w = max(10, render_w - margin_x * 2)
-        bottom_margin = max(14, int(render_h * 0.016))
-        y_fill = render_h - bar_h - bottom_margin
+        margin_x = 0
+        track_w = max(10, int(render_w))
+        y_fill = max(0, int(render_h) - bar_h)
         bg_label = "vhfprogressbg"
         fill_src_label = "vhfprogressfillsrc"
         fill_label = "vhfprogressfill"
@@ -2508,20 +2507,28 @@ def _build_hyperframes_visual_filters(
                     f"[{current_progress_label}]drawbox=x={x}:y={y_fill}:w=2:h={bar_h}:color=white@0.58:t=fill[{tick_label}]"
                 )
                 current_progress_label = tick_label
-        title_font_size = max(18, min(28, int(render_h * 0.024)))
-        title_x = margin_x + max(12, int(bar_h * 0.35))
-        title_y = f"{y_fill}+({bar_h}-text_h)/2"
         for segment_index, segment in enumerate(chapter_segments[:10]):
             try:
                 start = max(0.0, float(segment.get("start_sec", 0.0) or 0.0))
                 end = min(duration, max(start, float(segment.get("end_sec", start) or start)))
             except (TypeError, ValueError):
                 continue
-            title = _escape_drawtext_value(str(segment.get("title") or "").strip()[:8])
+            raw_title = str(segment.get("title") or "").strip()
+            title = _escape_drawtext_value(raw_title)
             if not title or end - start <= 0.1:
                 continue
+            segment_x = margin_x + int(track_w * min(max(start / duration, 0.0), 1.0))
+            segment_end_x = margin_x + int(track_w * min(max(end / duration, 0.0), 1.0))
+            segment_w = max(1, segment_end_x - segment_x)
+            title_pad = max(8, min(18, int(bar_h * 0.28)))
+            title_font_size = _resolve_progress_title_font_size(
+                raw_title,
+                render_h=render_h,
+                available_width=max(1, segment_w - title_pad * 2),
+            )
+            title_x = segment_x + title_pad
+            title_y = f"{y_fill}+({bar_h}-text_h)/2"
             title_label = f"vhfprogresschaptertitle{segment_index}"
-            enable_expr = f"between(t\\,{start}\\,{end})"
             parts.append(
                 f"[{current_progress_label}]drawtext="
                 f"font='{font_name}':"
@@ -2529,8 +2536,7 @@ def _build_hyperframes_visual_filters(
                 f"fontsize={title_font_size}:"
                 f"fontcolor=white:"
                 f"borderw=2:bordercolor=black@0.55:"
-                f"x={title_x}:y={title_y}:"
-                f"enable='{enable_expr}'"
+                f"x={title_x}:y={title_y}"
                 f"[{title_label}]"
             )
             current_progress_label = title_label
@@ -2609,6 +2615,32 @@ def _ffmpeg_fps_expr(fps: float) -> str:
     if abs(fps - rounded) < 0.01 and rounded > 0:
         return str(int(rounded))
     return f"{fps:.6f}"
+
+
+def _resolve_progress_title_font_size(
+    title: str,
+    *,
+    render_h: int,
+    available_width: int,
+) -> int:
+    base_size = max(18, min(28, int(render_h * 0.024)))
+    visual_units = _drawtext_visual_units(title)
+    if visual_units <= 0:
+        return base_size
+    fit_size = int(max(12, available_width / visual_units))
+    return max(12, min(base_size, fit_size))
+
+
+def _drawtext_visual_units(value: str) -> float:
+    units = 0.0
+    for char in str(value or ""):
+        if char.isspace():
+            units += 0.35
+        elif ord(char) <= 0x007F:
+            units += 0.58
+        else:
+            units += 1.0
+    return units
 
 
 def _escape_drawtext_value(value: str) -> str:

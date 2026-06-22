@@ -65,8 +65,7 @@ def test_hyperframes_chapters_derive_from_subtitle_section_roles() -> None:
     progress_elements = [item for item in plan["elements"] if item.get("track") == "progress_bar"]
 
     assert [item["role"] for item in segments] == ["hook", "detail", "body", "cta"]
-    assert [item["title"] for item in segments] == ["开场", "细节", "展示", "总结"]
-    assert all("先看整体" not in item["title"] for item in segments)
+    assert [item["title"] for item in segments] == ["先看整体", "这里看结构", "开始上手展示", "最后总结"]
     assert len(chapter_elements) == 4
     assert chapter_elements[1]["start_sec"] == 3.0
     assert chapter_elements[1]["end_sec"] == 6.0
@@ -95,3 +94,45 @@ def test_hyperframes_chapters_fallback_to_section_choreography() -> None:
     assert [item["title"] for item in segments] == ["开场", "细节", "总结"]
     assert [item["source"] for item in segments] == ["section_choreography"] * 3
     assert all("优先保留" not in item["title"] for item in segments)
+
+
+def test_hyperframes_chapters_use_explicit_section_choreography_titles() -> None:
+    plan = hyperframes.build_render_plan(
+        width=1920,
+        height=1080,
+        duration_sec=12.0,
+        section_choreography={
+            "sections": [
+                {"start_sec": 0.0, "end_sec": 3.0, "role": "hook", "chapter_title": "开箱先看核心变化"},
+                {"start_sec": 3.0, "end_sec": 8.0, "role": "detail", "chapter_title": "结构和背负细节"},
+                {"start_sec": 8.0, "end_sec": 12.0, "role": "cta", "chapter_title": "购买建议总结"},
+            ]
+        },
+    )
+
+    segments = hyperframes.chapter_segments(plan)
+
+    assert [item["title"] for item in segments] == ["开箱先看核心变化", "结构和背负细节", "购买建议总结"]
+    assert [item["source"] for item in segments] == ["section_choreography"] * 3
+
+
+def test_hyperframes_chapters_fallback_to_plain_subtitle_timeline() -> None:
+    plan = hyperframes.build_render_plan(
+        width=1920,
+        height=1080,
+        duration_sec=24.0,
+        subtitle_items=[
+            {"start_time": 0.0, "end_time": 2.0, "text_final": "先看整体变化"},
+            {"start_time": 3.0, "end_time": 5.0, "text_final": "外观结构细节"},
+            {"start_time": 8.0, "end_time": 10.0, "text_final": "容量展示"},
+            {"start_time": 12.0, "end_time": 15.0, "text_final": "背负体验"},
+            {"start_time": 18.0, "end_time": 22.0, "text_final": "最后总结建议"},
+        ],
+    )
+
+    segments = hyperframes.chapter_segments(plan)
+
+    assert len(segments) >= 2
+    assert {item["source"] for item in segments} == {"subtitle_timeline_fallback"}
+    assert segments[0]["title"] == "先看整体变化"
+    assert segments[-1]["title"] in {"背负体验", "最后总结建议"}

@@ -10460,8 +10460,8 @@ def test_resolve_projection_split_profile_ignores_stale_projection_profile() -> 
     )
 
     assert profile["orientation"] == "landscape"
-    assert profile["max_chars"] == 20
-    assert profile["max_duration"] == pytest.approx(3.8)
+    assert profile["max_chars"] == 34
+    assert profile["max_duration"] == pytest.approx(5.8)
 
 
 @pytest.mark.asyncio
@@ -12310,9 +12310,76 @@ def test_resolve_subtitle_split_profile_uses_relaxed_landscape_defaults() -> Non
 
     assert profile == {
         "orientation": "landscape",
-        "max_chars": 20,
-        "max_duration": 3.8,
+        "max_chars": 34,
+        "max_duration": 5.8,
     }
+
+
+def test_resolve_subtitle_split_profile_uses_spoken_portrait_defaults() -> None:
+    from roughcut.pipeline.steps import _resolve_subtitle_split_profile
+
+    profile = _resolve_subtitle_split_profile(width=1080, height=1920)
+
+    assert profile == {
+        "orientation": "portrait",
+        "max_chars": 18,
+        "max_duration": 4.2,
+    }
+
+
+def test_relaxed_subtitle_split_profile_expands_landscape_once() -> None:
+    from roughcut.pipeline.steps import _relaxed_subtitle_split_profile
+
+    profile = _relaxed_subtitle_split_profile(
+        {"orientation": "landscape", "max_chars": 34, "max_duration": 5.8}
+    )
+
+    assert profile is not None
+    assert profile["orientation"] == "landscape"
+    assert profile["max_chars"] == 40
+    assert profile["max_duration"] == pytest.approx(6.8)
+    assert profile["base_max_chars"] == 34
+    assert profile["base_max_duration"] == pytest.approx(5.8)
+    assert profile["auto_relaxed"] is True
+    assert _relaxed_subtitle_split_profile(profile) is None
+
+
+def test_subtitle_segmentation_profile_retry_uses_defect_rank() -> None:
+    from roughcut.pipeline.steps import (
+        _subtitle_segmentation_candidate_is_better,
+        _subtitle_segmentation_needs_profile_retry,
+    )
+
+    clean = SimpleNamespace(
+        protected_term_split_count=0,
+        generic_word_split_count=0,
+        fragment_start_count=0,
+        fragment_end_count=0,
+        suspicious_boundary_count=0,
+        low_confidence_window_count=1,
+    )
+    bad = SimpleNamespace(
+        protected_term_split_count=0,
+        generic_word_split_count=1,
+        fragment_start_count=0,
+        fragment_end_count=0,
+        suspicious_boundary_count=0,
+        low_confidence_window_count=0,
+    )
+    noisy = SimpleNamespace(
+        protected_term_split_count=0,
+        generic_word_split_count=0,
+        fragment_start_count=0,
+        fragment_end_count=0,
+        suspicious_boundary_count=0,
+        low_confidence_window_count=6,
+    )
+
+    assert not _subtitle_segmentation_needs_profile_retry(clean)
+    assert _subtitle_segmentation_needs_profile_retry(bad)
+    assert _subtitle_segmentation_needs_profile_retry(noisy)
+    assert _subtitle_segmentation_candidate_is_better(bad, clean)
+    assert not _subtitle_segmentation_candidate_is_better(clean, bad)
 
 
 def test_manual_editor_change_plan_detects_subtitle_only_edits() -> None:

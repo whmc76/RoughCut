@@ -1766,6 +1766,7 @@ def _build_section_actions(
                 "start_sec": start_sec,
                 "end_sec": end_sec,
                 "duration_sec": round(duration_sec, 3),
+                "summary": str(section.get("summary") or "").strip(),
                 "trim_intensity": trim_intensity,
                 "packaging_intent": str(policy.get("packaging_intent") or f"{role}_support"),
                 "transition_boost": round(
