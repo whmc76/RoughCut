@@ -67,11 +67,12 @@ def test_build_audio_chunk_specs_adds_overlapping_tail_instead_of_extending_last
 def test_local_http_asr_request_data_includes_explicit_model() -> None:
     provider = LocalHTTPASRProvider(model_name="fun-asr-nano-2512")
 
-    data = provider._build_request_data(context="MAXACE", max_new_tokens=512)
+    data = provider._build_request_data(context="MAXACE", language="en-US", max_new_tokens=512)
 
     assert data["model"] == "fun-asr-nano-2512"
     assert data["model_name"] == "fun-asr-nano-2512"
     assert data["hotwords"] == "MAXACE"
+    assert data["language"] == "en-US"
     assert data["max_new_tokens"] == "512"
 
 
@@ -106,7 +107,8 @@ async def test_transcribe_long_audio_in_chunks_offsets_segments_and_reports_prog
     def _export_audio_chunk(_: Path, chunk_path: Path, *, start: float, end: float, timeout_sec: float | None = None) -> None:
         chunk_path.write_bytes(f"{start}-{end}".encode("utf-8"))
 
-    async def _post_transcribe_request(chunk_path: Path, *, context: str | None, max_new_tokens: int, timeout):
+    async def _post_transcribe_request(chunk_path: Path, *, context: str | None, language: str, max_new_tokens: int, timeout):
+        assert language == "zh-CN"
         return {
             "duration": 100.0,
             "segments": [
@@ -179,7 +181,7 @@ async def test_transcribe_long_audio_in_chunks_drops_repeated_chunk_decode_loop(
     def _export_audio_chunk(_: Path, chunk_path: Path, *, start: float, end: float, timeout_sec: float | None = None) -> None:
         chunk_path.write_bytes(f"{start}-{end}".encode("utf-8"))
 
-    async def _post_transcribe_request(chunk_path: Path, *, context: str | None, max_new_tokens: int, timeout):
+    async def _post_transcribe_request(chunk_path: Path, *, context: str | None, language: str, max_new_tokens: int, timeout):
         return {
             "duration": 20.0,
             "segments": [
@@ -338,7 +340,7 @@ async def test_qwen3_local_http_asr_recovers_truncated_chunk_with_smaller_splits
     def _export_audio_chunk(_: Path, chunk_path: Path, *, start: float, end: float, timeout_sec: float | None = None) -> None:
         chunk_path.write_bytes(f"{start:.1f}-{end:.1f}".encode("utf-8"))
 
-    async def _post_transcribe_request(chunk_path: Path, *, context: str | None, max_new_tokens: int, timeout):
+    async def _post_transcribe_request(chunk_path: Path, *, context: str | None, language: str, max_new_tokens: int, timeout):
         marker = chunk_path.read_bytes().decode("utf-8")
         if marker == "0.0-75.0":
             return {
@@ -820,7 +822,7 @@ async def test_post_chunk_transcribe_request_retries_and_reports_wait(
     )
     attempts = {"count": 0}
 
-    async def _post_transcribe_request(chunk_path: Path, *, context: str | None, max_new_tokens: int, timeout):
+    async def _post_transcribe_request(chunk_path: Path, *, context: str | None, language: str, max_new_tokens: int, timeout):
         attempts["count"] += 1
         if attempts["count"] == 1:
             raise httpx.ReadTimeout("timed out")
@@ -846,6 +848,7 @@ async def test_post_chunk_transcribe_request_retries_and_reports_wait(
         chunk_path=chunk_path,
         chunk=chunk,
         context="",
+        language="zh-CN",
         max_new_tokens=4096,
         timeout=httpx.Timeout(180.0, connect=30.0),
         chunk_config=chunk_config,
@@ -911,7 +914,8 @@ async def test_transcribe_single_audio_reports_request_progress(
     audio_path = tmp_path / "audio.wav"
     audio_path.write_bytes(b"stub")
 
-    async def _post_transcribe_request(audio_path: Path, *, context: str | None, max_new_tokens: int, timeout):
+    async def _post_transcribe_request(audio_path: Path, *, context: str | None, language: str, max_new_tokens: int, timeout):
+        assert language == "en-US"
         return {
             "duration": 42.0,
             "segments": [
@@ -932,7 +936,7 @@ async def test_transcribe_single_audio_reports_request_progress(
 
     result = await provider._transcribe_single_audio(
         audio_path,
-        language="zh-CN",
+        language="en-US",
         context="",
         max_new_tokens=4096,
         progress_callback=progress_events.append,

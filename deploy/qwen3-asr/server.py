@@ -215,6 +215,8 @@ def normalize_language(value: str) -> str:
     normalized = str(value or "").strip().lower()
     if normalized in {"zh", "zh-cn", "zh_cn", "chinese", "mandarin", "cn"}:
         return "Chinese"
+    if normalized in {"en", "en-us", "en_us", "english"}:
+        return "English"
     return str(value or "").strip() or "Chinese"
 
 

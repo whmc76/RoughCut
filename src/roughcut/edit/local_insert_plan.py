@@ -6,6 +6,7 @@ from typing import Any
 
 from roughcut.config import get_settings
 from roughcut.edit.product_controls import MATERIAL_USAGE_ALL_UPLOADED, resolve_product_controls_for_profile
+from roughcut.edit.strategy_review_context import strategy_review_timeline_preview_windows
 from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.packaging.library import rank_insert_candidates_for_section
 from roughcut.providers.factory import get_reasoning_provider
@@ -178,6 +179,7 @@ async def plan_local_insert_slot(
         for action in section_actions
         if isinstance(action, dict) and bool(action.get("broll_allowed"))
     ]
+    strategy_timeline_windows = strategy_review_timeline_preview_windows(content_profile)
 
     preferred_insert_windows: list[dict[str, float | int | str]] = []
 
@@ -215,6 +217,55 @@ async def plan_local_insert_slot(
                 key=lambda item: min(
                     abs(float(item.get("end_time", 0.0) or 0.0) - float(window.get("anchor_sec", 0.0) or 0.0))
                     for window in preferred_windows
+                ),
+            )
+    elif strategy_timeline_windows:
+        strategy_timeline_windows.sort(key=lambda item: (-float(item.get("priority", 0.0) or 0.0), float(item.get("start_sec", 0.0) or 0.0)))
+        prioritized = [
+            item
+            for item in candidates
+            if any(
+                float(window.get("start_sec", 0.0) or 0.0) - 1e-6
+                <= float(item.get("end_time", 0.0) or 0.0)
+                <= float(window.get("end_sec", 0.0) or 0.0) + 1e-6
+                for window in strategy_timeline_windows
+            )
+        ]
+        if prioritized:
+            top_priority = max(
+                (
+                    float(window.get("priority", 0.0) or 0.0)
+                    for window in strategy_timeline_windows
+                    if any(
+                        float(window.get("start_sec", 0.0) or 0.0) - 1e-6
+                        <= float(item.get("end_time", 0.0) or 0.0)
+                        <= float(window.get("end_sec", 0.0) or 0.0) + 1e-6
+                        for item in prioritized
+                    )
+                ),
+                default=0.0,
+            )
+            preferred_insert_windows = [
+                window
+                for window in strategy_timeline_windows
+                if abs(float(window.get("priority", 0.0) or 0.0) - top_priority) < 1e-6
+            ]
+            candidates = sorted(
+                [
+                    item
+                    for item in prioritized
+                    if any(
+                        float(window.get("start_sec", 0.0) or 0.0) - 1e-6
+                        <= float(item.get("end_time", 0.0) or 0.0)
+                        <= float(window.get("end_sec", 0.0) or 0.0) + 1e-6
+                        and abs(float(window.get("priority", 0.0) or 0.0) - top_priority) < 1e-6
+                        for window in strategy_timeline_windows
+                    )
+                ]
+                or prioritized,
+                key=lambda item: min(
+                    abs(float(item.get("end_time", 0.0) or 0.0) - float(window.get("anchor_sec", 0.0) or 0.0))
+                    for window in preferred_insert_windows
                 ),
             )
     elif allowed_windows:
@@ -404,6 +455,10 @@ def _apply_insert_window(
     plan["insert_after_sec"] = round(resolved_sec, 3)
     plan["insert_section_role"] = str(selected_window.get("role") or "")
     plan["insert_packaging_intent"] = str(selected_window.get("packaging_intent") or "")
+    if str(selected_window.get("source") or "").strip():
+        plan["insert_window_source"] = str(selected_window.get("source") or "").strip()
+    if str(selected_window.get("segment_id") or "").strip():
+        plan["insert_strategy_timeline_segment_id"] = str(selected_window.get("segment_id") or "").strip()
     if int(selected_window.get("index", -1) or -1) >= 0:
         plan["insert_section_index"] = int(selected_window.get("index", -1) or -1)
     plan["broll_window"] = {

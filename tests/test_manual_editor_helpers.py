@@ -185,6 +185,8 @@ from roughcut.pipeline.steps import (
     _build_projection_candidate_pool,
     _build_projection_correction_assessment,
     _build_edit_review_bundle_payload,
+    _build_fixture_seeded_render_subtitle_asr_alignment,
+    _build_strategy_cut_boundary_sample_manifest,
     _build_edited_subtitle_projection,
     _build_variant_timeline_bundle,
     _load_latest_subtitle_payloads,
@@ -193,6 +195,8 @@ from roughcut.pipeline.steps import (
     _resolve_editorial_analysis_payload,
     _runtime_packaging_context,
     _runtime_render_plan_context,
+    _strategy_requires_highlight_boundary_frames,
+    _content_profile_is_generated_strategy_replay_fixture,
     _variant_timeline_editorial_context,
     _resolve_packaged_timeline_mapping_context,
     _resolve_transition_overlap_offsets,
@@ -204,6 +208,7 @@ from roughcut.pipeline.steps import (
     _manual_editor_subtitle_items_from_editorial,
     _merge_render_runtime_result,
     _normalize_subtitle_event,
+    _persist_render_runtime_diagnostics,
     _persist_projection_layer_to_subtitle_items,
     _projection_boundary_splits_material_token,
     _projection_compact_text,
@@ -223,6 +228,7 @@ from roughcut.pipeline.steps import (
     _resegment_packaged_subtitles,
     _rewrite_packaged_subtitle_copy,
     _shift_render_subtitle_items,
+    _bound_render_subtitles_to_duration,
     _stabilize_render_subtitle_timeline,
     _subtitle_item_payload,
     _subtitle_projection_entry_payload,
@@ -253,6 +259,196 @@ def test_merge_render_runtime_result_preserves_stronger_existing_degraded_reason
         "retryable": True,
         "error_metadata": {"call_timeout_seconds": 180.0},
     }
+
+
+def test_strategy_requires_highlight_boundary_frames_reads_render_policy() -> None:
+    assert _strategy_requires_highlight_boundary_frames(
+        {
+            "strategy_review_gates": {
+                "pipeline_plan": {
+                    "strategy_policy": {
+                        "render_validation_policy": {
+                            "check_highlight_boundary_frames": True,
+                        }
+                    }
+                }
+            }
+        }
+    ) is True
+    assert _strategy_requires_highlight_boundary_frames(
+        {
+            "strategy_review_gates": {
+                "pipeline_plan": {
+                    "strategy_policy": {
+                        "render_validation_policy": {
+                            "check_cut_boundaries": True,
+                        }
+                    }
+                }
+            }
+        }
+    ) is False
+
+
+def test_generated_strategy_replay_fixture_detection_is_source_context_scoped() -> None:
+    assert _content_profile_is_generated_strategy_replay_fixture(
+        {
+            "source_context": {
+                "fixture_source": "generated_strategy_replay_fixture",
+            }
+        }
+    ) is True
+    assert _content_profile_is_generated_strategy_replay_fixture(
+        {
+            "resolved_profile": {
+                "source_context": {
+                    "fixture_source": "generated_strategy_replay_fixture",
+                }
+            }
+        }
+    ) is True
+    assert _content_profile_is_generated_strategy_replay_fixture(
+        {
+            "source_context": {
+                "fixture_source": "user_upload",
+            }
+        }
+    ) is False
+    assert _content_profile_is_generated_strategy_replay_fixture({}) is False
+
+
+def test_fixture_seeded_render_subtitle_alignment_writes_gate_pass_payload(tmp_path: Path) -> None:
+    debug_dir = tmp_path / "alignment"
+    payload = _build_fixture_seeded_render_subtitle_asr_alignment(
+        video_path=tmp_path / "render.mp4",
+        subtitle_items=[
+                {
+                    "start_time": 0.0,
+                    "end_time": 1.0,
+                    "text_final": "fixture subtitle",
+                }
+        ],
+        debug_dir=debug_dir,
+        label="packaged_final",
+    )
+
+    assert payload["gate_pass"] is True
+    assert payload["fixture_seeded"] is True
+    assert payload["provider"] == "fixture_seed"
+    assert payload["subtitle_event_count"] == 1
+    assert (debug_dir / "packaged_final.subtitle_alignment.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_build_strategy_cut_boundary_sample_manifest_extracts_boundary_frames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extracted: list[float] = []
+
+    async def fake_extract_frame(video_path: Path, output_path: Path, *, seek_sec: float) -> None:
+        assert video_path == tmp_path / "render.mp4"
+        extracted.append(seek_sec)
+        output_path.write_bytes(b"frame")
+
+    async def fake_extract_waveform(
+        video_path: Path,
+        output_path: Path,
+        *,
+        start_sec: float,
+        end_sec: float,
+    ) -> None:
+        assert video_path == tmp_path / "render.mp4"
+        assert start_sec == 0.75
+        assert end_sec == 2.25
+        output_path.write_text('{"schema":"strategy_cut_boundary_waveform.v1"}', encoding="utf-8")
+
+    monkeypatch.setattr(
+        "roughcut.pipeline.steps._extract_strategy_boundary_frame",
+        fake_extract_frame,
+    )
+    monkeypatch.setattr(
+        "roughcut.pipeline.steps._extract_strategy_boundary_waveform",
+        fake_extract_waveform,
+    )
+    video_path = tmp_path / "render.mp4"
+    video_path.write_bytes(b"video")
+
+    manifest = await _build_strategy_cut_boundary_sample_manifest(
+        video_path=video_path,
+        debug_dir=tmp_path / "debug",
+        cut_boundary_evidence={
+            "high_risk_cuts": [
+                {
+                    "rule_id": "highlight_cut",
+                    "start": 1.0,
+                    "end": 2.0,
+                    "reason": "visual_action",
+                    "risk_level": "high",
+                    "boundary_keep_energy": 1.25,
+                }
+            ]
+        },
+    )
+
+    assert manifest["schema"] == "strategy_cut_boundary_samples.v1"
+    assert manifest["sample_count"] == 1
+    assert manifest["frame_count"] == 2
+    assert manifest["boundary_samples"][0]["cut_id"] == "highlight_cut"
+    assert manifest["boundary_samples"][0]["frame_paths"]
+    assert manifest["boundary_samples"][0]["waveform_path"].endswith("cut_01_waveform.json")
+    assert extracted == [0.88, 2.12]
+    assert Path(manifest["manifest_path"]).exists()
+
+
+@pytest.mark.asyncio
+async def test_build_strategy_cut_boundary_sample_manifest_falls_back_to_rule_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    extracted: list[float] = []
+
+    async def fake_extract_frame(video_path: Path, output_path: Path, *, seek_sec: float) -> None:
+        extracted.append(seek_sec)
+        output_path.write_bytes(b"frame")
+
+    async def fake_extract_waveform(
+        video_path: Path,
+        output_path: Path,
+        *,
+        start_sec: float,
+        end_sec: float,
+    ) -> None:
+        output_path.write_text('{"schema":"strategy_cut_boundary_waveform.v1"}', encoding="utf-8")
+
+    monkeypatch.setattr("roughcut.pipeline.steps._extract_strategy_boundary_frame", fake_extract_frame)
+    monkeypatch.setattr("roughcut.pipeline.steps._extract_strategy_boundary_waveform", fake_extract_waveform)
+    video_path = tmp_path / "render.mp4"
+    video_path.write_bytes(b"video")
+
+    manifest = await _build_strategy_cut_boundary_sample_manifest(
+        video_path=video_path,
+        debug_dir=tmp_path / "debug",
+        cut_boundary_evidence={"high_risk_cuts": []},
+        cut_analysis={
+            "schema": "cut_analysis.v1",
+            "accepted_cuts": [],
+            "rule_candidates": [
+                {
+                    "rule_id": "timing_trim:2.823:3.000",
+                    "start": 2.823,
+                    "end": 3.0,
+                    "reason": "timing_trim",
+                    "risk_level": "medium",
+                }
+            ],
+        },
+    )
+
+    assert manifest["sample_count"] == 1
+    assert manifest["boundary_samples"][0]["cut_id"] == "timing_trim:2.823:3.000"
+    assert manifest["boundary_samples"][0]["frame_paths"]
+    assert extracted == [2.703, 3.12]
 
 
 @pytest.mark.asyncio
@@ -455,24 +651,24 @@ async def test_packaged_timeline_mapping_reuses_local_packaging_timeline_for_sec
     )
 
     assert timeline_mapping["section_profile_context"] == {"subtitles": {}, "timeline_analysis": {}}
-    assert captured_packaging_timelines == [
-        {
-            "timeline_analysis": {},
-            "editing_skill": {},
-            "section_choreography": {},
-            "subtitles": {"style": "clean_white"},
-            "packaging": {
-                "intro": None,
-                "outro": None,
-                "insert": None,
-                "watermark": None,
-                "music": None,
-            },
-            "editing_accents": {
-                "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
-            },
-        }
-    ]
+    captured_timeline = dict(captured_packaging_timelines[0])
+    assert captured_timeline.pop("hyperframes")["schema"] == "roughcut.hyperframes.plan.v1"
+    assert captured_timeline == {
+        "timeline_analysis": {},
+        "editing_skill": {},
+        "section_choreography": {},
+        "subtitles": {"style": "clean_white"},
+        "packaging": {
+            "intro": None,
+            "outro": None,
+            "insert": None,
+            "watermark": None,
+            "music": None,
+        },
+        "editing_accents": {
+            "transitions": {"enabled": True, "boundary_indexes": [0], "duration_sec": 0.12},
+        },
+    }
 
 
 @pytest.mark.asyncio
@@ -1819,6 +2015,53 @@ def test_retime_render_subtitle_items_from_alignment_audit_uses_expected_asr_bou
     assert repaired[0]["words"][1]["end"] == pytest.approx(10.12)
 
 
+def test_retime_render_subtitle_items_drops_fallback_events_past_render_duration() -> None:
+    repaired, summary = _retime_render_subtitle_items_from_alignment_audit(
+        [
+            {"start_time": 0.0, "end_time": 1.0, "text_final": "匹配字幕"},
+            {"start_time": 18.0, "end_time": 20.0, "text_final": "尾部字幕"},
+        ],
+        {
+            "events": [
+                {
+                    "matched": True,
+                    "text": "匹配字幕",
+                    "subtitle_start_sec": 0.0,
+                    "subtitle_end_sec": 1.0,
+                    "expected_start_sec": 8.0,
+                    "expected_end_sec": 9.0,
+                },
+                {
+                    "matched": False,
+                    "subtitle_start_sec": 18.0,
+                    "subtitle_end_sec": 20.0,
+                },
+            ]
+        },
+        duration_sec=10.0,
+    )
+
+    assert [item["text_final"] for item in repaired] == ["匹配字幕"]
+    assert repaired[0]["end_time"] <= 10.0
+    assert summary["out_of_bounds_dropped_count"] == 1
+    assert summary["fallback_retimed_count"] == 1
+
+
+def test_bound_render_subtitles_to_duration_clamps_variant_sidecar_tail() -> None:
+    bounded = _bound_render_subtitles_to_duration(
+        [
+            {"start_time": 16.28, "end_time": 21.72, "text_final": "第一条"},
+            {"start_time": 23.56, "end_time": 24.38, "text_final": "第二条"},
+            {"start_time": 25.0, "end_time": 26.0, "text_final": "越界"},
+        ],
+        duration_sec=24.021,
+    )
+
+    assert [item["text_final"] for item in bounded] == ["第一条", "第二条"]
+    assert bounded[-1]["end_time"] == pytest.approx(23.981)
+    assert bounded[-1]["render_duration_bound_repair"] == "clamp_to_variant_duration"
+
+
 def test_render_subtitle_alignment_gate_blocks_large_bad_drift_ratio() -> None:
     assert not _render_subtitle_alignment_gate_passes(
         {
@@ -1872,6 +2115,44 @@ def test_render_subtitle_alignment_gate_blocks_tail_bad_cluster_despite_clean_av
     assert metrics["worst_window_count"] == 5
     assert not metrics["gate_pass"]
     assert not _render_subtitle_alignment_gate_passes(audit)
+
+
+def test_render_subtitle_alignment_gate_allows_single_isolated_short_sample_bad_event() -> None:
+    events = [
+        {
+            "matched": True,
+            "bad_drift": False,
+            "subtitle_start_sec": float(index * 4),
+            "subtitle_end_sec": float(index * 4 + 2),
+            "start_drift_sec": 0.04,
+            "end_drift_sec": 0.12,
+        }
+        for index in range(5)
+    ]
+    events.append(
+        {
+            "matched": False,
+            "bad_drift": True,
+            "subtitle_start_sec": 26.927,
+            "subtitle_end_sec": 27.747,
+            "start_drift_sec": 0.0,
+            "end_drift_sec": 0.0,
+        }
+    )
+    audit = {
+        "event_count": 6,
+        "matched_count": 5,
+        "unmatched_count": 1,
+        "bad_drift_count": 1,
+        "avg_abs_start_drift_sec": 0.04,
+        "avg_abs_end_drift_sec": 0.088,
+        "events": events,
+    }
+
+    metrics = _render_subtitle_alignment_local_cluster_metrics(audit)
+
+    assert metrics["gate_pass"] is True
+    assert _render_subtitle_alignment_gate_passes(audit) is True
 
 
 def test_drop_clustered_unmatched_render_subtitles_keeps_matched_bad_rows_for_retime() -> None:
@@ -2165,7 +2446,7 @@ def test_runtime_packaging_context_reuses_local_normalized_packaging_payload() -
     assert not hasattr(pipeline_steps_module, "packaging_timeline_has_packaging_assets")
     assert not hasattr(pipeline_steps_module, "packaging_timeline_has_editing_accents")
 
-    assert _runtime_packaging_context(
+    runtime_context = _runtime_packaging_context(
         {
             "packaging": {
                 "outro": {"path": "outro.mp4"},
@@ -2175,7 +2456,10 @@ def test_runtime_packaging_context_reuses_local_normalized_packaging_payload() -
                 "emphasis_overlays": [{"start_time": 0.5, "end_time": 1.0, "text": "demo"}],
             },
         }
-    ) == {
+    )
+    packaging_timeline = dict(runtime_context["packaging_timeline"])
+    assert packaging_timeline.pop("hyperframes")["schema"] == "roughcut.hyperframes.plan.v1"
+    assert {**runtime_context, "packaging_timeline": packaging_timeline} == {
         "packaging_timeline": {
             "timeline_analysis": {},
             "editing_skill": {},
@@ -2293,6 +2577,70 @@ def test_runtime_render_plan_context_reads_render_plan_once() -> None:
         "voice_processing": {"noise_reduction": False},
         "loudness": {"target_lufs": -14.0, "peak_limit": -1.0},
     }
+
+
+def test_runtime_render_plan_context_includes_strategy_review_context_when_present() -> None:
+    runtime_context = _runtime_render_plan_context(
+        {
+            "strategy_review_context": {
+                "strategy_review_gates": {
+                    "pipeline_plan": {
+                        "strategy_type": "narrative_assembly",
+                        "review_gates": ["timeline_preview_required"],
+                    }
+                }
+            }
+        }
+    )
+
+    assert runtime_context["strategy_review_context"]["strategy_review_gates"]["pipeline_plan"][
+        "strategy_type"
+    ] == "narrative_assembly"
+
+
+@pytest.mark.asyncio
+async def test_persist_render_runtime_diagnostics_stores_strategy_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeSession:
+        def __init__(self) -> None:
+            self.added: list[Any] = []
+            self.committed = False
+
+        def add(self, artifact: Any) -> None:
+            self.added.append(artifact)
+
+        async def commit(self) -> None:
+            self.committed = True
+
+    async def fake_load_latest_optional_artifact(*args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        return None
+
+    monkeypatch.setattr(
+        pipeline_steps_module,
+        "_load_latest_optional_artifact",
+        fake_load_latest_optional_artifact,
+    )
+    session = FakeSession()
+
+    await _persist_render_runtime_diagnostics(
+        session,
+        job_id=uuid4(),
+        step_id=None,
+        strategy_render_validation={
+            "schema": "strategy_render_validation.v1",
+            "status": "blocking",
+            "blocking": True,
+            "reason": "strategy_timeline_preview_missing",
+        },
+    )
+
+    assert session.committed is True
+    assert len(session.added) == 1
+    assert session.added[0].data_json["strategy_render_validation"]["reason"] == (
+        "strategy_timeline_preview_missing"
+    )
 
 
 def test_resolve_transition_overlap_offsets_reuses_local_normalized_packaging_payload(
@@ -2626,37 +2974,53 @@ def test_manual_editor_render_plan_context_reads_render_plan_once() -> None:
             "voice_processing": {"noise_reduction": True},
             "ai_director": {"enabled": True},
             "avatar_commentary": {"mode": "segmented_audio_passthrough"},
+            "strategy_review_context": {
+                "strategy_review_gates": {
+                    "review_gate_status": {"blocking": False},
+                },
+                "strategy_timeline_preview": {
+                    "segments": [{"segment_id": "preview_1"}],
+                },
+            },
         }
     )
 
-    assert context == {
-        "packaging_timeline": {
-            "timeline_analysis": {},
-            "editing_skill": {"key": "knowledge_explainer"},
-            "section_choreography": {},
-            "subtitles": {"version": 3},
-            "packaging": {
-                "intro": None,
-                "outro": None,
-                "insert": None,
-                "watermark": None,
-                "music": None,
-            },
-            "editing_accents": {},
+    packaging_timeline = dict(context["packaging_timeline"])
+    assert packaging_timeline.pop("hyperframes", None) is not None
+    assert packaging_timeline == {
+        "timeline_analysis": {},
+        "editing_skill": {"key": "knowledge_explainer"},
+        "section_choreography": {},
+        "subtitles": {"version": 3},
+        "packaging": {
+            "intro": None,
+            "outro": None,
+            "insert": None,
+            "watermark": None,
+            "music": None,
         },
-        "workflow_preset": "knowledge_explainer",
-        "delivery": {},
-        "video_transform": {
-            "rotation_manual": True,
-            "rotation_cw": 90,
-            "aspect_ratio": "source",
-            "resolution_mode": "source",
-            "resolution_preset": "1080p",
+        "editing_accents": {},
+    }
+    assert context["workflow_preset"] == "knowledge_explainer"
+    assert context["delivery"] == {}
+    assert context["video_transform"] == {
+        "rotation_manual": True,
+        "rotation_cw": 90,
+        "aspect_ratio": "source",
+        "resolution_mode": "source",
+        "resolution_preset": "1080p",
+    }
+    assert context["loudness"] == {"target_lufs": -18.0}
+    assert context["voice_processing"] == {"noise_reduction": True}
+    assert context["ai_director_plan"] == {"enabled": True}
+    assert context["avatar_commentary_plan"] == {"mode": "segmented_audio_passthrough"}
+    assert context["strategy_review_context"] == {
+        "strategy_review_gates": {
+            "review_gate_status": {"blocking": False},
         },
-        "loudness": {"target_lufs": -18.0},
-        "voice_processing": {"noise_reduction": True},
-        "ai_director_plan": {"enabled": True},
-        "avatar_commentary_plan": {"mode": "segmented_audio_passthrough"},
+        "strategy_timeline_preview": {
+            "segments": [{"segment_id": "preview_1"}],
+        },
     }
 
 
@@ -4297,7 +4661,9 @@ def test_variant_timeline_bundle_carries_refine_decision_plan() -> None:
         "multimodal_auto_apply_cut_count": 0,
         "risk_levels": {},
     }
-    assert bundle["timeline_rules"]["packaging_timeline"] == {
+    packaging_timeline = dict(bundle["timeline_rules"]["packaging_timeline"])
+    assert packaging_timeline.pop("hyperframes")["schema"] == "roughcut.hyperframes.plan.v1"
+    assert packaging_timeline == {
         "timeline_analysis": {"hook_end_sec": 2.5},
         "editing_skill": {},
         "section_choreography": {},
@@ -6281,7 +6647,10 @@ def test_refine_decision_plan_payload_summarizes_cut_analysis_candidates() -> No
     }
     assert payload["strategy_type"] == "information_density"
     assert payload["strategy_profile"] == build_strategy_profile_payload()
-    assert payload["keep_segments"] == [{"start": 0.0, "end": 3.0}, {"start": 3.4, "end": 8.0}]
+    assert payload["keep_segments"] == [
+        {"start": 0.0, "end": 1.0},
+        {"start": 2.0, "end": 8.0},
+    ]
     assert payload["smart_cut_rules"]["fillerEnabled"] is True
     assert payload["smart_cut_rules"]["pauseThresholdSec"] == 0.8
     assert payload["smart_cut_rules"]["fillers"] == DEFAULT_SMART_CUT_FILLERS

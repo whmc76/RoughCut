@@ -795,6 +795,20 @@ def test_live_readiness_summary_collects_failed_checks() -> None:
                 "checks": {
                     "required_checks_contract": {"passed": False},
                     "risk_alignment_contract": {"passed": True},
+                    "render_end_state_stability": {
+                        "passed": False,
+                        "failed_render_job_count": 0,
+                        "strategy_validation_evaluated_job_count": 1,
+                        "strategy_validation_blocking_job_count": 1,
+                        "strategy_validation_blocking_job_ids": ["job-strategy"],
+                        "strategy_validation_blocking_reasons": {
+                            "strategy_timeline_preview_missing": 1,
+                        },
+                        "strategy_validation_strategy_types": {"narrative_assembly": 1},
+                        "strategy_validation_review_gates": {
+                            "timeline_preview_required": 1,
+                        },
+                    },
                 },
             }
         }
@@ -803,7 +817,20 @@ def test_live_readiness_summary_collects_failed_checks() -> None:
     assert result == {
         "gate_passed": False,
         "status": "blocked",
-        "failed_checks": ["required_checks_contract"],
+        "failed_checks": ["render_end_state_stability", "required_checks_contract"],
+        "render_end_state_stability": {
+            "failed_render_job_count": 0,
+            "strategy_validation_evaluated_job_count": 1,
+            "strategy_validation_blocking_job_count": 1,
+            "strategy_validation_blocking_job_ids": ["job-strategy"],
+            "strategy_validation_blocking_reasons": {
+                "strategy_timeline_preview_missing": 1,
+            },
+            "strategy_validation_strategy_types": {"narrative_assembly": 1},
+            "strategy_validation_review_gates": {
+                "timeline_preview_required": 1,
+            },
+        },
     }
 
 
@@ -818,6 +845,17 @@ def test_render_markdown_includes_aggregate_and_job_level_editing_risk_metrics()
                 "gate_passed": False,
                 "status": "blocked",
                 "failed_checks": ["required_checks_contract"],
+                "render_end_state_stability": {
+                    "failed_render_job_count": 0,
+                    "strategy_validation_blocking_job_count": 1,
+                    "strategy_validation_blocking_reasons": {
+                        "strategy_timeline_preview_missing": 1,
+                    },
+                    "strategy_validation_strategy_types": {"narrative_assembly": 1},
+                    "strategy_validation_review_gates": {
+                        "timeline_preview_required": 1,
+                    },
+                },
             },
                 "aggregate_risk_metrics": {
                     "high_risk_cut_count": 3,
@@ -870,6 +908,10 @@ def test_render_markdown_includes_aggregate_and_job_level_editing_risk_metrics()
     assert "- gate_passed: false" in content
     assert "- status: blocked" in content
     assert "- failed_checks: required_checks_contract" in content
+    assert "- strategy_validation_blocking_jobs: 1" in content
+    assert "- strategy_validation_blocking_reasons: strategy_timeline_preview_missing=1" in content
+    assert "- strategy_validation_strategy_types: narrative_assembly=1" in content
+    assert "- strategy_validation_review_gates: timeline_preview_required=1" in content
     assert "- viewing_experience: 82.0 (B) | 观感偏拖" in content
     assert "- high_risk_cut_count: 3" in content
     assert "- blocking_manual_confirm_job_count: 1" in content

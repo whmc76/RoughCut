@@ -11972,6 +11972,16 @@ textarea.input {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
 }
 
+.manual-editor-unified-strategy-track {
+  position: relative;
+  min-height: 34px;
+  border-radius: 7px;
+  background:
+    linear-gradient(90deg, rgba(59, 130, 246, 0.12), rgba(20, 184, 166, 0.06)),
+    rgba(8, 47, 73, 0.38);
+  box-shadow: inset 0 0 0 1px rgba(125, 211, 252, 0.14);
+}
+
 .manual-editor-unified-semantic-marker {
   position: absolute;
   top: 5px;
@@ -12004,6 +12014,41 @@ textarea.input {
 }
 
 .manual-editor-unified-semantic-marker:focus-visible {
+  outline: 2px solid #ffffff;
+  outline-offset: 1px;
+}
+
+.manual-editor-unified-strategy-marker {
+  position: absolute;
+  top: 5px;
+  bottom: 5px;
+  min-width: 20px;
+  padding: 0 8px;
+  border: 1px solid rgba(125, 211, 252, 0.4);
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.88), rgba(45, 212, 191, 0.82));
+  color: #06212a;
+  font-size: 11px;
+  font-weight: 850;
+  cursor: pointer;
+  overflow: hidden;
+  text-align: left;
+  box-shadow: 0 5px 14px rgba(2, 6, 23, 0.28);
+}
+
+.manual-editor-unified-strategy-marker span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.manual-editor-unified-strategy-marker.active {
+  background: linear-gradient(135deg, rgba(125, 211, 252, 1), rgba(34, 197, 94, 0.94));
+  box-shadow: 0 0 0 2px rgba(240, 249, 255, 0.34), 0 8px 18px rgba(2, 6, 23, 0.3);
+}
+
+.manual-editor-unified-strategy-marker:focus-visible {
   outline: 2px solid #ffffff;
   outline-offset: 1px;
 }

@@ -383,6 +383,7 @@ export type JobManualEditSession = {
   rule_segments?: JobManualEditRuleSegment[];
   cut_analysis?: Record<string, unknown> | null;
   refine_decision_plan?: Record<string, unknown> | null;
+  strategy_review_context?: StrategyReviewContext | null;
   source_subtitle_basis?: string | null;
   projected_subtitle_basis?: string | null;
   projection_contract_locked?: boolean;
@@ -1339,6 +1340,45 @@ export type ContentProfilePayload = Record<string, any> & {
   search_queries?: string[];
 };
 
+export type StrategyReviewGates = Record<string, any> & {
+  strategy_type?: string;
+  evidence_fingerprint?: string;
+  classification?: Record<string, any>;
+  pipeline_plan?: Record<string, any>;
+  review_gate_status?: {
+    blocking?: boolean;
+    blocking_gate_ids?: string[];
+    gates?: Array<{
+      gate_id: string;
+      source_key?: string;
+      requirement?: string;
+      status?: string;
+      blocking?: boolean;
+    }>;
+  };
+  confirmations?: Record<string, any>;
+};
+
+export type StrategyTimelinePreviewSegment = Record<string, any> & {
+  segment_id?: string;
+  timestamp?: string;
+  start_time?: number | null;
+  end_time?: number | null;
+  role?: string;
+  text?: string;
+};
+
+export type StrategyReviewContext = Record<string, any> & {
+  schema?: string;
+  strategy_review_gates?: StrategyReviewGates | null;
+  strategy_storyboard_review?: (Record<string, any> & {
+    panels?: Array<Record<string, any> & { panel_id?: string; role?: string; text?: string; timestamp?: string }>;
+  }) | null;
+  strategy_timeline_preview?: (Record<string, any> & {
+    segments?: StrategyTimelinePreviewSegment[];
+  }) | null;
+};
+
 export type ContentProfileReview = {
   job_id: string;
   status: string;
@@ -1372,6 +1412,8 @@ export type ContentProfileReview = {
   entity_resolution_trace: Record<string, any>;
   workflow_mode: string;
   enhancement_modes: string[];
+  product_controls?: Record<string, any>;
+  strategy_review_gates?: StrategyReviewGates | null;
   draft: ContentProfilePayload | null;
   final: ContentProfilePayload | null;
   memory: Record<string, any> | null;

@@ -741,6 +741,7 @@ export function JobsPage() {
           isConfirmingProfile={workspace.confirmProfile.isPending}
           isInitializing={workspace.initializeJob.isPending}
           isApplyingReview={workspace.applyReview.isPending}
+          isConfirmingStrategyGates={workspace.confirmStrategyReviewGates.isPending}
           isRefiningAgentPlan={workspace.refineAgentPlan.isPending}
           isApplyingAgentPlan={workspace.applyAgentPlan.isPending}
           isTriggeringSubtitleRerun={workspace.rerunSubtitleDecision.isPending}
@@ -779,6 +780,7 @@ export function JobsPage() {
           }
           onPendingInitializationChange={workspace.setPendingInitialization}
           onConfirmProfile={confirmReviewProfile}
+          onConfirmStrategyGates={(gateIds) => workspace.confirmStrategyReviewGates.mutate({ gateIds })}
           onInitialize={() => workspace.initializeJob.mutate()}
           onOpenFolder={() => workspace.selectedJob && workspace.openFolder.mutate(workspace.selectedJob.id)}
           onDownload={() => workspace.selectedJob && openJobDownload(workspace.selectedJob.id)}
@@ -850,6 +852,7 @@ export function JobsPage() {
         contentDraft={workspace.contentDraft}
         contentKeywords={workspace.contentKeywords}
         isConfirmingProfile={workspace.confirmProfile.isPending}
+        isConfirmingStrategyGates={workspace.confirmStrategyReviewGates.isPending}
         isApplyingReview={workspace.applyReview.isPending}
         isTriggeringSubtitleRerun={workspace.rerunSubtitleDecision.isPending}
         pendingRerunStartStep={pendingSubtitleRerun?.rerunStartStep ?? null}
@@ -884,6 +887,7 @@ export function JobsPage() {
           }))
         }
         onConfirmProfile={confirmReviewProfile}
+        onConfirmStrategyGates={(gateIds) => workspace.confirmStrategyReviewGates.mutate({ gateIds })}
         onApplyReview={confirmAndApplyReview}
         onTriggerSubtitleRerun={triggerSubtitleRerun}
         onApproveFinalReview={() => workspace.finalReviewDecision.mutate({ decision: "approve" })}

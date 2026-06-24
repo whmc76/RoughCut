@@ -49,6 +49,7 @@ from roughcut.api.schemas import (
     OpenFolderOut,
     ReportOut,
     ReviewApplyRequest,
+    StrategyReviewGateConfirmIn,
     TokenUsageReportOut,
     normalize_execution_mode,
     normalize_job_flow_mode,
@@ -91,9 +92,7 @@ from roughcut.edit.cut_analysis import (
     cut_analysis_silence_segments,
 )
 from roughcut.edit.capabilities import CAPABILITY_KEYS
-from roughcut.edit.capability_orchestrator import build_capability_orchestration_payload
 from roughcut.edit.product_controls import (
-    build_product_controls_payload,
     normalize_automation_level,
     normalize_edit_mode,
     normalize_material_usage,
@@ -107,7 +106,6 @@ from roughcut.edit.editorial_timeline import (
     normalize_keep_segments_payloads,
     resolve_editorial_keep_segments,
 )
-from roughcut.edit.local_asset_inventory import build_uploaded_material_inventory
 from roughcut.edit.local_focus_plan import build_local_focus_plan
 from roughcut.edit.packaging_timeline import (
     packaging_timeline_analysis,
@@ -148,6 +146,7 @@ from roughcut.edit.render_plan import (
     render_plan_avatar_commentary,
     render_plan_delivery,
     render_plan_loudness,
+    render_plan_strategy_review_context,
     render_plan_voice_processing,
     render_plan_video_transform,
     render_plan_workflow_preset,
@@ -169,7 +168,11 @@ from roughcut.edit.smart_cut_rules import (
     default_smart_cut_rules_payload,
     normalize_smart_cut_rules_payload,
 )
-from roughcut.edit.strategy_profile import build_strategy_profile_payload, infer_strategy_type, normalize_strategy_type
+from roughcut.edit.strategy_profile import normalize_strategy_type
+from roughcut.edit.strategy_review_gates import (
+    build_strategy_review_gate_confirmations_payload,
+    normalize_strategy_review_gate_confirmations,
+)
 from roughcut.edit.subtitle_surfaces import (
     subtitle_canonical_rule_text,
     subtitle_display_rule_text,
@@ -270,10 +273,27 @@ from roughcut.review.content_profile_memory import (
     load_content_profile_user_memory,
     record_content_profile_feedback_memory,
 )
+from roughcut.review.content_profile_artifacts import (
+    ARTIFACT_TYPE_STRATEGY_REVIEW_GATE_CONFIRMATIONS,
+    ARTIFACT_TYPE_STRATEGY_REVIEW_GATES,
+    ARTIFACT_TYPE_STRATEGY_STORYBOARD_REVIEW,
+    ARTIFACT_TYPE_STRATEGY_TIMELINE_PREVIEW,
+    build_strategy_storyboard_review_artifact_payload,
+    build_strategy_timeline_preview_artifact_payload,
+    build_strategy_review_gates_artifact_payload,
+)
+from roughcut.review.content_profile_strategy import (
+    attach_content_profile_capability_orchestration,
+    build_content_profile_local_asset_inventory,
+    extract_content_profile_source_context_from_steps,
+    resolve_job_merged_source_names,
+)
 from roughcut.review.hotword_learning import load_learned_hotwords, upsert_learned_hotword
 from roughcut.review.downstream_context import (
+    attach_strategy_review_context,
     build_downstream_context,
     resolve_downstream_profile,
+    select_strategy_review_artifact_context,
     strip_publication_only_profile_fields,
 )
 from roughcut.review.final_review_rerun import (
@@ -372,7 +392,13 @@ PROFILE_ARTIFACT_PRIORITY = {
 }
 _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
 _MATERIAL_ENHANCEMENT_MODES = frozenset({"voice_enhancement", "loudness_normalization"})
-_DOWNSTREAM_PROFILE_ARTIFACT_TYPES = ("downstream_context",) + _CONTENT_PROFILE_ARTIFACT_TYPES
+_DOWNSTREAM_PROFILE_ARTIFACT_TYPES = (
+    "downstream_context",
+    *_CONTENT_PROFILE_ARTIFACT_TYPES,
+    ARTIFACT_TYPE_STRATEGY_REVIEW_GATES,
+    ARTIFACT_TYPE_STRATEGY_STORYBOARD_REVIEW,
+    ARTIFACT_TYPE_STRATEGY_TIMELINE_PREVIEW,
+)
 _CONTENT_PROFILE_THUMBNAIL_CACHE_VERSION = "v2"
 _CONTENT_PROFILE_THUMBNAIL_LOCKS: dict[str, asyncio.Lock] = {}
 _CONTENT_PROFILE_THUMBNAIL_GENERATION_SEMAPHORE = asyncio.Semaphore(2)
@@ -581,6 +607,7 @@ class ManualEditorSessionOut(BaseModel):
     cut_analysis: dict[str, Any] | None = None
     refine_decision_plan: dict[str, Any] | None = None
     multimodal_trim_review: dict[str, Any] | None = None
+    strategy_review_context: dict[str, Any] | None = None
     source_subtitle_basis: str | None = None
     projected_subtitle_basis: str | None = None
     projection_contract_locked: bool = False
@@ -777,20 +804,7 @@ def _ensure_content_understanding_payload(profile: dict[str, Any] | None) -> dic
 
 
 def _build_content_profile_local_asset_inventory(job: Job | None, profile: dict[str, Any] | None) -> dict[str, Any]:
-    payload = profile if isinstance(profile, dict) else {}
-    fallback_merged_source_names = _resolve_job_merged_source_names(job) if job is not None and hasattr(job, "steps") else []
-    merged_source_candidates = payload.get("merged_source_names") if isinstance(payload.get("merged_source_names"), list) else None
-    merged_source_names = [
-        str(item).strip()
-        for item in (merged_source_candidates if merged_source_candidates is not None else fallback_merged_source_names)
-        if str(item).strip()
-    ]
-    packaging_snapshot = getattr(job, "packaging_snapshot_json", None) if job is not None else None
-    return build_uploaded_material_inventory(
-        has_primary_video=job is not None,
-        merged_source_names=merged_source_names,
-        packaging_snapshot=packaging_snapshot if isinstance(packaging_snapshot, dict) else None,
-    )
+    return build_content_profile_local_asset_inventory(job, profile)
 
 
 def _infer_content_profile_strategy_type(
@@ -798,13 +812,12 @@ def _infer_content_profile_strategy_type(
     *,
     local_asset_inventory: dict[str, Any] | None = None,
 ) -> str:
-    payload = profile if isinstance(profile, dict) else {}
-    return infer_strategy_type(
-        strategy_profile=payload.get("strategy_profile") if isinstance(payload.get("strategy_profile"), dict) else None,
-        workflow_template=str(payload.get("workflow_template") or "").strip() or None,
-        content_profile=payload,
-        local_asset_inventory=local_asset_inventory,
-    )
+    enriched = attach_content_profile_capability_orchestration(profile, job=None)
+    if isinstance(enriched, dict):
+        orchestration = enriched.get("capability_orchestration")
+        if isinstance(orchestration, dict):
+            return str(orchestration.get("strategy_type") or "").strip() or "information_density"
+    return "information_density"
 
 
 def _normalize_json_string_list(value: Any, *, field_name: str) -> list[str]:
@@ -948,61 +961,19 @@ def _attach_content_profile_capability_orchestration(
     payload = _ensure_content_understanding_payload(profile)
     if not isinstance(payload, dict):
         return payload
-    enriched = dict(payload)
-    local_asset_inventory = _build_content_profile_local_asset_inventory(job, enriched)
-    job_source_context = (
-        _extract_job_source_context_from_steps(getattr(job, "steps", []) or [])
-        if job is not None and hasattr(job, "steps")
-        else {}
-    )
-    source_context = enriched.get("source_context") if isinstance(enriched.get("source_context"), dict) else {}
-    requested_product_controls = (
-        dict(source_context.get("product_controls") or {})
-        if isinstance(source_context.get("product_controls"), dict)
-        else dict(job_source_context.get("product_controls") or {})
-        if isinstance(job_source_context.get("product_controls"), dict)
-        else {}
-    )
-    if "smart_cut_rules" not in enriched and isinstance(job_source_context.get("smart_cut_rules"), dict):
-        enriched["smart_cut_rules"] = dict(job_source_context["smart_cut_rules"])
-    if "material_enhancement_modes" not in enriched and isinstance(job_source_context.get("material_enhancement_modes"), list):
-        enriched["material_enhancement_modes"] = list(job_source_context["material_enhancement_modes"])
-    requested_capability_overrides = (
-        dict(job_source_context.get("capability_overrides") or {})
-        if isinstance(job_source_context.get("capability_overrides"), dict)
-        else {}
-    )
-    strategy_profile = build_strategy_profile_payload(
-        strategy_type=_infer_content_profile_strategy_type(
-            enriched,
-            local_asset_inventory=local_asset_inventory,
-        )
-    )
-    product_controls = build_product_controls_payload(
-        requested_product_controls,
-        strategy_type=strategy_profile.get("strategy_type"),
-        content_kind=enriched.get("content_kind"),
-        local_asset_inventory=local_asset_inventory,
-        job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
-    )
-    enriched["product_controls"] = product_controls
-    enriched["capability_orchestration"] = build_capability_orchestration_payload(
-        strategy_profile=strategy_profile,
-        workflow_template=str(getattr(job, "workflow_template", "") or enriched.get("workflow_template") or "").strip() or None,
-        content_profile=enriched,
-        local_asset_inventory=local_asset_inventory,
-        job_flow_mode=str(getattr(job, "job_flow_mode", "") or "auto"),
-        product_controls=product_controls,
-        capability_overrides=requested_capability_overrides,
-    )
-    return enriched
+    return attach_content_profile_capability_orchestration(payload, job=job)
 
 
 def _select_preferred_content_profile_artifact(artifacts: list[Artifact]) -> Artifact | None:
-    if not artifacts:
+    profile_artifacts = [
+        artifact
+        for artifact in artifacts or []
+        if str(artifact.artifact_type or "").strip() in _CONTENT_PROFILE_ARTIFACT_TYPES
+    ]
+    if not profile_artifacts:
         return None
     epoch = datetime.min.replace(tzinfo=timezone.utc)
-    finals = [artifact for artifact in artifacts if str(artifact.artifact_type or "").strip() == "content_profile_final"]
+    finals = [artifact for artifact in profile_artifacts if str(artifact.artifact_type or "").strip() == "content_profile_final"]
     if finals:
         return max(
             finals,
@@ -1012,7 +983,7 @@ def _select_preferred_content_profile_artifact(artifacts: list[Artifact]) -> Art
             ),
         )
     return max(
-        artifacts,
+        profile_artifacts,
         key=lambda artifact: (
             PROFILE_ARTIFACT_PRIORITY.get(str(artifact.artifact_type or "").strip(), 0),
             artifact.created_at or epoch,
@@ -1060,7 +1031,11 @@ async def _load_manual_editor_preferred_downstream_profile(
     artifact = _select_preferred_downstream_artifact(artifacts)
     if artifact is None:
         return None, {}
-    return artifact, resolve_downstream_profile(artifact.data_json if isinstance(artifact.data_json, dict) else {})
+    profile = resolve_downstream_profile(artifact.data_json if isinstance(artifact.data_json, dict) else {})
+    return artifact, attach_strategy_review_context(
+        profile,
+        select_strategy_review_artifact_context(artifacts),
+    )
 
 
 def _manual_editor_projection_has_suspicious_subtitle_timing(
@@ -1291,22 +1266,27 @@ def _normalize_manual_video_summary(value: Any) -> str | None:
 
 
 def _select_preferred_downstream_artifact(artifacts: list[Artifact]) -> Artifact | None:
-    if not artifacts:
-        return None
     priority = {
         "downstream_context": 4,
         "content_profile_final": 3,
         "content_profile": 2,
         "content_profile_draft": 1,
     }
+    profile_artifacts = [
+        artifact
+        for artifact in artifacts or []
+        if priority.get(str(artifact.artifact_type or "").strip(), 0) > 0
+    ]
+    if not profile_artifacts:
+        return None
     epoch = datetime.min.replace(tzinfo=timezone.utc)
     latest_final = max(
-        (artifact for artifact in artifacts if str(artifact.artifact_type or "").strip() == "content_profile_final"),
+        (artifact for artifact in profile_artifacts if str(artifact.artifact_type or "").strip() == "content_profile_final"),
         key=lambda artifact: artifact.created_at or epoch,
         default=None,
     )
     latest_downstream = max(
-        (artifact for artifact in artifacts if str(artifact.artifact_type or "").strip() == "downstream_context"),
+        (artifact for artifact in profile_artifacts if str(artifact.artifact_type or "").strip() == "downstream_context"),
         key=lambda artifact: artifact.created_at or epoch,
         default=None,
     )
@@ -1316,7 +1296,7 @@ def _select_preferred_downstream_artifact(artifacts: list[Artifact]) -> Artifact
     ):
         return latest_final
     return max(
-        artifacts,
+        profile_artifacts,
         key=lambda artifact: (
             priority.get(str(artifact.artifact_type or "").strip(), 0),
             artifact.created_at or epoch,
@@ -4000,6 +3980,7 @@ def _manual_editor_render_plan_context(render_plan: dict[str, Any] | None) -> di
         "voice_processing": render_plan_voice_processing(payload),
         "ai_director_plan": render_plan_ai_director(payload),
         "avatar_commentary_plan": render_plan_avatar_commentary(payload),
+        "strategy_review_context": render_plan_strategy_review_context(payload),
     }
 
 
@@ -8701,6 +8682,13 @@ async def _build_manual_editor_session(
         cut_analysis=cut_analysis_payload,
         refine_decision_plan=refine_decision_plan_payload,
         multimodal_trim_review=multimodal_trim_review_payload,
+        strategy_review_context=(
+            dict(render_plan_context.get("strategy_review_context") or {})
+            if isinstance(render_plan_context.get("strategy_review_context"), dict)
+            else dict(content_profile.get("strategy_review_context") or {})
+            if isinstance(content_profile.get("strategy_review_context"), dict)
+            else None
+        ),
         source_subtitle_basis=subtitle_basis,
         projected_subtitle_basis=_manual_editor_subtitle_basis(projected_subtitles),
         projection_contract_locked=projection_contract_locked,
@@ -9571,12 +9559,21 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
     if not isinstance(final, dict) or not final:
         final = None if has_draft_artifact else base_profile
     settings = get_settings()
+    strategy_gate_confirmations = await _load_latest_strategy_review_gate_confirmations(session, job_id=job_id)
     if isinstance(draft, dict):
         draft = apply_current_content_profile_review_policy(draft, settings=settings)
-        draft = _attach_content_profile_capability_orchestration(draft, job=job)
+        draft = attach_content_profile_capability_orchestration(
+            _ensure_content_understanding_payload(draft),
+            job=job,
+            strategy_review_gate_confirmations=strategy_gate_confirmations,
+        )
     if isinstance(final, dict):
         final = apply_current_content_profile_review_policy(final, settings=settings)
-        final = _attach_content_profile_capability_orchestration(final, job=job)
+        final = attach_content_profile_capability_orchestration(
+            _ensure_content_understanding_payload(final),
+            job=job,
+            strategy_review_gate_confirmations=strategy_gate_confirmations,
+        )
     reviewed_subtitle_excerpt = await _build_current_reviewed_subtitle_excerpt(job_id, session)
     if reviewed_subtitle_excerpt:
         if isinstance(draft, dict):
@@ -9613,6 +9610,17 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
         candidate = (review_step.metadata_ or {}).get("identity_review")
         identity_review = candidate if isinstance(candidate, dict) else None
     evidence = await _load_content_profile_review_evidence(job_id, session)
+    strategy_review_gates = build_strategy_review_gates_artifact_payload(
+        active_profile,
+        confirmations=strategy_gate_confirmations,
+    )
+    if strategy_review_gates is None:
+        latest_strategy_gates = await _load_latest_strategy_review_gates_artifact(session, job_id=job_id)
+        strategy_review_gates = (
+            dict(latest_strategy_gates.data_json or {})
+            if latest_strategy_gates is not None and isinstance(latest_strategy_gates.data_json, dict)
+            else None
+        )
 
     return ContentProfileReviewOut(
         job_id=str(job_id),
@@ -9626,6 +9634,7 @@ async def get_content_profile(job_id: uuid.UUID, session: AsyncSession = Depends
         workflow_mode=str(getattr(job, "workflow_mode", "") or "standard_edit"),
         enhancement_modes=list(getattr(job, "enhancement_modes", []) or []),
         product_controls=(active_profile.get("product_controls") if isinstance(active_profile, dict) else {}) or {},
+        strategy_review_gates=strategy_review_gates,
         draft=draft,
         final=final,
         memory=memory,
@@ -9790,6 +9799,122 @@ async def warm_content_profile_thumbnails(
     return {"status": "accepted", "job_id": str(job_id)}
 
 
+async def _load_latest_strategy_review_gate_confirmations(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+) -> dict[str, Any]:
+    result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id == job_id,
+            Artifact.artifact_type == ARTIFACT_TYPE_STRATEGY_REVIEW_GATE_CONFIRMATIONS,
+        )
+        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+    )
+    artifact = result.scalars().first()
+    return dict(artifact.data_json or {}) if artifact is not None and isinstance(artifact.data_json, dict) else {}
+
+
+async def _load_latest_strategy_review_gates_artifact(
+    session: AsyncSession,
+    *,
+    job_id: uuid.UUID,
+) -> Artifact | None:
+    result = await session.execute(
+        select(Artifact)
+        .where(
+            Artifact.job_id == job_id,
+            Artifact.artifact_type == ARTIFACT_TYPE_STRATEGY_REVIEW_GATES,
+        )
+        .order_by(Artifact.created_at.desc(), Artifact.id.desc())
+    )
+    return result.scalars().first()
+
+
+@router.post("/{job_id}/strategy-review-gates/confirm")
+async def confirm_strategy_review_gates(
+    job_id: uuid.UUID,
+    body: StrategyReviewGateConfirmIn,
+    session: AsyncSession = Depends(get_session),
+):
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    gate_artifact = await _load_latest_strategy_review_gates_artifact(session, job_id=job_id)
+    if gate_artifact is None or not isinstance(gate_artifact.data_json, dict):
+        raise HTTPException(status_code=404, detail="Strategy review gates not found")
+    gate_payload = dict(gate_artifact.data_json)
+    pipeline_plan = gate_payload.get("pipeline_plan")
+    if not isinstance(pipeline_plan, dict):
+        raise HTTPException(status_code=409, detail="Strategy review gates artifact has no pipeline plan")
+    classification = gate_payload.get("classification") if isinstance(gate_payload.get("classification"), dict) else {}
+    review_gate_status = gate_payload.get("review_gate_status") if isinstance(gate_payload.get("review_gate_status"), dict) else {}
+    default_gate_ids = [
+        str(item or "").strip()
+        for item in list(review_gate_status.get("blocking_gate_ids") or [])
+        if str(item or "").strip()
+    ]
+    requested_gate_ids = [
+        str(item or "").strip()
+        for item in list(body.gate_ids or default_gate_ids)
+        if str(item or "").strip()
+    ]
+    if not requested_gate_ids:
+        raise HTTPException(status_code=409, detail="No blocking strategy review gates require confirmation")
+
+    existing_payload = await _load_latest_strategy_review_gate_confirmations(session, job_id=job_id)
+    existing_confirmations = normalize_strategy_review_gate_confirmations(
+        existing_payload,
+        pipeline_plan=pipeline_plan,
+        classification=classification,
+    )
+    confirmation_payload = build_strategy_review_gate_confirmations_payload(
+        gate_ids=requested_gate_ids,
+        pipeline_plan=pipeline_plan,
+        classification=classification,
+        status=body.status,
+        note=body.note or "",
+        actor="operator",
+    )
+    confirmation_payload["confirmations"] = {
+        **existing_confirmations,
+        **dict(confirmation_payload.get("confirmations") or {}),
+    }
+    updated_gate_payload = build_strategy_review_gates_artifact_payload(
+        {
+            "capability_orchestration": {
+                "strategy_type": gate_payload.get("strategy_type") or pipeline_plan.get("strategy_type"),
+                "classification": classification,
+                "pipeline_plan": pipeline_plan,
+            }
+        },
+        confirmations=confirmation_payload,
+    )
+    if updated_gate_payload is None:
+        raise HTTPException(status_code=409, detail="Unable to rebuild strategy review gates")
+
+    session.add(
+        Artifact(
+            job_id=job.id,
+            step_id=gate_artifact.step_id,
+            artifact_type=ARTIFACT_TYPE_STRATEGY_REVIEW_GATE_CONFIRMATIONS,
+            data_json=confirmation_payload,
+        )
+    )
+    session.add(
+        Artifact(
+            job_id=job.id,
+            step_id=gate_artifact.step_id,
+            artifact_type=ARTIFACT_TYPE_STRATEGY_REVIEW_GATES,
+            data_json=updated_gate_payload,
+        )
+    )
+    job.updated_at = datetime.now(timezone.utc)
+    await session.commit()
+    return updated_gate_payload
+
+
 @router.post("/{job_id}/content-profile/confirm", response_model=ContentProfileReviewOut)
 async def confirm_content_profile(
     job_id: uuid.UUID,
@@ -9894,6 +10019,19 @@ async def confirm_content_profile(
         )
         final_profile["automation_review"] = automation_review
     final_profile["manual_review_outcome"] = manual_review_outcome
+    strategy_gate_confirmations = await _load_latest_strategy_review_gate_confirmations(session, job_id=job_id)
+    enriched_final_profile = attach_content_profile_capability_orchestration(
+        _ensure_content_understanding_payload(final_profile),
+        job=job,
+        strategy_review_gate_confirmations=strategy_gate_confirmations,
+    )
+    final_profile = enriched_final_profile if isinstance(enriched_final_profile, dict) else final_profile
+    strategy_review_gates_payload = build_strategy_review_gates_artifact_payload(
+        final_profile,
+        confirmations=strategy_gate_confirmations,
+    )
+    strategy_storyboard_review_payload = build_strategy_storyboard_review_artifact_payload(final_profile)
+    strategy_timeline_preview_payload = build_strategy_timeline_preview_artifact_payload(final_profile)
 
     review_step_result = await session.execute(
         select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "summary_review")
@@ -9916,9 +10054,41 @@ async def confirm_content_profile(
             job_id=job.id,
             step_id=review_step.id if review_step else None,
             artifact_type="downstream_context",
-            data_json=build_downstream_context(final_profile),
+            data_json=build_downstream_context(
+                final_profile,
+                strategy_review_gates=strategy_review_gates_payload,
+                strategy_storyboard_review=strategy_storyboard_review_payload,
+                strategy_timeline_preview=strategy_timeline_preview_payload,
+            ),
         )
     )
+    if strategy_review_gates_payload is not None:
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=review_step.id if review_step else None,
+                artifact_type=ARTIFACT_TYPE_STRATEGY_REVIEW_GATES,
+                data_json=strategy_review_gates_payload,
+            )
+        )
+    if strategy_storyboard_review_payload is not None:
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=review_step.id if review_step else None,
+                artifact_type=ARTIFACT_TYPE_STRATEGY_STORYBOARD_REVIEW,
+                data_json=strategy_storyboard_review_payload,
+            )
+        )
+    if strategy_timeline_preview_payload is not None:
+        session.add(
+            Artifact(
+                job_id=job.id,
+                step_id=review_step.id if review_step else None,
+                artifact_type=ARTIFACT_TYPE_STRATEGY_TIMELINE_PREVIEW,
+                data_json=strategy_timeline_preview_payload,
+            )
+        )
     await record_content_profile_feedback_memory(
         session,
         job=job,
@@ -9959,8 +10129,20 @@ async def confirm_content_profile(
     automation_review = final_profile.get("automation_review") if isinstance(final_profile, dict) else {}
     identity_review = final_profile.get("identity_review") if isinstance(final_profile, dict) else None
     evidence = await _load_content_profile_review_evidence(job_id, session)
-    draft_profile = _attach_content_profile_capability_orchestration(draft_artifact.data_json, job=job)
-    final_profile = _attach_content_profile_capability_orchestration(final_profile, job=job)
+    draft_profile = attach_content_profile_capability_orchestration(
+        _ensure_content_understanding_payload(draft_artifact.data_json),
+        job=job,
+        strategy_review_gate_confirmations=strategy_gate_confirmations,
+    )
+    final_profile = attach_content_profile_capability_orchestration(
+        _ensure_content_understanding_payload(final_profile),
+        job=job,
+        strategy_review_gate_confirmations=strategy_gate_confirmations,
+    )
+    response_strategy_review_gates = build_strategy_review_gates_artifact_payload(
+        final_profile,
+        confirmations=strategy_gate_confirmations,
+    )
 
     return ContentProfileReviewOut(
         job_id=str(job_id),
@@ -9973,6 +10155,8 @@ async def confirm_content_profile(
         **evidence,
         workflow_mode=job.workflow_mode,
         enhancement_modes=list(job.enhancement_modes or []),
+        product_controls=(final_profile.get("product_controls") if isinstance(final_profile, dict) else {}) or {},
+        strategy_review_gates=response_strategy_review_gates,
         draft=draft_profile,
         final=final_profile,
         memory=memory,
@@ -13386,25 +13570,11 @@ def _resolve_job_publication_preview(job: Job) -> dict[str, str | None]:
 
 
 def _extract_job_source_context_from_steps(steps: list[JobStep]) -> dict[str, Any]:
-    for step in list(steps or []):
-        if step.step_name != "content_profile" or not isinstance(step.metadata_, dict):
-            continue
-        source_context = step.metadata_.get("source_context")
-        if isinstance(source_context, dict):
-            return dict(source_context)
-    return {}
+    return extract_content_profile_source_context_from_steps(steps)
 
 
 def _resolve_job_merged_source_names(job: Job) -> list[str]:
-    source_context = _extract_job_source_context_from_steps(job.steps or [])
-    merged_source_names = [
-        str(item).strip()
-        for item in (source_context.get("merged_source_names") or [])
-        if str(item).strip()
-    ]
-    if merged_source_names:
-        return merged_source_names
-    return []
+    return resolve_job_merged_source_names(job)
 
 
 def _calculate_job_progress_percent(job: Job) -> int:

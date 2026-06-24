@@ -9,6 +9,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.edit.presets import get_workflow_preset, normalize_workflow_template_name
+from roughcut.edit.strategy_review_context import strategy_review_context_from_profile
 from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.db.models import Timeline
 from roughcut.edit.local_audio_cues import normalize_local_music_plan
@@ -184,6 +185,10 @@ def render_plan_ai_director(payload: dict[str, Any] | None) -> dict[str, Any]:
     return copy.deepcopy(_render_plan_payload(payload).get("ai_director") or {})
 
 
+def render_plan_strategy_review_context(payload: dict[str, Any] | None) -> dict[str, Any]:
+    return copy.deepcopy(_render_plan_payload(payload).get("strategy_review_context") or {})
+
+
 def render_plan_video_transform(payload: dict[str, Any] | None) -> dict[str, Any]:
     plan = _render_plan_payload(payload)
     manual_editor = copy.deepcopy(plan.get("manual_editor") or {})
@@ -235,6 +240,7 @@ def build_render_plan(
         workflow_preset=preset.name,
         content_profile=content_profile,
     )
+    strategy_review_context = strategy_review_context_from_profile(content_profile)
     preserve_color = bool(content_effect_policy.get("preserve_color"))
     resolved_effect_style = _resolve_workflow_smart_effect_style(
         smart_effect_style,
@@ -328,6 +334,10 @@ def build_render_plan(
         "content_effect_policy": content_effect_policy,
         "ai_director": ai_director_plan,
         "avatar_commentary": avatar_commentary_plan,
+        "strategy_review_context": copy.deepcopy(strategy_review_context),
+        "manual_editor": {
+            "strategy_review_context": copy.deepcopy(strategy_review_context),
+        },
         "editing_accents": resolved_editing_accents,
         "delivery": {
             "resolution_mode": export_resolution_mode,
@@ -350,6 +360,7 @@ def build_render_plan(
             "music": copy.deepcopy(plan.get("music")),
         },
         "editing_accents": copy.deepcopy(plan["editing_accents"] or {}),
+        "strategy_review_context": copy.deepcopy(strategy_review_context),
         "focus": copy.deepcopy(plan.get("focus")) if isinstance(plan.get("focus"), dict) else None,
         "hyperframes": copy.deepcopy(hyperframes_plan),
     }

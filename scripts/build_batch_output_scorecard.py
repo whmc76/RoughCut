@@ -91,11 +91,27 @@ def _live_readiness_summary(batch_report: dict[str, Any]) -> dict[str, Any] | No
         for name, check in checks.items()
         if str(name).strip() and isinstance(check, dict) and not bool(check.get("passed"))
     )
-    return {
+    summary = {
         "gate_passed": bool(payload.get("gate_passed")),
         "status": str(payload.get("status") or "").strip() or None,
         "failed_checks": failed_checks,
     }
+    render_check = checks.get("render_end_state_stability") if isinstance(checks.get("render_end_state_stability"), dict) else {}
+    if render_check:
+        summary["render_end_state_stability"] = {
+            key: render_check.get(key)
+            for key in (
+                "failed_render_job_count",
+                "strategy_validation_evaluated_job_count",
+                "strategy_validation_blocking_job_count",
+                "strategy_validation_blocking_job_ids",
+                "strategy_validation_blocking_reasons",
+                "strategy_validation_strategy_types",
+                "strategy_validation_review_gates",
+            )
+            if render_check.get(key) not in (None, "", [])
+        }
+    return summary
 
 
 def _score_from_status(status: str | None, *, pass_score: float = 100.0, warn_score: float = 75.0) -> float:
@@ -1400,6 +1416,30 @@ def render_markdown(scorecard: dict[str, Any], batch_report_path: Path) -> str:
                 f"- failed_checks: {', '.join(live_readiness.get('failed_checks') or []) or '-'}",
             ]
         )
+        render_end_state = (
+            live_readiness.get("render_end_state_stability")
+            if isinstance(live_readiness.get("render_end_state_stability"), dict)
+            else {}
+        )
+        if render_end_state:
+            lines.append(f"- render_failed_jobs: {render_end_state.get('failed_render_job_count') or 0}")
+            lines.append(
+                "- strategy_validation_blocking_jobs: "
+                f"{render_end_state.get('strategy_validation_blocking_job_count') or 0}"
+            )
+            for label, key in (
+                ("strategy_validation_blocking_reasons", "strategy_validation_blocking_reasons"),
+                ("strategy_validation_strategy_types", "strategy_validation_strategy_types"),
+                ("strategy_validation_review_gates", "strategy_validation_review_gates"),
+            ):
+                counts = render_end_state.get(key) if isinstance(render_end_state.get(key), dict) else {}
+                if counts:
+                    rendered = ", ".join(
+                        f"{name}={count}"
+                        for name, count in sorted(counts.items())
+                        if str(name).strip()
+                    )
+                    lines.append(f"- {label}: {rendered}")
     lines.extend(["", "## Aggregate Stages", ""])
     for item in _visible_aggregate_stage_items():
         lines.append(f"- {item['stage']}: {item.get('score')} ({item.get('grade')})")

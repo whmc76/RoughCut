@@ -109,7 +109,6 @@ docs/dreamina-setup.md
 /compose-full.yml
 
 # Local debug and runtime scratch outputs
-.hydra-host-dev/
 /3305
 /tmp-dedupe-video.mp4
 /.external-services/

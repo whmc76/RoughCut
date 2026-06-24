@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties, typ
 import type WaveSurfer from "wavesurfer.js";
 import type { RegionsPlugin as RegionsPluginInstance } from "wavesurfer.js/dist/plugins/regions.esm.js";
 
-import type { ContentProfileReview, Job, JobManualEditApplyPayload, JobManualEditPreviewAssets, JobManualEditRuleSegment, JobManualEditSession, JobManualEditSilence, JobManualEditSubtitle, JobManualEditSubtitleOverride, JobManualEditWord, JobManualSubtitleReplacement, JobManualVideoTransform } from "../../types";
+import type { ContentProfileReview, Job, JobManualEditApplyPayload, JobManualEditPreviewAssets, JobManualEditRuleSegment, JobManualEditSession, JobManualEditSilence, JobManualEditSubtitle, JobManualEditSubtitleOverride, JobManualEditWord, JobManualSubtitleReplacement, JobManualVideoTransform, StrategyReviewContext, StrategyTimelinePreviewSegment } from "../../types";
 import { classNames } from "../../utils";
 import { buildVideoUnderstandingSnapshot } from "./contentProfile";
 
@@ -105,6 +105,11 @@ type ManualTimelineSemanticMarker = {
 type ManualTimelineSemanticFocus = {
   primary: ManualTimelineSemanticMarker | null;
   active: ManualTimelineSemanticMarker[];
+};
+
+type ManualTimelineStrategyMarker = ManualTimelineSemanticMarker & {
+  segmentId: string;
+  role: string;
 };
 
 type FrequentTermKind = "名词/术语" | "动作词" | "描述词" | "专名/型号" | "低置信词";
@@ -757,6 +762,92 @@ export function buildManualTimelineSemanticMarkers(
     });
   });
   return markers.slice(0, 12);
+}
+
+export function buildManualStrategyPreviewMarkers(
+  strategyReviewContext: StrategyReviewContext | null | undefined,
+  sourceTimelineDuration: number,
+): ManualTimelineStrategyMarker[] {
+  if (!strategyReviewContext || sourceTimelineDuration <= 0) return [];
+  const segments = strategyReviewContext.strategy_timeline_preview?.segments || [];
+  const markers: ManualTimelineStrategyMarker[] = [];
+  const seen = new Set<string>();
+  segments.forEach((segment: StrategyTimelinePreviewSegment, index: number) => {
+    const bounds = strategySegmentTimeBounds(segment);
+    if (!bounds) return;
+    const [rawStart, rawEnd] = bounds;
+    const start = clamp(rawStart, 0, sourceTimelineDuration);
+    const end = clamp(rawEnd, start, sourceTimelineDuration);
+    if (end <= start) return;
+    const role = String(segment.role || "preview").trim();
+    const label = strategyPreviewRoleLabel(role);
+    const text = String(segment.text || "").trim();
+    const timestamp = String(segment.timestamp || "").trim() || `${formatSeconds(start)} - ${formatSeconds(end)}`;
+    const segmentId = String(segment.segment_id || `preview_${index + 1}`);
+    const dedupeKey = `${segmentId}|${start}|${end}|${role}|${text}`;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+    markers.push({
+      key: `strategy-${dedupeKey}`,
+      segmentId,
+      role,
+      label,
+      text,
+      timestamp,
+      leftPercent: clamp((start / sourceTimelineDuration) * 100, 0, 100),
+      widthPercent: clamp(((end - start) / sourceTimelineDuration) * 100, 0.8, 18),
+      start,
+      end,
+      detail: ["策略预览", segmentId],
+    });
+  });
+  return markers.slice(0, 12);
+}
+
+function strategySegmentTimeBounds(segment: StrategyTimelinePreviewSegment): [number, number] | null {
+  const start = optionalFiniteNumber(segment.start_time);
+  const end = optionalFiniteNumber(segment.end_time);
+  if (start != null && end != null) return [start, end];
+  const timestamp = String(segment.timestamp || "").trim();
+  if (!timestamp) return null;
+  const matches = [...timestamp.matchAll(/(?:(\d{1,2}):)?(\d{1,2})(?::(\d{1,2}(?:\.\d+)?))?/g)];
+  if (matches.length < 2) return null;
+  const parsedStart = timestampMatchToSeconds(matches[0]);
+  const parsedEnd = timestampMatchToSeconds(matches[1]);
+  if (parsedStart == null || parsedEnd == null) return null;
+  return [parsedStart, parsedEnd];
+}
+
+function optionalFiniteNumber(value: unknown): number | null {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function timestampMatchToSeconds(match: RegExpMatchArray): number | null {
+  const hour = match[1];
+  const minuteOrSecond = match[2];
+  const second = match[3];
+  if (second != null && second !== "") {
+    return Number(hour || 0) * 3600 + Number(minuteOrSecond || 0) * 60 + Number(second || 0);
+  }
+  return Number(minuteOrSecond || 0);
+}
+
+function strategyPreviewRoleLabel(role: string) {
+  switch (role) {
+    case "material_insert":
+      return "素材插入";
+    case "assembly":
+      return "组接预览";
+    case "opening":
+      return "开场预览";
+    case "closing":
+      return "收束预览";
+    case "evidence":
+      return "证据段";
+    default:
+      return "策略预览";
+  }
 }
 
 export function resolveManualTimelineSemanticFocus(
@@ -6164,11 +6255,19 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
     () => buildManualTimelineSemanticMarkers(contentProfile, sourceTimelineDuration),
     [contentProfile, sourceTimelineDuration],
   );
+  const strategyPreviewMarkers = useMemo(
+    () => buildManualStrategyPreviewMarkers(session.strategy_review_context, sourceTimelineDuration),
+    [session.strategy_review_context, sourceTimelineDuration],
+  );
   const timelinePlayheadSourceTime = clamp(currentSourceTime, 0, Math.max(0, sourceTimelineDuration));
   const semanticFocusTime = timelineHoverSourceTime ?? timelinePlayheadSourceTime;
   const semanticFocus = useMemo(
     () => resolveManualTimelineSemanticFocus(semanticTimelineMarkers, semanticFocusTime),
     [semanticFocusTime, semanticTimelineMarkers],
+  );
+  const strategyPreviewFocus = useMemo(
+    () => resolveManualTimelineSemanticFocus(strategyPreviewMarkers, semanticFocusTime),
+    [semanticFocusTime, strategyPreviewMarkers],
   );
   const unifiedTimelineStyle = {
     "--playhead-left": `${sourceTimelineDuration > 0 ? (timelinePlayheadSourceTime / sourceTimelineDuration) * 100 : 0}%`,
@@ -8991,7 +9090,14 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
           <div className="manual-editor-preview-head">
             <strong>统一时间轴</strong>
             <div className="manual-editor-semantic-summary">
-              {semanticFocus.primary ? (
+              {strategyPreviewFocus.primary ? (
+                <>
+                  <span className="status-pill active">策略预览</span>
+                  <span className="status-pill pending">{strategyPreviewFocus.primary.label}</span>
+                  {strategyPreviewFocus.primary.timestamp ? <span className="muted">{strategyPreviewFocus.primary.timestamp}</span> : null}
+                  {strategyPreviewFocus.primary.text ? <span className="muted">{strategyPreviewFocus.primary.text}</span> : null}
+                </>
+              ) : semanticFocus.primary ? (
                 <>
                   <span className="status-pill pending">{semanticFocus.primary.label}</span>
                   {semanticFocus.primary.timestamp ? <span className="muted">{semanticFocus.primary.timestamp}</span> : null}
@@ -9138,6 +9244,29 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
                       jumpToSourceTime(marker.start);
                     }}
                     title={`${marker.timestamp || `${formatSeconds(marker.start)} - ${formatSeconds(marker.end)}`} ${marker.label}${marker.text ? `：${marker.text}` : ""}${marker.detail.length ? ` / ${marker.detail.join(" / ")}` : ""}`}
+                  >
+                    <span>{marker.label}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {strategyPreviewMarkers.length ? (
+              <div className="manual-editor-unified-strategy-track" aria-label="策略预览时间锚点">
+                {strategyPreviewMarkers.map((marker) => (
+                  <button
+                    key={marker.key}
+                    type="button"
+                    className={classNames(
+                      "manual-editor-unified-strategy-marker",
+                      strategyPreviewFocus.active.some((item) => item.key === marker.key) && "active",
+                    )}
+                    style={{ left: `${marker.leftPercent}%`, width: `${marker.widthPercent}%` }}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      selectSubtitleNearSourceTime(marker.start);
+                      jumpToSourceTime(marker.start);
+                    }}
+                    title={`${marker.timestamp || `${formatSeconds(marker.start)} - ${formatSeconds(marker.end)}`} ${marker.label}${marker.text ? `：${marker.text}` : ""}`}
                   >
                     <span>{marker.label}</span>
                   </button>

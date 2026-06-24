@@ -677,6 +677,7 @@ class ContentProfileReviewOut(BaseModel):
     workflow_mode: str
     enhancement_modes: list[str] = Field(default_factory=list)
     product_controls: dict[str, Any] = Field(default_factory=dict)
+    strategy_review_gates: dict[str, Any] | None = None
     draft: dict[str, Any] | None
     final: dict[str, Any] | None
     memory: dict[str, Any] | None = None
@@ -984,6 +985,12 @@ class ContentProfileConfirmIn(BaseModel):
         if isinstance(value, (list, tuple, set)):
             return normalize_enhancement_modes(list(value))
         raise ValueError("enhancement_modes must be a list of strings")
+
+
+class StrategyReviewGateConfirmIn(BaseModel):
+    gate_ids: list[str] = Field(default_factory=list)
+    status: str = "approved"
+    note: str | None = None
 
 
 class PackagingAssetOut(BaseModel):

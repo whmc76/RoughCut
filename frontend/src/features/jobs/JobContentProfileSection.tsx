@@ -26,6 +26,8 @@ type JobContentProfileSectionProps = {
   onFieldChange: (field: string, value: string) => void;
   onKeywordsChange: (value: string) => void;
   onConfirm: () => void;
+  onConfirmStrategyGates?: (gateIds?: string[]) => void;
+  isConfirmingStrategyGates?: boolean;
 };
 
 export function JobContentProfileSection({
@@ -41,6 +43,8 @@ export function JobContentProfileSection({
   onFieldChange,
   onKeywordsChange,
   onConfirm,
+  onConfirmStrategyGates,
+  isConfirmingStrategyGates = false,
 }: JobContentProfileSectionProps) {
   const { t, locale } = useI18n();
   const videoTypeOptions = getVideoTypeOptions(locale);
@@ -113,6 +117,19 @@ export function JobContentProfileSection({
     getTextValue(sourceContextFeedback?.supplemental_context),
   ].filter(Boolean);
   const videoUnderstanding = buildVideoUnderstandingSnapshot(effectiveContentSource, contentDraft);
+  const strategyReviewGates = contentProfile?.strategy_review_gates;
+  const strategyGateStatus =
+    strategyReviewGates?.review_gate_status && typeof strategyReviewGates.review_gate_status === "object"
+      ? strategyReviewGates.review_gate_status
+      : null;
+  const strategyPipelinePlan =
+    strategyReviewGates?.pipeline_plan && typeof strategyReviewGates.pipeline_plan === "object"
+      ? strategyReviewGates.pipeline_plan
+      : null;
+  const strategyBlockingGateIds = Array.isArray(strategyGateStatus?.blocking_gate_ids)
+    ? strategyGateStatus.blocking_gate_ids.filter(Boolean)
+    : [];
+  const strategyGateRows = Array.isArray(strategyGateStatus?.gates) ? strategyGateStatus.gates : [];
 
   return (
     <section className={["detail-block", reviewMode ? "summary-review-editor" : ""].filter(Boolean).join(" ")}>
@@ -166,6 +183,57 @@ export function JobContentProfileSection({
                   alt={`thumbnail-${index}`}
                 />
               ))}
+            </div>
+          ) : null}
+          {strategyReviewGates ? (
+            <div className="timeline-list top-gap">
+              <div className={["timeline-item", reviewMode ? "summary-review-evidence-card" : ""].filter(Boolean).join(" ")}>
+                <div className="toolbar">
+                  <strong>剪辑策略门禁</strong>
+                  <span className={`status-pill ${strategyGateStatus?.blocking ? "pending" : "done"}`}>
+                    {strategyGateStatus?.blocking ? "待确认" : "已满足"}
+                  </span>
+                </div>
+                <div className="mode-chip-list compact-top">
+                  <span className="mode-chip subtle">策略：{String(strategyReviewGates.strategy_type || strategyPipelinePlan?.strategy_type || "auto")}</span>
+                  {strategyPipelinePlan?.production_mode ? (
+                    <span className="mode-chip subtle">生产线：{String(strategyPipelinePlan.production_mode)}</span>
+                  ) : null}
+                  {strategyPipelinePlan?.primary_type ? (
+                    <span className="mode-chip subtle">类型：{String(strategyPipelinePlan.primary_type)}</span>
+                  ) : null}
+                </div>
+                {strategyGateRows.length ? (
+                  <div className="timeline-list compact-top">
+                    {strategyGateRows.map((gate) => (
+                      <div key={gate.gate_id} className="timeline-item">
+                        <div className="toolbar">
+                          <strong>{strategyGateLabel(gate.gate_id)}</strong>
+                          <span className={`status-pill ${gate.blocking ? "pending" : "done"}`}>
+                            {strategyGateStatusLabel(gate.status, gate.requirement)}
+                          </span>
+                        </div>
+                        <div className="muted">
+                          {gate.requirement === "required" ? "必需确认" : gate.requirement === "recommended" ? "建议复核" : "可选复核"}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+                {strategyBlockingGateIds.length && onConfirmStrategyGates ? (
+                  <div className="toolbar compact-top">
+                    <button
+                      type="button"
+                      className="button button-sm"
+                      disabled={isConfirmingStrategyGates}
+                      onClick={() => onConfirmStrategyGates(strategyBlockingGateIds)}
+                    >
+                      {isConfirmingStrategyGates ? "正在确认..." : "确认当前策略门禁"}
+                    </button>
+                    <span className="muted">确认会绑定当前分类证据；重新识别后需重新确认。</span>
+                  </div>
+                ) : null}
+              </div>
             </div>
           ) : null}
           <div className={["form-stack", reviewMode ? "summary-review-form-stack" : ""].filter(Boolean).join(" ")}>
@@ -310,6 +378,25 @@ export function JobContentProfileSection({
       )}
     </section>
   );
+}
+
+function strategyGateLabel(gateId: string): string {
+  const labels: Record<string, string> = {
+    strategy_confirmation: "策略确认",
+    storyboard_review: "分镜复核",
+    timeline_preview: "时间线预览",
+    manual_cut_review: "剪辑点复核",
+    highlight_review: "高光复核",
+  };
+  return labels[gateId] ?? gateId;
+}
+
+function strategyGateStatusLabel(status?: string, requirement?: string): string {
+  if (status === "approved" || status === "confirmed" || status === "satisfied") return "已确认";
+  if (status === "skipped") return "已跳过";
+  if (status === "rejected") return "已退回";
+  if (requirement === "required") return "待确认";
+  return "未要求";
 }
 
 function extractSourceContext(

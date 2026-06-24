@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ from scripts.export_job_audit_snapshot import (
 )
 from scripts import promote_auto_edit_golden_references as promote_refs
 from scripts import run_auto_edit_recovery_golden_set as golden
+from roughcut.db.models import Job
 from scripts.run_fullchain_batch import JobRunReport, LiveStageValidation, StepRun
 
 
@@ -31,6 +33,18 @@ def test_load_golden_job_manifest_accepts_rich_job_entries(tmp_path: Path) -> No
                         "scenario": "manual editor regression anchor",
                         "reference_job_id": "fb30a42c-1af1-4c78-b065-bc3cd4004b2e",
                         "reference_risk_job_id": "a8b490ec-155d-4cff-85ee-f1316740205a",
+                        "source_paths": ["main.mp4", "broll.mp4"],
+                        "product_controls": {"edit_mode": "multi_material"},
+                        "strategy_classification": {
+                            "primary_type": "avatar_commentary_remix",
+                            "production_mode": "remix",
+                            "media_tags": ["digital_human"],
+                            "editing_signals": ["material_insert_required"],
+                        },
+                        "source_context": {"operator_note": "fixture"},
+                        "transcript_segments": [
+                            {"start": 0.0, "end": 2.0, "text": "hello fixture"},
+                        ],
                         "tags": ["manual_editor", "projection"],
                         "required_checks": ["manual_editor_ready", "subtitle_projection"],
                         "risk_hints": {
@@ -58,6 +72,19 @@ def test_load_golden_job_manifest_accepts_rich_job_entries(tmp_path: Path) -> No
     assert cases[0].case_id == "manual_editor_edc17"
     assert cases[0].reference_job_id == "fb30a42c-1af1-4c78-b065-bc3cd4004b2e"
     assert cases[0].reference_risk_job_id == "a8b490ec-155d-4cff-85ee-f1316740205a"
+    assert cases[0].source_paths == ["main.mp4", "broll.mp4"]
+    assert cases[0].enhancement_modes_explicit is False
+    assert cases[0].product_controls == {"edit_mode": "multi_material"}
+    assert cases[0].strategy_classification == {
+        "primary_type": "avatar_commentary_remix",
+        "production_mode": "remix",
+        "media_tags": ["digital_human"],
+        "editing_signals": ["material_insert_required"],
+    }
+    assert cases[0].source_context == {"operator_note": "fixture"}
+    assert cases[0].transcript_segments == [
+        {"index": 0, "start": 0.0, "end": 2.0, "speaker": "SPEAKER_00", "text": "hello fixture"}
+    ]
     assert cases[0].tags == ["manual_editor", "projection"]
     assert cases[0].required_checks == ["manual_editor_ready", "subtitle_projection"]
     assert cases[0].risk_hints == {
@@ -70,6 +97,125 @@ def test_load_golden_job_manifest_accepts_rich_job_entries(tmp_path: Path) -> No
             }
         },
     }
+
+
+def test_load_golden_job_manifest_tracks_explicit_empty_enhancement_modes(tmp_path: Path) -> None:
+    manifest_path = tmp_path / "golden.json"
+    manifest_path.write_text(
+        json.dumps(
+            [
+                {
+                    "case_id": "strategy_candidate",
+                    "reference_job_id": "fb30a42c-1af1-4c78-b065-bc3cd4004b2e",
+                    "enhancement_modes": [],
+                }
+            ],
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    cases = golden.load_golden_job_manifest(manifest_path)
+
+    assert cases[0].enhancement_modes == []
+    assert cases[0].enhancement_modes_explicit is True
+
+
+def test_clone_evaluation_job_honors_explicit_empty_enhancement_modes() -> None:
+    captured: dict[str, Job] = {}
+
+    class EmptyScalarResult:
+        def all(self) -> list[object]:
+            return []
+
+        def first(self) -> None:
+            return None
+
+    class EmptyExecuteResult:
+        def scalars(self) -> EmptyScalarResult:
+            return EmptyScalarResult()
+
+    class FakeSession:
+        async def execute(self, *_args: object, **_kwargs: object) -> EmptyExecuteResult:
+            return EmptyExecuteResult()
+
+        def add(self, item: Job) -> None:
+            if isinstance(item, Job):
+                captured["job"] = item
+
+        async def flush(self) -> None:
+            return None
+
+    source_job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/source.mp4",
+        source_name="source.mp4",
+        file_hash="hash",
+        status="done",
+        workflow_template="edc_tactical",
+        enhancement_modes=["avatar_commentary", "ai_effects"],
+    )
+
+    asyncio.run(
+        golden._clone_evaluation_job_from_existing(
+            FakeSession(),
+            source_job=source_job,
+            workflow_template="edc_tactical",
+            language="zh-CN",
+            enhancement_modes=[],
+        )
+    )
+
+    assert captured["job"].enhancement_modes == []
+
+
+def test_clone_evaluation_job_inherits_enhancement_modes_when_manifest_does_not_override() -> None:
+    captured: dict[str, Job] = {}
+
+    class EmptyScalarResult:
+        def all(self) -> list[object]:
+            return []
+
+        def first(self) -> None:
+            return None
+
+    class EmptyExecuteResult:
+        def scalars(self) -> EmptyScalarResult:
+            return EmptyScalarResult()
+
+    class FakeSession:
+        async def execute(self, *_args: object, **_kwargs: object) -> EmptyExecuteResult:
+            return EmptyExecuteResult()
+
+        def add(self, item: Job) -> None:
+            if isinstance(item, Job):
+                captured["job"] = item
+
+        async def flush(self) -> None:
+            return None
+
+    source_job = Job(
+        id=uuid.uuid4(),
+        source_path="jobs/source.mp4",
+        source_name="source.mp4",
+        file_hash="hash",
+        status="done",
+        workflow_template="edc_tactical",
+        enhancement_modes=["avatar_commentary", "ai_effects"],
+    )
+
+    asyncio.run(
+        golden._clone_evaluation_job_from_existing(
+            FakeSession(),
+            source_job=source_job,
+            workflow_template="edc_tactical",
+            language="zh-CN",
+            enhancement_modes=None,
+        )
+    )
+
+    assert captured["job"].enhancement_modes == ["avatar_commentary", "ai_effects"]
 
 
 def test_load_golden_job_manifest_rejects_duplicate_reference_job_ids(tmp_path: Path) -> None:
@@ -111,7 +257,92 @@ def test_load_golden_job_manifest_rejects_unsupported_required_checks(tmp_path: 
         golden.load_golden_job_manifest(manifest_path)
 
 
-def test_current_golden_manifest_required_checks_are_all_supported() -> None:
+def test_prepare_golden_job_uses_merged_sources_and_strategy_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source_a = tmp_path / "main.mp4"
+    source_b = tmp_path / "broll.mp4"
+    source_a.write_bytes(b"a")
+    source_b.write_bytes(b"b")
+    captured: dict[str, object] = {}
+
+    class FakeSession:
+        async def __aenter__(self) -> "FakeSession":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+    def fake_session_factory():
+        return lambda: FakeSession()
+
+    async def fake_create_merged_job_for_inventory_paths(file_paths: list[str], **kwargs: object) -> str:
+        captured["file_paths"] = file_paths
+        captured["kwargs"] = kwargs
+        return "merged-job-id"
+
+    monkeypatch.setattr(golden, "get_session_factory", fake_session_factory)
+    monkeypatch.setattr(golden, "create_merged_job_for_inventory_paths", fake_create_merged_job_for_inventory_paths)
+
+    async def fake_apply_golden_case_transcript_seed(job_id: str, case: golden.GoldenJobCase) -> None:
+        captured["seed_job_id"] = job_id
+        captured["seed_case_id"] = case.case_id
+
+    monkeypatch.setattr(golden, "_apply_golden_case_transcript_seed", fake_apply_golden_case_transcript_seed)
+
+    case = golden.GoldenJobCase(
+        case_id="strategy-narrative",
+        scenario="narrative replay-safe fixture",
+        source_paths=[str(source_a), str(source_b)],
+        workflow_template="multi_material_story",
+        product_controls={"edit_mode": "multi_material"},
+        source_context={"operator_note": "fixture"},
+        strategy_classification={
+            "primary_type": "avatar_commentary_remix",
+            "production_mode": "remix",
+            "media_tags": ["digital_human"],
+            "editing_signals": ["material_insert_required"],
+        },
+    )
+
+    prepared = asyncio.run(
+        golden.prepare_golden_job(
+            case,
+            default_workflow_template="edc_tactical",
+            default_language="zh-CN",
+            locate_roots=[],
+        )
+    )
+
+    assert prepared.job_id == "merged-job-id"
+    assert prepared.mode == "fresh_merged_full_chain"
+    assert prepared.item["source_paths"] == [str(source_a), str(source_b)]
+    assert captured["file_paths"] == [str(source_a), str(source_b)]
+    kwargs = captured["kwargs"]
+    assert kwargs["workflow_template"] == "multi_material_story"
+    assert kwargs["product_controls"] == {"edit_mode": "multi_material"}
+    assert kwargs["allow_related_profiles"] is True
+    assert kwargs["allow_duplicate_file"] is True
+    assert kwargs["content_profile_source_context"] == {
+        "operator_note": "fixture",
+        "strategy_classification": {
+            "primary_type": "avatar_commentary_remix",
+            "production_mode": "remix",
+            "media_tags": ["digital_human"],
+            "editing_signals": ["material_insert_required"],
+        },
+        "product_controls": {"edit_mode": "multi_material"},
+    }
+    assert captured["seed_job_id"] == "merged-job-id"
+    assert captured["seed_case_id"] == "strategy-narrative"
+
+
+def test_transcript_seed_does_not_skip_media_artifact_steps() -> None:
+    assert "probe" not in golden.TRANSCRIPT_SEED_DONE_STEPS
+    assert "extract_audio" not in golden.TRANSCRIPT_SEED_DONE_STEPS
+    assert "transcribe" in golden.TRANSCRIPT_SEED_DONE_STEPS
+    assert "subtitle_translation" in golden.TRANSCRIPT_SEED_DONE_STEPS
+
+
+def test_current_golden_manifest_required_checks_are_supported() -> None:
     manifest_path = golden.ROOT / "docs" / "golden-jobs" / "auto-edit-recovery-golden-slice.v1.json"
     cases = golden.load_golden_job_manifest(manifest_path)
 
@@ -121,7 +352,7 @@ def test_current_golden_manifest_required_checks_are_all_supported() -> None:
         for check in case.required_checks
     }
 
-    assert manifest_required_checks == golden.SUPPORTED_REQUIRED_CHECKS
+    assert manifest_required_checks <= golden.SUPPORTED_REQUIRED_CHECKS
 
 
 def test_previous_effective_keep_segments_prefers_aligned_refine_plan_over_editorial_full_keep() -> None:
@@ -754,6 +985,501 @@ def test_evaluate_required_checks_supports_term_and_low_signal_typed_checks() ->
     assert failed == ["low_signal_traceability"]
 
 
+def test_strategy_pipeline_coverage_status_matches_declared_strategy_tag() -> None:
+    case = golden.GoldenJobCase(
+        case_id="case-strategy",
+        scenario="strategy coverage",
+        tags=["strategy:information_density"],
+    )
+    report = JobRunReport(
+        job_id="job-strategy",
+        source_path="E:/demo.mp4",
+        source_name="demo.mp4",
+        status="partial",
+        output_path=None,
+        cover_path=None,
+        output_duration_sec=0.0,
+        transcript_segment_count=0,
+        subtitle_count=0,
+        correction_count=0,
+        keep_ratio=1.0,
+        cover_variant_count=0,
+        platform_doc=None,
+        quality_score=100.0,
+        quality_grade="A",
+        quality_issue_codes=[],
+        live_stage_validations=[],
+        content_profile={
+            "capability_orchestration": {
+                "strategy_type": "information_density",
+                "pipeline_plan": {
+                    "strategy_type": "information_density",
+                },
+            }
+        },
+        steps=[],
+        notes=[],
+        render_diagnostics={
+            "strategy_render_validation": {
+                "strategy_type": "information_density",
+                "status": "ok",
+            }
+        },
+    )
+
+    status = golden._strategy_pipeline_coverage_status(
+        case,
+        report=report,
+        content_profile_final={},
+        strategy_review_gates={},
+    )
+
+    assert status["passed"] is True
+    assert status["expected_strategy_types"] == ["information_density"]
+    assert status["observed_strategy_types"] == ["information_density"]
+
+
+def test_strategy_pipeline_coverage_status_fails_without_matching_pipeline_evidence() -> None:
+    case = golden.GoldenJobCase(
+        case_id="case-strategy-missing",
+        scenario="strategy coverage missing",
+        tags=["strategy:event_highlight"],
+    )
+    report = JobRunReport(
+        job_id="job-strategy",
+        source_path="E:/demo.mp4",
+        source_name="demo.mp4",
+        status="partial",
+        output_path=None,
+        cover_path=None,
+        output_duration_sec=0.0,
+        transcript_segment_count=0,
+        subtitle_count=0,
+        correction_count=0,
+        keep_ratio=1.0,
+        cover_variant_count=0,
+        platform_doc=None,
+        quality_score=100.0,
+        quality_grade="A",
+        quality_issue_codes=[],
+        live_stage_validations=[],
+        content_profile={
+            "capability_orchestration": {
+                "strategy_type": "information_density",
+            }
+        },
+        steps=[],
+        notes=[],
+    )
+
+    status = golden._strategy_pipeline_coverage_status(
+        case,
+        report=report,
+        content_profile_final={},
+        strategy_review_gates={},
+    )
+
+    assert status["passed"] is False
+    assert status["missing_strategy_types"] == ["event_highlight"]
+
+
+def test_evaluate_required_checks_supports_strategy_pipeline_coverage_typed_check() -> None:
+    case = golden.GoldenJobCase(
+        case_id="case-strategy-check",
+        scenario="strategy coverage check",
+        tags=["strategy:information_density"],
+        required_checks=["strategy_pipeline_coverage"],
+    )
+
+    passed, failed = golden._evaluate_required_checks(
+        case,
+        None,
+        check_statuses={"strategy_pipeline_coverage": {"passed": True}},
+    )
+
+    assert passed is True
+    assert failed == []
+
+
+def test_strategy_boundary_samples_status_passes_with_render_sample_evidence() -> None:
+    case = golden.GoldenJobCase(
+        case_id="case-event-render",
+        scenario="event highlight render",
+        tags=["strategy:event_highlight"],
+    )
+    report = JobRunReport(
+        job_id="job-event",
+        source_path="E:/demo.mp4",
+        source_name="demo.mp4",
+        status="done",
+        output_path="E:/out.mp4",
+        cover_path=None,
+        output_duration_sec=5.0,
+        transcript_segment_count=1,
+        subtitle_count=1,
+        correction_count=0,
+        keep_ratio=0.5,
+        cover_variant_count=0,
+        platform_doc=None,
+        quality_score=90.0,
+        quality_grade="A",
+        quality_issue_codes=[],
+        live_stage_validations=[],
+        content_profile=None,
+        steps=[],
+        notes=[],
+        render_diagnostics={
+            "strategy_render_validation": {
+                "strategy_type": "event_highlight",
+                "status": "ok",
+                "required": True,
+                "boundary_frame_sample_count": 2,
+                "boundary_waveform_sample_count": 1,
+                "blocking_reasons": [],
+            }
+        },
+    )
+
+    status = golden._strategy_boundary_samples_status(
+        case,
+        report=report,
+        sample_manifest={
+            "schema": "strategy_cut_boundary_samples.v1",
+            "boundary_samples": [
+                {
+                    "frame_paths": ["E:/samples/cut_01_01.jpg", "E:/samples/cut_01_02.jpg"],
+                    "waveform_path": "E:/samples/cut_01_waveform.json",
+                }
+            ],
+        },
+    )
+
+    assert status["passed"] is True
+    assert status["strategy_type"] == "event_highlight"
+    assert status["frame_sample_count"] == 2
+    assert status["waveform_sample_count"] == 1
+
+
+def test_count_boundary_sample_evidence_does_not_double_count_manifest_totals() -> None:
+    frame_count, waveform_count = golden._count_boundary_sample_evidence(
+        {
+            "frame_count": 1,
+            "boundary_samples": [
+                {
+                    "frame_paths": ["E:/samples/cut_01_01.jpg"],
+                    "waveform_path": "E:/samples/cut_01_waveform.json",
+                }
+            ],
+        }
+    )
+
+    assert frame_count == 1
+    assert waveform_count == 1
+
+
+def test_strategy_boundary_samples_status_fails_without_render_sample_evidence() -> None:
+    case = golden.GoldenJobCase(
+        case_id="case-event-render-missing",
+        scenario="event highlight render missing samples",
+        tags=["strategy:event_highlight"],
+    )
+    report = JobRunReport(
+        job_id="job-event",
+        source_path="E:/demo.mp4",
+        source_name="demo.mp4",
+        status="failed",
+        output_path=None,
+        cover_path=None,
+        output_duration_sec=0.0,
+        transcript_segment_count=1,
+        subtitle_count=1,
+        correction_count=0,
+        keep_ratio=0.5,
+        cover_variant_count=0,
+        platform_doc=None,
+        quality_score=0.0,
+        quality_grade="E",
+        quality_issue_codes=["render_failed"],
+        live_stage_validations=[],
+        content_profile=None,
+        steps=[],
+        notes=[],
+        render_diagnostics={
+            "strategy_render_validation": {
+                "strategy_type": "event_highlight",
+                "status": "blocking",
+                "required": True,
+                "boundary_frame_sample_count": 0,
+                "boundary_waveform_sample_count": 0,
+                "blocking_reasons": ["strategy_cut_boundary_frame_samples_missing"],
+            }
+        },
+    )
+
+    status = golden._strategy_boundary_samples_status(
+        case,
+        report=report,
+        sample_manifest={},
+    )
+
+    assert status["passed"] is False
+    assert "missing_frame_samples" in status["missing_reasons"]
+    assert "missing_waveform_samples" in status["missing_reasons"]
+    assert "validation_reports_missing_frame_samples" in status["missing_reasons"]
+
+
+def test_evaluate_required_checks_supports_strategy_boundary_samples_typed_check() -> None:
+    case = golden.GoldenJobCase(
+        case_id="case-strategy-boundary-check",
+        scenario="strategy boundary samples check",
+        tags=["strategy:event_highlight"],
+        required_checks=["strategy_boundary_samples"],
+    )
+
+    passed, failed = golden._evaluate_required_checks(
+        case,
+        None,
+        check_statuses={"strategy_boundary_samples": {"passed": True}},
+    )
+
+    assert passed is True
+    assert failed == []
+
+
+def test_strategy_review_preview_evidence_status_passes_with_timecoded_preview() -> None:
+    case = golden.GoldenJobCase(
+        case_id="case-narrative-preview",
+        scenario="narrative preview evidence",
+        tags=["strategy:narrative_assembly"],
+    )
+
+    status = golden._strategy_review_preview_evidence_status(
+        case,
+        strategy_review_gates={
+            "strategy_type": "narrative_assembly",
+            "gate_artifacts": {
+                "storyboard_review": {"artifact_type": "strategy_storyboard_review"},
+                "timeline_preview": {"artifact_type": "strategy_timeline_preview"},
+            },
+        },
+        storyboard_review={
+            "strategy_type": "narrative_assembly",
+            "panels": [{"panel_id": "opening_hook", "text": "先看关键转折"}],
+        },
+        timeline_preview={
+            "strategy_type": "narrative_assembly",
+            "segments": [
+                {
+                    "segment_id": "preview_1",
+                    "timestamp": "00:00-00:04",
+                    "text": "插入原始素材解释背景",
+                }
+            ],
+        },
+    )
+
+    assert status["passed"] is True
+    assert status["storyboard_panel_count"] == 1
+    assert status["timeline_segment_count"] == 1
+    assert status["timeline_time_anchor_count"] == 1
+
+
+def test_strategy_review_preview_evidence_status_fails_without_time_anchor() -> None:
+    case = golden.GoldenJobCase(
+        case_id="case-narrative-preview-missing-time",
+        scenario="narrative preview evidence missing time",
+        tags=["strategy:narrative_assembly"],
+    )
+
+    status = golden._strategy_review_preview_evidence_status(
+        case,
+        strategy_review_gates={
+            "strategy_type": "narrative_assembly",
+            "gate_artifacts": {
+                "timeline_preview": {"artifact_type": "strategy_timeline_preview"},
+            },
+        },
+        storyboard_review={},
+        timeline_preview={
+            "strategy_type": "narrative_assembly",
+            "segments": [{"segment_id": "preview_1", "text": "缺少时间锚点"}],
+        },
+    )
+
+    assert status["passed"] is False
+    assert "missing_timeline_time_anchors" in status["missing_reasons"]
+
+
+def test_evaluate_required_checks_supports_strategy_review_preview_evidence_typed_check() -> None:
+    case = golden.GoldenJobCase(
+        case_id="case-strategy-preview-check",
+        scenario="strategy review preview check",
+        tags=["strategy:narrative_assembly"],
+        required_checks=["strategy_review_preview_evidence"],
+    )
+
+    passed, failed = golden._evaluate_required_checks(
+        case,
+        None,
+        check_statuses={"strategy_review_preview_evidence": {"passed": True}},
+    )
+
+    assert passed is True
+    assert failed == []
+
+
+def test_strategy_review_preview_media_evidence_status_passes_with_readable_source_media(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    media_path = tmp_path / "source.mp4"
+    media_path.write_bytes(b"fake media")
+    monkeypatch.setattr(golden, "_probe_media_duration_sec", lambda _path: (3.0, ""))
+    case = golden.GoldenJobCase(
+        case_id="case-narrative-preview-media",
+        scenario="narrative preview media evidence",
+        source_paths=[str(media_path)],
+        tags=["strategy:narrative_assembly"],
+    )
+
+    status = golden._strategy_review_preview_media_evidence_status(
+        case,
+        job=SimpleNamespace(source_path=""),
+        strategy_review_gates={"strategy_type": "narrative_assembly"},
+        timeline_preview={
+            "strategy_type": "narrative_assembly",
+            "segments": [
+                {
+                    "segment_id": "preview_1",
+                    "start_time": 0.2,
+                    "end_time": 1.5,
+                    "text": "插入可核对的素材片段",
+                }
+            ],
+        },
+    )
+
+    assert status["passed"] is True
+    assert status["source_media_count"] == 1
+    assert status["readable_media_count"] == 1
+    assert status["media_backed_segment_count"] == 1
+    assert status["segment_evidence"][0]["within_media_duration"] is True
+
+
+def test_strategy_review_preview_media_evidence_resolves_runtime_relative_job_media(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_media_path = tmp_path / "data" / "runtime" / "jobs" / "job-1" / "source.mp4"
+    runtime_media_path.parent.mkdir(parents=True)
+    runtime_media_path.write_bytes(b"fake media")
+    monkeypatch.setattr(golden, "ROOT", tmp_path)
+    monkeypatch.setattr(golden, "_probe_media_duration_sec", lambda _path: (3.0, ""))
+    case = golden.GoldenJobCase(
+        case_id="case-narrative-preview-media-runtime",
+        scenario="narrative preview media evidence with cloned runtime source",
+        tags=["strategy:narrative_assembly"],
+    )
+
+    status = golden._strategy_review_preview_media_evidence_status(
+        case,
+        job=SimpleNamespace(source_path="jobs/job-1/source.mp4"),
+        strategy_review_gates={"strategy_type": "narrative_assembly"},
+        timeline_preview={
+            "strategy_type": "narrative_assembly",
+            "segments": [{"segment_id": "preview_1", "start_time": 0.2, "end_time": 1.5}],
+        },
+    )
+
+    assert status["passed"] is True
+    assert status["readable_media_count"] == 1
+    assert status["media_evidence"][0]["path"] == str(runtime_media_path)
+
+
+def test_strategy_review_preview_media_evidence_status_fails_when_segments_exceed_media(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    media_path = tmp_path / "source.mp4"
+    media_path.write_bytes(b"fake media")
+    monkeypatch.setattr(golden, "_probe_media_duration_sec", lambda _path: (2.0, ""))
+    case = golden.GoldenJobCase(
+        case_id="case-narrative-preview-media-outside",
+        scenario="narrative preview media evidence outside source",
+        source_path=str(media_path),
+        tags=["strategy:narrative_assembly"],
+    )
+
+    status = golden._strategy_review_preview_media_evidence_status(
+        case,
+        job=SimpleNamespace(source_path=""),
+        strategy_review_gates={"strategy_type": "narrative_assembly"},
+        timeline_preview={
+            "strategy_type": "narrative_assembly",
+            "segments": [{"segment_id": "preview_1", "timestamp": "00:00-00:04"}],
+        },
+    )
+
+    assert status["passed"] is False
+    assert "timeline_segments_outside_media_duration" in status["missing_reasons"]
+    assert status["media_backed_segment_count"] == 0
+
+
+def test_evaluate_required_checks_supports_strategy_review_preview_media_evidence_typed_check() -> None:
+    case = golden.GoldenJobCase(
+        case_id="case-strategy-preview-media-check",
+        scenario="strategy review preview media check",
+        tags=["strategy:narrative_assembly"],
+        required_checks=["strategy_review_preview_media_evidence"],
+    )
+
+    passed, failed = golden._evaluate_required_checks(
+        case,
+        None,
+        check_statuses={"strategy_review_preview_media_evidence": {"passed": True}},
+    )
+
+    assert passed is True
+    assert failed == []
+
+
+def test_summarize_strategy_pipeline_coverage_collects_declared_and_missing_strategies() -> None:
+    summary = golden.summarize_strategy_pipeline_coverage(
+        [
+            {
+                "case_id": "case-pass",
+                "required_check_statuses": {
+                    "strategy_pipeline_coverage": {
+                        "passed": True,
+                        "expected_strategy_types": ["information_density"],
+                        "observed_strategy_types": ["information_density"],
+                        "missing_strategy_types": [],
+                    }
+                },
+            },
+            {
+                "case_id": "case-fail",
+                "required_check_statuses": {
+                    "strategy_pipeline_coverage": {
+                        "passed": False,
+                        "expected_strategy_types": ["event_highlight"],
+                        "observed_strategy_types": ["information_density"],
+                        "missing_strategy_types": ["event_highlight"],
+                    }
+                },
+            },
+        ]
+    )
+
+    assert summary == {
+        "evaluated_case_count": 2,
+        "declared_strategy_types": ["event_highlight", "information_density"],
+        "covered_strategy_types": ["information_density"],
+        "missing_strategy_types": ["event_highlight"],
+        "failed_case_ids": ["case-fail"],
+    }
+
+
 def test_traceable_cut_candidate_accepts_structured_evidence_without_surface_text() -> None:
     assert golden._traceable_cut_candidate(
         {
@@ -1035,6 +1761,67 @@ def test_summarize_render_diagnostics_aggregates_failed_and_degraded_jobs() -> N
         "avatar_degraded_job_ids": ["job-avatar"],
         "avatar_degraded_reasons": {"avatar_full_track_call_timeout": 1},
         "avatar_degraded_reason_categories": {"call_timeout": 1},
+        "strategy_validation_evaluated_job_count": 0,
+        "strategy_validation_blocking_job_count": 0,
+        "strategy_validation_blocking_job_ids": [],
+        "strategy_validation_blocking_reasons": {},
+        "strategy_validation_strategy_types": {},
+        "strategy_validation_review_gates": {},
+    }
+
+
+def test_summarize_render_diagnostics_aggregates_strategy_validation() -> None:
+    summary = golden.summarize_render_diagnostics(
+        [
+            JobRunReport(
+                job_id="job-strategy",
+                source_path="E:/demo.mp4",
+                source_name="demo.mp4",
+                status="done",
+                output_path="E:/out.mp4",
+                cover_path=None,
+                output_duration_sec=12.0,
+                transcript_segment_count=0,
+                subtitle_count=0,
+                correction_count=0,
+                keep_ratio=1.0,
+                cover_variant_count=0,
+                platform_doc=None,
+                quality_score=90.0,
+                quality_grade="A",
+                quality_issue_codes=[],
+                live_stage_validations=[],
+                content_profile=None,
+                steps=[],
+                notes=[],
+                render_diagnostics={
+                    "strategy_render_validation": {
+                        "status": "blocking",
+                        "reason": "strategy_timeline_preview_missing",
+                        "blocking_reasons": [
+                            "strategy_timeline_preview_missing",
+                            "strategy_storyboard_review_missing",
+                        ],
+                        "strategy_type": "narrative_assembly",
+                        "review_gates": ["timeline_preview_required", "storyboard_review_required"],
+                        "blocking": True,
+                    }
+                },
+            )
+        ]
+    )
+
+    assert summary["strategy_validation_evaluated_job_count"] == 1
+    assert summary["strategy_validation_blocking_job_count"] == 1
+    assert summary["strategy_validation_blocking_job_ids"] == ["job-strategy"]
+    assert summary["strategy_validation_blocking_reasons"] == {
+        "strategy_storyboard_review_missing": 1,
+        "strategy_timeline_preview_missing": 1,
+    }
+    assert summary["strategy_validation_strategy_types"] == {"narrative_assembly": 1}
+    assert summary["strategy_validation_review_gates"] == {
+        "storyboard_review_required": 1,
+        "timeline_preview_required": 1,
     }
 
 
@@ -1108,6 +1895,85 @@ def test_summarize_render_outputs_prefers_runtime_avatar_reason_and_adds_categor
         "error_metadata": {"call_timeout_seconds": 180.0},
     }
     assert "cover" not in summary
+
+
+def test_summarize_render_outputs_preserves_strategy_validation_payload() -> None:
+    summary = summarize_render_outputs(
+        [
+            {
+                "artifact_type": "render_runtime_diagnostics",
+                "data_json": {
+                    "strategy_render_validation": {
+                        "schema": "strategy_render_validation.v1",
+                        "check": "strategy_timeline_preview_alignment",
+                        "status": "blocking",
+                        "reason": "strategy_timeline_preview_missing",
+                        "strategy_type": "narrative_assembly",
+                        "required": True,
+                        "blocking": True,
+                        "segment_count": 0,
+                        "panel_count": 0,
+                        "overlay_count": 1,
+                        "unsafe_overlay_count": 1,
+                        "blocking_reasons": [
+                            "strategy_timeline_preview_missing",
+                            "strategy_storyboard_review_missing",
+                            "strategy_overlay_subtitle_occlusion_unverified",
+                        ],
+                        "checks": [
+                            {
+                                "check": "strategy_timeline_preview_alignment",
+                                "status": "blocking",
+                            },
+                            {
+                                "check": "strategy_storyboard_alignment",
+                                "status": "blocking",
+                            },
+                            {
+                                "check": "strategy_overlay_subtitle_occlusion",
+                                "status": "blocking",
+                            },
+                        ],
+                        "review_gates": ["timeline_preview_required"],
+                    }
+                },
+            }
+        ]
+    )
+
+    assert summary["strategy_render_validation"] == {
+        "schema": "strategy_render_validation.v1",
+        "check": "strategy_timeline_preview_alignment",
+        "status": "blocking",
+        "reason": "strategy_timeline_preview_missing",
+        "strategy_type": "narrative_assembly",
+        "required": True,
+        "blocking": True,
+        "segment_count": 0,
+        "panel_count": 0,
+        "overlay_count": 1,
+        "unsafe_overlay_count": 1,
+        "blocking_reasons": [
+            "strategy_timeline_preview_missing",
+            "strategy_storyboard_review_missing",
+            "strategy_overlay_subtitle_occlusion_unverified",
+        ],
+        "checks": [
+            {
+                "check": "strategy_timeline_preview_alignment",
+                "status": "blocking",
+            },
+            {
+                "check": "strategy_storyboard_alignment",
+                "status": "blocking",
+            },
+            {
+                "check": "strategy_overlay_subtitle_occlusion",
+                "status": "blocking",
+            },
+        ],
+        "review_gates": ["timeline_preview_required"],
+    }
 
 
 def test_summarize_render_outputs_ignores_runtime_cover_payload() -> None:
@@ -1472,6 +2338,13 @@ def test_render_case_summary_markdown_includes_manual_editor_apply_semantics() -
             "required_checks_case_failed": 0,
             "cases_with_checks": 1,
         },
+        strategy_pipeline_coverage_summary={
+            "evaluated_case_count": 1,
+            "declared_strategy_types": ["information_density"],
+            "covered_strategy_types": ["information_density"],
+            "missing_strategy_types": [],
+            "failed_case_ids": [],
+        },
         render_diagnostics_summary={
             "evaluated_job_count": 1,
             "failed_render_job_count": 1,
@@ -1494,6 +2367,8 @@ def test_render_case_summary_markdown_includes_manual_editor_apply_semantics() -
     )
 
     assert "## Render Diagnostics Summary" in content
+    assert "## Strategy Pipeline Coverage" in content
+    assert "covered_strategy_types: information_density" in content
     assert "## Risk Alignment Summary" in content
     assert "failed_render_reasons: render_failed=1" in content
     assert "avatar_degraded_reasons: avatar_full_track_call_timeout=1" in content
@@ -1526,6 +2401,7 @@ def test_render_case_summary_markdown_includes_reference_refresh_candidates() ->
             "required_checks_case_failed": 0,
             "cases_with_checks": 0,
         },
+        strategy_pipeline_coverage_summary=None,
         render_diagnostics_summary=None,
         risk_alignment_summary=None,
         reference_refresh_candidates=[

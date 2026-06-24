@@ -198,6 +198,8 @@ type JobDetailPanelProps = {
     videoDescription: string;
   }) => void;
   onConfirmProfile: () => void;
+  onConfirmStrategyGates?: (gateIds?: string[]) => void;
+  isConfirmingStrategyGates?: boolean;
   onInitialize: () => void;
   onOpenFolder: () => void;
   onDownload?: () => void;
@@ -254,6 +256,8 @@ export function JobDetailPanel({
   onKeywordsChange,
   onPendingInitializationChange,
   onConfirmProfile,
+  onConfirmStrategyGates,
+  isConfirmingStrategyGates = false,
   onInitialize,
   onOpenFolder,
   onDownload,
@@ -847,6 +851,8 @@ export function JobDetailPanel({
               onFieldChange={onContentFieldChange}
               onKeywordsChange={onKeywordsChange}
               onConfirm={onConfirmProfile}
+              onConfirmStrategyGates={onConfirmStrategyGates}
+              isConfirmingStrategyGates={isConfirmingStrategyGates}
             />
           ) : null}
 

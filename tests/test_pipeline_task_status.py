@@ -40,19 +40,23 @@ def test_update_step_status_ignores_missing_job(task_status_session_factory):
 
 
 def test_reset_session_state_sync_disposes_cached_engine(monkeypatch: pytest.MonkeyPatch) -> None:
-    disposed: list[str] = []
+    calls: list[str] = []
 
     class FakeEngine:
         async def dispose(self) -> None:
-            disposed.append("disposed")
+            calls.append("disposed")
+
+    async def fake_close_all_sessions() -> None:
+        calls.append("close_all_sessions")
 
     monkeypatch.setattr(db_session, "_engine", FakeEngine())
     monkeypatch.setattr(db_session, "_engine_loop_id", 123)
     monkeypatch.setattr(db_session, "_session_factory", object())
+    monkeypatch.setattr(db_session, "close_all_sessions", fake_close_all_sessions)
 
     db_session.reset_session_state_sync()
 
-    assert disposed == ["disposed"]
+    assert calls == ["close_all_sessions", "disposed"]
     assert db_session._engine is None
     assert db_session._engine_loop_id is None
     assert db_session._session_factory is None

@@ -15,7 +15,6 @@ function isDebugEnabled(payload = {}) {
   const values = [
     config.debug,
     config.verbose,
-    process.env.HYDRA_DREAMINA_DEBUG,
     process.env.INTELLIGENT_COPY_COVER_DREAMINA_DEBUG
   ];
   return values.some((value) => {
@@ -29,7 +28,6 @@ function resolveDebugLogPath(payload = {}) {
   const configured = normalizeText(
     config.debugLogPath ||
       config.debug_log_path ||
-      process.env.HYDRA_DREAMINA_DEBUG_LOG_PATH ||
       process.env.INTELLIGENT_COPY_COVER_DREAMINA_DEBUG_LOG_PATH
   );
   if (configured) {

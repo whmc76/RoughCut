@@ -149,6 +149,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
         payload = await self._post_transcribe_request(
             audio_path,
             context=context,
+            language=language,
             max_new_tokens=max_new_tokens,
             timeout=httpx.Timeout(1800.0, connect=30.0),
         )
@@ -281,6 +282,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
             chunk_path=chunk_path,
             chunk=chunk,
             context=context,
+            language=language,
             max_new_tokens=max_new_tokens,
             timeout=httpx.Timeout(float(chunk_config.request_timeout_sec), connect=30.0),
             chunk_config=chunk_config,
@@ -408,6 +410,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                 chunk_path=retry_chunk_path,
                 chunk=absolute_chunk,
                 context=context,
+                language=language,
                 max_new_tokens=retry_max_new_tokens,
                 timeout=httpx.Timeout(float(parent_chunk_config.request_timeout_sec), connect=30.0),
                 chunk_config=parent_chunk_config,
@@ -593,6 +596,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
         chunk_path: Path,
         chunk,
         context: str | None,
+        language: str,
         max_new_tokens: int,
         timeout: httpx.Timeout,
         chunk_config,
@@ -626,6 +630,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                 return await self._post_transcribe_request(
                     chunk_path,
                     context=context,
+                    language=language,
                     max_new_tokens=max_new_tokens,
                     timeout=timeout,
                 )
@@ -658,6 +663,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
         audio_path: Path,
         *,
         context: str | None,
+        language: str,
         max_new_tokens: int,
         timeout: httpx.Timeout,
     ) -> dict[str, Any]:
@@ -669,7 +675,7 @@ class LocalHTTPASRProvider(TranscriptionProvider):
                     "application/octet-stream",
                 )
             }
-            data = self._build_request_data(context=context, max_new_tokens=max_new_tokens)
+            data = self._build_request_data(context=context, language=language, max_new_tokens=max_new_tokens)
             async with hold_managed_gpu_services_async(
                 required_urls=[self._base_url],
                 reason="local_http_asr_transcribe",
@@ -679,9 +685,10 @@ class LocalHTTPASRProvider(TranscriptionProvider):
         response.raise_for_status()
         return dict(response.json() or {})
 
-    def _build_request_data(self, *, context: str | None, max_new_tokens: int) -> dict[str, str]:
+    def _build_request_data(self, *, context: str | None, language: str, max_new_tokens: int) -> dict[str, str]:
         return {
             self._hotwords_field: context or "",
+            "language": str(language or "").strip() or "zh-CN",
             "model": self._model_name,
             "model_name": self._model_name,
             "max_new_tokens": str(max_new_tokens),

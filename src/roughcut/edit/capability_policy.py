@@ -6,10 +6,13 @@ from roughcut.edit.capabilities import build_disabled_capability_map
 from roughcut.edit.skills import resolve_editing_skill
 from roughcut.edit.strategy_profile import (
     DEFAULT_STRATEGY_TYPE,
+    build_strategy_pipeline_plan,
     infer_strategy_content_kind,
     infer_strategy_type,
+    normalize_strategy_classification_payload,
     normalize_strategy_profile_payload,
     normalize_strategy_type,
+    strategy_classification_source,
 )
 
 
@@ -29,7 +32,16 @@ def resolve_capability_strategy_inputs(
     strategy_profile: dict[str, Any] | None = None,
     workflow_template: str | None = None,
     content_profile: dict[str, Any] | None = None,
+    local_asset_inventory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    strategy_source = strategy_profile if isinstance(strategy_profile, dict) else {}
+    classification = normalize_strategy_classification_payload(
+        strategy_source.get("classification")
+        if isinstance(strategy_source.get("classification"), dict)
+        else strategy_classification_source(content_profile),
+        content_profile=content_profile,
+        local_asset_inventory=local_asset_inventory,
+    )
     inferred_strategy_type = infer_strategy_type(
         strategy_profile=strategy_profile,
         workflow_template=workflow_template,
@@ -43,10 +55,16 @@ def resolve_capability_strategy_inputs(
         workflow_template=workflow_template,
         content_profile=content_profile,
     )
+    strategy_type = normalize_strategy_type(
+        normalized_strategy_profile.get("strategy_type") or inferred_strategy_type
+    )
     return {
         "strategy_profile": normalized_strategy_profile,
-        "strategy_type": normalize_strategy_type(
-            normalized_strategy_profile.get("strategy_type") or inferred_strategy_type
+        "strategy_type": strategy_type,
+        "classification": classification,
+        "pipeline_plan": build_strategy_pipeline_plan(
+            strategy_type=strategy_type,
+            classification=classification,
         ),
         "content_kind": content_kind,
         "workflow_template": str(workflow_template or "").strip() or None,
@@ -62,11 +80,13 @@ def resolve_default_capability_states(
     strategy_profile: dict[str, Any] | None = None,
     workflow_template: str | None = None,
     content_profile: dict[str, Any] | None = None,
+    local_asset_inventory: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     resolved = resolve_capability_strategy_inputs(
         strategy_profile=strategy_profile,
         workflow_template=workflow_template,
         content_profile=content_profile,
+        local_asset_inventory=local_asset_inventory,
     )
     strategy_type = str(resolved["strategy_type"])
     content_kind = str(resolved["content_kind"])

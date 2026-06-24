@@ -371,6 +371,54 @@ def summarize_render_outputs(artifacts: list[dict[str, Any]]) -> dict[str, Any]:
             avatar_summary["error_metadata"] = dict(error_metadata)
         if avatar_summary:
             summary["avatar_result"] = avatar_summary
+    strategy_render_validation = runtime_payload.get("strategy_render_validation")
+    if isinstance(strategy_render_validation, dict) and strategy_render_validation:
+        validation_summary: dict[str, Any] = {}
+        for key in (
+            "schema",
+            "check",
+            "status",
+            "reason",
+            "strategy_type",
+            "required",
+            "blocking",
+            "segment_count",
+            "panel_count",
+            "overlay_count",
+            "unsafe_overlay_count",
+            "accepted_cut_count",
+            "high_risk_cut_count",
+            "blocking_high_risk_cut_count",
+            "boundary_energy_evidence_count",
+            "boundary_frame_sample_count",
+            "boundary_waveform_sample_count",
+        ):
+            value = strategy_render_validation.get(key)
+            if value not in (None, "", []):
+                validation_summary[key] = value
+        blocking_reasons = [
+            str(item).strip()
+            for item in list(strategy_render_validation.get("blocking_reasons") or [])
+            if str(item).strip()
+        ]
+        if blocking_reasons:
+            validation_summary["blocking_reasons"] = blocking_reasons
+        checks = [
+            dict(item)
+            for item in list(strategy_render_validation.get("checks") or [])
+            if isinstance(item, dict)
+        ]
+        if checks:
+            validation_summary["checks"] = checks
+        review_gates = [
+            str(item).strip()
+            for item in list(strategy_render_validation.get("review_gates") or [])
+            if str(item).strip()
+        ]
+        if review_gates:
+            validation_summary["review_gates"] = review_gates
+        if validation_summary:
+            summary["strategy_render_validation"] = validation_summary
     for key in ("final_video", "project_path"):
         value = str(payload.get(key) or "").strip()
         if value:

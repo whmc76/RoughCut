@@ -15,6 +15,7 @@ from roughcut.edit.product_controls import (
     MATERIAL_USAGE_SELECTED_UPLOADED,
     build_product_controls_payload,
 )
+from roughcut.edit.strategy_review_gates import build_strategy_review_gate_status
 
 
 CAPABILITY_ORCHESTRATION_SCHEMA_VERSION = "capability_orchestration.v1"
@@ -98,17 +99,19 @@ def build_capability_orchestration_payload(
     capability_overrides: dict[str, Any] | None = None,
     product_controls: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    normalized_inventory = normalize_local_asset_inventory(local_asset_inventory)
     resolved_inputs = resolve_capability_strategy_inputs(
         strategy_profile=strategy_profile,
         workflow_template=workflow_template,
         content_profile=content_profile,
+        local_asset_inventory=normalized_inventory,
     )
     resolved_capabilities = resolve_default_capability_states(
         strategy_profile=resolved_inputs["strategy_profile"],
         workflow_template=workflow_template,
         content_profile=content_profile,
+        local_asset_inventory=normalized_inventory,
     )
-    normalized_inventory = normalize_local_asset_inventory(local_asset_inventory)
     normalized_overrides = normalize_capability_overrides(capability_overrides)
     product_control_payload = build_product_controls_payload(
         product_controls,
@@ -159,6 +162,9 @@ def build_capability_orchestration_payload(
         "schema": CAPABILITY_ORCHESTRATION_SCHEMA_VERSION,
         "strategy_type": resolved_inputs["strategy_type"],
         "strategy_profile": resolved_inputs["strategy_profile"],
+        "classification": resolved_inputs["classification"],
+        "pipeline_plan": resolved_inputs["pipeline_plan"],
+        "review_gate_status": build_strategy_review_gate_status(resolved_inputs["pipeline_plan"]),
         "workflow_template": resolved_inputs["workflow_template"],
         "content_kind": resolved_inputs["content_kind"],
         "job_flow_mode": str(job_flow_mode or "").strip().lower() or "auto",

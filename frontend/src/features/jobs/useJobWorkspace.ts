@@ -785,6 +785,21 @@ export function useJobWorkspace({
       ]);
     },
   });
+  const confirmStrategyReviewGates = useMutation({
+    mutationFn: async (payload?: { gateIds?: string[]; note?: string }) =>
+      api.confirmStrategyReviewGates(selectedJobId!, {
+        gate_ids: payload?.gateIds,
+        status: "approved",
+        note: payload?.note,
+      }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["job", selectedJobId] }),
+        queryClient.invalidateQueries({ queryKey: ["job-activity", selectedJobId] }),
+        queryClient.invalidateQueries({ queryKey: ["job-content-profile", selectedJobId] }),
+      ]);
+    },
+  });
   const applyReview = useMutation({
     mutationFn: async (payload: { targetId: string; action: "accepted" | "rejected" }) =>
       api.applyReview(selectedJobId!, [{ target_type: "subtitle_correction", target_id: payload.targetId, action: payload.action }]),
@@ -901,6 +916,7 @@ export function useJobWorkspace({
     uploadJob,
     initializeJob,
     confirmProfile,
+    confirmStrategyReviewGates,
     applyReview,
     rerunSubtitleDecision,
     finalReviewDecision,

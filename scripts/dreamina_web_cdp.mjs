@@ -62,7 +62,6 @@ function isDreaminaDebugEnabled(config = {}) {
     firstNonEmpty(
       String(normalizeObject(config).debug ?? ""),
       String(normalizeObject(config).verbose ?? ""),
-      process.env.HYDRA_DREAMINA_DEBUG,
       process.env.INTELLIGENT_COPY_COVER_DREAMINA_DEBUG
     ),
     false
@@ -73,7 +72,6 @@ function resolveDreaminaDebugLogPath(config = {}) {
   const configured = firstNonEmpty(
     normalizeObject(config).debugLogPath,
     normalizeObject(config).debug_log_path,
-    process.env.HYDRA_DREAMINA_DEBUG_LOG_PATH,
     process.env.INTELLIGENT_COPY_COVER_DREAMINA_DEBUG_LOG_PATH
   );
   return configured ? resolvePath(configured) : "";
@@ -407,13 +405,13 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
   const requestedModelVersion = firstNonEmpty(
     normalizedBackend.model,
     normalizedBackend.imageModel,
-    env.HYDRA_DREAMINA_MODEL_VERSION,
-    process.env.HYDRA_DREAMINA_MODEL_VERSION
+    env.INTELLIGENT_COPY_COVER_IMAGE_MODEL,
+    process.env.INTELLIGENT_COPY_COVER_IMAGE_MODEL
   );
   const requestedResolutionType = firstNonEmpty(
     normalizedBackend.quality,
-    env.HYDRA_DREAMINA_RESOLUTION_TYPE,
-    process.env.HYDRA_DREAMINA_RESOLUTION_TYPE,
+    env.INTELLIGENT_COPY_COVER_IMAGE_QUALITY,
+    process.env.INTELLIGENT_COPY_COVER_IMAGE_QUALITY,
     "2k"
   );
   return {
@@ -422,20 +420,20 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
     cdpBaseUrl: firstNonEmpty(
       normalizedBackend.cdpBaseUrl,
       normalizedBackend.cdp_base_url,
-      env.HYDRA_DREAMINA_CDP_URL,
-      process.env.HYDRA_DREAMINA_CDP_URL,
+      env.INTELLIGENT_COPY_COVER_DREAMINA_CDP_BASE_URL,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_CDP_BASE_URL,
       "http://127.0.0.1:9222"
     ),
     cdpTargetPageUrl: firstNonEmpty(
       normalizedBackend.cdpTargetPageUrl,
       normalizedBackend.cdp_target_page_url,
-      env.HYDRA_DREAMINA_TARGET_PAGE_URL,
-      process.env.HYDRA_DREAMINA_TARGET_PAGE_URL,
+      env.INTELLIGENT_COPY_COVER_DREAMINA_PAGE_URL,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_PAGE_URL,
       "https://jimeng.jianying.com/ai-tool/generate/?type=image"
     ),
     cdpWebSocketUrl: firstNonEmpty(
-      env.HYDRA_DREAMINA_CDP_WEBSOCKET_URL,
-      process.env.HYDRA_DREAMINA_CDP_WEBSOCKET_URL,
+      env.INTELLIGENT_COPY_COVER_DREAMINA_CDP_WEBSOCKET_URL,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_CDP_WEBSOCKET_URL,
       normalizedBackend.cdpWebSocketUrl,
       normalizedBackend.cdp_websocket_url,
       ""
@@ -443,15 +441,15 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
     pageUrlPattern: firstNonEmpty(
       normalizedBackend.pageUrlPattern,
       normalizedBackend.page_url_pattern,
-      env.HYDRA_DREAMINA_PAGE_URL_PATTERN,
-      process.env.HYDRA_DREAMINA_PAGE_URL_PATTERN,
+      env.INTELLIGENT_COPY_COVER_DREAMINA_PAGE_URL_PATTERN,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_PAGE_URL_PATTERN,
       "jimeng.jianying.com/ai-tool/generate"
     ),
     cdpAutoLaunch: parseBooleanish(
       firstNonEmpty(
         String(normalizedBackend.cdpAutoLaunch ?? normalizedBackend.cdp_auto_launch ?? ""),
-        env.HYDRA_DREAMINA_CDP_AUTO_LAUNCH,
-        process.env.HYDRA_DREAMINA_CDP_AUTO_LAUNCH,
+        env.INTELLIGENT_COPY_COVER_DREAMINA_AUTO_LAUNCH,
+        process.env.INTELLIGENT_COPY_COVER_DREAMINA_AUTO_LAUNCH,
         "true"
       ),
       true
@@ -459,8 +457,8 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
     cdpHeadless: parseBooleanish(
       firstNonEmpty(
         String(normalizedBackend.cdpHeadless ?? normalizedBackend.cdp_headless ?? ""),
-        env.HYDRA_DREAMINA_CDP_HEADLESS,
-        process.env.HYDRA_DREAMINA_CDP_HEADLESS,
+        env.INTELLIGENT_COPY_COVER_DREAMINA_HEADLESS,
+        process.env.INTELLIGENT_COPY_COVER_DREAMINA_HEADLESS,
         "true"
       ),
       true
@@ -468,8 +466,8 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
     cdpKeepAlive: parseBooleanish(
       firstNonEmpty(
         String(normalizedBackend.cdpKeepAlive ?? normalizedBackend.cdp_keep_alive ?? ""),
-        env.HYDRA_DREAMINA_CDP_KEEP_ALIVE,
-        process.env.HYDRA_DREAMINA_CDP_KEEP_ALIVE,
+        env.INTELLIGENT_COPY_COVER_DREAMINA_KEEP_ALIVE,
+        process.env.INTELLIGENT_COPY_COVER_DREAMINA_KEEP_ALIVE,
         ""
       ),
       false
@@ -477,8 +475,8 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
     cdpForceCreateTarget: parseBooleanish(
       firstNonEmpty(
         String(normalizedBackend.cdpForceCreateTarget ?? normalizedBackend.cdp_force_create_target ?? ""),
-        env.HYDRA_DREAMINA_CDP_FORCE_CREATE_TARGET,
-        process.env.HYDRA_DREAMINA_CDP_FORCE_CREATE_TARGET,
+        env.INTELLIGENT_COPY_COVER_DREAMINA_FORCE_CREATE_TARGET,
+        process.env.INTELLIGENT_COPY_COVER_DREAMINA_FORCE_CREATE_TARGET,
         ""
       ),
       false
@@ -486,29 +484,29 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
     cdpExecutablePath: firstNonEmpty(
       normalizedBackend.cdpExecutablePath,
       normalizedBackend.cdp_executable_path,
-      env.HYDRA_DREAMINA_CDP_EXECUTABLE_PATH,
-      process.env.HYDRA_DREAMINA_CDP_EXECUTABLE_PATH,
+      env.INTELLIGENT_COPY_COVER_DREAMINA_EXECUTABLE_PATH,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_EXECUTABLE_PATH,
       ""
     ),
     cdpUserDataDir: firstNonEmpty(
       normalizedBackend.cdpUserDataDir,
       normalizedBackend.cdp_user_data_dir,
-      env.HYDRA_DREAMINA_CDP_USER_DATA_DIR,
-      process.env.HYDRA_DREAMINA_CDP_USER_DATA_DIR,
+      env.INTELLIGENT_COPY_COVER_DREAMINA_USER_DATA_DIR,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_USER_DATA_DIR,
       "./data/runtime/dreamina-profile"
     ),
     cdpHeadlessUserDataDir: firstNonEmpty(
       normalizedBackend.cdpHeadlessUserDataDir,
       normalizedBackend.cdp_headless_user_data_dir,
-      env.HYDRA_DREAMINA_CDP_HEADLESS_USER_DATA_DIR,
-      process.env.HYDRA_DREAMINA_CDP_HEADLESS_USER_DATA_DIR,
+      env.INTELLIGENT_COPY_COVER_DREAMINA_HEADLESS_USER_DATA_DIR,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_HEADLESS_USER_DATA_DIR,
       "./data/runtime/dreamina-profile-headless"
     ),
     cdpCookieSourceBaseUrl: firstNonEmpty(
       normalizedBackend.cdpCookieSourceBaseUrl,
       normalizedBackend.cdp_cookie_source_base_url,
-      env.HYDRA_DREAMINA_CDP_COOKIE_SOURCE_URL,
-      process.env.HYDRA_DREAMINA_CDP_COOKIE_SOURCE_URL,
+      env.INTELLIGENT_COPY_COVER_DREAMINA_COOKIE_SOURCE_BASE_URL,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_COOKIE_SOURCE_BASE_URL,
       "http://127.0.0.1:9222"
     ),
     cdpLaunchTimeoutMs: Math.max(
@@ -516,8 +514,8 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
       Number.parseInt(
         firstNonEmpty(
           String(normalizedBackend.cdpLaunchTimeoutMs ?? normalizedBackend.cdp_launch_timeout_ms ?? ""),
-          env.HYDRA_DREAMINA_CDP_LAUNCH_TIMEOUT_MS,
-          process.env.HYDRA_DREAMINA_CDP_LAUNCH_TIMEOUT_MS,
+          env.INTELLIGENT_COPY_COVER_DREAMINA_CDP_LAUNCH_TIMEOUT_MS,
+          process.env.INTELLIGENT_COPY_COVER_DREAMINA_CDP_LAUNCH_TIMEOUT_MS,
           "20000"
         ),
         10
@@ -526,8 +524,8 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
     submitUrlPattern: firstNonEmpty(
       normalizedBackend.submitUrlPattern,
       normalizedBackend.submit_url_pattern,
-      env.HYDRA_DREAMINA_SUBMIT_URL_PATTERN,
-      process.env.HYDRA_DREAMINA_SUBMIT_URL_PATTERN,
+      env.INTELLIGENT_COPY_COVER_DREAMINA_SUBMIT_URL_PATTERN,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_SUBMIT_URL_PATTERN,
       ""
     ),
     captureTimeoutMs: Math.max(
@@ -535,8 +533,8 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
       Number.parseInt(
         firstNonEmpty(
           String(normalizedBackend.captureTimeoutMs ?? normalizedBackend.capture_timeout_ms ?? ""),
-          env.HYDRA_DREAMINA_CAPTURE_TIMEOUT_MS,
-          process.env.HYDRA_DREAMINA_CAPTURE_TIMEOUT_MS,
+          env.INTELLIGENT_COPY_COVER_DREAMINA_CAPTURE_TIMEOUT_MS,
+          process.env.INTELLIGENT_COPY_COVER_DREAMINA_CAPTURE_TIMEOUT_MS,
           "120000"
         ),
         10
@@ -545,42 +543,42 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
     templatePath: firstNonEmpty(
       normalizedBackend.templatePath,
       normalizedBackend.template_path,
-      env.HYDRA_DREAMINA_CAPTURE_PATH,
-      process.env.HYDRA_DREAMINA_CAPTURE_PATH,
-      resolvePath(process.cwd(), ".hydra-host-dev", "dreamina-generate-template.json")
+      env.INTELLIGENT_COPY_COVER_DREAMINA_TEMPLATE_PATH,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_TEMPLATE_PATH,
+      resolvePath(process.cwd(), "data", "runtime", "dreamina", "dreamina-generate-template.json")
     ),
     promptFieldPath: firstNonEmpty(
       normalizedBackend.promptFieldPath,
       normalizedBackend.prompt_field_path,
-      env.HYDRA_DREAMINA_PROMPT_FIELD_PATH,
-      process.env.HYDRA_DREAMINA_PROMPT_FIELD_PATH,
+      env.INTELLIGENT_COPY_COVER_DREAMINA_PROMPT_FIELD_PATH,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_PROMPT_FIELD_PATH,
       ""
     ),
     modelFieldPath: firstNonEmpty(
       normalizedBackend.modelFieldPath,
       normalizedBackend.model_field_path,
-      env.HYDRA_DREAMINA_MODEL_FIELD_PATH,
-      process.env.HYDRA_DREAMINA_MODEL_FIELD_PATH,
+      env.INTELLIGENT_COPY_COVER_DREAMINA_MODEL_FIELD_PATH,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_MODEL_FIELD_PATH,
       ""
     ),
     resolutionFieldPath: firstNonEmpty(
       normalizedBackend.resolutionFieldPath,
       normalizedBackend.resolution_field_path,
-      env.HYDRA_DREAMINA_RESOLUTION_FIELD_PATH,
-      process.env.HYDRA_DREAMINA_RESOLUTION_FIELD_PATH,
+      env.INTELLIGENT_COPY_COVER_DREAMINA_RESOLUTION_FIELD_PATH,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_RESOLUTION_FIELD_PATH,
       ""
     ),
     ratioFieldPath: firstNonEmpty(
       normalizedBackend.ratioFieldPath,
       normalizedBackend.ratio_field_path,
-      env.HYDRA_DREAMINA_RATIO_FIELD_PATH,
-      process.env.HYDRA_DREAMINA_RATIO_FIELD_PATH,
+      env.INTELLIGENT_COPY_COVER_DREAMINA_RATIO_FIELD_PATH,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_RATIO_FIELD_PATH,
       ""
     ),
     candidateSelectionPolicy: normalizeDreaminaCandidateSelectionPolicy(
       firstNonEmpty(
-        env.HYDRA_DREAMINA_CANDIDATE_SELECTION,
-        process.env.HYDRA_DREAMINA_CANDIDATE_SELECTION,
+        env.INTELLIGENT_COPY_COVER_DREAMINA_CANDIDATE_SELECTION,
+        process.env.INTELLIGENT_COPY_COVER_DREAMINA_CANDIDATE_SELECTION,
         normalizedBackend.candidateSelectionPolicy,
         normalizedBackend.candidate_selection_policy,
         "first"
@@ -595,8 +593,8 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
       Number.parseInt(
         firstNonEmpty(
           String(normalizedBackend.submitTimeoutMs ?? normalizedBackend.submit_timeout_ms ?? ""),
-          env.HYDRA_DREAMINA_SUBMIT_TIMEOUT_MS,
-          process.env.HYDRA_DREAMINA_SUBMIT_TIMEOUT_MS,
+          env.INTELLIGENT_COPY_COVER_DREAMINA_SUBMIT_TIMEOUT_MS,
+          process.env.INTELLIGENT_COPY_COVER_DREAMINA_SUBMIT_TIMEOUT_MS,
           "60000"
         ),
         10
@@ -607,8 +605,8 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
       Number.parseInt(
         firstNonEmpty(
           String(normalizedBackend.pollIntervalMs ?? normalizedBackend.poll_interval_ms ?? ""),
-          env.HYDRA_DREAMINA_POLL_INTERVAL_MS,
-          process.env.HYDRA_DREAMINA_POLL_INTERVAL_MS,
+          env.INTELLIGENT_COPY_COVER_DREAMINA_POLL_INTERVAL_MS,
+          process.env.INTELLIGENT_COPY_COVER_DREAMINA_POLL_INTERVAL_MS,
           "5000"
         ),
         10
@@ -619,8 +617,8 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
       Number.parseInt(
         firstNonEmpty(
           String(normalizedBackend.pollTimeoutMs ?? normalizedBackend.poll_timeout_ms ?? ""),
-          env.HYDRA_DREAMINA_POLL_TIMEOUT_MS,
-          process.env.HYDRA_DREAMINA_POLL_TIMEOUT_MS,
+          env.INTELLIGENT_COPY_COVER_DREAMINA_POLL_TIMEOUT_MS,
+          process.env.INTELLIGENT_COPY_COVER_DREAMINA_POLL_TIMEOUT_MS,
           "300000"
         ),
         10
@@ -631,32 +629,32 @@ export function resolveDreaminaWebImageGenerationConfig(env = {}, backend = {}) 
       Number.parseInt(
         firstNonEmpty(
           String(normalizedBackend.minSubmitIntervalMs ?? normalizedBackend.min_submit_interval_ms ?? ""),
-          env.HYDRA_DREAMINA_MIN_SUBMIT_INTERVAL_MS,
-          process.env.HYDRA_DREAMINA_MIN_SUBMIT_INTERVAL_MS,
+          env.INTELLIGENT_COPY_COVER_DREAMINA_MIN_SUBMIT_INTERVAL_MS,
+          process.env.INTELLIGENT_COPY_COVER_DREAMINA_MIN_SUBMIT_INTERVAL_MS,
           "45000"
         ),
         10
       ) || 45_000
     ),
     submitStatePath: firstNonEmpty(
-      env.HYDRA_DREAMINA_SUBMIT_STATE_PATH,
-      process.env.HYDRA_DREAMINA_SUBMIT_STATE_PATH,
+      env.INTELLIGENT_COPY_COVER_DREAMINA_SUBMIT_STATE_PATH,
+      process.env.INTELLIGENT_COPY_COVER_DREAMINA_SUBMIT_STATE_PATH,
       normalizedBackend.submitStatePath,
       normalizedBackend.submit_state_path,
-      ""
+      resolvePath(process.cwd(), "data", "runtime", "dreamina", "dreamina-submit-state.json")
     ),
     captureOnly: parseBooleanish(
       firstNonEmpty(
-        env.HYDRA_DREAMINA_CAPTURE_ONLY,
-        process.env.HYDRA_DREAMINA_CAPTURE_ONLY,
+        env.INTELLIGENT_COPY_COVER_DREAMINA_CAPTURE_ONLY,
+        process.env.INTELLIGENT_COPY_COVER_DREAMINA_CAPTURE_ONLY,
         ""
       ),
       false
     ),
     httpReplayEnabled: parseBooleanish(
       firstNonEmpty(
-        env.HYDRA_DREAMINA_HTTP_REPLAY_ENABLED,
-        process.env.HYDRA_DREAMINA_HTTP_REPLAY_ENABLED,
+        env.INTELLIGENT_COPY_COVER_DREAMINA_HTTP_REPLAY_ENABLED,
+        process.env.INTELLIGENT_COPY_COVER_DREAMINA_HTTP_REPLAY_ENABLED,
         "true"
       ),
       true
@@ -782,7 +780,7 @@ async function createDreaminaPageTarget(config = {}) {
       payload.webSocketDebuggerUrl,
       payload.webSocketDebuggerURL
     ),
-    createdByHydra: true
+    createdByDreaminaRunner: true
   };
 }
 
@@ -907,7 +905,7 @@ async function resolveDreaminaPageTarget(config = {}) {
     runtime: {
       ...cdpRuntime,
       createdTargetId: firstNonEmpty(
-        resolvedTarget.createdByHydra === true ? resolvedTarget.id : "",
+        resolvedTarget.createdByDreaminaRunner === true ? resolvedTarget.id : "",
         ""
       )
     }

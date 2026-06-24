@@ -20,6 +20,7 @@ from roughcut.edit.local_highlight_candidates import build_local_highlight_candi
 from roughcut.edit.local_multi_material_candidates import build_local_multi_material_candidates
 from roughcut.edit.skills import apply_review_focus_overrides, resolve_editing_skill
 from roughcut.edit.strategy_profile import build_strategy_profile_payload, infer_strategy_type
+from roughcut.edit.strategy_review_context import strategy_review_context_from_profile
 from roughcut.edit.subtitle_surfaces import (
     subtitle_canonical_rule_text,
     subtitle_display_rule_text,
@@ -474,6 +475,7 @@ def build_edit_decision(
             content_profile=content_profile,
         )
     )
+    strategy_review_context = strategy_review_context_from_profile(content_profile)
     effective_min_silence_to_cut = max(0.12, float(resolved_skill.get("silence_floor_sec", min_silence_to_cut) or min_silence_to_cut))
     normalized_subtitles = _normalize_subtitle_items(subtitle_items or [])
     normalized_transcript = _normalize_transcript_segments(transcript_segments or [])
@@ -590,6 +592,7 @@ def build_edit_decision(
             "effective_min_silence_to_cut": round(effective_min_silence_to_cut, 3),
             "strategy_type": str(resolved_strategy_profile.get("strategy_type") or ""),
             "strategy_profile": resolved_strategy_profile,
+            "strategy_review_context": strategy_review_context,
             "silence_segments": [
                 {
                     "start": round(max(0.0, silence.start), 3),

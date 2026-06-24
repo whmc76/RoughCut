@@ -885,13 +885,16 @@ def test_build_browser_agent_task_payload_includes_session_binding_contract():
     ]
 
 
-def test_build_request_payload_x_platform_supports_share_link_without_local_media():
+def test_build_request_payload_x_platform_supports_share_link_with_cover_preview_media(tmp_path):
+    cover_path = tmp_path / "cover.jpg"
+    cover_path.write_bytes(b"cover")
     plan = {"media_path": r"C:\\tmp\\video.mp4"}
     target = {
         "platform": "x",
         "adapter": "x_link_share",
         "title": "标题",
         "body": "短视频测试",
+        "cover_path": str(cover_path),
         "tags": ["tag1", "tag2"],
         "platform_specific_overrides": {
             "x_share_link": "https://youtu.be/abc123",
@@ -902,9 +905,19 @@ def test_build_request_payload_x_platform_supports_share_link_without_local_medi
     payload = publication._build_request_payload(plan=plan, target=target)
 
     assert payload["publication_capability"]["requires_local_media"] is False
-    assert payload["body"] == "短视频测试\nhttps://youtu.be/abc123"
-    assert payload["media_items"] == []
-    assert payload["media_urls"] == []
+    assert payload["body"] == "短视频测试\nhttps://www.youtube.com/watch?v=abc123"
+    assert payload["platform_specific_overrides"]["x_share_link"] == "https://www.youtube.com/watch?v=abc123"
+    assert payload["media_items"] == [
+        {
+            "kind": "image",
+            "local_path": str(cover_path.resolve()),
+            "source_url": None,
+            "uploaded_url": None,
+            "mime_type": "image/jpeg",
+            "role": "x_link_preview_cover",
+        }
+    ]
+    assert payload["media_urls"] == [str(cover_path.resolve())]
     assert payload["publication_content_signature"]["value"]
     assert payload["publication_content_signature"]["fields"]["platform"] == "x"
     assert payload["publication_capability"]["supports_collection_select"] is False
@@ -1120,6 +1133,49 @@ def test_build_browser_agent_task_payload_from_attempt_x_does_not_require_local_
     assert payload["content"]["media_urls"] == ["https://youtu.be/abc123"]
     assert payload["content"]["publish_media_source"]["provider"] == "link_only"
     assert payload["content"]["publish_media_source"]["mode"] == "link_only"
+
+
+def test_build_browser_agent_task_payload_from_attempt_x_uses_preview_media(tmp_path):
+    cover_path = tmp_path / "cover.jpg"
+    cover_path.write_bytes(b"cover")
+    attempt = PublicationAttempt(
+        id="attempt-x-share-preview",
+        job_id=uuid.uuid4(),
+        content_id="job-x-share-preview",
+        platform="x",
+        platform_label="X",
+        idempotency_key="key-x-share-preview",
+        semantic_fingerprint="fingerprint-x-share-preview",
+        adapter="browser_agent",
+        status="queued",
+        request_payload={
+            "title": "标题",
+            "body": "短视频测试\nhttps://www.youtube.com/watch?v=abc123",
+            "cover_path": str(cover_path),
+            "platform_specific_overrides": {
+                "x_share_link": "https://www.youtube.com/watch?v=abc123",
+            },
+            "publication_capability": {
+                "requires_local_media": False,
+            },
+            "media_items": [
+                {
+                    "kind": "image",
+                    "local_path": str(cover_path),
+                    "mime_type": "image/jpeg",
+                    "role": "x_link_preview_cover",
+                }
+            ],
+            "media_urls": [str(cover_path)],
+        },
+    )
+
+    payload = publication.build_browser_agent_task_payload_from_attempt(attempt)
+
+    assert payload["content"]["media_items"][0]["local_path"] == str(cover_path.resolve())
+    assert payload["content"]["publish_media_source"]["provider"] == "link_with_preview_media"
+    assert payload["content"]["publish_media_source"]["mode"] == "link_with_preview_media"
+    assert payload["content"]["publish_media_source"]["preview_file_count"] == 1
 
 
 def test_build_browser_agent_task_payload_from_attempt_includes_reconcile_callback_url(monkeypatch):

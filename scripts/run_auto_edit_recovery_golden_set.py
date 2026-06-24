@@ -4,6 +4,9 @@ import argparse
 import asyncio
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -51,7 +54,7 @@ from roughcut.media.variant_timeline_bundle import variant_high_risk_cuts
 from roughcut.pipeline.live_readiness import build_live_readiness_summary
 from roughcut.pipeline.orchestrator import PIPELINE_STEPS, create_job_steps
 from roughcut.review.content_profile import extract_source_identity_constraints
-from roughcut.watcher.folder_watcher import create_jobs_for_inventory_paths
+from roughcut.watcher.folder_watcher import create_jobs_for_inventory_paths, create_merged_job_for_inventory_paths
 from scripts.run_fullchain_batch import (
     JobRunReport,
     _classify_avatar_runtime_reason_category,
@@ -70,11 +73,17 @@ class GoldenJobCase:
     scenario: str
     source_name: str = ""
     source_path: str = ""
+    source_paths: list[str] = field(default_factory=list)
     reference_job_id: str = ""
     reference_risk_job_id: str = ""
     workflow_template: str = ""
     language: str = ""
     enhancement_modes: list[str] = field(default_factory=list)
+    enhancement_modes_explicit: bool = False
+    product_controls: dict[str, Any] = field(default_factory=dict)
+    strategy_classification: dict[str, Any] = field(default_factory=dict)
+    source_context: dict[str, Any] = field(default_factory=dict)
+    transcript_segments: list[dict[str, Any]] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     required_checks: list[str] = field(default_factory=list)
     notes: str = ""
@@ -96,9 +105,23 @@ SUPPORTED_REQUIRED_CHECKS = frozenset(
         "manual_editor_apply_semantics",
         "manual_editor_ready",
         "model_token_integrity",
+        "strategy_boundary_samples",
+        "strategy_pipeline_coverage",
+        "strategy_review_preview_media_evidence",
+        "strategy_review_preview_evidence",
         "subtitle_projection",
         "term_format_consistency",
     }
+)
+
+TRANSCRIPT_SEED_DONE_STEPS = (
+    "transcribe",
+    "subtitle_postprocess",
+    "subtitle_term_resolution",
+    "subtitle_consistency_review",
+    "glossary_review",
+    "transcript_review",
+    "subtitle_translation",
 )
 
 
@@ -262,6 +285,33 @@ def _normalize_risk_hints(value: Any) -> dict[str, Any]:
     return normalized
 
 
+def _normalize_transcript_seed_segments(value: Any) -> list[dict[str, Any]]:
+    segments: list[dict[str, Any]] = []
+    for index, item in enumerate(list(value or [])):
+        if not isinstance(item, dict):
+            continue
+        try:
+            start = round(float(item.get("start", item.get("start_time", 0.0)) or 0.0), 3)
+            end = round(float(item.get("end", item.get("end_time", start + 1.0)) or start + 1.0), 3)
+        except (TypeError, ValueError):
+            continue
+        text = str(item.get("text") or item.get("text_raw") or item.get("text_final") or "").strip()
+        if not text:
+            continue
+        if end <= start:
+            end = round(start + 1.0, 3)
+        segments.append(
+            {
+                "index": int(item.get("index", item.get("segment_index", index)) or index),
+                "start": start,
+                "end": end,
+                "speaker": str(item.get("speaker") or "SPEAKER_00").strip() or "SPEAKER_00",
+                "text": text,
+            }
+        )
+    return segments
+
+
 def load_golden_job_manifest(path: Path) -> list[GoldenJobCase]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     raw_cases = payload.get("jobs") if isinstance(payload, dict) else payload
@@ -286,11 +336,17 @@ def load_golden_job_manifest(path: Path) -> list[GoldenJobCase]:
             scenario=str(raw_case.get("scenario") or raw_case.get("name") or "").strip(),
             source_name=str(raw_case.get("source_name") or "").strip(),
             source_path=str(raw_case.get("source_path") or "").strip(),
+            source_paths=_normalize_string_list(raw_case.get("source_paths")),
             reference_job_id=str(raw_case.get("reference_job_id") or raw_case.get("job_id") or "").strip(),
             reference_risk_job_id=str(raw_case.get("reference_risk_job_id") or "").strip(),
             workflow_template=str(raw_case.get("workflow_template") or "").strip(),
             language=str(raw_case.get("language") or "").strip(),
             enhancement_modes=_normalize_string_list(raw_case.get("enhancement_modes")),
+            enhancement_modes_explicit="enhancement_modes" in raw_case,
+            product_controls=_normalize_risk_hints(raw_case.get("product_controls")),
+            strategy_classification=_normalize_risk_hints(raw_case.get("strategy_classification")),
+            source_context=_normalize_risk_hints(raw_case.get("source_context")),
+            transcript_segments=_normalize_transcript_seed_segments(raw_case.get("transcript_segments")),
             tags=_normalize_string_list(raw_case.get("tags")),
             required_checks=_normalize_string_list(raw_case.get("required_checks")),
             notes=str(raw_case.get("notes") or "").strip(),
@@ -305,8 +361,10 @@ def load_golden_job_manifest(path: Path) -> list[GoldenJobCase]:
             raise ValueError(
                 f"golden job case {case.case_id} has unsupported required_checks: {', '.join(unknown_required_checks)}"
             )
-        if not (case.reference_job_id or case.source_name or case.source_path):
-            raise ValueError(f"golden job case {case.case_id} must provide reference_job_id, source_name, or source_path")
+        if not (case.reference_job_id or case.source_name or case.source_path or case.source_paths):
+            raise ValueError(
+                f"golden job case {case.case_id} must provide reference_job_id, source_name, source_path, or source_paths"
+            )
         if case.reference_job_id:
             if case.reference_job_id in seen_reference_jobs:
                 raise ValueError(f"duplicate reference_job_id in golden manifest: {case.reference_job_id}")
@@ -352,10 +410,40 @@ def _slugify(value: str) -> str:
     return slug or "case"
 
 
+def _runtime_source_path_candidates(value: str | Path) -> list[Path]:
+    raw_text = str(value or "").strip()
+    if not raw_text:
+        return []
+    raw_path = Path(raw_text).expanduser()
+    candidates = [raw_path]
+    if not raw_path.is_absolute():
+        candidates.append(ROOT / raw_path)
+        candidates.append(ROOT / "data" / "runtime" / raw_path)
+    normalized_parts = [part.lower() for part in raw_path.parts]
+    if normalized_parts and normalized_parts[0] == "jobs":
+        candidates.append(ROOT / "data" / "runtime" / raw_path)
+
+    resolved: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved.append(candidate)
+    return resolved
+
+
+def _resolve_existing_runtime_source_path(value: str | Path) -> Path | None:
+    for candidate in _runtime_source_path_candidates(value):
+        if candidate.exists() and candidate.is_file():
+            return candidate
+    return None
+
+
 def _resolve_source_candidate(case: GoldenJobCase, locate_roots: list[str]) -> Path | None:
     if case.source_path:
-        path = Path(case.source_path).expanduser()
-        return path if path.exists() else None
+        return _resolve_existing_runtime_source_path(case.source_path)
     if not case.source_name:
         return None
     for raw_root in locate_roots:
@@ -372,13 +460,121 @@ def _resolve_source_candidate(case: GoldenJobCase, locate_roots: list[str]) -> P
     return None
 
 
+def _resolve_source_candidates(case: GoldenJobCase, locate_roots: list[str]) -> list[Path]:
+    if case.source_paths:
+        resolved: list[Path] = []
+        for raw_path in case.source_paths:
+            path = _resolve_existing_runtime_source_path(raw_path)
+            if path is None:
+                raise RuntimeError(f"golden case {case.case_id} source_paths entry does not exist: {raw_path}")
+            if not path.is_file():
+                raise RuntimeError(f"golden case {case.case_id} source_paths entry is not a file: {raw_path}")
+            resolved.append(path)
+        return resolved
+    candidate = _resolve_source_candidate(case, locate_roots)
+    return [candidate] if candidate is not None else []
+
+
+def _golden_case_source_context(case: GoldenJobCase) -> dict[str, Any]:
+    source_context = dict(case.source_context or {})
+    if case.strategy_classification:
+        source_context["strategy_classification"] = dict(case.strategy_classification)
+    if case.product_controls:
+        source_context["product_controls"] = dict(case.product_controls)
+    return source_context
+
+
+async def _apply_golden_case_source_context(session, *, job_id: uuid.UUID, case: GoldenJobCase) -> None:
+    source_context = _golden_case_source_context(case)
+    if not source_context:
+        return
+    step = (
+        await session.execute(
+            select(JobStep).where(JobStep.job_id == job_id, JobStep.step_name == "content_profile")
+        )
+    ).scalars().first()
+    if step is None:
+        return
+    metadata = dict(step.metadata_ or {})
+    existing = metadata.get("source_context") if isinstance(metadata.get("source_context"), dict) else {}
+    merged = dict(existing)
+    for key, value in source_context.items():
+        if isinstance(value, dict):
+            child = dict(merged.get(key) or {}) if isinstance(merged.get(key), dict) else {}
+            child.update(value)
+            merged[key] = child
+        else:
+            merged[key] = value
+    metadata["source_context"] = merged
+    step.metadata_ = metadata
+
+
+async def _apply_golden_case_transcript_seed(job_id: str, case: GoldenJobCase) -> None:
+    segments = list(case.transcript_segments or [])
+    if not segments:
+        return
+    factory = get_session_factory()
+    async with factory() as session:
+        job_uuid = uuid.UUID(str(job_id))
+        step_rows = (
+            await session.execute(select(JobStep).where(JobStep.job_id == job_uuid))
+        ).scalars().all()
+        step_map = {str(step.step_name or ""): step for step in step_rows}
+        now = datetime.now(timezone.utc)
+        for step_name in TRANSCRIPT_SEED_DONE_STEPS:
+            step = step_map.get(step_name)
+            if step is None:
+                continue
+            step.status = "done"
+            step.started_at = step.started_at or now
+            step.finished_at = now
+            step.error_message = None
+            step.metadata_ = {
+                **(step.metadata_ or {}),
+                "detail": f"seeded_by_golden_case:{case.case_id}",
+                "progress": 1.0,
+                "updated_at": now.isoformat(),
+            }
+
+        for segment in segments:
+            index = int(segment["index"])
+            start = float(segment["start"])
+            end = float(segment["end"])
+            text = str(segment["text"])
+            session.add(
+                TranscriptSegment(
+                    job_id=job_uuid,
+                    version=1,
+                    segment_index=index,
+                    start_time=start,
+                    end_time=end,
+                    speaker=str(segment.get("speaker") or "SPEAKER_00"),
+                    text=text,
+                    words_json=[],
+                )
+            )
+            session.add(
+                SubtitleItem(
+                    job_id=job_uuid,
+                    version=1,
+                    item_index=index,
+                    start_time=start,
+                    end_time=end,
+                    text_raw=text,
+                    text_norm=text,
+                    text_final=text,
+                )
+            )
+        await session.commit()
+
+
 async def _clone_evaluation_job_from_existing(
     session,
     *,
     source_job: Job,
     workflow_template: str,
     language: str,
-    enhancement_modes: list[str],
+    enhancement_modes: list[str] | None,
 ) -> tuple[uuid.UUID, str]:
     transcript_rows = (
         await session.execute(
@@ -412,7 +608,7 @@ async def _clone_evaluation_job_from_existing(
     job_id = uuid.uuid4()
     cloned_job = Job(
         id=job_id,
-        source_path=source_job.source_path,
+        source_path=str(_resolve_existing_runtime_source_path(str(source_job.source_path or "")) or source_job.source_path),
         source_name=source_job.source_name,
         file_hash=source_job.file_hash,
         status="pending",
@@ -424,7 +620,7 @@ async def _clone_evaluation_job_from_existing(
         packaging_snapshot_json=dict(source_job.packaging_snapshot_json or {}) or None,
         language=language or source_job.language,
         workflow_mode=source_job.workflow_mode,
-        enhancement_modes=enhancement_modes or list(source_job.enhancement_modes or []),
+        enhancement_modes=list(enhancement_modes) if enhancement_modes is not None else list(source_job.enhancement_modes or []),
     )
     session.add(cloned_job)
     step_map: dict[str, JobStep] = {}
@@ -505,7 +701,7 @@ async def prepare_golden_job(
 ) -> PreparedGoldenJob:
     workflow_template = case.workflow_template or default_workflow_template
     language = case.language or default_language
-    enhancement_modes = list(case.enhancement_modes or [])
+    enhancement_modes = list(case.enhancement_modes or []) if case.enhancement_modes_explicit else None
     factory = get_session_factory()
     async with factory() as session:
         source_job: Job | None = None
@@ -530,6 +726,7 @@ async def prepare_golden_job(
                 language=language,
                 enhancement_modes=enhancement_modes,
             )
+            await _apply_golden_case_source_context(session, job_id=cloned_job_id, case=case)
             await session.commit()
             return PreparedGoldenJob(
                 case=case,
@@ -541,24 +738,49 @@ async def prepare_golden_job(
                 },
             )
 
-    source_candidate = _resolve_source_candidate(case, locate_roots)
-    if source_candidate is None:
+    source_candidates = _resolve_source_candidates(case, locate_roots)
+    if not source_candidates:
         raise RuntimeError(
-            f"golden case {case.case_id} could not resolve a source file from source_path/source_name/locate_root"
+            f"golden case {case.case_id} could not resolve source files from source_path/source_paths/source_name/locate_root"
         )
-    created = await create_jobs_for_inventory_paths(
-        [str(source_candidate)],
-        workflow_template=workflow_template,
-        language=language,
-    )
-    job_id = str(created[0].get("job_id") or "").strip()
+    source_context = _golden_case_source_context(case)
+    if len(source_candidates) > 1:
+        job_id = str(
+            await create_merged_job_for_inventory_paths(
+                [str(path) for path in source_candidates],
+                workflow_template=workflow_template,
+                product_controls=case.product_controls or None,
+                content_profile_source_context=source_context or None,
+                language=language,
+                allow_related_profiles=True,
+                allow_duplicate_file=True,
+            )
+            or ""
+        ).strip()
+        mode = "fresh_merged_full_chain"
+    else:
+        created = await create_jobs_for_inventory_paths(
+            [str(source_candidates[0])],
+            workflow_template=workflow_template,
+            product_controls=case.product_controls or None,
+            content_profile_source_context=source_context or None,
+            language=language,
+            allow_duplicate_file=True,
+        )
+        job_id = str(created[0].get("job_id") or "").strip()
+        mode = "fresh_full_chain"
     if not job_id:
         raise RuntimeError(f"failed to create job for golden case {case.case_id}")
+    await _apply_golden_case_transcript_seed(job_id, case)
     return PreparedGoldenJob(
         case=case,
         job_id=job_id,
-        mode="fresh_full_chain",
-        item={"path": str(source_candidate), "source_name": source_candidate.name},
+        mode=mode,
+        item={
+            "path": str(source_candidates[0]),
+            "source_name": source_candidates[0].name,
+            "source_paths": [str(path) for path in source_candidates],
+        },
     )
 
 
@@ -1038,6 +1260,505 @@ def _traceable_cut_candidate(item: dict[str, Any]) -> bool:
     return True
 
 
+def _expected_strategy_types_for_case(case: GoldenJobCase) -> set[str]:
+    expected = {
+        str(tag).split(":", 1)[1].strip()
+        for tag in list(case.tags or [])
+        if str(tag).strip().startswith("strategy:") and str(tag).split(":", 1)[1].strip()
+    }
+    risk_hints = dict(case.risk_hints or {}) if isinstance(case.risk_hints, dict) else {}
+    for key in ("expected_strategy_type", "strategy_type"):
+        value = str(risk_hints.get(key) or "").strip()
+        if value:
+            expected.add(value)
+    expected.update(
+        str(item or "").strip()
+        for item in list(risk_hints.get("expected_strategy_types") or [])
+        if str(item or "").strip()
+    )
+    return expected
+
+
+def _collect_strategy_pipeline_evidence(
+    payload: dict[str, Any] | None,
+    *,
+    source: str,
+) -> list[dict[str, str]]:
+    data = dict(payload or {}) if isinstance(payload, dict) else {}
+    if not data:
+        return []
+    candidates: list[tuple[str, dict[str, Any]]] = [
+        ("root", data),
+    ]
+    for key in ("capability_orchestration", "pipeline_plan"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            candidates.append((key, value))
+            nested_plan = value.get("pipeline_plan")
+            if isinstance(nested_plan, dict):
+                candidates.append((f"{key}.pipeline_plan", nested_plan))
+    strategy_review_context = data.get("strategy_review_context")
+    if isinstance(strategy_review_context, dict):
+        candidates.append(("strategy_review_context", strategy_review_context))
+        gates = strategy_review_context.get("strategy_review_gates")
+        if isinstance(gates, dict):
+            candidates.append(("strategy_review_context.strategy_review_gates", gates))
+            plan = gates.get("pipeline_plan")
+            if isinstance(plan, dict):
+                candidates.append(("strategy_review_context.strategy_review_gates.pipeline_plan", plan))
+    gates = data.get("strategy_review_gates")
+    if isinstance(gates, dict):
+        candidates.append(("strategy_review_gates", gates))
+        plan = gates.get("pipeline_plan")
+        if isinstance(plan, dict):
+            candidates.append(("strategy_review_gates.pipeline_plan", plan))
+
+    evidence: list[dict[str, str]] = []
+    for path, candidate in candidates:
+        strategy_type = str(candidate.get("strategy_type") or "").strip()
+        if not strategy_type:
+            continue
+        evidence.append({"source": source, "path": path, "strategy_type": strategy_type})
+    return evidence
+
+
+def _strategy_pipeline_coverage_status(
+    case: GoldenJobCase,
+    *,
+    report: JobRunReport | None,
+    content_profile_final: dict[str, Any] | None,
+    strategy_review_gates: dict[str, Any] | None,
+) -> dict[str, Any]:
+    expected = sorted(_expected_strategy_types_for_case(case))
+    evidence: list[dict[str, str]] = []
+    evidence.extend(
+        _collect_strategy_pipeline_evidence(
+            report.content_profile if report and isinstance(report.content_profile, dict) else None,
+            source="report.content_profile",
+        )
+    )
+    evidence.extend(
+        _collect_strategy_pipeline_evidence(
+            content_profile_final,
+            source="artifact.content_profile_final",
+        )
+    )
+    evidence.extend(
+        _collect_strategy_pipeline_evidence(
+            strategy_review_gates,
+            source="artifact.strategy_review_gates",
+        )
+    )
+    strategy_validation = (
+        report.render_diagnostics.get("strategy_render_validation")
+        if report
+        and isinstance(report.render_diagnostics, dict)
+        and isinstance(report.render_diagnostics.get("strategy_render_validation"), dict)
+        else {}
+    )
+    evidence.extend(
+        _collect_strategy_pipeline_evidence(
+            strategy_validation,
+            source="render_diagnostics.strategy_render_validation",
+        )
+    )
+
+    observed = sorted({item["strategy_type"] for item in evidence if item.get("strategy_type")})
+    missing = [item for item in expected if item not in observed]
+    passed = bool(expected) and not missing and bool(evidence) and report is not None
+    details: list[str] = []
+    if not expected:
+        details.append("missing_strategy_tag")
+    if missing:
+        details.append("missing=" + ",".join(missing))
+    if observed:
+        details.append("observed=" + ",".join(observed))
+    if not evidence:
+        details.append("missing_pipeline_evidence")
+    return {
+        "passed": passed,
+        "detail": " | ".join(details),
+        "expected_strategy_types": expected,
+        "observed_strategy_types": observed,
+        "missing_strategy_types": missing,
+        "evidence": evidence,
+    }
+
+
+def _count_boundary_sample_evidence(payload: dict[str, Any] | None) -> tuple[int, int]:
+    source = dict(payload or {}) if isinstance(payload, dict) else {}
+    sample_sources: list[dict[str, Any]] = [source]
+    for key in ("cut_boundary_sample_manifest", "boundary_sample_manifest"):
+        value = source.get(key)
+        if isinstance(value, dict):
+            sample_sources.append(value)
+    frame_count = 0
+    waveform_count = 0
+    for sample_source in sample_sources:
+        explicit_frame_count = 0
+        explicit_waveform_count = 0
+        if sample_source.get("frame_count") is not None:
+            try:
+                explicit_frame_count = int(sample_source.get("frame_count") or 0)
+            except (TypeError, ValueError):
+                pass
+        if sample_source.get("waveform_count") is not None:
+            try:
+                explicit_waveform_count = int(sample_source.get("waveform_count") or 0)
+            except (TypeError, ValueError):
+                pass
+        derived_frame_count = 0
+        derived_waveform_count = 0
+        samples = [
+            item
+            for item in list(sample_source.get("boundary_samples") or sample_source.get("samples") or [])
+            if isinstance(item, dict)
+        ]
+        for sample in samples:
+            frame_paths = [
+                str(item or "").strip()
+                for item in list(sample.get("frame_paths") or sample.get("frames") or [])
+                if str(item or "").strip()
+            ]
+            if frame_paths or str(sample.get("frame_path") or "").strip():
+                derived_frame_count += max(1, len(frame_paths))
+            waveform_paths = [
+                str(item or "").strip()
+                for item in list(sample.get("waveform_paths") or [])
+                if str(item or "").strip()
+            ]
+            if (
+                waveform_paths
+                or str(sample.get("waveform_path") or "").strip()
+                or isinstance(sample.get("waveform_peaks"), dict)
+                or isinstance(sample.get("waveform_window"), dict)
+            ):
+                derived_waveform_count += max(1, len(waveform_paths))
+        frame_count = max(frame_count, explicit_frame_count, derived_frame_count)
+        waveform_count = max(waveform_count, explicit_waveform_count, derived_waveform_count)
+    return frame_count, waveform_count
+
+
+def _strategy_boundary_samples_status(
+    case: GoldenJobCase,
+    *,
+    report: JobRunReport | None,
+    sample_manifest: dict[str, Any] | None,
+) -> dict[str, Any]:
+    validation = (
+        report.render_diagnostics.get("strategy_render_validation")
+        if report
+        and isinstance(report.render_diagnostics, dict)
+        and isinstance(report.render_diagnostics.get("strategy_render_validation"), dict)
+        else {}
+    )
+    expected = sorted(_expected_strategy_types_for_case(case))
+    strategy_type = str(validation.get("strategy_type") or "").strip()
+    validation_frame_count = int(validation.get("boundary_frame_sample_count") or 0)
+    validation_waveform_count = int(validation.get("boundary_waveform_sample_count") or 0)
+    manifest_frame_count, manifest_waveform_count = _count_boundary_sample_evidence(sample_manifest)
+    frame_count = max(validation_frame_count, manifest_frame_count)
+    waveform_count = max(validation_waveform_count, manifest_waveform_count)
+    blocking_reasons = [
+        str(item or "").strip()
+        for item in list(validation.get("blocking_reasons") or [])
+        if str(item or "").strip()
+    ]
+    missing_reasons: list[str] = []
+    if report is None:
+        missing_reasons.append("missing_report")
+    if not validation:
+        missing_reasons.append("missing_strategy_render_validation")
+    if expected and strategy_type and strategy_type not in expected:
+        missing_reasons.append(f"unexpected_strategy_type={strategy_type}")
+    if frame_count <= 0:
+        missing_reasons.append("missing_frame_samples")
+    if waveform_count <= 0:
+        missing_reasons.append("missing_waveform_samples")
+    if "strategy_cut_boundary_frame_samples_missing" in blocking_reasons:
+        missing_reasons.append("validation_reports_missing_frame_samples")
+    passed = not missing_reasons
+    return {
+        "passed": passed,
+        "detail": (
+            f"strategy_type={strategy_type or 'unknown'} "
+            f"frame_samples={frame_count} waveform_samples={waveform_count}"
+            + (f" missing={','.join(missing_reasons)}" if missing_reasons else "")
+        ),
+        "expected_strategy_types": expected,
+        "strategy_type": strategy_type,
+        "frame_sample_count": frame_count,
+        "waveform_sample_count": waveform_count,
+        "blocking_reasons": blocking_reasons,
+        "missing_reasons": missing_reasons,
+    }
+
+
+def _preview_segment_has_time_anchor(segment: dict[str, Any]) -> bool:
+    if _preview_segment_time_bounds(segment) is not None:
+        return True
+    return bool(str(segment.get("timestamp") or segment.get("time_range") or "").strip())
+
+
+def _preview_segment_time_bounds(segment: dict[str, Any]) -> tuple[float, float] | None:
+    start = _optional_float(segment.get("start_time", segment.get("start_sec")))
+    end = _optional_float(segment.get("end_time", segment.get("end_sec")))
+    if start is not None and end is not None and end > start:
+        return max(0.0, start), max(0.0, end)
+    timestamp = str(segment.get("timestamp") or segment.get("time_range") or "").strip()
+    if not timestamp:
+        return None
+    matches = re.findall(r"(?:(\d{1,2}):)?(\d{1,2})(?::(\d{1,2}(?:\.\d+)?))?", timestamp)
+    if len(matches) < 2:
+        return None
+    start_sec = _timestamp_match_to_seconds(matches[0])
+    end_sec = _timestamp_match_to_seconds(matches[1])
+    if start_sec is None or end_sec is None or end_sec <= start_sec:
+        return None
+    return max(0.0, start_sec), max(0.0, end_sec)
+
+
+def _timestamp_match_to_seconds(match: tuple[str, str, str]) -> float | None:
+    hour_or_empty, minute_or_second, second_or_empty = match
+    try:
+        if second_or_empty:
+            hours = int(hour_or_empty or 0)
+            minutes = int(minute_or_second or 0)
+            seconds = float(second_or_empty)
+            return hours * 3600.0 + minutes * 60.0 + seconds
+        return float(minute_or_second)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_float(value: Any) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _source_media_paths_for_preview_check(
+    *,
+    case: GoldenJobCase,
+    job: Job,
+) -> list[Path]:
+    if case.source_paths:
+        raw_paths = list(case.source_paths)
+    elif case.source_path:
+        raw_paths = [case.source_path]
+    elif getattr(job, "source_path", None):
+        raw_paths = [str(job.source_path)]
+    else:
+        raw_paths = []
+    paths: list[Path] = []
+    seen: set[str] = set()
+    for raw_path in raw_paths:
+        text = str(raw_path or "").strip()
+        if not text:
+            continue
+        path = _resolve_existing_runtime_source_path(text) or Path(text).expanduser()
+        key = str(path.resolve()) if path.exists() else str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        paths.append(path)
+    return paths
+
+
+def _probe_media_duration_sec(path: Path) -> tuple[float | None, str]:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return None, "ffprobe_not_found"
+    result = subprocess.run(
+        [
+            ffprobe,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode != 0:
+        return None, str(result.stderr or result.stdout or "ffprobe_failed").strip()[-500:]
+    try:
+        payload = json.loads(result.stdout or "{}")
+        duration = float(((payload.get("format") or {}).get("duration") or 0.0))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, "ffprobe_duration_parse_failed"
+    if duration <= 0:
+        return None, "non_positive_duration"
+    return duration, ""
+
+
+def _strategy_review_preview_media_evidence_status(
+    case: GoldenJobCase,
+    *,
+    job: Job,
+    strategy_review_gates: dict[str, Any] | None,
+    timeline_preview: dict[str, Any] | None,
+) -> dict[str, Any]:
+    expected = sorted(_expected_strategy_types_for_case(case))
+    gates = dict(strategy_review_gates or {}) if isinstance(strategy_review_gates, dict) else {}
+    timeline = dict(timeline_preview or {}) if isinstance(timeline_preview, dict) else {}
+    strategy_type = str(
+        gates.get("strategy_type")
+        or timeline.get("strategy_type")
+        or ""
+    ).strip()
+    media_paths = _source_media_paths_for_preview_check(case=case, job=job)
+    media_evidence: list[dict[str, Any]] = []
+    missing_reasons: list[str] = []
+    for path in media_paths:
+        item: dict[str, Any] = {"path": str(path), "exists": path.exists()}
+        if not path.exists() or not path.is_file():
+            item["error"] = "missing_source_media"
+            media_evidence.append(item)
+            continue
+        duration, error = _probe_media_duration_sec(path)
+        if duration is None:
+            item["error"] = error or "unreadable_media_duration"
+            media_evidence.append(item)
+            continue
+        item["duration_sec"] = round(float(duration), 3)
+        media_evidence.append(item)
+
+    valid_durations = [
+        float(item.get("duration_sec") or 0.0)
+        for item in media_evidence
+        if float(item.get("duration_sec") or 0.0) > 0
+    ]
+    max_duration = max(valid_durations) if valid_durations else 0.0
+    segments = [item for item in list(timeline.get("segments") or []) if isinstance(item, dict)]
+    segment_evidence: list[dict[str, Any]] = []
+    for index, segment in enumerate(segments):
+        bounds = _preview_segment_time_bounds(segment)
+        item = {
+            "segment_id": str(segment.get("segment_id") or f"preview_{index + 1}"),
+            "has_time_bounds": bounds is not None,
+            "within_media_duration": False,
+        }
+        if bounds is not None:
+            start_sec, end_sec = bounds
+            item["start_sec"] = round(start_sec, 3)
+            item["end_sec"] = round(end_sec, 3)
+            item["within_media_duration"] = bool(max_duration > 0 and end_sec <= max_duration + 0.25)
+        segment_evidence.append(item)
+
+    media_backed_segment_count = sum(
+        1 for item in segment_evidence if bool(item.get("within_media_duration"))
+    )
+    if expected and strategy_type and strategy_type not in expected:
+        missing_reasons.append(f"unexpected_strategy_type={strategy_type}")
+    if not media_paths:
+        missing_reasons.append("missing_source_media")
+    if not valid_durations:
+        missing_reasons.append("missing_readable_source_media_duration")
+    if not timeline:
+        missing_reasons.append("missing_strategy_timeline_preview")
+    if not segments:
+        missing_reasons.append("missing_timeline_segments")
+    if segments and not any(item.get("has_time_bounds") for item in segment_evidence):
+        missing_reasons.append("missing_timeline_time_bounds")
+    if segments and valid_durations and media_backed_segment_count <= 0:
+        missing_reasons.append("timeline_segments_outside_media_duration")
+    unreadable_count = len(media_evidence) - len(valid_durations)
+    passed = not missing_reasons
+    details = [
+        f"strategy_type={strategy_type or 'unknown'}",
+        f"source_media={len(media_paths)}",
+        f"readable_media={len(valid_durations)}",
+        f"timeline_segments={len(segments)}",
+        f"media_backed_segments={media_backed_segment_count}",
+    ]
+    if unreadable_count:
+        details.append(f"unreadable_media={unreadable_count}")
+    if missing_reasons:
+        details.append("missing=" + ",".join(missing_reasons))
+    return {
+        "passed": passed,
+        "detail": " | ".join(details),
+        "expected_strategy_types": expected,
+        "strategy_type": strategy_type,
+        "source_media_count": len(media_paths),
+        "readable_media_count": len(valid_durations),
+        "timeline_segment_count": len(segments),
+        "media_backed_segment_count": media_backed_segment_count,
+        "max_source_duration_sec": round(float(max_duration), 3),
+        "media_evidence": media_evidence,
+        "segment_evidence": segment_evidence,
+        "missing_reasons": missing_reasons,
+    }
+
+
+def _strategy_review_preview_evidence_status(
+    case: GoldenJobCase,
+    *,
+    strategy_review_gates: dict[str, Any] | None,
+    storyboard_review: dict[str, Any] | None,
+    timeline_preview: dict[str, Any] | None,
+) -> dict[str, Any]:
+    expected = sorted(_expected_strategy_types_for_case(case))
+    gates = dict(strategy_review_gates or {}) if isinstance(strategy_review_gates, dict) else {}
+    storyboard = dict(storyboard_review or {}) if isinstance(storyboard_review, dict) else {}
+    timeline = dict(timeline_preview or {}) if isinstance(timeline_preview, dict) else {}
+    strategy_type = str(
+        gates.get("strategy_type")
+        or storyboard.get("strategy_type")
+        or timeline.get("strategy_type")
+        or ""
+    ).strip()
+    gate_artifacts = gates.get("gate_artifacts") if isinstance(gates.get("gate_artifacts"), dict) else {}
+    storyboard_declared = bool(gate_artifacts.get("storyboard_review")) or bool(storyboard)
+    timeline_declared = bool(gate_artifacts.get("timeline_preview")) or bool(timeline)
+    panels = [item for item in list(storyboard.get("panels") or []) if isinstance(item, dict)]
+    segments = [item for item in list(timeline.get("segments") or []) if isinstance(item, dict)]
+    time_anchor_count = sum(1 for item in segments if _preview_segment_has_time_anchor(item))
+    missing_reasons: list[str] = []
+    if expected and strategy_type and strategy_type not in expected:
+        missing_reasons.append(f"unexpected_strategy_type={strategy_type}")
+    if not gates:
+        missing_reasons.append("missing_strategy_review_gates")
+    if not storyboard_declared and not timeline_declared:
+        missing_reasons.append("missing_review_preview_artifact_declarations")
+    if storyboard_declared and not panels:
+        missing_reasons.append("missing_storyboard_panels")
+    if timeline_declared and not segments:
+        missing_reasons.append("missing_timeline_segments")
+    if timeline_declared and time_anchor_count <= 0:
+        missing_reasons.append("missing_timeline_time_anchors")
+    passed = not missing_reasons
+    details = [
+        f"strategy_type={strategy_type or 'unknown'}",
+        f"storyboard_panels={len(panels)}",
+        f"timeline_segments={len(segments)}",
+        f"timeline_time_anchors={time_anchor_count}",
+    ]
+    if missing_reasons:
+        details.append("missing=" + ",".join(missing_reasons))
+    return {
+        "passed": passed,
+        "detail": " | ".join(details),
+        "expected_strategy_types": expected,
+        "strategy_type": strategy_type,
+        "storyboard_declared": storyboard_declared,
+        "timeline_declared": timeline_declared,
+        "storyboard_panel_count": len(panels),
+        "timeline_segment_count": len(segments),
+        "timeline_time_anchor_count": time_anchor_count,
+        "missing_reasons": missing_reasons,
+    }
+
+
 def _model_token_integrity_status(
     *,
     source_name: str,
@@ -1213,6 +1934,10 @@ async def inspect_evaluation_required_checks(
                             "variant_timeline_bundle",
                             "subtitle_projection_layer",
                             "content_profile_final",
+                            "strategy_review_gates",
+                            "strategy_storyboard_review",
+                            "strategy_timeline_preview",
+                            "strategy_cut_boundary_samples",
                         ]
                     ),
                 )
@@ -1248,6 +1973,26 @@ async def inspect_evaluation_required_checks(
         content_profile_final = (
             artifacts_by_type.get("content_profile_final").data_json
             if artifacts_by_type.get("content_profile_final") is not None and isinstance(artifacts_by_type["content_profile_final"].data_json, dict)
+            else {}
+        )
+        strategy_review_gates = (
+            artifacts_by_type.get("strategy_review_gates").data_json
+            if artifacts_by_type.get("strategy_review_gates") is not None and isinstance(artifacts_by_type["strategy_review_gates"].data_json, dict)
+            else {}
+        )
+        strategy_storyboard_review = (
+            artifacts_by_type.get("strategy_storyboard_review").data_json
+            if artifacts_by_type.get("strategy_storyboard_review") is not None and isinstance(artifacts_by_type["strategy_storyboard_review"].data_json, dict)
+            else {}
+        )
+        strategy_timeline_preview = (
+            artifacts_by_type.get("strategy_timeline_preview").data_json
+            if artifacts_by_type.get("strategy_timeline_preview") is not None and isinstance(artifacts_by_type["strategy_timeline_preview"].data_json, dict)
+            else {}
+        )
+        strategy_cut_boundary_samples = (
+            artifacts_by_type.get("strategy_cut_boundary_samples").data_json
+            if artifacts_by_type.get("strategy_cut_boundary_samples") is not None and isinstance(artifacts_by_type["strategy_cut_boundary_samples"].data_json, dict)
             else {}
         )
 
@@ -1288,6 +2033,29 @@ async def inspect_evaluation_required_checks(
                 quality_issue_codes=quality_issue_codes,
             ),
             "low_signal_traceability": _low_signal_traceability_status(cut_analysis),
+            "strategy_pipeline_coverage": _strategy_pipeline_coverage_status(
+                case,
+                report=report,
+                content_profile_final=content_profile_final,
+                strategy_review_gates=strategy_review_gates,
+            ),
+            "strategy_boundary_samples": _strategy_boundary_samples_status(
+                case,
+                report=report,
+                sample_manifest=strategy_cut_boundary_samples,
+            ),
+            "strategy_review_preview_evidence": _strategy_review_preview_evidence_status(
+                case,
+                strategy_review_gates=strategy_review_gates,
+                storyboard_review=strategy_storyboard_review,
+                timeline_preview=strategy_timeline_preview,
+            ),
+            "strategy_review_preview_media_evidence": _strategy_review_preview_media_evidence_status(
+                case,
+                job=job,
+                strategy_review_gates=strategy_review_gates,
+                timeline_preview=strategy_timeline_preview,
+            ),
         }
 
 
@@ -1653,6 +2421,49 @@ def summarize_required_checks(case_rows: list[dict[str, Any]]) -> dict[str, Any]
     }
 
 
+def summarize_strategy_pipeline_coverage(case_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    declared_strategy_types: set[str] = set()
+    covered_strategy_types: set[str] = set()
+    missing_strategy_types: set[str] = set()
+    failed_case_ids: list[str] = []
+    evaluated_case_count = 0
+    for row in case_rows:
+        statuses = row.get("required_check_statuses") if isinstance(row.get("required_check_statuses"), dict) else {}
+        status = statuses.get("strategy_pipeline_coverage") if isinstance(statuses.get("strategy_pipeline_coverage"), dict) else {}
+        if not status:
+            continue
+        evaluated_case_count += 1
+        expected = {
+            str(item or "").strip()
+            for item in list(status.get("expected_strategy_types") or [])
+            if str(item or "").strip()
+        }
+        observed = {
+            str(item or "").strip()
+            for item in list(status.get("observed_strategy_types") or [])
+            if str(item or "").strip()
+        }
+        missing = {
+            str(item or "").strip()
+            for item in list(status.get("missing_strategy_types") or [])
+            if str(item or "").strip()
+        }
+        declared_strategy_types.update(expected)
+        covered_strategy_types.update(expected.intersection(observed))
+        missing_strategy_types.update(missing)
+        if not bool(status.get("passed")):
+            case_id = str(row.get("case_id") or "").strip()
+            if case_id:
+                failed_case_ids.append(case_id)
+    return {
+        "evaluated_case_count": evaluated_case_count,
+        "declared_strategy_types": sorted(declared_strategy_types),
+        "covered_strategy_types": sorted(covered_strategy_types),
+        "missing_strategy_types": sorted(missing_strategy_types),
+        "failed_case_ids": failed_case_ids,
+    }
+
+
 def summarize_manual_editor_apply_semantics(case_rows: list[dict[str, Any]]) -> dict[str, Any]:
     eligible_rows = [
         row
@@ -1683,18 +2494,51 @@ def summarize_manual_editor_apply_semantics(case_rows: list[dict[str, Any]]) -> 
 def summarize_render_diagnostics(reports: list[JobRunReport]) -> dict[str, Any]:
     failed_render_job_ids: list[str] = []
     avatar_degraded_job_ids: list[str] = []
+    strategy_validation_blocking_job_ids: list[str] = []
     failed_render_reason_counts: dict[str, int] = {}
     avatar_degraded_reason_counts: dict[str, int] = {}
     avatar_degraded_reason_category_counts: dict[str, int] = {}
+    strategy_validation_blocking_reason_counts: dict[str, int] = {}
+    strategy_validation_strategy_type_counts: dict[str, int] = {}
+    strategy_validation_review_gate_counts: dict[str, int] = {}
+    strategy_validation_evaluated_job_count = 0
     evaluated_job_count = 0
     for report in reports:
         diagnostics = report.render_diagnostics if isinstance(report.render_diagnostics, dict) else {}
         render_step = diagnostics.get("render_step") if isinstance(diagnostics.get("render_step"), dict) else {}
         avatar_result = diagnostics.get("avatar_result") if isinstance(diagnostics.get("avatar_result"), dict) else {}
-        if not render_step and not avatar_result:
+        strategy_validation = (
+            diagnostics.get("strategy_render_validation")
+            if isinstance(diagnostics.get("strategy_render_validation"), dict)
+            else {}
+        )
+        if not render_step and not avatar_result and not strategy_validation:
             continue
         evaluated_job_count += 1
         identifier = str(report.job_id or report.source_name or "").strip()
+        if strategy_validation:
+            strategy_validation_evaluated_job_count += 1
+            _increment_summary_count(
+                strategy_validation_strategy_type_counts,
+                str(strategy_validation.get("strategy_type") or "").strip(),
+            )
+            for gate in list(strategy_validation.get("review_gates") or []):
+                _increment_summary_count(strategy_validation_review_gate_counts, str(gate).strip())
+            validation_status = str(strategy_validation.get("status") or "").strip().lower()
+            if bool(strategy_validation.get("blocking")) or validation_status == "blocking":
+                if identifier:
+                    strategy_validation_blocking_job_ids.append(identifier)
+                blocking_reasons = [
+                    str(item).strip()
+                    for item in list(strategy_validation.get("blocking_reasons") or [])
+                    if str(item).strip()
+                ]
+                if not blocking_reasons:
+                    blocking_reasons = [
+                        str(strategy_validation.get("reason") or "strategy_render_validation_blocked").strip()
+                    ]
+                for reason in blocking_reasons:
+                    _increment_summary_count(strategy_validation_blocking_reason_counts, reason)
         if str(render_step.get("status") or "").strip().lower() == "failed" and identifier:
             failed_render_job_ids.append(identifier)
             reason = str(render_step.get("reason") or "").strip()
@@ -1722,7 +2566,20 @@ def summarize_render_diagnostics(reports: list[JobRunReport]) -> dict[str, Any]:
         "avatar_degraded_job_ids": avatar_degraded_job_ids,
         "avatar_degraded_reasons": avatar_degraded_reason_counts,
         "avatar_degraded_reason_categories": avatar_degraded_reason_category_counts,
+        "strategy_validation_evaluated_job_count": strategy_validation_evaluated_job_count,
+        "strategy_validation_blocking_job_count": len(strategy_validation_blocking_job_ids),
+        "strategy_validation_blocking_job_ids": strategy_validation_blocking_job_ids,
+        "strategy_validation_blocking_reasons": strategy_validation_blocking_reason_counts,
+        "strategy_validation_strategy_types": strategy_validation_strategy_type_counts,
+        "strategy_validation_review_gates": strategy_validation_review_gate_counts,
     }
+
+
+def _increment_summary_count(counts: dict[str, int], key: str) -> None:
+    normalized = str(key or "").strip()
+    if not normalized:
+        return
+    counts[normalized] = counts.get(normalized, 0) + 1
 
 
 def render_case_summary_markdown(
@@ -1730,6 +2587,7 @@ def render_case_summary_markdown(
     manifest_path: Path,
     case_rows: list[dict[str, Any]],
     required_checks_summary: dict[str, Any],
+    strategy_pipeline_coverage_summary: dict[str, Any] | None,
     render_diagnostics_summary: dict[str, Any] | None,
     risk_alignment_summary: dict[str, Any] | None,
     reference_refresh_candidates: list[dict[str, Any]] | None,
@@ -1748,6 +2606,27 @@ def render_case_summary_markdown(
         f"- case_count: `{len(case_rows)}`",
         "",
     ]
+    if (
+        isinstance(strategy_pipeline_coverage_summary, dict)
+        and int(strategy_pipeline_coverage_summary.get("evaluated_case_count") or 0) > 0
+    ):
+        lines.extend(
+            [
+                "## Strategy Pipeline Coverage",
+                f"- evaluated_case_count: {strategy_pipeline_coverage_summary.get('evaluated_case_count') or 0}",
+                "- declared_strategy_types: "
+                + ", ".join(strategy_pipeline_coverage_summary.get("declared_strategy_types") or []),
+                "- covered_strategy_types: "
+                + ", ".join(strategy_pipeline_coverage_summary.get("covered_strategy_types") or []),
+            ]
+        )
+        missing = list(strategy_pipeline_coverage_summary.get("missing_strategy_types") or [])
+        if missing:
+            lines.append("- missing_strategy_types: " + ", ".join(missing))
+        failed_case_ids = list(strategy_pipeline_coverage_summary.get("failed_case_ids") or [])
+        if failed_case_ids:
+            lines.append("- failed_case_ids: " + ", ".join(failed_case_ids))
+        lines.append("")
     if isinstance(render_diagnostics_summary, dict) and int(render_diagnostics_summary.get("evaluated_job_count") or 0) > 0:
         lines.extend(
             [
@@ -1755,12 +2634,16 @@ def render_case_summary_markdown(
                 f"- evaluated_job_count: {render_diagnostics_summary.get('evaluated_job_count') or 0}",
                 f"- failed_render_job_count: {render_diagnostics_summary.get('failed_render_job_count') or 0}",
                 f"- avatar_degraded_job_count: {render_diagnostics_summary.get('avatar_degraded_job_count') or 0}",
+                f"- strategy_validation_blocking_job_count: {render_diagnostics_summary.get('strategy_validation_blocking_job_count') or 0}",
             ]
         )
         for label, key in (
             ("failed_render_reasons", "failed_render_reasons"),
             ("avatar_degraded_reasons", "avatar_degraded_reasons"),
             ("avatar_degraded_reason_categories", "avatar_degraded_reason_categories"),
+            ("strategy_validation_blocking_reasons", "strategy_validation_blocking_reasons"),
+            ("strategy_validation_strategy_types", "strategy_validation_strategy_types"),
+            ("strategy_validation_review_gates", "strategy_validation_review_gates"),
         ):
             reason_counts = render_diagnostics_summary.get(key) if isinstance(render_diagnostics_summary.get(key), dict) else {}
             if reason_counts:
@@ -1952,6 +2835,9 @@ def main() -> None:
         "source_dir": "",
         "channel_profile": args.workflow_template,
         "language": args.language,
+        "case_languages": {
+            prepared.case.case_id: prepared.case.language or args.language for prepared in prepared_jobs
+        },
         "output_dir": None,
         "enhancement_modes": [],
         "job_count": len(reports),
@@ -2008,11 +2894,13 @@ def main() -> None:
         required_check_statuses_by_case=required_check_statuses,
     )
     required_checks_summary = summarize_required_checks(case_rows)
+    strategy_pipeline_coverage_summary = summarize_strategy_pipeline_coverage(case_rows)
     manual_editor_apply_semantics_summary = summarize_manual_editor_apply_semantics(case_rows)
     render_diagnostics_summary = summarize_render_diagnostics(reports)
     risk_alignment_summary = summarize_case_risk_alignment(case_rows)
     reference_refresh_candidates = summarize_reference_refresh_candidates(case_rows)
     summary["required_checks"] = required_checks_summary
+    summary["strategy_pipeline_coverage"] = strategy_pipeline_coverage_summary
     summary["golden_case_rows"] = case_rows
     summary["manual_editor_apply_semantics_summary"] = manual_editor_apply_semantics_summary
     summary["render_diagnostics_summary"] = render_diagnostics_summary
@@ -2044,6 +2932,7 @@ def main() -> None:
             manifest_path=args.manifest.resolve(),
             case_rows=case_rows,
             required_checks_summary=required_checks_summary,
+            strategy_pipeline_coverage_summary=strategy_pipeline_coverage_summary,
             render_diagnostics_summary=render_diagnostics_summary,
             risk_alignment_summary=risk_alignment_summary,
             reference_refresh_candidates=reference_refresh_candidates,

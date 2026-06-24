@@ -5,7 +5,7 @@ import os
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, close_all_sessions, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
 
@@ -55,6 +55,7 @@ async def reset_session_state() -> None:
     _engine = None
     _engine_loop_id = None
     _session_factory = None
+    await close_all_sessions()
     if engine is not None:
         await engine.dispose()
 

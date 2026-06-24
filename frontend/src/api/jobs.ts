@@ -19,6 +19,7 @@ import type {
   PublicationPlatformPublishOptions,
   Report,
   RemixProductionTasks,
+  StrategyReviewGates,
   TokenUsageReport,
 } from "../types";
 import { apiPath, request, requestForm } from "./core";
@@ -208,6 +209,8 @@ export const jobsApi = {
   getContentProfile: (jobId: string) => request<ContentProfileReview>(`/jobs/${jobId}/content-profile`),
   confirmContentProfile: (jobId: string, body: Record<string, unknown>) =>
     request<ContentProfileReview>(`/jobs/${jobId}/content-profile/confirm`, { method: "POST", body: JSON.stringify(body) }),
+  confirmStrategyReviewGates: (jobId: string, body: { gate_ids?: string[]; status?: string; note?: string } = {}) =>
+    request<StrategyReviewGates>(`/jobs/${jobId}/strategy-review-gates/confirm`, { method: "POST", body: JSON.stringify(body) }),
   finalReviewDecision: (jobId: string, body: { decision: FinalReviewDecision; note?: string }) =>
     request<FinalReviewDecisionResponse>(`/jobs/${jobId}/final-review`, { method: "POST", body: JSON.stringify(body) }),
   getJobPublicationPlan: (jobId: string, creatorProfileId?: string | null) =>

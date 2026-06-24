@@ -9,6 +9,11 @@ from roughcut.production_readiness import (
     platform_packaging_output_fallback_reasons,
     projection_output_fallback_reasons,
     render_output_blocking_reasons,
+    strategy_cut_boundary_validation,
+    strategy_overlay_subtitle_occlusion_validation,
+    strategy_render_validation_summary,
+    strategy_storyboard_validation,
+    strategy_timeline_preview_validation,
 )
 
 
@@ -60,6 +65,569 @@ def test_render_output_blocking_reasons_ignore_optional_runtime_degradation() ->
         avatar_result=None,
         subtitle_projection_repair=None,
     ) == []
+
+
+def test_strategy_timeline_preview_validation_blocks_missing_required_preview() -> None:
+    strategy_review_context = {
+        "strategy_review_gates": {
+            "pipeline_plan": {
+                "strategy_type": "narrative_assembly",
+                "review_gates": ["timeline_preview_required"],
+                "strategy_policy": {
+                    "render_validation_policy": {
+                        "check_timeline_preview_alignment": True,
+                    }
+                },
+            }
+        }
+    }
+
+    validation = strategy_timeline_preview_validation(strategy_review_context)
+
+    assert validation["status"] == "blocking"
+    assert validation["blocking"] is True
+    assert validation["reason"] == "strategy_timeline_preview_missing"
+    assert render_output_blocking_reasons(
+        avatar_result=None,
+        subtitle_projection_repair=None,
+        strategy_review_context=strategy_review_context,
+    ) == ["strategy_timeline_preview_missing"]
+
+
+def test_strategy_timeline_preview_validation_passes_when_required_preview_has_segments() -> None:
+    strategy_review_context = {
+        "strategy_review_gates": {
+            "pipeline_plan": {
+                "strategy_type": "narrative_assembly",
+                "review_gates": ["timeline_preview_required"],
+                "strategy_policy": {
+                    "render_validation_policy": {
+                        "check_timeline_preview_alignment": True,
+                    }
+                },
+            }
+        },
+        "strategy_timeline_preview": {
+            "segments": [
+                {
+                    "segment_id": "preview_1",
+                    "timestamp": "00:00-00:04",
+                }
+            ]
+        },
+    }
+
+    validation = strategy_timeline_preview_validation(strategy_review_context)
+
+    assert validation["status"] == "ok"
+    assert validation["blocking"] is False
+    assert validation["segment_count"] == 1
+    assert render_output_blocking_reasons(
+        avatar_result=None,
+        subtitle_projection_repair=None,
+        strategy_review_context=strategy_review_context,
+    ) == []
+
+
+def test_strategy_timeline_preview_validation_ignores_optional_strategy_without_policy() -> None:
+    validation = strategy_timeline_preview_validation(
+        {
+            "strategy_review_gates": {
+                "pipeline_plan": {
+                    "strategy_type": "event_highlight",
+                    "review_gates": ["manual_cut_review_optional"],
+                    "strategy_policy": {"render_validation_policy": {}},
+                }
+            }
+        }
+    )
+
+    assert validation["status"] == "not_required"
+    assert validation["blocking"] is False
+
+
+def test_strategy_storyboard_validation_blocks_missing_required_storyboard() -> None:
+    strategy_review_context = {
+        "strategy_review_gates": {
+            "pipeline_plan": {
+                "strategy_type": "narrative_assembly",
+                "review_gates": ["storyboard_review_required"],
+                "strategy_policy": {
+                    "render_validation_policy": {
+                        "check_storyboard_alignment": True,
+                    }
+                },
+            }
+        }
+    }
+
+    validation = strategy_storyboard_validation(strategy_review_context)
+
+    assert validation["status"] == "blocking"
+    assert validation["blocking"] is True
+    assert validation["reason"] == "strategy_storyboard_review_missing"
+    assert render_output_blocking_reasons(
+        avatar_result=None,
+        subtitle_projection_repair=None,
+        strategy_review_context=strategy_review_context,
+    ) == ["strategy_storyboard_review_missing"]
+
+
+def test_strategy_storyboard_validation_passes_when_required_storyboard_has_panels() -> None:
+    strategy_review_context = {
+        "strategy_review_gates": {
+            "pipeline_plan": {
+                "strategy_type": "narrative_assembly",
+                "review_gates": ["storyboard_review_required"],
+                "strategy_policy": {
+                    "render_validation_policy": {
+                        "check_storyboard_alignment": True,
+                    }
+                },
+            }
+        },
+        "strategy_storyboard_review": {
+            "panels": [
+                {
+                    "panel_id": "opening_hook",
+                    "text": "先看关键转折",
+                }
+            ]
+        },
+    }
+
+    validation = strategy_storyboard_validation(strategy_review_context)
+
+    assert validation["status"] == "ok"
+    assert validation["blocking"] is False
+    assert validation["panel_count"] == 1
+    assert render_output_blocking_reasons(
+        avatar_result=None,
+        subtitle_projection_repair=None,
+        strategy_review_context=strategy_review_context,
+    ) == []
+
+
+def test_strategy_render_validation_summary_collects_multiple_blocking_reasons() -> None:
+    strategy_review_context = {
+        "strategy_review_gates": {
+            "pipeline_plan": {
+                "strategy_type": "narrative_assembly",
+                "review_gates": ["storyboard_review_required", "timeline_preview_required"],
+                "strategy_policy": {
+                    "render_validation_policy": {
+                        "check_storyboard_alignment": True,
+                        "check_timeline_preview_alignment": True,
+                    }
+                },
+            }
+        }
+    }
+
+    validation = strategy_render_validation_summary(strategy_review_context)
+
+    assert validation["status"] == "blocking"
+    assert validation["blocking"] is True
+    assert validation["reason"] == "strategy_timeline_preview_missing"
+    assert validation["blocking_reasons"] == [
+        "strategy_timeline_preview_missing",
+        "strategy_storyboard_review_missing",
+    ]
+    assert {check["check"] for check in validation["checks"]} == {
+        "strategy_timeline_preview_alignment",
+        "strategy_storyboard_alignment",
+        "strategy_overlay_subtitle_occlusion",
+        "strategy_cut_boundary_evidence",
+    }
+    assert render_output_blocking_reasons(
+        avatar_result=None,
+        subtitle_projection_repair=None,
+        strategy_review_context=strategy_review_context,
+    ) == [
+        "strategy_timeline_preview_missing",
+        "strategy_storyboard_review_missing",
+    ]
+
+
+def test_strategy_overlay_subtitle_occlusion_validation_blocks_unsafe_overlay_evidence() -> None:
+    strategy_review_context = {
+        "strategy_review_gates": {
+            "pipeline_plan": {
+                "strategy_type": "narrative_assembly",
+                "review_gates": [],
+                "strategy_policy": {
+                    "render_validation_policy": {
+                        "check_overlay_subtitle_occlusion": True,
+                    }
+                },
+            }
+        }
+    }
+    render_plan = {
+        "packaging_timeline": {
+            "subtitles": {"style": "bold_yellow_outline"},
+            "editing_accents": {
+                "emphasis_overlays": [
+                    {"start_time": 1.0, "end_time": 2.0, "text": "重点"}
+                ]
+            },
+        }
+    }
+
+    validation = strategy_overlay_subtitle_occlusion_validation(
+        strategy_review_context,
+        render_plan=render_plan,
+    )
+
+    assert validation["status"] == "blocking"
+    assert validation["blocking"] is True
+    assert validation["reason"] == "strategy_overlay_subtitle_occlusion_unverified"
+    assert validation["overlay_count"] == 1
+    assert validation["unsafe_overlay_count"] == 1
+    assert render_output_blocking_reasons(
+        avatar_result=None,
+        subtitle_projection_repair=None,
+        strategy_review_context=strategy_review_context,
+        render_plan=render_plan,
+    ) == ["strategy_overlay_subtitle_occlusion_unverified"]
+
+
+def test_strategy_overlay_subtitle_occlusion_validation_accepts_safe_overlay_treatment() -> None:
+    strategy_review_context = {
+        "strategy_review_gates": {
+            "pipeline_plan": {
+                "strategy_type": "narrative_assembly",
+                "review_gates": [],
+                "strategy_policy": {
+                    "render_validation_policy": {
+                        "check_overlay_subtitle_occlusion": True,
+                    }
+                },
+            }
+        }
+    }
+    render_plan = {
+        "subtitles": {"style": "bold_yellow_outline"},
+        "editing_accents": {
+            "emphasis_overlays": [
+                {
+                    "start_time": 1.0,
+                    "end_time": 2.0,
+                    "text": "重点",
+                    "visual_treatment": "keyword_sticker",
+                }
+            ]
+        },
+    }
+
+    validation = strategy_overlay_subtitle_occlusion_validation(
+        strategy_review_context,
+        render_plan=render_plan,
+    )
+
+    assert validation["status"] == "ok"
+    assert validation["blocking"] is False
+    assert validation["overlay_count"] == 1
+    assert validation["unsafe_overlay_count"] == 0
+    assert render_output_blocking_reasons(
+        avatar_result=None,
+        subtitle_projection_repair=None,
+        strategy_review_context=strategy_review_context,
+        render_plan=render_plan,
+    ) == []
+
+
+def test_strategy_render_validation_summary_collects_overlay_blocking_reason_with_render_plan() -> None:
+    strategy_review_context = {
+        "strategy_review_gates": {
+            "pipeline_plan": {
+                "strategy_type": "narrative_assembly",
+                "review_gates": [],
+                "strategy_policy": {
+                    "render_validation_policy": {
+                        "check_overlay_subtitle_occlusion": True,
+                    }
+                },
+            }
+        }
+    }
+    render_plan = {
+        "subtitles": {"style": "bold_yellow_outline"},
+        "editing_accents": {
+            "emphasis_overlays": [{"start_time": 1.0, "end_time": 2.0, "text": "重点"}]
+        },
+    }
+
+    validation = strategy_render_validation_summary(
+        strategy_review_context,
+        render_plan=render_plan,
+    )
+
+    assert validation["status"] == "blocking"
+    assert validation["reason"] == "strategy_overlay_subtitle_occlusion_unverified"
+    assert validation["blocking_reasons"] == [
+        "strategy_overlay_subtitle_occlusion_unverified",
+    ]
+    assert validation["overlay_count"] == 1
+    assert validation["unsafe_overlay_count"] == 1
+    assert {check["check"] for check in validation["checks"]} == {
+        "strategy_timeline_preview_alignment",
+        "strategy_storyboard_alignment",
+        "strategy_overlay_subtitle_occlusion",
+        "strategy_cut_boundary_evidence",
+    }
+
+
+def test_strategy_cut_boundary_validation_blocks_unresolved_high_risk_cuts() -> None:
+    strategy_review_context = {
+        "strategy_review_gates": {
+            "pipeline_plan": {
+                "strategy_type": "information_density",
+                "review_gates": [],
+                "strategy_policy": {
+                    "render_validation_policy": {
+                        "check_cut_boundaries": True,
+                    }
+                },
+            }
+        }
+    }
+    cut_boundary_evidence = {
+        "cut_analysis_summary": {"accepted_cut_count": 2},
+        "blocking_high_risk_cut_count": 1,
+        "high_risk_cuts": [
+            {
+                "start": 1.0,
+                "end": 2.0,
+                "boundary_keep_energy": 1.4,
+                "blocking": True,
+                "review_priority": "blocking",
+            }
+        ],
+    }
+
+    validation = strategy_cut_boundary_validation(
+        strategy_review_context,
+        cut_boundary_evidence=cut_boundary_evidence,
+    )
+
+    assert validation["status"] == "blocking"
+    assert validation["blocking"] is True
+    assert validation["reason"] == "strategy_cut_boundary_high_risk_unresolved"
+    assert validation["accepted_cut_count"] == 2
+    assert validation["high_risk_cut_count"] == 1
+    assert validation["blocking_high_risk_cut_count"] == 1
+    assert validation["boundary_energy_evidence_count"] == 1
+    assert validation["boundary_energy_evidence_count"] == 1
+    assert render_output_blocking_reasons(
+        avatar_result=None,
+        subtitle_projection_repair=None,
+        strategy_review_context=strategy_review_context,
+        cut_boundary_evidence=cut_boundary_evidence,
+    ) == ["strategy_cut_boundary_high_risk_unresolved"]
+
+
+def test_strategy_cut_boundary_validation_accepts_advisory_boundary_evidence() -> None:
+    strategy_review_context = {
+        "strategy_review_gates": {
+            "pipeline_plan": {
+                "strategy_type": "information_density",
+                "review_gates": [],
+                "strategy_policy": {
+                    "render_validation_policy": {
+                        "check_cut_boundaries": True,
+                    }
+                },
+            }
+        }
+    }
+    cut_boundary_evidence = {
+        "cut_analysis_summary": {"accepted_cut_count": 1},
+        "high_risk_cuts": [
+            {
+                "start": 1.0,
+                "end": 2.0,
+                "boundary_keep_energy": 1.2,
+                "blocking": False,
+                "review_priority": "advisory",
+            }
+        ],
+    }
+
+    validation = strategy_cut_boundary_validation(
+        strategy_review_context,
+        cut_boundary_evidence=cut_boundary_evidence,
+    )
+
+    assert validation["status"] == "ok"
+    assert validation["blocking"] is False
+    assert validation["accepted_cut_count"] == 1
+    assert validation["high_risk_cut_count"] == 1
+    assert validation["blocking_high_risk_cut_count"] == 0
+    assert render_output_blocking_reasons(
+        avatar_result=None,
+        subtitle_projection_repair=None,
+        strategy_review_context=strategy_review_context,
+        cut_boundary_evidence=cut_boundary_evidence,
+    ) == []
+
+
+def test_strategy_cut_boundary_validation_respects_explicit_zero_blocking_count() -> None:
+    strategy_review_context = {
+        "strategy_review_gates": {
+            "pipeline_plan": {
+                "strategy_type": "information_density",
+                "review_gates": [],
+                "strategy_policy": {
+                    "render_validation_policy": {
+                        "check_cut_boundaries": True,
+                    }
+                },
+            }
+        }
+    }
+    cut_boundary_evidence = {
+        "cut_analysis_summary": {"accepted_cut_count": 1},
+        "blocking_high_risk_cut_count": 0,
+        "high_risk_cuts": [
+            {
+                "start": 1.0,
+                "end": 2.0,
+                "boundary_keep_energy": 1.2,
+                "blocking": True,
+                "review_priority": "blocking",
+            }
+        ],
+    }
+
+    validation = strategy_cut_boundary_validation(
+        strategy_review_context,
+        cut_boundary_evidence=cut_boundary_evidence,
+    )
+
+    assert validation["status"] == "ok"
+    assert validation["blocking"] is False
+    assert validation["blocking_high_risk_cut_count"] == 0
+    assert validation["high_risk_cut_count"] == 1
+
+
+def test_strategy_render_validation_summary_collects_cut_boundary_blocking_reason() -> None:
+    strategy_review_context = {
+        "strategy_review_gates": {
+            "pipeline_plan": {
+                "strategy_type": "information_density",
+                "review_gates": [],
+                "strategy_policy": {
+                    "render_validation_policy": {
+                        "check_cut_boundaries": True,
+                    }
+                },
+            }
+        }
+    }
+    cut_boundary_evidence = {
+        "cut_analysis_summary": {"accepted_cut_count": 2},
+        "blocking_high_risk_cut_count": 1,
+        "high_risk_cuts": [
+            {
+                "start": 1.0,
+                "end": 2.0,
+                "boundary_keep_energy": 1.4,
+                "blocking": True,
+            }
+        ],
+    }
+
+    validation = strategy_render_validation_summary(
+        strategy_review_context,
+        cut_boundary_evidence=cut_boundary_evidence,
+    )
+
+    assert validation["status"] == "blocking"
+    assert validation["reason"] == "strategy_cut_boundary_high_risk_unresolved"
+    assert validation["blocking_reasons"] == [
+        "strategy_cut_boundary_high_risk_unresolved",
+    ]
+    assert validation["accepted_cut_count"] == 2
+    assert validation["high_risk_cut_count"] == 1
+    assert validation["blocking_high_risk_cut_count"] == 1
+
+
+def test_strategy_cut_boundary_validation_requires_highlight_frame_samples() -> None:
+    strategy_review_context = {
+        "strategy_review_gates": {
+            "pipeline_plan": {
+                "strategy_type": "event_highlight",
+                "review_gates": [],
+                "strategy_policy": {
+                    "render_validation_policy": {
+                        "check_cut_boundaries": True,
+                        "check_highlight_boundary_frames": True,
+                    }
+                },
+            }
+        }
+    }
+    cut_boundary_evidence = {
+        "cut_analysis_summary": {"accepted_cut_count": 1},
+        "blocking_high_risk_cut_count": 0,
+        "high_risk_cuts": [],
+    }
+
+    validation = strategy_cut_boundary_validation(
+        strategy_review_context,
+        cut_boundary_evidence=cut_boundary_evidence,
+    )
+
+    assert validation["status"] == "blocking"
+    assert validation["reason"] == "strategy_cut_boundary_frame_samples_missing"
+    assert validation["boundary_frame_sample_count"] == 0
+    assert render_output_blocking_reasons(
+        avatar_result=None,
+        subtitle_projection_repair=None,
+        strategy_review_context=strategy_review_context,
+        cut_boundary_evidence=cut_boundary_evidence,
+    ) == ["strategy_cut_boundary_frame_samples_missing"]
+
+
+def test_strategy_cut_boundary_validation_accepts_highlight_sample_manifest() -> None:
+    strategy_review_context = {
+        "strategy_review_gates": {
+            "pipeline_plan": {
+                "strategy_type": "event_highlight",
+                "review_gates": [],
+                "strategy_policy": {
+                    "render_validation_policy": {
+                        "check_cut_boundaries": True,
+                        "check_highlight_boundary_frames": True,
+                    }
+                },
+            }
+        }
+    }
+    cut_boundary_evidence = {
+        "cut_analysis_summary": {"accepted_cut_count": 1},
+        "blocking_high_risk_cut_count": 0,
+        "cut_boundary_sample_manifest": {
+            "schema": "strategy_cut_boundary_samples.v1",
+            "boundary_samples": [
+                {
+                    "cut_id": "highlight_1",
+                    "frame_paths": ["frames/highlight_1_before.jpg", "frames/highlight_1_after.jpg"],
+                    "waveform_path": "waveforms/highlight_1.json",
+                }
+            ],
+        },
+    }
+
+    validation = strategy_render_validation_summary(
+        strategy_review_context,
+        cut_boundary_evidence=cut_boundary_evidence,
+    )
+
+    assert validation["status"] == "ok"
+    assert validation["boundary_frame_sample_count"] == 2
+    assert validation["boundary_waveform_sample_count"] == 1
 
 
 def test_creator_refine_and_insert_plan_fallbacks_are_blocking() -> None:

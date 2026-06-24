@@ -18,6 +18,8 @@ type JobSummaryReviewOverlayProps = {
   onContentFieldChange: (field: string, value: string) => void;
   onKeywordsChange: (value: string) => void;
   onConfirmProfile: () => void;
+  onConfirmStrategyGates?: (gateIds?: string[]) => void;
+  isConfirmingStrategyGates?: boolean;
 };
 
 function uniqueStrings(values: Array<string | null | undefined>) {
@@ -44,6 +46,8 @@ export function JobSummaryReviewOverlay({
   onContentFieldChange,
   onKeywordsChange,
   onConfirmProfile,
+  onConfirmStrategyGates,
+  isConfirmingStrategyGates = false,
 }: JobSummaryReviewOverlayProps) {
   const summaryReasons = uniqueStrings([
     ...(reviewReasons ?? contentProfile?.review_reasons ?? []),
@@ -159,6 +163,8 @@ export function JobSummaryReviewOverlay({
         onFieldChange={onContentFieldChange}
         onKeywordsChange={onKeywordsChange}
         onConfirm={onConfirmProfile}
+        onConfirmStrategyGates={onConfirmStrategyGates}
+        isConfirmingStrategyGates={isConfirmingStrategyGates}
       />
     </section>
   );

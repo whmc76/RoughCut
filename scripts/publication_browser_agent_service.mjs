@@ -16860,7 +16860,10 @@ export function platformBodyWithTags(platform, content) {
   const taggedBody = !["kuaishou", "toutiao", "wechat-channels", "x"].includes(platform) || !tags.length
     ? body
     : `${platform === "kuaishou" && title ? `${title}\n` : ""}${body}\n${tags.map((tag) => `#${tag}`).join(" ")}`;
-  if (platform === "x" && xShareLink) return `${taggedBody ? `${taggedBody}\n` : ""}${xShareLink}`.trim();
+  if (platform === "x" && xShareLink) {
+    if (taggedBody.includes(xShareLink)) return taggedBody;
+    return `${taggedBody ? `${taggedBody}\n` : ""}${xShareLink}`.trim();
+  }
   return taggedBody;
 }
 
@@ -20460,9 +20463,66 @@ async function prepareWechatChannelsCompositeDraft(client, platform, content) {
   return actions;
 }
 
+function expectedXPreviewMediaPath(content = {}) {
+  const mediaItems = Array.isArray(content?.media_items) ? content.media_items : [];
+  const previewItem = mediaItems.find((item) => {
+    if (!item || typeof item !== "object") return false;
+    const kind = String(item.kind || "").trim().toLowerCase();
+    const role = String(item.role || "").trim().toLowerCase();
+    const mimeType = String(item.mime_type || "").trim().toLowerCase();
+    return Boolean(item.local_path) && (
+      role === "x_link_preview_cover"
+      || kind === "image"
+      || mimeType.startsWith("image/")
+    );
+  });
+  return String(
+    previewItem?.local_path
+      || content?.cover_path
+      || content?.copy_material?.cover_path
+      || "",
+  ).trim();
+}
+
+function expectedXShareLink(content = {}) {
+  const overrides = content?.platform_specific_overrides && typeof content.platform_specific_overrides === "object"
+    ? content.platform_specific_overrides
+    : {};
+  return String(overrides.x_share_link || overrides.x_share_url || "").trim();
+}
+
+async function uploadXPreviewMedia(client, content) {
+  const shareLink = expectedXShareLink(content);
+  if (!shareLink) {
+    return { uploaded: false, skipped: true, reason: "missing_x_share_link" };
+  }
+  const previewPath = expectedXPreviewMediaPath(content);
+  if (!previewPath) {
+    return { uploaded: false, blocked: true, reason: "missing_x_preview_media_path" };
+  }
+  if (!fs.existsSync(previewPath)) {
+    return { uploaded: false, blocked: true, reason: "x_preview_media_not_found", path: previewPath };
+  }
+  const upload = await setImageFileInputByAccept(client, previewPath, {
+    preferVisible: false,
+    contextTexts: ["What’s happening?", "Post", "帖子", "发布"],
+    preferRootTexts: ["What’s happening?", "Post", "帖子", "发布"],
+  });
+  return {
+    ...upload,
+    path: previewPath,
+    blocked: !Boolean(upload?.uploaded),
+    reason: upload?.uploaded ? "x_preview_media_loaded" : (upload?.reason || "x_preview_media_upload_failed"),
+  };
+}
+
 async function prepareXCompositeDraft(client, platform, content) {
   const actions = [];
   actions.push({ kind: "x_ensure_compose", ...(await ensureXCompose(client)) });
+  await sleep(800);
+  const previewUpload = await uploadXPreviewMedia(client, content);
+  actions.push({ kind: "x_preview_media", ...previewUpload });
+  if (previewUpload.blocked) return actions;
   await sleep(800);
   actions.push({ kind: "x_rich_text", ...(await setPlatformRichText(client, platform, "", platformBodyWithTags(platform, content))) });
   actions.push(...(await setCompositeSchedule(client, platform, content)));

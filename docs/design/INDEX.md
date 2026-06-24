@@ -11,6 +11,7 @@ kept out of the open-source tree.
 | Project Build Principles | Project-level engineering principles | [project-build-principles.md](./project-build-principles.md) |
 | Naming System | Naming conventions for outputs and internal objects | [naming-system.md](./naming-system.md) |
 | Manual Editor Open Source Alignment | Manual editor architecture and open-source alignment | [manual-editor-open-source-plan.md](./manual-editor-open-source-plan.md) |
+| Strategy Classification Orchestration | Video classification, strategy routing, capability planning, and phased integration plan | [strategy-classification-orchestration-plan.md](./strategy-classification-orchestration-plan.md) |
 | Open Source Release Checklist | Final release, history rewrite, and credential rotation checklist | [open-source-release-checklist.md](./open-source-release-checklist.md) |
 
 ## Notes

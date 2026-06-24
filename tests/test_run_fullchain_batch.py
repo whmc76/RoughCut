@@ -21,6 +21,7 @@ def test_run_job_stops_job_after_requested_step(monkeypatch) -> None:
     monkeypatch.setattr(batch, "_resolve_batch_step_timeout_strategy", lambda step_name: "thread")
     monkeypatch.setattr(batch, "mark_step", lambda *args, **kwargs: None)
     monkeypatch.setattr(batch, "run_step_sync", lambda step_name, job_id: {"step": step_name, "job_id": job_id})
+    monkeypatch.setattr(batch, "wait_for_step_completion_if_dispatched", lambda *args, **kwargs: None)
     monkeypatch.setattr(batch, "read_step_detail", lambda job_id, step_name: f"{step_name} done")
     monkeypatch.setattr(batch, "finalize_job", lambda job_id, status, **kwargs: calls.append(("finalize", status)))
     monkeypatch.setattr(
@@ -35,6 +36,39 @@ def test_run_job_stops_job_after_requested_step(monkeypatch) -> None:
     assert result["status"] == "partial"
     assert result["step_count"] == 1
     assert calls == [("stop", "content_profile")]
+
+
+def test_run_job_waits_for_dispatched_stop_after_step(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    async def fake_collect_job_report(job_id, item, step_runs, status, *, stop_after=None):
+        return {
+            "job_id": job_id,
+            "status": status,
+            "step_runs": [run.step for run in step_runs],
+        }
+
+    monkeypatch.setattr(batch, "load_step_statuses", lambda job_id: {"probe": "done"})
+    monkeypatch.setattr(batch, "PIPELINE_STEPS", ["probe", "content_profile", "render"])
+    monkeypatch.setattr(batch, "_resolve_batch_step_timeout_strategy", lambda step_name: "thread")
+    monkeypatch.setattr(batch, "mark_step", lambda *args, **kwargs: calls.append(("mark", args[2])))
+    monkeypatch.setattr(batch, "run_step_sync", lambda step_name, job_id: {"dispatched": step_name})
+    monkeypatch.setattr(batch, "wait_for_step_completion_if_dispatched", lambda *args, **kwargs: "done")
+    monkeypatch.setattr(batch, "read_step_detail", lambda job_id, step_name: f"{step_name} done")
+    monkeypatch.setattr(batch, "finalize_job", lambda job_id, status, **kwargs: calls.append(("finalize", status)))
+    monkeypatch.setattr(
+        batch,
+        "stop_job_after_requested_step",
+        lambda job_id, *, stopped_after: calls.append(("stop", stopped_after)),
+    )
+    monkeypatch.setattr(batch, "collect_job_report", fake_collect_job_report)
+
+    result = batch.run_job("job-1", {"path": "E:/demo.mp4", "source_name": "demo.mp4"}, stop_after="content_profile")
+
+    assert result["status"] == "partial"
+    assert result["step_runs"] == ["content_profile"]
+    assert ("mark", "done") not in calls
+    assert calls == [("mark", "running"), ("stop", "content_profile")]
 
 
 def test_configure_local_event_loop_policy_does_not_force_selector_by_default(monkeypatch) -> None:
@@ -205,6 +239,7 @@ def test_run_job_finishes_done_runs_normally(monkeypatch) -> None:
     monkeypatch.setattr(batch, "_resolve_batch_step_timeout_strategy", lambda step_name: "thread")
     monkeypatch.setattr(batch, "mark_step", lambda *args, **kwargs: None)
     monkeypatch.setattr(batch, "run_step_sync", lambda step_name, job_id: {"step": step_name, "job_id": job_id})
+    monkeypatch.setattr(batch, "wait_for_step_completion_if_dispatched", lambda *args, **kwargs: None)
     monkeypatch.setattr(batch, "read_step_detail", lambda job_id, step_name: f"{step_name} done")
     monkeypatch.setattr(
         batch,
@@ -334,7 +369,7 @@ def test_resolve_batch_step_timeout_default_and_step_override(monkeypatch) -> No
     monkeypatch.delenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS_CONTENT_PROFILE", raising=False)
     monkeypatch.delenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS_RENDER", raising=False)
     assert batch._resolve_batch_step_timeout_seconds("content_profile") == 420.0
-    assert batch._resolve_batch_step_timeout_seconds("render") == 1200.0
+    assert batch._resolve_batch_step_timeout_seconds("render") == 5400.0
 
     monkeypatch.setenv("ROUGHCUT_BATCH_STEP_TIMEOUT_SECONDS", "1200")
     assert batch._resolve_batch_step_timeout_seconds("content_profile") == 1200.0
@@ -399,6 +434,7 @@ def test_run_job_calls_process_timeout_strategy(monkeypatch) -> None:
         lambda step_name, job_id, timeout_seconds: calls.append("thread"),  # noqa: B008
     )
     monkeypatch.setattr(batch, "read_step_detail", lambda job_id, step_name: "")
+    monkeypatch.setattr(batch, "wait_for_step_completion_if_dispatched", lambda *args, **kwargs: None)
     monkeypatch.setattr(batch, "_resolve_batch_step_timeout_seconds", lambda step_name: 10.0)
     monkeypatch.setattr(
         batch,
@@ -692,6 +728,83 @@ def test_build_render_diagnostics_preserves_avatar_reason_and_sync_runner() -> N
     }
 
 
+def test_build_render_diagnostics_preserves_strategy_validation() -> None:
+    diagnostics = batch._build_render_diagnostics(
+        {
+            "strategy_render_validation": {
+                "schema": "strategy_render_validation.v1",
+                "check": "strategy_timeline_preview_alignment",
+                "status": "blocking",
+                "reason": "strategy_timeline_preview_missing",
+                "strategy_type": "narrative_assembly",
+                "required": True,
+                "blocking": True,
+                "segment_count": 0,
+                "panel_count": 0,
+                "overlay_count": 1,
+                "unsafe_overlay_count": 1,
+                "blocking_reasons": [
+                    "strategy_timeline_preview_missing",
+                    "strategy_storyboard_review_missing",
+                    "strategy_overlay_subtitle_occlusion_unverified",
+                ],
+                "checks": [
+                    {
+                        "check": "strategy_timeline_preview_alignment",
+                        "status": "blocking",
+                    },
+                    {
+                        "check": "strategy_storyboard_alignment",
+                        "status": "blocking",
+                    },
+                    {
+                        "check": "strategy_overlay_subtitle_occlusion",
+                        "status": "blocking",
+                    },
+                ],
+                "review_gates": ["timeline_preview_required"],
+            }
+        },
+        [],
+    )
+
+    assert diagnostics == {
+        "strategy_render_validation": {
+            "schema": "strategy_render_validation.v1",
+            "check": "strategy_timeline_preview_alignment",
+            "status": "blocking",
+            "reason": "strategy_timeline_preview_missing",
+            "strategy_type": "narrative_assembly",
+            "required": True,
+            "blocking": True,
+            "segment_count": 0,
+            "panel_count": 0,
+            "overlay_count": 1,
+            "unsafe_overlay_count": 1,
+            "blocking_reasons": [
+                "strategy_timeline_preview_missing",
+                "strategy_storyboard_review_missing",
+                "strategy_overlay_subtitle_occlusion_unverified",
+            ],
+            "checks": [
+                {
+                    "check": "strategy_timeline_preview_alignment",
+                    "status": "blocking",
+                },
+                {
+                    "check": "strategy_storyboard_alignment",
+                    "status": "blocking",
+                },
+                {
+                    "check": "strategy_overlay_subtitle_occlusion",
+                    "status": "blocking",
+                },
+            ],
+            "review_gates": ["timeline_preview_required"],
+        }
+    }
+
+
 def test_classify_render_failure_reason_distinguishes_thread_timeout() -> None:
     reason, issue_codes = batch._classify_render_failure_reason(
         error="TimeoutError: 步骤 render 执行超过 30.0 秒",
@@ -866,7 +979,7 @@ def test_normalize_render_step_summary_for_reporting_classifies_timeout_and_stri
     assert done == {"status": "done", "detail": "ok"}
 
 
-def test_merge_render_runtime_payloads_preserves_runtime_avatar_and_ignores_cover_facts() -> None:
+def test_merge_render_runtime_payloads_preserves_runtime_avatar_and_strategy_validation_but_ignores_cover_facts() -> None:
     merged = batch._merge_render_runtime_payloads(
         {
             "packaged_mp4": "E:/demo.mp4",
@@ -883,6 +996,10 @@ def test_merge_render_runtime_payloads_preserves_runtime_avatar_and_ignores_cove
                 "reason": "cover_export_failed",
                 "detail": "封面导出失败，成片已保留但未产出封面图。",
             },
+            "strategy_render_validation": {
+                "status": "blocking",
+                "reason": "strategy_timeline_preview_missing",
+            },
         },
     )
 
@@ -892,6 +1009,10 @@ def test_merge_render_runtime_payloads_preserves_runtime_avatar_and_ignores_cove
             "status": "degraded",
             "reason": "avatar_full_track_call_timeout",
             "detail": "数字人渲染未完成，已自动回退普通成片：avatar_full_track_call_timeout>180.0s",
+        },
+        "strategy_render_validation": {
+            "status": "blocking",
+            "reason": "strategy_timeline_preview_missing",
         },
     }
 
@@ -1224,6 +1345,126 @@ def test_live_readiness_fails_when_required_checks_contract_not_all_passed() -> 
     assert any("required_checks" in item for item in readiness.failure_reasons)
 
 
+def test_live_readiness_fails_when_strategy_pipeline_coverage_is_incomplete() -> None:
+    readiness = build_live_readiness_summary(
+        {
+            "stop_after": "render",
+            "jobs": [
+                {
+                    "job_id": "job-strategy",
+                    "source_name": "demo.mp4",
+                    "status": "partial",
+                    "quality_score": 100.0,
+                    "output_path": "E:/out.mp4",
+                    "output_duration_sec": 12.0,
+                    "quality_issue_codes": [],
+                    "live_stage_validations": [],
+                }
+            ],
+            "strategy_pipeline_coverage": {
+                "evaluated_case_count": 1,
+                "declared_strategy_types": ["information_density"],
+                "covered_strategy_types": ["information_density"],
+                "missing_strategy_types": [],
+                "failed_case_ids": [],
+            },
+        },
+        golden_source_names=["demo.mp4"],
+        required_stable_runs=1,
+    )
+
+    check = readiness.checks["strategy_pipeline_coverage"]
+    assert check["passed"] is False
+    assert check["actual"] == 1
+    assert check["required"] == 5
+    assert check["missing_strategy_types"] == [
+        "step_demonstration",
+        "experience_and_mood",
+        "event_highlight",
+        "narrative_assembly",
+    ]
+    assert any("策略 fixture 覆盖未完成" in item for item in readiness.failure_reasons)
+
+
+def test_live_readiness_passes_strategy_pipeline_coverage_when_all_strategies_are_covered() -> None:
+    strategies = [
+        "information_density",
+        "step_demonstration",
+        "experience_and_mood",
+        "event_highlight",
+        "narrative_assembly",
+    ]
+    readiness = build_live_readiness_summary(
+        {
+            "stop_after": "render",
+            "jobs": [
+                {
+                    "job_id": "job-strategy",
+                    "source_name": "demo.mp4",
+                    "status": "partial",
+                    "quality_score": 100.0,
+                    "output_path": "E:/out.mp4",
+                    "output_duration_sec": 12.0,
+                    "quality_issue_codes": [],
+                    "live_stage_validations": [],
+                }
+            ],
+            "strategy_pipeline_coverage": {
+                "evaluated_case_count": 5,
+                "declared_strategy_types": strategies,
+                "covered_strategy_types": strategies,
+                "missing_strategy_types": [],
+                "failed_case_ids": [],
+            },
+        },
+        golden_source_names=["demo.mp4"],
+        required_stable_runs=1,
+    )
+
+    assert readiness.checks["strategy_pipeline_coverage"]["passed"] is True
+    assert not any("策略 fixture 覆盖未完成" in item for item in readiness.failure_reasons)
+
+
+def test_live_readiness_backfills_strategy_pipeline_coverage_from_case_rows() -> None:
+    readiness = build_live_readiness_summary(
+        {
+            "stop_after": "render",
+            "jobs": [
+                {
+                    "job_id": "job-strategy",
+                    "source_name": "demo.mp4",
+                    "status": "partial",
+                    "quality_score": 100.0,
+                    "output_path": "E:/out.mp4",
+                    "output_duration_sec": 12.0,
+                    "quality_issue_codes": [],
+                    "live_stage_validations": [],
+                }
+            ],
+            "golden_case_rows": [
+                {
+                    "case_id": "case-info",
+                    "required_check_statuses": {
+                        "strategy_pipeline_coverage": {
+                            "passed": True,
+                            "expected_strategy_types": ["information_density"],
+                            "observed_strategy_types": ["information_density"],
+                            "missing_strategy_types": [],
+                        }
+                    },
+                }
+            ],
+        },
+        golden_source_names=["demo.mp4"],
+        required_stable_runs=1,
+    )
+
+    assert readiness.checks["strategy_pipeline_coverage"]["covered_strategy_types"] == [
+        "information_density"
+    ]
+    assert readiness.checks["strategy_pipeline_coverage"]["passed"] is False
+
+
 def test_live_readiness_backfills_required_checks_summary_from_case_rows() -> None:
     summary = {
         "jobs": [
@@ -1448,6 +1689,53 @@ def test_live_readiness_extract_render_diagnostics_summary_preserves_reason_coun
     }
     assert any("render 终态稳定性" in item for item in readiness.failure_reasons)
     assert any("数字人降级" in item for item in readiness.warning_reasons)
+
+
+def test_live_readiness_fails_when_strategy_render_validation_blocks() -> None:
+    readiness = build_live_readiness_summary(
+        {
+            "job_count": 1,
+            "jobs": [
+                {
+                    "job_id": "job-strategy",
+                    "source_name": "demo.mp4",
+                    "status": "done",
+                    "output_path": "E:/out.mp4",
+                    "output_duration_sec": 12.3,
+                    "quality_score": 90.0,
+                    "quality_issue_codes": [],
+                    "live_stage_validations": [],
+                    "render_diagnostics": {
+                        "strategy_render_validation": {
+                            "status": "blocking",
+                            "reason": "strategy_timeline_preview_missing",
+                            "strategy_type": "narrative_assembly",
+                            "review_gates": ["timeline_preview_required"],
+                            "blocking": True,
+                        }
+                    },
+                }
+            ],
+        },
+        golden_source_names=["demo.mp4"],
+        previous_summaries=[],
+        required_stable_runs=1,
+        required_success_rate=0.0,
+        required_average_quality=0.0,
+    )
+
+    check = readiness.checks["render_end_state_stability"]
+    assert check["passed"] is False
+    assert check["actual"] == 1
+    assert check["failed_render_job_count"] == 0
+    assert check["strategy_validation_blocking_job_count"] == 1
+    assert check["strategy_validation_blocking_job_ids"] == ["job-strategy"]
+    assert check["strategy_validation_blocking_reasons"] == {
+        "strategy_timeline_preview_missing": 1
+    }
+    assert check["strategy_validation_strategy_types"] == {"narrative_assembly": 1}
+    assert check["strategy_validation_review_gates"] == {"timeline_preview_required": 1}
+    assert any("strategy_validation_blocking_jobs=1" in item for item in readiness.failure_reasons)
 
 
 def test_live_readiness_backfills_render_reason_counts_from_jobs_when_summary_is_legacy() -> None:

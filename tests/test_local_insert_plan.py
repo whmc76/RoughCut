@@ -119,6 +119,130 @@ def test_plan_local_insert_slot_prefers_allowed_action_window_without_llm() -> N
     assert plan["broll_window"]["start_sec"] == 9.8
 
 
+def test_plan_local_insert_slot_uses_strategy_timeline_preview_window_without_llm() -> None:
+    plan = asyncio.run(
+        plan_local_insert_slot(
+            job_id="job-strategy-preview",
+            insert_plan={
+                "candidate_assets": [
+                    {
+                        "asset_id": "insert-source-clip",
+                        "path": "source-clip.mp4",
+                        "original_name": "source-clip.mp4",
+                        "insert_archetype": "generic_broll",
+                        "insert_motion_profile": "balanced_hold",
+                        "insert_transition_style": "straight_cut",
+                        "insert_target_duration_sec": 2.0,
+                        "selection_score": 0.7,
+                        "selection_reasons": ["strategy"],
+                    }
+                ]
+            },
+            subtitle_items=[
+                {"start_time": 8.2, "end_time": 9.5, "text_final": "先交代背景。"},
+                {"start_time": 14.0, "end_time": 15.2, "text_final": "这里继续铺垫。"},
+                {"start_time": 24.0, "end_time": 25.8, "text_final": "这段适合插入原始素材。"},
+            ],
+            content_profile={
+                "content_kind": "commentary",
+                "source_context": {
+                    "product_controls": {
+                        "edit_mode": "commentary",
+                        "automation_level": "standard",
+                        "material_usage": "all_uploaded",
+                    }
+                },
+                "strategy_review_context": {
+                    "strategy_review_gates": {
+                        "pipeline_plan": {
+                            "strategy_type": "narrative_assembly",
+                            "enabled_features": ["material_insert_plan", "timeline_preview"],
+                        }
+                    },
+                    "strategy_timeline_preview": {
+                        "segments": [
+                            {
+                                "segment_id": "preview_material",
+                                "role": "material_insert",
+                                "start_time": 23.5,
+                                "end_time": 26.5,
+                                "text": "插入原始素材解释背景",
+                            }
+                        ]
+                    },
+                },
+            },
+            timeline_analysis={"hook_end_sec": 2.0, "strategy_type": "narrative_assembly"},
+            allow_llm=False,
+        )
+    )
+
+    assert plan is not None
+    assert plan["insert_after_sec"] == 25.8
+    assert plan["insert_window_source"] == "strategy_timeline_preview"
+    assert plan["insert_strategy_timeline_segment_id"] == "preview_material"
+    assert plan["insert_packaging_intent"] == "strategy_timeline_material_insert"
+    assert plan["broll_window"]["start_sec"] == 23.5
+
+
+def test_plan_local_insert_slot_ignores_timeline_preview_without_strategy_contract() -> None:
+    plan = asyncio.run(
+        plan_local_insert_slot(
+            job_id="job-strategy-preview-ignored",
+            insert_plan={
+                "asset_id": "insert-source-clip",
+                "path": "source-clip.mp4",
+                "candidate_assets": [
+                    {
+                        "asset_id": "insert-source-clip",
+                        "path": "source-clip.mp4",
+                        "original_name": "source-clip.mp4",
+                        "insert_archetype": "generic_broll",
+                        "insert_motion_profile": "balanced_hold",
+                        "insert_transition_style": "straight_cut",
+                        "insert_target_duration_sec": 2.0,
+                        "selection_score": 0.7,
+                        "selection_reasons": ["fallback"],
+                    }
+                ],
+            },
+            subtitle_items=[
+                {"start_time": 8.2, "end_time": 9.5, "text_final": "先交代背景。"},
+                {"start_time": 14.0, "end_time": 15.2, "text_final": "这里继续铺垫。"},
+                {"start_time": 24.0, "end_time": 25.8, "text_final": "这段适合插入原始素材。"},
+            ],
+            content_profile={
+                "content_kind": "commentary",
+                "source_context": {
+                    "product_controls": {
+                        "edit_mode": "commentary",
+                        "automation_level": "standard",
+                        "material_usage": "all_uploaded",
+                    }
+                },
+                "strategy_review_context": {
+                    "strategy_timeline_preview": {
+                        "segments": [
+                            {
+                                "segment_id": "preview_material",
+                                "role": "material_insert",
+                                "start_time": 23.5,
+                                "end_time": 26.5,
+                            }
+                        ]
+                    },
+                },
+            },
+            timeline_analysis={"hook_end_sec": 2.0},
+            allow_llm=False,
+        )
+    )
+
+    assert plan is not None
+    assert plan["insert_after_sec"] == 15.2
+    assert "insert_window_source" not in plan
+
+
 def test_packaging_timeline_insert_plan_normalizes_nested_payload() -> None:
     plan = packaging_timeline_insert_plan(
         {

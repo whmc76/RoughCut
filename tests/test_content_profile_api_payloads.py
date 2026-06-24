@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 from roughcut.api.jobs import (
@@ -5,12 +6,38 @@ from roughcut.api.jobs import (
     _ensure_content_understanding_payload,
     _smart_cut_rule_reasons_from_capabilities,
 )
+from roughcut.api.schemas import ContentProfileReviewOut
 from roughcut.review.content_profile import _attach_content_understanding_timed_focus_spans, assess_content_profile_automation
 from roughcut.review.downstream_context import (
     build_downstream_context,
     resolve_downstream_profile,
+    select_resolved_downstream_profile,
     strip_publication_only_profile_fields,
 )
+
+
+def test_content_profile_review_out_exposes_strategy_review_gates() -> None:
+    payload = ContentProfileReviewOut(
+        job_id="job-1",
+        status="needs_review",
+        review_step_status="pending",
+        workflow_mode="standard_edit",
+        enhancement_modes=[],
+        product_controls={},
+        strategy_review_gates={
+            "strategy_type": "narrative_assembly",
+            "review_gate_status": {
+                "blocking": True,
+                "blocking_gate_ids": ["storyboard_review"],
+            },
+        },
+        draft={},
+        final=None,
+        memory=None,
+    )
+
+    assert payload.strategy_review_gates is not None
+    assert payload.strategy_review_gates["review_gate_status"]["blocking_gate_ids"] == ["storyboard_review"]
 
 
 def test_smart_cut_rules_follow_speech_density_capability() -> None:
@@ -84,6 +111,64 @@ def test_downstream_context_strips_publication_only_profile_fields() -> None:
     assert "cover_style_label" not in resolved_profile
     assert "cover_variant_count" not in resolved_profile
     assert "cover_title" not in resolve_downstream_profile(context)
+
+
+def test_downstream_context_carries_strategy_review_artifacts() -> None:
+    context = build_downstream_context(
+        {"summary": "数字人解说热点事件"},
+        strategy_review_gates={
+            "artifact_type": "strategy_review_gates",
+            "review_gate_status": {"blocking": True, "blocking_gate_ids": ["storyboard_review"]},
+        },
+        strategy_storyboard_review={
+            "artifact_type": "strategy_storyboard_review",
+            "panels": [{"panel_id": "opening_hook", "text": "先看争议转折"}],
+        },
+        strategy_timeline_preview={
+            "artifact_type": "strategy_timeline_preview",
+            "segments": [{"segment_id": "preview_1", "text": "插入原素材"}],
+        },
+    )
+
+    resolved = resolve_downstream_profile(context)
+    strategy_context = resolved["strategy_review_context"]
+
+    assert strategy_context["schema"] == "strategy_review_context.v1"
+    assert strategy_context["strategy_review_gates"]["review_gate_status"]["blocking"] is True
+    assert strategy_context["strategy_storyboard_review"]["panels"][0]["panel_id"] == "opening_hook"
+    assert strategy_context["strategy_timeline_preview"]["segments"][0]["segment_id"] == "preview_1"
+
+
+def test_select_resolved_downstream_profile_merges_latest_strategy_artifacts() -> None:
+    now = datetime.now(timezone.utc)
+    artifacts = [
+        SimpleNamespace(
+            artifact_type="downstream_context",
+            created_at=now,
+            data_json=build_downstream_context({"summary": "base"}),
+        ),
+        SimpleNamespace(
+            artifact_type="strategy_review_gates",
+            created_at=now + timedelta(seconds=1),
+            data_json={
+                "artifact_type": "strategy_review_gates",
+                "review_gate_status": {"blocking": False, "blocking_gate_ids": []},
+            },
+        ),
+        SimpleNamespace(
+            artifact_type="strategy_review_gates",
+            created_at=now - timedelta(seconds=1),
+            data_json={
+                "artifact_type": "strategy_review_gates",
+                "review_gate_status": {"blocking": True, "blocking_gate_ids": ["storyboard_review"]},
+            },
+        ),
+    ]
+
+    resolved = select_resolved_downstream_profile(artifacts)
+
+    assert resolved["summary"] == "base"
+    assert resolved["strategy_review_context"]["strategy_review_gates"]["review_gate_status"]["blocking"] is False
 
 
 def test_edit_profile_automation_does_not_score_or_request_cover_fields() -> None:
@@ -314,6 +399,52 @@ def test_attach_content_profile_capability_orchestration_recommends_multi_materi
     assert controls["requested"]["edit_mode"] == "auto"
     assert controls["recommended"]["edit_mode"] == "multi_material"
     assert payload["capability_orchestration"]["product_controls"]["effective"]["edit_mode"] == "multi_material"
+
+
+def test_attach_content_profile_capability_orchestration_uses_strategy_classification_from_source_context() -> None:
+    job = SimpleNamespace(
+        workflow_template="commentary_focus",
+        job_flow_mode="auto",
+        packaging_snapshot_json={
+            "insert_asset_ids": ["insert-a"],
+            "music_asset_ids": ["music-a"],
+        },
+        steps=[
+            SimpleNamespace(
+                step_name="content_profile",
+                metadata_={
+                    "source_context": {
+                        "strategy_classification": {
+                            "primary_type": "avatar_commentary_remix",
+                            "production_mode": "remix",
+                            "content_tags": ["news_commentary"],
+                            "media_tags": ["script_driven", "digital_human"],
+                            "editing_signals": ["storyboard_required", "material_insert_required"],
+                            "asset_tags": ["creator_avatar", "tts_voice"],
+                            "confidence": 0.78,
+                        }
+                    }
+                },
+            )
+        ],
+    )
+    payload = _attach_content_profile_capability_orchestration(
+        {
+            "content_kind": "commentary",
+            "merged_source_names": ["main.mp4", "broll-a.mp4", "broll-b.mp4"],
+            "subject_type": "数字人解说",
+        },
+        job=job,
+    )
+
+    assert payload is not None
+    orchestration = payload["capability_orchestration"]
+    assert orchestration["strategy_type"] == "narrative_assembly"
+    assert orchestration["classification"]["primary_type"] == "avatar_commentary_remix"
+    assert orchestration["pipeline_plan"]["production_mode"] == "remix"
+    assert "avatar_render" in orchestration["pipeline_plan"]["enabled_features"]
+    assert "storyboard_review_required" in orchestration["pipeline_plan"]["review_gates"]
+    assert orchestration["capabilities"]["multi_material_assembly"] == "manual_required"
 
 
 def test_attach_content_profile_capability_orchestration_uses_create_task_rule_and_capability_choices() -> None:

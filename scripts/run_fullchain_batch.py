@@ -874,7 +874,13 @@ def run_job(job_id: str, item: dict[str, Any], *, stop_after: str | None = None)
         step_timeout_seconds = _resolve_batch_step_timeout_seconds(step_name)
         try:
             _run_step_sync_with_timeout(step_name, job_id, step_timeout_seconds)
-            mark_step(job_id, step_name, "done")
+            observed_status = wait_for_step_completion_if_dispatched(
+                job_id,
+                step_name,
+                timeout_seconds=step_timeout_seconds,
+            )
+            if observed_status != "done":
+                mark_step(job_id, step_name, "done")
             current_steps[step_name] = "done"
             detail = read_step_detail(job_id, step_name)
             step_runs.append(
@@ -940,6 +946,49 @@ def run_job(job_id: str, item: dict[str, Any], *, stop_after: str | None = None)
     return collected
 
 
+def wait_for_step_completion_if_dispatched(
+    job_id: str,
+    step_name: str,
+    *,
+    timeout_seconds: float,
+    poll_interval_seconds: float = 1.0,
+) -> str | None:
+    deadline = time.monotonic() + max(0.0, float(timeout_seconds or 0.0))
+    while True:
+        status, metadata, error_message = read_step_status_payload(job_id, step_name)
+        normalized_status = str(status or "").strip().lower()
+        if normalized_status == "running" and _step_has_dispatched_task_metadata(metadata):
+            if time.monotonic() >= deadline:
+                exc = TimeoutError(f"步骤 {step_name} 已派发到 worker 但等待完成超过 {float(timeout_seconds):.1f} 秒")
+                setattr(
+                    exc,
+                    "__batch_step_execution_metadata__",
+                    {
+                        "sync_runner_timeout_strategy": "worker_wait",
+                        "sync_runner_timeout_seconds": float(timeout_seconds),
+                        "sync_runner_step_name": str(step_name).strip().lower(),
+                    },
+                )
+                raise exc
+            time.sleep(max(0.1, float(poll_interval_seconds or 1.0)))
+            continue
+        if normalized_status == "done":
+            return "done"
+        if normalized_status in {"failed", "cancelled"}:
+            detail = str((metadata or {}).get("detail") or error_message or "").strip()
+            raise RuntimeError(f"步骤 {step_name} worker 执行失败: {detail or normalized_status}")
+        return normalized_status or None
+
+
+def _step_has_dispatched_task_metadata(metadata: dict[str, Any] | None) -> bool:
+    payload = metadata if isinstance(metadata, dict) else {}
+    return bool(
+        str(payload.get("task_id") or payload.get("last_task_id") or "").strip()
+        or str(payload.get("queue") or "").strip()
+        or str(payload.get("dispatched_at") or "").strip()
+    )
+
+
 def load_step_statuses(job_id: str) -> dict[str, str]:
     async def _load() -> dict[str, str]:
         factory = get_session_factory()
@@ -948,6 +997,26 @@ def load_step_statuses(job_id: str) -> dict[str, str]:
             return {step.step_name: step.status for step in result.scalars().all()}
 
     return asyncio.run(_load())
+
+
+def read_step_status_payload(job_id: str, step_name: str) -> tuple[str, dict[str, Any], str]:
+    async def _read() -> tuple[str, dict[str, Any], str]:
+        factory = get_session_factory()
+        async with factory() as session:
+            job_uuid = uuid.UUID(job_id)
+            result = await session.execute(
+                select(JobStep).where(JobStep.job_id == job_uuid, JobStep.step_name == step_name)
+            )
+            step = result.scalar_one_or_none()
+            if step is None:
+                return "", {}, ""
+            return (
+                str(step.status or ""),
+                dict(step.metadata_ or {}) if isinstance(step.metadata_, dict) else {},
+                str(step.error_message or ""),
+            )
+
+    return asyncio.run(_read())
 
 
 def _sync_runner_attempt_value(current_attempt: int | None, *, status: str, terminal_failure: bool) -> int:
@@ -1145,6 +1214,15 @@ def _build_render_diagnostics(
     steps: list[JobStep],
 ) -> dict[str, Any]:
     diagnostics: dict[str, Any] = {}
+    strategy_render_validation = (
+        render_payload.get("strategy_render_validation")
+        if isinstance(render_payload, dict)
+        else None
+    )
+    if isinstance(strategy_render_validation, dict) and strategy_render_validation:
+        diagnostics["strategy_render_validation"] = _normalize_strategy_render_validation_for_reporting(
+            strategy_render_validation
+        )
     avatar_result = render_payload.get("avatar_result") if isinstance(render_payload, dict) else None
     if isinstance(avatar_result, dict) and avatar_result:
         avatar_summary = _normalize_avatar_render_result_for_reporting(avatar_result)
@@ -1184,11 +1262,56 @@ def _merge_render_runtime_payloads(
 ) -> dict[str, Any]:
     merged = dict(render_payload or {}) if isinstance(render_payload, dict) else {}
     runtime = runtime_payload if isinstance(runtime_payload, dict) else {}
-    for key in ("avatar_result",):
+    for key in ("avatar_result", "strategy_render_validation"):
         value = runtime.get(key)
         if isinstance(value, dict) and value:
             merged[key] = dict(value)
     return merged
+
+
+def _normalize_strategy_render_validation_for_reporting(
+    validation: dict[str, Any] | None,
+) -> dict[str, Any]:
+    source = validation if isinstance(validation, dict) else {}
+    if not source:
+        return {}
+    summary: dict[str, Any] = {}
+    for key in (
+        "schema",
+        "check",
+        "status",
+        "reason",
+        "strategy_type",
+        "required",
+        "blocking",
+        "segment_count",
+        "panel_count",
+        "overlay_count",
+        "unsafe_overlay_count",
+        "accepted_cut_count",
+        "high_risk_cut_count",
+        "blocking_high_risk_cut_count",
+        "boundary_energy_evidence_count",
+        "boundary_frame_sample_count",
+        "boundary_waveform_sample_count",
+    ):
+        value = source.get(key)
+        if value not in (None, "", []):
+            summary[key] = value
+    blocking_reasons = [
+        str(item).strip()
+        for item in list(source.get("blocking_reasons") or [])
+        if str(item).strip()
+    ]
+    if blocking_reasons:
+        summary["blocking_reasons"] = blocking_reasons
+    checks = [dict(item) for item in list(source.get("checks") or []) if isinstance(item, dict)]
+    if checks:
+        summary["checks"] = checks
+    review_gates = [str(item).strip() for item in list(source.get("review_gates") or []) if str(item).strip()]
+    if review_gates:
+        summary["review_gates"] = review_gates
+    return summary
 
 
 def _classify_avatar_runtime_reason_category(reason: str) -> str | None:
@@ -1249,6 +1372,15 @@ def _normalize_render_diagnostics_for_reporting(
     diagnostics: dict[str, Any] | None,
 ) -> dict[str, Any]:
     payload = dict(diagnostics or {}) if isinstance(diagnostics, dict) else {}
+    strategy_render_validation = (
+        dict(payload.get("strategy_render_validation") or {})
+        if isinstance(payload.get("strategy_render_validation"), dict)
+        else {}
+    )
+    if strategy_render_validation:
+        payload["strategy_render_validation"] = _normalize_strategy_render_validation_for_reporting(
+            strategy_render_validation
+        )
     avatar_result = dict(payload.get("avatar_result") or {}) if isinstance(payload.get("avatar_result"), dict) else {}
     if avatar_result:
         payload["avatar_result"] = _normalize_avatar_render_result_for_reporting(avatar_result)
@@ -2195,6 +2327,40 @@ def render_markdown(summary: dict[str, Any]) -> str:
                         "error_metadata=" + json.dumps(avatar_result["error_metadata"], ensure_ascii=False, sort_keys=True)
                     )
                 lines.append("- render_avatar: " + ", ".join(avatar_parts))
+            strategy_render_validation = (
+                render_diagnostics.get("strategy_render_validation")
+                if isinstance(render_diagnostics.get("strategy_render_validation"), dict)
+                else {}
+            )
+            if strategy_render_validation:
+                strategy_parts = [
+                    f"{key}={strategy_render_validation[key]}"
+                    for key in (
+                        "status",
+                        "reason",
+                        "strategy_type",
+                        "required",
+                        "blocking",
+                        "segment_count",
+                        "panel_count",
+                        "overlay_count",
+                        "unsafe_overlay_count",
+                        "accepted_cut_count",
+                        "high_risk_cut_count",
+                        "blocking_high_risk_cut_count",
+                        "boundary_energy_evidence_count",
+                        "boundary_frame_sample_count",
+                        "boundary_waveform_sample_count",
+                    )
+                    if key in strategy_render_validation
+                ]
+                if strategy_render_validation.get("blocking_reasons"):
+                    strategy_parts.append(
+                        "blocking_reasons=" + ",".join(strategy_render_validation["blocking_reasons"])
+                    )
+                if strategy_render_validation.get("review_gates"):
+                    strategy_parts.append("review_gates=" + ",".join(strategy_render_validation["review_gates"]))
+                lines.append("- render_strategy_validation: " + ", ".join(strategy_parts))
             if render_step:
                 render_step_parts = [
                     f"{key}={render_step[key]}"

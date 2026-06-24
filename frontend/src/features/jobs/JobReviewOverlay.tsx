@@ -26,6 +26,8 @@ type JobReviewOverlayProps = {
   onContentFieldChange: (field: string, value: string) => void;
   onKeywordsChange: (value: string) => void;
   onConfirmProfile: () => void;
+  onConfirmStrategyGates?: (gateIds?: string[]) => void;
+  isConfirmingStrategyGates?: boolean;
   onApplyReview: (targetId: string, action: "accepted" | "rejected") => void;
   onTriggerSubtitleRerun?: (decision: NonNullable<JobActivity["decisions"]>[number]) => void;
   onApproveFinalReview?: () => void;
@@ -53,6 +55,8 @@ export function JobReviewOverlay({
   onContentFieldChange,
   onKeywordsChange,
   onConfirmProfile,
+  onConfirmStrategyGates,
+  isConfirmingStrategyGates = false,
   onApplyReview,
   onTriggerSubtitleRerun,
   onApproveFinalReview,
@@ -158,6 +162,8 @@ export function JobReviewOverlay({
               onContentFieldChange={onContentFieldChange}
               onKeywordsChange={onKeywordsChange}
               onConfirmProfile={onConfirmProfile}
+              onConfirmStrategyGates={onConfirmStrategyGates}
+              isConfirmingStrategyGates={isConfirmingStrategyGates}
             />
           ) : (
             <JobFinalReviewOverlay

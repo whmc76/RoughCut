@@ -3925,12 +3925,11 @@ def build_browser_agent_task_payload(attempt_id: str, *, plan: dict[str, Any], t
             "publication_path_contract": request_payload.get("publication_path_contract") or {},
             "publication_capability": request_payload.get("publication_capability") or {},
             "validation_contract": request_payload.get("validation_contract") or BROWSER_AGENT_PUBLICATION_RUN_CONTRACT,
-            "publish_media_source": {
-                "provider": "local_file" if requires_local_media else "link_only",
-                "mode": "platform_native_upload" if requires_local_media else "link_only",
-                "requires_public_url": False,
-                "local_file_count": local_file_count,
-            },
+            "publish_media_source": _build_browser_publish_media_source(
+                requires_local_media=requires_local_media,
+                media_items=media_items,
+                local_file_count=local_file_count,
+            ),
             "media_urls": list(request_payload.get("media_urls") or []),
             "media_items": media_items,
             "metadata": metadata,
@@ -4283,12 +4282,11 @@ def build_browser_agent_task_payload_from_attempt(attempt: PublicationAttempt) -
             "publication_path_contract": request_payload.get("publication_path_contract") or {},
             "publication_capability": request_payload.get("publication_capability") or {},
             "validation_contract": request_payload.get("validation_contract") or BROWSER_AGENT_PUBLICATION_RUN_CONTRACT,
-            "publish_media_source": {
-                "provider": "local_file" if requires_local_media else "link_only",
-                "mode": "platform_native_upload" if requires_local_media else "link_only",
-                "requires_public_url": False,
-                "local_file_count": local_file_count,
-            },
+            "publish_media_source": _build_browser_publish_media_source(
+                requires_local_media=requires_local_media,
+                media_items=media_items,
+                local_file_count=local_file_count,
+            ),
             "media_urls": list(request_payload.get("media_urls") or []),
             "media_items": media_items,
             "metadata": metadata,
@@ -7001,6 +6999,62 @@ def _iso_or_none(value: Any) -> str | None:
     return text or None
 
 
+def _normalize_x_share_link(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    match = re.match(r"^https?://(?:www\.)?youtu\.be/([A-Za-z0-9_-]{6,})(?:[/?#].*)?$", text)
+    if match:
+        return f"https://www.youtube.com/watch?v={match.group(1)}"
+    return text
+
+
+def _build_x_link_preview_media_items(cover_path: str | None) -> list[dict[str, Any]]:
+    resolved_cover_path = str(cover_path or "").strip()
+    if not resolved_cover_path:
+        return []
+    return [
+        {
+            "kind": "image",
+            "local_path": resolved_cover_path,
+            "source_url": None,
+            "uploaded_url": None,
+            "mime_type": "image/jpeg",
+            "role": "x_link_preview_cover",
+        }
+    ]
+
+
+def _build_browser_publish_media_source(
+    *,
+    requires_local_media: bool,
+    media_items: list[dict[str, Any]],
+    local_file_count: int,
+) -> dict[str, Any]:
+    preview_file_count = sum(
+        1
+        for item in media_items
+        if str(item.get("local_path") or "").strip()
+        and str(item.get("kind") or "").strip().lower() == "image"
+    )
+    if requires_local_media:
+        provider = "local_file"
+        mode = "platform_native_upload"
+    elif preview_file_count:
+        provider = "link_with_preview_media"
+        mode = "link_with_preview_media"
+    else:
+        provider = "link_only"
+        mode = "link_only"
+    return {
+        "provider": provider,
+        "mode": mode,
+        "requires_public_url": False,
+        "local_file_count": local_file_count,
+        "preview_file_count": preview_file_count,
+    }
+
+
 def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
     tags = [str(item).strip().lstrip("#") for item in (target.get("tags") or []) if str(item).strip()]
     native_topics = _coerce_publication_topic_list(target.get("native_topics"))
@@ -7018,11 +7072,11 @@ def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> d
     platform_specific_overrides = target.get("platform_specific_overrides")
     if not isinstance(platform_specific_overrides, dict):
         platform_specific_overrides = {}
-    x_share_link = str(
+    x_share_link = _normalize_x_share_link(
         platform_specific_overrides.get("x_share_link")
         or platform_specific_overrides.get("x_share_url")
         or ""
-    ).strip()
+    )
     raw_body = str(target.get("body") or "").strip()
     x_link_share = platform == "x" and bool(x_share_link) and adapter == X_LINK_SHARE_PUBLICATION_ADAPTER
     body = (
@@ -7054,6 +7108,12 @@ def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> d
         platform=platform,
         requested_media_path=raw_source_media_path or raw_media_path,
     )
+    runtime_platform_specific_overrides_for_payload = dict(platform_specific_overrides)
+    if x_link_share:
+        runtime_platform_specific_overrides_for_payload["x_share_link"] = x_share_link
+        runtime_platform_specific_overrides_for_payload["x_share_url"] = x_share_link
+        runtime_platform_specific_overrides_for_payload["x_preview_strategy"] = "cover_media_with_youtube_link"
+    x_preview_media_items = _build_x_link_preview_media_items(cover_path) if x_link_share else []
     publication_plan_signature_source = {
         "platform": platform,
         "adapter": adapter,
@@ -7174,7 +7234,7 @@ def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> d
             "schedule_publish": bool(scheduled_publish_at),
             "collection_select": bool(collection),
         },
-        "platform_specific_overrides": target.get("platform_specific_overrides") or {},
+        "platform_specific_overrides": runtime_platform_specific_overrides_for_payload,
         "media_items": [
             {
                 "kind": "video",
@@ -7185,8 +7245,12 @@ def _build_request_payload(*, plan: dict[str, Any], target: dict[str, Any]) -> d
             }
         ]
         if media_path and requires_local_media and not x_link_share
-        else [],
-        "media_urls": [media_path] if media_path and requires_local_media and not x_link_share else [],
+        else x_preview_media_items,
+        "media_urls": (
+            [media_path]
+            if media_path and requires_local_media and not x_link_share
+            else [str(item["local_path"]) for item in x_preview_media_items if str(item.get("local_path") or "").strip()]
+        ),
         "publication_plan_signature": publication_plan_signature,
         "publication_content_signature": publication_content_signature,
         "publication_dedupe_signature": publication_dedupe_signature,

@@ -280,10 +280,12 @@ async def create_jobs_for_inventory_paths(
     config_profile_id: uuid.UUID | str | None = None,
     workflow_template: str | None = None,
     product_controls: dict[str, Any] | None = None,
+    content_profile_source_context: dict[str, Any] | None = None,
     job_flow_mode: str = "auto",
     output_dir: str | None = None,
     language: str = "zh-CN",
     awaiting_initialization: bool = False,
+    allow_duplicate_file: bool = False,
 ) -> list[dict[str, str | None]]:
     results: list[dict[str, str | None]] = []
     for file_path in file_paths:
@@ -292,10 +294,12 @@ async def create_jobs_for_inventory_paths(
             workflow_template,
             language,
             product_controls=product_controls,
+            content_profile_source_context=content_profile_source_context,
             job_flow_mode=job_flow_mode,
             output_dir=output_dir,
             config_profile_id=config_profile_id,
             awaiting_initialization=awaiting_initialization,
+            allow_duplicate_file=allow_duplicate_file,
         )
         results.append({"path": file_path, "job_id": job_id or None})
     return results
@@ -968,11 +972,13 @@ async def create_merged_job_for_inventory_paths(
     config_profile_id: uuid.UUID | str | None = None,
     workflow_template: str | None = None,
     product_controls: dict[str, Any] | None = None,
+    content_profile_source_context: dict[str, Any] | None = None,
     job_flow_mode: str = "auto",
     output_dir: str | None = None,
     language: str = "zh-CN",
     allow_related_profiles: bool = False,
     awaiting_initialization: bool = False,
+    allow_duplicate_file: bool = False,
 ) -> str | None:
     if len(file_paths) < 2:
         raise ValueError("At least two files are required to create a merged job")
@@ -984,13 +990,14 @@ async def create_merged_job_for_inventory_paths(
 
     temp_output_dir = DEFAULT_TEST_OUTPUT_ROOT / "watch-merged"
     output_path = temp_output_dir / f"watch_merge_{uuid.uuid4().hex}.mp4"
-    content_profile_source_context = (
+    merged_source_context = (
         {
+            **(content_profile_source_context or {}),
             "allow_related_profiles": True,
             "merged_source_names": [path.name for path in resolved_paths],
         }
         if allow_related_profiles
-        else None
+        else content_profile_source_context
     )
 
     merged_path = await _merge_videos_for_job(resolved_paths, output_path=output_path)
@@ -1003,8 +1010,9 @@ async def create_merged_job_for_inventory_paths(
             job_flow_mode=job_flow_mode,
             output_dir=output_dir,
             config_profile_id=config_profile_id,
-            content_profile_source_context=content_profile_source_context,
+            content_profile_source_context=merged_source_context,
             awaiting_initialization=awaiting_initialization,
+            allow_duplicate_file=allow_duplicate_file,
         )
     finally:
         if merged_path.exists():

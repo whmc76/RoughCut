@@ -12,8 +12,8 @@ x-asr-common: &asr-common
     NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}
     NVIDIA_DRIVER_CAPABILITIES: ${NVIDIA_DRIVER_CAPABILITIES:-compute,utility}
   volumes:
-    - ${ASR_MATRIX_HF_CACHE:-C:/sample-workspace/RoughCut/.model-cache/huggingface}:/models/huggingface
-    - ${ASR_MATRIX_MODELSCOPE_CACHE:-C:/sample-workspace/RoughCut/.model-cache/modelscope}:/models/modelscope
+    - ${ASR_MATRIX_HF_CACHE:-./.model-cache/huggingface}:/models/huggingface
+    - ${ASR_MATRIX_MODELSCOPE_CACHE:-./.model-cache/modelscope}:/models/modelscope
     - ./output/test/asr-alignment-matrix/samples:/bench/asr-alignment-matrix/samples:ro
     - ./output/test/asr-bench/samples:/bench/asr-bench/samples:ro
   restart: unless-stopped
@@ -116,8 +116,8 @@ services:
       HF_HOME: /models/huggingface
       HUGGINGFACE_HUB_CACHE: /models/huggingface/hub
       MODELSCOPE_CACHE: /models/modelscope
-      QWEN3_ASR_MODEL: ${QWEN3_ASR_MODEL:-/models/modelscope/Qwen/Qwen3-ASR-1.7B}
-      QWEN3_ASR_ALIGNER: ${QWEN3_ASR_ALIGNER:-/models/modelscope/Qwen/Qwen3-ForcedAligner-0.6B}
+      QWEN3_ASR_MODEL: ${QWEN3_ASR_MODEL:-/models/modelscope/Qwen/Qwen3-ASR-1___7B}
+      QWEN3_ASR_ALIGNER: ${QWEN3_ASR_ALIGNER:-/models/modelscope/Qwen/Qwen3-ForcedAligner-0___6B}
       QWEN3_ASR_DEVICE_MAP: ${QWEN3_ASR_DEVICE_MAP:-cuda:0}
       QWEN3_ASR_IDLE_UNLOAD_SECONDS: ${ASR_MATRIX_IDLE_UNLOAD_SECONDS:-10}
       NVIDIA_VISIBLE_DEVICES: ${NVIDIA_VISIBLE_DEVICES:-all}

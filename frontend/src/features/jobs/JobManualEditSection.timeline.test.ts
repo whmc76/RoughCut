@@ -7,6 +7,7 @@ import {
   autoSmartCutRuleRanges,
   blockAutoSmartCutRangesForSmartDeleteReview,
   buildManualEditChangeList,
+  buildManualStrategyPreviewMarkers,
   buildManualTimelineSemanticMarkers,
   resolveManualTimelineSemanticFocus,
   buildSourceTranscriptProjectedBaseline,
@@ -251,6 +252,34 @@ describe("manual editor timeline mapping", () => {
       end: 5,
     });
     expect(markers[1].leftPercent).toBe(20);
+  });
+
+  it("builds strategy preview markers from manual editor session strategy context", () => {
+    const markers = buildManualStrategyPreviewMarkers(
+      {
+        strategy_timeline_preview: {
+          segments: [
+            {
+              segment_id: "preview_material",
+              role: "material_insert",
+              start_time: 12,
+              end_time: 16,
+              text: "插入原始素材解释背景",
+            },
+          ],
+        },
+      },
+      40,
+    );
+
+    expect(markers).toHaveLength(1);
+    expect(markers[0]).toMatchObject({
+      segmentId: "preview_material",
+      label: "素材插入",
+      start: 12,
+      end: 16,
+      leftPercent: 30,
+    });
   });
 
   it("resolves the active semantic focus around the current source time", () => {

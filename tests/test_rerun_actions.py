@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 
 from roughcut.pipeline.orchestrator import PIPELINE_STEPS
@@ -23,6 +24,42 @@ def test_editing_step_runner_rejects_legacy_platform_package_entrypoint() -> Non
         assert "Unknown step" in str(exc)
     else:
         raise AssertionError("platform_package must not be executable through the editing step runner")
+
+
+def test_run_step_sync_disposes_async_session_state_in_step_event_loop(monkeypatch) -> None:
+    events: list[tuple[str, int | None]] = []
+
+    async def fake_run_render(job_id: str) -> dict:
+        events.append((f"run:{job_id}", id(asyncio.get_running_loop())))
+        return {"ok": True}
+
+    async def fake_reset_session_state() -> None:
+        events.append(("async_reset", id(asyncio.get_running_loop())))
+
+    monkeypatch.setattr(steps, "reset_session_state_sync", lambda: events.append(("sync_reset", None)))
+    monkeypatch.setattr(steps, "reset_session_state", fake_reset_session_state)
+    monkeypatch.setattr(steps, "run_render", fake_run_render)
+
+    assert steps.run_step_sync("render", "job-1") == {"ok": True}
+
+    assert events[0] == ("sync_reset", None)
+    assert events[1][0] == "run:job-1"
+    assert events[2][0] == "async_reset"
+    assert events[1][1] == events[2][1]
+
+
+def test_run_step_sync_preserves_step_result_when_async_session_dispose_fails(monkeypatch) -> None:
+    async def fake_run_render(job_id: str) -> dict:
+        return {"job_id": job_id}
+
+    async def fake_reset_session_state() -> None:
+        raise RuntimeError("dispose failed")
+
+    monkeypatch.setattr(steps, "reset_session_state_sync", lambda: None)
+    monkeypatch.setattr(steps, "reset_session_state", fake_reset_session_state)
+    monkeypatch.setattr(steps, "run_render", fake_run_render)
+
+    assert steps.run_step_sync("render", "job-2") == {"job_id": "job-2"}
 
 
 def test_editing_worker_does_not_expose_legacy_platform_package_task() -> None:

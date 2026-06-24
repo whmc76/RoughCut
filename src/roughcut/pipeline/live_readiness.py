@@ -12,6 +12,15 @@ from roughcut.pipeline.render_diagnostics import (
 from roughcut.pipeline.rerun_actions import MANUAL_REVIEW_ONLY_ISSUES
 
 
+DEFAULT_REQUIRED_STRATEGY_TYPES = (
+    "information_density",
+    "step_demonstration",
+    "experience_and_mood",
+    "event_highlight",
+    "narrative_assembly",
+)
+
+
 @dataclass
 class BatchLiveReadiness:
     status: str
@@ -256,6 +265,127 @@ def _manual_editor_apply_semantics_stable_passes(candidate: dict[str, Any]) -> b
     return semantics_summary["failed_case_count"] == 0
 
 
+def _extract_strategy_pipeline_coverage_summary(summary: dict[str, Any]) -> dict[str, Any] | None:
+    payload = summary.get("strategy_pipeline_coverage")
+    if not isinstance(payload, dict):
+        case_rows = [dict(item) for item in list(summary.get("golden_case_rows") or []) if isinstance(item, dict)]
+        declared: set[str] = set()
+        covered: set[str] = set()
+        missing: set[str] = set()
+        failed_case_ids: list[str] = []
+        evaluated_case_count = 0
+        for row in case_rows:
+            statuses = row.get("required_check_statuses") if isinstance(row.get("required_check_statuses"), dict) else {}
+            status = (
+                statuses.get("strategy_pipeline_coverage")
+                if isinstance(statuses.get("strategy_pipeline_coverage"), dict)
+                else {}
+            )
+            if not status:
+                continue
+            expected = {
+                str(item or "").strip()
+                for item in list(status.get("expected_strategy_types") or [])
+                if str(item or "").strip()
+            }
+            observed = {
+                str(item or "").strip()
+                for item in list(status.get("observed_strategy_types") or [])
+                if str(item or "").strip()
+            }
+            row_missing = {
+                str(item or "").strip()
+                for item in list(status.get("missing_strategy_types") or [])
+                if str(item or "").strip()
+            }
+            evaluated_case_count += 1
+            declared.update(expected)
+            covered.update(expected.intersection(observed))
+            missing.update(row_missing or (expected - observed))
+            if not bool(status.get("passed")):
+                case_id = str(row.get("case_id") or "").strip()
+                if case_id:
+                    failed_case_ids.append(case_id)
+        if evaluated_case_count <= 0:
+            return None
+        default_missing = [
+            strategy
+            for strategy in DEFAULT_REQUIRED_STRATEGY_TYPES
+            if strategy not in covered
+        ]
+        missing = set([*default_missing, *missing])
+        return {
+            "evaluated_case_count": evaluated_case_count,
+            "declared_strategy_types": sorted(declared),
+            "covered_strategy_types": sorted(covered),
+            "missing_strategy_types": sorted(missing),
+            "failed_case_ids": failed_case_ids,
+        }
+    evaluated_case_count = int(payload.get("evaluated_case_count") or 0)
+    declared = [
+        str(item or "").strip()
+        for item in list(payload.get("declared_strategy_types") or [])
+        if str(item or "").strip()
+    ]
+    covered = [
+        str(item or "").strip()
+        for item in list(payload.get("covered_strategy_types") or [])
+        if str(item or "").strip()
+    ]
+    explicit_missing = [
+        str(item or "").strip()
+        for item in list(payload.get("missing_strategy_types") or [])
+        if str(item or "").strip()
+    ]
+    missing = [
+        strategy
+        for strategy in DEFAULT_REQUIRED_STRATEGY_TYPES
+        if strategy not in set(covered)
+    ]
+    missing = list(dict.fromkeys([*missing, *explicit_missing]))
+    return {
+        "evaluated_case_count": evaluated_case_count,
+        "declared_strategy_types": declared,
+        "covered_strategy_types": covered,
+        "missing_strategy_types": missing,
+        "failed_case_ids": [
+            str(item or "").strip()
+            for item in list(payload.get("failed_case_ids") or [])
+            if str(item or "").strip()
+        ],
+    }
+
+
+def _strategy_pipeline_coverage_gate_passed(summary: dict[str, Any]) -> bool:
+    coverage_summary = _extract_strategy_pipeline_coverage_summary(summary)
+    if coverage_summary is None:
+        return True
+    return (
+        int(coverage_summary.get("evaluated_case_count") or 0) > 0
+        and not coverage_summary.get("missing_strategy_types")
+        and not coverage_summary.get("failed_case_ids")
+    )
+
+
+def _strategy_pipeline_coverage_stable_passes(candidate: dict[str, Any]) -> bool:
+    return _strategy_pipeline_coverage_gate_passed(candidate)
+
+
+def _int_count_map(value: Any) -> dict[str, int]:
+    return {
+        str(key): int(count)
+        for key, count in dict(value or {}).items()
+        if str(key).strip()
+    }
+
+
+def _increment_count(counts: dict[str, int], key: str) -> None:
+    normalized = str(key or "").strip()
+    if not normalized:
+        return
+    counts[normalized] = counts.get(normalized, 0) + 1
+
+
 def _extract_render_diagnostics_summary(summary: dict[str, Any]) -> dict[str, Any] | None:
     payload = summary.get("render_diagnostics_summary")
     if isinstance(payload, dict):
@@ -263,6 +393,8 @@ def _extract_render_diagnostics_summary(summary: dict[str, Any]) -> dict[str, An
             evaluated_jobs = int(payload.get("evaluated_job_count") or 0)
             failed_render_jobs = int(payload.get("failed_render_job_count") or 0)
             avatar_degraded_jobs = int(payload.get("avatar_degraded_job_count") or 0)
+            strategy_validation_evaluated_jobs = int(payload.get("strategy_validation_evaluated_job_count") or 0)
+            strategy_validation_blocking_jobs = int(payload.get("strategy_validation_blocking_job_count") or 0)
         except (TypeError, ValueError):
             return None
         if evaluated_jobs <= 0:
@@ -291,6 +423,22 @@ def _extract_render_diagnostics_summary(summary: dict[str, Any]) -> dict[str, An
                 for key, value in dict(payload.get("avatar_degraded_reason_categories") or {}).items()
                 if str(key).strip()
             },
+            "strategy_validation_evaluated_job_count": strategy_validation_evaluated_jobs,
+            "strategy_validation_blocking_job_count": strategy_validation_blocking_jobs,
+            "strategy_validation_blocking_job_ids": [
+                str(item)
+                for item in list(payload.get("strategy_validation_blocking_job_ids") or [])
+                if str(item).strip()
+            ],
+            "strategy_validation_blocking_reasons": _int_count_map(
+                payload.get("strategy_validation_blocking_reasons")
+            ),
+            "strategy_validation_strategy_types": _int_count_map(
+                payload.get("strategy_validation_strategy_types")
+            ),
+            "strategy_validation_review_gates": _int_count_map(
+                payload.get("strategy_validation_review_gates")
+            ),
         }
         jobs_fallback_summary = _extract_render_diagnostics_summary({"jobs": summary.get("jobs") or []})
         if jobs_fallback_summary is not None:
@@ -303,6 +451,12 @@ def _extract_render_diagnostics_summary(summary: dict[str, Any]) -> dict[str, An
                 "avatar_degraded_job_ids",
                 "avatar_degraded_reasons",
                 "avatar_degraded_reason_categories",
+                "strategy_validation_evaluated_job_count",
+                "strategy_validation_blocking_job_count",
+                "strategy_validation_blocking_job_ids",
+                "strategy_validation_blocking_reasons",
+                "strategy_validation_strategy_types",
+                "strategy_validation_review_gates",
             ):
                 fallback_value = jobs_fallback_summary.get(key)
                 current_value = result.get(key)
@@ -318,16 +472,49 @@ def _extract_render_diagnostics_summary(summary: dict[str, Any]) -> dict[str, An
     failed_render_reasons: dict[str, int] = {}
     avatar_degraded_reasons: dict[str, int] = {}
     avatar_degraded_reason_categories: dict[str, int] = {}
+    strategy_validation_blocking_job_ids: list[str] = []
+    strategy_validation_blocking_reasons: dict[str, int] = {}
+    strategy_validation_strategy_types: dict[str, int] = {}
+    strategy_validation_review_gates: dict[str, int] = {}
+    strategy_validation_evaluated_job_count = 0
     evaluated_job_count = 0
     for job in jobs:
         diagnostics = job.get("render_diagnostics") if isinstance(job.get("render_diagnostics"), dict) else {}
         diagnostics = _normalize_legacy_render_diagnostics(diagnostics)
         render_step = diagnostics.get("render_step") if isinstance(diagnostics.get("render_step"), dict) else {}
         avatar_result = diagnostics.get("avatar_result") if isinstance(diagnostics.get("avatar_result"), dict) else {}
-        if not render_step and not avatar_result:
+        strategy_render_validation = (
+            diagnostics.get("strategy_render_validation")
+            if isinstance(diagnostics.get("strategy_render_validation"), dict)
+            else {}
+        )
+        if not render_step and not avatar_result and not strategy_render_validation:
             continue
         evaluated_job_count += 1
         job_id = str(job.get("job_id") or job.get("source_name") or "").strip()
+        if strategy_render_validation:
+            strategy_validation_evaluated_job_count += 1
+            _increment_count(
+                strategy_validation_strategy_types,
+                str(strategy_render_validation.get("strategy_type") or "").strip(),
+            )
+            for gate in list(strategy_render_validation.get("review_gates") or []):
+                _increment_count(strategy_validation_review_gates, str(gate).strip())
+            validation_status = str(strategy_render_validation.get("status") or "").strip().lower()
+            if bool(strategy_render_validation.get("blocking")) or validation_status == "blocking":
+                if job_id:
+                    strategy_validation_blocking_job_ids.append(job_id)
+                blocking_reasons = [
+                    str(item).strip()
+                    for item in list(strategy_render_validation.get("blocking_reasons") or [])
+                    if str(item).strip()
+                ]
+                if not blocking_reasons:
+                    blocking_reasons = [
+                        str(strategy_render_validation.get("reason") or "strategy_render_validation_blocked").strip()
+                    ]
+                for reason in blocking_reasons:
+                    _increment_count(strategy_validation_blocking_reasons, reason)
         if str(render_step.get("status") or "").strip().lower() == "failed" and job_id:
             failed_render_job_ids.append(job_id)
             reason = str(render_step.get("reason") or "").strip()
@@ -355,11 +542,35 @@ def _extract_render_diagnostics_summary(summary: dict[str, Any]) -> dict[str, An
         "avatar_degraded_job_ids": avatar_degraded_job_ids,
         "avatar_degraded_reasons": avatar_degraded_reasons,
         "avatar_degraded_reason_categories": avatar_degraded_reason_categories,
+        "strategy_validation_evaluated_job_count": strategy_validation_evaluated_job_count,
+        "strategy_validation_blocking_job_count": len(strategy_validation_blocking_job_ids),
+        "strategy_validation_blocking_job_ids": strategy_validation_blocking_job_ids,
+        "strategy_validation_blocking_reasons": strategy_validation_blocking_reasons,
+        "strategy_validation_strategy_types": strategy_validation_strategy_types,
+        "strategy_validation_review_gates": strategy_validation_review_gates,
     }
 
 
 def _normalize_legacy_render_diagnostics(diagnostics: dict[str, Any] | None) -> dict[str, Any]:
     payload = dict(diagnostics or {}) if isinstance(diagnostics, dict) else {}
+    strategy_render_validation = (
+        dict(payload.get("strategy_render_validation") or {})
+        if isinstance(payload.get("strategy_render_validation"), dict)
+        else {}
+    )
+    if strategy_render_validation:
+        strategy_render_validation["review_gates"] = [
+            str(item).strip()
+            for item in list(strategy_render_validation.get("review_gates") or [])
+            if str(item).strip()
+        ]
+        strategy_render_validation["blocking_reasons"] = [
+            str(item).strip()
+            for item in list(strategy_render_validation.get("blocking_reasons") or [])
+            if str(item).strip()
+        ]
+        payload["strategy_render_validation"] = strategy_render_validation
+
     avatar_result = dict(payload.get("avatar_result") or {}) if isinstance(payload.get("avatar_result"), dict) else {}
     if avatar_result:
         reason = str(avatar_result.get("reason") or "").strip().lower()
@@ -379,7 +590,10 @@ def _render_diagnostics_gate_passed(summary: dict[str, Any]) -> bool:
     render_summary = _extract_render_diagnostics_summary(summary)
     if render_summary is None:
         return True
-    return render_summary["failed_render_job_count"] == 0
+    return (
+        render_summary["failed_render_job_count"] == 0
+        and int(render_summary.get("strategy_validation_blocking_job_count") or 0) == 0
+    )
 
 
 def _render_diagnostics_stable_passes(candidate: dict[str, Any]) -> bool:
@@ -580,11 +794,27 @@ def build_live_readiness_summary(
             "failed_case_count": semantics_summary["failed_case_count"],
             "failed_case_ids": list(semantics_summary["failed_case_ids"]),
         }
+    strategy_coverage_summary = _extract_strategy_pipeline_coverage_summary(summary)
+    if strategy_coverage_summary is not None:
+        checks["strategy_pipeline_coverage"] = {
+            "passed": _strategy_pipeline_coverage_gate_passed(summary),
+            "actual": len(strategy_coverage_summary["covered_strategy_types"]),
+            "required": len(DEFAULT_REQUIRED_STRATEGY_TYPES),
+            "evaluated_case_count": strategy_coverage_summary["evaluated_case_count"],
+            "declared_strategy_types": list(strategy_coverage_summary["declared_strategy_types"]),
+            "covered_strategy_types": list(strategy_coverage_summary["covered_strategy_types"]),
+            "missing_strategy_types": list(strategy_coverage_summary["missing_strategy_types"]),
+            "failed_case_ids": list(strategy_coverage_summary["failed_case_ids"]),
+        }
     render_summary = _extract_render_diagnostics_summary(summary)
     if render_summary is not None:
+        render_blocking_count = (
+            render_summary["failed_render_job_count"]
+            + int(render_summary.get("strategy_validation_blocking_job_count") or 0)
+        )
         checks["render_end_state_stability"] = {
             "passed": _render_diagnostics_gate_passed(summary),
-            "actual": render_summary["failed_render_job_count"],
+            "actual": render_blocking_count,
             "required": 0,
             "evaluated_job_count": render_summary["evaluated_job_count"],
             "failed_render_job_count": render_summary["failed_render_job_count"],
@@ -597,6 +827,24 @@ def build_live_readiness_summary(
             "avatar_degraded_job_ids": list(render_summary["avatar_degraded_job_ids"]),
             "avatar_degraded_reasons": dict(render_summary.get("avatar_degraded_reasons") or {}),
             "avatar_degraded_reason_categories": dict(render_summary.get("avatar_degraded_reason_categories") or {}),
+            "strategy_validation_evaluated_job_count": int(
+                render_summary.get("strategy_validation_evaluated_job_count") or 0
+            ),
+            "strategy_validation_blocking_job_count": int(
+                render_summary.get("strategy_validation_blocking_job_count") or 0
+            ),
+            "strategy_validation_blocking_job_ids": list(
+                render_summary.get("strategy_validation_blocking_job_ids") or []
+            ),
+            "strategy_validation_blocking_reasons": dict(
+                render_summary.get("strategy_validation_blocking_reasons") or {}
+            ),
+            "strategy_validation_strategy_types": dict(
+                render_summary.get("strategy_validation_strategy_types") or {}
+            ),
+            "strategy_validation_review_gates": dict(
+                render_summary.get("strategy_validation_review_gates") or {}
+            ),
         }
     risk_alignment_summary = _extract_risk_alignment_summary(summary)
     if risk_alignment_summary is not None:
@@ -649,6 +897,7 @@ def build_live_readiness_summary(
         )
         candidate_checks_ok = _required_checks_stable_passes(candidate)
         candidate_manual_editor_ok = _manual_editor_apply_semantics_stable_passes(candidate)
+        candidate_strategy_coverage_ok = _strategy_pipeline_coverage_stable_passes(candidate)
         candidate_render_ok = _render_diagnostics_stable_passes(candidate)
         candidate_risk_alignment_ok = _risk_alignment_stable_passes(candidate)
         candidate_blocking_quality_jobs, _ = _blocking_quality_issue_job_ids(candidate_jobs)
@@ -660,6 +909,7 @@ def build_live_readiness_summary(
             and not candidate_p0
             and candidate_checks_ok
             and candidate_manual_editor_ok
+            and candidate_strategy_coverage_ok
             and candidate_render_ok
             and candidate_risk_alignment_ok
             and not candidate_blocking_quality_jobs
@@ -696,9 +946,16 @@ def build_live_readiness_summary(
                 failure_reasons.append(
                     f"manual_editor_apply_semantics 未通过：failed_cases={check.get('failed_case_count', 0)}"
                 )
+            elif name == "strategy_pipeline_coverage":
+                failure_reasons.append(
+                    "策略 fixture 覆盖未完成：missing="
+                    + ",".join(list(check.get("missing_strategy_types") or []))
+                )
             elif name == "render_end_state_stability":
                 failure_reasons.append(
-                    f"render 终态稳定性未通过：failed_render_jobs={check.get('actual', 0)}"
+                    "render 终态稳定性未通过："
+                    f"failed_render_jobs={check.get('failed_render_job_count', 0)}，"
+                    f"strategy_validation_blocking_jobs={check.get('strategy_validation_blocking_job_count', 0)}"
                 )
             elif name == "risk_alignment_contract":
                 failure_reasons.append(
