@@ -112,10 +112,10 @@ from roughcut.edit.editorial_timeline import (
     resolve_editorial_keep_segments,
 )
 from roughcut.edit.render_plan import (
-    render_plan_ai_director,
     render_plan_automatic_gate,
     render_plan_avatar_commentary,
     render_plan_delivery,
+    render_plan_dialogue_polish,
     render_plan_loudness,
     render_plan_manual_editor,
     render_plan_video_transform,
@@ -222,6 +222,7 @@ from roughcut.pipeline.steps import (
     _resolve_projection_split_profile,
     _estimate_render_subtitle_global_offset,
     _drop_clustered_unmatched_render_subtitles,
+    _drop_tail_compressed_duplicate_render_subtitles,
     _render_subtitle_alignment_local_cluster_metrics,
     _render_subtitle_alignment_gate_passes,
     _retime_render_subtitle_items_from_alignment_audit,
@@ -2177,6 +2178,56 @@ def test_drop_clustered_unmatched_render_subtitles_keeps_matched_bad_rows_for_re
     assert [item["text_final"] for item in cleaned] == ["字幕0", "字幕1", "字幕4", "字幕5"]
 
 
+def test_drop_tail_compressed_duplicate_render_subtitles_removes_short_repeated_tail_rows() -> None:
+    subtitle_items = [
+        {"start_time": 581.92, "end_time": 591.36, "text_final": "同时它的肩带是做了一定的加宽也是起到了一定的减轻肩膀压力"},
+        {"start_time": 591.36, "end_time": 597.12, "text_final": "力的效果吧这款单肩包说实话"},
+        {"start_time": 597.12, "end_time": 600.496, "text_final": "你只有亲自到手去上身"},
+        {"start_time": 600.496, "end_time": 604.256, "text_final": "真正的背一次就是在你日常场景啊"},
+        {"start_time": 604.336, "end_time": 605.296, "text_final": "真正的使用一次"},
+        {"start_time": 605.296, "end_time": 608.976, "text_final": "你能理解到它到底有多么的实用和优秀"},
+        {
+            "start_time": 609.696,
+            "end_time": 610.446,
+            "text_final": "力啊同时它的肩带是做了一定的加宽啊嗯也是起到了一定的这种减轻肩膀压力的效果",
+        },
+        {
+            "start_time": 610.446,
+            "end_time": 610.931,
+            "text_final": "吧嗯这款单肩包说实话你只有亲自到手去上身呃实真正的背一次就是在你",
+        },
+        {
+            "start_time": 610.971,
+            "end_time": 611.495,
+            "text_final": "日常场景啊真正的使用一次你才能理解到它到底有多么的实用和优秀嗯虽然它不如",
+        },
+        {"start_time": 611.535, "end_time": 616.975, "text_final": "我们这些机能包啊那么花里胡哨"},
+    ]
+    audit = {
+        "events": [
+            {
+                "matched": True,
+                "subtitle_start_sec": item["start_time"],
+                "subtitle_end_sec": item["end_time"],
+            }
+            for item in subtitle_items
+        ]
+    }
+
+    cleaned, summary = _drop_tail_compressed_duplicate_render_subtitles(subtitle_items, audit)
+
+    assert summary["dropped_tail_duplicate_indexes"] == [6, 7, 8]
+    assert [item["text_final"] for item in cleaned] == [
+        "同时它的肩带是做了一定的加宽也是起到了一定的减轻肩膀压力",
+        "力的效果吧这款单肩包说实话",
+        "你只有亲自到手去上身",
+        "真正的背一次就是在你日常场景啊",
+        "真正的使用一次",
+        "你能理解到它到底有多么的实用和优秀",
+        "我们这些机能包啊那么花里胡哨",
+    ]
+
+
 @pytest.mark.asyncio
 async def test_map_subtitles_to_packaged_timeline_reuses_local_section_profile_context(
     monkeypatch: pytest.MonkeyPatch,
@@ -2887,7 +2938,7 @@ def test_render_plan_helpers_return_defaults_and_safe_copies() -> None:
         "loudness": {"target_lufs": -14.0, "peak_limit": -1.0},
         "voice_processing": {"noise_reduction": False},
         "avatar_commentary": {"mode": "segmented_audio_passthrough"},
-        "ai_director": {"enabled": True},
+        "dialogue_polish": {"enabled": True},
     }
 
     gate = render_plan_automatic_gate(payload)
@@ -2896,7 +2947,7 @@ def test_render_plan_helpers_return_defaults_and_safe_copies() -> None:
     loudness = render_plan_loudness(payload)
     voice_processing = render_plan_voice_processing(payload)
     avatar = render_plan_avatar_commentary(payload)
-    ai_director = render_plan_ai_director(payload)
+    dialogue_polish = render_plan_dialogue_polish(payload)
 
     gate["blocking"] = False
     manual_editor["video_transform"]["aspect_ratio"] = "1:1"
@@ -2904,7 +2955,7 @@ def test_render_plan_helpers_return_defaults_and_safe_copies() -> None:
     loudness["target_lufs"] = -20.0
     voice_processing["noise_reduction"] = True
     avatar["mode"] = "mutated"
-    ai_director["enabled"] = False
+    dialogue_polish["enabled"] = False
 
     assert render_plan_workflow_preset(payload) == "knowledge_explainer"
     assert render_plan_workflow_preset({}, default="fallback") == "fallback"
@@ -2914,7 +2965,7 @@ def test_render_plan_helpers_return_defaults_and_safe_copies() -> None:
     assert payload["loudness"]["target_lufs"] == -14.0
     assert payload["voice_processing"]["noise_reduction"] is False
     assert payload["avatar_commentary"]["mode"] == "segmented_audio_passthrough"
-    assert payload["ai_director"]["enabled"] is True
+    assert payload["dialogue_polish"]["enabled"] is True
 
 
 def test_render_plan_video_transform_merges_manual_editor_and_delivery_defaults() -> None:
@@ -2972,7 +3023,7 @@ def test_manual_editor_render_plan_context_reads_render_plan_once() -> None:
             "manual_editor": {"video_transform": {"rotation_manual": True, "rotation_cw": 90}},
             "loudness": {"target_lufs": -18.0},
             "voice_processing": {"noise_reduction": True},
-            "ai_director": {"enabled": True},
+            "dialogue_polish": {"enabled": True},
             "avatar_commentary": {"mode": "segmented_audio_passthrough"},
             "strategy_review_context": {
                 "strategy_review_gates": {
@@ -3012,7 +3063,7 @@ def test_manual_editor_render_plan_context_reads_render_plan_once() -> None:
     }
     assert context["loudness"] == {"target_lufs": -18.0}
     assert context["voice_processing"] == {"noise_reduction": True}
-    assert context["ai_director_plan"] == {"enabled": True}
+    assert context["dialogue_polish_plan"] == {"enabled": True}
     assert context["avatar_commentary_plan"] == {"mode": "segmented_audio_passthrough"}
     assert context["strategy_review_context"] == {
         "strategy_review_gates": {
@@ -12786,6 +12837,7 @@ def test_manual_editor_change_contract_reuses_scope_for_rerun_and_detail() -> No
         "timeline_changed": False,
         "subtitle_changed": True,
         "video_transform_changed": False,
+        "packaging_changed": False,
         "rotation_changed": False,
     }
     assert _manual_editor_rerun_issue_code(contract) == "manual_subtitle_edit"
@@ -12800,6 +12852,7 @@ def test_manual_editor_rerun_plan_skips_no_material_change_rerun() -> None:
             "timeline_changed": False,
             "subtitle_changed": False,
             "video_transform_changed": False,
+            "packaging_changed": False,
             "rotation_changed": False,
         }
     )
@@ -12819,6 +12872,7 @@ def test_manual_editor_change_contract_consistency_accepts_no_material_and_rejec
             "timeline_changed": False,
             "subtitle_changed": False,
             "video_transform_changed": False,
+            "packaging_changed": False,
             "rotation_changed": False,
         }
     ) is True
@@ -12829,9 +12883,32 @@ def test_manual_editor_change_contract_consistency_accepts_no_material_and_rejec
             "timeline_changed": False,
             "subtitle_changed": True,
             "video_transform_changed": False,
+            "packaging_changed": False,
             "rotation_changed": False,
         }
     ) is False
+
+
+def test_manual_editor_change_plan_detects_packaging_only_edits() -> None:
+    plan = _manual_editor_change_plan(
+        previous_keep_segments=[{"start": 0.0, "end": 2.0}],
+        next_keep_segments=[{"start": 0.0, "end": 2.0}],
+        subtitle_overrides=[],
+        previous_hyperframes_options={"progress_bar": False},
+        next_hyperframes_options={"progress_bar": True},
+    )
+    contract = _manual_editor_change_contract(plan)
+
+    assert plan["change_scope"] == "packaging"
+    assert plan["render_strategy"] == "packaging_only_render"
+    assert plan["packaging_changed"] is True
+    assert manual_editor_change_contract_is_consistent(contract) is True
+    assert _manual_editor_rerun_plan(contract) == {
+        "rerun_start_step": "render",
+        "rerun_steps": ["render"],
+    }
+    assert _manual_editor_rerun_issue_code(contract) == "manual_packaging_edit"
+    assert "外挂包装设置已保存" in _manual_editor_apply_detail(contract["change_scope"])
 
 
 def test_manual_editor_change_plan_detects_timeline_edits() -> None:
@@ -13185,7 +13262,7 @@ def test_manual_editor_can_open_after_edit_plan_before_full_pipeline_done() -> N
         SimpleNamespace(step_name="subtitle_translation", status="skipped"),
         SimpleNamespace(step_name="content_profile", status="done"),
         SimpleNamespace(step_name="summary_review", status="done"),
-        SimpleNamespace(step_name="ai_director", status="done"),
+        SimpleNamespace(step_name="dialogue_polish", status="done"),
         SimpleNamespace(step_name="avatar_commentary", status="done"),
         SimpleNamespace(step_name="edit_plan", status="done"),
         SimpleNamespace(step_name="render", status="pending"),
@@ -13208,7 +13285,7 @@ def test_manual_editor_can_open_when_review_gate_pending_after_edit_plan() -> No
         SimpleNamespace(step_name="subtitle_translation", status="skipped"),
         SimpleNamespace(step_name="content_profile", status="done"),
         SimpleNamespace(step_name="summary_review", status="pending"),
-        SimpleNamespace(step_name="ai_director", status="skipped"),
+        SimpleNamespace(step_name="dialogue_polish", status="skipped"),
         SimpleNamespace(step_name="avatar_commentary", status="done"),
         SimpleNamespace(step_name="edit_plan", status="done"),
         SimpleNamespace(step_name="render", status="pending"),
@@ -13231,7 +13308,7 @@ def test_manual_editor_prerequisites_ignore_optional_creative_steps_before_edit_
         SimpleNamespace(step_name="subtitle_translation", status="done"),
         SimpleNamespace(step_name="content_profile", status="done"),
         SimpleNamespace(step_name="summary_review", status="done"),
-        SimpleNamespace(step_name="ai_director", status="skipped"),
+        SimpleNamespace(step_name="dialogue_polish", status="skipped"),
         SimpleNamespace(step_name="avatar_commentary", status="pending"),
         SimpleNamespace(step_name="edit_plan", status="done"),
         SimpleNamespace(step_name="render", status="pending"),
@@ -13254,7 +13331,7 @@ def test_manual_editor_save_blocks_when_render_is_running() -> None:
         SimpleNamespace(step_name="subtitle_translation", status="skipped"),
         SimpleNamespace(step_name="content_profile", status="done"),
         SimpleNamespace(step_name="summary_review", status="done"),
-        SimpleNamespace(step_name="ai_director", status="done"),
+        SimpleNamespace(step_name="dialogue_polish", status="done"),
         SimpleNamespace(step_name="avatar_commentary", status="done"),
         SimpleNamespace(step_name="edit_plan", status="done"),
         SimpleNamespace(step_name="render", status="running"),

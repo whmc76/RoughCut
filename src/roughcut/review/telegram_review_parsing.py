@@ -56,13 +56,14 @@ REVIEW_KEYWORD_TOKEN_LIMIT = 10
 WORKFLOW_MODE_ALIASES = {
     "standard_edit": ("standard_edit", "标准成片", "标准剪辑", "标准模式"),
     "long_text_to_video": ("long_text_to_video", "长文本转视频", "长文转视频", "图文转视频", "文稿转视频"),
+    "smart_director": ("smart_director", "智能导演", "智能导演模式", "prompt-to-video", "prompt to video", "一句话成片"),
 }
 ENHANCEMENT_MODE_ALIASES = {
     "multilingual_translation": ("multilingual_translation", "多语言翻译", "多语翻译"),
     "auto_review": ("auto_review", "自动审核", "自动复核"),
     "avatar_commentary": ("avatar_commentary", "数字人解说", "数字人口播", "虚拟人口播"),
     "ai_effects": ("ai_effects", "智能剪辑特效", "ai特效", "ai 特效"),
-    "ai_director": ("ai_director", "ai导演", "ai 导演"),
+    "dialogue_polish": ("dialogue_polish", "智能台词润色", "智能润色", "台词润色", "重配音", "ai导演", "ai 导演"),
 }
 KEYWORDS_CAPTURE_PATTERNS = (
     re.compile(r"(?:关键词|关键字)\s*(?:改成|改为|更新为|补充|增加|加上|设为|设置为|[:：])\s*([^\n。！？!?]+)"),

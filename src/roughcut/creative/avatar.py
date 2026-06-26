@@ -18,9 +18,11 @@ def build_avatar_commentary_plan(
     source_name: str,
     subtitle_items: list[dict[str, Any]],
     content_profile: dict[str, Any] | None,
-    ai_director_plan: dict[str, Any] | None = None,
+    dialogue_polish_plan: dict[str, Any] | None = None,
     presenter_id: str | None = None,
+    ai_director_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    _ = dialogue_polish_plan or ai_director_plan
     settings = get_settings()
     effective_content_profile = apply_source_identity_constraints(
         content_profile or {},

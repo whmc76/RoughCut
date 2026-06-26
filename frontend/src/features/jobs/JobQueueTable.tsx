@@ -22,7 +22,138 @@ import {
   workflowModeLabel,
 } from "./constants";
 
+type JobActionIconName =
+  | "alert"
+  | "chevron-left"
+  | "chevron-right"
+  | "download"
+  | "folder"
+  | "pen"
+  | "play"
+  | "refresh"
+  | "rocket"
+  | "scissors"
+  | "spinner"
+  | "trash"
+  | "x";
+
 const FILENAME_DESCRIPTION_PREFIX_RE = /^(?:任务说明依据文件名|Task description from filename)[:：]\s*/i;
+
+function JobActionIcon({ name }: { name: JobActionIconName }) {
+  const commonProps = {
+    className: "job-action-icon",
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 2,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true,
+  };
+
+  switch (name) {
+    case "alert":
+      return (
+        <svg {...commonProps}>
+          <path d="M10.3 3.4 2.4 17.1a2 2 0 0 0 1.7 3h15.8a2 2 0 0 0 1.7-3L13.7 3.4a2 2 0 0 0-3.4 0Z" />
+          <path d="M12 9v4" />
+          <path d="M12 17h.01" />
+        </svg>
+      );
+    case "chevron-left":
+      return (
+        <svg {...commonProps}>
+          <path d="m15 18-6-6 6-6" />
+        </svg>
+      );
+    case "chevron-right":
+      return (
+        <svg {...commonProps}>
+          <path d="m9 18 6-6-6-6" />
+        </svg>
+      );
+    case "download":
+      return (
+        <svg {...commonProps}>
+          <path d="M12 3v12" />
+          <path d="m7 10 5 5 5-5" />
+          <path d="M5 21h14" />
+        </svg>
+      );
+    case "folder":
+      return (
+        <svg {...commonProps}>
+          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z" />
+        </svg>
+      );
+    case "pen":
+      return (
+        <svg {...commonProps}>
+          <path d="m16 4 4 4" />
+          <path d="M14 6 5 15l-1 5 5-1 9-9" />
+        </svg>
+      );
+    case "play":
+      return (
+        <svg {...commonProps}>
+          <path d="m8 5 11 7-11 7Z" fill="currentColor" stroke="none" />
+        </svg>
+      );
+    case "refresh":
+      return (
+        <svg {...commonProps}>
+          <path d="M20 12a8 8 0 0 1-13.5 5.8" />
+          <path d="M4 12A8 8 0 0 1 17.5 6.2" />
+          <path d="M17 2v5h5" />
+          <path d="M7 22v-5H2" />
+        </svg>
+      );
+    case "rocket":
+      return (
+        <svg {...commonProps}>
+          <path d="M4.5 16.5c-1 1-1.5 2.5-1.5 4.5 2 0 3.5-.5 4.5-1.5" />
+          <path d="M9 15 4 10l6-1 5-5c2.5-2.5 5-2 6-1-1 1-1.5 3.5-4 6l-5 5-1 6-5-5Z" />
+          <path d="M15 9h.01" />
+        </svg>
+      );
+    case "scissors":
+      return (
+        <svg {...commonProps}>
+          <path d="m14 7-8.5 8.5" />
+          <path d="m14 17-8.5-8.5" />
+          <circle cx="4.5" cy="6.5" r="2.5" />
+          <circle cx="4.5" cy="17.5" r="2.5" />
+          <path d="M15 7h6" />
+          <path d="M15 17h6" />
+        </svg>
+      );
+    case "spinner":
+      return (
+        <svg {...commonProps}>
+          <path d="M21 12a9 9 0 0 1-9 9" />
+          <path d="M12 3a9 9 0 0 1 9 9" opacity="0.35" />
+          <path d="M3 12a9 9 0 0 1 9-9" opacity="0.2" />
+        </svg>
+      );
+    case "trash":
+      return (
+        <svg {...commonProps}>
+          <path d="M3 6h18" />
+          <path d="M8 6V4h8v2" />
+          <path d="M19 6 18 20H6L5 6" />
+          <path d="M10 11v5" />
+          <path d="M14 11v5" />
+        </svg>
+      );
+    case "x":
+      return (
+        <svg {...commonProps}>
+          <path d="M18 6 6 18" />
+          <path d="m6 6 12 12" />
+        </svg>
+      );
+  }
+}
 
 function splitVideoDescription(value: string | null | undefined): {
   filenameDescription: string | null;
@@ -106,20 +237,19 @@ function isTerminalJob(job: Job) {
   return job.status === "done" || job.status === "failed" || job.status === "cancelled";
 }
 
-function reviewPreviewText(job: Job, t: (key: string) => string) {
+function queueSummaryText(job: Job, t: (key: string) => string) {
   const { manualDescription, filenameDescription } = splitVideoDescription(job.video_description);
-  const cutEvidenceSummary = formatCutEvidenceSummary(job.timeline_diagnostics);
   if (job.awaiting_manual_edit) {
-    return job.review_detail || "智能辅助模式预处理已完成。当前百分比不是渲染进度；任务仍在等待手动调整页正式提交渲染。";
+    return "等待手动调整";
   }
   if (job.status !== "needs_review") {
     return job.content_summary || job.content_subject || manualDescription || filenameDescription || t("jobs.queue.noSummary");
   }
   const reviewStep = resolvePendingReviewStep(job);
   if (reviewStep?.step_name === "final_review") {
-    return job.quality_summary || cutEvidenceSummary || job.review_detail || "成片质量门发现异常，处理后继续生成平台文案。";
+    return "成片异常待处理";
   }
-  return job.content_summary || job.content_subject || job.review_detail || "内容异常门发现阻塞问题，处理后继续剪辑与渲染。";
+  return "内容异常待处理";
 }
 
 function enhancementBadgeLabel(job: Job, mode: string) {
@@ -146,15 +276,21 @@ function isPublicationJob(job: Job) {
   return job.queue_task_kind === "publication";
 }
 
+function isSmartDirectorJob(job: Job) {
+  return job.queue_task_kind === "smart_director";
+}
+
 function taskKindLabel(job: Job) {
   if (isPublicationJob(job)) return "发布任务";
-  if (isRemixProductionJob(job)) return "影视二创";
+  if (isRemixProductionJob(job)) return "解说二创";
+  if (isSmartDirectorJob(job)) return "智能导演";
   return "剪辑任务";
 }
 
 function JobQueueThumbnail({ job }: { job: Job }) {
-  const contentThumbnailUrl = api.contentProfileThumbnailUrl(job.id, 0, job.updated_at);
-  const coverThumbnailUrl = api.jobCoverThumbnailUrl(job.id, job.updated_at);
+  const thumbnailVersion = job.queue_thumbnail_version || job.updated_at;
+  const contentThumbnailUrl = api.contentProfileThumbnailUrl(job.id, 0, thumbnailVersion);
+  const coverThumbnailUrl = api.jobCoverThumbnailUrl(job.id, thumbnailVersion);
   const [source, setSource] = useState<"cover" | "content_profile" | "fallback">(
     job.queue_thumbnail_source === "cover" ? "cover" : "content_profile",
   );
@@ -212,7 +348,6 @@ type JobQueueTableProps = {
   onRestart: (jobId: string) => void;
   onStartRemixProduction?: (jobId: string, force?: boolean) => void;
   onDelete: (jobId: string) => void;
-  onOpenRemixProduction?: (jobId: string) => void;
 };
 
 export function JobQueueTable({
@@ -239,7 +374,6 @@ export function JobQueueTable({
   onRestart,
   onStartRemixProduction,
   onDelete,
-  onOpenRemixProduction,
   onPageChange,
 }: JobQueueTableProps) {
   const { t } = useI18n();
@@ -310,16 +444,16 @@ export function JobQueueTable({
             {jobs.map((job) => {
               const isPublicationTask = isPublicationJob(job);
               const isRemixTask = isRemixProductionJob(job);
+              const isSmartDirectorTask = isSmartDirectorJob(job);
               const showReviewAction = job.status === "needs_review";
               const highlightedReviewAction = isHighlightedReviewAction(job);
-              const { filenameDescription } = splitVideoDescription(job.video_description);
-              const cutEvidenceSummary = formatCutEvidenceSummary(job.timeline_diagnostics);
               const showPreview = job.status === "done";
               const showOpenFolder = job.status === "done";
               const showDownload = job.status === "done" && !isLocalOutputJob(job);
               const showCancel = !isRemixTask && hasJobStarted(job) && !isTerminalJob(job);
               const manualEditStatus = awaitingManualEditLabel(job, t);
               const manualEditorReady = canOpenManualEditorFromQueue(job);
+              const hasCutEvidenceSummary = Boolean(formatCutEvidenceSummary(job.timeline_diagnostics));
 
               return (
                 <tr
@@ -328,6 +462,7 @@ export function JobQueueTable({
                     selectedJobId === job.id && "selected-row",
                     isPublicationTask && "job-row-publication",
                     isRemixTask && "job-row-remix-production",
+                    isSmartDirectorTask && "job-row-smart-director",
                   )}
                   onClick={() => onSelect(job.id)}
                 >
@@ -335,16 +470,14 @@ export function JobQueueTable({
                     <div className="job-file-cell">
                       <JobQueueThumbnail job={job} />
                       <div className="job-file-copy">
-                        <div className="row-title">{job.source_name}</div>
-                        <div className="muted line-clamp-2">{reviewPreviewText(job, t)}</div>
-                        {job.status !== "needs_review" && filenameDescription ? (
-                          <div className="compact-top">
-                            <span className="status-pill pending">{t("jobs.queue.filenameDerivedBadge")}</span>
-                            <span className="muted"> {filenameDescription}</span>
-                          </div>
-                        ) : null}
-                        <div className="mode-chip-list compact-top">
-                          <span className={classNames("mode-chip", job.queue_task_kind === "publication" ? "publication" : "planned")}>
+                        <div className="row-title job-queue-title">{job.source_name}</div>
+                        <div className="muted line-clamp-1 job-queue-summary">{queueSummaryText(job, t)}</div>
+                        <div className="mode-chip-list job-queue-primary-tags">
+                          <span className={classNames(
+                            "mode-chip",
+                            job.queue_task_kind === "publication" ? "publication" : "planned",
+                            isSmartDirectorTask && "smart-director",
+                          )}>
                             {taskKindLabel(job)}
                           </span>
                           <span className="mode-chip planned">{jobFlowModeLabel(job.job_flow_mode || "auto")}</span>
@@ -354,41 +487,28 @@ export function JobQueueTable({
                               {enhancementBadgeLabel(job, mode)}
                             </span>
                           ))}
-                        </div>
-                        {job.auto_review_mode_enabled && job.auto_review_summary ? (
-                          <div className="compact-top">
+                          {job.auto_review_mode_enabled && job.auto_review_summary ? (
                             <span className={`status-pill ${autoReviewTone(job.auto_review_status)}`}>
                               {autoReviewBadgeLabel(job)}
                             </span>
-                            <span className="muted"> {job.auto_review_summary}</span>
-                          </div>
-                        ) : null}
-                        {cutEvidenceSummary ? (
-                          <div className="compact-top">
-                            <span className="status-pill pending">剪辑证据</span>
-                            <span className="muted"> {cutEvidenceSummary}</span>
-                          </div>
-                        ) : null}
-                        {job.avatar_delivery_summary ? (
-                          <div className="compact-top">
-                            <span className={`status-pill ${job.avatar_delivery_status || "pending"}`}>
-                              数字人
-                            </span>
-                            <span className="muted"> {job.avatar_delivery_summary}</span>
-                          </div>
-                        ) : null}
+                          ) : null}
+                          {hasCutEvidenceSummary ? <span className="status-pill pending">剪辑证据</span> : null}
+                          {job.avatar_delivery_summary ? (
+                            <span className={`status-pill ${job.avatar_delivery_status || "pending"}`}>数字人</span>
+                          ) : null}
+                        </div>
                       </div>
                     </div>
                   </td>
                   <td>
-                    <div className="form-stack compact-top">
+                    <div className="form-stack compact-top job-queue-status-stack">
                       <span className={`status-chip ${jobStatusTone(job)}`}>{reviewStatusLabel(job)}</span>
                       {isPublicationTask ? <span className="status-pill publication">发布任务</span> : null}
-                      {isRemixTask ? <span className="status-pill pending">影视二创</span> : null}
+                      {isRemixTask ? <span className="status-pill pending">解说二创</span> : null}
                       {manualEditStatus ? (
                         <span className="status-pill pending">{manualEditStatus}</span>
                       ) : null}
-                      {job.publication_summary ? <span className="muted">{job.publication_summary}</span> : null}
+                      {job.publication_summary ? <span className="muted line-clamp-1">{job.publication_summary}</span> : null}
                       <span className="muted">{job.progress_percent ?? 0}%</span>
                     </div>
                   </td>
@@ -408,149 +528,160 @@ export function JobQueueTable({
                       {showReviewAction ? (
                         <button
                           className={classNames(
-                            "button ghost button-sm",
+                            "button ghost button-sm job-icon-button",
                             "job-review-cta",
                             highlightedReviewAction && "job-review-cta-active",
                           )}
                           type="button"
+                          aria-label={reviewActionLabel(job, t)}
+                          title={reviewActionLabel(job, t)}
                           onClick={(event) => {
                             event.stopPropagation();
                             onOpenReview?.(job.id);
                           }}
                         >
-                          {reviewActionLabel(job, t)}
+                          <JobActionIcon name="alert" />
                         </button>
                       ) : null}
                       {job.status === "done" && !isPublicationTask ? (
                         <button
-                          className="button button-sm job-publish-cta"
+                          className="button button-sm job-icon-button job-publish-cta"
                           type="button"
+                          aria-label="一键发布"
+                          title="一键发布"
                           onClick={(event) => {
                             event.stopPropagation();
                             onPublish?.(job.id);
                           }}
                         >
                           <span className="job-publish-cta-rgb-mark" aria-hidden="true" />
-                          <span>一键发布</span>
-                        </button>
-                      ) : null}
-                      {isRemixTask ? (
-                        <button
-                          className="button button-sm"
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onOpenRemixProduction?.(job.id);
-                          }}
-                        >
-                          查看队列
+                          <JobActionIcon name="rocket" />
                         </button>
                       ) : null}
                       {isRemixTask && ["pending", "failed", "cancelled", "done"].includes(job.status) ? (
                         <button
-                          className="button primary button-sm job-restart-cta"
+                          className="button primary button-sm job-action-text-button job-restart-cta"
                           type="button"
                           disabled={isStartingRemixProduction}
+                          aria-label={isStartingRemixProduction ? "启动中" : job.status === "pending" ? "开始" : t("jobs.actions.restart")}
+                          title={isStartingRemixProduction ? "启动中" : job.status === "pending" ? "开始" : t("jobs.actions.restart")}
                           onClick={(event) => {
                             event.stopPropagation();
                             onStartRemixProduction?.(job.id, job.status !== "pending");
                           }}
                         >
-                          {isStartingRemixProduction
-                            ? "启动中"
-                            : job.status === "pending" ? "开始" : t("jobs.actions.restart")}
+                          {job.status === "pending" ? "START" : "RESTART"}
                         </button>
                       ) : null}
                       {!isPublicationTask && !isRemixTask ? (
                         <Link
                           className={classNames(
-                            "button button-sm",
+                            "button button-sm job-icon-button",
                             manualEditorReady ? "job-manual-edit-cta" : "ghost",
                           )}
                           to={`/jobs/${job.id}/manual-editor`}
+                          aria-label="手动调整"
+                          title="手动调整"
                           onMouseEnter={() => prefetchManualEditor(job.id)}
                           onFocus={() => prefetchManualEditor(job.id)}
                           onClick={(event) => event.stopPropagation()}
                         >
-                          手动调整
+                          <JobActionIcon name="scissors" />
                         </Link>
                       ) : null}
                       {showPreview ? (
                         <button
-                          className="button ghost button-sm"
+                          className="button ghost button-sm job-icon-button job-preview-cta"
                           type="button"
+                          aria-label={t("jobs.actions.preview")}
+                          title={t("jobs.actions.preview")}
                           onClick={(event) => {
                             event.stopPropagation();
                             onPreview?.(job.id);
                           }}
                         >
-                          {t("jobs.actions.preview")}
+                          <JobActionIcon name="play" />
                         </button>
                       ) : null}
                       {showOpenFolder ? (
                         <button
-                          className="button ghost button-sm"
+                          className="button ghost button-sm job-icon-button"
                           type="button"
                           disabled={isOpeningFolder}
+                          aria-label={t("jobs.actions.openFolder")}
+                          title={t("jobs.actions.openFolder")}
                           onClick={(event) => {
                             event.stopPropagation();
                             onOpenFolder(job.id);
                           }}
                         >
-                          {t("jobs.actions.openFolder")}
+                          <JobActionIcon name={isOpeningFolder ? "spinner" : "folder"} />
                         </button>
                       ) : null}
                       {showDownload ? (
                         <button
-                          className="button ghost button-sm"
+                          className="button ghost button-sm job-icon-button"
                           type="button"
+                          aria-label={t("jobs.actions.download")}
+                          title={t("jobs.actions.download")}
                           onClick={(event) => {
                             event.stopPropagation();
                             onDownload(job.id);
                           }}
                         >
-                          {t("jobs.actions.download")}
+                          <JobActionIcon name="download" />
                         </button>
                       ) : null}
                       {showCancel ? (
                         <button
-                          className="button ghost button-sm"
+                          className="button ghost button-sm job-icon-button"
                           type="button"
                           disabled={isCancelling}
+                          aria-label={isCancelling ? t("jobs.actions.cancelling") : t("jobs.actions.cancel")}
+                          title={isCancelling ? t("jobs.actions.cancelling") : t("jobs.actions.cancel")}
                           onClick={(event) => {
                             event.stopPropagation();
                             onCancel(job.id);
                           }}
                         >
-                          {isCancelling ? t("jobs.actions.cancelling") : t("jobs.actions.cancel")}
+                          <JobActionIcon name={isCancelling ? "spinner" : "x"} />
                         </button>
                       ) : null}
                       {!isRemixTask ? (
                         <>
                           <button
-                            className="button primary button-sm job-restart-cta"
+                            className="button primary button-sm job-action-text-button job-restart-cta"
                             type="button"
                             disabled={isRestarting || !isRestartableJobStatus(job.status)}
+                            aria-label={
+                              isRestarting
+                                ? t("jobs.actions.restarting")
+                                : isRestartableJobStatus(job.status) ? t("jobs.actions.restart") : t("jobs.actions.restartUnavailable")
+                            }
                             onClick={(event) => {
                               event.stopPropagation();
                               onRestart(job.id);
                             }}
-                            title={isRestartableJobStatus(job.status) ? undefined : t(getRestartUnavailableReason(job.status))}
+                            title={
+                              isRestarting
+                                ? t("jobs.actions.restarting")
+                                : isRestartableJobStatus(job.status) ? t("jobs.actions.restart") : t(getRestartUnavailableReason(job.status))
+                            }
                           >
-                            {isRestarting
-                              ? t("jobs.actions.restarting")
-                              : isRestartableJobStatus(job.status) ? t("jobs.actions.restart") : t("jobs.actions.restartUnavailable")}
+                            RESTART
                           </button>
                           <button
-                            className="button danger button-sm"
+                            className="button danger button-sm job-icon-button"
                             type="button"
                             disabled={isDeleting}
+                            aria-label={isDeleting ? t("jobs.actions.deleting") : t("jobs.actions.delete")}
+                            title={isDeleting ? t("jobs.actions.deleting") : t("jobs.actions.delete")}
                             onClick={(event) => {
                               event.stopPropagation();
                               onDelete(job.id);
                             }}
                           >
-                            {isDeleting ? t("jobs.actions.deleting") : t("jobs.actions.delete")}
+                            <JobActionIcon name={isDeleting ? "spinner" : "trash"} />
                           </button>
                         </>
                       ) : null}
@@ -567,20 +698,24 @@ export function JobQueueTable({
           <div className="muted">{`每页 ${pageSize} 条，当前 ${jobs.length} 条`}</div>
           <div className="toolbar">
             <button
-              className="button ghost button-sm"
+              className="button ghost button-sm job-icon-button"
               type="button"
               disabled={!canGoPrev}
+              aria-label="上一页"
+              title="上一页"
               onClick={() => onPageChange(currentPage - 1)}
             >
-              上一页
+              <JobActionIcon name="chevron-left" />
             </button>
             <button
-              className="button button-sm"
+              className="button button-sm job-icon-button"
               type="button"
               disabled={!canGoNext}
+              aria-label="下一页"
+              title="下一页"
               onClick={() => onPageChange(currentPage + 1)}
             >
-              下一页
+              <JobActionIcon name="chevron-right" />
             </button>
           </div>
         </div>

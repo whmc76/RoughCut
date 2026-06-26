@@ -50,7 +50,7 @@ TARGET_STEPS = [
     "subtitle_translation",
     "content_profile",
     "summary_review",
-    "ai_director",
+    "dialogue_polish",
     "avatar_commentary",
     "edit_plan",
     "render",
@@ -224,7 +224,7 @@ def run_job_renderless(job_id: str) -> tuple[list[StepRun], str]:
             )
             continue
 
-        if step_name in {"render", "final_review", "ai_director", "avatar_commentary"}:
+        if step_name in {"render", "final_review", "dialogue_polish", "avatar_commentary"}:
             started = time.perf_counter()
             mark_step(job_id, step_name, "skipped")
             step_runs.append(

@@ -40,26 +40,41 @@ _WORKFLOW_MODES: Final[dict[str, dict[str, object]]] = {
         ],
         "delivery_scope": "规划中，暂不开放任务创建",
     },
+    "smart_director": {
+        "key": "smart_director",
+        "kind": "workflow",
+        "status": "active",
+        "title": "智能导演",
+        "tagline": "输入一句创意或主题，由 LLM 自动扩写剧本、生成分镜，并编排素材生成成片。",
+        "summary": "面向 prompt-to-video 创作：用户给一段话后，系统先生成剧本和分镜脚本，再规划网络素材检索、原创图/视频生成、配音、字幕、包装和最终剪辑。",
+        "suitable_for": ["一句话短片创作", "热点选题快速成片", "知识/商业脚本视频化", "无现成素材的概念片"],
+        "pipeline_outline": [
+            "LLM 将一句话扩展为完整剧本、旁白、镜头表和分镜脚本",
+            "按分镜自动规划网络素材检索、素材授权检查、原创图片或视频生成",
+            "生成配音、字幕、音乐和 Hyperframes 包装后拼接剪辑成片",
+        ],
+        "delivery_scope": "创作模式已开放；纯文本无源文件提交仍需要生成任务入口或素材生成链路落地。",
+    },
     "remix_auto_commentary": {
         "key": "remix_auto_commentary",
         "kind": "workflow",
         "status": "active",
-        "title": "影视二创 · 自动精简解说",
+        "title": "解说二创 · 自动精简解说",
         "tagline": "用户只给原片时，自动理解剧情、提炼观点、生成精简解说并剪辑包装。",
-        "summary": "这是影视二创的默认模式。没有用户文字输入时，系统根据原片 ASR、画面和题材自动生成短解说、定位重点片段、生成 TTS、字幕和包装。",
+        "summary": "这是解说二创的默认模式。没有用户文字输入时，系统根据原片 ASR、画面和题材自动生成短解说、定位重点片段、生成 TTS、字幕和包装。",
         "suitable_for": ["批量二创", "无成稿脚本", "快速生产解说版", "需要自动提炼剧情重点的影视动画原片"],
         "pipeline_outline": [
             "Source-ASR 和画面理解识别剧情、角色、场景和可讲解主题",
             "LLM 自动生成精简解说脚本和剪辑结构",
             "TTS、字幕、Hyperframes 包装和原片重点片段组合输出",
         ],
-        "delivery_scope": "影视二创默认创建模式",
+        "delivery_scope": "解说二创默认创建模式",
     },
     "remix_llm_plan": {
         "key": "remix_llm_plan",
         "kind": "workflow",
         "status": "active",
-        "title": "影视二创 · 智能方案编排",
+        "title": "解说二创 · 智能方案编排",
         "tagline": "用户输入想法、方向或半成稿时，由 LLM 分析意图并编排剪辑方案。",
         "summary": "当用户填写文字但没有明确选择完整脚本模式时使用。文本会被当作剪辑方案、风格要求或半成稿，由 LLM 判断如何生成解说、选镜头和安排包装。",
         "suitable_for": ["有剪辑要求", "有主题方向", "半成稿脚本", "需要按用户方案组织剧情重点"],
@@ -68,13 +83,13 @@ _WORKFLOW_MODES: Final[dict[str, dict[str, object]]] = {
             "根据原片 ASR 和画面证据生成剪辑编排与解说策略",
             "按方案生成 TTS、字幕、原片插入和 Hyperframes 包装",
         ],
-        "delivery_scope": "影视二创有文字输入时的智能编排模式",
+        "delivery_scope": "解说二创有文字输入时的智能编排模式",
     },
     "script_footage_remix": {
         "key": "script_footage_remix",
         "kind": "workflow",
         "status": "active",
-        "title": "影视二创 · 按脚本文案讲解插入",
+        "title": "解说二创 · 按脚本文案讲解插入",
         "tagline": "完整保留用户成稿脚本，按文案主题定位原片画面，并按意图插入原片声画片段。",
         "summary": "适用于用户已经提供打磨好的解说文案。默认不压缩文案，不删句，只通过 TTS-ASR 对齐字幕、Source-ASR 定位原片剧情点。",
         "suitable_for": ["完整成稿文案", "文案引用原片", "育儿/科普解读脚本", "需要保留用户脚本文字的二创"],
@@ -83,43 +98,42 @@ _WORKFLOW_MODES: Final[dict[str, dict[str, object]]] = {
             "TTS-ASR 对齐字幕时间戳，Source-ASR 定位原片剧情段落",
             "LLM 只在文案语义需要时插入完整原片声画桥段",
         ],
-        "delivery_scope": "影视二创脚本保真模式",
+        "delivery_scope": "解说二创脚本保真模式",
     },
 }
 
 _ENHANCEMENT_MODES: Final[dict[str, dict[str, object]]] = {
+    "dialogue_polish": {
+        "key": "dialogue_polish",
+        "kind": "enhancement",
+        "status": "active",
+        "title": "智能台词润色",
+        "tagline": "在全片剪辑完成后优化台词、补顺逻辑，并按新台词重新 TTS 配音。",
+        "summary": "这是成片后增强能力，不再承担前置导演规划。它读取已收敛的字幕、内容画像和剪辑结构，生成全片台词润色方案、重配音段落和 TTS 请求，用于替换或增强原旁白。",
+        "suitable_for": ["口播逻辑不够顺", "需要统一旁白风格", "剪完后重配音", "全片台词精修"],
+        "pipeline_outline": [
+            "在 edit_plan 和 chapter_analysis 后读取全片剪辑结构",
+            "润色关键台词、补足逻辑桥和结尾收口，尽量保留原说话人口吻",
+            "用 IndexTTS2、RunningHub 或其他真实语音克隆服务完成重新 TTS 配音并回贴时间线",
+        ],
+        "providers": ["IndexTTS2", "RunningHub API", "其他语音克隆 API"],
+        "default_delivery": "可作为全片剪辑后的台词增强与重配音步骤启用。",
+    },
     "multilingual_translation": {
         "key": "multilingual_translation",
         "kind": "enhancement",
         "status": "active",
         "title": "多语言翻译",
-        "tagline": "在字幕完整校对后生成多语言字幕版本，默认先产出英文译文。",
+        "tagline": "在字幕完整校对后生成可选第二语言译文，默认按英文/中文自动互译。",
         "summary": "翻译步骤会放在字幕纠错之后，优先使用校正后的字幕文本做多语言输出，降低术语和品牌误译概率。",
         "suitable_for": ["海外分发", "双语字幕", "英文版视频包装", "后续多语言再创作"],
         "pipeline_outline": [
-            "先完成字幕后处理与术语纠错，拿到较干净的中文字幕",
-            "基于校正后的字幕生成英文译文，后续可扩展更多目标语言",
+            "先完成字幕后处理与术语纠错，拿到较干净的主语言字幕",
+            "基于校正后的字幕生成所选第二语言译文，默认中文转英文、英文转中文",
             "将译文作为独立 artifact 保留，供包装、出海分发和再创作使用",
         ],
         "providers": ["内置推理模型", "OpenAI 兼容推理接口", "MiniMax 兼容推理接口"],
-        "default_delivery": "默认生成英文字幕版本，后续可扩展语言选择",
-    },
-    "auto_review": {
-        "key": "auto_review",
-        "kind": "enhancement",
-        "status": "active",
-        "selectable": False,
-        "title": "异常门自动放行",
-        "tagline": "默认全自动跑完，只在内容、字幕或质量门发现阻塞异常时暂停。",
-        "summary": "内容画像与成片核对不再作为常规人工节点；低置信度进入自动质量复跑，阻塞异常才进入人工处理。",
-        "suitable_for": ["稳定栏目", "高重复结构任务", "批量值班自动剪辑", "夜间无人值守任务"],
-        "pipeline_outline": [
-            "完成内容画像后评估阻塞原因",
-            "未命中阻塞异常时自动确认摘要并续跑后续步骤",
-            "命中字幕语义污染、主体冲突或质量门阻塞时保留人工处理入口",
-        ],
-        "providers": ["内置摘要审核规则"],
-        "default_delivery": "默认行为是异常才停；该模式用于显式展示自动放行状态",
+        "default_delivery": "默认自动选择英文/中文互译，也可手动选择第二语言",
     },
     "multi_platform_adaptation": {
         "key": "multi_platform_adaptation",
@@ -153,6 +167,23 @@ _ENHANCEMENT_MODES: Final[dict[str, dict[str, object]]] = {
         "providers": ["HeyGem", "其他数字人 API"],
         "default_delivery": "先完成配置透传、任务挂载和方案展示",
     },
+    "auto_review": {
+        "key": "auto_review",
+        "kind": "enhancement",
+        "status": "active",
+        "selectable": False,
+        "title": "异常门自动放行",
+        "tagline": "默认全自动跑完，只在内容、字幕或质量门发现阻塞异常时暂停。",
+        "summary": "内容画像与成片核对不再作为常规人工节点；低置信度进入自动质量复跑，阻塞异常才进入人工处理。",
+        "suitable_for": ["稳定栏目", "高重复结构任务", "批量值班自动剪辑", "夜间无人值守任务"],
+        "pipeline_outline": [
+            "完成内容画像后评估阻塞原因",
+            "未命中阻塞异常时自动确认摘要并续跑后续步骤",
+            "命中字幕语义污染、主体冲突或质量门阻塞时保留人工处理入口",
+        ],
+        "providers": ["内置摘要审核规则"],
+        "default_delivery": "默认行为是异常才停；该模式用于显式展示自动放行状态",
+    },
     "ai_effects": {
         "key": "ai_effects",
         "kind": "enhancement",
@@ -169,23 +200,10 @@ _ENHANCEMENT_MODES: Final[dict[str, dict[str, object]]] = {
         "providers": ["FFmpeg", "内置模板效果", "后续扩展视觉模型"],
         "default_delivery": "先完成模式挂载和审核入口，再逐步补具体特效策略",
     },
-    "ai_director": {
-        "key": "ai_director",
-        "kind": "enhancement",
-        "status": "active",
-        "selectable": False,
-        "title": "AI 导演",
-        "tagline": "基于画面、题材和原台词结构自动润色、补叙或重配音，提升逻辑与情绪。",
-        "summary": "能力设计尚未定稿，暂不开放任务创建或默认配置选择。",
-        "suitable_for": ["知识科普", "故事化旁白", "剧情剪辑", "信息密度不足的视频"],
-        "pipeline_outline": [
-            "识别原台词结构、镜头节奏和视频题材",
-            "生成改写建议、补充信息点和情绪桥段",
-            "用 IndexTTS2、RunningHub 或其他真实语音克隆服务完成重配音并回贴时间线",
-        ],
-        "providers": ["IndexTTS2", "RunningHub API", "其他语音克隆 API"],
-        "default_delivery": "暂不启用；待产品和执行合同明确后再开放。",
-    },
+}
+
+_LEGACY_ENHANCEMENT_MODE_ALIASES: Final[dict[str, str]] = {
+    "ai_director": "dialogue_polish",
 }
 
 
@@ -235,6 +253,7 @@ def normalize_enhancement_modes(values: list[str] | tuple[str, ...] | None) -> l
         normalized = str(raw or "").strip()
         if not normalized:
             continue
+        normalized = _LEGACY_ENHANCEMENT_MODE_ALIASES.get(normalized, normalized)
         mode = _ENHANCEMENT_MODES.get(normalized)
         if mode is None or mode["status"] != "active":
             raise ValueError(f"Unsupported enhancement_mode: {normalized}")
@@ -275,8 +294,9 @@ def build_job_creative_profile(*, workflow_mode: str, enhancement_modes: list[st
         "execution_state": execution_state,
         "implementation_notes": [
             "长文本转视频当前只保留方案与接口占位，不进入现有已有视频主流程。",
+            "智能导演是 prompt-to-video 编排模式，目标链路包含剧本、分镜、素材检索/生成和剪辑成片。",
             "多平台版本适配、数字人解说、智能剪辑特效当前作为通用增强能力挂载到标准成片任务。",
-            "AI 导演能力暂未开放选择和执行，待方案定稿后再启用。",
+            "智能台词润色是全片剪辑后的台词优化与重新 TTS 配音增强能力。",
             "TTS 方案优先支持 IndexTTS2 与 RunningHub 这类真实服务。",
             "素材库策略要求走较新素材，不使用老旧缓存素材。",
         ],

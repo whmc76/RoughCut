@@ -209,8 +209,9 @@ class JobOut(BaseModel):
     avatar_delivery_summary: str | None = None
     publication_status: str = "unpublished"
     publication_summary: str | None = None
-    queue_task_kind: Literal["edit", "publication", "remix_production"] = "edit"
+    queue_task_kind: Literal["edit", "publication", "remix_production", "smart_director"] = "edit"
     queue_thumbnail_source: Literal["cover", "content_profile"] = "content_profile"
+    queue_thumbnail_version: str | None = None
     status: str
     language: str
     workflow_template: str | None
@@ -219,6 +220,7 @@ class JobOut(BaseModel):
     workflow_mode: str
     enhancement_modes: list[str] = Field(default_factory=list)
     creator_card_id: uuid.UUID | None = None
+    creator_card_name: str | None = None
     task_brief: str | None = None
     execution_mode: str = "auto"
     platform_targets: list[str] = Field(default_factory=list)

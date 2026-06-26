@@ -168,7 +168,7 @@ export function CreativeSettingsPanel({ form, config, runtimeEnvironment, option
             </div>
           </article>
           <article className="settings-overview-card">
-            <span className="settings-overview-label">导演改写</span>
+            <span className="settings-overview-label">台词润色</span>
             <strong>{Math.round(directorRewriteStrength * 100)}%</strong>
             <div className="muted">
               布局 {String(form.avatar_layout_template ?? "picture_in_picture_right")} · 位置 {currentOverlayPosition}
@@ -178,7 +178,7 @@ export function CreativeSettingsPanel({ form, config, runtimeEnvironment, option
       </div>
       <div className="settings-module-column">
         <TextField
-          label="AI 导演改写强度"
+          label="智能台词润色强度"
           type="number"
           value={String(directorRewriteStrength)}
           onChange={(event) => onChange("director_rewrite_strength", Number(event.target.value))}

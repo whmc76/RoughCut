@@ -53,7 +53,7 @@ SKIPPED_DOWNSTREAM_STEPS = [
     "subtitle_translation",
     "content_profile",
     "summary_review",
-    "ai_director",
+    "dialogue_polish",
     "avatar_commentary",
     "edit_plan",
     "render",

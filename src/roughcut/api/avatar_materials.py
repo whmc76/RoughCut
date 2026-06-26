@@ -934,7 +934,7 @@ def _build_profile_runtime_state(
     if portrait_photo_count == 0:
         warnings.append("还没有肖像照，建议补 3 到 10 张正脸图片用于形象核验。")
     if voice_sample_count == 0:
-        warnings.append("还没有声音采样，后续语音克隆和 AI 导演重配音将无法直接复用同音色。")
+        warnings.append("还没有声音采样，后续语音克隆和智能台词润色重配音将无法直接复用同音色。")
 
     avatar_ready = speaking_video_count > 0 and not any("讲话视频" in item for item in blocking_issues)
     voice_clone_ready = voice_sample_count > 0 and not any("声音采样" in item for item in blocking_issues)

@@ -2381,7 +2381,7 @@ def analyze_original_audio_reference_intent_with_llm(
                             Message(
                                 role="system",
                                 content=(
-                                    "你是严谨的中文影视二创剪辑策划。只做文案语义判断。"
+                                    "你是严谨的中文解说二创剪辑策划。只做文案语义判断。"
                                     "当文案正在描述原片里的具体场景、连续对话、角色动作、剧情证据或声音线索，"
                                     "且暂停解说播放一段完整原片声画能增强沉浸和证据感时，规划原片情景桥；"
                                     "只是泛泛提到原片、角色名或抽象观点时不要规划。"
@@ -2938,7 +2938,7 @@ def map_original_audio_insertions_to_source_asr_with_llm(
                             Message(
                                 role="system",
                                 content=(
-                                    "你是中文影视二创剪辑定位助手。"
+                                    "你是中文解说二创剪辑定位助手。"
                                     "必须根据原片 ASR 文本选择原片声桥片段，不能只按时间比例猜。"
                                     "如果没有合适原片 ASR 证据，要明确低置信度。"
                                 ),

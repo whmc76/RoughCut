@@ -5,7 +5,7 @@ import { api } from "../../api";
 import type { CapabilityDefinition, Job, JobActivity, SelectOption } from "../../types";
 import { maybeNotify } from "../../utils/browserNotifications";
 import { normalizeKeywordList } from "./contentProfile";
-import type { UploadForm } from "./constants";
+import type { JobCreateEntryMode, UploadForm } from "./constants";
 
 const EMPTY_UPLOAD: UploadForm = {
   files: [],
@@ -28,6 +28,7 @@ const EMPTY_UPLOAD: UploadForm = {
   creatorCardId: "",
   executionMode: "auto",
   platformTargets: [],
+  translationTargetLanguage: "auto",
   taskBrief: "",
   outputDir: "",
   videoDescription: "",
@@ -57,7 +58,10 @@ const JOBS_PAGE_SIZE = 20;
 const OUTPUT_DIR_HISTORY_STORAGE_KEY = "roughcut.jobs.outputDirHistory";
 const CREATE_TASK_PREFERENCES_STORAGE_KEY = "roughcut.jobs.createTaskPreferences";
 const OUTPUT_DIR_HISTORY_LIMIT = 8;
+const CREATE_TASK_EXCLUDED_ENHANCEMENT_MODES = new Set(["multi_platform_adaptation"]);
+const HEAVY_SPECIAL_ENHANCEMENT_MODES = new Set(["multilingual_translation", "avatar_commentary"]);
 export const MATERIAL_ENHANCEMENT_OPTIONS: SelectOption[] = [
+  { value: "auto_orientation_correction", label: "自动方向校正" },
   { value: "voice_enhancement", label: "人声增强" },
   { value: "loudness_normalization", label: "响度统一" },
 ];
@@ -78,7 +82,8 @@ const JOB_STATUS_NOTIFY = {
 };
 const JOB_TYPE_LABEL: Record<string, string> = {
   publication: "发布任务",
-  remix_production: "影视二创",
+  remix_production: "解说二创",
+  smart_director: "智能导演",
   edit: "剪辑任务",
 };
 
@@ -225,14 +230,87 @@ function capabilityKeys(capabilities: CapabilityDefinition[]): string[] {
   return capabilities.map((capability) => String(capability.key ?? "").trim()).filter(Boolean);
 }
 
-type StoredCreateTaskPreferences = {
+type CreateTaskPreferenceValues = {
+  language?: string;
+  workflowTemplate?: string;
+  jobFlowMode?: string;
   workflowMode?: string;
   enhancementModes?: string[];
   selectedSmartCutRuleReasons?: string[];
   materialEnhancementModes?: string[];
   selectedAgentCapabilityKeys?: string[];
   hyperframesOptions?: Record<string, boolean>;
+  creatorCardId?: string;
+  executionMode?: string;
+  platformTargets?: string[];
+  translationTargetLanguage?: string;
+  outputDir?: string;
 };
+
+type StoredCreateTaskPreferences = CreateTaskPreferenceValues & {
+  byEntryMode?: Partial<Record<JobCreateEntryMode, CreateTaskPreferenceValues>>;
+};
+
+const CREATE_TASK_ENTRY_MODES: JobCreateEntryMode[] = ["source_edit", "film_remix", "smart_director"];
+
+function readCreateTaskPreferenceValues(value: unknown): CreateTaskPreferenceValues {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const payload = value as Record<string, unknown>;
+  return {
+    language: String(payload.language ?? "").trim() || undefined,
+    workflowTemplate: String(payload.workflowTemplate ?? "").trim() || undefined,
+    jobFlowMode: String(payload.jobFlowMode ?? "").trim() || undefined,
+    workflowMode: String(payload.workflowMode ?? "").trim() || undefined,
+    enhancementModes: Array.isArray(payload.enhancementModes) ? normalizedUniqueStrings(payload.enhancementModes) : undefined,
+    selectedSmartCutRuleReasons: Array.isArray(payload.selectedSmartCutRuleReasons)
+      ? normalizedUniqueStrings(payload.selectedSmartCutRuleReasons)
+      : undefined,
+    materialEnhancementModes: Array.isArray(payload.materialEnhancementModes)
+      ? normalizedUniqueStrings(payload.materialEnhancementModes)
+      : undefined,
+    selectedAgentCapabilityKeys: Array.isArray(payload.selectedAgentCapabilityKeys)
+      ? normalizedUniqueStrings(payload.selectedAgentCapabilityKeys)
+      : undefined,
+    hyperframesOptions: payload.hyperframesOptions && typeof payload.hyperframesOptions === "object" && !Array.isArray(payload.hyperframesOptions)
+      ? Object.fromEntries(
+        Object.entries(payload.hyperframesOptions as Record<string, unknown>).map(([key, optionValue]) => [key, Boolean(optionValue)]),
+      )
+      : undefined,
+    creatorCardId: String(payload.creatorCardId ?? "").trim() || undefined,
+    executionMode: String(payload.executionMode ?? "").trim() || undefined,
+    platformTargets: Array.isArray(payload.platformTargets) ? normalizedUniqueStrings(payload.platformTargets) : undefined,
+    translationTargetLanguage: normalizeTranslationTargetLanguage(payload.translationTargetLanguage),
+    outputDir: String(payload.outputDir ?? "").trim() || undefined,
+  };
+}
+
+function createTaskPreferenceValuesFromUpload(upload: UploadForm): CreateTaskPreferenceValues {
+  return {
+    language: upload.language,
+    workflowTemplate: upload.workflowTemplate,
+    jobFlowMode: upload.jobFlowMode,
+    workflowMode: upload.workflowMode,
+    enhancementModes: upload.enhancementModes,
+    selectedSmartCutRuleReasons: upload.selectedSmartCutRuleReasons,
+    materialEnhancementModes: upload.materialEnhancementModes,
+    selectedAgentCapabilityKeys: upload.selectedAgentCapabilityKeys,
+    hyperframesOptions: upload.hyperframesOptions,
+    creatorCardId: upload.creatorCardId,
+    executionMode: upload.executionMode,
+    platformTargets: upload.platformTargets,
+    translationTargetLanguage: upload.translationTargetLanguage,
+    outputDir: upload.outputDir,
+  };
+}
+
+function hasCreateTaskPreferenceValues(preferences: CreateTaskPreferenceValues | undefined): boolean {
+  if (!preferences) return false;
+  return Object.values(preferences).some((value) => {
+    if (Array.isArray(value)) return true;
+    if (value && typeof value === "object") return true;
+    return value != null && String(value).trim() !== "";
+  });
+}
 
 function readStoredCreateTaskPreferences(): StoredCreateTaskPreferences {
   if (typeof window === "undefined") return {};
@@ -241,46 +319,73 @@ function readStoredCreateTaskPreferences(): StoredCreateTaskPreferences {
     const parsed = raw ? JSON.parse(raw) : {};
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
     const payload = parsed as Record<string, unknown>;
+    const base = readCreateTaskPreferenceValues(payload);
+    const byEntryMode = payload.byEntryMode && typeof payload.byEntryMode === "object" && !Array.isArray(payload.byEntryMode)
+      ? Object.fromEntries(
+        CREATE_TASK_ENTRY_MODES.map((entryMode) => [
+          entryMode,
+          readCreateTaskPreferenceValues((payload.byEntryMode as Record<string, unknown>)[entryMode]),
+        ]),
+      ) as Partial<Record<JobCreateEntryMode, CreateTaskPreferenceValues>>
+      : undefined;
     return {
-      workflowMode: String(payload.workflowMode ?? "").trim() || undefined,
-      enhancementModes: Array.isArray(payload.enhancementModes) ? normalizedUniqueStrings(payload.enhancementModes) : undefined,
-      selectedSmartCutRuleReasons: Array.isArray(payload.selectedSmartCutRuleReasons)
-        ? normalizedUniqueStrings(payload.selectedSmartCutRuleReasons)
-        : undefined,
-      materialEnhancementModes: Array.isArray(payload.materialEnhancementModes)
-        ? normalizedUniqueStrings(payload.materialEnhancementModes)
-        : undefined,
-      selectedAgentCapabilityKeys: Array.isArray(payload.selectedAgentCapabilityKeys)
-        ? normalizedUniqueStrings(payload.selectedAgentCapabilityKeys)
-        : undefined,
-      hyperframesOptions: payload.hyperframesOptions && typeof payload.hyperframesOptions === "object" && !Array.isArray(payload.hyperframesOptions)
-        ? Object.fromEntries(
-          Object.entries(payload.hyperframesOptions as Record<string, unknown>).map(([key, value]) => [key, Boolean(value)]),
-        )
-        : undefined,
+      ...base,
+      byEntryMode,
     };
   } catch {
     return {};
   }
 }
 
-function writeStoredCreateTaskPreferences(upload: UploadForm) {
+function writeStoredCreateTaskPreferences(preferences: StoredCreateTaskPreferences) {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.setItem(
-      CREATE_TASK_PREFERENCES_STORAGE_KEY,
-      JSON.stringify({
-        workflowMode: upload.workflowMode,
-        enhancementModes: upload.enhancementModes,
-        selectedSmartCutRuleReasons: upload.selectedSmartCutRuleReasons,
-        materialEnhancementModes: upload.materialEnhancementModes,
-        selectedAgentCapabilityKeys: upload.selectedAgentCapabilityKeys,
-        hyperframesOptions: upload.hyperframesOptions,
-      }),
-    );
+    window.localStorage.setItem(CREATE_TASK_PREFERENCES_STORAGE_KEY, JSON.stringify(preferences));
   } catch {
     // Local storage is only a convenience for restoring the next create-task form.
   }
+}
+
+function mergeStoredCreateTaskPreferences(
+  current: StoredCreateTaskPreferences,
+  upload: UploadForm,
+  entryMode: JobCreateEntryMode,
+): StoredCreateTaskPreferences {
+  const nextValues = createTaskPreferenceValuesFromUpload(upload);
+  return {
+    ...nextValues,
+    byEntryMode: {
+      ...(current.byEntryMode ?? {}),
+      [entryMode]: nextValues,
+    },
+  };
+}
+
+function effectiveEnhancementModesForCreate(upload: UploadForm): string[] {
+  const modes = normalizedUniqueStrings(upload.enhancementModes)
+    .filter((mode) => !CREATE_TASK_EXCLUDED_ENHANCEMENT_MODES.has(mode));
+  return upload.hyperframesOptions.smart_effects === false
+    ? modes.filter((mode) => mode !== "ai_effects")
+    : modes;
+}
+
+function defaultEnhancementModesForCreate(modes: string[] | undefined): string[] {
+  return normalizedUniqueStrings(modes ?? [])
+    .filter((mode) => !HEAVY_SPECIAL_ENHANCEMENT_MODES.has(mode));
+}
+
+function effectiveAgentCapabilityKeysForCreate(upload: UploadForm): string[] {
+  const keys = normalizedUniqueStrings(upload.selectedAgentCapabilityKeys)
+    .filter((key) => key !== "speech_density_trim");
+  return upload.selectedSmartCutRuleReasons.length > 0
+    ? [...keys, "speech_density_trim"]
+    : keys;
+}
+
+function normalizeTranslationTargetLanguage(value: unknown): string | undefined {
+  const normalized = String(value ?? "").trim();
+  if (!normalized) return undefined;
+  return ["auto", "en-US", "zh-CN", "ja-JP", "ko-KR"].includes(normalized) ? normalized : "auto";
 }
 
 function normalizeOutputDir(value: string | null | undefined): string {
@@ -341,13 +446,14 @@ export function useJobWorkspace({
   const [jobsPage, setJobsPage] = useState(0);
   const [upload, setUpload] = useState<UploadForm>(EMPTY_UPLOAD);
   const [storedOutputDirHistory, setStoredOutputDirHistory] = useState<string[]>(readStoredOutputDirHistory);
-  const [storedCreateTaskPreferences] = useState<StoredCreateTaskPreferences>(readStoredCreateTaskPreferences);
+  const [storedCreateTaskPreferences, setStoredCreateTaskPreferences] = useState<StoredCreateTaskPreferences>(readStoredCreateTaskPreferences);
   const [pendingInitialization, setPendingInitialization] = useState<PendingInitializationForm>(EMPTY_PENDING_INITIALIZATION);
   const [contentDraft, setContentDraft] = useState<Record<string, unknown>>({});
   const [reviewWorkflowMode, setReviewWorkflowMode] = useState("standard_edit");
   const [reviewEnhancementModes, setReviewEnhancementModes] = useState<string[]>([]);
   const [reviewCopyStyle, setReviewCopyStyle] = useState("attention_grabbing");
   const [restartError, setRestartError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const previousUploadDefaultsRef = useRef({
     workflowMode: EMPTY_UPLOAD.workflowMode,
     enhancementModes: EMPTY_UPLOAD.enhancementModes,
@@ -498,40 +604,89 @@ export function useJobWorkspace({
   const contentSourceSearchQueries = normalizeKeywordList(
     (contentSource as Record<string, unknown> | null)?.search_queries ?? contentFallbackSource?.search_queries,
   );
-  const inheritedUploadDefaults: UploadForm = useMemo(
+  const createTaskDefaultsByEntryMode: Record<JobCreateEntryMode, UploadForm> = useMemo(
     () => {
       const availableMaterialEnhancementModes = optionValues(MATERIAL_ENHANCEMENT_OPTIONS);
       const availableAgentCapabilityKeys = capabilityKeys(options.data?.capability_catalog ?? []);
-      const storedMaterialEnhancementModes = normalizedUniqueStrings(storedCreateTaskPreferences.materialEnhancementModes)
-        .filter((mode) => availableMaterialEnhancementModes.includes(mode));
-      const storedAgentCapabilityKeys = normalizedUniqueStrings(storedCreateTaskPreferences.selectedAgentCapabilityKeys)
-        .filter((key) => !availableAgentCapabilityKeys.length || availableAgentCapabilityKeys.includes(key));
+      const availableSmartCutRuleReasons = (options.data?.smart_cut_rules ?? [])
+        .map((rule) => String(rule.reason ?? "").trim())
+        .filter(Boolean);
+      const defaultsForMode = (entryMode: JobCreateEntryMode): UploadForm => {
+        const modePreferences = storedCreateTaskPreferences.byEntryMode?.[entryMode];
+        const hasScopedPreferences = Boolean(storedCreateTaskPreferences.byEntryMode);
+        const effectivePreferences: CreateTaskPreferenceValues = hasCreateTaskPreferenceValues(modePreferences)
+          ? modePreferences ?? {}
+          : hasScopedPreferences
+            ? {}
+          : storedCreateTaskPreferences ?? {};
+        const storedMaterialEnhancementModes = normalizedUniqueStrings(effectivePreferences.materialEnhancementModes)
+          .filter((mode) => availableMaterialEnhancementModes.includes(mode));
+        const storedAgentCapabilityKeys = normalizedUniqueStrings(effectivePreferences.selectedAgentCapabilityKeys)
+          .filter((key) => !availableAgentCapabilityKeys.length || availableAgentCapabilityKeys.includes(key));
+        const storedSmartCutRuleReasons = normalizedUniqueStrings(effectivePreferences.selectedSmartCutRuleReasons)
+          .filter((reason) => !availableSmartCutRuleReasons.length || availableSmartCutRuleReasons.includes(reason));
+        const defaultSmartCutRuleReasons = entryMode === "source_edit"
+          ? availableSmartCutRuleReasons
+          : EMPTY_UPLOAD.selectedSmartCutRuleReasons;
+        return {
+          ...EMPTY_UPLOAD,
+          language: effectivePreferences.language ?? EMPTY_UPLOAD.language,
+          workflowTemplate: effectivePreferences.workflowTemplate ?? EMPTY_UPLOAD.workflowTemplate,
+          jobFlowMode: effectivePreferences.jobFlowMode ?? EMPTY_UPLOAD.jobFlowMode,
+          workflowMode:
+            effectivePreferences.workflowMode
+            ?? config.data?.default_job_workflow_mode
+            ?? EMPTY_UPLOAD.workflowMode,
+          enhancementModes:
+            effectivePreferences.enhancementModes
+            ?? defaultEnhancementModesForCreate(config.data?.default_job_enhancement_modes ?? EMPTY_UPLOAD.enhancementModes),
+          selectedSmartCutRuleReasons: storedSmartCutRuleReasons.length || effectivePreferences.selectedSmartCutRuleReasons
+            ? storedSmartCutRuleReasons
+            : defaultSmartCutRuleReasons,
+          materialEnhancementModes: storedMaterialEnhancementModes.length || effectivePreferences.materialEnhancementModes
+            ? storedMaterialEnhancementModes
+            : availableMaterialEnhancementModes,
+          selectedAgentCapabilityKeys: storedAgentCapabilityKeys.length || effectivePreferences.selectedAgentCapabilityKeys
+            ? storedAgentCapabilityKeys
+            : availableAgentCapabilityKeys,
+          hyperframesOptions: {
+            ...EMPTY_UPLOAD.hyperframesOptions,
+            ...(effectivePreferences.hyperframesOptions ?? {}),
+          },
+          creatorCardId: effectivePreferences.creatorCardId ?? EMPTY_UPLOAD.creatorCardId,
+          executionMode: effectivePreferences.executionMode ?? EMPTY_UPLOAD.executionMode,
+          platformTargets: effectivePreferences.platformTargets ?? EMPTY_UPLOAD.platformTargets,
+          translationTargetLanguage: effectivePreferences.translationTargetLanguage ?? EMPTY_UPLOAD.translationTargetLanguage,
+          outputDir: effectivePreferences.outputDir ?? EMPTY_UPLOAD.outputDir,
+        };
+      };
       return {
-        ...EMPTY_UPLOAD,
-        workflowMode:
-          storedCreateTaskPreferences.workflowMode
-          ?? config.data?.default_job_workflow_mode
-          ?? EMPTY_UPLOAD.workflowMode,
-        enhancementModes:
-          storedCreateTaskPreferences.enhancementModes
-          ?? config.data?.default_job_enhancement_modes
-          ?? EMPTY_UPLOAD.enhancementModes,
-        selectedSmartCutRuleReasons: [],
-        materialEnhancementModes: storedMaterialEnhancementModes.length || storedCreateTaskPreferences.materialEnhancementModes
-          ? storedMaterialEnhancementModes
-          : availableMaterialEnhancementModes,
-        selectedAgentCapabilityKeys: storedAgentCapabilityKeys.length || storedCreateTaskPreferences.selectedAgentCapabilityKeys
-          ? storedAgentCapabilityKeys
-          : availableAgentCapabilityKeys,
-        hyperframesOptions: storedCreateTaskPreferences.hyperframesOptions ?? EMPTY_UPLOAD.hyperframesOptions,
+        source_edit: defaultsForMode("source_edit"),
+        film_remix: defaultsForMode("film_remix"),
+        smart_director: {
+          ...defaultsForMode("smart_director"),
+          workflowMode: "smart_director",
+          jobFlowMode: "auto",
+          executionMode: "plan_first",
+        },
       };
     },
     [
       config.data?.default_job_workflow_mode,
       config.data?.default_job_enhancement_modes,
       options.data?.capability_catalog,
+      options.data?.smart_cut_rules,
       storedCreateTaskPreferences,
     ],
+  );
+  const inheritedUploadDefaults: UploadForm = createTaskDefaultsByEntryMode.source_edit;
+  const hasStoredCreateTaskPreferencesByEntryMode = useMemo(
+    () => ({
+      source_edit: hasCreateTaskPreferenceValues(storedCreateTaskPreferences.byEntryMode?.source_edit),
+      film_remix: hasCreateTaskPreferenceValues(storedCreateTaskPreferences.byEntryMode?.film_remix),
+      smart_director: hasCreateTaskPreferenceValues(storedCreateTaskPreferences.byEntryMode?.smart_director),
+    }),
+    [storedCreateTaskPreferences.byEntryMode],
   );
 
   useEffect(() => {
@@ -676,7 +831,11 @@ export function useJobWorkspace({
   });
   const deleteJob = useMutation({
     mutationFn: async (jobId: string) => api.deleteJob(jobId),
+    onMutate: () => {
+      setDeleteError(null);
+    },
     onSuccess: async (_, jobId) => {
+      setDeleteError(null);
       if (selectedJobId === jobId) {
         setSelectedJobId(null);
       }
@@ -692,19 +851,22 @@ export function useJobWorkspace({
       await queryClient.removeQueries({ queryKey: ["job-agent-plan", jobId] });
       await queryClient.removeQueries({ queryKey: ["job-agent-decisions", jobId] });
     },
+    onError: (error) => {
+      setDeleteError(error instanceof Error ? error.message : String(error));
+    },
   });
   const uploadJob = useMutation({
-    mutationFn: async () =>
+    mutationFn: async (variables?: { createEntryMode?: JobCreateEntryMode; startMode?: "manual" | "immediate" }) =>
       api.createJob(
         upload.files,
         upload.language,
         upload.workflowTemplate || undefined,
         upload.jobFlowMode,
         upload.workflowMode,
-        upload.enhancementModes,
+        effectiveEnhancementModesForCreate(upload),
         upload.selectedSmartCutRuleReasons,
         upload.materialEnhancementModes,
-        upload.selectedAgentCapabilityKeys,
+        effectiveAgentCapabilityKeysForCreate(upload),
         upload.hyperframesOptions,
         upload.outputDir,
         upload.videoDescription,
@@ -712,15 +874,30 @@ export function useJobWorkspace({
         upload.taskBrief,
         upload.executionMode,
         upload.platformTargets,
+        upload.translationTargetLanguage,
+        variables?.startMode ?? "immediate",
       ),
-    onSuccess: async (job) => {
+    onSuccess: async (job, variables) => {
+      const createEntryMode = variables?.createEntryMode ?? "source_edit";
+      const storedUpload = {
+        ...upload,
+        enhancementModes: effectiveEnhancementModesForCreate(upload),
+        selectedAgentCapabilityKeys: effectiveAgentCapabilityKeysForCreate(upload),
+      };
+      const nextStoredPreferences = mergeStoredCreateTaskPreferences(storedCreateTaskPreferences, storedUpload, createEntryMode);
       setStoredOutputDirHistory((prev) => {
         const next = mergeOutputDirHistory([upload.outputDir, ...prev]);
         writeStoredOutputDirHistory(next);
         return next;
       });
-      writeStoredCreateTaskPreferences(upload);
-      setUpload(inheritedUploadDefaults);
+      setStoredCreateTaskPreferences(nextStoredPreferences);
+      writeStoredCreateTaskPreferences(nextStoredPreferences);
+      setUpload({
+        ...storedUpload,
+        files: [],
+        taskBrief: "",
+        videoDescription: "",
+      });
       setSelectedJobId(job.id);
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["jobs"] }),
@@ -889,6 +1066,8 @@ export function useJobWorkspace({
     queueStats,
     upload,
     setUpload,
+    createTaskDefaultsByEntryMode,
+    hasStoredCreateTaskPreferencesByEntryMode,
     creatorCards,
     outputDirHistory,
     pendingInitialization,
@@ -938,5 +1117,6 @@ export function useJobWorkspace({
       hasMoreJobs,
       setJobsPage,
       restartError,
+      deleteError,
   };
 }

@@ -372,7 +372,7 @@ export function AvatarMaterialPanel() {
                 />
                 <AvatarFileField
                   label="声音采样"
-                  hint="声音克隆 / AI 导演重配音。建议单说话人干净人声。"
+                  hint="声音克隆 / 智能台词润色重配音。建议单说话人干净人声。"
                   accept=".wav,.mp3,.m4a"
                   files={voiceSamples}
                   onChange={setVoiceSamples}

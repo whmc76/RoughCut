@@ -142,6 +142,16 @@ class _FakeBrowserAgentHealthClient:
                     "final_publish_platforms": self.final_publish_platforms,
                     "platform_composite_frameworks": self.composite_frameworks,
                     "legacy_lightweight_scripts_blocked": self.legacy_blocked,
+                    "auto_create_platform_tabs": True,
+                    "task_owned_platform_pages": True,
+                    "platform_route_capability": {
+                        platform: {
+                            "publish_entry_url": f"https://publisher.test/{platform}/upload",
+                            "auto_create_platform_tabs": True,
+                            "task_owned_platform_page": True,
+                        }
+                        for platform in sorted(set(self.final_publish_platforms) | set(self.composite_frameworks))
+                    },
                     **self.extra_capabilities,
                 },
                 "creator_sessions": self.creator_sessions,
@@ -204,6 +214,16 @@ def test_job_queue_preview_marks_publication_task_and_uses_attempt_cover(tmp_pat
     assert job.queue_thumbnail_source == "cover"
 
 
+def test_job_queue_preview_versions_content_profile_thumbnails_with_cache_schema() -> None:
+    updated_at = datetime(2026, 6, 26, 11, 14, 37, tzinfo=timezone.utc)
+    job = Job(id=uuid.uuid4(), source_path="source.mp4", source_name="source.mp4", status="processing", updated_at=updated_at)
+
+    _attach_job_preview(job, lightweight=True)
+
+    assert job.queue_thumbnail_source == "content_profile"
+    assert job.queue_thumbnail_version == f"{updated_at}:{jobs_api._CONTENT_PROFILE_THUMBNAIL_CACHE_VERSION}"
+
+
 def test_job_queue_preview_prefers_render_cover_for_edit_task(tmp_path):
     cover_path = tmp_path / "render-cover.jpg"
     cover_path.write_bytes(b"cover")
@@ -220,6 +240,21 @@ def test_job_queue_preview_prefers_render_cover_for_edit_task(tmp_path):
 
     assert job.queue_task_kind == "edit"
     assert job.queue_thumbnail_source == "cover"
+    assert job.queue_thumbnail_version == str(job.updated_at or "")
+
+
+def test_job_queue_preview_marks_smart_director_task() -> None:
+    job = Job(
+        id=uuid.uuid4(),
+        source_path="source.mp4",
+        source_name="source.mp4",
+        status="pending",
+        workflow_mode="smart_director",
+    )
+
+    _attach_job_preview(job, lightweight=True)
+
+    assert job.queue_task_kind == "smart_director"
 
 
 def test_job_queue_preview_uses_publication_response_cover(tmp_path):
@@ -358,6 +393,32 @@ def test_normalize_publication_credentials_filters_to_browser_agent():
             "last_error": None,
         }
     ]
+
+
+def test_normalize_publication_credentials_routes_stale_social_ref_with_browser_binding_to_browser_agent():
+    credentials = publication.normalize_publication_credentials(
+        [
+            {
+                "platform": "bilibili",
+                "account_label": "FAS · Chrome",
+                "credential_ref": "social-auto-upload:FAS · Chrome:bilibili",
+                "browser_profile_id": "browser-profile:chrome:fas",
+                "browser_binding": {
+                    "browser": "chrome",
+                    "user_data_dir": "C:/Users/test/AppData/Local/Google/Chrome/User Data",
+                    "profile_directory": "Profile 2",
+                    "profile_id": "browser-profile:chrome:fas",
+                },
+                "status": "logged_in",
+                "enabled": True,
+                "adapter": "social_auto_upload",
+            }
+        ]
+    )
+
+    assert credentials[0]["adapter"] == "browser_agent"
+    assert credentials[0]["browser_profile_id"] == "browser-profile:chrome:fas"
+    assert credentials[0]["browser_binding"]["profile_directory"] == "Profile 2"
 
 
 def test_build_browser_agent_task_payload_from_attempt_does_not_require_worker_local_path():
@@ -1827,6 +1888,112 @@ def test_intelligent_copy_packaging_normalization_projects_bilibili_dual_cover_s
     ]
 
 
+def test_build_publication_plan_normalizes_raw_cover_matrix_into_required_cover_slots(tmp_path):
+    video_path = tmp_path / "final.mp4"
+    video_path.write_bytes(b"video")
+    job = SimpleNamespace(id=uuid.uuid4(), status="done")
+    render_output = SimpleNamespace(output_path=str(video_path))
+    creator_profile = {
+        "id": "creator-1",
+        "display_name": "Creator",
+        "creator_profile": {
+            "publishing": {
+                "platform_credentials": [
+                    {
+                        "id": "cred-douyin",
+                        "platform": "douyin",
+                        "credential_ref": "browser-profile:chrome:creator",
+                        "account_label": "Creator Chrome",
+                        "status": "logged_in",
+                        "enabled": True,
+                        "adapter": "browser_agent",
+                        "browser_binding": {"profile_id": "browser-profile:chrome:creator"},
+                    },
+                    {
+                        "id": "cred-bilibili",
+                        "platform": "bilibili",
+                        "credential_ref": "browser-profile:chrome:creator",
+                        "account_label": "Creator Chrome",
+                        "status": "logged_in",
+                        "enabled": True,
+                        "adapter": "browser_agent",
+                        "browser_binding": {"profile_id": "browser-profile:chrome:creator"},
+                    },
+                ]
+            }
+        },
+    }
+    cover_quality = {"publish_ready": True, "blocking_reasons": []}
+    packaging = {
+        "platforms": {
+            "douyin": {
+                "primary_title": "发布标题",
+                "body": "发布正文",
+                "tags": ["开箱"],
+                "live_publish_preflight": {"status": "ready"},
+                "publish_ready": True,
+            },
+            "bilibili": {
+                "primary_title": "发布标题",
+                "body": "发布正文",
+                "tags": ["开箱"],
+                "live_publish_preflight": {"status": "ready"},
+                "publish_ready": True,
+            },
+        },
+        "cover_matrix": {
+            "landscape_4_3": {
+                "cover_path": "E:/covers/landscape-4-3.jpg",
+                "cover_size": [1440, 1080],
+                "cover_quality": cover_quality,
+            },
+            "portrait_3_4": {
+                "cover_path": "E:/covers/portrait-3-4.jpg",
+                "cover_size": [1080, 1440],
+                "cover_quality": cover_quality,
+            },
+            "landscape_16_9": {
+                "cover_path": "E:/covers/landscape-16-9.jpg",
+                "cover_size": [1600, 900],
+                "cover_quality": cover_quality,
+            },
+        },
+    }
+
+    plan = publication.build_publication_plan(
+        job=job,
+        render_output=render_output,
+        platform_packaging=packaging,
+        creator_profile=creator_profile,
+        requested_platforms=["douyin", "bilibili"],
+    )
+
+    targets = {target["platform"]: target for target in plan["targets"]}
+    assert plan["publish_ready"] is True
+    assert [slot["matrix_key"] for slot in targets["douyin"]["cover_slots"]] == [
+        "landscape_4_3",
+        "portrait_3_4",
+    ]
+    assert [slot["matrix_key"] for slot in targets["bilibili"]["cover_slots"]] == [
+        "landscape_4_3",
+        "landscape_16_9",
+    ]
+
+
+def test_job_smart_copy_material_dir_prefers_existing_local_packaging_without_host_materialize(tmp_path, monkeypatch):
+    material_dir = tmp_path / "smart-copy"
+    material_dir.mkdir()
+    (material_dir / "platform-packaging.json").write_text('{"platforms": {}}', encoding="utf-8")
+
+    def _fail_materialize(*args, **kwargs):
+        raise AssertionError("host materialize should not run for an existing local smart-copy package")
+
+    monkeypatch.setattr(jobs_api, "_materialize_job_smart_copy_material_dir", _fail_materialize)
+    monkeypatch.setattr(jobs_api, "_materialize_job_publication_folder", _fail_materialize)
+
+    assert jobs_api._resolve_job_smart_copy_material_dir(material_dir) == material_dir
+
+
 def test_intelligent_copy_packaging_normalization_derives_publish_ready_from_platform_entries_when_root_flag_missing():
     packaging = _normalize_intelligent_copy_payload_as_packaging(
         {
@@ -2271,6 +2438,7 @@ async def test_apply_browser_agent_task_state_blocks_published_without_public_ur
         "task_id": "task-1",
         "status": "published",
         "result": {
+            "url": "https://creator.douyin.com/creator-micro/content/manage",
             "publication_audit": {
                 "verified": True,
             }
@@ -2282,7 +2450,78 @@ async def test_apply_browser_agent_task_state_blocks_published_without_public_ur
     assert attempt.status == "needs_human"
     assert attempt.error_code == "publication_public_url_missing"
     assert "未读到可公开访问链接" in attempt.error_message
+    assert attempt.external_url is None
+    assert attempt.response_payload["publication_receipt_state"]["state"] == "manager_published_status_verified_public_url_required"
+    assert attempt.response_payload["publication_receipt_state"]["public_url_lookup_required"] is True
+    assert attempt.response_payload["publication_locator"]["manager_url"] == "https://creator.douyin.com/creator-micro/content/manage"
     assert run.status == "needs_human"
+
+
+@pytest.mark.asyncio
+async def test_apply_browser_agent_task_state_keeps_scheduled_receipt_pending_public_url_lookup():
+    attempt = SimpleNamespace(
+        id="attempt-scheduled-receipt",
+        adapter="browser_agent",
+        platform="douyin",
+        provider_status=None,
+        provider_task_id="task-scheduled",
+        provider_execution_id="run-scheduled",
+        response_payload=None,
+        status="processing",
+        run_status="processing",
+        published_at=None,
+        scheduled_at=None,
+        external_post_id=None,
+        external_receipt_id=None,
+        external_url=None,
+        retry_count=0,
+        max_retries=3,
+        next_retry_at=None,
+        error_code=None,
+        error_message=None,
+        operator_summary=None,
+        request_payload={
+            "scheduled_publish_at": "2026-06-30T20:30:00+08:00",
+            "publication_content_signature": {
+                "version": 1,
+                "value": "scheduled-sig",
+                "fields": {"title": "预约标题"},
+            },
+        },
+    )
+    run = SimpleNamespace(
+        status="processing",
+        phase="reconcile",
+        heartbeat_at=None,
+        provider_task_id="task-scheduled",
+        provider_execution_id="run-scheduled",
+        provider_status=None,
+        result_json=None,
+        error_message=None,
+        completed_at=None,
+    )
+    task = {
+        "task_id": "task-scheduled",
+        "status": "scheduled_pending",
+        "result": {
+            "scheduled_publish_at": "2026-06-30T20:30:00+08:00",
+            "publication_content_signature": {
+                "version": 1,
+                "value": "scheduled-sig",
+                "fields": {"title": "预约标题"},
+            },
+            "publication_audit": {"verified": True},
+        },
+    }
+
+    await publication._apply_browser_agent_task_state(attempt, run, task, response_payload={"task": task})
+
+    assert attempt.status == "scheduled_pending"
+    assert attempt.external_url is None
+    assert attempt.response_payload["publication_receipt_state"]["state"] == "scheduled_pending"
+    assert attempt.response_payload["publication_receipt_state"]["public_url_lookup_required"] is True
+    assert attempt.response_payload["publication_receipt_state"]["recommended_next_actions"] == ["follow_up_public_url_lookup"]
+    assert run.status == "scheduled_pending"
 
 
 @pytest.mark.asyncio
@@ -3209,6 +3448,8 @@ async def test_apply_browser_agent_task_state_treats_verified_stop_before_final_
     assert attempt.error_code is None
     assert attempt.error_message is None
     assert attempt.operator_summary == "已完成发布前验证，并安全停在最终发布前。"
+    assert attempt.response_payload["publication_receipt_state"]["state"] == "draft_created"
+    assert attempt.response_payload["publication_receipt_state"]["public_url_lookup_required"] is False
     assert run.status == "draft_created"
     assert run.completed_at is not None
 
@@ -6289,6 +6530,7 @@ def test_publication_plan_falls_back_to_package_publication_metadata(tmp_path, m
     cover_path = tmp_path / "cover.jpg"
     cover_path.write_bytes(b"cover")
     monkeypatch.setattr(publication, "platform_auto_publish_supported", lambda platform: str(platform or "").strip().lower() == "xiaohongshu")
+    monkeypatch.setattr(publication, "platform_manual_handoff_only", lambda platform: False)
     plan = publication.build_publication_plan(
         job=SimpleNamespace(id="job-1", status="done"),
         render_output=SimpleNamespace(output_path=str(media_path)),
@@ -6628,6 +6870,7 @@ def test_publication_plan_clamps_xiaohongshu_title_to_platform_hard_limit(tmp_pa
     media_path = tmp_path / "output.mp4"
     media_path.write_bytes(b"video")
     monkeypatch.setattr(publication, "platform_auto_publish_supported", lambda platform: str(platform or "").strip().lower() == "xiaohongshu")
+    monkeypatch.setattr(publication, "platform_manual_handoff_only", lambda platform: False)
     plan = publication.build_publication_plan(
         job=SimpleNamespace(id="job-1", status="done"),
         render_output=SimpleNamespace(output_path=str(media_path)),
@@ -6670,6 +6913,7 @@ def test_publication_plan_suppresses_xiaohongshu_original_declaration_for_config
     media_path.write_bytes(b"video")
     cover_path.write_bytes(b"cover")
     monkeypatch.setattr(publication, "platform_auto_publish_supported", lambda platform: str(platform or "").strip().lower() == "xiaohongshu")
+    monkeypatch.setattr(publication, "platform_manual_handoff_only", lambda platform: False)
 
     plan = publication.build_publication_plan(
         job=SimpleNamespace(id="job-1", status="done"),
@@ -6847,6 +7091,17 @@ def test_publication_plan_defaults_to_stable_platforms_when_not_explicitly_reque
     assert "xiaohongshu" not in target_platforms
     assert "wechat-channels" not in target_platforms
     assert "toutiao" not in target_platforms
+    material_platforms = [target["platform"] for target in plan["material_targets"]]
+    assert material_platforms == [
+        "douyin",
+        "xiaohongshu",
+        "bilibili",
+        "kuaishou",
+        "wechat-channels",
+        "toutiao",
+        "youtube",
+        "x",
+    ]
     assert not any(
         "仅支持生成发布物料" in str(warning)
         for warning in plan["warnings"]
@@ -6908,6 +7163,8 @@ def test_publication_plan_blocks_material_only_platforms_from_auto_publish(tmp_p
     assert plan["manual_handoff_ready"] is False
     assert plan["targets"] == []
     assert plan["manual_handoff_targets"] == []
+    assert [target["platform"] for target in plan["material_targets"]] == ["xiaohongshu", "wechat-channels"]
+    assert plan["material_targets"][0]["body"] == "简介"
     assert any("小红书" in reason and "仅支持生成发布物料" in reason for reason in plan["blocked_reasons"])
     assert any("视频号" in reason and "仅支持生成发布物料" in reason for reason in plan["blocked_reasons"])
     assert any("小红书" in warning and "已跳过自动发布目标" in warning for warning in plan["warnings"])

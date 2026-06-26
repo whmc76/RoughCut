@@ -14,11 +14,12 @@ export const STEP_LABELS: Record<string, string> = {
   content_profile: "摘要",
   summary_review: "内容异常门",
   glossary_review: "纠错",
-  ai_director: "导演",
+  dialogue_polish: "台词润色",
   avatar_commentary: "数字人",
   edit_plan: "剪辑",
+  chapter_analysis: "章节",
   render: "渲染",
-  script_footage_remix: "影视二创",
+  script_footage_remix: "解说二创",
   final_review: "成片异常门",
   platform_package: "文案",
 };
@@ -69,12 +70,13 @@ export type UploadForm = {
   creatorCardId: string;
   executionMode: string;
   platformTargets: string[];
+  translationTargetLanguage: string;
   taskBrief: string;
   outputDir: string;
   videoDescription: string;
 };
 
-export type JobCreateEntryMode = "source_edit" | "film_remix";
+export type JobCreateEntryMode = "source_edit" | "film_remix" | "smart_director";
 
 export const RESTARTABLE_JOB_STATUSES = ["done", "running", "processing", "awaiting_manual_edit", "needs_review", "cancelled", "failed"] as const;
 
@@ -127,6 +129,7 @@ export function jobStatusTone(job: Pick<Job, "status" | "publication_status">): 
 export const WORKFLOW_MODE_LABELS: Record<string, string> = {
   standard_edit: "标准成片",
   long_text_to_video: "长文本转视频",
+  smart_director: "智能导演",
   remix_auto_commentary: "二创自动精简解说",
   remix_llm_plan: "二创智能方案编排",
   script_footage_remix: "二创按脚本文案讲解插入",
@@ -144,7 +147,7 @@ export const ENHANCEMENT_MODE_LABELS: Record<string, string> = {
   multi_platform_adaptation: "多平台版本适配",
   avatar_commentary: "数字人解说",
   ai_effects: "智能剪辑特效",
-  ai_director: "AI 导演",
+  dialogue_polish: "智能台词润色",
 };
 
 export function stepLabel(stepName: string): string {

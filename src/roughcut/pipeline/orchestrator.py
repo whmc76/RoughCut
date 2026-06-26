@@ -4,9 +4,10 @@ State in DB, Celery only executes individual steps.
 
  Pipeline: probe → extract_audio → transcribe → subtitle_postprocess
         → subtitle_term_resolution → subtitle_consistency_review
-        → glossary_review → transcript_review → subtitle_translation
-        → content_profile → summary_review(auto gate) → ai_director
-        → avatar_commentary → edit_plan → render
+        → glossary_review → transcript_review
+        → content_profile → summary_review(auto gate)
+        → edit_plan → chapter_analysis → dialogue_polish
+        → subtitle_translation → avatar_commentary → render
 
  The ASR cleanup and review gates remain in the main path because they provide
  term resolution, consistency checks, and canonical transcript projection for
@@ -61,12 +62,16 @@ PIPELINE_STEPS = [
     "subtitle_consistency_review",
     "glossary_review",
     "transcript_review",
-    "subtitle_translation",
     "content_profile",
     "summary_review",
-    "ai_director",
-    "avatar_commentary",
     "edit_plan",
+    "chapter_analysis",
+    "dialogue_polish",
+    "subtitle_translation",
+    "avatar_commentary",
+    "render_plain_base",
+    "render_packaging_candidates",
+    "render_burn_in",
     "render",
 ]
 
@@ -81,9 +86,13 @@ STEP_TASK_MAP = {
     "subtitle_translation": "roughcut.pipeline.tasks.llm_subtitle_translation",
     "content_profile": "roughcut.pipeline.tasks.llm_content_profile",
     "glossary_review": "roughcut.pipeline.tasks.llm_glossary_review",
-    "ai_director": "roughcut.pipeline.tasks.llm_ai_director",
+    "dialogue_polish": "roughcut.pipeline.tasks.llm_dialogue_polish",
     "avatar_commentary": "roughcut.pipeline.tasks.llm_avatar_commentary",
     "edit_plan": "roughcut.pipeline.tasks.media_edit_plan",
+    "chapter_analysis": "roughcut.pipeline.tasks.llm_chapter_analysis",
+    "render_plain_base": "roughcut.pipeline.tasks.media_render_plain_base",
+    "render_packaging_candidates": "roughcut.pipeline.tasks.media_render_packaging_candidates",
+    "render_burn_in": "roughcut.pipeline.tasks.media_render_burn_in",
     "render": "roughcut.pipeline.tasks.media_render",
 }
 
@@ -98,16 +107,21 @@ STEP_QUEUES = {
     "subtitle_translation": "llm_queue",
     "content_profile": "llm_queue",
     "glossary_review": "llm_queue",
-    "ai_director": "llm_queue",
+    "dialogue_polish": "llm_queue",
     "avatar_commentary": "llm_queue",
     "edit_plan": "media_queue",
+    "chapter_analysis": "llm_queue",
+    "render_plain_base": "media_queue",
+    "render_packaging_candidates": "media_queue",
+    "render_burn_in": "media_queue",
     "render": "media_queue",
 }
 
 MAX_ATTEMPTS = 3
-_GPU_SENSITIVE_STEPS = {"transcribe", "avatar_commentary", "render"}
+_RENDER_EXECUTION_STEPS = {"render_plain_base", "render_packaging_candidates", "render_burn_in", "render"}
+_GPU_SENSITIVE_STEPS = {"transcribe", "avatar_commentary", *_RENDER_EXECUTION_STEPS}
 _REVIEW_ROUND_STEPS = {"summary_review", "glossary_review"}
-_EDIT_PLAN_OPTIONAL_PREREQUISITES = {"ai_director", "avatar_commentary"}
+_EDIT_PLAN_OPTIONAL_PREREQUISITES = {"avatar_commentary"}
 _EXTERNAL_SCRIPT_FOOTAGE_WORKFLOW_MODES = {"remix_auto_commentary", "remix_llm_plan", "script_footage_remix"}
 _STREAMLINED_ASR_REVIEW_STEPS = frozenset(
     {
@@ -125,6 +139,8 @@ _TERMINAL_FAILURE_ERROR_PREFIXES = (
     "edit_plan_blocked_by_projection_fallback:",
     "edit_plan_blocked_by_insert_fallback:",
     "render_blocked_by_fallback_output:",
+    "render_final_subtitle_asr_alignment_blocked:",
+    "render_variant_sync_blocked:",
 )
 _LEGACY_NON_EXECUTABLE_STEPS = {"final_review", "platform_package"}
 
@@ -435,21 +451,22 @@ async def tick() -> None:
 
 
 async def _step_paused_for_smart_assist(step: JobStep, session) -> bool:
-    if step.step_name != "render":
+    if step.step_name not in _RENDER_EXECUTION_STEPS:
         return False
     job = await session.get(Job, step.job_id)
     if job is None or str(getattr(job, "job_flow_mode", "") or "").strip() != _SMART_ASSIST_MODE:
         return False
-    if _render_step_released_by_manual_editor(step):
-        return False
 
     steps_result = await session.execute(select(JobStep).where(JobStep.job_id == step.job_id))
     step_map = {item.step_name: item for item in steps_result.scalars().all()}
+    render_step = step_map.get("render")
+    if _render_step_released_by_manual_editor(render_step or step):
+        return False
     edit_plan_step = step_map.get("edit_plan")
     if edit_plan_step is None or edit_plan_step.status != "done":
         return False
 
-    _mark_job_waiting_for_manual_edit(job, step)
+    _mark_job_waiting_for_manual_edit(job, render_step or step)
     return True
 
 
@@ -479,8 +496,8 @@ def _auto_skip_reason_for_step(job: Job, step_name: str, *, settings: object | N
         getattr(job, "enhancement_modes", [])
     ):
         return "multilingual_translation_disabled"
-    if normalized == "ai_director" and "ai_director" not in set(getattr(job, "enhancement_modes", []) or []):
-        return "ai_director_disabled"
+    if normalized == "dialogue_polish" and "dialogue_polish" not in set(getattr(job, "enhancement_modes", []) or []):
+        return "dialogue_polish_disabled"
     if normalized == "avatar_commentary" and "avatar_commentary" not in set(getattr(job, "enhancement_modes", []) or []):
         return "avatar_commentary_disabled"
     if normalized in _LEGACY_NON_EXECUTABLE_STEPS:
@@ -511,8 +528,8 @@ def _skip_detail_for_reason(reason: str) -> str:
         return "新 ASR 精简链路已跳过旧版转写/字幕兜底审校。"
     if reason == "multilingual_translation_disabled":
         return "未启用多语言翻译模式，跳过字幕翻译。"
-    if reason == "ai_director_disabled":
-        return "未启用 AI 导演模式，跳过。"
+    if reason == "dialogue_polish_disabled":
+        return "未启用智能台词润色，跳过。"
     if reason == "avatar_commentary_disabled":
         return "未启用数字人解说模式，跳过。"
     if reason == "legacy_non_executable_step":
@@ -597,7 +614,7 @@ async def _count_running_gpu_steps(session) -> dict[str, int]:
 
 def _step_stale_timeout_seconds(step_name: str) -> int:
     settings = get_settings()
-    if step_name == "render":
+    if step_name in _RENDER_EXECUTION_STEPS:
         return max(600, int(getattr(settings, "render_step_stale_timeout_sec", 5400) or 5400))
     return max(300, int(getattr(settings, "step_stale_timeout_sec", 900) or 900))
 
@@ -623,7 +640,7 @@ def _render_step_runtime_stale_timeout_seconds(step: JobStep) -> int:
 
 
 def _step_runtime_stale_timeout_seconds(step: JobStep) -> int:
-    if step.step_name == "render":
+    if step.step_name in _RENDER_EXECUTION_STEPS:
         return _render_step_runtime_stale_timeout_seconds(step)
     return _step_stale_timeout_seconds(step.step_name)
 
@@ -980,6 +997,10 @@ def _step_blocks_job_as_failure(step: JobStep) -> bool:
     return any(error_message.startswith(prefix) for prefix in _TERMINAL_FAILURE_ERROR_PREFIXES)
 
 
+def _step_blocks_job_as_cancellation(step: JobStep) -> bool:
+    return str(step.status or "").strip().lower() == "cancelled" and not _step_blocks_job_as_failure(step)
+
+
 async def _recover_stale_running_steps(session) -> None:
     settings = get_settings()
     if not bool(getattr(settings, "step_stale_recovery_enabled", True)):
@@ -1130,7 +1151,7 @@ async def _recover_stale_running_steps(session) -> None:
             )
             continue
 
-        if step.step_name == "render":
+        if step.step_name in _RENDER_EXECUTION_STEPS:
             metadata["progress"] = 0.0
             render_outputs_result = await session.execute(
                 select(RenderOutput).where(RenderOutput.job_id == step.job_id, RenderOutput.status == "running")
@@ -1164,9 +1185,9 @@ def _gpu_dispatch_wait_reason(step_name: str, *, running_gpu_steps: int | dict[s
     if not _step_requires_local_gpu_for_dispatch(step_name):
         return None
     normalized = str(step_name or "").strip().lower()
-    render_running = _running_gpu_step_count(running_gpu_steps, "render")
+    render_running = sum(_running_gpu_step_count(running_gpu_steps, name) for name in _RENDER_EXECUTION_STEPS)
     total_running = _running_gpu_step_total(running_gpu_steps)
-    if normalized == "render":
+    if normalized in _RENDER_EXECUTION_STEPS:
         non_render_running = max(0, total_running - render_running)
         if non_render_running > 0:
             return "检测到 RoughCut 仍有 GPU 步骤运行，当前渲染等待空闲后再派发。"
@@ -1448,10 +1469,15 @@ async def _update_job_statuses(session) -> None:
             job.updated_at = datetime.now(timezone.utc)
             continue
         edit_plan_step = step_map.get("edit_plan")
+        chapter_analysis_step = step_map.get("chapter_analysis")
         if (
             str(getattr(job, "job_flow_mode", "") or "").strip() == _SMART_ASSIST_MODE
             and edit_plan_step is not None
             and edit_plan_step.status == "done"
+            and (
+                chapter_analysis_step is None
+                or chapter_analysis_step.status in {"done", "skipped"}
+            )
             and render_step is not None
             and render_step.status == "pending"
             and not _render_step_released_by_manual_editor(render_step)
@@ -1475,12 +1501,31 @@ async def _update_job_statuses(session) -> None:
             job.updated_at = now
             await _cleanup_terminal_job_files(session, job, purge_deliverables=True)
             logger.error(f"Job {job.id} failed: {job.error_message}")
+            continue
+
+        cancelled_steps = [s for s in steps if _step_blocks_job_as_cancellation(s)]
+        running_steps = [s for s in steps if str(s.status or "").strip().lower() == "running"]
+        if job.status in {"pending", "processing", "failed"} and cancelled_steps and not running_steps:
+            job.status = "cancelled"
+            job.error_message = _build_job_cancellation_message(_latest_cancelled_step(steps))
+            job.updated_at = now
+            await _cleanup_terminal_job_files(session, job, purge_deliverables=True)
+            logger.warning("Job %s cancelled after terminal step cancellation: %s", job.id, job.error_message)
 
 def _latest_failed_step(steps: list[JobStep]) -> JobStep | None:
     step_map = {step.step_name: step for step in steps}
     for step_name in reversed(PIPELINE_STEPS):
         step = step_map.get(step_name)
         if step is not None and _step_blocks_job_as_failure(step):
+            return step
+    return None
+
+
+def _latest_cancelled_step(steps: list[JobStep]) -> JobStep | None:
+    step_map = {step.step_name: step for step in steps}
+    for step_name in reversed(PIPELINE_STEPS):
+        step = step_map.get(step_name)
+        if step is not None and _step_blocks_job_as_cancellation(step):
             return step
     return None
 
@@ -1507,6 +1552,21 @@ def _build_job_failure_message(failed_step: JobStep | None, *, attempts: int) ->
     return f"{failed_step.step_name} 步骤在最大重试（{attempts}）后仍失败"
 
 
+def _build_job_cancellation_message(cancelled_step: JobStep | None) -> str:
+    if cancelled_step is None:
+        return "任务已终止：检测到取消步骤但未定位到具体步骤，调度器已停止继续派发。"
+
+    metadata = cancelled_step.metadata_ or {}
+    details: list[str] = [str(cancelled_step.error_message or "").strip()]
+    detail = str(metadata.get("detail") or "").strip()
+    if detail:
+        details.append(detail)
+    cleaned = [item for item in details if item]
+    if cleaned:
+        return f"{cancelled_step.step_name} 步骤已取消：{'; '.join(cleaned)}"
+    return f"{cancelled_step.step_name} 步骤已取消，调度器已停止继续派发。"
+
+
 async def _cleanup_terminal_job_files(session, job: Job, *, purge_deliverables: bool) -> None:
     artifact_result = await session.execute(select(Artifact).where(Artifact.job_id == job.id))
     render_output_result = await session.execute(select(RenderOutput).where(RenderOutput.job_id == job.id))
@@ -1521,7 +1581,12 @@ async def _cleanup_terminal_job_files(session, job: Job, *, purge_deliverables: 
 
 async def _reconcile_completed_render_step(session, job: Job, step_map: dict[str, JobStep]) -> None:
     render_step = step_map.get("render")
-    if render_step is None or render_step.status == "done":
+    render_phase_steps = [
+        step_map.get("render_plain_base"),
+        step_map.get("render_packaging_candidates"),
+        step_map.get("render_burn_in"),
+    ]
+    if render_step is None and not any(render_phase_steps):
         return
 
     render_output_result = await session.execute(
@@ -1533,17 +1598,32 @@ async def _reconcile_completed_render_step(session, job: Job, step_map: dict[str
     if render_output is None or not render_output.output_path:
         return
 
-    render_step.status = "done"
-    render_step.finished_at = render_step.finished_at or datetime.now(timezone.utc)
-    render_step.error_message = None
-    render_step.metadata_ = {
-        **(render_step.metadata_ or {}),
-        "detail": "检测到已完成渲染输出，调度器已自动收口 render 步骤。",
-        "progress": 1.0,
-        "output_path": render_output.output_path,
-        "updated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    logger.info("Job %s reconciled render step from completed render output", job.id)
+    now = datetime.now(timezone.utc)
+    for phase_step in render_phase_steps:
+        if phase_step is None or phase_step.status == "done":
+            continue
+        phase_step.status = "done"
+        phase_step.finished_at = phase_step.finished_at or now
+        phase_step.error_message = None
+        phase_step.metadata_ = {
+            **(phase_step.metadata_ or {}),
+            "detail": "检测到已完成渲染输出，调度器已自动收口 render phase 步骤。",
+            "progress": 1.0,
+            "output_path": render_output.output_path,
+            "updated_at": now.isoformat(),
+        }
+    if render_step is not None and render_step.status != "done":
+        render_step.status = "done"
+        render_step.finished_at = render_step.finished_at or now
+        render_step.error_message = None
+        render_step.metadata_ = {
+            **(render_step.metadata_ or {}),
+            "detail": "检测到已完成渲染输出，调度器已自动收口 render 步骤。",
+            "progress": 1.0,
+            "output_path": render_output.output_path,
+            "updated_at": now.isoformat(),
+        }
+    logger.info("Job %s reconciled render steps from completed render output", job.id)
 
 
 def _reconcile_completed_summary_review_step(step_map: dict[str, JobStep]) -> None:
@@ -1825,8 +1905,8 @@ def _artifact_types_for_quality_rerun(rerun_steps: set[str], *, issue_codes: lis
             artifact_types.add(ARTIFACT_TYPE_ENTITY_RESOLUTION_TRACE)
     elif "glossary_review" in rerun_steps and bool(getattr(settings, "entity_graph_enabled", False)):
         artifact_types.add(ARTIFACT_TYPE_ENTITY_RESOLUTION_TRACE)
-    if "ai_director" in rerun_steps:
-        artifact_types.add("ai_director_plan")
+    if "dialogue_polish" in rerun_steps:
+        artifact_types.add("dialogue_polish_plan")
     if "avatar_commentary" in rerun_steps:
         artifact_types.add("avatar_commentary_plan")
     if "render" in rerun_steps:

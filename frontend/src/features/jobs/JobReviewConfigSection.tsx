@@ -127,21 +127,21 @@ export function buildReviewChecks({
     });
   }
 
-  if (enhancementModes.includes("ai_director")) {
+  if (enhancementModes.includes("dialogue_polish")) {
     const indexTtsReady = config?.voice_provider === "indextts2"
       && Boolean(String(runtimeEnvironment?.voice_clone_api_base_url ?? "").trim());
     const runningHubReady = config?.voice_provider === "runninghub"
       && config.voice_clone_api_key_set
       && Boolean(String(config.voice_clone_voice_id ?? "").trim());
     checks.push({
-      key: "ai_director",
-      label: "AI 导演重配音",
+      key: "dialogue_polish",
+      label: "智能台词润色",
       status: indexTtsReady || runningHubReady ? "ready" : "warning",
       detail: indexTtsReady
         ? `当前走 IndexTTS2 accel 主实例，本地服务：${runtimeEnvironment?.voice_clone_api_base_url}；会自动做情绪文本和强度控制。`
         : runningHubReady
         ? `当前走 RunningHub，工作流 / voice id：${config?.voice_clone_voice_id}`
-        : "已启用 AI 导演，但语音 provider 配置还不完整，缺少可用的 TTS / 语音克隆执行入口。",
+        : "已启用智能台词润色，但语音 provider 配置还不完整，缺少可用的 TTS / 语音克隆执行入口。",
     });
   }
 

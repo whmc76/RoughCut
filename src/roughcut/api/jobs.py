@@ -26,6 +26,7 @@ import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import delete, distinct, func, inspect, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.orm.attributes import set_committed_value
@@ -58,6 +59,7 @@ from roughcut.api.schemas import (
 from roughcut.avatar import get_avatar_material_profile, list_avatar_material_profiles
 from roughcut.config import DEFAULT_PROJECT_ROOT, get_settings, llm_task_route
 from roughcut.config import apply_runtime_overrides
+from roughcut.creator_asset_runtime import creator_has_complete_packaging_assets
 from roughcut.creative.modes import normalize_enhancement_modes, normalize_workflow_mode
 from roughcut.db.models import (
     Artifact,
@@ -110,8 +112,10 @@ from roughcut.edit.local_focus_plan import build_local_focus_plan
 from roughcut.edit.packaging_timeline import (
     packaging_timeline_analysis,
     packaging_timeline_asset_plan,
+    packaging_timeline_chapter_analysis,
     packaging_timeline_editing_accents,
     packaging_timeline_editing_skill,
+    packaging_timeline_hyperframes_options,
     packaging_timeline_insert_plan,
     packaging_timeline_subtitles,
     resolve_packaging_timeline_payload,
@@ -142,9 +146,9 @@ from roughcut.edit.refine_decisions import (
     normalize_refine_decision_plan_strategy_metadata,
 )
 from roughcut.edit.render_plan import (
-    render_plan_ai_director,
     render_plan_avatar_commentary,
     render_plan_delivery,
+    render_plan_dialogue_polish,
     render_plan_loudness,
     render_plan_strategy_review_context,
     render_plan_voice_processing,
@@ -165,6 +169,7 @@ from roughcut.edit.manual_editor_contract import (
     manual_editor_rerun_issue_code as _shared_manual_editor_rerun_issue_code,
 )
 from roughcut.edit.smart_cut_rules import (
+    SMART_DELETE_AUTO_EDIT_REASONS,
     default_smart_cut_rules_payload,
     normalize_smart_cut_rules_payload,
 )
@@ -255,7 +260,7 @@ from roughcut.publication import (
     publication_plan_status,
     submit_publication_attempts,
 )
-from roughcut.publication_packaging import load_publication_packaging_payload
+from roughcut.publication_packaging import load_publication_packaging_payload, normalize_publication_packaging_payload
 from roughcut.pipeline.quality import QUALITY_ARTIFACT_TYPE
 from roughcut.media.variant_timeline_bundle import resolve_effective_variant_timeline_bundle
 from roughcut.packaging.library import resolve_packaging_plan_for_job
@@ -281,6 +286,10 @@ from roughcut.review.content_profile_artifacts import (
     build_strategy_storyboard_review_artifact_payload,
     build_strategy_timeline_preview_artifact_payload,
     build_strategy_review_gates_artifact_payload,
+)
+from roughcut.review.chapter_analysis import (
+    ARTIFACT_TYPE_CHAPTER_ANALYSIS,
+    build_chapter_analysis_payload,
 )
 from roughcut.review.content_profile_strategy import (
     attach_content_profile_capability_orchestration,
@@ -362,15 +371,16 @@ STEP_LABELS = {
     "content_profile": "内容摘要",
     "summary_review": "内容异常门",
     "glossary_review": "术语纠错",
-    "ai_director": "AI导演",
+    "dialogue_polish": "智能台词润色",
     "avatar_commentary": "数字人解说",
     "edit_plan": "剪辑决策",
+    "chapter_analysis": "进度条章节",
     "render": "渲染输出",
-    "script_footage_remix": "影视二创",
+    "script_footage_remix": "解说二创",
 }
 
 STEP_ORDER = {step_name: index for index, step_name in enumerate(PIPELINE_STEPS)}
-MANUAL_EDITOR_OPTIONAL_PREREQUISITE_STEPS = {"ai_director", "avatar_commentary"}
+MANUAL_EDITOR_OPTIONAL_PREREQUISITE_STEPS = {"dialogue_polish", "avatar_commentary"}
 _LIST_PREVIEW_ARTIFACT_TYPES = (
     "content_profile_final",
     "content_profile",
@@ -391,7 +401,7 @@ PROFILE_ARTIFACT_PRIORITY = {
     "content_profile_draft": 1,
 }
 _CONTENT_PROFILE_ARTIFACT_TYPES = ("content_profile_final", "content_profile", "content_profile_draft")
-_MATERIAL_ENHANCEMENT_MODES = frozenset({"voice_enhancement", "loudness_normalization"})
+_MATERIAL_ENHANCEMENT_MODES = frozenset({"auto_orientation_correction", "voice_enhancement", "loudness_normalization"})
 _DOWNSTREAM_PROFILE_ARTIFACT_TYPES = (
     "downstream_context",
     *_CONTENT_PROFILE_ARTIFACT_TYPES,
@@ -399,7 +409,7 @@ _DOWNSTREAM_PROFILE_ARTIFACT_TYPES = (
     ARTIFACT_TYPE_STRATEGY_STORYBOARD_REVIEW,
     ARTIFACT_TYPE_STRATEGY_TIMELINE_PREVIEW,
 )
-_CONTENT_PROFILE_THUMBNAIL_CACHE_VERSION = "v2"
+_CONTENT_PROFILE_THUMBNAIL_CACHE_VERSION = "v7"
 _CONTENT_PROFILE_THUMBNAIL_LOCKS: dict[str, asyncio.Lock] = {}
 _CONTENT_PROFILE_THUMBNAIL_GENERATION_SEMAPHORE = asyncio.Semaphore(2)
 _CONTENT_PROFILE_THUMBNAIL_WARM_TASKS: dict[str, asyncio.Task] = {}
@@ -498,6 +508,7 @@ class ManualEditorApplyIn(BaseModel):
     subtitle_replacements: list[ManualEditorSubtitleReplacementIn] = Field(default_factory=list)
     video_transform: ManualEditorVideoTransformIn | None = None
     smart_cut_rules: dict[str, Any] | None = None
+    hyperframes_options: dict[str, Any] | None = None
     video_summary: str | None = None
     base_timeline_id: str | None = None
     base_timeline_version: int | None = None
@@ -618,6 +629,7 @@ class ManualEditorSessionOut(BaseModel):
     video_transform: ManualEditorVideoTransformIn | None = None
     base_video_transform: ManualEditorVideoTransformIn | None = None
     smart_cut_rules: dict[str, Any] | None = None
+    hyperframes_options: dict[str, bool] = Field(default_factory=dict)
     draft_saved_at: str | None = None
     draft_note: str | None = None
     editable: bool = True
@@ -857,6 +869,9 @@ def _normalize_selected_smart_cut_rule_reasons(value: Any) -> list[str]:
 
 def _smart_cut_rules_payload_from_selected_reasons(reasons: list[str]) -> dict[str, Any]:
     selected = set(reasons)
+    selected_smart_delete_reasons = [
+        reason for reason in SMART_DELETE_AUTO_EDIT_REASONS if reason in selected
+    ]
     defaults = default_smart_cut_rules_payload()
     return {
         **defaults,
@@ -865,13 +880,26 @@ def _smart_cut_rules_payload_from_selected_reasons(reasons: list[str]) -> dict[s
         "catchphraseEnabled": bool(selected.intersection({"catchphrase_phrase"})),
         "repeatedEnabled": bool(selected.intersection({"repeated_speech"})),
         "pauseEnabled": bool(selected.intersection({"silence", "pause"})),
-        "smartDeleteEnabled": any(rule_kind(reason) == "smart_delete" for reason in selected),
+        "smartDeleteEnabled": bool(selected_smart_delete_reasons),
+        "disabledSmartDeleteReasons": [
+            reason for reason in SMART_DELETE_AUTO_EDIT_REASONS if reason not in selected_smart_delete_reasons
+        ],
     }
 
 
 def _normalize_material_enhancement_modes(value: Any) -> list[str]:
     requested = _normalize_json_string_list(value, field_name="material_enhancement_modes")
     return [mode for mode in requested if mode in _MATERIAL_ENHANCEMENT_MODES]
+
+
+def _normalize_translation_target_language(value: Any) -> str:
+    normalized = str(value or "auto").strip()
+    return normalized if normalized in {"auto", "en-US", "zh-CN", "ja-JP", "ko-KR"} else "auto"
+
+
+def _normalize_create_start_mode(value: Any) -> str:
+    normalized = str(value or "immediate").strip().lower()
+    return normalized if normalized in {"manual", "immediate"} else "immediate"
 
 
 def _normalize_agent_capability_keys(value: Any) -> list[str]:
@@ -917,26 +945,28 @@ def _smart_cut_rule_reasons_from_capabilities(
     smart_cut_reasons: list[str] | None,
     capability_keys: list[str] | None,
 ) -> list[str] | None:
+    if smart_cut_reasons is not None:
+        return list(smart_cut_reasons)
     if capability_keys is None:
         return smart_cut_reasons
     selected_capabilities = set(capability_keys)
-    base_reasons = list(smart_cut_reasons or [])
-    auto_edit_rule_reasons = {
-        "filler_word",
-        "catchphrase_phrase",
-        "repeated_speech",
-        "silence",
-        "pause",
-        "low_signal_subtitle",
-    }
-    without_auto_edit = [reason for reason in base_reasons if reason not in auto_edit_rule_reasons]
     if "speech_density_trim" not in selected_capabilities:
-        return without_auto_edit
-    enabled = list(without_auto_edit)
+        return []
+    enabled: list[str] = []
     for reason in ("filler_word", "repeated_speech", "silence", "low_signal_subtitle"):
         if reason not in enabled:
             enabled.append(reason)
     return enabled
+
+
+def _merge_smart_cut_capability_key(
+    keys: list[str] | None,
+    smart_cut_reasons: list[str] | None,
+) -> list[str] | None:
+    if keys is None:
+        return None
+    selected = [key for key in keys if key != "speech_density_trim"]
+    return [*selected, "speech_density_trim"] if smart_cut_reasons else selected
 
 
 def _merge_hyperframes_capability_keys(
@@ -1538,12 +1568,23 @@ async def list_jobs(
     include_history: bool = False,
     session: AsyncSession = Depends(get_session),
 ):
+    page_limit = max(1, min(int(limit or 50), 200))
+    page_offset = max(0, int(offset or 0))
+    raw_limit = page_limit
+    raw_offset = page_offset
+    if not include_history:
+        # The primary queue collapses duplicate reruns into one visible card.
+        # Fetch a larger raw window and apply offset after collapse; otherwise
+        # the first page can shrink to only a few cards when recent duplicate
+        # runs dominate the raw ordering.
+        raw_limit = max(page_limit + page_offset, page_limit * 8)
+        raw_offset = 0
     result = await session.execute(
         select(Job)
-        .options(selectinload(Job.steps), selectinload(Job.publication_attempts))
+        .options(selectinload(Job.steps), selectinload(Job.publication_attempts), selectinload(Job.creator_card))
         .order_by(Job.updated_at.desc(), Job.created_at.desc())
-        .limit(limit)
-        .offset(offset)
+        .limit(raw_limit)
+        .offset(raw_offset)
     )
     jobs = result.scalars().all()
     if jobs:
@@ -1564,6 +1605,7 @@ async def list_jobs(
     _attach_job_previews(jobs, lightweight=True)
     if not include_history:
         jobs = _collapse_jobs_for_primary_queue(jobs)
+        jobs = jobs[page_offset:page_offset + page_limit]
     return jobs
 
 
@@ -1757,7 +1799,7 @@ async def start_remix_production_job(
         "command": command,
         "output_dir": str(output_dir),
         "progress": 0.05,
-        "detail": "已提交影视二创 script-footage 生产任务。",
+        "detail": "已提交解说二创 script-footage 生产任务。",
         "task_id": task_id,
         "queue": REMIX_PRODUCTION_CELERY_QUEUE,
         "dispatched_at": now.isoformat(),
@@ -1771,7 +1813,7 @@ async def start_remix_production_job(
     try:
         _send_remix_production_job_task(str(job.id), command, str(output_dir), task_id=task_id)
     except Exception as exc:
-        detail = f"影视二创生产任务入队失败：{exc}"
+        detail = f"解说二创生产任务入队失败：{exc}"
         now = datetime.now(timezone.utc)
         step.status = "failed"
         step.finished_at = now
@@ -1789,7 +1831,7 @@ async def start_remix_production_job(
     return RemixProductionStartOut(
         job_id=str(job.id),
         status="started",
-        detail="已将该集影视二创生产任务提交到媒体队列。",
+        detail="已将该集解说二创生产任务提交到媒体队列。",
         command=command,
         task_id=task_id,
     )
@@ -1798,6 +1840,9 @@ async def start_remix_production_job(
 def _resolve_remix_production_manifest_path(value: str | None) -> Path:
     raw = str(value or os.getenv(DEFAULT_REMIX_PRODUCTION_MANIFEST_ENV) or "").strip()
     if not raw:
+        discovered = _discover_default_remix_production_manifest_path()
+        if discovered is not None:
+            return discovered
         raise HTTPException(
             status_code=400,
             detail=f"Remix production manifest path is required. Set {DEFAULT_REMIX_PRODUCTION_MANIFEST_ENV} or pass a manifest path.",
@@ -1806,6 +1851,46 @@ def _resolve_remix_production_manifest_path(value: str | None) -> Path:
     if path.is_absolute():
         return path
     return (DEFAULT_PROJECT_ROOT / path).resolve()
+
+
+def _discover_default_remix_production_manifest_path() -> Path | None:
+    candidates: list[Path] = []
+    profiles_dir = DEFAULT_PROJECT_ROOT / "data" / "creator_profiles"
+    for profile_path in sorted(profiles_dir.glob("*.json")) if profiles_dir.exists() else []:
+        try:
+            payload = json.loads(profile_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for binding in list(payload.get("remix_task_bindings") or []):
+            if not isinstance(binding, dict):
+                continue
+            raw_path = str(binding.get("production_manifest_path") or "").strip()
+            if not raw_path:
+                continue
+            path = Path(raw_path).expanduser()
+            if not path.is_absolute():
+                path = (DEFAULT_PROJECT_ROOT / path).resolve()
+            if path.exists() and path.is_file():
+                candidates.append(path)
+
+    manifest_dir = DEFAULT_PROJECT_ROOT / "data" / "remix_production_tasks"
+    if manifest_dir.exists():
+        candidates.extend(path.resolve() for path in manifest_dir.glob("*.json") if path.is_file())
+
+    unique_candidates: dict[str, Path] = {str(path): path for path in candidates}
+    if not unique_candidates:
+        return None
+    ranked = sorted(
+        unique_candidates.values(),
+        key=lambda path: (
+            "example" in path.name.lower(),
+            -path.stat().st_mtime,
+            path.name.lower(),
+        ),
+    )
+    return ranked[0]
 
 
 def _load_remix_production_manifest(value: str | None) -> tuple[Path, dict[str, Any]]:
@@ -1960,11 +2045,11 @@ async def _create_or_update_remix_production_job(
         workflow_template=None,
         job_flow_mode="auto",
         workflow_mode="script_footage_remix",
-        enhancement_modes=["ai_effects", "multi_platform_adaptation"],
+        enhancement_modes=["ai_effects"],
         output_dir=str(_default_remix_production_output_dir(payload, task)),
         creator_card_id=creator_card_id,
         task_brief=(
-            f"{label} 影视二创正式生产任务。完整保留文案，使用创作者参考语音、"
+            f"{label} 解说二创正式生产任务。完整保留文案，使用创作者参考语音、"
             "Source-ASR 定位原片剧情，TTS-ASR 对齐字幕，Hyperframes 包装。"
         ),
         execution_mode="auto",
@@ -1985,7 +2070,7 @@ async def _create_or_update_remix_production_job(
             job_id=job.id,
             step_name=REMIX_PRODUCTION_STEP_NAME,
             status="pending",
-            metadata_={"source_context": source_context, "detail": "等待启动影视二创生产。", "progress": 0.0},
+            metadata_={"source_context": source_context, "detail": "等待启动解说二创生产。", "progress": 0.0},
         )
     )
     _ensure_remix_production_cover_artifact(job, payload, task)
@@ -2015,7 +2100,7 @@ def _refresh_remix_production_job_metadata(
     if creator_card_id is not None:
         job.creator_card_id = creator_card_id
     job.task_brief = (
-        f"{label} 影视二创正式生产任务。完整保留文案，使用创作者参考语音、"
+        f"{label} 解说二创正式生产任务。完整保留文案，使用创作者参考语音、"
         "Source-ASR 定位原片剧情，TTS-ASR 对齐字幕，Hyperframes 包装。"
     )
 
@@ -2039,7 +2124,7 @@ def _refresh_remix_production_job_metadata(
     remix_step.metadata_ = {
         **(remix_step.metadata_ or {}),
         "source_context": source_context,
-        "detail": (remix_step.metadata_ or {}).get("detail") or "等待启动影视二创生产。",
+        "detail": (remix_step.metadata_ or {}).get("detail") or "等待启动解说二创生产。",
         "progress": (remix_step.metadata_ or {}).get("progress", 0.0),
     }
     return source_context
@@ -2280,7 +2365,7 @@ def _remix_runtime_path_blocker(remix_payload: dict[str, Any]) -> str | None:
     if not missing:
         return None
     return (
-        "影视二创生产源素材在当前 API 运行环境中不可读。请把源片/文案目录挂载进 API 容器，"
+        "解说二创生产源素材在当前 API 运行环境中不可读。请把源片/文案目录挂载进 API 容器，"
         "或设置 ROUGHCUT_REMIX_SOURCE_HOST_ROOT/ROUGHCUT_REMIX_SOURCE_CONTAINER_ROOT 后重建 API 容器。缺失路径："
         + "；".join(missing)
     )
@@ -2329,7 +2414,7 @@ async def recover_interrupted_remix_production_jobs_on_startup(
             remix_payload = source_context.get("remix_production") if isinstance(source_context, dict) else None
             metadata = dict(step.metadata_ or {})
             if not isinstance(remix_payload, dict):
-                detail = "服务启动恢复失败：影视二创任务缺少 remix production 元数据，无法自动续跑。"
+                detail = "服务启动恢复失败：解说二创任务缺少 remix production 元数据，无法自动续跑。"
                 step.status = "failed"
                 step.finished_at = now
                 step.error_message = detail
@@ -2340,7 +2425,7 @@ async def recover_interrupted_remix_production_jobs_on_startup(
                 continue
             if int(step.attempt or 0) >= REMIX_PRODUCTION_STARTUP_RECOVERY_MAX_ATTEMPTS:
                 detail = (
-                    "服务启动发现影视二创任务已达到最大自动恢复次数"
+                    "服务启动发现解说二创任务已达到最大自动恢复次数"
                     f"({REMIX_PRODUCTION_STARTUP_RECOVERY_MAX_ATTEMPTS})，不再自动续跑。"
                 )
                 step.status = "failed"
@@ -2375,7 +2460,7 @@ async def recover_interrupted_remix_production_jobs_on_startup(
                 "command": command,
                 "output_dir": str(output_dir),
                 "progress": float(metadata.get("progress") or 0.05),
-                "detail": "服务重启后自动恢复影视二创生产任务，复用已有中间产物继续执行。",
+                "detail": "服务重启后自动恢复解说二创生产任务，复用已有中间产物继续执行。",
                 "task_id": task_id,
                 "queue": REMIX_PRODUCTION_CELERY_QUEUE,
                 "startup_recovered_at": now.isoformat(),
@@ -2464,7 +2549,7 @@ async def _run_remix_production_job(job_id: str, command: list[str], output_dir:
             step.finished_at = now
             step.error_message = None
             metadata["progress"] = 1.0
-            metadata["detail"] = "影视二创生产完成。"
+            metadata["detail"] = "解说二创生产完成。"
             job.status = "done"
             job.error_message = None
             if output_path:
@@ -2481,7 +2566,7 @@ async def _run_remix_production_job(job_id: str, command: list[str], output_dir:
                     )
                 )
         else:
-            detail = (result.stderr or result.stdout or "影视二创生产失败").strip()[-1000:]
+            detail = (result.stderr or result.stdout or "解说二创生产失败").strip()[-1000:]
             step.status = "failed"
             step.finished_at = now
             step.error_message = detail
@@ -2563,6 +2648,8 @@ async def create_job(
     material_enhancement_modes: str | None = Form(None),
     agent_capability_keys: str | None = Form(None),
     hyperframes_options: str | None = Form(None),
+    translation_target_language: str | None = Form(None),
+    start_mode: str | None = Form(None),
     output_dir: str | None = Form(None),
     video_description: str | None = Form(None),
     session: AsyncSession = Depends(get_session),
@@ -2599,6 +2686,7 @@ async def create_job(
         )
         normalized_material_enhancement_modes = _normalize_material_enhancement_modes(material_enhancement_modes)
         normalized_hyperframes_options = _normalize_hyperframes_options_payload(hyperframes_options)
+        normalized_start_mode = _normalize_create_start_mode(start_mode)
         selected_agent_capability_keys = (
             _normalize_agent_capability_keys(agent_capability_keys)
             if agent_capability_keys is not None
@@ -2612,6 +2700,10 @@ async def create_job(
             selected_smart_cut_rule_reasons,
             selected_agent_capability_keys,
         )
+        selected_agent_capability_keys = _merge_smart_cut_capability_key(
+            selected_agent_capability_keys,
+            selected_smart_cut_rule_reasons,
+        )
         workflow_template = workflow_template_for_edit_mode(edit_mode) or workflow_template
         enhancement_modes = _merge_hyperframes_enhancement_modes(
             normalize_enhancement_modes(
@@ -2621,10 +2713,16 @@ async def create_job(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    resolved_creator_card: CreatorCard | None = None
     if parsed_creator_card_id is not None:
-        creator_exists = await session.get(CreatorCard, parsed_creator_card_id)
-        if creator_exists is None:
+        resolved_creator_card = await session.get(CreatorCard, parsed_creator_card_id)
+        if resolved_creator_card is None:
             raise HTTPException(status_code=422, detail="creator_card_id does not exist")
+    else:
+        default_packaging_creator = await _infer_single_complete_packaging_creator_card(session)
+        if default_packaging_creator is not None:
+            parsed_creator_card_id = default_packaging_creator.id
+            resolved_creator_card = default_packaging_creator
 
     with tempfile.TemporaryDirectory() as tmpdir:
         temp_root = Path(tmpdir)
@@ -2656,6 +2754,7 @@ async def create_job(
             ),
             material_enhancement_modes=normalized_material_enhancement_modes,
             hyperframes_options=normalized_hyperframes_options,
+            translation_target_language=translation_target_language,
             capability_overrides=(
                 _capability_overrides_from_selected_keys(selected_agent_capability_keys)
                 if selected_agent_capability_keys is not None
@@ -2673,7 +2772,7 @@ async def create_job(
             id=job_id,
             source_path=s3_key,
             source_name=source_name,
-            status="pending",
+            status="awaiting_init" if normalized_start_mode == "manual" else "pending",
             language=language,
             workflow_template=workflow_template,
             job_flow_mode=job_flow_mode,
@@ -2685,10 +2784,14 @@ async def create_job(
             execution_mode=execution_mode,
             platform_targets_json=normalized_platform_targets,
         )
+        if resolved_creator_card is not None:
+            job.creator_card = resolved_creator_card
         session.add(job)
 
         steps = create_job_steps(job_id)
+        step_initial_status = "awaiting_init" if normalized_start_mode == "manual" else "pending"
         for step in steps:
+            step.status = step_initial_status
             if step.step_name == "content_profile" and source_context:
                 step.metadata_ = {
                     **(step.metadata_ or {}),
@@ -2874,15 +2977,23 @@ async def _ensure_job_agent_plan(
             status="ready",
             plan_payload_json=payload,
         )
-        session.add(plan)
-        await session.flush()
-        await _record_job_agent_plan_revision(
-            session,
-            job_id=job.id,
-            plan_payload=payload,
-            prompt=str(job.task_brief or getattr(job, "video_description", "") or "").strip() or None,
-            operation="generate",
-        )
+        try:
+            async with session.begin_nested():
+                session.add(plan)
+                await session.flush()
+                await _record_job_agent_plan_revision(
+                    session,
+                    job_id=job.id,
+                    plan_payload=payload,
+                    prompt=str(job.task_brief or getattr(job, "video_description", "") or "").strip() or None,
+                    operation="generate",
+                )
+        except IntegrityError:
+            result = await session.execute(select(JobAgentPlan).where(JobAgentPlan.job_id == job.id))
+            existing_plan = result.scalar_one_or_none()
+            if existing_plan is None:
+                raise
+            return existing_plan
         return plan
     if regenerate:
         plan.creator_card_id = creator.id if creator is not None else None
@@ -3010,6 +3121,7 @@ def _build_job_source_context(
     smart_cut_rules: dict[str, Any] | None = None,
     material_enhancement_modes: list[str] | None = None,
     hyperframes_options: dict[str, bool] | None = None,
+    translation_target_language: str | None = None,
     capability_overrides: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     source_context: dict[str, Any] = {}
@@ -3039,6 +3151,13 @@ def _build_job_source_context(
     ]
     if normalized_material_enhancement_modes:
         source_context["material_enhancement_modes"] = list(dict.fromkeys(normalized_material_enhancement_modes))
+    if translation_target_language is not None:
+        translation_target = _normalize_translation_target_language(translation_target_language)
+        source_context["translation"] = (
+            {"target_language_mode": "auto"}
+            if translation_target == "auto"
+            else {"target_language_mode": "manual", "target_language": translation_target}
+        )
     source_context["hyperframes_options"] = normalize_hyperframes_options(hyperframes_options)
     normalized_capability_overrides = {
         key: "disabled"
@@ -3105,7 +3224,12 @@ async def _save_uploaded_file(
 async def get_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
     result = await session.execute(
         select(Job)
-        .options(selectinload(Job.steps), selectinload(Job.artifacts), selectinload(Job.publication_attempts))
+        .options(
+            selectinload(Job.steps),
+            selectinload(Job.artifacts),
+            selectinload(Job.publication_attempts),
+            selectinload(Job.creator_card),
+        )
         .where(Job.id == job_id)
     )
     job = result.scalar_one_or_none()
@@ -3366,7 +3490,7 @@ async def restart_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_ses
         remix_step.error_message = None
         remix_step.metadata_ = {
             "source_context": preserved_source_context,
-            "detail": "任务已重新开始，等待启动影视二创生产。",
+            "detail": "任务已重新开始，等待启动解说二创生产。",
             "progress": 0.0,
             "updated_at": now.isoformat(),
         } if preserved_source_context else {
@@ -3472,7 +3596,7 @@ async def initialize_job(
 
     now = datetime.now(timezone.utc)
     existing_source_context = _extract_job_source_context_from_steps(job.steps or [])
-    source_context = _build_job_source_context(
+    updated_source_context = _build_job_source_context(
         source_name=job.source_name,
         video_description=body.video_description,
         merged_source_names=[
@@ -3484,6 +3608,10 @@ async def initialize_job(
         product_controls=body.model_dump(include={"edit_mode", "automation_level", "material_usage"}, exclude_none=True)
         or existing_source_context.get("product_controls"),
     )
+    source_context = {
+        **existing_source_context,
+        **(updated_source_context or {}),
+    }
     resolved_workflow_template = workflow_template_for_edit_mode(body.edit_mode) or body.workflow_template
 
     job.status = "pending"
@@ -3530,7 +3658,11 @@ async def initialize_job(
 
 
 @router.delete("/{job_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
+async def delete_job(
+    job_id: uuid.UUID,
+    include_family: bool = Query(False),
+    session: AsyncSession = Depends(get_session),
+):
     result = await session.execute(
         select(Job).options(selectinload(Job.steps), selectinload(Job.artifacts)).where(Job.id == job_id)
     )
@@ -3538,11 +3670,42 @@ async def delete_job(job_id: uuid.UUID, session: AsyncSession = Depends(get_sess
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    _revoke_running_steps(job.steps or [])
-    await _clear_job_runtime_state(job_id, session, source_path="")
-    await session.execute(delete(JobStep).where(JobStep.job_id == job_id))
-    await session.execute(delete(Job).where(Job.id == job_id))
+    jobs_to_delete = [job]
+    if include_family:
+        jobs_to_delete = await _resolve_job_delete_family(job, session)
+
+    for target_job in jobs_to_delete:
+        _revoke_running_steps(target_job.steps or [])
+        await _clear_job_runtime_state(target_job.id, session, source_path="")
+
+    target_ids = [target_job.id for target_job in jobs_to_delete]
+    await session.execute(delete(JobStep).where(JobStep.job_id.in_(target_ids)))
+    await session.execute(delete(Job).where(Job.id.in_(target_ids)))
     await session.commit()
+
+
+async def _resolve_job_delete_family(job: Job, session: AsyncSession) -> list[Job]:
+    _attach_job_preview(job)
+    family_key = _job_queue_family_key(job)
+    identity = family_key[0]
+    if not identity:
+        return [job]
+
+    result = await session.execute(
+        select(Job)
+        .options(selectinload(Job.steps), selectinload(Job.artifacts))
+        .where(
+            (func.lower(Job.file_hash) == identity)
+            | (func.lower(Job.source_path) == identity)
+            | (func.lower(Job.source_name) == identity)
+        )
+    )
+    candidates = list(result.scalars().all())
+    if not any(candidate.id == job.id for candidate in candidates):
+        candidates.append(job)
+    _attach_job_previews(candidates, lightweight=True)
+    family_jobs = [candidate for candidate in candidates if _job_queue_family_key(candidate) == family_key]
+    return family_jobs or [job]
 
 
 @router.get("/{job_id}/report", response_model=ReportOut)
@@ -3978,10 +4141,40 @@ def _manual_editor_render_plan_context(render_plan: dict[str, Any] | None) -> di
         "video_transform": render_plan_video_transform(payload),
         "loudness": render_plan_loudness(payload),
         "voice_processing": render_plan_voice_processing(payload),
-        "ai_director_plan": render_plan_ai_director(payload),
+        "dialogue_polish_plan": render_plan_dialogue_polish(payload),
         "avatar_commentary_plan": render_plan_avatar_commentary(payload),
         "strategy_review_context": render_plan_strategy_review_context(payload),
     }
+
+
+async def _load_packaging_creator_card_for_job(session: AsyncSession, job: Job) -> CreatorCard | None:
+    if job.creator_card_id:
+        result = await session.execute(
+            select(CreatorCard)
+            .options(selectinload(CreatorCard.assets))
+            .where(CreatorCard.id == job.creator_card_id)
+        )
+        creator = result.scalar_one_or_none()
+        if creator is not None:
+            return creator
+    return await _infer_single_complete_packaging_creator_card(session)
+
+
+async def _infer_single_complete_packaging_creator_card(session: AsyncSession) -> CreatorCard | None:
+    result = await session.execute(
+        select(CreatorCard)
+        .options(selectinload(CreatorCard.assets))
+        .where(CreatorCard.status == "active")
+        .order_by(CreatorCard.updated_at.desc(), CreatorCard.created_at.desc())
+    )
+    candidates = [
+        creator
+        for creator in result.scalars().all()
+        if creator_has_complete_packaging_assets(list(getattr(creator, "assets", []) or []))
+    ]
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
 
 
 def _manual_editor_multimodal_trim_review_payload(
@@ -7366,10 +7559,13 @@ def _manual_editor_change_plan(
     subtitle_overrides: list[dict[str, Any]],
     previous_video_transform: dict[str, Any] | None = None,
     next_video_transform: dict[str, Any] | None = None,
+    previous_hyperframes_options: dict[str, Any] | None = None,
+    next_hyperframes_options: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     timeline_changed = _manual_keep_segments_changed(previous_keep_segments, next_keep_segments)
     subtitle_changed = bool(subtitle_overrides)
     video_transform_changed = _manual_video_transform_payload(previous_video_transform) != _manual_video_transform_payload(next_video_transform)
+    packaging_changed = normalize_hyperframes_options(previous_hyperframes_options) != normalize_hyperframes_options(next_hyperframes_options)
     rotation_changed = _manual_video_transform_payload(previous_video_transform).get("rotation_cw") != _manual_video_transform_payload(next_video_transform).get("rotation_cw")
     if timeline_changed:
         change_scope = "timeline"
@@ -7380,6 +7576,9 @@ def _manual_editor_change_plan(
     elif subtitle_changed:
         change_scope = "subtitle_only"
         render_strategy = "reuse_timeline_effect_plan"
+    elif packaging_changed:
+        change_scope = "packaging"
+        render_strategy = "packaging_only_render"
     else:
         change_scope = "no_material_change"
         render_strategy = "metadata_refresh_render"
@@ -7388,6 +7587,7 @@ def _manual_editor_change_plan(
         "timeline_changed": timeline_changed,
         "subtitle_changed": subtitle_changed,
         "video_transform_changed": video_transform_changed,
+        "packaging_changed": packaging_changed,
         "rotation_changed": rotation_changed,
         "render_strategy": render_strategy,
     }
@@ -8308,6 +8508,9 @@ async def _build_manual_editor_session(
     manual_projection_items: list[dict[str, Any]] = []
     render_plan_data = render_plan_timeline.data_json if render_plan_timeline and isinstance(render_plan_timeline.data_json, dict) else {}
     render_plan_context = _manual_editor_render_plan_context(render_plan_data)
+    hyperframes_options = normalize_hyperframes_options(
+        packaging_timeline_hyperframes_options(render_plan_context["packaging_timeline"])
+    )
     base_video_transform = _manual_video_transform_from_render_plan(
         None,
         render_plan_context=render_plan_context,
@@ -8552,6 +8755,11 @@ async def _build_manual_editor_session(
             )
         video_transform = _manual_video_transform_payload(draft_payload.get("video_transform"))
         smart_cut_rules = _manual_editor_smart_cut_rules_payload(draft_payload.get("smart_cut_rules")) or smart_cut_rules
+        hyperframes_options = normalize_hyperframes_options(
+            draft_payload.get("hyperframes_options")
+            if isinstance(draft_payload.get("hyperframes_options"), dict)
+            else hyperframes_options
+        )
         video_summary = _normalize_manual_video_summary(draft_payload.get("video_summary")) or base_video_summary
         draft_saved_at = str(draft_payload.get("saved_at") or "") or None
         draft_note = str(draft_payload.get("note") or "") or None
@@ -8705,6 +8913,7 @@ async def _build_manual_editor_session(
         video_transform=ManualEditorVideoTransformIn(**video_transform),
         base_video_transform=ManualEditorVideoTransformIn(**base_video_transform),
         smart_cut_rules=smart_cut_rules,
+        hyperframes_options=hyperframes_options,
         draft_saved_at=draft_saved_at,
         draft_note=draft_note,
         editable=session_detail is None,
@@ -8917,6 +9126,17 @@ async def save_manual_editor_draft(
     )
     video_transform = _manual_video_transform_payload(request.video_transform)
     smart_cut_rules = _manual_editor_smart_cut_rules_payload(request.smart_cut_rules)
+    render_plan_context = _manual_editor_render_plan_context(
+        render_plan_timeline.data_json if isinstance(render_plan_timeline.data_json, dict) else {}
+    )
+    base_hyperframes_options = normalize_hyperframes_options(
+        packaging_timeline_hyperframes_options(render_plan_context["packaging_timeline"])
+    )
+    hyperframes_options = (
+        normalize_hyperframes_options(request.hyperframes_options)
+        if isinstance(request.hyperframes_options, dict)
+        else base_hyperframes_options
+    )
     video_summary = _normalize_manual_video_summary(request.video_summary)
     saved_at = datetime.now(timezone.utc).isoformat()
     await _persist_manual_video_summary_evidence(
@@ -8954,6 +9174,7 @@ async def save_manual_editor_draft(
                 "subtitle_replacements": subtitle_replacement_payloads,
                 "video_transform": video_transform,
                 "smart_cut_rules": smart_cut_rules,
+                "hyperframes_options": hyperframes_options,
                 "video_summary": video_summary,
                 "note": str(request.note or "").strip() or None,
             },
@@ -9111,6 +9332,11 @@ async def apply_manual_editor_timeline(
     subtitle_replacement_payloads = _manual_subtitle_replacement_payloads(request.subtitle_replacements)
     video_transform = _manual_video_transform_payload(request.video_transform)
     smart_cut_rules = _manual_editor_smart_cut_rules_payload(request.smart_cut_rules)
+    requested_hyperframes_options = (
+        normalize_hyperframes_options(request.hyperframes_options)
+        if isinstance(request.hyperframes_options, dict)
+        else None
+    )
     video_summary = _normalize_manual_video_summary(request.video_summary)
     _profile_artifact, content_profile = await _load_manual_editor_preferred_downstream_profile(
         session,
@@ -9183,6 +9409,15 @@ async def apply_manual_editor_timeline(
         clean_text=False,
     )
     previous_render_plan_context = _manual_editor_render_plan_context(previous_render_plan)
+    previous_packaging_timeline = previous_render_plan_context["packaging_timeline"]
+    previous_hyperframes_options = normalize_hyperframes_options(
+        packaging_timeline_hyperframes_options(previous_packaging_timeline)
+    )
+    effective_hyperframes_options = (
+        requested_hyperframes_options
+        if requested_hyperframes_options is not None
+        else previous_hyperframes_options
+    )
     previous_video_transform = _manual_video_transform_from_render_plan(
         None,
         render_plan_context=previous_render_plan_context,
@@ -9193,6 +9428,8 @@ async def apply_manual_editor_timeline(
         subtitle_overrides=subtitle_override_payloads,
         previous_video_transform=previous_video_transform,
         next_video_transform=video_transform,
+        previous_hyperframes_options=previous_hyperframes_options,
+        next_hyperframes_options=effective_hyperframes_options,
     )
     change_contract = _manual_editor_change_contract(change_plan)
     await _record_manual_subtitle_replacement_memory(
@@ -9207,8 +9444,8 @@ async def apply_manual_editor_timeline(
             video_summary=video_summary,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
-    previous_packaging_timeline = previous_render_plan_context["packaging_timeline"]
     editing_skill = packaging_timeline_editing_skill(previous_packaging_timeline)
+    previous_chapter_analysis = packaging_timeline_chapter_analysis(previous_packaging_timeline)
     previous_editing_accents = packaging_timeline_editing_accents(previous_packaging_timeline)
     previous_subtitles = packaging_timeline_subtitles(previous_packaging_timeline)
     previous_smart_effect_style = str(previous_editing_accents.get("style") or "smart_effect_commercial")
@@ -9234,10 +9471,32 @@ async def apply_manual_editor_timeline(
             if isinstance(previous_editing_accents, dict)
             else None
         )
+    if change_contract["timeline_changed"] or not previous_chapter_analysis.get("chapters"):
+        chapter_analysis = await build_chapter_analysis_payload(
+            source_name=str(job.source_name or ""),
+            subtitle_items=remapped_subtitles,
+            transcript_segments=[],
+            content_profile=content_profile,
+            duration_sec=output_duration_sec,
+        )
+        session.add(
+            Artifact(
+                job_id=job.id,
+                artifact_type=ARTIFACT_TYPE_CHAPTER_ANALYSIS,
+                data_json=chapter_analysis,
+            )
+        )
+    else:
+        chapter_analysis = previous_chapter_analysis
 
     should_replan_packaging = bool(change_contract["timeline_changed"] or change_contract["video_transform_changed"])
     if should_replan_packaging:
-        packaging_plan = resolve_packaging_plan_for_job(str(job.id), content_profile=content_profile)
+        creator_card = await _load_packaging_creator_card_for_job(session, job)
+        packaging_plan = resolve_packaging_plan_for_job(
+            str(job.id),
+            content_profile=content_profile,
+            creator_assets=list(getattr(creator_card, "assets", []) or []),
+        )
         packaging_plan["insert"] = await _plan_insert_asset_slot(
             job_id=str(job.id),
             insert_plan=packaging_plan.get("insert"),
@@ -9423,13 +9682,15 @@ async def apply_manual_editor_timeline(
             content_profile=content_profile,
             timeline_analysis=timeline_analysis,
         ),
+        chapter_analysis=chapter_analysis,
         timeline_analysis=timeline_analysis,
         editing_skill=editing_skill,
         editing_accents=editing_accents,
         content_profile=content_profile,
         creative_profile=_job_creative_profile(job),
-        ai_director_plan=previous_render_plan_context["ai_director_plan"],
+        dialogue_polish_plan=previous_render_plan_context["dialogue_polish_plan"],
         avatar_commentary_plan=previous_render_plan_context["avatar_commentary_plan"],
+        hyperframes_options=effective_hyperframes_options,
         export_resolution_mode=export_resolution_mode,
         export_resolution_preset=export_resolution_preset,
         export_frame_rate_mode=export_frame_rate_mode,
@@ -10283,6 +10544,7 @@ async def get_job_publication_plan(
     job_id: uuid.UUID,
     creator_profile_id: str | None = None,
     platforms: list[str] | None = Query(default=None),
+    dynamic_options: bool = Query(default=False),
     session: AsyncSession = Depends(get_session),
 ):
     requested_platforms = _normalize_publication_query_platforms(platforms)
@@ -10301,6 +10563,7 @@ async def get_job_publication_plan(
         existing_attempts=existing_attempts,
         requested_platforms=requested_platforms,
         requested_platform_options=None,
+        resolve_dynamic_options=dynamic_options,
     )
     return build_publication_plan(
         job=job,
@@ -10736,6 +10999,8 @@ async def _platform_options_from_job_collection_strategy(
 async def _job_agent_publication_profile_options(
     session: AsyncSession,
     job: Job,
+    *,
+    resolve_dynamic_strategy: bool = True,
 ) -> dict[str, dict[str, Any]]:
     result = await session.execute(
         select(JobAgentPlan)
@@ -10749,6 +11014,8 @@ async def _job_agent_publication_profile_options(
         return {}
     payload = profile.publication_payload_json if isinstance(profile.publication_payload_json, dict) else {}
     profile_options = _normalize_publish_platform_options_payload(payload.get("platform_options"))
+    if not resolve_dynamic_strategy:
+        return profile_options
     target_platforms = list(payload.get("default_platforms") or []) or list(profile_options.keys())
     strategy_options = await _platform_options_from_job_collection_strategy(
         payload.get("collection_strategy"),
@@ -10843,12 +11110,19 @@ async def _resolve_job_publication_platform_options(
     existing_attempts: list[dict[str, Any]],
     requested_platforms: list[str] | None,
     requested_platform_options: Any,
+    resolve_dynamic_options: bool = True,
 ) -> dict[str, dict[str, Any]]:
     explicit_options = _normalize_publish_platform_options_payload(requested_platform_options)
     if explicit_options:
         return explicit_options
-    profile_options = await _job_agent_publication_profile_options(session, job)
+    profile_options = await _job_agent_publication_profile_options(
+        session,
+        job,
+        resolve_dynamic_strategy=resolve_dynamic_options,
+    )
     if not creator_profile:
+        return profile_options
+    if not resolve_dynamic_options:
         return profile_options
     base_plan = build_publication_plan(
         job=job,
@@ -11168,7 +11442,212 @@ def _load_job_smart_copy_publication_packaging(
         material_json=str(resolve_smart_copy_material_json_path(material_dir)),
         platform_packaging=str(resolve_smart_copy_platform_packaging_json_path(material_dir)),
     )
+    discovered_material_dir = _discover_job_smart_copy_material_dir(
+        job=job,
+        render_output=render_output,
+        current_material_dir=material_dir,
+        current_packaging=packaging if isinstance(packaging, dict) else None,
+    )
+    if discovered_material_dir is not None and discovered_material_dir != material_dir:
+        discovered_packaging, _discovered_sources = load_publication_packaging_payload(
+            material_json=str(resolve_smart_copy_material_json_path(discovered_material_dir)),
+            platform_packaging=str(resolve_smart_copy_platform_packaging_json_path(discovered_material_dir)),
+        )
+        if _publication_packaging_platform_count(discovered_packaging) > _publication_packaging_platform_count(packaging):
+            material_dir = discovered_material_dir
+            packaging = discovered_packaging
+    packaging = _merge_job_generation_task_publication_packaging(
+        packaging if isinstance(packaging, dict) else None,
+        material_dir=material_dir,
+        job=job,
+        render_output=render_output,
+    )
     return packaging if isinstance(packaging, dict) else None
+
+
+def _publication_packaging_platform_count(packaging: Any) -> int:
+    platforms = packaging.get("platforms") if isinstance(packaging, dict) else None
+    if isinstance(platforms, dict):
+        return len(platforms)
+    if isinstance(platforms, list):
+        return len([item for item in platforms if isinstance(item, dict)])
+    return 0
+
+
+def _discover_job_smart_copy_material_dir(
+    *,
+    job: Job,
+    render_output: RenderOutput | None,
+    current_material_dir: Path,
+    current_packaging: dict[str, Any] | None,
+) -> Path | None:
+    output_root = DEFAULT_PROJECT_ROOT / "data" / "runtime" / "output"
+    if not output_root.exists():
+        return None
+    current_count = _publication_packaging_platform_count(current_packaging)
+    query_text = " ".join(
+        str(value or "")
+        for value in (
+            getattr(job, "source_name", ""),
+            getattr(job, "task_brief", ""),
+            getattr(job, "output_dir", ""),
+            getattr(render_output, "output_path", "") if render_output is not None else "",
+        )
+    )
+    query_tokens = _publication_material_discovery_tokens(query_text)
+    candidates: list[tuple[int, int, float, Path]] = []
+    for packaging_path in output_root.rglob("platform-packaging.json"):
+        material_dir = packaging_path.parent
+        if material_dir.name == "_meta":
+            material_dir = material_dir.parent
+        if material_dir.name != "smart-copy":
+            continue
+        try:
+            package_payload, _sources = load_publication_packaging_payload(
+                material_json=str(resolve_smart_copy_material_json_path(material_dir)),
+                platform_packaging=str(resolve_smart_copy_platform_packaging_json_path(material_dir)),
+            )
+        except Exception:
+            continue
+        platform_count = _publication_packaging_platform_count(package_payload)
+        if platform_count <= current_count:
+            continue
+        haystack = _normalize_publication_discovery_text(str(material_dir.parent))
+        score = sum(1 for token in query_tokens if token in haystack)
+        if score <= 0 and query_tokens:
+            continue
+        try:
+            mtime = packaging_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        candidates.append((score, platform_count, mtime, material_dir))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1], item[2]), reverse=True)
+    return candidates[0][3]
+
+
+def _normalize_publication_discovery_text(value: Any) -> str:
+    return re.sub(r"\s+", "", str(value or "").replace("\\", "/").casefold())
+
+
+def _publication_material_discovery_tokens(value: Any) -> list[str]:
+    normalized = _normalize_publication_discovery_text(value)
+    raw_tokens = re.split(r"[^0-9a-zA-Z\u4e00-\u9fff]+", normalized)
+    tokens = [token for token in raw_tokens if len(token) >= 2]
+    priority = [
+        token
+        for token in tokens
+        if len(token) >= 4
+    ]
+    return list(dict.fromkeys(priority or tokens))
+
+
+def _merge_job_generation_task_publication_packaging(
+    packaging: dict[str, Any] | None,
+    *,
+    material_dir: Path,
+    job: Job,
+    render_output: RenderOutput | None,
+) -> dict[str, Any] | None:
+    task_packaging = _load_matching_generation_task_publication_packaging(
+        material_dir=material_dir,
+        job=job,
+        render_output=render_output,
+    )
+    if task_packaging is None:
+        return packaging
+    if packaging is None:
+        return task_packaging
+    current_platforms = packaging.get("platforms") if isinstance(packaging.get("platforms"), dict) else {}
+    task_platforms = task_packaging.get("platforms") if isinstance(task_packaging.get("platforms"), dict) else {}
+    if not task_platforms:
+        return packaging
+    merged = dict(packaging)
+    merged_platforms = {
+        **task_platforms,
+        **current_platforms,
+    }
+    merged["platforms"] = merged_platforms
+    return normalize_publication_packaging_payload(merged, material_dir=str(material_dir))
+
+
+def _load_matching_generation_task_publication_packaging(
+    *,
+    material_dir: Path,
+    job: Job,
+    render_output: RenderOutput | None,
+) -> dict[str, Any] | None:
+    task_store = DEFAULT_PROJECT_ROOT / "data" / "intelligent_copy" / "generation_tasks.json"
+    try:
+        payload = json.loads(task_store.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    tasks = payload.get("tasks") if isinstance(payload, dict) else payload
+    if not isinstance(tasks, list):
+        return None
+    expected_keys = _job_generation_task_match_keys(job=job, render_output=render_output, material_dir=material_dir)
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        if str(task.get("status") or "").strip().lower() not in {"completed", "done", "success"}:
+            continue
+        if not _generation_task_matches_job_material(task, expected_keys):
+            continue
+        result = task.get("result") if isinstance(task.get("result"), dict) else {}
+        normalized = normalize_publication_packaging_payload(result, material_dir=str(material_dir))
+        platforms = normalized.get("platforms") if isinstance(normalized, dict) and isinstance(normalized.get("platforms"), dict) else {}
+        if platforms:
+            return normalized
+    return None
+
+
+def _job_generation_task_match_keys(
+    *,
+    job: Job,
+    render_output: RenderOutput | None,
+    material_dir: Path,
+) -> set[str]:
+    values = {
+        str(material_dir),
+        str(material_dir.parent),
+        str(getattr(job, "source_name", "") or ""),
+        str(getattr(job, "output_dir", "") or ""),
+        str(getattr(job, "source_path", "") or ""),
+        str(getattr(render_output, "output_path", "") or "") if render_output is not None else "",
+    }
+    return {
+        _normalize_publication_path_for_compare(value)
+        for value in values
+        if str(value or "").strip()
+    }
+
+
+def _generation_task_matches_job_material(task: dict[str, Any], expected_keys: set[str]) -> bool:
+    inspection = task.get("inspection") if isinstance(task.get("inspection"), dict) else {}
+    result = task.get("result") if isinstance(task.get("result"), dict) else {}
+    candidates = [
+        task.get("material_dir"),
+        task.get("folder_path"),
+        inspection.get("material_dir"),
+        inspection.get("folder_path"),
+        inspection.get("video_file"),
+        result.get("material_dir"),
+        result.get("folder_path"),
+        result.get("markdown_path"),
+        result.get("json_path"),
+    ]
+    normalized_candidates = {
+        _normalize_publication_path_for_compare(candidate)
+        for candidate in candidates
+        if str(candidate or "").strip()
+    }
+    if normalized_candidates & expected_keys:
+        return True
+    for candidate in normalized_candidates:
+        if any(key and (key in candidate or candidate in key) for key in expected_keys):
+            return True
+    return False
 
 
 def _resolve_job_smart_copy_material_dir(material_dir: Path) -> Path | None:
@@ -12273,6 +12752,7 @@ async def get_job_activity(job_id: uuid.UUID, session: AsyncSession = Depends(ge
                     ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT,
                     ARTIFACT_TYPE_SUBTITLE_TERM_RESOLUTION_PATCH,
                     ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT,
+                    "dialogue_polish_plan",
                     "ai_director_plan",
                     "avatar_commentary_plan",
                     "render_outputs",
@@ -12643,18 +13123,25 @@ def _build_activity_decisions(
             }
         )
 
-    ai_director = next((artifact for artifact in artifacts if artifact.artifact_type == "ai_director_plan"), None)
-    if ai_director and ai_director.data_json:
-        plan = ai_director.data_json
+    dialogue_polish = next(
+        (
+            artifact
+            for artifact in artifacts
+            if artifact.artifact_type in {"dialogue_polish_plan", "ai_director_plan"}
+        ),
+        None,
+    )
+    if dialogue_polish and dialogue_polish.data_json:
+        plan = dialogue_polish.data_json
         decisions.append(
             {
-                "kind": "ai_director",
-                "step_name": "ai_director",
-                "title": "AI导演",
+                "kind": "dialogue_polish",
+                "step_name": "dialogue_polish",
+                "title": "智能台词润色",
                 "status": "done",
-                "summary": f"生成 {len(plan.get('voiceover_segments') or [])} 段导演重配音建议",
-                "detail": str(plan.get("opening_hook") or plan.get("bridge_line") or "已输出导演建议稿"),
-                "updated_at": _iso_or_none(ai_director.created_at),
+                "summary": f"生成 {len(plan.get('voiceover_segments') or [])} 段台词润色/重配音建议",
+                "detail": str(plan.get("opening_hook") or plan.get("bridge_line") or "已输出台词润色稿"),
+                "updated_at": _iso_or_none(dialogue_polish.created_at),
             }
         )
 
@@ -13022,11 +13509,11 @@ def _artifact_event_summary(artifact: Artifact) -> dict | None:
             "title": "平台文案已生成",
             "detail": detail,
         }
-    if artifact.artifact_type == "ai_director_plan":
+    if artifact.artifact_type in {"dialogue_polish_plan", "ai_director_plan"}:
         return {
-            "step_name": "ai_director",
-            "title": "AI 导演建议已生成",
-            "detail": str(data.get("opening_hook") or "已输出改写与重配音计划"),
+            "step_name": "dialogue_polish",
+            "title": "智能台词润色已生成",
+            "detail": str(data.get("opening_hook") or "已输出台词润色与重配音计划"),
         }
     if artifact.artifact_type == "avatar_commentary_plan":
         placement = str(data.get("overlay_position") or data.get("layout_template") or "").strip()
@@ -13335,6 +13822,7 @@ def _attach_job_preview(job: Job, *, lightweight: bool = False) -> None:
     job.publication_summary = publication_preview["summary"]
     job.queue_task_kind = _resolve_job_queue_task_kind(job)
     job.queue_thumbnail_source = "cover" if _resolve_job_queue_cover_path(job) else "content_profile"
+    job.queue_thumbnail_version = _resolve_job_queue_thumbnail_version(job)
     _reconcile_job_preview_terminal_status(job)
     job.progress_percent = _calculate_job_progress_percent(job)
 
@@ -13396,6 +13884,8 @@ def _reconcile_job_preview_terminal_status(job: Job) -> None:
 def _resolve_job_queue_task_kind(job: Job) -> str:
     if _job_is_remix_production(job):
         return "remix_production"
+    if str(getattr(job, "workflow_mode", "") or "").strip() == "smart_director":
+        return "smart_director"
     if str(getattr(job, "workflow_template", "") or "").strip() == "intelligent_publish":
         return "publication"
     if str(getattr(job, "status", "") or "").strip() == "published":
@@ -13454,6 +13944,14 @@ def _resolve_job_queue_cover_path(job: Job) -> Path | None:
             if path is not None:
                 return path
     return None
+
+
+def _resolve_job_queue_thumbnail_version(job: Job) -> str:
+    updated_at = str(getattr(job, "updated_at", "") or "").strip()
+    source = str(getattr(job, "queue_thumbnail_source", "") or "").strip()
+    if source == "content_profile":
+        return f"{updated_at}:{_CONTENT_PROFILE_THUMBNAIL_CACHE_VERSION}"
+    return updated_at
 
 
 def _iter_publication_cover_path_candidates(attempt: Any) -> list[str]:
@@ -14421,6 +14919,12 @@ async def _ensure_content_profile_thumbnail(job: Job, *, index: int) -> Path:
                 source_path = await _resolve_job_source(job, tmpdir)
             except FileNotFoundError:
                 raise FileNotFoundError(f"Unable to resolve source media for job {job.id}")
+            try:
+                from roughcut.media.rotation import detect_video_rotation_decision
+
+                orientation_decision = (await detect_video_rotation_decision(source_path)).to_dict()
+            except Exception:
+                orientation_decision = {}
             loop = asyncio.get_running_loop()
             async with _CONTENT_PROFILE_THUMBNAIL_GENERATION_SEMAPHORE:
                 success = await loop.run_in_executor(
@@ -14430,6 +14934,7 @@ async def _ensure_content_profile_thumbnail(job: Job, *, index: int) -> Path:
                     cache_dir,
                     index,
                     3,
+                    orientation_decision,
                 )
             if not success:
                 raise RuntimeError(f"Unable to extract content profile thumbnail for job {job.id}")
@@ -14482,7 +14987,13 @@ def _spawn_content_profile_thumbnail_generation(job: Job, *, index: int) -> bool
     return True
 
 
-def _extract_reference_frame(source_path: Path, cache_dir: Path, index: int, total_frames: int) -> bool:
+def _extract_reference_frame(
+    source_path: Path,
+    cache_dir: Path,
+    index: int,
+    total_frames: int,
+    orientation_decision: dict[str, Any] | None = None,
+) -> bool:
     out = cache_dir / f"profile_{index:02d}.jpg"
     out.unlink(missing_ok=True)
     try:
@@ -14509,6 +15020,7 @@ def _extract_reference_frame(source_path: Path, cache_dir: Path, index: int, tot
                 f"{segment_start:.2f}",
                 "-t",
                 f"{segment_length:.2f}",
+                "-noautorotate",
                 "-i",
                 str(source_path),
                 "-frames:v",
@@ -14516,7 +15028,7 @@ def _extract_reference_frame(source_path: Path, cache_dir: Path, index: int, tot
                 "-q:v",
                 "3",
                 "-vf",
-                "thumbnail=90,scale=960:-2",
+                _content_profile_thumbnail_video_filter(orientation_decision, "thumbnail=90", "scale=960:-2"),
                 str(out),
             ],
             capture_output=True,
@@ -14529,6 +15041,7 @@ def _extract_reference_frame(source_path: Path, cache_dir: Path, index: int, tot
                     "-y",
                     "-ss",
                     f"{seek:.2f}",
+                    "-noautorotate",
                     "-i",
                     str(source_path),
                     "-frames:v",
@@ -14538,7 +15051,7 @@ def _extract_reference_frame(source_path: Path, cache_dir: Path, index: int, tot
                     "-q:v",
                     "3",
                     "-vf",
-                    "scale=960:-2",
+                    _content_profile_thumbnail_video_filter(orientation_decision, "scale=960:-2"),
                     str(out),
                 ],
                 capture_output=True,
@@ -14547,6 +15060,15 @@ def _extract_reference_frame(source_path: Path, cache_dir: Path, index: int, tot
         return result.returncode == 0 and out.exists()
     except Exception:
         return False
+
+
+def _content_profile_thumbnail_video_filter(
+    orientation_decision: dict[str, Any] | None,
+    *extra_filters: str,
+) -> str:
+    from roughcut.media.rotation import build_orientation_video_filter
+
+    return build_orientation_video_filter(orientation_decision, *extra_filters)
 
 
 

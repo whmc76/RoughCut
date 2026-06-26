@@ -17,7 +17,8 @@ from roughcut.publication import run_publication_worker_once
 from roughcut.telegram.executors import execute_agent_preset
 
 logger = logging.getLogger(__name__)
-_GPU_INTENSIVE_STEPS = {"transcribe", "avatar_commentary", "render"}
+_RENDER_EXECUTION_STEPS = {"render_plain_base", "render_packaging_candidates", "render_burn_in", "render"}
+_GPU_INTENSIVE_STEPS = {"transcribe", "avatar_commentary", *_RENDER_EXECUTION_STEPS}
 _GPU_ERROR_TOKENS = ("cuda", "cudnn", "cublas", "gpu", "nvidia", "hip")
 _GPU_PRESSURE_TOKENS = (
     "out of memory",
@@ -37,6 +38,8 @@ _NON_RETRYABLE_STEP_ERROR_PREFIXES = (
     "edit_plan_blocked_by_projection_fallback:",
     "edit_plan_blocked_by_insert_fallback:",
     "render_blocked_by_fallback_output:",
+    "render_final_subtitle_asr_alignment_blocked:",
+    "render_variant_sync_blocked:",
 )
 
 
@@ -400,7 +403,7 @@ def _is_gpu_sensitive_step(step_name: str) -> bool:
 
 def _step_requires_local_gpu(step_name: str) -> bool:
     normalized = str(step_name or "").strip().lower()
-    if normalized == "render":
+    if normalized in _RENDER_EXECUTION_STEPS:
         return True
     if normalized == "transcribe":
         settings = get_settings()
@@ -444,7 +447,7 @@ def _memory_pressure_guard_enabled(step_name: str) -> bool:
     transcription_provider = normalize_transcription_provider_name(getattr(settings, "transcription_provider", ""))
     if step_name == "transcribe" and transcription_provider == "local_http_asr":
         return False
-    if step_name == "render":
+    if step_name in _RENDER_EXECUTION_STEPS:
         # Render may rely on an external managed GPU service like HeyGem.
         # Those containers keep large VRAM reservations even while idle, so
         # a memory-based local guard would block render forever.
@@ -703,9 +706,14 @@ def llm_glossary_review(self, job_id: str):
     return _run_task_step(self, job_id, "glossary_review", retry_countdown=10)
 
 
+@celery_app.task(name="roughcut.pipeline.tasks.llm_dialogue_polish", bind=True, max_retries=2)
+def llm_dialogue_polish(self, job_id: str):
+    return _run_task_step(self, job_id, "dialogue_polish", retry_countdown=20)
+
+
 @celery_app.task(name="roughcut.pipeline.tasks.llm_ai_director", bind=True, max_retries=2)
 def llm_ai_director(self, job_id: str):
-    return _run_task_step(self, job_id, "ai_director", retry_countdown=20)
+    return _run_task_step(self, job_id, "dialogue_polish", retry_countdown=20)
 
 
 @celery_app.task(name="roughcut.pipeline.tasks.llm_avatar_commentary", bind=True, max_retries=2)
@@ -716,6 +724,26 @@ def llm_avatar_commentary(self, job_id: str):
 @celery_app.task(name="roughcut.pipeline.tasks.media_edit_plan", bind=True, max_retries=3)
 def media_edit_plan(self, job_id: str):
     return _run_task_step(self, job_id, "edit_plan", retry_countdown=10)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.llm_chapter_analysis", bind=True, max_retries=2)
+def llm_chapter_analysis(self, job_id: str):
+    return _run_task_step(self, job_id, "chapter_analysis", retry_countdown=15)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.media_render_plain_base", bind=True, max_retries=2)
+def media_render_plain_base(self, job_id: str):
+    return _run_task_step(self, job_id, "render_plain_base", retry_countdown=30)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.media_render_packaging_candidates", bind=True, max_retries=2)
+def media_render_packaging_candidates(self, job_id: str):
+    return _run_task_step(self, job_id, "render_packaging_candidates", retry_countdown=30)
+
+
+@celery_app.task(name="roughcut.pipeline.tasks.media_render_burn_in", bind=True, max_retries=2)
+def media_render_burn_in(self, job_id: str):
+    return _run_task_step(self, job_id, "render_burn_in", retry_countdown=30)
 
 
 @celery_app.task(name="roughcut.pipeline.tasks.media_render", bind=True, max_retries=2)

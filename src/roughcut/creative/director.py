@@ -11,12 +11,11 @@ from roughcut.review.content_profile_memory import merge_content_profile_creativ
 from roughcut.usage import track_usage_operation
 
 
-def ai_director_mode_enabled(enhancement_modes: list[str] | tuple[str, ...] | None) -> bool:
-    _ = enhancement_modes
-    return False
+def dialogue_polish_mode_enabled(enhancement_modes: list[str] | tuple[str, ...] | None) -> bool:
+    return "dialogue_polish" in set(enhancement_modes or [])
 
 
-async def build_ai_director_plan(
+async def build_dialogue_polish_plan(
     *,
     job_id: str,
     source_name: str,
@@ -59,7 +58,7 @@ async def build_ai_director_plan(
         constraint_section = f"\n强约束：{constraint_lines}" if constraint_lines else ""
         video_understanding_section = _build_video_understanding_prompt_section(effective_content_profile)
         prompt = (
-            "你是短视频 AI 导演。请根据字幕和内容画像，输出 JSON，给出："
+            "你是短视频智能台词润色与重配音策划。请根据字幕和内容画像，输出 JSON，给出："
             "opening_hook、bridge_line、science_boost、closing_prompt、rewrite_strategy、voiceover_segments。"
             "voiceover_segments 最多 4 段，每段包含 purpose/source_text/rewritten_text/suggested_start_time/target_duration_sec/reason。"
             "要求：补逻辑、补信息、补情绪，但不要编造事实；尽量保留说话人口吻。"
@@ -71,10 +70,10 @@ async def build_ai_director_plan(
             f"\n字幕：{subtitle_items[:14]}"
             f"\n当前启发式草案：{heuristic}"
         )
-        with track_usage_operation("ai_director.plan"):
+        with track_usage_operation("dialogue_polish.plan"):
             response = await provider.complete(
                 [
-                    Message(role="system", content="你是严谨的中文短视频导演和重配音策划。"),
+                    Message(role="system", content="你是严谨的中文短视频台词润色和重配音策划。"),
                     Message(role="user", content=prompt),
                 ],
                 temperature=0.25,
@@ -100,6 +99,11 @@ async def build_ai_director_plan(
         },
     )
     return heuristic
+
+
+# Backward-compatible aliases for older imports. New runtime keys use dialogue_polish.
+ai_director_mode_enabled = dialogue_polish_mode_enabled
+build_ai_director_plan = build_dialogue_polish_plan
 
 
 def _build_heuristic_director_plan(

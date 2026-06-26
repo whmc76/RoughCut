@@ -11,10 +11,20 @@ from roughcut.api import jobs as api_jobs
 
 def test_editing_pipeline_excludes_publication_steps() -> None:
     assert "render" in PIPELINE_STEPS
+    assert (
+        PIPELINE_STEPS.index("edit_plan")
+        < PIPELINE_STEPS.index("chapter_analysis")
+        < PIPELINE_STEPS.index("render_plain_base")
+        < PIPELINE_STEPS.index("render_packaging_candidates")
+        < PIPELINE_STEPS.index("render_burn_in")
+        < PIPELINE_STEPS.index("render")
+    )
     assert "final_review" not in PIPELINE_STEPS
     assert "platform_package" not in PIPELINE_STEPS
     assert "final_review" not in QUALITY_RERUN_STEPS
     assert "platform_package" not in QUALITY_RERUN_STEPS
+    assert "chapter_analysis" in QUALITY_RERUN_STEPS
+    assert {"render_plain_base", "render_packaging_candidates", "render_burn_in"} <= QUALITY_RERUN_STEPS
 
 
 def test_editing_step_runner_rejects_legacy_platform_package_entrypoint() -> None:
@@ -66,6 +76,21 @@ def test_editing_worker_does_not_expose_legacy_platform_package_task() -> None:
     assert not hasattr(tasks, "llm_platform_package")
 
 
+def test_chapter_analysis_has_durable_task_entrypoint() -> None:
+    assert hasattr(tasks, "llm_chapter_analysis")
+    assert "chapter_analysis" in inspect.getsource(steps.run_step_sync)
+
+
+def test_render_phases_have_durable_task_entrypoints() -> None:
+    assert hasattr(tasks, "media_render_plain_base")
+    assert hasattr(tasks, "media_render_packaging_candidates")
+    assert hasattr(tasks, "media_render_burn_in")
+    step_runner_source = inspect.getsource(steps.run_step_sync)
+    assert "render_plain_base" in step_runner_source
+    assert "render_packaging_candidates" in step_runner_source
+    assert "render_burn_in" in step_runner_source
+
+
 def test_editing_render_flow_does_not_consume_publication_cover_hooks() -> None:
     edit_plan_source = inspect.getsource(steps.run_edit_plan)
     render_source = inspect.getsource(steps.run_render)
@@ -87,7 +112,17 @@ def test_extract_audio_is_supported_recovery_rerun_start() -> None:
 
     assert "extract_audio" in QUALITY_RERUN_STEPS
     assert chain[:3] == ["extract_audio", "transcribe", "subtitle_postprocess"]
-    assert chain[-2:] == ["edit_plan", "render"]
+    assert chain[-9:] == [
+        "edit_plan",
+        "chapter_analysis",
+        "dialogue_polish",
+        "subtitle_translation",
+        "avatar_commentary",
+        "render_plain_base",
+        "render_packaging_candidates",
+        "render_burn_in",
+        "render",
+    ]
 
 
 def test_transcribe_is_supported_recovery_rerun_start() -> None:
@@ -96,7 +131,17 @@ def test_transcribe_is_supported_recovery_rerun_start() -> None:
     assert "transcribe" in QUALITY_RERUN_STEPS
     assert chain[:2] == ["transcribe", "subtitle_postprocess"]
     assert chain[chain.index("content_profile") + 1] == "summary_review"
-    assert chain[-2:] == ["edit_plan", "render"]
+    assert chain[-9:] == [
+        "edit_plan",
+        "chapter_analysis",
+        "dialogue_polish",
+        "subtitle_translation",
+        "avatar_commentary",
+        "render_plain_base",
+        "render_packaging_candidates",
+        "render_burn_in",
+        "render",
+    ]
 
 
 def test_content_profile_rerun_revisits_summary_review_gate() -> None:

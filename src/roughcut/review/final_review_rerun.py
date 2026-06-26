@@ -100,7 +100,7 @@ def build_final_review_rerun_plans(note: str) -> list[FinalReviewRerunPlan]:
         ("subtitle", "字幕与术语修订", "subtitle_postprocess", ("字幕", "术语", "错别字", "翻译", "字幕时间", "字幕不同步", "字幕内容", "字幕文本"), ("subtitle_text", "subtitle_timing")),
         ("subtitle_style", "字幕样式重出", "render", _SUBTITLE_STYLE_KEYWORDS, ("subtitle_style",)),
         ("content_profile", "内容摘要与文案定位调整", "content_profile", ("摘要", "主题", "关键词", "文案方向", "内容定位", "主体识别", "标题钩子"), ("summary", "keywords", "content_profile")),
-        ("ai_director", "AI 导演文案与配音重做", "ai_director", ("旁白", "解说词", "口播文案", "ai导演", "ai 导演", "重配音", "配音文案"), ("voiceover", "director_script")),
+        ("dialogue_polish", "智能台词润色与重配音重做", "dialogue_polish", ("旁白", "解说词", "口播文案", "智能润色", "台词润色", "ai导演", "ai 导演", "重配音", "配音文案"), ("voiceover", "director_script")),
         ("avatar_commentary", "数字人解说重做", "avatar_commentary", ("数字人", "口播人", "虚拟人", "画中画", "主播形象", "讲解人"), ("avatar",)),
         ("edit_plan", "剪辑结构重做", "edit_plan", ("节奏", "结构", "镜头", "重剪", "重新剪", "剪辑", "删掉", "前面太长", "后面太长", "卡点", *_DIAGNOSTIC_EDIT_KEYWORDS), ("timeline", "pacing", "cut_boundary")),
         ("cover_render", "封面重出", "render", ("封面", "缩略图", "标题图", "封面字", "封面标题"), ("cover",)),

@@ -181,8 +181,13 @@ def render_plan_avatar_commentary(payload: dict[str, Any] | None) -> dict[str, A
     return copy.deepcopy(_render_plan_payload(payload).get("avatar_commentary") or {})
 
 
+def render_plan_dialogue_polish(payload: dict[str, Any] | None) -> dict[str, Any]:
+    plan = _render_plan_payload(payload)
+    return copy.deepcopy(plan.get("dialogue_polish") or plan.get("ai_director") or {})
+
+
 def render_plan_ai_director(payload: dict[str, Any] | None) -> dict[str, Any]:
-    return copy.deepcopy(_render_plan_payload(payload).get("ai_director") or {})
+    return render_plan_dialogue_polish(payload)
 
 
 def render_plan_strategy_review_context(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -223,11 +228,14 @@ def build_render_plan(
     watermark: dict | None = None,
     music: dict | None = None,
     focus_plan: dict[str, Any] | None = None,
+    chapter_analysis: dict[str, Any] | None = None,
+    hyperframes_options: dict[str, Any] | None = None,
     timeline_analysis: dict[str, Any] | None = None,
     editing_skill: dict[str, Any] | None = None,
     editing_accents: dict | None = None,
     content_profile: dict[str, Any] | None = None,
     creative_profile: dict[str, Any] | None = None,
+    dialogue_polish_plan: dict[str, Any] | None = None,
     ai_director_plan: dict[str, Any] | None = None,
     avatar_commentary_plan: dict[str, Any] | None = None,
     export_resolution_mode: str = "source",
@@ -304,7 +312,9 @@ def build_render_plan(
         subtitles_plan=bound_subtitles,
         editing_accents=resolved_editing_accents,
         focus_plan=copy.deepcopy(focus_plan or {}) if isinstance(focus_plan, dict) and focus_plan else None,
+        chapter_analysis=copy.deepcopy(chapter_analysis or {}) if isinstance(chapter_analysis, dict) and chapter_analysis else None,
         audio_cues=list((normalized_music or {}).get("audio_cues") or []) if isinstance(normalized_music, dict) else [],
+        options=hyperframes_options,
         source="roughcut.edit.render_plan",
     )
     plan = {
@@ -327,12 +337,14 @@ def build_render_plan(
         "watermark": watermark,
         "music": normalized_music,
         "focus": copy.deepcopy(focus_plan or {}) if isinstance(focus_plan, dict) and focus_plan else None,
+        "chapter_analysis": copy.deepcopy(chapter_analysis or {}) if isinstance(chapter_analysis, dict) and chapter_analysis else None,
+        "hyperframes_options": copy.deepcopy(hyperframes_options or {}) if isinstance(hyperframes_options, dict) and hyperframes_options else {},
         "timeline_analysis": resolved_timeline_analysis,
         "editing_skill": resolved_editing_skill,
         "section_choreography": section_choreography,
         "creative_profile": creative_profile,
         "content_effect_policy": content_effect_policy,
-        "ai_director": ai_director_plan,
+        "dialogue_polish": dialogue_polish_plan or ai_director_plan,
         "avatar_commentary": avatar_commentary_plan,
         "strategy_review_context": copy.deepcopy(strategy_review_context),
         "manual_editor": {
@@ -351,6 +363,8 @@ def build_render_plan(
         "timeline_analysis": copy.deepcopy(plan["timeline_analysis"] or {}),
         "editing_skill": copy.deepcopy(plan["editing_skill"] or {}),
         "section_choreography": copy.deepcopy(plan["section_choreography"] or {}),
+        "chapter_analysis": copy.deepcopy(plan.get("chapter_analysis") or {}),
+        "hyperframes_options": copy.deepcopy(plan.get("hyperframes_options") or {}),
         "subtitles": copy.deepcopy(plan["subtitles"] or {}),
         "packaging": {
             "intro": copy.deepcopy(plan.get("intro")),
@@ -457,6 +471,18 @@ def build_plain_render_plan(render_plan: dict[str, Any]) -> dict[str, Any]:
         plain_plan.get("editing_accents"),
         style="plain",
     )
+    packaging_timeline = plain_plan.get("packaging_timeline")
+    if isinstance(packaging_timeline, dict):
+        nested_packaging = dict(packaging_timeline.get("packaging") or {})
+        for key in ("intro", "outro", "insert", "watermark", "music"):
+            nested_packaging[key] = None
+        packaging_timeline["packaging"] = nested_packaging
+        packaging_timeline["subtitles"] = None
+        packaging_timeline["editing_accents"] = _build_disabled_editing_accents(
+            packaging_timeline.get("editing_accents"),
+            style="plain",
+        )
+        packaging_timeline["hyperframes"] = None
     return plain_plan
 
 
@@ -545,12 +571,16 @@ def build_ai_effect_render_plan(
         subtitles_plan=ai_plan.get("subtitles") if isinstance(ai_plan.get("subtitles"), dict) else None,
         editing_accents=ai_plan.get("editing_accents") if isinstance(ai_plan.get("editing_accents"), dict) else None,
         focus_plan=ai_plan.get("focus") if isinstance(ai_plan.get("focus"), dict) else None,
+        chapter_analysis=ai_plan.get("chapter_analysis") if isinstance(ai_plan.get("chapter_analysis"), dict) else None,
         audio_cues=list(((ai_plan.get("music") or {}).get("audio_cues") or [])) if isinstance(ai_plan.get("music"), dict) else [],
+        options=ai_plan.get("hyperframes_options") if isinstance(ai_plan.get("hyperframes_options"), dict) else None,
         source="roughcut.edit.render_plan.ai_effect",
     )
     packaging_timeline = dict(ai_plan.get("packaging_timeline") or {})
     packaging_timeline["subtitles"] = copy.deepcopy(ai_plan.get("subtitles") or {})
     packaging_timeline["section_choreography"] = copy.deepcopy(ai_plan.get("section_choreography") or {})
+    packaging_timeline["chapter_analysis"] = copy.deepcopy(ai_plan.get("chapter_analysis") or {})
+    packaging_timeline["hyperframes_options"] = copy.deepcopy(ai_plan.get("hyperframes_options") or {})
     packaging_timeline["editing_accents"] = copy.deepcopy(ai_plan.get("editing_accents") or {})
     packaging_timeline["focus"] = copy.deepcopy(ai_plan.get("focus")) if isinstance(ai_plan.get("focus"), dict) else None
     packaging_timeline["hyperframes"] = copy.deepcopy(ai_plan["hyperframes"])
@@ -1890,8 +1920,13 @@ def _extract_overlay_label_text(raw: str) -> str:
     text = _compact_overlay_text(raw)
     if not text:
         return ""
-    model_match = re.search(r"\b[A-Z][A-Z0-9+\-]{1,}(?:mini|MAX|PRO|Plus|Ultra)?\b", text, flags=re.IGNORECASE)
+    model_match = re.search(r"[A-Z][A-Z0-9+\-]{1,}(?:mini|MAX|PRO|Plus|Ultra)?", text, flags=re.IGNORECASE)
     if model_match:
+        contextual_label = _normalize_overlay_label_text(
+            _overlay_phrase_around_model_match(text, model_match)
+        )
+        if contextual_label:
+            return contextual_label
         return _normalize_overlay_label_text(model_match.group(0))
     for term in _OVERLAY_LABEL_TERMS:
         if term not in text:
@@ -1901,6 +1936,25 @@ def _extract_overlay_label_text(raw: str) -> str:
         if label:
             return label
     return ""
+
+
+def _overlay_phrase_around_model_match(text: str, model_match: re.Match[str]) -> str:
+    model_start, model_end = model_match.span()
+    prefix_start = model_start
+    while prefix_start > 0 and model_start - prefix_start < 2:
+        previous = text[prefix_start - 1]
+        if not ("\u4e00" <= previous <= "\u9fff"):
+            break
+        prefix_start -= 1
+    suffix_end = model_end
+    while suffix_end < len(text) and suffix_end - model_end < 3:
+        current = text[suffix_end]
+        if not ("\u4e00" <= current <= "\u9fff"):
+            break
+        suffix_end += 1
+    if prefix_start == model_start and suffix_end == model_end:
+        return ""
+    return text[prefix_start:suffix_end]
 
 
 def _overlay_phrase_around_term(text: str, term: str) -> str:

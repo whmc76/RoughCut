@@ -22,8 +22,19 @@ import { classNames } from "../utils";
 const TASK_KIND_FILTER_META: Array<{ key: JobTaskKindFilter; label: string }> = [
   { key: "all", label: "全部标签" },
   { key: "edit", label: "剪辑任务" },
-  { key: "remix_production", label: "影视二创" },
+  { key: "smart_director", label: "智能导演" },
+  { key: "remix_production", label: "解说二创" },
   { key: "publication", label: "发布任务" },
+];
+
+const FILM_REMIX_WORKFLOW_MODES = new Set(["remix_auto_commentary", "remix_llm_plan", "script_footage_remix"]);
+const DEFAULT_FILM_REMIX_ENHANCEMENT_MODES = ["ai_effects"];
+const DEFAULT_FILM_REMIX_AGENT_CAPABILITIES = [
+  "highlight_window_selection",
+  "multi_material_assembly",
+  "chapter_cards",
+  "local_audio_cues",
+  "speech_density_trim",
 ];
 
 const PUBLICATION_FILTER_META: Array<{ key: JobPublicationFilter; label: string }> = [
@@ -105,6 +116,7 @@ export function JobsPage() {
     queryKey: ["remix-production-tasks"],
     queryFn: () => api.getRemixProductionTasks(),
     staleTime: 15_000,
+    refetchInterval: taskKindFilter === "remix_production" ? 15_000 : false,
   });
   const remixQueueJobs = useMemo(
     () => (remixProductionTasks.data?.tasks ?? [])
@@ -155,6 +167,11 @@ export function JobsPage() {
     remixTaskCreationAttemptedRef.current = true;
     createMissingRemixProductionJobs.mutate(missingJobTasks);
   }, [createMissingRemixProductionJobs, remixProductionTasks.data]);
+
+  useEffect(() => {
+    if (taskKindFilter !== "remix_production") return;
+    void remixProductionTasks.refetch();
+  }, [remixProductionTasks.refetch, taskKindFilter]);
   const selectedReviewJob =
     workspace.filteredJobs.find((job) => job.id === workspace.selectedJobId)
     ?? workspace.selectedJob;
@@ -177,24 +194,60 @@ export function JobsPage() {
   const showPublicationModal = Boolean(publicationJobId && publicationJob);
   const showPreviewModal = Boolean(previewJobId && previewJob);
   const showReviewOverlay = Boolean(reviewOverlayOpen && workspace.selectedJobId && isReviewContext && reviewStep);
-  const createModalTitle = createEntryMode === "film_remix" ? "影视二创" : "原片剪辑";
+  const createModalTitle =
+    createEntryMode === "film_remix"
+      ? "解说二创"
+      : createEntryMode === "smart_director"
+        ? "智能导演"
+        : "全能剪辑";
   const remixSummary = remixProductionTasks.data?.summary;
   const remixPendingTasks = remixProductionTasks.data?.pending_tasks ?? [];
+  const remixCreatorLabel = remixProductionTasks.data?.creator_profile || "解说二创";
+  const remixTaskBindingLabel = remixProductionTasks.data?.task_binding_id || remixProductionTasks.data?.id || "生产清单";
+
+  const refreshJobsPage = () => {
+    void workspace.refreshAll();
+    void remixProductionTasks.refetch();
+  };
 
   const openCreateModal = (mode: JobCreateEntryMode) => {
     setCreateEntryMode(mode);
-    if (mode === "film_remix") {
-      workspace.setUpload((prev) => ({
-        ...prev,
+    workspace.setUpload((prev) => {
+      const modeDefaults = workspace.createTaskDefaultsByEntryMode[mode] ?? workspace.createTaskDefaultsByEntryMode.source_edit;
+      const nextUpload = {
+        ...modeDefaults,
+        files: prev.files,
+        taskBrief: prev.taskBrief,
+        videoDescription: prev.videoDescription,
+      };
+      if (mode !== "film_remix" || workspace.hasStoredCreateTaskPreferencesByEntryMode.film_remix) {
+        if (mode === "smart_director") {
+          return {
+            ...nextUpload,
+            jobFlowMode: "auto",
+            executionMode: "plan_first",
+            workflowMode: "smart_director",
+          };
+        }
+        return nextUpload;
+      }
+      return {
+        ...nextUpload,
         jobFlowMode: "auto",
         executionMode: "auto",
-        workflowMode: prev.taskBrief.trim() ? "remix_llm_plan" : "remix_auto_commentary",
-        enhancementModes: Array.from(new Set([...prev.enhancementModes, "ai_effects", "multi_platform_adaptation"])),
-        selectedAgentCapabilityKeys: prev.selectedAgentCapabilityKeys.length
-          ? prev.selectedAgentCapabilityKeys
-          : ["highlight_window_selection", "multi_material_assembly", "chapter_cards", "local_audio_cues", "speech_density_trim"],
-      }));
-    }
+        workflowMode: FILM_REMIX_WORKFLOW_MODES.has(nextUpload.workflowMode)
+          ? nextUpload.workflowMode
+          : nextUpload.taskBrief.trim()
+            ? "remix_llm_plan"
+            : "remix_auto_commentary",
+        enhancementModes: nextUpload.enhancementModes.length
+          ? nextUpload.enhancementModes
+          : DEFAULT_FILM_REMIX_ENHANCEMENT_MODES,
+        selectedAgentCapabilityKeys: nextUpload.selectedAgentCapabilityKeys.length
+          ? nextUpload.selectedAgentCapabilityKeys
+          : DEFAULT_FILM_REMIX_AGENT_CAPABILITIES,
+      };
+    });
     setCreateOpen(true);
   };
 
@@ -334,11 +387,6 @@ export function JobsPage() {
     queueStageRef.current?.scrollIntoView?.({ behavior: "smooth", block: "start" });
   };
 
-  const openRemixProductionQueue = () => {
-    setRemixProductionOpen(true);
-    void remixProductionTasks.refetch();
-  };
-
   const startRemixProduction = (jobId: string, force = false) => {
     startRemixProductionJob.mutate({ jobId, force });
   };
@@ -361,10 +409,10 @@ export function JobsPage() {
     });
   };
 
-  const submitCreateJob = () =>
-    workspace.uploadJob.mutate(undefined, {
+  const submitCreateJob = (startMode: "manual" | "immediate") =>
+    workspace.uploadJob.mutate({ createEntryMode, startMode }, {
       onSuccess: (job) => {
-        const shouldOpenManualEditor = workspace.upload.jobFlowMode === "smart_assist";
+        const shouldOpenManualEditor = startMode === "immediate" && workspace.upload.jobFlowMode === "smart_assist";
         setCreateOpen(false);
         if (shouldOpenManualEditor) {
           navigate(`/jobs/${job.id}/manual-editor`);
@@ -386,14 +434,17 @@ export function JobsPage() {
               onChange={(event) => workspace.setKeyword(event.target.value)}
               placeholder={t("jobs.page.searchPlaceholder")}
             />
-            <button type="button" className="button jobs-header-subtle-button" onClick={workspace.refreshAll}>
+            <button type="button" className="button jobs-header-subtle-button" onClick={refreshJobsPage}>
               {t("jobs.page.refresh")}
             </button>
             <button type="button" className="button jobs-header-source-edit-button" onClick={() => openCreateModal("source_edit")}>
-              原片剪辑
+              全能剪辑
+            </button>
+            <button type="button" className="button jobs-header-smart-director-button" onClick={() => openCreateModal("smart_director")}>
+              智能导演
             </button>
             <button type="button" className="button primary jobs-header-create-button" onClick={() => openCreateModal("film_remix")}>
-              影视二创
+              解说二创
             </button>
           </div>
         }
@@ -500,7 +551,7 @@ export function JobsPage() {
         </div>
         {taskKindFilter === "remix_production" ? (
           <p className="jobs-queue-stage-note">
-            Demo Creator · 示例动画育儿二创：待生产 {remixSummary?.pending_count ?? 0} 集，路径缺失 {remixSummary?.pending_file_missing_count ?? 0}。
+            {remixCreatorLabel} · {remixTaskBindingLabel}：待生产 {remixSummary?.pending_count ?? 0} 集，路径缺失 {remixSummary?.pending_file_missing_count ?? 0}。
           </p>
         ) : null}
 
@@ -529,13 +580,17 @@ export function JobsPage() {
           onRestart={confirmAndRestartJob}
           onStartRemixProduction={startRemixProduction}
           onDelete={confirmAndDeleteJob}
-          onOpenRemixProduction={openRemixProductionQueue}
         />
       </section>
 
       {workspace.restartError ? (
         <div className="notice">
           {t("jobs.actions.restartFailed").replace("{error}", workspace.restartError)}
+        </div>
+      ) : null}
+      {workspace.deleteError ? (
+        <div className="notice notice-error">
+          删除任务失败：{workspace.deleteError}
         </div>
       ) : null}
       {workspace.openFolder.isError ? (
@@ -547,13 +602,13 @@ export function JobsPage() {
 
       <JobCreateModal
         open={remixProductionOpen}
-        title="影视二创生产清单"
+        title="解说二创生产清单"
         onClose={() => setRemixProductionOpen(false)}
       >
         <section className="jobs-create-modal-content jobs-remix-production-modal-content">
           <div className="jobs-stage-head">
             <div>
-              <h3>Demo Creator · 示例动画正式生产队列</h3>
+              <h3>{remixCreatorLabel} · 解说二创正式生产队列</h3>
               <p>待生产剧集可批量启动，路径缺失的条目需先补齐素材。</p>
             </div>
             <div className="jobs-stage-meta">
@@ -600,14 +655,24 @@ export function JobsPage() {
         title={createModalTitle}
         onClose={() => setCreateOpen(false)}
         actions={
-          <button
-            type="button"
-            className="button primary jobs-create-submit-button"
-            disabled={workspace.upload.files.length === 0 || workspace.uploadJob.isPending}
-            onClick={submitCreateJob}
-          >
-            {workspace.uploadJob.isPending ? t("jobs.upload.submitting") : t("jobs.upload.submit")}
-          </button>
+          <>
+            <button
+              type="button"
+              className="button jobs-create-submit-button secondary"
+              disabled={workspace.upload.files.length === 0 || workspace.uploadJob.isPending}
+              onClick={() => submitCreateJob("manual")}
+            >
+              {workspace.uploadJob.isPending ? t("jobs.upload.submitting") : "创建任务"}
+            </button>
+            <button
+              type="button"
+              className="button primary jobs-create-submit-button"
+              disabled={workspace.upload.files.length === 0 || workspace.uploadJob.isPending}
+              onClick={() => submitCreateJob("immediate")}
+            >
+              {workspace.uploadJob.isPending ? t("jobs.upload.submitting") : "开始剪辑"}
+            </button>
+          </>
         }
       >
         <section className="jobs-create-modal-content">

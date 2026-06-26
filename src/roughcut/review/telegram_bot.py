@@ -112,13 +112,14 @@ _REVIEW_KEYWORD_MIN_COUNT = 4
 _WORKFLOW_MODE_LABELS = {
     "standard_edit": "标准成片",
     "long_text_to_video": "长文本转视频",
+    "smart_director": "智能导演",
 }
 _ENHANCEMENT_MODE_LABELS = {
     "multilingual_translation": "多语言翻译",
     "auto_review": "异常门",
     "avatar_commentary": "数字人解说",
     "ai_effects": "智能剪辑特效",
-    "ai_director": "AI 导演",
+    "dialogue_polish": "智能台词润色",
 }
 _COPY_STYLE_LABELS = {
     "attention_grabbing": "吸引眼球",
@@ -3059,7 +3060,7 @@ def _build_review_checks(
             status = "待补"
         checks.append({"label": "智能剪辑特效", "status": status, "detail": detail})
 
-    if "ai_director" in enhancement_modes:
+    if "dialogue_polish" in enhancement_modes:
         voice_provider = str(_get_value(config, "voice_provider") or "").strip().lower()
         voice_clone_api_base_url = str(_get_value(config, "voice_clone_api_base_url") or "").strip()
         voice_clone_voice_id = str(_get_value(config, "voice_clone_voice_id") or "").strip()
@@ -3073,9 +3074,9 @@ def _build_review_checks(
             detail = f"当前走 RunningHub，工作流 / voice id：{voice_clone_voice_id}"
             status = "齐全"
         else:
-            detail = "已启用 AI 导演，但语音 provider 配置还不完整，缺少可用的 TTS / 语音克隆执行入口。"
+            detail = "已启用智能台词润色，但语音 provider 配置还不完整，缺少可用的 TTS / 语音克隆执行入口。"
             status = "待补"
-        checks.append({"label": "AI 导演重配音", "status": status, "detail": detail})
+        checks.append({"label": "智能台词润色", "status": status, "detail": detail})
 
     if not enhancement_modes:
         checks.append(

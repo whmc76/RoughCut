@@ -41,6 +41,7 @@ export type Job = {
   merged_source_names?: string[];
   video_description?: string | null;
   creator_card_id?: string | null;
+  creator_card_name?: string | null;
   task_brief?: string | null;
   execution_mode?: string;
   platform_targets?: string[];
@@ -67,8 +68,9 @@ export type Job = {
   avatar_delivery_summary?: string | null;
   publication_status?: string;
   publication_summary?: string | null;
-  queue_task_kind?: "edit" | "publication" | "remix_production";
+  queue_task_kind?: "edit" | "publication" | "remix_production" | "smart_director";
   queue_thumbnail_source?: "cover" | "content_profile";
+  queue_thumbnail_version?: string | null;
   status: string;
   language: string;
   workflow_template?: string | null;
@@ -393,6 +395,7 @@ export type JobManualEditSession = {
   video_transform?: JobManualVideoTransform | null;
   base_video_transform?: JobManualVideoTransform | null;
   smart_cut_rules?: Record<string, unknown> | null;
+  hyperframes_options?: Record<string, boolean>;
   draft_saved_at?: string | null;
   draft_note?: string | null;
   editable: boolean;
@@ -475,6 +478,7 @@ export type JobManualEditApplyPayload = {
   subtitle_replacements?: JobManualSubtitleReplacement[];
   video_transform?: JobManualVideoTransform | null;
   smart_cut_rules?: Record<string, unknown> | null;
+  hyperframes_options?: Record<string, boolean>;
   video_summary?: string | null;
   base_timeline_id?: string;
   base_timeline_version?: number;
@@ -1260,6 +1264,7 @@ export type PublicationPlan = {
   creator_profile_id: string;
   creator_profile_name: string;
   media_path?: string | null;
+  material_targets?: PublicationTarget[];
   targets: PublicationTarget[];
   existing_attempts: PublicationAttempt[];
   created_attempts?: PublicationAttempt[];

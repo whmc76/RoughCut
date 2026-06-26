@@ -167,7 +167,7 @@ def build_avatar_material_requirements() -> dict[str, Any]:
                     {
                         "severity": "recommended",
                         "title": "声音采样",
-                        "detail": "用于声音克隆和 AI 导演重配音。建议干净人声 10 到 60 秒，单说话人，无背景音乐。",
+                        "detail": "用于声音克隆和智能台词润色重配音。建议干净人声 10 到 60 秒，单说话人，无背景音乐。",
                     },
                     {
                         "severity": "recommended",

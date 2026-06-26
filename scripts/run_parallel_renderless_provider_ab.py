@@ -54,7 +54,7 @@ RUN_STEPS = [
     "subtitle_translation",
     "content_profile",
     "summary_review",
-    "ai_director",
+    "dialogue_polish",
     "avatar_commentary",
     "edit_plan",
     "render",
@@ -497,7 +497,7 @@ def run_job_steps(job_id: str) -> tuple[list[StepRun], str]:
                 )
             )
             continue
-        if step_name in {"ai_director", "avatar_commentary", "render", "final_review"}:
+        if step_name in {"dialogue_polish", "avatar_commentary", "render", "final_review"}:
             mark_step(job_id, step_name, "skipped")
             step_runs.append(
                 StepRun(

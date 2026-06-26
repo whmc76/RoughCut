@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from roughcut.creative.modes import (
     build_active_enhancement_mode_options,
+    build_active_workflow_mode_options,
     build_mode_catalog,
     normalize_enhancement_modes,
     resolve_live_batch_enhancement_modes,
@@ -60,12 +61,25 @@ def test_auto_review_is_not_a_selectable_enhancement_mode() -> None:
     assert "auto_review" not in {item["key"] for item in catalog["enhancement_modes"]}
     assert "ai_director" not in {item["value"] for item in options}
     assert "ai_director" not in {item["key"] for item in catalog["enhancement_modes"]}
+    assert {"value": "dialogue_polish", "label": "智能台词润色"} in options
+
+
+def test_smart_director_is_a_selectable_workflow_mode() -> None:
+    options = build_active_workflow_mode_options()
+    catalog = build_mode_catalog()
+
+    assert {"value": "smart_director", "label": "智能导演"} in options
+    workflow = next(item for item in catalog["workflow_modes"] if item["key"] == "smart_director")
+    assert workflow["status"] == "active"
+    assert "剧本" in workflow["summary"]
+    assert "素材检索" in " ".join(workflow["pipeline_outline"])
 
 
 def test_legacy_auto_review_enhancement_mode_is_dropped_from_new_configs() -> None:
     assert normalize_enhancement_modes(["avatar_commentary", "auto_review", "ai_effects", "ai_director"]) == [
         "avatar_commentary",
         "ai_effects",
+        "dialogue_polish",
     ]
     assert "auto_review" not in resolve_live_batch_enhancement_modes(None)
 
@@ -356,7 +370,7 @@ async def test_edit_plan_does_not_wait_for_optional_creative_steps() -> None:
         JobStep(job_id=job.id, step_name="subtitle_translation", status="done"),
         JobStep(job_id=job.id, step_name="content_profile", status="done"),
         JobStep(job_id=job.id, step_name="summary_review", status="done"),
-        JobStep(job_id=job.id, step_name="ai_director", status="skipped"),
+        JobStep(job_id=job.id, step_name="dialogue_polish", status="skipped"),
         JobStep(job_id=job.id, step_name="avatar_commentary", status="pending"),
         JobStep(job_id=job.id, step_name="edit_plan", status="pending"),
     ]
@@ -423,6 +437,10 @@ async def test_failed_job_with_completed_summary_review_recovers_for_edit_plan_d
                 ),
                 JobStep(job_id=job.id, step_name="summary_review", status="done"),
                 JobStep(job_id=job.id, step_name="edit_plan", status="pending"),
+                JobStep(job_id=job.id, step_name="chapter_analysis", status="pending"),
+                JobStep(job_id=job.id, step_name="dialogue_polish", status="pending"),
+                JobStep(job_id=job.id, step_name="avatar_commentary", status="pending"),
+                JobStep(job_id=job.id, step_name="render", status="pending"),
             ]
             session.add(job)
             session.add_all(steps)
@@ -495,7 +513,7 @@ async def test_summary_review_quality_issue_records_advisory_without_auto_rerun(
                 JobStep(job_id=job.id, step_name="subtitle_translation", status="done"),
                 JobStep(job_id=job.id, step_name="content_profile", status="done"),
                 JobStep(job_id=job.id, step_name="summary_review", status="pending"),
-                JobStep(job_id=job.id, step_name="ai_director", status="pending"),
+                JobStep(job_id=job.id, step_name="dialogue_polish", status="pending"),
                 JobStep(job_id=job.id, step_name="avatar_commentary", status="pending"),
                 JobStep(job_id=job.id, step_name="edit_plan", status="pending"),
                 JobStep(job_id=job.id, step_name="render", status="pending"),

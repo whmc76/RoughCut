@@ -40,7 +40,7 @@ export function formatDirtyKeyLabel(key: string): string {
     avatar_overlay_scale: "数字人缩放",
     voice_provider: "配音 provider",
     voice_clone_voice_id: "配音 Voice ID",
-    director_rewrite_strength: "导演改写强度",
+    director_rewrite_strength: "台词润色强度",
     default_job_workflow_mode: "工作流模式",
     default_job_enhancement_modes: "增强模式",
     fact_check_enabled: "事实校验",
