@@ -19,14 +19,6 @@ import { MATERIAL_ENHANCEMENT_OPTIONS, resolveJobReviewStep, type JobReviewStep,
 import { useI18n } from "../i18n";
 import { classNames } from "../utils";
 
-const QUEUE_FILTER_META: Record<JobQueueFilter, { label: string; description: string }> = {
-  all: { label: "全部任务", description: "当前搜索范围内的全部任务。" },
-  pending: { label: "排队中", description: "等待进入执行链路的任务。" },
-  running: { label: "运行中", description: "正在执行中的任务。" },
-  done: { label: "已完成", description: "已完成并可继续查看结果的任务。" },
-  attention: { label: "待处理事项", description: "失败、待核对、已取消等需要人工介入的任务。" },
-};
-
 const TASK_KIND_FILTER_META: Array<{ key: JobTaskKindFilter; label: string }> = [
   { key: "all", label: "全部标签" },
   { key: "edit", label: "剪辑任务" },
@@ -171,16 +163,6 @@ export function JobsPage() {
   const workflowTemplateOptions = workspace.options.data?.workflow_templates ?? [{ value: "", label: t("watch.page.autoMatch") }];
   const workflowModeOptions = workspace.options.data?.workflow_modes ?? [{ value: "standard_edit", label: t("creative.workflow.standard_edit") }];
   const enhancementOptions = workspace.options.data?.enhancement_modes ?? [];
-  const queueFilterMeta = QUEUE_FILTER_META[workspace.queueFilter];
-  const taskKindFilterMeta = TASK_KIND_FILTER_META.find((item) => item.key === taskKindFilter) ?? TASK_KIND_FILTER_META[0];
-  const publicationFilterMeta = PUBLICATION_FILTER_META.find((item) => item.key === publicationFilter) ?? PUBLICATION_FILTER_META[0];
-  const clipStatusFilterMeta = CLIP_STATUS_FILTER_META.find((item) => item.key === clipStatusFilter) ?? CLIP_STATUS_FILTER_META[0];
-  const activeFilterSummary = [
-    queueFilterMeta.label,
-    taskKindFilter !== "all" ? taskKindFilterMeta.label : null,
-    publicationFilter !== "all" ? publicationFilterMeta.label : null,
-    clipStatusFilter !== "all" ? clipStatusFilterMeta.label : null,
-  ].filter(Boolean).join(" · ");
 
   const reviewStep = reviewStepOverride ?? workspace.reviewStep ?? resolveJobReviewStep(selectedReviewJob, workspace.activity.data);
   const activeReviewStep: JobReviewStep = reviewStep ?? "summary_review";
@@ -396,7 +378,6 @@ export function JobsPage() {
     <section className="page-stack jobs-page">
       <PageHeader
         title={t("jobs.page.title")}
-        description={t("jobs.page.description")}
         actions={
           <div className="jobs-header-toolbar">
             <input
@@ -422,10 +403,10 @@ export function JobsPage() {
         <article className="jobs-dashboard-card">
           <div className="jobs-dashboard-head">
             <div>
-              <span className="jobs-dashboard-eyebrow">任务队列仪表盘</span>
-              <h3>把任务流转和处理压力收在一个面板里</h3>
+              <span className="jobs-dashboard-eyebrow">队列概览</span>
+              <h3>任务队列</h3>
             </div>
-            <p>{workspace.keyword.trim() ? `搜索“${workspace.keyword.trim()}”后的统计` : "当前标签任务统计"}</p>
+            {workspace.keyword.trim() ? <p>{`搜索“${workspace.keyword.trim()}”`}</p> : null}
           </div>
           <div className="jobs-dashboard-metrics">
             {[
@@ -455,7 +436,6 @@ export function JobsPage() {
         >
           <span className="jobs-dashboard-eyebrow">待处理事项</span>
           <strong>{workspace.queueStats.attention}</strong>
-          <p>失败、待核对、已取消等需要人工介入的任务统一从这里进入。</p>
           <div className="jobs-attention-breakdown">
             <span>待核对 {workspace.queueStats.needsReview}</span>
             <span>失败 {workspace.queueStats.failed}</span>
@@ -465,39 +445,6 @@ export function JobsPage() {
       </section>
 
       <section className="jobs-queue-stage" ref={queueStageRef}>
-        <div className="jobs-stage-head">
-          <div>
-            <h3>任务列表</h3>
-            <p>
-              {workspace.filteredJobs.length
-                ? `${activeFilterSummary} · ${workspace.filteredJobs.length} 个任务`
-                : `${activeFilterSummary} · 当前没有任务`}
-            </p>
-          </div>
-          <div className="jobs-stage-meta">
-            <span>当前筛选</span>
-            <strong>{activeFilterSummary}</strong>
-            <button
-              type="button"
-              className="button ghost button-sm"
-              onClick={() => {
-                setTaskKindFilter("all");
-                setPublicationFilter("all");
-                setClipStatusFilter("all");
-                focusQueue("all");
-              }}
-              disabled={
-                workspace.queueFilter === "all"
-                && taskKindFilter === "all"
-                && publicationFilter === "all"
-                && clipStatusFilter === "all"
-              }
-            >
-              查看全部
-            </button>
-          </div>
-        </div>
-        <p className="jobs-queue-stage-note">{queueFilterMeta.description}</p>
         <div className="jobs-queue-filter-panel" aria-label="任务列表筛选">
           <div className="jobs-filter-row">
             <span className="jobs-filter-label">任务标签</span>
@@ -607,7 +554,7 @@ export function JobsPage() {
           <div className="jobs-stage-head">
             <div>
               <h3>Demo Creator · 示例动画正式生产队列</h3>
-              <p>这里读取的是创作者档案绑定的二创生产 manifest，不进入普通原片剪辑流水线。</p>
+              <p>待生产剧集可批量启动，路径缺失的条目需先补齐素材。</p>
             </div>
             <div className="jobs-stage-meta">
               <span>待生产</span>

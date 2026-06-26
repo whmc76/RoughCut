@@ -42,7 +42,7 @@ function jobFlowModeOptions(t: (key: string) => string): SelectOption[] {
 }
 
 const AGENT_CAPABILITY_DESCRIPTIONS: Record<string, string> = {
-  speech_density_trim: "智能自动剪辑的唯一剪辑入口；手动编辑器只暴露语气词、重复、停顿阈值和智能删减等参数覆盖。",
+  speech_density_trim: "启用语气词、重复、停顿阈值和智能删减等节奏控制。",
   screen_focus: "面向教程类素材，编排局部放大、热点强调和屏幕重点跟随。",
   chapter_cards: "根据段落结构和字幕边界生成章节卡片、步骤提示和过渡包装。",
   local_broll_insert: "把本地上传的补充视频或图片作为插片素材编排进成片版本。",
@@ -68,7 +68,7 @@ const FILM_REMIX_MODE_OPTIONS: Array<{ value: string; label: string; description
   {
     value: "remix_auto_commentary",
     label: "自动精简解说",
-    description: "不输入文字时默认使用。系统理解原片后自动生成精简解说、选镜头、配音和包装。",
+    description: "不输入文字时默认使用。自动生成精简解说、选镜头、配音和包装。",
   },
   {
     value: "remix_llm_plan",
@@ -195,7 +195,7 @@ export function JobUploadPanel({
     : capabilityCatalog;
   const taskBriefLabel = isFilmRemix ? "脚本与任务要求" : "本条任务想法";
   const taskBriefPlaceholder = isFilmRemix
-    ? "留空时使用自动精简解说。也可以写主题、风格、剪辑要求或半成稿；如果选择“按脚本文案讲解插入”，这里应粘贴完整成稿文案。"
+    ? "留空时使用自动精简解说。也可以写主题、风格、剪辑要求或半成稿；选择“按脚本文案讲解插入”时请粘贴完整成稿文案。"
     : "例如：新品开箱和老款对比，突出升级点和适合谁。";
   const reorderFile = (fromIndex: number, toIndex: number) => {
     onChange({

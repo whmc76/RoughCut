@@ -422,12 +422,12 @@ export function IntelligentCopyPage() {
         <PageSection
           eyebrow={t("smartCopy.publish.eyebrow")}
           title={t("smartCopy.publish.title")}
-          description="选择一个已完成的物料生成任务，确认视频、字幕和可发布平台后提交一键发布。发布任务会进入队列，页面可持续恢复每个平台的执行状态。"
+          description="选择已完成物料，确认视频、字幕和发布平台。"
         >
           <section className="panel smart-copy-publish-material-picker">
             <PanelHeader
               title="选择已完成物料任务"
-              description="只列出已经生成完成、可继续自动发布或人工接管的物料任务。选择后会自动定位对应的视频、字幕、输出目录和平台物料。"
+              description="选择后会带入对应的视频、字幕、输出目录和平台物料。"
               actions={
                 <div className="toolbar">
                   <select
@@ -467,7 +467,7 @@ export function IntelligentCopyPage() {
                 <article className="activity-card">
                   <span className="stat-label">队列恢复</span>
                   <strong>持久化发布任务</strong>
-                  <div className="muted compact-top">提交后按平台创建发布记录，刷新页面也能继续跟踪状态和链接。</div>
+                  <div className="muted compact-top">提交后可继续跟踪各平台状态和链接。</div>
                 </article>
               </div>
             ) : (
@@ -725,7 +725,7 @@ export function IntelligentCopyPage() {
                 ) : null}
               </>
             ) : (
-              <EmptyState message="已选平台后点击生成智能发布方案，系统会给出发布时间、合集/栏目、分类和发布模式建议。" />
+              <EmptyState message="已选平台后可生成发布时间、合集/栏目、分类和发布模式建议。" />
             )}
           </section>
         ) : null}
@@ -902,14 +902,14 @@ function PublicationPlatformProgressPanel({ targets, attempts, selectedPlatformI
   if (!selectedTargets.length) {
     return (
       <section className="panel top-gap">
-        <PanelHeader title="发布进度" description="勾选发布平台后，这里会展示每个平台的队列状态、执行摘要和跟踪链接。" />
+        <PanelHeader title="发布进度" />
         <EmptyState message="还没有选择发布平台。" />
       </section>
     );
   }
   return (
     <section className="panel top-gap">
-      <PanelHeader title="发布进度" description="每个平台独立进入发布队列，可单独查看状态、错误、执行摘要和最终链接。" />
+      <PanelHeader title="发布进度" description="按平台跟踪状态、错误、执行摘要和最终链接。" />
       <div className="smart-copy-publication-progress-grid">
         {selectedTargets.map((target) => {
           const attempt = latestPublicationAttemptForPlatform(attempts, target.platform);

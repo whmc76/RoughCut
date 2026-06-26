@@ -53,7 +53,7 @@ export function SettingsOverviewPanel({ form, config, runtimeEnvironment, servic
 
   return (
     <section className="panel settings-summary-panel">
-      <PanelHeader title="当前状态" description="这里显示模型、服务和当前方案。" />
+      <PanelHeader title="当前状态" />
       <div className="settings-summary-grid">
         <article className="settings-command-card">
           <span className="settings-overview-label">全局路由表</span>

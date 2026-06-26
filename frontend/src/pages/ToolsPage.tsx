@@ -795,15 +795,15 @@ export function ToolsPage() {
       <PageHeader
         eyebrow="Tools"
         title="百宝箱"
-        description="把 TTS、ASR、数字人口播这些能力拆成可直接调用的页面，方便单独试音、转写和预览。"
+        description="直连调试 TTS、ASR 和数字人口播服务。"
         summary={[
           { label: "TTS", value: "CosyVoice3 Docker", detail: "用于文本到语音和音色参考测试" },
-          { label: "ASR", value: "当前本地 ASR", detail: "复用剪辑流水线里的转写服务" },
+          { label: "ASR", value: "当前本地 ASR", detail: "用于转写音视频素材" },
           { label: "数字人", value: "HeyGem", detail: "用上传素材跑单段口播预览" },
         ]}
       />
 
-      <PageSection className="tools-entry-section" eyebrow="入口" title="选择要直接调用的能力" description="每个入口都进入独立页面，提交后直接调用后端服务。">
+      <PageSection className="tools-entry-section" eyebrow="入口" title="选择能力">
         <div className="tool-entry-grid">
           {toolCards.map((tool) => (
             <Link className={`tool-entry tool-entry-${tool.key}`} key={tool.key} to={tool.route}>
@@ -821,7 +821,7 @@ export function ToolsPage() {
         </div>
       </PageSection>
 
-      <PageSection eyebrow="状态" title="工具服务在线状态" description="这里检查的是直连入口依赖，不代表完整任务流水线状态。">
+      <PageSection eyebrow="状态" title="工具服务在线状态">
         <section className="panel tools-status-panel">
           <PanelHeader title="Service endpoints" description={status.data?.checked_at ?? "正在检查服务状态"} />
           <div className="service-grid">
@@ -1706,7 +1706,7 @@ function ReferenceAudioPicker({
               ))}
             </div>
           ) : (
-            <div className="muted compact">暂无参考历史；提交一次参考音频或视频后会出现在这里。</div>
+            <div className="muted compact">暂无参考历史；提交参考音频或视频后会显示记录。</div>
           )}
         </div>
       </div>

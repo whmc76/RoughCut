@@ -23,18 +23,9 @@ export function GlossaryPage() {
         eyebrow={t("glossary.page.eyebrow")}
         title={t("glossary.page.title")}
         description={t("glossary.page.description")}
-        summary={[
-          { label: "先维护", value: "术语表单", detail: "新增和修正都应先经过左侧表单" },
-          { label: "再管理", value: "范围与词条列表", detail: "右侧列表更适合查重、筛选和继续编辑" },
-          { label: "最后补全", value: "内置词包导入", detail: "内置包用来提速，不替代针对频道的精修" },
-        ]}
       />
 
-      <PageSection
-        eyebrow="维护"
-        title="手工术语维护"
-        description="左侧负责新增和改写，右侧负责查找、筛选和继续编辑，避免导入操作干扰日常修正。"
-      >
+      <PageSection eyebrow="维护" title="手工术语维护">
         <div className="panel-grid two-up">
           <GlossaryFormPanel
             editing={workspace.editing}
@@ -57,11 +48,7 @@ export function GlossaryPage() {
         </div>
       </PageSection>
 
-      <PageSection
-        eyebrow="补充"
-        title="内置词包导入"
-        description="内置词包放在后段，只在需要批量补齐行业词时再处理，避免抢占主操作区。"
-      >
+      <PageSection eyebrow="补充" title="内置词包导入">
         <GlossaryBuiltinPanel
           packs={workspace.builtinPacks.data ?? []}
           filter={workspace.builtinFilter}

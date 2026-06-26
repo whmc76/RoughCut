@@ -34,18 +34,9 @@ export function ControlPage() {
         eyebrow={t("control.page.eyebrow")}
         title={t("control.page.title")}
         description={t("control.page.description")}
-        summary={[
-          { label: "先检查", value: "服务在线状态", detail: "确认异常是单点问题还是整体服务不可用" },
-          { label: "再动作", value: "安全停机", detail: "停机入口独立放置，避免和日常管理动作混在一起" },
-          { label: "适用场景", value: "排障与维护", detail: "这页不是高频操作页，重点是可靠和清晰" },
-        ]}
       />
 
-      <PageSection
-        eyebrow="监控"
-        title="先确认服务是否健康"
-        description="服务状态单独成段，方便先判断故障范围，再决定是否需要停机。"
-      >
+      <PageSection eyebrow="监控" title="服务状态">
         <section className="panel">
           <PanelHeader title={t("control.services.title")} description={lastChecked} />
           <div className="service-grid">
@@ -61,7 +52,6 @@ export function ControlPage() {
               <article className="list-card">
                 <div>
                   <div className="row-title">Runtime readiness</div>
-                  <div className="muted">区分“进程在线”与“依赖可用”。</div>
                 </div>
                 <div className="row-meta">
                   <strong className={renderRuntimeTone(runtime.readiness_status)}>{runtime.readiness_status ?? "unknown"}</strong>
@@ -125,11 +115,7 @@ export function ControlPage() {
         </section>
       </PageSection>
 
-      <PageSection
-        eyebrow="补偿队列"
-        title="审核通知补偿"
-        description="这里显示 Telegram 审核通知的补偿状态。优先看 due_now 和 failed，再决定是否手动重排。"
-      >
+      <PageSection eyebrow="补偿队列" title="审核通知补偿">
         <section className="panel">
           <PanelHeader
             title="Review notifications"
@@ -257,11 +243,7 @@ export function ControlPage() {
         </section>
       </PageSection>
 
-      <PageSection
-        eyebrow="运行细项"
-        title="把问题拆到依赖和自动化层"
-        description="这里单独展开 health detail，方便判断故障是出在受管服务、watcher 自动入队，还是基础依赖。"
-      >
+      <PageSection eyebrow="运行细项" title="健康详情">
         <div className="panel-grid two-up">
           <section className="panel">
             <PanelHeader title="Managed services" description={healthChecked} />
@@ -305,7 +287,6 @@ export function ControlPage() {
                   <article className="list-card">
                     <div>
                       <div className="row-title">Auto enqueue / merge</div>
-                      <div className="muted">判断 watcher 当前是否在自动接片和自动合并。</div>
                     </div>
                     <div className="row-meta">
                       <strong className={watchAutomation.auto_enqueue_enabled ? "status-ok" : "status-off"}>
@@ -317,7 +298,6 @@ export function ControlPage() {
                   <article className="list-card">
                     <div>
                       <div className="row-title">Watch roots / pending</div>
-                      <div className="muted">根目录数量和缓存中的待处理素材规模。</div>
                     </div>
                     <div className="row-meta">
                       <strong>{watchAutomation.roots_total} roots</strong>
@@ -327,7 +307,6 @@ export function ControlPage() {
                   <article className="list-card">
                     <div>
                       <div className="row-title">Scans / active jobs</div>
-                      <div className="muted">同时看扫描活动和当前自动调度出的任务量。</div>
                     </div>
                     <div className="row-meta">
                       <strong>{watchAutomation.running_scans} scans</strong>
@@ -337,7 +316,6 @@ export function ControlPage() {
                   <article className="list-card">
                     <div>
                       <div className="row-title">GPU guard / idle slots</div>
-                      <div className="muted">GPU 步骤是否在跑，以及自动调度还剩多少空位。</div>
                     </div>
                     <div className="row-meta">
                       <strong>{watchAutomation.running_gpu_steps} gpu</strong>
@@ -360,11 +338,7 @@ export function ControlPage() {
         </div>
       </PageSection>
 
-      <PageSection
-        eyebrow="维护"
-        title="停机控制"
-        description="停机操作单独放在后段，避免与状态查看混在同一块区域里误触。"
-      >
+      <PageSection eyebrow="维护" title="停机控制">
         <section className="panel">
           <PanelHeader title={t("control.stop.title")} description={t("control.stop.description")} />
           <label className="checkbox-row">

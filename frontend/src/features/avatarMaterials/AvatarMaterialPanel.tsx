@@ -225,7 +225,7 @@ export function AvatarMaterialPanel() {
     <section className="panel">
       <PanelHeader
         title="创作者档案"
-        description="把作者身份、内容定位、渠道策略、商务备注和数字人口播素材放进同一个档案，后续文案生成、模板复用和数字人预览都从这里取数。"
+        description="维护作者身份、内容定位、渠道策略和数字人口播素材。"
         actions={
           <button className="button primary" type="button" onClick={() => setCreateModalOpen(true)}>
             创建创作者档案
@@ -314,10 +314,7 @@ export function AvatarMaterialPanel() {
 
       <FloatingModal open={createModalOpen} onClose={() => setCreateModalOpen(false)} title="创建创作者档案" closeLabel="关闭">
         <section className="panel creator-profile-modal-panel">
-          <PanelHeader
-            title="创建创作者档案"
-            description="通过独立弹窗录入人设资料和数字人素材，避免把创建表单长期占在主页面里。"
-          />
+          <PanelHeader title="创建创作者档案" />
           <CreatorProfileIntakeGuide payload={payload} readyCount={readyCount} />
           <div className="avatar-create-summary-grid top-gap">
             <AvatarMetricCard value={selectedFileCount} label="已选素材" />

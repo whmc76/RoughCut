@@ -109,7 +109,6 @@ export function SettingsPage() {
       <section className="settings-architecture-deck">
         <div className="settings-architecture-lead">
           <h3>常用设置</h3>
-          <p>这里只放最常改的项目。</p>
         </div>
         <div className="settings-overview-grid">
           {summaryCards.map((card) => (

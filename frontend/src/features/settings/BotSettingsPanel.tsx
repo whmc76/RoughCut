@@ -32,7 +32,7 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
         <article className="settings-module-chip">
           <span className="settings-overview-label">Agent</span>
           <strong>{agentStatus}</strong>
-          <div className="muted">{agentEnabled ? "接收 Telegram 工程命令" : "不接管 Telegram 命令"}</div>
+          <div className="muted">{agentEnabled ? "接收 Telegram 命令" : "不接管 Telegram 命令"}</div>
         </article>
         <article className="settings-module-chip">
           <span className="settings-overview-label">传输凭据</span>
@@ -101,8 +101,8 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
         <section className="settings-tool-card settings-tool-card-agent">
           <div className="settings-tool-card-head">
             <div>
-              <strong>Telegram Agent 工程任务</strong>
-              <div className="muted">只控制 Telegram 命令、工程任务分流和结果回推。</div>
+              <strong>Telegram Agent 任务分流</strong>
+              <div className="muted">控制 Telegram 命令接收、任务分流和结果回推。</div>
             </div>
           </div>
         <div className="form-stack">
@@ -229,7 +229,7 @@ export function BotSettingsPanel({ form, config, onChange }: BotSettingsPanelPro
             </>
           ) : (
             <div className="muted">
-              {reviewEnabled ? "Agent 关闭；仍可使用上方 Telegram 远程审核。" : "Agent 关闭，不会接管 Telegram 命令或工程任务。"}
+              {reviewEnabled ? "Agent 关闭；仍可使用上方 Telegram 远程审核。" : "Agent 关闭，不会接管 Telegram 命令或任务分流。"}
             </div>
           )}
         </div>

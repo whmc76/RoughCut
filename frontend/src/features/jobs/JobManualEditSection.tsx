@@ -8375,7 +8375,7 @@ export function JobManualEditSection({ job, contentProfile, session, previewAsse
         <div className="manual-editor-preview-head">
           <div>
             <strong>视频摘要</strong>
-            <div className="muted compact-top">人工填写后会自动保存，并作为强证据进入自动审核、字幕校对和后续文案链路。</div>
+            <div className="muted compact-top">人工填写后会自动保存，并用于自动审核、字幕校对和后续文案生成。</div>
           </div>
           <span className={classNames("status-pill", currentVideoSummary ? "done" : "pending")}>
             {currentVideoSummary ? "强证据已填写" : "待填写"}

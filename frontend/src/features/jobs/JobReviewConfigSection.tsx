@@ -38,10 +38,7 @@ export function JobReviewConfigSection({
     <section className="detail-block review-config-block">
       <div className="detail-key">方案与审核</div>
       <div className="notice">
-        审核页不再展开所有参数，只保留方案切换和审核检查。
-      </div>
-      <div className="notice compact-top">
-        这里会提示资源是否齐全、服务是否可用，以及是否会自动降级。
+        确认方案、素材资源、服务状态和自动降级风险。
       </div>
       <div className="toolbar compact-top">
         <Link className="button ghost button-sm" to="/task-strategies">

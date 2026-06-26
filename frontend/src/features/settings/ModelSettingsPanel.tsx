@@ -415,7 +415,7 @@ export function ModelSettingsPanel({ form, config, options, runtimeEnvironment, 
 
   return (
     <section className="panel settings-core-panel">
-      <PanelHeader title="全局模型路由" description="唯一权威路由表和对应的执行配置都在这里。创作者方案不再承载这些字段。" />
+      <PanelHeader title="全局模型路由" />
       <div className="settings-provider-deck-head">
         <div>
           <strong>权威路由表</strong>

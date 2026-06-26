@@ -55,7 +55,7 @@ export function QualitySettingsPanel({ form, config, onChange }: QualitySettings
           disabled
           onChange={(event) => onChange("fact_check_enabled", event.target.checked)}
         />
-        <div className="muted">事实核查配置项目前未接入任务运行链路，保留显示仅用于兼容旧配置，不会影响当前任务执行。</div>
+        <div className="muted">当前任务不会使用事实核查配置，保留此项用于旧配置兼容。</div>
         <CheckboxField
           label="内容画像异常门自动放行"
           checked
