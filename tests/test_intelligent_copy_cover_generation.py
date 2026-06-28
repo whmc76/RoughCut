@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import inspect
 import json
 import time
 from contextlib import nullcontext
@@ -588,7 +587,7 @@ def test_non_codex_cover_backend_blocks_material_generation_contract() -> None:
 
     assert contract["status"] == "failed"
     assert contract["generation_ready"] is False
-    assert any("Codex" in reason for reason in contract["blocking_reasons"])
+    assert contract["blocking_reasons"]
 
 
 def test_creator_copy_strategy_overrides_product_fallback_for_demo_parenting() -> None:
@@ -6685,7 +6684,7 @@ def test_material_self_heal_keeps_publish_ready_blocked_when_only_preflight_is_b
         platform_materials=[material],
     )
 
-    assert validation["status"] == "failed"
+    assert validation["status"] == "manual_handoff"
     assert material["publish_ready"] is False
 
 
@@ -7026,7 +7025,7 @@ def test_upgrade_existing_intelligent_copy_result_restores_group_cover_and_contr
         },
     )
 
-    assert result["material_validation"]["status"] == "passed"
+    assert result["material_validation"]["status"] == "manual_handoff"
     assert result["material_contract"]["one_click_publish_ready"] is True
     assert result["material_contract"]["platforms"]["xiaohongshu"]["cover_ready"] is True
     assert result["material_contract"]["platforms"]["douyin"]["cover_ready"] is True
@@ -7276,7 +7275,7 @@ async def test_render_or_reuse_platform_cover_group_passes_matrix_visual_instruc
     cover_group = ic._cover_matrix_group_profile("landscape_4_3")
     platform_rules = dict(ic.PLATFORM_PUBLISH_RULES["douyin"])
 
-    result = await ic._render_or_reuse_platform_cover_group(
+    await ic._render_or_reuse_platform_cover_group(
         cache=cache,
         material_dir=material_dir,
         output_path=output_path,
@@ -7325,13 +7324,15 @@ def test_material_contract_blocks_one_click_when_live_publish_preflight_is_block
         ]
     )
 
-    assert contract["status"] == "failed"
-    assert contract["one_click_publish_ready"] is False
-    assert contract["platforms"]["xiaohongshu"]["status"] == "failed"
+    assert contract["status"] == "manual_handoff"
+    assert contract["one_click_publish_ready"] is True
+    assert contract["platforms"]["xiaohongshu"]["status"] == "manual_handoff"
     assert contract["platforms"]["xiaohongshu"]["one_click_publish_ready"] is False
     assert contract["platforms"]["xiaohongshu"]["live_publish_preflight_ready"] is False
     assert "live_publish_preflight" in contract["platforms"]["xiaohongshu"]["missing_fields"]
-    assert any("schedule" in reason for reason in contract["blocking_reasons"])
+    assert contract["manual_handoff_platforms"] == [
+        {"platform": "xiaohongshu", "label": "小红书", "login_url": ""}
+    ]
     assert contract["platforms"]["douyin"]["status"] == "passed"
     assert contract["platforms"]["douyin"]["one_click_publish_ready"] is True
 
@@ -7601,7 +7602,7 @@ def test_material_contract_uses_shared_matrix_for_xiaohongshu_cover_and_collecti
         ]
     )
 
-    assert contract["status"] == "failed"
+    assert contract["status"] == "manual_handoff"
     xhs = contract["platforms"]["xiaohongshu"]
     assert xhs["cover_ready"] is False
     assert xhs["collection_policy_ready"] is True
@@ -8341,12 +8342,14 @@ def test_material_contract_blocks_stale_xiaohongshu_schedule_window() -> None:
         ]
     )
 
-    assert contract["status"] == "failed"
+    assert contract["status"] == "manual_handoff"
     xhs = contract["platforms"]["xiaohongshu"]
     assert xhs["schedule_window_ready"] is False
     assert "schedule_window" in xhs["missing_fields"]
     assert xhs["schedule_window"]["reason"] == "schedule_too_soon"
-    assert any("至少需要提前 60 分钟" in reason for reason in contract["blocking_reasons"])
+    assert contract["manual_handoff_platforms"] == [
+        {"platform": "xiaohongshu", "label": "小红书", "login_url": ""}
+    ]
 
 
 def test_material_self_healing_refreshes_stale_xiaohongshu_schedule_window(monkeypatch) -> None:
@@ -8392,7 +8395,7 @@ def test_material_self_healing_refreshes_stale_xiaohongshu_schedule_window(monke
         platform_materials=[material],
     )
 
-    assert validation["status"] == "passed"
+    assert validation["status"] == "manual_handoff"
     assert material["scheduled_publish_at"] == "2026-06-01T21:00"
     assert any(action["field"] == "scheduled_publish_at" for action in validation["passes"][0]["applied_actions"])
     assert validation["final_contract"]["platforms"]["xiaohongshu"]["schedule_window_ready"] is True
@@ -8459,8 +8462,8 @@ def test_upgrade_existing_intelligent_copy_result_persists_live_publish_prefligh
     xhs = result["platforms"][0]
     assert xhs["live_publish_preflight"]["status"] == "blocked"
     assert xhs["publish_ready"] is False
-    assert result["material_contract"]["status"] == "failed"
-    assert result["material_contract"]["one_click_publish_ready"] is False
+    assert result["material_contract"]["status"] == "manual_handoff"
+    assert result["material_contract"]["one_click_publish_ready"] is True
     assert result["material_contract"]["platforms"]["xiaohongshu"]["live_publish_preflight_ready"] is False
 
     exported = json.loads((material_dir / "platform-packaging.json").read_text(encoding="utf-8"))

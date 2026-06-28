@@ -115,7 +115,6 @@ def _passing_report(episode: int) -> dict[str, object]:
         "subtitle_timing_bad_drift_count": 0,
         "subtitle_timing_max_abs_start_drift_sec": 0.04,
         "subtitle_timing_max_abs_end_drift_sec": 0.12,
-        "subtitle_timing_audit_path": "subtitle_timing_audit.json",
         "tts_asr_coverage": 0.98,
         "source_asr_anchor_count": 14,
         **_original_audio_no_insert_report_fields(),

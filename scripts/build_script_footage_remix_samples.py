@@ -4462,7 +4462,7 @@ def build_reference_style_packaging_events(episode: int, title: str, question: s
                 start,
                 end,
                 "BlueBanner",
-                rf"{{\p1\move(230,88,600,88,0,260)\c&HDD7A22&\alpha&H22&\bord0\shad0\fad(120,240)\t(0,220,\alpha&H08&)}}m 0 0 l 760 0 l 704 108 l 0 108",
+                r"{\p1\move(230,88,600,88,0,260)\c&HDD7A22&\alpha&H22&\bord0\shad0\fad(120,240)\t(0,220,\alpha&H08&)}m 0 0 l 760 0 l 704 108 l 0 108",
             )
         )
         events.append(

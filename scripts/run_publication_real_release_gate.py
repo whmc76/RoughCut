@@ -1568,7 +1568,6 @@ def _adaptive_recovery_overrides(
     summary: dict[str, Any] | None = None,
     default_trigger: str = "auto_recover",
 ) -> tuple[dict[str, Any], list[str]]:
-    normalized_platform = _normalize(platform).lower().replace("_", "-")
     adaptive_reason: list[str] = []
     status = _normalize(summary.get("status")).lower() if isinstance(summary, dict) else ""
     error_code = _normalize(summary.get("error_code")).lower() if isinstance(summary, dict) else ""
@@ -3972,7 +3971,6 @@ def _build_expected_platform_manifest(
     for platform in platforms:
         normalized_platform = _normalize(platform).lower().replace("_", "-")
         entry = normalized_packaging.get(normalized_platform) if isinstance(normalized_packaging.get(normalized_platform), dict) else {}
-        has_explicit_declaration = bool(_normalize(entry.get("declaration") or entry.get("content_declaration")))
         normalized_entry = _coerce_platform_packaging_entry(
             normalized_platform,
             dict(entry),
@@ -7286,7 +7284,6 @@ async def _run_real_publish_gate(
                 "stale_draft_platforms": sorted(stale_draft_platforms),
                 "stale_refresh_platforms": sorted(stale_refresh_platforms),
                 "prepublish_draft_signals": prepublish_draft_signals,
-                "prepublish_recovery_events": prepublish_recovery_events,
                 "post_x_status": post_x_status,
                 "target_profile_ids": target_profile_ids,
                 "agent_ready": {
@@ -8361,7 +8358,6 @@ async def _run_real_publish_gate(
                     plan_targets=effective_platforms,
                 ),
                 "attempts": all_attempts,
-                "prepublish_recovery_events": prepublish_recovery_events,
                 "recovery_events": all_recovery_events,
                 "recovery_signals": all_recovery_signals,
                 "recovery_knowledge_base": _summarize_recovery_knowledge_base(recovery_knowledge_base),

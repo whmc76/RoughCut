@@ -10,7 +10,6 @@ import shutil
 import subprocess
 import sys
 import time
-import uuid
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,10 +19,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from sqlalchemy import select
 
 from roughcut.config import apply_runtime_overrides, get_settings
-from roughcut.db.models import Artifact, Job, JobStep
+from roughcut.db.models import Job
 from roughcut.db.session import get_session_factory
 from roughcut.pipeline.orchestrator import create_job_steps
 from roughcut.pipeline.steps import run_step_sync
@@ -32,7 +30,6 @@ from run_fullchain_batch import (
     auto_confirm_content_profile,
     finalize_job,
     mark_step,
-    prepare_job_for_source,
     read_step_detail,
 )
 from run_renderless_provider_comparison import ProviderSpec, build_report, collect_run_summary, render_markdown

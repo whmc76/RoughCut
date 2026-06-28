@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from tests.creator_assets_testkit import creator_assets_client
 from roughcut.api import creator_assets
 
 

@@ -23,7 +23,6 @@ from roughcut.db.models import Job  # noqa: E402
 from roughcut.db.session import Base  # noqa: E402
 from roughcut.publication_packaging import (  # noqa: E402
     filter_publication_packaging_platforms,
-    load_json_payload,
     load_publication_packaging_payload,
     normalize_publication_packaging_payload,
     publication_packaging_payload_publish_ready,

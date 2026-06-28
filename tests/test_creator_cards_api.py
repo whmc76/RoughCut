@@ -8,9 +8,6 @@ from sqlalchemy import select
 from roughcut.api import creator_assets as creator_assets_api
 from roughcut.db.models import CreatorAsset
 
-from tests.creator_assets_testkit import creator_assets_client
-
-
 class _FakeReasoningResponse:
     model = "fake-llm"
     usage = {"input_tokens": 1, "output_tokens": 1}

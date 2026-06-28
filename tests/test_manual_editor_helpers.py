@@ -125,8 +125,6 @@ from roughcut.edit.render_plan import (
 from roughcut.edit.packaging_timeline import (
     packaging_timeline_asset_plan,
     packaging_timeline_assets,
-    packaging_timeline_chapter_cards,
-    packaging_timeline_focus_events,
     packaging_timeline_has_editing_accents,
     packaging_timeline_has_packaging_assets,
     packaging_timeline_transitions,

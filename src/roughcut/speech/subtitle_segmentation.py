@@ -2891,7 +2891,6 @@ def _build_word_candidate(
     else:
         score -= (duration - max_duration) * 4.0
 
-    text_core = _strip_boundary_trailing_punctuation(text) or text
     boundary_quality = boundary_assessment.quality if boundary_assessment is not None else 4.0
     score += boundary_quality * 4.5
     if boundary_assessment is not None:

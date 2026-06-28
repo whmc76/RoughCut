@@ -55,7 +55,6 @@ from roughcut.docker_gpu_guard import _acquire_operation_lock, _release_operatio
 from roughcut.db.models import (
     Artifact,
     CreatorCard,
-    CreatorPreference,
     GlossaryTerm,
     Job,
     JobStep,
@@ -78,7 +77,6 @@ from roughcut.edit.decisions import (
 from roughcut.edit.cut_analysis import (
     ARTIFACT_TYPE_CUT_ANALYSIS,
     build_cut_analysis_payload,
-    cut_analysis_accepted_cuts,
     cut_analysis_effective_applied_cuts,
     cut_analysis_rule_candidates,
     summarize_cut_analysis_candidate_metrics,
@@ -97,9 +95,9 @@ from roughcut.edit.packaging_timeline import (
     build_packaging_timeline_payload,
     packaging_timeline_asset_plan,
     packaging_timeline_analysis,
-    packaging_timeline_editing_skill,
+    packaging_timeline_editing_skill as packaging_timeline_editing_skill,
     packaging_timeline_focus_plan,
-    packaging_timeline_insert_plan,
+    packaging_timeline_insert_plan as packaging_timeline_insert_plan,
     packaging_timeline_local_audio_cues,
     packaging_timeline_music_plan,
     packaging_timeline_section_choreography,
@@ -314,7 +312,6 @@ from roughcut.remix.contracts import AsrToken, SubtitleTiming
 from roughcut.speech.postprocess import (
     SubtitleEntry,
     _fragment_window_candidate_is_acceptable,
-    _rebalance_semantic_boundaries,
     _reindex_subtitle_entries,
     analyze_subtitle_segmentation,
     generate_subtitle_window_candidates,
@@ -10795,10 +10792,9 @@ async def run_render(job_id: str, *, step_name: str = "render") -> dict:
             )
             raise RuntimeError(
                 f"render blocked by automatic gate: {blocking_reasons or 'source_timeline_contract_blocking'}"
-            )
+        )
         packaging_assets = packaging_context["assets"]
         has_packaging = bool(packaging_context["has_packaging"])
-        editing_accents = packaging_context["editing_accents"]
         has_editing_accents = bool(packaging_context["has_editing_accents"])
         requested_render_variants = resolve_requested_render_variants(job, render_plan_payload)
         enhancement_mode_set = {
@@ -11142,7 +11138,6 @@ async def run_render(job_id: str, *, step_name: str = "render") -> dict:
                         "render_subtitle_asr_alignment_blocked: "
                         + str(rendered_audio_alignment.get("reason") or "rendered_audio_asr_alignment_failed")
                     )
-            packaged_render_plan = render_plan_timeline.data_json
             packaged_packaging_context = packaging_context
             packaged_runtime_plan_context = dict(render_plan_context)
             packaged_runtime_plan_context["audio_already_mastered"] = True
@@ -12616,7 +12611,6 @@ async def _finalize_render_from_phase_outputs(
     debug_dir: Path,
     use_fixture_seeded_render_alignment: bool,
 ) -> dict:
-    from roughcut.db.models import RenderOutput
 
     validated = await _validate_render_phase_outputs_for_finalize(phase_outputs)
     variants = validated["variants"]
@@ -14885,9 +14879,18 @@ async def _audit_subtitles_against_rendered_audio(
     label: str,
 ) -> dict[str, Any]:
     debug_dir.mkdir(parents=True, exist_ok=True)
-    audio_path = debug_dir / f"{label}.subtitle_alignment.wav"
-    await extract_audio(video_path, audio_path)
-    result = await LocalHTTPASRProvider().transcribe(audio_path, language=language)
+    debug_audio_path = debug_dir / f"{label}.subtitle_alignment.wav"
+    safe_label = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(label or "subtitle_alignment")).strip("._")
+    if not safe_label:
+        safe_label = "subtitle_alignment"
+    with tempfile.TemporaryDirectory(prefix="roughcut_subtitle_alignment_") as tmpdir:
+        audio_path = Path(tmpdir) / f"{safe_label}.subtitle_alignment.wav"
+        await extract_audio(video_path, audio_path)
+        result = await LocalHTTPASRProvider().transcribe(audio_path, language=language)
+        debug_audio_copied = False
+        with suppress(OSError):
+            shutil.copy2(audio_path, debug_audio_path)
+            debug_audio_copied = True
     tokens = _render_asr_tokens_from_transcript(result)
     asr_text = "".join(segment.text for segment in result.segments)
     timings = _render_subtitle_timings_from_items(subtitle_items)
@@ -14901,7 +14904,9 @@ async def _audit_subtitles_against_rendered_audio(
     payload = {
         "label": label,
         "video_path": str(video_path),
-        "audio_path": str(audio_path),
+        "audio_path": str(debug_audio_path if debug_audio_copied else audio_path),
+        "asr_audio_path": str(audio_path),
+        "debug_audio_copied": debug_audio_copied,
         "language": language,
         "provider": result.provider,
         "model": result.model,
@@ -14915,10 +14920,12 @@ async def _audit_subtitles_against_rendered_audio(
         "offset_estimate": _estimate_render_subtitle_global_offset(audit),
         "audit": audit,
     }
-    (debug_dir / f"{label}.subtitle_alignment.json").write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    with suppress(OSError):
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        (debug_dir / f"{label}.subtitle_alignment.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
     return payload
 
 
@@ -17184,8 +17191,6 @@ def _classify_high_risk_cut_review(item: dict[str, Any], *, compact_evidence: di
         for tag in list(compact_evidence.get("tags") or [])
         if str(tag).strip()
     }
-    protection_score = float(compact_evidence.get("protection_score") or 0.0)
-    language_score = float(compact_evidence.get("language_score") or 0.0)
     explicit_speech_overlap = bool(
         _cut_text_has_spoken_content(source_text)
         or _cut_text_has_spoken_content(match_surface)

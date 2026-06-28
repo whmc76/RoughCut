@@ -4,9 +4,8 @@ from typing import Any
 
 from roughcut.edit.cut_analysis import CUT_ANALYSIS_SCHEMA_VERSION, cut_analysis_refine_auto_cut_candidates
 from roughcut.edit.editorial_timeline import (
-    editorial_keep_segments,
     normalize_keep_segments_payloads,
-    resolve_refine_keep_segments_for_timeline,
+    resolve_refine_keep_segments_for_timeline as resolve_refine_keep_segments_for_timeline,
 )
 from roughcut.edit.multimodal_trim_review import (
     multimodal_trim_review_auto_cut_candidates,

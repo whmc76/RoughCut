@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 
 from roughcut.config import (
     DEFAULT_TRANSCRIPTION_MODELS,

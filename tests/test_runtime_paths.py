@@ -16,7 +16,7 @@ def test_resolve_runtime_media_path_maps_windows_data_path_to_current_project_ro
     expected.write_bytes(b"clip")
     monkeypatch.setattr(runtime_paths, "DEFAULT_PROJECT_ROOT", project_root)
 
-    resolved = resolve_runtime_media_path("E:/WorkSpace/RoughCut/data/runtime/output/clip.mp4")
+    resolved = resolve_runtime_media_path("C:/sample-workspace/RoughCut/data/runtime/output/clip.mp4")
 
     assert resolved == expected
 
@@ -31,7 +31,7 @@ def test_resolve_runtime_media_path_strips_container_prefixed_windows_path(
     expected.write_bytes(b"clip")
     monkeypatch.setattr(runtime_paths, "DEFAULT_PROJECT_ROOT", project_root)
 
-    resolved = resolve_runtime_media_path("/app/E:/WorkSpace/RoughCut/data/runtime/output/clip.mp4")
+    resolved = resolve_runtime_media_path("/app/C:/sample-workspace/RoughCut/data/runtime/output/clip.mp4")
 
     assert resolved == expected
 
@@ -47,7 +47,7 @@ def test_resolve_runtime_media_path_falls_back_to_legacy_output_root(
     monkeypatch.setattr(runtime_paths, "DEFAULT_PROJECT_ROOT", project_root)
 
     resolved = resolve_runtime_media_path(
-        "E:/WorkSpace/RoughCut/data/runtime/output/_creator_assets/creator/intro.mp4"
+        "C:/sample-workspace/RoughCut/data/runtime/output/_creator_assets/creator/intro.mp4"
     )
 
     assert resolved == expected

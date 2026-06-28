@@ -12,7 +12,7 @@ from typing import Any
 from roughcut.config import get_settings, llm_task_route
 from roughcut.edit.cut_analysis import summarize_cut_analysis_candidate_metrics
 from roughcut.edit.rule_registry import rule_multimodal_review_trigger
-from roughcut.llm_cache import build_cache_key, digest_payload, load_cached_entry, save_cached_json
+from roughcut.llm_cache import build_cache_key, load_cached_entry, save_cached_json
 from roughcut.prompts.edit_decision import build_multimodal_trim_review_batch_prompt
 from roughcut.providers.multimodal import complete_with_images
 from roughcut.providers.reasoning.base import extract_json_text

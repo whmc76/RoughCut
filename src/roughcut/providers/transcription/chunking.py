@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import shutil
 import subprocess
 from typing import Any
 
@@ -130,6 +131,7 @@ def export_audio_chunk(
     end: float,
     timeout_sec: float | None = None,
 ) -> None:
+    ffmpeg_input_path = _ffmpeg_safe_audio_input_path(audio_path, working_dir=chunk_path.parent)
     subprocess.run(
         [
             "ffmpeg",
@@ -142,7 +144,7 @@ def export_audio_chunk(
             "-to",
             f"{end:.3f}",
             "-i",
-            str(audio_path),
+            str(ffmpeg_input_path),
             "-ac",
             "1",
             "-ar",
@@ -154,6 +156,19 @@ def export_audio_chunk(
         check=True,
         timeout=None if timeout_sec is None or timeout_sec <= 0 else float(timeout_sec),
     )
+
+
+def _ffmpeg_safe_audio_input_path(audio_path: Path, *, working_dir: Path) -> Path:
+    raw_path = Path(audio_path)
+    if str(raw_path).isascii():
+        return raw_path
+
+    working_dir.mkdir(parents=True, exist_ok=True)
+    suffix = raw_path.suffix if raw_path.suffix and raw_path.suffix.isascii() else ".wav"
+    shadow_path = working_dir / f"roughcut_source_audio{suffix}"
+    if shadow_path.resolve() != raw_path.resolve():
+        shutil.copy2(raw_path, shadow_path)
+    return shadow_path
 
 
 def probe_audio_duration(path: Path) -> float:

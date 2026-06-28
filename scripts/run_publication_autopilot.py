@@ -2182,7 +2182,6 @@ async def _run_autopilot(args: argparse.Namespace) -> int:
                 # 前置已成功且 x 已成功，跳过后续迭代
                 stable_ok = True
 
-        stage_failures = [item for item in all_known_failures if item]
         if any(r.get("status") == "failed" for r in stage_records):
             if iteration < retries_left and args.auto_retry:
                 failures = [str(item) for item in (all_known_failures[-100:] if all_known_failures else [])]

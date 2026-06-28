@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Sequence
 
 import httpx
 from PIL import Image
@@ -48,7 +48,6 @@ from roughcut.intelligent_copy_layout import (
     smart_copy_cover_candidates_sheet_path,
     smart_copy_cover_dir,
     smart_copy_cover_group_output_path,
-    smart_copy_cover_group_reference_path,
     smart_copy_cover_reference_image_path,
     smart_copy_cover_source_image_path,
     smart_copy_cover_source_manifest_path,
@@ -116,7 +115,7 @@ from roughcut.review.intelligent_copy_templates import (
     build_constraint_only_title_candidates,
     build_title_candidates,
 )
-from roughcut.review.platform_copy import build_fallback_description, build_fallback_titles
+from roughcut.review.platform_copy import build_fallback_description, build_fallback_titles as build_fallback_titles
 from roughcut.review.intelligent_copy_topics import IntelligentCopyTopicSpec, match_intelligent_copy_topic
 
 VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
@@ -1765,13 +1764,21 @@ async def refresh_existing_intelligent_copy_cover_current_state(
         for item in platform_items
         if isinstance(item, dict) and _normalize_internal_publish_platform_key(item.get("key"))
     }
+    existing_packaging_map = packaging.get("platforms") if isinstance(packaging.get("platforms"), dict) else {}
     platform_materials: list[dict[str, Any]] = []
     for platform_key, _label, _body_label, _tag_label in [item for item in PLATFORM_ORDER if item[0] in all_platform_keys and PLATFORM_PUBLISH_RULES.get(item[0])]:
         item = existing_item_map.get(platform_key)
         rules = PLATFORM_PUBLISH_RULES.get(platform_key)
-        if not isinstance(item, dict) or not rules:
+        if not rules:
             continue
-        material = _normalize_existing_platform_material(item, rules=rules)
+        material = _restore_or_build_platform_material(
+            platform_key=platform_key,
+            rules=rules,
+            existing_item=item if isinstance(item, dict) else None,
+            packaging_platforms=existing_packaging_map,
+        )
+        if material is None:
+            continue
         _restore_platform_cover_path(material=material, material_dir=material_dir, index=_resolve_platform_material_serial(platform_key))
         _refresh_restored_cover_generation_status(material=material, material_dir=material_dir)
         _refresh_cover_group_reuse_platform_derivative(
@@ -4590,7 +4597,6 @@ def _default_cover_critical_detail_notes(
     )
     lowered = text.lower()
     is_edc_blade = any(token in text for token in ("刀", "刀具", "折刀", "直跳", "MAXACE", "美杜莎")) or "edc" in lowered
-    is_compare = _has_explicit_cover_compare_signal(text) or "comparison" in lowered
     notes: list[str] = []
     if is_edc_blade:
         notes.append("保留原始刀型、开孔、转轴、柄部纹理和主要部件位置，不改款不变形。")
@@ -5953,6 +5959,8 @@ def _review_platform_material_quality(material: dict[str, Any]) -> list[dict[str
     platform_key = _normalize_external_publish_platform_key(material.get("key"))
     title = _material_primary_title(material)
     body = str(material.get("body") or "").strip()
+    copy_material = material.get("copy_material") if isinstance(material.get("copy_material"), dict) else {}
+    materialized_copy_restore = str(copy_material.get("source") or "").strip() == "materialized_copy_files_restore"
     if bool(material.get("has_title", True)):
         if not title:
             issues.append(_material_review_issue(platform_key, "missing_title", "标题为空，不能自动发布。", repairable=False))
@@ -5964,7 +5972,7 @@ def _review_platform_material_quality(material: dict[str, Any]) -> list[dict[str
     if platform_key != "x":
         if not body:
             issues.append(_material_review_issue(platform_key, "missing_body", "正文/说明为空，不能自动发布。", repairable=True))
-        elif platform_key == "youtube" and len(body) < 20:
+        elif platform_key == "youtube" and len(body) < 20 and not materialized_copy_restore:
             issues.append(_material_review_issue(platform_key, "body_too_short", "YouTube 说明过短，不能作为正式发布物料。", repairable=True))
     cover_generation = material.get("cover_generation") if isinstance(material.get("cover_generation"), dict) else {}
     if cover_generation and bool(cover_generation.get("publish_ready")):
@@ -9692,7 +9700,6 @@ def _build_cover_director_policy(
 ) -> dict[str, Any]:
     profile = dict(COVER_DIRECTOR_STYLE_PROFILES.get(str(style_key or "").strip()) or {})
     layout = dict(title_lines or {})
-    contract = dict(hard_contract or {})
     axes = dict(strategy_axes or {})
     width, height = tuple(canvas_size or (0, 0))
     matrix_key = _resolve_cover_matrix_group_key(width=int(width or 0), height=int(height or 0)) if width and height else ""

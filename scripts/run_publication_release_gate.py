@@ -18,10 +18,10 @@ from roughcut.config import get_settings  # noqa: E402
 
 try:
     from scripts.run_minimax_publication_cdp_smoke import _run_backend_contract_smoke  # noqa: E402
-    from scripts.run_publication_preflight import _default_platforms, _resolve_requested_platforms, _run_checks  # noqa: E402
+    from scripts.run_publication_preflight import _resolve_requested_platforms, _run_checks  # noqa: E402
 except ModuleNotFoundError:
     from run_minimax_publication_cdp_smoke import _run_backend_contract_smoke  # noqa: E402
-    from run_publication_preflight import _default_platforms, _resolve_requested_platforms, _run_checks  # noqa: E402
+    from run_publication_preflight import _resolve_requested_platforms, _run_checks  # noqa: E402
 
 
 def _normalize(value: Any) -> str:

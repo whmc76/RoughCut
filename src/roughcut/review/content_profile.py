@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from roughcut.config import get_settings
 from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
-from roughcut.edit.subtitle_surfaces import subtitle_canonical_rule_text
 from roughcut.edit.subtitle_surfaces import subtitle_semantic_item_text
 from roughcut.edit.subtitle_surfaces import subtitle_surface_item_dict
 from roughcut.edit.presets import WorkflowPreset, get_workflow_preset, normalize_workflow_template_name, select_workflow_template

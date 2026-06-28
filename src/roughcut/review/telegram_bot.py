@@ -41,7 +41,6 @@ from roughcut.media.variant_timeline_bundle import (
 from roughcut.packaging.library import list_packaging_assets, resolve_packaging_plan_for_job
 from roughcut.providers.factory import get_reasoning_provider, get_transcription_provider
 from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
-from roughcut.edit.subtitle_surfaces import subtitle_display_rule_text
 from roughcut.review.downstream_context import select_resolved_downstream_profile
 from roughcut.review.final_review_rerun import (
     build_final_review_rerun_plans as _build_final_review_rerun_plans,

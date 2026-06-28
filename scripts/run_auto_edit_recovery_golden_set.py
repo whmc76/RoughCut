@@ -37,16 +37,14 @@ from roughcut.api.jobs import (
     _manual_editor_deleted_ranges_from_keep_segments,
     _manual_editor_frontend_managed_auto_cut_ranges,
     _manual_editor_restore_frontend_managed_auto_cuts,
-    _manual_keep_segments_from_editorial_payload,
     _manual_video_transform_from_render_plan,
 )
 from roughcut.db.models import Artifact, Job, JobStep, SubtitleItem, TranscriptSegment
 from roughcut.db.session import get_session_factory
-from roughcut.edit.cut_analysis import cut_analysis_accepted_cuts, cut_analysis_effective_applied_cuts, cut_analysis_rule_candidates
+from roughcut.edit.cut_analysis import cut_analysis_effective_applied_cuts, cut_analysis_rule_candidates
 from roughcut.edit.manual_editor_contract import (
     manual_editor_change_contract,
     manual_editor_change_contract_is_consistent,
-    manual_editor_is_subtitle_only_render,
     manual_editor_rerun_plan,
 )
 from roughcut.edit.refine_decisions import resolve_refine_keep_segments_for_timeline

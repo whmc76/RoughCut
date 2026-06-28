@@ -9,6 +9,7 @@ import pytest
 
 from roughcut.media import subtitle_projection_validation as projection_validation_module
 from roughcut.pipeline import steps as pipeline_steps
+from roughcut.providers.transcription.base import TranscriptResult, TranscriptSegment
 
 
 def _build_fake_validation(repaired_payload: list[dict[str, object]]) -> SimpleNamespace:
@@ -83,6 +84,43 @@ async def test_resolve_audio_artifact_rebuilds_missing_storage_file(
     assert (stored_root / str(job_id) / "audio.wav").read_bytes() == b"wav"
     assert step.metadata_["audio_artifact_rebuilt"] is True
     assert step.metadata_["has_audio"] is True
+
+
+@pytest.mark.asyncio
+async def test_render_subtitle_audit_uses_ascii_temp_audio_for_asr(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed_audio_paths: list[Path] = []
+
+    async def fake_extract_audio(_source: Path, output_path: Path) -> Path:
+        output_path.write_bytes(b"wav")
+        return output_path
+
+    class FakeASRProvider:
+        async def transcribe(self, audio_path: Path, *, language: str = "zh") -> TranscriptResult:
+            observed_audio_paths.append(Path(audio_path))
+            return TranscriptResult(
+                segments=[TranscriptSegment(index=0, start=0.0, end=1.0, text="测试")],
+                language=language,
+                duration=1.0,
+                provider="fake",
+                model="fake",
+            )
+
+    monkeypatch.setattr(pipeline_steps, "extract_audio", fake_extract_audio)
+    monkeypatch.setattr(pipeline_steps, "LocalHTTPASRProvider", FakeASRProvider)
+
+    await pipeline_steps._audit_subtitles_against_rendered_audio(
+        video_path=tmp_path / "video.mp4",
+        subtitle_items=[{"start_time": 0.0, "end_time": 1.0, "text": "测试"}],
+        language="zh",
+        debug_dir=tmp_path / "魂2调试",
+        label="plain",
+    )
+
+    assert observed_audio_paths
+    assert str(observed_audio_paths[0]).isascii()
 
 
 def test_subtitle_projection_repair_summary_does_not_treat_annotation_only_changes_as_repair() -> None:

@@ -217,7 +217,7 @@ def _render_markdown(api_base: str, insights: list[JobInsight]) -> str:
     counts = _status_summary(jobs)
 
     lines: list[str] = []
-    lines.append(f"# RoughCut Progress Report")
+    lines.append("# RoughCut Progress Report")
     lines.append("")
     lines.append(f"- Updated: {now}")
     lines.append(f"- API: `{api_base}`")

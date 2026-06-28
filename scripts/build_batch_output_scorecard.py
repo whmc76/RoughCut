@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from roughcut.db.models import Artifact, Timeline
 from roughcut.db.session import get_session_factory
-from roughcut.edit.cut_analysis import cut_analysis_accepted_cuts, cut_analysis_effective_applied_cuts
+from roughcut.edit.cut_analysis import cut_analysis_effective_applied_cuts
 from roughcut.edit.packaging_timeline import packaging_timeline_editing_accents
 from roughcut.media.variant_timeline_bundle import (
     variant_cut_analysis_summary,
@@ -991,7 +991,6 @@ def _score_editing_with_variant_bundle(
     if not resolved_bundle:
         return _score_editing(job, editorial, render_plan)
 
-    diagnostics = variant_timeline_diagnostics(resolved_bundle)
     cut_analysis_summary = variant_cut_analysis_summary(resolved_bundle)
     refine_decision_summary = variant_refine_decision_summary(resolved_bundle)
     llm_cut_review = variant_llm_cut_review(resolved_bundle)

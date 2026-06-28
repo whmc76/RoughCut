@@ -175,7 +175,6 @@ from roughcut.edit.smart_cut_rules import (
     default_smart_cut_rules_payload,
     normalize_smart_cut_rules_payload,
 )
-from roughcut.edit.strategy_profile import normalize_strategy_type
 from roughcut.edit.strategy_review_gates import (
     build_strategy_review_gate_confirmations_payload,
     normalize_strategy_review_gate_confirmations,
@@ -246,7 +245,6 @@ from roughcut.providers.reasoning.base import Message
 from roughcut.media.subtitle_fingerprint import subtitle_payload_fingerprint
 from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_CANONICAL_TRANSCRIPT_LAYER
 from roughcut.speech.subtitle_pipeline import ARTIFACT_TYPE_SUBTITLE_PROJECTION_LAYER
-from roughcut.speech.subtitle_pipeline import SUBTITLE_PROJECTION_SEGMENTATION_ENGINE_VERSION
 from roughcut.speech.subtitle_pipeline import canonical_transcript_data_is_current
 from roughcut.speech.subtitle_pipeline import subtitle_projection_data_is_current
 from roughcut.speech.subtitle_segmentation import SubtitleEntry, analyze_subtitle_segmentation, segment_subtitles
@@ -6724,7 +6722,6 @@ def _manual_editor_leading_units_to_move_for_split_boundary(previous_units: list
     previous_text = "".join(previous_units)
     current_text = "".join(current_units)
     previous_compact = _manual_editor_compact_text_key(previous_text)
-    current_compact = _manual_editor_compact_text_key(current_text)
 
     if previous_compact.endswith("E") and (current_text.startswith("C手电") or current_text.startswith("C电筒")):
         return 3
@@ -8525,7 +8522,7 @@ async def _build_manual_editor_session(
     render_plan_data = render_plan_timeline.data_json if render_plan_timeline and isinstance(render_plan_timeline.data_json, dict) else {}
     render_plan_context = _manual_editor_render_plan_context(render_plan_data)
     hyperframes_options = normalize_hyperframes_options(
-        packaging_timeline_hyperframes_options(render_plan_context["packaging_timeline"])
+        packaging_timeline_hyperframes_options(render_plan_context.get("packaging_timeline") or {})
     )
     base_video_transform = _manual_video_transform_from_render_plan(
         None,
@@ -9146,7 +9143,7 @@ async def save_manual_editor_draft(
         render_plan_timeline.data_json if isinstance(render_plan_timeline.data_json, dict) else {}
     )
     base_hyperframes_options = normalize_hyperframes_options(
-        packaging_timeline_hyperframes_options(render_plan_context["packaging_timeline"])
+        packaging_timeline_hyperframes_options(render_plan_context.get("packaging_timeline") or {})
     )
     hyperframes_options = (
         normalize_hyperframes_options(request.hyperframes_options)

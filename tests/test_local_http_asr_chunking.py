@@ -8,6 +8,7 @@ from roughcut.providers.transcription.chunking import (
     AudioChunkConfig,
     AudioChunkSpec,
     build_audio_chunk_specs,
+    export_audio_chunk,
     extract_chunking_summary,
     resolve_audio_chunk_config,
     should_chunk_audio,
@@ -62,6 +63,30 @@ def test_build_audio_chunk_specs_adds_overlapping_tail_instead_of_extending_last
         (652.64, 952.64),
     ]
     assert all(chunk.duration <= 300.0 for chunk in chunks)
+
+
+def test_export_audio_chunk_uses_ascii_shadow_copy_for_non_ascii_input(monkeypatch, tmp_path: Path) -> None:
+    source_dir = tmp_path / "魂2"
+    source_dir.mkdir()
+    source_audio = source_dir / "字幕对齐.wav"
+    source_audio.write_bytes(b"wav")
+    chunk_path = tmp_path / "chunks" / "chunk.wav"
+    observed_commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs):
+        observed_commands.append(command)
+        Path(command[-1]).parent.mkdir(parents=True, exist_ok=True)
+        Path(command[-1]).write_bytes(b"chunk")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr("roughcut.providers.transcription.chunking.subprocess.run", fake_run)
+
+    export_audio_chunk(source_audio, chunk_path, start=0.0, end=1.0)
+
+    input_path = Path(observed_commands[0][observed_commands[0].index("-i") + 1])
+    assert str(input_path).isascii()
+    assert input_path.name == "roughcut_source_audio.wav"
+    assert input_path.read_bytes() == b"wav"
 
 
 def test_local_http_asr_request_data_includes_explicit_model() -> None:

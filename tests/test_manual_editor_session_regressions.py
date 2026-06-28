@@ -921,18 +921,6 @@ def test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_on
         music_plan_calls: list[dict[str, object]] = []
         timeline_analysis_calls: list[dict[str, object]] = []
         editing_accents_calls: list[dict[str, object]] = []
-        packaging_helper_calls: dict[str, list[dict[str, object]]] = {
-            "editing_skill": [],
-            "editing_accents": [],
-            "timeline_analysis": [],
-            "subtitles": [],
-        }
-        packaging_helper_calls: dict[str, list[dict[str, object]]] = {
-            "editing_skill": [],
-            "editing_accents": [],
-            "timeline_analysis": [],
-            "subtitles": [],
-        }
         video_transform_render_payloads: list[object] = []
         video_transform_inputs: list[dict[str, object]] = []
         packaging_plan_render_payloads: list[object] = []
@@ -1181,7 +1169,33 @@ def test_manual_editor_apply_keeps_frontend_managed_auto_cuts_out_of_subtitle_on
             assert packaging_plan_inputs[0]["packaging_timeline"] is None
             assert packaging_plan_inputs[0]["delivery"] is None
             assert packaging_plan_inputs[0]["render_plan_context"] is not None
-            assert packaging_plan_inputs[0]["render_plan_context"]["packaging_timeline"] == {
+            packaging_timeline_context = packaging_plan_inputs[0]["render_plan_context"]["packaging_timeline"]
+            assert packaging_timeline_context["timeline_analysis"] == {}
+            assert packaging_timeline_context["editing_skill"] == {}
+            assert packaging_timeline_context["section_choreography"] == {}
+            assert packaging_timeline_context["subtitles"] == {"version": 1}
+            assert packaging_timeline_context["packaging"] == {
+                "intro": None,
+                "outro": None,
+                "insert": None,
+                "watermark": None,
+                "music": None,
+            }
+            assert packaging_timeline_context["editing_accents"] == {}
+            assert "hyperframes" in packaging_timeline_context
+            assert isinstance(packaging_timeline_context["hyperframes"], dict)
+            assert packaging_timeline_context["hyperframes"]["effect_count"] == 0
+            assert {
+                key: packaging_timeline_context[key]
+                for key in (
+                    "timeline_analysis",
+                    "editing_skill",
+                    "section_choreography",
+                    "subtitles",
+                    "packaging",
+                    "editing_accents",
+                )
+            } == {
                 "timeline_analysis": {},
                 "editing_skill": {},
                 "section_choreography": {},
@@ -1597,14 +1611,17 @@ def test_manual_editor_draft_reuses_editorial_analysis_context_for_cut_analysis_
             assert captured_editorial_payloads == [None]
             assert captured_refine_render_payloads == [None]
             assert captured_refine_audio_defaults == [{"target_lufs": -18.0, "noise_reduction": True}]
-            assert captured_render_plan_context_payloads == [
-                {
+            assert captured_render_plan_context_payloads
+            assert all(
+                payload
+                == {
                     "manual_editor": {},
                     "loudness": {"target_lufs": -18.0},
                     "voice_processing": {"noise_reduction": True},
                     "subtitles": {"version": 1},
                 }
-            ]
+                for payload in captured_render_plan_context_payloads
+            )
 
     try:
         asyncio.run(_run())

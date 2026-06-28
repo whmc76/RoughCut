@@ -987,7 +987,6 @@ async def _generate_claim_grounded_platform_packaging(
     trace: list[dict[str, Any]] = []
 
     with llm_task_route("copy", search_enabled=False):
-        provider = get_reasoning_provider()
         with track_usage_operation("platform_package.claim_ledger"):
             claim_payload = await _complete_json_with_same_model_repair(
                 [
@@ -1414,7 +1413,6 @@ async def _maybe_run_claim_entailment_audit(
         return _normalize_claim_entailment_audit({"verdict": "pass", "unsupported": [], "summary": "local risk gate pass"})
     platform_wrapper = {"platforms": {platform_key: platform_draft}}
     with llm_task_route("copy", search_enabled=False):
-        provider = get_reasoning_provider()
         with track_usage_operation("platform_package.claim_entailment_audit.platform"):
             audit_raw = await _complete_json_with_same_model_repair(
                 [
@@ -1770,7 +1768,6 @@ async def _repair_claim_grounded_draft_for_publish_quality(
         f"\n原 draft：{json.dumps(draft, ensure_ascii=False)}"
     )
     with llm_task_route("copy", search_enabled=False):
-        provider = get_reasoning_provider()
         with track_usage_operation("platform_package.claim_grounded_publish_repair"):
             repaired = await _complete_json_with_same_model_repair(
                 [
@@ -1912,7 +1909,6 @@ async def _generate_claim_grounded_highlights(
         f"\n内容风格约束：{_domain_prompt_voice_instruction(content_profile)}"
     )
     with llm_task_route("copy", search_enabled=False):
-        provider = get_reasoning_provider()
         with track_usage_operation("platform_package.claim_grounded_highlights"):
             payload = await _complete_json_with_same_model_repair(
                 [
@@ -1954,7 +1950,6 @@ async def _generate_one_claim_grounded_platform(
         f"\n作者信息：{json.dumps(author_profile or {}, ensure_ascii=False)}"
     )
     with llm_task_route("copy", search_enabled=False):
-        provider = get_reasoning_provider()
         with track_usage_operation(f"platform_package.claim_grounded_draft.{platform_key}"):
             return await _complete_json_with_same_model_repair(
                 [
@@ -1990,7 +1985,6 @@ async def _repair_one_claim_grounded_platform(
         f"\n原平台文案：{json.dumps(platform_draft, ensure_ascii=False)}"
     )
     with llm_task_route("copy", search_enabled=False):
-        provider = get_reasoning_provider()
         with track_usage_operation(f"platform_package.claim_grounded_repair.{platform_key}"):
             return await _complete_json_with_same_model_repair(
                 [

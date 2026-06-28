@@ -1,4 +1,3 @@
-from pathlib import Path
 
 from scripts.check_agent_docs import (
     DOC_INDEX_PATH,

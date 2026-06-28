@@ -693,7 +693,6 @@ def test_build_scheme_downgrades_xiaohongshu_schedule_when_surface_missing():
     )
 
     item = scheme["items"][0]
-    preflight = item["live_publish_preflight"]
     platform_option = scheme["platform_options"]["xiaohongshu"]
 
     assert item["visibility_or_publish_mode"] == "draft"

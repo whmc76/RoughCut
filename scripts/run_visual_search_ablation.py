@@ -98,7 +98,6 @@ def main() -> None:
             for sample in samples
         }
         for future in as_completed(futures):
-            sample = futures[future]
             report = future.result()
             reports.append(report)
             print(json.dumps({

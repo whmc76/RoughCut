@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,7 +10,6 @@ import pytest
 from roughcut.pipeline import steps as pipeline_steps
 from roughcut.pipeline.steps import (
     _AVATAR_FULL_TRACK_BUSY_MAX_WAIT_SECONDS,
-    _AVATAR_FULL_TRACK_CALL_TIMEOUT_SECONDS,
     _AVATAR_FULL_TRACK_SLOT_TIMEOUT_SECONDS,
     AvatarFullTrackRenderError,
     _avatar_full_track_error_payload,

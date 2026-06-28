@@ -353,7 +353,7 @@ def _is_short_source_edge_trim_mismatch(source_key: str, projected_key: str, sou
         return False
     if len(source_key) <= 4 or len(projected_key) <= 4:
         return False
-    if not projected_key in source_key:
+    if projected_key not in source_key:
         return False
     if source_key == projected_key:
         return False

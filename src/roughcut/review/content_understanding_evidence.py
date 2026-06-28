@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from roughcut.edit.subtitle_surfaces import subtitle_canonical_rule_text
 from roughcut.edit.subtitle_surfaces import subtitle_semantic_item_text
 from roughcut.edit.subtitle_surfaces import subtitle_surface_item_dict
 from roughcut.review.content_understanding_schema import parse_primary_evidence_graph_payload

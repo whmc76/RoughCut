@@ -19,9 +19,8 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from sqlalchemy import select
 
 from roughcut.config import _normalize_settings, get_settings
-from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline, TranscriptSegment
+from roughcut.db.models import Artifact, Job, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline, TranscriptSegment
 from roughcut.db.session import get_session_factory
-from roughcut.pipeline.orchestrator import PIPELINE_STEPS
 from roughcut.pipeline.steps import run_step_sync
 from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
 from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
@@ -276,11 +275,11 @@ async def collect_run_summary(
     factory = get_session_factory()
     async with factory() as session:
         job_uuid = uuid.UUID(job_id)
-        job = await session.get(Job, job_uuid)
+        if await session.get(Job, job_uuid) is None:
+            raise RuntimeError(f"Job not found: {job_id}")
         subtitles = (await session.execute(select(SubtitleItem).where(SubtitleItem.job_id == job_uuid, SubtitleItem.version == 1))).scalars().all()
         transcripts = (await session.execute(select(TranscriptSegment).where(TranscriptSegment.job_id == job_uuid, TranscriptSegment.version == 1))).scalars().all()
         corrections = (await session.execute(select(SubtitleCorrection).where(SubtitleCorrection.job_id == job_uuid))).scalars().all()
-        steps = (await session.execute(select(JobStep).where(JobStep.job_id == job_uuid))).scalars().all()
         artifacts = (await session.execute(select(Artifact).where(Artifact.job_id == job_uuid).order_by(Artifact.created_at.desc(), Artifact.id.desc()))).scalars().all()
         timelines = (await session.execute(select(Timeline).where(Timeline.job_id == job_uuid, Timeline.timeline_type == "editorial"))).scalars().all()
         render_outputs = (await session.execute(select(RenderOutput).where(RenderOutput.job_id == job_uuid))).scalars().all()

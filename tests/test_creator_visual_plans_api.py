@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from tests.creator_assets_testkit import creator_assets_client
-
-
 def test_visual_plans_generate_refine_activate_and_keep_versions(creator_assets_client):
     client, _session_factory = creator_assets_client
     creator_id = client.post(

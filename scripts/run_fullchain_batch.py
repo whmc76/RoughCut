@@ -23,7 +23,6 @@ from sqlalchemy import delete, select
 from roughcut.config import get_settings
 from roughcut.creative.modes import resolve_live_batch_enhancement_modes
 from roughcut.db.models import Artifact, Job, JobStep, RenderOutput, SubtitleCorrection, SubtitleItem, Timeline, TranscriptSegment
-from roughcut.media.output import get_cover_manifest_path
 from roughcut.db.session import get_session_factory, reset_session_state_sync
 from roughcut.pipeline.orchestrator import MAX_ATTEMPTS, PIPELINE_STEPS
 from roughcut.pipeline.render_diagnostics import (
@@ -31,13 +30,11 @@ from roughcut.pipeline.render_diagnostics import (
     classify_render_failure_reason as _shared_classify_render_failure_reason,
     normalize_render_step_summary_for_reporting as _shared_normalize_render_step_summary_for_reporting,
 )
-from roughcut.pipeline.live_readiness import build_live_readiness_summary, collect_job_issue_codes
+from roughcut.pipeline.live_readiness import build_live_readiness_summary
 from roughcut.pipeline.quality import assess_job_quality
 from roughcut.pipeline.steps import run_step_sync
 from roughcut.runtime_health import build_readiness_payload
 from roughcut.edit.refine_decisions import resolve_refine_keep_segments_for_timeline
-from roughcut.review.content_profile import apply_content_profile_feedback
-from roughcut.review.content_profile_memory import record_content_profile_feedback_memory
 from roughcut.review.downstream_context import strip_publication_only_profile_fields
 from roughcut.review.subtitle_consistency import ARTIFACT_TYPE_SUBTITLE_CONSISTENCY_REPORT
 from roughcut.review.subtitle_quality import ARTIFACT_TYPE_SUBTITLE_QUALITY_REPORT
@@ -1042,7 +1039,8 @@ def mark_step(
         factory = get_session_factory()
         async with factory() as session:
             job_uuid = uuid.UUID(job_id)
-            job = await session.get(Job, job_uuid)
+            if await session.get(Job, job_uuid) is None:
+                raise RuntimeError(f"Job not found: {job_id}")
             result = await session.execute(
                 select(JobStep).where(JobStep.job_id == job_uuid, JobStep.step_name == step_name)
             )
@@ -1506,8 +1504,6 @@ async def collect_job_report(
         else {}
     )
     render_payload = _merge_render_runtime_payloads(render_payload, render_runtime_payload)
-    cover_path = None
-    cover_variant_count = 0
     platform_doc = str(packaging_artifact.storage_path or "").strip() if packaging_artifact else None
 
     quality_assessment = assess_job_quality(

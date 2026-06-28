@@ -576,6 +576,8 @@ def test_variant_packaging_timeline_reads_nested_payload_and_legacy_flat_fields(
             }
         }
     )
+    hyperframes = nested.pop("hyperframes")
+    assert hyperframes["effect_count"] == 0
     assert nested == {
         "timeline_analysis": {"hook_end_sec": 2.5},
         "editing_skill": {"key": "unboxing_standard"},

@@ -749,7 +749,7 @@ async def _execute_tts_run(
         output_path.unlink(missing_ok=True)
         raise
     finally:
-        if requested_session_mode:
+        if segment_output_paths:
             _cleanup_paths(segment_output_paths)
     result = {
         "status": "success",

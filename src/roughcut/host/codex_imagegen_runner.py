@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import subprocess
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -12,7 +10,6 @@ import re
 
 from roughcut.host.codex_bridge import _resolve_codex_command_candidates, run_codex_exec
 from roughcut.providers.image_generation import mark_codex_imagegen_request_completed
-from roughcut.telegram.output_codec import decode_process_output
 
 
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}

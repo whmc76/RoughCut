@@ -1158,6 +1158,8 @@ def _pid_is_alive(pid: int) -> bool:
         return False
     except PermissionError:
         return True
+    except SystemError:
+        return False
     except OSError:
         return False
     return True
